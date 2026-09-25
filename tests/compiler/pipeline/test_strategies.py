@@ -141,6 +141,27 @@ def test_every_fusion_born_kernel_is_stamped_at_the_loop_terminal() -> None:
             assert node.op.knobs["I_kernel"] == node.op.identity_key(structural=False, with_io=True)
 
 
+def test_a_kernel_given_a_body_of_its_own_is_restamped_with_its_exact_identity() -> None:
+    """The lift and the twist rewrite a kernel's body in place, so its exact identity changes while
+    the ``S_*`` row, deliberately the fused body's, does not. The ``I_kernel`` stamp follows the
+    body: the tile a compile forks over carries the identity the tune DB keys its rows by
+    (``terminal_bench.kernel_key``), which is what lets those rows decide its forks. An online
+    softmax is a twisted kernel, where the two identities differ."""
+    from emmy.compiler.ir.tile import TileOp
+    from emmy.compiler.pipeline import TILE_PASSES
+    from tests.compiler.realization import helpers as corpus
+
+    case = corpus.load_case(corpus.CASES_DIR / "reduce/online-softmax-4x128.yaml")
+    lowered = Pipeline.build(LOOP_PASSES).run(case.record.target_program.copy(), ctx=case.context())
+    [loop] = [node.op for node in lowered.nodes.values() if isinstance(node.op, LoopOp)]
+    assert loop.knobs["I_kernel"] == loop.identity_key(structural=False, with_io=True)
+    out, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=case.context()).resolve(lowered, lambda fp: next(iter_leaves(fp.options)))
+    [tile] = [node.op for node in out.nodes.values() if isinstance(node.op, TileOp)]
+    assert tile.knobs["I_kernel"] == tile.identity_key(structural=False, with_io=True) != loop.knobs["I_kernel"]
+    stamps = {k: v for k, v in tile.knobs.items() if k.startswith(STRUCT_PREFIX)}
+    assert stamps == {k: v for k, v in loop.knobs.items() if k.startswith(STRUCT_PREFIX)}
+
+
 def test_read_api_is_knobs_first_and_compute_equal() -> None:
     """``signature`` serves the stamped row when present and computes the same values when not —
     the one spelling of identity, with no ordering dependence."""

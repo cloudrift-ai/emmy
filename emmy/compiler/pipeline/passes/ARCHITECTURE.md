@@ -135,6 +135,10 @@ taken alone may promote its own, and the fork asks `TileOp`'s own `promoted_swee
 Where the piece would promote nothing the kernel does not already, splitting buys a second launch and no grid, and the
 seam keeps its workspace reading — the pointwise NVFP4 quantize, whose branches own a store but hold no contraction
 reading it.
+The producer piece is minted with its workspace axes as its store's SWEEP and an EMPTY placement, so the same rank
+rule decides its grid: an axis the piece's own reduce does not read is that reduce's row statistic, and binding it
+folds the statistic once per output cell. A free axis per workspace dimension did exactly that, and a materialized
+RMSNorm + rotation cone launched one cooperative block per element.
 A two-pass softmax's row statistics are not seams of this tree: the twist carries them as
 components of ONE fold, so there is no statistic edge to materialize, and the score contraction and the fold itself
 are the seams that stand there. The unpinned fork offers every seam as its own structural arm. Bare `PLACE=cut`

@@ -22,7 +22,7 @@ from emmy.compiler.pipeline.dump import _inline_scalar_loads, _scalar_constant_i
 from emmy.compiler.pipeline.fork import Fork, OptionFork
 from emmy.compiler.pipeline.pipeline import _REWRITE_APPLIED, Cursor, RuleSkipped, _remember_structural_decision
 from emmy.compiler.pipeline.rule_diff import display_name, emit, format_skipped, render_rule_diff
-from emmy.compiler.pipeline.strategy import SplicedEvent, SpliceEvent
+from emmy.compiler.pipeline.strategy import RebindEvent, SplicedEvent, SpliceEvent
 
 # Use the engine logger so the existing debug-emit toggles (rule-
 # skipped lines under ``compile -vv``) keep working without callers
@@ -202,10 +202,17 @@ class Candidate:
         self._log_apply(match, option)
         minted = None
         if isinstance(option, Op):
-            old_op = self.graph.nodes[match.root_node_id].op
+            node = self.graph.nodes[match.root_node_id]
+            old_op = node.op
             if option is not old_op:
                 option = replace(option, source=old_op, knobs={**old_op.knobs, **option.knobs})
-            self.graph.nodes[match.root_node_id].op = option
+            node.op = option
+            pass_ = match.rule.pass_
+            event = RebindEvent(
+                match=match, node=node, replaced=old_op, pass_name=pass_.name if pass_ is not None else "", graph=self.graph
+            )
+            for strat in self.run.pipeline.strategies:
+                strat.on_rebind(event)
         else:
             assert isinstance(option, Graph), f"expected Graph or Op; got {type(option).__name__}"
             pass_ = match.rule.pass_
