@@ -69,11 +69,11 @@ def _reduction_domain(tile: TileOp, node) -> tuple[Reduce, ...]:
 
     roots = kernel_roots(tile.op)
     is_root = any(node is root for root in roots)
-    if node.observe is not None or not (is_root or any(node is member for root in roots for member in chain_members(root))):
+    owner = node if is_root else next((root for root in roots if any(node is member for member in chain_members(root))), None)
+    if node.observe is not None or owner is None:
         return (Reduce(),)  # the binder partitions the roots it peels and their chain members; any other reduce lowers serially
     # A sweep the member's own ROOT is evaluated over wraps the whole chain, members included, and
     # only the serial fold spells that: the chain arm closes one grid cell.
-    owner = next((root for root in roots if node is root or any(node is member for member in chain_members(root))), node)
     if {axis.name for spec in tile.output_specs for axis in spec.sweep} & (node.free_axes | owner.free_axes):
         return (Reduce(),)
     if is_root and merges_partition(tile):
