@@ -25,6 +25,7 @@ import yaml
 
 from emmy import config, gpu
 from emmy.compiler.loop_wire import loop_graph_from_wire, validate_loop_program_pool
+from emmy.compiler.pipeline.knob import family_of
 from emmy.compiler.pipeline.search.data.shape import ShapeKey
 from emmy.compiler.structural import digest
 from emmy.compiler.torch_wire import graph_from_wire, graph_to_wire, validate_program_pool
@@ -127,7 +128,7 @@ def fast_math_knobs(knobs: Mapping) -> bool:
 
     for key, value in knobs.items():
         spelling = str(value)
-        if str(key).split("@", 1)[0] == "TILE" and spelling:
+        if family_of(str(key)) == "TILE" and spelling:
             try:
                 plan = Tile.parse(spelling, Work(kind="warp", units=(1, 1)))
             except ValueError:
@@ -148,7 +149,6 @@ def precision_trading_pins(pins: Mapping) -> bool:
 def pins_freeze_cut(pins: Mapping) -> bool:
     """Whether the input pins freeze any placement cut (a ``PLACE…=cut`` pin) — the ONE spelling
     of the predicate behind both the loader's receipt validation and :attr:`GoldenRecord.is_receipt`."""
-    from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
 
     return any(family_of(str(name)) == "PLACE" and str(value) == "cut" for name, value in pins.items())
 
@@ -203,7 +203,7 @@ def _schedules_a_kernel(realization: Mapping) -> bool:
     the child-identity receipts and, deliberately, a routing row whose decision is a cross-CTA
     ``REDUCE`` split, which the recorder measures like any other."""
     knobs = realization.get("knobs") or {}
-    return bool(knobs) and any(str(key).split("@", 1)[0] != "PLACE" for key in knobs)
+    return bool(knobs) and any(family_of(str(key)) != "PLACE" for key in knobs)
 
 
 @dataclass(frozen=True)
@@ -250,7 +250,7 @@ class GoldenRecord:
         from emmy.compiler.pipeline.search.pins import stampable_reduce  # noqa: PLC0415
 
         def arm(key: str, value) -> bool:
-            family = str(key).split("@", 1)[0]
+            family = family_of(str(key))
             return family == "PLACE" or (family == "REDUCE" and stampable_reduce(str(value)) == "")
 
         return bool(self.knobs) and all(arm(key, value) for key, value in self.knobs.items())
@@ -267,8 +267,8 @@ class GoldenRecord:
         as recorded. A routing row keeps it in ``knobs``; a receipt, a corpus case or an ``--ab``
         row freezes it in ``pins``. Empty for a plain schedule row, which says the kernel it
         decorates ran fused."""
-        route = {str(key): str(value) for key, value in self.pins if str(key).split("@", 1)[0] == "PLACE"}
-        route.update((str(key), str(value)) for key, value in self.knobs.items() if str(key).split("@", 1)[0] == "PLACE")
+        route = {str(key): str(value) for key, value in self.pins if family_of(str(key)) == "PLACE"}
+        route.update((str(key), str(value)) for key, value in self.knobs.items() if family_of(str(key)) == "PLACE")
         return route
 
     @property
@@ -277,7 +277,7 @@ class GoldenRecord:
         index carries them (an OFF ``''`` is a decided value and stays)."""
         from emmy.compiler.pipeline.knob import tuning_knob_items  # noqa: PLC0415
 
-        return {key: value for key, value in tuning_knob_items(self.knobs) if key.split("@", 1)[0] != "PLACE"}
+        return {key: value for key, value in tuning_knob_items(self.knobs) if family_of(key) != "PLACE"}
 
     @cached_property
     def pool_group(self) -> tuple:
@@ -592,7 +592,7 @@ def validate_golden_file(
             pins = realization.get("pins")
             if not isinstance(pins, Mapping):
                 raise ValueError(f"{realization_where}.pins must be a mapping")
-            from emmy.compiler.pipeline.knob import KnobType, family_of, get  # noqa: PLC0415
+            from emmy.compiler.pipeline.knob import KnobType, get  # noqa: PLC0415
 
             for name, value in pins.items():
                 descriptor = get(family_of(name)) if isinstance(name, str) and name else None
@@ -627,7 +627,7 @@ def validate_golden_file(
                     raise ValueError(
                         f"{realization_where} gives conflicting input pins and measured knobs for {', '.join(sorted(conflicts))}"
                     )
-                families = {str(key).split("@", 1)[0] for key in realization["knobs"]}
+                families = {family_of(str(key)) for key in realization["knobs"]}
                 if "PLACE" in families and families != {"PLACE"}:
                     raise ValueError(f"{realization_where} mixes PLACE routing knobs with schedule knobs")
                 if families and "PLACE" not in families and pins_freeze_cut(pins) and "identity" not in realization:
@@ -713,7 +713,7 @@ def regime_pins(record: GoldenRecord) -> dict:
     and friends) a replay publishes to the environment so the record reads as live evidence
     (:func:`regime_live`). The schedule row and the route never travel this way; they are
     measured rows the evidence pick joins to the kernel they were recorded for."""
-    return {str(key): value for key, value in record.pins if str(key).split("@", 1)[0] != "PLACE"}
+    return {str(key): value for key, value in record.pins if family_of(str(key)) != "PLACE"}
 
 
 def kernel_set_pins(record: GoldenRecord, records: Sequence[GoldenRecord]) -> dict:
@@ -731,10 +731,10 @@ def kernel_set_pins(record: GoldenRecord, records: Sequence[GoldenRecord]) -> di
     Both precision lanes record their rows under one name, so a listed name resolves inside the
     record's own regime first: the standard lane's split is not the fast-math lane's.
 
-    A split arm travels only when its row names the record's own kernel. A split of a piece a cut
-    minted names that piece by identity, and its ``REDUCE`` value addresses no seam: published as a
-    hand pin it would reach every kernel of the graph, splitting pieces the set left whole and
-    refusing where a piece cannot split. Its row decides that piece by identity instead, as evidence."""
+    A row naming a piece a cut minted publishes only its ``PLACE`` keys. Its other knobs address
+    that piece by identity, not by seam: published as a hand pin they would reach every kernel of
+    the graph (two pieces' splits collapsing onto the last value, a piece that cannot split
+    refusing). Its row decides that piece by identity instead, as evidence."""
     regime = regime_pins(record)
     by_name: dict[str, GoldenRecord] = {}
     for other in records:
@@ -746,9 +746,7 @@ def kernel_set_pins(record: GoldenRecord, records: Sequence[GoldenRecord]) -> di
         if referenced is None:
             continue
         own_kernel = referenced.identity in (None, record.identity)
-        pins.update(
-            {str(key): str(value) for key, value in referenced.knobs.items() if own_kernel or str(key).split("@", 1)[0] != "REDUCE"}
-        )
+        pins.update({str(key): str(value) for key, value in referenced.knobs.items() if own_kernel or family_of(str(key)) == "PLACE"})
     return pins
 
 
@@ -1088,7 +1086,6 @@ def piece_row(row: Mapping[str, str]) -> dict[str, str]:
     omitting the family (:attr:`GoldenRecord.schedule_row`). Dropping the key instead read as
     "free", which no leaf equals — the whole split half of a card's rows decoded to nothing and
     joined no kernel in the evidence index."""
-    from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import stampable_reduce  # noqa: PLC0415
 
     out = {str(key): str(value) for key, value in row.items()}
@@ -1114,7 +1111,6 @@ def lead_of(record: GoldenRecord, records: Sequence[GoldenRecord]) -> GoldenReco
 
 
 def _set_key(record: GoldenRecord) -> tuple:
-    from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
 
     regime = tuple(sorted((str(k), str(v)) for k, v in record.pin_map.items() if family_of(str(k)) != "PLACE"))
     return (_record_cache_key(record), regime)
@@ -1156,7 +1152,6 @@ def _replay(
     from emmy.compiler.pipeline.fork import exact_schedule_leaf, fork_signature, iter_leaves, leaf_for, leaf_knobs  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import (  # noqa: PLC0415
         canonical_row_key,
-        family_of,
         schedule_match_key,
         schedule_row_key,
         validate_family_value,
@@ -1661,7 +1656,7 @@ def regime_live(record: GoldenRecord) -> bool:
     (:data:`_PRECISION_PINS`, umbrella semantics per ``space.precision_pin``) is compared even for
     pins the record omits (omitted = measured OFF). ``PLACE`` pins are the record's route, not a
     regime."""
-    from emmy.compiler.pipeline.knob import KnobType, family_of, registry  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import KnobType, registry  # noqa: PLC0415
     from emmy.compiler.pipeline.search.space import precision_pin  # noqa: PLC0415
 
     knobs = registry()
