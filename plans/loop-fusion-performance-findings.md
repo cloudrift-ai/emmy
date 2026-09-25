@@ -75,3 +75,7 @@ in the golden-refresh PR; recorded here because the s512 goldens were refreshed 
 - Multi-millisecond kernels need `--warmup 10 --iters 20`, or the isolated re-bench exceeds the 10 s GPU cap.
 - Fast math is the default, so a std-lane `--record-greedy` needs `EMMY_FAST_MATH=0` explicitly; the refresh-golden
   skill only mentions `EMMY_FAST_MATH=1`.
+- Gemma 4 5090 route rows: replaying a route row's own golden fails to compile with "the head fold is nested inside the
+  projection's sweep loop; the split cannot strip it" (seen on the post routes during the refresh).
+- Under a route's `PLACE` pins, `--record-greedy` ignores piece proposals (a proposal is not evidence) and picks atomic
+  split-K for Gemma post projection pieces (40 / 76 us) over the stored `w2x2` schedules (13.3 / 73 us).
