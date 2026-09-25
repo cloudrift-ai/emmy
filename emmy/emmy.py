@@ -14,6 +14,7 @@ from emmy.commands.deploy.ssh import register_ssh_target
 from emmy.commands.eval import register_eval_command
 from emmy.commands.fit import register_fit_command
 from emmy.commands.generate import register_generate_command
+from emmy.commands.golden import register_golden_command
 from emmy.commands.inspect_graph import register_inspect_command
 from emmy.commands.publish import register_publish_command
 from emmy.commands.pull import register_pull_command
@@ -31,7 +32,7 @@ from emmy.logging_setup import setup_cli_logging
 # listing recipes, tearing down a run). Everything else is guarded. The list is
 # opt-out on purpose: a new command that forgets to name itself here fails with
 # one explanation, which beats failing with a wall of NVRTC errors.
-_NO_GPU_COMMANDS = frozenset({"bench", "compare", "dataset", "deploy", "publish", "pull", "recipe", "teardown", "trace", "vm"})
+_NO_GPU_COMMANDS = frozenset({"bench", "compare", "dataset", "deploy", "golden", "publish", "pull", "recipe", "teardown", "trace", "vm"})
 
 
 def _package_version():
@@ -73,6 +74,7 @@ def main():
     register_inspect_command(subparsers)
     register_eval_command(subparsers)
     register_dataset_command(subparsers)
+    register_golden_command(subparsers)
     register_fit_command(subparsers)
     register_compare_command(subparsers)
 

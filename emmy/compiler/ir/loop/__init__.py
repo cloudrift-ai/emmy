@@ -30,7 +30,7 @@ from emmy.compiler.ir.loop.ir import (
     Stmt,
     Write,
 )
-from emmy.compiler.ir.loop.splicer import UnfusableStmt, splice_graph, splice_loops
+from emmy.compiler.ir.loop.splicer import UnfusableStmt, observes_running_accumulator, splice_graph, splice_loops
 from emmy.compiler.ir.sigma import Sigma
 
 __all__ = [
@@ -52,6 +52,7 @@ __all__ = [
     "iter_body",
     "map_body",
     "UnfusableStmt",
+    "observes_running_accumulator",
     "splice_graph",
     "splice_loops",
 ]

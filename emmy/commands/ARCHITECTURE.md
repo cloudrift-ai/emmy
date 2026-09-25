@@ -206,8 +206,23 @@ split per target. A static-only release is accepted
 only when the same env proves that no wider or symbolic path is reachable. The resulting working file is consumed
 directly by `tune --golden PATH` and verified by `run --golden PATH [--realization NAME]`.
 
+`emmy golden check [PATH…]` names the stored targets of a golden that a fresh lowering of its own programs no longer
+writes. It is two existing commands diffed per traced program: `emmy golden kernels PATH --program N` prints the Loop
+IR pool the golden stores, sorted by output set, and `emmy compile --golden PATH --program N --ir loop -o fresh.yaml`
+writes the same pool lowered fresh from the stored program (a `.yaml` output path is the wire a golden stores, for
+`--ir torch` the traced program and for `--ir loop` the kernel pool; any other path gets the readable listing). The
+check restricts the diff to the targets the file stores. `emmy golden restamp [PATH…]` rewrites the golden onto that
+lowering; `check` and `restamp` default to every repository golden, none of the three needs a card, and the
+`refresh-golden` skill is the flow around them. What a restamp keeps per row is decided in
+`compiler/pipeline/search/restamp.py`: a measurement survives only when the row's kernel renders the same CUDA source
+from the fresh Loop IR, otherwise the row becomes a proposal; a row that no longer decodes, or whose kernel no fresh
+kernel writes, is dropped and named. The command never deletes a file: one nothing survives in is left alone and
+reported. The lowering behind the check, the restamp and `emmy trace`'s inventory is one function
+(`working_golden.lowered_kernels`), and every command that reads a golden by path loads it through
+`golden.load_golden`, which validates a repository golden strictly and anything else as a working file.
+
 **One golden flag pair on every command.** `--golden PATH` names a golden YAML (working or canonical) on `run`,
-`compile`, `tune`, `serve` and `eval golden`: its MEASURED rows are the golden evidence that command deploys from,
+`compile`, `tune`, `serve`, `generate` and `eval golden`: its MEASURED rows are the golden evidence that command deploys from,
 instead of the repository's per-card goldens, joining the tune DB's rows in the one measured-evidence index the
 greedy pick reads (`search.golden.records_override` in-process; `EMMY_GOLDEN_FILE` for the vLLM child `serve`
 spawns, together with the precision regime the file's rows share — `EMMY_FAST_MATH` and friends — because a row
@@ -257,7 +272,7 @@ event loop, backend-slot queue, DB, and prior, so a file of one-kernel trace ent
 When the file has multiple targets, `--dump-dir` receives one stable indexed subdirectory per target; `--output` is
 rejected because a single CUDA-IR path cannot represent several independent results. The command also resolves and
 rejects any `--golden PATH` inside a canonical repository tree — recipe-local `golden/` or model-agnostic
-`search/goldens/` — including symlink aliases.
+`search/golden/` — including symlink aliases.
 With `--bench`, each target's `62_kernel_bench.json` records whether an eager reference was available and the
 non-fatal accuracy verdict alongside the deployable O3 timings. A null verdict proves correctness only when the
 reference-available field is true; reference-free Loop slices remain timing evidence rather than accuracy evidence.

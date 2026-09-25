@@ -325,7 +325,7 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   evidence, and only when a command names the file with `--golden PATH`.
 - **Canonical golden file** — A reviewed per-GPU YAML. Model goldens live at
   `recipes/<model>/golden/<gpu-slug>_<compute-cap>.yaml`; model-agnostic hardware goldens remain under
-  `emmy/compiler/pipeline/search/goldens/`. Every realization contains verified deployable measurements; `emmy tune`
+  `emmy/compiler/pipeline/search/golden/`. Every realization contains verified deployable measurements; `emmy tune`
   refuses to mutate these files directly. The files for the live card are the golden evidence an ordinary compile
   reads.
 - **Evidence** — A compatible recorded measurement used to select between candidates: a reservoir row or a tune

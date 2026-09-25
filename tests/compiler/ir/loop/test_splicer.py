@@ -21,6 +21,7 @@ from emmy.compiler.ir.loop import (
     Load,
     Loop,
     LoopOp,
+    UnfusableStmt,
     Write,
     splice_graph,
     splice_loops,
@@ -449,7 +450,8 @@ def test_ordered_prefix_root_declines_splice():
         ),
     )
 
-    assert _splice_loop_ops(producer, _prefix_scan(source="P", output="OUT"), source="P") is None
+    with pytest.raises(UnfusableStmt, match="observes running accumulator"):
+        _splice_loop_ops(producer, _prefix_scan(source="P", output="OUT"), source="P")
 
 
 def test_ordered_prefix_producer_declines_splice():
@@ -472,7 +474,8 @@ def test_ordered_prefix_producer_declines_splice():
         ),
     )
 
-    assert _splice_loop_ops(_prefix_scan(source="X", output="P"), consumer, source="P") is None
+    with pytest.raises(UnfusableStmt, match="observes running accumulator"):
+        _splice_loop_ops(_prefix_scan(source="X", output="P"), consumer, source="P")
 
 
 # ---------------------------------------------------------------------------
@@ -1111,8 +1114,10 @@ def test_shallow_affine_recurrence_still_fuses():
     assert _count_kind(merged, Write) == 1  # one root — every stage inlined
 
 
-def test_deep_affine_recurrence_is_declined_by_the_binding_cap():
+def test_deep_affine_recurrence_raises_past_the_binding_ratio():
     """Depth 12 → 2048 bindings per stage-0 stmt: constructing the merge is hopeless, so the
-    splicer must refuse (the region stays unfused) instead of multiplying bindings without end."""
+    splicer raises at the construction bound instead of multiplying bindings without end. Fusion
+    never catches it — a chain that multiplies is the roller's to roll — so the doom names the loop."""
     loops, edges, roots = _affine_recurrence_chain(12)
-    assert splice_loops(loops=loops, splice_edges=edges, roots=roots) is None
+    with pytest.raises(UnfusableStmt, match="bindings per source statement"):
+        splice_loops(loops=loops, splice_edges=edges, roots=roots)

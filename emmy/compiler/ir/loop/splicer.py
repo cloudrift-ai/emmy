@@ -62,7 +62,7 @@ from __future__ import annotations
 
 import logging
 import math
-from collections import Counter, deque
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 
@@ -98,10 +98,11 @@ class _NotSupported(Exception):
 
 class UnfusableStmt(_NotSupported):
     """One named loop's statement cannot be spliced, and no other loop in the region is implicated.
-    Two reasons reach it: ``origin``'s statements multiply σ-bindings past the per-stmt cap instead
-    of deduplicating (a recurrence-shaped chain), and a Write of ``origin`` that observes a running
-    accumulator (a scan), whose order no merged body preserves. Surfaced — not folded into ``None``
-    — when the caller asks, so fusion can drop ``origin`` from the region and retry the rest."""
+    Two reasons reach it: ``origin``'s statements multiply σ-bindings past the construction bound
+    instead of deduplicating (a recurrence the roller did not roll), and a Write of ``origin`` that
+    observes a running accumulator (a scan), whose order no merged body preserves. Raised, never
+    folded into ``None``: fusion decides its regions before it splices, so a region it cannot build
+    is a compiler bug to fix, and the roller declines a step it cannot splice."""
 
     def __init__(self, message: str, origin: str) -> None:
         super().__init__(message)
@@ -144,6 +145,20 @@ class _Demand:
     bound_as: str
 
 
+def _observes_running_accumulator(meta: LoopMeta, write: Write, scope: Scope) -> bool:
+    """Whether ``write`` observes an accumulator before its reduce loop completes."""
+    defining = meta.defs.get(write.value)
+    reduce_axis = meta.reduce_axes.get(write.value)
+    return isinstance(defining, Accum) and reduce_axis is not None and reduce_axis in scope.enclosing
+
+
+def observes_running_accumulator(op: LoopOp) -> bool:
+    """Whether a Write of ``op`` observes an accumulator before its reduce loop completes — an
+    ordered prefix output (a scan) no merged body preserves, so the loop is a kernel of its own."""
+    meta = op.analyze()
+    return any(_observes_running_accumulator(meta, write, scope) for write, scope in meta.writes)
+
+
 # ---------------------------------------------------------------------------
 # Public entrypoints
 # ---------------------------------------------------------------------------
@@ -154,7 +169,6 @@ def splice_loops(
     splice_edges: dict[tuple[str, str], tuple[str, str]],
     *,
     roots: tuple[tuple[str, str], ...] | None = None,
-    surface_unfusable: bool = False,
 ) -> LoopOp | None:
     """Splice a DAG of ``LoopOp``s into one merged kernel.
 
@@ -190,16 +204,15 @@ def splice_loops(
         # _NotSupported = splicer hit an unsupported pattern (σ-solve, scope).
         # ValueError = LoopOp construction validation rejected the emitted body.
         # Both surface to callers as None; debug log preserves which one for
-        # future investigation without polluting normal output. A binding-cap
-        # doom is re-raised on request so fusion can shrink the region by the
-        # named origin instead of abandoning every other merge in it.
-        if surface_unfusable and isinstance(exc, UnfusableStmt):
+        # future investigation without polluting normal output. A doomed
+        # statement is raised: fusion answers it with an error, the roller by declining.
+        if isinstance(exc, UnfusableStmt):
             raise
         logger.debug("splice_loops rejected pattern: %s: %s", type(exc).__name__, exc)
         return None
 
 
-def splice_graph(graph, *, surface_unfusable: bool = False) -> tuple[LoopOp, list[str]] | None:
+def splice_graph(graph) -> tuple[LoopOp, list[str]] | None:
     """Splice a subgraph of ``LoopOp`` nodes into one merged kernel.
 
     Each ``LoopOp`` node in ``graph`` becomes a registered loop tagged
@@ -267,7 +280,7 @@ def splice_graph(graph, *, surface_unfusable: bool = False) -> tuple[LoopOp, lis
                 seen_external.add(inp)
                 external_order.append(inp)
 
-    merged = splice_loops(loops=loops, splice_edges=splice_edges, roots=tuple(roots), surface_unfusable=surface_unfusable)
+    merged = splice_loops(loops=loops, splice_edges=splice_edges, roots=tuple(roots))
     if merged is None:
         return None
     return merged, external_order
@@ -580,24 +593,20 @@ class _Splicer(LoopBuilder):
         # dependency placement does not recursively walk the same large coordinate tree, while
         # avoiding structural hashing (which would perform another recursive tree walk).
         self._free_vars_by_expr_id: dict[int, tuple[Expr, frozenset[str]]] = {}
-        # Construction bound: how many DISTINCT bindings one statement may take. The dedup table
-        # shares each (stmt, emit scope, σ) binding, and in every successful splice across the
-        # compiler suite no single statement ever takes more than 8 (2,315 splices measured; the
-        # aggregate never exceeds ~1 binding per input statement). A recurrence-shaped region
-        # breaks that sharing — each stage is re-demanded under COMPOSITIONS of σs, so bindings
-        # multiply per stage instead of deduplicating (DeepSeek-V4's 20-iteration Sinkhorn chain
-        # drove 4.5M distinct bindings from 2,287 input statements and never finished). Such a
-        # merge cannot be constructed, so the first statement past the cap stops the splice and
-        # the region stays unfused — a termination bound, not a fusion-quality gate: placement
-        # still owns every cut on a merge that CAN be built. Per-stmt (not aggregate) so the
-        # refusal costs milliseconds: the blowup concentrates on the chain's statements long
-        # before the aggregate count is large.
-        self._bindings_per_stmt: Counter[tuple[str, str]] = Counter()
+        # Construction bound: how many DISTINCT bindings the merged body may take per source
+        # statement. The dedup table shares each (stmt, emit scope, σ) binding, and a legitimate
+        # splice emits about one binding per input statement — a value read at a few offsets a
+        # few. A recurrence left unrolled breaks that sharing: each stage is re-demanded under
+        # COMPOSITIONS of σs, so bindings multiply per stage instead of deduplicating (DeepSeek-V4's
+        # 20-iteration Sinkhorn chain drove 4.5M distinct bindings from 2,287 input statements and
+        # never finished). Such a merge cannot be constructed at any budget; the first binding past
+        # the bound raises, and the answer is the roller (``loop/fusion/005_roll_recurrence``), never
+        # a smaller region — a termination bound, not a fusion-quality gate: placement still owns
+        # every cut on a merge that CAN be built.
+        self._source_stmts = sum(1 for meta in loops.values() for _ in meta.op.body.iter())
 
-    # 2× the suite-wide observed maximum of 8. Kept tight because the refusal is paid REPEATEDLY:
-    # the greedy policy re-runs the fusion pass on every candidate graph it prices, so a doomed
-    # region is re-rejected on each priced compile — the cap is the whole cost of that.
-    _STMT_BINDING_CAP = 16
+    #: Bindings per source statement past which construction is a recurrence multiplying, not a merge.
+    _BINDING_RATIO = 32
 
     def run(self) -> LoopOp:
         self._seed()
@@ -611,13 +620,6 @@ class _Splicer(LoopBuilder):
 
     # -- Seed: every selected root Write, with its value queued -------------
 
-    @staticmethod
-    def _write_observes_running_accumulator(meta: LoopMeta, write: Write, scope: Scope) -> bool:
-        """Whether ``write`` observes an accumulator before its reduce loop completes."""
-        defining = meta.defs.get(write.value)
-        reduce_axis = meta.reduce_axes.get(write.value)
-        return isinstance(defining, Accum) and reduce_axis is not None and reduce_axis in scope.enclosing
-
     def _seed(self) -> None:
         for root_tag, output in self.roots:
             root = self.loops.get(root_tag)
@@ -627,7 +629,7 @@ class _Splicer(LoopBuilder):
             if found is None:
                 raise _NotSupported(f"root loop {root_tag!r} has no Write to {output!r}")
             w, scope = found
-            if self._write_observes_running_accumulator(root, w, scope):
+            if _observes_running_accumulator(root, w, scope):
                 raise UnfusableStmt(
                     f"root Write to {w.output!r} observes running accumulator {w.value!r}; ordered loop cannot be spliced",
                     origin=root_tag,
@@ -672,12 +674,10 @@ class _Splicer(LoopBuilder):
         existing = self._binding.get(key)
         if existing is not None:
             return existing
-        self._bindings_per_stmt[(origin, name)] += 1
-        if self._bindings_per_stmt[(origin, name)] > self._STMT_BINDING_CAP:
+        if len(self._binding) >= self._BINDING_RATIO * self._source_stmts:
             raise UnfusableStmt(
-                f"stmt {name!r} of loop {origin!r} takes over {self._STMT_BINDING_CAP} distinct bindings — "
-                f"the region's σ-bindings multiply instead of deduplicating (a recurrence-shaped chain); "
-                f"it stays unfused",
+                f"the merged body takes over {self._BINDING_RATIO} bindings per source statement, at {name!r} of loop "
+                f"{origin!r} — the region's σ-bindings multiply instead of deduplicating: a recurrence the roller did not roll",
                 origin=origin,
             )
         bound = self.fresh(name)
@@ -749,7 +749,7 @@ class _Splicer(LoopBuilder):
                 f"(target writes {[w.output for w, _ in target.writes]}) — usually a buf-name != node-id mismatch on the producer"
             )
         target_write, target_scope = found
-        if self._write_observes_running_accumulator(target, target_write, target_scope):
+        if _observes_running_accumulator(target, target_write, target_scope):
             raise UnfusableStmt(
                 f"splice edge into {target_tag!r} observes running accumulator {target_write.value!r}; ordered loop cannot be spliced",
                 origin=target_tag,

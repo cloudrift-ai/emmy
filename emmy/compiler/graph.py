@@ -696,6 +696,8 @@ class Graph:
             raise ValueError(f"Node id {new_id!r} already exists")
         node = self.nodes.pop(old_id)
         node.id = new_id
+        # The primary tensor travels under the node id, so its name follows.
+        node.outputs = (replace(node.outputs[0], name=new_id), *node.outputs[1:])
         self.nodes[new_id] = node
         consumers = self._users.pop(old_id, set())
         self._users[new_id] = consumers
