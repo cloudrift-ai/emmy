@@ -491,8 +491,8 @@ def _cluster_value_seams(seams: list[CutSite], axes: tuple) -> tuple[CutSite, ..
         rep = seams[rep_index]
         rep_params = scoped[rep_index]
         rep_axes = {axis.name: axis for axis in rep.axes}
-        if {axis.name for axis in _workspace_axes(rep, rep.node)} - set(rep_params):
-            continue  # a workspace axis with no capture to map has no sibling spelling
+        if {axis.name for axis in _workspace_axes(rep, rep.node) if not _unit(axis)} - set(rep_params):
+            continue  # a workspace axis with no capture to map has no sibling spelling; a unit axis reads at 0
         siblings = []
         aliases = []
         for member_index in eligible:
@@ -630,6 +630,10 @@ def _kept_components(tile: TileOp) -> dict[int, tuple[str, ...]]:
     return tile.op.read_components(frozenset(stored))
 
 
+def _unit(axis) -> bool:
+    return axis.extent.is_static and axis.extent.as_static() == 1
+
+
 def _workspace_axes(seam: CutSite, produced: Fold) -> tuple:
     """The seam axes the PRODUCED piece actually sweeps — its workspace dimensions. ``produced``
     is the seam node, or the frontier prefix when the seam materializes at a storage waypoint.
@@ -638,7 +642,7 @@ def _workspace_axes(seam: CutSite, produced: Fold) -> tuple:
     Dropping one lets a later split axis take its place as a contraction fragment axis even though
     operand indices still read it as the outer partition coordinate."""
     read = _external_reads(produced)
-    return tuple(axis for axis in seam.axes if axis.name in read or (axis.extent.is_static and axis.extent.as_static() == 1))
+    return tuple(axis for axis in seam.axes if axis.name in read or _unit(axis))
 
 
 def _workspace_strides(produced: Fold, axes: tuple) -> dict[str, int]:
@@ -1094,8 +1098,9 @@ def realize(
             # since it reads that workspace at a DIFFERENT address than the representative. It
             # reads the component that is its value: a lone contraction reads one channel of the
             # twin it equals.
-            mapping = dict(pairs)
-            sibling_index = tuple(expr.substitute({name: Var(other) for name, other in mapping.items()}) for expr in index)
+            mapping = {name: Var(other) for name, other in pairs}
+            mapping.update({axis.name: Literal(0, "int") for axis in axes if _unit(axis) and axis.name not in mapping})
+            sibling_index = tuple(expr.substitute(mapping) for expr in index)
             replacements[id(sibling)] = tuple(
                 Fold.slab(Load(name=_read_name(own, token, ordinal), input=held[channel], index=sibling_index)) if channel in held else None
                 for own, channel in zip(sibling.exposes, channels, strict=True)
