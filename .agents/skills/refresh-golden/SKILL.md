@@ -105,7 +105,9 @@ evidence, so without `PLACE=fuse` the prior decides the cut fork and can record 
 (a route row carries its own `PLACE@seam=cut` keys instead). The receipt is named `<name>.<identity12>`, or lands on
 the row itself when the row already carries the identity, with the `measurements` a strict compile reads. `--record`
 alone writes a per-card `latency:` block, which is not what a model golden's rows are read by. One run per precision
-lane (`EMMY_FAST_MATH=1` for the fast-math row). Then promote: move the receipt's `measurements`, `knobs` and
+lane, each spelled explicitly: `EMMY_FAST_MATH=1` for the fast-math row and `EMMY_FAST_MATH=0` for the standard row.
+Fast math is the default, so a standard row recorded with the variable unset measures the fast-math kernel under the
+standard row's name. Then promote: move the receipt's `measurements`, `knobs` and
 `identity` onto the proposal row in the canonical file, or keep the receipt and drop the proposal, and write through
 `dump_golden_file(..., validation=REPOSITORY)` so the diff is only the rows. Prove it: `emmy golden check PATH` stays
 clean, the row's test node decodes, and a `--strict-evidence` compile of the target with `--golden PATH` picks the
@@ -118,6 +120,14 @@ When the restamp leaves nothing, or drops the targets a deploy needs (a serving 
 - **Still a maintained recipe** — the `onboard-model` skill re-traces and records the inventory on the card, and the
   `tune-kernels` skill tunes and promotes the winners. Start from a fresh `emmy trace` inventory; the old file is
   history, not a seed.
+- **A target regrouped into a bigger kernel** (a whole layer fused into one) — the unpinned greedy may hang on it.
+  Loop fusion stays maximal, so the fix is a cut route, never a smaller region. Find one without scheduling:
+  `emmy compile --golden PATH --realization NAME --ir tile --passes dolfnstp` under `EMMY_KNOBS="PLACE@<seam>=cut,…"`
+  prints the unscheduled kernel set in seconds, with the seam spellings the cut pass accepts. Cut first where a
+  piece's value is recomputed under consumer axes it does not read, judged from the realized piece's grid (a seam's
+  raw axes omit the strides the cut applies). Add cuts one at a time; more cuts are not faster by themselves. Then
+  record the route with `--record-greedy` under its pins, and for multi-millisecond pieces pass `--warmup 2 --iters 5`
+  so the isolated re-bench stays under the GPU cap.
 - **No longer relevant** (an experiment's card, a retired quantization) — `git rm` the file and its nodes' entries in
   `tests/durations.json`, and say in the PR what evidence went with it. That call is the author's; propose it, do not
   make it.
