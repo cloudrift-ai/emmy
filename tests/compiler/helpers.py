@@ -333,21 +333,19 @@ def loop_target(graph, origins, loops: list[dict], compute_cap=(12, 0)) -> dict:
     interned into ``loops``, with ``origins`` beside it as provenance — what the recorder writes."""
     from emmy.compiler import provenance  # noqa: PLC0415
     from emmy.compiler.context import Context  # noqa: PLC0415
-    from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
     from emmy.compiler.loop_wire import intern_loop_program  # noqa: PLC0415
-    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.slice import single_node_graph  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.working_golden import lowered_kernels  # noqa: PLC0415
 
     lowered = graph.copy()
     provenance.seed(lowered)
-    lowered = Pipeline.build(LOOP_PASSES).run(lowered, ctx=Context.from_target(tuple(compute_cap)))
+    fused, kernels = lowered_kernels(lowered, ctx=Context.from_target(tuple(compute_cap)))
     wanted = set(origins)
-    (node_id,) = (
-        node_id
-        for node_id, node in lowered.nodes.items()
-        if isinstance(node.op, LoopOp) and {origin for origin in provenance.get(node) if origin in graph.nodes} == wanted
+    (program,) = (
+        program
+        for node_id, program in kernels
+        if {origin for origin in provenance.get(fused.nodes[node_id]) if origin in graph.nodes} == wanted
     )
-    return {"loop": intern_loop_program(loops, single_node_graph(lowered, node_id)), "origins": list(origins)}
+    return {"loop": intern_loop_program(loops, program), "origins": list(origins)}
 
 
 def loop_record_fields(graph, origins, compute_cap=(12, 0)) -> dict:

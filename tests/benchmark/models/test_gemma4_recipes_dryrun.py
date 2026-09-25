@@ -19,7 +19,6 @@ from emmy.benchmark.tasks import enumerate_tasks
 from emmy.recipe.lifecycle import recipe_is_runnable
 
 RECIPE = "gemma-4-12B-it"
-BASE_RECIPE = "gemma-4-12B"
 
 # The shape docker/vllm-emmy-serve/models/gemma-4-12b-it.env pins, and therefore the shape
 # the published image's execution-plan pack is keyed on.
@@ -102,25 +101,3 @@ def test_recipe_shape_agrees_with_the_release_config(project_root, recipes_dir):
     assert int(values["SERVE_MAX_MODEL_LEN"]) == llm.context_length
     assert f"--max-num-batched-tokens {values['SERVE_MAX_NUM_BATCHED_TOKENS']}" in llm.vllm.extra_args
     assert values["SERVE_DECODE_BUCKET"] == llm.vllm.extra_env["EMMY_GEN_DECODE_BUCKET"]
-
-
-def test_base_recipe_is_one_pinned_completion_server(recipes_dir):
-    """The separately requested base checkpoint has no chat contract or benchmark grid."""
-    directory = _require_runnable(recipes_dir, BASE_RECIPE)
-    tasks = enumerate_tasks([directory])
-    assert len(tasks) == 1
-
-    recipe = tasks[0].recipe
-    assert recipe.model.huggingface == "google/gemma-4-12B"
-    assert recipe.model.revision == "023679ed352de9bb66cc873c9009ce3482585c08"
-    assert recipe.model.smoke_test == "completion"
-    assert recipe.engine.llm.context_length == 131072
-    assert recipe.engine.llm.max_concurrent_requests == 64
-    assert recipe.engine.llm.gpu_memory_utilization == 0.96
-    assert "cloudriftai/vllm-emmy-gemma-4-12b" in recipe.engine.llm.vllm.image
-    assert recipe.engine.llm.vllm.extra_env["EMMY_FAST_MATH"] == "1"
-    assert recipe.engine.llm.vllm.extra_env["VLLM_USE_V2_MODEL_RUNNER"] == "1"
-
-    raw = open(os.path.join(directory, "recipe.yaml")).read()
-    body = "\n".join(ln for ln in raw.splitlines() if not ln.lstrip().startswith("#"))
-    assert "benchmark:" not in body

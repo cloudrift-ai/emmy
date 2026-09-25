@@ -336,9 +336,9 @@ configs:
       LOOPIFY: '0'
       RASTER: ''
     measurements:
-      emmy_us: 2.4
-      reference_us: 4.1
-      reference_backend: torch-eager
+      emmy_us: 1.7394842579960823
+      reference_us: 1.728386851027608
+      reference_backend: same-input-greedy
 - program: 6
   target:
     loop: 6
@@ -850,8 +850,6 @@ loops:
             input: rms_norm_mean_count
             index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
             dtype: null
-        - class: Assign
-          fields: {name: v0, op: {elementwise: reciprocal}, args: {tuple: [in1]}, dtype: null}
         - class: Loop
           fields:
             axis: {class: Axis, fields: {name: a0, extent: {dim: 16}, window: null}}
@@ -869,16 +867,16 @@ loops:
                         index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
                         dtype: null
                     - class: Assign
-                      fields: {name: v1, op: {elementwise: multiply}, args: {tuple: [in2, in2]}, dtype: null}
+                      fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in2, in2]}, dtype: null}
                     - class: Accum
-                      fields: {name: acc0, value: v1, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
+                      fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
                   unroll: false
                   seed: true
               - class: Assign
-                fields: {name: v2, op: {elementwise: multiply}, args: {tuple: [acc0, v0]}, dtype: null}
+                fields: {name: v1, op: {elementwise: divide}, args: {tuple: [acc0, in1]}, dtype: null}
               - class: Assign
-                fields: {name: v3, op: {elementwise: add}, args: {tuple: [in0, v2]}, dtype: null}
-              - {class: Assign, fields: {name: v4, op: {elementwise: rsqrt}, args: {tuple: [v3]}, dtype: null}}
+                fields: {name: v2, op: {elementwise: add}, args: {tuple: [in0, v1]}, dtype: null}
+              - {class: Assign, fields: {name: v3, op: {elementwise: rsqrt}, args: {tuple: [v2]}, dtype: null}}
               - class: Loop
                 fields:
                   axis: {class: Axis, fields: {name: a2, extent: {dim: 2048}, window: null}}
@@ -891,16 +889,16 @@ loops:
                         index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
                         dtype: null
                     - class: Assign
-                      fields: {name: v5, op: {elementwise: multiply}, args: {tuple: [in3, v4]}, dtype: null}
+                      fields: {name: v4, op: {elementwise: multiply}, args: {tuple: [in3, v3]}, dtype: null}
                     - class: Load
                       fields: {names: {tuple: [in4]}, input: p_weight, index: {tuple: [{expr: {var: a2}}]}, dtype: null}
                     - class: Assign
-                      fields: {name: v6, op: {elementwise: multiply}, args: {tuple: [in4, v5]}, dtype: null}
+                      fields: {name: v5, op: {elementwise: multiply}, args: {tuple: [in4, v4]}, dtype: null}
                     - class: Write
                       fields:
                         output: rms_norm
                         index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                        values: {tuple: [v6]}
+                        values: {tuple: [v5]}
                         value_dtype: null
                         atomic: false
                         swizzle: NONE
@@ -908,7 +906,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_rms_norm_41f954
+      name: k_rms_norm_023144
     inputs: [rms_norm_mean_count, rms_norm_eps, x, p_weight]
     outputs: [[rms_norm, f32, [16, 2048]]]
 - inputs: [x0, x1]

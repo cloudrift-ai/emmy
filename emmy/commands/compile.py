@@ -195,8 +195,24 @@ def resolve_golden_arg(args) -> None:
     ``--code`` / positional input / ``--ir`` / ``--dynamic``."""
     name = getattr(args, "realization", None)
     golden_file = getattr(args, "golden", None)
+    program = getattr(args, "program", None)
     args.golden_configs = []
     args._golden_records = []
+    if program is not None:
+        # A stored traced program as the input, prepared as the inventory writer prepared it, so the
+        # loop stage is what ``emmy golden kernels`` must equal for the file to be current.
+        from emmy.compiler.pipeline.search.golden import load_golden, load_golden_records, stored_program  # noqa: PLC0415
+
+        if not golden_file or name or args.code or args.input:
+            logger.error("--program N selects a traced program inside --golden PATH and excludes --realization / --code / positional input")
+            sys.exit(2)
+        document = load_golden(golden_file)
+        if not 0 <= program < len(document["programs"]):
+            logger.error("--program %d: %s stores %d program(s)", program, golden_file, len(document["programs"]))
+            sys.exit(2)
+        args._golden_graph = stored_program(document, program)
+        args._golden_records = load_golden_records(document)
+        return
     if golden_file and not name:
         logger.error("--golden PATH requires --realization NAME here (run --golden PATH alone walks every realization)")
         sys.exit(2)
@@ -219,7 +235,7 @@ def resolve_golden_arg(args) -> None:
         GoldenEntryState,
         golden_set_state,
         goldens_for_live_gpu,
-        load_golden_file,
+        load_golden,
         load_golden_records,
     )
 
@@ -234,7 +250,7 @@ def resolve_golden_arg(args) -> None:
         document = getattr(args, "_golden_document", None)
         if document is None:
             try:
-                document = load_golden_file(golden_file)
+                document = load_golden(golden_file)
             except ValueError as exc:
                 logger.error(str(exc))
                 sys.exit(2)
@@ -497,7 +513,25 @@ def register_compile_command(subparsers):
     parser = subparsers.add_parser("compile", help="Compile a model or IR through structural lowering")
     add_input_args(parser)
     add_golden_arg(parser)
-    parser.add_argument("--output", "-o", help="Output path for compiled IR")
+    parser.add_argument(
+        "--program",
+        type=int,
+        metavar="N",
+        help=(
+            "With --golden PATH: compile the golden's traced program N (its `programs` entry) instead of a "
+            "realization's kernel — the whole layer or serving twin the file recorded, prepared as the trace "
+            "inventory writer prepared it. With --ir loop -o fresh.yaml this writes the kernels the golden must store."
+        ),
+    )
+    parser.add_argument(
+        "--output",
+        "-o",
+        help=(
+            "Output path for the IR. A `.yaml` path writes the stage as the wire a golden stores — `--ir torch`: the "
+            "traced program; `--ir loop`: one Loop IR program per kernel, sorted by output set, what `emmy golden "
+            "kernels PATH --program N` prints — so the two diff; any other path (or none) gets the readable listing."
+        ),
+    )
     parser.add_argument(
         "--ir",
         choices=list(_IR_STAGES),
@@ -585,7 +619,10 @@ def handle_compile(args):
 
     n_compute = sum(1 for n in result.nodes.values() if not _is_boundary(n.op))
     logger.info("Lowered: %d graph nodes -> %d kernels", initial_count, n_compute)
-    content = format_stage(result, args.ir)
+    if args.output and args.output.endswith(".yaml"):
+        content = wire_stage(result, args.ir)
+    else:
+        content = format_stage(result, args.ir)
     if args.output:
         Path(args.output).write_text(content)
         logger.info("Saved %s IR: %s", args.ir, args.output)
@@ -614,6 +651,22 @@ def format_stage(graph, stage: str) -> str:
     if formatter == "graph":
         return graph.pretty_print()
     return format_kernels(graph)
+
+
+def wire_stage(graph, stage: str) -> str:
+    """The stage as the wire a golden stores: the traced program for ``torch``, the Loop IR pool for
+    ``loop``. Other stages have no stored form."""
+    from emmy.compiler.pipeline.search.golden import kernel_pool_text, program_text  # noqa: PLC0415
+
+    if stage == "torch":
+        return program_text(graph)
+    if stage == "loop":
+        from emmy.compiler.loop_wire import loop_graph_to_wire  # noqa: PLC0415
+        from emmy.compiler.pipeline.search.working_golden import kernel_programs  # noqa: PLC0415
+
+        return kernel_pool_text(loop_graph_to_wire(program) for _, program in kernel_programs(graph))
+    logger.error("a .yaml output holds the wire a golden stores, which exists for --ir torch and --ir loop only")
+    sys.exit(2)
 
 
 def _quantize_traced(graph: Graph, bundle, args) -> str:

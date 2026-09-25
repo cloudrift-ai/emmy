@@ -638,13 +638,13 @@ def _run_golden_targets(args) -> None:
     """
     from copy import copy  # noqa: PLC0415
 
-    from emmy.compiler.pipeline.search.golden import lead_of, load_golden_file, load_golden_records  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import lead_of, load_golden, load_golden_records  # noqa: PLC0415
 
     if args.input or args.code or args.ir:
         logger.error("--golden is mutually exclusive with positional input / --code / --ir")
         sys.exit(2)
     try:
-        document = load_golden_file(args.golden)
+        document = load_golden(args.golden)
         records = load_golden_records(document)
     except (OSError, ValueError) as exc:
         logger.error("cannot load --golden %s: %s", args.golden, exc)

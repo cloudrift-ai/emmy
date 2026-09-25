@@ -12,7 +12,7 @@ import json
 import os
 import re
 import tempfile
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from enum import StrEnum
@@ -27,10 +27,10 @@ from emmy import config, gpu
 from emmy.compiler.loop_wire import loop_graph_from_wire, validate_loop_program_pool
 from emmy.compiler.pipeline.search.data.shape import ShapeKey
 from emmy.compiler.structural import digest
-from emmy.compiler.torch_wire import graph_from_wire, validate_program_pool
+from emmy.compiler.torch_wire import graph_from_wire, graph_to_wire, validate_program_pool
 from emmy.recipe.bundled import default_recipe_root
 
-_HARDWARE_GOLDENS_DIR = Path(__file__).parent / "goldens"
+_HARDWARE_GOLDENS_DIR = Path(__file__).parent / "golden"
 _RECIPE_GOLDEN_DIR = "golden"
 _PROGRAM_GRAPH_CACHE: dict[int, tuple[dict, object]] = {}
 _LOOP_GRAPH_CACHE: dict[int, tuple[dict, object]] = {}
@@ -651,8 +651,10 @@ def validate_golden_file(
                 state = golden_set_state(realization, entry["realizations"])
             except ValueError as exc:
                 raise ValueError(f"{realization_where} ({realization.get('name', '?')}): {exc}") from exc
-            if strict and state != GoldenEntryState.VERIFIED:
-                raise ValueError(f"{realization_where} repository promotion requires knobs and paired positive timings")
+            if strict and state == GoldenEntryState.INVENTORY:
+                raise ValueError(f"{realization_where} a repository row must spell a schedule (knobs)")
+            if validation == GoldenFileValidation.PROMOTION and state != GoldenEntryState.VERIFIED:
+                raise ValueError(f"{realization_where} promotion requires knobs and paired positive timings")
             if state == GoldenEntryState.VERIFIED and "measurements" in realization:
                 measurements = realization["measurements"]
                 _require_keys(measurements, {"emmy_us", "reference_us", "reference_backend"}, f"{realization_where}.measurements")
@@ -791,7 +793,7 @@ def _identity_store() -> dict:
         from emmy import config  # noqa: PLC0415
 
         fingerprint = _compiler_fingerprint()
-        sections: dict = {"entries": {}, "verdicts": {}}
+        sections: dict = {"entries": {}, "verdicts": {}, "lowerings": {}}
         try:
             payload = json.loads(config.golden_identity_cache_path(fingerprint).read_text())
             sections = {name: payload.get(name, {}) for name in sections}
@@ -802,9 +804,9 @@ def _identity_store() -> dict:
 
 
 def flush_identity_store() -> None:
-    """Persist newly derived identities and decode verdicts (atomic replace; concurrent writers
-    merge — a lost write only re-derives later), so the next process on this machine and compiler
-    reads the derivations instead of lifting every record again."""
+    """Persist newly derived identities, decode verdicts and fresh-lowering digests (atomic replace;
+    concurrent writers merge — a lost write only re-derives later), so the next process on this machine and
+    compiler reads the derivations instead of lifting every record again."""
     global _IDENTITY_STORE_DIRTY
     if not _IDENTITY_STORE_DIRTY or _IDENTITY_STORE is None:
         return
@@ -822,7 +824,7 @@ def flush_identity_store() -> None:
         except (OSError, ValueError):
             on_disk = None
         if on_disk is not None:
-            for section in ("entries", "verdicts"):
+            for section in ("entries", "verdicts", "lowerings"):
                 merged = dict(on_disk.get(section, {}))
                 merged.update(_IDENTITY_STORE.get(section, {}))
                 _IDENTITY_STORE[section] = merged
@@ -1468,6 +1470,17 @@ def dump_golden_file(
     return destination
 
 
+def golden_validation(path: str | Path) -> GoldenFileValidation:
+    """The validation a golden file's location demands: a repository golden strictly, anything else
+    as a working file — what every command reading or writing a golden by path uses."""
+    return GoldenFileValidation.REPOSITORY if is_repository_golden_path(path) else GoldenFileValidation.WORKING
+
+
+def load_golden(path: str | Path) -> dict:
+    """A golden file loaded with the validation its location demands (:func:`golden_validation`)."""
+    return load_golden_file(path, validation=golden_validation(path))
+
+
 def is_repository_golden_path(path: str | Path) -> bool:
     resolved = Path(path).resolve()
     hardware_root = _HARDWARE_GOLDENS_DIR.resolve()
@@ -1660,16 +1673,54 @@ def regime_live(record: GoldenRecord) -> bool:
     return True
 
 
-_DOCUMENT_MEMO: dict[Path, list[GoldenRecord]] = {}
+_DOCUMENT_MEMO: dict[Path, tuple[dict, list[GoldenRecord]]] = {}
 
 
-def _records_of(path: Path, *, validation: GoldenFileValidation = GoldenFileValidation.REPOSITORY) -> list[GoldenRecord]:
+def _document_of(path: Path, *, validation: GoldenFileValidation = GoldenFileValidation.REPOSITORY) -> tuple[dict, list[GoldenRecord]]:
+    """A golden parsed once per process: ``(document, records)``."""
     path = Path(path)
     cached = _DOCUMENT_MEMO.get(path)
     if cached is None:
         document = load_golden_file(path, validation=validation)
-        cached = _DOCUMENT_MEMO.setdefault(path, load_golden_records(document))
+        cached = _DOCUMENT_MEMO.setdefault(path, (document, load_golden_records(document)))
     return cached
+
+
+def _records_of(path: Path, *, validation: GoldenFileValidation = GoldenFileValidation.REPOSITORY) -> list[GoldenRecord]:
+    return _document_of(path, validation=validation)[1]
+
+
+def stored_program(document: Mapping, index: int):
+    """The golden's traced program ``index`` as the compiler receives it — decoded from the wire and
+    prepared exactly as the trace inventory writer prepares a fresh trace, so its fresh lowering is
+    comparable byte for byte with the targets the golden stores."""
+    from emmy.compiler.pipeline.search.working_golden import prepare_traced_graph  # noqa: PLC0415
+    from emmy.compiler.torch_wire import graph_from_wire  # noqa: PLC0415
+
+    graph = graph_from_wire(document["programs"][index])
+    prepare_traced_graph(graph)
+    return graph
+
+
+def stored_kernels(document: Mapping, program: int | None = None) -> list[dict]:
+    """The Loop IR kernels the golden's targets store, each once, in target order — every
+    target's, or those of one traced ``program``."""
+    indexes = [entry["target"]["loop"] for entry in document["configs"] if program is None or entry["program"] == program]
+    return [document["loops"][index] for index in dict.fromkeys(indexes)]
+
+
+def program_text(graph) -> str:
+    """A traced program as the wire a golden stores in ``programs`` — ``emmy compile --ir torch -o file.yaml``."""
+    return yaml.dump(_style_program(graph_to_wire(graph)), Dumper=_GoldenDumper, sort_keys=False, width=140)
+
+
+def kernel_pool_text(kernels: Iterable[Mapping]) -> str:
+    """Loop IR kernels as the pool a golden stores them in, sorted by output set, so two pools diff
+    line by line whatever order their kernels came in: what ``emmy golden kernels`` prints for a
+    golden and ``emmy compile --golden PATH --program N --ir loop -o fresh.yaml`` writes for its fresh
+    lowering."""
+    ordered = sorted(kernels, key=lambda kernel: sorted(kernel["outputs"]))
+    return yaml.dump([_style_program(kernel) for kernel in ordered], Dumper=_GoldenDumper, sort_keys=False, width=140)
 
 
 def _load_goldens() -> list[GoldenRecord]:

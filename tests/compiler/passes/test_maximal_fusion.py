@@ -1,12 +1,14 @@
 """Maximal loop fusion is one schedule-blind fixpoint."""
 
 import numpy as np
+import pytest
 
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import LinearOp
 from emmy.compiler.ir.loop import Loop, LoopOp
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
+from tests.compiler.passes.test_roll_recurrence import _SINKHORN, _delta
 
 
 def _nests_reduce(loop_op: LoopOp) -> bool:
@@ -60,27 +62,18 @@ def test_nested_reduction_fusion_preserves_numerics() -> None:
     np.testing.assert_allclose(got.reshape(want.shape), want, rtol=1e-5, atol=1e-5)
 
 
-def test_an_unfusable_chain_does_not_shatter_the_rest_of_the_region():
-    """The maximal region contains a recurrence-shaped chain no budget can construct. Fusion
-    must decline the CHAIN — dropping the splicer-named origin and its downstream closure — and
-    still merge everything else, rather than abandoning the whole region. Abandoning it is what
-    shattered DeepSeek-V4's post block into 433 kernels where pre-maximal fusion produced 92.
-    """
+def _chain_beside_a_sibling(stages: dict[str, LoopOp], widths: dict[str, int] | None = None) -> tuple[Graph, str]:
+    """A producer feeding both ``stages`` — a chain of states, each reading the last, eight wide
+    unless ``widths`` says otherwise — through a broadcast, and a plain elementwise sibling;
+    ``(graph, the chain's last state)``."""
     from dataclasses import replace
-    from importlib import import_module
 
-    from emmy.compiler.backend.numpy import NumpyBackend
     from emmy.compiler.ir.expr import Literal, Var
     from emmy.compiler.ir.loop import Assign, Axis, Load, Write
-    from emmy.compiler.pipeline import Match, Rule
-    from tests.compiler.ir.loop.test_splicer import _affine_recurrence_chain
-
-    fusion = import_module("emmy.compiler.pipeline.passes.loop.fusion.010_merge_loop_ops")
 
     axis = Axis("i", 8)
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("b0", (9,)), node_id="b0")
-    # The shared producer both feeds the doomed chain and a plain elementwise consumer.
     producer = LoopOp(
         body=(
             Loop(
@@ -111,9 +104,8 @@ def test_an_unfusable_chain_does_not_shatter_the_rest_of_the_region():
         ),
     )
     graph.add_node(broadcast, ["root"], Tensor("broadcast", (8, 32)), node_id="broadcast")
-    chain_loops, _edges, _roots = _affine_recurrence_chain(12)
     upstream = "broadcast"
-    for tag, op in chain_loops.items():
+    for tag, op in stages.items():
         # Keep the affine recurrence's exponentially distinct bindings inside the input.
         def bound_load(stmt):
             if not isinstance(stmt, Load):
@@ -122,7 +114,7 @@ def test_an_unfusable_chain_does_not_shatter_the_rest_of_the_region():
             return replace(stmt, index=(*index, Literal(0, "int")) if stmt.input == "b0" else index)
 
         rebound = replace(op, body=op.body.map(bound_load)).rename_buffers({"b0": "broadcast"})
-        graph.add_node(rebound, [upstream], Tensor(tag, (8,)), node_id=tag)
+        graph.add_node(rebound, [upstream], Tensor(tag, ((widths or {}).get(tag, 8),)), node_id=tag)
         upstream = tag
     sibling = LoopOp(
         body=(
@@ -138,25 +130,79 @@ def test_an_unfusable_chain_does_not_shatter_the_rest_of_the_region():
     )
     graph.add_node(sibling, ["root"], Tensor("easy", (8,)), node_id="easy")
     graph.inputs, graph.outputs = ["b0"], [upstream, "easy"]
+    return graph, upstream
 
-    match = Match(graph=graph, root_node_id="root", rule=Rule(name="test", pattern=[]))
-    fragment = fusion.rewrite(match, graph.nodes["root"])
 
-    assert fragment is not None, "the fusable half of the region must still merge"
-    fused = set(match.consumed)
-    assert {"root", "easy"} <= fused, "the plain sibling consumer fused with the producer"
-    assert not any(nid.startswith("s") and nid[1:].isdigit() for nid in fused), "no stage of the doomed chain was pulled into the merge"
-    # The copy that only the doomed chain reads stays in the region and is stored as one of its outputs.
-    # Leaving it beside the departed readers looked cheaper, but a copy of its own never fuses into a
-    # chain fusion already declined, and the materialized output is what later merges grow around: with
-    # the copy excluded, DeepSeek-V4's post block lowers to 45 kernels per twin instead of 36, its two
-    # large softmax-matmul kernels split apart.
-    assert "broadcast" in fused, "the copy the doomed chain reads is materialized by the region that computes its source"
+def test_a_recurrence_chain_rolls_and_the_rest_of_the_region_merges():
+    """The maximal region contains a chain no splice can construct: each stage reads the last at
+    two affine maps, so stage 0 is demanded under two to the twelfth σs. The roller replaces the
+    chain by one kernel that carries its state, and everything else — the producer, the broadcast
+    the first state reads, the plain sibling — is one region and one kernel. Fusion never declines
+    a region: leaving the chain unrolled and shrinking around it is what shattered DeepSeek-V4's
+    post block into 433 kernels where pre-maximal fusion produced 92, and it made the kernel set
+    depend on the order the producers were visited in."""
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.pipeline.passes.loop.fusion._region import carries_state
+    from tests.compiler.ir.loop.test_splicer import _affine_recurrence_chain
 
+    stages, _edges, _roots = _affine_recurrence_chain(12)
+    graph, last = _chain_beside_a_sibling(stages)
     backend = NumpyBackend()
     inputs = {"b0": np.linspace(-1, 1, 9, dtype=np.float32)}
     before = backend.run(backend.compile(graph), input_data=inputs)[0].outputs
-    rewritten = Pipeline.build(["loop/fusion"]).run(graph)
-    after = backend.run(backend.compile(rewritten), input_data=inputs)[0].outputs
-    for got, want in zip(after.values(), before.values(), strict=True):
-        np.testing.assert_allclose(got, want)
+
+    fused = Pipeline.build(["loop/fusion"]).run(graph)
+
+    kernels = {nid: node.op for nid, node in fused.nodes.items() if isinstance(node.op, LoopOp)}
+    (rolled,) = (op for op in kernels.values() if carries_state(op))
+    (steps,) = (stmt for stmt in rolled.body if isinstance(stmt, Loop))
+    assert steps.axis.extent.as_static() == 11, "eleven states carried from the first, which reads the broadcast"
+    (merged,) = (nid for nid, op in kernels.items() if not carries_state(op) and "easy" in op.outputs)
+    assert set(kernels[merged].outputs) >= {"easy", "s0"}, "the producer, the broadcast, the first state and the sibling are one kernel"
+    assert len(kernels) == 3, sorted(kernels)  # ... plus the slice of the last state the graph exports
+    after = backend.run(backend.compile(fused), input_data=inputs)[0].outputs
+    for name in (last, "easy"):
+        np.testing.assert_allclose(after[name], before[name])
+
+
+def test_a_chain_the_roller_does_not_roll_is_an_error_not_a_smaller_region():
+    """Every stage of this chain has a shape of its own, so no two are states of one recurrence
+    and nothing rolls; the region the chain multiplies in raises at the splicer's construction
+    bound. Nothing catches it — the kernel set is never a fall-through."""
+    from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+    from emmy.compiler.ir.loop import Assign, Axis, Load, UnfusableStmt, Write
+
+    stages: dict[str, LoopOp] = {}
+    for k in range(12):
+        src = "b0" if k == 0 else f"s{k - 1}"
+        left = BinaryExpr("+", BinaryExpr("*", Literal(2, "int"), Var("i")), Literal(1, "int"))
+        right = BinaryExpr("+", BinaryExpr("*", Literal(3, "int"), Var("i")), Literal(2, "int"))
+        body = (
+            Load(name=f"x{k}", input=src, index=(left,)),
+            Load(name=f"y{k}", input=src, index=(right,)),
+            Assign(name=f"v{k}", op="add", args=(f"x{k}", f"y{k}")),
+            Write(output=f"s{k}", index=(Var("i"),), value=f"v{k}"),
+        )
+        stages[f"s{k}"] = LoopOp(body=(Loop(axis=Axis("i", 8 + k), body=body),))
+    graph, _ = _chain_beside_a_sibling(stages, widths={f"s{k}": 8 + k for k in range(12)})
+    with pytest.raises(UnfusableStmt, match="bindings per source statement"):
+        Pipeline.build(["loop/fusion"]).run(graph)
+
+
+@pytest.mark.parametrize("code", [_delta(1, 6, 4, 2), _SINKHORN.format(iters=3, n=2, r=3, c=3)])
+def test_the_kernel_set_does_not_depend_on_the_order_the_producers_are_visited_in(code: str) -> None:
+    """Fusion decides its regions from the graph before it merges any, so the kernels are the same
+    whatever order the producers are visited in. Topological order breaks ties by node id: renaming
+    every node in reverse visits them in another order, and a rolled recurrence's boundary is
+    where a walk from one producer or another used to disagree."""
+    from emmy.commands.trace import graph_from_code
+
+    def kernels(graph) -> list[str]:
+        fused = Pipeline.build(LOOP_PASSES).run(graph)
+        return sorted(node.op.body.structural_key(structural=False) for node in fused.nodes.values() if isinstance(node.op, LoopOp))
+
+    graph, _, _ = graph_from_code(code)
+    renamed, _, _ = graph_from_code(code)
+    for index, nid in enumerate(reversed(renamed.topological_order())):
+        renamed.rename_node(nid, f"z{index}")
+    assert kernels(renamed) == kernels(graph)

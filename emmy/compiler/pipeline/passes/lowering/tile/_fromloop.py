@@ -517,15 +517,21 @@ def states_as_buffers(body: Body, prefix: str) -> tuple[Body, tuple[Axis, ...], 
     serial: list[Axis] = []
     shapes: dict[str, tuple] = {}
 
-    def read(stmt: Pre, time: Axis, outer: tuple[Axis, ...], seeds: dict[str, float]) -> tuple[Stmt, ...]:
+    def read(stmt: Pre, time: Axis, outer: tuple[Axis, ...], seeds: dict[str, float | str]) -> tuple[Stmt, ...]:
         step = Var(time.name)
         after_first = BinaryExpr(">", step, Literal(0, "int"))
         previous = TernaryExpr(after_first, step - Literal(1, "int"), Literal(0, "int"))
         index = (previous, *(Var(axis.name) for axis in outer), *stmt.index)
         held, seed = f"{stmt.name}__prev", f"{stmt.name}__seed"
+        start = seeds[stmt.carrier]
+        # The seed is a buffer of the state's shape (the tensor an unrolled loop started from) or a constant.
+        if isinstance(start, str):
+            seeded: Stmt = Load(name=seed, input=start, index=(*(Var(axis.name) for axis in outer), *stmt.index))
+        else:
+            seeded = Let(name=seed, value=Literal(start))
         return (
             Load(name=held, input=f"{prefix}__{stmt.carrier}", index=index),
-            Let(name=seed, value=Literal(seeds[stmt.carrier])),
+            seeded,
             Select(name=stmt.name, branches=(SelectBranch(held, after_first), SelectBranch(seed, Literal(True, "bool")))),
         )
 
@@ -533,7 +539,7 @@ def states_as_buffers(body: Body, prefix: str) -> tuple[Body, tuple[Axis, ...], 
         index = (Var(time.name), *(Var(axis.name) for axis in outer), *stmt.index)
         return Write(output=f"{prefix}__{stmt.name}", index=index, value=stmt.value)
 
-    def walk(stmts: Body, outer: tuple[Axis, ...], time: Axis | None, seeds: dict[str, float]) -> Body:
+    def walk(stmts: Body, outer: tuple[Axis, ...], time: Axis | None, seeds: dict[str, float | str]) -> Body:
         out: list[Stmt] = []
         for stmt in stmts:
             if isinstance(stmt, Pre):
@@ -567,7 +573,7 @@ def _peel(body: Body) -> tuple[list, list[Stmt]]:
     current = list(body)
     while True:
         index = 0
-        while index < len(current) and isinstance(current[index], (Load, Assign, Init, Select)):
+        while index < len(current) and isinstance(current[index], (Load, Assign, Init, Let, Select)):
             index += 1
         head, rest = current[:index], current[index:]
         if len(rest) != 1 or not isinstance(rest[0], Loop) or rest[0].is_reduce:

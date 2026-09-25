@@ -243,16 +243,18 @@ each recipe's model golden — on the DEFAULT lane, one node per recorded row, s
 count. Every golden target is its kernel's stored Loop IR, so a row replays from that kernel and nothing re-lowers a
 traced program, and the replay leaves undecided every kernel of the set that cannot hold the row. The derivation memo
 (`~/.cache/emmy/golden_identity.<fingerprint>.json`, one file per compiler fingerprint, keyed by record content) makes a
-re-run cost only the rows that actually changed; CI keeps no memo, so every CI run decodes cold. Collecting the rows
+re-run cost only the rows that actually changed; the self-hosted CI runners keep the memo, so a run on a compiler
+tree a runner already derived is warm and any other is cold. Collecting the rows
 parses every golden in each worker. The realization corpus's `offered` stage is this same decode (see
 `tests/compiler/realization/ARCHITECTURE.md`).
 
-Rows that no longer decode are listed in `golden_xfails.yaml` beside the test and asked as STRICT xfails, so
-the list can only shrink: closing a row turns its node red until the line is deleted, and a line naming a row the
-file no longer records fails on its own. Never add a line to make a red row green — a recorded row that stops
-decoding is a regression in the enumeration, and listing it enshrines that as the reference. The rule is the
-realization corpus's `_xfail_` suffix in another spelling; rows are not files, so the expectation cannot ride on a
-filename.
+The same file is also asked whether every stored target is still what the current compiler lowers the golden's own
+programs to (`emmy golden check`); a file that is not is stale — its rows decode, yet a deploy builds kernels none
+of them describe. Neither check has a list of expected failures: a row that stops decoding, or a file whose targets
+stop being the fresh lowering, is red until `emmy golden restamp` rewrites the file, which needs no card (the
+`refresh-golden` skill is the flow; rows measured on a kernel that now renders differently keep their schedule and
+lose their microseconds until a record run on the card measures them again). Never re-record a row to make a red
+node green: a recorded row that stops decoding is a regression in the enumeration, and re-recording enshrines it.
 
 Repository golden *qualification* is intentionally outside pytest. Model goldens are GPU-specific qualification
 evidence, so the nightly `onboard-model` workflow validates the selected recipe-local file, strictly decodes every

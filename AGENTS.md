@@ -100,11 +100,15 @@ one compile regime everywhere in the repo.
 
 The default suite strictly decodes every repository golden row by row — the model-agnostic hardware goldens and each
 recipe's model golden: one test node per recorded row, so the work scatters over the xdist workers and a failure names
-the row. Decoding replays each row at its declared capability, so a stale row is detectable on any machine;
-re-recording it is what needs the card. Rows that no longer decode are listed as strict xfails in
-`tests/compiler/pipeline/search/golden_xfails.yaml`, which only ever shrinks — closing a row turns its node red until
-the line is deleted. Never add a line to make a red row green. The nightly `onboard-model` workflow still owns a model
-golden's exact-GPU replay.
+the row. Decoding replays each row at its declared capability, so a stale row is detectable on any machine. The suite
+also asks every golden whether its stored targets are still what the current compiler lowers the golden's own programs
+to (`emmy golden check`); a file that is not is stale: its rows decode, yet a deploy builds kernels none of them
+describe. Neither check has a list of expected failures. The fix for both is `emmy golden restamp PATH`, GPU-free:
+targets take the fresh Loop IR, rows are re-keyed, a row measured on a kernel that now renders differently keeps its
+schedule and loses its microseconds (a proposal, no evidence until a record run on the card measures it again), a row
+that no longer decodes is dropped. The `refresh-golden` skill owns the whole flow, including the record run and the
+delete-or-re-record decision. Never re-record a row to make a red node green. The nightly `onboard-model` workflow
+still owns a model golden's exact-GPU replay.
 
 When running a large subset (e.g. `tests/compiler/`), pass the same `-n auto --dist=loadgroup` flags `make test` uses to
 parallelize (add `-p no:randomly` for a stable order):
@@ -171,10 +175,11 @@ it before answering any CLI-flag question. Quickstart for the common paths:
 | `emmy bench recipes/* [--filter KEY=PATTERN] [--no-teardown]` | deploy + benchmark + teardown across cloud VMs; `teardown <run_dir>` cleans up afterwards |
 | `emmy vm create gpu --gpu NAME --gpu-count N` | provision a GPU VM by name (also `vm create/delete {gcp,cloudrift}`) |
 | `emmy serve <model> [--generate] [--bench] [vllm flags…]` | serve an embedding (or `--generate` chat) model via vLLM with the emmy plugin |
-| `emmy compile <model_or_ir> [--layer N] [--ir STAGE] [--dynamic …] [--target sm_NN]` | trace + run the compiler; print or save any IR stage |
+| `emmy compile <model_or_ir> [--layer N] [--ir STAGE] [--dynamic …] [--target sm_NN]`, `emmy compile --golden PATH --program N --ir loop -o fresh.yaml` | trace + run the compiler; print or save any IR stage; lower a golden's stored program and write the stage as the golden's wire |
 | `emmy run <model_or_ir_or_--code> [--bench]` | compile + execute on the CUDA backend, check accuracy, optionally bench vs eager / `torch.compile` |
 | `emmy tune <target> [--bench] [--gpus N]` | two-level autotune; writes the online prior + tune DB |
 | `emmy eval {knobs,prior,golden,variants,failures} [--dataset {golden,db}]` | inspect the priors / tune DB |
+| `emmy golden {check,restamp} [PATH…]`, `emmy golden kernels PATH [--program N]` | name the stored targets a fresh lowering of a golden's programs no longer writes; rewrite the golden onto that lowering (every repository golden by default); print the Loop IR pool a golden stores |
 | `emmy dataset {import,freeze,check} …` | fill the dataset DB from measurement freezes and tune DBs; snapshot a DB into a freeze; check a DB's tables agree with themselves |
 | `emmy {pull,trace,generate,inspect,compare} …` | model download, IR tracing, the naive generation oracle, IR inspection, dump diffing |
 
@@ -321,8 +326,9 @@ Then update the documentation:
 Then run the gates, in this order, after every edit above is in:
 
 22. **Run the full suite**: `make test` — fix any failures. If a realization case comes back stale, `make
-    test-corpus-regen` applies the fix. If golden rows go red, name the change that did it in the PR body — do **not**
-    re-record them to make it green, which enshrines the regression as the new reference.
+    test-corpus-regen` applies the fix; if a golden's stored targets stop being the fresh lowering, `emmy golden
+    restamp` applies that one (the `refresh-golden` skill). If golden rows go red, name the change that did it in the
+    PR body — do **not** re-record them to make it green, which enshrines the regression as the new reference.
 23. **Record the durations of every test this change ADDS that takes over half a second.** `make test` fails at
     session end when a test at or over 5 s is missing from `tests/durations.json`, because CI buckets its xdist
     workers on that file and plans around a hole. Record well BELOW that bar: the gate reads the runner's clock,

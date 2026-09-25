@@ -721,15 +721,15 @@ normalization and softmax therefore retain f32 internal state rather than narrow
 `splice_graph` then preserves the explicit conversion through its ordinary statement path and reconstructs no dtype
 boundary from source provenance or graph topology.
 
-Construction is bounded per statement: the dedup table shares each `(stmt, emit scope, σ)` binding, and in
-every legitimate splice no single statement takes more than a handful of distinct bindings. A recurrence-shaped
-region — each stage re-demanded under compositions of σs, DeepSeek-V4's 20-iteration Sinkhorn chain being the live
-case — multiplies bindings per stage instead of deduplicating, and such a merge cannot be constructed at any budget.
-The first statement past the cap stops the splice. The doom is structured (`UnfusableStmt` names the offending
-loop) and surfaced to the fusion pass on request, which drops that loop plus its downstream closure from the region
-and retries — so one doomed chain costs only itself, not every other merge in its region. This is a termination
-bound, not a fusion-quality gate: placement still owns every cut on a merge that CAN be built, and the refusal must
-stay cheap because the greedy policy re-runs fusion on every candidate graph it prices.
+Construction is bounded as a ratio: the dedup table shares each `(stmt, emit scope, σ)` binding, and a legitimate
+splice emits a few bindings per source statement at most (a value read at several offsets takes one each). A
+recurrence left unrolled — each stage re-demanded under compositions of σs, DeepSeek-V4's 20-iteration Sinkhorn chain
+being the live case — multiplies bindings per stage instead of deduplicating, and such a merge cannot be constructed
+at any budget. The first binding past `_BINDING_RATIO` times the region's statement count raises `UnfusableStmt`,
+which names the loop. Fusion never catches it: its regions are decided before any is spliced, so a region that
+multiplies is a recurrence for `loop/fusion/005_roll_recurrence` to roll, not a region to shrink — shrinking made the
+kernel set depend on the order the producers were visited in. This is a termination bound, not a fusion-quality gate:
+placement still owns every cut on a merge that CAN be built.
 
 Each splice memoizes `Expr.free_vars()` by expression identity while placing dependencies. Sigma expressions remain
 live for the splice, and identity avoids both repeated coordinate-tree walks and the recursive structural hashing a
