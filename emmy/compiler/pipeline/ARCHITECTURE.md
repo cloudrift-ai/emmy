@@ -81,7 +81,7 @@ lifetimes, and telling them apart is the single most useful thing to learn early
 | **Golden configs** | model YAML under `recipes/<model>/golden/`; model-agnostic YAML under `search/goldens/` | promoted from deployable `run --bench` golden / `--ab` rows (Part 7) | greedy compile — measured rows in the one evidence index (the per-card files, or `--golden PATH`); `run --golden PATH --bench` measures them; `emmy fit` trains the offline prior on them; `emmy eval` datasets |
 | **Reservoir** | inside the online prior checkpoint (`~/.cache/emmy/online.json`) — the sample of past measurements the model trains on | `emmy tune` — every deployable-regime training row | greedy compile (measured evidence, consulted first); the online prior's own refits |
 | **`perf` table** | the tune DB (`~/.cache/emmy/autotune.db`), beside the `kernel` and `routing` rows its rows are of | `emmy tune` — one measurement per compilable kernel it benched, at the sweep's flags; `run --bench` — every clean pinned row (golden / `--ab`) and the greedy re-bench, per kernel, through the tuner's own writer | greedy compile (measured evidence); the per-variant replay cache |
-| **Dataset DB** | `~/.cache/emmy/dataset.db` — the same tables in a file of their own | `emmy dataset import`, from measurement freezes (`search/freezes/` when one is checked in) and tune DB files | `emmy eval prior --dataset db` — **never** a deploy |
+| **Dataset DB** | `~/.cache/emmy/dataset.db` — the same tables in a file of their own | `emmy dataset import`, from measurement freezes (`search/freezes/` when one is checked in), golden files and tune DB files — every kernel re-lowered from its definition | `emmy eval prior --dataset db` — **never** a deploy |
 
 Of the four, only the goldens travel with a clone: they are the only *measured* data a fresh machine has. The
 reservoir and the tune DB are machine-local caches written by local tunes, so a freshly rented box starts with the
@@ -764,8 +764,8 @@ touches the µs scale a deploy sees.
   online prior any more) until the machine re-tunes. A version bump therefore changes deploy behavior — the machine
   drops to the tune DB's and the golden rows → offline prior, with no warning at deploy time.
 - **The DB's `kernel` rows** carry no version: their `S_*` stamps are copied off the kernel at write time and never
-  re-derived — a tune DB is a cache, re-tuned or re-imported after a change — while a freeze written under another
-  version refuses to load (its manifest records the version; `load_freeze`).
+  re-derived — a tune DB is a cache, re-tuned or re-imported after a change — while a freeze stores no stamps at
+  all: it is re-lowered from each kernel's definition on import, so a version change is a re-import.
 
 Bump the constant on any incompatible change to knob naming or feature encoding; artifacts from the old version then
 age out instead of poisoning the model.
@@ -1230,13 +1230,16 @@ import`, and is what the measurement-data readers read, so an import there can n
 compilable kernels, the decisions that minted them, and measurements of them — nothing else.
 
 - **`kernel`** — one row per kernel, keyed by its exact identity: the clustered deploy identity beside it, its Loop IR
-  wire (`loop_wire.kernel_wire` — the one-node program of the tile kernel's schedule-free body, which decodes to the
-  same exact identity) and its C name; **`kernel_feature`** holds its
-  `S_*` stamps — the identity strategy's, written at the fusion boundary onto the fused loop body, which every
-  evidence join keys on; a twisted kernel's stored body would stamp differently. The fused kernel of a slice and a piece a
-  cut or a split minted are rows alike, so the same kernel reached from two parents has one definition — what a
-  candidate pool enumerates from. A kernel wire is a KERNEL, not a program: the Loop passes must not run over it
-  (they normalize a size-one axis away and mint another kernel).
+  wire (`loop_wire.kernel_wire` — the one-node program of the loop body the kernel was formed from, bound to its own
+  buffers), its C name and `formed`; **`kernel_feature`** holds its `S_*` stamps — the identity strategy's, which
+  every evidence join keys on, and the features of that same body. The lowering passes take a formed kernel's wire
+  back to the kernel — the lift, the twist and the identity strategy give it the same exact identity and stamps
+  (`tests/compiler/ir/test_kernel_wire.py` holds every kind of kernel the corpus mints to it) — which is what a
+  freeze re-lowers. A piece carved from a twisted tree (an attention cut or split piece) is formed from no loop op:
+  the lift does not take its derived body back, so its row keeps that body, `formed` false, and only its parent's
+  program reaches it. The fused kernel of a slice and a piece a cut or a split minted are rows alike, so the same
+  kernel reached from two parents has one definition — what a candidate pool enumerates from. A kernel wire enters
+  the LOWERING passes, never the Loop passes, which normalize a size-one axis away and mint another kernel.
 - **`context`** — one row per backend, card and regime: the card (`Context.hardware_id`, the PCIe product name — two
   SKUs off one die, H100 and H200, RTX 5090 and RTX PRO 6000, share a compute capability, and without it their rows
   would meet under the keep-best upsert), the target as the backend spells it (`sm_120`), the cicc opt level and the
@@ -1276,34 +1279,36 @@ every connection.
 **Drift checks** (`emmy dataset check`, `SearchDB.drift`). A tune DB is a cache: a row the current code disagrees with
 is re-tuned or re-imported, never patched, so the checks are the cheap ones over the tables themselves — a schedule or
 placement digest matches its knob rows, every row names the rows it references, every context names a registry card,
-schedule knobs and placement knobs stay apart. Nothing decodes a stored wire, and the stamps are not re-derived (the
-fused body they were computed from is not stored). The artifact that has to survive a code change is the freeze, and
-a freeze written under another featurizer version refuses to load.
+schedule knobs and placement knobs stay apart. Nothing decodes a stored wire, and the stamps are not re-derived
+here. The artifact that has to survive a code change is the freeze, which is re-lowered on import.
 
 **Measurement freeze** (`data/freeze.py`, written by `emmy dataset freeze`). The tune DB is a live store, so a model
-fit or evaluated straight from it is not reproducible. A *freeze* (v6) is a snapshot written into a directory, in
-natural keys only: one YAML file per `(gpu, compute_cap)` (a `gpu_name`/`compute_cap` header plus a `configs` list of
-`perf` rows — the kernel, the bindings, the schedule row, the opt level and flags, the stats), `kernels.yaml` (the
-`kernel` row of every kernel a frozen row or a routing row names, with its stamps) and `routing.yaml` (every
-`routing` row: parent, arm, pieces in order), beside a `manifest.json` holding the provenance header — the featurizer
-version among it — and, per file, its kind and content digest.
+fit or evaluated straight from it is not reproducible. A *freeze* is a snapshot written as a golden file per card
+(Part 7's format): the `loops` pool holds each kernel's definition — its `kernel` row's wire — one config per kernel
+set and binding, and a realization per measured row: its schedule row, its regime as the input pin `FAST_MATH`, its
+identity and its median. Nothing the compiler computed is stored: no exact identity a reader has to trust, no stamps
+in one featurizer's vocabulary, no stats beyond the median, no routing rows. A kernel formed from no loop op (an
+attention cut or split piece) is written under the nearest formed ancestor the routing table reaches: a routing entry
+per decision on the path, the piece's rows as receipts listing them in `kernel_set` — the shape `run --record-greedy`
+writes — and nothing else is written that way.
 
-- **Only deployable-regime rows freeze**, as filtered by `freeze_reason`: a card the GPU registry knows, the
-  deployable opt level, no extra compiler flags, and the two physical-plausibility checks
-  (`implausible_value_reason`, which reads the row's `bindings` as the size a symbolic axis ran at, and
-  `impossible_kernel_reason`). `bench_fail` rows are kept, as negative examples. The regime gate is what keeps a
-  freeze a fair yardstick: a freeze is the corpus a reported prior number is computed over, so rows from a regime
-  nothing deploys in would put half a card's pools in a lane no one runs. `group_measured` inherits the same filter,
-  so an analysis over a live DB agrees with one over a freeze.
-- **Freezing the same DB twice yields the same digests.** Every row serializes to one canonical JSON line, rows sort
-  by that line, the per-file sha256 covers exactly those lines (content-level — immune to YAML style), the manifest's
-  top sha256 folds the sorted per-file digests, and `created_at` enters none of them.
-- **Loading is strict.** `load_freeze` hard-errors on a missing/foreign/corrupt manifest, a `freeze_ver` or
-  featurizer-version mismatch, a listed file missing, an unknown file kind, a per-file digest mismatch, a row naming
-  a kernel the kernels file lacks, or an un-instantiable row — never a silent fallback. It is not a reader's entry
-  point: `emmy dataset import` loads a freeze into the dataset DB in foreign-key order (each row's `source` naming
-  the freeze's digest) and every reader reads the instance; `commands/dataset.dataset_db` refuses a default dataset
-  DB that does not hold the checked-in freeze, when one is, with the command that fixes it.
+- **What freezes** is `freeze_reason`'s call: an `ok` row on a card the GPU registry knows, at the deployable opt
+  level, in one of the two precision regimes (fast math on, the default, or off — the flags `nvcc.effective_flags`
+  spells under each), that passes the two physical-plausibility checks (`implausible_value_reason`, which reads the
+  row's `bindings` as the size a symbolic axis ran at, and `impossible_kernel_reason`). A failed bench is not a
+  measurement (the tune DB keeps it), and a row a compile imported from a golden file is the file's. The regime gate
+  is what keeps a freeze a fair yardstick: a freeze is the corpus a reported prior number is computed over, so rows
+  from a regime nothing deploys in would put half a card's pools in a lane no one runs. `group_measured` inherits the
+  same filter, and keys its pools by regime, so an analysis over a live DB agrees with one over a freeze.
+- **Freezing the same DB twice yields the same bytes**: rows sort by content, and the golden dump is deterministic.
+  A file's identity is its bytes: `emmy dataset import` sources its rows as `freeze:<sha256[:12]>` of the file, and
+  `commands/dataset.dataset_db` refuses a default dataset DB that does not hold every file of the checked-in freeze,
+  when one is, with the command that fixes it.
+- **Importing re-lowers.** `emmy dataset import` reads a freeze directory, a golden file or a tune DB (frozen first,
+  so one path serves all) and hands each file's records to the golden importer (`golden_import.import_goldens`) once
+  per regime the file holds, entering at the LOWERING passes as the tuner runs a slice. Every kernel comes back with
+  the current compiler's exact identity and stamps, and a definition the compiler no longer lowers is counted, not
+  guessed at. A compiler change is therefore a re-import (`--fresh`), never a re-collection.
 - No freeze is checked in at the moment. The RTX 5090 freeze predates the `kernel` table and was dropped rather than
   converted; the card is re-collected through the `perf` writer, after which `emmy dataset freeze` writes the next
   one into `search/freezes/`.
@@ -1542,8 +1547,9 @@ lands in the record.
 ## Part 8: Evaluating the prior (`emmy eval prior`)
 
 `emmy eval prior` is how you find out whether the prior is any good and, when it isn't, where it goes wrong. It runs
-over the goldens, the tune DB's `node` table, or a measurement freeze, and it reports BOTH halves of the composite
-prior, each labelled — they fail for different reasons, so an unlabelled "prior" number destroys the diagnostic.
+over the goldens or over a DB instance (the dataset DB, filled from a measurement freeze), and it reports BOTH halves
+of the composite prior, each labelled — they fail for different reasons, so an unlabelled "prior" number destroys the
+diagnostic.
 
 **Two datasets, two questions, one report.** `search/prior/report.py` assembles both into one serialisable schema
 (`--json`), so comparing two models is a `diff`. `emmy fit` writes the same summaries into its `metrics.json`, through

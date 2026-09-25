@@ -273,20 +273,30 @@ def kernel_tile(op):
     return next((ancestor for ancestor in op.source_chain() if isinstance(ancestor, TileOp)), None)
 
 
+def formed_from(tile) -> LoopOp | None:
+    """The loop op ``tile`` was formed from — the fused loop op the lift threads in as a kernel's ``source``,
+    the loop nest a cut or split piece is re-formed through — or ``None`` for a kernel formed from no loop op:
+    a piece carved from a twisted tree, whose derived body the lift does not take back."""
+    return next((op for op in tile.source_chain() if isinstance(op, LoopOp)), None)
+
+
 def kernel_wire(tile) -> dict:
-    """The Loop IR wire of one tile kernel: a one-node program holding the tile's schedule-free body, as
-    the ``LoopOp`` normalizes it, bound to the tile's own buffers. Its decoded loop op carries the tile's
-    exact and clustered identities (the body is what they digest, the buffers the io half), so a piece a
-    cut minted has a definition of its own rather than "its parent plus the route". It is a KERNEL, not a
-    program: the Loop passes must not run over it — they normalize a size-one axis away and mint another
-    kernel."""
+    """The Loop IR wire of one tile kernel: a one-node program holding the body the kernel was formed from
+    (:func:`formed_from`), bound to the tile's own buffers. The lowering passes take that body back to the
+    kernel — the lift, the twist and the identity strategy give it the same exact identity and ``S_*`` stamps
+    — so a kernel row's definition re-lowers on its own, a piece a cut minted included, rather than as "its
+    parent plus the route". A kernel formed from no loop op holds its derived ``loop_body`` instead: it
+    decodes to the kernel's identities, but the lift does not take it back and the Loop passes would normalize
+    a size-one axis away and mint another kernel — only its parent's program reaches such a kernel."""
+    formed = formed_from(tile)
     graph = Graph()
     for name, tensor in tile.inputs.items():
         graph.add_node(InputOp(), [], outputs=(tensor,), node_id=name)
     # A node's primary buffer is named after the node, so the kernel node takes its primary output's
     # buffer name as id — the shape a golden's standalone slice has too.
     primary, *_ = tile.outputs
-    graph.add_node(LoopOp(body=tile.loop_body, name=tile.name), list(tile.inputs), outputs=tuple(tile.outputs.values()), node_id=primary)
+    body = formed.body if formed is not None else tile.loop_body
+    graph.add_node(LoopOp(body=body, name=tile.name), list(tile.inputs), outputs=tuple(tile.outputs.values()), node_id=primary)
     graph.inputs = list(tile.inputs)
     graph.outputs = list(tile.outputs)
     return loop_graph_to_wire(graph)

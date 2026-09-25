@@ -189,12 +189,14 @@ class Context:
     kernel_cache: object | None = field(default=None, compare=False, repr=False)
 
     @classmethod
-    def from_target(cls, cap: tuple[int, int], *, gpu_name: str | None = None) -> Context:
+    def from_target(cls, cap: tuple[int, int], *, gpu_name: str | None = None, compile_flags: str | None = None) -> Context:
         """A target-derived context. ``gpu_name`` (a PCIe product name) pins the
         device-physical features to that card's **memorized** specs from the
         :mod:`emmy.gpu` registry — used to reconstruct a *golden* config's
         context so it featurizes with its own card's SM count / smem (not the live
         device's). Default ``None`` → the live device (the live-compile path).
+        ``compile_flags`` names the regime the context stands for — the flags a
+        recorded row was measured under — instead of the live environment's.
 
         A ``gpu_name`` the registry does not know is a hard error, never a fallback: the caller
         named a specific card, so substituting the live device's properties would featurize that
@@ -216,7 +218,7 @@ class Context:
             sm_count=sm,
             device_props=props,
             gpu_name=spec.name if spec else gpu_name,
-            compile_flags=_env_compile_flags(),
+            compile_flags=_env_compile_flags() if compile_flags is None else compile_flags,
         )
 
     @property

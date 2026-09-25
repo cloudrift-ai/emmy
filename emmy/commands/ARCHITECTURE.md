@@ -449,6 +449,10 @@ emmy
 +-- serve        -- vllm serve with the emmy embedding plugin (optional one-shot bench)
 +-- teardown     -- clean up VMs left by bench --no-teardown
 +-- publish      -- validate, tag, and push the canonical image named by one recipe
++-- dataset
+|   +-- import    -- fill the dataset DB from freezes, golden files and tune DBs, every kernel re-lowered
+|   +-- freeze    -- write a DB instance's admitted rows as a measurement freeze, a golden file per card
+|   +-- check     -- count the rows of a DB instance whose tables disagree with themselves
 +-- recipe
 |   +-- list      -- inspect and filter compact recipe metadata
 |   +-- query     -- filter and order normalized recipe or deployment rows
@@ -726,6 +730,18 @@ filter, fallback can cross providers in hardware-table order; `--provider` restr
 Capacity-class signals recognized today: CloudRift HTTP 503/429 on rent, CloudRift `Inactive` terminal status / readiness timeout, GCP `ZONE_RESOURCE_POOL_EXHAUSTED` / `QUOTA_EXCEEDED` / `STOCKOUT` in `gcloud` stderr, and GCP `RUNNING`-status timeout. Both providers terminate VMs they created but couldn't bring to readiness, so orchestrator fallback does not leak orphan instances.
 
 GCP project is inferred from `gcloud` config. CloudRift reads `CLOUDRIFT_API_KEY` and `CLOUDRIFT_API_URL` from the environment by default. **H200 on CloudRift** is only available on on-prem clusters — set `CLOUDRIFT_API_URL` to the on-prem endpoint (the public `api.cloudrift.ai` does not offer H200).
+
+### `emmy dataset`
+
+The dataset DB (`EMMY_DATASET_DB`) is the tune DB's tables in a file of their own, read by `emmy eval prior --dataset
+db` and never by a compile. `import [SOURCES…] [--db PATH] [--fresh]` fills it: a source is a measurement freeze
+directory (the checked-in one by default), a golden file, or a tune DB file, which is frozen first. Every kernel is
+re-lowered from its definition through the lowering passes by the current compiler (`golden_import.import_goldens`),
+once per precision regime the file's rows record, and its rows are sourced by the file's digest; a file the instance
+already holds is skipped, and `--fresh` rebuilds from nothing. `freeze --out DIR [--db PATH]` writes an instance's
+admitted rows (`data/freeze.freeze_reason`) as a golden file per card — the artifact that gets checked in. `check
+[--db PATH]` counts the rows of an instance whose tables disagree with themselves (`SearchDB.drift`) and exits
+non-zero when any do.
 
 ### `emmy fit`
 

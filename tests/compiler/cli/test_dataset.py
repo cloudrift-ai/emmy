@@ -1,26 +1,31 @@
-"""``emmy dataset import`` — a dataset DB filled from a measurement freeze and from tune DBs — the readers'
-refusal of a default dataset DB that does not hold the checked-in freeze, and ``emmy dataset check``, the
-checks that an instance's tables agree with themselves."""
+"""``emmy dataset import`` — a dataset DB filled from a measurement freeze, golden files and tune DBs, every
+kernel re-lowered by the current compiler — the readers' refusal of a default dataset DB that does not hold the
+checked-in freeze, and ``emmy dataset check``, the checks that an instance's tables agree with themselves."""
 
 from __future__ import annotations
 
+import dataclasses
 from argparse import Namespace
 
 import pytest
 
 from emmy.commands.dataset import dataset_db, handle_dataset_check, handle_dataset_import
-from emmy.compiler.pipeline.search.data.freeze import write_freeze
+from emmy.compiler.pipeline.search.data.freeze import freeze_source, write_freeze
 from emmy.compiler.pipeline.search.db import RoutingRow, SearchDB, knobs_json
 from emmy.compiler.structural import digest
-from tests.compiler.pipeline.search.helpers import kernel_row, perf_row
+from tests.compiler.pipeline.search.helpers import tuned_db
+
+_CASE = "fused/norm-linear-f16-scalar-reduce.yaml"
 
 
 def _freeze(tmp_path, name: str, us: float):
-    db = SearchDB(tmp_path / f"{name}.db")
-    db.record_kernel(kernel_row(name))
-    db.record_perf_rows([perf_row(name, us=us)])
+    """A freeze of one measured kernel at ``us``, written under ``name``."""
+    db = tuned_db(tmp_path / f"{name}.db", (_CASE,))
+    [row] = list(db.iter_perf_rows())
+    db._conn.execute("UPDATE perf SET latency_us_median = ?", (us,))
     db.close()
-    return write_freeze(tmp_path / f"{name}.db", tmp_path / name)
+    write_freeze(tmp_path / f"{name}.db", tmp_path / name)
+    return {freeze_source(path) for path in (tmp_path / name).glob("*.yaml")}
 
 
 def test_the_default_dataset_holds_the_checked_in_freeze_or_is_refused(tmp_path, monkeypatch):
@@ -43,27 +48,31 @@ def test_the_default_dataset_holds_the_checked_in_freeze_or_is_refused(tmp_path,
     handle_dataset_import(Namespace(sources=[], db=None, fresh=True))
     assert dataset_db(None) == tmp_path / "dataset.db"
     db = SearchDB.open_readonly(tmp_path / "dataset.db")
-    assert db.perf_sources() == {f"freeze:{current['sha256'][:12]}": 1}
+    assert db.perf_sources() == dict.fromkeys(current, 1)
+    assert [row.stats.median for row in db.iter_perf_rows()] == [500.0]
     db.close()
 
 
-def test_a_tune_db_imports_its_rows_and_definitions(tmp_path):
-    """A tune DB's CUDA rows arrive as they are, keeping the source they were written with, and so do
-    its kernel and routing rows — the definitions its rows are of."""
-    tune = SearchDB(tmp_path / "autotune.db")
-    tune.record_kernels([kernel_row("k", name="k_test", symbolic=("seq_len",)), kernel_row("p")])
-    tune.record_perf_rows([perf_row("k", us=500.0), perf_row("k", us=300.0, bindings={"seq_len": 128})])
-    # A golden row a compile imported into the tune DB stays behind: the golden dataset holds it already.
-    tune.record_perf_rows([perf_row("p", us=100.0, source="golden:abcdef012345")])
-    tune.record_routing(RoutingRow(parent="p", arm={"PLACE": "cut"}, children=("k",)))
+def test_a_tune_db_is_frozen_and_re_lowered_on_import(tmp_path):
+    """A tune DB's rows reach the dataset the way a freeze of it would: re-lowered from each kernel's
+    definition and sourced by the frozen file's digest. A golden row a compile imported into the tune DB
+    stays behind — the golden file holds it — and a file the instance already holds is not imported twice."""
+    tune = tuned_db(tmp_path / "autotune.db", (_CASE, "fused/linear-add-place-cut-sm70.yaml"))
+    [plain] = [row for row in tune.iter_perf_rows() if row.cc == 120]
+    tune.record_perf_row(dataclasses.replace(plain, knobs={**plain.knobs, "WORK": "t8"}, source="golden:abcdef012345"))
+    measured = sorted((row.kernel, knobs_json(row.bindings), row.stats.median) for row in tune.iter_perf_rows() if row.source == "measured")
     tune.close()
 
     handle_dataset_import(Namespace(sources=[str(tmp_path / "autotune.db")], db=str(tmp_path / "dataset.db"), fresh=False))
     db = SearchDB.open_readonly(tmp_path / "dataset.db")
-    assert sorted((r.kernel, tuple(r.bindings.items())) for r in db.iter_perf_rows()) == [("k", ()), ("k", (("seq_len", 128),))]
-    assert db.perf_sources() == {"measured": 2}
-    assert db.kernel_names() == {"k": "k_test", "p": "k_p"}
-    assert [(s.parent, s.arm, s.children) for s in db.iter_routing()] == [("p", {"PLACE": "cut"}, ("k",))]
+    assert sorted((row.kernel, knobs_json(row.bindings), row.stats.median) for row in db.iter_perf_rows()) == measured
+    assert all(source.startswith("freeze:") for source in db.perf_sources()) and len(db.perf_sources()) == 2
+    held = db.perf_sources()
+    db.close()
+
+    handle_dataset_import(Namespace(sources=[str(tmp_path / "autotune.db")], db=str(tmp_path / "dataset.db"), fresh=False))
+    db = SearchDB.open_readonly(tmp_path / "dataset.db")
+    assert db.perf_sources() == held
     db.close()
 
 
@@ -81,7 +90,8 @@ def _instance(path):
     parent = case_target_tile("fused/norm-linear-f16-scalar-reduce.yaml")
     piece = case_target_tile("matmul/f16-mma-f16acc-gmem.yaml")
     db = SearchDB(path)
-    db.record_kernels([tile_row(parent, "k_parent"), tile_row(piece, "k_piece")])
+    for tile, name in ((parent, "k_parent"), (piece, "k_piece")):
+        db.record_kernel(tile_row(tile, name))
     stats = PerfStats(median=10.0, min=10.0, max=10.0, mean=10.0, variance=0.0, n_samples=3)
     for tile in (parent, piece):
         identity = tile.identity_key(structural=False, with_io=True)

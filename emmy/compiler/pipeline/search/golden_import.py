@@ -38,11 +38,15 @@ if TYPE_CHECKING:
 logger = logging.getLogger("emmy.compiler.pipeline")
 
 
-def import_goldens(db: SearchDB, ctx: Context, records: Sequence[GoldenRecord], *, source: str) -> Counter:
+def import_goldens(
+    db: SearchDB, ctx: Context, records: Sequence[GoldenRecord], *, source: str, passes: Sequence[str] | None = None
+) -> Counter:
     """Write ``records``' measurements into ``db`` under ``ctx``'s card and regime, ``source`` on every perf
     row. Only a measured entry in the live input regime (``golden.regime_live``) is evidence. Returns what
     became of the entries, by kind. A set the current compiler cannot lower is skipped: the strict decode is
-    where that is loud."""
+    where that is loud. ``passes`` is the pipeline a target enters: the whole of it for a golden's traced
+    slice (the default), the lowering passes alone for a freeze's kernel body, which the Loop passes would
+    normalize into another kernel."""
     from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
     from emmy.compiler.loop_wire import kernel_tile  # noqa: PLC0415
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline  # noqa: PLC0415
@@ -59,7 +63,7 @@ def import_goldens(db: SearchDB, ctx: Context, records: Sequence[GoldenRecord], 
         consumed.add(parent.identity_key(with_io=True))
         counts["routing rows"] += 1
 
-    pipeline = Pipeline.build(CUDA_PASSES).with_strategies(KernelInventory(on_routing=on_routing))
+    pipeline = Pipeline.build(list(passes) if passes is not None else CUDA_PASSES).with_strategies(KernelInventory(on_routing=on_routing))
     sets: dict[tuple, list[GoldenRecord]] = {}
     for record in records:
         sets.setdefault(_set_key(record), []).append(record)

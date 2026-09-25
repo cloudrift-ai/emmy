@@ -154,7 +154,8 @@ def test_split_workspace_preserves_output_axis_order(monkeypatch, free_order) ->
     result, _ = _resolve(["lowering/tile"], graph)
     partial = result.nodes["out__partial"]
     assert tuple(dim.as_static() for dim in partial.output.shape) == (2, 4, 64, 256)
-    assert {axis.name for axis in sched_of(partial.op)._mn_for(partial.op.op)} == {"row", "channel"}
+    # The piece is formed as its own kernel, which names its axes afresh: the tile axes are told by extent.
+    assert {axis.extent.as_static() for axis in sched_of(partial.op)._mn_for(partial.op.op)} == {64, 256}
     result.validate()
 
 

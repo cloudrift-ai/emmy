@@ -9,8 +9,11 @@ Tables (the DDL is the reference):
 - ``kernel`` — one row per compilable kernel, keyed by its EXACT identity (``identity_key(structural=False,
   with_io=True)``: the digest of the normalized body's form plus each buffer's dtype and hint-free shape).
   The clustered deploy identity (``identity_key(with_io=True)``, pointwise ops merged — the identity
-  golden receipts store) is beside it, with the kernel's Loop IR wire and its C name. A piece a cut or a
-  split minted is a row like any other, so the same kernel reached from two parents has one definition.
+  golden receipts store) is beside it, with the kernel's Loop IR wire (``loop_wire.kernel_wire``: the body
+  it was formed from, which the lowering passes take back to the kernel — ``formed`` — or, for a piece
+  carved from a twisted tree, its derived body, which only its parent's program reaches) and its C name. A
+  piece a cut or a split minted is a row like any other, so the same kernel reached from two parents has
+  one definition.
 - ``kernel_feature`` — the kernel's ``S_*`` stamps, one per row: what the identity strategy writes onto a
   kernel at the fusion boundary, a function of the fused loop body it was lifted from. The structural
   signature deploy evidence joins and candidate pools group on is the digest of these rows, derived on
@@ -29,8 +32,8 @@ Tables (the DDL is the reference):
   all-or-nothing (:meth:`SearchDB.best_per_op_time`).
 - ``perf`` — one measurement per COMPILABLE kernel variant per context: the kernel, the sizes its symbolic
   dims were benched at (``bindings``, ``{}`` static), its schedule row, the statistics, ``captured``, a
-  ``bench_fail`` row's ``error`` and ``source`` (``measured``, or ``freeze:<digest>`` when imported). No
-  route rows, no whole-slice totals, no kernel-set verdicts.
+  ``bench_fail`` row's ``error`` and ``source`` (``measured``, or the golden file or freeze it was imported from,
+  ``golden:<digest>`` / ``freeze:<digest>``). No route rows, no whole-slice totals, no kernel-set verdicts.
 
 Readers see a FLAT :class:`PerfRow`: the context's columns, and ``knobs`` reassembled as the kernel's
 stamps, its exact identity as the ``I_kernel`` stamp and the schedule row, so the featurizer, the evidence
@@ -53,7 +56,7 @@ import fcntl
 import json
 import logging
 import sqlite3
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -133,13 +136,16 @@ class PerfRow:
 @dataclass(frozen=True)
 class KernelRow:
     """One ``kernel`` row with its stamps: the exact identity, the clustered deploy identity, the Loop IR
-    wire (what the identities digest), the C name, and the ``S_*`` dict."""
+    wire, the C name, the ``S_*`` dict, and whether the wire is the body the kernel was formed from
+    (``formed``: the lowering passes take it back to the kernel, identity and stamps alike) or the derived
+    body of a kernel formed from no loop op, which only its parent's program reaches."""
 
     exact_identity: str
     structural_identity: str
     loop_ir: dict
     name: str
     stamps: dict
+    formed: bool = True
 
 
 @dataclass(frozen=True)
@@ -159,7 +165,8 @@ _DDL = {
             exact_identity       TEXT PRIMARY KEY,
             structural_identity  TEXT NOT NULL,
             loop_ir              TEXT NOT NULL,
-            kernel_name          TEXT NOT NULL
+            kernel_name          TEXT NOT NULL,
+            formed               INTEGER NOT NULL
         )""",
     "kernel_feature": """
         CREATE TABLE kernel_feature (
@@ -235,7 +242,7 @@ _INDEXES = (
     "CREATE INDEX kernel_structural ON kernel (structural_identity)",
 )
 _COLS = {
-    "kernel": ("exact_identity", "structural_identity", "loop_ir", "kernel_name"),
+    "kernel": ("exact_identity", "structural_identity", "loop_ir", "kernel_name", "formed"),
     "kernel_feature": ("kernel", "name", "value"),
     "context": ("id", "backend", "gpu_name", "arch", "opt", "flags"),
     "schedule": ("id", "digest"),
@@ -396,21 +403,6 @@ class SearchDB:
         self._conn.execute("PRAGMA foreign_keys = ON")
         return self
 
-    def _transaction(self, rows: Iterable, write) -> int:
-        """``write(row)`` for every row in ONE transaction — an import of thousands of rows on this
-        autocommit connection would otherwise pay one fsync per row. Returns the rows offered."""
-        n = 0
-        self._conn.execute("BEGIN")
-        try:
-            for row in rows:
-                write(row)
-                n += 1
-        except BaseException:
-            self._conn.execute("ROLLBACK")
-            raise
-        self._conn.execute("COMMIT")
-        return n
-
     # ------------------------------------------------------------------
     # The dimension tables: context, schedule, placement
     # ------------------------------------------------------------------
@@ -470,8 +462,8 @@ class SearchDB:
         the one place a re-stamp under a new featurizer lands."""
         fresh = (
             self._conn.execute(
-                "INSERT OR IGNORE INTO kernel (exact_identity, structural_identity, loop_ir, kernel_name) VALUES (?, ?, ?, ?)",
-                (row.exact_identity, row.structural_identity, _wire_json(row.loop_ir), row.name),
+                "INSERT OR IGNORE INTO kernel (exact_identity, structural_identity, loop_ir, kernel_name, formed) VALUES (?, ?, ?, ?, ?)",
+                (row.exact_identity, row.structural_identity, _wire_json(row.loop_ir), row.name, int(row.formed)),
             ).rowcount
             == 1
         )
@@ -482,18 +474,15 @@ class SearchDB:
                 "INSERT INTO kernel_feature (kernel, name, value) VALUES (?, ?, ?)", [(row.exact_identity, k, v) for k, v in stamps.items()]
             )
 
-    def record_kernels(self, rows: Iterable[KernelRow]) -> int:
-        return self._transaction(rows, self.record_kernel)
-
     def kernel_names(self) -> dict[str, str]:
         """Every stored kernel's C name by exact identity — the per-kernel views' grouping key."""
         return dict(self._conn.execute("SELECT exact_identity, kernel_name FROM kernel"))
 
     def iter_kernels(self) -> Iterator[KernelRow]:
-        for exact, structural, loop_ir, name in self._conn.execute(
-            "SELECT exact_identity, structural_identity, loop_ir, kernel_name FROM kernel ORDER BY exact_identity"
+        for exact, structural, loop_ir, name, formed in self._conn.execute(
+            "SELECT exact_identity, structural_identity, loop_ir, kernel_name, formed FROM kernel ORDER BY exact_identity"
         ).fetchall():
-            yield KernelRow(exact, structural, json.loads(loop_ir), name, self._stamps(exact))
+            yield KernelRow(exact, structural, json.loads(loop_ir), name, self._stamps(exact), formed=bool(formed))
 
     # ------------------------------------------------------------------
     # Routing
@@ -511,9 +500,6 @@ class SearchDB:
             "INSERT INTO routing (parent, placement, position, child) VALUES (?, ?, ?, ?)",
             [(row.parent, pid, i, child) for i, child in enumerate(row.children)],
         )
-
-    def record_routings(self, rows: Iterable[RoutingRow]) -> int:
-        return self._transaction(rows, self.record_routing)
 
     def iter_routing(self) -> Iterator[RoutingRow]:
         rows = self._conn.execute("SELECT parent, placement, position, child FROM routing ORDER BY parent, placement, position").fetchall()
@@ -570,7 +556,7 @@ class SearchDB:
         )
 
     def record_perf_row(self, row: PerfRow) -> None:
-        """Upsert one measurement — a live one (:meth:`record_perf`) or an imported one. Keep-best-``ok``
+        """Upsert one measurement — a live one (:meth:`record_perf`) or a golden's. Keep-best-``ok``
         policy: a ``bench_fail`` never overwrites a prior ``ok`` row, and among same-semantics ``ok`` rows
         the lowest median wins. ``captured`` (CUDA-graph-captured, pure GPU time) adds a precedence axis:
         a captured measurement supersedes an uncaptured (wall-semantics) one regardless of median — the
@@ -617,9 +603,6 @@ class SearchDB:
                 row.source,
             ),
         )
-
-    def record_perf_rows(self, rows: Iterable[PerfRow]) -> int:
-        return self._transaction(rows, self.record_perf_row)
 
     # ------------------------------------------------------------------
     # Perf — read

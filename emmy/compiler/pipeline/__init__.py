@@ -46,6 +46,8 @@ LOOP_PASSES = [*TENSOR_PASSES, "loop/lifting", "loop/fusion", "loop/canonicalize
 TILE_PASSES = [*LOOP_PASSES, "lowering/tile"]
 KERNEL_PASSES = [*TILE_PASSES, "lowering/kernel"]
 CUDA_PASSES = [*KERNEL_PASSES, FINAL_LOWERING_PASS]
+# The lowering passes alone (``tile → kernel → cuda``): what a kernel body enters, never the Loop passes.
+LOWERING_PASSES = CUDA_PASSES[len(LOOP_PASSES) :]
 
 __all__ = [
     "CUDA_PASSES",
@@ -54,6 +56,7 @@ __all__ = [
     "FINAL_LOWERING_PASS",
     "KERNEL_PASSES",
     "LOOP_PASSES",
+    "LOWERING_PASSES",
     "LoweringError",
     "Match",
     "Pass",

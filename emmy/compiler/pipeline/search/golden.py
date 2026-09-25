@@ -165,10 +165,8 @@ def golden_entry_state(entry: Mapping) -> GoldenEntryState:
     measurements = entry["measurements"]
     if not isinstance(measurements, Mapping):
         raise ValueError("measurements must be a mapping")
-    required = {"emmy_us", "reference_us", "reference_backend"}
-    missing = required - set(measurements)
-    if missing:
-        raise ValueError(f"measurements missing {', '.join(sorted(missing))}")
+    if "emmy_us" not in measurements:
+        raise ValueError("measurements missing emmy_us")
     return GoldenEntryState.VERIFIED
 
 
@@ -212,8 +210,10 @@ class GoldenRecord:
     gpu_name: str
     compute_cap: tuple[int, int]
     model: str | None
-    program_index: int
-    program_wire: dict
+    #: The traced program the target's ``origins`` name — the Torch twin a bench compares against — and its index
+    #: in the document's pool; ``None`` for a target recorded from a measurement alone.
+    program_index: int | None
+    program_wire: dict | None
     origins: tuple[str, ...]
     bindings: tuple[tuple[str, int], ...]
     pins: tuple[tuple[str, object], ...]
@@ -242,6 +242,9 @@ class GoldenRecord:
     #: model golden is one file per card and uses the flat ``measurements`` block instead; a corpus
     #: case is one file across many cards, which a flat block cannot hold.
     latency: dict | None = None
+    #: Which config entry of its document the record came from. A config is one kernel set of one target: several
+    #: configs can hold one loop (a target's fused rows, and each route's receipts), and each is its own set.
+    config_index: int = 0
 
     @property
     def is_routing(self) -> bool:
@@ -328,6 +331,8 @@ class GoldenRecord:
     @cached_property
     def program(self):
         """Decode the stable Torch IR payload once per embedded program."""
+        if self.program_wire is None:
+            raise ValueError(f"{self.name}: the target was recorded from a measurement alone and has no traced program")
         key = id(self.program_wire)
         cached = _PROGRAM_GRAPH_CACHE.get(key)
         if cached is None or cached[0] is not self.program_wire:
@@ -437,7 +442,7 @@ class GoldenRecord:
 
     @property
     def reference_us(self) -> float:
-        return float(self.measurements["reference_us"]) if self.measurements else 0.0
+        return float(self.measurements.get("reference_us", 0.0)) if self.measurements else 0.0
 
     @property
     def reference_backend(self) -> str | None:
@@ -493,7 +498,7 @@ def _validate_latency(latency: object, where: str) -> None:
                 _positive_number(timings[field], f"{where}.{card}.{field}")
 
 
-def _validate_target(target: object, *, index: int, program_wire: dict, loops: list[dict]) -> None:
+def _validate_target(target: object, *, index: int, program_wire: dict | None, loops: list[dict]) -> None:
     where = f"configs[{index}].target"
     if not isinstance(target, Mapping):
         raise ValueError(f"{where} must be a mapping")
@@ -507,6 +512,8 @@ def _validate_target(target: object, *, index: int, program_wire: dict, loops: l
         origins = target["origins"]
         if not isinstance(origins, list) or not origins or not all(isinstance(origin, str) and origin for origin in origins):
             raise ValueError(f"{where}.origins must be a non-empty list of node ids")
+        if program_wire is None:
+            raise ValueError(f"{where}.origins name nodes of a program the config does not have")
         node_ids = {node["id"] for node in program_wire["nodes"]}
         missing_origins = set(origins) - node_ids
         if missing_origins:
@@ -539,7 +546,7 @@ def validate_golden_file(
     if quant_digest is not None and (not isinstance(quant_digest, str) or re.fullmatch(r"[0-9a-f]{16}", quant_digest) is None):
         raise ValueError("model_quant_digest must be a 16-character lowercase hexadecimal digest")
     try:
-        programs = validate_program_pool(document.get("programs"))
+        programs = validate_program_pool(document.get("programs") or [])
     except ValueError as exc:
         raise ValueError(f"programs: {exc}") from exc
     try:
@@ -557,12 +564,16 @@ def validate_golden_file(
         _require_keys(entry, {"model", "program", "target", "realizations"}, where)
         if entry.get("model") is not None and not isinstance(entry["model"], str):
             raise ValueError(f"{where}.model must be a string")
+        # The traced program is the Torch twin the target's origins name — the comparison a bench runs.
+        # A target recorded from a measurement alone (a freeze's) has none.
         program_ref = entry.get("program")
-        if isinstance(program_ref, bool) or not isinstance(program_ref, int) or not 0 <= program_ref < len(programs):
-            raise ValueError(f"{where}.program does not resolve in this document: {program_ref!r}")
+        if program_ref is not None:
+            if isinstance(program_ref, bool) or not isinstance(program_ref, int) or not 0 <= program_ref < len(programs):
+                raise ValueError(f"{where}.program does not resolve in this document: {program_ref!r}")
         # The pool check above already decoded every program. A whole-model inventory points
         # hundreds of configurations at a handful of programs, so do not decode again per config.
-        _validate_target(entry.get("target"), index=index, program_wire=programs[program_ref], loops=loops)
+        program_wire = programs[program_ref] if program_ref is not None else None
+        _validate_target(entry.get("target"), index=index, program_wire=program_wire, loops=loops)
         realizations = entry.get("realizations")
         if not isinstance(realizations, list) or not realizations:
             raise ValueError(f"{where}.realizations must be a non-empty list")
@@ -654,11 +665,16 @@ def validate_golden_file(
             if strict and state != GoldenEntryState.VERIFIED:
                 raise ValueError(f"{realization_where} repository promotion requires knobs and paired positive timings")
             if state == GoldenEntryState.VERIFIED and "measurements" in realization:
+                # The reference timing is the comparison a bench took beside the measurement; a row measured
+                # with none (a freeze's) carries only its own time.
                 measurements = realization["measurements"]
                 _require_keys(measurements, {"emmy_us", "reference_us", "reference_backend"}, f"{realization_where}.measurements")
                 _positive_number(measurements["emmy_us"], f"{realization_where}.measurements.emmy_us")
-                _positive_number(measurements["reference_us"], f"{realization_where}.measurements.reference_us")
-                if not isinstance(measurements["reference_backend"], str) or not measurements["reference_backend"]:
+                if "reference_us" in measurements:
+                    _positive_number(measurements["reference_us"], f"{realization_where}.measurements.reference_us")
+                if "reference_backend" in measurements and (
+                    not isinstance(measurements["reference_backend"], str) or not measurements["reference_backend"]
+                ):
                     raise ValueError(f"{realization_where}.measurements.reference_backend must be a non-empty string")
 
 
@@ -676,16 +692,17 @@ def load_golden_file(
     return document
 
 
-def golden_record_from_entry(document: Mapping, entry: Mapping, realization: Mapping) -> GoldenRecord:
+def golden_record_from_entry(document: Mapping, entry: Mapping, realization: Mapping, *, config_index: int = 0) -> GoldenRecord:
     target = entry["target"]
     loop_index = target.get("loop")
+    program_index = entry.get("program")
     return GoldenRecord(
         name=realization["name"],
         gpu_name=gpu.canonical_name(document.get("gpu_name") or ""),
         compute_cap=tuple(document["compute_cap"]),
         model=entry.get("model", document.get("model")),
-        program_index=entry["program"],
-        program_wire=document["programs"][entry["program"]],
+        program_index=program_index,
+        program_wire=document["programs"][program_index] if program_index is not None else None,
         origins=tuple(target.get("origins", ())),
         bindings=tuple(sorted(realization["bindings"].items())),
         pins=tuple(sorted(realization["pins"].items())),
@@ -697,12 +714,15 @@ def golden_record_from_entry(document: Mapping, entry: Mapping, realization: Map
         identity=realization.get("identity"),
         kernel_set=tuple(realization.get("kernel_set") or ()),
         latency=dict(realization["latency"]) if realization.get("latency") is not None else None,
+        config_index=config_index,
     )
 
 
 def load_golden_records(document: Mapping) -> list[GoldenRecord]:
     return [
-        golden_record_from_entry(document, entry, realization) for entry in document["configs"] for realization in entry["realizations"]
+        golden_record_from_entry(document, entry, realization, config_index=index)
+        for index, entry in enumerate(document["configs"])
+        for realization in entry["realizations"]
     ]
 
 
@@ -1083,9 +1103,9 @@ def piece_row(row: Mapping[str, str]) -> dict[str, str]:
 
 
 def siblings_of(record: GoldenRecord, records: Sequence[GoldenRecord]) -> tuple[GoldenRecord, ...]:
-    """The other records of ``record``'s target among ``records`` — same persisted target, bindings
-    and input regime: the entries that walk one kernel set together (a case's per-kernel entries,
-    a golden config's receipts). The first of them in ``records`` order is the set's lead."""
+    """The other records of ``record``'s target among ``records`` — same config entry, bindings and
+    input regime: the entries that walk one kernel set together (a case's per-kernel entries, a
+    golden config's receipts). The first of them in ``records`` order is the set's lead."""
     key = _set_key(record)
     return tuple(other for other in records if other is not record and _set_key(other) == key)
 
@@ -1101,7 +1121,7 @@ def _set_key(record: GoldenRecord) -> tuple:
     from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
 
     regime = tuple(sorted((str(k), str(v)) for k, v in record.pin_map.items() if family_of(str(k)) != "PLACE"))
-    return (_record_cache_key(record), regime)
+    return (_record_cache_key(record), record.config_index, regime)
 
 
 def _replay(

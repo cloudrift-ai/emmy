@@ -58,6 +58,7 @@ def _records(names):
             pin_map={},
             is_routing=False,
             emmy_us=0.0,
+            config_index=0,
         )
         for name in names
     ]
