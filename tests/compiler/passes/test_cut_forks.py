@@ -884,15 +884,16 @@ def test_a_multi_result_cone_does_not_materialize_its_own_dependency() -> None:
     assert not any(seam.siblings for seam in clustered)
 
 
-def _norm_residual_graph() -> Graph:
+def _norm_residual_graph(m: int = 16) -> Graph:
     """``y = x @ w`` read twice: under the norm's statistic reduce and at the residual add — the
     shape of a fused decoder half, whose o_proj result feeds the post-attention norm and the
-    residual stream. Fusion keeps one definition; the lifted tree holds one cone per scope."""
+    residual stream. Fusion keeps one definition; the lifted tree holds one cone per scope. At
+    ``m == 1`` (decode) every workspace also carries the kernel's unit row axis."""
     from emmy.commands.trace import graph_from_code
 
     code = (
         "(lambda y: y * torch.rsqrt(y.pow(2).mean(-1, keepdim=True) + 1e-6) + y)"
-        "(torch.matmul(torch.randn(16, 64, dtype=torch.float16), torch.randn(64, 32, dtype=torch.float16)))"
+        f"(torch.matmul(torch.randn({m}, 64, dtype=torch.float16), torch.randn(64, 32, dtype=torch.float16)))"
     )
     return graph_from_code(code)[0]
 
@@ -905,26 +906,28 @@ def _lifted_parent(graph: Graph) -> TileOp:
     return tile
 
 
-def test_a_value_read_under_a_reduce_and_at_the_free_axis_is_one_seam() -> None:
+@pytest.mark.parametrize("m", [16, 1])
+def test_a_value_read_under_a_reduce_and_at_the_free_axis_is_one_seam(m: int) -> None:
     """The two copies of the contraction bind the hidden coordinate under different names (the
     reduce's own axis, the kernel's free axis) and their slab params may sit in another order, so
     their canonical forms differ; they are one value, and cutting it once must materialize it once
     with every occurrence reading the workspace."""
-    parent = _lifted_parent(_norm_residual_graph())
+    parent = _lifted_parent(_norm_residual_graph(m))
     contractions = [seam for seam in cuttable_seams(parent) if seam.node.as_contraction() is not None]
     assert len(contractions) == 1 and len(contractions[0].siblings) == 1, [seam.spelling for seam in cuttable_seams(parent)]
-    cut = _lower_cut(_norm_residual_graph(), contractions[0].spelling)
+    cut = _lower_cut(_norm_residual_graph(m), contractions[0].spelling)
     cuda = [node for node in cut.nodes.values() if type(node.op).__name__ == "CudaOp"]
     assert len(cuda) == 2
 
 
 @requires_cuda
-def test_a_clustered_value_cut_once_computes_the_right_answer() -> None:
-    graph = _norm_residual_graph()
+@pytest.mark.parametrize("m", [16, 1])
+def test_a_clustered_value_cut_once_computes_the_right_answer(m: int) -> None:
+    graph = _norm_residual_graph(m)
     (seam,) = [seam for seam in cuttable_seams(_lifted_parent(graph.copy())) if seam.node.as_contraction() is not None]
     cut = _lower_cut(graph, seam.spelling)
     rng = np.random.default_rng(0)
-    x = rng.standard_normal((16, 64)).astype(np.float16)
+    x = rng.standard_normal((m, 64)).astype(np.float16)
     w = rng.standard_normal((64, 32)).astype(np.float16)
     inputs = dict(zip(cut.inputs, (x, w), strict=True))
     (out_name,) = cut.outputs
