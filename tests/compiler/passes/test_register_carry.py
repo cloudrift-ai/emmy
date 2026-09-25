@@ -66,13 +66,15 @@ def test_register_storage_refuses_cross_warp_state_reads():
     assert tile.register_program is None
 
 
-def test_a_descent_row_naming_other_families_narrows_without_refusing():
-    """A descent narrows every offered tier with the kernel's whole row: the register tier keeps its own keys, and a
-    strict row must still be its own."""
+def test_a_descent_row_naming_other_families_offers_no_register_leaf():
+    """A descent narrows every offered tier with the kernel's whole row: a row naming a family the register tier does
+    not own describes another tier, so the register tier offers nothing for it, and a strict row must be its own."""
     (tile,) = (n.op for n in _lift(_graph()).nodes.values() if isinstance(n.op, TileOp))
     context = _context(tile)
+    assert tuple(context.narrowed({}).extensions()), "the unnarrowed tier offers leaves"
     row = {"WORK": "t16x8", "TILE@map.2/inner": "f26x26", "REDUCE@map.1/inner": ""}
-    assert context.narrowed(row).problem.row == {"WORK": "t16x8"}
+    for narrowing in (row, {"REDUCE@map.1/inner": ""}):
+        assert not tuple(context.narrowed(narrowing).extensions())
     with pytest.raises(ValueError, match="accepts only WORK, TILE and STAGE"):
         context.narrowed(row, strict=True)
 
