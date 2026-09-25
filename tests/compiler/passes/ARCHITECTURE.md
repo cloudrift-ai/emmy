@@ -112,7 +112,7 @@ numpy backends in three places:
   eager. The `_cpu` variant runs `LoopBackend` + CPU eager (always
   on, ~3s); the `_cuda` variants are gated by `@requires_cuda`.
 
-### Tile lowering (`passes/lowering/tile/`)
+### Tile lowering (`passes/tile/`)
 
 `test_twisted_rewrite.py` traces softmax, SDPA, and causal SDPA through total lift and the same `020_twisted` rule,
 then checks the resulting carrier arity, the derived contraction sites, and that plain and causal SDPA reach both MMA

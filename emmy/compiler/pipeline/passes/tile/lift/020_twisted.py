@@ -7,7 +7,7 @@ from dataclasses import replace
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
-from emmy.compiler.pipeline.passes.lowering.tile._twist import rewrite_twisted
+from emmy.compiler.pipeline.passes.tile._twist import rewrite_twisted
 
 PATTERN = [Pattern("root", TileOp)]
 

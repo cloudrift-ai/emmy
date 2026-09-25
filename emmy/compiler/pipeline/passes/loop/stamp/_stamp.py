@@ -5,7 +5,7 @@ leading-digit pass module via ``importlib`` (a pass file's ``NNN_…`` stem isn'
 name).
 
 Structural identity (the ``S_*`` features that used to be stamped by a twin pair of rules here
-and in ``lowering/tile``) is owned by the ``IdentityStrategy``
+and in ``tile/``) is owned by the ``IdentityStrategy``
 (``pipeline/passes/identity.py``) — computed there and materialized into knobs at the engine's
 events, not by rules.
 """

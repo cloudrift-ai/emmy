@@ -49,7 +49,7 @@ from emmy.compiler.ir.schedule.classic.sites import _select
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tile import OutputSpec, TileOp
 from emmy.compiler.pipeline.fork import DeferredFork, iter_leaves, schedule_forks
-from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
+from emmy.compiler.pipeline.passes.tile._fromloop import fold_from_loop
 from tests.compiler.helpers import classic_cartesian_schedules, enumerate_classic_reference, literal_classic_context
 from tests.compiler.terms import contraction, projection
 

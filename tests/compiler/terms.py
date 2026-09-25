@@ -1,6 +1,6 @@
 """Hand-spelled tile terms for compiler tests.
 
-The total lift (``lowering/tile/_fromloop``) forms every term the compiler schedules: a gmem read is a
+The total lift (``tile/_fromloop``) forms every term the compiler schedules: a gmem read is a
 :meth:`Fold.slab`, a reduce's product arguments arrive as operand edges, a projection is a zero-axis term
 over its operands, and every extent lives in the kernel's axis table (``TileOp.axes``), never on the term.
 A fixture that the lift cannot yet form from Loop IR — a contraction over a COMPUTED operand, a projection

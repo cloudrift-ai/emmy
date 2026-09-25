@@ -24,7 +24,7 @@ from emmy.compiler.ir.schedule import Placement
 from emmy.compiler.ir.stmt import Assign, Load, Write
 from emmy.compiler.ir.stmt.leaves import OutputSpec
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams, realize
+from emmy.compiler.pipeline.passes.tile._cut import cuttable_seams, realize
 from tests.compiler.terms import projection, reduction, slab
 
 _ROW, _COL = Axis("m", Dim(8)), Axis("k", Dim(32))

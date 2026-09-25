@@ -2,7 +2,7 @@
 
 Rules that apply to EVERY pass in this tree (`frontend/`, `loop/`, `lowering/`). Per-dialect details live in
 [`../ARCHITECTURE.md`](../ARCHITECTURE.md) (pass order, knob table, fork semantics). The **tile-lowering** phase
-(`lowering/tile/`) is the canonical instance of the invariant below — a **purely algebraic moveset, no
+(`tile/`) is the canonical instance of the invariant below — a **purely algebraic moveset, no
 specializations**: it dispatches on the fold's derived readings (`axis is None` / `as_contraction()` for the
 schedule walk; a loop is a reduce iff its body carries an accumulator), never on a named shape
 (matmul / pointwise / attention) —
@@ -375,7 +375,7 @@ the sites' own atoms, not off the rows, so a pin naming the scalar tier cannot e
 from the rows it does enumerate.
 
 **The session kernel cache.** Greedy lowering of one fused kernel is a function — Loop-IR program in,
-lowered `KernelOp` out — and `pipeline/kernel_cache.py` memoizes it at its boundary: `lowering/tile/005`
+lowered `KernelOp` out — and `pipeline/kernel_cache.py` memoizes it at its boundary: `tile/lift/005`
 fetches a finished lowering (io rebound through `Stmt.rename_buffers`) before the lift, and
 `lowering/cuda/001` harvests every single-kernel lowering just before the per-graph negotiations
 (zero-init delegation, rendering) that deliberately sit below the boundary. Caller-owned on

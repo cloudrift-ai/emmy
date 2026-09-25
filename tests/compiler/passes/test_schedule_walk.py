@@ -34,7 +34,7 @@ from emmy.compiler.ir.tile import OutputSpec, Reduce, TileOp, ops
 from emmy.compiler.ir.tile.ops import Sched
 from emmy.compiler.pipeline.fork import iter_leaves
 from emmy.compiler.pipeline.knob import family_of
-from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop, scan_from_loop
+from emmy.compiler.pipeline.passes.tile._fromloop import fold_from_loop, scan_from_loop
 from emmy.compiler.pipeline.search.golden_eval import enumerate_graph
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from emmy.compiler.pipeline.search.pool import PoolSample
@@ -43,7 +43,7 @@ from tests.compiler.terms import contraction, projection, reduction, slab
 _CC = (12, 0)
 
 #: The scheduling rule, reached through ``importlib`` because its module name starts with a digit.
-_SCHEDULE_RULE = importlib.import_module("emmy.compiler.pipeline.passes.lowering.tile.040_schedule")
+_SCHEDULE_RULE = importlib.import_module("emmy.compiler.pipeline.passes.tile.schedule.040_schedule")
 
 #: The knob pins the enumeration reads off the environment. A host with one set would enumerate a
 #: narrowed pool and fail the offer assertions here for a reason that has nothing to do with the

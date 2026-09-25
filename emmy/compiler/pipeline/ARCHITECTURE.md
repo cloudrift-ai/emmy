@@ -27,7 +27,7 @@ After that the Parts are largely independent:
 | 6 | Persistence: the two identities, the tables, the freeze | you are adding a cache, a table, or a column |
 | 7 | Golden configs and the A/B integrity gates | you are recording or replaying goldens |
 | 8 | Evaluating the prior (`emmy eval`) | the prior is picking badly and you want to know where |
-| 9 | Tile lowering, at the pipeline level | you want the pipeline-side view of `lowering/tile/` |
+| 9 | Tile lowering, at the pipeline level | you want the pipeline-side view of `tile/` |
 
 The reference sections after Part 9 — "Tunable knobs", the pass table, the dump hooks — are lookup material, not
 reading material.
@@ -848,7 +848,7 @@ Rendered bytes are pinned across fresh interpreters by `test_source_determinism.
 
 **Structural options are priced, never raw-scored.** A `Graph` leaf carries no knob row, so the per-op prior cannot
 score it; `greedy_decide` asks the same evidence a different way instead. The splices (top-level siblings by
-construction) are each priced by a nested `resolve` per fragment kernel over a `lowering/tile`-only pipeline, the
+construction) are each priced by a nested `resolve` per fragment kernel over the tile passes alone (`tile/lift`, `tile/cut`, `tile/schedule`), the
 price being the `score` of the slice-resolve's partition-fork `Decision`, memoized per the variant key
 (`identity_key(with_io=True, with_knobs=True)`) with the compile's decision memo shared into the nested resolves; the
 keep-fused side prices by ONE nested resolve of the
@@ -863,7 +863,9 @@ different kernel families, and that is a fitting requirement on the prior. When 
 the pricing decides nothing and every leaf — cuts included — goes on to the ordinary leaf ranking
 (`_priced_pick`, the flat-list form kept for exactly these corners). **No leaf is
 withheld to keep a kernel set unchanged.** The one thing that does withdraw every splice is `price_structural=False`,
-which is not about speed: it is how a nested price probe avoids re-splitting the slice it is pricing. A retired cut
+which is not about speed: it is how a nested price probe avoids re-splitting the slice it is pricing, and how a
+pipeline that ends between `tile/cut` and `tile/schedule` resolves its cut forks — a price is a scheduled row, which
+that pipeline cannot form, so there only a pin picks a cut and an unpinned kernel stays fused. A retired cut
 withdraws ONE splice — the blocklisted decision identity at that node — and the fork re-prices over what remains.
 
 **Evidence joins tolerate stamps a row predates, and nothing else.** `Prior.sig_groups` is one contract for the
@@ -1636,7 +1638,7 @@ comparing two fits is running the same eval against two files and diffing the re
 
 ## Part 9: Tile lowering at the pipeline level
 
-`lowering/tile/010_lift` converts each maximally fused `LoopOp` to one unmapped `TileOp`. It peels the outer parallel
+`tile/lift/010_lift` converts each maximally fused `LoopOp` to one unmapped `TileOp`. It peels the outer parallel
 axes and mechanically lifts every inner reduction as a nested `Fold`; each term orients a bilinear lift A-first at
 formation, and `TileOp` construction canonicalizes the complete tree — an identity projection dissolves into its
 operand, same-value cones become one shared object. No Tile IR classifier runs. An output loop's per-cell
@@ -1737,7 +1739,7 @@ low-precision output, a multi-component twisted carrier, and a multi-channel ⊗
 destination would round once per partition and can cross the strict correctness boundary; the deferred arm combines
 carrier state in f32 and rounds once. Pin
 via `EMMY_REDUCE=g2k` (one flat knob — no per-axis `EMMY_REDUCE_<axis>`, no `EMMY_FINALIZE`). The split is realized by
-`lowering/tile/030_cut` as a graph rewrite whose pieces are **brand-new kernels** — unmapped, knob-free,
+`tile/cut/030_cut` as a graph rewrite whose pieces are **brand-new kernels** — unmapped, knob-free,
 re-stamped, each scheduled at its own fork; a split node is priced as the Σ of its pieces' bests, and the split is
 CONSUMED by the kernel that realizes it (the sliced axis is a `Window` of its parent, so nothing partitions it
 twice). See [`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md) for the invariant. The
@@ -1855,7 +1857,7 @@ of algebraic rewrites they may apply are documented there too.
 | `loop/fusion/`            | `roll_recurrence` first rolls an unrolled recurrence into one kernel that carries its state (`passes/ARCHITECTURE.md`). `merge_loop_ops` then maximally splices each downstream Loop region without consulting Tile IR or schedule support. Non-reconvergent consumers become ports of one multi-output `LoopOp`; one shared splicer worklist deduplicates their common producers. Only semantic splice legality stops a merge. |
 | `loop/canonicalize/`      | `fuse_split_free_axes` re-fuses an adjacent free-axis pair a fused reshape split (`p → f/Q, q → f%Q`, kept only when every access folds clean — composites collapse to the bare fused axis, a split store's row-major flatten folds back to an affine address, and a sub-byte-packed operand address separates its row axis out of the pair-packing division via `_div_mod_decompose`), so split and unsplit spellings of one contraction converge to one canonical nest, one kernel identity, one shape key. Runs after fusion's fixpoint (the splicer composes through the very indices it re-spells) and before `loop/stamp`. See the passes `ARCHITECTURE.md` for why it is not a `normalize_body` pass. |
 | `loop/stamp/`             | `stamp_loop_names` (`provenance.name_for`, e.g. `k_rms_norm_3f2a1b`) + `stamp_structural_features` (the `S_*` dict). Runs last in the loop dialect, after maximal fusion. |
-| `lowering/tile/`          | `010_lift` mechanically converts the complete inner loop nest to a canonically factored Fold tree; `020_twisted` rewrites the exp family; `030_cut` reaches a fixpoint over stored-edge then cross-CTA cuts; `040_schedule` schedules each stored tree. |
+| `tile/{lift,cut,schedule}/` | `010_lift` mechanically converts the complete inner loop nest to a canonically factored Fold tree; `020_twisted` rewrites the exp family; `030_cut` reaches a fixpoint over stored-edge then cross-CTA cuts; `040_schedule` schedules each stored tree. |
 | `lowering/kernel/`        | `010_materialize` lowers the selected schedule through `_factor.factorize`, followed by the Kernel IR peepholes. See [`passes/lowering/kernel/ARCHITECTURE.md`](passes/lowering/kernel/ARCHITECTURE.md). |
 | `lowering/cuda/`          | `delegate_zero_init` (first) moves an atomic accumulator's per-launch zero-init off the runtime memset and into a dataflow-predecessor kernel as a `ZeroPrologue` stmt (CTA 0 writes zero words; stream order guarantees happen-before) — one CUDA-graph MEMSET node saved per site; the capture's first launch and symbolic-shaped accumulators keep their memset, and the slab planner starts the buffer's live interval at the delegating launch (`CudaOp.zero_prologues`). `lower_kernelop` then renders the `KernelOp` body to a `__global__` source string (`ir/kernel/render.py::render_kernelop`) and mutates the node's op to `CudaOp` in place. |
 
@@ -1878,9 +1880,11 @@ provenance stay in memory for tune benchmarking and are never written as trace a
 
 At `compile -vv` (DEBUG) the engine emits one block per rule application: a unified diff between the matched subgraph
 and the rewritten fragment, bracketed by `>>> <pass>:NNN_rulename` and `<<< <pass>:NNN_rulename` markers. The `<pass>`
-prefix is the single-letter shorthand from `PASS_SHORTHAND` (`d` / `o` / `l` / `f` / `t` / `k` / `c`) — the same
-letters the CLI accepts in `--passes dolft` (`commands/compile.py` imports `PASS_SHORTHAND` so the flag and the marker
-prefix can't drift). Skipped rules collapse to a one-liner. The bracketing makes per-rule / per-pass slicing trivial
+prefix is the single-letter shorthand from `PASS_SHORTHAND` (`d` / `o` / `l` / `f` / `n` / `s` / `t` / `p` / `h` /
+`k` / `c`) — the same letters the CLI accepts in `--passes dolfnstph` (`commands/compile.py` imports `PASS_SHORTHAND`
+so the flag and the marker prefix can't drift). The three tile passes have a letter each, so `--passes dolfnstp` ends
+after the cut pass: the greedy then resolves every placement fork by pins alone (a kernel-set arm is priced by
+scheduling its pieces, which that pipeline cannot do) and the tile IR shows the offered kernel sets unscheduled. Skipped rules collapse to a one-liner. The bracketing makes per-rule / per-pass slicing trivial
 via `awk`; ANSI color is applied only inside the diff body so the markers stay plain ASCII. Color follows
 `compile --color`. Body-carrying ops render through their own `pretty_body` (the in-flight `TileGraphOp` pretty-prints
 its block-DAG), so a tile-pass diff reads as a readable block-DAG delta. The structured `.rules.json` dump is

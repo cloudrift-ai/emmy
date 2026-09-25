@@ -12,7 +12,7 @@ from dataclasses import replace
 from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.pure.twist import RECIPES
 from emmy.compiler.ir.stmt import Assign, Body, Load
-from emmy.compiler.pipeline.passes.lowering.tile._fromloop import product_spine
+from emmy.compiler.pipeline.passes.tile._fromloop import product_spine
 
 logger = logging.getLogger(__name__)
 

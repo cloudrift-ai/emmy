@@ -207,7 +207,7 @@ def _bound_contractions(tmp_path):
 
     g = _w4a4_shared_linears(tmp_path, ("q", "kp", "v"), m=16, n=128, k=128)
     looped = Pipeline.build(LOOP_PASSES).run(g)
-    tiled = Pipeline.build(["lowering/tile"], select={"lift"}).run(looped, ctx=Context.from_target((12, 0)))
+    tiled = Pipeline.build(["tile/lift"], select={"lift"}).run(looped, ctx=Context.from_target((12, 0)))
     tiles = [node.op for node in tiled.nodes.values() if isinstance(node.op, TileOp)]
     return [(tile, t) for tile in tiles for t in _folds(tile.op) if t.as_contraction() is not None]
 
@@ -379,10 +379,10 @@ def _seams_of(g):
     from emmy.compiler.context import Context
     from emmy.compiler.ir.tile import TileOp
     from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
-    from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams
+    from emmy.compiler.pipeline.passes.tile._cut import cuttable_seams
 
     looped = Pipeline.build(LOOP_PASSES).run(g)
-    tiled = Pipeline.build(["lowering/tile"], select={"lift"}).run(looped, ctx=Context.from_target((12, 0)))
+    tiled = Pipeline.build(["tile/lift"], select={"lift"}).run(looped, ctx=Context.from_target((12, 0)))
     tiles = [node.op for node in tiled.nodes.values() if isinstance(node.op, TileOp)]
     return [(tile, cuttable_seams(tile)) for tile in tiles]
 
@@ -419,7 +419,7 @@ def test_a_block_scaled_operand_workspace_would_re_encode_the_values_it_stores(t
     decoded values the cone computes. A workspace typed that way holds neither what the producer
     wrote nor what the consumer would decode, so the cone is not a seam and the question of
     storing into it never arises."""
-    from emmy.compiler.pipeline.passes.lowering.tile._cut import _dtype_table, _workspace_dtypes
+    from emmy.compiler.pipeline.passes.tile._cut import _dtype_table, _workspace_dtypes
 
     asked = 0
     for tile, _ in _seams_of(_w4a4_gate_up_down(tmp_path, m=16, k=128)):
