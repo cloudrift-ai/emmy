@@ -31634,21 +31634,6 @@ configs:
       emmy_us: 30.244572088122368
       reference_us: 30.151112005114555
       reference_backend: same-input-greedy
-  - name: post-sym.k_linear_softmax_matmul_mean_reduce_3836f9.e906d92853d9.dynamic.52983282da5e.2ef66c196bbc
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w1x8
-      TILE: mma_m8n8k4_f16_f32/f8x1/k2
-      REDUCE: ''
-      STAGE: d1/smem
-      RASTER: ''
-    identity: 16f098b32f83ed3e8af0c4627a15ae4b141267674b56aea542381f38f4854091
-    measurements:
-      emmy_us: 393.21601390838623
-      reference_us: 392.192006111145
-      reference_backend: same-input-greedy
   - name: post-sym.k_linear_softmax_matmul_mean_reduce_3836f9.e906d92853d9.dynamic.52983282da5e.9c963b605920
     bindings: {}
     pins:
@@ -31689,35 +31674,6 @@ configs:
     measurements:
       emmy_us: 7061.204685131088
       reference_us: 7110.683534992859
-      reference_backend: same-input-greedy
-  - name: post-sym.k_linear_softmax_matmul_mean_reduce_3836f9.e906d92853d9.dynamic.52983282da5e.7230e18669ec
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w8x1
-      TILE: mma_m8n8k4_f16_f32/f4x4/k8
-      REDUCE: ''
-      STAGE: d1/smem
-      RASTER: ''
-    identity: 7230e18669ec30f0a41a188649503566c978780f2f529d538484454483019d76
-    measurements:
-      emmy_us: 448.0000138282776
-      reference_us: 448.0000138282776
-      reference_backend: same-input-greedy
-  - name: post-sym.k_linear_softmax_matmul_mean_reduce_3836f9.e906d92853d9.dynamic.52983282da5e.7ec48d9aa23e
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      REDUCE@reduce: coop-t
-      REDUCE@reduce.1/inner: ''
-      WORK: t256
-      RASTER: ''
-    identity: 7ec48d9aa23e986b877b93edc7c0f14cfe16418a512f098da1a4dd8af7d2e1ad
-    measurements:
-      emmy_us: 92.45256866727557
-      reference_us: 92.45256866727557
       reference_backend: same-input-greedy
   - name: post-sym.k_linear_softmax_matmul_mean_reduce_3836f9.e906d92853d9.dynamic.52983282da5e.1a3269127ad8
     bindings: {}
@@ -36195,22 +36151,6 @@ configs:
       emmy_us: 4.025379388496794
       reference_us: 4.051478336686674
       reference_backend: same-input-greedy
-  - name: post16.k_linear_softmax_matmul_mean_reduce_8e1e80.ee59c5a2f07f.m16.9c098e32a2f6.226a03dd4680
-    bindings:
-      num_tokens: 16
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w1x2
-      TILE: mma_m8n8k4_f16_f32/f1x1/k4
-      REDUCE: ''
-      STAGE: d1/smem
-      RASTER: ''
-    identity: 302097290f3c372769294019bec554d94a447a69b524873efa91f71129f15be1
-    measurements:
-      emmy_us: 33.10933311780294
-      reference_us: 33.47692352074843
-      reference_backend: same-input-greedy
   - name: post16.k_linear_softmax_matmul_mean_reduce_8e1e80.ee59c5a2f07f.m16.9c098e32a2f6.37531d038240
     bindings:
       num_tokens: 16
@@ -38658,37 +38598,6 @@ configs:
     measurements:
       emmy_us: 1474.560022354126
       reference_us: 1476.6080379486084
-      reference_backend: same-input-greedy
-  - name: post4096.k_linear_softmax_matmul_mean_reduce_366777.f0fc3dc05f5c.m4096.02e3b8ae01c2.333ad6d4f3c9
-    bindings:
-      num_tokens: 4096
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: w8x2
-      TILE: mma_m8n8k4_f16_f32/f4x2/k4
-      REDUCE: ''
-      STAGE: d1/smem
-      RASTER: ''
-    identity: 333ad6d4f3c953b071346d5ba66541142e38248986e74dd592b8a7861e3c105c
-    measurements:
-      emmy_us: 560.6399774551392
-      reference_us: 561.6639852523804
-      reference_backend: same-input-greedy
-  - name: post4096.k_linear_softmax_matmul_mean_reduce_366777.f0fc3dc05f5c.m4096.02e3b8ae01c2.db0e3f674020
-    bindings:
-      num_tokens: 4096
-    pins:
-      FAST_MATH: false
-    knobs:
-      REDUCE@reduce: coop
-      REDUCE@reduce.1/inner: ''
-      WORK: t128
-      RASTER: ''
-    identity: db0e3f674020bd07a78909b08dc6308c2e5203cdc7ee66c7f86fb07fe366fc38
-    measurements:
-      emmy_us: 145.23733655611673
-      reference_us: 145.06666858990988
       reference_backend: same-input-greedy
   - name: post4096.k_linear_softmax_matmul_mean_reduce_366777.f0fc3dc05f5c.m4096.02e3b8ae01c2.168207255892
     bindings:
