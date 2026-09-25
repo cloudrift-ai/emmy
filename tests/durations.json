@@ -229,6 +229,7 @@
  "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[gemma-4-12B-it/rtx4090_sm89.yaml/gemma4_12b.o_proj_global.m64.lin]": 1.68,
  "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[gemma-4-12B-it/rtx4090_sm89.yaml/gemma4_12b.q_proj_global#1]": 1.58,
  "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[gemma-4-12B-it/rtx4090_sm89.yaml/gemma4_12b.qkv_cat.m4096.lin#2]": 1.67,
+ "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[gemma-4-12B-it/rtx5090_sm120.yaml/post64-global.k_linear_mean_reduce_7bd479.m64.fm.dafc79466b22.20dbd2cee573]": 5.02,
  "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[gemma-4-12B-it/rtx5090_sm120.yaml/post-sym-global.k_linear_mean_reduce_8162d3.dynamic.61b45f40c695]": 2.88,
  "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[gemma-4-12B-it/rtx5090_sm120.yaml/post-sym-global.k_linear_mean_reduce_8162d3.dynamic.c5059ce24a59]": 2.75,
  "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[gemma-4-12B-it/rtx5090_sm120.yaml/post-sym-global.k_linear_mean_reduce_8162d3.dynamic.d0eda2c9573a]": 2.89,
