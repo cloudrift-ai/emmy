@@ -34,7 +34,8 @@ hardware/kernel goldens have no recipe owner and remain under `emmy/compiler/pip
 If complete compiler qualification produces a model golden before serving qualification produces a runnable recipe,
 create the normal `onboarding`/`untested` shell first and store the golden beneath it. The nightly `onboard-model`
 workflow owns repository validation, strict decode, and exact-GPU replay for recipe-local goldens; the default
-test suite does not load checked-in golden YAML.
+test suite also decodes every recorded row and checks stored targets against fresh lowering. These checks need no
+GPU; re-recording changed kernels requires the exact card whose measurements the golden holds.
 
 ## Lifecycle
 
