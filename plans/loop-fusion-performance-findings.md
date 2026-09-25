@@ -77,14 +77,10 @@ in the golden-refresh PR; recorded here because the s512 goldens were refreshed 
 - Multi-millisecond kernels need `--warmup 10 --iters 20`, or the isolated re-bench exceeds the 10 s GPU cap.
 - Fast math is the default, so a std-lane `--record-greedy` needs `EMMY_FAST_MATH=0` explicitly; the refresh-golden
   skill only mentions `EMMY_FAST_MATH=1`.
-- Gemma 4 5090 route rows: replaying a route row's own golden fails to compile with "the head fold is nested inside the
-  projection's sweep loop; the split cannot strip it" (seen on the post routes during the refresh).
 - Under a route's `PLACE` pins, `--record-greedy` ignores piece proposals (a proposal is not evidence) and picks atomic
   split-K for Gemma post projection pieces (40 / 76 us) over the stored `w2x2` schedules (13.3 / 73 us).
 - Qwen3-0.6B s1 on the H100: the q/k projection contraction seam carries the o_proj column axis (2048 against 16
   heads), so cutting it still computes q/k 128 times (87 us piece). No seam computes q/k once; the seam's axes are a
   lowering issue. Best route: 11 cuts, 157.6 us against 17 us for the old kernel set.
-- The same "head fold is nested inside the projection's sweep loop" error blocks the strict replay of a Qwen3-0.6B s1
-  route whose kernel set carries `g8k` / `g<n>a` split receipts (H100).
 - The recurrence roller turns a plain chain of repeated same-shape pointwise steps (`x = tanh(x) + 0.5*x`, seven
   times) into a serial state kernel, which is then a kernel boundary. Found while writing the maximal-fusion tests.
