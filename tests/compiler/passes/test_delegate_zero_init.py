@@ -18,17 +18,15 @@ from emmy.compiler.pipeline import Match, Rule, RuleSkipped
 delegate = import_module("emmy.compiler.pipeline.passes.lowering.cuda.005_delegate_zero_init")
 
 
-def _atomic_graph(shape=(32, 512)) -> tuple[Graph, KernelOp, Match]:
+def _atomic_graph(shape=(32, 512), predecessor: str = "k_predecessor", mid: str = "mid") -> tuple[Graph, KernelOp, Match]:
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (1,), F32), node_id="x")
-    graph.add_node(KernelOp(name="k_predecessor"), ["x"], Tensor("mid", (1,), F32), node_id="mid")
+    graph.add_node(KernelOp(name=predecessor), ["x"], Tensor(mid, (1,), F32), node_id=mid)
     atomic = KernelOp(
         body=Body((Write(output="acc", index=(Literal(0, "int"),), value="v", atomic=True),)),
         name="k_atomic",
     )
-    graph.add_node(
-        atomic, ["mid"], Tensor("acc", tuple(Dim(size) if isinstance(size, int) else size for size in shape), F32), node_id="acc"
-    )
+    graph.add_node(atomic, [mid], Tensor("acc", tuple(Dim(size) if isinstance(size, int) else size for size in shape), F32), node_id="acc")
     atomic = graph.nodes["acc"].op = atomic.with_io(graph, graph.nodes["acc"])
     match = Match(graph=graph, root_node_id="acc", rule=Rule(name="test", pattern=[]))
     return graph, atomic, match
@@ -44,6 +42,16 @@ def test_static_atomic_output_delegates_to_predecessor() -> None:
     assert predecessor.name == "k_predecessor__zp16384"
     assert "acc" in predecessor.outputs
     assert atomic.zero_delegated == ("acc",)
+
+
+def test_unnamed_predecessors_keep_distinct_launch_names() -> None:
+    """Two unnamed predecessors (split pieces) zeroing as many words must not share a launch name."""
+    names = []
+    for mid in ("mid_a", "mid_b"):
+        graph, _, match = _atomic_graph(predecessor="", mid=mid)
+        delegate.rewrite(match, graph.nodes["acc"])
+        names.append(graph.nodes[mid].op.name)
+    assert names == ["k_mid_a__zp16384", "k_mid_b__zp16384"]
 
 
 def test_large_static_atomic_output_delegates_without_a_size_policy() -> None:
