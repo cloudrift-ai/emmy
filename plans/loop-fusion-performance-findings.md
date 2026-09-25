@@ -83,3 +83,9 @@ in the golden-refresh PR; recorded here because the s512 goldens were refreshed 
   so redundancy estimated from it is wrong by the stride (the refresh agents read 128x where there was none).
 - The recurrence roller turns a plain chain of repeated same-shape pointwise steps (`x = tanh(x) + 0.5*x`, seven
   times) into a serial state kernel, which is then a kernel boundary. Found while writing the maximal-fusion tests.
+- Qwen3-0.6B s512 P.V piece (A100, all seams cut): `out[q, ch] = sum_k P[q, ch/128, k] * V[ch, k]` runs as a scalar
+  loop at about 800 us of the layer's 1464 us. With the head folded into the channel axis no mma schedule realizes on
+  it. A lowering gap.
+- With faster split pieces measured in the tune DB, an unpinned greedy pick still chose unsplit o_proj and down
+  projections, and the strict replay reports "measured DB row(s) ... none matches any of the 4 offered candidates" for
+  split partials.
