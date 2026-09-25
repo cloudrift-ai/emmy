@@ -61,6 +61,10 @@ output) once instead of per MLP element, and one that lifts the norm and in_proj
 
 ## Compiler errors hit while cutting
 
+- DeepSeek-V4 post1 (V100): the unpinned greedy of `k_linear_matmul_softmax_mean_reduce_bcf52a` emits CUDA that nvcc
+  rejects ("identifier v148 is undefined" at `add_45[a10*4096+a27] = v148`). A cut route avoids it.
+- Several DeepSeek-V4 `linear_softmax` kernels fail `--strict` only with "did not use CUDA graph capture"; accuracy
+  against eager passes, so the refresh recorded them without `--strict`.
 - A tune-DB perf row with knobs `{LOOPIFY: '0'}`, written by a fallback record, makes the next compile of that kernel
   raise "register schedule accepts only WORK, TILE and STAGE". Workaround: a fresh tune DB.
 
