@@ -2325,5 +2325,12 @@
  "tests/compiler/pipeline/search/test_golden.py::test_stored_targets_are_the_fresh_lowering[DeepSeek-V4-Flash-0731/v100_sm70.yaml/program-2]": 1.2,
  "tests/compiler/pipeline/search/test_golden.py::test_stored_targets_are_the_fresh_lowering[DeepSeek-V4-Flash-0731/v100_sm70.yaml/program-1]": 1.03,
  "tests/compiler/pipeline/search/test_golden.py::test_stored_targets_are_the_fresh_lowering[DeepSeek-V4-Flash-0731/v100_sm70.yaml/program-0]": 1.02,
- "tests/compiler/cli/test_golden_command.py::test_kernels_and_a_yaml_compile_output_are_the_same_pool_for_a_current_golden": 9.7
+ "tests/compiler/cli/test_golden_command.py::test_kernels_and_a_yaml_compile_output_are_the_same_pool_for_a_current_golden": 9.7,
+ "tests/compiler/passes/test_maximal_fusion.py::test_every_boundary_of_a_golden_program_is_a_correctness_boundary[Qwen3.8-27B-FP8/v100_sm70.yaml]": 7.02,
+ "tests/compiler/passes/test_maximal_fusion.py::test_every_boundary_of_a_golden_program_is_a_correctness_boundary[Qwen3.8-27B-EXL3/v100_sm70.yaml]": 5.26,
+ "tests/compiler/passes/test_maximal_fusion.py::test_every_boundary_of_a_golden_program_is_a_correctness_boundary[DeepSeek-V4-Flash-0731/v100_sm70.yaml]": 4.55,
+ "tests/compiler/passes/test_maximal_fusion.py::test_every_boundary_of_a_golden_program_is_a_correctness_boundary[Qwen3.8-27B-GPTQ-Int4/v100_sm70.yaml]": 3.39,
+ "tests/compiler/passes/test_maximal_fusion.py::test_every_boundary_of_a_golden_program_is_a_correctness_boundary[gemma-4-12B-it/rtx5090_sm120.yaml]": 2.93,
+ "tests/compiler/passes/test_maximal_fusion.py::test_every_boundary_of_a_golden_program_is_a_correctness_boundary[Qwen3.8-27B-AWQ-INT4/v100_sm70.yaml]": 2.45,
+ "tests/compiler/passes/test_maximal_fusion.py::test_every_boundary_of_a_golden_program_is_a_correctness_boundary[gemma-4-12B-it/rtx4090_sm89.yaml]": 0.79
 }

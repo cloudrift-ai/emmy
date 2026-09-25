@@ -206,3 +206,166 @@ def test_the_kernel_set_does_not_depend_on_the_order_the_producers_are_visited_i
     for index, nid in enumerate(reversed(renamed.topological_order())):
         renamed.rename_node(nid, f"z{index}")
     assert kernels(renamed) == kernels(graph)
+
+
+def _unexplained_boundaries(graph: Graph) -> list[tuple[str, str]]:
+    """Every edge between two kernels of a fused graph that no correctness boundary explains — a
+    fusion gate. Derived from the op kinds alone, not from ``regions()``: the edge ``u -> v`` could
+    have been one kernel when every node on a path between them is a loop fusion may merge (no
+    carried state, no running-accumulator output) and none of them writes a packed buffer. Such an
+    edge is a region fusion declined, whatever the reason."""
+    from emmy.compiler.ir.loop import observes_running_accumulator
+    from emmy.compiler.pipeline.passes.loop.fusion._region import carries_state
+
+    nodes = graph.nodes
+
+    def mergeable(nid: str) -> bool:
+        op = nodes[nid].op
+        return isinstance(op, LoopOp) and not carries_state(op) and not observes_running_accumulator(op)
+
+    def packed(nid: str) -> bool:
+        return any((tensor := graph.buffer(buf)) is not None and tensor.dtype.logical_elems > 1 for buf in nodes[nid].buffer_names())
+
+    def producers(nid: str) -> set[str]:
+        return {producer.id for buf in nodes[nid].inputs if (producer := graph.producer(buf)) is not None}
+
+    upstream: dict[str, set[str]] = {}
+    for nid in graph.topological_order():
+        upstream[nid] = set().union(*({p} | upstream[p] for p in producers(nid)))
+    gates = []
+    for consumer, above in upstream.items():
+        for producer in producers(consumer) if mergeable(consumer) else ():
+            between = {nid for nid in above if producer in upstream[nid]} | {producer}
+            if all(mergeable(nid) and not packed(nid) for nid in between):
+                gates.append((producer, consumer))
+    return gates
+
+
+_TEMPTING = {
+    # a reduction over 64k elements, normalized and projected
+    "long_reduction": """
+import torch, torch.nn as nn
+class M(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.proj = nn.Linear(65536, 16, bias=False)
+    def forward(self, x):
+        x = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + 1e-6)
+        return self.proj(x)
+m = M()
+m(torch.randn(2, 65536))
+""",
+    # a projection read under a wide axis it does not depend on: the merged kernel recomputes it 4096 times
+    "recompute": """
+import torch, torch.nn as nn
+class M(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.proj = nn.Linear(64, 64, bias=False)
+    def forward(self, x, table):
+        h = self.proj(x)
+        return (h[:, :, None] * table[None]).sum(1)
+m = M()
+m(torch.randn(4, 64), torch.randn(64, 4096))
+""",
+    # attention and its output projection: three nested contractions
+    "attention": """
+import torch, torch.nn as nn
+class M(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.o = nn.Linear(32, 32, bias=False)
+    def forward(self, q, k, v):
+        p = torch.softmax(q @ k.transpose(-1, -2) / 4.0, dim=-1)
+        return self.o(p @ v)
+m = M()
+m(torch.randn(16, 32), torch.randn(24, 32), torch.randn(24, 32))
+""",
+    # sixty-four stages, long enough to trip any bound on a region's size; the pointwise stages are
+    # seven different ops and every projection has a width of its own, so no two stages are steps of
+    # one recurrence the roller would carry
+    "long_chain": """
+import torch, torch.nn as nn
+class M(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.ws = nn.ParameterList([nn.Parameter(torch.randn(16 + i, 17 + i)) for i in range(8)])
+    def forward(self, x):
+        for w in self.ws:
+            for f in (torch.tanh, torch.sigmoid, torch.sin, torch.cos, torch.relu, torch.abs, torch.neg):
+                x = f(x)
+            x = x @ w
+        return x
+m = M()
+m(torch.randn(4, 16))
+""",
+    # a decoder MLP block with its residual, exporting two outputs
+    "multi_output_block": """
+import torch, torch.nn as nn
+import torch.nn.functional as F
+class M(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.gate = nn.Linear(32, 96, bias=False)
+        self.up = nn.Linear(32, 96, bias=False)
+        self.down = nn.Linear(96, 32, bias=False)
+    def forward(self, x):
+        h = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + 1e-6)
+        return x + self.down(F.silu(self.gate(h)) * self.up(h)), h
+m = M()
+m(torch.randn(8, 32))
+""",
+}
+
+
+@pytest.mark.parametrize("name", sorted(_TEMPTING))
+def test_a_graph_that_tempts_a_gate_is_one_kernel(name: str) -> None:
+    """Each graph is a region a size, cost, recompute or recognizer bound would decline. None has a
+    correctness boundary, so fusion makes each one kernel; a cut offers the pieces back later."""
+    from emmy.commands.trace import graph_from_code
+
+    graph, _, _ = graph_from_code(_TEMPTING[name])
+    fused = Pipeline.build(LOOP_PASSES).run(graph)
+    assert _unexplained_boundaries(fused) == []
+    assert sum(isinstance(node.op, LoopOp) for node in fused.nodes.values()) == 1
+
+
+#: Programs with more traced nodes than this take 5 s to minutes each to fuse (the Qwen3.8 layers);
+#: the rest still hold a layer of every other model family the goldens store, and fuse in under a
+#: second.
+_MAX_TRACED_NODES = 200
+
+
+def _repository_goldens() -> list:
+    from emmy.compiler.pipeline.search.golden import _repository_golden_paths
+
+    with _repository_golden_paths() as paths:
+        return [pytest.param(path, id=f"{path.parent.parent.name}/{path.name}") for path in paths]
+
+
+@pytest.mark.parametrize("path", _repository_goldens())
+def test_every_boundary_of_a_golden_program_is_a_correctness_boundary(path) -> None:
+    """The traced programs the repository goldens store are real models' layers: none of them has
+    an edge between two kernels that fusion could have merged. One program per traced size — a
+    golden stores the same layer at many widths."""
+    import yaml
+
+    from emmy.compiler.pipeline.search.golden import _SAFE_LOADER, stored_program
+
+    document = yaml.load(path.read_text(), Loader=_SAFE_LOADER)
+    sizes: set[int] = set()
+    for index in range(len(document["programs"])):
+        graph = stored_program(document, index)
+        if len(graph.nodes) <= _MAX_TRACED_NODES and len(graph.nodes) not in sizes:
+            sizes.add(len(graph.nodes))
+            assert _unexplained_boundaries(Pipeline.build(LOOP_PASSES).run(graph)) == [], f"program {index}"
+
+
+def test_a_region_the_splicer_cannot_build_raises(monkeypatch) -> None:
+    """No fallback shrinks a region the splice refuses: the kernel set is never a fall-through."""
+    from emmy.compiler.pipeline.passes.loop.fusion import _region
+
+    # The pass loads its rule module afresh, so the rule imports the refusing splice.
+    monkeypatch.setattr(_region, "build_merged_region", lambda *_: None)
+    with pytest.raises(ValueError, match="fusion cannot splice the region"):
+        Pipeline.build(LOOP_PASSES).run(_chained_matmuls())
