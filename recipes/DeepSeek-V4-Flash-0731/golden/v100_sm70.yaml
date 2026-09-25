@@ -30686,7 +30686,7 @@ configs:
       TILE@map.3/inner: ''
       REDUCE@map.1/map.1/reduce: ''
       REDUCE@map.1/map.1/reduce.1/inner: ''
-      REDUCE@map.1/map.1/reduce.1/inner.2/map.2/map.1/reduce: coop
+      REDUCE@map.1/map.1/reduce.1/inner.2/map.2/map.1/reduce: ''
       REDUCE@map.1/map.2/reduce: ''
       REDUCE@map.1/map.2/reduce.1/inner: ''
       REDUCE@map.1/map.3/inner: ''
@@ -30695,12 +30695,12 @@ configs:
       STAGE@map.1/map.2/reduce.1/inner: ''
       STAGE@map.1/map.3/inner: ''
       STAGE@map.3/inner: ''
-      WORK: t128
+      WORK: ''
       RASTER: ''
     identity: b7f38f8f5a2df5bb9471b29da8532bb9d3367409eb55ac572e9451387d97d4da
     measurements:
-      emmy_us: 4946.944236755371
-      reference_us: 5450.751781463623
+      emmy_us: 20349.952697753906
+      reference_us: 20445.1847076416
       reference_backend: same-input-greedy
   - name: post1.k_linear_softmax_mean_reduce_f461f6.m1.b7f38f8f5a2d
     bindings:
