@@ -19,10 +19,12 @@ Numbers are from the refresh agents' runs on each card and are single measuremen
   | H100 | s1 | 9 cuts (+ q/k projection and q/k norm stat) | 168.6 us | 17 us |
   | A100 | s1 | 9 cuts | 530 us | ~31 us |
 
-  With every seam cut, the score and softmax pieces run as scalar code (200-630 us each on the H100). At s1 the q/k
-  projection piece is 87 us because attention-internal seams carry the o_proj column axis, which makes the Q/K/P
-  workspaces 128x redundant. The greedy also picks bad schedules for the pieces: an A100 s1 V projection at 7.8 ms and
-  gate/up at 329 us, where a GEMV should take single-digit microseconds.
+  The gap is piece schedules, not duplicated work. The fused Loop IR reads q, k, the score and the softmax statistics
+  through `col // 128` of the o_proj column, and the cut already stores them per head (the seam's `strides`), so each
+  cut piece computes its value once per head. With every seam cut, the score and softmax pieces still run as scalar
+  code (200-630 us each on the H100); the s1 q/k projection piece (about 2 MMAC) takes 87 us; the greedy picks an A100
+  s1 V projection at 7.8 ms and gate/up at 329 us, where a GEMV should take single-digit microseconds. The only
+  duplicated work left is GQA's 2x: k and v pieces are indexed per q head (16), not per KV head (8).
 - **More cuts are not better.** On a Qwen3.8 GDN kernel, 2 cuts gave 35.8 ms and all 4 depth-1 cuts gave 215 ms.
 
 Next step: fusion stays maximal, so the gains come from cuts. Make the greedy (or the prior) pick cuts by duplicated
@@ -77,8 +79,7 @@ in the golden-refresh PR; recorded here because the s512 goldens were refreshed 
   skill only mentions `EMMY_FAST_MATH=1`.
 - Under a route's `PLACE` pins, `--record-greedy` ignores piece proposals (a proposal is not evidence) and picks atomic
   split-K for Gemma post projection pieces (40 / 76 us) over the stored `w2x2` schedules (13.3 / 73 us).
-- Qwen3-0.6B s1 on the H100: the q/k projection contraction seam carries the o_proj column axis (2048 against 16
-  heads), so cutting it still computes q/k 128 times (87 us piece). No seam computes q/k once; the seam's axes are a
-  lowering issue. Best route: 11 cuts, 157.6 us against 17 us for the old kernel set.
+- A seam listing shows the raw axes (`CutSite.axes`, e.g. the 2048 o_proj column) and not the strides the cut applies,
+  so redundancy estimated from it is wrong by the stride (the refresh agents read 128x where there was none).
 - The recurrence roller turns a plain chain of repeated same-shape pointwise steps (`x = tanh(x) + 0.5*x`, seven
   times) into a serial state kernel, which is then a kernel boundary. Found while writing the maximal-fusion tests.
