@@ -12,9 +12,9 @@ What a restamp keeps is decided per row, never guessed:
 
 - a target a fresh kernel writes (same output set) takes that kernel's Loop IR; one no fresh kernel
   writes — the layer regrouped — is dropped with its rows, since a row is a schedule of one kernel;
-- a row's stored identity is re-keyed to the fresh kernel: the target's own lift for a plain or
-  routing row, and for a child-identity schedule receipt the fresh piece whose structural signature
-  equals the one it named — a receipt whose piece the fresh set does not mint is dropped;
+- a row whose stored identity is the target's own takes the fresh target's; a row naming a piece of
+  the target's kernel set (a receipt, or a piece row beside its routing row) keeps its identity, and
+  survives only if the fresh set still mints that piece under the set's own rows;
 - a row that no longer decodes on the fresh kernel is dropped;
 - a measurement stays only when the kernel it timed is the kernel the fresh Loop IR renders, byte
   for byte, under the row as the compile's only evidence. Otherwise the row keeps its schedule and
@@ -35,12 +35,10 @@ from emmy.compiler.pipeline.search.golden import (
     GoldenEntryState,
     GoldenRecord,
     _identity_store,
-    _replay,
     decode_record,
     golden_record_from_entry,
     golden_set_state,
     kernel_identity,
-    lead_of,
     siblings_of,
     sole_evidence,
     stored_program,
@@ -185,26 +183,18 @@ def _rekeyed_rows(document: Mapping, entry: Mapping, wire: dict, report: Restamp
     old_records = [golden_record_from_entry(document, entry, row) for row in entry["realizations"]]
     new_records = [golden_record_from_entry(scratch, fresh_entry, row) for row in entry["realizations"]]
 
-    # Identities first, leads before receipts: a receipt decodes behind its lead's cut, and its
-    # fresh piece is found by replaying the set under the lead's re-keyed identity.
-    rekeyed: list[GoldenRecord | None] = [None] * len(new_records)
-    for pass_receipts in (False, True):
-        for position, (old, new) in enumerate(zip(old_records, new_records, strict=True)):
-            if old.is_receipt != pass_receipts:
-                continue
-            if new.identity is None:
-                rekeyed[position] = new
-                continue
-            leads = [record for record in rekeyed if record is not None]
-            identity = _fresh_identity(old, new, old_records, leads) if old.is_receipt else kernel_identity(replace(new, identity=None))
-            rekeyed[position] = replace(new, identity=identity) if identity is not None else None
-    survivors = [record for record in rekeyed if record is not None]
+    # A row naming the target itself takes the fresh target's identity. Any other stored identity
+    # names a piece of the target's kernel set (a receipt, or a piece row beside its routing row):
+    # it stays as stored, and the decode below keeps the row only if the fresh set still mints that
+    # piece under the set's own rows.
+    old_key = kernel_identity(replace(old_records[0], identity=None))
+    new_key = kernel_identity(replace(new_records[0], identity=None))
+    survivors = [
+        replace(new, identity=new_key) if old.identity == old_key else new for old, new in zip(old_records, new_records, strict=True)
+    ]
 
     rows = []
-    for realization, old, new in zip(entry["realizations"], old_records, rekeyed, strict=True):
-        if new is None:
-            report.rows_dropped.append(f"{old.name}: its kernel is not among the fresh kernels")
-            continue
+    for realization, old, new in zip(entry["realizations"], old_records, survivors, strict=True):
         reason = decode_record(new, siblings_of(new, survivors))
         if reason is not None:
             report.rows_dropped.append(f"{old.name}: {reason}")
@@ -228,21 +218,6 @@ def _rekeyed_rows(document: Mapping, entry: Mapping, wire: dict, report: Restamp
         rows.remove(row)
         report.rows_dropped.append(f"{row['name']}: its kernel set lost its measurements")
     return rows
-
-
-def _fresh_identity(
-    old: GoldenRecord, new: GoldenRecord, old_records: Sequence[GoldenRecord], fresh_set: Sequence[GoldenRecord]
-) -> str | None:
-    """The fresh piece a receipt's stored identity names: the same identity when the fresh set still
-    mints it, else the one fresh kernel whose structural signature equals the stored piece's."""
-    before = _replay(lead_of(old, old_records), siblings=siblings_of(old, old_records), lead=lead_of(old, old_records))
-    lead = lead_of(new, [*fresh_set, new])
-    after = _replay(lead, siblings=tuple(record for record in fresh_set if record is not lead), lead=lead)
-    if old.identity in after.kernels:
-        return old.identity
-    wanted = before.signatures.get(old.identity)
-    matches = [identity for identity, signature in after.signatures.items() if signature == wanted and identity in after.kernels]
-    return matches[0] if wanted is not None and len(matches) == 1 else None
 
 
 def _kernel_sources(record: GoldenRecord, records: Sequence[GoldenRecord]) -> tuple[str, ...] | None:

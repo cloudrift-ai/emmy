@@ -96,6 +96,25 @@ def test_restamp_drops_a_kernel_set_row_whose_members_lose_their_measurements(go
     assert names == ["matmul.square.512"], "the file stays a valid repository golden"
 
 
+def test_restamp_keeps_the_piece_rows_of_a_kernel_set_whose_target_only_reordered_its_inputs(tmp_path, caplog):
+    """A piece row names a kernel of its set, not the target: re-keying it to the fresh target's
+    identity made it decode against the whole kernel, and every piece of a cut or split set was lost."""
+    document = yaml.safe_load((_HARDWARE_GOLDENS_DIR / "rtx5090_sm120.yaml").read_text())
+    entry = next(entry for entry in document["configs"] if entry["realizations"][0]["name"] == "attention.hd128.gqa.decode.split")
+    loop = document["loops"][entry["target"]["loop"]]
+    loop["inputs"] = loop["inputs"][::-1]  # the stale lowering: the same kernel with its inputs in another order
+    document.update(programs=[document["programs"][entry["program"]]], loops=[loop])
+    document["configs"] = [{**entry, "program": 0, "target": {**entry["target"], "loop": 0}}]
+    path = tmp_path / "golden.yaml"
+    path.write_text(yaml.safe_dump(document, sort_keys=False))
+    assert _check(path) == 1
+    with caplog.at_level("INFO"):
+        handle_golden_restamp(Namespace(paths=[str(path)]))
+    assert "1 of 1 targets restamped, 0 dropped; 3 rows kept" in caplog.text
+    rows = load_golden_file(path)["configs"][0]["realizations"]
+    assert [row.get("identity") for row in rows] == [row.get("identity") for row in entry["realizations"]], "each piece keeps its own"
+
+
 def test_restamp_refuses_to_write_a_golden_nothing_survives_in(golden, caplog):
     document = yaml.safe_load(golden.read_text())
     for index in range(len(document["programs"])):
