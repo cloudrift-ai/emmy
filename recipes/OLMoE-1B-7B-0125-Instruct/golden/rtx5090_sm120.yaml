@@ -396,15 +396,13 @@ configs:
       FAST_MATH: false
     knobs:
       WORK: t512
-      TILE: ''
       REDUCE: coop
-      STAGE: ''
-      LOOPIFY: '0'
       RASTER: ''
+    identity: b223f6fb77b1a439b04289c00f6e7e7f8aedc8986fb12c37a510eefe458f1db5
     measurements:
-      emmy_us: 1.9
-      reference_us: 4.1
-      reference_backend: torch-eager
+      emmy_us: 1.8592774868011475
+      reference_us: 1.8743715481832623
+      reference_backend: same-input-greedy
 - program: 9
   target:
     loop: 9
@@ -1131,7 +1129,7 @@ loops:
             unroll: false
             seed: true
       name: k_rms_norm_297d2f
-    inputs: [x, rms_norm_mean_count, rms_norm_eps, p_weight]
+    inputs: [rms_norm_mean_count, x, rms_norm_eps, p_weight]
     outputs: [[rms_norm, f32, [1, 2048]]]
 - inputs: [x0, x1]
   outputs: [linear]
