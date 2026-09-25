@@ -53,8 +53,6 @@ output) once instead of per MLP element, and one that lifts the norm and in_proj
 
 ## Compiler errors hit while cutting
 
-- `PLACE@map.4/map=cut` on the GDN pre kernel (AWQ) crashes the compile: `ValueError: Lambda body reads ['_r0'] it does
-  not bind`. The 4-seam depth-1 composition hits the same error on AWQ, and on GPTQ it compiles but a piece hangs.
 - A tune-DB perf row with knobs `{LOOPIFY: '0'}`, written by a fallback record, makes the next compile of that kernel
   raise "register schedule accepts only WORK, TILE and STAGE". Workaround: a fresh tune DB.
 
