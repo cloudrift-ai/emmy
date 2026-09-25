@@ -72,6 +72,8 @@ in the golden-refresh PR; recorded here because the s512 goldens were refreshed 
   pass (`map.1/inner.1/...` vs `map.1/inner.2/...`), so pins built from it silently do not apply. There is no CLI that
   lists a kernel's cuttable seams in the spelling `EMMY_KNOBS` accepts; the agents hooked `cuttable_seams` inside the
   compile.
+- `EMMY_KNOBS` cannot pin one piece of a cut set apart from the others: a bare key applies to every kernel of the set.
+  Recording a stored piece schedule over the greedy's choice needs the tune DB to price the alternatives.
 - Multi-millisecond kernels need `--warmup 10 --iters 20`, or the isolated re-bench exceeds the 10 s GPU cap.
 - Fast math is the default, so a std-lane `--record-greedy` needs `EMMY_FAST_MATH=0` explicitly; the refresh-golden
   skill only mentions `EMMY_FAST_MATH=1`.
