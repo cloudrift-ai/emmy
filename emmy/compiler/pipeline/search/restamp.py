@@ -32,11 +32,13 @@ from dataclasses import dataclass, field, replace
 
 from emmy.compiler.pipeline.search import golden
 from emmy.compiler.pipeline.search.golden import (
+    GoldenEntryState,
     GoldenRecord,
     _identity_store,
     _replay,
     decode_record,
     golden_record_from_entry,
+    golden_set_state,
     kernel_identity,
     lead_of,
     siblings_of,
@@ -220,6 +222,11 @@ def _rekeyed_rows(document: Mapping, entry: Mapping, wire: dict, report: Restamp
         else:
             report.rows_kept += 1
         rows.append(row)
+    # A kernel-set row carries no schedule of its own: once its members lose their measurements it
+    # spells nothing, and a repository golden refuses a row that spells nothing.
+    for row in [row for row in rows if golden_set_state(row, rows) is GoldenEntryState.INVENTORY]:
+        rows.remove(row)
+        report.rows_dropped.append(f"{row['name']}: its kernel set lost its measurements")
     return rows
 
 

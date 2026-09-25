@@ -81,6 +81,21 @@ def test_restamp_rewrites_the_golden_onto_the_fresh_lowering(golden, caplog):
     assert "already the fresh lowering" in caplog.text
 
 
+def test_restamp_drops_a_kernel_set_row_whose_members_lose_their_measurements(golden, caplog):
+    """A kernel-set row carries no schedule of its own; once its member is demoted it spells nothing."""
+    _make_stale(golden)
+    document = yaml.safe_load(golden.read_text())
+    realizations = document["configs"][0]["realizations"]
+    lead = {key: value for key, value in realizations[0].items() if key not in ("knobs", "measurements", "identity")}
+    realizations.append({**lead, "name": "matmul.square.512.set", "kernel_set": [realizations[0]["name"]]})
+    golden.write_text(yaml.safe_dump(document, sort_keys=False))
+    with caplog.at_level("INFO"):
+        handle_golden_restamp(Namespace(paths=[str(golden)]))
+    assert "matmul.square.512.set: its kernel set lost its measurements" in caplog.text
+    names = [row["name"] for row in load_golden_file(golden)["configs"][0]["realizations"]]
+    assert names == ["matmul.square.512"], "the file stays a valid repository golden"
+
+
 def test_restamp_refuses_to_write_a_golden_nothing_survives_in(golden, caplog):
     document = yaml.safe_load(golden.read_text())
     for index in range(len(document["programs"])):
