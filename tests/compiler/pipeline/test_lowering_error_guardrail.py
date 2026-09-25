@@ -169,7 +169,7 @@ def test_truncated_kernel_pipeline_registers_measured_composed_routes(monkeypatc
     routes = [(frozenset({("S_shape", "128")}), ("PLACE@map", "PLACE@map.1/map"))]
     registered = []
 
-    monkeypatch.setattr(greedy_strategy, "_measured_composed_routes", lambda _db, _ctx: routes)
+    monkeypatch.setattr(greedy_strategy, "_measured_composed_routes", lambda _db: routes)
 
     @contextmanager
     def capture_composed_routes(value):

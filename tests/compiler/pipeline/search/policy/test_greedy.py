@@ -14,7 +14,6 @@ from emmy.compiler.pipeline.search.policy.greedy import (
     EvidenceError,
     _db_measured_index_build,
     _direct_measured_pick,
-    _Measured,
     _require_evidence,
     _route_candidates,
     _stream_tiers,
@@ -143,14 +142,7 @@ def test_schedule_pick_descends_directly_to_complete_measured_row() -> None:
     assert materialized == []
 
 
-def _golden_row(sig: frozenset, tun: dict, us: float, name: str):
-    return (sig, tun, us, name)
-
-
-def test_measured_rows_do_not_cross_exact_kernel_identities(monkeypatch) -> None:
-    from emmy.compiler.pipeline.search import golden
-
-    monkeypatch.setattr(golden, "evidence_rows", lambda _gpu, _cap: [])
+def test_measured_rows_do_not_cross_exact_kernel_identities() -> None:
     common = {"S_shape": 128, "H_opt": 3}
     rows = [
         SimpleNamespace(status="ok", stats=SimpleNamespace(median=17.0), knobs={**common, "I_kernel": "flat", "WORK": "t32"}),
@@ -164,52 +156,6 @@ def test_measured_rows_do_not_cross_exact_kernel_identities(monkeypatch) -> None
 
     assert greedy._db_measured_pick(index.ok, candidates) == (2, 27.0)
     assert greedy._sig_groups(index.ok, frozenset({("S_shape", "128"), ("I_kernel", "unmeasured")})) == []
-
-
-def test_measured_index_folds_golden_rows_beside_the_tune_db(monkeypatch) -> None:
-    """Golden rows enter the ONE evidence index the greedy pick reads, in the tune DB rows' shape: a
-    schedule row ranks under its signature (and is remembered by name for the audit), a row that
-    spells a placement or a cross-CTA split is a measured price for that kernel-set decision."""
-    from emmy.compiler.pipeline.search import golden
-
-    sig = frozenset({("S_shape", "128.0")})
-    rows = [
-        _golden_row(sig, {"WORK": "t32", "TILE": "f2"}, 4.0, "g.row"),
-        _golden_row(sig, {"PLACE@map.1/map": "cut", "WORK": "t8"}, 9.0, "g.route"),
-        _golden_row(sig, {"REDUCE": "g2k/coop", "WORK": "w1x1"}, 7.0, "g.split"),
-    ]
-    monkeypatch.setattr(golden, "evidence_rows", lambda _gpu, _cap: rows)
-    monkeypatch.setattr(golden, "scope_explicit", lambda: True)
-    ctx = SimpleNamespace(structural_key=lambda: "ctx", gpu_name="", compute_capability=(8, 9), features=lambda: {"H_opt": 3.0})
-
-    index = _db_measured_index_build(None, ctx)
-
-    assert index.ok == {sig: [({"WORK": "t32", "TILE": "f2"}, 4.0)]}
-    assert index.routes == {sig: [({"PLACE@map.1/map": "cut", "WORK": "t8"}, 9.0), ({"REDUCE": "g2k/coop", "WORK": "w1x1"}, 7.0)]}
-    assert index.failed == {}
-
-
-def test_route_rows_become_measured_kernel_set_candidates() -> None:
-    """At a placement fork, every measured row of the kernel's signature is one candidate priced at
-    its µs: the OFFERED arm the row spells — a seam it marks ``cut``, the fuse arm when it marks
-    none (a schedule row says the kernel ran fused), nothing when the seam it marks is not on the
-    ballot. Nothing is installed on the kernel; the pieces a cut mints are new kernels read against
-    their own rows. A schedule fork has no such candidates."""
-    sig = frozenset({("S_shape", "128.0")})
-    fuse = DeferredFork(materialize=lambda: None, knobs={"PLACE": "fuse"})
-    cut = DeferredFork(materialize=lambda: None, knobs={"PLACE@map.1/map": "cut"}, structural=True)
-    root = TileOp(op=projection(), knobs={"S_shape": 128.0})
-    point = SimpleNamespace(options=[fuse, cut], node_id="node", root_op=root, ctx=SimpleNamespace(features=lambda: {"H_opt": 3.0}))
-    routes = {
-        sig: [({"PLACE@map.1/map": "cut", "WORK": "t8"}, 9.0), ({"PLACE@map.1/map": "fuse"}, 4.0), ({"PLACE@map.1/twist": "cut"}, 1.0)]
-    }
-    index = _Measured({sig: [({"WORK": "t32"}, 3.0)]}, {}, routes)
-
-    got = _route_candidates(point, index, None)
-
-    assert got == [(fuse, 3.0), (cut, 9.0), (fuse, 4.0)]
-    scheduled = SimpleNamespace(**{**vars(point), "options": [SimpleNamespace(pool_id="pool", knobs={"WORK": "t8"})]})
-    assert _route_candidates(scheduled, index, None) == []
 
 
 def test_strict_evidence_refuses_a_fork_no_measurement_decides(monkeypatch) -> None:
@@ -228,11 +174,8 @@ def test_strict_evidence_lets_a_hand_pin_decide_a_kernel_set_fork(monkeypatch) -
     strict evidence must not refuse it: recording a kernel set under a hand pin with
     ``--strict-evidence`` is how its pieces are proven measured before the routing row exists."""
     from emmy.compiler.pipeline.pipeline import ForkPoint
-    from emmy.compiler.pipeline.search import golden
     from emmy.compiler.pipeline.search.policy.greedy import greedy_decide
 
-    monkeypatch.setattr(golden, "evidence_rows", lambda _gpu, _cap: [])
-    monkeypatch.setattr(golden, "scope_explicit", lambda: True)
     monkeypatch.setenv("EMMY_STRICT_EVIDENCE", "1")
     cut = DeferredFork(materialize=lambda: None, knobs={"PLACE@map.1/map": "cut"}, structural=True)
     fuse = DeferredFork(materialize=lambda: None, knobs={"PLACE": "fuse"})
@@ -520,21 +463,17 @@ def test_a_stored_cut_is_priced_from_its_pieces_at_the_fork() -> None:
     assert _route_candidates(SimpleNamespace(**{**vars(point), "ctx": other}), greedy._EMPTY_MEASURED, db) == []
 
 
-def test_a_stored_composed_cut_is_offered_to_the_cut_pass(monkeypatch) -> None:
+def test_a_stored_composed_cut_is_offered_to_the_cut_pass() -> None:
     """A routing row that cuts several seams is the composed arm a later compile must offer beside the
-    single seams, keyed by the parent's stamps the way a golden route row is."""
-    from emmy.compiler.context import Context
-    from emmy.compiler.pipeline.search import golden
+    single seams, keyed by the parent's stamps the way the evidence pick matches its rows."""
     from emmy.compiler.pipeline.search.db import RoutingRow, SearchDB
     from emmy.compiler.pipeline.search.strategy.greedy import _measured_composed_routes
-    from tests.compiler.pipeline.search.helpers import GPU_5090, kernel_row
+    from tests.compiler.pipeline.search.helpers import kernel_row
 
-    monkeypatch.setattr(golden, "evidence_rows", lambda _gpu, _cap: [])
-    ctx = Context.from_target((12, 0), gpu_name=GPU_5090)
     db = SearchDB()
     db.record_kernels([kernel_row("p", stamps={"S_x": 1.0}), kernel_row("c1"), kernel_row("c2"), kernel_row("c3")])
     db.record_routing(RoutingRow(parent="p", arm={"PLACE@a": "cut", "PLACE@b": "cut"}, children=("c1", "c2", "c3")))
     db.record_routing(RoutingRow(parent="p", arm={"PLACE@a": "cut"}, children=("c1", "c2")))
 
-    assert _measured_composed_routes(db, ctx) == [(frozenset({("S_x", "1.0"), ("I_kernel", "p")}), ("PLACE@a", "PLACE@b"))]
-    assert _measured_composed_routes(None, ctx) == []
+    assert _measured_composed_routes(db) == [(frozenset({("S_x", "1.0"), ("I_kernel", "p")}), ("PLACE@a", "PLACE@b"))]
+    assert _measured_composed_routes(SearchDB()) == []

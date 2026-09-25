@@ -1133,6 +1133,10 @@ def _sync_operands(
     # 4-way (64 B A rows) / 8-way (128 B B rows) bank-conflicted — the measured megakernel residual
     # (294.9 M ld conflicts / 82.5 M LSU inst on the gemma-shape fused edge, 5090).
     channels = channels or ((c.operands[1], c.exposes[0]),)
+    # The value each channel multiplies, by its accumulator: one producer edge can expose several
+    # (a packed gate/up weight decoded by one lift), and each channel stages its own, not the
+    # edge's last.
+    multiplied = {c.base.results[index]: exposed for index, _, exposed in c.channel_operands()} if c.base is not None else {}
     drain: list = []
     sync_ops: list[SyncOperand] = []
     async_ops: list[Operand] = []
@@ -1140,7 +1144,7 @@ def _sync_operands(
     (async_ops if a_copied else sync_ops).append(a_op)
     drain.append(a_op)
 
-    for f, (edge, _) in enumerate(channels):
+    for f, (edge, acc) in enumerate(channels):
         tag = "b" if f == 0 else f"b_x{f}"
         # The channel's B is a TERM: a gmem read is a slab (one ``Load`` over its coordinates) and
         # copies; anything else is a producer cone and compute-fills.
@@ -1148,13 +1152,14 @@ def _sync_operands(
         bl = slab.load if slab is not None else edge
         if not isinstance(bl, Load):
             b_body = dedup_recomputes(bl.lower(axes=axes))
+            exposed = multiplied.get(acc, bl.exposes[-1])
 
-            def b_value(k0, row, col, *, body=b_body, edge=bl):
+            def b_value(k0, row, col, *, body=b_body, exposed=exposed):
                 if b_atoms > 1:
                     row, col = _atom_major(bk_elems, mn[1].tile // b_atoms)(row, col)
                 k = BinaryExpr("+", k0, row)
                 sigma = Sigma({k_name: k_coord(k), n_name: n_coord(col)})
-                return _k_masked([s.substitute(sigma) for s in body], edge.exposes[-1], k, k_ext)
+                return _k_masked([s.substitute(sigma) for s in body], exposed, k, k_ext)
 
             op = SyncOperand(tag=tag, shape=(bk_elems * b_atoms, mn[1].tile // b_atoms), value=b_value, swizzle=swizzles[1])
             sync_ops.append(op)

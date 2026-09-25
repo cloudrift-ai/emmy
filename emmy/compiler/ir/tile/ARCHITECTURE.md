@@ -149,13 +149,20 @@ same closed operand edges and placement seams. The invariant also applies when a
 already-mapped Tile: promotion extends the grid in lockstep with the free axes, so per-cell replication never mistakes
 the swept coordinate for an SSA name.
 
-That rule is `promoted_sweep`, and it has three readers. Construction applies it. The placement fork asks it of a
+A STATIC UNIT axis binds on neither ground and is promoted anyway: it spreads the launch over one cell, so it
+replicates nothing whatever the term does, and it is the geometry a contraction's `(m, n)` pair is read off — sweeping
+one drops an elided matrix row and with it the fragment tier.
+
+That rule is `promoted_sweep`, and it has four readers. Construction applies it. The placement fork asks it of a
 CANDIDATE piece: where a kernel's stores ride axes with no axis in common, nothing promotes and the whole kernel keeps
 its one-axis grid, yet each store taken alone may promote its own — the NVFP4 encode, whose packed codes ride the
 feature axis and whose block scales ride one sixteenth of it. That is the question the output-owning cut is offered on
-(`lowering/tile/_cut.py`). And the full-projection cut reads the refusal from the other side: a reduce this rule will
+(`lowering/tile/_cut.py`). The full-projection cut reads the refusal from the other side: a reduce this rule will
 not bind past is one that cut hands its own kernel, after which the piece reads a single stored value and its sweep
-binds. Stating the rule once keeps all three answers one rule rather than copies of it.
+binds. And a cut's PRODUCER piece is minted through it — its workspace axes are the store's sweep and an empty
+placement, so the rule decides the piece's grid rather than the cut handing it one free axis per workspace dimension,
+which used to bind the sweep a row statistic is invariant in and re-fold that statistic once per output cell. Stating
+the rule once keeps all four answers one rule rather than copies of it.
 
 Root ownership is asked twice, in two shapes, and the answers differ. `refused_roots` names the contraction roots the
 binder will not bind together, and the schedule projection refuses a prefix that schedules a second of them (an

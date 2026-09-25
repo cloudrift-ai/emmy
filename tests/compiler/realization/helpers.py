@@ -210,37 +210,46 @@ def regenerate(document: dict) -> dict:
 
 
 def complete(document: dict) -> dict:
-    """The case with an entry for every kernel of its set no entry decides yet.
+    """The case with an entry for every kernel of its set, each named by identity.
 
     The set is replayed the way the deploy reads it (``golden._replay`` with the entries as one
-    another's siblings); a scheduled kernel no entry names by identity and no entry's row vouches
-    for gets an entry of its own: that kernel's identity, the input regime, and the schedule row
-    the replay realized on it. Strict evidence then has a row at every fork. Authoring, not
-    derivation — the added rows are enumerable schedules of those kernels, and the case pins them
-    from then on."""
+    another's siblings); a scheduled kernel no entry names by identity gets an entry of its own:
+    that kernel's identity, the input regime, and the schedule row the replay realized on it. A
+    further entry naming a kernel the compiler no longer mints is dropped first: its row was
+    authored for a kernel that no longer exists, and the kernel standing in its place gets a fresh
+    entry. Strict evidence then has a row at every fork, each kernel's own — the rows the golden
+    import files in the DB are per kernel, and nothing stands in for a kernel no entry names.
+    Authoring, not derivation — the added rows are enumerable schedules of those kernels, and the
+    case pins them from then on."""
     from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden import _replay, lead_of, siblings_of  # noqa: PLC0415
 
     entry = document["configs"][0]
     records = [golden_record_from_entry(document, entry, realization) for realization in entry["realizations"]]
     primary = records[0]
-    covered = {record.identity for record in records if record.identity is not None}
-    replays = [_replay(record, siblings=siblings_of(record, records), lead=lead_of(record, records)) for record in records]
-    for replay in replays:
-        covered |= set(replay.holders)
+    replay = _replay(primary, siblings=siblings_of(primary, records), lead=lead_of(primary, records))
+    kernels = set(replay.kernels)
+    # The target's entry names the kernel the set was cut from; a routing entry names the kernel its
+    # decision replaced. Neither is a kernel the set ran as, and both stay.
+    kept = [
+        realization
+        for record, realization in zip(records, entry["realizations"], strict=True)
+        if record is primary or record.is_routing or record.identity in kernels
+    ]
+    covered = {record.identity for record in records if record.identity in kernels}
     regime = {key: value for key, value in primary.pin_map.items() if family_of(str(key)) != "PLACE"}
     added = [
         {
             "name": f"{primary.name}.{identity[:12]}",
             "bindings": dict(primary.bindings),
             "pins": dict(regime),
-            "knobs": dict(replays[0].realized.get(identity, {})),
+            "knobs": dict(replay.realized.get(identity, {})),
             "identity": identity,
         }
-        for identity in sorted(replays[0].kernels - covered)
+        for identity in sorted(kernels - covered)
     ]
-    if added:
-        entry["realizations"] = [*entry["realizations"], *added]
+    if added or len(kept) != len(records):
+        entry["realizations"] = [*kept, *added]
     return document
 
 
@@ -450,10 +459,22 @@ def correct(case: Case, compiled) -> None:
         want, _ = greedy.run(greedy.compile(program.copy()), input_data=dict(feed))
     narrow = _has_narrow_operand(program)
     for name in program.outputs:
-        reference = np.asarray(want.outputs[name])
-        np.testing.assert_allclose(
-            np.asarray(result.outputs[name]), reference, err_msg=f"{case.id}: output {name}", **_tolerance(narrow, reference)
-        )
+        got, reference = _comparable(program, name, np.asarray(result.outputs[name]), np.asarray(want.outputs[name]))
+        np.testing.assert_allclose(got, reference, err_msg=f"{case.id}: output {name}", **_tolerance(narrow, reference))
+
+
+def _comparable(program, name: str, got: np.ndarray, reference: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """The two sides of one output as the VALUES they stand for. A packed-pair output (two e2m1
+    codes to the byte) is decoded first: its bytes are not values, and the same value has two
+    spellings at zero — the block-scaled cell rounds a tiny negative product to the negative zero
+    code where the numpy reference lands on the positive one, and a byte comparison counts that
+    as a mismatch of every element of an all-zero output."""
+    from emmy.compiler.dtype import decode_f4x2  # noqa: PLC0415
+
+    tensor = program.buffer(name)
+    if tensor is not None and tensor.dtype.logical_elems == 2 and got.dtype == np.uint8 and reference.dtype == np.uint8:
+        return decode_f4x2(got), decode_f4x2(reference)
+    return got, reference
 
 
 def seeded_inputs(program, *, sources: dict[str, np.ndarray] | None = None) -> dict[str, np.ndarray]:

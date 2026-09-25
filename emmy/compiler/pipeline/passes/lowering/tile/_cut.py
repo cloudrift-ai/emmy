@@ -937,7 +937,16 @@ def _reformed(piece: TileOp) -> TileOp:
     with both channels once the o_proj result is a load. The twin is the term the warp tier tiles;
     two terms give one of them the scalar tier. Formed fresh, the piece is the kernel the same
     program gets on its own, which is also the kernel the card's rows were recorded on. A nest the
-    lift cannot take whole keeps the piece as minted."""
+    lift cannot take whole keeps the piece as minted.
+
+    A piece the rank rule left a SWEEP (``promoted_sweep``) keeps its minted form too. Re-forming
+    walks the piece out to a full loop nest and lifts it back, and that nest opens the sweep loop
+    AROUND the statistic the minted term holds beside it — the re-lifted reduce then reads the sweep
+    axis, the rank rule promotes it, and the piece is back to folding its row statistic per output
+    cell. The hoist is the form the reform is meant to preserve, so a piece that already has it is
+    not re-formed."""
+    if any(store.sweep for store in piece.output_specs):
+        return piece
     body = piece.op.lower(bound=frozenset(), stores=piece.output_specs, axes=piece.axes)
     try:
         # Through the LoopOp's normalization: that is where two reduce loops over one axis become
@@ -1136,13 +1145,18 @@ def realize(
             # launch rule stated beside ``nvcc.load_cubin_function``: two same-named producers from
             # different cut levels would launch one kernel twice.
             name=f"{tile.name}__place_{token}",
-            place=Placement(free=grid),
+            # The workspace axes are the store's SWEEP, and the one rank rule
+            # (``promoted_sweep``, applied by ``TileOp.__post_init__``) binds the ones binding
+            # replicates nothing over. A free axis per workspace dimension instead bound the sweep a
+            # row statistic is invariant in, so the piece re-folded it once per output CELL: a
+            # materialized q/k RoPE cone launched one cooperative block per element.
+            place=Placement(free=()),
             axes=(
                 *(next((axis for axis in grid if axis.name == original.name), original) for original in tile.axes),
                 *minted,
             ),
             output_specs=tuple(
-                OutputSpec(Write(output=buffer, index=index, value=name)) for name, buffer in zip(names, buffers, strict=True)
+                OutputSpec(Write(output=buffer, index=index, value=name), sweep=grid) for name, buffer in zip(names, buffers, strict=True)
             ),
             placement_decided=placement_decided,
             split_consumed=split_consumed,

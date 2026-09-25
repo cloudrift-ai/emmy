@@ -107,7 +107,7 @@ Four spelling rules decide what a case actually asserts:
 - **An entry is a complete row.** It spells every site its kernel decides, OFF as `''`, exactly as a golden row does,
   because `offered` compares it against one enumerated schedule. A partial row — a key left out for the fork to choose,
   a bare family on a kernel whose sites are routed — equals no schedule and fails. `helpers.complete` writes the rows
-  a replay realizes for the kernels no entry decides yet.
+  a replay realizes for the kernels no entry names, and drops an entry naming a kernel the compiler no longer mints.
 - **A placement is an entry of its own.** `PLACE@seam: cut` in the `knobs` of an entry whose identity is the kernel
   the cut is offered on; the golden validator refuses a placement key beside a schedule row. Older cases carry the
   route in the first entry's `pins`, which the replay reads the same way.
@@ -155,8 +155,9 @@ each entry standing in as a measured row — a case authors schedules rather tha
 evidence), so a fork no entry decides is an `EvidenceError` naming the kernel, never a prior's guess; the machine-local
 online prior is out of the way, the tune DB is not consulted, and the environment carries the case's input pins alone — the regime
 it was measured under (`FAST_MATH` and the precision gates), never its route or its schedule row. The route and the
-row reach the compile as measured rows of the kernels they decide, through the same evidence pick every `compile` /
-`run` / `serve` uses (`golden.evidence_rows`, `greedy._route_candidates`), or they do not reach it at all. That is the
+row reach the compile as measured rows of the kernels they decide — imported into the compile's DB, as every compile
+imports its golden scope (`golden_import`), and read through the same evidence pick every `compile` / `run` / `serve`
+uses (`greedy._route_candidates`) — or they do not reach it at all. That is the
 deploy contract, asked of every case on every commit: a row the compiler can honour under a pin but does not select
 when it is the evidence — a stale spelling, a route key no offered seam carries, a schedule that equals no leaf of the
 kernel that deploys — fails `realized`, and the failure names what was lost. A kernel-set decision is checked through
@@ -253,12 +254,14 @@ Five rules make it load-bearing:
 5. **Preserve the leading comment block.** `dump_golden_file` is a plain YAML dump and drops comments, so a naive
    rewrite would eat the `# evidence:` line on every regeneration.
 
-**A non-target entry's `identity` is authored, and nothing re-derives it.** `regenerate` restamps the target
-entry's identity only, so a change that moves a PIECE's identity leaves every further entry addressing a kernel the
-case no longer compiles to — and the staleness test cannot see it, because it compares against what `regenerate`
-produces and `regenerate` reproduces the same stale identity. `COMPLETE=1` adds the entry the set is now missing but
-never removes the dead one, so a case can carry both. Re-authoring the entry is the fix; detecting it automatically
-would mean matching a stored identity against the kernels the replay actually resolves, which nothing does yet.
+**A non-target entry's `identity` is authored, and `regenerate` does not re-derive it.** `regenerate` restamps the
+target entry's identity only, so a change that moves a PIECE's identity leaves a further entry addressing a kernel
+the case no longer compiles to — and the staleness test cannot see it, because it compares against what `regenerate`
+produces and `regenerate` reproduces the same stale identity. Such an entry fails `realized` instead: the golden
+import files nothing for a kernel the set never mints, so that kernel has no row and strict evidence refuses its
+fork. `COMPLETE=1` is the fix — `helpers.complete` matches every further entry's identity against the kernels the
+set's replay resolves, drops the entries naming none, and adds one for each kernel no entry names, so a case holds
+one entry per kernel of its set and nothing stands in for a kernel no entry describes.
 
 **The authored half rots differently.** Those five rules are about the DERIVED half, and they all assume the case still
 loads. When an IR dataclass loses a field, every case whose stored program serialized it stops parsing —

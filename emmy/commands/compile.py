@@ -132,8 +132,9 @@ def add_golden_arg(parser) -> None:
     """Register the golden flags every replaying command shares (``run`` / ``compile`` / ``tune`` /
     ``serve`` spell them the same way): ``--golden PATH`` names the golden YAML whose measured rows
     feed the evidence index INSTEAD of the repository goldens, ``--realization NAME`` selects one
-    realization inside it (or, without ``--golden``, inside the live card's repository corpus), and
-    ``--strict-evidence`` refuses any fork no measurement decides."""
+    realization inside it (or, without ``--golden``, inside the live card's repository corpus),
+    ``--strict-evidence`` refuses any fork no measurement decides, and ``--pin-route`` (``compile`` /
+    ``run``) compiles the named realization under the kernel-set decisions it records."""
     parser.add_argument(
         "--golden",
         metavar="PATH",
@@ -160,6 +161,16 @@ def add_golden_arg(parser) -> None:
             "or golden). A kernel nothing measured raises EvidenceError naming it."
         ),
     )
+    parser.add_argument(
+        "--pin-route",
+        action="store_true",
+        help=(
+            "Compile the named realization under its kernel-set decisions — the cut its route records, the cross-CTA "
+            "split its REDUCE spells — as a hand pin, so the kernel set the file describes is the one compiled (how "
+            "--record-greedy records a set's pieces). Never a schedule knob. A hand pin of the same seam with another "
+            "value is refused."
+        ),
+    )
 
 
 def resolve_golden_arg(args) -> None:
@@ -174,7 +185,8 @@ def resolve_golden_arg(args) -> None:
     a whole-file walk (``run --golden PATH`` alone, ``_explicit_realization`` false) benches a
     target's verified rows, or its one valid direct tune winner, and leaves proposals to the
     tuner. Nothing here installs a pin: a measured record reaches its kernel through the evidence
-    pick when the compile reaches that kernel's forks.
+    pick when the compile reaches that kernel's forks — except the kernel-set decisions a named
+    realization records, which the compile pins (:func:`selected_decisions`).
 
     ``NAME`` matches an exact realization name first, else a name **substring** — the same
     identifier ``emmy eval --kernel`` filters the golden dataset on. Because compile/run build a
@@ -307,6 +319,35 @@ def resolve_golden_arg(args) -> None:
         len(pinned),
         "" if len(pinned) == 1 else "s",
     )
+
+
+def selected_decisions(args) -> dict[str, str]:
+    """Under ``--pin-route``, the kernel-set decisions the realizations ``--realization`` named
+    record — their routes and cross-CTA splits, as one hand pin — so the compile takes the kernel
+    set the file describes; empty otherwise, and empty where the named rows disagree on a decision
+    (the walk leaves their receipts bare). A kernel set's measured price is its pieces' rows, which
+    the compile that takes the route is what records (``run --record-greedy``); until then nothing
+    prices the set, and a compile nothing pins keeps the kernel whole. The pin is the same hand pin
+    ``EMMY_KNOBS`` publishes, so one already set on a seam with another value is a conflict, refused."""
+    from emmy.compiler.pipeline.knob import parse_knob_spec  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.db import is_placement_knob  # noqa: PLC0415
+
+    if not getattr(args, "pin_route", False):
+        return {}
+    decisions: dict[str, str] = {}
+    for row in getattr(args, "golden_configs", None) or []:
+        for key, value in {**row.pins, **row.knobs}.items():
+            if is_placement_knob(key, value) and decisions.setdefault(str(key), str(value)) != str(value):
+                return {}
+    live = {
+        **parse_knob_spec(config.knobs_aggregate()),
+        **{key: config.knob_raw(key) for key in decisions if config.knob_raw(key) is not None},
+    }
+    for key, value in decisions.items():
+        if key in live and str(live[key]) != value:
+            logger.error("--pin-route: the named row decides %s=%s but the hand pin says %s=%s", key, value, key, live[key])
+            sys.exit(2)
+    return decisions
 
 
 def golden_row(record, records=()):
@@ -521,25 +562,22 @@ def handle_compile(args):
     if dump:
         dump.dump_input_graph(graph)
 
-    # Pick tuned forks from the DB when one is reachable; otherwise the
-    # engine falls back to rule defaults (single-shot option-0). Compile never
-    # errors on a missing DB — that's only a hint, not a requirement.
+    # The tune DB is the evidence a compile picks from: its own rows, and the card's golden rows
+    # imported into it before the pick — so it is created on first use, not only by a tune.
     # ``EMMY_TUNE_DB`` env var overrides the default path.
     tune_db_path = resolve_tune_db()
-    db = SearchDB(path=tune_db_path) if tune_db_path.exists() else None
-    if db is not None:
-        logger.info("Using tuning DB: %s", tune_db_path)
-    else:
-        logger.debug("No tuning DB at %s — using rule defaults", tune_db_path)
+    db = SearchDB.for_compile(tune_db_path)
+    logger.info("Using tuning DB: %s", tune_db_path)
 
     from emmy.compiler.pipeline.search.golden import records_override, shared_regime_pins  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
 
     # A selected golden's records are the golden evidence this compile deploys from; their shared
-    # input regime is published so the rows read as live measurements.
+    # input regime is published so the rows read as live measurements, and the kernel-set decisions
+    # the named realization records are pinned so the compile takes the kernel set it describes.
     scope = getattr(args, "_golden_records", None) or None
     with (
-        pinned_knobs(shared_regime_pins(scope or [])),
+        pinned_knobs({**shared_regime_pins(scope or []), **selected_decisions(args)}),
         records_override(scope),
         config.strict_evidence_override(True if args.strict_evidence else None),
     ):

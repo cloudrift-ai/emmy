@@ -791,7 +791,7 @@ def _identity_store() -> dict:
         from emmy import config  # noqa: PLC0415
 
         fingerprint = _compiler_fingerprint()
-        sections: dict = {"entries": {}, "verdicts": {}, "replays": {}}
+        sections: dict = {"entries": {}, "verdicts": {}}
         try:
             payload = json.loads(config.golden_identity_cache_path(fingerprint).read_text())
             sections = {name: payload.get(name, {}) for name in sections}
@@ -802,10 +802,9 @@ def _identity_store() -> dict:
 
 
 def flush_identity_store() -> None:
-    """Persist newly derived identities, decode verdicts and evidence replays (atomic replace;
-    concurrent writers merge — a lost write only re-derives later). Called once an evidence
-    import has derived what it needed (:func:`evidence_rows`), so the next process on this
-    machine and compiler reads the derivations instead of replaying every record."""
+    """Persist newly derived identities and decode verdicts (atomic replace; concurrent writers
+    merge — a lost write only re-derives later), so the next process on this machine and compiler
+    reads the derivations instead of lifting every record again."""
     global _IDENTITY_STORE_DIRTY
     if not _IDENTITY_STORE_DIRTY or _IDENTITY_STORE is None:
         return
@@ -823,7 +822,7 @@ def flush_identity_store() -> None:
         except (OSError, ValueError):
             on_disk = None
         if on_disk is not None:
-            for section in ("entries", "verdicts", "replays"):
+            for section in ("entries", "verdicts"):
                 merged = dict(on_disk.get(section, {}))
                 merged.update(_IDENTITY_STORE.get(section, {}))
                 _IDENTITY_STORE[section] = merged
@@ -851,7 +850,7 @@ def _record_fingerprint(record: GoldenRecord) -> str:
     return digest(cached[1], str(record.target_key), str(record.bindings), str(record.compute_cap), record.gpu_name or "")
 
 
-#: One evidence :class:`_Replay` per exact target, pins and spelled knobs — imports walk whole
+#: One :class:`_Replay` per exact target, pins and spelled knobs — the strict decode walks whole
 #: files, and sibling realizations that spell the same kernel-set decisions share one replay.
 #: Exhaustive strict-decode results are not retained: a miss can contain millions of candidate
 #: rows, and its requested-row cache key means no different recording can reuse it.
@@ -950,9 +949,10 @@ def decode_record(record: GoldenRecord, siblings: Sequence[GoldenRecord] = ()) -
     one enumerated leaf (``schedule_match_key`` equality under the record's own pins) — no prefix
     matching, no any-of, no classified shape. That equality is blind to the two sides' OFF anchors:
     which of them a spelling writes down depends on whether it came from a resolved kernel or from a
-    fork's offered leaf, and neither carries schedule content. A receipt's
-    identity must equal one kernel resolved under the record's pins, and the spelled row must equal
-    one of THAT kernel's rows — a sibling child's row must not vouch for it."""
+    fork's offered leaf, and neither carries schedule content. A stored identity — a receipt's, or
+    a target's own — must equal one kernel resolved under the record's pins, and the spelled row must
+    equal one of THAT kernel's rows — a sibling child's row must not vouch for it; a compiler change
+    that re-keys the kernel turns the row red until the file is re-keyed."""
     from emmy.compiler.pipeline.knob import schedule_match_key  # noqa: PLC0415
 
     sibling_spelling = tuple(
@@ -989,14 +989,19 @@ def decode_record(record: GoldenRecord, siblings: Sequence[GoldenRecord] = ()) -
     # replay already resolved, and the pieces it mints cannot stamp it, so comparing it to a leaf
     # asks a piece to spell its parent's decision.
     row = schedule_match_key(piece_row(record.knobs))
-    replay = _replay(record, siblings=siblings, exhaustive=True, wanted=row)
+    # The set's leading entry is the target's own — the one naming the kernel the target lifts to —
+    # and it decides every fork no entry names, a residual's further cut or split included; a
+    # receipt replayed as its own lead would read those forks as fused and never mint its kernel.
+    own = tile.identity_key(with_io=True) if tile is not None else None
+    lead = next((entry for entry in (record, *siblings) if own is not None and entry.identity == own), None)
+    replay = _replay(record, siblings=siblings, lead=lead, exhaustive=True, wanted=row)
     if record.is_routing:
         reason = f"routing key {replay.unresolved[0]!r} does not resolve to an offered cut seam" if replay.unresolved else None
         return _remember_verdict(verdict_key, reason)
 
     def verdict(replay: _Replay) -> str | None:
         candidates = replay.rows
-        if record.is_receipt and (tile is None or record.identity != tile.identity_key(with_io=True)):
+        if record.identity is not None and (tile is None or record.identity != tile.identity_key(with_io=True)):
             child_rows = candidates.get(record.identity)
             offered = replay.offered.get(record.identity, (frozenset(), frozenset()))
             if record.identity not in replay.kernels:
@@ -1012,7 +1017,7 @@ def decode_record(record: GoldenRecord, siblings: Sequence[GoldenRecord] = ()) -
     reason = verdict(replay)
     if reason is not None:
         # A miss: replay again walking every fork, so the reason names what the kernels offer.
-        reason = verdict(_replay(record, siblings=siblings, exhaustive=True, wanted=row, explain=True))
+        reason = verdict(_replay(record, siblings=siblings, lead=lead, exhaustive=True, wanted=row, explain=True))
     verdicts[verdict_key] = reason
     global _IDENTITY_STORE_DIRTY
     _IDENTITY_STORE_DIRTY = True
@@ -1037,25 +1042,18 @@ class _Replay(NamedTuple):
     own realized row — a forkless kernel (the schedule space collapsed to one row, often the all-OFF
     anchor) never opens a fork, so its one row is read off the resolved op instead. Behind a cut the
     buckets are exactly the pieces, which is what lets a child-identity receipt decode against its
-    own kernel only. A requested-row replay keeps only an exact match here. ``holders`` — the
-    evidence replay's answer to the one question the index needs of the same enumeration: the
-    kernels whose enumeration admits the record's piece row
-    (:func:`piece_row`), found by the deploy's own descent (``fork.leaf_for``) instead of by
-    flattening every pool. ``signatures`` — each resolved kernel's ``S_*`` signature by identity:
-    how a row is keyed as evidence for the kernel it decorates. ``arms`` — the arm the record's
-    route and knobs spelled at each kernel-set fork it decided (a cut seam, a cross-CTA plan),
-    keyed by the signature of the kernel that fork was offered on: the record's route rows.
+    own kernel only. A requested-row replay keeps only an exact match here. ``arms`` — the arm the
+    record's route and knobs spelled at each kernel-set fork it decided (a cut seam, a cross-CTA
+    plan), keyed by the signature of the kernel that fork was offered on.
     ``unresolved`` — the record's scoped cut keys no offered seam carried, the strict decode's
     routing failure. ``offered`` — for a requested-row replay, the bounded set of keys and
     key/value pairs offered per kernel identity; a miss uses it to explain re-spelling, narrowing
     or regrouping without retaining every candidate row."""
 
     rows: dict[str | None, frozenset]
-    holders: frozenset[str]
     #: The kernels the replay scheduled — those that reached a schedule fork or were resolved
     #: without one; a kernel a cut or split consumed is not among them.
     kernels: frozenset[str]
-    signatures: dict[str, frozenset]
     arms: tuple[tuple[frozenset, dict[str, str]], ...]
     unresolved: tuple[str, ...]
     #: Each scheduled kernel's realized schedule row (``schedule_row_key`` families), by identity —
@@ -1128,8 +1126,8 @@ def _replay(
     lead's — never by an entry that does not own it, whose row would say "fused" or "unsplit" of a
     kernel it never described. So a set of per-kernel entries — the parent's cut, each piece's
     row — walks one path together, and the record's own rows are what this replay reports.
-    ``exhaustive`` streams every schedule pool for ``rows``; the evidence import asks only
-    ``holders`` and descends. ``wanted`` names the ONE match key the caller will ask ``rows`` about.
+    ``exhaustive`` streams every schedule pool for ``rows``; a plain replay descends to each
+    kernel's realized row. ``wanted`` names the ONE match key the caller will ask ``rows`` about.
     An unsampled schedule answers by decoding that complete row through its codec and compatibility
     context, without enumerating candidates. Other forks use lazy descent and keep only the wanted
     keys and values needed to classify a miss, never the candidate rows. A schedule fork that cannot
@@ -1142,7 +1140,6 @@ def _replay(
     from emmy.compiler.pipeline.fork import exact_schedule_leaf, fork_signature, iter_leaves, leaf_for, leaf_knobs  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import (  # noqa: PLC0415
         canonical_row_key,
-        evidence_row_vouches,
         family_of,
         schedule_match_key,
         schedule_row_key,
@@ -1187,30 +1184,6 @@ def _replay(
     cached = None if exhaustive else _REPLAY_CACHE.get(cache_key)
     if cached is not None:
         return cached
-    # The evidence replay is a pure function of the record, its set and the compiler — it runs
-    # with the live decision pins withdrawn (``unpinned_decisions``) — so it persists beside
-    # identities and verdicts and serves every pinned compile; the exhaustive one stays in memory.
-    store = _identity_store()["replays"]
-    store_key = digest(
-        _record_fingerprint(record),
-        str(sorted(record.knobs.items())),
-        str(record.pins),
-        record.identity or "",
-        set_digest,
-    )
-    if not exhaustive and (kept := store.get(store_key)) is not None:
-        result = _Replay(
-            {},
-            frozenset(kept["holders"]),
-            frozenset(kept["kernels"]),
-            {identity: frozenset(tuple(pair) for pair in signature) for identity, signature in kept["signatures"].items()},
-            tuple((frozenset(tuple(pair) for pair in signature), dict(arm)) for signature, arm in kept["arms"]),
-            tuple(kept["unresolved"]),
-            {identity: dict(row) for identity, row in kept["realized"].items()},
-            {},
-        )
-        _REPLAY_CACHE[cache_key] = result
-        return result
     ctx_key = (record.compute_cap, record.gpu_name or None)
     ctx = _DECODE_CTX_CACHE.get(ctx_key)
     if ctx is None:
@@ -1224,20 +1197,13 @@ def _replay(
     offered_pairs: dict[str | None, set[tuple[str, str]]] = {}
     wanted_keys = frozenset(key for key, _ in wanted or ())
     wanted_pairs = frozenset(wanted or ())
-    holders: set[str] = set()
     kernels: set[str] = set()
-    signatures: dict[str, frozenset] = {}
     realized: dict[str, dict[str, str]] = {}
     arms: list[tuple[frozenset, dict[str, str]]] = []
     declined: set[str] = set()  # the schedule forks left undecided: none of them can hold ``wanted``
 
     def _identity_of(op) -> str | None:
         return op.identity_key(with_io=True) if isinstance(op, TileOp) else None
-
-    def _note(op, signature: frozenset) -> None:
-        identity = _identity_of(op)
-        if identity is not None:
-            signatures.setdefault(identity, signature)
 
     def _offer(identity: str | None, row: tuple[tuple[str, str], ...]) -> None:
         offered_keys.setdefault(identity, set()).update(key for key, _ in row if key in wanted_keys)
@@ -1247,7 +1213,6 @@ def _replay(
         # The kernel's signature as the deploy reads it at this fork — an op resolved without a
         # fork is keyed below, off its own stamp.
         signature = fork_signature(fp.root_op, fp.options, ctx)
-        _note(fp.root_op, signature)
         identity = _identity_of(fp.root_op)
         owner = named.get(identity) if identity is not None else None
         decider = owner if owner is not None else lead
@@ -1282,8 +1247,6 @@ def _replay(
                 hit = None
             if hit is None:
                 hit = leaf_for(fp.options, asked) if asked else None
-            if hit is not None and identity is not None and decider is record:
-                holders.add(identity)
             return hit[0] if hit is not None else next(iter_leaves(fp.options))
         # An unsampled semantic schedule decodes the complete wanted row through the same codec and
         # compatibility context that validates a direct schedule. Other forks retain the generic
@@ -1367,14 +1330,9 @@ def _replay(
             if identity is not None:
                 kernels.add(identity)
                 realized[identity] = dict(row)
-                if piece and (named.get(identity) or lead) is record and evidence_row_vouches(dict(row), piece):
-                    holders.add(identity)  # a forkless kernel: its one row is the resolved op's
-            _note(node.op, fork_signature(node.op, (), ctx))
     result = _Replay(
         {identity: frozenset(rows) for identity, rows in buckets.items()},
-        frozenset(holders),
         frozenset(kernels),
-        signatures,
         tuple(arms),
         tuple(sorted(pending)),
         realized,
@@ -1382,16 +1340,6 @@ def _replay(
     )
     if not exhaustive:
         _REPLAY_CACHE[cache_key] = result
-        global _IDENTITY_STORE_DIRTY
-        store[store_key] = {
-            "holders": sorted(holders),
-            "kernels": sorted(kernels),
-            "signatures": {identity: sorted(signature) for identity, signature in signatures.items()},
-            "arms": [[sorted(signature), arm] for signature, arm in arms],
-            "unresolved": sorted(pending),
-            "realized": realized,
-        }
-        _IDENTITY_STORE_DIRTY = True
     return result
 
 
@@ -1406,7 +1354,8 @@ def kernel_identity(record: GoldenRecord) -> str | None:
     lowers to several kernels (a schedule row decorates exactly one), or selection/lifting fails —
     best-effort here (a corpus row must never break a compile); nightly strict decoding is where
     failure is loud. Deploy never joins on this key: a record deploys as measured rows, matched by
-    ``S_*`` features plus the exact ``I_kernel`` stamp (:func:`evidence_rows`)."""
+    ``S_*`` features plus the exact ``I_kernel`` stamp, off the rows the golden import files
+    (``golden_import``)."""
     global _IDENTITY_STORE_DIRTY
     if record.identity is not None:
         return record.identity
@@ -1615,14 +1564,6 @@ def scope_explicit() -> bool:
     return RECORDS_OVERRIDE is not None or config.golden_scope() is not None
 
 
-def scope_token() -> object:
-    """A hashable stamp of the installed golden scope, for the evidence index's process memo."""
-    if RECORDS_OVERRIDE is not None:
-        return ("override", id(RECORDS_OVERRIDE), len(RECORDS_OVERRIDE))
-    path = config.golden_file()
-    return ("file", str(path)) if path is not None else ("repository",)
-
-
 def _scoped(records: Sequence[GoldenRecord], gpu_name: str, compute_cap: tuple[int, int]) -> list[GoldenRecord]:
     """An explicit scope's records for one card: the capability must agree; a record that names
     no card (a working golden traced off-GPU) applies to whichever card compiles it."""
@@ -1661,7 +1602,14 @@ def scope_digest(gpu_name: str) -> str:
     serving pack keys on it: plans compiled from other rows are not what this compile would deploy."""
     sha = hashlib.sha256()
     if RECORDS_OVERRIDE is not None:
-        rows = (json.dumps([r.name, r.gpu_name, r.pins, r.knobs, r.measurements], sort_keys=True, default=str) for r in RECORDS_OVERRIDE)
+        # The target and its bindings too: a case and its symbolic twin spell the same names, pins and knobs
+        # over different programs, and a compile of one must not pick from the other's rows.
+        rows = (
+            json.dumps(
+                [r.name, r.gpu_name, r.target_key, r.bindings, r.identity, r.pins, r.knobs, r.measurements], sort_keys=True, default=str
+            )
+            for r in RECORDS_OVERRIDE
+        )
         sha.update("\n".join(sorted(rows)).encode())
     elif (scope := config.golden_scope()) is not None:
         sha.update(Path(scope).read_bytes() if scope else b"no golden evidence")
@@ -1710,66 +1658,6 @@ def regime_live(record: GoldenRecord) -> bool:
         if recorded != live:
             return False
     return True
-
-
-def evidence_rows(gpu_name: str, compute_cap: tuple[int, int]) -> list[tuple[frozenset, dict, float, str]]:
-    """The golden rows in scope as measured-evidence rows for one card: ``(S_* signature, tuning
-    knobs, µs, record name)``, the same shape the tune DB's ``perf`` rows take in the deploy's
-    evidence index. Only a MEASURED record in the live input regime (:func:`regime_live`) is
-    evidence; a proposal has no µs to rank with and deploys once ``run --golden PATH --bench``
-    has measured it.
-
-    Every row is keyed by the kernel it decides — a piece a cut or split mints is a brand-new
-    kernel, so nothing a record says about the kernel it was offered on reaches the pieces. A
-    record that decorates the target's one kernel (no stored identity, no route, no cross-CTA
-    split) is that kernel's schedule row under the target's signature. Any other record is read through its
-    replay (:func:`_replay`): each kernel-set arm it spelled is a route row under the signature of
-    the kernel that fork was offered on, and its schedule row is keyed under the kernel its stored
-    identity names when that kernel is one the replay resolved — an empty row too: it spells the
-    fused, unsplit arm at that kernel's own forks (``pins.spelled_arm``). Otherwise the row speaks for the
-    kernel set collectively — a row the tuner merged with the parent's split, a case authored
-    behind a cut — and is keyed under every piece whose enumerated rows it vouches for
-    (``evidence_row_vouches``), its ``REDUCE`` value reduced to what a piece can still stamp
-    (:func:`~emmy.compiler.pipeline.search.pins.stampable_reduce`): the split it names was the
-    parent's decision. A row no kernel of the replay enumerates is stale and is no evidence.
-    Best-effort per record: a record the current compiler cannot lower is skipped, since the
-    strict decode is where that is loud."""
-    from emmy.compiler.pipeline.knob import EVIDENCE_PREFIXES, family_of  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.pins import parse_reduce  # noqa: PLC0415
-
-    rows: list[tuple[frozenset, dict, float, str]] = []
-    records = records_for_card(gpu_name, compute_cap)
-    for record in records:
-        if record.measurements is None or record.emmy_us <= 0 or not regime_live(record):
-            continue
-        row = record.schedule_row
-        split = any(family_of(k) == "REDUCE" and (plan := parse_reduce(v)) is not None and plan.needs_split for k, v in row.items())
-        if record.identity is None and not record.route and not split and not record.kernel_set:
-            try:
-                _lowered, nodes = _target_kernel_nodes(record)
-                (signature,) = {
-                    frozenset((key, str(value)) for key, value in node.op.knobs.items() if key.startswith(EVIDENCE_PREFIXES))
-                    for node in nodes
-                }
-            except Exception:  # noqa: BLE001 — a stale record is no evidence, not an error
-                continue
-            if row:
-                rows.append((signature, row, record.emmy_us, record.name))
-            continue
-        try:
-            replay = _replay(record, siblings=siblings_of(record, records), lead=lead_of(record, records))
-        except Exception:  # noqa: BLE001 — see above
-            continue
-        rows.extend((signature, arm, record.emmy_us, record.name) for signature, arm in replay.arms)
-        if not row and record.identity not in replay.kernels:
-            continue
-        if record.identity in replay.kernels:
-            kernels = [record.identity]
-        else:
-            row, kernels = piece_row(row), sorted(replay.holders)
-        rows.extend((replay.signatures[kernel], row, record.emmy_us, record.name) for kernel in kernels if kernel in replay.signatures)
-    flush_identity_store()
-    return rows
 
 
 _DOCUMENT_MEMO: dict[Path, list[GoldenRecord]] = {}

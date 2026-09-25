@@ -3,8 +3,8 @@
 Python prepares a standalone dense Qwen3 token-step artifact with FP16 weights, projections, logits, and KV cache.
 The Rust runtime submits the exported launches, retains the KV cache, and chooses each next token on the GPU.
 No Python model operation runs after
-preparation. This is a single-request correctness implementation, not an HTTP server or a performance replacement for
-vLLM. The existing serving integration remains the default.
+preparation. The experimental native HTTP adapter serves one active request; this is not a performance replacement
+for vLLM. The existing serving integration remains the default.
 
 ## Preparation
 
@@ -82,8 +82,9 @@ emmy generate Qwen/Qwen3-0.6B --revision REVISION --native-pack /tmp/qwen-native
   --temperature 0.7 --top-p 0.9 --seed 42
 ```
 
-Use the same checkpoint/tokenizer revision for preparation and text generation. The native artifact itself accepts
-and returns token IDs; tokenizer packaging and native text processing belong to the later API work.
+Use the same checkpoint/tokenizer revision for preparation and text generation. The runtime artifact accepts and returns
+token IDs. Native serving preparation additionally bundles the same
+checkpoint tokenizer and chat template; the HTTP adapter owns text processing.
 
 The hermetic tiny-Qwen3 GPU test checks every logit at `rtol=atol=1e-3`, greedy tokens, request reset, context bounds,
 EOS, zero output budget, graph replay, and first capture during decode. It hides Python and NVCC from the native
@@ -107,3 +108,20 @@ seventeen cases across 10,585 positions, including two 4,096-position prompts, w
 FP32 attention, rotary intermediates, and residual accumulation close the earlier numerical failures. Independent
 attention qualification also covers the full 4,096-position capacity.
 Performance and production concurrency are separate qualifications.
+
+## Native HTTP launcher
+
+`emmy serve MODEL --generate --native` prepares the artifact in a fresh temporary directory and executes a prebuilt
+`emmy-server`. Preparation uses FP16 checkpoint weights, the requested revision, and the existing golden and strict
+compiler-evidence controls. `--native-pack DIR` reuses an already prepared serving bundle; its recorded model,
+revision, and context must match. Preparation-only evidence flags are rejected when reusing a bundle.
+
+Native options are `--host`, `--port`, `--revision`, `--max-model-len`, and `--native-pack`, plus the existing Emmy
+preparation, dry-run, and benchmark controls. Context defaults to 4,096. `--native` requires `--generate`, rejects
+`--stock`, and rejects unsupported engine arguments. vLLM forwarding stays unchanged without `--native`. Dry-run
+prints preparation settings and the native command without downloading, compiling, or starting a process.
+
+`--bench` uses the existing vLLM benchmark client, with default native concurrency one. Higher explicit concurrency
+measures overload and receives busy responses. The client is an optional dependency; normal native serving does not
+import vLLM. Install the matching binaries from `make native-dist` before launching. See the
+[HTTP adapter contract](../../../crates/emmy-server/ARCHITECTURE.md) for API fields, cancellation, readiness, and tests.

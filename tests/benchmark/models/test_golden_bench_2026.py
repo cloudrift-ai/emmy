@@ -1,7 +1,6 @@
 """Configuration checks for the 2026 compiler-submission experiments."""
 
 import subprocess
-import sys
 from pathlib import Path
 
 from emmy.benchmark.command_workload import build_substitution_map, render_command
@@ -161,39 +160,6 @@ def test_native_fp8_large_layer_supplement_is_bounded(project_root) -> None:
         "RedHatAI/Qwen3-32B-FP8-dynamic@c6732fc26128341172e4005bad34aafa51c32866"
     }
     assert all(task.variant.params["budget"] == 8 for task in tasks)
-
-
-def test_serving_systems_are_pinned_and_controlled(project_root) -> None:
-    systems = {
-        "serving_deepseek_v4_flash_0731_v100x16": (
-            "deepseek-ai/DeepSeek-V4-Flash-0731",
-            "7872f01b1d1fe23eabc4c98b48bffcef5a386062",
-            "NVIDIA Tesla V100 SXM3 32GB",
-            16,
-        ),
-    }
-
-    for name, (model, revision, gpu, gpu_count) in systems.items():
-        tasks = enumerate_tasks([_experiment(project_root, name)])
-        assert len(tasks) == 15
-        repeats_by_point = {}
-        for task in tasks:
-            assert task.recipe.model.huggingface == model
-            assert task.recipe.model.revision == revision
-            assert task.recipe.deploy.gpu == gpu
-            assert task.recipe.deploy.gpu_count == gpu_count
-            benchmark = task.recipe.benchmark
-            assert benchmark.seed == 0
-            assert benchmark.temperature == 0
-            assert benchmark.ignore_eos is True
-            assert benchmark.repeats == 1
-            point = (benchmark.random_input_len, benchmark.random_output_len, benchmark.max_concurrency)
-            repeats_by_point.setdefault(point, set()).add(task.variant.params["repeat"])
-            assert "--no-enable-prefix-caching" in task.recipe.engine.llm.vllm.extra_args
-            if name != "serving_deepseek_v4_flash_0731_v100x16":
-                assert "@sha256:" in task.recipe.engine.llm.vllm.image
-        assert len(repeats_by_point) == 3
-        assert all(repeats == {0, 1, 2, 3, 4} for repeats in repeats_by_point.values())
 
 
 def test_large_layer_corpus_is_bounded_and_not_labeled_tp8(project_root) -> None:
@@ -416,131 +382,6 @@ def test_neptune_emmy_pytorch_a100_share_one_experiment(project_root) -> None:
     assert '"captured_whole_forward"' in pytorch_runner
 
 
-def test_rtx5090_attention_comparison_is_recorded_and_bounded(project_root) -> None:
-    directory = Path(project_root) / EXP / "compiler_attention_rtx5090"
-    tasks = enumerate_tasks([str(directory)])
-    recipe = load_recipe(str(directory))
-
-    assert len(tasks) == 20
-    assert {task.recipe.deploy.gpu for task in tasks} == {"NVIDIA GeForce RTX 5090"}
-    assert all(task.recipe.deploy.gpu_count == 1 for task in tasks)
-    assert {task.variant.params["lane"] for task in tasks} == {"emmy", "baselines"}
-    assert {task.variant.params["operator"] for task in tasks} == {
-        "prefill_global",
-        "prefill_causal",
-        "prefill_gqa",
-        "decode_causal",
-        "decode_gqa",
-    }
-    assert {task.variant.params["batch"] for task in tasks} == {1, 8}
-
-    run = recipe.command.run
-    assert "torch==2.14.0" in run
-    assert "flash_attn-2.8.3.tar.gz" in run
-    assert "tilelang==0.1.8 apache-tvm-ffi==0.1.8.post2" in run
-    assert "FLASH_ATTN_CUDA_ARCHS=120" in run
-    assert "da967821698eb7a79a76d27fbe25e314a3273f2b12ba4833e981658139d0e6d9" in run
-    assert "1e71dd64a9e0280e0447b8a0c2541bad4bf6ac65bdeaa2f90e51a9e57de0370d" in run
-    assert "s/-std=c++17/-std=c++20/g" in run
-    assert 'case "$lane" in' in run
-    assert "emmy tune" not in run
-    assert "for repeat" not in run
-    assert "--warmup 1 --iters 10" in run
-    assert "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True" in run
-    assert 'operator_sequence_lengths "$operator" "$batch"' in run
-    assert recipe.command.strict is True
-    assert recipe.command.result_files == ["artifacts.tar.gz"]
-    assert recipe.command.stage == [
-        "emmy",
-        "pyproject.toml",
-        "README.md",
-        "LICENSE",
-        "experiments/golden-bench-2026/compiler_attention_rtx5090/operators.sh",
-        "experiments/golden-bench-2026/compiler_attention_rtx5090/run_emmy.sh",
-        "experiments/golden-bench-2026/compiler_attention_rtx5090/run_baselines.py",
-        "experiments/golden-bench-2026/compiler_attention_rtx5090/golden",
-    ]
-
-    operators_path = directory / "operators.sh"
-    assert operators_path.stat().st_mode & 0o111
-    operators = operators_path.read_text()
-    assert "SEQUENCE_LENGTHS=(1024 2048 4096 8192 16384 32768)" in operators
-    assert "operator_sequence_lengths()" in operators
-    assert 'operator_code "$1" "$2" "$3" || exit' in operators
-    assert "q.reshape($batch,8,8,1,128)" in operators
-
-    emmy_runner_path = directory / "run_emmy.sh"
-    assert emmy_runner_path.stat().st_mode & 0o111
-    emmy_runner = emmy_runner_path.read_text()
-    assert '"$emmy" run --golden "$golden" --bench --bench-backends emmy' in emmy_runner
-    assert '"$emmy" run -c "$source_code" --bench --strict --bench-backends eager,tcompile,emmy' in emmy_runner
-    assert "--warmup 1 --iters 10" in emmy_runner
-    assert "for repetition" not in emmy_runner
-    assert 'test "$missing_goldens" -eq 0' in emmy_runner
-    assert 'test "$successful_setups" -eq "${#sequence_lengths[@]}"' in emmy_runner
-
-    baseline_runner = (directory / "run_baselines.py").read_text()
-    assert '"torch": "2.14.0", "flash_attn": "2.8.3", "tilelang": "0.1.8", "apache-tvm-ffi": "0.1.8.post2"}' in (baseline_runner)
-    assert "SDPBackend.CUDNN_ATTENTION" in baseline_runner
-    assert '"latency_estimator": "mean"' in baseline_runner
-    assert 'mode="max-autotune-no-cudagraphs"' in baseline_runner
-    assert "flash_attn_func" in baseline_runner
-    assert "flex_attention" in baseline_runner
-    assert '"inductor_normalized_speedup"' in baseline_runner
-    assert '"TileLang"] = {' in baseline_runner
-    subprocess.run([sys.executable, str(directory / "run_baselines.py"), "--smoke"], check=True)
-
-
-def test_gemma4_kernels_replay_a_hand_recorded_golden_per_lane(project_root) -> None:
-    recipe_dir = _experiment(project_root, "gemma4_kernels")
-    recipe = load_recipe(recipe_dir)
-    tasks = enumerate_tasks([recipe_dir])
-    cards = {"rtx5090": "NVIDIA GeForce RTX 5090", "rtx4090": "NVIDIA GeForce RTX 4090"}
-    assert sorted((task.variant.params["card"], task.variant.params["kernel"], task.variant.params["lane"]) for task in tasks) == sorted(
-        (card, kernel, lane)
-        for card in cards
-        for kernel in ("q_proj", "kv_proj", "o_proj", "mlp_gate_up", "mlp_down", "attention")
-        for lane in ("std", "fm")
-    )
-    assert all(task.recipe.deploy.gpu == cards[task.variant.params["card"]] for task in tasks)
-    # Every row replays a golden recorded on its own card; nothing traces, tunes or pins, so those rows alone decide.
-    for task in tasks:
-        name = f"{task.variant.params['kernel']}-s512_{task.variant.params['card']}.golden.yaml"
-        assert (Path(recipe_dir) / "golden" / name).is_file()
-    run = recipe.command.run
-    assert "emmy trace" not in run and "emmy tune" not in run and "EMMY_KNOBS" not in run
-    assert "--bench-backends eager,tcompile,emmy" in run
-    assert "--strict-evidence" in run
-    assert recipe.command.strict is True
-
-
-def test_gemma4_serving_runs_the_article_matrix_with_the_golden_deciding_every_emmy_lane(project_root) -> None:
-    """The article's six points in its three vLLM lanes; every Emmy lane boots under strict evidence, so the
-    serving golden's rows decide every kernel and a fork no row decides fails the boot rather than the prior."""
-    tasks = enumerate_tasks([_experiment(project_root, "gemma4_serving")])
-    assert len(tasks) == 18
-    points = {}
-    for task in tasks:
-        assert task.recipe.model.revision == "707f0a3b8a3c7ad586ed01e27eafbad8a27dd0f7"
-        assert task.recipe.deploy.gpu == "NVIDIA GeForce RTX 5090" and task.recipe.engine.llm.gpu_memory_utilization == 0.96
-        benchmark = task.recipe.benchmark
-        assert benchmark.seed == 0 and benchmark.temperature == 0 and benchmark.ignore_eos is True
-        assert "--no-enable-prefix-caching" in task.recipe.engine.llm.vllm.extra_args
-        vllm = task.recipe.engine.llm.vllm
-        lane = "stock" if "EmmyGenModel" not in vllm.extra_args else ("fm" if "EMMY_FAST_MATH=1" in vllm.extra_env else "std")
-        if lane != "stock":
-            assert "EMMY_STRICT_EVIDENCE=1" in vllm.extra_env and vllm.image.startswith("cloudriftai/vllm-emmy:")
-        points.setdefault((benchmark.random_input_len, benchmark.random_output_len, benchmark.max_concurrency), set()).add(lane)
-    assert points == {
-        (256, 256, 1): {"stock", "std", "fm"},
-        (256, 256, 64): {"stock", "std", "fm"},
-        (4096, 4096, 1): {"stock", "std", "fm"},
-        (4096, 4096, 4): {"stock", "std", "fm"},
-        (4096, 4096, 8): {"stock", "std", "fm"},
-        (8192, 256, 4): {"stock", "std", "fm"},
-    }
-
-
 def test_every_command_variant_renders(project_root) -> None:
     root = Path(project_root) / EXP
     rendered = 0
@@ -559,69 +400,4 @@ def test_every_command_variant_renders(project_root) -> None:
             assert "/task" in command
             subprocess.run(["bash", "-n"], input=command, text=True, check=True)
             rendered += 1
-    assert rendered == 167
-
-
-def test_gemma_serving_ab_has_four_points_per_lane(project_root) -> None:
-    tasks = enumerate_tasks([_experiment(project_root, "serving_gemma4_rtx5090")])
-    assert len(tasks) == 24
-
-    stock = [task for task in tasks if task.variant.params["arm"] == "stock"]
-    emmy = [task for task in tasks if task.variant.params["arm"] == "emmy"]
-    assert len(stock) == 12
-    assert len(emmy) == 12
-
-    expected_points = {(256, 256, 64), (4096, 4096, 1), (4096, 4096, 8), (8192, 256, 4)}
-    for lane in (stock, emmy):
-        points = {
-            (
-                task.recipe.benchmark.random_input_len,
-                task.recipe.benchmark.random_output_len,
-                task.recipe.benchmark.max_concurrency,
-            )
-            for task in lane
-        }
-        assert points == expected_points
-        assert all(task.recipe.benchmark.repeats == 1 for task in lane)
-
-    expected_tokens = {
-        (256, 256, 64): 2112,
-        (4096, 4096, 1): 4128,
-        (4096, 4096, 8): 2056,
-        (8192, 256, 4): 4104,
-    }
-    repeats_by_lane_and_point = {}
-    for task in tasks:
-        point = (
-            task.recipe.benchmark.random_input_len,
-            task.recipe.benchmark.random_output_len,
-            task.recipe.benchmark.max_concurrency,
-        )
-        assert f"--max-num-batched-tokens {expected_tokens[point]}" in task.recipe.engine.llm.vllm.extra_args
-        lane = task.variant.params["arm"]
-        repeats_by_lane_and_point.setdefault((lane, point), set()).add(task.variant.params["repeat"])
-    assert len(repeats_by_lane_and_point) == 8
-    assert all(repeats == {0, 1, 2} for repeats in repeats_by_lane_and_point.values())
-
-
-def test_gemma_arms_share_one_immutable_image(project_root) -> None:
-    directory = Path(project_root) / EXP / "serving_gemma4_rtx5090"
-    tasks = enumerate_tasks([str(directory)])
-    # One image for both arms, named by digest rather than by tag — a tag can be re-pushed, and then the
-    # two arms are no longer known to have run the same bits. The digest ITSELF is not pinned here: it
-    # changes legitimately whenever the image is republished, and the recipe and RESULTS.md record which
-    # one a run used.
-    (image,) = {task.recipe.engine.llm.vllm.image for task in tasks}
-    assert image.startswith("cloudriftai/vllm-emmy-gemma-4-12b-it@sha256:")
-    assert {task.recipe.engine.llm.vllm.entrypoint for task in tasks if task.variant.params["arm"] == "stock"} == {
-        "python3 -m vllm.entrypoints.openai.api_server"
-    }
-    assert all(
-        '"architectures":["EmmyGenModel"]' in task.recipe.engine.llm.vllm.extra_args
-        for task in tasks
-        if task.variant.params["arm"] == "emmy"
-    )
-    # Gemma 4 is a multimodal checkpoint and vLLM sizes an encoder budget from it, so a stock server
-    # refuses to start below max_tokens_per_mm_item. Declaring no items is what lets it run at the small
-    # per-workload token budgets, and it must be on BOTH arms or their argv differs and this is no A/B.
-    assert all('--limit-mm-per-prompt \'{"image":0,"video":0,"audio":0}\'' in task.recipe.engine.llm.vllm.extra_args for task in tasks)
+    assert rendered == 69

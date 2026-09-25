@@ -247,9 +247,17 @@ emmy serve Qwen/Qwen3-Embedding-0.6B --bench --random-input-len 32 --stock
 ## Experimental native generation
 
 Dense FP16 Qwen3 can be prepared as a standalone artifact and run through the Rust cached-generation loop. This
-single-request path supports greedy or seeded temperature/top-p sampling and optional CUDA graphs. Residuals and
+single-request path and experimental native HTTP adapter support greedy or seeded temperature/top-p sampling and
+optional CUDA graphs. Residuals and
 attention/rotary intermediates use FP32. It uses sequential prefill; vLLM remains the serving default. See the [native generation contract](emmy/serving/native/ARCHITECTURE.md)
 for preparation, commands, limitations, and qualification.
+
+```bash
+make native-dist  # install the archive's matching binaries on PATH
+emmy serve Qwen/Qwen3-0.6B --generate --native --revision REVISION
+```
+
+Native serving exposes text and chat completions with streaming, stop strings, usage, and one active request.
 
 ## Recipe
 
@@ -476,6 +484,8 @@ require CloudRift organization access.
   pack loader and cached generation (design, hosts, and qualification in
   [ARCHITECTURE.md](crates/emmy-runtime/ARCHITECTURE.md)); [crates/emmy-runtime-py/](crates/emmy-runtime-py/) is
   its in-process host, the `emmy.emmy_runtime` extension setuptools-rust builds into the package
+- [crates/emmy-server/](crates/emmy-server/) — Native text and HTTP adapter
+  (see [ARCHITECTURE.md](crates/emmy-server/ARCHITECTURE.md))
 - [docs/](docs/) — Docusaurus user-docs site (getting started, benchmarking, custom configurations, deployment)
 - [tests/](tests/) — pytest tests (see [ARCHITECTURE.md](tests/ARCHITECTURE.md))
   - [compiler/passes/](tests/compiler/passes/) — compiler pass tests (see [ARCHITECTURE.md](tests/compiler/passes/ARCHITECTURE.md))

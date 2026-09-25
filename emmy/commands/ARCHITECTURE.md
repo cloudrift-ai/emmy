@@ -214,7 +214,10 @@ spawns, together with the precision regime the file's rows share — `EMMY_FAST_
 is evidence only in its own regime and the child learns it from nowhere else; an environment pin at another value
 fails the boot). `--realization NAME` (`run`, `compile`, `tune`) selects one realization by exact name or an unambiguous
 substring — inside `--golden PATH`, or, on `run` / `compile` without it, inside the live card's repository goldens.
-There is no second spelling: no file flag beside `--golden`, no name flag beside `--realization`.
+There is no second spelling: no file flag beside `--golden`, no name flag beside `--realization`. `--pin-route` compiles
+the named realization under the kernel-set decisions it records — the cut its route spells, a cross-CTA split — as a
+hand pin, the same one `EMMY_KNOBS` publishes (a hand pin of the same seam with another value is refused); without it
+the compile picks the kernel set from the evidence, and a routing row alone prices nothing.
 
 `run --golden PATH` without `--realization` walks every persisted target, binding and input regime in one process,
 benching each target's verified rows or its one valid direct tune winner (proposals stay the tuner's). A routing row
@@ -222,8 +225,8 @@ or child-identity receipt is evidence for its target's walk, not a target of its
 not dotted name prefixes. A file that dropped its seed rows (a promoted serving-twin golden) benches each target
 through the row pricing all of it, its fastest routing row, else its fastest row. A
 failing target does not stop the walk: every target reports, and the command exits non-zero at the end naming
-the failures. A receipt of a piece a route row minted (its identity is no route row's) replays under the target's
-route rows composed, plus `PLACE=fuse` when no
+the failures. A receipt of a piece a routing row minted (its identity is no routing row's) replays under the target's
+routing rows composed, plus `PLACE=fuse` when no
 cut was recorded: bare, its piece keys would spell against the unsplit program and match nothing. It parses and validates the
 document once and hands that object to each name's resolution step, because a whole-model inventory is large
 enough that re-reading it per target dominates the replay: the 279-target DeepSeek V4 Flash golden costs about
@@ -300,9 +303,11 @@ measured realizations of the named target: one routing row per kernel-set decisi
 summed isolated launches of the kernels that decision produced, and one child-identity schedule receipt per kernel at
 its own isolated launch, both with the greedy comparison row as their `same-input-greedy` reference
 (`working_golden.record_greedy_pick`; the pipeline ARCHITECTURE's golden-record Part has the spelling and the
-pricing). That is how a pick the prior made becomes rows a strict-evidence compile of the file deploys
-from without a prior. Under `EMMY_KNOBS` the recorded pick IS the pin, so the recording refuses, and the run exits
-nonzero, when the env pin did not realize (`greedy_record_refusal`): the row would file the planner's own schedule
+pricing). Recording a set the file describes takes `--pin-route` beside it: a routing row's own time prices nothing,
+so without the pin the greedy row is the compiler's own pick, whole, and the receipts this writes are what price the
+decision for a compile nothing pins. That is how a pick the prior made becomes rows a strict-evidence compile of
+the file deploys from without a prior. Under `EMMY_KNOBS` the recorded pick IS the pin, so the recording refuses, and
+the run exits nonzero, when the env pin did not realize (`greedy_record_refusal`): the row would file the planner's own schedule
 under the pin's name and lane. It refuses a pick whose answer `--strict` rejected for the same reason. Independently of both, every clean pinned row and the greedy isolated re-bench are written into
 the tune DB by default at tune-standard measurement quality: per-kernel `perf` rows through the tuner's own writer —
 the deploy evidence the next `compile` / `run` / `serve` picks from, which is how a replayed golden or a hand-pinned
@@ -527,6 +532,11 @@ emmy deploy cloud --recipe <path> --gpu "NVIDIA H200 141GB" --gpu-count 8 [--pro
 Both `deploy local` and `deploy ssh` auto-detect the target GPU by scanning PCI sysfs device IDs (locally or over SSH) and select the matching `matrices` entry. If more GPUs are available than the recipe's base configuration needs, a scale-out strategy is applied (`--scale-out-strategy {data-parallelism,replica-parallelism}`, default `data-parallelism`).
 
 ### `emmy serve`
+
+`--generate --native` selects the experimental Rust text server. Its launcher prepares or reuses a checkpoint-owned
+bundle and executes a prebuilt binary. Native arguments are validated separately; vLLM forwarding remains the default.
+See the [native serving contract](../serving/native/ARCHITECTURE.md) for supported options and preparation controls.
+
 
 Serves an embedding model (or a generative chat model via `EmmyGenModel` with `--generate` — `--runner generate` +
 fp16) through vLLM with the emmy plugin flags baked in (`serving/` plugin; needs the `serving` extra). Unrecognized flags forward to `vllm serve`; tokens after a literal `--` forward verbatim (emmy's

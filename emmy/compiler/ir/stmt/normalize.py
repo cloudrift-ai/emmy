@@ -351,15 +351,17 @@ def unify_sibling_reduce_axes(stmts: Body) -> Body:
 
 def _unify_siblings(body: Body) -> Body:
     """Single-scope sibling grouping: rename reduce-axis vars across
-    sibling reduce Loops whose bare-Var Load positions overlap on any
-    ``(source, dim)`` pair so they share one canonical axis name.
+    sibling reduce Loops whose Load positions overlap on any
+    ``(source, dim)`` walk (:func:`_reduce_axis_source_positions`) so
+    they share one canonical axis name.
 
     Two reduce Loops that bind different axis names but both index the
-    same input slot (e.g. ``x[..., a2]`` and ``x[..., a3]`` for the
-    same ``x``) are semantically the same reduction dimension. Union-
-    find on the overlap relation merges all transitively-connected
-    Loops into one group. Within a group, the first Loop's axis name
-    wins; later Loops are rewritten to use it.
+    same input slot the same way (e.g. ``x[..., a2]`` and ``x[..., a3]``
+    for the same ``x``, or ``bits[..., (a2 / 16) * 8 + (a2 % 16) / 2]``
+    and the same expression in ``a3``) are semantically the same
+    reduction dimension. Union-find on the overlap relation merges all
+    transitively-connected Loops into one group. Within a group, the
+    first Loop's axis name wins; later Loops are rewritten to use it.
 
     Pairing on overlap rather than exact-set equality lets matmul-
     siblings that bring in distinct weight tensors (e.g.
@@ -374,7 +376,7 @@ def _unify_siblings(body: Body) -> Body:
     # extents matches both static and symbolic siblings: two ``Dim('seq_len')``
     # siblings unify (both back to ``Var('seq_len')``); two distinct symbolic
     # names don't. ``Expr`` is frozen + hashable so it slots into the tuple key.
-    entries: list[tuple[int, str, object, frozenset[tuple[str, int, object, int]]]] = []
+    entries: list[tuple[int, str, object, frozenset[tuple]]] = []
     for i, s in enumerate(stmts):
         if isinstance(s, Loop) and s.is_reduce:
             positions = _reduce_axis_source_positions(s.body, s.axis.name)
@@ -417,32 +419,49 @@ def _unify_siblings(body: Body) -> Body:
     return Body(stmts)
 
 
-def _reduce_axis_source_positions(body: Body, reduce_axis_name: str) -> set[tuple[str, int, object, int]]:
-    """Collect ``(source, dim, anchor, coefficient)`` positions where a Load index within ``body``
-    is AFFINE in ``Var(reduce_axis_name)`` (recursing into nested blocks).
+#: The name every reduce axis is spelled as inside a composite position key, so two siblings'
+#: index expressions compare as the same walk whatever axis name each loop bound.
+_REDUCE_AXIS_PLACEHOLDER = "__reduce_axis__"
 
-    A bare ``Var`` is the ``(source, dim, 0, 1)`` case, so this generalizes the original bare-Var
-    reading rather than replacing it. Affine matters because a BLOCKED reduce reads its stream at
-    ``outer·B + inner``: the axis still walks that dimension, and refusing to see it left sibling
-    loops over one block unmergeable for no semantic reason.
 
-    The anchor and coefficient ride the key because that is what makes the reading sound. Two
-    siblings indexing ``x[…, o·B + i]`` and ``x[…, o·B + j]`` walk the SAME dimension and unify;
-    ``o·B + i`` against ``o·B + 32 + j`` walk different halves and must not. ``(source, dim)`` alone
-    cannot tell those apart — seeing through the offset would be a miscompile, not a generalization.
+def _reduce_axis_source_positions(body: Body, reduce_axis_name: str) -> set[tuple]:
+    """Collect the positions where a Load index within ``body`` walks ``Var(reduce_axis_name)``
+    (recursing into nested blocks), each keyed by HOW the index walks the dimension.
+
+    Two readings, both keyed on ``(source, dim)`` plus the walk:
+
+    - AFFINE, ``("affine", source, dim, anchor, coefficient)``. A bare ``Var`` is the
+      ``(anchor 0, coefficient 1)`` case. A BLOCKED reduce reads its stream at ``outer·B + inner``:
+      the axis still walks that dimension. The anchor and coefficient ride the key because that is
+      what makes the reading sound: ``x[…, o·B + i]`` and ``x[…, o·B + j]`` walk the SAME dimension
+      and unify; ``o·B + i`` against ``o·B + 32 + j`` walk different halves and must not.
+      ``(source, dim)`` alone cannot tell those apart — seeing through the offset would be a
+      miscompile, not a generalization.
+    - COMPOSITE, ``("composite", source, dim, expr)``: any other index that mentions the axis,
+      spelled with the axis renamed to :data:`_REDUCE_AXIS_PLACEHOLDER` and simplified. A packed
+      operand is read this way — a byte-packed 4-bit stream at ``(k / 16) * 8 + (k % 16) / 2``, its
+      block scale at ``k / 16`` — and two siblings over such a stream walk the same dimension
+      exactly when their expressions agree after the rename. The key is the whole expression, so
+      any difference beyond the axis name (an offset, a different block size) keeps the siblings
+      apart, the same guarantee the affine anchor gives.
+
+    The extent equality :func:`_unify_siblings` requires on top is what makes a same-walk pair a
+    same-iteration-space pair.
     """
-    out: set[tuple[str, int, object, int]] = set()
+    out: set[tuple] = set()
     for s in body.iter():
         if not isinstance(s, Load):
             continue
         for dim, e in enumerate(s.index):
             form = affine_form(e, {reduce_axis_name})
-            if form is None:
-                continue
-            anchor, coeffs = form
-            coeff = coeffs.get(reduce_axis_name, 0)
-            if coeff:
-                out.add((s.input, dim, anchor, coeff))
+            if form is not None:
+                anchor, coeffs = form
+                coeff = coeffs.get(reduce_axis_name, 0)
+                if coeff:
+                    out.add(("affine", s.input, dim, anchor, coeff))
+            elif reduce_axis_name in e.free_vars():
+                spelled = e.substitute({reduce_axis_name: Var(_REDUCE_AXIS_PLACEHOLDER)}).simplify(SimplifyCtx.empty())
+                out.add(("composite", s.input, dim, spelled))
     return out
 
 

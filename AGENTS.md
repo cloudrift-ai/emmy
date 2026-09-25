@@ -54,13 +54,14 @@ relevant `ARCHITECTURE.md` before answering.
   the tune DB's tables in a file of their own, filled by `emmy dataset import` and read by the measurement-data
   readers, never by a compile.
 - `EMMY_TUNE_DB` environment variable (optional) — overrides the default tuning SQLite cache path
-  (`~/.cache/emmy/autotune.db`). `emmy tune` reads from / writes to this path. NOTE: greedy `compile` / `run` /
-  `serve` resolve forks through ONE measured-evidence pick — the reservoir, this DB's `perf` rows and the golden rows
-  in scope (the live card's repository goldens, or the file `--golden PATH` names) rank fastest-first, a row spelling
-  a placement or a cross-CTA split prices that kernel-set decision, and the global `Prior` (the online prior with its
-  offline cold-start fallback) decides only where nothing was measured; `--strict-evidence` turns that fall-through
-  into an error. `run --golden PATH --bench` writes what it measures back into this DB, which is how a golden row
-  becomes what the next compile picks. The online prior
+  (`~/.cache/emmy/autotune.db`). `emmy tune` reads from / writes to this path, and a greedy `compile` / `run` /
+  `serve` creates it on first use: the golden rows in scope (the live card's repository goldens, or the file
+  `--golden PATH` names) are imported into it before the compile picks, once per golden digest. NOTE: those commands
+  resolve forks through ONE measured-evidence pick — the reservoir, then this DB's `perf` rows, the golden rows among
+  them, rank fastest-first; a kernel-set decision (a routing row, the tuner's or a golden's) is priced as the sum of
+  its pieces' rows; and the global `Prior` (the online prior with its offline cold-start fallback) decides only where
+  nothing was measured; `--strict-evidence` turns that fall-through into an error. `run --golden PATH --bench` writes
+  what it measures back into this DB, which is how a golden row becomes what the next compile picks. The online prior
   is a separate JSON checkpoint (`EMMY_ONLINE_FILE` → `~/.cache/emmy/online.json`; legacy `EMMY_PRIOR_FILE` still
   accepted) that `tune` writes and `compile` / `run` read. Use the README architecture index for the prior and
   two-level autotune design.
@@ -169,7 +170,7 @@ it before answering any CLI-flag question. Quickstart for the common paths:
 | `emmy deploy {local,ssh,cloud} <model> …` | deploy via docker compose locally, over SSH, or on a freshly provisioned cloud VM |
 | `emmy bench recipes/* [--filter KEY=PATTERN] [--no-teardown]` | deploy + benchmark + teardown across cloud VMs; `teardown <run_dir>` cleans up afterwards |
 | `emmy vm create gpu --gpu NAME --gpu-count N` | provision a GPU VM by name (also `vm create/delete {gcp,cloudrift}`) |
-| `emmy serve <model> [--generate] [--bench] [vllm flags…]` | serve an embedding (or `--generate` chat) model via vLLM with the emmy plugin |
+| `emmy serve <model> [--generate] [--bench] [vllm flags…]` | serve via vLLM, or opt into native text serving with `--generate --native` |
 | `emmy compile <model_or_ir> [--layer N] [--ir STAGE] [--dynamic …] [--target sm_NN]` | trace + run the compiler; print or save any IR stage |
 | `emmy run <model_or_ir_or_--code> [--bench]` | compile + execute on the CUDA backend, check accuracy, optionally bench vs eager / `torch.compile` |
 | `emmy tune <target> [--bench] [--gpus N]` | two-level autotune; writes the online prior + tune DB |

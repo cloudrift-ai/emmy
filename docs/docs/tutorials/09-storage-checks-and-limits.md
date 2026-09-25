@@ -140,7 +140,7 @@ Gathered in one place, honestly.
 5. **A cold compile changes which kernels exist only on evidence.** Structural choices need a trusted online model
    to be costed, so on the offline prior the current kernel set is kept — even where splitting would be much faster.
    The 1.8-times-faster split on [the goldens page](./07-golden-configurations.md) is only deployable because
-   somebody recorded it, and that measured route row is what deploys it.
+   somebody recorded it, and its recorded decision, priced from the pieces' measured rows, is what deploys it.
 6. **A recording that no longer realizes is simply not evidence**, and the kernel falls to the prior, which can be
    far slower than the number the recording advertises. `--strict-evidence` makes that fall-through an error, and
    the release gate compiles the serving matrix under it; a plain deploy without the flag falls through silently.
