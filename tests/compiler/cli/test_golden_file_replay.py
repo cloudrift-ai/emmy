@@ -417,6 +417,23 @@ def test_a_kernel_set_name_resolves_inside_the_realization_own_precision_lane(tm
     assert _sample_replay_knobs(sample) == {"FAST_MATH": False, "REDUCE": "g4k"}
 
 
+def test_a_kernel_set_publishes_a_piece_split_only_through_the_piece_row():
+    """A split of a piece the cut minted names that piece; as a hand pin it would reach every kernel —
+    two pieces' splits would collapse onto one value, and a piece that cannot split would refuse."""
+    from emmy.compiler.pipeline.search.golden import kernel_set_pins
+
+    def row(name, identity, knobs):
+        return SimpleNamespace(name=name, identity=identity, knobs=knobs, pins=(("FAST_MATH", True),), kernel_set=())
+
+    route = row("set.route", "target", {"PLACE@map.2/inner": "cut"})
+    pieces = [row("set.a", "piece-a", {"REDUCE": "g64a"}), row("set.b", "piece-b", {"REDUCE": "g16a"})]
+    whole = row("set.whole", "target", {"REDUCE": "g4k"})
+    cut_set = SimpleNamespace(**{**vars(route), "name": "set", "kernel_set": ("set.route", "set.a", "set.b")})
+    assert kernel_set_pins(cut_set, [route, *pieces]) == {"PLACE@map.2/inner": "cut"}
+    split_set = SimpleNamespace(**{**vars(route), "name": "set", "kernel_set": ("set.whole",)})
+    assert kernel_set_pins(split_set, [whole]) == {"REDUCE": "g4k"}, "a split of the record's own kernel still travels"
+
+
 def test_selected_records_scope_the_tier_and_a_split_regime_publishes_nothing(monkeypatch, tmp_path):
     """The selected realization's records are the compile's whole golden scope; the input regime
     (the precision pins) reaches the environment only when every record agrees on it."""

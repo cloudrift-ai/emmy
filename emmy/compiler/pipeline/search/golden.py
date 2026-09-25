@@ -729,7 +729,12 @@ def kernel_set_pins(record: GoldenRecord, records: Sequence[GoldenRecord]) -> di
     record that names no route, which is the ordinary row whose own knobs are its pin.
 
     Both precision lanes record their rows under one name, so a listed name resolves inside the
-    record's own regime first: the standard lane's split is not the fast-math lane's."""
+    record's own regime first: the standard lane's split is not the fast-math lane's.
+
+    A split arm travels only when its row names the record's own kernel. A split of a piece a cut
+    minted names that piece by identity, and its ``REDUCE`` value addresses no seam: published as a
+    hand pin it would reach every kernel of the graph, splitting pieces the set left whole and
+    refusing where a piece cannot split. Its row decides that piece by identity instead, as evidence."""
     regime = regime_pins(record)
     by_name: dict[str, GoldenRecord] = {}
     for other in records:
@@ -738,8 +743,12 @@ def kernel_set_pins(record: GoldenRecord, records: Sequence[GoldenRecord]) -> di
     pins: dict[str, str] = {}
     for name in record.kernel_set:
         referenced = by_name.get(name)
-        if referenced is not None:
-            pins.update({str(key): str(value) for key, value in referenced.knobs.items()})
+        if referenced is None:
+            continue
+        own_kernel = referenced.identity in (None, record.identity)
+        pins.update(
+            {str(key): str(value) for key, value in referenced.knobs.items() if own_kernel or str(key).split("@", 1)[0] != "REDUCE"}
+        )
     return pins
 
 
