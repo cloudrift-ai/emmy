@@ -576,6 +576,10 @@ canonicalized before validation:
   duplicate K traversal in patterns like `silu(x@Wg) * (x@Wu)`, and the duplicate score pass between the channels of a
   blocked twisted carrier; subsequent normalization collapses the duplicate loads, and the lowering passes stage both
   weight tensors symmetrically.
+- `merge_sibling_free_loops` — combine independent sibling free loops of the same static extent, renaming their
+  axes and colliding local definitions. The loops must agree on unrolling and seeds and have no axis windows.
+  SSA dependencies and buffer reads or writes, including intervening statements, prevent unsafe reordering.
+  The combined body exposes shared loads to deduplication and makes equivalent fusion orders normalize alike.
 - `hoist_loop_invariants` — pull loop-invariant Assigns out of reduce
   Loops. The hoisted set is closed under the scope's ordering constraints, the same ones the sibling order respects:
   the consumer of an accumulator a pinned reduction exports, a read of a buffer the loop writes, and anything behind
