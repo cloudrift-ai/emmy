@@ -86,3 +86,5 @@ in the golden-refresh PR; recorded here because the s512 goldens were refreshed 
   lowering issue. Best route: 11 cuts, 157.6 us against 17 us for the old kernel set.
 - The same "head fold is nested inside the projection's sweep loop" error blocks the strict replay of a Qwen3-0.6B s1
   route whose kernel set carries `g8k` / `g<n>a` split receipts (H100).
+- The recurrence roller turns a plain chain of repeated same-shape pointwise steps (`x = tanh(x) + 0.5*x`, seven
+  times) into a serial state kernel, which is then a kernel boundary. Found while writing the maximal-fusion tests.
