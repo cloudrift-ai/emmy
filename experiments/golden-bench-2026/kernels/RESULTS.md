@@ -1,5 +1,127 @@
 # Golden-bench kernel corpus
 
+## Three cards — the score target computed its operands (2026-09-24)
+
+### Question and scope
+
+`q/k norm + RoPE + score statistics` was the corpus's slowest target on every card — 94 us on the H100, 161 on the
+A100, 361 on the V100, against 29, 64 and 285 for Inductor. The 2026-09-11 pass called its route space exhausted and
+its remaining gap structural: two pieces at 12% occupancy with 176 and 204 registers. This pass asks what those
+pieces are actually doing, and covers only this target: Qwen3-0.6B layer 0 at sequence length 512, on a V100, an
+A100 and an H100. It retunes no other target.
+
+The answer is that the dominant piece was computing its operands instead of reading them. It is a flash kernel whose
+q and k are the RMSNorm + RoPE cones of an f32 input, and a computed operand takes the synchronous compute fill: the
+kernel re-evaluated both cones per A- and B-slab cell, three strided f32 loads at a time, and staged nothing.
+Cutting the two cones into their own kernels leaves it two materialized f16 slabs, which is what lets it stage at
+all.
+
+### Protocol
+
+One card each: a V100-SXM2-16GB (CloudRift, driver 580.178.04, nvcc 12.9) — NOT the SXM3 32GB part the recipe names;
+an A100-SXM4-40GB and an H100 80GB HBM3 (GCP, driver 580.173.02, nvcc 12.9). Every number is deployable `-O3`,
+`EMMY_FAST_MATH=0`, 10 warmups, 100 iterations, eager, Inductor and Emmy in one process. Tuning was manual: about 45
+pinned `emmy run --ab` rows in four rounds per card, each round one process so the eager reference slice is built
+once. Each winner was re-recorded with `--record-greedy --strict` into a copy of the committed file whose loop-8
+rows had been stripped, merged back, and the committed file then replayed UNPINNED from a fresh tune DB — the
+deploy contract, and the numbers below.
+
+### Result summary
+
+Today's walk of the committed file, all nine targets. `before` is the same file on the same card before this pass;
+only the last row changed, so the other eight are one measurement printed once.
+
+| target | eager | Inductor | before | after |
+| --- | ---: | ---: | ---: | ---: |
+| **H100** | | | | |
+| input RMSNorm | 53 | 5 |  | 2.6 |
+| value projection | 5 | 5 |  | 6.2 |
+| query projection | 11 | 7 |  | 7.6 |
+| key projection | 9 | 6 |  | 6.0 |
+| softmax x V | 18 | 18 |  | 64.6 |
+| SDPA + o_proj + residual | 25 | 21 |  | 46.8 |
+| post-attn norm + gate/up | 79 | 22 |  | 18.3 |
+| down_proj + residual | 12 | 11 |  | 15.8 |
+| q/k norm + RoPE + score statistics | 168 | 29 | 94.2 | **29.5** |
+| H100 total | | 124 | 262.1 | **197.4** |
+| **A100** | | | | |
+| input RMSNorm | 65 | 6 |  | 3.9 |
+| value projection | 11 | 13 |  | 13.9 |
+| query projection | 22 | 21 |  | 19.2 |
+| key projection | 16 | 13 |  | 13.7 |
+| softmax x V | 49 | 50 |  | 163.2 |
+| SDPA + o_proj + residual | 65 | 63 |  | 67.0 |
+| post-attn norm + gate/up | 125 | 52 |  | 49.5 |
+| down_proj + residual | 27 | 32 |  | 36.3 |
+| q/k norm + RoPE + score statistics | 236 | 64 | 161.0 | **49.2** |
+| A100 total | | 314 | 527.7 | **415.9** |
+| **V100** | | | | |
+| input RMSNorm | 78 | 7 |  | 4.3 |
+| value projection | 42 | 41 |  | 33.0 |
+| query projection | 46 | 42 |  | 47.3 |
+| key projection | 48 | 46 |  | 32.0 |
+| softmax x V | 533 | 300 |  | 349.5 |
+| SDPA + o_proj + residual | 560 | 321 |  | 281.3 |
+| post-attn norm + gate/up | 217 | 130 |  | 105.5 |
+| down_proj + residual | 70 | 67 |  | 110.0 |
+| q/k norm + RoPE + score statistics | 822 | 285 | 360.7 | **229.3** |
+| V100 total | | 1239 | 1323.6 | **1192.2** |
+
+The retuned target's three kernels, after:
+
+| card | q cone | k cone | flash kernel |
+| --- | ---: | ---: | --- |
+| H100 | 6.6 | 4.1 | 17.7 us `w4x1`, `mma_m16n8k16/f1x8/k4` on both contractions, `d2/smem-async`, `gm8` |
+| A100 | 10.4 | 6.3 | 32.8 us `w4x1`, `mma_m16n8k16/f1x8/k4`, `d3/smem-async` |
+| V100 | 14.3 | 8.1 | 205.0 us `w4x1`, `mma_m8n8k4/f2x2/k8`, `d2/smem` |
+
+### What the pass found
+
+- **The cut the target wanted was not reachable, because a cut piece re-folded its row statistic per cell.** A piece
+  was minted with one free axis per workspace dimension, which binds the sweep the statistic is invariant in. The
+  materialized q cone therefore launched 1048576 cooperative blocks — one per output element, each re-reducing the
+  whole 128-wide row and writing one value: 317 us for a 1 MB pass on the H100. The piece now asks the same rank
+  rule the fused kernel and the cut's own peel test already ask, and runs 6.6 us. That fix is what makes every
+  number above reachable.
+- **The win is the transport, not the tile.** Fused, the flash kernel's operands are computed, so only the
+  synchronous compute fill resolves — every committed row on all three cards is `d1/smem`. With both cones
+  materialized it takes `d2/smem-async` on the H100 and V100 and `d3` on the A100. The tile alone buys little: the
+  first staged pick on the H100 still ran 69 us, and the same `f1x8/k4` tile measures 17.7 once the transport
+  follows. On the H100 the two cones cost 10.7 us and the set totals 28.4 against 94.2.
+- **The corpus's remaining gap on the datacenter cards is `softmax x V`, and it is the same defect one level down.**
+  That target's value projection is computed inside the attention sweep. Cutting it materializes the projection into
+  an f32 workspace shaped (head, dim, key), which the consumer reads back one fragment at a time through
+  `mma_load_b_gmem_trans<float, __half>` at a 2 KB stride with no staging: 150 us on the A100 against 33 for the
+  same kernel over `transpose_2`. Storing that workspace at the atom dtype instead was tried and measured nothing
+  (151.8 us), so the layout is what binds, not the width. A workspace whose axis order follows the consuming
+  contraction's own slab would close it; this pass does not.
+- **The V100's flash kernel still spills.** 205 us at 255 registers, 8 bytes of local, 12% occupancy; every tile,
+  warp split and staging depth the sweep reached lands between 197 and 636. That is the V100's remaining gap, and it
+  is register pressure, not placement.
+- **The V100 corpus now beats Inductor overall** (1192 against 1239) while the H100 and A100 still trail (197
+  against 124, 416 against 314). Both remaining gaps are `softmax x V` and `SDPA + o_proj + residual`.
+
+### Systems and provenance
+
+- V100-SXM2-16GB at `185.165.50.75` (CloudRift), A100-SXM4-40GB `bench-keep-a100-0921-1621-6784` (GCP
+  `a2-highgpu-1g`, us-central1-f), H100 80GB HBM3 `bench-gb-h100-0924-1252-99aa` (GCP `a3-highgpu-1g`, SPOT,
+  us-east4-a) — a replacement for `bench-attn-h100-0923-1047-4b3d`, preempted mid-pass; us-central1 had no H100
+  capacity to restart it in.
+- Source: this branch, on top of main `8ca20b12`. The tuning rows are host-local under `~/gb-work/` on each box.
+
+### Durable files
+
+- Goldens: loop 8 re-recorded in `golden/qwen3-06b-s512_h100.golden.yaml`, `golden/qwen3-06b-s512_a100.golden.yaml`
+  and `golden/qwen3-06b-s512_v100.golden.yaml`. Every other target is untouched.
+- No archive: this pass tuned one target by hand and did not run the recipe, so it replaces no platform archive and
+  the sections below remain the current lane evidence for every other target.
+- The V100 walk still fails its strict gate on `down_proj + residual` — 7 of 524288 elements at flat index 413453,
+  the same row and the same values #889 recorded. Nothing in this pass touches it.
+- The compiler half costs 29 recorded rows elsewhere: 19 in `DeepSeek-V4-Flash-0731/v100_sm70.yaml`, 6 in
+  `gemma-4-12B-it/rtx5090_sm120.yaml`, 4 in `Qwen3.8-27B-FP8/v100_sm70.yaml`. All are cut pieces whose schedule was
+  composed against the per-element grid the rank rule now declines, so the piece is a different kernel and carries
+  no rows. They need their cards to re-record; the strict decode names each one.
+
 ## Three cards — the gated MLP's staging lockout (2026-09-23)
 
 ### Question and scope
