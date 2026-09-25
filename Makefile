@@ -1,4 +1,4 @@
-.PHONY: help setup setup-agent clean bench bench-force bench-kernels bench-kernels-tune test-compose test-durations test-corpus-regen lint format git-sha-guard pypi-dist \
+.PHONY: help setup setup-agent clean bench bench-force bench-kernels bench-kernels-tune test-compose test-durations test-corpus-regen test-lowering lint format git-sha-guard pypi-dist \
 	serve-models serve-config serve-config-guard serve-goldens serve-warm serve-image serve-verify serve-push
 
 help:
@@ -23,6 +23,7 @@ help:
 	@echo "  serve-models    - List the models with a pinned release config"
 	@echo "  test-durations - Re-measure tests/durations.json (the CI test-balancing baseline)"
 	@echo "  test-corpus-regen - Restamp the realization corpus after an identity / codec change (COMPLETE=1 adds entries)"
+	@echo "  test-lowering  - The fresh-lowering gate over every repository golden (GPU-free; CI's lowering job)"
 	@echo "  clean          - Remove virtual environment and generated files"
 	@echo "  test-compose   - Test docker-compose generation with sample config"
 
@@ -88,6 +89,12 @@ format: setup
 # evidence scope it themselves (`--golden PATH`, `records_override`), which takes precedence.
 test: setup
 	EMMY_NVCC_FLAGS="-Xcicc -O1" EMMY_GOLDEN_FILE= ./venv/bin/pytest tests/ -v -n auto --dist=loadgroup --durations=0 --durations-min=1
+
+# The fresh-lowering gate: every repository golden's stored targets against a fresh lowering of its own
+# programs, GPU-free. Its own lane because a whole-model program takes minutes to lower, which the default
+# suite's cap cannot carry for every golden; CI runs it as its own job beside the suite.
+test-lowering: setup
+	./venv/bin/pytest tests/compiler/pipeline/search/test_golden.py -m lowering -v -n auto
 
 # Restamp the realization corpus's derived half (program wire, name, identity, canonical knobs)
 # after a kernel-identity or schedule-codec change. `make test` DETECTS staleness on any machine,

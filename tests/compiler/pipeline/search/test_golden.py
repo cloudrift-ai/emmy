@@ -378,6 +378,7 @@ def _golden_parameters():
     return parameters
 
 
+@pytest.mark.lowering
 @pytest.mark.parametrize("path", _golden_parameters())
 def test_stored_targets_are_the_fresh_lowering(path: Path) -> None:
     """Every stored target of a repository golden must be a kernel the current compiler lowers the
@@ -388,7 +389,9 @@ def test_stored_targets_are_the_fresh_lowering(path: Path) -> None:
     it stays green when the two drift apart: after #863 the DeepSeek V4 V100 golden decoded row by
     row while serving lowered kernels no row of it described and the strict boot refused. Lowering
     is the loop passes alone, GPU-free, so this holds on any machine; a file that fails needs a
-    restamp on the card that recorded it, not a card to detect it.
+    restamp on the card that recorded it, not a card to detect it. It is its own lane
+    (``make test-lowering``, the ``lowering`` CI job): a whole-model program takes minutes to lower,
+    which the default suite's cap cannot carry for every golden.
     """
     from emmy.compiler import provenance
     from emmy.compiler.context import Context

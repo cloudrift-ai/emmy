@@ -40,6 +40,30 @@ jobs:
       - name: Ruff format check
         run: ./venv/bin/ruff format --check
 
+  lowering:
+    runs-on: ubuntu-latest
+    # Every repository golden's stored targets against a fresh lowering of its own programs. Its own
+    # job: a whole-model program takes minutes to lower, which the suite's cap cannot carry for every
+    # golden. It needs no GPU, no LFS object and no model download, so a hosted runner carries it
+    # beside the suite: measured faster there than on the runner group, where it also queues behind
+    # the test job whenever no second runner is free.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # ``make setup-ci`` builds the runtime extension with cargo, which the conftest imports.
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: make setup-ci
+
+      - name: Run the fresh-lowering gate
+        run: make test-lowering
+
   test:
     runs-on:
       group: ubuntu-runners
