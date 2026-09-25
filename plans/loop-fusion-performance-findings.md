@@ -39,6 +39,24 @@ boundaries (norm, qkv, attention, o_proj, MLP), and seed each piece with the mat
 Next step: keep the roller's smaller IR but give the rolled loop parallel work (heads x batch x value columns), or leave
 short recurrences unrolled when the rolled kernel loses its parallelism.
 
+## GDN whole-layer pre and post kernels (Qwen3.8-27B, every quant, V100)
+
+- **Pre kernel** (`k_conv1d_linear_mean_reduce_*`: norm, in_proj, conv1d): the root has no free axis and compiles to
+  `if (_gid < 1)`, one thread for the whole layer. No single cut removes that root. Left unrecorded in the refresh.
+- **Post kernel** (`k_linear_matmul_mean_reduce_*`: out_proj + MLP): one thread per token, and it recomputes the GDN
+  output and out_proj (5120x6144) inside every MLP element. Five cuts at depth <= 2 give 6 kernels whose pieces still
+  carry 5120x6144x64x128 nests; only a deep composed cut at every projection would separate them.
+
+Both look like fusion decisions a schedule cannot repair: fusion should not merge a producer whose recompute cost
+grows with the consumer's extent, and a region should keep a free axis at its root.
+
+## Compiler errors hit while cutting
+
+- `PLACE@map.4/map=cut` on the GDN pre kernel (AWQ) crashes the compile: `ValueError: Lambda body reads ['_r0'] it does
+  not bind`. The 4-seam depth-1 composition hits the same error on AWQ, and on GPTQ it compiles but a piece hangs.
+- A tune-DB perf row with knobs `{LOOPIFY: '0'}`, written by a fallback record, makes the next compile of that kernel
+  raise "register schedule accepts only WORK, TILE and STAGE". Workaround: a fresh tune DB.
+
 ## Composed cuts: the V projection piece loses its name (fixed or in progress)
 
 Cutting both the attention output and the V projection of the s512 layer makes the V-projection piece carry the
