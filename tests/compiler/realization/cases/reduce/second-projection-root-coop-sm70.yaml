@@ -135,5 +135,5 @@ loops:
             unroll: false
             seed: true
       name: k_matmul_reduce_df1f9f
-    inputs: [x0, x1, x3, x2]
+    inputs: [x3, x2, x1, x0]
     outputs: [[add, f32, [4, 1]]]

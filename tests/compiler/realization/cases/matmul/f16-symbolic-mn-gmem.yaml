@@ -98,5 +98,5 @@ loops:
             unroll: false
             seed: true
       name: k_matmul_407fad
-    inputs: [q, kT]
+    inputs: [kT, q]
     outputs: [[o, f16, [{sym: seq_len, hint: 512}, {sym: seq_len, hint: 512}]]]

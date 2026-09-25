@@ -1100,5 +1100,5 @@ loops:
             unroll: false
             seed: true
       name: k_mean_d12855
-    inputs: [mean_count, add_c1, mul_static_fp4_floor, mul_static_fp4_shift, mul_static_fp4_f4_max, mul_static_fp4_scale_2, x]
+    inputs: [mean_count, add_c1, mul_static_fp4_floor, mul_static_fp4_shift, mul_static_fp4_scale_2, mul_static_fp4_f4_max, x]
     outputs: [[mul_static_fp4_scale_bits, f8e4m3, [32, 8, 1]], [mul_static_fp4_bits, f4e2m1x2, [32, 64]]]

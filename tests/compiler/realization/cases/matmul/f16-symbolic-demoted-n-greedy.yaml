@@ -138,5 +138,5 @@ loops:
             unroll: false
             seed: true
       name: k_linear_40037b
-    inputs: [x, sx, w, sw]
+    inputs: [w, sw, x, sx]
     outputs: [[o, f16, [{sym: seq_len, hint: 512}, {sym: seq_len, hint: 512}]]]
