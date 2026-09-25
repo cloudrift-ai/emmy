@@ -1574,8 +1574,8 @@ configs:
       RASTER: ''
     identity: 71bcd24f04686b5be00905bae36cd2b0a4140eb713d087b07cb1a3f59a51ab2a
     measurements:
-      emmy_us: 41.002665956815086
-      reference_us: 41.04904247366864
+      emmy_us: 44.02763769030571
+      reference_us: 44.357817620038986
       reference_backend: same-input-greedy
   - name: attention.hd256.causal.fused
     bindings: {}
@@ -1592,8 +1592,8 @@ configs:
       RASTER: ''
     identity: 71bcd24f04686b5be00905bae36cd2b0a4140eb713d087b07cb1a3f59a51ab2a
     measurements:
-      emmy_us: 37.88799964464628
-      reference_us: 39.64927911758423
+      emmy_us: 40.405333042144775
+      reference_us: 41.64266586303711
       reference_backend: same-input-greedy
 loops:
 - inputs: [x0, x1]
@@ -4730,5 +4730,5 @@ loops:
             unroll: false
             seed: true
       name: k_sdpa_96c531
-    inputs: [scaled_dot_product_attention_mask_fill_c, scaled_dot_product_attention_mask_zero_c, scaled_dot_product_attention_scale, x1, x0, x2]
+    inputs: [scaled_dot_product_attention_scale, scaled_dot_product_attention_mask_fill_c, scaled_dot_product_attention_mask_zero_c, x1, x0, x2]
     outputs: [[scaled_dot_product_attention, f16, [1, 16, 512, 256]]]
