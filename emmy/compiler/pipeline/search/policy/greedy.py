@@ -23,8 +23,8 @@ ever scored as a stand-in for the schedules it contains — and the argmin is gl
 evidence exists, because measured rows descend directly whatever the pool size.
 
 **Greedy is ranked by evidence and by nothing else.** Measured rows first —
-the reservoir, then ONE index holding the tune DB's rows and the golden rows in
-scope, compared on µs alone — then the fitted prior; every measured row is a
+the reservoir, then the tune DB's rows, the golden rows in scope imported among them
+(``golden_import``), compared on µs alone — then the fitted prior; every measured row is a
 recording of something that ran. There is no hand-written step: no leaf is
 promoted, demoted, withheld or given a head start here, and no fallback
 default is chosen for being safe. Where nothing measured and no prior speaks
@@ -38,9 +38,10 @@ no measurement decides.
 
 **Kernel-set forks follow the same rule.** Every measured row of the kernel's
 signature spells one offered arm (:func:`~emmy.compiler.pipeline.search.pins.spelled_arm`): a
-route row (:func:`_is_route_row`) the cut or split it records, a schedule row the fused /
-unsplit arm — the kernel it decorates ran that way. :func:`_route_candidates` turns them into
-candidates priced at the row's µs, nothing installed on the kernel, and a measured candidate
+schedule row the fused / unsplit arm — the kernel it decorates ran that way — and every
+kernel-set decision the tune DB stores on the exact kernel (a routing row) its cut or split,
+priced from the pieces' own rows (``SearchDB.priced_arms``). :func:`_route_candidates` turns them
+into candidates priced at those µs, nothing installed on the kernel, and a measured candidate
 outranks every arm priced by nested resolution. Only with no measured arm are the arms priced
 against each other. The pieces an arm mints are brand-new kernels, decided at their own forks
 from rows of their own signatures.
@@ -431,12 +432,10 @@ _DB_INDEX_CACHE: dict = {}
 
 def _db_measured_index(db, ctx) -> _Measured:
     """Caching wrapper over :func:`_db_measured_index_build` — memoizes the built index per
-    process on ``(db path, mtime, context key, card, golden scope)``, invalidated when the DB file's
-    mtime or the golden scope changes. An in-memory DB (no ``_path``) or an unstatable file
-    bypasses the cache and rebuilds. Best-effort throughout: a failed key computation just
+    process on ``(db path, mtime, context key, card)``, invalidated when the DB file's mtime
+    changes (a golden import into it changes it). An in-memory DB (no ``_path``) or an unstatable
+    file bypasses the cache and rebuilds. Best-effort throughout: a failed key computation just
     rebuilds."""
-    from emmy.compiler.pipeline.search.golden import scope_token  # noqa: PLC0415
-
     path = getattr(db, "_path", None)
     if db is not None and path is None:
         return _db_measured_index_build(db, ctx)
@@ -450,7 +449,7 @@ def _db_measured_index(db, ctx) -> _Measured:
             mtime = (path.stat().st_mtime_ns, wal.stat().st_mtime_ns if wal.exists() else 0)
         else:
             mtime = None
-        key = (str(path), mtime, ctx.structural_key(), ctx.hardware_id(), scope_token())
+        key = (str(path), mtime, ctx.structural_key(), ctx.hardware_id())
     except Exception:  # noqa: BLE001 — any key-build failure → just rebuild uncached
         return _db_measured_index_build(db, ctx)
     hit = _DB_INDEX_CACHE.get(key)
@@ -463,45 +462,26 @@ def _db_measured_index(db, ctx) -> _Measured:
 
 
 class _Measured(NamedTuple):
-    """One evidence scan's answers, because the scan is expensive and all come from the same rows.
+    """One evidence scan's answers, because the scan is expensive and both come from the same rows.
 
     ``ok`` RANKS — the measured schedule rows a pick argmins over, by ``S_*`` signature. ``failed``
     DISQUALIFIES — the signatures whose every measured variant failed, a different kind of answer
-    that cannot be expressed as a latency. ``routes`` PRICES A KERNEL SET — golden rows whose keys
-    spell a placement (``PLACE@…``) or a cross-CTA split, each a measured µs for applying that
-    decision to the kernel of its signature. The tune DB stores no such row: its kernel-set
-    decisions are routing rows, priced per kernel from the pieces' own measurements
+    that cannot be expressed as a latency. A kernel-set decision is no row here: it is a routing
+    row on the exact kernel, priced per kernel from the pieces' own measurements
     (:meth:`SearchDB.priced_arms`) when the fork is decided."""
 
     ok: dict[frozenset, list[tuple[dict, float]]]
     failed: dict[frozenset, list[float]]
-    routes: dict[frozenset, list[tuple[dict, float]]]
 
 
-_EMPTY_MEASURED = _Measured({}, {}, {})
-
-
-def _is_route_row(tun: dict) -> bool:
-    """Whether a measured row spells a kernel-SET decision beside (or instead of) a schedule: a
-    ``PLACE`` key, or a ``REDUCE`` value carrying a cross-CTA ``g<n>`` half."""
-    from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.pins import parse_reduce  # noqa: PLC0415
-
-    for key, value in tun.items():
-        family = family_of(key)
-        if family == "PLACE":
-            return True
-        if family == "REDUCE" and (plan := parse_reduce(value)) is not None and plan.needs_split:
-            return True
-    return False
+_EMPTY_MEASURED = _Measured({}, {})
 
 
 def _db_measured_index_build(db, ctx) -> _Measured:
-    """Every measured row this compile may deploy, split into what ranks, what disqualifies and
-    what prices a kernel set: the tune DB's CUDA ``perf`` rows for this compile's regime (``db``
-    may be ``None`` — a machine that never tuned) and the golden rows in scope
-    (:func:`~emmy.compiler.pipeline.search.golden.evidence_rows` — the repository's per-card
-    files, or the file ``--golden PATH`` named), all in one index.
+    """Every measured row this compile may deploy, split into what ranks and what disqualifies: the
+    DB's CUDA ``perf`` rows for this compile's regime — the tune's own and the golden rows in scope,
+    imported among them before the compile picks (``golden_import.evidence_db``); ``db`` may be
+    ``None`` on a probe that reads no evidence.
 
     Rows are indexed by their ``S_*`` structural signature (stringified values because perf knobs
     round-trip JSON). One context key is sufficient: tune measures in the deployable regime, and
@@ -514,18 +494,9 @@ def _db_measured_index_build(db, ctx) -> _Measured:
     than a speed. It lands in ``failed`` instead, and only where NO variant of that signature was
     measured ``ok``: one surviving row means the shape is realizable and merely has bad rows.
 
-    A golden row spelling a placement or a cross-CTA split (:func:`_is_route_row`) is the measured
-    price of applying that decision to the kernel it was recorded on, and lands in ``routes``: at
-    that kernel's fork it names one offered arm (:func:`_route_candidates`); the pieces the arm mints
-    are brand-new kernels, decided by rows of their own signatures. A tune DB row is never one: the
-    DB refuses a placement knob in a measurement, so its rows go to ``ok`` unexamined.
-
     Best-effort: any failure returns an empty index so deploy falls back to the prior.
     """
-    from emmy.compiler.pipeline.search.golden import evidence_rows, scope_explicit  # noqa: PLC0415
-
     index: dict[frozenset, list[tuple[dict, float]]] = {}
-    routes: dict[frozenset, list[tuple[dict, float]]] = {}
     survived: set[frozenset] = set()
     failures: dict[frozenset, list[float]] = {}
     try:
@@ -539,14 +510,10 @@ def _db_measured_index_build(db, ctx) -> _Measured:
                 continue
             tun = {k: str(v) for k, v in row.knobs.items() if not k.startswith(METADATA_PREFIXES)}
             index.setdefault(sig, []).append((tun, float(row.stats.median)))
-        gpu_name = getattr(ctx, "gpu_name", None) or ""
-        if gpu_name or scope_explicit():
-            for sig, tun, us, _name in evidence_rows(gpu_name, tuple(ctx.compute_capability)):
-                (routes if _is_route_row(tun) else index).setdefault(sig, []).append((tun, us))
     except Exception:  # noqa: BLE001 — an evidence consult failure must never break compile
         logger.debug("measured-evidence index build failed", exc_info=True)
         return _EMPTY_MEASURED
-    return _Measured(index, {sig: us for sig, us in failures.items() if sig not in survived}, routes)
+    return _Measured(index, {sig: us for sig, us in failures.items() if sig not in survived})
 
 
 def _sig_groups(index: dict[frozenset, list[tuple[dict, float]]], sig: frozenset) -> list[list[tuple[dict, float]]]:
@@ -690,11 +657,10 @@ def _route_candidates(fp: ForkPoint, index: _Measured, db) -> list[tuple[object,
     """The measured arms at this kernel-set fork: one ``(option, µs)`` per measured row of
     the kernel's signature that spells an arm on the ballot
     (:func:`~emmy.compiler.pipeline.search.pins.spelled_arm`) — a schedule row the fused /
-    unsplit arm (the kernel it decorates ran that way), a ``PLACE`` row its cut, a split-carrying
-    ``REDUCE`` row its split — and one per kernel-set decision the tune DB stores on this exact
-    kernel that its pieces' rows price at the fork's bindings (:meth:`SearchDB.priced_arms`). The
-    option is the cut pass's own offer; the pieces it mints are brand-new kernels whose own forks
-    consult their own rows. A schedule fork has none."""
+    unsplit arm, since the kernel it decorates ran that way — and one per kernel-set decision the
+    DB stores on this exact kernel that its pieces' rows price at the fork's bindings
+    (:meth:`SearchDB.priced_arms`). The option is the cut pass's own offer; the pieces it mints
+    are brand-new kernels whose own forks consult their own rows. A schedule fork has none."""
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
     from emmy.compiler.loop_wire import kernel_bindings  # noqa: PLC0415
     from emmy.compiler.pipeline.pipeline import _structural_domain  # noqa: PLC0415
@@ -709,9 +675,7 @@ def _route_candidates(fp: ForkPoint, index: _Measured, db) -> list[tuple[object,
     # space offers, which this fork is decided before anyone knows, so a recorded row carrying one
     # would never be a subset of a candidate that structurally cannot.
     sig = _strip_fork_stamps(_fork_signature(fp))
-    measured = [
-        entry for source in (index.ok, index.routes) for group in _sig_groups(_strip_fork_stamps_index(source), sig) for entry in group
-    ]
+    measured = [entry for group in _sig_groups(_strip_fork_stamps_index(index.ok), sig) for entry in group]
     if db is not None and (kernel := root.identity_key(structural=False, with_io=True)) is not None:
         measured.extend(db.priced_arms(fp.ctx, kernel, bindings=kernel_bindings(root)))
     out: list[tuple[object, float]] = []

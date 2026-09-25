@@ -34,15 +34,6 @@ configs:
       RASTER: ''
       STAGE: d2/smem
     identity: 36de740768cee2ab9c8b31829fefbfd3d05fbef43945a7dd0eb3200871f031fa
-  - name: k_matmul_2967be.94597cea094f
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      WORK: ''
-      REDUCE: ''
-      RASTER: ''
-    identity: 94597cea094f8c4111b71f0218dd87d27154fb515198adc09e70a4ac848ebe0e
   - name: k_matmul_2967be.c73bd7d12d00
     bindings: {}
     pins:
@@ -52,6 +43,17 @@ configs:
       REDUCE: ''
       RASTER: ''
     identity: c73bd7d12d002cf9a57afad02b14de1b18a696ba7cf5a97efa873ded5eafec40
+  - name: k_matmul_2967be.0c863e512c76
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t16x8
+      TILE: f4x8
+      REDUCE: ''
+      STAGE: d2/smem
+      RASTER: ''
+    identity: 0c863e512c76c128650eeb455ea02ff743453ae5bcbd7a85e1e9c99a5db1245a
 loops:
 - inputs: [x0, x1]
   outputs: [matmul]

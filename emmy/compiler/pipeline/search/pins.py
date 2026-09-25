@@ -244,7 +244,7 @@ def unpinned_decisions():
     unrestricted enumeration. A replay reconstructs what a record measured; the live compile's pins
     decide the live forks, where a row the pin contradicts finds no leaf and is not picked. Keeping
     the pins out of the replay makes it a function of the record and the compiler alone, which is
-    what lets its persisted result serve every pinned compile instead of going cold per pin."""
+    what lets the rows the golden import files hold for every pinned compile."""
     prefixes = tuple(config.knob_var(family) for family in KERNEL_DECISION_FAMILIES)
     saved = {key: value for key, value in os.environ.items() if any(key == p or key.startswith(p + "@") for p in prefixes)}
     aggregate = os.environ.get(config.KNOBS)

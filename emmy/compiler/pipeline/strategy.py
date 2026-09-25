@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from emmy.compiler.context import Context
-    from emmy.compiler.graph import Graph, SpliceReceipt
+    from emmy.compiler.graph import Graph, Node, SpliceReceipt
     from emmy.compiler.ir.base import Op
     from emmy.compiler.pipeline.pipeline import Match
 
@@ -59,6 +59,10 @@ class PipelineStrategy(ABC):  # noqa: B024 — deliberately no abstract methods:
 
     def on_spliced(self, e: SplicedEvent) -> None:  # noqa: B027 — optional hook, no-op default
         """After the splice, with its :class:`~emmy.compiler.graph.SpliceReceipt`."""
+
+    def on_rebind(self, e: RebindEvent) -> None:  # noqa: B027 — optional hook, no-op default
+        """After an ``Op`` option rebinds a node in place. Handlers may replace ``node.op`` — never
+        the graph or the cursor."""
 
     def on_pass_end(self, e: PassEndEvent) -> None:  # noqa: B027 — optional hook, no-op default
         """A named pass completed (quiescent scan)."""
@@ -103,6 +107,19 @@ class SplicedEvent:
     graph: Graph
     pass_name: str
     receipt: SpliceReceipt
+
+
+@dataclass(frozen=True)
+class RebindEvent:
+    """Emitted by ``Candidate.apply`` AFTER an ``Op`` option rebinds ``node.op`` in place — the
+    replaced op's knobs merged forward and stamped as its ``source``. ``node`` is the live node,
+    already holding the new op; ``replaced`` is the op it held."""
+
+    match: Match
+    node: Node
+    replaced: Op
+    pass_name: str
+    graph: Graph
 
 
 @dataclass(frozen=True)

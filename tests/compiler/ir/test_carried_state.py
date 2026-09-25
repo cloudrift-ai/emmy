@@ -147,7 +147,9 @@ def test_a_loop_over_the_cells_carries_nothing() -> None:
     assert over_k.is_reduce and not over_k.carries
 
 
-def test_the_last_step_is_what_a_read_sees_after_the_loop_closes() -> None:
+def _fold_then_read() -> LoopOp:
+    """``S`` summed over the steps, then a tail loop reading what the last step left — the smallest
+    body with one carrying loop and one loop that carries nothing."""
     fold = Loop(
         axis=Axis("c", STEPS),
         body=(
@@ -164,7 +166,11 @@ def test_the_last_step_is_what_a_read_sees_after_the_loop_closes() -> None:
     )
     r = Var("r")
     after = Loop(axis=Axis("r", N), body=(Pre(name="last", carrier="S", index=(r,)), Write(output="out", index=(r,), value="last")))
-    op = LoopOp(body=Body((fold, after)))
+    return LoopOp(body=Body((fold, after)))
+
+
+def test_the_last_step_is_what_a_read_sees_after_the_loop_closes() -> None:
+    op = _fold_then_read()
 
     update = np.arange(STEPS * N, dtype=np.float32).reshape(STEPS, N)
     got = np.asarray(execute_loop_op_cpp(op, {"U": update}, {"out": (N,)}))
@@ -197,3 +203,31 @@ def test_validation_refuses(stmts: tuple, message: str) -> None:
 
     with pytest.raises(ValueError, match=message):
         LoopOp(body=body)
+
+
+def _plain_fold() -> LoopOp:
+    """The same shape with a scalar ``Accum`` in place of the carried state: a reduce loop with
+    nothing to outline."""
+    over_i = Loop(axis=Axis("i", N), body=(Load(name="u", input="U", index=(c, i)), Accum(name="total", value="u")))
+    return LoopOp(body=Body((Loop(axis=Axis("c", STEPS), body=(over_i, Write(output="out", index=(c,), value="total"))),)))
+
+
+def test_a_dump_outlines_the_loop_that_carries_the_state() -> None:
+    """The dump says where a state lives: the header names it with its cell extents, a bar runs down
+    the carrying loop's column, and the commit closes the section."""
+    carrying, tail = (stmt.pretty() for stmt in _fold_then_read().body)
+
+    assert carrying[0].endswith("  # carries acc0[4]")
+    assert all(line.startswith("|") for line in carrying[1:])
+    assert carrying[-1] == "|   # commit acc0"
+    assert tail == ["for a2 in 0..4", "    v2 = pre acc0[a2]", "    out[a2] = v2"]
+
+
+def test_a_loop_that_carries_nothing_prints_unchanged() -> None:
+    assert _plain_fold().pretty_body() == (
+        "    for a0 in 0..3\n"
+        "        for a1 in 0..4\n"
+        "            in0 = load U[a0, a1]\n"
+        "            acc0 <- add(acc0, in0)\n"
+        "        out[a0] = acc0"
+    )

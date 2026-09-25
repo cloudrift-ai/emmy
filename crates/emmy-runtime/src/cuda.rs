@@ -76,9 +76,28 @@ pub struct Device {
     stream: std::mem::ManuallyDrop<Arc<CudaStream>>,
 }
 
+/// ``CudaContext::new`` behind a panic guard.
+///
+/// cudarc loads libcuda dynamically on first touch and PANICS when the driver is absent, so the
+/// no-driver case never reaches its ``Result``. That panic must not cross the FFI boundary: PyO3
+/// re-raises it as ``PanicException``, which derives from ``BaseException``, so the
+/// ``except Exception`` guards that let a GPU-free host fall back to memorized device specs are
+/// bypassed and an offline decode, eval or ``compile --target`` dies instead of degrading. A
+/// missing driver is an ordinary answer here, so the hook stays quiet while we ask.
+fn load_context(ordinal: usize) -> Result<Arc<CudaContext>> {
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let loaded = std::panic::catch_unwind(|| CudaContext::new(ordinal));
+    std::panic::set_hook(hook);
+    match loaded {
+        Ok(context) => Ok(context?),
+        Err(_) => bail!("no CUDA driver: libcuda could not be loaded"),
+    }
+}
+
 impl Device {
     pub fn new(ordinal: usize) -> Result<Self> {
-        let context = CudaContext::new(ordinal)?;
+        let context = load_context(ordinal)?;
         // Executors synchronize before releasing anything; the safe cross-stream event
         // tracking would only add work.
         unsafe {

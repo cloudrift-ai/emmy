@@ -361,6 +361,17 @@ class SearchDB:
         return 0 < sum(bool(cols) for cols in present.values()) < len(present)
 
     @classmethod
+    def for_compile(cls, path: Path | str) -> SearchDB | None:
+        """The DB a compile picks from, made when absent (the golden rows in scope are imported into it), or
+        ``None`` where the file cannot be made or opened — a read-only cache directory — so the compile picks
+        from an in-memory instance instead, as one given no DB does."""
+        try:
+            return cls(path=Path(path))
+        except (OSError, sqlite3.OperationalError) as exc:
+            logger.warning("tune DB %s cannot be opened (%s); picking from an in-memory instance", path, exc)
+            return None
+
+    @classmethod
     def open_readonly(cls, path: Path | str) -> SearchDB:
         """Open an existing DB **read-only** — no schema creation, no table drop, no WAL pragma — so a
         read-side consumer (``eval``, the dataset import) never contends with a concurrent ``tune`` writer
@@ -528,12 +539,14 @@ class SearchDB:
         stats: PerfStats,
         captured: bool = False,
         error: str | None = None,
+        source: str = "measured",
     ) -> None:
         """Record one measurement taken now under ``ctx``: keyed by the context ``ctx`` names, and upserted
         through :meth:`record_perf_row`. ``knobs`` is the kernel's stamped dict as the tuner holds it; the
         ``S_*`` / ``H_*`` entries are the kernel's and the context's and are not stored with the row.
         ``error`` is the failure text for a ``bench_fail`` row (whitespace-collapsed, truncated) so failure
-        forensics (``eval failures``) need no tune-log grepping."""
+        forensics (``eval failures``) need no tune-log grepping. ``source`` names where the row came from: a
+        live bench, or the golden file it was imported from (``golden:<digest>``)."""
         gpu, arch, opt, flags = self._regime(ctx)
         if error is not None:
             error = " ".join(str(error).split())[:300] or None
@@ -552,6 +565,7 @@ class SearchDB:
                 measured_at=datetime.now(UTC).isoformat(),
                 captured=captured,
                 error=error,
+                source=source,
             )
         )
 
@@ -561,15 +575,21 @@ class SearchDB:
         the lowest median wins. ``captured`` (CUDA-graph-captured, pure GPU time) adds a precedence axis:
         a captured measurement supersedes an uncaptured (wall-semantics) one regardless of median — the
         numbers aren't comparable, and captured is the better truth — while an uncaptured measurement
-        never overwrites a captured one. The kernel must be a ``kernel`` row already."""
+        never overwrites a captured one. A row measured here (``source`` ``measured``) is never replaced
+        by an imported one: the import is a cache fill, and the local row is the one copy of what this
+        machine measured. The kernel must be a ``kernel`` row already."""
         context = self._context_id(row.backend, row.gpu, _arch(row.cc), row.opt, row.flags, create=True)
         schedule = self._row_id("schedule", _split_knobs(row.knobs), create=True)
         key = (context, row.kernel, knobs_json(row.bindings), schedule)
         existing = self._conn.execute(
-            "SELECT status, captured, latency_us_median FROM perf WHERE context = ? AND kernel = ? AND bindings = ? AND schedule = ?", key
+            "SELECT status, captured, latency_us_median, source FROM perf "
+            "WHERE context = ? AND kernel = ? AND bindings = ? AND schedule = ?",
+            key,
         ).fetchone()
         if existing is not None:
-            prev_status, prev_captured, prev_median = existing
+            prev_status, prev_captured, prev_median, prev_source = existing
+            if prev_source == "measured" and row.source != "measured":
+                return  # an import never replaces a measurement taken here
             if prev_status == "ok":
                 if row.status != "ok":
                     return  # a failure never replaces a good measurement
@@ -605,9 +625,29 @@ class SearchDB:
     # Perf — read
     # ------------------------------------------------------------------
 
-    def perf_sources(self) -> dict[str, int]:
-        """How many ``perf`` rows each source contributed — what a report over this instance names as its data."""
-        return dict(self._conn.execute("SELECT source, COUNT(*) FROM perf GROUP BY 1 ORDER BY 1"))
+    def perf_sources(self, ctx: Context | None = None) -> dict[str, int]:
+        """How many ``perf`` rows each source contributed — what a report over this instance names as its data;
+        the rows under ``ctx``'s card and regime only when one is given."""
+        if ctx is None:
+            return dict(self._conn.execute("SELECT source, COUNT(*) FROM perf GROUP BY 1 ORDER BY 1"))
+        return dict(
+            self._conn.execute(
+                "SELECT p.source, COUNT(*) FROM perf p JOIN context c ON c.id = p.context "
+                "WHERE c.gpu_name = ? AND c.arch = ? AND c.opt = ? AND c.flags = ? GROUP BY 1 ORDER BY 1",
+                self._regime(ctx),
+            )
+        )
+
+    def forget_perf(self, ctx: Context, source_prefix: str) -> int:
+        """Delete the rows measured under ``ctx``'s card and regime whose ``source`` starts with ``source_prefix``
+        — how the cache lets a golden file's rows go before the file's current rows are imported, since
+        keep-best would keep a stale faster row. Returns how many were deleted."""
+        gpu, arch, opt, flags = self._regime(ctx)
+        return self._conn.execute(
+            "DELETE FROM perf WHERE source LIKE ? AND context IN "
+            "(SELECT id FROM context WHERE gpu_name = ? AND arch = ? AND opt = ? AND flags = ?)",
+            (source_prefix + "%", gpu, arch, opt, flags),
+        ).rowcount
 
     def lookup_perf(self, ctx: Context, kernel: str, *, bindings: dict, knobs: dict, backend: str) -> PerfRow | None:
         """The row ``ctx``'s context measured for this kernel variant."""

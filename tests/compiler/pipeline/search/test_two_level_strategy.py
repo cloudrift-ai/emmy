@@ -34,7 +34,7 @@ from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.search.db import SearchDB
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from emmy.compiler.pipeline.search.slice import single_node_graph
-from emmy.compiler.pipeline.search.strategy.two_level import InnerReward, OpResult, _kernel_nodes, _KernelInventory
+from emmy.compiler.pipeline.search.strategy.two_level import InnerReward, KernelInventory, OpResult, _kernel_nodes
 from tests.compiler.helpers import run_inner_reward, run_two_level
 
 # Moderate patience: each kernel explores several variants then stops on stagnation (the fake
@@ -417,7 +417,7 @@ def test_inventory_dedups_by_structural_identity() -> None:
     identity = next(s for s in discovered_strategies() if type(s).__name__ == "IdentityStrategy")
     loop_node = next(nid for nid, n in fused.nodes.items() if isinstance(n.op, LoopOp))
     reported: list[str] = []
-    inventory = _KernelInventory(identity, lambda nid, op, frag: reported.append(nid))
+    inventory = KernelInventory(identity, lambda nid, op, frag: reported.append(nid))
     event = SpliceEvent(match=None, fragment=fused, root_op=fused.nodes[loop_node].op, pass_name="lowering/tile", graph=fused)
     inventory.on_splice(event)
     assert reported == [loop_node], "first sighting reported"

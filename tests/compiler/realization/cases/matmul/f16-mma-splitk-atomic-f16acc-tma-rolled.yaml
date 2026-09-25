@@ -36,6 +36,17 @@ configs:
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 5.942476292451222
+  - name: k_matmul_360224.077a99a8f199
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w1x8
+      TILE: mma_m16n8k16_f16_f16/f2x2/k4
+      REDUCE: ''
+      STAGE: d2/smem-tma
+      RASTER: ''
+    identity: 077a99a8f199cb31bc20e699aa91041d5ba5b0e4fdb23b7fa34a58ec7938778d
 loops:
 - inputs: [a, b]
   outputs: [o]

@@ -685,7 +685,16 @@ class Fold:
     @cached_method
     def bilinear_channels(self) -> tuple[tuple[int, Fold], ...]:
         """Every carried state whose per-element contribution is ONE product of ``operands[0]`` by
-        another operand edge, as ``(state index, that streamed edge)`` in carrier order.
+        another operand edge, as ``(state index, that streamed edge)`` in carrier order — the
+        channels of :meth:`channel_operands` without the value each multiplies."""
+        return tuple((index, edge) for index, edge, _ in self.channel_operands())
+
+    @cached_method
+    def channel_operands(self) -> tuple[tuple[int, Fold, str], ...]:
+        """Every carried state whose per-element contribution is ONE product of ``operands[0]`` by
+        another operand edge, as ``(state index, that streamed edge, the result of it the product
+        multiplies)`` in carrier order. The result matters when one edge exposes several — a packed
+        gate/up weight decoded by one lift — since each channel multiplies its own.
 
         The algebraic half of :meth:`as_contraction`, kept apart because the emission wants all of
         them and the geometry only the first: a fused multi-channel edge folds one A against a
@@ -716,7 +725,7 @@ class Fold:
         a_names = {edge.exposes[index] for _param, edge, index in self.bindings if edge is a_edge}
         uniform = {edge.exposes[index] for _param, edge, index in self.bindings if edge is not a_edge and not edge.free_axes}
         based = self.based()  # bilinearity lives in BASE coordinates; ψ divides the product away
-        out: list[tuple[int, Fold]] = []
+        out: list[tuple[int, Fold, str]] = []
         for index, result in enumerate(based.results):
             cone, product = _channel_product(based, result)
             if product is None or len(product.args) != 2:
@@ -732,7 +741,7 @@ class Fold:
             right = [arg for arg in product.args if (edge := by_name.get(arg)) is not None and edge is not a_edge and edge.free_axes]
             if len(left) != 1 or len(right) != 1 or left[0] == right[0]:
                 continue  # a square, or a product that does not multiply A by exactly one other edge
-            out.append((index, by_name[right[0]]))
+            out.append((index, by_name[right[0]], right[0]))
         return tuple(out)
 
     @cached_method

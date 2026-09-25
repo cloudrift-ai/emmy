@@ -94,6 +94,12 @@ invokes Cargo. Neither the worker nor the extension needs the CUDA toolkit to bu
 at run time. Running needs a compatible NVIDIA driver. cudarc's `nvrtc` feature exposes its binary module-loading
 type, but this path loads cubin files directly and never calls NVRTC.
 
+cudarc PANICS when that dynamic load fails rather than returning its error, so `Device::new` takes it behind a panic
+guard and answers with an ordinary error. A host with no driver is a supported caller — Python's device probe turns
+that error into `None` and falls back to memorized per-SKU specs, which is what lets the strict golden decode, offline
+eval and `compile --target` run on a machine with no card. A panic crossing the FFI boundary would not: PyO3 re-raises
+it as `PanicException`, which derives from `BaseException` and slips straight through every `except Exception`.
+
 Each control frame is an eight-byte little-endian byte count followed by UTF-8 JSON, limited to 1 MiB on input:
 
 ```json
@@ -130,8 +136,9 @@ The native preparation and attention contract lives in
 
 `start` binds the prompt and sampling controls once and resets request state. `advance` processes exactly one token
 at the current absolute position. Before prompt completion it returns no token; afterward it returns the GPU-selected
-ID, which stays on the
-GPU for the next step. `generate` owns the complete prompt/decode loop and stops at EOS or the requested output count.
+ID, which stays on the GPU for the next step. Its explicit `ignore_eos` control permits fixed-output serving
+benchmarks to continue after EOS; ordinary worker generation retains EOS stopping. `generate` owns the complete
+prompt/decode loop and stops at EOS or the requested output count.
 Prompt plus requested output must fit capacity. `logits` is an explicit diagnostic download. All CUDA operations stay
 inside `cuda`, and a failed step cannot continue the current request.
 

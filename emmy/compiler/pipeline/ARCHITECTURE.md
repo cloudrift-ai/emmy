@@ -65,12 +65,11 @@ That order has a name — the **deploy evidence hierarchy**. The list above is o
 evidence hierarchy" is the authoritative statement** of the exact order, of what the evidence index holds, and of the
 rule that measured evidence applies only to a compile at deployable `-O3` flags.
 
-Structural forks — the ones that change which kernels exist — follow the same rule. A golden row that spells a
-placement or a cross-CTA split (a **route row**) is the measured price of applying that decision, and a decision the
-tune DB stores on the kernel (a routing row) is priced as the sum of its pieces' fastest rows; both outrank arms
-whose price is a Σ of nested predictions. With no measured arm the compiler compares whole-kernel-set costs, priced by
-measurements where they exist and by any loaded prior — the offline model on a cold machine — for the remainder
-(Part 4).
+Structural forks — the ones that change which kernels exist — follow the same rule. A decision the tune DB stores on
+the kernel (a **routing row** — the tuner's, or a golden's cut or split imported as one) is priced as the sum of its
+pieces' fastest rows, and outranks arms whose price is a Σ of nested predictions. With no measured arm the compiler
+compares whole-kernel-set costs, priced by measurements where they exist and by any loaded prior — the offline model
+on a cold machine — for the remainder (Part 4).
 
 ### The four stores
 
@@ -551,35 +550,36 @@ At a **schedule fork** (one kernel's row):
    branch itself DECIDED off admits only off, since every string extends the empty one and the descent would otherwise
    fail no earlier than leaf matching. An off merely inherited down the branch is a pin rather than a decision and
    still admits. The index is built once per compile and memoized per process on
-   the DB path and mtime, the context key and the golden scope. It holds the tune DB's CUDA `perf` rows for this
+   the DB path and mtime, the context key and the card. It holds the DB's CUDA `perf` rows for this
    compile's context key (one lane, because a sweep measures in the regime a deploy compiles in; rows from a
-   deliberately non-deployable `--nvcc-flags` run key elsewhere and are simply never consulted) and the **golden rows**
-   in scope (`golden.evidence_rows`): every MEASURED record in the live input regime (`golden.regime_live`), keyed by
-   its fork-time `S_*` features and exact `I_kernel` identity. A record decorating one kernel is keyed by the kernel
-   its target lifts to; any other
-   record through its replay (`golden._replay`), which files each kernel-set arm the record spelled under the kernel
-   that fork was offered on and its schedule row under the kernel its stored identity names (an empty row too: a
-   piece the pick took no knobs on is recorded as `knobs: {}`, and that row spells its fused, unsplit arm), or, for a
-   row that speaks for a kernel set collectively, under every piece whose enumerated rows it vouches for. An unmeasured
-   record (a proposal) is not evidence: `run --golden PATH --bench` measures it under a hand pin and writes the
-   measurement as `perf` rows, after which it deploys like any other;
+   deliberately non-deployable `--nvcc-flags` run key elsewhere and are simply never consulted) — the tune's own and
+   the **golden rows** in scope, which the compile imports before it picks (`golden_import.evidence_db`): the live
+   card's repository files, or the file `--golden PATH` names, once per golden digest into the tune DB — created on
+   first use — or into an in-memory instance when the compile has none; a re-recorded file changes the digest, and its
+   earlier rows on this card and regime are let go first. Every MEASURED record in the live input regime
+   (`golden.regime_live`) lands as the rows of the kernels it decides, keyed by their exact identity: a plain record as
+   its one kernel's schedule row, a child-identity receipt as the row of the kernel its identity names (an empty row
+   too: a piece the pick took no knobs on is recorded as `knobs: {}`, and that row spells its fused, unsplit arm), a
+   routing record as the routing rows its decision took. A record whose row spells a cross-CTA split over a set it
+   timed as a whole is routing rows only: the DB holds measurements of kernels, and a set's time is no piece's. An
+   unmeasured record (a proposal) is not evidence: `run --golden PATH --bench` measures it under a hand pin and writes
+   the measurement as `perf` rows, after which it deploys like any other;
 3. the prior's `mean_scores` argmin — only when no candidate has any evidence at all. Score ties break by
    `knob.canonical_row_key`, never by the order options were emitted in.
 
 At a **kernel-set fork** (the cut pass's placement fork and its cross-CTA split fork), the same rule holds — measured
-first — over two more kinds of evidence. A **route row** is a golden row whose keys spell a kernel-set decision: a
-`PLACE@…` key, or a `REDUCE` value carrying a cross-CTA `g<n>` half (`greedy._is_route_row`); its µs is the measured
-price of applying that decision to the kernel it was recorded on, and the index files it under `routes` rather than
-`ok`. The tune DB stores no such row: a decision it took is a `routing` row on the exact kernel, and its price on this
-card is the sum of its pieces' fastest rows, each piece at its own projection of the fork's bindings, all-or-nothing
-(`SearchDB.priced_arms` — the same read the tuner's reward uses, so the two agree). `greedy._route_candidates` turns
-EVERY measured row of the kernel's signature, and every priced decision on the exact kernel, into a candidate, each
-one of the pass's OWN offered arms: the arm the row spells (`pins.spelled_arm` — a schedule row the fused / unsplit
-arm, since the kernel it decorates ran that way; a route row or a routing arm the composed arm that cuts exactly the
-several offered seams it marks `cut` — the one decision a pinned compile consumed them as, which the cut pass offers
-beside its single seams wherever a measured row or a stored decision of the kernel names it (`pins.composed_routes`,
-registered by `GreedyStrategy.run`) — else the first offered seam it marks, or the offered plan whose `g<n>` half its
-`REDUCE` value carries; a row whose cut seams are not on this ballot decides nothing). A measured arm
+first — over one more kind of evidence. A kernel-set decision is a `routing` row on the exact kernel — the tuner's,
+or a golden's cut or split imported as one — and its price on this card is the sum of its pieces' fastest rows, each
+piece at its own projection of the fork's bindings, all-or-nothing (`SearchDB.priced_arms` — the same read the
+tuner's reward uses, so the two agree); a decision no piece's row prices is off the measured ballot, which is what a
+golden's cross-CTA split timed as a whole is until its pieces are benched. `greedy._route_candidates` turns EVERY
+measured row of the kernel's signature, and every priced decision on the exact kernel, into a candidate, each one of
+the pass's OWN offered arms: the arm the row spells (`pins.spelled_arm` — a schedule row the fused / unsplit arm,
+since the kernel it decorates ran that way; a routing arm the composed arm that cuts exactly the several offered
+seams it marks `cut` — the one decision a pinned compile consumed them as, which the cut pass offers beside its
+single seams wherever a stored decision of the kernel names it (`pins.composed_routes`, registered by
+`GreedyStrategy.run`) — else the first offered seam it marks, or the offered plan whose `g<n>` half its `REDUCE`
+value carries; an arm whose cut seams are not on this ballot decides nothing). A measured arm
 outranks every arm priced by nested resolution (a Σ that may hold predictions); among measured arms the fastest wins;
 strict evidence refuses a kernel-set fork no measured arm decides — a fork with more than one arm left, that is: a
 hand pin that leaves one arm decides it, which is how a kernel set gets recorded under strict evidence before its
@@ -611,9 +611,11 @@ Three definitions the list leans on:
   That is what lets one fully-decided measured row settle a fork whose candidates are still only partly decided.
   Rows first require the same exact `I_kernel` identity. `Prior.sig_groups` then matches their `S_*` features:
   the candidate must carry every feature the row has with the same value; a newer feature may remain unspecified.
-  `I_kernel` hashes the typed, schedule-free Loop body at kernel birth. Equal feature histograms alone cannot make
-  two kernels share measurements. Legacy rows without this identity remain training data but cannot decide a current
-  kernel's measured pick. Golden imports derive the stamp from the current target or its cut replay.
+  `I_kernel` hashes the typed, schedule-free Loop body at kernel birth, re-derived when the lift or the twist gives
+  the kernel a body of its own — the tile identity the tune DB keys the kernel on, so a kernel's rows and its forks
+  name it alike. Equal feature histograms alone cannot make two kernels share measurements. Legacy rows without this
+  identity remain training data but cannot decide a current kernel's measured pick. The golden import keys a
+  record's rows by the kernels its lowering mints.
 - **The reservoir** is the online prior's own training dataset: a bounded uniform sample (Algorithm R, capped at
   `MAX_ROWS` = 100k) of every training row ever streamed in across runs, stored INSIDE the online checkpoint
   (`online.json`, Part 5). Its rows are all `H_opt=3` — `Prior.add_rows` admits no other regime — and they double as
@@ -667,8 +669,8 @@ candidates, the resolve trace (`Decision.score` carries the deciding row's µs),
 
 **Placement does not weaken maximal fusion.** Maximal Loop IR fusion produces the canonical combined kernel. Tile IR
 then offers that kernel beside legal `PLACE` cuts of closed stored Fold edges and `REDUCE` cross-CTA splits. These are
-structural forks; measured route rows and the priced comparison choose a kernel set, and no greedy or enumeration rule
-removes a legal sibling.
+structural forks; stored decisions priced from their pieces and the priced comparison choose a kernel set, and no
+greedy or enumeration rule removes a legal sibling.
 
 **Both file-backed inputs to that pick are built once per process.** The parsed online prior and the evidence index
 are memoized on the source file's `(path, mtime)` — the online file, and the DB file plus its `-wal` sidecar, the
@@ -685,22 +687,22 @@ that regime, and the paired Emmy/reference timings. Its uses are measured eviden
 pinned measurement (`run --golden PATH --bench`, `--ab`), training data for the offline prior (`emmy fit`), the
 `emmy eval` datasets, and regression reference points.
 
-At deploy a record is rows, nothing more, and every row is keyed by the kernel it decides (`golden.evidence_rows`).
-A record that decorates one kernel is that kernel's schedule row under the target's signature. Any other record is
-read through its replay (`golden._replay`): the target is resolved through the tile passes under the record's pins
-(the environment it was measured under) and with the live decision pins withdrawn (`pins.unpinned_decisions` — a
-replay reconstructs what a record measured, so it is a function of the record and the compiler alone, and its
-persisted result serves every pinned compile instead of going cold per pin; the live pins decide the live forks,
-where a row they contradict finds no leaf), its knobs followed fork by fork through the same `pins.spelled_arm` the
-deploy reads a route row with — the seams an entry of the set marks `cut` together offered as one composed arm on the
-replay's kernels, exactly as the deploy offers them. Each kernel-set arm the knobs spelled is a route row under the
-signature of the kernel that fork was offered on; its schedule row is keyed under the child its stored identity
-names — an empty receipt row included, which says the child ran fused and unsplit — or, for a row the tuner merged
-with the parent's split, under the one child whose enumerated rows contain it. A piece inherits nothing
-from the kernel it replaced, so a record's remaining keys are read against the piece's own offers; a key no piece
-offers, or a schedule row no kernel of the replay enumerates, is stale and is no evidence. Whether a record still
-realizes is the question the nightly `onboard-model` workflow asks with the strict decode (`golden.decode_record`),
-over the same replay: the persisted program must select exactly one kernel (a receipt selects its child by stored
+At deploy a record is tune DB rows, nothing more, and every row is keyed by the kernel it decides
+(`golden_import.import_goldens`). A target's entries in one input regime — the ones that walk one kernel set together
+(`golden.siblings_of`) — are lowered once, under the record's pins (the environment it was measured under) and with
+the live decision pins withdrawn (`pins.unpinned_decisions` — the rows filed hold for every pinned compile; the live
+pins decide the live forks, where a row they contradict finds no leaf), each entry deciding the forks of the kernel it
+names by identity and the leading entry every other: a kernel-set fork through the same `pins.spelled_arm` the deploy
+reads a row with — the seams an entry marks `cut` together offered as one composed arm, exactly as the deploy offers
+them — a schedule fork by the leaf the entry's row vouches for. Each decision the lowering took is a routing row on
+the kernel it was offered on; each measured entry's schedule row is the perf row of the kernel it names — an empty
+receipt row included, which says the child ran fused and unsplit — under that kernel's exact identity, captured, with
+the golden's digest as its source. A piece inherits nothing from the kernel it replaced. An entry naming a kernel the
+lowering never mints writes nothing, unless the target ran as one kernel, whose row it then is whatever key the entry
+stored (a compiler change re-keys a kernel; the row still says how it ran); a set timed as a whole is its routing rows
+only. Whether a record still realizes is the question the nightly `onboard-model` workflow asks with the strict decode
+(`golden.decode_record`), over the record's replay (`golden._replay`, the same walk through the tile passes): the
+persisted program must select exactly one kernel (a receipt selects its child by stored
 identity), a routing record's every cut key must name a seam the cut pass offers, and a schedule row must equal one
 enumerated leaf under the record's own pins. An explicit kernel-set entry supplies the replay's route even when its
 parent identity changes; each receipt still has to match its own stored child identity and schedule. Equality there is
@@ -1092,8 +1094,9 @@ winner only when its ordinary schedule pins reproduce the decisions on every dir
 parent whose pins
 name a different independently tuned child is left unpromoted. A `PLACE`-only row is a routing row, and so is a row
 spelling only a cross-CTA `REDUCE` arm (`g<n>k` / `g<n>a`, which mints its pieces the way a cut does): it does not
-claim the child schedules, and once measured it is a route row — the measured price of that kernel set, the arm the
-greedy compile takes at that kernel's fork (Part 3). A receipt `--record-greedy` writes carries no route of its own,
+claim the child schedules, and imported it is the routing row of that kernel set, priced from its pieces' receipts
+(Part 3) — which `run --record-greedy` writes, its compile taking the named realization's route under `--pin-route`
+(`compile.selected_decisions`). A receipt `--record-greedy` writes carries no route of its own,
 so the golden's per-row bench replays a receipt whose identity no route row names under the target's route rows
 composed (plus `PLACE=fuse` when no cut was recorded, the state a set with no placement row ran in); a receipt
 replayed bare would spell its piece keys against the unsplit program and match nothing. A search number never
@@ -1221,8 +1224,9 @@ don't invent a third:
 ### Search persistence: the tables on disk vs in-memory MCTS
 
 **`SearchDB`** (`db.py`) is a SQLite store — one schema in several instances. The tune DB (`EMMY_TUNE_DB`) is what
-compile reads and tune writes; the dataset DB (`EMMY_DATASET_DB`) holds the same tables filled by `emmy dataset
-import`, and is what the measurement-data readers read, so an import can never change a deploy. The tables hold
+compile reads and tune writes — a compile creates it on first use and imports the golden rows in scope into it before
+it picks (`golden_import`); the dataset DB (`EMMY_DATASET_DB`) holds the same tables filled by `emmy dataset
+import`, and is what the measurement-data readers read, so an import there can never change a deploy. The tables hold
 compilable kernels, the decisions that minted them, and measurements of them — nothing else.
 
 - **`kernel`** — one row per kernel, keyed by its exact identity: the clustered deploy identity beside it, its Loop IR
@@ -1245,13 +1249,16 @@ compilable kernels, the decisions that minted them, and measurements of them —
 - **`routing`** — one row per PIECE of one decision on one parent, in the fragment's order: the parent's exact
   identity, the placement, the position and the piece's exact identity, resolved after the splice, when a piece's
   buffers are bound and its identity is the one the assembled route runs (`two_level.record_routing`, from the
-  tuner's splice watcher). A piece with forks of its own is the parent of further rows. A decision has no
+  splice watcher the tuner and the golden import both compose in). A piece with forks of its own is the parent of
+  further rows. A decision has no
   measurement of its own: its price on a context is the sum of its pieces' fastest rows there, all-or-nothing
   (`SearchDB.priced_arms`), which is what both the tuner's reward and the deploy pick read.
 - **`perf`** — one measurement per compilable kernel variant per context, keyed `(context, kernel, bindings,
   schedule)`: the sizes a dynamic kernel's symbolic dims were benched at (`bindings`, `{}` for a static kernel — the
   identity ignores the hint, so without them one kernel at two sizes would be one row), then the stats, `status`,
-  `captured`, a `bench_fail` row's `error` and `source` (`measured`, or `freeze:<digest>` for an imported row).
+  `captured`, a `bench_fail` row's `error` and `source` (`measured`; `golden:<digest>` or `freeze:<digest>` for an
+  imported row — the digest of the golden scope or the freeze it came from, which is how a re-recorded golden's rows
+  are told from the current file's and let go).
   Failed rows ARE recorded — they are the negative examples a search needs — and an `ok` row is never downgraded by
   a later failure; a config whose **compile** ran past its budget is not recorded at all, since a stored row would
   make it a permanent cache hit that is never re-benched (see the two bench budgets in

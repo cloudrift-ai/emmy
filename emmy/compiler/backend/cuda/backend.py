@@ -142,10 +142,10 @@ class CudaBackend(Backend):
     def compile(self, graph: Graph, *, ctx: Context | None = None) -> Graph:
         """Lower ``Graph`` → ``Graph[LoopOp]`` → ``Graph[TileOp]`` → ``Graph[CudaOp]``."""
         db = None
-        if self.tune_db is not None and self.tune_db.exists():
+        if self.tune_db is not None:
             from emmy.compiler.pipeline.search.db import SearchDB
 
-            db = SearchDB(path=self.tune_db)
+            db = SearchDB.for_compile(self.tune_db)
         return Pipeline.build(CUDA_PASSES).run(graph, ctx=ctx, db=db, dump=self.dump)
 
     def run(
