@@ -50,6 +50,12 @@ short recurrences unrolled when the rolled kernel loses its parallelism.
   output and out_proj (5120x6144) inside every MLP element. Five cuts at depth <= 2 give 6 kernels whose pieces still
   carry 5120x6144x64x128 nests; only a deep composed cut at every projection would separate them.
 
+- **Pre kernel is a lowering gap, not a cut choice** (FP8, `7c37f0` and the width-64 `24b33c`): the root's stores share
+  no axis (`free=()`), none of its depth-1 seams owns an output, and the `to_7` gate (`sigmoid(linear_2(normed
+  hidden))`, 48x512 dot products of 5120) has no cuttable seam. After any cut set the root still computes that gate and
+  copies every workspace into the 9 outputs on one thread, and hangs. It needs a grid for a multi-store root or a seam
+  for the gate cone. The best route found (8 cuts) leaves 8 sane gridded pieces plus that root.
+
 Fusion stays maximal, so both need cuts that remove the duplicated work: a cut that computes out_proj (and the GDN
 output) once instead of per MLP element, and one that lifts the norm and in_proj out from under the one-thread root.
 
