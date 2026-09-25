@@ -1115,9 +1115,9 @@ def test_shallow_affine_recurrence_still_fuses():
 
 
 def test_deep_affine_recurrence_raises_past_the_binding_ratio():
-    """Depth 12 → 2048 bindings per stage-0 stmt: constructing the merge is hopeless, so the
+    """Depth 16 → 32768 bindings per stage-0 stmt: constructing the merge is hopeless, so the
     splicer raises at the construction bound instead of multiplying bindings without end. Fusion
     never catches it — a chain that multiplies is the roller's to roll — so the doom names the loop."""
-    loops, edges, roots = _affine_recurrence_chain(12)
+    loops, edges, roots = _affine_recurrence_chain(16)
     with pytest.raises(UnfusableStmt, match="bindings per source statement"):
         splice_loops(loops=loops, splice_edges=edges, roots=roots)

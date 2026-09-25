@@ -173,7 +173,7 @@ def test_a_chain_the_roller_does_not_roll_is_an_error_not_a_smaller_region():
     from emmy.compiler.ir.loop import Assign, Axis, Load, UnfusableStmt, Write
 
     stages: dict[str, LoopOp] = {}
-    for k in range(12):
+    for k in range(16):
         src = "b0" if k == 0 else f"s{k - 1}"
         left = BinaryExpr("+", BinaryExpr("*", Literal(2, "int"), Var("i")), Literal(1, "int"))
         right = BinaryExpr("+", BinaryExpr("*", Literal(3, "int"), Var("i")), Literal(2, "int"))
@@ -184,7 +184,7 @@ def test_a_chain_the_roller_does_not_roll_is_an_error_not_a_smaller_region():
             Write(output=f"s{k}", index=(Var("i"),), value=f"v{k}"),
         )
         stages[f"s{k}"] = LoopOp(body=(Loop(axis=Axis("i", 8 + k), body=body),))
-    graph, _ = _chain_beside_a_sibling(stages, widths={f"s{k}": 8 + k for k in range(12)})
+    graph, _ = _chain_beside_a_sibling(stages, widths={f"s{k}": 8 + k for k in range(16)})
     with pytest.raises(UnfusableStmt, match="bindings per source statement"):
         Pipeline.build(["loop/fusion"]).run(graph)
 
