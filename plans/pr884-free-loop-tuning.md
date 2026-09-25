@@ -16,6 +16,29 @@ Small earlier prior-driven attempts did not resolve the regressions and are not 
 This is not the tune skill's equal-budget hybrid-versus-MCTS experiment; that procedure was explicitly superseded by
 the author's manual, conservative scope.
 
+## Incidence in the stored model inventories
+
+Fresh-lowering comparison with only the new sibling-free-loop merge disabled versus enabled:
+
+| Inventory | Emitted final Loop kernels | Changed final Loop kernels |
+| --- | ---: | ---: |
+| DeepSeek-V4-Flash-0731, V100 | 152 | 8 |
+| Gemma-4-12B-it, RTX 5090 | 40 | 0 |
+| Qwen3.8-27B-FP8, V100 | 129 | 6 |
+| Qwen3.8-27B-AWQ-INT4, V100 | 46 | 3 |
+| Qwen3.8-27B-GPTQ-Int4, V100 | 40 | 2 |
+| Qwen3.8-27B-EXL3, V100 | 38 | 2 |
+
+The comparison lowers each distinct stored frontend program through `LOOP_PASSES` under the golden's declared
+capability, pairs final kernels by output buffers, and compares their serialized Loop IR. The listed inventories
+have no added or removed final kernels in this comparison. Counts include emitted kernels that have no configured
+stored golden entry; DeepSeek has 149 configured entries but emits 152 kernels across its 12 stored programs.
+
+This measures changed final bodies, not every intermediate application, affected schedule identity, or execution
+frequency. Gemma demonstrates the distinction: its final Loop bodies remain the same while 26 root routing
+identities need repair. Multiple shape variants or timing rows can describe one target. No serving-throughput
+improvement follows from these counts alone, and no NVFP4 performance claim is made.
+
 ## Comparison and hardware
 
 - Main baseline: `c1ba9e5b`, merged into the PR by `be423aff`.
