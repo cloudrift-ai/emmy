@@ -65,6 +65,8 @@ output) once instead of per MLP element, and one that lifts the norm and in_proj
   rejects ("identifier v148 is undefined" at `add_45[a10*4096+a27] = v148`). A cut route avoids it.
 - Several DeepSeek-V4 `linear_softmax` kernels fail `--strict` only with "did not use CUDA graph capture"; accuracy
   against eager passes, so the refresh recorded them without `--strict`.
+- Qwen3.8-FP8 full-attention layer (program 1, about 650 seams): a 9-cut cuts-only compile ran 30 min inside
+  `_cluster_value_seams` (a `canonicalize_identity` per piece) without finishing. Left unrecorded.
 - A tune-DB perf row with knobs `{LOOPIFY: '0'}`, written by a fallback record, makes the next compile of that kernel
   raise "register schedule accepts only WORK, TILE and STAGE". Workaround: a fresh tune DB.
 
