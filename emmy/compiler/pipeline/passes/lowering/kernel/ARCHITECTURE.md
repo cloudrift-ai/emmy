@@ -476,11 +476,14 @@ the multi-channel sync compute-fill and the scalar resolver still decline 1-byte
 the general reading above already covers it: the compute fill evaluates its decode cone per slab cell. That reading
 moves 16-bit values through global memory, which is the whole point of a 4-bit format thrown away. The specialized
 reading keeps it. `ir.schedule.packing.match_packed_b_node` recognizes the node (the ONE question the offer, the
-resolver and the materializer all ask, so they cannot drift apart), and `_atom._packed_operands` stages THREE slabs
-where the
-ordinary matmul stages two: A and the weight's raw bits as `cp.async` peers, plus the weight's block scales as the
-`SyncTransport`'s compute-filled operand. The bits slab is half the K width of a 16-bit one (one byte is two K
-elements) and is addressed canonically — row `n`, byte column `k / 2` over the checkpoint's `[N, K/2]` buffer —
+resolver and the materializer all ask, so they cannot drift apart). `_atom._packed_operands` stages one shared A
+slab and one raw bits slab plus one compute-filled scale slab per weight channel: three slabs for one channel,
+five for a gate/up pair. Every channel shares one block extent and the number of K elements per stored byte; the
+matcher declines channels that disagree, and the stage budget counts every channel's slabs. Each channel selects
+the result its product multiplies, even when channels share one producer edge. Materialized A and the weight bytes
+copy asynchronously; the scales use `SyncTransport`. The bits slab is half the K width of a
+16-bit one (one byte is two K elements) and is addressed canonically — row `n`, byte column `k / 2` over the
+checkpoint's `[N, K/2]` buffer —
 rather than through the cone's flattened reshape arithmetic, which says the same thing in a form no fill can chunk.
 The scale slab is `tile_n × bk_elems/block` and single-buffer: its fill is compute, which runs on the drain's own
 threads, so ringing it buys no overlap. Evaluating the scale cone at ONE k per block instead of at every k is
@@ -498,8 +501,8 @@ written for — a copy transport, an N-major weight of 16-value blocks under an 
 same 16, an A already at the atom's dtype, and the byte row's 16-divisibility for the same chunking reason the fp8
 slab has. Everything outside the scope declines and keeps the general reading.
 
-**Block-scaled fp8 weights ride the same three slabs.** The reading also takes a single fp8 byte per element: a stored fp8 load
-whose own decode cast feeds the multiply by a block-guarded factor (`PackedKBlockB.per_byte == 1`). The bits slab is
+**Block-scaled fp8 weights use the same slabs per channel.** The reading also takes a single fp8 byte per element:
+a stored fp8 load whose own decode cast feeds the multiply by a block-guarded factor (`PackedKBlockB.per_byte == 1`). The bits slab is
 then the full K width in bytes, and the scale slab holds f32 — the dtype the fill multiplies the decoded value in
 before its round to the fragment — with one column per block the chunk spans; a 128-wide block holds whole atom
 steps and tiles every legal chunk or is tiled by it, so each drain step reads one scale. Its loader

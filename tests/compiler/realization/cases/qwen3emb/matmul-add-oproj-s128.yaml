@@ -119,5 +119,5 @@ loops:
             unroll: false
             seed: true
       name: k_matmul_8425e0
-    inputs: [r, b, a]
+    inputs: [b, a, r]
     outputs: [[o, f32, [1, 128, 1024]]]

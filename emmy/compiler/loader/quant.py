@@ -1894,7 +1894,15 @@ def _spell_static_fp4_decode(graph: Graph, quant: tuple[str, str, str, str], dty
     multiplied in f32 and rounded once to f16 (:func:`fuse_nvfp4_scales` parity). Spelled per
     consumer rather than shared, so each marked matmul carries both operands in that one
     decode-chain reading — the packed pair and the raw e4m3 scale each reached through a load of
-    their own."""
+    their own.
+
+    The pair-value TABLE is the one piece every reconstruction of an activation shares (one
+    constant per activation and dtype). It is a fixed 256x2 value map, so sharing changes nothing
+    a consumer computes; what it changes is the kernel two consumers fuse into. Two reconstructions
+    gathering from one table are the same load, and load deduplication folds them into one decode
+    chain, which is what lets a fused pair of marked matmuls over one activation read as ONE
+    block-scaled contraction with two channels. Two tables would keep two gathers standing, and
+    that operand would read as no decode chain at all."""
     from emmy.compiler.ir.frontend.ir import ReshapeOp  # noqa: PLC0415
     from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp  # noqa: PLC0415
     from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to  # noqa: PLC0415
@@ -1914,7 +1922,8 @@ def _spell_static_fp4_decode(graph: Graph, quant: tuple[str, str, str, str], dty
     stem = f"{quant_stem}_r{suffix}"
 
     idx = graph.add_node(op=ElementwiseOp(op="copy"), inputs=[bits], output=Tensor(f"{stem}_idx", half, "i32"))
-    table = _f4_pair_table(graph, name=f"{stem}_f4_pairs", out_name=f"{stem}_f4_pairs", dtype=dtype)
+    table_id = f"{quant_stem}_{dtype.name}_f4_pairs"
+    table = table_id if table_id in graph.nodes else _f4_pair_table(graph, name=table_id, out_name=table_id, dtype=dtype)
     pairs = graph.add_node(op=GatherOp(axis=0), inputs=[table, idx], output=Tensor(f"{stem}_pairs", (*half, 2), dtype))
     vblk = graph.add_node(op=ReshapeOp(shape=blocked), inputs=[pairs], output=Tensor(f"{stem}_vals", blocked, dtype))
     sdec = graph.add_node(op=ElementwiseOp(op=f"from_{F8E4M3.name}"), inputs=[sbits], output=Tensor(f"{stem}_scale_vals", bshape, "f32"))

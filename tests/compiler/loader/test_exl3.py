@@ -687,7 +687,7 @@ def test_computed_b_lane_offers_the_cross_cta_split(monkeypatch):
     from emmy.compiler.context import Context
     from emmy.compiler.pipeline import TILE_PASSES, Pipeline
     from emmy.compiler.pipeline.fork import iter_leaves
-    from emmy.compiler.pipeline.passes.lowering.tile._split import split_forks
+    from emmy.compiler.pipeline.passes.tile._split import split_forks
     from emmy.compiler.pipeline.pipeline import Run
 
     for var in ("EMMY_TILE", "EMMY_WORK", "EMMY_STAGE", "EMMY_REDUCE"):

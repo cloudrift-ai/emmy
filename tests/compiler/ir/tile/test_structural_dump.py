@@ -32,7 +32,7 @@ from emmy.compiler.ir.schedule.classic import (
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Let, Load, Loop, Write
 from emmy.compiler.ir.tile import OutputSpec, TileOp
 from emmy.compiler.ir.tile._dump import pretty
-from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
+from emmy.compiler.pipeline.passes.tile._fromloop import fold_from_loop
 from tests.compiler.terms import contraction, projection
 
 K_STAT, K_PRODUCT = Axis("k", 512), Axis("k", 256)

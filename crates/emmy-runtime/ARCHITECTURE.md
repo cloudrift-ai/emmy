@@ -136,8 +136,9 @@ The native preparation and attention contract lives in
 
 `start` binds the prompt and sampling controls once and resets request state. `advance` processes exactly one token
 at the current absolute position. Before prompt completion it returns no token; afterward it returns the GPU-selected
-ID, which stays on the
-GPU for the next step. `generate` owns the complete prompt/decode loop and stops at EOS or the requested output count.
+ID, which stays on the GPU for the next step. Its explicit `ignore_eos` control permits fixed-output serving
+benchmarks to continue after EOS; ordinary worker generation retains EOS stopping. `generate` owns the complete
+prompt/decode loop and stops at EOS or the requested output count.
 Prompt plus requested output must fit capacity. `logits` is an explicit diagnostic download. All CUDA operations stay
 inside `cuda`, and a failed step cannot continue the current request.
 

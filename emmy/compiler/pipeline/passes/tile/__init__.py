@@ -1,0 +1,18 @@
+"""Loop IR → Tile IR, as three passes.
+
+``tile/lift`` peels the outer parallel axes and mechanically converts every remaining reduction loop
+to a ``Fold``; a carried state lifts onto a serial launch axis over a state buffer. Its ``020_twisted``
+fuses every reduce that reads a reduce into the twisted carrier a recipe recognizes
+(``ir/pure/twist.py``). ``tile/cut`` runs to a fixpoint: it first offers the maximal fused tree beside
+every closed stored Fold-edge cut, then the unsplit tree beside every cross-CTA reduce split the head
+Fold admits. A structural choice replaces the kernel with fresh unmapped pieces that re-enter the pass.
+``tile/schedule`` schedules the stored tree only after the cut pass is quiescent.
+
+The three are separate passes so a pipeline can stop between them: ``tile/lift`` alone gives the
+canonical tree, ``tile/lift, tile/cut`` the kernel sets the cuts offer, and a greedy compile that never
+reaches ``tile/schedule`` resolves those cuts by pins alone rather than pricing an arm by scheduling it.
+The helpers here (``_fromloop``, ``_twist``, ``_cut``, ``_split``, ``_row``) are shared by the three.
+
+``030_cut`` reads the structural tree through ``ir.tile.path.sites``. ``040_schedule`` adapts the classic
+schedule model's accepted schedules to lazy pipeline forks; schedule membership remains independent of traversal order.
+"""

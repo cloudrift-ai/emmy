@@ -24,7 +24,7 @@ tests/compiler/passes/
 ├── test_optimization_rules.py      # optimization rules (structural + correctness)
 ├── test_fusion_rules.py            # maximal/multi-output fusion structure and Loop-runner correctness
 ├── test_matcher.py                 # Pattern matcher unit tests
-├── test_maximal_fusion.py          # one-pass maximal fusion, including nested reductions
+├── test_maximal_fusion.py          # maximal fusion: every kernel boundary is a correctness boundary (golden programs too)
 ├── test_twisted_rewrite.py         # general exp-family Tile rewrite: softmax and masked/unmasked SDPA
 ├── test_matmul_rules.py            # matmul-specific rewrite rules
 ├── test_reduction_rules.py         # reduction-pattern rewrite rules
@@ -112,7 +112,7 @@ numpy backends in three places:
   eager. The `_cpu` variant runs `LoopBackend` + CPU eager (always
   on, ~3s); the `_cuda` variants are gated by `@requires_cuda`.
 
-### Tile lowering (`passes/lowering/tile/`)
+### Tile lowering (`passes/tile/`)
 
 `test_twisted_rewrite.py` traces softmax, SDPA, and causal SDPA through total lift and the same `020_twisted` rule,
 then checks the resulting carrier arity, the derived contraction sites, and that plain and causal SDPA reach both MMA

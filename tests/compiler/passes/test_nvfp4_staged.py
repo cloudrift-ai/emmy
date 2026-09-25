@@ -14,6 +14,8 @@ reading rather than lowering something the drain is not written for.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
@@ -124,6 +126,216 @@ def test_match_packed_b_node_admits_a_computed_a():
     node, inputs, _axes, ka = _node()
     coned = contraction(ka, _packed_cone(4096, row="m", prefix="a_"), *zip(node.operands[1:], node.combine.results, strict=True))
     assert _packed(coned, inputs)[0] is not None
+
+
+# ===================================================================
+# Several weight channels over one A — the byte slab per channel
+# ===================================================================
+
+
+def _two_channel_node(*, m=512, n=4096, k=4096, blocks=(16, 16)):
+    """The W4A16 gate/up shape: one materialized 16-bit ``x[m, k]`` against TWO packed-decode
+    weights, one accumulator each. What a quantized SwiGLU MLP binds to once its two projections
+    fuse through the multiply they feed."""
+    axes = (Axis("m", Dim(m)), Axis("n", Dim(n)))
+    a = Load(name="a", input="x", index=(Var("m"), Var("k")), dtype=F16)
+    ka = Axis("k", Dim(k))
+    node = contraction(
+        ka,
+        a,
+        (_packed_cone(k, block=blocks[0], prefix="g_"), "acc0"),
+        (_packed_cone(k, block=blocks[1], prefix="u_"), "acc1"),
+    )
+    inputs = {"x": Tensor("x", (m, k), F16)}
+    for q, block in zip(("g_", "u_"), blocks, strict=True):
+        inputs |= {
+            f"{q}w_bits": Tensor(f"{q}w_bits", (n, k // 2), F4E2M1x2),
+            f"{q}w_scale_bits": Tensor(f"{q}w_scale_bits", (n, k // block), F8E4M3),
+            f"{q}w_scale_2": Tensor(f"{q}w_scale_2", (1, 1), F32),
+            f"{q}w_f4_pairs": Tensor(f"{q}w_f4_pairs", (256, 2), F16),
+        }
+    return node, inputs, axes, ka
+
+
+def test_match_packed_b_node_reads_every_channel_in_order():
+    """Arity is not a shape the reading declines: a node folding two packed weights over one A
+    reads as one packed B per channel, in channel order, sharing one block extent."""
+    node, inputs, _axes, _ka = _two_channel_node()
+    packed = _packed(node, inputs)[0]
+    assert packed is not None and packed.block == 16 and packed.per_byte == 2
+    assert [ch.bits.input for ch in packed.channels] == ["g_w_bits", "u_w_bits"]
+    assert [ch.factor for ch in packed.channels] == ["g_v2", "u_v2"]
+    assert packed.bits.input == "g_w_bits"  # the shared facts are read off the first channel
+
+
+def test_match_packed_b_node_declines_channels_that_disagree_on_block():
+    """One slab geometry per node: two weights whose scales span different blocks keep the
+    generic computed-B reading rather than staging one of them at the other's block."""
+    node, inputs, _axes, _ka = _two_channel_node(blocks=(16, 32))
+    assert _packed(node, inputs)[0] is None
+
+
+def test_packed_channels_read_their_own_result_of_a_shared_producer():
+    node, inputs, axes, ka = _two_channel_node()
+    weights = node.operands[1:]
+    producer = projection(
+        body=tuple(stmt for edge in weights for stmt in edge.lower(axes=())),
+        results=tuple(edge.exposes[0] for edge in weights),
+    )
+    node = replace(node, operands=(node.operands[0], producer))
+    assert len(node.operands) == 2 and len(node.channel_operands()) == 2
+    packed = _packed(node, inputs)[0]
+    assert packed is not None
+    assert [channel.bits.input for channel in packed.channels] == ["g_w_bits", "u_w_bits"]
+    assert [channel.factor for channel in packed.channels] == ["g_v2", "u_v2"]
+    tile = _tile(K16, "f2x2/k2", "w1x4", axes)
+    assert resolve_warp_stage(node, tile, Stage.parse("d2/smem-async"), 100 * 1024, inputs, k_axis=ka) is not None
+
+
+def test_two_channels_resolve_both_copy_transports_and_size_a_slab_per_channel():
+    """The budget is the A slab plus one padded byte slab PER CHANNEL per ring slot, plus one
+    single-buffer scale slab per channel on top. Sizing for one channel would admit a ring the
+    second channel's slabs overflow."""
+    node, inputs, axes, ka = _two_channel_node()
+    tile = _tile(K16, "f2x2/k2", "w1x4", axes)
+    bk_elems = tile.bk * 16
+    slot = tile.m.tile * bk_elems * 2 + 2 * tile.n.tile * (bk_elems // 2 + BYTE_SLAB_PAD)
+    scale = 2 * tile.n.tile * (bk_elems // 16) * 2
+    for spec in ("d2/smem-async", "d2/smem-tma"):
+        st = resolve_warp_stage(node, tile, Stage.parse(spec), 100 * 1024, inputs, k_axis=ka)
+        assert st is not None and st.bk_elems == bk_elems and st.transport == spec.split("/")[1], spec
+    assert resolve_warp_stage(node, tile, Stage.parse("d2/smem-async"), scale + 2 * slot, inputs, k_axis=ka).depth == 2
+    assert resolve_warp_stage(node, tile, Stage.parse("d2/smem-async"), scale + 2 * slot - 1, inputs, k_axis=ka).depth == 1
+    # The single-channel budget for the same tile fits in half the weight-side bytes: a resolver
+    # still sizing one channel would grant depth 2 here.
+    one_slot = tile.m.tile * bk_elems * 2 + tile.n.tile * (bk_elems // 2 + BYTE_SLAB_PAD)
+    one_scale = tile.n.tile * (bk_elems // 16) * 2
+    assert resolve_warp_stage(node, tile, Stage.parse("d2/smem-async"), one_scale + 2 * one_slot, inputs, k_axis=ka).depth == 1
+
+
+def test_the_offer_puts_the_copy_transports_beside_the_fill_on_a_two_channel_node():
+    """The two-channel packed node is offered the byte-slab transports beside the compute fill, as
+    the single-channel node is — the offer asks the reading, and the reading now answers for it."""
+    node, inputs, axes, ka = _two_channel_node()
+    rows = _rows(node, inputs, axes, ka)
+    assert any(_transport(r) == "smem" for r in rows), rows
+    assert any(_transport(r) == "smem-async" for r in rows), rows
+
+
+def _nvfp4_gate_up_graph(tmp_path, *, m, n, k):
+    """``(x @ dequant(g)ᵀ) * (x @ dequant(u)ᵀ)`` over a synthetic two-weight NVFP4 checkpoint —
+    the shape whose two projections fuse into one two-channel contraction. Returns the graph and
+    each weight's stored tensors."""
+    import torch
+
+    from emmy.compiler.graph import Graph
+    from emmy.compiler.ir.base import ConstantOp, InputOp
+    from emmy.compiler.ir.frontend.ir import MatmulOp, TransposeOp
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp
+    from emmy.compiler.loader.quant import spell_quantized_constants
+    from tests.compiler.loader.test_quant import _FP4_MODELOPT_QC, _fp8_tensor, _write_checkpoint
+
+    rng = np.random.default_rng(7)
+    weights = {}
+    tensors = {}
+    for name in ("g", "u"):
+        packed = rng.integers(0, 256, (n, k // 2)).astype(np.uint8)
+        scale_bits = rng.integers(0, 0x7F, (n, k // 16)).astype(np.uint8)
+        s2 = np.array(0.25, dtype=np.float32)
+        weights[name] = (packed, scale_bits, s2)
+        tensors |= {
+            f"{name}.weight": torch.from_numpy(packed),
+            f"{name}.weight_scale": _fp8_tensor(scale_bits),
+            f"{name}.weight_scale_2": torch.tensor(float(s2), dtype=torch.float32),
+        }
+    _write_checkpoint(tmp_path, tensors, quant_config={**_FP4_MODELOPT_QC, "ignore": ["lm_head"]})
+    g = Graph()
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (m, k), "f16"), node_id="x")
+    products = []
+    for name in ("g", "u"):
+        w = g.add_node(
+            op=ConstantOp(name=name, source_path=f"{name}.weight", source_shape=(n, k), source_dtype="f16"),
+            inputs=[],
+            output=Tensor(name, (n, k), "f16"),
+            node_id=name,
+        )
+        wt = g.add_node(op=TransposeOp(axes=(1, 0)), inputs=[w], output=Tensor(f"{name}t", (k, n), "f16"))
+        products.append(g.add_node(op=MatmulOp(), inputs=["x", wt], output=Tensor(f"y_{name}", (m, n), "f16"), node_id=f"y_{name}"))
+    y = g.add_node(op=ElementwiseOp("multiply"), inputs=products, output=Tensor("y", (m, n), "f16"), node_id="y")
+    g.inputs, g.outputs = ["x"], [y]
+    assert spell_quantized_constants(g, str(tmp_path)) == 2
+    return g, weights
+
+
+def test_two_spelled_weights_lower_to_one_kernel_with_a_byte_slab_per_channel(tmp_path):
+    """The whole path, structurally: two spelled NVFP4 matmuls over one activation, fused through
+    the multiply they feed, emit ONE kernel with one f16 A slab and, per channel, its own raw byte
+    slab and its own decoded scale slab."""
+    from emmy.compiler.context import Context
+    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+    g, _ = _nvfp4_gate_up_graph(tmp_path, m=32, n=128, k=128)
+    with pinned_knobs(PACKED_PINS):
+        lowered = Pipeline.build(CUDA_PASSES).run(g, ctx=Context.from_target((8, 9)))
+    sources = [s for node in lowered.nodes.values() if (s := getattr(node.op, "kernel_source", None))]
+    assert len(sources) == 1, "the two projections must stay one kernel"
+    src = sources[0]
+    assert "emmy_mma_load_b_smem_trans_f4s_f16" in src
+    # Channel 0 keeps the bare slab names; channel 1 gets its own bits and scale slabs.
+    assert "unsigned char _b_smem[4096]" in src and "unsigned char _b_x1_smem[4096]" in src
+    assert "__half _bs_smem[128]" in src and "__half _b_x1s_smem[128]" in src
+    assert src.count("__half _a_smem[") == 1, "one shared A slab"
+
+
+@pytest.mark.parametrize(
+    ("m", "n", "k", "stage"),
+    [
+        (32, 128, 128, "d2/smem-async"),
+        (4, 2048, 2048, "d2/smem-async"),
+        pytest.param(32, 128, 128, "d2/smem-tma", marks=requires_sm(9)),
+    ],
+)
+@pytest.mark.xdist_group("cuda")
+@requires_sm(8)
+def test_the_two_channel_packed_drain_matches_the_decoded_oracle(tmp_path, m, n, k, stage):
+    """Numerical parity on the device: the two-channel kernel equals
+    ``(x @ dequantize_nvfp4(g)ᵀ) * (x @ dequantize_nvfp4(u)ᵀ)`` under both copy transports.
+
+    The bound is the single-channel test's, loosened for the product: each factor carries the
+    f16 fragment error, and the product roughly doubles the relative error."""
+    import torch  # noqa: F401 — the checkpoint writer needs it importable
+
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.loader.binder import bind_constants
+    from emmy.compiler.loader.quant import dequantize_nvfp4
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+    g, weights = _nvfp4_gate_up_graph(tmp_path, m=m, n=n, k=k)
+    rng = np.random.default_rng(11)
+    # The output is an f16 PRODUCT of two dot products, so its magnitude grows with k twice over;
+    # the activation shrinks with k to keep every element inside the f16 range.
+    x = (rng.standard_normal((m, k)) * (0.05 * 128 / k)).astype(np.float16)
+
+    backend = CudaBackend()
+    with pinned_knobs(_packed_pins("f16", stage)):
+        compiled = backend.compile(g)
+    sources = [s for node in compiled.nodes.values() if (s := getattr(node.op, "kernel_source", None))]
+    assert len(sources) == 1 and "_b_x1_smem" in sources[0], "the packed pins did not reach the two-channel byte-slab drain"
+    if stage.endswith("tma"):
+        assert "cp.async.bulk.tensor" in sources[0] and "emmy_cp_async" not in sources[0], "the TMA pin must box-copy, not cp.async"
+
+    constants = {}
+    for name, (packed, scale_bits, s2) in weights.items():
+        constants |= {f"{name}.weight": packed, f"{name}.weight_scale": scale_bits, f"{name}.weight_scale_2": s2}
+    data = bind_constants(compiled, constants)
+    result, _ = backend.run(compiled, input_data={**data, "x": x})
+    y = result.outputs[compiled.outputs[0]].reshape(m, n).astype(np.float32)
+
+    x_ref = x.astype(np.float32)
+    ref = np.prod([x_ref @ dequantize_nvfp4(*weights[name]).T for name in ("g", "u")], axis=0)
+    denom = max(float(np.abs(ref).max()), 1e-9)
+    assert float(np.abs(y - ref).max()) / denom < 2e-3
 
 
 # ===================================================================
@@ -267,21 +479,31 @@ def _rows(node, inputs, axes, ka, pins=None):
     from emmy.compiler.ir.tile import Placement, TileOp
     from emmy.compiler.ir.tile.ir import OutputSpec
 
-    write = Write(output="y", index=(Var("m"), Var("n")), value="acc")
+    # One store per carried state: the single-channel node exposes ``acc``, a two-channel one
+    # ``acc0`` and ``acc1``, and the kernel writes each to its own output.
+    specs = tuple(
+        OutputSpec(write=Write(output=f"y{i}" if i else "y", index=(Var("m"), Var("n")), value=state))
+        for i, state in enumerate(node.combine.results)
+    )
     op = TileOp(
         op=projection((node,)),
         name="y",
         place=Placement(free=axes),
         axes=(*axes, ka),
         inputs=inputs,
-        output_specs=(OutputSpec(write=write),),
+        output_specs=specs,
     )
     ctx = Context.from_target((8, 9))
     tile = _tile(K16, "f2x2/k2", "w1x4", axes)
     from emmy.compiler.ir.schedule.classic import ClassicProblem
 
     offers = ClassicProblem(op, ctx)
-    site = op.node_id(node)
+    # Construction canonicalizes the tree, so a node built from shared cones may come back as a
+    # fresh object; the kernel has one contraction either way, and that is the site.
+    try:
+        site = op.node_id(node)
+    except KeyError:
+        (site,) = op.contractions.keys()
     context = literal_classic_context(
         op,
         ctx,

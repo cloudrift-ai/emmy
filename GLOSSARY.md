@@ -99,7 +99,7 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Serial axis / lagged read** — A recurrence's time as a kernel's launch loop: a `Placement.serial` axis is
   launched once per coordinate, in order, the coordinate a runtime `int` in the body, and the kernel may read its
   own output strictly behind the step it writes (`S[c − 1]` while writing `S[c]`). The state lives in the buffer,
-  so the step is any `Fold`; a Loop IR carried state lifts to this (`lowering/tile/010_lift`).
+  so the step is any `Fold`; a Loop IR carried state lifts to this (`tile/lift/010_lift`).
 - **Carried state** — A recurrence's state in Loop IR: `Carry` defines the next value of one cell and names the seed,
   a `Pre` read sees the previous step's value at any cell, and the loop that carries it sits outside the loops
   over its cells. Not a fold: its steps are ordered and its step is any computation, so it has no op.
@@ -325,7 +325,7 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   evidence, and only when a command names the file with `--golden PATH`.
 - **Canonical golden file** — A reviewed per-GPU YAML. Model goldens live at
   `recipes/<model>/golden/<gpu-slug>_<compute-cap>.yaml`; model-agnostic hardware goldens remain under
-  `emmy/compiler/pipeline/search/goldens/`. Every realization contains verified deployable measurements; `emmy tune`
+  `emmy/compiler/pipeline/search/golden/`. Every realization contains verified deployable measurements; `emmy tune`
   refuses to mutate these files directly. The files for the live card are the golden evidence an ordinary compile
   reads.
 - **Evidence** — A compatible recorded measurement used to select between candidates: a reservoir row or a tune

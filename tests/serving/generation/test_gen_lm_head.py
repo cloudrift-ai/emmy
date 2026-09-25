@@ -48,7 +48,7 @@ def _model(*, model_id="does-not-exist/nowhere", tied=False, vocab=VOCAB, hidden
 
 
 def _load(model, weights=()):
-    # ``reclaim_device_memory`` imports cupy and touches the driver; this suite is CPU-only.
+    # ``reclaim_device_memory`` touches the driver; this suite is CPU-only.
     model.reclaim_device_memory = lambda: None
     return vllm_model_gen.EmmyGenModel.load_weights(model, iter(weights))
 

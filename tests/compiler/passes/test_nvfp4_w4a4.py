@@ -207,7 +207,7 @@ def _bound_contractions(tmp_path):
 
     g = _w4a4_shared_linears(tmp_path, ("q", "kp", "v"), m=16, n=128, k=128)
     looped = Pipeline.build(LOOP_PASSES).run(g)
-    tiled = Pipeline.build(["lowering/tile"], select={"lift"}).run(looped, ctx=Context.from_target((12, 0)))
+    tiled = Pipeline.build(["tile/lift"], select={"lift"}).run(looped, ctx=Context.from_target((12, 0)))
     tiles = [node.op for node in tiled.nodes.values() if isinstance(node.op, TileOp)]
     return [(tile, t) for tile in tiles for t in _folds(tile.op) if t.as_contraction() is not None]
 
@@ -374,15 +374,120 @@ def _w4a4_gate_up_down(tmp_path, *, m, k):
     return g
 
 
+def _w4a4_gate_times_up(tmp_path, *, m, n, k):
+    """Two marked linears over one quantized activation, multiplied — the gate/up half of the
+    serving MLP with the product left in 16 bits. Fusion puts both projections in one kernel
+    through the shared consumer, and that kernel is what the two-channel questions below ask."""
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp
+
+    _w4a4_checkpoint(tmp_path, {"gate": (n, 0.02), "up": (n, 0.02)}, k=k)
+    g = Graph()
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (m, k), "f16"), node_id="x")
+    for name in ("gate", "up"):
+        w = g.add_node(
+            op=ConstantOp(name=name, source_path=f"{name}.weight", source_shape=(n, k), source_dtype="f16"),
+            inputs=[],
+            output=Tensor(f"{name}_w", (n, k), "f16"),
+            node_id=f"{name}_w",
+        )
+        g.add_node(op=LinearOp(), inputs=["x", w], output=Tensor(name, (m, n), "f16"), node_id=name)
+    g.add_node(op=ElementwiseOp(op="multiply"), inputs=["gate", "up"], output=Tensor("act", (m, n), "f16"), node_id="act")
+    g.inputs, g.outputs = ["x"], ["act"]
+    assert spell_quantized_constants(g, str(tmp_path)) == 2
+    assert spell_static_fp4_activations(g, str(tmp_path)) == 2
+    return g
+
+
+def _two_channel_pair(tmp_path, *, m=16, n=128, k=256):
+    """The gate/up kernel's one two-channel contraction after the tile LIFT, with its pair reading."""
+    from emmy.compiler.context import Context
+    from emmy.compiler.ir.schedule.packing import match_packed_pair_node
+    from emmy.compiler.ir.tile import TileOp
+    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
+
+    looped = Pipeline.build(LOOP_PASSES).run(_w4a4_gate_times_up(tmp_path, m=m, n=n, k=k))
+    tiled = Pipeline.build(["tile/lift"], select={"lift"}).run(looped, ctx=Context.from_target((12, 0)))
+    tiles = [node.op for node in tiled.nodes.values() if isinstance(node.op, TileOp)]
+    # A shared cone is one object reached through several operand edges; key on identity.
+    two_channel = {
+        id(t): (tile, t) for tile in tiles for t in _folds(tile.op) if t.as_contraction() is not None and len(t.combine.results) == 2
+    }
+    assert len(two_channel) == 1, "gate and up must lower to exactly one two-channel contraction"
+    ((tile, con),) = two_channel.values()
+    return tile, con, match_packed_pair_node(con, tile.inputs)
+
+
+def test_gate_and_up_over_one_quantized_activation_bind_as_one_two_channel_contraction(tmp_path):
+    """Gate and up read one quantized activation through the same byte-packed index. Fusion puts
+    both projections in one kernel, and the loop normalizer unifies their K axes although the axis
+    reaches the activation's index through div and mod, so the two reductions become ONE
+    contraction with two channels — the shape the block-scaled pair reading accepts with any
+    channel count. Left as two reductions feeding one projection, the kernel has no warp-tier
+    schedule at all."""
+    _tile, _con, pair = _two_channel_pair(tmp_path)
+    assert pair is not None, "the two-channel contraction must read as a block-scaled pair"
+    assert len(pair.b) == 2
+
+
+def test_the_two_channel_pair_is_offered_the_block_scaled_cell_with_its_copy_transports(tmp_path):
+    """The cell's transports are the copy ones, one codes and one scale slab per channel, so the
+    pair reading keeps them at any channel count. The one-slab-per-fold rule that sends a
+    multi-channel node to the compute fill is about the other transports."""
+    from emmy.compiler.context import Context
+    from emmy.compiler.ir.schedule.classic import refusals as sched
+    from emmy.compiler.ir.schedule.classic.schedule import ProjectionSchedule
+
+    tile, con, _pair = _two_channel_pair(tmp_path)
+    ctx = Context.from_target((12, 0))
+    atoms = sched._warp_atoms(tile, ctx, con)
+    assert "mma_m16n8k64_e2m1_f32" in atoms, atoms
+    plan = next(p for p in sched.warp_tile_moves(atoms) if p.atom.name == "mma_m16n8k64_e2m1_f32" and p.bk == 4)
+    assert not sched._needs_fill(tile, con, plan)
+    transports = {stage.transport for stage in sched._stage_candidates(tile, ctx, con, ProjectionSchedule(tile=plan))}
+    assert transports == {"smem-async"}, transports
+
+
+@requires_cuda
+@pytest.mark.xdist_group("cuda")
+@pytest.mark.skipif((device_compute_capability() or (0, 0))[0] != 12, reason="block-scaled FP4 mma requires sm_12x")
+def test_the_two_channel_block_scaled_cell_runs_and_holds_the_declared_tolerance(tmp_path):
+    """The native fp4 cell over the fused gate/up pair: one A pair shared by two weight channels,
+    each with its own codes and scale slabs, to the tolerance the single-channel cell declares."""
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.loader.safetensors import load_constants_from_safetensors
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+    m, n, k = 16, 128, 256
+    g = _w4a4_gate_times_up(tmp_path, m=m, n=n, k=k)
+    feed = {"x": (np.random.default_rng(3).standard_normal((m, k)) * 0.05).astype(np.float16)}
+    data = load_constants_from_safetensors(g, str(tmp_path))
+    ref, _ = NumpyBackend().run(g, input_data={**data, **feed})
+    backend = CudaBackend()
+    with pinned_knobs({"TILE": "mma_m16n8k64_e2m1_f32/f1x2/k4", "STAGE": "d1/smem-async", "PLACE": "fuse"}):
+        compiled = backend.compile(g)
+    sources = [s for node in compiled.nodes.values() if (s := getattr(node.op, "kernel_source", None))]
+    native = [s for s in sources if "emmy_mma_m16n8k64_e2m1_f32(" in s]
+    assert len(native) == 1, "the pinned block-scaled cell never reached the gate/up kernel"
+    assert "_b1_smem" in native[0] and "_b1s_smem" in native[0], "the second channel has no slabs of its own"
+
+    got, _ = backend.run(compiled, input_data={**data, **feed})
+    r = ref.outputs["act"].astype(np.float32).reshape(-1)
+    c = np.asarray(got.outputs["act"]).astype(np.float32).reshape(-1)
+    rel = np.abs(c - r) / max(float(np.abs(r).max()), 1e-9)
+    assert float(np.median(rel)) < 1e-4, "a systematic shift, not the fused-scale rounding"
+    assert float(rel.max()) < 2e-3, "past one fused-scale rounding per side"
+
+
 def _seams_of(g):
     """Every kernel's cuttable placement seams after the tile LIFT, as ``(tile, seams)``."""
     from emmy.compiler.context import Context
     from emmy.compiler.ir.tile import TileOp
     from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
-    from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams
+    from emmy.compiler.pipeline.passes.tile._cut import cuttable_seams
 
     looped = Pipeline.build(LOOP_PASSES).run(g)
-    tiled = Pipeline.build(["lowering/tile"], select={"lift"}).run(looped, ctx=Context.from_target((12, 0)))
+    tiled = Pipeline.build(["tile/lift"], select={"lift"}).run(looped, ctx=Context.from_target((12, 0)))
     tiles = [node.op for node in tiled.nodes.values() if isinstance(node.op, TileOp)]
     return [(tile, cuttable_seams(tile)) for tile in tiles]
 
@@ -419,7 +524,7 @@ def test_a_block_scaled_operand_workspace_would_re_encode_the_values_it_stores(t
     decoded values the cone computes. A workspace typed that way holds neither what the producer
     wrote nor what the consumer would decode, so the cone is not a seam and the question of
     storing into it never arises."""
-    from emmy.compiler.pipeline.passes.lowering.tile._cut import _dtype_table, _workspace_dtypes
+    from emmy.compiler.pipeline.passes.tile._cut import _dtype_table, _workspace_dtypes
 
     asked = 0
     for tile, _ in _seams_of(_w4a4_gate_up_down(tmp_path, m=16, k=128)):

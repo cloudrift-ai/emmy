@@ -222,7 +222,7 @@ def test_the_walk_offers_and_the_binder_realizes_two_partitioned_members(monkeyp
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.pipeline.fork import iter_leaves  # noqa: PLC0415
 
-    classic_forks = importlib.import_module("emmy.compiler.pipeline.passes.lowering.tile.040_schedule").classic_forks
+    classic_forks = importlib.import_module("emmy.compiler.pipeline.passes.tile.schedule.040_schedule").classic_forks
     for var in ("EMMY_KNOBS", "EMMY_PLACE", "EMMY_TILE", "EMMY_WORK", "EMMY_STAGE", "EMMY_REDUCE", "EMMY_RASTER"):
         monkeypatch.delenv(var, raising=False)
     _, _, root = _two_member_root()

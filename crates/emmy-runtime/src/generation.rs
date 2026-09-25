@@ -182,7 +182,7 @@ impl Generator {
     }
 
     /// Process one prompt or decode token; only generated tokens are observed by the CPU.
-    pub fn advance(&mut self, capture: bool) -> Result<Option<i64>> {
+    pub fn advance(&mut self, capture: bool, ignore_eos: bool) -> Result<Option<i64>> {
         ensure!(
             !self.stopped && self.position < self.config.context_length,
             "generation is stopped or context is full"
@@ -206,7 +206,7 @@ impl Generator {
             token >= 0 && (token as usize) < self.config.vocab_size,
             "invalid sampled token"
         );
-        self.stopped = self.config.eos_ids.contains(&token);
+        self.stopped = !ignore_eos && self.config.eos_ids.contains(&token);
         Ok(Some(token))
     }
 
@@ -230,7 +230,7 @@ impl Generator {
         self.start(prompt, sampling)?;
         let mut tokens = Vec::new();
         while tokens.len() < max_new_tokens && !self.stopped {
-            if let Some(token) = self.advance(capture)? {
+            if let Some(token) = self.advance(capture, false)? {
                 tokens.push(token);
             }
         }

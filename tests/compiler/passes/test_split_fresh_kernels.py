@@ -87,7 +87,7 @@ def _tile_pieces(graph=None) -> list[TileOp]:
         ["frontend/decomposition", "frontend/optimization", "loop/lifting", "loop/fusion", "loop/stamp"],
         graph,
     )
-    tiled, _ = Run(pipeline=Pipeline.build(["lowering/tile"]), ctx=_CTX).resolve(
+    tiled, _ = Run(pipeline=Pipeline.build(["tile/lift", "tile/cut", "tile/schedule"]), ctx=_CTX).resolve(
         loop,
         lambda fp: next(iter_leaves(fp.options)),
     )
@@ -151,7 +151,7 @@ def test_split_workspace_preserves_output_axis_order(monkeypatch, free_order) ->
     )
     graph.inputs, graph.outputs = ["a", "b"], ["out"]
     monkeypatch.setenv("EMMY_REDUCE", "g2k")
-    result, _ = _resolve(["lowering/tile"], graph)
+    result, _ = _resolve(["tile/lift", "tile/cut", "tile/schedule"], graph)
     partial = result.nodes["out__partial"]
     assert tuple(dim.as_static() for dim in partial.output.shape) == (2, 4, 64, 256)
     # The piece is formed as its own kernel, which names its axes afresh: the tile axes are told by extent.
@@ -365,7 +365,7 @@ def test_sweep_resident_head_fold_refuses_the_split(monkeypatch) -> None:
     from emmy.compiler.ir.stmt import Assign, Load, Write
     from emmy.compiler.ir.tile import OutputSpec, Placement
     from emmy.compiler.ir.tile.ops import head
-    from emmy.compiler.pipeline.passes.lowering.tile._split import _projection_refusal, split_forks
+    from emmy.compiler.pipeline.passes.tile._split import _projection_refusal, split_forks
     from tests.compiler.terms import projection, reduction, slab
 
     # The fold reads the prologue value ``c[j]`` as its own slab operand, and that read indexes the

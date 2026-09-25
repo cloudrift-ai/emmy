@@ -45,5 +45,5 @@ def build_merged_region(graph: Graph, region: set[str], live_outputs: tuple[str,
         sub.add_node(node.op, list(node.inputs), outputs=node.outputs, node_id=nid)
     sub.outputs = list(live_outputs)
 
-    result = splice_graph(sub, surface_unfusable=True)
+    result = splice_graph(sub)
     return result[0] if result is not None else None

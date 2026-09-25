@@ -47,7 +47,7 @@ def test_checkpoint_format_names_stop_at_frontend_decomposition() -> None:
 
 
 def test_lowering_tile_does_not_import_kernel_ir() -> None:
-    """``lowering/tile/*.py`` may not import from ``ir.kernel.ir``.
+    """``tile/**/*.py`` may not import from ``ir.kernel.ir``.
 
     The Tile-IR / Kernel-IR boundary is: Tile passes encode scheduling
     *decisions* (``StagePolicy``, ``AsyncWait``, ``WarpSpecialize``);
@@ -64,20 +64,20 @@ def test_lowering_tile_does_not_import_kernel_ir() -> None:
     2. you're in the wrong directory — Kernel-IR-emitting passes live
        under ``lowering/kernel/``.
     """
-    tile_dir = _REPO_ROOT / "emmy" / "compiler" / "pipeline" / "passes" / "lowering" / "tile"
-    assert tile_dir.is_dir(), f"lowering/tile/ not found at {tile_dir}"
+    tile_dir = _REPO_ROOT / "emmy" / "compiler" / "pipeline" / "passes" / "tile"
+    assert tile_dir.is_dir(), f"tile/ not found at {tile_dir}"
     forbidden = "from emmy.compiler.ir.kernel"
     offenders: list[str] = []
-    for py in sorted(tile_dir.glob("*.py")):
+    for py in sorted(tile_dir.rglob("*.py")):
         text = py.read_text()
         for lineno, line in enumerate(text.splitlines(), start=1):
             if forbidden in line:
                 offenders.append(f"{py.relative_to(_REPO_ROOT)}:{lineno}: {line.strip()}")
-    assert not offenders, "lowering/tile/*.py must not import from ir.kernel — layering violation.\n" + "\n".join(offenders)
+    assert not offenders, "tile/**/*.py must not import from ir.kernel — layering violation.\n" + "\n".join(offenders)
 
 
 def test_lowering_tile_does_not_import_kernel_passes() -> None:
-    """``lowering/tile/**/*.py`` may not import from the ``lowering/kernel`` pass layer.
+    """``tile/**/*.py`` may not import from the ``lowering/kernel`` pass layer.
 
     The tile layer (``enumeration`` + ``assembly`` + ``split``) runs ABOVE the
     kernel pass layer; a tile pass importing ``lowering.kernel`` is a back-edge in
@@ -89,8 +89,8 @@ def test_lowering_tile_does_not_import_kernel_passes() -> None:
     If this fires: move the shared helper into a ``lowering/`` root module and import
     it there from both layers, rather than reaching down into ``lowering/kernel``.
     """
-    tile_dir = _REPO_ROOT / "emmy" / "compiler" / "pipeline" / "passes" / "lowering" / "tile"
-    assert tile_dir.is_dir(), f"lowering/tile/ not found at {tile_dir}"
+    tile_dir = _REPO_ROOT / "emmy" / "compiler" / "pipeline" / "passes" / "tile"
+    assert tile_dir.is_dir(), f"tile/ not found at {tile_dir}"
     forbidden = "emmy.compiler.pipeline.passes.lowering.kernel"
     offenders: list[str] = []
     for py in sorted(tile_dir.rglob("*.py")):
@@ -98,7 +98,7 @@ def test_lowering_tile_does_not_import_kernel_passes() -> None:
             if forbidden in line and "import" in line:
                 offenders.append(f"{py.relative_to(_REPO_ROOT)}:{lineno}: {line.strip()}")
     assert not offenders, (
-        "lowering/tile/**/*.py must not import from lowering/kernel — back-edge in the pass DAG.\n"
+        "tile/**/*.py must not import from lowering/kernel — back-edge in the pass DAG.\n"
         "Shared structural predicates live in lowering/_predicates.\n" + "\n".join(offenders)
     )
 
@@ -133,8 +133,8 @@ _KERNEL_DIR = _REPO_ROOT / "emmy" / "compiler" / "pipeline" / "passes" / "loweri
 # kernel pass importing any of these is reaching above assemble to (re-)make a
 # scheduling decision instead of reading a stamped fact off the ``TileOp``.
 _FORBIDDEN_IMPORTS = (
-    "lowering.tile.enumeration",
-    "lowering.tile.split",
+    "passes.tile.enumeration",
+    "passes.tile.split",
 )
 
 # Schedule-decision functions (offer enumeration / algebra classifiers). A

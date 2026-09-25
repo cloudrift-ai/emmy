@@ -206,8 +206,25 @@ split per target. A static-only release is accepted
 only when the same env proves that no wider or symbolic path is reachable. The resulting working file is consumed
 directly by `tune --golden PATH` and verified by `run --golden PATH [--realization NAME]`.
 
+`emmy golden check [PATH…]` names the stored targets of a golden that a fresh lowering of its own programs no longer
+writes. It is two existing commands diffed per traced program: `emmy golden kernels PATH --program N` prints the Loop
+IR pool the golden stores, sorted by output set, and `emmy compile --golden PATH --program N --ir loop -o fresh.yaml`
+writes the same pool lowered fresh from the stored program (a `.yaml` output path is the wire a golden stores, for
+`--ir torch` the traced program and for `--ir loop` the kernel pool; any other path gets the readable listing). The
+check restricts the diff to the targets the file stores. `emmy golden restamp [PATH…]` rewrites the golden onto that
+lowering; `check` and `restamp` default to every repository golden, none of the three needs a card, and the
+`refresh-golden` skill is the flow around them. What a restamp keeps per row is decided in
+`compiler/pipeline/search/restamp.py`: a measurement survives only when the row's kernel renders the same CUDA source
+from the fresh Loop IR, otherwise the row becomes a proposal. A row naming the target takes the fresh target's
+identity; a row naming a piece of the target's cut or split set keeps its own and survives only if the fresh set
+still mints that piece. A row that no longer decodes, a row whose kernel no fresh kernel writes, and a kernel-set row
+whose members all lost their measurements are dropped and named. The command never deletes a file: one nothing survives
+in is left alone and reported. The lowering behind the check, the restamp and `emmy trace`'s inventory is one function
+(`working_golden.lowered_kernels`), and every command that reads a golden by path loads it through
+`golden.load_golden`, which validates a repository golden strictly and anything else as a working file.
+
 **One golden flag pair on every command.** `--golden PATH` names a golden YAML (working or canonical) on `run`,
-`compile`, `tune`, `serve` and `eval golden`: its MEASURED rows are the golden evidence that command deploys from,
+`compile`, `tune`, `serve`, `generate` and `eval golden`: its MEASURED rows are the golden evidence that command deploys from,
 instead of the repository's per-card goldens, joining the tune DB's rows in the one measured-evidence index the
 greedy pick reads (`search.golden.records_override` in-process; `EMMY_GOLDEN_FILE` for the vLLM child `serve`
 spawns, together with the precision regime the file's rows share — `EMMY_FAST_MATH` and friends — because a row
@@ -257,7 +274,7 @@ event loop, backend-slot queue, DB, and prior, so a file of one-kernel trace ent
 When the file has multiple targets, `--dump-dir` receives one stable indexed subdirectory per target; `--output` is
 rejected because a single CUDA-IR path cannot represent several independent results. The command also resolves and
 rejects any `--golden PATH` inside a canonical repository tree — recipe-local `golden/` or model-agnostic
-`search/goldens/` — including symlink aliases.
+`search/golden/` — including symlink aliases.
 With `--bench`, each target's `62_kernel_bench.json` records whether an eager reference was available and the
 non-fatal accuracy verdict alongside the deployable O3 timings. A null verdict proves correctness only when the
 reference-available field is true; reference-free Loop slices remain timing evidence rather than accuracy evidence.
@@ -537,6 +554,11 @@ Both `deploy local` and `deploy ssh` auto-detect the target GPU by scanning PCI 
 
 ### `emmy serve`
 
+`--generate --native` selects the experimental Rust text server. Its launcher prepares or reuses a checkpoint-owned
+bundle and executes a prebuilt binary. Native arguments are validated separately; vLLM forwarding remains the default.
+See the [native serving contract](../serving/native/ARCHITECTURE.md) for supported options and preparation controls.
+
+
 Serves an embedding model (or a generative chat model via `EmmyGenModel` with `--generate` — `--runner generate` +
 fp16) through vLLM with the emmy plugin flags baked in (`serving/` plugin; needs the `serving` extra). Unrecognized flags forward to `vllm serve`; tokens after a literal `--` forward verbatim (emmy's
 own flags are otherwise extracted wherever they appear — argparse REMAINDER swallows everything after MODEL, so the
@@ -564,7 +586,7 @@ misses). Under `--speculative-config` the ladder is derived from the resulting
 round-up to that multiple cannot push a step's padded width past the decode bucket and off the static decode twin
 (`serving/ARCHITECTURE.md` carries the rule and its invariant). The emmy generative arm also defaults
 `--gpu-memory-utilization` to **0.97** (its
-cupy residents are invisible to vLLM's torch-only profiler, so the 0.90 line can fail the min-KV fit at long
+runtime residents are invisible to vLLM's torch-only profiler, so the 0.90 line can fail the min-KV fit at long
 model lens; stock keeps 0.90) and `--max-num-batched-tokens` to **the runner's prefill capacity + the decode
 bucket** — the bucket-sized rider headroom is covered by the chunk+decode twin row split
 (`serving/ARCHITECTURE.md`), so full chunk steps keep carrying their decode riders; an explicit value past that cap

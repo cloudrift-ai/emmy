@@ -16,8 +16,8 @@
 - :mod:`.dump` — ``CompilerDump`` artifact collector + ``on_pass``
   dispatch that routes post-pass dumps by pass name.
 - :mod:`.passes` — pass directories grouped by IR level:
-  ``frontend/{decomposition,optimization}``, ``loop/{lifting,fusion}``,
-  ``lowering/{tile,kernel,cuda}``. Each leaf contains ``NNN_<name>.py``
+  ``frontend/{decomposition,optimization}``, ``loop/{lifting,fusion,canonicalize,stamp}``,
+  ``tile/{lift,cut,schedule}``, ``lowering/{kernel,cuda}``. Each leaf contains ``NNN_<name>.py``
   rule modules picked up by ``Pass.load``.
 """
 
@@ -43,7 +43,10 @@ from emmy.compiler.pipeline.search import (
 # and tests should reference these rather than re-listing pass names.
 TENSOR_PASSES = ["frontend/decomposition", "frontend/optimization"]
 LOOP_PASSES = [*TENSOR_PASSES, "loop/lifting", "loop/fusion", "loop/canonicalize", "loop/stamp"]
-TILE_PASSES = [*LOOP_PASSES, "lowering/tile"]
+# The tile passes: Loop IR to an unmapped tile, the kernel-set cuts to their fixpoint, then a schedule per
+# kernel. A pipeline that ends after ``tile/cut`` shows the cuts a kernel offers without scheduling any piece.
+TILE_LOWERING = ["tile/lift", "tile/cut", "tile/schedule"]
+TILE_PASSES = [*LOOP_PASSES, *TILE_LOWERING]
 KERNEL_PASSES = [*TILE_PASSES, "lowering/kernel"]
 CUDA_PASSES = [*KERNEL_PASSES, FINAL_LOWERING_PASS]
 # The lowering passes alone (``tile → kernel → cuda``): what a kernel body enters, never the Loop passes.
@@ -66,6 +69,7 @@ __all__ = [
     "RuleSkipped",
     "Search",
     "TENSOR_PASSES",
+    "TILE_LOWERING",
     "TILE_PASSES",
     "TuningSearch",
     "_strip_rule_prefix",

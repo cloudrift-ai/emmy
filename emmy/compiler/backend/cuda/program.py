@@ -835,7 +835,7 @@ def benchmark_program(
 
     ``run_timeout_s`` bounds the iter loop on **accumulated GPU time**
     (sum of per-launch CUDA-event measurements), not wall-clock — so
-    Python/cupy framing overhead doesn't shrink the budget for tiny
+    Python framing overhead doesn't shrink the budget for tiny
     ops. Catches the gap left by the per-launch ``config.kernel_timeout_ms()``
     watchdog: a variant where every launch fits under the watchdog but
     summed across iters exceeds the budget (e.g. 999 ms × N iters).
@@ -1046,7 +1046,7 @@ class _AsyncBenchWorker:
     respond within ``wall_timeout_s``, the parent SIGKILLs it. The dirty CUDA stream
     (and any kernels still queued behind a hung launch) dies with the process, so the
     *next* bench starts on a clean device — fixing the "autotune hangs on the variant
-    AFTER a bench_fail" pathology. The worker imports cupy lazily on its first
+    AFTER a bench_fail" pathology. The worker loads the runtime lazily on its first
     request, so spawn cost is just Python startup (~0.2 s).
 
     Drives the ``_bench_worker`` protocol (``<8-byte LE length><pickle>``, both

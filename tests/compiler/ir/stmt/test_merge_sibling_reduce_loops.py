@@ -290,6 +290,70 @@ def test_unify_keeps_apart_blocks_at_different_offsets() -> None:
     assert len({s.axis.name for s in out if isinstance(s, Loop)}) == 2
 
 
+def _packed_stream_reduce(name: str, index, w_buffer: str = "W") -> Loop:
+    """A reduce loop ``acc += W[k] * bits[index(k)]`` reading one byte-packed stream ``bits`` — the
+    shape a 4-bit activation is read in, where the axis reaches the index through div and mod.
+    ``w_buffer`` names the weight, so two instances compute distinct values."""
+    return Loop(
+        axis=Axis(name, 256),
+        body=(
+            Load(name=f"w_{name}", input=w_buffer, index=(Var(name),)),
+            Load(name=f"v_{name}", input="bits", index=(index(Var(name)),)),
+            Assign(name=f"m_{name}", op="multiply", args=(f"w_{name}", f"v_{name}")),
+            Accum(name=f"acc_{name}", value=f"m_{name}"),
+        ),
+    )
+
+
+def _two_codes_per_byte(k):
+    """``(k / 16) * 8 + (k % 16) / 2`` — the byte holding logical element ``k`` of a stream packed
+    two codes per byte in blocks of 16."""
+    lit = lambda n: Literal(n, "int")  # noqa: E731
+    return BinaryExpr("+", BinaryExpr("*", BinaryExpr("/", k, lit(16)), lit(8)), BinaryExpr("/", BinaryExpr("%", k, lit(16)), lit(2)))
+
+
+def test_unify_groups_loops_indexed_through_one_composite_expression() -> None:
+    """A packed stream is read through div and mod of the axis, which is not affine in it. Two
+    siblings reading one stream through the same expression of their own axis walk the same
+    dimension and unify, the same way bare and affine readers do."""
+    out = unify_sibling_reduce_axes(
+        Body((_packed_stream_reduce("i", _two_codes_per_byte), _packed_stream_reduce("j", _two_codes_per_byte)))
+    )
+
+    names = {s.axis.name for s in out if isinstance(s, Loop)}
+    assert len(names) == 1, "composite siblings over one packed stream index the same dimension"
+
+
+def test_unify_keeps_apart_different_composite_expressions() -> None:
+    """The composite key is the whole expression: ``bits[k / 16]`` and ``bits[k % 16]`` both
+    mention the axis at the same position and walk different things, so they stay distinct."""
+    lit = Literal(16, "int")
+    out = unify_sibling_reduce_axes(
+        Body(
+            (
+                _packed_stream_reduce("i", lambda k: BinaryExpr("/", k, lit), "Wg"),
+                _packed_stream_reduce("j", lambda k: BinaryExpr("%", k, lit), "Wu"),
+            )
+        )
+    )
+
+    assert len({s.axis.name for s in out if isinstance(s, Loop)}) == 2
+
+
+def test_unify_then_merge_collapses_two_readers_of_one_packed_stream() -> None:
+    """After unification the two packed-stream siblings merge into one loop with both
+    accumulators, which is the two-channel contraction a fused gate/up pair over a 4-bit
+    activation lowers to."""
+    out = normalize_body(
+        Body((_packed_stream_reduce("i", _two_codes_per_byte, "Wg"), _packed_stream_reduce("j", _two_codes_per_byte, "Wu")))
+    )
+
+    loops = [s for s in out if isinstance(s, Loop)]
+    assert len(loops) == 1
+    assert len([s for s in loops[0].body if isinstance(s, Accum)]) == 2
+    assert len([s for s in loops[0].body if isinstance(s, Load) and s.input == "bits"]) == 1, "the shared stream read is one load"
+
+
 def test_merge_skips_when_between_stmt_def_used_by_second_loop() -> None:
     """A pure stmt between the two loops defines an SSA name the second
     loop's body reads — merging would move the read above the def."""

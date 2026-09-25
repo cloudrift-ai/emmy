@@ -2,7 +2,7 @@
 
 Rules that apply to EVERY pass in this tree (`frontend/`, `loop/`, `lowering/`). Per-dialect details live in
 [`../ARCHITECTURE.md`](../ARCHITECTURE.md) (pass order, knob table, fork semantics). The **tile-lowering** phase
-(`lowering/tile/`) is the canonical instance of the invariant below — a **purely algebraic moveset, no
+(`tile/`) is the canonical instance of the invariant below — a **purely algebraic moveset, no
 specializations**: it dispatches on the fold's derived readings (`axis is None` / `as_contraction()` for the
 schedule walk; a loop is a reduce iff its body carries an accumulator), never on a named shape
 (matmul / pointwise / attention) —
@@ -135,6 +135,10 @@ taken alone may promote its own, and the fork asks `TileOp`'s own `promoted_swee
 Where the piece would promote nothing the kernel does not already, splitting buys a second launch and no grid, and the
 seam keeps its workspace reading — the pointwise NVFP4 quantize, whose branches own a store but hold no contraction
 reading it.
+The producer piece is minted with its workspace axes as its store's SWEEP and an EMPTY placement, so the same rank
+rule decides its grid: an axis the piece's own reduce does not read is that reduce's row statistic, and binding it
+folds the statistic once per output cell. A free axis per workspace dimension did exactly that, and a materialized
+RMSNorm + rotation cone launched one cooperative block per element.
 A two-pass softmax's row statistics are not seams of this tree: the twist carries them as
 components of ONE fold, so there is no statistic edge to materialize, and the score contraction and the fold itself
 are the seams that stand there. The unpinned fork offers every seam as its own structural arm. Bare `PLACE=cut`
@@ -284,11 +288,13 @@ has byte-transport siblings beside the fill: a byte-slab weight cone — packed 
 K-block scale — whose bytes copy verbatim as a raw byte slab while only its block scales are compute-filled, so
 `resolve_warp_stage` answers for it
 and the cp.async and TMA rows sit beside the fill's depths as fork siblings. Which reading applies is a fact about
-the NODE, not about the transport a pin names — a multi-channel product carrying a cp.async or TMA pin still RAISES,
-since the single-sided byte-transport emitters carry one channel — and a shape the byte slab declines keeps the
-generic reading, which computes the same values through the fill. Where BOTH operands are packed over one block
-extent the native fp4 mma cell multiplies those values as stored and applies their raw block scales itself: that
-node's atom is read off the pair rather than off the A edge's leaf dtype, and its stored slabs copy verbatim — only
+the NODE, not about the transport a pin names. The byte-slab reading takes any channel arity over one A: a
+gate/up edge over two packed weights stages one bits slab and one scale slab per channel, all channels sharing
+one block extent and one bytes-per-element (a node whose channels disagree keeps the generic reading). A shape the
+byte slab declines keeps the generic reading, which computes the same values through the fill. Where BOTH operands
+are packed over one block extent the native fp4 mma cell multiplies those values as stored and applies their raw
+block scales itself: that node's atom is read off the pair rather than off the A edge's leaf dtype, and its stored
+slabs copy verbatim — only
 an activation whose values this kernel computes takes a fill underneath them. That reading takes ANY channel arity:
 the shared A stages once and each product channel adds its own codes and block-scale slab (`2 + 2N` in all), so a
 fused gate⊗up MLP edge is the two-channel case of the same cell rather than a shape it declines. The fp8 (k32)
@@ -371,7 +377,7 @@ the sites' own atoms, not off the rows, so a pin naming the scalar tier cannot e
 from the rows it does enumerate.
 
 **The session kernel cache.** Greedy lowering of one fused kernel is a function — Loop-IR program in,
-lowered `KernelOp` out — and `pipeline/kernel_cache.py` memoizes it at its boundary: `lowering/tile/005`
+lowered `KernelOp` out — and `pipeline/kernel_cache.py` memoizes it at its boundary: `tile/lift/005`
 fetches a finished lowering (io rebound through `Stmt.rename_buffers`) before the lift, and
 `lowering/cuda/001` harvests every single-kernel lowering just before the per-graph negotiations
 (zero-init delegation, rendering) that deliberately sit below the boundary. Caller-owned on
@@ -465,18 +471,17 @@ trait — an e2m1 code decodes through a value-table gather. Nothing offers the 
 widest of several siblings; it is the only one left.
 
 Consumer count decides nothing. One consumer or three reach the same shape: the quantize is a kernel of its own and
-the codes sit in memory. The buffer's readers leave the region together with everything downstream of them, so the
-remainder keeps no holes — a hole would make the merged node depend on a node that depends on it.
+the codes sit in memory. The buffer's readers begin another region, with everything downstream of them, so no region
+has a hole — a hole would make the merged node depend on a node that depends on it.
 
-Whatever is left feeding only what departed leaves with it. A cut materializes every buffer crossing it, so a survivor
-whose entire readership is on the far side buys nothing: its value is stored once and read once, and it is stored at
+A loop whose every reader sits in one other region joins it. A cut materializes every buffer crossing it, so a loop
+read only from the far side buys nothing where it is: its value is stored once and read once, and it is stored at
 whatever shape it happens to have. The quantized activation's scale is the case that shows why this matters. Its
 per-consumer reconstruction multiplies the block scale by the per-tensor one, rounds the product to f16 and broadcasts
 it across the block; left on the producer's side, that broadcast is what the boundary stores — one value per logical
 element where its source held one per block. Released, the reconstruction sits beside its matmul and the boundary falls
-on the raw block scales instead, which is the narrower buffer and the one a consumer can index block-wise. Two nodes
-never leave this way: one writing the packed buffer itself, since that buffer is the boundary the refusal exists to
-place, and one read from outside the region, whose value has to be stored for those readers regardless.
+on the raw block scales instead, which is the narrower buffer and the one a consumer can index block-wise. The loop
+writing the packed buffer itself never leaves, since that buffer is the boundary the refusal exists to place.
 
 That is a boundary-placement rule, not a lowering-driven exception. It asks only which side a value's readers are on,
 and it is what lets a contraction see a packed operand's two scale levels — the raw per-block byte and the k-invariant
@@ -484,12 +489,17 @@ per-tensor factor — as separate loads, the shape `ir/schedule/packing.py` read
 requires. Materializing the fused product instead does not merely cost bytes; it erases the block structure from the
 consumer's index, and a reading that cannot prove k-block invariance declines.
 
-There is one fusion pass and one fixpoint. One rewrite takes the maximal downstream Loop region: non-reconvergent
-consumers become output ports of one multi-output `LoopOp`, and all terminal Writes seed one splicer worklist. The
-worklist's shared binding table emits an equal upstream demand once across every port, so fusion order cannot duplicate
-a shared producer or change the recognized computation. Merge order may temporarily place a contraction inside
-another reduction; the later legal merge is still taken. That maximal result is final: no later placement rule cuts
-it apart.
+There is one fusion pass and one fixpoint, and the graph decides every region before any is merged
+(`010_merge_loop_ops.regions`). Some nodes no region holds: a kernel that carries a state, an ordered prefix output
+(a scan, whose Write observes a running accumulator) and any op that is not a loop. Two loops share a region when the
+same such nodes — and the same packed producers — lie upstream of both and a chain of loop edges joins them; equal
+upstream boundaries are what keep a region convex, so the merged kernel never depends on a node that depends on it.
+One rewrite splices one region: non-reconvergent consumers become output ports of one multi-output `LoopOp`, and all
+terminal Writes seed one splicer worklist, whose shared binding table emits an equal upstream demand once across every
+port. The partition is a function of the graph alone, so the kernel set is the same whatever order the producers are
+visited in — what a walk that grew a region from each producer and shrank it on a refusal could not promise. A
+region the splicer cannot build is an error (`ir/ARCHITECTURE.md`, the construction bound), never a smaller region.
+That maximal result is final: no later placement rule cuts it apart.
 
 **Measured evidence this rule is spending.** Dropping the work-growth cap and the merge-ordering pass is a deliberate
 trade: both existed because of a measurement, and neither measurement has been retaken. A merge that splices a compute
@@ -609,17 +619,23 @@ chain `f_j(f_{j−1}(… f_1(0)))` as its own operand cone, so the state is re-d
 `j`'s stored.
 
 `loop/fusion/005_roll_recurrence` rolls it BEFORE fusion inlines it, while the structure is still plain. The states
-are a chain of nodes of one shape — the same body once load anchors are taken out — each depending on the last. A
-step is what lies between two of them, `ancestors(S_{j+1}) − ancestors(S_j)`; the first step is what the first state
-needs beyond what every step reads, and it must start from a zero buffer, the carrier's seed. Nothing about the step
-is assumed: each step is spliced into one body by the fusion rule's own splicer under step-independent buffer names,
-the strides are read off the first two, and the first step advanced by `j` strides must NORMALIZE to step `j`'s body
-for every `j`. Only then is the chain replaced, by one kernel that carries the state (`Carry`, `ir/ARCHITECTURE.md`)
-and which stores what each step kept — the state, and any other buffer of the step read outside it — with the step as
-the leading axis, and by one slice of those stores per replaced buffer, which ordinary fusion then inlines into its
-reader. A chain that is not one step at a stride is left alone: a recurrence rolled wrongly is a wrong answer, not a
-slow kernel. A kernel that carries a state is a fusion region of its own (`carries_state`): the splice inlines a
-store into its readers, and a state is stored once per step.
+are a chain of nodes of one shape — the same body once its integer literals are taken out (`Body.literal_free_key`:
+load anchors, mask bounds, static loop extents) — each depending on the last. A step is what lies between two of
+them, `ancestors(S_{j+1}) − ancestors(S_j)`; the first step is what the first state needs beyond what every step
+reads, and its state is the seed: the one buffer of the state's shape whose ancestry, taken out, leaves a first step
+shaped like every later one — the zeros the loop was seeded with, or the tensor it started from (a softmax before a
+Sinkhorn), which the carrier reads before its first step (`Carry.seed`). Nothing about the step is assumed: each
+step is spliced into one body by the fusion rule's own splicer under step-independent buffer names, the literals'
+deltas are read off the first two, and the first step advanced `j` times must spell step `j`'s body for every `j`. A
+reduction whose extent grows with the step runs at its widest in the rolled body and folds its identity past the
+step's own bound — the mask the tracer itself spells a partial reduction with. Only then is the chain replaced, by
+one kernel that carries the state (`Carry`, `ir/ARCHITECTURE.md`) and which stores what each step kept — the state,
+and any other buffer of the step read outside it — with the step as the leading axis, and by one slice of those
+stores per replaced buffer, which ordinary fusion then inlines into its reader. A chain whose states alternate two
+bodies (a row step, then a column step) rolls as one step of two; a chain that is not one step advanced is left
+alone: a recurrence rolled wrongly is a wrong answer, not a slow kernel. What the roller leaves unrolled, fusion
+splices whole, up to the splicer's construction bound. A kernel that carries a state is a fusion region of its own
+(`carries_state`): the splice inlines a store into its readers, and a state is stored once per step.
 
 ## Kernel boundaries after maximal fusion
 

@@ -68,7 +68,7 @@ def _patch_records(monkeypatch, names):
     from emmy.compiler.pipeline.search import golden
 
     rows = _records(names)
-    monkeypatch.setattr(golden, "load_golden_file", lambda _path: {})
+    monkeypatch.setattr(golden, "load_golden_file", lambda _path, **_: {})
     monkeypatch.setattr(golden, "load_golden_records", lambda _document: rows)
     return rows
 
@@ -120,7 +120,7 @@ def test_golden_walk_without_seeds_benches_the_row_pricing_the_whole_target(monk
         row("post16.k_a.1111.m16.cccc", True, 7.0),
     ]
     rows += [row("pre1.k_b.2222.m1.dddd", False, 30.0), row("pre1.k_b.2222.m1.eeee", False, 20.0)]
-    monkeypatch.setattr(golden, "load_golden_file", lambda _path: {})
+    monkeypatch.setattr(golden, "load_golden_file", lambda _path, **_: {})
     monkeypatch.setattr(golden, "load_golden_records", lambda _document: rows)
     calls = []
     monkeypatch.setattr(run_mod, "_handle_run_once", calls.append)
@@ -273,7 +273,7 @@ def test_golden_document_is_parsed_once_for_every_target(monkeypatch, tmp_path):
 
     loads = []
     document = {"configs": []}
-    monkeypatch.setattr(golden, "load_golden_file", lambda _path: loads.append(_path) or document)
+    monkeypatch.setattr(golden, "load_golden_file", lambda _path, **_: loads.append(_path) or document)
     monkeypatch.setattr(golden, "load_golden_records", lambda _document: _records(("a", "b", "c")))
     calls = []
     monkeypatch.setattr(run_mod, "_handle_run_once", calls.append)

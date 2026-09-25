@@ -4,7 +4,7 @@ One :class:`TileOp` is the article's reduction skeleton — ``project ∘ reduce
 scheduled but not yet bound to hardware threads. It sits between Loop IR (pure iteration) and
 Kernel IR (threads / smem):
 
-    Loop IR ──lowering/tile──▶ Tile IR ──lowering/kernel──▶ Kernel IR
+    Loop IR ──tile/*──▶ Tile IR ──lowering/kernel──▶ Kernel IR
 
 The whole point of the layer is the article's thesis: **the schedule is separate from the
 combine.** The combine is not defined here — it is the :class:`~emmy.compiler.ir.pure.fold.Fold`
@@ -212,11 +212,15 @@ def promoted_sweep(op, output_specs: tuple[OutputSpec, ...], *, free: tuple[Axis
     row's statistic, evaluated once for the whole sweep — softmax's maximum, rms-norm's sum of
     squares. Binding the sweep would recompute it per output element, so that sweep stays a loop.
 
+    A STATIC UNIT axis promotes on neither ground and still binds: it spreads the launch over one
+    cell, so it replicates nothing whatever the term does, and it is the geometry a contraction's
+    ``(m, n)`` pair is read off — sweeping it drops an elided matrix row.
+
     Three readers, one rule. :meth:`TileOp.__post_init__` applies it. The cut pass asks it of a
     candidate piece, to decide whether peeling an output off a multi-output kernel would give that
     piece a grid pair the fused kernel cannot have. And the full-projection cut reads its refusal
     from the other side: a reduce this will not bind past is one that cut hands its own kernel
-    (both in ``lowering/tile/_cut.py``).
+    (both in ``tile/_cut.py``).
     """
     if not output_specs:
         return set()
@@ -238,7 +242,8 @@ def promoted_sweep(op, output_specs: tuple[OutputSpec, ...], *, free: tuple[Axis
     return {
         name
         for name in shared
-        if any(any(name in edge.free_axes for edge in con.operands) for con in contractions)
+        if (rides[0][name].is_static and rides[0][name].as_static() == 1)
+        or any(any(name in edge.free_axes for edge in con.operands) for con in contractions)
         or (all(name in reduce.free_axes for reduce in reduces) and (reduces or not free))
     }
 

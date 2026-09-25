@@ -20,7 +20,7 @@ between the eager forward and the emmy comparison.
 
 Individual backends may do different internal lowerings: the CUDA backend
 calls ``run_pipeline`` through the full chain (decomposition →
-optimization → fusion → lowering/tile → lowering/cuda), the Loop
+optimization → fusion → tile → lowering/cuda), the Loop
 backend stops after fusion, and the numpy backend walks the graph
 directly. From the caller's perspective the interface is identical.
 """

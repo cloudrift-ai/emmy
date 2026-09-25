@@ -56,6 +56,7 @@ def _add_own_flags(parser, *, suppress_defaults: bool) -> None:
     def d(value):
         return argparse.SUPPRESS if suppress_defaults else value
 
+    parser.add_argument("--native", action="store_true", default=d(False), help="Use the experimental native text server with --generate.")
     parser.add_argument(
         "--stock", action="store_true", default=d(False), help="Serve stock vLLM kernels instead of the emmy plugin (A/B baseline)."
     )
@@ -71,7 +72,7 @@ def _add_own_flags(parser, *, suppress_defaults: bool) -> None:
         default=d(False),
         help="Start the server, run `vllm bench serve` against it, print results, shut down.",
     )
-    parser.add_argument("--max-concurrency", type=int, default=d(32), help="Bench client concurrency (with --bench).")
+    parser.add_argument("--max-concurrency", type=int, default=d(None), help="Bench client concurrency (with --bench).")
     parser.add_argument("--num-prompts", type=int, default=d(256), help="Bench request count (with --bench).")
     parser.add_argument("--random-input-len", type=int, default=d(512), help="Bench tokens per request (with --bench).")
     parser.add_argument(
@@ -481,10 +482,10 @@ def _golden_regime_env(golden: str, env: dict) -> dict:
     pin at another value fails the boot instead of being overridden."""
     from emmy import config as emmy_config  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import get  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden import load_golden_file, load_golden_records, shared_regime_pins  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import load_golden, load_golden_records, shared_regime_pins  # noqa: PLC0415
 
     out = {}
-    for name, value in shared_regime_pins(load_golden_records(load_golden_file(golden))).items():
+    for name, value in shared_regime_pins(load_golden_records(load_golden(golden))).items():
         key = emmy_config.knob_var(name)
         if key in env and get(name.split("@", 1)[0]).parse(env[key]) != value:
             logger.error("%s: its rows were measured under %s=%s, but the environment pins %s=%r", golden, name, value, key, env[key])
@@ -497,6 +498,10 @@ def handle_serve(args):
     from emmy.compiler.loader.safetensors import split_revision  # noqa: PLC0415
 
     vllm_args = _split_own_flags(args)  # re-parses own flags placed after MODEL into args
+    if args.native:
+        from emmy.serving.native.launch import launch
+
+        return launch(args, vllm_args)
     # ``<repo>@<revision>`` is emmy's pin spelling — ``compile``, ``pull``, the gen runner and the
     # twins all read it, and a repo publishing one quantization rung per branch is a DIFFERENT
     # model on each, so the default branch is never a safe stand-in. vLLM takes the two apart, and
@@ -511,7 +516,7 @@ def handle_serve(args):
     bench_cmd = build_bench_cmd(
         model,
         port=port,
-        max_concurrency=args.max_concurrency,
+        max_concurrency=args.max_concurrency if args.max_concurrency is not None else 32,
         num_prompts=args.num_prompts,
         random_input_len=args.random_input_len,
         seed=args.bench_seed,
