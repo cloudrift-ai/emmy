@@ -248,7 +248,7 @@ def _persisted_placement_child() -> Graph:
     """Return one unscheduled child as a Tile dump round-trip would load it."""
     fused = Pipeline.build(LOOP_PASSES).run(_placement_route_graph(), ctx=Context.from_target((8, 0)), db=SearchDB())
     with pinned_knobs({"PLACE": "cut", "REDUCE": ""}):
-        pieces = Pipeline.build(["tile/lift"], select={"lift", "cut"}).run(fused, ctx=Context.from_target((8, 0)), db=SearchDB())
+        pieces = Pipeline.build(["tile/lift", "tile/cut"], select={"lift", "cut"}).run(fused, ctx=Context.from_target((8, 0)), db=SearchDB())
     producer = next(node.id for node in pieces.nodes.values() if isinstance(node.op, TileOp) and "__place_" in node.op.name)
     child = single_node_graph(pieces, producer)
     return Graph.from_dict(json.loads(json.dumps(child.to_dict(), default=str)))
