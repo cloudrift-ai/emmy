@@ -1293,13 +1293,14 @@ per decision on the path, the piece's rows as receipts listing them in `kernel_s
 writes — and nothing else is written that way.
 
 - **What freezes** is `freeze_reason`'s call: an `ok` row on a card the GPU registry knows, at the deployable opt
-  level, in one of the two precision regimes (fast math on, the default, or off — the flags `nvcc.effective_flags`
-  spells under each), that passes the two physical-plausibility checks (`implausible_value_reason`, which reads the
-  row's `bindings` as the size a symbolic axis ran at, and `impossible_kernel_reason`). A failed bench is not a
-  measurement (the tune DB keeps it), and a row a compile imported from a golden file is the file's. The regime gate
-  is what keeps a freeze a fair yardstick: a freeze is the corpus a reported prior number is computed over, so rows
-  from a regime nothing deploys in would put half a card's pools in a lane no one runs. `group_measured` inherits the
-  same filter, and keys its pools by regime, so an analysis over a live DB agrees with one over a freeze.
+  level, that passes the two physical-plausibility checks (`implausible_value_reason`, which reads the row's
+  `bindings` as the size a symbolic axis ran at, and `impossible_kernel_reason`). The fast-math flag alone decides
+  which of the two precision regimes a row is in (`regime_of`), and no other compiler flag is stored or gated on. A
+  failed bench is not a measurement (the tune DB keeps it), and a row a compile imported from a golden file is the
+  file's. The opt-level gate is what keeps a freeze a fair yardstick: a freeze is the corpus a reported prior number
+  is computed over, so rows from a regime nothing deploys in would put half a card's pools in a lane no one runs.
+  `group_measured` inherits the same filter, and keys its pools by regime, so an analysis over a live DB agrees with
+  one over a freeze.
 - **Freezing the same DB twice yields the same bytes**: rows sort by content, and the golden dump is deterministic.
   A file's identity is its bytes: `emmy dataset import` sources its rows as `freeze:<sha256[:12]>` of the file, and
   `commands/dataset.dataset_db` refuses a default dataset DB that does not hold every file of the checked-in freeze,

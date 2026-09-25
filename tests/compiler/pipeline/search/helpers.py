@@ -61,6 +61,7 @@ def kernel_row(identity: str, *, stamps: dict | None = None, name: str | None = 
         loop_ir=wire,
         name=name or f"k_{identity}",
         stamps=dict(F16_MATMUL_STAMPS if stamps is None else stamps),
+        formed=True,
     )
 
 
@@ -102,19 +103,19 @@ def perf_row(
 CARDS = {(12, 0): GPU_5090, (7, 0): "NVIDIA Tesla V100 SXM2 16GB"}
 
 
-def tuned_db(path, cases: tuple[str, ...], *, source: str = "measured") -> SearchDB:
+def tuned_db(path, cases: tuple[str, ...], *, source: str = "measured", us: float = 1.0) -> SearchDB:
     """A DB as a tune of the named realization corpus cases leaves it: every entry filed as a measured row
-    (a stand-in microsecond where the case authors none) through the golden importer, under the registry
+    (``us`` microseconds where the case authors none) through the golden importer, under the registry
     card of the case's capability and the case's own regime, ``source`` on every row."""
     from dataclasses import replace
 
-    from emmy.compiler.context import Context
+    from emmy.compiler.context import FAST_MATH_FLAG, Context
     from emmy.compiler.pipeline.knob import KERNEL_DECISION_FAMILIES, family_of
     from emmy.compiler.pipeline.search.golden_import import import_goldens
     from emmy.compiler.pipeline.search.pins import pinned_knobs
     from tests.compiler.realization import helpers as corpus
 
-    measured = {"emmy_us": 1.0, "reference_us": 1.0, "reference_backend": "corpus"}
+    measured = {"emmy_us": us, "reference_us": us, "reference_backend": "corpus"}
     db = SearchDB(path)
     for case_path in cases:
         case = corpus.load_case(corpus.CASES_DIR / case_path)
@@ -122,7 +123,7 @@ def tuned_db(path, cases: tuple[str, ...], *, source: str = "measured") -> Searc
         regime = {str(name): value for name, value in case.record.pin_map.items() if family_of(str(name)) not in KERNEL_DECISION_FAMILIES}
         with pinned_knobs(regime):
             # Measured at the deployable opt level whatever lane the suite compiles at.
-            flags = "--use_fast_math" if regime.get("FAST_MATH") else ""
+            flags = FAST_MATH_FLAG if regime.get("FAST_MATH") else ""
             ctx = Context.from_target(case.compute_cap, gpu_name=CARDS[tuple(case.compute_cap)], compile_flags=flags)
             import_goldens(db, ctx, records, source=source)
     return db

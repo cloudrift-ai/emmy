@@ -7,15 +7,15 @@ back as the same kernel under the current compiler — the lift, the twist and t
 same exact identity, clustered identity and ``S_*`` stamps — for every kind of kernel the compiler mints, which is
 what the realization corpus lets this assert without a GPU: a fused kernel, the pieces of a placement cut, a
 cross-CTA split's pieces, a nested cut, a twisted attention kernel. The one kind formed from no loop op — a piece
-carved from a twisted tree, whose derived body the lift does not take back — keeps a wire that decodes to its
-identities and is reached through its parent's program instead (``formed`` is false on its row)."""
+carved from a twisted tree, whose derived body the lift does not take back — keeps its derived body, whose buffers
+still say which symbolic dims a measurement of it binds (what ``priced_arms`` projects a parent's sizes onto), and is
+reached through its parent's program instead (``formed`` is false on its row)."""
 
 from __future__ import annotations
 
 import pytest
 
 from emmy.compiler.ir.cuda.ir import CudaOp
-from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.loop_wire import formed_from, kernel_bindings, kernel_tile, kernel_wire, loop_graph_from_wire, symbolic_vars
 from emmy.compiler.pipeline.search.golden import _replay, kernel_identity, lead_of, siblings_of
 from tests.compiler.realization import helpers as corpus
@@ -33,13 +33,6 @@ UNFORMED_CASES = (
     "attention/sdpa-gqa-decode-split-kv.yaml",
     "attention/rmsnorm-qk-sdpa-stat-cut.yaml",
 )
-
-
-def _decoded(wire: dict) -> LoopOp:
-    """The wire's one loop op, bound to the wire's own buffers — what a ``kernel`` row defines."""
-    graph = loop_graph_from_wire(wire)
-    [node] = [node for node in graph.nodes.values() if isinstance(node.op, LoopOp)]
-    return node.op.with_io(graph, node)
 
 
 def _relowered(wire: dict, ctx):
@@ -91,16 +84,14 @@ def test_every_kernel_of_a_set_re_lowers_from_its_wire_to_itself(case_path):
 
 
 @pytest.mark.parametrize("case_path", UNFORMED_CASES)
-def test_a_piece_of_a_twisted_kernel_keeps_a_wire_that_decodes_to_its_identities(case_path):
+def test_a_piece_of_a_twisted_kernel_keeps_a_wire_that_names_its_symbolic_dims(case_path):
     case = corpus.load_case(corpus.CASES_DIR / case_path)
     graph, _taken = corpus.lowered(case, case.context())
     tiles = [kernel_tile(node.op) for node in graph.nodes.values() if isinstance(node.op, CudaOp)]
     unformed = [tile for tile in tiles if formed_from(tile) is None]
     assert unformed, "the case mints a piece the lift cannot form"
     for tile in unformed:
-        wire = kernel_wire(tile)
-        assert _identities(_decoded(wire)) == _identities(tile), tile.name
-        assert symbolic_vars(wire) == set(kernel_bindings(tile)), tile.name
+        assert symbolic_vars(kernel_wire(tile)) == set(kernel_bindings(tile)), tile.name
 
 
 def test_bindings_are_the_hints_a_bench_sizes_a_symbolic_kernel_by():

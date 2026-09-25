@@ -198,11 +198,10 @@ def freeze_path() -> Path:
     per card holding each kernel's definition and its measured rows, identical on any machine that
     has it and re-lowered by the current compiler on import — so two evaluations of two models are
     a fair comparison, and a number in a report is one someone else can reproduce. The tune DB and
-    the online prior's reservoir are neither: both are
-    machine-local, both are rewritten as tuning continues, and the reservoir is additionally a
-    bounded random SAMPLE that churns, so one model evaluated twice on one machine need not
-    score the same. A report names the sources its dataset holds, so a number computed over a
-    freeze says so.
+    the online prior's reservoir are neither: both are machine-local, both are rewritten as tuning
+    continues, and the reservoir is additionally a bounded random SAMPLE that churns, so one model
+    evaluated twice on one machine need not score the same. A report names the sources its dataset
+    holds, so a number computed over a freeze says so.
 
     Advisory, like :func:`tune_db_path`: callers check it exists."""
     override = os.environ.get(FREEZE_DIR)

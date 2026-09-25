@@ -145,7 +145,7 @@ class KernelRow:
     loop_ir: dict
     name: str
     stamps: dict
-    formed: bool = True
+    formed: bool
 
 
 @dataclass(frozen=True)

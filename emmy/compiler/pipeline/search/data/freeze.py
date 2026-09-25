@@ -18,9 +18,10 @@ path, the rows as receipts naming their kernel and listing the entries in ``kern
 records a kernel set, and nothing else is written that way.
 
 What freezes (:func:`freeze_reason`): every ``ok`` CUDA row measured on a card the GPU registry knows, at the
-deployable opt level, in one of the two precision regimes, that passes the physical-plausibility predicates.
-A failed bench is not a measurement; the tune DB keeps it. A row a compile imported from a golden file is
-the file's, and is not frozen again.
+deployable opt level, that passes the physical-plausibility predicates; the fast-math flag decides which of
+the two precision regimes a row is in, and no other compiler flag is stored or gated on. A failed bench is
+not a measurement; the tune DB keeps it. A row a compile imported from a golden file is the file's, and is
+not frozen again.
 
 Freezing the same rows twice yields the same bytes: rows sort by content and the golden dump is
 deterministic. A file's identity is its bytes — ``emmy dataset import`` sources its rows as
@@ -41,52 +42,48 @@ import shutil
 from collections import Counter, defaultdict, deque
 from pathlib import Path
 
+from emmy.compiler.context import FAST_MATH_FLAG
+from emmy.compiler.loop_wire import intern_wire
 from emmy.compiler.pipeline.knob import METADATA_PREFIXES
 from emmy.compiler.pipeline.search.db import KernelRow, PerfRow, SearchDB, knobs_json
 from emmy.compiler.pipeline.search.features import DEPLOYABLE_OPT
+from emmy.compiler.specialize import rehint_program
 
 logger = logging.getLogger(__name__)
 
 _LFS_POINTER = "version https://git-lfs.github.com/spec/v1"
 
+#: The two precision regimes a golden records — fast math off, and on (the default since #868) — by the one
+#: compiler flag that decides them, each mapped to the input pin a freeze row carries.
+REGIME_PINS = {"": {"FAST_MATH": False}, FAST_MATH_FLAG: {"FAST_MATH": True}}
 
-def regime_pins_by_flags() -> dict[str, dict]:
-    """The residual compiler flags of the two precision regimes a golden records — fast math on (the default
-    since #868) and off — each mapped to the input pin a freeze row carries. Any other flags are another regime,
-    which a freeze excludes. Read live, the way a bench spells them (``nvcc.effective_flags``)."""
-    from emmy.compiler.backend.cuda.nvcc import effective_flags  # noqa: PLC0415
-    from emmy.compiler.context import split_opt_level  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
 
-    regimes: dict[str, dict] = {}
-    for fast_math in (False, True):
-        with pinned_knobs({"FAST_MATH": fast_math}):
-            _opt, flags = split_opt_level(" ".join(effective_flags()))
-        regimes.setdefault(flags, {"FAST_MATH": fast_math})
-    return regimes
+def regime_of(flags: str) -> str:
+    """The regime a row's residual compiler flags put it in — a key of :data:`REGIME_PINS`. The fast-math flag is
+    the one flag that is a regime; any other flag a row was compiled with is not, and is not what a freeze
+    stores."""
+    return FAST_MATH_FLAG if FAST_MATH_FLAG in flags.split() else ""
 
 
 def freeze_reason(row: PerfRow) -> str | None:
     """Why ``row`` is excluded from a measurement freeze and from every measured-pool reader, or
     ``None`` to keep it.
 
-    THE admission filter, and nothing else — keep every ``ok`` row measured in the DEPLOYABLE regime, on a
+    THE admission filter, and nothing else — keep every ``ok`` row measured at the DEPLOYABLE opt level, on a
     card the GPU registry knows, that passes the shared plausibility predicates.
 
-    The regime gate is what keeps a freeze a fair yardstick. A freeze is the corpus a reported
+    The opt-level gate is what keeps a freeze a fair yardstick. A freeze is the corpus a reported
     prior number is computed over, and a measurement taken under a non-deployable opt level
     answers a question nothing asks: nothing trains on it (``Prior.add_rows``) and no deploy
     reads it. Kept, it would put half a card's pools in a lane no one runs, so half the headline
-    number would describe a regime that does not exist. The same goes for compiler flags beyond the
-    fast-math regimes: a row measured under any was measured in some other regime."""
+    number would describe a regime that does not exist. Of the other compiler flags only fast math
+    is a regime (:func:`regime_of`); the rest a freeze neither stores nor gates on."""
     from emmy import gpu  # noqa: PLC0415
 
     if gpu.by_name(row.gpu) is None:
         return "unknown card (not in the GPU registry)"
     if row.opt != DEPLOYABLE_OPT:
         return f"non-deployable regime (H_opt={row.opt:g})"
-    if row.flags not in regime_pins_by_flags():
-        return "non-default compiler flags"
     if row.status != "ok":
         return f"{row.status}: not a measurement"
     reason = implausible_value_reason(row)
@@ -223,58 +220,12 @@ def _path_to(kernel: str, kernels: dict[str, KernelRow], parents: dict[str, list
     return None
 
 
-def _rehinted(wire: dict, bindings: dict[str, int]) -> dict:
-    """``wire`` with its symbolic dims' hints set to ``bindings`` — the sizes a row was benched at — so the program
-    stays symbolic and a bench of it binds those sizes (``loop_wire.symbolic_bindings``). A golden's ``bindings``
-    would make the dims static instead, another kernel. A dim spelled as an expression over the vars takes the
-    expression's value at those sizes."""
-    from emmy.compiler.torch_wire import expr_from_wire  # noqa: PLC0415
-
-    def hints(value) -> dict[str, int]:
-        if isinstance(value, list):
-            return {name: hint for item in value for name, hint in hints(item).items()}
-        if not isinstance(value, dict):
-            return {}
-        if set(value) == {"sym", "hint"}:
-            return {value["sym"]: value["hint"]}
-        return {name: hint for item in value.values() for name, hint in hints(item).items()}
-
-    sizes = {**hints(wire), **bindings}
-
-    def walk(value):
-        if isinstance(value, list):
-            return [walk(item) for item in value]
-        if not isinstance(value, dict):
-            return value
-        # A hinted dim is the one two-key mapping a wire holds: a body's tagged values have one key.
-        if set(value) == {"sym", "hint"}:
-            return {**value, "hint": sizes[value["sym"]]} if value["sym"] in sizes else dict(value)
-        if set(value) == {"expr", "hint"}:
-            try:
-                hint = int(expr_from_wire(dict(value["expr"])).eval(sizes))
-            except (KeyError, TypeError, ValueError):
-                return dict(value)
-            return {"expr": value["expr"], "hint": hint}
-        return {key: walk(item) for key, item in value.items()}
-
-    return walk(wire)
-
-
 def _schedule_row(row: PerfRow) -> dict[str, str]:
     return {str(k): str(v) for k, v in row.knobs.items() if not str(k).startswith(METADATA_PREFIXES)}
 
 
-def _interned(loops: list[dict], wire: dict) -> int:
-    for index, current in enumerate(loops):
-        if current == wire:
-            return index
-    loops.append(wire)
-    return len(loops) - 1
-
-
 def _document(gpu_name: str, cap: tuple[int, int], rows: list[PerfRow], kernels: dict[str, KernelRow], parents, dropped: Counter) -> dict:
-    """One card's golden document: a config per kernel set and size, in content order."""
-    regimes = regime_pins_by_flags()
+    """One card's golden document: a config per kernel set, size and regime, in content order."""
     sets: dict[tuple, list[PerfRow]] = defaultdict(list)
     paths: dict[tuple, tuple] = {}
     for row in rows:
@@ -283,15 +234,22 @@ def _document(gpu_name: str, cap: tuple[int, int], rows: list[PerfRow], kernels:
             dropped["no formed kernel reaches it"] += 1
             continue
         root = path[0][0] if path else row.kernel
-        key = (root, tuple((parent, knobs_json(arm)) for parent, arm in path), knobs_json(row.bindings), row.flags)
+        key = (root, tuple((parent, knobs_json(arm)) for parent, arm in path), knobs_json(row.bindings), regime_of(row.flags))
         sets[key].append(row)
         paths[key] = path
     loops: list[dict] = []
     configs: list[dict] = []
     for key in sorted(sets):
-        root, _route, _bindings, flags = key
+        root, _route, _bindings, regime = key
         path, members = paths[key], sorted(sets[key], key=lambda r: (r.kernel, knobs_json(r.knobs)))
-        pins = regimes[flags]
+        # The sizes the rows were benched at are the program's hints; a golden's ``bindings`` would make them static.
+        # A parent axis a piece dropped keeps the stored hint: the piece's measurement does not depend on it.
+        try:
+            program = rehint_program(kernels[root].loop_ir, dict(members[0].bindings))
+        except ValueError:
+            dropped["sizes the program cannot bind"] += len(members)
+            continue
+        pins = REGIME_PINS[regime]
         realizations: list[dict] = []
         for step, (parent, arm) in enumerate(path):
             name = f"{kernels[parent].name}.{parent[:12]}.route{step}"
@@ -310,9 +268,7 @@ def _document(gpu_name: str, cap: tuple[int, int], rows: list[PerfRow], kernels:
                     **({"kernel_set": routes} if routes else {}),
                 }
             )
-        # The sizes the rows were benched at are the program's hints; a golden's ``bindings`` would make them static.
-        program = _rehinted(kernels[root].loop_ir, dict(members[0].bindings))
-        configs.append({"target": {"loop": _interned(loops, program)}, "realizations": realizations})
+        configs.append({"target": {"loop": intern_wire(loops, program)}, "realizations": realizations})
     return {"gpu_name": gpu_name, "compute_cap": list(cap), "loops": loops, "configs": configs}
 
 

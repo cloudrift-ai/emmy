@@ -48,7 +48,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from emmy.compiler.pipeline.search.data.freeze import freeze_reason
+from emmy.compiler.pipeline.search.data.freeze import freeze_reason, regime_of
 from emmy.compiler.pipeline.search.data.sample import measured_features
 from emmy.compiler.pipeline.search.db import knobs_json
 from emmy.compiler.pipeline.search.features import ROUTING_FEATURES, is_dynamic_row, knob_features
@@ -366,8 +366,9 @@ def group_measured(rows) -> tuple[list[MeasuredGroup], dict[str, int]]:
       Keying on where a decision was OFFERED instead gets it wrong in both directions: a site realized
       as several kernels files a piece beside the whole (the RTX 5090 freeze once paired a 5.9 µs norm
       kernel with a 131 ms whole-op row), and one kernel reached from two sites is tuned twice.
-    - **The opt level and the compiler flags.** The regimes must not pool — ``-O1`` and ``-O3`` invert
+    - **The opt level and the precision regime.** The regimes must not pool — ``-O1`` and ``-O3`` invert
       often enough that a merged group measures neither, and fast math changes the code a kernel runs as.
+      No other compiler flag is a regime.
     - **``gpu``.** Cards never pool.
 
     Admission is :func:`~.freeze.freeze_reason`, the rule a freeze is written under, failures excluded
@@ -385,12 +386,12 @@ def group_measured(rows) -> tuple[list[MeasuredGroup], dict[str, int]]:
         if reason is not None:
             dropped[reason.split(":")[0]] += 1
         else:
-            buckets[(r.gpu, kernel_sig(r.knobs), float(r.opt), r.flags)].append(r)
+            buckets[(r.gpu, kernel_sig(r.knobs), float(r.opt), regime_of(r.flags))].append(r)
 
     groups = []
-    for (gpu, sig, h_opt, flags), grp in sorted(buckets.items()):
+    for (gpu, sig, h_opt, regime), grp in sorted(buckets.items()):
         grp.sort(key=lambda r: (r.kernel, knobs_json(r.knobs)))  # a pool's row order is its own, not the DB's
         feats = [knob_features(measured_features(r)) for r in grp]
-        key = f"{gpu}/{sig}@O{h_opt:g}" + (f" {flags}" if flags else "")
+        key = f"{gpu}/{sig}@O{h_opt:g}" + (f" {regime}" if regime else "")
         groups.append(MeasuredGroup.from_measured(key, gpu, sig, h_opt, [r.stats.median for r in grp], feats))
     return groups, dict(dropped)

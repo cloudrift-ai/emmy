@@ -61,6 +61,11 @@ def _env_compile_flags() -> str:
 _OPT_TOKEN = re.compile(r"(?:-Xcicc\s+)?-O(\d)")
 
 
+#: The flag fast math adds — the one extra compiler flag that is a regime of its own, since it changes the
+#: code a kernel runs as (``backend.cuda.nvcc.effective_flags``).
+FAST_MATH_FLAG = "--use_fast_math"
+
+
 def split_opt_level(compile_flags: str) -> tuple[int, str]:
     """Split effective nvcc flags into ``(cicc opt level, everything else)``.
 

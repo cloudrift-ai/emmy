@@ -335,13 +335,17 @@ def kernel_bindings(op) -> dict[str, int]:
     return symbolic_bindings((*op.inputs.values(), *op.outputs.values()))
 
 
-def intern_loop_program(programs: list[dict], graph: Graph) -> int:
-    payload = loop_graph_to_wire(graph)
-    for index, current in enumerate(programs):
-        if current == payload:
+def intern_wire(pool: list[dict], wire: dict) -> int:
+    """``wire``'s index in ``pool``, appended when no equal wire is there."""
+    for index, current in enumerate(pool):
+        if current == wire:
             return index
-    programs.append(payload)
-    return len(programs) - 1
+    pool.append(wire)
+    return len(pool) - 1
+
+
+def intern_loop_program(programs: list[dict], graph: Graph) -> int:
+    return intern_wire(programs, loop_graph_to_wire(graph))
 
 
 def validate_loop_program_pool(programs: object) -> list[dict]:

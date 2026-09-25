@@ -665,17 +665,17 @@ def validate_golden_file(
             if strict and state != GoldenEntryState.VERIFIED:
                 raise ValueError(f"{realization_where} repository promotion requires knobs and paired positive timings")
             if state == GoldenEntryState.VERIFIED and "measurements" in realization:
-                # The reference timing is the comparison a bench took beside the measurement; a row measured
-                # with none (a freeze's) carries only its own time.
+                # The reference timing is the comparison a bench took beside the measurement. A repository row
+                # carries one; a working row measured with none (a freeze's) carries only its own time.
                 measurements = realization["measurements"]
                 _require_keys(measurements, {"emmy_us", "reference_us", "reference_backend"}, f"{realization_where}.measurements")
                 _positive_number(measurements["emmy_us"], f"{realization_where}.measurements.emmy_us")
-                if "reference_us" in measurements:
-                    _positive_number(measurements["reference_us"], f"{realization_where}.measurements.reference_us")
-                if "reference_backend" in measurements and (
-                    not isinstance(measurements["reference_backend"], str) or not measurements["reference_backend"]
-                ):
-                    raise ValueError(f"{realization_where}.measurements.reference_backend must be a non-empty string")
+                if strict or "reference_us" in measurements:
+                    _positive_number(measurements.get("reference_us"), f"{realization_where}.measurements.reference_us")
+                if strict or "reference_backend" in measurements:
+                    backend = measurements.get("reference_backend")
+                    if not isinstance(backend, str) or not backend:
+                        raise ValueError(f"{realization_where}.measurements.reference_backend must be a non-empty string")
 
 
 def load_golden_file(

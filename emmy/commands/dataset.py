@@ -25,7 +25,6 @@ from __future__ import annotations
 import logging
 import sys
 import tempfile
-from collections import Counter
 from pathlib import Path
 
 from emmy import config
@@ -61,6 +60,7 @@ def register_dataset_command(subparsers) -> None:
 def handle_dataset_import(args) -> None:
     from emmy.compiler.pipeline.search.data.freeze import write_freeze  # noqa: PLC0415
     from emmy.compiler.pipeline.search.db import SearchDB  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden_import import import_file  # noqa: PLC0415
 
     db_path = Path(args.db).expanduser() if args.db else config.dataset_db_path()
     sources = [Path(s).expanduser() for s in args.sources] or [config.freeze_path()]
@@ -79,51 +79,20 @@ def handle_dataset_import(args) -> None:
                 if not files:
                     logger.error("no golden files in %s", src)
                     sys.exit(2)
-                for path in files:
-                    import_golden_file(db, path)
-                continue
-            # A tune DB is frozen first, so what reaches the dataset is what a freeze of it would hold.
-            with tempfile.TemporaryDirectory() as tmp:
-                frozen = Path(tmp) / "freeze"
+            else:
+                # A tune DB is frozen first, so what reaches the dataset is what a freeze of it would hold.
+                frozen = Path(tempfile.mkdtemp()) / "freeze"
                 write_freeze(src, frozen)
-                for path in sorted(frozen.glob("*.yaml")):
-                    import_golden_file(db, path)
+                files = sorted(frozen.glob("*.yaml"))
+            for path in files:
+                try:
+                    import_file(db, path)
+                except ValueError as exc:
+                    logger.error("%s", exc)
+                    sys.exit(2)
     finally:
         db.close()
     logger.info("dataset DB: %s", db_path)
-
-
-def import_golden_file(db, path: Path) -> Counter:
-    """Import one golden-shaped file into ``db``: every kernel re-lowered from its definition through the
-    lowering passes, once per regime the file's rows record, its rows sourced by the file's digest. A file the
-    instance already holds is skipped. Returns what became of the entries, by kind."""
-    from emmy.compiler.context import Context  # noqa: PLC0415
-    from emmy.compiler.pipeline import LOWERING_PASSES  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.data.freeze import freeze_source, is_lfs_pointer, regime_pins_by_flags  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden import load_golden_file, load_golden_records, regime_pins  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden_import import import_goldens  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
-
-    if is_lfs_pointer(path):
-        logger.error("%s is a git-LFS pointer, not the data. Run `git lfs install && git lfs pull`; in CI, check out with lfs", path)
-        sys.exit(2)
-    source = freeze_source(path)
-    if source in db.perf_sources():
-        logger.info("%s is already held (%s)", path.name, source)
-        return Counter()
-    document = load_golden_file(path)
-    records = load_golden_records(document)
-    counts: Counter = Counter()
-    flags_of = {tuple(sorted(pins.items())): flags for flags, pins in regime_pins_by_flags().items()}
-    for regime in sorted({tuple(sorted(regime_pins(record).items())) for record in records}):
-        # The rows were measured at the deployable opt level under the regime's flags, whatever this machine compiles at.
-        with pinned_knobs(dict(regime)):
-            cap, gpu_name = tuple(document["compute_cap"]), document.get("gpu_name") or None
-            ctx = Context.from_target(cap, gpu_name=gpu_name, compile_flags=flags_of.get(regime))
-            in_regime = [record for record in records if tuple(sorted(regime_pins(record).items())) == regime]
-            counts += import_goldens(db, ctx, in_regime, source=source, passes=LOWERING_PASSES)
-    logger.info("imported %s as %s: %s", path.name, source, ", ".join(f"{n} {what}" for what, n in sorted(counts.items())) or "nothing")
-    return counts
 
 
 def handle_dataset_freeze(args) -> None:

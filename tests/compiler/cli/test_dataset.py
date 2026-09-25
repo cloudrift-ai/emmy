@@ -20,10 +20,7 @@ _CASE = "fused/norm-linear-f16-scalar-reduce.yaml"
 
 def _freeze(tmp_path, name: str, us: float):
     """A freeze of one measured kernel at ``us``, written under ``name``."""
-    db = tuned_db(tmp_path / f"{name}.db", (_CASE,))
-    [row] = list(db.iter_perf_rows())
-    db._conn.execute("UPDATE perf SET latency_us_median = ?", (us,))
-    db.close()
+    tuned_db(tmp_path / f"{name}.db", (_CASE,), us=us).close()
     write_freeze(tmp_path / f"{name}.db", tmp_path / name)
     return {freeze_source(path) for path in (tmp_path / name).glob("*.yaml")}
 
