@@ -385,7 +385,9 @@ def _uniform_extras(node) -> bool:
     # What it has no residence for is an operand past the streamed one that VARIES: those are read
     # once, ahead of the cells, so every one of them must be uniform across the tile (attention's
     # scale and its mask fills are; a second streamed B is not, and rides the warp compute fill).
-    return len(node.operands) >= 2 and not any(edge.free_axes for edge in node.operands[2:])
+    # The same holds for a second channel on ONE edge — a packed gate/up weight exposes both
+    # projections from a single operand, so the channel count, not the operand count, decides.
+    return len(node.operands) >= 2 and len(node.bilinear_channels()) <= 1 and not any(edge.free_axes for edge in node.operands[2:])
 
 
 def _warp_plans(node, facts: ContractionFacts, atoms: tuple[str, ...]) -> Iterator[Tile]:
