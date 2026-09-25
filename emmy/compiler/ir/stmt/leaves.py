@@ -513,8 +513,16 @@ class Carry(Stmt):
     name: str
     value: str
     index: tuple[Expr, ...]
-    seed: float
+    #: What the state holds before the first step: a constant, or the name of a buffer of the
+    #: state's shape read cell by cell — the tensor an unrolled loop started from.
+    seed: float | str
     dtype: DataType | None = None
+
+    def external_reads(self) -> tuple[str, ...]:
+        return (self.seed,) if isinstance(self.seed, str) else ()
+
+    def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
+        return replace(self, seed=rename.get(self.seed, self.seed)) if isinstance(self.seed, str) else self
 
     @property
     def cells(self) -> tuple[str, ...]:
@@ -535,7 +543,8 @@ class Carry(Stmt):
         return self.index
 
     def pretty(self, indent: str = "") -> list[str]:
-        return [f"{indent}{self.name}[{', '.join(e.pretty() for e in self.index)}] <- {self.value}  (seed {self.seed:g})"]
+        seed = self.seed if isinstance(self.seed, str) else f"{self.seed:g}"
+        return [f"{indent}{self.name}[{', '.join(e.pretty() for e in self.index)}] <- {self.value}  (seed {seed})"]
 
     def render(self, ctx: RenderCtx) -> list[str]:
         # The carrying ``Loop`` declared this slot beside the one reads see, and commits it after

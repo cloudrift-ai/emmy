@@ -1,5 +1,5 @@
 compute_cap:
-- 9
+- 12
 - 0
 programs:
 - inputs: [hidden]
@@ -7984,11 +7984,11 @@ configs:
   - name: g000.k_linear_mean_reduce_1c2333
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
   - name: g000.k_linear_mean_reduce_1c2333.578cba9f4791
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
     knobs:
       TILE@map.1/inner: ''
       TILE@map.2/map.1/map.1/reduce.1/inner: ''
@@ -8040,11 +8040,11 @@ configs:
   - name: g001.k_linear_mean_reduce_79b8f4
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
   - name: g001.k_linear_mean_reduce_79b8f4.bfff68ecb0c3
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
     knobs:
       TILE@map.1/inner: ''
       TILE@map.1/inner.1/map.1/inner: ''
@@ -8115,11 +8115,11 @@ configs:
   - name: g002.k_linear_mean_reduce_d03c37
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
   - name: g002.k_linear_mean_reduce_d03c37.429573f92aa2
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
     knobs:
       TILE@map.1/inner: ''
       TILE@map.2/map.1/map.1/reduce.1/inner: ''
@@ -8171,11 +8171,11 @@ configs:
   - name: g003.k_linear_mean_reduce_7defda
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
   - name: g003.k_linear_mean_reduce_7defda.6992f078152c
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
     knobs:
       TILE@map.1/inner: ''
       TILE@map.1/inner.1/map.1/inner: ''
@@ -8246,11 +8246,11 @@ configs:
   - name: g004.k_linear_mean_reduce_f10dd4
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
   - name: g004.k_linear_mean_reduce_f10dd4.bd98ee1c64c1
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
     knobs:
       TILE@map.1/inner: ''
       TILE@map.2/map.1/map.1/reduce.1/inner: ''
@@ -8300,11 +8300,11 @@ configs:
   - name: g005.k_linear_mean_reduce_b86da3
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
   - name: g005.k_linear_mean_reduce_b86da3.fbe99760544e
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
     knobs:
       TILE@map.1/inner: ''
       TILE@map.1/inner.2/map.1/inner: ''
@@ -8341,11 +8341,11 @@ configs:
   - name: g006.k_linear_reduce_409a68
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
   - name: g006.k_linear_reduce_409a68.7ee61a4baee8
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
     knobs:
       TILE@map.1/inner: ''
       TILE@map.1/inner.1/map.1/inner: ''
@@ -8372,11 +8372,11 @@ configs:
   - name: g007.k_linear_reduce_04d649
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
   - name: g007.k_linear_reduce_04d649.3b585987bf89
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
     knobs:
       TILE@map.1/inner: ''
       TILE@map.1/inner.1/map.1/inner: ''
@@ -8403,11 +8403,11 @@ configs:
   - name: g008.k_linear_reduce_00d191
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
   - name: g008.k_linear_reduce_00d191.580b2e5dcbf6
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
     knobs:
       TILE@map.1/inner: ''
       TILE@map.1/inner.2/map.1/inner: ''
@@ -8434,11 +8434,11 @@ configs:
   - name: g009.k_linear_reduce_5e8d6f
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
   - name: g009.k_linear_reduce_5e8d6f.5658fe6c9d0b
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
     knobs:
       TILE@map.1/inner: ''
       TILE@map.1/inner.1/map.1/inner: ''
@@ -8499,11 +8499,11 @@ configs:
   - name: g011.k_linear_mean_reduce_5e36fc
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
   - name: g011.k_linear_mean_reduce_5e36fc.2e57c44b5f76
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
     knobs:
       TILE@map.1/inner: ''
       TILE@map.2/map.1/map.1/reduce.1/inner: ''
@@ -8541,11 +8541,11 @@ configs:
   - name: g012.k_linear_mean_reduce_b2c1d3
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
   - name: g012.k_linear_mean_reduce_b2c1d3.f720fa68349a
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
     knobs:
       TILE@map.1/map.1/reduce.1/inner: ''
       TILE@map.2/inner: ''
@@ -8607,11 +8607,11 @@ configs:
   - name: g013.k_linear_mean_reduce_39d378
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
   - name: g013.k_linear_mean_reduce_39d378.1e6b4fb5104e
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
     knobs:
       TILE@map.1/inner: ''
       TILE@map.2/map.1/map.1/reduce.1/inner: ''
@@ -8649,11 +8649,11 @@ configs:
   - name: g014.k_linear_mean_reduce_b18cbc
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
   - name: g014.k_linear_mean_reduce_b18cbc.59827c418bfe
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
     knobs:
       TILE@map.1/map.1/reduce.1/inner: ''
       TILE@map.2/inner: ''
@@ -8715,11 +8715,11 @@ configs:
   - name: g015.k_linear_mean_reduce_5e505c
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
   - name: g015.k_linear_mean_reduce_5e505c.706688d7cff8
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
     knobs:
       TILE@map.1/inner: ''
       TILE@map.2/map.1/map.1/reduce.1/inner: ''
@@ -8757,11 +8757,11 @@ configs:
   - name: g016.k_linear_mean_reduce_3c4987
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
   - name: g016.k_linear_mean_reduce_3c4987.3cc550305d9b
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
     knobs:
       TILE@map.1/map.1/reduce.1/inner: ''
       TILE@map.2/inner: ''
@@ -8789,11 +8789,11 @@ configs:
   - name: g017.k_linear_reduce_f5ed75
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
   - name: g017.k_linear_reduce_f5ed75.da03beb866d1
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
     knobs:
       TILE@map.1/inner: ''
       TILE@map.1/inner.1/map.1/inner: ''
@@ -8854,11 +8854,11 @@ configs:
   - name: g018.k_linear_mean_reduce_ace2ad
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
   - name: g018.k_linear_mean_reduce_ace2ad.053dbae757af
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
     knobs:
       TILE@map.1/inner: ''
       TILE@map.2/map.1/map.1/reduce.1/inner: ''
@@ -8896,11 +8896,11 @@ configs:
   - name: g019.k_linear_mean_reduce_41c768
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
   - name: g019.k_linear_mean_reduce_41c768.380773c8cf41
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
     knobs:
       TILE@map.1/map.1/reduce.1/inner: ''
       TILE@map.2/inner: ''
@@ -8928,11 +8928,11 @@ configs:
   - name: g020.k_linear_reduce_e1cf71
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
   - name: g020.k_linear_reduce_e1cf71.fdacf2320159
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
     knobs:
       TILE@map.1/inner: ''
       TILE@map.1/inner.1/map.1/inner: ''
@@ -8959,11 +8959,11 @@ configs:
   - name: g021.k_linear_reduce_00b358
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
   - name: g021.k_linear_reduce_00b358.4025fd903e5d
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
     knobs:
       TILE@map.1/inner: ''
       TILE@map.1/inner.1/map.1/inner: ''
@@ -8990,11 +8990,11 @@ configs:
   - name: g022.k_linear_reduce_4bf504
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
   - name: g022.k_linear_reduce_4bf504.9b1e07dc8566
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
     knobs:
       TILE@map.1/inner: ''
       TILE@map.1/inner.2/map.1/inner: ''
@@ -9021,11 +9021,11 @@ configs:
   - name: g023.k_linear_reduce_6e099c
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
   - name: g023.k_linear_reduce_6e099c.2f54849c4e92
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
     knobs:
       TILE@map.1/inner: ''
       TILE@map.1/inner.1/map.1/inner: ''
@@ -9052,11 +9052,11 @@ configs:
   - name: g025.k_linear_reduce_2d0129
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
   - name: g025.k_linear_reduce_2d0129.1c297404b93e
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
     knobs:
       TILE@map.1/inner: ''
       TILE@map.1/inner.1/map.1/inner: ''
@@ -9117,11 +9117,11 @@ configs:
   - name: g026.k_linear_mean_reduce_f9bd2d
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
   - name: g026.k_linear_mean_reduce_f9bd2d.0aeb0757d9af
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
     knobs:
       TILE@map.1/inner: ''
       TILE@map.2/map.1/map.1/reduce.1/inner: ''
@@ -9159,11 +9159,11 @@ configs:
   - name: g027.k_linear_mean_reduce_47d100
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
   - name: g027.k_linear_mean_reduce_47d100.83a299fb4fb2
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
     knobs:
       TILE@map.1/map.1/reduce.1/inner: ''
       TILE@map.2/inner: ''
@@ -9203,11 +9203,11 @@ configs:
   - name: g028.k_linear_mean_reduce_8dfd46
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
   - name: g028.k_linear_mean_reduce_8dfd46.012c3b71b0eb
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
     knobs:
       TILE@map.1/inner: ''
       TILE@map.2/inner: ''
@@ -9247,11 +9247,11 @@ configs:
   - name: g029.k_linear_mean_reduce_442d82
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
   - name: g029.k_linear_mean_reduce_442d82.ed4101bdd5b8
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
     knobs:
       TILE@map.1/inner: ''
       TILE@map.2/inner: ''
@@ -9291,11 +9291,11 @@ configs:
   - name: g030.k_linear_mean_reduce_cb8956
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
   - name: g030.k_linear_mean_reduce_cb8956.40d0fe42fd9d
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
     knobs:
       TILE@map.1/inner: ''
       TILE@map.2/inner: ''
@@ -9335,11 +9335,11 @@ configs:
   - name: g031.k_linear_mean_reduce_f2954c
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
   - name: g031.k_linear_mean_reduce_f2954c.0dd7e124d16a
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
     knobs:
       TILE@map.1/inner: ''
       TILE@map.2/inner: ''
@@ -9378,11 +9378,11 @@ configs:
   - name: g032.k_linear_mean_reduce_7c3ae8
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
   - name: g032.k_linear_mean_reduce_7c3ae8.e928a3d2a217
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
     knobs:
       TILE@map.1/inner: ''
       TILE@map.1/inner.1/map.1/inner: ''
@@ -9453,11 +9453,11 @@ configs:
   - name: g033.k_linear_mean_reduce_7c0221
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
   - name: g033.k_linear_mean_reduce_7c0221.1e4dfacbf066
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
     knobs:
       TILE@map.1/inner: ''
       TILE@map.2/map.1/map.1/reduce.1/inner: ''
@@ -9495,11 +9495,11 @@ configs:
   - name: g034.k_linear_mean_reduce_05a33c
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
   - name: g034.k_linear_mean_reduce_05a33c.4d722073232c
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
     knobs:
       TILE@map.1/map.1/reduce.1/inner: ''
       TILE@map.2/inner: ''
@@ -9560,11 +9560,11 @@ configs:
   - name: w-gemma3.post.k_linear_mean_reduce_eb9a4d
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
   - name: w-gemma3.post.k_linear_mean_reduce_eb9a4d.0b6df1f50258
     bindings: {}
     pins:
-      FAST_MATH: false
+      FAST_MATH: true
     knobs:
       TILE@map.1/map.1/reduce.1/inner: ''
       TILE@map.1/map.2/reduce.1/inner: ''
@@ -10545,7 +10545,7 @@ loops:
             unroll: false
             seed: true
       name: k_linear_mean_reduce_79b8f4
-    inputs: [mean_count, add_1_c1, silu_one, residual, linear_wt, attn_out, p_post_attention_layernorm_weight, linear_1_wt, linear_2_wt, linear_3_wt]
+    inputs: [mean_count, add_1_c1, silu_one, linear_wt, attn_out, residual, p_post_attention_layernorm_weight, linear_1_wt, linear_2_wt, linear_3_wt]
     outputs: [[add_2, f32, [{sym: num_tokens, hint: 512}, 64]]]
 - inputs: [hidden]
   outputs: [reshape_2, reshape, reshape_1]
@@ -11491,7 +11491,7 @@ loops:
             unroll: false
             seed: true
       name: k_linear_mean_reduce_7defda
-    inputs: [mean_count, add_1_c1, silu_one, residual, linear_wt, attn_out, p_post_attention_layernorm_weight, linear_1_wt, linear_2_wt, linear_3_wt]
+    inputs: [mean_count, add_1_c1, silu_one, linear_wt, attn_out, residual, p_post_attention_layernorm_weight, linear_1_wt, linear_2_wt, linear_3_wt]
     outputs: [[add_2, f32, [16, 64]]]
 - inputs: [hidden]
   outputs: [reshape_2, reshape, reshape_1]
@@ -12035,7 +12035,7 @@ loops:
             unroll: false
             seed: true
       name: k_linear_mean_reduce_f10dd4
-    inputs: [hidden, mean_count, add_c1, mean_2_count, mean_1_count, add_2_c1, add_1_c1, p_input_layernorm_weight, linear_1_wt, p_k_norm_weight,
+    inputs: [mean_count, hidden, add_c1, mean_2_count, mean_1_count, add_2_c1, add_1_c1, p_input_layernorm_weight, linear_1_wt, p_k_norm_weight,
       linear_wt, p_q_norm_weight, linear_2_wt]
     outputs: [[reshape_2, f32, [1, 32]], [reshape, f32, [1, 64]], [reshape_1, f32, [1, 32]]]
 - inputs: [attn_out, residual]
@@ -12364,7 +12364,7 @@ loops:
             unroll: false
             seed: true
       name: k_linear_mean_reduce_b86da3
-    inputs: [mean_count, residual, linear_wt, attn_out, add_1_c1, silu_one, p_post_attention_layernorm_weight, linear_1_wt, linear_2_wt, linear_3_wt]
+    inputs: [mean_count, linear_wt, attn_out, residual, add_1_c1, silu_one, p_post_attention_layernorm_weight, linear_1_wt, linear_2_wt, linear_3_wt]
     outputs: [[add_2, f32, [1, 64]]]
 - inputs: [w_down, w_gate_up, x]
   outputs: [mul_1]
@@ -12508,7 +12508,7 @@ loops:
             unroll: false
             seed: true
       name: k_linear_reduce_409a68
-    inputs: [silu_one, mul_1_c1, x, w_gate_up, w_down]
+    inputs: [silu_one, mul_1_c1, w_gate_up, x, w_down]
     outputs: [[mul_1, f32, [{sym: num_tokens, hint: 512}, 64]]]
 - inputs: [w_down, w_gate_up, x]
   outputs: [mul_1]
@@ -12652,7 +12652,7 @@ loops:
             unroll: false
             seed: true
       name: k_linear_reduce_04d649
-    inputs: [silu_one, mul_1_c1, x, w_gate_up, w_down]
+    inputs: [silu_one, mul_1_c1, w_gate_up, x, w_down]
     outputs: [[mul_1, f32, [16, 64]]]
 - inputs: [w_down, w_gate_up, x]
   outputs: [mul_1]
@@ -12789,7 +12789,7 @@ loops:
             unroll: false
             seed: true
       name: k_linear_reduce_00d191
-    inputs: [silu_one, mul_1_c1, x, w_gate_up, w_down]
+    inputs: [silu_one, mul_1_c1, w_gate_up, x, w_down]
     outputs: [[mul_1, f32, [1, 64]]]
 - inputs: [w_down, w_gate_up, x]
   outputs: [mul_1]
@@ -12933,7 +12933,7 @@ loops:
             unroll: false
             seed: true
       name: k_linear_reduce_5e8d6f
-    inputs: [silu_one, mul_1_c1, x, w_gate_up, w_down]
+    inputs: [silu_one, mul_1_c1, w_gate_up, x, w_down]
     outputs: [[mul_1, f32, [256, 64]]]
 - inputs: [hidden]
   outputs: [reshape_2, reshape, reshape_1]
@@ -13565,7 +13565,7 @@ loops:
             unroll: false
             seed: true
       name: k_linear_mean_reduce_b2c1d3
-    inputs: [mean_count, add_1_c1, residual, linear_wt, attn_out, p_post_attention_layernorm_weight]
+    inputs: [mean_count, add_1_c1, linear_wt, attn_out, residual, p_post_attention_layernorm_weight]
     outputs: [[to, f32, [{sym: num_tokens, hint: 512}, 64]], [mul_1, f32, [{sym: num_tokens, hint: 512}, 64]]]
 - inputs: [hidden]
   outputs: [reshape_2, reshape, reshape_1]
@@ -14196,7 +14196,7 @@ loops:
             unroll: false
             seed: true
       name: k_linear_mean_reduce_b18cbc
-    inputs: [mean_count, add_1_c1, residual, linear_wt, attn_out, p_post_attention_layernorm_weight]
+    inputs: [mean_count, add_1_c1, linear_wt, attn_out, residual, p_post_attention_layernorm_weight]
     outputs: [[to, f32, [16, 64]], [mul_1, f32, [16, 64]]]
 - inputs: [hidden]
   outputs: [reshape_2, reshape, reshape_1]
@@ -14620,7 +14620,7 @@ loops:
             unroll: false
             seed: true
       name: k_linear_mean_reduce_5e505c
-    inputs: [hidden, mean_count, add_c1, mean_2_count, p_input_layernorm_weight, linear_1_wt, mean_1_count, linear_wt, add_2_c1, add_1_c1, p_k_norm_weight,
+    inputs: [mean_count, hidden, add_c1, mean_2_count, p_input_layernorm_weight, linear_1_wt, mean_1_count, linear_wt, add_2_c1, add_1_c1, p_k_norm_weight,
       p_q_norm_weight, linear_2_wt]
     outputs: [[reshape_2, f32, [1, 64]], [reshape, f32, [1, 64]], [reshape_1, f32, [1, 64]]]
 - inputs: [attn_out, residual]
@@ -14813,7 +14813,7 @@ loops:
             unroll: false
             seed: true
       name: k_linear_mean_reduce_3c4987
-    inputs: [mean_count, residual, linear_wt, attn_out, add_1_c1, p_post_attention_layernorm_weight]
+    inputs: [mean_count, linear_wt, attn_out, residual, add_1_c1, p_post_attention_layernorm_weight]
     outputs: [[to, f32, [1, 64]], [mul_1, f32, [1, 64]]]
 - inputs: [w_down, w_gate_up, x]
   outputs: [mul_1]
@@ -14957,7 +14957,7 @@ loops:
             unroll: false
             seed: true
       name: k_linear_reduce_f5ed75
-    inputs: [silu_one, mul_1_c1, x, w_gate_up, w_down]
+    inputs: [silu_one, mul_1_c1, w_gate_up, x, w_down]
     outputs: [[mul_1, f32, [8, 64]]]
 - inputs: [hidden]
   outputs: [reshape_2, reshape, reshape_1]
@@ -15588,7 +15588,7 @@ loops:
             unroll: false
             seed: true
       name: k_linear_mean_reduce_41c768
-    inputs: [mean_count, add_1_c1, residual, linear_wt, attn_out, p_post_attention_layernorm_weight]
+    inputs: [mean_count, add_1_c1, linear_wt, attn_out, residual, p_post_attention_layernorm_weight]
     outputs: [[to, f32, [8, 64]], [mul_1, f32, [8, 64]]]
 - inputs: [w_down, w_gate_up, x]
   outputs: [mul_1]
@@ -15732,7 +15732,7 @@ loops:
             unroll: false
             seed: true
       name: k_linear_reduce_e1cf71
-    inputs: [silu_one, mul_1_c1, x, w_gate_up, w_down]
+    inputs: [silu_one, mul_1_c1, w_gate_up, x, w_down]
     outputs: [[mul_1, f32, [{sym: num_tokens, hint: 512}, 64]]]
 - inputs: [w_down, w_gate_up, x]
   outputs: [mul_1]
@@ -15876,7 +15876,7 @@ loops:
             unroll: false
             seed: true
       name: k_linear_reduce_00b358
-    inputs: [silu_one, mul_1_c1, x, w_gate_up, w_down]
+    inputs: [silu_one, mul_1_c1, w_gate_up, x, w_down]
     outputs: [[mul_1, f32, [8, 64]]]
 - inputs: [w_down, w_gate_up, x]
   outputs: [mul_1]
@@ -16013,7 +16013,7 @@ loops:
             unroll: false
             seed: true
       name: k_linear_reduce_4bf504
-    inputs: [silu_one, mul_1_c1, x, w_gate_up, w_down]
+    inputs: [silu_one, mul_1_c1, w_gate_up, x, w_down]
     outputs: [[mul_1, f32, [1, 64]]]
 - inputs: [w_down, w_gate_up, x]
   outputs: [mul_1]
@@ -16157,7 +16157,7 @@ loops:
             unroll: false
             seed: true
       name: k_linear_reduce_6e099c
-    inputs: [silu_one, mul_1_c1, x, w_gate_up, w_down]
+    inputs: [silu_one, mul_1_c1, w_gate_up, x, w_down]
     outputs: [[mul_1, f32, [256, 64]]]
 - inputs: [w_down, w_gate_up, x]
   outputs: [mul_1]
@@ -16301,7 +16301,7 @@ loops:
             unroll: false
             seed: true
       name: k_linear_reduce_2d0129
-    inputs: [silu_one, mul_1_c1, x, w_gate_up, w_down]
+    inputs: [silu_one, mul_1_c1, w_gate_up, x, w_down]
     outputs: [[mul_1, f32, [4, 64]]]
 - inputs: [hidden]
   outputs: [reshape_2, reshape, reshape_1]
@@ -16932,7 +16932,7 @@ loops:
             unroll: false
             seed: true
       name: k_linear_mean_reduce_47d100
-    inputs: [mean_count, add_1_c1, residual, linear_wt, attn_out, p_post_attention_layernorm_weight]
+    inputs: [mean_count, add_1_c1, linear_wt, attn_out, residual, p_post_attention_layernorm_weight]
     outputs: [[to, f32, [4, 64]], [mul_1, f32, [4, 64]]]
 - inputs: [hidden]
   outputs: [reshape, reshape_1, reshape_2]
@@ -17667,7 +17667,7 @@ loops:
             unroll: false
             seed: true
       name: k_linear_mean_reduce_cb8956
-    inputs: [hidden, mean_count, add_c1, p_input_layernorm_weight, linear_2_wt, linear_1_wt, linear_wt]
+    inputs: [mean_count, hidden, add_c1, p_input_layernorm_weight, linear_2_wt, linear_1_wt, linear_wt]
     outputs: [[reshape, f32, [1, 64]], [reshape_1, f32, [1, 32]], [reshape_2, f32, [1, 32]]]
 - inputs: [hidden]
   outputs: [reshape, reshape_1, reshape_2]
@@ -18249,7 +18249,7 @@ loops:
             unroll: false
             seed: true
       name: k_linear_mean_reduce_7c3ae8
-    inputs: [mean_count, add_1_c1, silu_one, residual, linear_wt, attn_out, p_post_attention_layernorm_weight, linear_1_wt, linear_2_wt, linear_3_wt]
+    inputs: [mean_count, add_1_c1, silu_one, linear_wt, attn_out, residual, p_post_attention_layernorm_weight, linear_1_wt, linear_2_wt, linear_3_wt]
     outputs: [[add_2, f32, [32, 64]]]
 - inputs: [hidden]
   outputs: [reshape_2, reshape, reshape_1]
@@ -18880,7 +18880,7 @@ loops:
             unroll: false
             seed: true
       name: k_linear_mean_reduce_05a33c
-    inputs: [mean_count, add_1_c1, residual, linear_wt, attn_out, p_post_attention_layernorm_weight]
+    inputs: [mean_count, add_1_c1, linear_wt, attn_out, residual, p_post_attention_layernorm_weight]
     outputs: [[to, f32, [512, 64]], [mul_1, f32, [512, 64]]]
 - inputs: [attn_out, residual]
   outputs: [add_7]
@@ -19720,7 +19720,7 @@ loops:
             unroll: false
             seed: true
       name: k_linear_mean_reduce_eb9a4d
-    inputs: [mean_1_count, gelu_c1, add_3_c1, gelu_c0, gelu_one, gelu_half, mean_count, mean_2_count, add_c1, add_5_c1, linear_wt, attn_out, add_1,
+    inputs: [mean_1_count, add_3_c1, gelu_c1, gelu_c0, gelu_one, gelu_half, mean_count, add_c1, mean_2_count, add_5_c1, linear_wt, attn_out, add_1,
       residual, add_4, linear_1_wt, linear_2_wt, linear_3_wt, add_6]
     outputs: [[add_7, f32, [{sym: num_tokens, hint: 512}, 64]]]
-gpu_name: NVIDIA H100 80GB
+gpu_name: NVIDIA GeForce RTX 5090

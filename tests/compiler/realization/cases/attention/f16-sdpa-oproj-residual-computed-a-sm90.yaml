@@ -435,6 +435,6 @@ loops:
             unroll: false
             seed: true
       name: k_sdpa_linear_reduce_7e63bd
-    inputs: [scaled_dot_product_attention_mask_fill_c, scaled_dot_product_attention_mask_zero_c, scaled_dot_product_attention_scale, x1, x0, x3,
-      x2, x4]
+    inputs: [scaled_dot_product_attention_scale, scaled_dot_product_attention_mask_fill_c, scaled_dot_product_attention_mask_zero_c, x1, x0, x2,
+      x3, x4]
     outputs: [[add, f16, [1, 64, 128]]]

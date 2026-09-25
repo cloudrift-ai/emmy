@@ -27,7 +27,7 @@ They do three jobs at once:
 ## What one looks like
 
 Model golden configurations live under `recipes/<model>/golden/`, in one file per exact GPU model and compute
-capability. Model-agnostic hardware goldens remain under `emmy/compiler/pipeline/search/goldens/`. A file embeds its
+capability. Model-agnostic hardware goldens remain under `emmy/compiler/pipeline/search/golden/`. A file embeds its
 program pool, then lists structural targets whose realization arrays hold bindings, regimes, schedules, and paired
 measurements:
 
@@ -154,6 +154,33 @@ kernel still agrees with an offered option (a match), whether the rows for that 
 the compiler offers (drift), or whether no row covers it at all (a gap). Drift, a gap, or a compile failure fails the
 release. Beyond that, a recorded row's health is its pinned replay — `run --golden PATH --realization NAME --bench`
 reproduces it under the A/B integrity gates above.
+
+### Against a fresh lowering
+
+A row is evidence for the kernel its stored Loop IR names, and a deploy keys rows by the kernels it lowers fresh from
+the model. When a compiler change moves that lowering the file goes stale: every row still decodes, and serving builds
+kernels none of them describe. Two commands cover it, and neither needs a card:
+
+```bash
+emmy golden check [PATH…]      # the stored targets a fresh lowering of the golden's own programs no longer writes
+emmy golden restamp [PATH…]    # rewrite the golden onto that lowering
+```
+
+The check is a diff you can run yourself, per traced program: the pool of Loop IR kernels the golden stores against
+the same pool lowered fresh from the program the golden stores (a `.yaml` output path makes `compile` write the
+stage as the golden's wire instead of the readable listing):
+
+```bash
+emmy golden kernels recipes/gemma-4-12B-it/golden/rtx5090_sm120.yaml --program 3 > stored.yaml
+emmy compile --golden recipes/gemma-4-12B-it/golden/rtx5090_sm120.yaml --program 3 --ir loop -o fresh.yaml
+diff stored.yaml fresh.yaml
+```
+
+`restamp` replaces each stored target with the fresh Loop IR and re-keys its rows. A row keeps its measurement only
+when its kernel renders the same CUDA source from the fresh Loop IR; otherwise it keeps its schedule and loses its
+microseconds — a proposal, no evidence until a record run on the card measures it again. Rows that no longer decode,
+and targets no fresh kernel writes, are dropped and named; a file nothing survives in is left untouched. Both default
+to every repository golden. The `refresh-golden` skill is the whole flow, including what needs a card.
 
 ## Two smaller rules
 

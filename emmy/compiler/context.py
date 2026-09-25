@@ -164,7 +164,7 @@ class Context:
     # so timings under different arithmetic or optimization flags cannot rank one another.
     # Populated from the environment by probe / from_target.
     compile_flags: str = ""
-    # Whether the strict knob-pin validator (``lowering/tile/_validate``)
+    # Whether the strict knob-pin validator (``tile/_validate``)
     # is active. ``True`` on the deterministic greedy compile (``compile`` / ``run``),
     # where a force-pinned env knob foreign to the kernel's resolved tier is a user
     # error that should fail loudly instead of silently mis-compiling. ``False`` under
@@ -343,7 +343,7 @@ class Context:
     @classmethod
     def probe(cls) -> Context:
         """Build by probing the live CUDA device. Falls back to (0, 0) if
-        cupy is unavailable — callers treat that as "no hardware feature
+        no CUDA device is visible — callers treat that as "no hardware feature
         support" (rules gating on capability self-skip via ``RuleSkipped``).
 
         ``max_dynamic_smem`` is the *live device's* opt-in cap, not the

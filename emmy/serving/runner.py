@@ -72,7 +72,7 @@ class EmmyForwardRunner:
         # (batch_cap, max_seq_len) program (static=True: steps pad to max_seq_len).
         self.batch_cap = batch_cap
         self.static = static
-        # int seq_len -> device-built (1,1,S,S) cupy causal mask (built on first
+        # int seq_len -> device-built (1,1,S,S) causal mask (built on first
         # sight of each S, reused across same-S requests via a D2D prefix copy).
         self._mask_cache: dict = {}
 

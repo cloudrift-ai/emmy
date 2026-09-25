@@ -22,7 +22,7 @@ from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.stmt import Body, Load, Loop, Stmt, Write
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op
+from emmy.compiler.pipeline.passes.tile._fromloop import lift_loop_op
 
 ROW_AXIS = "_row"
 

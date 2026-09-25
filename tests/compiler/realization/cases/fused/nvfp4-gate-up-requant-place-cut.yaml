@@ -3221,7 +3221,7 @@ loops:
             unroll: false
             seed: true
       name: k_linear_reduce_105826
-    inputs: [p_gate_weight_scale_2, p_up_weight_scale_2, x_static_fp4_scale_2, silu_one, mul_static_fp4_floor, mul_static_fp4_shift, mul_static_fp4_f4_max,
-      mul_static_fp4_scale_2, p_gate_weight_scale_bits, x_static_fp4_scale_bits, p_gate_weight_bits, x_static_fp4_bits, p_gate_weight_f4_pairs,
+    inputs: [p_gate_weight_scale_2, x_static_fp4_scale_2, p_up_weight_scale_2, silu_one, mul_static_fp4_floor, mul_static_fp4_shift, mul_static_fp4_scale_2,
+      mul_static_fp4_f4_max, p_gate_weight_scale_bits, x_static_fp4_scale_bits, p_gate_weight_bits, x_static_fp4_bits, p_gate_weight_f4_pairs,
       x_static_fp4_f16_f4_pairs, p_up_weight_scale_bits, p_up_weight_bits, p_up_weight_f4_pairs]
     outputs: [[mul_static_fp4_scale_bits, f8e4m3, [128, 32, 1]], [mul_static_fp4_bits, f4e2m1x2, [128, 256]]]

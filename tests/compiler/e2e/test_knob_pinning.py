@@ -3,7 +3,7 @@
 Pinning rides on the ``EMMY_KNOBS="K1=V1,..."`` env-var mechanism (see
 ``emmy/compiler/pipeline/knob.py`` — ``apply_knobs_env`` splats the aggregate into per-knob
 ``EMMY_<K>=V`` vars at import time, and ``Knob.narrow`` overrides the schedule's candidate codecs
-with the pinned value in ``lowering/tile/040_schedule`` so only the matching variant is built).
+with the pinned value in ``tile/schedule/040_schedule`` so only the matching variant is built).
 
 What this file kept is the half a corpus row cannot state: a substring the lowered kernel must (or
 must not) carry, and a pin the scheduler must REFUSE — the pin names a kernel, so quietly lowering

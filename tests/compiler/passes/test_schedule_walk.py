@@ -34,7 +34,7 @@ from emmy.compiler.ir.tile import OutputSpec, Reduce, TileOp, ops
 from emmy.compiler.ir.tile.ops import Sched
 from emmy.compiler.pipeline.fork import iter_leaves
 from emmy.compiler.pipeline.knob import family_of
-from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop, scan_from_loop
+from emmy.compiler.pipeline.passes.tile._fromloop import fold_from_loop, scan_from_loop
 from emmy.compiler.pipeline.search.golden_eval import enumerate_graph
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from emmy.compiler.pipeline.search.pool import PoolSample
@@ -43,7 +43,7 @@ from tests.compiler.terms import contraction, projection, reduction, slab
 _CC = (12, 0)
 
 #: The scheduling rule, reached through ``importlib`` because its module name starts with a digit.
-_SCHEDULE_RULE = importlib.import_module("emmy.compiler.pipeline.passes.lowering.tile.040_schedule")
+_SCHEDULE_RULE = importlib.import_module("emmy.compiler.pipeline.passes.tile.schedule.040_schedule")
 
 #: The knob pins the enumeration reads off the environment. A host with one set would enumerate a
 #: narrowed pool and fail the offer assertions here for a reason that has nothing to do with the
@@ -445,6 +445,17 @@ def test_a_sweep_carrying_store_keeps_a_member_serial_only_when_the_member_reads
     assert _classic._reduction_domain(_tile_stub(_chain_root(red), (spec,)), red) == _member_catalog()
     over = OutputSpec(write=Write(output="o", index=(Var("m"),), value="v"), sweep=(Axis("m", 4),))
     assert _classic._reduction_domain(_tile_stub(_chain_root(red), (over,)), red) == (Reduce(),)
+
+
+def test_a_sweep_the_chain_root_reads_keeps_every_member_serial(unpinned) -> None:
+    """A sweep the ROOT is evaluated over wraps the whole chain, so a member that never reads it
+    is serial too: the chain arm closes one grid cell and dropped the sweep, leaving its coordinate
+    unbound (a cut piece's group amax over a projection, on a Qwen3.8 FP8 layer)."""
+    root = _norm_linear_root()
+    statistic = next(member for member in ops.chain_members(root) if member.axis == "k")
+    assert "n" in root.free_axes and "n" not in statistic.free_axes
+    swept = OutputSpec(write=Write(output="o", index=(Var("m"), Var("n")), value="acc"), sweep=(Axis("n", 4),))
+    assert _classic._reduction_domain(_tile_stub(root, (swept,)), statistic) == (Reduce(),)
 
 
 def test_a_streamed_store_keeps_chain_members_serial(unpinned) -> None:

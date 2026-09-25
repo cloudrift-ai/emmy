@@ -20,8 +20,8 @@ from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.normalize import _share_common_cones
 from emmy.compiler.ir.tile.path import family_sites, sites
 from emmy.compiler.pipeline import Pipeline
-from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams
-from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
+from emmy.compiler.pipeline.passes.tile._cut import cuttable_seams
+from emmy.compiler.pipeline.passes.tile._fromloop import fold_from_loop
 from tests.compiler.helpers import case_target_tile
 from tests.compiler.terms import contraction, projection, reduction, slab
 
@@ -32,7 +32,7 @@ def _lift(body: Body) -> TileOp:
     graph = Graph()
     graph.add_node(LoopOp(body=body), [], Tensor("out", (1,)), node_id="out")
     graph.outputs = ["out"]
-    return Pipeline.build(["lowering/tile"], select=["lift"]).run(graph).nodes["out"].op
+    return Pipeline.build(["tile/lift"], select=["lift"]).run(graph).nodes["out"].op
 
 
 def _reduce_loop(*stmts, axis: Axis = K32) -> Fold:

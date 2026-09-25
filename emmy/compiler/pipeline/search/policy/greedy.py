@@ -82,11 +82,11 @@ if TYPE_CHECKING:
 
 @lru_cache(maxsize=1)
 def _tile_pipeline():
-    """The ``lowering/tile``-only pipeline the structural price probes drive —
+    """The tile-passes-only pipeline the structural price probes drive —
     frozen and shareable, so one load serves every nested descent."""
-    from emmy.compiler.pipeline import Pipeline  # noqa: PLC0415
+    from emmy.compiler.pipeline import TILE_LOWERING, Pipeline  # noqa: PLC0415
 
-    return Pipeline.build(["lowering/tile"])
+    return Pipeline.build(TILE_LOWERING)
 
 
 def tile_identity(knobs: dict) -> frozenset:
@@ -283,7 +283,7 @@ def _price_kernel(
     deadline: float | None = None,
 ) -> float | None:
     """One kernel's price: a nested deterministic resolution of its
-    single-node slice through ``lowering/tile`` only (the schedule fork is
+    single-node slice through the ``tile/`` passes only (the schedule fork is
     where the prior prices a complete tile row; the kernel/cuda passes add
     nothing and cost real CPU), summed over the kernels that resolution ends
     with (:func:`_resolved_price`). ``db`` rides into the
@@ -392,7 +392,7 @@ def _priced_pick(
     ordinary ranking cannot featurize, not a rule about which leaf should win.
     Every leaf is priced the same way: the best µs at each kernel's partition
     fork, obtained by a nested deterministic resolution of the kernel's
-    single-node slice (``lowering/tile`` only, no backend, CPU-only —
+    single-node slice (the ``tile/`` passes only, no backend, CPU-only —
     :func:`_price_kernel`); a structural option's price is the Σ over its
     fragment's kernels. The nested pick follows the deploy evidence hierarchy
     (``db`` threads the tune DB down), so each side's price is a *measurement*

@@ -124,5 +124,5 @@ loops:
             unroll: false
             seed: true
       name: k_matmul_15d111
-    inputs: [q, k]
+    inputs: [k, q]
     outputs: [[c, f32, [2, 3, 128, 128]]]

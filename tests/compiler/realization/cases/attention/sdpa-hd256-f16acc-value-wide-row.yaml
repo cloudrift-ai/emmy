@@ -362,5 +362,5 @@ loops:
             unroll: false
             seed: true
       name: k_sdpa_96c531
-    inputs: [scaled_dot_product_attention_mask_fill_c, scaled_dot_product_attention_mask_zero_c, scaled_dot_product_attention_scale, x1, x0, x2]
+    inputs: [scaled_dot_product_attention_scale, scaled_dot_product_attention_mask_fill_c, scaled_dot_product_attention_mask_zero_c, x1, x0, x2]
     outputs: [[scaled_dot_product_attention, f16, [1, 16, 512, 256]]]

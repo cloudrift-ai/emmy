@@ -482,10 +482,10 @@ def _golden_regime_env(golden: str, env: dict) -> dict:
     pin at another value fails the boot instead of being overridden."""
     from emmy import config as emmy_config  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import get  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden import load_golden_file, load_golden_records, shared_regime_pins  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import load_golden, load_golden_records, shared_regime_pins  # noqa: PLC0415
 
     out = {}
-    for name, value in shared_regime_pins(load_golden_records(load_golden_file(golden))).items():
+    for name, value in shared_regime_pins(load_golden_records(load_golden(golden))).items():
         key = emmy_config.knob_var(name)
         if key in env and get(name.split("@", 1)[0]).parse(env[key]) != value:
             logger.error("%s: its rows were measured under %s=%s, but the environment pins %s=%r", golden, name, value, key, env[key])

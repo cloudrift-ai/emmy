@@ -12,7 +12,7 @@ import json
 import os
 import re
 import tempfile
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from enum import StrEnum
@@ -25,12 +25,13 @@ import yaml
 
 from emmy import config, gpu
 from emmy.compiler.loop_wire import loop_graph_from_wire, validate_loop_program_pool
+from emmy.compiler.pipeline.knob import family_of
 from emmy.compiler.pipeline.search.data.shape import ShapeKey
 from emmy.compiler.structural import digest
-from emmy.compiler.torch_wire import graph_from_wire, validate_program_pool
+from emmy.compiler.torch_wire import graph_from_wire, graph_to_wire, validate_program_pool
 from emmy.recipe.bundled import default_recipe_root
 
-_HARDWARE_GOLDENS_DIR = Path(__file__).parent / "goldens"
+_HARDWARE_GOLDENS_DIR = Path(__file__).parent / "golden"
 _RECIPE_GOLDEN_DIR = "golden"
 _PROGRAM_GRAPH_CACHE: dict[int, tuple[dict, object]] = {}
 _LOOP_GRAPH_CACHE: dict[int, tuple[dict, object]] = {}
@@ -127,7 +128,7 @@ def fast_math_knobs(knobs: Mapping) -> bool:
 
     for key, value in knobs.items():
         spelling = str(value)
-        if str(key).split("@", 1)[0] == "TILE" and spelling:
+        if family_of(str(key)) == "TILE" and spelling:
             try:
                 plan = Tile.parse(spelling, Work(kind="warp", units=(1, 1)))
             except ValueError:
@@ -148,7 +149,6 @@ def precision_trading_pins(pins: Mapping) -> bool:
 def pins_freeze_cut(pins: Mapping) -> bool:
     """Whether the input pins freeze any placement cut (a ``PLACE…=cut`` pin) — the ONE spelling
     of the predicate behind both the loader's receipt validation and :attr:`GoldenRecord.is_receipt`."""
-    from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
 
     return any(family_of(str(name)) == "PLACE" and str(value) == "cut" for name, value in pins.items())
 
@@ -203,7 +203,7 @@ def _schedules_a_kernel(realization: Mapping) -> bool:
     the child-identity receipts and, deliberately, a routing row whose decision is a cross-CTA
     ``REDUCE`` split, which the recorder measures like any other."""
     knobs = realization.get("knobs") or {}
-    return bool(knobs) and any(str(key).split("@", 1)[0] != "PLACE" for key in knobs)
+    return bool(knobs) and any(family_of(str(key)) != "PLACE" for key in knobs)
 
 
 @dataclass(frozen=True)
@@ -250,7 +250,7 @@ class GoldenRecord:
         from emmy.compiler.pipeline.search.pins import stampable_reduce  # noqa: PLC0415
 
         def arm(key: str, value) -> bool:
-            family = str(key).split("@", 1)[0]
+            family = family_of(str(key))
             return family == "PLACE" or (family == "REDUCE" and stampable_reduce(str(value)) == "")
 
         return bool(self.knobs) and all(arm(key, value) for key, value in self.knobs.items())
@@ -267,8 +267,8 @@ class GoldenRecord:
         as recorded. A routing row keeps it in ``knobs``; a receipt, a corpus case or an ``--ab``
         row freezes it in ``pins``. Empty for a plain schedule row, which says the kernel it
         decorates ran fused."""
-        route = {str(key): str(value) for key, value in self.pins if str(key).split("@", 1)[0] == "PLACE"}
-        route.update((str(key), str(value)) for key, value in self.knobs.items() if str(key).split("@", 1)[0] == "PLACE")
+        route = {str(key): str(value) for key, value in self.pins if family_of(str(key)) == "PLACE"}
+        route.update((str(key), str(value)) for key, value in self.knobs.items() if family_of(str(key)) == "PLACE")
         return route
 
     @property
@@ -277,7 +277,7 @@ class GoldenRecord:
         index carries them (an OFF ``''`` is a decided value and stays)."""
         from emmy.compiler.pipeline.knob import tuning_knob_items  # noqa: PLC0415
 
-        return {key: value for key, value in tuning_knob_items(self.knobs) if key.split("@", 1)[0] != "PLACE"}
+        return {key: value for key, value in tuning_knob_items(self.knobs) if family_of(key) != "PLACE"}
 
     @cached_property
     def pool_group(self) -> tuple:
@@ -592,7 +592,7 @@ def validate_golden_file(
             pins = realization.get("pins")
             if not isinstance(pins, Mapping):
                 raise ValueError(f"{realization_where}.pins must be a mapping")
-            from emmy.compiler.pipeline.knob import KnobType, family_of, get  # noqa: PLC0415
+            from emmy.compiler.pipeline.knob import KnobType, get  # noqa: PLC0415
 
             for name, value in pins.items():
                 descriptor = get(family_of(name)) if isinstance(name, str) and name else None
@@ -627,7 +627,7 @@ def validate_golden_file(
                     raise ValueError(
                         f"{realization_where} gives conflicting input pins and measured knobs for {', '.join(sorted(conflicts))}"
                     )
-                families = {str(key).split("@", 1)[0] for key in realization["knobs"]}
+                families = {family_of(str(key)) for key in realization["knobs"]}
                 if "PLACE" in families and families != {"PLACE"}:
                     raise ValueError(f"{realization_where} mixes PLACE routing knobs with schedule knobs")
                 if families and "PLACE" not in families and pins_freeze_cut(pins) and "identity" not in realization:
@@ -651,8 +651,10 @@ def validate_golden_file(
                 state = golden_set_state(realization, entry["realizations"])
             except ValueError as exc:
                 raise ValueError(f"{realization_where} ({realization.get('name', '?')}): {exc}") from exc
-            if strict and state != GoldenEntryState.VERIFIED:
-                raise ValueError(f"{realization_where} repository promotion requires knobs and paired positive timings")
+            if strict and state == GoldenEntryState.INVENTORY:
+                raise ValueError(f"{realization_where} a repository row must spell a schedule (knobs)")
+            if validation == GoldenFileValidation.PROMOTION and state != GoldenEntryState.VERIFIED:
+                raise ValueError(f"{realization_where} promotion requires knobs and paired positive timings")
             if state == GoldenEntryState.VERIFIED and "measurements" in realization:
                 measurements = realization["measurements"]
                 _require_keys(measurements, {"emmy_us", "reference_us", "reference_backend"}, f"{realization_where}.measurements")
@@ -711,7 +713,7 @@ def regime_pins(record: GoldenRecord) -> dict:
     and friends) a replay publishes to the environment so the record reads as live evidence
     (:func:`regime_live`). The schedule row and the route never travel this way; they are
     measured rows the evidence pick joins to the kernel they were recorded for."""
-    return {str(key): value for key, value in record.pins if str(key).split("@", 1)[0] != "PLACE"}
+    return {str(key): value for key, value in record.pins if family_of(str(key)) != "PLACE"}
 
 
 def kernel_set_pins(record: GoldenRecord, records: Sequence[GoldenRecord]) -> dict:
@@ -727,7 +729,12 @@ def kernel_set_pins(record: GoldenRecord, records: Sequence[GoldenRecord]) -> di
     record that names no route, which is the ordinary row whose own knobs are its pin.
 
     Both precision lanes record their rows under one name, so a listed name resolves inside the
-    record's own regime first: the standard lane's split is not the fast-math lane's."""
+    record's own regime first: the standard lane's split is not the fast-math lane's.
+
+    A row naming a piece a cut minted publishes only its ``PLACE`` keys. Its other knobs address
+    that piece by identity, not by seam: published as a hand pin they would reach every kernel of
+    the graph (two pieces' splits collapsing onto the last value, a piece that cannot split
+    refusing). Its row decides that piece by identity instead, as evidence."""
     regime = regime_pins(record)
     by_name: dict[str, GoldenRecord] = {}
     for other in records:
@@ -736,8 +743,10 @@ def kernel_set_pins(record: GoldenRecord, records: Sequence[GoldenRecord]) -> di
     pins: dict[str, str] = {}
     for name in record.kernel_set:
         referenced = by_name.get(name)
-        if referenced is not None:
-            pins.update({str(key): str(value) for key, value in referenced.knobs.items()})
+        if referenced is None:
+            continue
+        own_kernel = referenced.identity in (None, record.identity)
+        pins.update({str(key): str(value) for key, value in referenced.knobs.items() if own_kernel or family_of(str(key)) == "PLACE"})
     return pins
 
 
@@ -791,7 +800,7 @@ def _identity_store() -> dict:
         from emmy import config  # noqa: PLC0415
 
         fingerprint = _compiler_fingerprint()
-        sections: dict = {"entries": {}, "verdicts": {}}
+        sections: dict = {"entries": {}, "verdicts": {}, "lowerings": {}}
         try:
             payload = json.loads(config.golden_identity_cache_path(fingerprint).read_text())
             sections = {name: payload.get(name, {}) for name in sections}
@@ -802,9 +811,9 @@ def _identity_store() -> dict:
 
 
 def flush_identity_store() -> None:
-    """Persist newly derived identities and decode verdicts (atomic replace; concurrent writers
-    merge — a lost write only re-derives later), so the next process on this machine and compiler
-    reads the derivations instead of lifting every record again."""
+    """Persist newly derived identities, decode verdicts and fresh-lowering digests (atomic replace;
+    concurrent writers merge — a lost write only re-derives later), so the next process on this machine and
+    compiler reads the derivations instead of lifting every record again."""
     global _IDENTITY_STORE_DIRTY
     if not _IDENTITY_STORE_DIRTY or _IDENTITY_STORE is None:
         return
@@ -822,7 +831,7 @@ def flush_identity_store() -> None:
         except (OSError, ValueError):
             on_disk = None
         if on_disk is not None:
-            for section in ("entries", "verdicts"):
+            for section in ("entries", "verdicts", "lowerings"):
                 merged = dict(on_disk.get(section, {}))
                 merged.update(_IDENTITY_STORE.get(section, {}))
                 _IDENTITY_STORE[section] = merged
@@ -884,18 +893,19 @@ def _target_kernel_nodes(record: GoldenRecord):
 
 def _lifted_target(record: GoldenRecord):
     """Lift the record's single selected kernel to Tile IR — the tree the cut pass schedules: the
-    lift, then the twist rewrite, exactly as ``lowering/tile`` runs them. A placement key is
+    lift, then the twist rewrite, exactly as ``tile/lift`` runs them. A placement key is
     spelled on that tree, so decoding it against the lift alone would name sites the fused
     single-pass carrier no longer has."""
-    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op  # noqa: PLC0415
-    from emmy.compiler.pipeline.passes.lowering.tile._twist import rewrite_twisted  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.tile._fromloop import lift_loop_op, lift_serial  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.tile._twist import rewrite_twisted  # noqa: PLC0415
 
     lowered, nodes = _target_kernel_nodes(record)
     if len(nodes) != 1:
         raise ValueError(f"{record.name}: target lowers to {len(nodes)} kernels — a row decorates exactly one")
     node = nodes[0]
     node.op = node.op.with_io(lowered, node)
-    tile = lift_loop_op(node.op, name=node.id)
+    # A serial kernel lifts its carried states as state buffers, as ``tile/lift`` does.
+    tile = lift_serial(node.op, name=node.id, prefix=node.id)[0] if node.op.body.carries else lift_loop_op(node.op, name=node.id)
     tile = replace(tile, op=rewrite_twisted(tile.op, tile.axes))
     # A fork's root op is always matcher-refreshed (``_match_at`` runs ``with_io`` on every matched
     # node before the rule that offers the fork), so the record side mirrors the io through that
@@ -1072,7 +1082,6 @@ def piece_row(row: Mapping[str, str]) -> dict[str, str]:
     omitting the family (:attr:`GoldenRecord.schedule_row`). Dropping the key instead read as
     "free", which no leaf equals — the whole split half of a card's rows decoded to nothing and
     joined no kernel in the evidence index."""
-    from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import stampable_reduce  # noqa: PLC0415
 
     out = {str(key): str(value) for key, value in row.items()}
@@ -1098,7 +1107,6 @@ def lead_of(record: GoldenRecord, records: Sequence[GoldenRecord]) -> GoldenReco
 
 
 def _set_key(record: GoldenRecord) -> tuple:
-    from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
 
     regime = tuple(sorted((str(k), str(v)) for k, v in record.pin_map.items() if family_of(str(k)) != "PLACE"))
     return (_record_cache_key(record), regime)
@@ -1140,7 +1148,6 @@ def _replay(
     from emmy.compiler.pipeline.fork import exact_schedule_leaf, fork_signature, iter_leaves, leaf_for, leaf_knobs  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import (  # noqa: PLC0415
         canonical_row_key,
-        family_of,
         schedule_match_key,
         schedule_row_key,
         validate_family_value,
@@ -1468,6 +1475,17 @@ def dump_golden_file(
     return destination
 
 
+def golden_validation(path: str | Path) -> GoldenFileValidation:
+    """The validation a golden file's location demands: a repository golden strictly, anything else
+    as a working file — what every command reading or writing a golden by path uses."""
+    return GoldenFileValidation.REPOSITORY if is_repository_golden_path(path) else GoldenFileValidation.WORKING
+
+
+def load_golden(path: str | Path) -> dict:
+    """A golden file loaded with the validation its location demands (:func:`golden_validation`)."""
+    return load_golden_file(path, validation=golden_validation(path))
+
+
 def is_repository_golden_path(path: str | Path) -> bool:
     resolved = Path(path).resolve()
     hardware_root = _HARDWARE_GOLDENS_DIR.resolve()
@@ -1634,7 +1652,7 @@ def regime_live(record: GoldenRecord) -> bool:
     (:data:`_PRECISION_PINS`, umbrella semantics per ``space.precision_pin``) is compared even for
     pins the record omits (omitted = measured OFF). ``PLACE`` pins are the record's route, not a
     regime."""
-    from emmy.compiler.pipeline.knob import KnobType, family_of, registry  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import KnobType, registry  # noqa: PLC0415
     from emmy.compiler.pipeline.search.space import precision_pin  # noqa: PLC0415
 
     knobs = registry()
@@ -1660,16 +1678,54 @@ def regime_live(record: GoldenRecord) -> bool:
     return True
 
 
-_DOCUMENT_MEMO: dict[Path, list[GoldenRecord]] = {}
+_DOCUMENT_MEMO: dict[Path, tuple[dict, list[GoldenRecord]]] = {}
 
 
-def _records_of(path: Path, *, validation: GoldenFileValidation = GoldenFileValidation.REPOSITORY) -> list[GoldenRecord]:
+def _document_of(path: Path, *, validation: GoldenFileValidation = GoldenFileValidation.REPOSITORY) -> tuple[dict, list[GoldenRecord]]:
+    """A golden parsed once per process: ``(document, records)``."""
     path = Path(path)
     cached = _DOCUMENT_MEMO.get(path)
     if cached is None:
         document = load_golden_file(path, validation=validation)
-        cached = _DOCUMENT_MEMO.setdefault(path, load_golden_records(document))
+        cached = _DOCUMENT_MEMO.setdefault(path, (document, load_golden_records(document)))
     return cached
+
+
+def _records_of(path: Path, *, validation: GoldenFileValidation = GoldenFileValidation.REPOSITORY) -> list[GoldenRecord]:
+    return _document_of(path, validation=validation)[1]
+
+
+def stored_program(document: Mapping, index: int):
+    """The golden's traced program ``index`` as the compiler receives it — decoded from the wire and
+    prepared exactly as the trace inventory writer prepares a fresh trace, so its fresh lowering is
+    comparable byte for byte with the targets the golden stores."""
+    from emmy.compiler.pipeline.search.working_golden import prepare_traced_graph  # noqa: PLC0415
+    from emmy.compiler.torch_wire import graph_from_wire  # noqa: PLC0415
+
+    graph = graph_from_wire(document["programs"][index])
+    prepare_traced_graph(graph)
+    return graph
+
+
+def stored_kernels(document: Mapping, program: int | None = None) -> list[dict]:
+    """The Loop IR kernels the golden's targets store, each once, in target order — every
+    target's, or those of one traced ``program``."""
+    indexes = [entry["target"]["loop"] for entry in document["configs"] if program is None or entry["program"] == program]
+    return [document["loops"][index] for index in dict.fromkeys(indexes)]
+
+
+def program_text(graph) -> str:
+    """A traced program as the wire a golden stores in ``programs`` — ``emmy compile --ir torch -o file.yaml``."""
+    return yaml.dump(_style_program(graph_to_wire(graph)), Dumper=_GoldenDumper, sort_keys=False, width=140)
+
+
+def kernel_pool_text(kernels: Iterable[Mapping]) -> str:
+    """Loop IR kernels as the pool a golden stores them in, sorted by output set, so two pools diff
+    line by line whatever order their kernels came in: what ``emmy golden kernels`` prints for a
+    golden and ``emmy compile --golden PATH --program N --ir loop -o fresh.yaml`` writes for its fresh
+    lowering."""
+    ordered = sorted(kernels, key=lambda kernel: sorted(kernel["outputs"]))
+    return yaml.dump([_style_program(kernel) for kernel in ordered], Dumper=_GoldenDumper, sort_keys=False, width=140)
 
 
 def _load_goldens() -> list[GoldenRecord]:

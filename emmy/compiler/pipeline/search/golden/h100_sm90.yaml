@@ -533,23 +533,6 @@ programs:
   nodes:
   - id: x0
     op: input
-    outputs: [[x0, f16, [1, 8, {sym: seq_len, hint: 512}, 128]]]
-  - id: x1
-    op: input
-    outputs: [[x1, f16, [1, 8, {sym: seq_len, hint: 512}, 128]]]
-  - id: x2
-    op: input
-    outputs: [[x2, f16, [1, 8, {sym: seq_len, hint: 512}, 128]]]
-  - id: scaled_dot_product_attention
-    op: torch.sdpa
-    attrs: {is_causal: false, sliding_window: null, scale: null}
-    inputs: [x0, x1, x2]
-    outputs: [[scaled_dot_product_attention, f16, [1, 8, {sym: seq_len, hint: 512}, 128]]]
-- inputs: [x0, x1, x2]
-  outputs: [scaled_dot_product_attention]
-  nodes:
-  - id: x0
-    op: input
     outputs: [[x0, f16, [1, 8, 512, 64]]]
   - id: x1
     op: input
@@ -562,23 +545,6 @@ programs:
     attrs: {is_causal: false, sliding_window: null, scale: null}
     inputs: [x0, x1, x2]
     outputs: [[scaled_dot_product_attention, f16, [1, 8, 512, 64]]]
-- inputs: [x0, x1, x2]
-  outputs: [scaled_dot_product_attention]
-  nodes:
-  - id: x0
-    op: input
-    outputs: [[x0, f16, [1, 8, {sym: seq_len, hint: 512}, 64]]]
-  - id: x1
-    op: input
-    outputs: [[x1, f16, [1, 8, {sym: seq_len, hint: 512}, 64]]]
-  - id: x2
-    op: input
-    outputs: [[x2, f16, [1, 8, {sym: seq_len, hint: 512}, 64]]]
-  - id: scaled_dot_product_attention
-    op: torch.sdpa
-    attrs: {is_causal: false, sliding_window: null, scale: null}
-    inputs: [x0, x1, x2]
-    outputs: [[scaled_dot_product_attention, f16, [1, 8, {sym: seq_len, hint: 512}, 64]]]
 - inputs: [x0, x1, x2]
   outputs: [scaled_dot_product_attention]
   nodes:
@@ -672,7 +638,7 @@ programs:
 configs:
 - program: 0
   target:
-    loop: 8
+    loop: 0
     origins:
     - matmul
   realizations:
@@ -692,7 +658,7 @@ configs:
       reference_backend: cublas
 - program: 1
   target:
-    loop: 9
+    loop: 1
     origins:
     - matmul
   realizations:
@@ -712,7 +678,7 @@ configs:
       reference_backend: cublas
 - program: 2
   target:
-    loop: 10
+    loop: 2
     origins:
     - matmul
   realizations:
@@ -732,7 +698,7 @@ configs:
       reference_backend: cublas
 - program: 3
   target:
-    loop: 11
+    loop: 3
     origins:
     - matmul
   realizations:
@@ -752,7 +718,7 @@ configs:
       reference_backend: cublas
 - program: 4
   target:
-    loop: 12
+    loop: 4
     origins:
     - matmul
   realizations:
@@ -772,7 +738,7 @@ configs:
       reference_backend: cublas
 - program: 5
   target:
-    loop: 13
+    loop: 5
     origins:
     - matmul
   realizations:
@@ -792,7 +758,7 @@ configs:
       reference_backend: cublas
 - program: 6
   target:
-    loop: 14
+    loop: 6
     origins:
     - matmul
   realizations:
@@ -812,7 +778,7 @@ configs:
       reference_backend: cublas
 - program: 7
   target:
-    loop: 15
+    loop: 7
     origins:
     - matmul
   realizations:
@@ -832,7 +798,7 @@ configs:
       reference_backend: cublas
 - program: 8
   target:
-    loop: 16
+    loop: 8
     origins:
     - matmul
   realizations:
@@ -852,7 +818,7 @@ configs:
       reference_backend: cublas
 - program: 9
   target:
-    loop: 17
+    loop: 9
     origins:
     - matmul
   realizations:
@@ -872,7 +838,7 @@ configs:
       reference_backend: cublas
 - program: 10
   target:
-    loop: 18
+    loop: 10
     origins:
     - matmul
   realizations:
@@ -892,7 +858,7 @@ configs:
       reference_backend: cublas
 - program: 11
   target:
-    loop: 19
+    loop: 11
     origins:
     - matmul
   realizations:
@@ -912,7 +878,7 @@ configs:
       reference_backend: cublas
 - program: 12
   target:
-    loop: 20
+    loop: 12
     origins:
     - matmul
   realizations:
@@ -932,7 +898,7 @@ configs:
       reference_backend: cublas
 - program: 13
   target:
-    loop: 21
+    loop: 13
     origins:
     - matmul
   realizations:
@@ -952,7 +918,7 @@ configs:
       reference_backend: cublas
 - program: 14
   target:
-    loop: 22
+    loop: 14
     origins:
     - softmax
   realizations:
@@ -961,16 +927,17 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      RASTER: ''
-      REDUCE: coop/r2
       WORK: t128
+      REDUCE: coop/r2
+      RASTER: ''
+    identity: 1c7c394f75d723b7036eafebd65da886897bc8fba2426aac9bbcf09204d6d7bf
     measurements:
-      emmy_us: 3.246
-      reference_us: 7.862
-      reference_backend: torch-eager
+      emmy_us: 4.176067188382149
+      reference_us: 4.172719549387693
+      reference_backend: same-input-greedy
 - program: 15
   target:
-    loop: 23
+    loop: 15
     origins:
     - sum_1
     - sum_1_keepdim
@@ -989,7 +956,7 @@ configs:
       reference_backend: torch-eager
 - program: 16
   target:
-    loop: 24
+    loop: 16
     origins:
     - softmax
   realizations:
@@ -998,16 +965,17 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      RASTER: ''
-      REDUCE: coop/r4
       WORK: t512
+      REDUCE: coop/r4
+      RASTER: ''
+    identity: ecd536d96f64c82f83c188a9530a6bc545c74d679af9f8b6825a37af36fd4c23
     measurements:
-      emmy_us: 8.705
-      reference_us: 17.241
-      reference_backend: torch-eager
+      emmy_us: 12.389999814331532
+      reference_us: 11.177818290889263
+      reference_backend: same-input-greedy
 - program: 17
   target:
-    loop: 25
+    loop: 17
     origins:
     - sum_1
     - sum_1_keepdim
@@ -1026,7 +994,7 @@ configs:
       reference_backend: torch-eager
 - program: 18
   target:
-    loop: 26
+    loop: 18
     origins:
     - rms_norm
   realizations:
@@ -1035,16 +1003,17 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      RASTER: ''
-      REDUCE: coop
       WORK: t512
+      REDUCE: coop
+      RASTER: ''
+    identity: b234f73394f781bc10f2c3bc7665795ba68af917b032762abe63734c2197b1ed
     measurements:
-      emmy_us: 3.397
-      reference_us: 4.901
-      reference_backend: torch-eager
+      emmy_us: 3.257495118305087
+      reference_us: 3.2498701475560665
+      reference_backend: same-input-greedy
 - program: 19
   target:
-    loop: 27
+    loop: 19
     origins:
     - rms_norm
   realizations:
@@ -1053,16 +1022,17 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      RASTER: ''
-      REDUCE: coop/r2
       WORK: t512
+      REDUCE: coop/r2
+      RASTER: ''
+    identity: fb7a762add6f602383192dd889a3346cc9dd0817adaef21d47c730caa4d865d3
     measurements:
-      emmy_us: 4.968
-      reference_us: 6.487
-      reference_backend: torch-eager
+      emmy_us: 4.959840793162584
+      reference_us: 5.09325135499239
+      reference_backend: same-input-greedy
 - program: 20
   target:
-    loop: 28
+    loop: 20
     origins:
     - rms_norm
   realizations:
@@ -1071,16 +1041,17 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      RASTER: ''
-      REDUCE: coop
       WORK: t512
+      REDUCE: coop
+      RASTER: ''
+    identity: 888fddf962aeec78a1c5c50696e708bb4f526e170f81d0ede5e411b47889ee61
     measurements:
-      emmy_us: 9.046
-      reference_us: 10.662
-      reference_backend: torch-eager
+      emmy_us: 8.549470454454422
+      reference_us: 8.562871254980564
+      reference_backend: same-input-greedy
 - program: 21
   target:
-    loop: 29
+    loop: 21
     origins:
     - relu
   realizations:
@@ -1098,7 +1069,7 @@ configs:
       reference_backend: torch-eager
 - program: 22
   target:
-    loop: 30
+    loop: 22
     origins:
     - relu
   realizations:
@@ -1116,7 +1087,7 @@ configs:
       reference_backend: torch-eager
 - program: 23
   target:
-    loop: 31
+    loop: 23
     origins:
     - softmax
   realizations:
@@ -1125,16 +1096,17 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      RASTER: ''
-      REDUCE: coop/r2
       WORK: t128
+      REDUCE: coop/r2
+      RASTER: ''
+    identity: 0b96c6ee0a0021764fd767a4a55db93db98e94c619cd68977d636c3ac18b4b39
     measurements:
-      emmy_us: 3.254
-      reference_us: 7.96
-      reference_backend: torch-eager
+      emmy_us: 4.12165280431509
+      reference_us: 4.132627975195646
+      reference_backend: same-input-greedy
 - program: 24
   target:
-    loop: 32
+    loop: 24
     origins:
     - sum_1
     - sum_1_keepdim
@@ -1153,7 +1125,7 @@ configs:
       reference_backend: torch-eager
 - program: 25
   target:
-    loop: 33
+    loop: 25
     origins:
     - softmax
   realizations:
@@ -1162,16 +1134,17 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      RASTER: ''
-      REDUCE: coop/r2
       WORK: t512
+      REDUCE: coop/r2
+      RASTER: ''
+    identity: a72f666d72e7f7d88cc76e958d5a2b9fc67408af319bcc1a7246c3db839c5a8b
     measurements:
-      emmy_us: 8.826
-      reference_us: 17.249
-      reference_backend: torch-eager
+      emmy_us: 11.511172167956829
+      reference_us: 10.888439603149891
+      reference_backend: same-input-greedy
 - program: 26
   target:
-    loop: 34
+    loop: 26
     origins:
     - sum_1
     - sum_1_keepdim
@@ -1190,7 +1163,7 @@ configs:
       reference_backend: torch-eager
 - program: 27
   target:
-    loop: 35
+    loop: 27
     origins:
     - rms_norm
   realizations:
@@ -1199,16 +1172,17 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      RASTER: ''
-      REDUCE: coop/r4
       WORK: t512
+      REDUCE: coop/r4
+      RASTER: ''
+    identity: c287f2c97990fb011db2d45dbce0d5073ed22b3c1a5d6dd19c51892f81e0b8ae
     measurements:
-      emmy_us: 3.307
-      reference_us: 4.865
-      reference_backend: torch-eager
+      emmy_us: 3.284526290372014
+      reference_us: 3.2340711914002895
+      reference_backend: same-input-greedy
 - program: 28
   target:
-    loop: 36
+    loop: 28
     origins:
     - rms_norm
   realizations:
@@ -1217,16 +1191,17 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      RASTER: ''
-      REDUCE: coop/r2
       WORK: t512
+      REDUCE: coop/r2
+      RASTER: ''
+    identity: d59d2a03f19696e9d7128d00c1977e767bc5beb22970bba77b0bb99c0383f168
     measurements:
-      emmy_us: 5.015
-      reference_us: 6.674
-      reference_backend: torch-eager
+      emmy_us: 4.918384365737438
+      reference_us: 4.917596001178026
+      reference_backend: same-input-greedy
 - program: 29
   target:
-    loop: 37
+    loop: 29
     origins:
     - rms_norm
   realizations:
@@ -1235,16 +1210,17 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      RASTER: ''
-      REDUCE: coop/r2
       WORK: t512
+      REDUCE: coop/r2
+      RASTER: ''
+    identity: 2dca8e17cf8157954dfbc18b897d8a49e423117337de902dab9533c7ae13d379
     measurements:
-      emmy_us: 8.839
-      reference_us: 10.655
-      reference_backend: torch-eager
+      emmy_us: 8.429829962551594
+      reference_us: 8.67979135364294
+      reference_backend: same-input-greedy
 - program: 30
   target:
-    loop: 38
+    loop: 30
     origins:
     - relu
   realizations:
@@ -1262,7 +1238,7 @@ configs:
       reference_backend: torch-eager
 - program: 31
   target:
-    loop: 39
+    loop: 31
     origins:
     - relu
   realizations:
@@ -1280,211 +1256,7 @@ configs:
       reference_backend: torch-eager
 - program: 32
   target:
-    loop: 0
-  realizations:
-  - name: attention.hd128.qk
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      RASTER: ''
-      REDUCE: ''
-      STAGE: d1/smem-tma
-      TILE: mma_m16n8k16_f16_f32/f4x2/k4
-      WORK: w1x4
-    measurements:
-      emmy_us: 6.049
-      reference_us: 7.757
-      reference_backend: same-input-greedy
-- program: 32
-  target:
-    loop: 1
-  realizations:
-  - name: attention.hd128.softmax_v
-    bindings: {}
-    pins:
-      FAST_MATH: true
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: d1/smem-tma
-      TILE: mma_m16n8k16_f16_f32/f1x4/k8
-      WORK: w2x2
-    measurements:
-      emmy_us: 14.432
-      reference_us: 24.524
-      reference_backend: same-input-greedy
-  - name: attention.hd128.softmax_v
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      RASTER: ''
-      REDUCE: ''
-      STAGE: d1/smem-tma
-      TILE: mma_m16n8k16_f16_f32/f1x8/k8
-      WORK: w2x1
-    measurements:
-      emmy_us: 11.98
-      reference_us: 24.524
-      reference_backend: same-input-greedy
-- program: 33
-  target:
-    loop: 2
-  realizations:
-  - name: attention.hd128.dynM.qk
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: mma_m16n8k16_f16_f32/f4x8/k4
-      WORK: w2x2
-    measurements:
-      emmy_us: 20.127
-      reference_us: 33.732
-      reference_backend: same-input-greedy
-- program: 33
-  target:
-    loop: 3
-  realizations:
-  - name: attention.hd128.dynM.softmax_v
-    bindings: {}
-    pins:
-      FAST_MATH: true
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: d1/smem-tma
-      TILE: mma_m16n8k16_f16_f32/f1x2/k4
-      WORK: w1x4
-    measurements:
-      emmy_us: 26.492
-      reference_us: 29.063
-      reference_backend: same-input-greedy
-  - name: attention.hd128.dynM.softmax_v
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      RASTER: ''
-      REDUCE: ''
-      STAGE: d1/smem-async
-      TILE: mma_m16n8k16_f16_f32/f1x4/k8
-      WORK: w4x1
-    measurements:
-      emmy_us: 16.167
-      reference_us: 29.063
-      reference_backend: same-input-greedy
-- program: 34
-  target:
-    loop: 4
-  realizations:
-  - name: attention.hd64.qk
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      RASTER: ''
-      REDUCE: ''
-      STAGE: d1/smem-tma
-      TILE: mma_m16n8k16_f16_f32/f4x2/k4
-      WORK: w1x4
-    measurements:
-      emmy_us: 5.564
-      reference_us: 6.774
-      reference_backend: same-input-greedy
-- program: 34
-  target:
-    loop: 5
-  realizations:
-  - name: attention.hd64.softmax_v
-    bindings: {}
-    pins:
-      FAST_MATH: true
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: d1/smem-tma
-      TILE: mma_m16n8k16_f16_f32/f1x8/k8
-      WORK: w4x1
-    measurements:
-      emmy_us: 12.288
-      reference_us: 47.934
-      reference_backend: same-input-greedy
-  - name: attention.hd64.softmax_v
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      RASTER: ''
-      REDUCE: ''
-      STAGE: d1/smem-tma
-      TILE: mma_m16n8k16_f16_f32/f1x4/k8
-      WORK: w2x1
-    measurements:
-      emmy_us: 10.004
-      reference_us: 47.934
-      reference_backend: same-input-greedy
-- program: 35
-  target:
-    loop: 6
-  realizations:
-  - name: attention.hd64.dynM.qk
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      RASTER: ''
-      REDUCE: ''
-      STAGE: ''
-      TILE: mma_m16n8k16_f16_f32/f4x8/k4
-      WORK: w1x4
-    measurements:
-      emmy_us: 16.05
-      reference_us: 16.052
-      reference_backend: same-input-greedy
-- program: 35
-  target:
-    loop: 7
-  realizations:
-  - name: attention.hd64.dynM.softmax_v
-    bindings: {}
-    pins:
-      FAST_MATH: true
-    knobs:
-      LOOPIFY: '0'
-      RASTER: ''
-      REDUCE: ''
-      STAGE: d1/smem-async
-      TILE: mma_m16n8k16_f16_f32/f1x2/k8
-      WORK: w2x2
-    measurements:
-      emmy_us: 16.357
-      reference_us: 111.433
-      reference_backend: same-input-greedy
-  - name: attention.hd64.dynM.softmax_v
-    bindings: {}
-    pins:
-      FAST_MATH: false
-    knobs:
-      RASTER: ''
-      REDUCE: ''
-      STAGE: d1/smem-async
-      TILE: mma_m16n8k16_f16_f32/f1x4/k8
-      WORK: w4x1
-    measurements:
-      emmy_us: 11.831
-      reference_us: 111.433
-      reference_backend: same-input-greedy
-- program: 32
-  target:
-    loop: 40
+    loop: 32
     origins:
     - scaled_dot_product_attention
   realizations:
@@ -1501,11 +1273,11 @@ configs:
       TILE@map.1/twist: mma_m16n8k16_f16_f16/f1x16/k4
       TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x8/k4
       WORK: w2x1
-    identity: 8accfd2106236950ce3d63b80b3ae413803cf2289ac16d241baaab4c652a8121
+    identity: 48df8ea845702cdc2761a1a3a8d98e030b378c15be386f624f77996ac2927bfe
     measurements:
-      emmy_us: 14.331
-      reference_us: 11.236
-      reference_backend: torch-eager
+      emmy_us: 13.824889436364174
+      reference_us: 13.927314430475235
+      reference_backend: same-input-greedy
   - name: attention.hd128.fused
     bindings: {}
     pins:
@@ -1519,14 +1291,14 @@ configs:
       TILE@map.1/twist: mma_m16n8k16_f16_f32/f1x16/k4
       TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x8/k4
       WORK: w1x1
-    identity: 8accfd2106236950ce3d63b80b3ae413803cf2289ac16d241baaab4c652a8121
+    identity: 48df8ea845702cdc2761a1a3a8d98e030b378c15be386f624f77996ac2927bfe
     measurements:
-      emmy_us: 11.86
-      reference_us: 11.236
-      reference_backend: torch-eager
-- program: 34
+      emmy_us: 15.639500692486763
+      reference_us: 15.771353617310524
+      reference_backend: same-input-greedy
+- program: 33
   target:
-    loop: 41
+    loop: 33
     origins:
     - scaled_dot_product_attention
   realizations:
@@ -1543,11 +1315,11 @@ configs:
       TILE@map.1/twist: mma_m16n8k16_f16_f16/f1x8/k4
       TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x8/k4
       WORK: w2x1
-    identity: cf1c12f9f3898f2ce00f1a61fd9a06e4d94565772fe1168621ac25618b3258bf
+    identity: 33c8fa10c8eae066e9a0099f4b24491e90d1350b1556ce89eef2aea47c9c01ff
     measurements:
-      emmy_us: 7.88
-      reference_us: 8.906
-      reference_backend: torch-eager
+      emmy_us: 7.778999861329794
+      reference_us: 7.750144228339195
+      reference_backend: same-input-greedy
   - name: attention.hd64.fused
     bindings: {}
     pins:
@@ -1561,14 +1333,14 @@ configs:
       TILE@map.1/twist: mma_m16n8k16_f16_f32/f1x8/k8
       TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x16/k4
       WORK: w2x1
-    identity: cf1c12f9f3898f2ce00f1a61fd9a06e4d94565772fe1168621ac25618b3258bf
+    identity: 33c8fa10c8eae066e9a0099f4b24491e90d1350b1556ce89eef2aea47c9c01ff
     measurements:
-      emmy_us: 6.75
-      reference_us: 8.906
-      reference_backend: torch-eager
-- program: 36
+      emmy_us: 7.838992401957512
+      reference_us: 7.870699279010296
+      reference_backend: same-input-greedy
+- program: 34
   target:
-    loop: 42
+    loop: 34
     origins:
     - scaled_dot_product_attention
   realizations:
@@ -1585,11 +1357,11 @@ configs:
       TILE@map.1/twist: mma_m16n8k16_f16_f16/f1x8/k4
       TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x8/k4
       WORK: w2x1
-    identity: e60f838d57b526cb060b9df70b188313b0dc1810c00fa5f62421ecff81dd8caf
+    identity: d5a4693cfeb89f2bd9f9fadfa4b83acd75a10386f96058858fbf9efc1941bfea
     measurements:
-      emmy_us: 14.704
-      reference_us: 11.696
-      reference_backend: torch-eager
+      emmy_us: 12.453599832952023
+      reference_us: 12.467692606151104
+      reference_backend: same-input-greedy
   - name: attention.hd128.causal.fused
     bindings: {}
     pins:
@@ -1603,14 +1375,14 @@ configs:
       TILE@map.1/twist: mma_m16n8k16_f16_f32/f1x16/k4
       TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x8/k4
       WORK: w2x1
-    identity: e60f838d57b526cb060b9df70b188313b0dc1810c00fa5f62421ecff81dd8caf
+    identity: d5a4693cfeb89f2bd9f9fadfa4b83acd75a10386f96058858fbf9efc1941bfea
     measurements:
-      emmy_us: 12.977
-      reference_us: 11.696
-      reference_backend: torch-eager
-- program: 37
+      emmy_us: 16.153806820511818
+      reference_us: 16.39840006828308
+      reference_backend: same-input-greedy
+- program: 35
   target:
-    loop: 43
+    loop: 35
     origins:
     - scaled_dot_product_attention
   realizations:
@@ -1627,11 +1399,11 @@ configs:
       TILE@map.1/twist: mma_m16n8k16_f16_f16/f1x8/k8
       TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x16/k4
       WORK: w2x1
-    identity: c03cd5bd6f103f09586a246701a6e9bbbaa137ef3ce0edfacd457916d24764c6
+    identity: b6e9dcde08be8b3e0dd7cb33866327166fc1d6785b655be766292d20f6ea3ae3
     measurements:
-      emmy_us: 7.271
-      reference_us: 9.218
-      reference_backend: torch-eager
+      emmy_us: 7.362588308751583
+      reference_us: 7.333090994507074
+      reference_backend: same-input-greedy
   - name: attention.hd64.causal.fused
     bindings: {}
     pins:
@@ -1645,14 +1417,14 @@ configs:
       TILE@map.1/twist: mma_m16n8k16_f16_f32/f1x8/k8
       TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x16/k4
       WORK: w1x1
-    identity: c03cd5bd6f103f09586a246701a6e9bbbaa137ef3ce0edfacd457916d24764c6
+    identity: b6e9dcde08be8b3e0dd7cb33866327166fc1d6785b655be766292d20f6ea3ae3
     measurements:
-      emmy_us: 7.003
-      reference_us: 9.218
-      reference_backend: torch-eager
-- program: 38
+      emmy_us: 8.997765369713306
+      reference_us: 9.117607027292252
+      reference_backend: same-input-greedy
+- program: 36
   target:
-    loop: 44
+    loop: 36
     origins:
     - scaled_dot_product_attention
   realizations:
@@ -1669,11 +1441,11 @@ configs:
       TILE@map.1/twist: mma_m16n8k16_f16_f32/f1x32/k2
       TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x4/k4
       WORK: w2x1
-    identity: 99f93d427be1ab5a5169d5ea068364c04832b106d72c20989241b9db63180bde
+    identity: 71bcd24f04686b5be00905bae36cd2b0a4140eb713d087b07cb1a3f59a51ab2a
     measurements:
-      emmy_us: 44.145
-      reference_us: 17.302
-      reference_backend: torch-eager
+      emmy_us: 49.36639964580536
+      reference_us: 49.056001007556915
+      reference_backend: same-input-greedy
   - name: attention.hd256.causal.fused
     bindings: {}
     pins:
@@ -1687,1032 +1459,12 @@ configs:
       TILE@map.1/twist: mma_m16n8k16_f16_f32/f1x32/k2
       TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x4/k4
       WORK: w4x1
-    identity: 99f93d427be1ab5a5169d5ea068364c04832b106d72c20989241b9db63180bde
+    identity: 71bcd24f04686b5be00905bae36cd2b0a4140eb713d087b07cb1a3f59a51ab2a
     measurements:
-      emmy_us: 48.171
-      reference_us: 17.302
-      reference_backend: torch-eager
+      emmy_us: 49.265600740909576
+      reference_us: 49.641601741313934
+      reference_backend: same-input-greedy
 loops:
-- inputs: [x0, x1]
-  outputs: [scaled_dot_product_attention_scaled]
-  nodes:
-  - id: scaled_dot_product_attention_scale
-    op: constant
-    attrs:
-      name: scaled_dot_product_attention_scale
-      value: 0.08838834764831843
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
-    outputs: [[scaled_dot_product_attention_scale, f16, [1]]]
-  - id: x0
-    op: input
-    outputs: [[x0, f16, [1, 8, 512, 128]]]
-  - id: x1
-    op: input
-    outputs: [[x1, f16, [1, 8, 512, 128]]]
-  - id: scaled_dot_product_attention_scaled
-    op: loop
-    attrs:
-      body:
-        body:
-        - class: Load
-          fields:
-            names: {tuple: [in0]}
-            input: scaled_dot_product_attention_scale
-            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
-            dtype: null
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 8}, window: null}}
-            body:
-              body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 512}, window: null}}
-                  body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 512}, window: null}}
-                        body:
-                          body:
-                          - class: Loop
-                            fields:
-                              axis: {class: Axis, fields: {name: a3, extent: {dim: 128}, window: null}}
-                              body:
-                                body:
-                                - class: Load
-                                  fields:
-                                    names: {tuple: [in1]}
-                                    input: x1
-                                    index:
-                                      tuple:
-                                      - {expr: {literal: {value: 0, dtype: int}}}
-                                      - {expr: {var: a0}}
-                                      - {expr: {var: a2}}
-                                      - {expr: {var: a3}}
-                                    dtype: null
-                                - class: Load
-                                  fields:
-                                    names: {tuple: [in2]}
-                                    input: x0
-                                    index:
-                                      tuple:
-                                      - {expr: {literal: {value: 0, dtype: int}}}
-                                      - {expr: {var: a0}}
-                                      - {expr: {var: a1}}
-                                      - {expr: {var: a3}}
-                                    dtype: null
-                                - class: Assign
-                                  fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in1, in2]}, dtype: null}
-                                - class: Accum
-                                  fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a3]}, base: null}
-                              unroll: false
-                              role: {axis_role: free}
-                              seed: true
-                          - class: Assign
-                            fields: {name: v1, op: {elementwise: multiply}, args: {tuple: [acc0, in0]}, dtype: null}
-                          - class: Write
-                            fields:
-                              output: scaled_dot_product_attention_scaled
-                              index:
-                                tuple:
-                                - {expr: {literal: {value: 0, dtype: int}}}
-                                - {expr: {var: a0}}
-                                - {expr: {var: a1}}
-                                - {expr: {var: a2}}
-                              values: {tuple: [v1]}
-                              value_dtype: null
-                              atomic: false
-                              swizzle: NONE
-                        unroll: false
-                        role: {axis_role: free}
-                        seed: true
-                  unroll: false
-                  role: {axis_role: free}
-                  seed: true
-            unroll: false
-            role: {axis_role: free}
-            seed: true
-      name: k_sdpa_reduce_282f22
-    inputs: [scaled_dot_product_attention_scale, x1, x0]
-    outputs: [[scaled_dot_product_attention_scaled, f16, [1, 8, 512, 512]]]
-- inputs: [scaled_dot_product_attention_scaled, x2]
-  outputs: [scaled_dot_product_attention]
-  nodes:
-  - id: scaled_dot_product_attention_scaled
-    op: input
-    outputs: [[scaled_dot_product_attention_scaled, f16, [1, 8, 512, 512]]]
-  - id: x2
-    op: input
-    outputs: [[x2, f16, [1, 8, 512, 128]]]
-  - id: scaled_dot_product_attention
-    op: loop
-    attrs:
-      body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 8}, window: null}}
-            body:
-              body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 512}, window: null}}
-                  body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 512}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: scaled_dot_product_attention_scaled
-                              index:
-                                tuple:
-                                - {expr: {literal: {value: 0, dtype: int}}}
-                                - {expr: {var: a0}}
-                                - {expr: {var: a1}}
-                                - {expr: {var: a2}}
-                              dtype: null
-                          - class: Accum
-                            fields:
-                              name: acc0
-                              value: in0
-                              op: {elementwise: maximum}
-                              dtype: null
-                              axes: {tuple: [a2]}
-                              base: null
-                        unroll: false
-                        role: {axis_role: free}
-                        seed: true
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 512}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: scaled_dot_product_attention_scaled
-                              index:
-                                tuple:
-                                - {expr: {literal: {value: 0, dtype: int}}}
-                                - {expr: {var: a0}}
-                                - {expr: {var: a1}}
-                                - {expr: {var: a2}}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: subtract}, args: {tuple: [in1, acc0]}, dtype: null}
-                          - {class: Assign, fields: {name: v1, op: {elementwise: exp}, args: {tuple: [v0]}, dtype: null}}
-                          - class: Accum
-                            fields: {name: acc1, value: v1, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        role: {axis_role: free}
-                        seed: true
-                    - class: Assign
-                      fields: {name: v2, op: {elementwise: reciprocal}, args: {tuple: [acc1]}, dtype: null}
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a3, extent: {dim: 128}, window: null}}
-                        body:
-                          body:
-                          - class: Loop
-                            fields:
-                              axis: {class: Axis, fields: {name: a4, extent: {dim: 512}, window: null}}
-                              body:
-                                body:
-                                - class: Load
-                                  fields:
-                                    names: {tuple: [in2]}
-                                    input: scaled_dot_product_attention_scaled
-                                    index:
-                                      tuple:
-                                      - {expr: {literal: {value: 0, dtype: int}}}
-                                      - {expr: {var: a0}}
-                                      - {expr: {var: a1}}
-                                      - {expr: {var: a4}}
-                                    dtype: null
-                                - class: Assign
-                                  fields: {name: v3, op: {elementwise: subtract}, args: {tuple: [in2, acc0]}, dtype: null}
-                                - {class: Assign, fields: {name: v4, op: {elementwise: exp}, args: {tuple: [v3]}, dtype: null}}
-                                - class: Assign
-                                  fields: {name: v5, op: {elementwise: multiply}, args: {tuple: [v2, v4]}, dtype: null}
-                                - class: Load
-                                  fields:
-                                    names: {tuple: [in3]}
-                                    input: x2
-                                    index:
-                                      tuple:
-                                      - {expr: {literal: {value: 0, dtype: int}}}
-                                      - {expr: {var: a0}}
-                                      - {expr: {var: a4}}
-                                      - {expr: {var: a3}}
-                                    dtype: null
-                                - class: Assign
-                                  fields: {name: v6, op: {elementwise: multiply}, args: {tuple: [in3, v5]}, dtype: null}
-                                - class: Accum
-                                  fields: {name: acc2, value: v6, op: {elementwise: add}, dtype: null, axes: {tuple: [a4]}, base: null}
-                              unroll: false
-                              role: {axis_role: free}
-                              seed: true
-                          - class: Write
-                            fields:
-                              output: scaled_dot_product_attention
-                              index:
-                                tuple:
-                                - {expr: {literal: {value: 0, dtype: int}}}
-                                - {expr: {var: a0}}
-                                - {expr: {var: a1}}
-                                - {expr: {var: a3}}
-                              values: {tuple: [acc2]}
-                              value_dtype: null
-                              atomic: false
-                              swizzle: NONE
-                        unroll: false
-                        role: {axis_role: free}
-                        seed: true
-                  unroll: false
-                  role: {axis_role: free}
-                  seed: true
-            unroll: false
-            role: {axis_role: free}
-            seed: true
-      name: k_sdpa_reduce_540e6d
-    inputs: [scaled_dot_product_attention_scaled, x2]
-    outputs: [[scaled_dot_product_attention, f16, [1, 8, 512, 128]]]
-- inputs: [x0, x1]
-  outputs: [scaled_dot_product_attention_scaled]
-  nodes:
-  - id: scaled_dot_product_attention_scale
-    op: constant
-    attrs:
-      name: scaled_dot_product_attention_scale
-      value: 0.08838834764831843
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
-    outputs: [[scaled_dot_product_attention_scale, f16, [1]]]
-  - id: x0
-    op: input
-    outputs: [[x0, f16, [1, 8, {sym: seq_len, hint: 512}, 128]]]
-  - id: x1
-    op: input
-    outputs: [[x1, f16, [1, 8, {sym: seq_len, hint: 512}, 128]]]
-  - id: scaled_dot_product_attention_scaled
-    op: loop
-    attrs:
-      body:
-        body:
-        - class: Load
-          fields:
-            names: {tuple: [in0]}
-            input: scaled_dot_product_attention_scale
-            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
-            dtype: null
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 8}, window: null}}
-            body:
-              body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
-                  body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
-                        body:
-                          body:
-                          - class: Loop
-                            fields:
-                              axis: {class: Axis, fields: {name: a3, extent: {dim: 128}, window: null}}
-                              body:
-                                body:
-                                - class: Load
-                                  fields:
-                                    names: {tuple: [in1]}
-                                    input: x1
-                                    index:
-                                      tuple:
-                                      - {expr: {literal: {value: 0, dtype: int}}}
-                                      - {expr: {var: a0}}
-                                      - {expr: {var: a2}}
-                                      - {expr: {var: a3}}
-                                    dtype: null
-                                - class: Load
-                                  fields:
-                                    names: {tuple: [in2]}
-                                    input: x0
-                                    index:
-                                      tuple:
-                                      - {expr: {literal: {value: 0, dtype: int}}}
-                                      - {expr: {var: a0}}
-                                      - {expr: {var: a1}}
-                                      - {expr: {var: a3}}
-                                    dtype: null
-                                - class: Assign
-                                  fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in1, in2]}, dtype: null}
-                                - class: Accum
-                                  fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a3]}, base: null}
-                              unroll: false
-                              role: {axis_role: free}
-                              seed: true
-                          - class: Assign
-                            fields: {name: v1, op: {elementwise: multiply}, args: {tuple: [acc0, in0]}, dtype: null}
-                          - class: Write
-                            fields:
-                              output: scaled_dot_product_attention_scaled
-                              index:
-                                tuple:
-                                - {expr: {literal: {value: 0, dtype: int}}}
-                                - {expr: {var: a0}}
-                                - {expr: {var: a1}}
-                                - {expr: {var: a2}}
-                              values: {tuple: [v1]}
-                              value_dtype: null
-                              atomic: false
-                              swizzle: NONE
-                        unroll: false
-                        role: {axis_role: free}
-                        seed: true
-                  unroll: false
-                  role: {axis_role: free}
-                  seed: true
-            unroll: false
-            role: {axis_role: free}
-            seed: true
-      name: k_sdpa_reduce_05b522
-    inputs: [scaled_dot_product_attention_scale, x1, x0]
-    outputs: [[scaled_dot_product_attention_scaled, f16, [1, 8, {sym: seq_len, hint: 512}, {sym: seq_len, hint: 512}]]]
-- inputs: [scaled_dot_product_attention_scaled, x2]
-  outputs: [scaled_dot_product_attention]
-  nodes:
-  - id: scaled_dot_product_attention_scaled
-    op: input
-    outputs: [[scaled_dot_product_attention_scaled, f16, [1, 8, {sym: seq_len, hint: 512}, {sym: seq_len, hint: 512}]]]
-  - id: x2
-    op: input
-    outputs: [[x2, f16, [1, 8, {sym: seq_len, hint: 512}, 128]]]
-  - id: scaled_dot_product_attention
-    op: loop
-    attrs:
-      body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 8}, window: null}}
-            body:
-              body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
-                  body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: scaled_dot_product_attention_scaled
-                              index:
-                                tuple:
-                                - {expr: {literal: {value: 0, dtype: int}}}
-                                - {expr: {var: a0}}
-                                - {expr: {var: a1}}
-                                - {expr: {var: a2}}
-                              dtype: null
-                          - class: Accum
-                            fields:
-                              name: acc0
-                              value: in0
-                              op: {elementwise: maximum}
-                              dtype: null
-                              axes: {tuple: [a2]}
-                              base: null
-                        unroll: false
-                        role: {axis_role: free}
-                        seed: true
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: scaled_dot_product_attention_scaled
-                              index:
-                                tuple:
-                                - {expr: {literal: {value: 0, dtype: int}}}
-                                - {expr: {var: a0}}
-                                - {expr: {var: a1}}
-                                - {expr: {var: a2}}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: subtract}, args: {tuple: [in1, acc0]}, dtype: null}
-                          - {class: Assign, fields: {name: v1, op: {elementwise: exp}, args: {tuple: [v0]}, dtype: null}}
-                          - class: Accum
-                            fields: {name: acc1, value: v1, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        role: {axis_role: free}
-                        seed: true
-                    - class: Assign
-                      fields: {name: v2, op: {elementwise: reciprocal}, args: {tuple: [acc1]}, dtype: null}
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a3, extent: {dim: 128}, window: null}}
-                        body:
-                          body:
-                          - class: Loop
-                            fields:
-                              axis: {class: Axis, fields: {name: a4, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
-                              body:
-                                body:
-                                - class: Load
-                                  fields:
-                                    names: {tuple: [in2]}
-                                    input: scaled_dot_product_attention_scaled
-                                    index:
-                                      tuple:
-                                      - {expr: {literal: {value: 0, dtype: int}}}
-                                      - {expr: {var: a0}}
-                                      - {expr: {var: a1}}
-                                      - {expr: {var: a4}}
-                                    dtype: null
-                                - class: Assign
-                                  fields: {name: v3, op: {elementwise: subtract}, args: {tuple: [in2, acc0]}, dtype: null}
-                                - {class: Assign, fields: {name: v4, op: {elementwise: exp}, args: {tuple: [v3]}, dtype: null}}
-                                - class: Assign
-                                  fields: {name: v5, op: {elementwise: multiply}, args: {tuple: [v2, v4]}, dtype: null}
-                                - class: Load
-                                  fields:
-                                    names: {tuple: [in3]}
-                                    input: x2
-                                    index:
-                                      tuple:
-                                      - {expr: {literal: {value: 0, dtype: int}}}
-                                      - {expr: {var: a0}}
-                                      - {expr: {var: a4}}
-                                      - {expr: {var: a3}}
-                                    dtype: null
-                                - class: Assign
-                                  fields: {name: v6, op: {elementwise: multiply}, args: {tuple: [in3, v5]}, dtype: null}
-                                - class: Accum
-                                  fields: {name: acc2, value: v6, op: {elementwise: add}, dtype: null, axes: {tuple: [a4]}, base: null}
-                              unroll: false
-                              role: {axis_role: free}
-                              seed: true
-                          - class: Write
-                            fields:
-                              output: scaled_dot_product_attention
-                              index:
-                                tuple:
-                                - {expr: {literal: {value: 0, dtype: int}}}
-                                - {expr: {var: a0}}
-                                - {expr: {var: a1}}
-                                - {expr: {var: a3}}
-                              values: {tuple: [acc2]}
-                              value_dtype: null
-                              atomic: false
-                              swizzle: NONE
-                        unroll: false
-                        role: {axis_role: free}
-                        seed: true
-                  unroll: false
-                  role: {axis_role: free}
-                  seed: true
-            unroll: false
-            role: {axis_role: free}
-            seed: true
-      name: k_sdpa_reduce_143343
-    inputs: [scaled_dot_product_attention_scaled, x2]
-    outputs: [[scaled_dot_product_attention, f16, [1, 8, {sym: seq_len, hint: 512}, 128]]]
-- inputs: [x0, x1]
-  outputs: [scaled_dot_product_attention_scaled]
-  nodes:
-  - id: scaled_dot_product_attention_scale
-    op: constant
-    attrs:
-      name: scaled_dot_product_attention_scale
-      value: 0.125
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
-    outputs: [[scaled_dot_product_attention_scale, f16, [1]]]
-  - id: x0
-    op: input
-    outputs: [[x0, f16, [1, 8, 512, 64]]]
-  - id: x1
-    op: input
-    outputs: [[x1, f16, [1, 8, 512, 64]]]
-  - id: scaled_dot_product_attention_scaled
-    op: loop
-    attrs:
-      body:
-        body:
-        - class: Load
-          fields:
-            names: {tuple: [in0]}
-            input: scaled_dot_product_attention_scale
-            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
-            dtype: null
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 8}, window: null}}
-            body:
-              body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 512}, window: null}}
-                  body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 512}, window: null}}
-                        body:
-                          body:
-                          - class: Loop
-                            fields:
-                              axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null}}
-                              body:
-                                body:
-                                - class: Load
-                                  fields:
-                                    names: {tuple: [in1]}
-                                    input: x1
-                                    index:
-                                      tuple:
-                                      - {expr: {literal: {value: 0, dtype: int}}}
-                                      - {expr: {var: a0}}
-                                      - {expr: {var: a2}}
-                                      - {expr: {var: a3}}
-                                    dtype: null
-                                - class: Load
-                                  fields:
-                                    names: {tuple: [in2]}
-                                    input: x0
-                                    index:
-                                      tuple:
-                                      - {expr: {literal: {value: 0, dtype: int}}}
-                                      - {expr: {var: a0}}
-                                      - {expr: {var: a1}}
-                                      - {expr: {var: a3}}
-                                    dtype: null
-                                - class: Assign
-                                  fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in1, in2]}, dtype: null}
-                                - class: Accum
-                                  fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a3]}, base: null}
-                              unroll: false
-                              role: {axis_role: free}
-                              seed: true
-                          - class: Assign
-                            fields: {name: v1, op: {elementwise: multiply}, args: {tuple: [acc0, in0]}, dtype: null}
-                          - class: Write
-                            fields:
-                              output: scaled_dot_product_attention_scaled
-                              index:
-                                tuple:
-                                - {expr: {literal: {value: 0, dtype: int}}}
-                                - {expr: {var: a0}}
-                                - {expr: {var: a1}}
-                                - {expr: {var: a2}}
-                              values: {tuple: [v1]}
-                              value_dtype: null
-                              atomic: false
-                              swizzle: NONE
-                        unroll: false
-                        role: {axis_role: free}
-                        seed: true
-                  unroll: false
-                  role: {axis_role: free}
-                  seed: true
-            unroll: false
-            role: {axis_role: free}
-            seed: true
-      name: k_sdpa_reduce_bf514b
-    inputs: [scaled_dot_product_attention_scale, x1, x0]
-    outputs: [[scaled_dot_product_attention_scaled, f16, [1, 8, 512, 512]]]
-- inputs: [scaled_dot_product_attention_scaled, x2]
-  outputs: [scaled_dot_product_attention]
-  nodes:
-  - id: scaled_dot_product_attention_scaled
-    op: input
-    outputs: [[scaled_dot_product_attention_scaled, f16, [1, 8, 512, 512]]]
-  - id: x2
-    op: input
-    outputs: [[x2, f16, [1, 8, 512, 64]]]
-  - id: scaled_dot_product_attention
-    op: loop
-    attrs:
-      body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 8}, window: null}}
-            body:
-              body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 512}, window: null}}
-                  body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 512}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: scaled_dot_product_attention_scaled
-                              index:
-                                tuple:
-                                - {expr: {literal: {value: 0, dtype: int}}}
-                                - {expr: {var: a0}}
-                                - {expr: {var: a1}}
-                                - {expr: {var: a2}}
-                              dtype: null
-                          - class: Accum
-                            fields:
-                              name: acc0
-                              value: in0
-                              op: {elementwise: maximum}
-                              dtype: null
-                              axes: {tuple: [a2]}
-                              base: null
-                        unroll: false
-                        role: {axis_role: free}
-                        seed: true
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 512}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: scaled_dot_product_attention_scaled
-                              index:
-                                tuple:
-                                - {expr: {literal: {value: 0, dtype: int}}}
-                                - {expr: {var: a0}}
-                                - {expr: {var: a1}}
-                                - {expr: {var: a2}}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: subtract}, args: {tuple: [in1, acc0]}, dtype: null}
-                          - {class: Assign, fields: {name: v1, op: {elementwise: exp}, args: {tuple: [v0]}, dtype: null}}
-                          - class: Accum
-                            fields: {name: acc1, value: v1, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        role: {axis_role: free}
-                        seed: true
-                    - class: Assign
-                      fields: {name: v2, op: {elementwise: reciprocal}, args: {tuple: [acc1]}, dtype: null}
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null}}
-                        body:
-                          body:
-                          - class: Loop
-                            fields:
-                              axis: {class: Axis, fields: {name: a4, extent: {dim: 512}, window: null}}
-                              body:
-                                body:
-                                - class: Load
-                                  fields:
-                                    names: {tuple: [in2]}
-                                    input: scaled_dot_product_attention_scaled
-                                    index:
-                                      tuple:
-                                      - {expr: {literal: {value: 0, dtype: int}}}
-                                      - {expr: {var: a0}}
-                                      - {expr: {var: a1}}
-                                      - {expr: {var: a4}}
-                                    dtype: null
-                                - class: Assign
-                                  fields: {name: v3, op: {elementwise: subtract}, args: {tuple: [in2, acc0]}, dtype: null}
-                                - {class: Assign, fields: {name: v4, op: {elementwise: exp}, args: {tuple: [v3]}, dtype: null}}
-                                - class: Assign
-                                  fields: {name: v5, op: {elementwise: multiply}, args: {tuple: [v2, v4]}, dtype: null}
-                                - class: Load
-                                  fields:
-                                    names: {tuple: [in3]}
-                                    input: x2
-                                    index:
-                                      tuple:
-                                      - {expr: {literal: {value: 0, dtype: int}}}
-                                      - {expr: {var: a0}}
-                                      - {expr: {var: a4}}
-                                      - {expr: {var: a3}}
-                                    dtype: null
-                                - class: Assign
-                                  fields: {name: v6, op: {elementwise: multiply}, args: {tuple: [in3, v5]}, dtype: null}
-                                - class: Accum
-                                  fields: {name: acc2, value: v6, op: {elementwise: add}, dtype: null, axes: {tuple: [a4]}, base: null}
-                              unroll: false
-                              role: {axis_role: free}
-                              seed: true
-                          - class: Write
-                            fields:
-                              output: scaled_dot_product_attention
-                              index:
-                                tuple:
-                                - {expr: {literal: {value: 0, dtype: int}}}
-                                - {expr: {var: a0}}
-                                - {expr: {var: a1}}
-                                - {expr: {var: a3}}
-                              values: {tuple: [acc2]}
-                              value_dtype: null
-                              atomic: false
-                              swizzle: NONE
-                        unroll: false
-                        role: {axis_role: free}
-                        seed: true
-                  unroll: false
-                  role: {axis_role: free}
-                  seed: true
-            unroll: false
-            role: {axis_role: free}
-            seed: true
-      name: k_sdpa_reduce_09b9ca
-    inputs: [scaled_dot_product_attention_scaled, x2]
-    outputs: [[scaled_dot_product_attention, f16, [1, 8, 512, 64]]]
-- inputs: [x0, x1]
-  outputs: [scaled_dot_product_attention_scaled]
-  nodes:
-  - id: scaled_dot_product_attention_scale
-    op: constant
-    attrs:
-      name: scaled_dot_product_attention_scale
-      value: 0.125
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
-    outputs: [[scaled_dot_product_attention_scale, f16, [1]]]
-  - id: x0
-    op: input
-    outputs: [[x0, f16, [1, 8, {sym: seq_len, hint: 512}, 64]]]
-  - id: x1
-    op: input
-    outputs: [[x1, f16, [1, 8, {sym: seq_len, hint: 512}, 64]]]
-  - id: scaled_dot_product_attention_scaled
-    op: loop
-    attrs:
-      body:
-        body:
-        - class: Load
-          fields:
-            names: {tuple: [in0]}
-            input: scaled_dot_product_attention_scale
-            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
-            dtype: null
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 8}, window: null}}
-            body:
-              body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
-                  body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
-                        body:
-                          body:
-                          - class: Loop
-                            fields:
-                              axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null}}
-                              body:
-                                body:
-                                - class: Load
-                                  fields:
-                                    names: {tuple: [in1]}
-                                    input: x1
-                                    index:
-                                      tuple:
-                                      - {expr: {literal: {value: 0, dtype: int}}}
-                                      - {expr: {var: a0}}
-                                      - {expr: {var: a2}}
-                                      - {expr: {var: a3}}
-                                    dtype: null
-                                - class: Load
-                                  fields:
-                                    names: {tuple: [in2]}
-                                    input: x0
-                                    index:
-                                      tuple:
-                                      - {expr: {literal: {value: 0, dtype: int}}}
-                                      - {expr: {var: a0}}
-                                      - {expr: {var: a1}}
-                                      - {expr: {var: a3}}
-                                    dtype: null
-                                - class: Assign
-                                  fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in1, in2]}, dtype: null}
-                                - class: Accum
-                                  fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a3]}, base: null}
-                              unroll: false
-                              role: {axis_role: free}
-                              seed: true
-                          - class: Assign
-                            fields: {name: v1, op: {elementwise: multiply}, args: {tuple: [acc0, in0]}, dtype: null}
-                          - class: Write
-                            fields:
-                              output: scaled_dot_product_attention_scaled
-                              index:
-                                tuple:
-                                - {expr: {literal: {value: 0, dtype: int}}}
-                                - {expr: {var: a0}}
-                                - {expr: {var: a1}}
-                                - {expr: {var: a2}}
-                              values: {tuple: [v1]}
-                              value_dtype: null
-                              atomic: false
-                              swizzle: NONE
-                        unroll: false
-                        role: {axis_role: free}
-                        seed: true
-                  unroll: false
-                  role: {axis_role: free}
-                  seed: true
-            unroll: false
-            role: {axis_role: free}
-            seed: true
-      name: k_sdpa_reduce_37854e
-    inputs: [scaled_dot_product_attention_scale, x1, x0]
-    outputs: [[scaled_dot_product_attention_scaled, f16, [1, 8, {sym: seq_len, hint: 512}, {sym: seq_len, hint: 512}]]]
-- inputs: [scaled_dot_product_attention_scaled, x2]
-  outputs: [scaled_dot_product_attention]
-  nodes:
-  - id: scaled_dot_product_attention_scaled
-    op: input
-    outputs: [[scaled_dot_product_attention_scaled, f16, [1, 8, {sym: seq_len, hint: 512}, {sym: seq_len, hint: 512}]]]
-  - id: x2
-    op: input
-    outputs: [[x2, f16, [1, 8, {sym: seq_len, hint: 512}, 64]]]
-  - id: scaled_dot_product_attention
-    op: loop
-    attrs:
-      body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 8}, window: null}}
-            body:
-              body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
-                  body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: scaled_dot_product_attention_scaled
-                              index:
-                                tuple:
-                                - {expr: {literal: {value: 0, dtype: int}}}
-                                - {expr: {var: a0}}
-                                - {expr: {var: a1}}
-                                - {expr: {var: a2}}
-                              dtype: null
-                          - class: Accum
-                            fields:
-                              name: acc0
-                              value: in0
-                              op: {elementwise: maximum}
-                              dtype: null
-                              axes: {tuple: [a2]}
-                              base: null
-                        unroll: false
-                        role: {axis_role: free}
-                        seed: true
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: scaled_dot_product_attention_scaled
-                              index:
-                                tuple:
-                                - {expr: {literal: {value: 0, dtype: int}}}
-                                - {expr: {var: a0}}
-                                - {expr: {var: a1}}
-                                - {expr: {var: a2}}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: subtract}, args: {tuple: [in1, acc0]}, dtype: null}
-                          - {class: Assign, fields: {name: v1, op: {elementwise: exp}, args: {tuple: [v0]}, dtype: null}}
-                          - class: Accum
-                            fields: {name: acc1, value: v1, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        role: {axis_role: free}
-                        seed: true
-                    - class: Assign
-                      fields: {name: v2, op: {elementwise: reciprocal}, args: {tuple: [acc1]}, dtype: null}
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null}}
-                        body:
-                          body:
-                          - class: Loop
-                            fields:
-                              axis: {class: Axis, fields: {name: a4, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
-                              body:
-                                body:
-                                - class: Load
-                                  fields:
-                                    names: {tuple: [in2]}
-                                    input: scaled_dot_product_attention_scaled
-                                    index:
-                                      tuple:
-                                      - {expr: {literal: {value: 0, dtype: int}}}
-                                      - {expr: {var: a0}}
-                                      - {expr: {var: a1}}
-                                      - {expr: {var: a4}}
-                                    dtype: null
-                                - class: Assign
-                                  fields: {name: v3, op: {elementwise: subtract}, args: {tuple: [in2, acc0]}, dtype: null}
-                                - {class: Assign, fields: {name: v4, op: {elementwise: exp}, args: {tuple: [v3]}, dtype: null}}
-                                - class: Assign
-                                  fields: {name: v5, op: {elementwise: multiply}, args: {tuple: [v2, v4]}, dtype: null}
-                                - class: Load
-                                  fields:
-                                    names: {tuple: [in3]}
-                                    input: x2
-                                    index:
-                                      tuple:
-                                      - {expr: {literal: {value: 0, dtype: int}}}
-                                      - {expr: {var: a0}}
-                                      - {expr: {var: a4}}
-                                      - {expr: {var: a3}}
-                                    dtype: null
-                                - class: Assign
-                                  fields: {name: v6, op: {elementwise: multiply}, args: {tuple: [in3, v5]}, dtype: null}
-                                - class: Accum
-                                  fields: {name: acc2, value: v6, op: {elementwise: add}, dtype: null, axes: {tuple: [a4]}, base: null}
-                              unroll: false
-                              role: {axis_role: free}
-                              seed: true
-                          - class: Write
-                            fields:
-                              output: scaled_dot_product_attention
-                              index:
-                                tuple:
-                                - {expr: {literal: {value: 0, dtype: int}}}
-                                - {expr: {var: a0}}
-                                - {expr: {var: a1}}
-                                - {expr: {var: a3}}
-                              values: {tuple: [acc2]}
-                              value_dtype: null
-                              atomic: false
-                              swizzle: NONE
-                        unroll: false
-                        role: {axis_role: free}
-                        seed: true
-                  unroll: false
-                  role: {axis_role: free}
-                  seed: true
-            unroll: false
-            role: {axis_role: free}
-            seed: true
-      name: k_sdpa_reduce_8d5b30
-    inputs: [scaled_dot_product_attention_scaled, x2]
-    outputs: [[scaled_dot_product_attention, f16, [1, 8, {sym: seq_len, hint: 512}, 64]]]
 - inputs: [x0, x1]
   outputs: [matmul]
   nodes:
@@ -3636,8 +2388,6 @@ loops:
                       fields: {name: acc1, value: v1, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
                   unroll: false
                   seed: true
-              - class: Assign
-                fields: {name: v2, op: {elementwise: reciprocal}, args: {tuple: [acc1]}, dtype: null}
               - class: Loop
                 fields:
                   axis: {class: Axis, fields: {name: a3, extent: {dim: 2048}, window: null}}
@@ -3650,15 +2400,15 @@ loops:
                         index: {tuple: [{expr: {var: a0}}, {expr: {var: a3}}]}
                         dtype: null
                     - class: Assign
-                      fields: {name: v3, op: {elementwise: subtract}, args: {tuple: [in2, acc0]}, dtype: null}
-                    - {class: Assign, fields: {name: v4, op: {elementwise: exp}, args: {tuple: [v3]}, dtype: null}}
+                      fields: {name: v2, op: {elementwise: subtract}, args: {tuple: [in2, acc0]}, dtype: null}
+                    - {class: Assign, fields: {name: v3, op: {elementwise: exp}, args: {tuple: [v2]}, dtype: null}}
                     - class: Assign
-                      fields: {name: v5, op: {elementwise: multiply}, args: {tuple: [v2, v4]}, dtype: null}
+                      fields: {name: v4, op: {elementwise: divide}, args: {tuple: [v3, acc1]}, dtype: null}
                     - class: Write
                       fields:
                         output: softmax
                         index: {tuple: [{expr: {var: a0}}, {expr: {var: a3}}]}
-                        values: {tuple: [v5]}
+                        values: {tuple: [v4]}
                         value_dtype: null
                         atomic: false
                         swizzle: NONE
@@ -3666,7 +2416,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_softmax_557c32
+      name: k_softmax_eba8b4
     inputs: [x]
     outputs: [[softmax, f32, [512, 2048]]]
 - inputs: [x]
@@ -3768,8 +2518,6 @@ loops:
                       fields: {name: acc1, value: v1, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
                   unroll: false
                   seed: true
-              - class: Assign
-                fields: {name: v2, op: {elementwise: reciprocal}, args: {tuple: [acc1]}, dtype: null}
               - class: Loop
                 fields:
                   axis: {class: Axis, fields: {name: a3, extent: {dim: 8192}, window: null}}
@@ -3782,15 +2530,15 @@ loops:
                         index: {tuple: [{expr: {var: a0}}, {expr: {var: a3}}]}
                         dtype: null
                     - class: Assign
-                      fields: {name: v3, op: {elementwise: subtract}, args: {tuple: [in2, acc0]}, dtype: null}
-                    - {class: Assign, fields: {name: v4, op: {elementwise: exp}, args: {tuple: [v3]}, dtype: null}}
+                      fields: {name: v2, op: {elementwise: subtract}, args: {tuple: [in2, acc0]}, dtype: null}
+                    - {class: Assign, fields: {name: v3, op: {elementwise: exp}, args: {tuple: [v2]}, dtype: null}}
                     - class: Assign
-                      fields: {name: v5, op: {elementwise: multiply}, args: {tuple: [v2, v4]}, dtype: null}
+                      fields: {name: v4, op: {elementwise: divide}, args: {tuple: [v3, acc1]}, dtype: null}
                     - class: Write
                       fields:
                         output: softmax
                         index: {tuple: [{expr: {var: a0}}, {expr: {var: a3}}]}
-                        values: {tuple: [v5]}
+                        values: {tuple: [v4]}
                         value_dtype: null
                         atomic: false
                         swizzle: NONE
@@ -3798,7 +2546,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_softmax_045539
+      name: k_softmax_6a9038
     inputs: [x]
     outputs: [[softmax, f32, [512, 8192]]]
 - inputs: [x]
@@ -3907,8 +2655,6 @@ loops:
             input: rms_norm_mean_count
             index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
             dtype: null
-        - class: Assign
-          fields: {name: v0, op: {elementwise: reciprocal}, args: {tuple: [in1]}, dtype: null}
         - class: Loop
           fields:
             axis: {class: Axis, fields: {name: a0, extent: {dim: 512}, window: null}}
@@ -3926,16 +2672,16 @@ loops:
                         index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
                         dtype: null
                     - class: Assign
-                      fields: {name: v1, op: {elementwise: multiply}, args: {tuple: [in2, in2]}, dtype: null}
+                      fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in2, in2]}, dtype: null}
                     - class: Accum
-                      fields: {name: acc0, value: v1, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
+                      fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
                   unroll: false
                   seed: true
               - class: Assign
-                fields: {name: v2, op: {elementwise: multiply}, args: {tuple: [acc0, v0]}, dtype: null}
+                fields: {name: v1, op: {elementwise: divide}, args: {tuple: [acc0, in1]}, dtype: null}
               - class: Assign
-                fields: {name: v3, op: {elementwise: add}, args: {tuple: [in0, v2]}, dtype: null}
-              - {class: Assign, fields: {name: v4, op: {elementwise: rsqrt}, args: {tuple: [v3]}, dtype: null}}
+                fields: {name: v2, op: {elementwise: add}, args: {tuple: [in0, v1]}, dtype: null}
+              - {class: Assign, fields: {name: v3, op: {elementwise: rsqrt}, args: {tuple: [v2]}, dtype: null}}
               - class: Loop
                 fields:
                   axis: {class: Axis, fields: {name: a2, extent: {dim: 2048}, window: null}}
@@ -3948,16 +2694,16 @@ loops:
                         index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
                         dtype: null
                     - class: Assign
-                      fields: {name: v5, op: {elementwise: multiply}, args: {tuple: [in3, v4]}, dtype: null}
+                      fields: {name: v4, op: {elementwise: multiply}, args: {tuple: [in3, v3]}, dtype: null}
                     - class: Load
                       fields: {names: {tuple: [in4]}, input: p_weight, index: {tuple: [{expr: {var: a2}}]}, dtype: null}
                     - class: Assign
-                      fields: {name: v6, op: {elementwise: multiply}, args: {tuple: [in4, v5]}, dtype: null}
+                      fields: {name: v5, op: {elementwise: multiply}, args: {tuple: [in4, v4]}, dtype: null}
                     - class: Write
                       fields:
                         output: rms_norm
                         index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                        values: {tuple: [v6]}
+                        values: {tuple: [v5]}
                         value_dtype: null
                         atomic: false
                         swizzle: NONE
@@ -3965,7 +2711,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_rms_norm_3c8367
+      name: k_rms_norm_a414c9
     inputs: [rms_norm_mean_count, rms_norm_eps, x, p_weight]
     outputs: [[rms_norm, f32, [512, 2048]]]
 - inputs: [x]
@@ -4030,8 +2776,6 @@ loops:
             input: rms_norm_mean_count
             index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
             dtype: null
-        - class: Assign
-          fields: {name: v0, op: {elementwise: reciprocal}, args: {tuple: [in1]}, dtype: null}
         - class: Loop
           fields:
             axis: {class: Axis, fields: {name: a0, extent: {dim: 512}, window: null}}
@@ -4049,16 +2793,16 @@ loops:
                         index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
                         dtype: null
                     - class: Assign
-                      fields: {name: v1, op: {elementwise: multiply}, args: {tuple: [in2, in2]}, dtype: null}
+                      fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in2, in2]}, dtype: null}
                     - class: Accum
-                      fields: {name: acc0, value: v1, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
+                      fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
                   unroll: false
                   seed: true
               - class: Assign
-                fields: {name: v2, op: {elementwise: multiply}, args: {tuple: [acc0, v0]}, dtype: null}
+                fields: {name: v1, op: {elementwise: divide}, args: {tuple: [acc0, in1]}, dtype: null}
               - class: Assign
-                fields: {name: v3, op: {elementwise: add}, args: {tuple: [in0, v2]}, dtype: null}
-              - {class: Assign, fields: {name: v4, op: {elementwise: rsqrt}, args: {tuple: [v3]}, dtype: null}}
+                fields: {name: v2, op: {elementwise: add}, args: {tuple: [in0, v1]}, dtype: null}
+              - {class: Assign, fields: {name: v3, op: {elementwise: rsqrt}, args: {tuple: [v2]}, dtype: null}}
               - class: Loop
                 fields:
                   axis: {class: Axis, fields: {name: a2, extent: {dim: 4096}, window: null}}
@@ -4071,16 +2815,16 @@ loops:
                         index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
                         dtype: null
                     - class: Assign
-                      fields: {name: v5, op: {elementwise: multiply}, args: {tuple: [in3, v4]}, dtype: null}
+                      fields: {name: v4, op: {elementwise: multiply}, args: {tuple: [in3, v3]}, dtype: null}
                     - class: Load
                       fields: {names: {tuple: [in4]}, input: p_weight, index: {tuple: [{expr: {var: a2}}]}, dtype: null}
                     - class: Assign
-                      fields: {name: v6, op: {elementwise: multiply}, args: {tuple: [in4, v5]}, dtype: null}
+                      fields: {name: v5, op: {elementwise: multiply}, args: {tuple: [in4, v4]}, dtype: null}
                     - class: Write
                       fields:
                         output: rms_norm
                         index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                        values: {tuple: [v6]}
+                        values: {tuple: [v5]}
                         value_dtype: null
                         atomic: false
                         swizzle: NONE
@@ -4088,7 +2832,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_rms_norm_3fbe25
+      name: k_rms_norm_7f9133
     inputs: [rms_norm_mean_count, rms_norm_eps, x, p_weight]
     outputs: [[rms_norm, f32, [512, 4096]]]
 - inputs: [x]
@@ -4153,8 +2897,6 @@ loops:
             input: rms_norm_mean_count
             index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
             dtype: null
-        - class: Assign
-          fields: {name: v0, op: {elementwise: reciprocal}, args: {tuple: [in1]}, dtype: null}
         - class: Loop
           fields:
             axis: {class: Axis, fields: {name: a0, extent: {dim: 512}, window: null}}
@@ -4172,16 +2914,16 @@ loops:
                         index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
                         dtype: null
                     - class: Assign
-                      fields: {name: v1, op: {elementwise: multiply}, args: {tuple: [in2, in2]}, dtype: null}
+                      fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in2, in2]}, dtype: null}
                     - class: Accum
-                      fields: {name: acc0, value: v1, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
+                      fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
                   unroll: false
                   seed: true
               - class: Assign
-                fields: {name: v2, op: {elementwise: multiply}, args: {tuple: [acc0, v0]}, dtype: null}
+                fields: {name: v1, op: {elementwise: divide}, args: {tuple: [acc0, in1]}, dtype: null}
               - class: Assign
-                fields: {name: v3, op: {elementwise: add}, args: {tuple: [in0, v2]}, dtype: null}
-              - {class: Assign, fields: {name: v4, op: {elementwise: rsqrt}, args: {tuple: [v3]}, dtype: null}}
+                fields: {name: v2, op: {elementwise: add}, args: {tuple: [in0, v1]}, dtype: null}
+              - {class: Assign, fields: {name: v3, op: {elementwise: rsqrt}, args: {tuple: [v2]}, dtype: null}}
               - class: Loop
                 fields:
                   axis: {class: Axis, fields: {name: a2, extent: {dim: 8192}, window: null}}
@@ -4194,16 +2936,16 @@ loops:
                         index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
                         dtype: null
                     - class: Assign
-                      fields: {name: v5, op: {elementwise: multiply}, args: {tuple: [in3, v4]}, dtype: null}
+                      fields: {name: v4, op: {elementwise: multiply}, args: {tuple: [in3, v3]}, dtype: null}
                     - class: Load
                       fields: {names: {tuple: [in4]}, input: p_weight, index: {tuple: [{expr: {var: a2}}]}, dtype: null}
                     - class: Assign
-                      fields: {name: v6, op: {elementwise: multiply}, args: {tuple: [in4, v5]}, dtype: null}
+                      fields: {name: v5, op: {elementwise: multiply}, args: {tuple: [in4, v4]}, dtype: null}
                     - class: Write
                       fields:
                         output: rms_norm
                         index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                        values: {tuple: [v6]}
+                        values: {tuple: [v5]}
                         value_dtype: null
                         atomic: false
                         swizzle: NONE
@@ -4211,7 +2953,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_rms_norm_386b12
+      name: k_rms_norm_c74b04
     inputs: [rms_norm_mean_count, rms_norm_eps, x, p_weight]
     outputs: [[rms_norm, f32, [512, 8192]]]
 - inputs: [x]
@@ -4353,8 +3095,6 @@ loops:
                       fields: {name: acc1, value: v1, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
                   unroll: false
                   seed: true
-              - class: Assign
-                fields: {name: v2, op: {elementwise: reciprocal}, args: {tuple: [acc1]}, dtype: null}
               - class: Loop
                 fields:
                   axis: {class: Axis, fields: {name: a3, extent: {dim: 2048}, window: null}}
@@ -4367,15 +3107,15 @@ loops:
                         index: {tuple: [{expr: {var: a0}}, {expr: {var: a3}}]}
                         dtype: null
                     - class: Assign
-                      fields: {name: v3, op: {elementwise: subtract}, args: {tuple: [in2, acc0]}, dtype: null}
-                    - {class: Assign, fields: {name: v4, op: {elementwise: exp}, args: {tuple: [v3]}, dtype: null}}
+                      fields: {name: v2, op: {elementwise: subtract}, args: {tuple: [in2, acc0]}, dtype: null}
+                    - {class: Assign, fields: {name: v3, op: {elementwise: exp}, args: {tuple: [v2]}, dtype: null}}
                     - class: Assign
-                      fields: {name: v5, op: {elementwise: multiply}, args: {tuple: [v2, v4]}, dtype: null}
+                      fields: {name: v4, op: {elementwise: divide}, args: {tuple: [v3, acc1]}, dtype: null}
                     - class: Write
                       fields:
                         output: softmax
                         index: {tuple: [{expr: {var: a0}}, {expr: {var: a3}}]}
-                        values: {tuple: [v5]}
+                        values: {tuple: [v4]}
                         value_dtype: null
                         atomic: false
                         swizzle: NONE
@@ -4383,7 +3123,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_softmax_0b397d
+      name: k_softmax_6b2248
     inputs: [x]
     outputs: [[softmax, f32, [{sym: seq_len, hint: 512}, 2048]]]
 - inputs: [x]
@@ -4485,8 +3225,6 @@ loops:
                       fields: {name: acc1, value: v1, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
                   unroll: false
                   seed: true
-              - class: Assign
-                fields: {name: v2, op: {elementwise: reciprocal}, args: {tuple: [acc1]}, dtype: null}
               - class: Loop
                 fields:
                   axis: {class: Axis, fields: {name: a3, extent: {dim: 8192}, window: null}}
@@ -4499,15 +3237,15 @@ loops:
                         index: {tuple: [{expr: {var: a0}}, {expr: {var: a3}}]}
                         dtype: null
                     - class: Assign
-                      fields: {name: v3, op: {elementwise: subtract}, args: {tuple: [in2, acc0]}, dtype: null}
-                    - {class: Assign, fields: {name: v4, op: {elementwise: exp}, args: {tuple: [v3]}, dtype: null}}
+                      fields: {name: v2, op: {elementwise: subtract}, args: {tuple: [in2, acc0]}, dtype: null}
+                    - {class: Assign, fields: {name: v3, op: {elementwise: exp}, args: {tuple: [v2]}, dtype: null}}
                     - class: Assign
-                      fields: {name: v5, op: {elementwise: multiply}, args: {tuple: [v2, v4]}, dtype: null}
+                      fields: {name: v4, op: {elementwise: divide}, args: {tuple: [v3, acc1]}, dtype: null}
                     - class: Write
                       fields:
                         output: softmax
                         index: {tuple: [{expr: {var: a0}}, {expr: {var: a3}}]}
-                        values: {tuple: [v5]}
+                        values: {tuple: [v4]}
                         value_dtype: null
                         atomic: false
                         swizzle: NONE
@@ -4515,7 +3253,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_softmax_4839e3
+      name: k_softmax_985923
     inputs: [x]
     outputs: [[softmax, f32, [{sym: seq_len, hint: 512}, 8192]]]
 - inputs: [x]
@@ -4624,8 +3362,6 @@ loops:
             input: rms_norm_mean_count
             index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
             dtype: null
-        - class: Assign
-          fields: {name: v0, op: {elementwise: reciprocal}, args: {tuple: [in1]}, dtype: null}
         - class: Loop
           fields:
             axis: {class: Axis, fields: {name: a0, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
@@ -4643,16 +3379,16 @@ loops:
                         index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
                         dtype: null
                     - class: Assign
-                      fields: {name: v1, op: {elementwise: multiply}, args: {tuple: [in2, in2]}, dtype: null}
+                      fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in2, in2]}, dtype: null}
                     - class: Accum
-                      fields: {name: acc0, value: v1, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
+                      fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
                   unroll: false
                   seed: true
               - class: Assign
-                fields: {name: v2, op: {elementwise: multiply}, args: {tuple: [acc0, v0]}, dtype: null}
+                fields: {name: v1, op: {elementwise: divide}, args: {tuple: [acc0, in1]}, dtype: null}
               - class: Assign
-                fields: {name: v3, op: {elementwise: add}, args: {tuple: [in0, v2]}, dtype: null}
-              - {class: Assign, fields: {name: v4, op: {elementwise: rsqrt}, args: {tuple: [v3]}, dtype: null}}
+                fields: {name: v2, op: {elementwise: add}, args: {tuple: [in0, v1]}, dtype: null}
+              - {class: Assign, fields: {name: v3, op: {elementwise: rsqrt}, args: {tuple: [v2]}, dtype: null}}
               - class: Loop
                 fields:
                   axis: {class: Axis, fields: {name: a2, extent: {dim: 2048}, window: null}}
@@ -4665,16 +3401,16 @@ loops:
                         index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
                         dtype: null
                     - class: Assign
-                      fields: {name: v5, op: {elementwise: multiply}, args: {tuple: [in3, v4]}, dtype: null}
+                      fields: {name: v4, op: {elementwise: multiply}, args: {tuple: [in3, v3]}, dtype: null}
                     - class: Load
                       fields: {names: {tuple: [in4]}, input: p_weight, index: {tuple: [{expr: {var: a2}}]}, dtype: null}
                     - class: Assign
-                      fields: {name: v6, op: {elementwise: multiply}, args: {tuple: [in4, v5]}, dtype: null}
+                      fields: {name: v5, op: {elementwise: multiply}, args: {tuple: [in4, v4]}, dtype: null}
                     - class: Write
                       fields:
                         output: rms_norm
                         index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                        values: {tuple: [v6]}
+                        values: {tuple: [v5]}
                         value_dtype: null
                         atomic: false
                         swizzle: NONE
@@ -4682,7 +3418,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_rms_norm_088e96
+      name: k_rms_norm_198dd3
     inputs: [rms_norm_mean_count, rms_norm_eps, x, p_weight]
     outputs: [[rms_norm, f32, [{sym: seq_len, hint: 512}, 2048]]]
 - inputs: [x]
@@ -4747,8 +3483,6 @@ loops:
             input: rms_norm_mean_count
             index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
             dtype: null
-        - class: Assign
-          fields: {name: v0, op: {elementwise: reciprocal}, args: {tuple: [in1]}, dtype: null}
         - class: Loop
           fields:
             axis: {class: Axis, fields: {name: a0, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
@@ -4766,16 +3500,16 @@ loops:
                         index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
                         dtype: null
                     - class: Assign
-                      fields: {name: v1, op: {elementwise: multiply}, args: {tuple: [in2, in2]}, dtype: null}
+                      fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in2, in2]}, dtype: null}
                     - class: Accum
-                      fields: {name: acc0, value: v1, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
+                      fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
                   unroll: false
                   seed: true
               - class: Assign
-                fields: {name: v2, op: {elementwise: multiply}, args: {tuple: [acc0, v0]}, dtype: null}
+                fields: {name: v1, op: {elementwise: divide}, args: {tuple: [acc0, in1]}, dtype: null}
               - class: Assign
-                fields: {name: v3, op: {elementwise: add}, args: {tuple: [in0, v2]}, dtype: null}
-              - {class: Assign, fields: {name: v4, op: {elementwise: rsqrt}, args: {tuple: [v3]}, dtype: null}}
+                fields: {name: v2, op: {elementwise: add}, args: {tuple: [in0, v1]}, dtype: null}
+              - {class: Assign, fields: {name: v3, op: {elementwise: rsqrt}, args: {tuple: [v2]}, dtype: null}}
               - class: Loop
                 fields:
                   axis: {class: Axis, fields: {name: a2, extent: {dim: 4096}, window: null}}
@@ -4788,16 +3522,16 @@ loops:
                         index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
                         dtype: null
                     - class: Assign
-                      fields: {name: v5, op: {elementwise: multiply}, args: {tuple: [in3, v4]}, dtype: null}
+                      fields: {name: v4, op: {elementwise: multiply}, args: {tuple: [in3, v3]}, dtype: null}
                     - class: Load
                       fields: {names: {tuple: [in4]}, input: p_weight, index: {tuple: [{expr: {var: a2}}]}, dtype: null}
                     - class: Assign
-                      fields: {name: v6, op: {elementwise: multiply}, args: {tuple: [in4, v5]}, dtype: null}
+                      fields: {name: v5, op: {elementwise: multiply}, args: {tuple: [in4, v4]}, dtype: null}
                     - class: Write
                       fields:
                         output: rms_norm
                         index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                        values: {tuple: [v6]}
+                        values: {tuple: [v5]}
                         value_dtype: null
                         atomic: false
                         swizzle: NONE
@@ -4805,7 +3539,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_rms_norm_952695
+      name: k_rms_norm_eadfc0
     inputs: [rms_norm_mean_count, rms_norm_eps, x, p_weight]
     outputs: [[rms_norm, f32, [{sym: seq_len, hint: 512}, 4096]]]
 - inputs: [x]
@@ -4870,8 +3604,6 @@ loops:
             input: rms_norm_mean_count
             index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
             dtype: null
-        - class: Assign
-          fields: {name: v0, op: {elementwise: reciprocal}, args: {tuple: [in1]}, dtype: null}
         - class: Loop
           fields:
             axis: {class: Axis, fields: {name: a0, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
@@ -4889,16 +3621,16 @@ loops:
                         index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
                         dtype: null
                     - class: Assign
-                      fields: {name: v1, op: {elementwise: multiply}, args: {tuple: [in2, in2]}, dtype: null}
+                      fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in2, in2]}, dtype: null}
                     - class: Accum
-                      fields: {name: acc0, value: v1, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
+                      fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
                   unroll: false
                   seed: true
               - class: Assign
-                fields: {name: v2, op: {elementwise: multiply}, args: {tuple: [acc0, v0]}, dtype: null}
+                fields: {name: v1, op: {elementwise: divide}, args: {tuple: [acc0, in1]}, dtype: null}
               - class: Assign
-                fields: {name: v3, op: {elementwise: add}, args: {tuple: [in0, v2]}, dtype: null}
-              - {class: Assign, fields: {name: v4, op: {elementwise: rsqrt}, args: {tuple: [v3]}, dtype: null}}
+                fields: {name: v2, op: {elementwise: add}, args: {tuple: [in0, v1]}, dtype: null}
+              - {class: Assign, fields: {name: v3, op: {elementwise: rsqrt}, args: {tuple: [v2]}, dtype: null}}
               - class: Loop
                 fields:
                   axis: {class: Axis, fields: {name: a2, extent: {dim: 8192}, window: null}}
@@ -4911,16 +3643,16 @@ loops:
                         index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
                         dtype: null
                     - class: Assign
-                      fields: {name: v5, op: {elementwise: multiply}, args: {tuple: [in3, v4]}, dtype: null}
+                      fields: {name: v4, op: {elementwise: multiply}, args: {tuple: [in3, v3]}, dtype: null}
                     - class: Load
                       fields: {names: {tuple: [in4]}, input: p_weight, index: {tuple: [{expr: {var: a2}}]}, dtype: null}
                     - class: Assign
-                      fields: {name: v6, op: {elementwise: multiply}, args: {tuple: [in4, v5]}, dtype: null}
+                      fields: {name: v5, op: {elementwise: multiply}, args: {tuple: [in4, v4]}, dtype: null}
                     - class: Write
                       fields:
                         output: rms_norm
                         index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                        values: {tuple: [v6]}
+                        values: {tuple: [v5]}
                         value_dtype: null
                         atomic: false
                         swizzle: NONE
@@ -4928,7 +3660,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_rms_norm_791357
+      name: k_rms_norm_3a45cb
     inputs: [rms_norm_mean_count, rms_norm_eps, x, p_weight]
     outputs: [[rms_norm, f32, [{sym: seq_len, hint: 512}, 8192]]]
 - inputs: [x]
@@ -5160,8 +3892,6 @@ loops:
                             fields: {name: acc3, value: v5, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
                         unroll: false
                         seed: true
-                    - class: Assign
-                      fields: {name: v6, op: {elementwise: reciprocal}, args: {tuple: [acc3]}, dtype: null}
                     - class: Loop
                       fields:
                         axis: {class: Axis, fields: {name: a6, extent: {dim: 128}, window: null}}
@@ -5200,18 +3930,18 @@ loops:
                                             - {expr: {var: a8}}
                                           dtype: null
                                       - class: Assign
-                                        fields: {name: v7, op: {elementwise: multiply}, args: {tuple: [in5, in6]}, dtype: {dtype: f32}}
+                                        fields: {name: v6, op: {elementwise: multiply}, args: {tuple: [in5, in6]}, dtype: {dtype: f32}}
                                       - class: Accum
-                                        fields: {name: acc4, value: v7, op: {elementwise: add}, dtype: null, axes: {tuple: [a8]}, base: null}
+                                        fields: {name: acc4, value: v6, op: {elementwise: add}, dtype: null, axes: {tuple: [a8]}, base: null}
                                     unroll: false
                                     seed: true
                                 - class: Assign
-                                  fields: {name: v8, op: {elementwise: multiply}, args: {tuple: [acc4, in0]}, dtype: null}
+                                  fields: {name: v7, op: {elementwise: multiply}, args: {tuple: [acc4, in0]}, dtype: null}
                                 - class: Assign
-                                  fields: {name: v9, op: {elementwise: subtract}, args: {tuple: [v8, acc1]}, dtype: null}
-                                - {class: Assign, fields: {name: v10, op: {elementwise: exp}, args: {tuple: [v9]}, dtype: null}}
+                                  fields: {name: v8, op: {elementwise: subtract}, args: {tuple: [v7, acc1]}, dtype: null}
+                                - {class: Assign, fields: {name: v9, op: {elementwise: exp}, args: {tuple: [v8]}, dtype: null}}
                                 - class: Assign
-                                  fields: {name: v11, op: {elementwise: multiply}, args: {tuple: [v10, v6]}, dtype: null}
+                                  fields: {name: v10, op: {elementwise: divide}, args: {tuple: [v9, acc3]}, dtype: null}
                                 - class: Load
                                   fields:
                                     names: {tuple: [in7]}
@@ -5224,9 +3954,9 @@ loops:
                                       - {expr: {var: a6}}
                                     dtype: null
                                 - class: Assign
-                                  fields: {name: v12, op: {elementwise: multiply}, args: {tuple: [in7, v11]}, dtype: {dtype: f32}}
+                                  fields: {name: v11, op: {elementwise: multiply}, args: {tuple: [in7, v10]}, dtype: {dtype: f32}}
                                 - class: Accum
-                                  fields: {name: acc5, value: v12, op: {elementwise: add}, dtype: null, axes: {tuple: [a7]}, base: null}
+                                  fields: {name: acc5, value: v11, op: {elementwise: add}, dtype: null, axes: {tuple: [a7]}, base: null}
                               unroll: false
                               seed: true
                           - class: Write
@@ -5248,7 +3978,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_sdpa_c77793
+      name: k_sdpa_0561cc
     inputs: [scaled_dot_product_attention_scale, x1, x0, x2]
     outputs: [[scaled_dot_product_attention, f16, [1, 8, 512, 128]]]
 - inputs: [x0, x1, x2]
@@ -5394,8 +4124,6 @@ loops:
                             fields: {name: acc3, value: v5, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
                         unroll: false
                         seed: true
-                    - class: Assign
-                      fields: {name: v6, op: {elementwise: reciprocal}, args: {tuple: [acc3]}, dtype: null}
                     - class: Loop
                       fields:
                         axis: {class: Axis, fields: {name: a6, extent: {dim: 64}, window: null}}
@@ -5434,18 +4162,18 @@ loops:
                                             - {expr: {var: a8}}
                                           dtype: null
                                       - class: Assign
-                                        fields: {name: v7, op: {elementwise: multiply}, args: {tuple: [in5, in6]}, dtype: {dtype: f32}}
+                                        fields: {name: v6, op: {elementwise: multiply}, args: {tuple: [in5, in6]}, dtype: {dtype: f32}}
                                       - class: Accum
-                                        fields: {name: acc4, value: v7, op: {elementwise: add}, dtype: null, axes: {tuple: [a8]}, base: null}
+                                        fields: {name: acc4, value: v6, op: {elementwise: add}, dtype: null, axes: {tuple: [a8]}, base: null}
                                     unroll: false
                                     seed: true
                                 - class: Assign
-                                  fields: {name: v8, op: {elementwise: multiply}, args: {tuple: [acc4, in0]}, dtype: null}
+                                  fields: {name: v7, op: {elementwise: multiply}, args: {tuple: [acc4, in0]}, dtype: null}
                                 - class: Assign
-                                  fields: {name: v9, op: {elementwise: subtract}, args: {tuple: [v8, acc1]}, dtype: null}
-                                - {class: Assign, fields: {name: v10, op: {elementwise: exp}, args: {tuple: [v9]}, dtype: null}}
+                                  fields: {name: v8, op: {elementwise: subtract}, args: {tuple: [v7, acc1]}, dtype: null}
+                                - {class: Assign, fields: {name: v9, op: {elementwise: exp}, args: {tuple: [v8]}, dtype: null}}
                                 - class: Assign
-                                  fields: {name: v11, op: {elementwise: multiply}, args: {tuple: [v10, v6]}, dtype: null}
+                                  fields: {name: v10, op: {elementwise: divide}, args: {tuple: [v9, acc3]}, dtype: null}
                                 - class: Load
                                   fields:
                                     names: {tuple: [in7]}
@@ -5458,9 +4186,9 @@ loops:
                                       - {expr: {var: a6}}
                                     dtype: null
                                 - class: Assign
-                                  fields: {name: v12, op: {elementwise: multiply}, args: {tuple: [in7, v11]}, dtype: {dtype: f32}}
+                                  fields: {name: v11, op: {elementwise: multiply}, args: {tuple: [in7, v10]}, dtype: {dtype: f32}}
                                 - class: Accum
-                                  fields: {name: acc5, value: v12, op: {elementwise: add}, dtype: null, axes: {tuple: [a7]}, base: null}
+                                  fields: {name: acc5, value: v11, op: {elementwise: add}, dtype: null, axes: {tuple: [a7]}, base: null}
                               unroll: false
                               seed: true
                           - class: Write
@@ -5482,7 +4210,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_sdpa_796a6e
+      name: k_sdpa_989ec6
     inputs: [scaled_dot_product_attention_scale, x1, x0, x2]
     outputs: [[scaled_dot_product_attention, f16, [1, 8, 512, 64]]]
 - inputs: [x0, x1, x2]
@@ -5688,8 +4416,6 @@ loops:
                             fields: {name: acc3, value: v9, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
                         unroll: false
                         seed: true
-                    - class: Assign
-                      fields: {name: v10, op: {elementwise: reciprocal}, args: {tuple: [acc3]}, dtype: null}
                     - class: Loop
                       fields:
                         axis: {class: Axis, fields: {name: a6, extent: {dim: 128}, window: null}}
@@ -5728,13 +4454,13 @@ loops:
                                             - {expr: {var: a8}}
                                           dtype: null
                                       - class: Assign
-                                        fields: {name: v11, op: {elementwise: multiply}, args: {tuple: [in7, in8]}, dtype: {dtype: f32}}
+                                        fields: {name: v10, op: {elementwise: multiply}, args: {tuple: [in7, in8]}, dtype: {dtype: f32}}
                                       - class: Accum
-                                        fields: {name: acc4, value: v11, op: {elementwise: add}, dtype: null, axes: {tuple: [a8]}, base: null}
+                                        fields: {name: acc4, value: v10, op: {elementwise: add}, dtype: null, axes: {tuple: [a8]}, base: null}
                                     unroll: false
                                     seed: true
                                 - class: Assign
-                                  fields: {name: v12, op: {elementwise: multiply}, args: {tuple: [acc4, in2]}, dtype: null}
+                                  fields: {name: v11, op: {elementwise: multiply}, args: {tuple: [acc4, in2]}, dtype: null}
                                 - class: Load
                                   fields:
                                     names: {tuple: [in9]}
@@ -5748,7 +4474,7 @@ loops:
                                     dtype: null
                                 - class: Select
                                   fields:
-                                    name: v13
+                                    name: v12
                                     branches:
                                       tuple:
                                       - class: SelectBranch
@@ -5756,16 +4482,16 @@ loops:
                                       - class: SelectBranch
                                         fields: {value: in0, select: {expr: {binary: {op: <, left: {var: a1}, right: {var: a7}}}}}
                                 - class: Assign
-                                  fields: {name: v14, op: {elementwise: add}, args: {tuple: [v12, v13]}, dtype: null}
+                                  fields: {name: v13, op: {elementwise: add}, args: {tuple: [v11, v12]}, dtype: null}
                                 - class: Assign
-                                  fields: {name: v15, op: {elementwise: subtract}, args: {tuple: [v14, acc1]}, dtype: null}
-                                - {class: Assign, fields: {name: v16, op: {elementwise: exp}, args: {tuple: [v15]}, dtype: null}}
+                                  fields: {name: v14, op: {elementwise: subtract}, args: {tuple: [v13, acc1]}, dtype: null}
+                                - {class: Assign, fields: {name: v15, op: {elementwise: exp}, args: {tuple: [v14]}, dtype: null}}
                                 - class: Assign
-                                  fields: {name: v17, op: {elementwise: multiply}, args: {tuple: [v10, v16]}, dtype: null}
+                                  fields: {name: v16, op: {elementwise: divide}, args: {tuple: [v15, acc3]}, dtype: null}
                                 - class: Assign
-                                  fields: {name: v18, op: {elementwise: multiply}, args: {tuple: [in9, v17]}, dtype: {dtype: f32}}
+                                  fields: {name: v17, op: {elementwise: multiply}, args: {tuple: [in9, v16]}, dtype: {dtype: f32}}
                                 - class: Accum
-                                  fields: {name: acc5, value: v18, op: {elementwise: add}, dtype: null, axes: {tuple: [a7]}, base: null}
+                                  fields: {name: acc5, value: v17, op: {elementwise: add}, dtype: null, axes: {tuple: [a7]}, base: null}
                               unroll: false
                               seed: true
                           - class: Write
@@ -5787,8 +4513,8 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_sdpa_9ff789
-    inputs: [scaled_dot_product_attention_mask_fill_c, scaled_dot_product_attention_mask_zero_c, scaled_dot_product_attention_scale, x1, x0, x2]
+      name: k_sdpa_9cc7d2
+    inputs: [scaled_dot_product_attention_scale, scaled_dot_product_attention_mask_fill_c, scaled_dot_product_attention_mask_zero_c, x1, x0, x2]
     outputs: [[scaled_dot_product_attention, f16, [1, 8, 512, 128]]]
 - inputs: [x0, x1, x2]
   outputs: [scaled_dot_product_attention]
@@ -5993,8 +4719,6 @@ loops:
                             fields: {name: acc3, value: v9, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
                         unroll: false
                         seed: true
-                    - class: Assign
-                      fields: {name: v10, op: {elementwise: reciprocal}, args: {tuple: [acc3]}, dtype: null}
                     - class: Loop
                       fields:
                         axis: {class: Axis, fields: {name: a6, extent: {dim: 64}, window: null}}
@@ -6033,13 +4757,13 @@ loops:
                                             - {expr: {var: a8}}
                                           dtype: null
                                       - class: Assign
-                                        fields: {name: v11, op: {elementwise: multiply}, args: {tuple: [in7, in8]}, dtype: {dtype: f32}}
+                                        fields: {name: v10, op: {elementwise: multiply}, args: {tuple: [in7, in8]}, dtype: {dtype: f32}}
                                       - class: Accum
-                                        fields: {name: acc4, value: v11, op: {elementwise: add}, dtype: null, axes: {tuple: [a8]}, base: null}
+                                        fields: {name: acc4, value: v10, op: {elementwise: add}, dtype: null, axes: {tuple: [a8]}, base: null}
                                     unroll: false
                                     seed: true
                                 - class: Assign
-                                  fields: {name: v12, op: {elementwise: multiply}, args: {tuple: [acc4, in2]}, dtype: null}
+                                  fields: {name: v11, op: {elementwise: multiply}, args: {tuple: [acc4, in2]}, dtype: null}
                                 - class: Load
                                   fields:
                                     names: {tuple: [in9]}
@@ -6053,7 +4777,7 @@ loops:
                                     dtype: null
                                 - class: Select
                                   fields:
-                                    name: v13
+                                    name: v12
                                     branches:
                                       tuple:
                                       - class: SelectBranch
@@ -6061,16 +4785,16 @@ loops:
                                       - class: SelectBranch
                                         fields: {value: in0, select: {expr: {binary: {op: <, left: {var: a1}, right: {var: a7}}}}}
                                 - class: Assign
-                                  fields: {name: v14, op: {elementwise: add}, args: {tuple: [v12, v13]}, dtype: null}
+                                  fields: {name: v13, op: {elementwise: add}, args: {tuple: [v11, v12]}, dtype: null}
                                 - class: Assign
-                                  fields: {name: v15, op: {elementwise: subtract}, args: {tuple: [v14, acc1]}, dtype: null}
-                                - {class: Assign, fields: {name: v16, op: {elementwise: exp}, args: {tuple: [v15]}, dtype: null}}
+                                  fields: {name: v14, op: {elementwise: subtract}, args: {tuple: [v13, acc1]}, dtype: null}
+                                - {class: Assign, fields: {name: v15, op: {elementwise: exp}, args: {tuple: [v14]}, dtype: null}}
                                 - class: Assign
-                                  fields: {name: v17, op: {elementwise: multiply}, args: {tuple: [v10, v16]}, dtype: null}
+                                  fields: {name: v16, op: {elementwise: divide}, args: {tuple: [v15, acc3]}, dtype: null}
                                 - class: Assign
-                                  fields: {name: v18, op: {elementwise: multiply}, args: {tuple: [in9, v17]}, dtype: {dtype: f32}}
+                                  fields: {name: v17, op: {elementwise: multiply}, args: {tuple: [in9, v16]}, dtype: {dtype: f32}}
                                 - class: Accum
-                                  fields: {name: acc5, value: v18, op: {elementwise: add}, dtype: null, axes: {tuple: [a7]}, base: null}
+                                  fields: {name: acc5, value: v17, op: {elementwise: add}, dtype: null, axes: {tuple: [a7]}, base: null}
                               unroll: false
                               seed: true
                           - class: Write
@@ -6092,8 +4816,8 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_sdpa_153e7c
-    inputs: [scaled_dot_product_attention_mask_fill_c, scaled_dot_product_attention_mask_zero_c, scaled_dot_product_attention_scale, x1, x0, x2]
+      name: k_sdpa_ae5786
+    inputs: [scaled_dot_product_attention_scale, scaled_dot_product_attention_mask_fill_c, scaled_dot_product_attention_mask_zero_c, x1, x0, x2]
     outputs: [[scaled_dot_product_attention, f16, [1, 8, 512, 64]]]
 - inputs: [x0, x1, x2]
   outputs: [scaled_dot_product_attention]
@@ -6298,8 +5022,6 @@ loops:
                             fields: {name: acc3, value: v9, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
                         unroll: false
                         seed: true
-                    - class: Assign
-                      fields: {name: v10, op: {elementwise: reciprocal}, args: {tuple: [acc3]}, dtype: null}
                     - class: Loop
                       fields:
                         axis: {class: Axis, fields: {name: a6, extent: {dim: 256}, window: null}}
@@ -6338,13 +5060,13 @@ loops:
                                             - {expr: {var: a8}}
                                           dtype: null
                                       - class: Assign
-                                        fields: {name: v11, op: {elementwise: multiply}, args: {tuple: [in7, in8]}, dtype: {dtype: f32}}
+                                        fields: {name: v10, op: {elementwise: multiply}, args: {tuple: [in7, in8]}, dtype: {dtype: f32}}
                                       - class: Accum
-                                        fields: {name: acc4, value: v11, op: {elementwise: add}, dtype: null, axes: {tuple: [a8]}, base: null}
+                                        fields: {name: acc4, value: v10, op: {elementwise: add}, dtype: null, axes: {tuple: [a8]}, base: null}
                                     unroll: false
                                     seed: true
                                 - class: Assign
-                                  fields: {name: v12, op: {elementwise: multiply}, args: {tuple: [acc4, in2]}, dtype: null}
+                                  fields: {name: v11, op: {elementwise: multiply}, args: {tuple: [acc4, in2]}, dtype: null}
                                 - class: Load
                                   fields:
                                     names: {tuple: [in9]}
@@ -6358,7 +5080,7 @@ loops:
                                     dtype: null
                                 - class: Select
                                   fields:
-                                    name: v13
+                                    name: v12
                                     branches:
                                       tuple:
                                       - class: SelectBranch
@@ -6366,16 +5088,16 @@ loops:
                                       - class: SelectBranch
                                         fields: {value: in0, select: {expr: {binary: {op: <, left: {var: a1}, right: {var: a7}}}}}
                                 - class: Assign
-                                  fields: {name: v14, op: {elementwise: add}, args: {tuple: [v12, v13]}, dtype: null}
+                                  fields: {name: v13, op: {elementwise: add}, args: {tuple: [v11, v12]}, dtype: null}
                                 - class: Assign
-                                  fields: {name: v15, op: {elementwise: subtract}, args: {tuple: [v14, acc1]}, dtype: null}
-                                - {class: Assign, fields: {name: v16, op: {elementwise: exp}, args: {tuple: [v15]}, dtype: null}}
+                                  fields: {name: v14, op: {elementwise: subtract}, args: {tuple: [v13, acc1]}, dtype: null}
+                                - {class: Assign, fields: {name: v15, op: {elementwise: exp}, args: {tuple: [v14]}, dtype: null}}
                                 - class: Assign
-                                  fields: {name: v17, op: {elementwise: multiply}, args: {tuple: [v10, v16]}, dtype: null}
+                                  fields: {name: v16, op: {elementwise: divide}, args: {tuple: [v15, acc3]}, dtype: null}
                                 - class: Assign
-                                  fields: {name: v18, op: {elementwise: multiply}, args: {tuple: [in9, v17]}, dtype: {dtype: f32}}
+                                  fields: {name: v17, op: {elementwise: multiply}, args: {tuple: [in9, v16]}, dtype: {dtype: f32}}
                                 - class: Accum
-                                  fields: {name: acc5, value: v18, op: {elementwise: add}, dtype: null, axes: {tuple: [a7]}, base: null}
+                                  fields: {name: acc5, value: v17, op: {elementwise: add}, dtype: null, axes: {tuple: [a7]}, base: null}
                               unroll: false
                               seed: true
                           - class: Write
@@ -6397,6 +5119,6 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_sdpa_3a06a9
-    inputs: [scaled_dot_product_attention_mask_fill_c, scaled_dot_product_attention_mask_zero_c, scaled_dot_product_attention_scale, x1, x0, x2]
+      name: k_sdpa_96c531
+    inputs: [scaled_dot_product_attention_scale, scaled_dot_product_attention_mask_fill_c, scaled_dot_product_attention_mask_zero_c, x1, x0, x2]
     outputs: [[scaled_dot_product_attention, f16, [1, 16, 512, 256]]]

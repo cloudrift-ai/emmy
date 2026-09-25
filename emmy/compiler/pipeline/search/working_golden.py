@@ -202,6 +202,48 @@ def whole_origins(coverage: Mapping, program) -> tuple[str, ...]:
     return origins if origins and all(coverage[origin][2] for origin in origins) else ()
 
 
+def prepare_traced_graph(graph) -> None:
+    """Make a traced graph the pristine program an inventory stores, in place.
+
+    A birth-time speller may mark an internal storage value that has to remain materialized for
+    a faithful target inventory (dynamic activation bits and scale are the first use); promoting
+    it to an auxiliary graph output preserves the boundary without changing normal model outputs.
+    And torch tracing or checkpoint spelling may hand over a graph that already crossed one
+    compiler pipeline and carries implementation-piece provenance; the stable wire persists no
+    provenance, so those selectors would come from one universe and replay after a fresh seed.
+    Re-seeding here is exactly what the wire decoder's reader does, which is what makes a stored
+    program's fresh lowering comparable with the kernels the inventory stored.
+    """
+    from emmy.compiler import provenance  # noqa: PLC0415
+
+    for traced_node in graph.nodes.values():
+        if traced_node.hints.get("trace.materialize") and traced_node.id not in graph.outputs:
+            graph.outputs.append(traced_node.id)
+    for traced_node in graph.nodes.values():
+        traced_node.hints.remove(provenance.PROV)
+    provenance.seed(graph)
+
+
+def kernel_programs(fused) -> list[tuple[str, object]]:
+    """One standalone Loop IR program per kernel of a lowered graph, ``(kernel node id, program)``
+    in topological order — the targets an inventory stores and ``emmy compile --wire`` prints."""
+    from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.slice import single_node_graph  # noqa: PLC0415
+
+    kernels = [node_id for node_id in fused.topological_order() if isinstance(fused.nodes[node_id].op, LoopOp)]
+    return [(node_id, single_node_graph(fused, node_id)) for node_id in kernels]
+
+
+def lowered_kernels(graph, *, ctx) -> tuple[object, list[tuple[str, object]]]:
+    """``graph`` through the loop passes at ``ctx``: ``(fused graph, kernel programs)``. The one
+    lowering a trace inventory, ``emmy golden check`` and a restamp share, so a stored target and
+    its fresh lowering can only differ where the compiler differs."""
+    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline  # noqa: PLC0415
+
+    fused = Pipeline.build(LOOP_PASSES).run(graph, ctx=ctx)
+    return fused, kernel_programs(fused)
+
+
 def _append_trace_inventory(
     graph,
     *,
@@ -215,39 +257,13 @@ def _append_trace_inventory(
 ) -> None:
     """Append one lowered graph to shared trace-inventory pools."""
     from emmy.compiler import provenance  # noqa: PLC0415
-    from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
     from emmy.compiler.loop_wire import intern_loop_program  # noqa: PLC0415
-    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import measured_precision_pins  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.slice import single_node_graph  # noqa: PLC0415
     from emmy.compiler.torch_wire import intern_program  # noqa: PLC0415
 
-    # A birth-time speller may mark an internal storage value that has to remain
-    # materialized for a faithful target inventory (dynamic activation bits and
-    # scale are the first use). Promoting only the inventory copy to an auxiliary
-    # graph output preserves the boundary without changing normal model outputs.
-    for traced_node in graph.nodes.values():
-        if traced_node.hints.get("trace.materialize") and traced_node.id not in graph.outputs:
-            graph.outputs.append(traced_node.id)
-
-    # Torch tracing and checkpoint spelling may hand us a graph that has already crossed one
-    # compiler pipeline and therefore carries implementation-piece provenance. The stable wire
-    # deliberately does not persist provenance hints, so retaining those here would write
-    # selectors from one provenance universe and replay them after a fresh per-node seed — they
-    # cannot match.
-    # Re-seed the pristine frontend graph exactly as the wire decoder will.
-    for traced_node in graph.nodes.values():
-        traced_node.hints.remove(provenance.PROV)
-    provenance.seed(graph)
+    prepare_traced_graph(graph)
     input_graph = graph.copy()
-    fused = Pipeline.build(LOOP_PASSES).run(graph, ctx=ctx)
-
-    targets: list[tuple[str, object]] = []
-    for node_id in fused.topological_order():
-        node = fused.nodes[node_id]
-        if not isinstance(node.op, LoopOp):
-            continue
-        targets.append((node_id, node))
+    fused, kernels = lowered_kernels(graph, ctx=ctx)
 
     # Persist the pristine program once.  Per-target frontend slices are useful
     # ephemeral tuning views, but they can change fusion when independently
@@ -256,8 +272,9 @@ def _append_trace_inventory(
     program_ref: int | None = None
     inventory = []
     totals = provenance.totals(fused)
-    for node_id, node in targets:
-        inventory.append((node_id, node, whole_origins(provenance.coverage(provenance.get(node), totals), input_graph)))
+    for node_id, program in kernels:
+        node = fused.nodes[node_id]
+        inventory.append((node_id, node, program, whole_origins(provenance.coverage(provenance.get(node), totals), input_graph)))
     used_names = {
         realization["name"]
         for entry in entries
@@ -265,7 +282,7 @@ def _append_trace_inventory(
         if isinstance(realization, dict) and isinstance(realization.get("name"), str)
     }
 
-    for node_id, node, origins in inventory:
+    for node_id, node, program, origins in inventory:
         # The entry's name is a label, never re-derived: the kernel's provenance name (the ops it
         # realizes, as the backend and the profiler show it), so a reader can tell what a row is.
         name = node.op.name or node_id
@@ -286,7 +303,7 @@ def _append_trace_inventory(
         # The target IS the kernel's Loop IR: a replay starts from the stored kernel and never re-lowers
         # the program. The traced ops it computes whole ride beside it as provenance — the frontend
         # slice a benchmark compares the kernel against.
-        loop_ref = intern_loop_program(loops, single_node_graph(fused, node_id))
+        loop_ref = intern_loop_program(loops, program)
         if seen_loops is not None and loop_ref in seen_loops:
             continue
         if seen_loops is not None:

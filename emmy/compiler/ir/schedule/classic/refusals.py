@@ -69,9 +69,12 @@ def _reduction_domain(tile: TileOp, node) -> tuple[Reduce, ...]:
 
     roots = kernel_roots(tile.op)
     is_root = any(node is root for root in roots)
-    if node.observe is not None or not (is_root or any(node is member for root in roots for member in chain_members(root))):
+    owner = node if is_root else next((root for root in roots if any(node is member for member in chain_members(root))), None)
+    if node.observe is not None or owner is None:
         return (Reduce(),)  # the binder partitions the roots it peels and their chain members; any other reduce lowers serially
-    if {axis.name for spec in tile.output_specs for axis in spec.sweep} & node.free_axes:
+    # A sweep the member's own ROOT is evaluated over wraps the whole chain, members included, and
+    # only the serial fold spells that: the chain arm closes one grid cell.
+    if {axis.name for spec in tile.output_specs for axis in spec.sweep} & (node.free_axes | owner.free_axes):
         return (Reduce(),)
     if is_root and merges_partition(tile):
         # A split's deferred finalize: one partial per split per cell, the parallelism is the cells,
@@ -385,7 +388,9 @@ def _uniform_extras(node) -> bool:
     # What it has no residence for is an operand past the streamed one that VARIES: those are read
     # once, ahead of the cells, so every one of them must be uniform across the tile (attention's
     # scale and its mask fills are; a second streamed B is not, and rides the warp compute fill).
-    return len(node.operands) >= 2 and not any(edge.free_axes for edge in node.operands[2:])
+    # The same holds for a second channel on ONE edge — a packed gate/up weight exposes both
+    # projections from a single operand, so the channel count, not the operand count, decides.
+    return len(node.operands) >= 2 and len(node.bilinear_channels()) <= 1 and not any(edge.free_axes for edge in node.operands[2:])
 
 
 def _warp_plans(node, facts: ContractionFacts, atoms: tuple[str, ...]) -> Iterator[Tile]:

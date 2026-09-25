@@ -16,8 +16,8 @@ from emmy.compiler.ir.tile.path import MissingSiteError, parse_key, resolve, sit
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.fork import SCHEDULE_FORK_STAMPS, DeferredFork, fork_signature
 from emmy.compiler.pipeline.knob import family_of, family_pins
-from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams, full_projection_seams, output_map, realize
-from emmy.compiler.pipeline.passes.lowering.tile._split import split_forks
+from emmy.compiler.pipeline.passes.tile._cut import cuttable_seams, full_projection_seams, output_map, realize
+from emmy.compiler.pipeline.passes.tile._split import split_forks
 from emmy.compiler.pipeline.search.pins import composed_cuts_for
 
 PATTERN = [Pattern("root", TileOp)]
