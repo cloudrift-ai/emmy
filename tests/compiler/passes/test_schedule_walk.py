@@ -447,6 +447,17 @@ def test_a_sweep_carrying_store_keeps_a_member_serial_only_when_the_member_reads
     assert _classic._reduction_domain(_tile_stub(_chain_root(red), (over,)), red) == (Reduce(),)
 
 
+def test_a_sweep_the_chain_root_reads_keeps_every_member_serial(unpinned) -> None:
+    """A sweep the ROOT is evaluated over wraps the whole chain, so a member that never reads it
+    is serial too: the chain arm closes one grid cell and dropped the sweep, leaving its coordinate
+    unbound (a cut piece's group amax over a projection, on a Qwen3.8 FP8 layer)."""
+    root = _norm_linear_root()
+    statistic = next(member for member in ops.chain_members(root) if member.axis == "k")
+    assert "n" in root.free_axes and "n" not in statistic.free_axes
+    swept = OutputSpec(write=Write(output="o", index=(Var("m"), Var("n")), value="acc"), sweep=(Axis("n", 4),))
+    assert _classic._reduction_domain(_tile_stub(root, (swept,)), statistic) == (Reduce(),)
+
+
 def test_a_streamed_store_keeps_chain_members_serial(unpinned) -> None:
     """A boundary store that streams into a SIBLING observed member's reduce loop keeps every
     OTHER direct member serial too: the trailing splice cannot reach a loop that already sits in an
