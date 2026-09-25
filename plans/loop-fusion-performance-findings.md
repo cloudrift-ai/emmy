@@ -25,8 +25,9 @@ Numbers are from the refresh agents' runs on each card and are single measuremen
   gate/up at 329 us, where a GEMV should take single-digit microseconds.
 - **More cuts are not better.** On a Qwen3.8 GDN kernel, 2 cuts gave 35.8 ms and all 4 depth-1 cuts gave 215 ms.
 
-Next step: make the greedy (or the prior) choose a route for a whole-layer kernel that reproduces the old kernel
-boundaries (norm, qkv, attention, o_proj, MLP), and seed each piece with the matching old schedule family.
+Next step: fusion stays maximal, so the gains come from cuts. Make the greedy (or the prior) pick cuts by duplicated
+work: rank each seam by how often its producer is recomputed (the extent of consumer axes it sits under but does not
+depend on) times its cost, cut the largest first, and seed each piece with the matching old schedule family.
 
 ## The recurrence roller on GDN (Qwen3.8-27B, V100)
 
@@ -47,8 +48,8 @@ short recurrences unrolled when the rolled kernel loses its parallelism.
   output and out_proj (5120x6144) inside every MLP element. Five cuts at depth <= 2 give 6 kernels whose pieces still
   carry 5120x6144x64x128 nests; only a deep composed cut at every projection would separate them.
 
-Both look like fusion decisions a schedule cannot repair: fusion should not merge a producer whose recompute cost
-grows with the consumer's extent, and a region should keep a free axis at its root.
+Fusion stays maximal, so both need cuts that remove the duplicated work: a cut that computes out_proj (and the GDN
+output) once instead of per MLP element, and one that lifts the norm and in_proj out from under the one-thread root.
 
 ## Compiler errors hit while cutting
 
