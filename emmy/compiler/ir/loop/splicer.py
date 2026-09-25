@@ -762,7 +762,7 @@ class _Splicer(LoopBuilder):
         sigma = _solve_sigma(target_write.index, effective_index, {a.name for a in target.op.axes})
         if sigma is None:
             raise _NotSupported(f"σ-solve failed pairing target write index {target_write.index} against reader index {effective_index}")
-        v_bound = self._ensure_dep(target_write.value, target_tag, sigma, d.demand_scope)
+        v_bound = self._ensure_dep(target_write.value, target_tag, _canonical(sigma, d.demand_scope), d.demand_scope)
         self.insert(Assign(name=d.bound_as, op="copy", args=(v_bound,)), d.demand_scope)
 
     def _resolve_accum(self, stmt: Accum, d: _Demand) -> None:
@@ -781,6 +781,14 @@ class _Splicer(LoopBuilder):
 # ---------------------------------------------------------------------------
 # Pure helpers
 # ---------------------------------------------------------------------------
+
+
+def _canonical(sigma: Sigma, scope: Scope) -> Sigma:
+    """``sigma`` with each binding simplified under the ranges of ``scope``'s axes, so two readers
+    that spell one address differently — the block of the even nibble, ``2·a / 16``, and of the odd,
+    ``(2·a + 1) / 16`` — demand one binding, not two: the dedup table keys on the spelling."""
+    ctx = _extent_ctx({axis.name: axis.extent.as_static() for axis in scope.enclosing if axis.extent.is_static})
+    return Sigma({name: expr.simplify(ctx) for name, expr in sigma.mapping.items()})
 
 
 def _scope_for_axes(ref_scope: Scope, required: tuple[str, ...]) -> Scope:
