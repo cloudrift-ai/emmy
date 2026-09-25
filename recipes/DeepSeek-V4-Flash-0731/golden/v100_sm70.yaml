@@ -31344,7 +31344,7 @@ configs:
       PLACE@map.1/twist.1/inner: cut
       PLACE@map.1/twist.1/inner.2/map: cut
       PLACE@map.1/twist.1/inner.2/map.3/map: cut
-      PLACE@map.3/map: cut
+      PLACE@map.2/map: cut
       PLACE@map.4/map: cut
       PLACE@map.4/map.1/map: cut
       PLACE@map.4/map.1/map.1/inner: cut
@@ -31359,7 +31359,7 @@ configs:
       PLACE@map.4/map.2/inner.1/map.1/inner.1/map.3/map.1/reduce: cut
       PLACE@map.4/map.2/inner.1/map: cut
       PLACE@map.6/map: cut
-    identity: b954053e36581756f61113a37fac67959aaf11bb22bb138c4082e324349fe88b
+    identity: 91fb786cdda8239b5ed8ffdb4939ffe4155f22791e196923edaf5d65bba63761
     measurements:
       emmy_us: 4836.147223371599
       reference_us: 4831.555021447794
@@ -31528,7 +31528,7 @@ configs:
       PLACE@map.1/twist.1/inner.2/map: cut
       PLACE@map.1/twist.1/inner.2/map.3/map: cut
       PLACE@map.1/twist.1/inner.2/map.3/map.1/reduce: cut
-      PLACE@map.3/map: cut
+      PLACE@map.2/map: cut
       PLACE@map.4/map: cut
       PLACE@map.4/map.1/map: cut
       PLACE@map.4/map.1/map.1/inner: cut
@@ -31544,7 +31544,7 @@ configs:
       PLACE@map.6/map: cut
       PLACE@map.5/map: cut
       PLACE@map.4/map.2/inner.1/map.1/inner.1/map.1/inner.1/map: cut
-    identity: b954053e36581756f61113a37fac67959aaf11bb22bb138c4082e324349fe88b
+    identity: 91fb786cdda8239b5ed8ffdb4939ffe4155f22791e196923edaf5d65bba63761
     measurements:
       emmy_us: 3625.097757806292
       reference_us: 3630.244598116371
@@ -31640,37 +31640,26 @@ configs:
       FAST_MATH: false
     knobs:
       PLACE@map.1/twist.1/inner: cut
-      PLACE@map.2/map.2/inner: cut
       PLACE@map.1/twist.1/inner.2/map: cut
-      PLACE@map.2/map.2/inner.2/map: cut
       PLACE@map.1/twist.1/inner.2/map.3/map: cut
       PLACE@map.1/twist.1/inner.2/map.3/map.1/reduce: cut
-      PLACE@map.3/map: cut
+      PLACE@map.2/map: cut
       PLACE@map.4/map: cut
       PLACE@map.4/map.1/map: cut
       PLACE@map.4/map.1/map.1/inner: cut
       PLACE@map.4/map.1/map.1/inner.1/map: cut
-      PLACE@map.4/map.2/inner.1/map.1/inner.1/map.1/inner.2/map.1/inner.1/map: cut
-      PLACE@map.4/map.2/inner.1/map.1/inner.1/map.3/map.1/reduce.1/inner.2/map.1/inner.1/map: cut
-      PLACE@map.6/map.2/inner.2/map.1/inner.1/map: cut
       PLACE@map.4/map.2/inner: cut
       PLACE@map.4/map.2/inner.1/map: cut
       PLACE@map.4/map.2/inner.1/map.1/inner: cut
       PLACE@map.4/map.2/inner.1/map.1/inner.1/map: cut
       PLACE@map.4/map.2/inner.1/map.1/inner.1/map.1/inner.1/map: cut
-      PLACE@map.4/map.2/inner.1/map.1/inner.1/map.3/map.1/reduce.1/inner.1/map: cut
-      PLACE@map.6/map.2/inner.1/map: cut
       PLACE@map.4/map.2/inner.1/map.1/inner.1/map.1/inner.2/map: cut
-      PLACE@map.4/map.2/inner.1/map.1/inner.1/map.3/map.1/reduce.1/inner.2/map: cut
-      PLACE@map.6/map.2/inner.2/map: cut
       PLACE@map.4/map.2/inner.1/map.1/inner.1/map.1/inner.2/map.1/inner: cut
-      PLACE@map.4/map.2/inner.1/map.1/inner.1/map.3/map.1/reduce.1/inner.2/map.1/inner: cut
-      PLACE@map.6/map.2/inner.2/map.1/inner: cut
       PLACE@map.4/map.2/inner.1/map.1/inner.1/map.3/map: cut
       PLACE@map.4/map.2/inner.1/map.1/inner.1/map.3/map.1/reduce: cut
       PLACE@map.5/map: cut
       PLACE@map.6/map: cut
-    identity: b954053e36581756f61113a37fac67959aaf11bb22bb138c4082e324349fe88b
+    identity: 91fb786cdda8239b5ed8ffdb4939ffe4155f22791e196923edaf5d65bba63761
     measurements:
       emmy_us: 7061.204685131088
       reference_us: 7110.683534992859
@@ -33541,7 +33530,7 @@ configs:
       PLACE@map.1/twist.1/inner.2/map: cut
       PLACE@map.1/twist.1/inner.2/map.3/map: cut
       PLACE@map.1/twist.1/inner.2/map.3/map.1/reduce: cut
-      PLACE@map.3/map: cut
+      PLACE@map.2/map: cut
       PLACE@map.4/map: cut
       PLACE@map.4/map.1/map: cut
       PLACE@map.4/map.1/map.1/inner: cut
@@ -33555,7 +33544,7 @@ configs:
       PLACE@map.4/map.2/inner.2/map.1/inner.1/map.3/map.1/reduce: cut
       PLACE@map.4/map.2/inner.2/map: cut
       PLACE@map.6/map: cut
-    identity: 442b61ccfb11c862e9069c1ee6efac581fa32cdbcb83e7d44a3f69abda1a0143
+    identity: 17061ffca31262886db21c607a12451ee5da98de82bcd9f75e08d690baa58740
     measurements:
       emmy_us: 405.8587179210568
       reference_us: 399.8879568263111
@@ -33738,7 +33727,7 @@ configs:
       PLACE@map.1/twist.1/inner.2/map: cut
       PLACE@map.1/twist.1/inner.2/map.3/map: cut
       PLACE@map.1/twist.1/inner.2/map.3/map.1/reduce: cut
-      PLACE@map.3/map: cut
+      PLACE@map.2/map: cut
       PLACE@map.4/map: cut
       PLACE@map.4/map.1/map: cut
       PLACE@map.4/map.1/map.1/inner: cut
@@ -33754,7 +33743,7 @@ configs:
       PLACE@map.6/map: cut
       PLACE@map.5/map: cut
       PLACE@map.4/map.2/inner.2/map.1/inner.1/map.1/inner.1/map: cut
-    identity: 442b61ccfb11c862e9069c1ee6efac581fa32cdbcb83e7d44a3f69abda1a0143
+    identity: 17061ffca31262886db21c607a12451ee5da98de82bcd9f75e08d690baa58740
     measurements:
       emmy_us: 448.53096387843885
       reference_us: 444.9327313207296
@@ -33938,37 +33927,26 @@ configs:
       FAST_MATH: false
     knobs:
       PLACE@map.1/twist.1/inner: cut
-      PLACE@map.2/map.2/inner: cut
       PLACE@map.1/twist.1/inner.2/map: cut
-      PLACE@map.2/map.2/inner.2/map: cut
       PLACE@map.1/twist.1/inner.2/map.3/map: cut
       PLACE@map.1/twist.1/inner.2/map.3/map.1/reduce: cut
-      PLACE@map.3/map: cut
+      PLACE@map.2/map: cut
       PLACE@map.4/map: cut
       PLACE@map.4/map.1/map: cut
       PLACE@map.4/map.1/map.1/inner: cut
       PLACE@map.4/map.1/map.1/inner.2/map: cut
-      PLACE@map.4/map.2/inner.2/map.1/inner.1/map.1/inner.2/map.1/inner.1/map: cut
-      PLACE@map.4/map.2/inner.2/map.1/inner.1/map.3/map.1/reduce.1/inner.2/map.1/inner.1/map: cut
-      PLACE@map.6/map.2/inner.2/map.1/inner.1/map: cut
       PLACE@map.4/map.2/inner: cut
       PLACE@map.4/map.2/inner.2/map: cut
       PLACE@map.4/map.2/inner.2/map.1/inner: cut
       PLACE@map.4/map.2/inner.2/map.1/inner.1/map: cut
       PLACE@map.4/map.2/inner.2/map.1/inner.1/map.1/inner.1/map: cut
-      PLACE@map.4/map.2/inner.2/map.1/inner.1/map.3/map.1/reduce.1/inner.1/map: cut
-      PLACE@map.6/map.2/inner.1/map: cut
       PLACE@map.4/map.2/inner.2/map.1/inner.1/map.1/inner.2/map: cut
-      PLACE@map.4/map.2/inner.2/map.1/inner.1/map.3/map.1/reduce.1/inner.2/map: cut
-      PLACE@map.6/map.2/inner.2/map: cut
       PLACE@map.4/map.2/inner.2/map.1/inner.1/map.1/inner.2/map.1/inner: cut
-      PLACE@map.4/map.2/inner.2/map.1/inner.1/map.3/map.1/reduce.1/inner.2/map.1/inner: cut
-      PLACE@map.6/map.2/inner.2/map.1/inner: cut
       PLACE@map.4/map.2/inner.2/map.1/inner.1/map.3/map: cut
       PLACE@map.4/map.2/inner.2/map.1/inner.1/map.3/map.1/reduce: cut
       PLACE@map.5/map: cut
       PLACE@map.6/map: cut
-    identity: 442b61ccfb11c862e9069c1ee6efac581fa32cdbcb83e7d44a3f69abda1a0143
+    identity: 17061ffca31262886db21c607a12451ee5da98de82bcd9f75e08d690baa58740
     measurements:
       emmy_us: 421.3616309083561
       reference_us: 429.60218199963407
@@ -35919,7 +35897,7 @@ configs:
       PLACE@map.1/twist.1/inner: cut
       PLACE@map.1/twist.1/inner.2/map: cut
       PLACE@map.1/twist.1/inner.2/map.3/map: cut
-      PLACE@map.3/map: cut
+      PLACE@map.2/map: cut
       PLACE@map.4/map: cut
       PLACE@map.4/map.1/map: cut
       PLACE@map.4/map.1/map.1/inner: cut
@@ -35934,7 +35912,7 @@ configs:
       PLACE@map.4/map.2/inner.1/map.1/inner.1/map.3/map.1/reduce: cut
       PLACE@map.4/map.2/inner.1/map: cut
       PLACE@map.6/map: cut
-    identity: 52b30f82b382fb9b3572e5c71b48b6640213469a77b50a41bceca302ae108cbf
+    identity: a5cf0b1b1d079011b6005884c26718fe47c1a4f1bf1c4ff277f3c0f2b1616f45
     measurements:
       emmy_us: 8847.258097771042
       reference_us: 8876.706859523494
@@ -36099,7 +36077,7 @@ configs:
       PLACE@map.1/twist.1/inner.2/map: cut
       PLACE@map.1/twist.1/inner.2/map.3/map: cut
       PLACE@map.1/twist.1/inner.2/map.3/map.1/reduce: cut
-      PLACE@map.3/map: cut
+      PLACE@map.2/map: cut
       PLACE@map.4/map: cut
       PLACE@map.4/map.1/map: cut
       PLACE@map.4/map.1/map.1/inner: cut
@@ -36115,7 +36093,7 @@ configs:
       PLACE@map.6/map: cut
       PLACE@map.5/map: cut
       PLACE@map.4/map.2/inner.1/map.1/inner.1/map.1/inner.1/map: cut
-    identity: 52b30f82b382fb9b3572e5c71b48b6640213469a77b50a41bceca302ae108cbf
+    identity: a5cf0b1b1d079011b6005884c26718fe47c1a4f1bf1c4ff277f3c0f2b1616f45
     measurements:
       emmy_us: 5966.320774205142
       reference_us: 5966.973595550627
@@ -36217,37 +36195,26 @@ configs:
       FAST_MATH: false
     knobs:
       PLACE@map.1/twist.1/inner: cut
-      PLACE@map.2/map.2/inner: cut
       PLACE@map.1/twist.1/inner.2/map: cut
-      PLACE@map.2/map.2/inner.2/map: cut
       PLACE@map.1/twist.1/inner.2/map.3/map: cut
       PLACE@map.1/twist.1/inner.2/map.3/map.1/reduce: cut
-      PLACE@map.3/map: cut
+      PLACE@map.2/map: cut
       PLACE@map.4/map: cut
       PLACE@map.4/map.1/map: cut
       PLACE@map.4/map.1/map.1/inner: cut
       PLACE@map.4/map.1/map.1/inner.1/map: cut
-      PLACE@map.4/map.2/inner.1/map.1/inner.1/map.1/inner.2/map.1/inner.1/map: cut
-      PLACE@map.4/map.2/inner.1/map.1/inner.1/map.3/map.1/reduce.1/inner.2/map.1/inner.1/map: cut
-      PLACE@map.6/map.2/inner.2/map.1/inner.1/map: cut
       PLACE@map.4/map.2/inner: cut
       PLACE@map.4/map.2/inner.1/map: cut
       PLACE@map.4/map.2/inner.1/map.1/inner: cut
       PLACE@map.4/map.2/inner.1/map.1/inner.1/map: cut
       PLACE@map.4/map.2/inner.1/map.1/inner.1/map.1/inner.1/map: cut
-      PLACE@map.4/map.2/inner.1/map.1/inner.1/map.3/map.1/reduce.1/inner.1/map: cut
-      PLACE@map.6/map.2/inner.1/map: cut
       PLACE@map.4/map.2/inner.1/map.1/inner.1/map.1/inner.2/map: cut
-      PLACE@map.4/map.2/inner.1/map.1/inner.1/map.3/map.1/reduce.1/inner.2/map: cut
-      PLACE@map.6/map.2/inner.2/map: cut
       PLACE@map.4/map.2/inner.1/map.1/inner.1/map.1/inner.2/map.1/inner: cut
-      PLACE@map.4/map.2/inner.1/map.1/inner.1/map.3/map.1/reduce.1/inner.2/map.1/inner: cut
-      PLACE@map.6/map.2/inner.2/map.1/inner: cut
       PLACE@map.4/map.2/inner.1/map.1/inner.1/map.3/map: cut
       PLACE@map.4/map.2/inner.1/map.1/inner.1/map.3/map.1/reduce: cut
       PLACE@map.5/map: cut
       PLACE@map.6/map: cut
-    identity: 52b30f82b382fb9b3572e5c71b48b6640213469a77b50a41bceca302ae108cbf
+    identity: a5cf0b1b1d079011b6005884c26718fe47c1a4f1bf1c4ff277f3c0f2b1616f45
     measurements:
       emmy_us: 2586.655487306416
       reference_us: 2714.35408142861
@@ -38285,7 +38252,7 @@ configs:
       PLACE@map.1/twist.1/inner: cut
       PLACE@map.1/twist.1/inner.2/map: cut
       PLACE@map.1/twist.1/inner.2/map.3/map: cut
-      PLACE@map.3/map: cut
+      PLACE@map.2/map: cut
       PLACE@map.4/map: cut
       PLACE@map.4/map.1/map: cut
       PLACE@map.4/map.1/map.1/inner: cut
@@ -38300,7 +38267,7 @@ configs:
       PLACE@map.4/map.2/inner.1/map.1/inner.1/map.3/map.1/reduce: cut
       PLACE@map.4/map.2/inner.1/map: cut
       PLACE@map.6/map: cut
-    identity: 6753f504886988454ba3f6ac2f6856ba3caf456e435aeaa540220b51b09c4d8d
+    identity: e483185c4f24cfdf604bef6b05b7fde0f1570d85824db99c0f337ab25e3a8498
     measurements:
       emmy_us: 120596.23987335298
       reference_us: 121695.53271324064
@@ -38399,7 +38366,7 @@ configs:
       PLACE@map.1/twist.1/inner.2/map: cut
       PLACE@map.1/twist.1/inner.2/map.3/map: cut
       PLACE@map.1/twist.1/inner.2/map.3/map.1/reduce: cut
-      PLACE@map.3/map: cut
+      PLACE@map.2/map: cut
       PLACE@map.4/map: cut
       PLACE@map.4/map.1/map: cut
       PLACE@map.4/map.1/map.1/inner: cut
@@ -38415,7 +38382,7 @@ configs:
       PLACE@map.6/map: cut
       PLACE@map.5/map: cut
       PLACE@map.4/map.2/inner.1/map.1/inner.1/map.1/inner.1/map: cut
-    identity: 6753f504886988454ba3f6ac2f6856ba3caf456e435aeaa540220b51b09c4d8d
+    identity: e483185c4f24cfdf604bef6b05b7fde0f1570d85824db99c0f337ab25e3a8498
     measurements:
       emmy_us: 84625.9305201057
       reference_us: 84557.85868354142
@@ -38549,37 +38516,26 @@ configs:
       FAST_MATH: false
     knobs:
       PLACE@map.1/twist.1/inner: cut
-      PLACE@map.2/map.2/inner: cut
       PLACE@map.1/twist.1/inner.2/map: cut
-      PLACE@map.2/map.2/inner.2/map: cut
       PLACE@map.1/twist.1/inner.2/map.3/map: cut
       PLACE@map.1/twist.1/inner.2/map.3/map.1/reduce: cut
-      PLACE@map.3/map: cut
+      PLACE@map.2/map: cut
       PLACE@map.4/map: cut
       PLACE@map.4/map.1/map: cut
       PLACE@map.4/map.1/map.1/inner: cut
       PLACE@map.4/map.1/map.1/inner.1/map: cut
-      PLACE@map.4/map.2/inner.1/map.1/inner.1/map.1/inner.2/map.1/inner.1/map: cut
-      PLACE@map.4/map.2/inner.1/map.1/inner.1/map.3/map.1/reduce.1/inner.2/map.1/inner.1/map: cut
-      PLACE@map.6/map.2/inner.2/map.1/inner.1/map: cut
       PLACE@map.4/map.2/inner: cut
       PLACE@map.4/map.2/inner.1/map: cut
       PLACE@map.4/map.2/inner.1/map.1/inner: cut
       PLACE@map.4/map.2/inner.1/map.1/inner.1/map: cut
       PLACE@map.4/map.2/inner.1/map.1/inner.1/map.1/inner.1/map: cut
-      PLACE@map.4/map.2/inner.1/map.1/inner.1/map.3/map.1/reduce.1/inner.1/map: cut
-      PLACE@map.6/map.2/inner.1/map: cut
       PLACE@map.4/map.2/inner.1/map.1/inner.1/map.1/inner.2/map: cut
-      PLACE@map.4/map.2/inner.1/map.1/inner.1/map.3/map.1/reduce.1/inner.2/map: cut
-      PLACE@map.6/map.2/inner.2/map: cut
       PLACE@map.4/map.2/inner.1/map.1/inner.1/map.1/inner.2/map.1/inner: cut
-      PLACE@map.4/map.2/inner.1/map.1/inner.1/map.3/map.1/reduce.1/inner.2/map.1/inner: cut
-      PLACE@map.6/map.2/inner.2/map.1/inner: cut
       PLACE@map.4/map.2/inner.1/map.1/inner.1/map.3/map: cut
       PLACE@map.4/map.2/inner.1/map.1/inner.1/map.3/map.1/reduce: cut
       PLACE@map.5/map: cut
       PLACE@map.6/map: cut
-    identity: 6753f504886988454ba3f6ac2f6856ba3caf456e435aeaa540220b51b09c4d8d
+    identity: e483185c4f24cfdf604bef6b05b7fde0f1570d85824db99c0f337ab25e3a8498
     measurements:
       emmy_us: 45242.91705572978
       reference_us: 45207.02256355435
