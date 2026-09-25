@@ -72,6 +72,21 @@ All `EMMY_*` config env vars are read and written through one module — `emmy/c
 `--nvcc-flags`) resolve through `config.py` inside the library, not the command layer, so programmatic callers and tests
 get the same precedence. `config.py` is the source of truth for the full var list — do not maintain a copy here.
 
+## Compiler Invariant: Loop Fusion Is Maximal
+
+Loop fusion merges every structurally legal region, to fixpoint, and nothing else. Kernel boundaries come later, from
+cuts (`030_cut`), picked by evidence. No one can know before measuring that a merge is a bad decision, and the maximal
+region is what keeps every kernel variant open to try.
+
+- **Never add a fusion gate.** No size, cost, recompute, schedulability, recognizer or speed bound on a merge; no
+  retained early boundary; no "fusion should not merge X" rule. This holds for code, plans, reviews and proposals to
+  the user.
+- **A slow or unschedulable fused kernel is a cut or lowering problem.** Fix it with a cut that removes the duplicated
+  work, a schedule, or lowering coverage.
+- **A region the splicer cannot build is a compiler bug to raise,** never a smaller region.
+
+The passes `ARCHITECTURE.md` owns the design; `tests/compiler/passes/test_maximal_fusion.py` guards it.
+
 ## Running Tests
 
 `make test` runs the whole suite. It takes many minutes, so **do not run it while developing** — run only the tests
