@@ -820,7 +820,8 @@ are provably four-element aligned and K needs no mask. FP16 uses one 64-bit load
 each coupled to FP16 conversion in inline PTX, keeping temporary float lifetimes inside the packed load. The
 alignment proof reuses the expression-divisibility check used by swizzled addresses. M/N clamps preserve aligned
 rows; K tails, unknown alignment, other source types, and strided canonical B retain the scalar gather. No schedule
-field or model-specific choice is involved.
+field or model-specific choice is involved. Both loaders zero-fill a fragment wholly beyond M/N without
+reading its out-of-range base address; the output store already masks that fragment.
 
 ## `cuda/ir.py`
 
