@@ -13,10 +13,10 @@ import yaml
 
 from emmy.commands.golden import handle_golden_check, handle_golden_restamp
 from emmy.compiler.pipeline.search.golden import GoldenEntryState, GoldenFile
-from emmy.compiler.pipeline.search.golden.repository import _HARDWARE_GOLDENS_DIR
+from emmy.compiler.pipeline.search.golden.repository import _RECORDS_DIR
 
 #: Eight square matmuls with one measured row each — the smallest repository golden, and current.
-_SMALLEST = _HARDWARE_GOLDENS_DIR / "rtx4080_sm89.yaml"
+_SMALLEST = _RECORDS_DIR / "rtx4080_sm89.yaml"
 
 
 @pytest.fixture
@@ -100,7 +100,7 @@ def test_restamp_drops_a_kernel_set_row_whose_members_lose_their_measurements(go
 def test_restamp_keeps_the_piece_rows_of_a_kernel_set_whose_target_only_reordered_its_inputs(tmp_path, caplog):
     """A piece row names a kernel of its set, not the target: re-keying it to the fresh target's
     identity made it decode against the whole kernel, and every piece of a cut or split set was lost."""
-    document = yaml.safe_load((_HARDWARE_GOLDENS_DIR / "rtx5090_sm120.yaml").read_text())
+    document = yaml.safe_load((_RECORDS_DIR / "rtx5090_sm120.yaml").read_text())
     entry = next(entry for entry in document["configs"] if entry["realizations"][0]["name"] == "attention.hd128.gqa.decode.split")
     loop = document["loops"][entry["target"]["loop"]]
     loop["inputs"] = loop["inputs"][::-1]  # the stale lowering: the same kernel with its inputs in another order

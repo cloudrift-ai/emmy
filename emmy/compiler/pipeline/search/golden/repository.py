@@ -18,15 +18,16 @@ from emmy.recipe.bundled import default_recipe_root
 from .format import _SAFE_LOADER, GoldenFile
 from .record import GoldenRecord
 
-#: The model-agnostic hardware goldens, one file per card, ship inside this package.
-_HARDWARE_GOLDENS_DIR = Path(__file__).parent / "hardware"
+#: The maintained golden records, one file per card: model-agnostic rows the offline prior trains on, the tests
+#: decode, and a compile on that card picks from. They ship inside this package.
+_RECORDS_DIR = Path(__file__).parent / "records"
 _RECIPE_GOLDEN_DIR = "golden"
 
 
 def is_repository_golden_path(path: str | Path) -> bool:
     resolved = Path(path).resolve()
-    hardware_root = _HARDWARE_GOLDENS_DIR.resolve()
-    if resolved == hardware_root or hardware_root in resolved.parents:
+    records_root = _RECORDS_DIR.resolve()
+    if resolved == records_root or records_root in resolved.parents:
         return True
     with default_recipe_root() as recipe_root:
         if recipe_root is None:
@@ -42,7 +43,7 @@ def is_repository_golden_path(path: str | Path) -> bool:
 def _repository_golden_paths():
     """Yield model-agnostic hardware goldens plus recipe-local model goldens."""
     with default_recipe_root() as recipe_root:
-        paths = list(_HARDWARE_GOLDENS_DIR.glob("*.yaml"))
+        paths = list(_RECORDS_DIR.glob("*.yaml"))
         if recipe_root is not None:
             paths.extend(recipe_root.glob(f"*/{_RECIPE_GOLDEN_DIR}/*.yaml"))
         yield sorted(paths)

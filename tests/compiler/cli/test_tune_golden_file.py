@@ -508,7 +508,7 @@ def test_working_file_rejects_canonical_path_and_symlink(monkeypatch, tmp_path):
     def default_recipe_root():
         yield recipe_root
 
-    monkeypatch.setattr(golden.repository, "_HARDWARE_GOLDENS_DIR", hardware_dir)
+    monkeypatch.setattr(golden.repository, "_RECORDS_DIR", hardware_dir)
     monkeypatch.setattr(golden.repository, "default_recipe_root", default_recipe_root)
     alias = tmp_path / "canonical-link.yaml"
     alias.symlink_to(recipe)

@@ -180,7 +180,7 @@ def test_the_rtx_5090_hardware_golden_deploys_from_the_db(tmp_path) -> None:
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
     from emmy.compiler.pipeline.knob import schedule_row_key
     from emmy.compiler.pipeline.search.db import is_placement_knob
-    from emmy.compiler.pipeline.search.golden.repository import _HARDWARE_GOLDENS_DIR
+    from emmy.compiler.pipeline.search.golden.repository import _RECORDS_DIR
     from emmy.compiler.pipeline.search.pins import regime_live
     from emmy.compiler.wire import kernel_tile
     from tests.compiler.pipeline.search.helpers import GPU_5090
@@ -188,7 +188,7 @@ def test_the_rtx_5090_hardware_golden_deploys_from_the_db(tmp_path) -> None:
     def splits(record) -> bool:
         return not record.is_routing and any(is_placement_knob(key, value) for key, value in record.schedule_row.items())
 
-    records = GoldenFile.load(_HARDWARE_GOLDENS_DIR / "rtx5090_sm120.yaml").records()
+    records = GoldenFile.load(_RECORDS_DIR / "rtx5090_sm120.yaml").records()
     ctx = Context.from_target((12, 0), gpu_name=GPU_5090)
     db = SearchDB()
     with pinned_knobs({"FAST_MATH": False}):

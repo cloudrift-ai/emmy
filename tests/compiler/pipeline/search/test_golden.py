@@ -17,7 +17,7 @@ import pytest
 
 from emmy.compiler.pipeline.search import golden
 from emmy.compiler.pipeline.search.golden import decode_record, scope_digest, siblings_of
-from emmy.compiler.pipeline.search.golden.repository import _HARDWARE_GOLDENS_DIR, _records_of, _repository_golden_paths
+from emmy.compiler.pipeline.search.golden.repository import _RECORDS_DIR, _records_of, _repository_golden_paths
 
 
 def _decode(record, records) -> str | None:
@@ -42,7 +42,7 @@ def _labels(records) -> list[str]:
 
 def _golden_id(path: Path) -> str:
     """A golden file's id: its name for a hardware golden, ``<recipe>/<name>`` for a model golden."""
-    return path.name if path.parent == _HARDWARE_GOLDENS_DIR else f"{path.parent.parent.name}/{path.name}"
+    return path.name if path.parent == _RECORDS_DIR else f"{path.parent.parent.name}/{path.name}"
 
 
 def _row_parameters():
@@ -107,7 +107,7 @@ def test_decode_ignores_off_anchors_but_not_a_decided_value() -> None:
 
     # The smallest target on the card, named rather than searched for: every assertion below decodes
     # the record again, so the row this stands on decides what the test costs.
-    records = _records_of(_HARDWARE_GOLDENS_DIR / "rtx5090_sm120.yaml")
+    records = _records_of(_RECORDS_DIR / "rtx5090_sm120.yaml")
     named = [r for r in records if r.name == "matmul.square.512" and any(v == "" for v in r.knobs.values())]
     record = next((r for r in named if _decode(r, records) is None), None)
     assert record is not None, "matmul.square.512 records no decoding row carrying an OFF anchor to compare against"
@@ -138,7 +138,7 @@ def test_a_pool_that_holds_the_recorded_row_is_not_walked_whole(monkeypatch) -> 
     from emmy.compiler.pipeline.search.golden.decode import _replay, _unmatched_reason
 
     # The same smallest target the anchor test stands on: every assertion here replays it.
-    records = _records_of(_HARDWARE_GOLDENS_DIR / "rtx5090_sm120.yaml")
+    records = _records_of(_RECORDS_DIR / "rtx5090_sm120.yaml")
     record = next(r for r in records if r.name == "matmul.square.512" and _decode(r, records) is None)
     siblings = siblings_of(record, records)
 
@@ -186,7 +186,7 @@ def test_a_row_with_only_an_invalid_offered_value_reports_a_semantic_miss() -> N
     """
     from dataclasses import replace
 
-    records = _records_of(_HARDWARE_GOLDENS_DIR / "rtx5090_sm120.yaml")
+    records = _records_of(_RECORDS_DIR / "rtx5090_sm120.yaml")
     record = next(r for r in records if r.name == "matmul.square.512" and _decode(r, records) is None)
     decided = next(key for key, value in record.knobs.items() if value not in ("", "0"))
     invalid = replace(record, knobs={decided: "not-a-real-value"})
@@ -203,7 +203,7 @@ def test_a_row_whose_every_site_is_re_spelled_still_gets_a_verdict() -> None:
     behind them, then indexed the pair it never filed."""
     from dataclasses import replace
 
-    records = _records_of(_HARDWARE_GOLDENS_DIR / "rtx5090_sm120.yaml")
+    records = _records_of(_RECORDS_DIR / "rtx5090_sm120.yaml")
     record = next(r for r in records if r.name == "matmul.square.512" and _decode(r, records) is None)
     respelled = replace(record, knobs={f"{key}@missing": value for key, value in record.knobs.items() if value not in ("", "0")})
     reason = _decode(respelled, records)
@@ -271,6 +271,42 @@ def test_the_narrowing_reading_outranks_the_respelling_one() -> None:
     offered = frozenset({(("WORK", "t128"),)})
     both = unmatched_reason(((("TILE"), "f4"), ("WORK", "t512")), offered)
     assert "re-spelling" in both and "NARROWING" not in both
+
+
+def _kernel_parameters():
+    """One parameter per stored kernel of every repository golden, named by the first row that targets it."""
+    from emmy.compiler.pipeline.search.golden.repository import _document_of
+
+    parameters = []
+    with _repository_golden_paths() as paths:
+        for path in sorted(paths, key=_golden_id):
+            document, _ = _document_of(path)
+            for index in range(len(document.loops)):
+                name = next((entry.realizations[0].name for entry in document.configs if entry.target.loop == index), f"loop-{index}")
+                parameters.append(pytest.param(path, index, id=f"{_golden_id(path)}/{name}"))
+    return parameters
+
+
+@pytest.mark.parametrize(("path", "index"), _kernel_parameters())
+def test_stored_kernel_is_a_fixed_point_of_normalization(path: Path, index: int) -> None:
+    """A stored kernel must come back byte for byte from a decode: decoding builds a Loop op, whose
+    constructor normalizes the body, so a kernel that decodes to different wire is one the current
+    normalizer spells differently. A load keeps the pools as wires and never decodes, and this is
+    the premise that lets it: until ``emmy golden restamp`` rewrites such a kernel, every consumer
+    reads a body the compiler would not produce, and its rows are evidence for a kernel that does
+    not exist. Cheaper than the fresh-lowering test above, which lowers the whole program, and
+    narrower: it says whether the normalizer moved, not whether the lowering did."""
+    from emmy.compiler.graph import Graph
+    from emmy.compiler.pipeline.search.golden import kernel_pool_text
+    from emmy.compiler.pipeline.search.golden.repository import _document_of
+
+    document, _ = _document_of(path)
+    stored = document.loops[index]
+    rewritten = Graph.from_wire(stored).to_wire()
+    diff = difflib.unified_diff(
+        kernel_pool_text([stored]).splitlines(), kernel_pool_text([rewritten]).splitlines(), "stored", "normalized", lineterm=""
+    )
+    assert rewritten == stored, "\n".join(diff)
 
 
 def _golden_parameters():

@@ -645,7 +645,7 @@ def test_import_files_each_row_under_the_kernel_it_decides(monkeypatch) -> None:
     from emmy.compiler.pipeline.search.db import SearchDB
     from emmy.compiler.pipeline.search.golden.evidence import import_goldens
 
-    fields = {**_receipt_fields(), "measurements": {"emmy_us": 1.0, "reference_us": 2.0, "reference_backend": "torch"}}
+    fields = {**_receipt_fields(), "measurements": Measurements(emmy_us=1.0, reference_us=2.0, reference_backend="torch")}
     route = {"PLACE@map.1/twist.1/inner": "cut"}
     routing = GoldenRecord(knobs=route, **{**fields, "pins": ()})
     parent = GoldenRecord(knobs={}, **fields)

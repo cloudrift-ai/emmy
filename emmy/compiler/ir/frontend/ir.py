@@ -71,7 +71,7 @@ class ReshapeOp(Op):
 
     wire_tag = "torch.reshape"
 
-    shape: tuple[int | str, ...]
+    shape: tuple[int | str | Dim, ...]
 
     @staticmethod
     def _numel(shape) -> Dim:
@@ -120,7 +120,7 @@ class SliceOp(Op):
 
     wire_tag = "torch.slice"
 
-    shape: tuple[int | str, ...]
+    shape: tuple[int | str | Dim, ...]
     dim: int | None = None
     start: int | None = None
 

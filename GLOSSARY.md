@@ -327,8 +327,8 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   realizations, proposed knob rows, and tune ranking feedback. It is search state; only its measured rows are
   evidence, and only when a command names the file with `--golden PATH`.
 - **Canonical golden file** — A reviewed per-GPU YAML. Model goldens live at
-  `recipes/<model>/golden/<gpu-slug>_<compute-cap>.yaml`; model-agnostic hardware goldens remain under
-  `emmy/compiler/pipeline/search/golden/hardware/`. Every realization contains verified deployable measurements; `emmy
+  `recipes/<model>/golden/<gpu-slug>_<compute-cap>.yaml`; the maintained model-agnostic golden records live under
+  `emmy/compiler/pipeline/search/golden/records/`. Every realization contains verified deployable measurements; `emmy
   tune`
   refuses to mutate these files directly. The files for the live card are the golden evidence an ordinary compile
   reads.
