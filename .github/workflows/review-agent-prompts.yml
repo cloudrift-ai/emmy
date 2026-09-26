@@ -44,8 +44,6 @@ jobs:
       - name: Load the shared rolling-branch helpers
         uses: actions/checkout@v4
         with:
-          sparse-checkout: .github/workflows/scripts
-          sparse-checkout-cone-mode: false
           persist-credentials: false
 
       - name: Find rolling discovery pull request
