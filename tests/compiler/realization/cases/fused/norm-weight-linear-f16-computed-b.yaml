@@ -3,9 +3,7 @@
 # re-binds the contraction axis name for its own sum-of-squares statistic. Guards the fill's
 # hygienic σ: a blind substitution rewired that nested reduce onto the slab coordinate, summing
 # one element 128 times (wrong answer, not a refusal).
-compute_cap:
-- 12
-- 0
+compute_cap: [12, 0]
 programs:
 - inputs: [x0, x1, x2]
   outputs: [linear]
@@ -29,16 +27,10 @@ programs:
     outputs: [[linear, f16, [64, 64]]]
 configs:
 - program: 0
-  target:
-    loop: 0
-    origins:
-    - linear
-    - rms_norm
+  target: {loop: 0, origins: [linear, rms_norm]}
   realizations:
   - name: k_rms_norm_linear_reduce_9a0f5a
-    bindings: {}
-    pins:
-      FAST_MATH: false
+    pins: {FAST_MATH: false}
     knobs:
       REDUCE@inner: ''
       REDUCE@inner.2/map.3/map.1/reduce: ''
@@ -72,8 +64,8 @@ loops:
     op: loop
     attrs:
       body:
-      - Load: {names: [in0], input: rms_norm_eps, index: [{literal: {value: 0, dtype: int}}], dtype: null}
-      - Load: {names: [in1], input: rms_norm_mean_count, index: [{literal: {value: 0, dtype: int}}], dtype: null}
+      - {Load: {names: [in0], input: rms_norm_eps, index: [{literal: 0}]}}
+      - {Load: {names: [in1], input: rms_norm_mean_count, index: [{literal: 0}]}}
       - Loop:
           axis: {name: a0, extent: 64}
           body:
@@ -83,7 +75,7 @@ loops:
               - Loop:
                   axis: {name: a2, extent: 128}
                   body:
-                  - {Load: {names: [in2], input: x1, index: [{var: a1}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in2], input: x1, index: [{var: a1}, {var: a2}]}}
                   - {Assign: {name: v0, op: multiply, args: [in2, in2]}}
                   - {Accum: {name: acc0, value: v0, axes: [a2]}}
               - {Assign: {name: v1, op: divide, args: [acc0, in1]}}
@@ -92,23 +84,14 @@ loops:
               - Loop:
                   axis: {name: a2, extent: 128}
                   body:
-                  - {Load: {names: [in3], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
-                  - {Load: {names: [in4], input: x1, index: [{var: a1}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in3], input: x0, index: [{var: a0}, {var: a2}]}}
+                  - {Load: {names: [in4], input: x1, index: [{var: a1}, {var: a2}]}}
                   - {Assign: {name: v4, op: multiply, args: [in4, v3]}}
-                  - {Load: {names: [in5], input: x2, index: [{var: a2}], dtype: null}}
+                  - {Load: {names: [in5], input: x2, index: [{var: a2}]}}
                   - {Assign: {name: v5, op: multiply, args: [in5, v4]}}
                   - {Assign: {name: v6, op: multiply, args: [in3, v5], dtype: f32}}
                   - {Accum: {name: acc1, value: v6, axes: [a2]}}
-              - Write:
-                  output: linear
-                  index:
-                  - {var: a0}
-                  - {var: a1}
-                  values:
-                  - acc1
-                  value_dtype: null
-                  atomic: false
-                  swizzle: NONE
+              - {Write: {output: linear, index: [{var: a0}, {var: a1}], values: [acc1]}}
       name: k_rms_norm_linear_reduce_1969c1
     inputs: [rms_norm_mean_count, rms_norm_eps, x1, x2, x0]
     outputs: [[linear, f16, [64, 64]]]

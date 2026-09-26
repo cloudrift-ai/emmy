@@ -7,9 +7,7 @@
 # The prefix's leaves are read ONCE ahead of the chunk loop, so they need no slab; the `Select` is per element and
 # lands at fragment residence as a `FragmentMask`, the same coordinate substitution the boundary mask
 # already performs.
-compute_cap:
-- 12
-- 0
+compute_cap: [12, 0]
 programs:
 - inputs: [x0, x1, x2]
   outputs: [scaled_dot_product_attention]
@@ -34,15 +32,10 @@ programs:
     outputs: [[scaled_dot_product_attention, f16, [1, 8, 512, 128]]]
 configs:
 - program: 0
-  target:
-    loop: 0
-    origins:
-    - scaled_dot_product_attention
+  target: {loop: 0, origins: [scaled_dot_product_attention]}
   realizations:
   - name: k_sdpa_e85801
-    bindings: {}
-    pins:
-      FAST_MATH: false
+    pins: {FAST_MATH: false}
     knobs:
       WORK: w2x1
       TILE@map.1/twist: mma_m16n8k16_f16_f32/f1x1
@@ -83,27 +76,9 @@ loops:
     op: loop
     attrs:
       body:
-      - Load:
-          names:
-          - in0
-          input: scaled_dot_product_attention_mask_fill_c
-          index:
-          - {literal: {value: 0, dtype: int}}
-          dtype: null
-      - Load:
-          names:
-          - in1
-          input: scaled_dot_product_attention_mask_zero_c
-          index:
-          - {literal: {value: 0, dtype: int}}
-          dtype: null
-      - Load:
-          names:
-          - in2
-          input: scaled_dot_product_attention_scale
-          index:
-          - {literal: {value: 0, dtype: int}}
-          dtype: null
+      - {Load: {names: [in0], input: scaled_dot_product_attention_mask_fill_c, index: [{literal: 0}]}}
+      - {Load: {names: [in1], input: scaled_dot_product_attention_mask_zero_c, index: [{literal: 0}]}}
+      - {Load: {names: [in2], input: scaled_dot_product_attention_scale, index: [{literal: 0}]}}
       - Loop:
           axis: {name: a0, extent: 8}
           body:
@@ -116,26 +91,8 @@ loops:
                   - Loop:
                       axis: {name: a3, extent: 128}
                       body:
-                      - Load:
-                          names:
-                          - in3
-                          input: x0
-                          index:
-                          - {literal: {value: 0, dtype: int}}
-                          - {var: a0}
-                          - {var: a1}
-                          - {var: a3}
-                          dtype: null
-                      - Load:
-                          names:
-                          - in4
-                          input: x1
-                          index:
-                          - {literal: {value: 0, dtype: int}}
-                          - {var: a0}
-                          - {var: a2}
-                          - {var: a3}
-                          dtype: null
+                      - {Load: {names: [in3], input: x0, index: [{literal: 0}, {var: a0}, {var: a1}, {var: a3}]}}
+                      - {Load: {names: [in4], input: x1, index: [{literal: 0}, {var: a0}, {var: a2}, {var: a3}]}}
                       - {Assign: {name: v0, op: multiply, args: [in3, in4], dtype: f32}}
                       - {Accum: {name: acc0, value: v0, axes: [a3]}}
                   - {Assign: {name: v1, op: multiply, args: [acc0, in2]}}
@@ -152,26 +109,8 @@ loops:
                   - Loop:
                       axis: {name: a5, extent: 128}
                       body:
-                      - Load:
-                          names:
-                          - in5
-                          input: x0
-                          index:
-                          - {literal: {value: 0, dtype: int}}
-                          - {var: a0}
-                          - {var: a1}
-                          - {var: a5}
-                          dtype: null
-                      - Load:
-                          names:
-                          - in6
-                          input: x1
-                          index:
-                          - {literal: {value: 0, dtype: int}}
-                          - {var: a0}
-                          - {var: a2}
-                          - {var: a5}
-                          dtype: null
+                      - {Load: {names: [in5], input: x0, index: [{literal: 0}, {var: a0}, {var: a1}, {var: a5}]}}
+                      - {Load: {names: [in6], input: x1, index: [{literal: 0}, {var: a0}, {var: a2}, {var: a5}]}}
                       - {Assign: {name: v4, op: multiply, args: [in5, in6], dtype: f32}}
                       - {Accum: {name: acc2, value: v4, axes: [a5]}}
                   - {Assign: {name: v5, op: multiply, args: [acc2, in2]}}
@@ -193,39 +132,12 @@ loops:
                       - Loop:
                           axis: {name: a8, extent: 128}
                           body:
-                          - Load:
-                              names:
-                              - in7
-                              input: x0
-                              index:
-                              - {literal: {value: 0, dtype: int}}
-                              - {var: a0}
-                              - {var: a1}
-                              - {var: a8}
-                              dtype: null
-                          - Load:
-                              names:
-                              - in8
-                              input: x1
-                              index:
-                              - {literal: {value: 0, dtype: int}}
-                              - {var: a0}
-                              - {var: a7}
-                              - {var: a8}
-                              dtype: null
+                          - {Load: {names: [in7], input: x0, index: [{literal: 0}, {var: a0}, {var: a1}, {var: a8}]}}
+                          - {Load: {names: [in8], input: x1, index: [{literal: 0}, {var: a0}, {var: a7}, {var: a8}]}}
                           - {Assign: {name: v10, op: multiply, args: [in7, in8], dtype: f32}}
                           - {Accum: {name: acc4, value: v10, axes: [a8]}}
                       - {Assign: {name: v11, op: multiply, args: [acc4, in2]}}
-                      - Load:
-                          names:
-                          - in9
-                          input: x2
-                          index:
-                          - {literal: {value: 0, dtype: int}}
-                          - {var: a0}
-                          - {var: a7}
-                          - {var: a6}
-                          dtype: null
+                      - {Load: {names: [in9], input: x2, index: [{literal: 0}, {var: a0}, {var: a7}, {var: a6}]}}
                       - Select:
                           name: v12
                           branches:
@@ -240,15 +152,12 @@ loops:
                   - Write:
                       output: scaled_dot_product_attention
                       index:
-                      - {literal: {value: 0, dtype: int}}
+                      - {literal: 0}
                       - {var: a0}
                       - {var: a1}
                       - {var: a6}
                       values:
                       - acc5
-                      value_dtype: null
-                      atomic: false
-                      swizzle: NONE
       name: k_sdpa_9cc7d2
     inputs: [scaled_dot_product_attention_scale, scaled_dot_product_attention_mask_fill_c, scaled_dot_product_attention_mask_zero_c, x1, x0, x2]
     outputs: [[scaled_dot_product_attention, f16, [1, 8, 512, 128]]]

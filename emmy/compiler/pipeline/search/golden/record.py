@@ -11,10 +11,19 @@ from dataclasses import dataclass, replace
 from functools import cached_property
 from typing import TYPE_CHECKING
 
+from emmy import gpu
+from emmy.compiler.context import Context
+from emmy.compiler.dim import DEFAULT_SEQ_HINT
 from emmy.compiler.graph import Graph
-from emmy.compiler.pipeline.knob import family_of
+from emmy.compiler.ir.base import InputOp
+from emmy.compiler.ir.loop import LoopOp
+from emmy.compiler.pipeline import LOOP_PASSES, CompilerDump, Pipeline
+from emmy.compiler.pipeline.knob import STRUCT_PREFIX, family_of, tuning_knob_items
+from emmy.compiler.pipeline.passes.tile._fromloop import lift_loop_op, lift_serial
+from emmy.compiler.pipeline.passes.tile._twist import rewrite_twisted
 from emmy.compiler.pipeline.search.data.shape import ShapeKey
-from emmy.compiler.pipeline.search.pins import pins_freeze_cut
+from emmy.compiler.pipeline.search.pins import pins_freeze_cut, stampable_reduce
+from emmy.compiler.specialize import specialize_program
 from emmy.compiler.structural import digest
 
 if TYPE_CHECKING:
@@ -88,7 +97,6 @@ class GoldenRecord:
     def is_routing(self) -> bool:
         """Whether this row records a kernel-set decision — a placement cut, or a cross-CTA split's
         ``g<n>`` arm, which mints its pieces the same way — rather than a kernel schedule."""
-        from emmy.compiler.pipeline.search.pins import stampable_reduce  # noqa: PLC0415
 
         def arm(key: str, value) -> bool:
             family = family_of(str(key))
@@ -116,7 +124,6 @@ class GoldenRecord:
     def schedule_row(self) -> dict[str, str]:
         """The schedule half of the record — its decided tuning knobs minus the route, as the evidence
         index carries them (an OFF ``''`` is a decided value and stays)."""
-        from emmy.compiler.pipeline.knob import tuning_knob_items  # noqa: PLC0415
 
         return {key: value for key, value in tuning_knob_items(self.knobs) if family_of(key) != "PLACE"}
 
@@ -139,7 +146,6 @@ class GoldenRecord:
         Best-effort like every record-side derivation: a target the current compiler no longer
         lowers falls back to the persisted wire's digest, so a stale record still groups
         deterministically (alone) instead of breaking a fit."""
-        from emmy.compiler.dim import DEFAULT_SEQ_HINT  # noqa: PLC0415
 
         try:
             _lowered, nodes = _target_kernel_nodes(self)
@@ -181,7 +187,6 @@ class GoldenRecord:
     @cached_property
     def target_program(self):
         """The stored kernel as a standalone program, specialized to this record's bindings."""
-        from emmy.compiler.specialize import specialize_program  # noqa: PLC0415
 
         return specialize_program(self.kernel_graph, dict(self.bindings))
 
@@ -192,9 +197,6 @@ class GoldenRecord:
         traced ops for it, or when they are no exact twin — the kernel writes a value the ops do not
         compute, or the slice and kernel have different boundary inputs. Comparison only: the stored
         kernel stays the identity."""
-        from emmy.compiler.ir.base import InputOp  # noqa: PLC0415
-        from emmy.compiler.pipeline import CompilerDump  # noqa: PLC0415
-        from emmy.compiler.specialize import specialize_program  # noqa: PLC0415
 
         if not self.origins:
             return None
@@ -227,7 +229,6 @@ class GoldenRecord:
     @cached_property
     def structural_features(self) -> dict[str, float]:
         """The exact replay target lowered, and its one ``S_*`` row recovered."""
-        from emmy.compiler.pipeline.knob import STRUCT_PREFIX  # noqa: PLC0415
 
         _lowered, nodes = _target_kernel_nodes(self)
         signatures = {
@@ -286,8 +287,6 @@ class GoldenRecord:
 
     @property
     def sm_count(self) -> int | None:
-        from emmy import gpu  # noqa: PLC0415
-
         spec = gpu.by_name(self.gpu_name)
         return spec.sm_count if spec else None
 
@@ -346,9 +345,6 @@ def _target_kernel_nodes(record: GoldenRecord):
     """The record's stored kernel through the CURRENT loop passes: ``(lowered graph, nodes)``, one
     node per kernel the stored Loop IR lowers to. Raises when it lowers to none — the strict
     tripwire's loud case."""
-    from emmy.compiler.context import Context  # noqa: PLC0415
-    from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
-    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline  # noqa: PLC0415
 
     ctx = Context.from_target(record.compute_cap, gpu_name=record.gpu_name or None)
     lowered = Pipeline.build(LOOP_PASSES).run(record.target_program.copy(), ctx=ctx)
@@ -367,8 +363,6 @@ def _lifted_target(record: GoldenRecord):
     lift, then the twist rewrite, exactly as ``tile/lift`` runs them. A placement key is
     spelled on that tree, so decoding it against the lift alone would name sites the fused
     single-pass carrier no longer has."""
-    from emmy.compiler.pipeline.passes.tile._fromloop import lift_loop_op, lift_serial  # noqa: PLC0415
-    from emmy.compiler.pipeline.passes.tile._twist import rewrite_twisted  # noqa: PLC0415
 
     lowered, nodes = _target_kernel_nodes(record)
     if len(nodes) != 1:

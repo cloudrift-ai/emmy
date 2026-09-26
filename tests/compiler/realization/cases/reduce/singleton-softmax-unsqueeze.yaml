@@ -1,7 +1,5 @@
 # Reduced from Qwen3-0.6B decode on an RTX 5090: fusion hoists the singleton value outside the max/sum loops.
-compute_cap:
-- 12
-- 0
+compute_cap: [12, 0]
 programs:
 - inputs: [x]
   outputs: [softmax]
@@ -28,16 +26,10 @@ programs:
     outputs: [[softmax, f32, [4, 1]]]
 configs:
 - program: 0
-  target:
-    loop: 0
-    origins:
-    - softmax
-    - unsqueeze
+  target: {loop: 0, origins: [softmax, unsqueeze]}
   realizations:
   - name: k_softmax_834f63
-    bindings: {}
-    pins:
-      FAST_MATH: false
+    pins: {FAST_MATH: false}
     knobs: {}
     identity: 74f9e75edec568edbdcea2d15f6230a61e18b296823ea92f2d2fc6ac2d2cd3b3
 loops:
@@ -54,20 +46,11 @@ loops:
       - Loop:
           axis: {name: a0, extent: 4}
           body:
-          - {Load: {names: [in0], input: x, index: [{var: a0}], dtype: null}}
+          - {Load: {names: [in0], input: x, index: [{var: a0}]}}
           - {Assign: {name: v0, op: subtract, args: [in0, in0]}}
           - {Assign: {name: v1, op: exp, args: [v0]}}
           - {Assign: {name: v2, op: divide, args: [v1, v1]}}
-          - Write:
-              output: softmax
-              index:
-              - {var: a0}
-              - {literal: {value: 0, dtype: int}}
-              values:
-              - v2
-              value_dtype: null
-              atomic: false
-              swizzle: NONE
+          - {Write: {output: softmax, index: [{var: a0}, {literal: 0}], values: [v2]}}
       name: k_softmax_834f63
     inputs: [x]
     outputs: [[softmax, f32, [4, 1]]]

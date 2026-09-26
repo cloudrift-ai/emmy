@@ -6,7 +6,13 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import NamedTuple
 
-from emmy.compiler.pipeline.knob import family_of
+from emmy.compiler.context import Context
+from emmy.compiler.ir.tile import TileOp
+from emmy.compiler.pipeline import TILE_PASSES, Pipeline
+from emmy.compiler.pipeline.fork import exact_schedule_leaf, fork_signature, iter_leaves, leaf_for, leaf_knobs
+from emmy.compiler.pipeline.knob import family_of, schedule_match_key, schedule_row_key, validate_family_value
+from emmy.compiler.pipeline.pipeline import NO_OPTION, Run, _is_structural_option
+from emmy.compiler.pipeline.search.pins import composed_routes, pinned_knobs, spelled_arm, stampable_reduce, unpinned_decisions
 
 from .record import GoldenRecord, _lifted_target, kernel_set_pins
 
@@ -58,7 +64,6 @@ def decode_record(record: GoldenRecord, siblings: Sequence[GoldenRecord] = ()) -
     a target's own — must equal one kernel resolved under the record's pins, and the spelled row must
     equal one of THAT kernel's rows — a sibling child's row must not vouch for it; a compiler change
     that re-keys the kernel turns the row red until the file is re-keyed."""
-    from emmy.compiler.pipeline.knob import schedule_match_key  # noqa: PLC0415
 
     tile = None
     try:
@@ -143,7 +148,6 @@ def piece_row(row: Mapping[str, str]) -> dict[str, str]:
     omitting the family (:attr:`GoldenRecord.schedule_row`). Dropping the key instead read as
     "free", which no leaf equals — the whole split half of a card's rows decoded to nothing and
     joined no kernel in the evidence index."""
-    from emmy.compiler.pipeline.search.pins import stampable_reduce  # noqa: PLC0415
 
     out = {str(key): str(value) for key, value in row.items()}
     for key, value in list(out.items()):
@@ -207,17 +211,6 @@ def _replay(
     hold ``wanted`` is left undecided: the kernel it decides is not the one the row describes, and
     giving it a schedule anyway walks its fork to a first leaf, the bulk of a cold decode. ``explain``
     walks such forks instead, to name what they offer when the row is found nowhere."""
-    from emmy.compiler.context import Context  # noqa: PLC0415
-    from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
-    from emmy.compiler.pipeline import TILE_PASSES, Pipeline  # noqa: PLC0415
-    from emmy.compiler.pipeline.fork import exact_schedule_leaf, fork_signature, iter_leaves, leaf_for, leaf_knobs  # noqa: PLC0415
-    from emmy.compiler.pipeline.knob import (  # noqa: PLC0415
-        schedule_match_key,
-        schedule_row_key,
-        validate_family_value,
-    )
-    from emmy.compiler.pipeline.pipeline import NO_OPTION, Run, _is_structural_option  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.pins import composed_routes, pinned_knobs, spelled_arm, unpinned_decisions  # noqa: PLC0415
 
     def _spelling(entry: GoldenRecord) -> dict[str, str]:
         # A routed realization measures nothing itself and carries no row, so read alone it would

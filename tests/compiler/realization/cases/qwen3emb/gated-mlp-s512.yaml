@@ -1,6 +1,4 @@
-compute_cap:
-- 12
-- 0
+compute_cap: [12, 0]
 programs:
 - inputs: [x, wg, wu]
   outputs: [o]
@@ -34,18 +32,10 @@ programs:
     outputs: [[o, f32, [1, 512, 3072]]]
 configs:
 - program: 0
-  target:
-    loop: 0
-    origins:
-    - gate
-    - o
-    - sg
-    - up
+  target: {loop: 0, origins: [gate, o, sg, up]}
   realizations:
   - name: k_matmul_reduce_64a7c8
-    bindings: {}
-    pins:
-      FAST_MATH: false
+    pins: {FAST_MATH: false}
     knobs:
       WORK: t256
       TILE: ''
@@ -53,9 +43,7 @@ configs:
       STAGE: ''
       RASTER: ''
     identity: 66f6210a3802f2a1234773d7ca9e4090a86939956d66144b7045b12fca55913f
-    latency:
-      NVIDIA GeForce RTX 5090:
-        emmy_us: 1716.70401096344
+    latency: {NVIDIA GeForce RTX 5090: {emmy_us: 1716.70401096344}}
 loops:
 - inputs: [wg, wu, x]
   outputs: [o]
@@ -77,7 +65,7 @@ loops:
     op: loop
     attrs:
       body:
-      - {Load: {names: [in0], input: sg_one, index: [{literal: {value: 0, dtype: int}}], dtype: null}}
+      - {Load: {names: [in0], input: sg_one, index: [{literal: 0}]}}
       - Loop:
           axis: {name: a0, extent: 512}
           body:
@@ -87,19 +75,11 @@ loops:
               - Loop:
                   axis: {name: a2, extent: 1024}
                   body:
-                  - Load:
-                      names:
-                      - in1
-                      input: x
-                      index:
-                      - {literal: {value: 0, dtype: int}}
-                      - {var: a0}
-                      - {var: a2}
-                      dtype: null
-                  - {Load: {names: [in2], input: wg, index: [{var: a2}, {var: a1}], dtype: null}}
+                  - {Load: {names: [in1], input: x, index: [{literal: 0}, {var: a0}, {var: a2}]}}
+                  - {Load: {names: [in2], input: wg, index: [{var: a2}, {var: a1}]}}
                   - {Assign: {name: v0, op: multiply, args: [in1, in2]}}
                   - {Accum: {name: acc0, value: v0, axes: [a2]}}
-                  - {Load: {names: [in3], input: wu, index: [{var: a2}, {var: a1}], dtype: null}}
+                  - {Load: {names: [in3], input: wu, index: [{var: a2}, {var: a1}]}}
                   - {Assign: {name: v1, op: multiply, args: [in1, in3]}}
                   - {Accum: {name: acc1, value: v1, axes: [a2]}}
               - {Assign: {name: v2, op: negative, args: [acc0]}}
@@ -107,17 +87,7 @@ loops:
               - {Assign: {name: v4, op: add, args: [in0, v3]}}
               - {Assign: {name: v5, op: divide, args: [acc0, v4]}}
               - {Assign: {name: v6, op: multiply, args: [acc1, v5]}}
-              - Write:
-                  output: o
-                  index:
-                  - {literal: {value: 0, dtype: int}}
-                  - {var: a0}
-                  - {var: a1}
-                  values:
-                  - v6
-                  value_dtype: null
-                  atomic: false
-                  swizzle: NONE
+              - {Write: {output: o, index: [{literal: 0}, {var: a0}, {var: a1}], values: [v6]}}
       name: k_matmul_reduce_17f7d4
     inputs: [sg_one, wg, x, wu]
     outputs: [[o, f32, [1, 512, 3072]]]

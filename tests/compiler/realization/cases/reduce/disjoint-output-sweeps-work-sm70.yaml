@@ -3,9 +3,7 @@
 # remain an offered, exactly realizable schedule for this current Loop IR.
 # The recurrence roller now rolls the first step into a state kernel of its own, and the kernel after it carries both
 # sweeps fused with no cut; the row pins it whole at t128.
-compute_cap:
-- 7
-- 0
+compute_cap: [7, 0]
 programs:
 - inputs: [copy__6_base]
   outputs: [copy__8_base, add_14]
@@ -27,7 +25,7 @@ programs:
         - {var: out_coord_0}
         - {var: out_coord_1}
         - {var: out_coord_2}
-        - {literal: {value: 8, dtype: int}}
+        - {literal: 8}
         - {var: out_coord_3}
     inputs: [copy__6_base]
     outputs: [[select_14, f32, [1, 48, 8, 64]]]
@@ -175,7 +173,7 @@ programs:
         - {var: out_coord_1}
         - {var: out_coord_2}
         - {var: out_coord_3}
-        - {literal: {value: 0, dtype: int}}
+        - {literal: 0}
     inputs: [unsqueeze_11]
     outputs: [[unsqueeze_11_bc, f32, [1, 48, 8, 8, 8]]]
   - id: mul_18
@@ -202,7 +200,7 @@ programs:
         - {var: out_coord_0}
         - {var: out_coord_1}
         - {var: out_coord_2}
-        - {literal: {value: 0, dtype: int}}
+        - {literal: 0}
         - {var: out_coord_3}
     inputs: [sum_10_keepdim]
     outputs: [[sum_10, f32, [1, 48, 8, 8]]]
@@ -256,34 +254,34 @@ programs:
                             left:
                               binary:
                                 op: '&&'
-                                left: {literal: {value: true, dtype: bool}}
+                                left: {literal: true}
                                 right:
                                   binary:
                                     op: '&&'
-                                    left: {binary: {op: '>=', left: {var: out_coord_0}, right: {literal: {value: 0, dtype: int}}}}
-                                    right: {binary: {op: <, left: {var: out_coord_0}, right: {literal: {value: 1, dtype: int}}}}
+                                    left: {binary: {op: '>=', left: {var: out_coord_0}, right: {literal: 0}}}
+                                    right: {binary: {op: <, left: {var: out_coord_0}, right: {literal: 1}}}
                             right:
                               binary:
                                 op: '&&'
-                                left: {binary: {op: '>=', left: {var: out_coord_1}, right: {literal: {value: 0, dtype: int}}}}
-                                right: {binary: {op: <, left: {var: out_coord_1}, right: {literal: {value: 48, dtype: int}}}}
+                                left: {binary: {op: '>=', left: {var: out_coord_1}, right: {literal: 0}}}
+                                right: {binary: {op: <, left: {var: out_coord_1}, right: {literal: 48}}}
                         right:
                           binary:
                             op: '&&'
-                            left: {binary: {op: '>=', left: {var: out_coord_2}, right: {literal: {value: 0, dtype: int}}}}
-                            right: {binary: {op: <, left: {var: out_coord_2}, right: {literal: {value: 8, dtype: int}}}}
+                            left: {binary: {op: '>=', left: {var: out_coord_2}, right: {literal: 0}}}
+                            right: {binary: {op: <, left: {var: out_coord_2}, right: {literal: 8}}}
                     right:
                       binary:
                         op: '&&'
-                        left: {binary: {op: '>=', left: {var: out_coord_3}, right: {literal: {value: 8, dtype: int}}}}
-                        right: {binary: {op: <, left: {var: out_coord_3}, right: {literal: {value: 9, dtype: int}}}}
+                        left: {binary: {op: '>=', left: {var: out_coord_3}, right: {literal: 8}}}
+                        right: {binary: {op: <, left: {var: out_coord_3}, right: {literal: 9}}}
                 right:
                   binary:
                     op: '&&'
-                    left: {binary: {op: '>=', left: {var: out_coord_4}, right: {literal: {value: 0, dtype: int}}}}
-                    right: {binary: {op: <, left: {var: out_coord_4}, right: {literal: {value: 8, dtype: int}}}}
+                    left: {binary: {op: '>=', left: {var: out_coord_4}, right: {literal: 0}}}
+                    right: {binary: {op: <, left: {var: out_coord_4}, right: {literal: 8}}}
             if_true: {var: out_coord_0}
-            if_false: {literal: {value: 0, dtype: int}}
+            if_false: {literal: 0}
         - ternary:
             cond:
               binary:
@@ -300,34 +298,34 @@ programs:
                             left:
                               binary:
                                 op: '&&'
-                                left: {literal: {value: true, dtype: bool}}
+                                left: {literal: true}
                                 right:
                                   binary:
                                     op: '&&'
-                                    left: {binary: {op: '>=', left: {var: out_coord_0}, right: {literal: {value: 0, dtype: int}}}}
-                                    right: {binary: {op: <, left: {var: out_coord_0}, right: {literal: {value: 1, dtype: int}}}}
+                                    left: {binary: {op: '>=', left: {var: out_coord_0}, right: {literal: 0}}}
+                                    right: {binary: {op: <, left: {var: out_coord_0}, right: {literal: 1}}}
                             right:
                               binary:
                                 op: '&&'
-                                left: {binary: {op: '>=', left: {var: out_coord_1}, right: {literal: {value: 0, dtype: int}}}}
-                                right: {binary: {op: <, left: {var: out_coord_1}, right: {literal: {value: 48, dtype: int}}}}
+                                left: {binary: {op: '>=', left: {var: out_coord_1}, right: {literal: 0}}}
+                                right: {binary: {op: <, left: {var: out_coord_1}, right: {literal: 48}}}
                         right:
                           binary:
                             op: '&&'
-                            left: {binary: {op: '>=', left: {var: out_coord_2}, right: {literal: {value: 0, dtype: int}}}}
-                            right: {binary: {op: <, left: {var: out_coord_2}, right: {literal: {value: 8, dtype: int}}}}
+                            left: {binary: {op: '>=', left: {var: out_coord_2}, right: {literal: 0}}}
+                            right: {binary: {op: <, left: {var: out_coord_2}, right: {literal: 8}}}
                     right:
                       binary:
                         op: '&&'
-                        left: {binary: {op: '>=', left: {var: out_coord_3}, right: {literal: {value: 8, dtype: int}}}}
-                        right: {binary: {op: <, left: {var: out_coord_3}, right: {literal: {value: 9, dtype: int}}}}
+                        left: {binary: {op: '>=', left: {var: out_coord_3}, right: {literal: 8}}}
+                        right: {binary: {op: <, left: {var: out_coord_3}, right: {literal: 9}}}
                 right:
                   binary:
                     op: '&&'
-                    left: {binary: {op: '>=', left: {var: out_coord_4}, right: {literal: {value: 0, dtype: int}}}}
-                    right: {binary: {op: <, left: {var: out_coord_4}, right: {literal: {value: 8, dtype: int}}}}
+                    left: {binary: {op: '>=', left: {var: out_coord_4}, right: {literal: 0}}}
+                    right: {binary: {op: <, left: {var: out_coord_4}, right: {literal: 8}}}
             if_true: {var: out_coord_1}
-            if_false: {literal: {value: 0, dtype: int}}
+            if_false: {literal: 0}
         - ternary:
             cond:
               binary:
@@ -344,34 +342,34 @@ programs:
                             left:
                               binary:
                                 op: '&&'
-                                left: {literal: {value: true, dtype: bool}}
+                                left: {literal: true}
                                 right:
                                   binary:
                                     op: '&&'
-                                    left: {binary: {op: '>=', left: {var: out_coord_0}, right: {literal: {value: 0, dtype: int}}}}
-                                    right: {binary: {op: <, left: {var: out_coord_0}, right: {literal: {value: 1, dtype: int}}}}
+                                    left: {binary: {op: '>=', left: {var: out_coord_0}, right: {literal: 0}}}
+                                    right: {binary: {op: <, left: {var: out_coord_0}, right: {literal: 1}}}
                             right:
                               binary:
                                 op: '&&'
-                                left: {binary: {op: '>=', left: {var: out_coord_1}, right: {literal: {value: 0, dtype: int}}}}
-                                right: {binary: {op: <, left: {var: out_coord_1}, right: {literal: {value: 48, dtype: int}}}}
+                                left: {binary: {op: '>=', left: {var: out_coord_1}, right: {literal: 0}}}
+                                right: {binary: {op: <, left: {var: out_coord_1}, right: {literal: 48}}}
                         right:
                           binary:
                             op: '&&'
-                            left: {binary: {op: '>=', left: {var: out_coord_2}, right: {literal: {value: 0, dtype: int}}}}
-                            right: {binary: {op: <, left: {var: out_coord_2}, right: {literal: {value: 8, dtype: int}}}}
+                            left: {binary: {op: '>=', left: {var: out_coord_2}, right: {literal: 0}}}
+                            right: {binary: {op: <, left: {var: out_coord_2}, right: {literal: 8}}}
                     right:
                       binary:
                         op: '&&'
-                        left: {binary: {op: '>=', left: {var: out_coord_3}, right: {literal: {value: 8, dtype: int}}}}
-                        right: {binary: {op: <, left: {var: out_coord_3}, right: {literal: {value: 9, dtype: int}}}}
+                        left: {binary: {op: '>=', left: {var: out_coord_3}, right: {literal: 8}}}
+                        right: {binary: {op: <, left: {var: out_coord_3}, right: {literal: 9}}}
                 right:
                   binary:
                     op: '&&'
-                    left: {binary: {op: '>=', left: {var: out_coord_4}, right: {literal: {value: 0, dtype: int}}}}
-                    right: {binary: {op: <, left: {var: out_coord_4}, right: {literal: {value: 8, dtype: int}}}}
+                    left: {binary: {op: '>=', left: {var: out_coord_4}, right: {literal: 0}}}
+                    right: {binary: {op: <, left: {var: out_coord_4}, right: {literal: 8}}}
             if_true: {var: out_coord_2}
-            if_false: {literal: {value: 0, dtype: int}}
+            if_false: {literal: 0}
         - ternary:
             cond:
               binary:
@@ -388,34 +386,34 @@ programs:
                             left:
                               binary:
                                 op: '&&'
-                                left: {literal: {value: true, dtype: bool}}
+                                left: {literal: true}
                                 right:
                                   binary:
                                     op: '&&'
-                                    left: {binary: {op: '>=', left: {var: out_coord_0}, right: {literal: {value: 0, dtype: int}}}}
-                                    right: {binary: {op: <, left: {var: out_coord_0}, right: {literal: {value: 1, dtype: int}}}}
+                                    left: {binary: {op: '>=', left: {var: out_coord_0}, right: {literal: 0}}}
+                                    right: {binary: {op: <, left: {var: out_coord_0}, right: {literal: 1}}}
                             right:
                               binary:
                                 op: '&&'
-                                left: {binary: {op: '>=', left: {var: out_coord_1}, right: {literal: {value: 0, dtype: int}}}}
-                                right: {binary: {op: <, left: {var: out_coord_1}, right: {literal: {value: 48, dtype: int}}}}
+                                left: {binary: {op: '>=', left: {var: out_coord_1}, right: {literal: 0}}}
+                                right: {binary: {op: <, left: {var: out_coord_1}, right: {literal: 48}}}
                         right:
                           binary:
                             op: '&&'
-                            left: {binary: {op: '>=', left: {var: out_coord_2}, right: {literal: {value: 0, dtype: int}}}}
-                            right: {binary: {op: <, left: {var: out_coord_2}, right: {literal: {value: 8, dtype: int}}}}
+                            left: {binary: {op: '>=', left: {var: out_coord_2}, right: {literal: 0}}}
+                            right: {binary: {op: <, left: {var: out_coord_2}, right: {literal: 8}}}
                     right:
                       binary:
                         op: '&&'
-                        left: {binary: {op: '>=', left: {var: out_coord_3}, right: {literal: {value: 8, dtype: int}}}}
-                        right: {binary: {op: <, left: {var: out_coord_3}, right: {literal: {value: 9, dtype: int}}}}
+                        left: {binary: {op: '>=', left: {var: out_coord_3}, right: {literal: 8}}}
+                        right: {binary: {op: <, left: {var: out_coord_3}, right: {literal: 9}}}
                 right:
                   binary:
                     op: '&&'
-                    left: {binary: {op: '>=', left: {var: out_coord_4}, right: {literal: {value: 0, dtype: int}}}}
-                    right: {binary: {op: <, left: {var: out_coord_4}, right: {literal: {value: 8, dtype: int}}}}
+                    left: {binary: {op: '>=', left: {var: out_coord_4}, right: {literal: 0}}}
+                    right: {binary: {op: <, left: {var: out_coord_4}, right: {literal: 8}}}
             if_true: {var: out_coord_4}
-            if_false: {literal: {value: 0, dtype: int}}
+            if_false: {literal: 0}
         select:
           binary:
             op: '&&'
@@ -431,32 +429,32 @@ programs:
                         left:
                           binary:
                             op: '&&'
-                            left: {literal: {value: true, dtype: bool}}
+                            left: {literal: true}
                             right:
                               binary:
                                 op: '&&'
-                                left: {binary: {op: '>=', left: {var: out_coord_0}, right: {literal: {value: 0, dtype: int}}}}
-                                right: {binary: {op: <, left: {var: out_coord_0}, right: {literal: {value: 1, dtype: int}}}}
+                                left: {binary: {op: '>=', left: {var: out_coord_0}, right: {literal: 0}}}
+                                right: {binary: {op: <, left: {var: out_coord_0}, right: {literal: 1}}}
                         right:
                           binary:
                             op: '&&'
-                            left: {binary: {op: '>=', left: {var: out_coord_1}, right: {literal: {value: 0, dtype: int}}}}
-                            right: {binary: {op: <, left: {var: out_coord_1}, right: {literal: {value: 48, dtype: int}}}}
+                            left: {binary: {op: '>=', left: {var: out_coord_1}, right: {literal: 0}}}
+                            right: {binary: {op: <, left: {var: out_coord_1}, right: {literal: 48}}}
                     right:
                       binary:
                         op: '&&'
-                        left: {binary: {op: '>=', left: {var: out_coord_2}, right: {literal: {value: 0, dtype: int}}}}
-                        right: {binary: {op: <, left: {var: out_coord_2}, right: {literal: {value: 8, dtype: int}}}}
+                        left: {binary: {op: '>=', left: {var: out_coord_2}, right: {literal: 0}}}
+                        right: {binary: {op: <, left: {var: out_coord_2}, right: {literal: 8}}}
                 right:
                   binary:
                     op: '&&'
-                    left: {binary: {op: '>=', left: {var: out_coord_3}, right: {literal: {value: 8, dtype: int}}}}
-                    right: {binary: {op: <, left: {var: out_coord_3}, right: {literal: {value: 9, dtype: int}}}}
+                    left: {binary: {op: '>=', left: {var: out_coord_3}, right: {literal: 8}}}
+                    right: {binary: {op: <, left: {var: out_coord_3}, right: {literal: 9}}}
             right:
               binary:
                 op: '&&'
-                left: {binary: {op: '>=', left: {var: out_coord_4}, right: {literal: {value: 0, dtype: int}}}}
-                right: {binary: {op: <, left: {var: out_coord_4}, right: {literal: {value: 8, dtype: int}}}}
+                left: {binary: {op: '>=', left: {var: out_coord_4}, right: {literal: 0}}}
+                right: {binary: {op: <, left: {var: out_coord_4}, right: {literal: 8}}}
       - input_idx: 1
         coord_map:
         - {var: out_coord_0}
@@ -480,7 +478,7 @@ programs:
         - {var: out_coord_0}
         - {var: out_coord_1}
         - {var: out_coord_2}
-        - {literal: {value: 9, dtype: int}}
+        - {literal: 9}
         - {var: out_coord_3}
     inputs: [copy__7_base]
     outputs: [[select_16, f32, [1, 48, 8, 64]]]
@@ -520,7 +518,7 @@ programs:
         - {var: out_coord_1}
         - {var: out_coord_2}
         - {var: out_coord_3}
-        - {literal: {value: 0, dtype: int}}
+        - {literal: 0}
     inputs: [unsqueeze_12]
     outputs: [[unsqueeze_12_bc, f32, [1, 48, 8, 9, 9]]]
   - id: mul_19
@@ -547,7 +545,7 @@ programs:
         - {var: out_coord_0}
         - {var: out_coord_1}
         - {var: out_coord_2}
-        - {literal: {value: 0, dtype: int}}
+        - {literal: 0}
         - {var: out_coord_3}
     inputs: [sum_11_keepdim]
     outputs: [[sum_11, f32, [1, 48, 8, 9]]]
@@ -601,34 +599,34 @@ programs:
                             left:
                               binary:
                                 op: '&&'
-                                left: {literal: {value: true, dtype: bool}}
+                                left: {literal: true}
                                 right:
                                   binary:
                                     op: '&&'
-                                    left: {binary: {op: '>=', left: {var: out_coord_0}, right: {literal: {value: 0, dtype: int}}}}
-                                    right: {binary: {op: <, left: {var: out_coord_0}, right: {literal: {value: 1, dtype: int}}}}
+                                    left: {binary: {op: '>=', left: {var: out_coord_0}, right: {literal: 0}}}
+                                    right: {binary: {op: <, left: {var: out_coord_0}, right: {literal: 1}}}
                             right:
                               binary:
                                 op: '&&'
-                                left: {binary: {op: '>=', left: {var: out_coord_1}, right: {literal: {value: 0, dtype: int}}}}
-                                right: {binary: {op: <, left: {var: out_coord_1}, right: {literal: {value: 48, dtype: int}}}}
+                                left: {binary: {op: '>=', left: {var: out_coord_1}, right: {literal: 0}}}
+                                right: {binary: {op: <, left: {var: out_coord_1}, right: {literal: 48}}}
                         right:
                           binary:
                             op: '&&'
-                            left: {binary: {op: '>=', left: {var: out_coord_2}, right: {literal: {value: 0, dtype: int}}}}
-                            right: {binary: {op: <, left: {var: out_coord_2}, right: {literal: {value: 8, dtype: int}}}}
+                            left: {binary: {op: '>=', left: {var: out_coord_2}, right: {literal: 0}}}
+                            right: {binary: {op: <, left: {var: out_coord_2}, right: {literal: 8}}}
                     right:
                       binary:
                         op: '&&'
-                        left: {binary: {op: '>=', left: {var: out_coord_3}, right: {literal: {value: 9, dtype: int}}}}
-                        right: {binary: {op: <, left: {var: out_coord_3}, right: {literal: {value: 10, dtype: int}}}}
+                        left: {binary: {op: '>=', left: {var: out_coord_3}, right: {literal: 9}}}
+                        right: {binary: {op: <, left: {var: out_coord_3}, right: {literal: 10}}}
                 right:
                   binary:
                     op: '&&'
-                    left: {binary: {op: '>=', left: {var: out_coord_4}, right: {literal: {value: 0, dtype: int}}}}
-                    right: {binary: {op: <, left: {var: out_coord_4}, right: {literal: {value: 9, dtype: int}}}}
+                    left: {binary: {op: '>=', left: {var: out_coord_4}, right: {literal: 0}}}
+                    right: {binary: {op: <, left: {var: out_coord_4}, right: {literal: 9}}}
             if_true: {var: out_coord_0}
-            if_false: {literal: {value: 0, dtype: int}}
+            if_false: {literal: 0}
         - ternary:
             cond:
               binary:
@@ -645,34 +643,34 @@ programs:
                             left:
                               binary:
                                 op: '&&'
-                                left: {literal: {value: true, dtype: bool}}
+                                left: {literal: true}
                                 right:
                                   binary:
                                     op: '&&'
-                                    left: {binary: {op: '>=', left: {var: out_coord_0}, right: {literal: {value: 0, dtype: int}}}}
-                                    right: {binary: {op: <, left: {var: out_coord_0}, right: {literal: {value: 1, dtype: int}}}}
+                                    left: {binary: {op: '>=', left: {var: out_coord_0}, right: {literal: 0}}}
+                                    right: {binary: {op: <, left: {var: out_coord_0}, right: {literal: 1}}}
                             right:
                               binary:
                                 op: '&&'
-                                left: {binary: {op: '>=', left: {var: out_coord_1}, right: {literal: {value: 0, dtype: int}}}}
-                                right: {binary: {op: <, left: {var: out_coord_1}, right: {literal: {value: 48, dtype: int}}}}
+                                left: {binary: {op: '>=', left: {var: out_coord_1}, right: {literal: 0}}}
+                                right: {binary: {op: <, left: {var: out_coord_1}, right: {literal: 48}}}
                         right:
                           binary:
                             op: '&&'
-                            left: {binary: {op: '>=', left: {var: out_coord_2}, right: {literal: {value: 0, dtype: int}}}}
-                            right: {binary: {op: <, left: {var: out_coord_2}, right: {literal: {value: 8, dtype: int}}}}
+                            left: {binary: {op: '>=', left: {var: out_coord_2}, right: {literal: 0}}}
+                            right: {binary: {op: <, left: {var: out_coord_2}, right: {literal: 8}}}
                     right:
                       binary:
                         op: '&&'
-                        left: {binary: {op: '>=', left: {var: out_coord_3}, right: {literal: {value: 9, dtype: int}}}}
-                        right: {binary: {op: <, left: {var: out_coord_3}, right: {literal: {value: 10, dtype: int}}}}
+                        left: {binary: {op: '>=', left: {var: out_coord_3}, right: {literal: 9}}}
+                        right: {binary: {op: <, left: {var: out_coord_3}, right: {literal: 10}}}
                 right:
                   binary:
                     op: '&&'
-                    left: {binary: {op: '>=', left: {var: out_coord_4}, right: {literal: {value: 0, dtype: int}}}}
-                    right: {binary: {op: <, left: {var: out_coord_4}, right: {literal: {value: 9, dtype: int}}}}
+                    left: {binary: {op: '>=', left: {var: out_coord_4}, right: {literal: 0}}}
+                    right: {binary: {op: <, left: {var: out_coord_4}, right: {literal: 9}}}
             if_true: {var: out_coord_1}
-            if_false: {literal: {value: 0, dtype: int}}
+            if_false: {literal: 0}
         - ternary:
             cond:
               binary:
@@ -689,34 +687,34 @@ programs:
                             left:
                               binary:
                                 op: '&&'
-                                left: {literal: {value: true, dtype: bool}}
+                                left: {literal: true}
                                 right:
                                   binary:
                                     op: '&&'
-                                    left: {binary: {op: '>=', left: {var: out_coord_0}, right: {literal: {value: 0, dtype: int}}}}
-                                    right: {binary: {op: <, left: {var: out_coord_0}, right: {literal: {value: 1, dtype: int}}}}
+                                    left: {binary: {op: '>=', left: {var: out_coord_0}, right: {literal: 0}}}
+                                    right: {binary: {op: <, left: {var: out_coord_0}, right: {literal: 1}}}
                             right:
                               binary:
                                 op: '&&'
-                                left: {binary: {op: '>=', left: {var: out_coord_1}, right: {literal: {value: 0, dtype: int}}}}
-                                right: {binary: {op: <, left: {var: out_coord_1}, right: {literal: {value: 48, dtype: int}}}}
+                                left: {binary: {op: '>=', left: {var: out_coord_1}, right: {literal: 0}}}
+                                right: {binary: {op: <, left: {var: out_coord_1}, right: {literal: 48}}}
                         right:
                           binary:
                             op: '&&'
-                            left: {binary: {op: '>=', left: {var: out_coord_2}, right: {literal: {value: 0, dtype: int}}}}
-                            right: {binary: {op: <, left: {var: out_coord_2}, right: {literal: {value: 8, dtype: int}}}}
+                            left: {binary: {op: '>=', left: {var: out_coord_2}, right: {literal: 0}}}
+                            right: {binary: {op: <, left: {var: out_coord_2}, right: {literal: 8}}}
                     right:
                       binary:
                         op: '&&'
-                        left: {binary: {op: '>=', left: {var: out_coord_3}, right: {literal: {value: 9, dtype: int}}}}
-                        right: {binary: {op: <, left: {var: out_coord_3}, right: {literal: {value: 10, dtype: int}}}}
+                        left: {binary: {op: '>=', left: {var: out_coord_3}, right: {literal: 9}}}
+                        right: {binary: {op: <, left: {var: out_coord_3}, right: {literal: 10}}}
                 right:
                   binary:
                     op: '&&'
-                    left: {binary: {op: '>=', left: {var: out_coord_4}, right: {literal: {value: 0, dtype: int}}}}
-                    right: {binary: {op: <, left: {var: out_coord_4}, right: {literal: {value: 9, dtype: int}}}}
+                    left: {binary: {op: '>=', left: {var: out_coord_4}, right: {literal: 0}}}
+                    right: {binary: {op: <, left: {var: out_coord_4}, right: {literal: 9}}}
             if_true: {var: out_coord_2}
-            if_false: {literal: {value: 0, dtype: int}}
+            if_false: {literal: 0}
         - ternary:
             cond:
               binary:
@@ -733,34 +731,34 @@ programs:
                             left:
                               binary:
                                 op: '&&'
-                                left: {literal: {value: true, dtype: bool}}
+                                left: {literal: true}
                                 right:
                                   binary:
                                     op: '&&'
-                                    left: {binary: {op: '>=', left: {var: out_coord_0}, right: {literal: {value: 0, dtype: int}}}}
-                                    right: {binary: {op: <, left: {var: out_coord_0}, right: {literal: {value: 1, dtype: int}}}}
+                                    left: {binary: {op: '>=', left: {var: out_coord_0}, right: {literal: 0}}}
+                                    right: {binary: {op: <, left: {var: out_coord_0}, right: {literal: 1}}}
                             right:
                               binary:
                                 op: '&&'
-                                left: {binary: {op: '>=', left: {var: out_coord_1}, right: {literal: {value: 0, dtype: int}}}}
-                                right: {binary: {op: <, left: {var: out_coord_1}, right: {literal: {value: 48, dtype: int}}}}
+                                left: {binary: {op: '>=', left: {var: out_coord_1}, right: {literal: 0}}}
+                                right: {binary: {op: <, left: {var: out_coord_1}, right: {literal: 48}}}
                         right:
                           binary:
                             op: '&&'
-                            left: {binary: {op: '>=', left: {var: out_coord_2}, right: {literal: {value: 0, dtype: int}}}}
-                            right: {binary: {op: <, left: {var: out_coord_2}, right: {literal: {value: 8, dtype: int}}}}
+                            left: {binary: {op: '>=', left: {var: out_coord_2}, right: {literal: 0}}}
+                            right: {binary: {op: <, left: {var: out_coord_2}, right: {literal: 8}}}
                     right:
                       binary:
                         op: '&&'
-                        left: {binary: {op: '>=', left: {var: out_coord_3}, right: {literal: {value: 9, dtype: int}}}}
-                        right: {binary: {op: <, left: {var: out_coord_3}, right: {literal: {value: 10, dtype: int}}}}
+                        left: {binary: {op: '>=', left: {var: out_coord_3}, right: {literal: 9}}}
+                        right: {binary: {op: <, left: {var: out_coord_3}, right: {literal: 10}}}
                 right:
                   binary:
                     op: '&&'
-                    left: {binary: {op: '>=', left: {var: out_coord_4}, right: {literal: {value: 0, dtype: int}}}}
-                    right: {binary: {op: <, left: {var: out_coord_4}, right: {literal: {value: 9, dtype: int}}}}
+                    left: {binary: {op: '>=', left: {var: out_coord_4}, right: {literal: 0}}}
+                    right: {binary: {op: <, left: {var: out_coord_4}, right: {literal: 9}}}
             if_true: {var: out_coord_4}
-            if_false: {literal: {value: 0, dtype: int}}
+            if_false: {literal: 0}
         select:
           binary:
             op: '&&'
@@ -776,32 +774,32 @@ programs:
                         left:
                           binary:
                             op: '&&'
-                            left: {literal: {value: true, dtype: bool}}
+                            left: {literal: true}
                             right:
                               binary:
                                 op: '&&'
-                                left: {binary: {op: '>=', left: {var: out_coord_0}, right: {literal: {value: 0, dtype: int}}}}
-                                right: {binary: {op: <, left: {var: out_coord_0}, right: {literal: {value: 1, dtype: int}}}}
+                                left: {binary: {op: '>=', left: {var: out_coord_0}, right: {literal: 0}}}
+                                right: {binary: {op: <, left: {var: out_coord_0}, right: {literal: 1}}}
                         right:
                           binary:
                             op: '&&'
-                            left: {binary: {op: '>=', left: {var: out_coord_1}, right: {literal: {value: 0, dtype: int}}}}
-                            right: {binary: {op: <, left: {var: out_coord_1}, right: {literal: {value: 48, dtype: int}}}}
+                            left: {binary: {op: '>=', left: {var: out_coord_1}, right: {literal: 0}}}
+                            right: {binary: {op: <, left: {var: out_coord_1}, right: {literal: 48}}}
                     right:
                       binary:
                         op: '&&'
-                        left: {binary: {op: '>=', left: {var: out_coord_2}, right: {literal: {value: 0, dtype: int}}}}
-                        right: {binary: {op: <, left: {var: out_coord_2}, right: {literal: {value: 8, dtype: int}}}}
+                        left: {binary: {op: '>=', left: {var: out_coord_2}, right: {literal: 0}}}
+                        right: {binary: {op: <, left: {var: out_coord_2}, right: {literal: 8}}}
                 right:
                   binary:
                     op: '&&'
-                    left: {binary: {op: '>=', left: {var: out_coord_3}, right: {literal: {value: 9, dtype: int}}}}
-                    right: {binary: {op: <, left: {var: out_coord_3}, right: {literal: {value: 10, dtype: int}}}}
+                    left: {binary: {op: '>=', left: {var: out_coord_3}, right: {literal: 9}}}
+                    right: {binary: {op: <, left: {var: out_coord_3}, right: {literal: 10}}}
             right:
               binary:
                 op: '&&'
-                left: {binary: {op: '>=', left: {var: out_coord_4}, right: {literal: {value: 0, dtype: int}}}}
-                right: {binary: {op: <, left: {var: out_coord_4}, right: {literal: {value: 9, dtype: int}}}}
+                left: {binary: {op: '>=', left: {var: out_coord_4}, right: {literal: 0}}}
+                right: {binary: {op: <, left: {var: out_coord_4}, right: {literal: 9}}}
       - input_idx: 1
         coord_map:
         - {var: out_coord_0}
@@ -825,7 +823,7 @@ programs:
         - {var: out_coord_0}
         - {var: out_coord_1}
         - {var: out_coord_2}
-        - {literal: {value: 10, dtype: int}}
+        - {literal: 10}
         - {var: out_coord_3}
     inputs: [copy__8_base]
     outputs: [[select_18, f32, [1, 48, 8, 64]]]
@@ -865,7 +863,7 @@ programs:
         - {var: out_coord_1}
         - {var: out_coord_2}
         - {var: out_coord_3}
-        - {literal: {value: 0, dtype: int}}
+        - {literal: 0}
     inputs: [unsqueeze_13]
     outputs: [[unsqueeze_13_bc, f32, [1, 48, 8, 10, 10]]]
   - id: mul_20
@@ -892,7 +890,7 @@ programs:
         - {var: out_coord_0}
         - {var: out_coord_1}
         - {var: out_coord_2}
-        - {literal: {value: 0, dtype: int}}
+        - {literal: 0}
         - {var: out_coord_3}
     inputs: [sum_12_keepdim]
     outputs: [[sum_12, f32, [1, 48, 8, 10]]]
@@ -903,46 +901,12 @@ programs:
     outputs: [[add_14, f32, [1, 48, 8, 10]]]
 configs:
 - program: 0
-  target:
-    loop: 0
-    origins:
-    - add_12
-    - add_13
-    - add_14
-    - copy__8
-    - copy__8_base
-    - mul_18
-    - mul_19
-    - mul_20
-    - select_14
-    - select_16
-    - select_18
-    - slice_30
-    - slice_31
-    - slice_32
-    - slice_34
-    - slice_35
-    - slice_36
-    - slice_38
-    - slice_39
-    - slice_40
-    - sum_10
-    - sum_10_keepdim
-    - sum_11
-    - sum_11_keepdim
-    - sum_12
-    - sum_12_keepdim
-    - unsqueeze_11
-    - unsqueeze_11_bc
-    - unsqueeze_12
-    - unsqueeze_12_bc
-    - unsqueeze_13
-    - unsqueeze_13_bc
+  target: {loop: 0, origins: [add_12, add_13, add_14, copy__8, copy__8_base, mul_18, mul_19, mul_20, select_14, select_16, select_18, slice_30,
+      slice_31, slice_32, slice_34, slice_35, slice_36, slice_38, slice_39, slice_40, sum_10, sum_10_keepdim, sum_11, sum_11_keepdim, sum_12,
+      sum_12_keepdim, unsqueeze_11, unsqueeze_11_bc, unsqueeze_12, unsqueeze_12_bc, unsqueeze_13, unsqueeze_13_bc]}
   realizations:
   - name: k_slice_unsqueeze_reduce_034e35
-    bindings: {}
-    pins:
-      FAST_MATH: false
+    pins: {FAST_MATH: false}
     knobs:
       WORK: t128
       REDUCE: ''
@@ -973,25 +937,23 @@ loops:
                       - in0
                       input: copy__7_base__steps0
                       index:
-                      - {literal: {value: 1, dtype: int}}
-                      - {literal: {value: 0, dtype: int}}
-                      - {binary: {op: //, left: {var: a0}, right: {literal: {value: 8, dtype: int}}}}
-                      - {binary: {op: '%', left: {var: a0}, right: {literal: {value: 8, dtype: int}}}}
-                      - {literal: {value: 10, dtype: int}}
+                      - {literal: 1}
+                      - {literal: 0}
+                      - {binary: {op: //, left: {var: a0}, right: {literal: 8}}}
+                      - {binary: {op: '%', left: {var: a0}, right: {literal: 8}}}
+                      - {literal: 10}
                       - {var: a2}
-                      dtype: null
                   - Load:
                       names:
                       - in1
                       input: copy__7_base__steps0
                       index:
-                      - {literal: {value: 1, dtype: int}}
-                      - {literal: {value: 0, dtype: int}}
-                      - {binary: {op: //, left: {var: a0}, right: {literal: {value: 8, dtype: int}}}}
-                      - {binary: {op: '%', left: {var: a0}, right: {literal: {value: 8, dtype: int}}}}
+                      - {literal: 1}
+                      - {literal: 0}
+                      - {binary: {op: //, left: {var: a0}, right: {literal: 8}}}
+                      - {binary: {op: '%', left: {var: a0}, right: {literal: 8}}}
                       - {var: a2}
                       - {var: a1}
-                      dtype: null
                   - {Assign: {name: v0, op: multiply, args: [in0, in1]}}
                   - {Accum: {name: acc0, value: v0, axes: [a2]}}
               - Load:
@@ -999,26 +961,22 @@ loops:
                   - in2
                   input: copy__7_base__steps0
                   index:
-                  - {literal: {value: 1, dtype: int}}
-                  - {literal: {value: 0, dtype: int}}
-                  - {binary: {op: //, left: {var: a0}, right: {literal: {value: 8, dtype: int}}}}
-                  - {binary: {op: '%', left: {var: a0}, right: {literal: {value: 8, dtype: int}}}}
-                  - {literal: {value: 10, dtype: int}}
+                  - {literal: 1}
+                  - {literal: 0}
+                  - {binary: {op: //, left: {var: a0}, right: {literal: 8}}}
+                  - {binary: {op: '%', left: {var: a0}, right: {literal: 8}}}
+                  - {literal: 10}
                   - {var: a1}
-                  dtype: null
               - {Assign: {name: v1, op: add, args: [acc0, in2]}}
               - Write:
                   output: add_14
                   index:
-                  - {literal: {value: 0, dtype: int}}
-                  - {binary: {op: //, left: {var: a0}, right: {literal: {value: 8, dtype: int}}}}
-                  - {binary: {op: '%', left: {var: a0}, right: {literal: {value: 8, dtype: int}}}}
+                  - {literal: 0}
+                  - {binary: {op: //, left: {var: a0}, right: {literal: 8}}}
+                  - {binary: {op: '%', left: {var: a0}, right: {literal: 8}}}
                   - {var: a1}
                   values:
                   - v1
-                  value_dtype: null
-                  atomic: false
-                  swizzle: NONE
           - Loop:
               axis: {name: a3, extent: 4096}
               body:
@@ -1027,26 +985,22 @@ loops:
                   - in3
                   input: copy__7_base__steps0
                   index:
-                  - {literal: {value: 1, dtype: int}}
-                  - {literal: {value: 0, dtype: int}}
-                  - {binary: {op: //, left: {var: a0}, right: {literal: {value: 8, dtype: int}}}}
-                  - {binary: {op: '%', left: {var: a0}, right: {literal: {value: 8, dtype: int}}}}
-                  - {binary: {op: //, left: {var: a3}, right: {literal: {value: 64, dtype: int}}}}
-                  - {binary: {op: '%', left: {var: a3}, right: {literal: {value: 64, dtype: int}}}}
-                  dtype: null
+                  - {literal: 1}
+                  - {literal: 0}
+                  - {binary: {op: //, left: {var: a0}, right: {literal: 8}}}
+                  - {binary: {op: '%', left: {var: a0}, right: {literal: 8}}}
+                  - {binary: {op: //, left: {var: a3}, right: {literal: 64}}}
+                  - {binary: {op: '%', left: {var: a3}, right: {literal: 64}}}
               - Write:
                   output: copy__8_base
                   index:
-                  - {literal: {value: 0, dtype: int}}
-                  - {binary: {op: //, left: {var: a0}, right: {literal: {value: 8, dtype: int}}}}
-                  - {binary: {op: '%', left: {var: a0}, right: {literal: {value: 8, dtype: int}}}}
-                  - {binary: {op: //, left: {var: a3}, right: {literal: {value: 64, dtype: int}}}}
-                  - {binary: {op: '%', left: {var: a3}, right: {literal: {value: 64, dtype: int}}}}
+                  - {literal: 0}
+                  - {binary: {op: //, left: {var: a0}, right: {literal: 8}}}
+                  - {binary: {op: '%', left: {var: a0}, right: {literal: 8}}}
+                  - {binary: {op: //, left: {var: a3}, right: {literal: 64}}}
+                  - {binary: {op: '%', left: {var: a3}, right: {literal: 64}}}
                   values:
                   - in3
-                  value_dtype: null
-                  atomic: false
-                  swizzle: NONE
       name: k_slice_unsqueeze_reduce_034e35
     inputs: [copy__7_base__steps0]
     outputs: [[copy__8_base, f32, [1, 48, 8, 64, 64]], [add_14, f32, [1, 48, 8, 10]]]

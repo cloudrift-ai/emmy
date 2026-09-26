@@ -287,6 +287,19 @@ class Literal(_ExprOps):
     value: int | float | bool
     dtype: str = "float"
 
+    def to_wire(self):
+        """The bare value when its dtype is the value's own kind — ``3``, ``0.5``, ``true`` — else ``{value, dtype}``."""
+        own = {int: "int", float: "float", bool: "bool"}[type(self.value)]
+        return self.value if own == self.dtype else {"value": self.value, "dtype": self.dtype}
+
+    @classmethod
+    def from_wire(cls, value: object, where: str = "literal") -> Literal:
+        if isinstance(value, (bool, int, float)):
+            return cls(value, {bool: "bool", int: "int", float: "float"}[type(value)])
+        if not isinstance(value, dict) or set(value) - {"value", "dtype"} or "value" not in value:
+            raise ValueError(f"{where} must be a number or {{value, dtype}}")
+        return cls(value["value"], value.get("dtype", "float"))
+
     def eval(self, env: dict[str, object]) -> object:
         return self.value
 

@@ -1,6 +1,4 @@
-compute_cap:
-- 12
-- 0
+compute_cap: [12, 0]
 programs:
 - inputs: [q, k]
   outputs: [c]
@@ -22,24 +20,15 @@ programs:
     outputs: [[c, f32, [1, 4, 128, 128]]]
 configs:
 - program: 0
-  target:
-    loop: 0
-    origins:
-    - c
-    - kt
+  target: {loop: 0, origins: [c, kt]}
   realizations:
   - name: k_matmul_1775af
-    bindings: {}
-    pins:
-      FAST_MATH: false
+    pins: {FAST_MATH: false}
     knobs:
       TILE: mma_m16n8k16_f16_f32/f4x8/k2
       WORK: w2x2
     identity: fe9bc34a38817eee3e22531cb9f57af142bd6b19bc47c475e2acdc6b39fedf33
-    latency:
-      NVIDIA GeForce RTX 5090:
-        emmy_us: 5.915266169598822
-        tcompile_us: 2.0502913145371426
+    latency: {NVIDIA GeForce RTX 5090: {emmy_us: 5.915266169598822, tcompile_us: 2.0502913145371426}}
 loops:
 - inputs: [k, q]
   outputs: [c]
@@ -66,40 +55,11 @@ loops:
                   - Loop:
                       axis: {name: a3, extent: 64}
                       body:
-                      - Load:
-                          names:
-                          - in0
-                          input: k
-                          index:
-                          - {literal: {value: 0, dtype: int}}
-                          - {var: a0}
-                          - {var: a2}
-                          - {var: a3}
-                          dtype: null
-                      - Load:
-                          names:
-                          - in1
-                          input: q
-                          index:
-                          - {literal: {value: 0, dtype: int}}
-                          - {var: a0}
-                          - {var: a1}
-                          - {var: a3}
-                          dtype: null
+                      - {Load: {names: [in0], input: k, index: [{literal: 0}, {var: a0}, {var: a2}, {var: a3}]}}
+                      - {Load: {names: [in1], input: q, index: [{literal: 0}, {var: a0}, {var: a1}, {var: a3}]}}
                       - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
                       - {Accum: {name: acc0, value: v0, axes: [a3]}}
-                  - Write:
-                      output: c
-                      index:
-                      - {literal: {value: 0, dtype: int}}
-                      - {var: a0}
-                      - {var: a1}
-                      - {var: a2}
-                      values:
-                      - acc0
-                      value_dtype: null
-                      atomic: false
-                      swizzle: NONE
+                  - {Write: {output: c, index: [{literal: 0}, {var: a0}, {var: a1}, {var: a2}], values: [acc0]}}
       name: k_matmul_1775af
     inputs: [k, q]
     outputs: [[c, f32, [1, 4, 128, 128]]]

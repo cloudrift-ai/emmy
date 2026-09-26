@@ -30,6 +30,10 @@ import json
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 
+from emmy.compiler.context import Context
+from emmy.compiler.ir.cuda.ir import CudaOp
+from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+from emmy.compiler.pipeline.knob import KERNEL_DECISION_FAMILIES, family_of
 from emmy.compiler.pipeline.search.golden import (
     Config,
     GoldenEntryState,
@@ -41,14 +45,14 @@ from emmy.compiler.pipeline.search.golden import (
     siblings_of,
     sole_evidence,
 )
+from emmy.compiler.pipeline.search.pins import pinned_knobs
+from emmy.compiler.pipeline.search.working_golden import lowered_kernels
 from emmy.compiler.structural import digest
 
 
 def fresh_kernels(document: GoldenFile, programs: Sequence[int] | None = None) -> dict[int, dict[frozenset, dict]]:
     """The kernels a fresh lowering of each stored program writes, keyed by output set, per program
     index — ``emmy compile --golden PATH --program N --ir loop -o fresh.yaml``, as data."""
-    from emmy.compiler.context import Context  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.working_golden import lowered_kernels  # noqa: PLC0415
 
     ctx = Context.from_target(tuple(document.compute_cap), gpu_name=document.gpu_name)
     fresh: dict[int, dict[frozenset, dict]] = {}
@@ -212,11 +216,6 @@ def _kernel_sources(record: GoldenRecord, records: Sequence[GoldenRecord]) -> tu
     beside the rows of its set that decide other kernels (its route, the other pieces), never an
     alternate schedule of its own kernel. ``None`` when the compile refuses, which a caller reads
     as "not the same kernel"."""
-    from emmy.compiler.context import Context  # noqa: PLC0415
-    from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
-    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline  # noqa: PLC0415
-    from emmy.compiler.pipeline.knob import KERNEL_DECISION_FAMILIES, family_of  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
 
     siblings = [other for other in siblings_of(record, records) if other.is_routing or other.identity != record.identity]
     stand_in = Measurements(emmy_us=1.0, reference_us=1.0, reference_backend="restamp")

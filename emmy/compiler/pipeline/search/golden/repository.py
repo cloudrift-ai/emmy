@@ -217,7 +217,7 @@ def goldens_for_live_gpu() -> list[GoldenRecord]:
 
 def _live_gpu_key() -> tuple[str, tuple[int, int]] | None:
     try:
-        import torch  # noqa: PLC0415
+        import torch  # noqa: PLC0415 — heavy, and only the live-card path needs it
 
         if not torch.cuda.is_available():
             return None

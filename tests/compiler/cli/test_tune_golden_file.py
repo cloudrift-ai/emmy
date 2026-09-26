@@ -730,7 +730,6 @@ def test_record_greedy_pick_appends_routing_rows_and_receipts_once(tmp_path, mon
     assert [row.name for row in realizations] == ["mm", *written]
     assert realizations[1].to_wire() == {
         "name": "mm.111111111111",
-        "bindings": {},
         "pins": {"FAST_MATH": True},
         "knobs": {"PLACE@map.1/map": "cut"},
         "identity": root,

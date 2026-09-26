@@ -1,6 +1,4 @@
-compute_cap:
-- 7
-- 0
+compute_cap: [7, 0]
 programs:
 - inputs: [x0, x1]
   outputs: [matmul]
@@ -17,15 +15,10 @@ programs:
     outputs: [[matmul, f32, [512, 512]]]
 configs:
 - program: 0
-  target:
-    loop: 0
-    origins:
-    - matmul
+  target: {loop: 0, origins: [matmul]}
   realizations:
   - name: k_matmul_2967be
-    bindings: {}
-    pins:
-      FAST_MATH: false
+    pins: {FAST_MATH: false}
     knobs:
       WORK: t16x8
       TILE: f4x8
@@ -34,18 +27,14 @@ configs:
       STAGE: d2/smem
     identity: 36de740768cee2ab9c8b31829fefbfd3d05fbef43945a7dd0eb3200871f031fa
   - name: k_matmul_2967be.c73bd7d12d00
-    bindings: {}
-    pins:
-      FAST_MATH: false
+    pins: {FAST_MATH: false}
     knobs:
       WORK: ''
       REDUCE: ''
       RASTER: ''
     identity: c73bd7d12d002cf9a57afad02b14de1b18a696ba7cf5a97efa873ded5eafec40
   - name: k_matmul_2967be.0c863e512c76
-    bindings: {}
-    pins:
-      FAST_MATH: false
+    pins: {FAST_MATH: false}
     knobs:
       WORK: t16x8
       TILE: f4x8
@@ -76,20 +65,11 @@ loops:
               - Loop:
                   axis: {name: a2, extent: 512}
                   body:
-                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
-                  - {Load: {names: [in1], input: x1, index: [{var: a2}, {var: a1}], dtype: null}}
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}]}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a2}, {var: a1}]}}
                   - {Assign: {name: v0, op: multiply, args: [in0, in1]}}
                   - {Accum: {name: acc0, value: v0, axes: [a2]}}
-              - Write:
-                  output: matmul
-                  index:
-                  - {var: a0}
-                  - {var: a1}
-                  values:
-                  - acc0
-                  value_dtype: null
-                  atomic: false
-                  swizzle: NONE
+              - {Write: {output: matmul, index: [{var: a0}, {var: a1}], values: [acc0]}}
       name: k_matmul_2967be
     inputs: [x1, x0]
     outputs: [[matmul, f32, [512, 512]]]

@@ -1,6 +1,4 @@
-compute_cap:
-- 12
-- 0
+compute_cap: [12, 0]
 programs:
 - inputs: [a, b]
   outputs: [o]
@@ -17,28 +15,19 @@ programs:
     outputs: [[o, f32, [32, 256]]]
 configs:
 - program: 0
-  target:
-    loop: 0
-    origins:
-    - o
+  target: {loop: 0, origins: [o]}
   realizations:
   - name: k_matmul_360224
-    bindings: {}
-    pins:
-      FAST_MATH: true
+    pins: {FAST_MATH: true}
     knobs:
       TILE: mma_m16n8k16_f16_f16/f2x2/k4
       WORK: w1x8
       REDUCE: g2a
       STAGE: d2/smem-tma
     identity: 952cb0553db845d5e5d91b648e6e0d44c4dc42a41714ee826880c1cd62e77e89
-    latency:
-      NVIDIA GeForce RTX 5090:
-        emmy_us: 5.942476292451222
+    latency: {NVIDIA GeForce RTX 5090: {emmy_us: 5.942476292451222}}
   - name: k_matmul_360224.077a99a8f199
-    bindings: {}
-    pins:
-      FAST_MATH: true
+    pins: {FAST_MATH: true}
     knobs:
       WORK: w1x8
       TILE: mma_m16n8k16_f16_f16/f2x2/k4
@@ -69,20 +58,11 @@ loops:
               - Loop:
                   axis: {name: a2, extent: 1024}
                   body:
-                  - {Load: {names: [in0], input: a, index: [{var: a0}, {var: a2}], dtype: null}}
-                  - {Load: {names: [in1], input: b, index: [{var: a2}, {var: a1}], dtype: null}}
+                  - {Load: {names: [in0], input: a, index: [{var: a0}, {var: a2}]}}
+                  - {Load: {names: [in1], input: b, index: [{var: a2}, {var: a1}]}}
                   - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
                   - {Accum: {name: acc0, value: v0, axes: [a2]}}
-              - Write:
-                  output: o
-                  index:
-                  - {var: a0}
-                  - {var: a1}
-                  values:
-                  - acc0
-                  value_dtype: null
-                  atomic: false
-                  swizzle: NONE
+              - {Write: {output: o, index: [{var: a0}, {var: a1}], values: [acc0]}}
       name: k_matmul_360224
     inputs: [b, a]
     outputs: [[o, f32, [32, 256]]]

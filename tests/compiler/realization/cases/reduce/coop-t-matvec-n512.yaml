@@ -1,6 +1,4 @@
-compute_cap:
-- 12
-- 0
+compute_cap: [12, 0]
 programs:
 - inputs: [x0, x1]
   outputs: [linear]
@@ -17,23 +15,15 @@ programs:
     outputs: [[linear, f32, [1, 512]]]
 configs:
 - program: 0
-  target:
-    loop: 0
-    origins:
-    - linear
+  target: {loop: 0, origins: [linear]}
   realizations:
   - name: k_linear_98e8e8
-    bindings: {}
-    pins:
-      FAST_MATH: false
+    pins: {FAST_MATH: false}
     knobs:
       WORK: t128
       REDUCE: coop-t
     identity: 3444e6a484574ac668e66fa29ddb2b02f44dd7fb01bfb80a08a77f212a7216ee
-    latency:
-      NVIDIA GeForce RTX 5090:
-        emmy_us: 4.774124428415982
-        tcompile_us: 2.0490272469926225
+    latency: {NVIDIA GeForce RTX 5090: {emmy_us: 4.774124428415982, tcompile_us: 2.0490272469926225}}
 loops:
 - inputs: [x0, x1]
   outputs: [linear]
@@ -54,20 +44,11 @@ loops:
           - Loop:
               axis: {name: a1, extent: 256}
               body:
-              - Load: {names: [in0], input: x0, index: [{literal: {value: 0, dtype: int}}, {var: a1}], dtype: null}
-              - {Load: {names: [in1], input: x1, index: [{var: a0}, {var: a1}], dtype: null}}
+              - {Load: {names: [in0], input: x0, index: [{literal: 0}, {var: a1}]}}
+              - {Load: {names: [in1], input: x1, index: [{var: a0}, {var: a1}]}}
               - {Assign: {name: v0, op: multiply, args: [in0, in1]}}
               - {Accum: {name: acc0, value: v0, axes: [a1]}}
-          - Write:
-              output: linear
-              index:
-              - {literal: {value: 0, dtype: int}}
-              - {var: a0}
-              values:
-              - acc0
-              value_dtype: null
-              atomic: false
-              swizzle: NONE
+          - {Write: {output: linear, index: [{literal: 0}, {var: a0}], values: [acc0]}}
       name: k_linear_98e8e8
     inputs: [x1, x0]
     outputs: [[linear, f32, [1, 512]]]

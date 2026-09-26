@@ -13,9 +13,7 @@
 # evidence: the same route is what `tune` proposes on the Qwen3-8B-NVFP4 decode trunk, where it
 # reached nvcc as `"v23" has already been declared in the current scope` and cost the candidate its
 # measurement.
-compute_cap:
-- 12
-- 0
+compute_cap: [12, 0]
 programs:
 - inputs: [x]
   outputs: [linear]
@@ -69,7 +67,7 @@ programs:
           outputs: [[mask, i32, [1]]]
         - id: mask_bc
           op: tensor.index_map
-          attrs: {out_shape: [256], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
+          attrs: {out_shape: [256], sources: [{input_idx: 0, coord_map: [{literal: 0}]}]}
           inputs: [mask]
           outputs: [[mask_bc, i32, [256]]]
         - id: low
@@ -83,7 +81,7 @@ programs:
           outputs: [[shift, i32, [1]]]
         - id: shift_bc
           op: tensor.index_map
-          attrs: {out_shape: [256], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
+          attrs: {out_shape: [256], sources: [{input_idx: 0, coord_map: [{literal: 0}]}]}
           inputs: [shift]
           outputs: [[shift_bc, i32, [256]]]
         - id: high
@@ -111,7 +109,7 @@ programs:
             - input_idx: 0
               coord_map:
               - {var: out_coord_0}
-              select: {binary: {op: <, left: {var: out_coord_1}, right: {literal: {value: 1, dtype: int}}}}
+              select: {binary: {op: <, left: {var: out_coord_1}, right: {literal: 1}}}
             - {input_idx: 1, coord_map: [{var: out_coord_0}]}
           inputs: [vlow, vhigh]
           outputs: [[pairs, f32, [256, 2]]]
@@ -134,11 +132,7 @@ programs:
       - 8
       - 1
       sources:
-      - input_idx: 0
-        coord_map:
-        - {literal: {value: 0, dtype: int}}
-        - {literal: {value: 0, dtype: int}}
-        - {var: out_coord_2}
+      - {input_idx: 0, coord_map: [{literal: 0}, {literal: 0}, {var: out_coord_2}]}
     inputs: [mul_static_fp4_scale_2]
     outputs: [[mul_static_fp4_scale_2_bc, f32, [32, 8, 1]]]
   - id: mul_static_fp4_denom
@@ -152,7 +146,7 @@ programs:
     outputs: [[mul_static_fp4_shift, i32, [1]]]
   - id: mul_static_fp4_shift_bc
     op: tensor.index_map
-    attrs: {out_shape: [32, 64], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
+    attrs: {out_shape: [32, 64], sources: [{input_idx: 0, coord_map: [{literal: 0}]}]}
     inputs: [mul_static_fp4_shift]
     outputs: [[mul_static_fp4_shift_bc, i32, [32, 64]]]
   - id: n1
@@ -163,11 +157,7 @@ programs:
       - 8
       - 1
       sources:
-      - input_idx: 0
-        coord_map:
-        - {literal: {value: 0, dtype: int}}
-        - {literal: {value: 0, dtype: int}}
-        - {var: out_coord_2}
+      - {input_idx: 0, coord_map: [{literal: 0}, {literal: 0}, {var: out_coord_2}]}
     inputs: [mul_static_fp4_scale_2]
     outputs: [[mul_static_fp4_scale_2_bc, f32, [32, 8, 1]]]
   - id: p_w_weight_bits
@@ -196,7 +186,7 @@ programs:
           outputs: [[mask, i32, [1]]]
         - id: mask_bc
           op: tensor.index_map
-          attrs: {out_shape: [256], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
+          attrs: {out_shape: [256], sources: [{input_idx: 0, coord_map: [{literal: 0}]}]}
           inputs: [mask]
           outputs: [[mask_bc, i32, [256]]]
         - id: low
@@ -210,7 +200,7 @@ programs:
           outputs: [[shift, i32, [1]]]
         - id: shift_bc
           op: tensor.index_map
-          attrs: {out_shape: [256], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
+          attrs: {out_shape: [256], sources: [{input_idx: 0, coord_map: [{literal: 0}]}]}
           inputs: [shift]
           outputs: [[shift_bc, i32, [256]]]
         - id: high
@@ -238,7 +228,7 @@ programs:
             - input_idx: 0
               coord_map:
               - {var: out_coord_0}
-              select: {binary: {op: <, left: {var: out_coord_1}, right: {literal: {value: 1, dtype: int}}}}
+              select: {binary: {op: <, left: {var: out_coord_1}, right: {literal: 1}}}
             - {input_idx: 1, coord_map: [{var: out_coord_0}]}
           inputs: [vlow, vhigh]
           outputs: [[pairs, f32, [256, 2]]]
@@ -264,12 +254,7 @@ programs:
     outputs: [[p_w_weight_scale_2, f32, [1, 1]]]
   - id: p_w_weight_scale_2_bc
     op: tensor.index_map
-    attrs:
-      out_shape:
-      - 64
-      - 8
-      sources:
-      - {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}, {literal: {value: 0, dtype: int}}]}
+    attrs: {out_shape: [64, 8], sources: [{input_idx: 0, coord_map: [{literal: 0}, {literal: 0}]}]}
     inputs: [p_w_weight_scale_2]
     outputs: [[p_w_weight_scale_2_bc, f32, [64, 8]]]
   - id: p_w_weight_scale_bits
@@ -307,11 +292,7 @@ programs:
       - 8
       - 16
       sources:
-      - input_idx: 0
-        coord_map:
-        - {var: out_coord_0}
-        - {var: out_coord_1}
-        - {literal: {value: 0, dtype: int}}
+      - {input_idx: 0, coord_map: [{var: out_coord_0}, {var: out_coord_1}, {literal: 0}]}
     inputs: [p_w_weight_fused_r]
     outputs: [[p_w_weight_fused_r_bc, f32, [64, 8, 16]]]
   - id: p_w_weight_vals
@@ -340,7 +321,7 @@ programs:
     outputs: [[pow_1_c1, f32, [1]]]
   - id: pow_1_c1_bc
     op: tensor.index_map
-    attrs: {out_shape: [32, 128], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
+    attrs: {out_shape: [32, 128], sources: [{input_idx: 0, coord_map: [{literal: 0}]}]}
     inputs: [pow_1_c1]
     outputs: [[pow_1_c1_bc, f32, [32, 128]]]
   - id: x
@@ -367,12 +348,7 @@ programs:
     outputs: [[rsqrt, f32, [32, 1]]]
   - id: rsqrt_bc
     op: tensor.index_map
-    attrs:
-      out_shape:
-      - 32
-      - 128
-      sources:
-      - {input_idx: 0, coord_map: [{var: out_coord_0}, {literal: {value: 0, dtype: int}}]}
+    attrs: {out_shape: [32, 128], sources: [{input_idx: 0, coord_map: [{var: out_coord_0}, {literal: 0}]}]}
     inputs: [rsqrt]
     outputs: [[rsqrt_bc, f32, [32, 128]]]
   - id: mul
@@ -431,11 +407,7 @@ programs:
       - 8
       - 16
       sources:
-      - input_idx: 0
-        coord_map:
-        - {var: out_coord_0}
-        - {var: out_coord_1}
-        - {literal: {value: 0, dtype: int}}
+      - {input_idx: 0, coord_map: [{var: out_coord_0}, {var: out_coord_1}, {literal: 0}]}
     inputs: [mul_static_fp4_r1_fused_cast]
     outputs: [[mul_static_fp4_r1_fused_cast_bc, f32, [32, 8, 16]]]
   - id: mul_static_fp4_scale_vals
@@ -469,11 +441,7 @@ programs:
       - 8
       - 16
       sources:
-      - input_idx: 0
-        coord_map:
-        - {var: out_coord_0}
-        - {var: out_coord_1}
-        - {literal: {value: 0, dtype: int}}
+      - {input_idx: 0, coord_map: [{var: out_coord_0}, {var: out_coord_1}, {literal: 0}]}
     inputs: [mul_static_fp4_safe]
     outputs: [[mul_static_fp4_safe_bc, f32, [32, 8, 16]]]
   - id: mul_static_fp4_norm
@@ -501,7 +469,7 @@ programs:
       - input_idx: 0
         coord_map:
         - {var: out_coord_0}
-        - {binary: {op: '*', left: {var: out_coord_1}, right: {literal: {value: 2, dtype: int}}}}
+        - {binary: {op: '*', left: {var: out_coord_1}, right: {literal: 2}}}
     inputs: [mul_static_fp4_codes_flat]
     outputs: [[mul_static_fp4_even, i32, [32, 64]]]
   - id: mul_static_fp4_odd
@@ -516,8 +484,8 @@ programs:
         - {var: out_coord_0}
         - binary:
             op: +
-            left: {binary: {op: '*', left: {var: out_coord_1}, right: {literal: {value: 2, dtype: int}}}}
-            right: {literal: {value: 1, dtype: int}}
+            left: {binary: {op: '*', left: {var: out_coord_1}, right: {literal: 2}}}
+            right: {literal: 1}
     inputs: [mul_static_fp4_codes_flat]
     outputs: [[mul_static_fp4_odd, i32, [32, 64]]]
   - id: mul_static_fp4_hi
@@ -563,52 +531,19 @@ programs:
     outputs: [[linear, f32, [32, 64]]]
 configs:
 - program: 0
-  target:
-    loop: 0
-    origins:
-    - add
-    - add_c1_bc
-    - mean
-    - mul
-    - mul_static_fp4_abs
-    - mul_static_fp4_amax
-    - mul_static_fp4_bits
-    - mul_static_fp4_blk
-    - mul_static_fp4_byte
-    - mul_static_fp4_codes
-    - mul_static_fp4_codes_flat
-    - mul_static_fp4_denom
-    - mul_static_fp4_div32
-    - mul_static_fp4_even
-    - mul_static_fp4_f4_max_bc
-    - mul_static_fp4_floor_bc
-    - mul_static_fp4_fused
-    - mul_static_fp4_fused32
-    - mul_static_fp4_hi
-    - mul_static_fp4_norm
-    - mul_static_fp4_odd
-    - mul_static_fp4_ratio
-    - mul_static_fp4_safe
-    - mul_static_fp4_safe_bc
-    - mul_static_fp4_scale_2_bc
-    - mul_static_fp4_scale_bits
-    - mul_static_fp4_scale_vals
-    - mul_static_fp4_shift_bc
-    - pow_1
-    - rsqrt
-    - rsqrt_bc
+  target: {loop: 0, origins: [add, add_c1_bc, mean, mul, mul_static_fp4_abs, mul_static_fp4_amax, mul_static_fp4_bits, mul_static_fp4_blk, mul_static_fp4_byte,
+      mul_static_fp4_codes, mul_static_fp4_codes_flat, mul_static_fp4_denom, mul_static_fp4_div32, mul_static_fp4_even, mul_static_fp4_f4_max_bc,
+      mul_static_fp4_floor_bc, mul_static_fp4_fused, mul_static_fp4_fused32, mul_static_fp4_hi, mul_static_fp4_norm, mul_static_fp4_odd, mul_static_fp4_ratio,
+      mul_static_fp4_safe, mul_static_fp4_safe_bc, mul_static_fp4_scale_2_bc, mul_static_fp4_scale_bits, mul_static_fp4_scale_vals, mul_static_fp4_shift_bc,
+      pow_1, rsqrt, rsqrt_bc]}
   realizations:
   - name: k_mean_e934a3
-    bindings: {}
-    pins:
-      FAST_MATH: false
+    pins: {FAST_MATH: false}
     knobs:
       PLACE@map.1/map.2/reduce.2/map: cut
     identity: 4f5e91533406911cecb9d5fb684d0885f81fdc9f32e5236a2408be02774a5f68
   - name: k_mean_e934a3.5ab3d806c685
-    bindings: {}
-    pins:
-      FAST_MATH: false
+    pins: {FAST_MATH: false}
     knobs:
       REDUCE@map.1/map.2/reduce: ''
       REDUCE@map.2/map.2/reduce: ''
@@ -616,9 +551,7 @@ configs:
       RASTER: ''
     identity: a5cb7473387b4eaae6c0d9357d28c98dc563b4aac790ee9efc0e4e79737286fc
   - name: k_mean_e934a3.d074fcf531fc
-    bindings: {}
-    pins:
-      FAST_MATH: false
+    pins: {FAST_MATH: false}
     knobs:
       WORK: ''
       REDUCE: ''
@@ -665,34 +598,20 @@ loops:
     op: loop
     attrs:
       body:
-      - Load:
-          names:
-          - in0
-          input: mul_static_fp4_scale_2
-          index:
-          - {literal: {value: 0, dtype: int}}
-          - {literal: {value: 0, dtype: int}}
-          - {literal: {value: 0, dtype: int}}
-          dtype: null
-      - {Load: {names: [in1], input: add_c1, index: [{literal: {value: 0, dtype: int}}], dtype: null}}
-      - {Load: {names: [in2], input: mean_count, index: [{literal: {value: 0, dtype: int}}], dtype: null}}
-      - Load:
-          names:
-          - in3
-          input: mul_static_fp4_f4_max
-          index:
-          - {literal: {value: 0, dtype: int}}
-          dtype: null
+      - Load: {names: [in0], input: mul_static_fp4_scale_2, index: [{literal: 0}, {literal: 0}, {literal: 0}]}
+      - {Load: {names: [in1], input: add_c1, index: [{literal: 0}]}}
+      - {Load: {names: [in2], input: mean_count, index: [{literal: 0}]}}
+      - {Load: {names: [in3], input: mul_static_fp4_f4_max, index: [{literal: 0}]}}
       - {Assign: {name: v0, op: multiply, args: [in0, in3]}}
-      - Load: {names: [in4], input: mul_static_fp4_floor, index: [{literal: {value: 0, dtype: int}}], dtype: null}
-      - Load: {names: [in5], input: mul_static_fp4_shift, index: [{literal: {value: 0, dtype: int}}], dtype: null}
+      - {Load: {names: [in4], input: mul_static_fp4_floor, index: [{literal: 0}]}}
+      - {Load: {names: [in5], input: mul_static_fp4_shift, index: [{literal: 0}]}}
       - Loop:
           axis: {name: a0, extent: 32}
           body:
           - Loop:
               axis: {name: a1, extent: 128}
               body:
-              - {Load: {names: [in6], input: x, index: [{var: a0}, {var: a1}], dtype: null}}
+              - {Load: {names: [in6], input: x, index: [{var: a0}, {var: a1}]}}
               - {Assign: {name: v1, op: multiply, args: [in6, in6]}}
               - {Accum: {name: acc0, value: v1, axes: [a1]}}
           - {Assign: {name: v2, op: divide, args: [acc0, in2]}}
@@ -710,27 +629,13 @@ loops:
                       input: x
                       index:
                       - {var: a0}
-                      - binary:
-                          op: +
-                          left: {binary: {op: '*', left: {literal: {value: 16, dtype: int}}, right: {var: a2}}}
-                          right: {var: a3}
-                      dtype: null
+                      - binary: {op: +, left: {binary: {op: '*', left: {literal: 16}, right: {var: a2}}}, right: {var: a3}}
                   - {Assign: {name: v5, op: multiply, args: [in7, v4]}}
                   - {Assign: {name: v6, op: abs, args: [v5]}}
                   - {Accum: {name: acc1, value: v6, op: maximum, axes: [a3]}}
               - {Assign: {name: v7, op: divide, args: [acc1, v0]}}
               - {Assign: {name: v8, op: to_f8e4m3, args: [v7], dtype: f8e4m3}}
-              - Write:
-                  output: mul_static_fp4_scale_bits
-                  index:
-                  - {var: a0}
-                  - {var: a2}
-                  - {literal: {value: 0, dtype: int}}
-                  values:
-                  - v8
-                  value_dtype: null
-                  atomic: false
-                  swizzle: NONE
+              - Write: {output: mul_static_fp4_scale_bits, index: [{var: a0}, {var: a2}, {literal: 0}], values: [v8]}
           - Loop:
               axis: {name: a4, extent: 64}
               body:
@@ -746,12 +651,8 @@ loops:
                       - binary:
                           op: +
                           left:
-                            binary:
-                              op: '*'
-                              left: {binary: {op: /, left: {var: a4}, right: {literal: {value: 8, dtype: int}}}}
-                              right: {literal: {value: 16, dtype: int}}
+                            binary: {op: '*', left: {binary: {op: /, left: {var: a4}, right: {literal: 8}}}, right: {literal: 16}}
                           right: {var: a5}
-                      dtype: null
                   - {Assign: {name: v9, op: multiply, args: [in8, v4]}}
                   - {Assign: {name: v10, op: abs, args: [v9]}}
                   - {Accum: {name: acc2, value: v10, op: maximum, axes: [a5]}}
@@ -768,8 +669,7 @@ loops:
                   input: x
                   index:
                   - {var: a0}
-                  - {binary: {op: '*', left: {literal: {value: 2, dtype: int}}, right: {var: a4}}}
-                  dtype: null
+                  - {binary: {op: '*', left: {literal: 2}, right: {var: a4}}}
               - {Assign: {name: v18, op: multiply, args: [in9, v4]}}
               - {Assign: {name: v19, op: divide, args: [v18, v17]}}
               - {Assign: {name: v20, op: to_f4e2m1, args: [v19], dtype: i32}}
@@ -779,27 +679,14 @@ loops:
                   input: x
                   index:
                   - {var: a0}
-                  - binary:
-                      op: +
-                      left: {binary: {op: '*', left: {literal: {value: 2, dtype: int}}, right: {var: a4}}}
-                      right: {literal: {value: 1, dtype: int}}
-                  dtype: null
+                  - binary: {op: +, left: {binary: {op: '*', left: {literal: 2}, right: {var: a4}}}, right: {literal: 1}}
               - {Assign: {name: v21, op: multiply, args: [in10, v4]}}
               - {Assign: {name: v22, op: divide, args: [v21, v17]}}
               - {Assign: {name: v23, op: to_f4e2m1, args: [v22], dtype: i32}}
               - {Assign: {name: v24, op: left_shift, args: [v23, in5]}}
               - {Assign: {name: v25, op: bitwise_or, args: [v20, v24]}}
               - {Assign: {name: v26, op: copy, args: [v25], dtype: f4e2m1x2}}
-              - Write:
-                  output: mul_static_fp4_bits
-                  index:
-                  - {var: a0}
-                  - {var: a4}
-                  values:
-                  - v26
-                  value_dtype: null
-                  atomic: false
-                  swizzle: NONE
+              - {Write: {output: mul_static_fp4_bits, index: [{var: a0}, {var: a4}], values: [v26]}}
       name: k_mean_d12855
     inputs: [mean_count, add_c1, mul_static_fp4_floor, mul_static_fp4_shift, mul_static_fp4_scale_2, mul_static_fp4_f4_max, x]
     outputs: [[mul_static_fp4_scale_bits, f8e4m3, [32, 8, 1]], [mul_static_fp4_bits, f4e2m1x2, [32, 64]]]

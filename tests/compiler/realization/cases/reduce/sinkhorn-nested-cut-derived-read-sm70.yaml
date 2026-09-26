@@ -7,9 +7,7 @@
 # one name (nvcc: already declared). Kernel lowering re-spells such a pair positionally, which also moves the piece
 # identities this case pins, so the case fails at `realized` if the cut stops renaming.
 # Found on the DeepSeek V4 post-attention Sinkhorn kernel on a V100, where the prior picked such a row.
-compute_cap:
-- 7
-- 0
+compute_cap: [7, 0]
 programs:
 - inputs: [x]
   outputs: [mul_5]
@@ -20,7 +18,7 @@ programs:
     outputs: [[add_1_c1, f32, [1]]]
   - id: add_1_c1_bc
     op: tensor.index_map
-    attrs: {out_shape: [1, 1, 1, 4], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
+    attrs: {out_shape: [1, 1, 1, 4], sources: [{input_idx: 0, coord_map: [{literal: 0}]}]}
     inputs: [add_1_c1]
     outputs: [[add_1_c1_bc, f32, [1, 1, 1, 4]]]
   - id: add_2_c1
@@ -29,7 +27,7 @@ programs:
     outputs: [[add_2_c1, f32, [1]]]
   - id: add_2_c1_bc
     op: tensor.index_map
-    attrs: {out_shape: [1, 1, 1, 4], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
+    attrs: {out_shape: [1, 1, 1, 4], sources: [{input_idx: 0, coord_map: [{literal: 0}]}]}
     inputs: [add_2_c1]
     outputs: [[add_2_c1_bc, f32, [1, 1, 1, 4]]]
   - id: add_3_c1
@@ -56,7 +54,7 @@ programs:
     outputs: [[add_5_c1, f32, [1]]]
   - id: add_5_c1_bc
     op: tensor.index_map
-    attrs: {out_shape: [1, 1, 1, 4], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
+    attrs: {out_shape: [1, 1, 1, 4], sources: [{input_idx: 0, coord_map: [{literal: 0}]}]}
     inputs: [add_5_c1]
     outputs: [[add_5_c1_bc, f32, [1, 1, 1, 4]]]
   - id: add_c1
@@ -95,12 +93,7 @@ programs:
       - 4
       - 4
       sources:
-      - input_idx: 0
-        coord_map:
-        - {var: out_coord_0}
-        - {var: out_coord_1}
-        - {var: out_coord_2}
-        - {literal: {value: 0, dtype: int}}
+      - {input_idx: 0, coord_map: [{var: out_coord_0}, {var: out_coord_1}, {var: out_coord_2}, {literal: 0}]}
     inputs: [reciprocal]
     outputs: [[reciprocal_bc, f32, [1, 1, 4, 4]]]
   - id: mul
@@ -132,12 +125,7 @@ programs:
       - 4
       - 4
       sources:
-      - input_idx: 0
-        coord_map:
-        - {var: out_coord_0}
-        - {var: out_coord_1}
-        - {literal: {value: 0, dtype: int}}
-        - {var: out_coord_3}
+      - {input_idx: 0, coord_map: [{var: out_coord_0}, {var: out_coord_1}, {literal: 0}, {var: out_coord_3}]}
     inputs: [reciprocal_1]
     outputs: [[reciprocal_1_bc, f32, [1, 1, 4, 4]]]
   - id: mul_1
@@ -169,12 +157,7 @@ programs:
       - 4
       - 4
       sources:
-      - input_idx: 0
-        coord_map:
-        - {var: out_coord_0}
-        - {var: out_coord_1}
-        - {literal: {value: 0, dtype: int}}
-        - {var: out_coord_3}
+      - {input_idx: 0, coord_map: [{var: out_coord_0}, {var: out_coord_1}, {literal: 0}, {var: out_coord_3}]}
     inputs: [reciprocal_2]
     outputs: [[reciprocal_2_bc, f32, [1, 1, 4, 4]]]
   - id: mul_2
@@ -206,12 +189,7 @@ programs:
       - 4
       - 4
       sources:
-      - input_idx: 0
-        coord_map:
-        - {var: out_coord_0}
-        - {var: out_coord_1}
-        - {var: out_coord_2}
-        - {literal: {value: 0, dtype: int}}
+      - {input_idx: 0, coord_map: [{var: out_coord_0}, {var: out_coord_1}, {var: out_coord_2}, {literal: 0}]}
     inputs: [reciprocal_3]
     outputs: [[reciprocal_3_bc, f32, [1, 1, 4, 4]]]
   - id: mul_3
@@ -243,12 +221,7 @@ programs:
       - 4
       - 4
       sources:
-      - input_idx: 0
-        coord_map:
-        - {var: out_coord_0}
-        - {var: out_coord_1}
-        - {var: out_coord_2}
-        - {literal: {value: 0, dtype: int}}
+      - {input_idx: 0, coord_map: [{var: out_coord_0}, {var: out_coord_1}, {var: out_coord_2}, {literal: 0}]}
     inputs: [reciprocal_4]
     outputs: [[reciprocal_4_bc, f32, [1, 1, 4, 4]]]
   - id: mul_4
@@ -280,12 +253,7 @@ programs:
       - 4
       - 4
       sources:
-      - input_idx: 0
-        coord_map:
-        - {var: out_coord_0}
-        - {var: out_coord_1}
-        - {literal: {value: 0, dtype: int}}
-        - {var: out_coord_3}
+      - {input_idx: 0, coord_map: [{var: out_coord_0}, {var: out_coord_1}, {literal: 0}, {var: out_coord_3}]}
     inputs: [reciprocal_5]
     outputs: [[reciprocal_5_bc, f32, [1, 1, 4, 4]]]
   - id: mul_5
@@ -295,51 +263,12 @@ programs:
     outputs: [[mul_5, f32, [1, 1, 4, 4]]]
 configs:
 - program: 0
-  target:
-    loop: 0
-    origins:
-    - add
-    - add_1
-    - add_1_c1_bc
-    - add_2
-    - add_2_c1_bc
-    - add_3
-    - add_3_c1_bc
-    - add_4
-    - add_4_c1_bc
-    - add_5
-    - add_5_c1_bc
-    - add_c1_bc
-    - mul
-    - mul_1
-    - mul_2
-    - mul_3
-    - mul_4
-    - mul_5
-    - reciprocal
-    - reciprocal_1
-    - reciprocal_1_bc
-    - reciprocal_2
-    - reciprocal_2_bc
-    - reciprocal_3
-    - reciprocal_3_bc
-    - reciprocal_4
-    - reciprocal_4_bc
-    - reciprocal_5
-    - reciprocal_5_bc
-    - reciprocal_bc
-    - sum_1
-    - sum_2
-    - sum_3
-    - sum_4
-    - sum_5
-    - sum_6
+  target: {loop: 0, origins: [add, add_1, add_1_c1_bc, add_2, add_2_c1_bc, add_3, add_3_c1_bc, add_4, add_4_c1_bc, add_5, add_5_c1_bc, add_c1_bc,
+      mul, mul_1, mul_2, mul_3, mul_4, mul_5, reciprocal, reciprocal_1, reciprocal_1_bc, reciprocal_2, reciprocal_2_bc, reciprocal_3, reciprocal_3_bc,
+      reciprocal_4, reciprocal_4_bc, reciprocal_5, reciprocal_5_bc, reciprocal_bc, sum_1, sum_2, sum_3, sum_4, sum_5, sum_6]}
   realizations:
   - name: k_mul_5_reduce
-    bindings: {}
-    pins:
-      FAST_MATH: false
-      PLACE@map.1/map.2/reduce.1/map.4/map: cut
+    pins: {FAST_MATH: false, PLACE@map.1/map.2/reduce.1/map.4/map: cut}
     knobs:
       TILE@map.1/map.2/reduce.1/map.1/inner: ''
       TILE@map.1/map.2/reduce.2/map.1/inner: ''
@@ -388,9 +317,7 @@ configs:
       RASTER: ''
     identity: 2be0d0484f77fd1300a6d60b83044267a57502fc0074055e010ec22ebf71e835
   - name: k_mul_5_reduce.96711baa9e76
-    bindings: {}
-    pins:
-      FAST_MATH: false
+    pins: {FAST_MATH: false}
     knobs:
       TILE@map.1/map.2/inner: ''
       TILE@map.1/map.2/inner.1/map.1/reduce.2/map.1/inner: ''
@@ -437,9 +364,7 @@ configs:
       RASTER: ''
     identity: 96711baa9e768ee05609821423bd461ac9f49c079a6781b9b7654d39c942bac0
   - name: k_mul_5_reduce.e41646fe02ca
-    bindings: {}
-    pins:
-      FAST_MATH: false
+    pins: {FAST_MATH: false}
     knobs:
       WORK: ''
       REDUCE: ''
@@ -480,28 +405,19 @@ loops:
     op: loop
     attrs:
       body:
-      - {Load: {names: [in0], input: add_1_c1, index: [{literal: {value: 0, dtype: int}}], dtype: null}}
-      - {Load: {names: [in1], input: add_2_c1, index: [{literal: {value: 0, dtype: int}}], dtype: null}}
-      - {Load: {names: [in2], input: add_3_c1, index: [{literal: {value: 0, dtype: int}}], dtype: null}}
-      - {Load: {names: [in3], input: add_4_c1, index: [{literal: {value: 0, dtype: int}}], dtype: null}}
-      - {Load: {names: [in4], input: add_5_c1, index: [{literal: {value: 0, dtype: int}}], dtype: null}}
-      - {Load: {names: [in5], input: add_c1, index: [{literal: {value: 0, dtype: int}}], dtype: null}}
+      - {Load: {names: [in0], input: add_1_c1, index: [{literal: 0}]}}
+      - {Load: {names: [in1], input: add_2_c1, index: [{literal: 0}]}}
+      - {Load: {names: [in2], input: add_3_c1, index: [{literal: 0}]}}
+      - {Load: {names: [in3], input: add_4_c1, index: [{literal: 0}]}}
+      - {Load: {names: [in4], input: add_5_c1, index: [{literal: 0}]}}
+      - {Load: {names: [in5], input: add_c1, index: [{literal: 0}]}}
       - Loop:
           axis: {name: a0, extent: 4}
           body:
           - Loop:
               axis: {name: a1, extent: 4}
               body:
-              - Load:
-                  names:
-                  - in6
-                  input: x
-                  index:
-                  - {literal: {value: 0, dtype: int}}
-                  - {literal: {value: 0, dtype: int}}
-                  - {var: a0}
-                  - {var: a1}
-                  dtype: null
+              - {Load: {names: [in6], input: x, index: [{literal: 0}, {literal: 0}, {var: a0}, {var: a1}]}}
               - {Accum: {name: acc0, value: in6, axes: [a1]}}
           - {Assign: {name: v0, op: add, args: [acc0, in5]}}
           - {Assign: {name: v1, op: reciprocal, args: [v0]}}
@@ -514,29 +430,11 @@ loops:
                   - Loop:
                       axis: {name: a4, extent: 4}
                       body:
-                      - Load:
-                          names:
-                          - in7
-                          input: x
-                          index:
-                          - {literal: {value: 0, dtype: int}}
-                          - {literal: {value: 0, dtype: int}}
-                          - {var: a3}
-                          - {var: a4}
-                          dtype: null
+                      - {Load: {names: [in7], input: x, index: [{literal: 0}, {literal: 0}, {var: a3}, {var: a4}]}}
                       - {Accum: {name: acc1, value: in7, axes: [a4]}}
                   - {Assign: {name: v2, op: add, args: [acc1, in5]}}
                   - {Assign: {name: v3, op: reciprocal, args: [v2]}}
-                  - Load:
-                      names:
-                      - in8
-                      input: x
-                      index:
-                      - {literal: {value: 0, dtype: int}}
-                      - {literal: {value: 0, dtype: int}}
-                      - {var: a3}
-                      - {var: a1}
-                      dtype: null
+                  - {Load: {names: [in8], input: x, index: [{literal: 0}, {literal: 0}, {var: a3}, {var: a1}]}}
                   - {Assign: {name: v4, op: multiply, args: [in8, v3]}}
                   - {Accum: {name: acc2, value: v4, axes: [a3]}}
               - {Assign: {name: v5, op: add, args: [acc2, in0]}}
@@ -547,44 +445,17 @@ loops:
                   - Loop:
                       axis: {name: a6, extent: 4}
                       body:
-                      - Load:
-                          names:
-                          - in9
-                          input: x
-                          index:
-                          - {literal: {value: 0, dtype: int}}
-                          - {literal: {value: 0, dtype: int}}
-                          - {var: a3}
-                          - {var: a6}
-                          dtype: null
+                      - {Load: {names: [in9], input: x, index: [{literal: 0}, {literal: 0}, {var: a3}, {var: a6}]}}
                       - {Accum: {name: acc3, value: in9, axes: [a6]}}
                   - {Assign: {name: v7, op: add, args: [acc3, in5]}}
                   - {Assign: {name: v8, op: reciprocal, args: [v7]}}
-                  - Load:
-                      names:
-                      - in10
-                      input: x
-                      index:
-                      - {literal: {value: 0, dtype: int}}
-                      - {literal: {value: 0, dtype: int}}
-                      - {var: a3}
-                      - {var: a1}
-                      dtype: null
+                  - {Load: {names: [in10], input: x, index: [{literal: 0}, {literal: 0}, {var: a3}, {var: a1}]}}
                   - {Assign: {name: v9, op: multiply, args: [in10, v8]}}
                   - {Assign: {name: v10, op: multiply, args: [v6, v9]}}
                   - {Accum: {name: acc4, value: v10, axes: [a3]}}
               - {Assign: {name: v11, op: add, args: [acc4, in1]}}
               - {Assign: {name: v12, op: reciprocal, args: [v11]}}
-              - Load:
-                  names:
-                  - in11
-                  input: x
-                  index:
-                  - {literal: {value: 0, dtype: int}}
-                  - {literal: {value: 0, dtype: int}}
-                  - {var: a0}
-                  - {var: a1}
-                  dtype: null
+              - {Load: {names: [in11], input: x, index: [{literal: 0}, {literal: 0}, {var: a0}, {var: a1}]}}
               - {Assign: {name: v13, op: multiply, args: [in11, v1]}}
               - {Assign: {name: v14, op: multiply, args: [v13, v6]}}
               - {Assign: {name: v15, op: multiply, args: [v12, v14]}}
@@ -600,29 +471,11 @@ loops:
                   - Loop:
                       axis: {name: a9, extent: 4}
                       body:
-                      - Load:
-                          names:
-                          - in12
-                          input: x
-                          index:
-                          - {literal: {value: 0, dtype: int}}
-                          - {literal: {value: 0, dtype: int}}
-                          - {var: a8}
-                          - {var: a9}
-                          dtype: null
+                      - {Load: {names: [in12], input: x, index: [{literal: 0}, {literal: 0}, {var: a8}, {var: a9}]}}
                       - {Accum: {name: acc6, value: in12, axes: [a9]}}
                   - {Assign: {name: v18, op: add, args: [acc6, in5]}}
                   - {Assign: {name: v19, op: reciprocal, args: [v18]}}
-                  - Load:
-                      names:
-                      - in13
-                      input: x
-                      index:
-                      - {literal: {value: 0, dtype: int}}
-                      - {literal: {value: 0, dtype: int}}
-                      - {var: a8}
-                      - {var: a1}
-                      dtype: null
+                  - {Load: {names: [in13], input: x, index: [{literal: 0}, {literal: 0}, {var: a8}, {var: a1}]}}
                   - {Assign: {name: v20, op: multiply, args: [in13, v19]}}
                   - {Accum: {name: acc7, value: v20, axes: [a8]}}
               - {Assign: {name: v21, op: add, args: [acc7, in0]}}
@@ -633,44 +486,17 @@ loops:
                   - Loop:
                       axis: {name: a11, extent: 4}
                       body:
-                      - Load:
-                          names:
-                          - in14
-                          input: x
-                          index:
-                          - {literal: {value: 0, dtype: int}}
-                          - {literal: {value: 0, dtype: int}}
-                          - {var: a8}
-                          - {var: a11}
-                          dtype: null
+                      - {Load: {names: [in14], input: x, index: [{literal: 0}, {literal: 0}, {var: a8}, {var: a11}]}}
                       - {Accum: {name: acc8, value: in14, axes: [a11]}}
                   - {Assign: {name: v23, op: add, args: [acc8, in5]}}
                   - {Assign: {name: v24, op: reciprocal, args: [v23]}}
-                  - Load:
-                      names:
-                      - in15
-                      input: x
-                      index:
-                      - {literal: {value: 0, dtype: int}}
-                      - {literal: {value: 0, dtype: int}}
-                      - {var: a8}
-                      - {var: a1}
-                      dtype: null
+                  - {Load: {names: [in15], input: x, index: [{literal: 0}, {literal: 0}, {var: a8}, {var: a1}]}}
                   - {Assign: {name: v25, op: multiply, args: [in15, v24]}}
                   - {Assign: {name: v26, op: multiply, args: [v22, v25]}}
                   - {Accum: {name: acc9, value: v26, axes: [a8]}}
               - {Assign: {name: v27, op: add, args: [acc9, in1]}}
               - {Assign: {name: v28, op: reciprocal, args: [v27]}}
-              - Load:
-                  names:
-                  - in16
-                  input: x
-                  index:
-                  - {literal: {value: 0, dtype: int}}
-                  - {literal: {value: 0, dtype: int}}
-                  - {var: a0}
-                  - {var: a1}
-                  dtype: null
+              - {Load: {names: [in16], input: x, index: [{literal: 0}, {literal: 0}, {var: a0}, {var: a1}]}}
               - {Assign: {name: v29, op: multiply, args: [in16, v1]}}
               - {Assign: {name: v30, op: multiply, args: [v22, v29]}}
               - {Assign: {name: v31, op: multiply, args: [v28, v30]}}
@@ -687,29 +513,11 @@ loops:
                   - Loop:
                       axis: {name: a14, extent: 4}
                       body:
-                      - Load:
-                          names:
-                          - in17
-                          input: x
-                          index:
-                          - {literal: {value: 0, dtype: int}}
-                          - {literal: {value: 0, dtype: int}}
-                          - {var: a13}
-                          - {var: a14}
-                          dtype: null
+                      - {Load: {names: [in17], input: x, index: [{literal: 0}, {literal: 0}, {var: a13}, {var: a14}]}}
                       - {Accum: {name: acc11, value: in17, axes: [a14]}}
                   - {Assign: {name: v35, op: add, args: [acc11, in5]}}
                   - {Assign: {name: v36, op: reciprocal, args: [v35]}}
-                  - Load:
-                      names:
-                      - in18
-                      input: x
-                      index:
-                      - {literal: {value: 0, dtype: int}}
-                      - {literal: {value: 0, dtype: int}}
-                      - {var: a13}
-                      - {var: a12}
-                      dtype: null
+                  - {Load: {names: [in18], input: x, index: [{literal: 0}, {literal: 0}, {var: a13}, {var: a12}]}}
                   - {Assign: {name: v37, op: multiply, args: [in18, v36]}}
                   - {Accum: {name: acc12, value: v37, axes: [a13]}}
               - {Assign: {name: v38, op: add, args: [acc12, in0]}}
@@ -720,29 +528,11 @@ loops:
                   - Loop:
                       axis: {name: a16, extent: 4}
                       body:
-                      - Load:
-                          names:
-                          - in19
-                          input: x
-                          index:
-                          - {literal: {value: 0, dtype: int}}
-                          - {literal: {value: 0, dtype: int}}
-                          - {var: a13}
-                          - {var: a16}
-                          dtype: null
+                      - {Load: {names: [in19], input: x, index: [{literal: 0}, {literal: 0}, {var: a13}, {var: a16}]}}
                       - {Accum: {name: acc13, value: in19, axes: [a16]}}
                   - {Assign: {name: v40, op: add, args: [acc13, in5]}}
                   - {Assign: {name: v41, op: reciprocal, args: [v40]}}
-                  - Load:
-                      names:
-                      - in20
-                      input: x
-                      index:
-                      - {literal: {value: 0, dtype: int}}
-                      - {literal: {value: 0, dtype: int}}
-                      - {var: a13}
-                      - {var: a12}
-                      dtype: null
+                  - {Load: {names: [in20], input: x, index: [{literal: 0}, {literal: 0}, {var: a13}, {var: a12}]}}
                   - {Assign: {name: v42, op: multiply, args: [in20, v41]}}
                   - {Assign: {name: v43, op: multiply, args: [v39, v42]}}
                   - {Accum: {name: acc14, value: v43, axes: [a13]}}
@@ -754,16 +544,7 @@ loops:
                   - Loop:
                       axis: {name: a18, extent: 4}
                       body:
-                      - Load:
-                          names:
-                          - in21
-                          input: x
-                          index:
-                          - {literal: {value: 0, dtype: int}}
-                          - {literal: {value: 0, dtype: int}}
-                          - {var: a13}
-                          - {var: a18}
-                          dtype: null
+                      - {Load: {names: [in21], input: x, index: [{literal: 0}, {literal: 0}, {var: a13}, {var: a18}]}}
                       - {Accum: {name: acc15, value: in21, axes: [a18]}}
                   - {Assign: {name: v46, op: add, args: [acc15, in5]}}
                   - {Assign: {name: v47, op: reciprocal, args: [v46]}}
@@ -776,29 +557,11 @@ loops:
                           - Loop:
                               axis: {name: a21, extent: 4}
                               body:
-                              - Load:
-                                  names:
-                                  - in22
-                                  input: x
-                                  index:
-                                  - {literal: {value: 0, dtype: int}}
-                                  - {literal: {value: 0, dtype: int}}
-                                  - {var: a20}
-                                  - {var: a21}
-                                  dtype: null
+                              - {Load: {names: [in22], input: x, index: [{literal: 0}, {literal: 0}, {var: a20}, {var: a21}]}}
                               - {Accum: {name: acc16, value: in22, axes: [a21]}}
                           - {Assign: {name: v48, op: add, args: [acc16, in5]}}
                           - {Assign: {name: v49, op: reciprocal, args: [v48]}}
-                          - Load:
-                              names:
-                              - in23
-                              input: x
-                              index:
-                              - {literal: {value: 0, dtype: int}}
-                              - {literal: {value: 0, dtype: int}}
-                              - {var: a20}
-                              - {var: a18}
-                              dtype: null
+                          - {Load: {names: [in23], input: x, index: [{literal: 0}, {literal: 0}, {var: a20}, {var: a18}]}}
                           - {Assign: {name: v50, op: multiply, args: [in23, v49]}}
                           - {Accum: {name: acc17, value: v50, axes: [a20]}}
                       - {Assign: {name: v51, op: add, args: [acc17, in0]}}
@@ -809,44 +572,17 @@ loops:
                           - Loop:
                               axis: {name: a23, extent: 4}
                               body:
-                              - Load:
-                                  names:
-                                  - in24
-                                  input: x
-                                  index:
-                                  - {literal: {value: 0, dtype: int}}
-                                  - {literal: {value: 0, dtype: int}}
-                                  - {var: a20}
-                                  - {var: a23}
-                                  dtype: null
+                              - {Load: {names: [in24], input: x, index: [{literal: 0}, {literal: 0}, {var: a20}, {var: a23}]}}
                               - {Accum: {name: acc18, value: in24, axes: [a23]}}
                           - {Assign: {name: v53, op: add, args: [acc18, in5]}}
                           - {Assign: {name: v54, op: reciprocal, args: [v53]}}
-                          - Load:
-                              names:
-                              - in25
-                              input: x
-                              index:
-                              - {literal: {value: 0, dtype: int}}
-                              - {literal: {value: 0, dtype: int}}
-                              - {var: a20}
-                              - {var: a18}
-                              dtype: null
+                          - {Load: {names: [in25], input: x, index: [{literal: 0}, {literal: 0}, {var: a20}, {var: a18}]}}
                           - {Assign: {name: v55, op: multiply, args: [in25, v54]}}
                           - {Assign: {name: v56, op: multiply, args: [v52, v55]}}
                           - {Accum: {name: acc19, value: v56, axes: [a20]}}
                       - {Assign: {name: v57, op: add, args: [acc19, in1]}}
                       - {Assign: {name: v58, op: reciprocal, args: [v57]}}
-                      - Load:
-                          names:
-                          - in26
-                          input: x
-                          index:
-                          - {literal: {value: 0, dtype: int}}
-                          - {literal: {value: 0, dtype: int}}
-                          - {var: a13}
-                          - {var: a18}
-                          dtype: null
+                      - {Load: {names: [in26], input: x, index: [{literal: 0}, {literal: 0}, {var: a13}, {var: a18}]}}
                       - {Assign: {name: v59, op: multiply, args: [in26, v47]}}
                       - {Assign: {name: v60, op: multiply, args: [v52, v59]}}
                       - {Assign: {name: v61, op: multiply, args: [v58, v60]}}
@@ -862,29 +598,11 @@ loops:
                           - Loop:
                               axis: {name: a26, extent: 4}
                               body:
-                              - Load:
-                                  names:
-                                  - in27
-                                  input: x
-                                  index:
-                                  - {literal: {value: 0, dtype: int}}
-                                  - {literal: {value: 0, dtype: int}}
-                                  - {var: a25}
-                                  - {var: a26}
-                                  dtype: null
+                              - {Load: {names: [in27], input: x, index: [{literal: 0}, {literal: 0}, {var: a25}, {var: a26}]}}
                               - {Accum: {name: acc21, value: in27, axes: [a26]}}
                           - {Assign: {name: v64, op: add, args: [acc21, in5]}}
                           - {Assign: {name: v65, op: reciprocal, args: [v64]}}
-                          - Load:
-                              names:
-                              - in28
-                              input: x
-                              index:
-                              - {literal: {value: 0, dtype: int}}
-                              - {literal: {value: 0, dtype: int}}
-                              - {var: a25}
-                              - {var: a18}
-                              dtype: null
+                          - {Load: {names: [in28], input: x, index: [{literal: 0}, {literal: 0}, {var: a25}, {var: a18}]}}
                           - {Assign: {name: v66, op: multiply, args: [in28, v65]}}
                           - {Accum: {name: acc22, value: v66, axes: [a25]}}
                       - {Assign: {name: v67, op: add, args: [acc22, in0]}}
@@ -895,44 +613,17 @@ loops:
                           - Loop:
                               axis: {name: a28, extent: 4}
                               body:
-                              - Load:
-                                  names:
-                                  - in29
-                                  input: x
-                                  index:
-                                  - {literal: {value: 0, dtype: int}}
-                                  - {literal: {value: 0, dtype: int}}
-                                  - {var: a25}
-                                  - {var: a28}
-                                  dtype: null
+                              - {Load: {names: [in29], input: x, index: [{literal: 0}, {literal: 0}, {var: a25}, {var: a28}]}}
                               - {Accum: {name: acc23, value: in29, axes: [a28]}}
                           - {Assign: {name: v69, op: add, args: [acc23, in5]}}
                           - {Assign: {name: v70, op: reciprocal, args: [v69]}}
-                          - Load:
-                              names:
-                              - in30
-                              input: x
-                              index:
-                              - {literal: {value: 0, dtype: int}}
-                              - {literal: {value: 0, dtype: int}}
-                              - {var: a25}
-                              - {var: a18}
-                              dtype: null
+                          - {Load: {names: [in30], input: x, index: [{literal: 0}, {literal: 0}, {var: a25}, {var: a18}]}}
                           - {Assign: {name: v71, op: multiply, args: [in30, v70]}}
                           - {Assign: {name: v72, op: multiply, args: [v68, v71]}}
                           - {Accum: {name: acc24, value: v72, axes: [a25]}}
                       - {Assign: {name: v73, op: add, args: [acc24, in1]}}
                       - {Assign: {name: v74, op: reciprocal, args: [v73]}}
-                      - Load:
-                          names:
-                          - in31
-                          input: x
-                          index:
-                          - {literal: {value: 0, dtype: int}}
-                          - {literal: {value: 0, dtype: int}}
-                          - {var: a13}
-                          - {var: a18}
-                          dtype: null
+                      - {Load: {names: [in31], input: x, index: [{literal: 0}, {literal: 0}, {var: a13}, {var: a18}]}}
                       - {Assign: {name: v75, op: multiply, args: [in31, v47]}}
                       - {Assign: {name: v76, op: multiply, args: [v68, v75]}}
                       - {Assign: {name: v77, op: multiply, args: [v74, v76]}}
@@ -940,16 +631,7 @@ loops:
                       - {Accum: {name: acc25, value: v78, axes: [a18]}}
                   - {Assign: {name: v79, op: add, args: [acc25, in3]}}
                   - {Assign: {name: v80, op: reciprocal, args: [v79]}}
-                  - Load:
-                      names:
-                      - in32
-                      input: x
-                      index:
-                      - {literal: {value: 0, dtype: int}}
-                      - {literal: {value: 0, dtype: int}}
-                      - {var: a13}
-                      - {var: a12}
-                      dtype: null
+                  - {Load: {names: [in32], input: x, index: [{literal: 0}, {literal: 0}, {var: a13}, {var: a12}]}}
                   - {Assign: {name: v81, op: multiply, args: [in32, v47]}}
                   - {Assign: {name: v82, op: multiply, args: [v39, v81]}}
                   - {Assign: {name: v83, op: multiply, args: [v45, v82]}}
@@ -958,34 +640,14 @@ loops:
                   - {Accum: {name: acc26, value: v85, axes: [a13]}}
               - {Assign: {name: v86, op: add, args: [acc26, in4]}}
               - {Assign: {name: v87, op: reciprocal, args: [v86]}}
-              - Load:
-                  names:
-                  - in33
-                  input: x
-                  index:
-                  - {literal: {value: 0, dtype: int}}
-                  - {literal: {value: 0, dtype: int}}
-                  - {var: a0}
-                  - {var: a12}
-                  dtype: null
+              - {Load: {names: [in33], input: x, index: [{literal: 0}, {literal: 0}, {var: a0}, {var: a12}]}}
               - {Assign: {name: v88, op: multiply, args: [in33, v1]}}
               - {Assign: {name: v89, op: multiply, args: [v39, v88]}}
               - {Assign: {name: v90, op: multiply, args: [v45, v89]}}
               - {Assign: {name: v91, op: multiply, args: [v17, v90]}}
               - {Assign: {name: v92, op: multiply, args: [v34, v91]}}
               - {Assign: {name: v93, op: multiply, args: [v87, v92]}}
-              - Write:
-                  output: mul_5
-                  index:
-                  - {literal: {value: 0, dtype: int}}
-                  - {literal: {value: 0, dtype: int}}
-                  - {var: a0}
-                  - {var: a12}
-                  values:
-                  - v93
-                  value_dtype: null
-                  atomic: false
-                  swizzle: NONE
+              - Write: {output: mul_5, index: [{literal: 0}, {literal: 0}, {var: a0}, {var: a12}], values: [v93]}
       name: k_mul_5_reduce
     inputs: [add_c1, add_1_c1, add_2_c1, add_3_c1, add_4_c1, add_5_c1, x]
     outputs: [[mul_5, f32, [1, 1, 4, 4]]]

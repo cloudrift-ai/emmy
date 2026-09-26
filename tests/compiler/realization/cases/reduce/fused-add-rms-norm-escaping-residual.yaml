@@ -1,6 +1,4 @@
-compute_cap:
-- 12
-- 0
+compute_cap: [12, 0]
 programs:
 - inputs: [x, r, w]
   outputs: [n, h]
@@ -25,24 +23,15 @@ programs:
     outputs: [[n, f32, [8, 256]]]
 configs:
 - program: 0
-  target:
-    loop: 0
-    origins:
-    - h
-    - n
+  target: {loop: 0, origins: [h, n]}
   realizations:
   - name: k_rms_norm_31ae5a
-    bindings: {}
-    pins:
-      FAST_MATH: false
+    pins: {FAST_MATH: false}
     knobs:
       REDUCE: coop
       WORK: t128
     identity: 41fd51a1e59b41047aff43e37a2e7126fb07462b999e92c06cad0ec97e0473dc
-    latency:
-      NVIDIA GeForce RTX 5090:
-        emmy_us: 1.6018490921436879
-        tcompile_us: 2.0489244935600563
+    latency: {NVIDIA GeForce RTX 5090: {emmy_us: 1.6018490921436879, tcompile_us: 2.0489244935600563}}
 loops:
 - inputs: [r, w, x]
   outputs: [h, n]
@@ -68,16 +57,16 @@ loops:
     op: loop
     attrs:
       body:
-      - {Load: {names: [in0], input: n_eps, index: [{literal: {value: 0, dtype: int}}], dtype: null}}
-      - Load: {names: [in1], input: n_mean_count, index: [{literal: {value: 0, dtype: int}}], dtype: null}
+      - {Load: {names: [in0], input: n_eps, index: [{literal: 0}]}}
+      - {Load: {names: [in1], input: n_mean_count, index: [{literal: 0}]}}
       - Loop:
           axis: {name: a0, extent: 8}
           body:
           - Loop:
               axis: {name: a1, extent: 256}
               body:
-              - {Load: {names: [in2], input: r, index: [{var: a0}, {var: a1}], dtype: null}}
-              - {Load: {names: [in3], input: x, index: [{var: a0}, {var: a1}], dtype: null}}
+              - {Load: {names: [in2], input: r, index: [{var: a0}, {var: a1}]}}
+              - {Load: {names: [in3], input: x, index: [{var: a0}, {var: a1}]}}
               - {Assign: {name: v0, op: add, args: [in2, in3]}}
               - {Assign: {name: v1, op: multiply, args: [v0, v0]}}
               - {Accum: {name: acc0, value: v1, axes: [a1]}}
@@ -87,32 +76,14 @@ loops:
           - Loop:
               axis: {name: a2, extent: 256}
               body:
-              - {Load: {names: [in4], input: r, index: [{var: a0}, {var: a2}], dtype: null}}
-              - {Load: {names: [in5], input: x, index: [{var: a0}, {var: a2}], dtype: null}}
+              - {Load: {names: [in4], input: r, index: [{var: a0}, {var: a2}]}}
+              - {Load: {names: [in5], input: x, index: [{var: a0}, {var: a2}]}}
               - {Assign: {name: v5, op: add, args: [in4, in5]}}
               - {Assign: {name: v6, op: multiply, args: [v4, v5]}}
-              - {Load: {names: [in6], input: w, index: [{var: a2}], dtype: null}}
+              - {Load: {names: [in6], input: w, index: [{var: a2}]}}
               - {Assign: {name: v7, op: multiply, args: [in6, v6]}}
-              - Write:
-                  output: h
-                  index:
-                  - {var: a0}
-                  - {var: a2}
-                  values:
-                  - v5
-                  value_dtype: null
-                  atomic: false
-                  swizzle: NONE
-              - Write:
-                  output: n
-                  index:
-                  - {var: a0}
-                  - {var: a2}
-                  values:
-                  - v7
-                  value_dtype: null
-                  atomic: false
-                  swizzle: NONE
+              - {Write: {output: h, index: [{var: a0}, {var: a2}], values: [v5]}}
+              - {Write: {output: n, index: [{var: a0}, {var: a2}], values: [v7]}}
       name: k_rms_norm_c541be
     inputs: [n_mean_count, n_eps, x, r, w]
     outputs: [[h, f32, [8, 256]], [n, f32, [8, 256]]]

@@ -19,9 +19,7 @@
 # Measured after the change: 4.2 us for this half, and the cut arm 6.3 us against 5.4 us fused --
 # a 211x kernel speedup that turns the placement fork from a foregone conclusion into a real
 # comparison. Correctness checked against eager (max abs error 3e-08).
-compute_cap:
-- 12
-- 0
+compute_cap: [12, 0]
 programs:
 - inputs: [x]
   outputs: [rms_norm]
@@ -39,33 +37,23 @@ programs:
     outputs: [[rms_norm, f32, [512, 4096]]]
 configs:
 - program: 0
-  target:
-    loop: 0
-    origins:
-    - rms_norm
+  target: {loop: 0, origins: [rms_norm]}
   realizations:
   - name: k_rms_norm_3fbe25
-    bindings: {}
-    pins:
-      FAST_MATH: false
-      PLACE@map.1/map: cut
+    pins: {FAST_MATH: false, PLACE@map.1/map: cut}
     knobs:
       WORK: t128
       REDUCE: coop
       RASTER: ''
     identity: fb7a762add6f602383192dd889a3346cc9dd0817adaef21d47c730caa4d865d3
   - name: k_rms_norm_3fbe25.b05eac70b4b1
-    bindings: {}
-    pins:
-      FAST_MATH: false
+    pins: {FAST_MATH: false}
     knobs:
       WORK: t512
       RASTER: ''
     identity: b05eac70b4b16c0bcc3256093315cb937b9cc86182f13c55c153d39b04ded368
   - name: k_rms_norm_3fbe25.146605b6f325
-    bindings: {}
-    pins:
-      FAST_MATH: false
+    pins: {FAST_MATH: false}
     knobs:
       WORK: t128
       REDUCE: coop
@@ -94,15 +82,15 @@ loops:
     op: loop
     attrs:
       body:
-      - Load: {names: [in0], input: rms_norm_eps, index: [{literal: {value: 0, dtype: int}}], dtype: null}
-      - Load: {names: [in1], input: rms_norm_mean_count, index: [{literal: {value: 0, dtype: int}}], dtype: null}
+      - {Load: {names: [in0], input: rms_norm_eps, index: [{literal: 0}]}}
+      - {Load: {names: [in1], input: rms_norm_mean_count, index: [{literal: 0}]}}
       - Loop:
           axis: {name: a0, extent: 512}
           body:
           - Loop:
               axis: {name: a1, extent: 4096}
               body:
-              - {Load: {names: [in2], input: x, index: [{var: a0}, {var: a1}], dtype: null}}
+              - {Load: {names: [in2], input: x, index: [{var: a0}, {var: a1}]}}
               - {Assign: {name: v0, op: multiply, args: [in2, in2]}}
               - {Accum: {name: acc0, value: v0, axes: [a1]}}
           - {Assign: {name: v1, op: divide, args: [acc0, in1]}}
@@ -111,20 +99,11 @@ loops:
           - Loop:
               axis: {name: a2, extent: 4096}
               body:
-              - {Load: {names: [in3], input: x, index: [{var: a0}, {var: a2}], dtype: null}}
+              - {Load: {names: [in3], input: x, index: [{var: a0}, {var: a2}]}}
               - {Assign: {name: v4, op: multiply, args: [in3, v3]}}
-              - {Load: {names: [in4], input: p_weight, index: [{var: a2}], dtype: null}}
+              - {Load: {names: [in4], input: p_weight, index: [{var: a2}]}}
               - {Assign: {name: v5, op: multiply, args: [in4, v4]}}
-              - Write:
-                  output: rms_norm
-                  index:
-                  - {var: a0}
-                  - {var: a2}
-                  values:
-                  - v5
-                  value_dtype: null
-                  atomic: false
-                  swizzle: NONE
+              - {Write: {output: rms_norm, index: [{var: a0}, {var: a2}], values: [v5]}}
       name: k_rms_norm_7f9133
     inputs: [rms_norm_mean_count, rms_norm_eps, x, p_weight]
     outputs: [[rms_norm, f32, [512, 4096]]]

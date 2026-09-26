@@ -10,9 +10,7 @@
 # weight channel per projection copy, since their K axes unify — into its own kernel gives that
 # piece a grid the block-scaled cell binds on. This case pins that route and the row it realizes,
 # so a placement seam this kernel must keep offering stays covered.
-compute_cap:
-- 12
-- 0
+compute_cap: [12, 0]
 programs:
 - inputs: [x]
   outputs: [linear_2]
@@ -39,7 +37,7 @@ programs:
           outputs: [[mask, i32, [1]]]
         - id: mask_bc
           op: tensor.index_map
-          attrs: {out_shape: [256], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
+          attrs: {out_shape: [256], sources: [{input_idx: 0, coord_map: [{literal: 0}]}]}
           inputs: [mask]
           outputs: [[mask_bc, i32, [256]]]
         - id: low
@@ -53,7 +51,7 @@ programs:
           outputs: [[shift, i32, [1]]]
         - id: shift_bc
           op: tensor.index_map
-          attrs: {out_shape: [256], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
+          attrs: {out_shape: [256], sources: [{input_idx: 0, coord_map: [{literal: 0}]}]}
           inputs: [shift]
           outputs: [[shift_bc, i32, [256]]]
         - id: high
@@ -81,7 +79,7 @@ programs:
             - input_idx: 0
               coord_map:
               - {var: out_coord_0}
-              select: {binary: {op: <, left: {var: out_coord_1}, right: {literal: {value: 1, dtype: int}}}}
+              select: {binary: {op: <, left: {var: out_coord_1}, right: {literal: 1}}}
             - {input_idx: 1, coord_map: [{var: out_coord_0}]}
           inputs: [vlow, vhigh]
           outputs: [[pairs, f32, [256, 2]]]
@@ -126,11 +124,7 @@ programs:
       - 32
       - 1
       sources:
-      - input_idx: 0
-        coord_map:
-        - {literal: {value: 0, dtype: int}}
-        - {literal: {value: 0, dtype: int}}
-        - {var: out_coord_2}
+      - {input_idx: 0, coord_map: [{literal: 0}, {literal: 0}, {var: out_coord_2}]}
     inputs: [mul_static_fp4_scale_2]
     outputs: [[mul_static_fp4_scale_2_bc, f32, [128, 32, 1]]]
   - id: mul_static_fp4_denom
@@ -144,7 +138,7 @@ programs:
     outputs: [[mul_static_fp4_shift, i32, [1]]]
   - id: mul_static_fp4_shift_bc
     op: tensor.index_map
-    attrs: {out_shape: [128, 256], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
+    attrs: {out_shape: [128, 256], sources: [{input_idx: 0, coord_map: [{literal: 0}]}]}
     inputs: [mul_static_fp4_shift]
     outputs: [[mul_static_fp4_shift_bc, i32, [128, 256]]]
   - id: n5
@@ -155,11 +149,7 @@ programs:
       - 32
       - 1
       sources:
-      - input_idx: 0
-        coord_map:
-        - {literal: {value: 0, dtype: int}}
-        - {literal: {value: 0, dtype: int}}
-        - {var: out_coord_2}
+      - {input_idx: 0, coord_map: [{literal: 0}, {literal: 0}, {var: out_coord_2}]}
     inputs: [mul_static_fp4_scale_2]
     outputs: [[mul_static_fp4_scale_2_bc, f32, [128, 32, 1]]]
   - id: p_down_weight_bits
@@ -188,7 +178,7 @@ programs:
           outputs: [[mask, i32, [1]]]
         - id: mask_bc
           op: tensor.index_map
-          attrs: {out_shape: [256], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
+          attrs: {out_shape: [256], sources: [{input_idx: 0, coord_map: [{literal: 0}]}]}
           inputs: [mask]
           outputs: [[mask_bc, i32, [256]]]
         - id: low
@@ -202,7 +192,7 @@ programs:
           outputs: [[shift, i32, [1]]]
         - id: shift_bc
           op: tensor.index_map
-          attrs: {out_shape: [256], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
+          attrs: {out_shape: [256], sources: [{input_idx: 0, coord_map: [{literal: 0}]}]}
           inputs: [shift]
           outputs: [[shift_bc, i32, [256]]]
         - id: high
@@ -230,7 +220,7 @@ programs:
             - input_idx: 0
               coord_map:
               - {var: out_coord_0}
-              select: {binary: {op: <, left: {var: out_coord_1}, right: {literal: {value: 1, dtype: int}}}}
+              select: {binary: {op: <, left: {var: out_coord_1}, right: {literal: 1}}}
             - {input_idx: 1, coord_map: [{var: out_coord_0}]}
           inputs: [vlow, vhigh]
           outputs: [[pairs, f32, [256, 2]]]
@@ -260,12 +250,7 @@ programs:
     outputs: [[p_down_weight_scale_2, f32, [1, 1]]]
   - id: p_down_weight_scale_2_bc
     op: tensor.index_map
-    attrs:
-      out_shape:
-      - 512
-      - 32
-      sources:
-      - {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}, {literal: {value: 0, dtype: int}}]}
+    attrs: {out_shape: [512, 32], sources: [{input_idx: 0, coord_map: [{literal: 0}, {literal: 0}]}]}
     inputs: [p_down_weight_scale_2]
     outputs: [[p_down_weight_scale_2_bc, f32, [512, 32]]]
   - id: p_down_weight_scale_bits
@@ -299,11 +284,7 @@ programs:
       - 32
       - 16
       sources:
-      - input_idx: 0
-        coord_map:
-        - {var: out_coord_0}
-        - {var: out_coord_1}
-        - {literal: {value: 0, dtype: int}}
+      - {input_idx: 0, coord_map: [{var: out_coord_0}, {var: out_coord_1}, {literal: 0}]}
     inputs: [p_down_weight_fused_r]
     outputs: [[p_down_weight_fused_r_bc, f16, [512, 32, 16]]]
   - id: p_down_weight_vals
@@ -352,7 +333,7 @@ programs:
           outputs: [[mask, i32, [1]]]
         - id: mask_bc
           op: tensor.index_map
-          attrs: {out_shape: [256], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
+          attrs: {out_shape: [256], sources: [{input_idx: 0, coord_map: [{literal: 0}]}]}
           inputs: [mask]
           outputs: [[mask_bc, i32, [256]]]
         - id: low
@@ -366,7 +347,7 @@ programs:
           outputs: [[shift, i32, [1]]]
         - id: shift_bc
           op: tensor.index_map
-          attrs: {out_shape: [256], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
+          attrs: {out_shape: [256], sources: [{input_idx: 0, coord_map: [{literal: 0}]}]}
           inputs: [shift]
           outputs: [[shift_bc, i32, [256]]]
         - id: high
@@ -394,7 +375,7 @@ programs:
             - input_idx: 0
               coord_map:
               - {var: out_coord_0}
-              select: {binary: {op: <, left: {var: out_coord_1}, right: {literal: {value: 1, dtype: int}}}}
+              select: {binary: {op: <, left: {var: out_coord_1}, right: {literal: 1}}}
             - {input_idx: 1, coord_map: [{var: out_coord_0}]}
           inputs: [vlow, vhigh]
           outputs: [[pairs, f32, [256, 2]]]
@@ -424,12 +405,7 @@ programs:
     outputs: [[p_gate_weight_scale_2, f32, [1, 1]]]
   - id: p_gate_weight_scale_2_bc
     op: tensor.index_map
-    attrs:
-      out_shape:
-      - 512
-      - 32
-      sources:
-      - {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}, {literal: {value: 0, dtype: int}}]}
+    attrs: {out_shape: [512, 32], sources: [{input_idx: 0, coord_map: [{literal: 0}, {literal: 0}]}]}
     inputs: [p_gate_weight_scale_2]
     outputs: [[p_gate_weight_scale_2_bc, f32, [512, 32]]]
   - id: p_gate_weight_scale_bits
@@ -463,11 +439,7 @@ programs:
       - 32
       - 16
       sources:
-      - input_idx: 0
-        coord_map:
-        - {var: out_coord_0}
-        - {var: out_coord_1}
-        - {literal: {value: 0, dtype: int}}
+      - {input_idx: 0, coord_map: [{var: out_coord_0}, {var: out_coord_1}, {literal: 0}]}
     inputs: [p_gate_weight_fused_r]
     outputs: [[p_gate_weight_fused_r_bc, f16, [512, 32, 16]]]
   - id: p_gate_weight_vals
@@ -516,7 +488,7 @@ programs:
           outputs: [[mask, i32, [1]]]
         - id: mask_bc
           op: tensor.index_map
-          attrs: {out_shape: [256], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
+          attrs: {out_shape: [256], sources: [{input_idx: 0, coord_map: [{literal: 0}]}]}
           inputs: [mask]
           outputs: [[mask_bc, i32, [256]]]
         - id: low
@@ -530,7 +502,7 @@ programs:
           outputs: [[shift, i32, [1]]]
         - id: shift_bc
           op: tensor.index_map
-          attrs: {out_shape: [256], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
+          attrs: {out_shape: [256], sources: [{input_idx: 0, coord_map: [{literal: 0}]}]}
           inputs: [shift]
           outputs: [[shift_bc, i32, [256]]]
         - id: high
@@ -558,7 +530,7 @@ programs:
             - input_idx: 0
               coord_map:
               - {var: out_coord_0}
-              select: {binary: {op: <, left: {var: out_coord_1}, right: {literal: {value: 1, dtype: int}}}}
+              select: {binary: {op: <, left: {var: out_coord_1}, right: {literal: 1}}}
             - {input_idx: 1, coord_map: [{var: out_coord_0}]}
           inputs: [vlow, vhigh]
           outputs: [[pairs, f32, [256, 2]]]
@@ -588,12 +560,7 @@ programs:
     outputs: [[p_up_weight_scale_2, f32, [1, 1]]]
   - id: p_up_weight_scale_2_bc
     op: tensor.index_map
-    attrs:
-      out_shape:
-      - 512
-      - 32
-      sources:
-      - {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}, {literal: {value: 0, dtype: int}}]}
+    attrs: {out_shape: [512, 32], sources: [{input_idx: 0, coord_map: [{literal: 0}, {literal: 0}]}]}
     inputs: [p_up_weight_scale_2]
     outputs: [[p_up_weight_scale_2_bc, f32, [512, 32]]]
   - id: p_up_weight_scale_bits
@@ -627,11 +594,7 @@ programs:
       - 32
       - 16
       sources:
-      - input_idx: 0
-        coord_map:
-        - {var: out_coord_0}
-        - {var: out_coord_1}
-        - {literal: {value: 0, dtype: int}}
+      - {input_idx: 0, coord_map: [{var: out_coord_0}, {var: out_coord_1}, {literal: 0}]}
     inputs: [p_up_weight_fused_r]
     outputs: [[p_up_weight_fused_r_bc, f16, [512, 32, 16]]]
   - id: p_up_weight_vals
@@ -694,7 +657,7 @@ programs:
           outputs: [[mask, i32, [1]]]
         - id: mask_bc
           op: tensor.index_map
-          attrs: {out_shape: [256], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
+          attrs: {out_shape: [256], sources: [{input_idx: 0, coord_map: [{literal: 0}]}]}
           inputs: [mask]
           outputs: [[mask_bc, i32, [256]]]
         - id: low
@@ -708,7 +671,7 @@ programs:
           outputs: [[shift, i32, [1]]]
         - id: shift_bc
           op: tensor.index_map
-          attrs: {out_shape: [256], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
+          attrs: {out_shape: [256], sources: [{input_idx: 0, coord_map: [{literal: 0}]}]}
           inputs: [shift]
           outputs: [[shift_bc, i32, [256]]]
         - id: high
@@ -736,7 +699,7 @@ programs:
             - input_idx: 0
               coord_map:
               - {var: out_coord_0}
-              select: {binary: {op: <, left: {var: out_coord_1}, right: {literal: {value: 1, dtype: int}}}}
+              select: {binary: {op: <, left: {var: out_coord_1}, right: {literal: 1}}}
             - {input_idx: 1, coord_map: [{var: out_coord_0}]}
           inputs: [vlow, vhigh]
           outputs: [[pairs, f32, [256, 2]]]
@@ -781,11 +744,7 @@ programs:
       - 32
       - 1
       sources:
-      - input_idx: 0
-        coord_map:
-        - {literal: {value: 0, dtype: int}}
-        - {literal: {value: 0, dtype: int}}
-        - {var: out_coord_2}
+      - {input_idx: 0, coord_map: [{literal: 0}, {literal: 0}, {var: out_coord_2}]}
     inputs: [x_static_fp4_scale_2]
     outputs: [[x_static_fp4_scale_2_bc, f32, [128, 32, 1]]]
   - id: n4
@@ -796,11 +755,7 @@ programs:
       - 32
       - 1
       sources:
-      - input_idx: 0
-        coord_map:
-        - {literal: {value: 0, dtype: int}}
-        - {literal: {value: 0, dtype: int}}
-        - {var: out_coord_2}
+      - {input_idx: 0, coord_map: [{literal: 0}, {literal: 0}, {var: out_coord_2}]}
     inputs: [x_static_fp4_scale_2]
     outputs: [[x_static_fp4_scale_2_bc, f32, [128, 32, 1]]]
   - id: x_static_fp4_scale_2_bc
@@ -811,11 +766,7 @@ programs:
       - 32
       - 1
       sources:
-      - input_idx: 0
-        coord_map:
-        - {literal: {value: 0, dtype: int}}
-        - {literal: {value: 0, dtype: int}}
-        - {var: out_coord_2}
+      - {input_idx: 0, coord_map: [{literal: 0}, {literal: 0}, {var: out_coord_2}]}
     inputs: [x_static_fp4_scale_2]
     outputs: [[x_static_fp4_scale_2_bc, f32, [128, 32, 1]]]
   - id: x_static_fp4_denom
@@ -855,11 +806,7 @@ programs:
       - 32
       - 16
       sources:
-      - input_idx: 0
-        coord_map:
-        - {var: out_coord_0}
-        - {var: out_coord_1}
-        - {literal: {value: 0, dtype: int}}
+      - {input_idx: 0, coord_map: [{var: out_coord_0}, {var: out_coord_1}, {literal: 0}]}
     inputs: [x_static_fp4_r1_fused]
     outputs: [[x_static_fp4_r1_fused_bc, f16, [128, 32, 16]]]
   - id: x_static_fp4_r2_scale_vals
@@ -884,11 +831,7 @@ programs:
       - 32
       - 16
       sources:
-      - input_idx: 0
-        coord_map:
-        - {var: out_coord_0}
-        - {var: out_coord_1}
-        - {literal: {value: 0, dtype: int}}
+      - {input_idx: 0, coord_map: [{var: out_coord_0}, {var: out_coord_1}, {literal: 0}]}
     inputs: [x_static_fp4_r2_fused]
     outputs: [[x_static_fp4_r2_fused_bc, f16, [128, 32, 16]]]
   - id: x_static_fp4_scale_vals
@@ -922,11 +865,7 @@ programs:
       - 32
       - 16
       sources:
-      - input_idx: 0
-        coord_map:
-        - {var: out_coord_0}
-        - {var: out_coord_1}
-        - {literal: {value: 0, dtype: int}}
+      - {input_idx: 0, coord_map: [{var: out_coord_0}, {var: out_coord_1}, {literal: 0}]}
     inputs: [x_static_fp4_safe]
     outputs: [[x_static_fp4_safe_bc, f32, [128, 32, 16]]]
   - id: x_static_fp4_norm
@@ -954,7 +893,7 @@ programs:
       - input_idx: 0
         coord_map:
         - {var: out_coord_0}
-        - {binary: {op: '*', left: {var: out_coord_1}, right: {literal: {value: 2, dtype: int}}}}
+        - {binary: {op: '*', left: {var: out_coord_1}, right: {literal: 2}}}
     inputs: [x_static_fp4_codes_flat]
     outputs: [[x_static_fp4_even, i32, [128, 256]]]
   - id: x_static_fp4_odd
@@ -969,8 +908,8 @@ programs:
         - {var: out_coord_0}
         - binary:
             op: +
-            left: {binary: {op: '*', left: {var: out_coord_1}, right: {literal: {value: 2, dtype: int}}}}
-            right: {literal: {value: 1, dtype: int}}
+            left: {binary: {op: '*', left: {var: out_coord_1}, right: {literal: 2}}}
+            right: {literal: 1}
     inputs: [x_static_fp4_codes_flat]
     outputs: [[x_static_fp4_odd, i32, [128, 256]]]
   - id: x_static_fp4_shift
@@ -979,7 +918,7 @@ programs:
     outputs: [[x_static_fp4_shift, i32, [1]]]
   - id: x_static_fp4_shift_bc
     op: tensor.index_map
-    attrs: {out_shape: [128, 256], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
+    attrs: {out_shape: [128, 256], sources: [{input_idx: 0, coord_map: [{literal: 0}]}]}
     inputs: [x_static_fp4_shift]
     outputs: [[x_static_fp4_shift_bc, i32, [128, 256]]]
   - id: x_static_fp4_hi
@@ -1107,11 +1046,7 @@ programs:
       - 32
       - 16
       sources:
-      - input_idx: 0
-        coord_map:
-        - {var: out_coord_0}
-        - {var: out_coord_1}
-        - {literal: {value: 0, dtype: int}}
+      - {input_idx: 0, coord_map: [{var: out_coord_0}, {var: out_coord_1}, {literal: 0}]}
     inputs: [mul_static_fp4_r1_fused]
     outputs: [[mul_static_fp4_r1_fused_bc, f16, [128, 32, 16]]]
   - id: mul_static_fp4_scale_vals
@@ -1145,11 +1080,7 @@ programs:
       - 32
       - 16
       sources:
-      - input_idx: 0
-        coord_map:
-        - {var: out_coord_0}
-        - {var: out_coord_1}
-        - {literal: {value: 0, dtype: int}}
+      - {input_idx: 0, coord_map: [{var: out_coord_0}, {var: out_coord_1}, {literal: 0}]}
     inputs: [mul_static_fp4_safe]
     outputs: [[mul_static_fp4_safe_bc, f32, [128, 32, 16]]]
   - id: mul_static_fp4_norm
@@ -1177,7 +1108,7 @@ programs:
       - input_idx: 0
         coord_map:
         - {var: out_coord_0}
-        - {binary: {op: '*', left: {var: out_coord_1}, right: {literal: {value: 2, dtype: int}}}}
+        - {binary: {op: '*', left: {var: out_coord_1}, right: {literal: 2}}}
     inputs: [mul_static_fp4_codes_flat]
     outputs: [[mul_static_fp4_even, i32, [128, 256]]]
   - id: mul_static_fp4_odd
@@ -1192,8 +1123,8 @@ programs:
         - {var: out_coord_0}
         - binary:
             op: +
-            left: {binary: {op: '*', left: {var: out_coord_1}, right: {literal: {value: 2, dtype: int}}}}
-            right: {literal: {value: 1, dtype: int}}
+            left: {binary: {op: '*', left: {var: out_coord_1}, right: {literal: 2}}}
+            right: {literal: 1}
     inputs: [mul_static_fp4_codes_flat]
     outputs: [[mul_static_fp4_odd, i32, [128, 256]]]
   - id: mul_static_fp4_hi
@@ -1239,93 +1170,24 @@ programs:
     outputs: [[linear_2, f16, [128, 512]]]
 configs:
 - program: 0
-  target:
-    loop: 0
-    origins:
-    - linear
-    - linear_1
-    - mul
-    - mul_static_fp4_abs
-    - mul_static_fp4_amax
-    - mul_static_fp4_bits
-    - mul_static_fp4_blk
-    - mul_static_fp4_byte
-    - mul_static_fp4_codes
-    - mul_static_fp4_codes_flat
-    - mul_static_fp4_denom
-    - mul_static_fp4_div32
-    - mul_static_fp4_even
-    - mul_static_fp4_f4_max_bc
-    - mul_static_fp4_floor_bc
-    - mul_static_fp4_fused
-    - mul_static_fp4_fused32
-    - mul_static_fp4_hi
-    - mul_static_fp4_norm
-    - mul_static_fp4_odd
-    - mul_static_fp4_ratio
-    - mul_static_fp4_safe
-    - mul_static_fp4_safe_bc
-    - mul_static_fp4_scale_2_bc
-    - mul_static_fp4_scale_bits
-    - mul_static_fp4_scale_vals
-    - mul_static_fp4_shift_bc
-    - n3
-    - n4
-    - p_gate_weight
-    - p_gate_weight_blk
-    - p_gate_weight_fused
-    - p_gate_weight_fused32
-    - p_gate_weight_fused_r
-    - p_gate_weight_fused_r_bc
-    - p_gate_weight_idx
-    - p_gate_weight_pairs
-    - p_gate_weight_sblk
-    - p_gate_weight_scale_2_bc
-    - p_gate_weight_scale_vals
-    - p_gate_weight_vals
-    - p_up_weight
-    - p_up_weight_blk
-    - p_up_weight_fused
-    - p_up_weight_fused32
-    - p_up_weight_fused_r
-    - p_up_weight_fused_r_bc
-    - p_up_weight_idx
-    - p_up_weight_pairs
-    - p_up_weight_sblk
-    - p_up_weight_scale_2_bc
-    - p_up_weight_scale_vals
-    - p_up_weight_vals
-    - silu
-    - x_static_fp4_r1_fused
-    - x_static_fp4_r1_fused32
-    - x_static_fp4_r1_fused_bc
-    - x_static_fp4_r1_idx
-    - x_static_fp4_r1_pairs
-    - x_static_fp4_r1_sblk
-    - x_static_fp4_r1_scale_vals
-    - x_static_fp4_r1_vals
-    - x_static_fp4_r1_value
-    - x_static_fp4_r2_fused
-    - x_static_fp4_r2_fused32
-    - x_static_fp4_r2_fused_bc
-    - x_static_fp4_r2_idx
-    - x_static_fp4_r2_pairs
-    - x_static_fp4_r2_sblk
-    - x_static_fp4_r2_scale_vals
-    - x_static_fp4_r2_vals
-    - x_static_fp4_r2_value
+  target: {loop: 0, origins: [linear, linear_1, mul, mul_static_fp4_abs, mul_static_fp4_amax, mul_static_fp4_bits, mul_static_fp4_blk, mul_static_fp4_byte,
+      mul_static_fp4_codes, mul_static_fp4_codes_flat, mul_static_fp4_denom, mul_static_fp4_div32, mul_static_fp4_even, mul_static_fp4_f4_max_bc,
+      mul_static_fp4_floor_bc, mul_static_fp4_fused, mul_static_fp4_fused32, mul_static_fp4_hi, mul_static_fp4_norm, mul_static_fp4_odd, mul_static_fp4_ratio,
+      mul_static_fp4_safe, mul_static_fp4_safe_bc, mul_static_fp4_scale_2_bc, mul_static_fp4_scale_bits, mul_static_fp4_scale_vals, mul_static_fp4_shift_bc,
+      n3, n4, p_gate_weight, p_gate_weight_blk, p_gate_weight_fused, p_gate_weight_fused32, p_gate_weight_fused_r, p_gate_weight_fused_r_bc, p_gate_weight_idx,
+      p_gate_weight_pairs, p_gate_weight_sblk, p_gate_weight_scale_2_bc, p_gate_weight_scale_vals, p_gate_weight_vals, p_up_weight, p_up_weight_blk,
+      p_up_weight_fused, p_up_weight_fused32, p_up_weight_fused_r, p_up_weight_fused_r_bc, p_up_weight_idx, p_up_weight_pairs, p_up_weight_sblk,
+      p_up_weight_scale_2_bc, p_up_weight_scale_vals, p_up_weight_vals, silu, x_static_fp4_r1_fused, x_static_fp4_r1_fused32, x_static_fp4_r1_fused_bc,
+      x_static_fp4_r1_idx, x_static_fp4_r1_pairs, x_static_fp4_r1_sblk, x_static_fp4_r1_scale_vals, x_static_fp4_r1_vals, x_static_fp4_r1_value,
+      x_static_fp4_r2_fused, x_static_fp4_r2_fused32, x_static_fp4_r2_fused_bc, x_static_fp4_r2_idx, x_static_fp4_r2_pairs, x_static_fp4_r2_sblk,
+      x_static_fp4_r2_scale_vals, x_static_fp4_r2_vals, x_static_fp4_r2_value]}
   realizations:
   - name: k_linear_reduce
-    bindings: {}
-    pins:
-      FAST_MATH: false
-      PLACE@map.1/map.3/inner: cut
+    pins: {FAST_MATH: false, PLACE@map.1/map.3/inner: cut}
     knobs: {}
     identity: 4fdfc44ca2c7f0ace07a82e78256d95101ae0c991be84a70a65db304c524353c
   - name: k_linear_reduce.4ee8d02336ac
-    bindings: {}
-    pins:
-      FAST_MATH: false
+    pins: {FAST_MATH: false}
     knobs:
       TILE@map.1/map.2/reduce.1/inner: ''
       TILE@map.2/map.2/reduce.1/inner: ''
@@ -1339,9 +1201,7 @@ configs:
       RASTER: ''
     identity: 4ee8d02336ac6118743535b0f3e1eb47419d8ae9bcc0ee673a0469fbc3cb52c6
   - name: k_linear_reduce.530f577c6ee3
-    bindings: {}
-    pins:
-      FAST_MATH: false
+    pins: {FAST_MATH: false}
     knobs:
       TILE: mma_m16n8k64_e2m1_f32/f1x4/k8
       WORK: w2x1
@@ -1401,7 +1261,7 @@ loops:
           outputs: [[mask, i32, [1]]]
         - id: mask_bc
           op: tensor.index_map
-          attrs: {out_shape: [256], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
+          attrs: {out_shape: [256], sources: [{input_idx: 0, coord_map: [{literal: 0}]}]}
           inputs: [mask]
           outputs: [[mask_bc, i32, [256]]]
         - id: low
@@ -1415,7 +1275,7 @@ loops:
           outputs: [[shift, i32, [1]]]
         - id: shift_bc
           op: tensor.index_map
-          attrs: {out_shape: [256], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
+          attrs: {out_shape: [256], sources: [{input_idx: 0, coord_map: [{literal: 0}]}]}
           inputs: [shift]
           outputs: [[shift_bc, i32, [256]]]
         - id: high
@@ -1443,7 +1303,7 @@ loops:
             - input_idx: 0
               coord_map:
               - {var: out_coord_0}
-              select: {binary: {op: <, left: {var: out_coord_1}, right: {literal: {value: 1, dtype: int}}}}
+              select: {binary: {op: <, left: {var: out_coord_1}, right: {literal: 1}}}
             - {input_idx: 1, coord_map: [{var: out_coord_0}]}
           inputs: [vlow, vhigh]
           outputs: [[pairs, f32, [256, 2]]]
@@ -1493,7 +1353,7 @@ loops:
           outputs: [[mask, i32, [1]]]
         - id: mask_bc
           op: tensor.index_map
-          attrs: {out_shape: [256], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
+          attrs: {out_shape: [256], sources: [{input_idx: 0, coord_map: [{literal: 0}]}]}
           inputs: [mask]
           outputs: [[mask_bc, i32, [256]]]
         - id: low
@@ -1507,7 +1367,7 @@ loops:
           outputs: [[shift, i32, [1]]]
         - id: shift_bc
           op: tensor.index_map
-          attrs: {out_shape: [256], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
+          attrs: {out_shape: [256], sources: [{input_idx: 0, coord_map: [{literal: 0}]}]}
           inputs: [shift]
           outputs: [[shift_bc, i32, [256]]]
         - id: high
@@ -1535,7 +1395,7 @@ loops:
             - input_idx: 0
               coord_map:
               - {var: out_coord_0}
-              select: {binary: {op: <, left: {var: out_coord_1}, right: {literal: {value: 1, dtype: int}}}}
+              select: {binary: {op: <, left: {var: out_coord_1}, right: {literal: 1}}}
             - {input_idx: 1, coord_map: [{var: out_coord_0}]}
           inputs: [vlow, vhigh]
           outputs: [[pairs, f32, [256, 2]]]
@@ -1585,7 +1445,7 @@ loops:
           outputs: [[mask, i32, [1]]]
         - id: mask_bc
           op: tensor.index_map
-          attrs: {out_shape: [256], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
+          attrs: {out_shape: [256], sources: [{input_idx: 0, coord_map: [{literal: 0}]}]}
           inputs: [mask]
           outputs: [[mask_bc, i32, [256]]]
         - id: low
@@ -1599,7 +1459,7 @@ loops:
           outputs: [[shift, i32, [1]]]
         - id: shift_bc
           op: tensor.index_map
-          attrs: {out_shape: [256], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
+          attrs: {out_shape: [256], sources: [{input_idx: 0, coord_map: [{literal: 0}]}]}
           inputs: [shift]
           outputs: [[shift_bc, i32, [256]]]
         - id: high
@@ -1627,7 +1487,7 @@ loops:
             - input_idx: 0
               coord_map:
               - {var: out_coord_0}
-              select: {binary: {op: <, left: {var: out_coord_1}, right: {literal: {value: 1, dtype: int}}}}
+              select: {binary: {op: <, left: {var: out_coord_1}, right: {literal: 1}}}
             - {input_idx: 1, coord_map: [{var: out_coord_0}]}
           inputs: [vlow, vhigh]
           outputs: [[pairs, f32, [256, 2]]]
@@ -1653,51 +1513,15 @@ loops:
     op: loop
     attrs:
       body:
-      - Load:
-          names:
-          - in0
-          input: p_gate_weight_scale_2
-          index:
-          - {literal: {value: 0, dtype: int}}
-          - {literal: {value: 0, dtype: int}}
-          dtype: null
-      - Load:
-          names:
-          - in1
-          input: p_up_weight_scale_2
-          index:
-          - {literal: {value: 0, dtype: int}}
-          - {literal: {value: 0, dtype: int}}
-          dtype: null
-      - Load:
-          names:
-          - in2
-          input: mul_static_fp4_scale_2
-          index:
-          - {literal: {value: 0, dtype: int}}
-          - {literal: {value: 0, dtype: int}}
-          - {literal: {value: 0, dtype: int}}
-          dtype: null
-      - Load:
-          names:
-          - in3
-          input: x_static_fp4_scale_2
-          index:
-          - {literal: {value: 0, dtype: int}}
-          - {literal: {value: 0, dtype: int}}
-          - {literal: {value: 0, dtype: int}}
-          dtype: null
-      - Load:
-          names:
-          - in4
-          input: mul_static_fp4_f4_max
-          index:
-          - {literal: {value: 0, dtype: int}}
-          dtype: null
+      - {Load: {names: [in0], input: p_gate_weight_scale_2, index: [{literal: 0}, {literal: 0}]}}
+      - {Load: {names: [in1], input: p_up_weight_scale_2, index: [{literal: 0}, {literal: 0}]}}
+      - Load: {names: [in2], input: mul_static_fp4_scale_2, index: [{literal: 0}, {literal: 0}, {literal: 0}]}
+      - {Load: {names: [in3], input: x_static_fp4_scale_2, index: [{literal: 0}, {literal: 0}, {literal: 0}]}}
+      - {Load: {names: [in4], input: mul_static_fp4_f4_max, index: [{literal: 0}]}}
       - {Assign: {name: v0, op: multiply, args: [in2, in4]}}
-      - Load: {names: [in5], input: mul_static_fp4_floor, index: [{literal: {value: 0, dtype: int}}], dtype: null}
-      - Load: {names: [in6], input: mul_static_fp4_shift, index: [{literal: {value: 0, dtype: int}}], dtype: null}
-      - {Load: {names: [in7], input: silu_one, index: [{literal: {value: 0, dtype: int}}], dtype: null}}
+      - {Load: {names: [in5], input: mul_static_fp4_floor, index: [{literal: 0}]}}
+      - {Load: {names: [in6], input: mul_static_fp4_shift, index: [{literal: 0}]}}
+      - {Load: {names: [in7], input: silu_one, index: [{literal: 0}]}}
       - Loop:
           axis: {name: a0, extent: 128}
           body:
@@ -1718,24 +1542,14 @@ loops:
                           - binary:
                               op: +
                               left:
-                                binary:
-                                  op: '*'
-                                  left: {binary: {op: /, left: {var: a1}, right: {literal: {value: 8, dtype: int}}}}
-                                  right: {literal: {value: 16, dtype: int}}
+                                binary: {op: '*', left: {binary: {op: /, left: {var: a1}, right: {literal: 8}}}, right: {literal: 16}}
                               right: {var: a2}
                           - binary:
                               op: +
                               left:
-                                binary:
-                                  op: '*'
-                                  left: {binary: {op: /, left: {var: a3}, right: {literal: {value: 16, dtype: int}}}}
-                                  right: {literal: {value: 8, dtype: int}}
+                                binary: {op: '*', left: {binary: {op: /, left: {var: a3}, right: {literal: 16}}}, right: {literal: 8}}
                               right:
-                                binary:
-                                  op: /
-                                  left: {binary: {op: '%', left: {var: a3}, right: {literal: {value: 16, dtype: int}}}}
-                                  right: {literal: {value: 2, dtype: int}}
-                          dtype: null
+                                binary: {op: /, left: {binary: {op: '%', left: {var: a3}, right: {literal: 16}}}, right: {literal: 2}}
                       - {Assign: {name: v1, op: copy, args: [in8], dtype: i32}}
                       - Load:
                           names:
@@ -1745,24 +1559,14 @@ loops:
                           - binary:
                               op: +
                               left:
-                                binary:
-                                  op: '*'
-                                  left: {binary: {op: /, left: {var: a1}, right: {literal: {value: 8, dtype: int}}}}
-                                  right: {literal: {value: 16, dtype: int}}
+                                binary: {op: '*', left: {binary: {op: /, left: {var: a1}, right: {literal: 8}}}, right: {literal: 16}}
                               right: {var: a2}
                           - binary:
                               op: +
                               left:
-                                binary:
-                                  op: '*'
-                                  left: {binary: {op: /, left: {var: a3}, right: {literal: {value: 16, dtype: int}}}}
-                                  right: {literal: {value: 8, dtype: int}}
+                                binary: {op: '*', left: {binary: {op: /, left: {var: a3}, right: {literal: 16}}}, right: {literal: 8}}
                               right:
-                                binary:
-                                  op: /
-                                  left: {binary: {op: '%', left: {var: a3}, right: {literal: {value: 16, dtype: int}}}}
-                                  right: {literal: {value: 2, dtype: int}}
-                          dtype: null
+                                binary: {op: /, left: {binary: {op: '%', left: {var: a3}, right: {literal: 16}}}, right: {literal: 2}}
                       - {Assign: {name: v2, op: copy, args: [in9], dtype: i32}}
                       - Load:
                           names:
@@ -1772,13 +1576,9 @@ loops:
                           - binary:
                               op: +
                               left:
-                                binary:
-                                  op: '*'
-                                  left: {binary: {op: /, left: {var: a1}, right: {literal: {value: 8, dtype: int}}}}
-                                  right: {literal: {value: 16, dtype: int}}
+                                binary: {op: '*', left: {binary: {op: /, left: {var: a1}, right: {literal: 8}}}, right: {literal: 16}}
                               right: {var: a2}
-                          - {binary: {op: /, left: {var: a3}, right: {literal: {value: 16, dtype: int}}}}
-                          dtype: null
+                          - {binary: {op: /, left: {var: a3}, right: {literal: 16}}}
                       - {Assign: {name: v3, op: from_f8e4m3, args: [in10]}}
                       - {Assign: {name: v4, op: multiply, args: [in0, v3]}}
                       - {Assign: {name: v5, op: copy, args: [v4], dtype: f16}}
@@ -1790,13 +1590,9 @@ loops:
                           - binary:
                               op: +
                               left:
-                                binary:
-                                  op: '*'
-                                  left: {binary: {op: /, left: {var: a1}, right: {literal: {value: 8, dtype: int}}}}
-                                  right: {literal: {value: 16, dtype: int}}
+                                binary: {op: '*', left: {binary: {op: /, left: {var: a1}, right: {literal: 8}}}, right: {literal: 16}}
                               right: {var: a2}
-                          - {binary: {op: /, left: {var: a3}, right: {literal: {value: 16, dtype: int}}}}
-                          dtype: null
+                          - {binary: {op: /, left: {var: a3}, right: {literal: 16}}}
                       - {Assign: {name: v6, op: from_f8e4m3, args: [in11]}}
                       - {Assign: {name: v7, op: multiply, args: [in1, v6]}}
                       - {Assign: {name: v8, op: copy, args: [v7], dtype: f16}}
@@ -1806,22 +1602,10 @@ loops:
                           input: p_gate_weight_f4_pairs
                           index:
                           - ternary:
-                              cond:
-                                binary:
-                                  op: <
-                                  left: {cast: {dtype: int, expr: {var: v1}}}
-                                  right: {literal: {value: 0, dtype: int}}
-                              if_true:
-                                binary:
-                                  op: +
-                                  left: {cast: {dtype: int, expr: {var: v1}}}
-                                  right: {literal: {value: 256, dtype: int}}
+                              cond: {binary: {op: <, left: {cast: {dtype: int, expr: {var: v1}}}, right: {literal: 0}}}
+                              if_true: {binary: {op: +, left: {cast: {dtype: int, expr: {var: v1}}}, right: {literal: 256}}}
                               if_false: {cast: {dtype: int, expr: {var: v1}}}
-                          - binary:
-                              op: '%'
-                              left: {binary: {op: '%', left: {var: a3}, right: {literal: {value: 16, dtype: int}}}}
-                              right: {literal: {value: 2, dtype: int}}
-                          dtype: null
+                          - binary: {op: '%', left: {binary: {op: '%', left: {var: a3}, right: {literal: 16}}}, right: {literal: 2}}
                       - {Assign: {name: v9, op: multiply, args: [in12, v5]}}
                       - Load:
                           names:
@@ -1829,22 +1613,10 @@ loops:
                           input: p_up_weight_f4_pairs
                           index:
                           - ternary:
-                              cond:
-                                binary:
-                                  op: <
-                                  left: {cast: {dtype: int, expr: {var: v2}}}
-                                  right: {literal: {value: 0, dtype: int}}
-                              if_true:
-                                binary:
-                                  op: +
-                                  left: {cast: {dtype: int, expr: {var: v2}}}
-                                  right: {literal: {value: 256, dtype: int}}
+                              cond: {binary: {op: <, left: {cast: {dtype: int, expr: {var: v2}}}, right: {literal: 0}}}
+                              if_true: {binary: {op: +, left: {cast: {dtype: int, expr: {var: v2}}}, right: {literal: 256}}}
                               if_false: {cast: {dtype: int, expr: {var: v2}}}
-                          - binary:
-                              op: '%'
-                              left: {binary: {op: '%', left: {var: a3}, right: {literal: {value: 16, dtype: int}}}}
-                              right: {literal: {value: 2, dtype: int}}
-                          dtype: null
+                          - binary: {op: '%', left: {binary: {op: '%', left: {var: a3}, right: {literal: 16}}}, right: {literal: 2}}
                       - {Assign: {name: v10, op: multiply, args: [in13, v8]}}
                       - Load:
                           names:
@@ -1855,16 +1627,9 @@ loops:
                           - binary:
                               op: +
                               left:
-                                binary:
-                                  op: '*'
-                                  left: {binary: {op: /, left: {var: a3}, right: {literal: {value: 16, dtype: int}}}}
-                                  right: {literal: {value: 8, dtype: int}}
+                                binary: {op: '*', left: {binary: {op: /, left: {var: a3}, right: {literal: 16}}}, right: {literal: 8}}
                               right:
-                                binary:
-                                  op: /
-                                  left: {binary: {op: '%', left: {var: a3}, right: {literal: {value: 16, dtype: int}}}}
-                                  right: {literal: {value: 2, dtype: int}}
-                          dtype: null
+                                binary: {op: /, left: {binary: {op: '%', left: {var: a3}, right: {literal: 16}}}, right: {literal: 2}}
                       - {Assign: {name: v11, op: copy, args: [in14], dtype: i32}}
                       - Load:
                           names:
@@ -1872,31 +1637,18 @@ loops:
                           input: x_static_fp4_f16_f4_pairs
                           index:
                           - ternary:
-                              cond:
-                                binary:
-                                  op: <
-                                  left: {cast: {dtype: int, expr: {var: v11}}}
-                                  right: {literal: {value: 0, dtype: int}}
-                              if_true:
-                                binary:
-                                  op: +
-                                  left: {cast: {dtype: int, expr: {var: v11}}}
-                                  right: {literal: {value: 256, dtype: int}}
+                              cond: {binary: {op: <, left: {cast: {dtype: int, expr: {var: v11}}}, right: {literal: 0}}}
+                              if_true: {binary: {op: +, left: {cast: {dtype: int, expr: {var: v11}}}, right: {literal: 256}}}
                               if_false: {cast: {dtype: int, expr: {var: v11}}}
-                          - binary:
-                              op: '%'
-                              left: {binary: {op: '%', left: {var: a3}, right: {literal: {value: 16, dtype: int}}}}
-                              right: {literal: {value: 2, dtype: int}}
-                          dtype: null
+                          - binary: {op: '%', left: {binary: {op: '%', left: {var: a3}, right: {literal: 16}}}, right: {literal: 2}}
                       - Load:
                           names:
                           - in16
                           input: x_static_fp4_scale_bits
                           index:
                           - {var: a0}
-                          - {binary: {op: /, left: {var: a3}, right: {literal: {value: 16, dtype: int}}}}
-                          - {literal: {value: 0, dtype: int}}
-                          dtype: null
+                          - {binary: {op: /, left: {var: a3}, right: {literal: 16}}}
+                          - {literal: 0}
                       - {Assign: {name: v12, op: from_f8e4m3, args: [in16]}}
                       - {Assign: {name: v13, op: multiply, args: [in3, v12]}}
                       - {Assign: {name: v14, op: copy, args: [v13], dtype: f16}}
@@ -1923,49 +1675,34 @@ loops:
                       - in17
                       input: p_gate_weight_bits
                       index:
-                      - {binary: {op: '*', left: {literal: {value: 2, dtype: int}}, right: {var: a1}}}
+                      - {binary: {op: '*', left: {literal: 2}, right: {var: a1}}}
                       - binary:
                           op: +
                           left:
-                            binary:
-                              op: '*'
-                              left: {binary: {op: /, left: {var: a4}, right: {literal: {value: 16, dtype: int}}}}
-                              right: {literal: {value: 8, dtype: int}}
+                            binary: {op: '*', left: {binary: {op: /, left: {var: a4}, right: {literal: 16}}}, right: {literal: 8}}
                           right:
-                            binary:
-                              op: /
-                              left: {binary: {op: '%', left: {var: a4}, right: {literal: {value: 16, dtype: int}}}}
-                              right: {literal: {value: 2, dtype: int}}
-                      dtype: null
+                            binary: {op: /, left: {binary: {op: '%', left: {var: a4}, right: {literal: 16}}}, right: {literal: 2}}
                   - {Assign: {name: v27, op: copy, args: [in17], dtype: i32}}
                   - Load:
                       names:
                       - in18
                       input: p_up_weight_bits
                       index:
-                      - {binary: {op: '*', left: {literal: {value: 2, dtype: int}}, right: {var: a1}}}
+                      - {binary: {op: '*', left: {literal: 2}, right: {var: a1}}}
                       - binary:
                           op: +
                           left:
-                            binary:
-                              op: '*'
-                              left: {binary: {op: /, left: {var: a4}, right: {literal: {value: 16, dtype: int}}}}
-                              right: {literal: {value: 8, dtype: int}}
+                            binary: {op: '*', left: {binary: {op: /, left: {var: a4}, right: {literal: 16}}}, right: {literal: 8}}
                           right:
-                            binary:
-                              op: /
-                              left: {binary: {op: '%', left: {var: a4}, right: {literal: {value: 16, dtype: int}}}}
-                              right: {literal: {value: 2, dtype: int}}
-                      dtype: null
+                            binary: {op: /, left: {binary: {op: '%', left: {var: a4}, right: {literal: 16}}}, right: {literal: 2}}
                   - {Assign: {name: v28, op: copy, args: [in18], dtype: i32}}
                   - Load:
                       names:
                       - in19
                       input: p_gate_weight_scale_bits
                       index:
-                      - {binary: {op: '*', left: {literal: {value: 2, dtype: int}}, right: {var: a1}}}
-                      - {binary: {op: /, left: {var: a4}, right: {literal: {value: 16, dtype: int}}}}
-                      dtype: null
+                      - {binary: {op: '*', left: {literal: 2}, right: {var: a1}}}
+                      - {binary: {op: /, left: {var: a4}, right: {literal: 16}}}
                   - {Assign: {name: v29, op: from_f8e4m3, args: [in19]}}
                   - {Assign: {name: v30, op: multiply, args: [in0, v29]}}
                   - {Assign: {name: v31, op: copy, args: [v30], dtype: f16}}
@@ -1974,9 +1711,8 @@ loops:
                       - in20
                       input: p_up_weight_scale_bits
                       index:
-                      - {binary: {op: '*', left: {literal: {value: 2, dtype: int}}, right: {var: a1}}}
-                      - {binary: {op: /, left: {var: a4}, right: {literal: {value: 16, dtype: int}}}}
-                      dtype: null
+                      - {binary: {op: '*', left: {literal: 2}, right: {var: a1}}}
+                      - {binary: {op: /, left: {var: a4}, right: {literal: 16}}}
                   - {Assign: {name: v32, op: from_f8e4m3, args: [in20]}}
                   - {Assign: {name: v33, op: multiply, args: [in1, v32]}}
                   - {Assign: {name: v34, op: copy, args: [v33], dtype: f16}}
@@ -1985,58 +1721,34 @@ loops:
                       - in21
                       input: p_gate_weight_bits
                       index:
-                      - binary:
-                          op: +
-                          left: {binary: {op: '*', left: {literal: {value: 2, dtype: int}}, right: {var: a1}}}
-                          right: {literal: {value: 1, dtype: int}}
+                      - binary: {op: +, left: {binary: {op: '*', left: {literal: 2}, right: {var: a1}}}, right: {literal: 1}}
                       - binary:
                           op: +
                           left:
-                            binary:
-                              op: '*'
-                              left: {binary: {op: /, left: {var: a4}, right: {literal: {value: 16, dtype: int}}}}
-                              right: {literal: {value: 8, dtype: int}}
+                            binary: {op: '*', left: {binary: {op: /, left: {var: a4}, right: {literal: 16}}}, right: {literal: 8}}
                           right:
-                            binary:
-                              op: /
-                              left: {binary: {op: '%', left: {var: a4}, right: {literal: {value: 16, dtype: int}}}}
-                              right: {literal: {value: 2, dtype: int}}
-                      dtype: null
+                            binary: {op: /, left: {binary: {op: '%', left: {var: a4}, right: {literal: 16}}}, right: {literal: 2}}
                   - {Assign: {name: v35, op: copy, args: [in21], dtype: i32}}
                   - Load:
                       names:
                       - in22
                       input: p_up_weight_bits
                       index:
-                      - binary:
-                          op: +
-                          left: {binary: {op: '*', left: {literal: {value: 2, dtype: int}}, right: {var: a1}}}
-                          right: {literal: {value: 1, dtype: int}}
+                      - binary: {op: +, left: {binary: {op: '*', left: {literal: 2}, right: {var: a1}}}, right: {literal: 1}}
                       - binary:
                           op: +
                           left:
-                            binary:
-                              op: '*'
-                              left: {binary: {op: /, left: {var: a4}, right: {literal: {value: 16, dtype: int}}}}
-                              right: {literal: {value: 8, dtype: int}}
+                            binary: {op: '*', left: {binary: {op: /, left: {var: a4}, right: {literal: 16}}}, right: {literal: 8}}
                           right:
-                            binary:
-                              op: /
-                              left: {binary: {op: '%', left: {var: a4}, right: {literal: {value: 16, dtype: int}}}}
-                              right: {literal: {value: 2, dtype: int}}
-                      dtype: null
+                            binary: {op: /, left: {binary: {op: '%', left: {var: a4}, right: {literal: 16}}}, right: {literal: 2}}
                   - {Assign: {name: v36, op: copy, args: [in22], dtype: i32}}
                   - Load:
                       names:
                       - in23
                       input: p_gate_weight_scale_bits
                       index:
-                      - binary:
-                          op: +
-                          left: {binary: {op: '*', left: {literal: {value: 2, dtype: int}}, right: {var: a1}}}
-                          right: {literal: {value: 1, dtype: int}}
-                      - {binary: {op: /, left: {var: a4}, right: {literal: {value: 16, dtype: int}}}}
-                      dtype: null
+                      - binary: {op: +, left: {binary: {op: '*', left: {literal: 2}, right: {var: a1}}}, right: {literal: 1}}
+                      - {binary: {op: /, left: {var: a4}, right: {literal: 16}}}
                   - {Assign: {name: v37, op: from_f8e4m3, args: [in23]}}
                   - {Assign: {name: v38, op: multiply, args: [in0, v37]}}
                   - {Assign: {name: v39, op: copy, args: [v38], dtype: f16}}
@@ -2045,12 +1757,8 @@ loops:
                       - in24
                       input: p_up_weight_scale_bits
                       index:
-                      - binary:
-                          op: +
-                          left: {binary: {op: '*', left: {literal: {value: 2, dtype: int}}, right: {var: a1}}}
-                          right: {literal: {value: 1, dtype: int}}
-                      - {binary: {op: /, left: {var: a4}, right: {literal: {value: 16, dtype: int}}}}
-                      dtype: null
+                      - binary: {op: +, left: {binary: {op: '*', left: {literal: 2}, right: {var: a1}}}, right: {literal: 1}}
+                      - {binary: {op: /, left: {var: a4}, right: {literal: 16}}}
                   - {Assign: {name: v40, op: from_f8e4m3, args: [in24]}}
                   - {Assign: {name: v41, op: multiply, args: [in1, v40]}}
                   - {Assign: {name: v42, op: copy, args: [v41], dtype: f16}}
@@ -2060,22 +1768,10 @@ loops:
                       input: p_gate_weight_f4_pairs
                       index:
                       - ternary:
-                          cond:
-                            binary:
-                              op: <
-                              left: {cast: {dtype: int, expr: {var: v27}}}
-                              right: {literal: {value: 0, dtype: int}}
-                          if_true:
-                            binary:
-                              op: +
-                              left: {cast: {dtype: int, expr: {var: v27}}}
-                              right: {literal: {value: 256, dtype: int}}
+                          cond: {binary: {op: <, left: {cast: {dtype: int, expr: {var: v27}}}, right: {literal: 0}}}
+                          if_true: {binary: {op: +, left: {cast: {dtype: int, expr: {var: v27}}}, right: {literal: 256}}}
                           if_false: {cast: {dtype: int, expr: {var: v27}}}
-                      - binary:
-                          op: '%'
-                          left: {binary: {op: '%', left: {var: a4}, right: {literal: {value: 16, dtype: int}}}}
-                          right: {literal: {value: 2, dtype: int}}
-                      dtype: null
+                      - binary: {op: '%', left: {binary: {op: '%', left: {var: a4}, right: {literal: 16}}}, right: {literal: 2}}
                   - {Assign: {name: v43, op: multiply, args: [in25, v31]}}
                   - Load:
                       names:
@@ -2083,22 +1779,10 @@ loops:
                       input: p_gate_weight_f4_pairs
                       index:
                       - ternary:
-                          cond:
-                            binary:
-                              op: <
-                              left: {cast: {dtype: int, expr: {var: v35}}}
-                              right: {literal: {value: 0, dtype: int}}
-                          if_true:
-                            binary:
-                              op: +
-                              left: {cast: {dtype: int, expr: {var: v35}}}
-                              right: {literal: {value: 256, dtype: int}}
+                          cond: {binary: {op: <, left: {cast: {dtype: int, expr: {var: v35}}}, right: {literal: 0}}}
+                          if_true: {binary: {op: +, left: {cast: {dtype: int, expr: {var: v35}}}, right: {literal: 256}}}
                           if_false: {cast: {dtype: int, expr: {var: v35}}}
-                      - binary:
-                          op: '%'
-                          left: {binary: {op: '%', left: {var: a4}, right: {literal: {value: 16, dtype: int}}}}
-                          right: {literal: {value: 2, dtype: int}}
-                      dtype: null
+                      - binary: {op: '%', left: {binary: {op: '%', left: {var: a4}, right: {literal: 16}}}, right: {literal: 2}}
                   - {Assign: {name: v44, op: multiply, args: [in26, v39]}}
                   - Load:
                       names:
@@ -2106,22 +1790,10 @@ loops:
                       input: p_up_weight_f4_pairs
                       index:
                       - ternary:
-                          cond:
-                            binary:
-                              op: <
-                              left: {cast: {dtype: int, expr: {var: v36}}}
-                              right: {literal: {value: 0, dtype: int}}
-                          if_true:
-                            binary:
-                              op: +
-                              left: {cast: {dtype: int, expr: {var: v36}}}
-                              right: {literal: {value: 256, dtype: int}}
+                          cond: {binary: {op: <, left: {cast: {dtype: int, expr: {var: v36}}}, right: {literal: 0}}}
+                          if_true: {binary: {op: +, left: {cast: {dtype: int, expr: {var: v36}}}, right: {literal: 256}}}
                           if_false: {cast: {dtype: int, expr: {var: v36}}}
-                      - binary:
-                          op: '%'
-                          left: {binary: {op: '%', left: {var: a4}, right: {literal: {value: 16, dtype: int}}}}
-                          right: {literal: {value: 2, dtype: int}}
-                      dtype: null
+                      - binary: {op: '%', left: {binary: {op: '%', left: {var: a4}, right: {literal: 16}}}, right: {literal: 2}}
                   - {Assign: {name: v45, op: multiply, args: [in27, v42]}}
                   - Load:
                       names:
@@ -2129,22 +1801,10 @@ loops:
                       input: p_up_weight_f4_pairs
                       index:
                       - ternary:
-                          cond:
-                            binary:
-                              op: <
-                              left: {cast: {dtype: int, expr: {var: v28}}}
-                              right: {literal: {value: 0, dtype: int}}
-                          if_true:
-                            binary:
-                              op: +
-                              left: {cast: {dtype: int, expr: {var: v28}}}
-                              right: {literal: {value: 256, dtype: int}}
+                          cond: {binary: {op: <, left: {cast: {dtype: int, expr: {var: v28}}}, right: {literal: 0}}}
+                          if_true: {binary: {op: +, left: {cast: {dtype: int, expr: {var: v28}}}, right: {literal: 256}}}
                           if_false: {cast: {dtype: int, expr: {var: v28}}}
-                      - binary:
-                          op: '%'
-                          left: {binary: {op: '%', left: {var: a4}, right: {literal: {value: 16, dtype: int}}}}
-                          right: {literal: {value: 2, dtype: int}}
-                      dtype: null
+                      - binary: {op: '%', left: {binary: {op: '%', left: {var: a4}, right: {literal: 16}}}, right: {literal: 2}}
                   - {Assign: {name: v46, op: multiply, args: [in28, v34]}}
                   - Load:
                       names:
@@ -2155,16 +1815,9 @@ loops:
                       - binary:
                           op: +
                           left:
-                            binary:
-                              op: '*'
-                              left: {binary: {op: /, left: {var: a4}, right: {literal: {value: 16, dtype: int}}}}
-                              right: {literal: {value: 8, dtype: int}}
+                            binary: {op: '*', left: {binary: {op: /, left: {var: a4}, right: {literal: 16}}}, right: {literal: 8}}
                           right:
-                            binary:
-                              op: /
-                              left: {binary: {op: '%', left: {var: a4}, right: {literal: {value: 16, dtype: int}}}}
-                              right: {literal: {value: 2, dtype: int}}
-                      dtype: null
+                            binary: {op: /, left: {binary: {op: '%', left: {var: a4}, right: {literal: 16}}}, right: {literal: 2}}
                   - {Assign: {name: v47, op: copy, args: [in29], dtype: i32}}
                   - Load:
                       names:
@@ -2172,31 +1825,18 @@ loops:
                       input: x_static_fp4_f16_f4_pairs
                       index:
                       - ternary:
-                          cond:
-                            binary:
-                              op: <
-                              left: {cast: {dtype: int, expr: {var: v47}}}
-                              right: {literal: {value: 0, dtype: int}}
-                          if_true:
-                            binary:
-                              op: +
-                              left: {cast: {dtype: int, expr: {var: v47}}}
-                              right: {literal: {value: 256, dtype: int}}
+                          cond: {binary: {op: <, left: {cast: {dtype: int, expr: {var: v47}}}, right: {literal: 0}}}
+                          if_true: {binary: {op: +, left: {cast: {dtype: int, expr: {var: v47}}}, right: {literal: 256}}}
                           if_false: {cast: {dtype: int, expr: {var: v47}}}
-                      - binary:
-                          op: '%'
-                          left: {binary: {op: '%', left: {var: a4}, right: {literal: {value: 16, dtype: int}}}}
-                          right: {literal: {value: 2, dtype: int}}
-                      dtype: null
+                      - binary: {op: '%', left: {binary: {op: '%', left: {var: a4}, right: {literal: 16}}}, right: {literal: 2}}
                   - Load:
                       names:
                       - in31
                       input: x_static_fp4_scale_bits
                       index:
                       - {var: a0}
-                      - {binary: {op: /, left: {var: a4}, right: {literal: {value: 16, dtype: int}}}}
-                      - {literal: {value: 0, dtype: int}}
-                      dtype: null
+                      - {binary: {op: /, left: {var: a4}, right: {literal: 16}}}
+                      - {literal: 0}
                   - {Assign: {name: v48, op: from_f8e4m3, args: [in31]}}
                   - {Assign: {name: v49, op: multiply, args: [in3, v48]}}
                   - {Assign: {name: v50, op: copy, args: [v49], dtype: f16}}
@@ -2239,16 +1879,7 @@ loops:
               - {Assign: {name: v83, op: left_shift, args: [v82, in6]}}
               - {Assign: {name: v84, op: bitwise_or, args: [v81, v83]}}
               - {Assign: {name: v85, op: copy, args: [v84], dtype: f4e2m1x2}}
-              - Write:
-                  output: mul_static_fp4_bits
-                  index:
-                  - {var: a0}
-                  - {var: a1}
-                  values:
-                  - v85
-                  value_dtype: null
-                  atomic: false
-                  swizzle: NONE
+              - {Write: {output: mul_static_fp4_bits, index: [{var: a0}, {var: a1}], values: [v85]}}
           - Loop:
               axis: {name: a5, extent: 32}
               body:
@@ -2263,58 +1894,34 @@ loops:
                           - in32
                           input: p_gate_weight_bits
                           index:
-                          - binary:
-                              op: +
-                              left: {binary: {op: '*', left: {literal: {value: 16, dtype: int}}, right: {var: a5}}}
-                              right: {var: a6}
+                          - binary: {op: +, left: {binary: {op: '*', left: {literal: 16}, right: {var: a5}}}, right: {var: a6}}
                           - binary:
                               op: +
                               left:
-                                binary:
-                                  op: '*'
-                                  left: {binary: {op: /, left: {var: a7}, right: {literal: {value: 16, dtype: int}}}}
-                                  right: {literal: {value: 8, dtype: int}}
+                                binary: {op: '*', left: {binary: {op: /, left: {var: a7}, right: {literal: 16}}}, right: {literal: 8}}
                               right:
-                                binary:
-                                  op: /
-                                  left: {binary: {op: '%', left: {var: a7}, right: {literal: {value: 16, dtype: int}}}}
-                                  right: {literal: {value: 2, dtype: int}}
-                          dtype: null
+                                binary: {op: /, left: {binary: {op: '%', left: {var: a7}, right: {literal: 16}}}, right: {literal: 2}}
                       - {Assign: {name: v86, op: copy, args: [in32], dtype: i32}}
                       - Load:
                           names:
                           - in33
                           input: p_up_weight_bits
                           index:
-                          - binary:
-                              op: +
-                              left: {binary: {op: '*', left: {literal: {value: 16, dtype: int}}, right: {var: a5}}}
-                              right: {var: a6}
+                          - binary: {op: +, left: {binary: {op: '*', left: {literal: 16}, right: {var: a5}}}, right: {var: a6}}
                           - binary:
                               op: +
                               left:
-                                binary:
-                                  op: '*'
-                                  left: {binary: {op: /, left: {var: a7}, right: {literal: {value: 16, dtype: int}}}}
-                                  right: {literal: {value: 8, dtype: int}}
+                                binary: {op: '*', left: {binary: {op: /, left: {var: a7}, right: {literal: 16}}}, right: {literal: 8}}
                               right:
-                                binary:
-                                  op: /
-                                  left: {binary: {op: '%', left: {var: a7}, right: {literal: {value: 16, dtype: int}}}}
-                                  right: {literal: {value: 2, dtype: int}}
-                          dtype: null
+                                binary: {op: /, left: {binary: {op: '%', left: {var: a7}, right: {literal: 16}}}, right: {literal: 2}}
                       - {Assign: {name: v87, op: copy, args: [in33], dtype: i32}}
                       - Load:
                           names:
                           - in34
                           input: p_gate_weight_scale_bits
                           index:
-                          - binary:
-                              op: +
-                              left: {binary: {op: '*', left: {literal: {value: 16, dtype: int}}, right: {var: a5}}}
-                              right: {var: a6}
-                          - {binary: {op: /, left: {var: a7}, right: {literal: {value: 16, dtype: int}}}}
-                          dtype: null
+                          - binary: {op: +, left: {binary: {op: '*', left: {literal: 16}, right: {var: a5}}}, right: {var: a6}}
+                          - {binary: {op: /, left: {var: a7}, right: {literal: 16}}}
                       - {Assign: {name: v88, op: from_f8e4m3, args: [in34]}}
                       - {Assign: {name: v89, op: multiply, args: [in0, v88]}}
                       - {Assign: {name: v90, op: copy, args: [v89], dtype: f16}}
@@ -2323,12 +1930,8 @@ loops:
                           - in35
                           input: p_up_weight_scale_bits
                           index:
-                          - binary:
-                              op: +
-                              left: {binary: {op: '*', left: {literal: {value: 16, dtype: int}}, right: {var: a5}}}
-                              right: {var: a6}
-                          - {binary: {op: /, left: {var: a7}, right: {literal: {value: 16, dtype: int}}}}
-                          dtype: null
+                          - binary: {op: +, left: {binary: {op: '*', left: {literal: 16}, right: {var: a5}}}, right: {var: a6}}
+                          - {binary: {op: /, left: {var: a7}, right: {literal: 16}}}
                       - {Assign: {name: v91, op: from_f8e4m3, args: [in35]}}
                       - {Assign: {name: v92, op: multiply, args: [in1, v91]}}
                       - {Assign: {name: v93, op: copy, args: [v92], dtype: f16}}
@@ -2338,22 +1941,10 @@ loops:
                           input: p_gate_weight_f4_pairs
                           index:
                           - ternary:
-                              cond:
-                                binary:
-                                  op: <
-                                  left: {cast: {dtype: int, expr: {var: v86}}}
-                                  right: {literal: {value: 0, dtype: int}}
-                              if_true:
-                                binary:
-                                  op: +
-                                  left: {cast: {dtype: int, expr: {var: v86}}}
-                                  right: {literal: {value: 256, dtype: int}}
+                              cond: {binary: {op: <, left: {cast: {dtype: int, expr: {var: v86}}}, right: {literal: 0}}}
+                              if_true: {binary: {op: +, left: {cast: {dtype: int, expr: {var: v86}}}, right: {literal: 256}}}
                               if_false: {cast: {dtype: int, expr: {var: v86}}}
-                          - binary:
-                              op: '%'
-                              left: {binary: {op: '%', left: {var: a7}, right: {literal: {value: 16, dtype: int}}}}
-                              right: {literal: {value: 2, dtype: int}}
-                          dtype: null
+                          - binary: {op: '%', left: {binary: {op: '%', left: {var: a7}, right: {literal: 16}}}, right: {literal: 2}}
                       - {Assign: {name: v94, op: multiply, args: [in36, v90]}}
                       - Load:
                           names:
@@ -2361,22 +1952,10 @@ loops:
                           input: p_up_weight_f4_pairs
                           index:
                           - ternary:
-                              cond:
-                                binary:
-                                  op: <
-                                  left: {cast: {dtype: int, expr: {var: v87}}}
-                                  right: {literal: {value: 0, dtype: int}}
-                              if_true:
-                                binary:
-                                  op: +
-                                  left: {cast: {dtype: int, expr: {var: v87}}}
-                                  right: {literal: {value: 256, dtype: int}}
+                              cond: {binary: {op: <, left: {cast: {dtype: int, expr: {var: v87}}}, right: {literal: 0}}}
+                              if_true: {binary: {op: +, left: {cast: {dtype: int, expr: {var: v87}}}, right: {literal: 256}}}
                               if_false: {cast: {dtype: int, expr: {var: v87}}}
-                          - binary:
-                              op: '%'
-                              left: {binary: {op: '%', left: {var: a7}, right: {literal: {value: 16, dtype: int}}}}
-                              right: {literal: {value: 2, dtype: int}}
-                          dtype: null
+                          - binary: {op: '%', left: {binary: {op: '%', left: {var: a7}, right: {literal: 16}}}, right: {literal: 2}}
                       - {Assign: {name: v95, op: multiply, args: [in37, v93]}}
                       - Load:
                           names:
@@ -2387,16 +1966,9 @@ loops:
                           - binary:
                               op: +
                               left:
-                                binary:
-                                  op: '*'
-                                  left: {binary: {op: /, left: {var: a7}, right: {literal: {value: 16, dtype: int}}}}
-                                  right: {literal: {value: 8, dtype: int}}
+                                binary: {op: '*', left: {binary: {op: /, left: {var: a7}, right: {literal: 16}}}, right: {literal: 8}}
                               right:
-                                binary:
-                                  op: /
-                                  left: {binary: {op: '%', left: {var: a7}, right: {literal: {value: 16, dtype: int}}}}
-                                  right: {literal: {value: 2, dtype: int}}
-                          dtype: null
+                                binary: {op: /, left: {binary: {op: '%', left: {var: a7}, right: {literal: 16}}}, right: {literal: 2}}
                       - {Assign: {name: v96, op: copy, args: [in38], dtype: i32}}
                       - Load:
                           names:
@@ -2404,31 +1976,18 @@ loops:
                           input: x_static_fp4_f16_f4_pairs
                           index:
                           - ternary:
-                              cond:
-                                binary:
-                                  op: <
-                                  left: {cast: {dtype: int, expr: {var: v96}}}
-                                  right: {literal: {value: 0, dtype: int}}
-                              if_true:
-                                binary:
-                                  op: +
-                                  left: {cast: {dtype: int, expr: {var: v96}}}
-                                  right: {literal: {value: 256, dtype: int}}
+                              cond: {binary: {op: <, left: {cast: {dtype: int, expr: {var: v96}}}, right: {literal: 0}}}
+                              if_true: {binary: {op: +, left: {cast: {dtype: int, expr: {var: v96}}}, right: {literal: 256}}}
                               if_false: {cast: {dtype: int, expr: {var: v96}}}
-                          - binary:
-                              op: '%'
-                              left: {binary: {op: '%', left: {var: a7}, right: {literal: {value: 16, dtype: int}}}}
-                              right: {literal: {value: 2, dtype: int}}
-                          dtype: null
+                          - binary: {op: '%', left: {binary: {op: '%', left: {var: a7}, right: {literal: 16}}}, right: {literal: 2}}
                       - Load:
                           names:
                           - in40
                           input: x_static_fp4_scale_bits
                           index:
                           - {var: a0}
-                          - {binary: {op: /, left: {var: a7}, right: {literal: {value: 16, dtype: int}}}}
-                          - {literal: {value: 0, dtype: int}}
-                          dtype: null
+                          - {binary: {op: /, left: {var: a7}, right: {literal: 16}}}
+                          - {literal: 0}
                       - {Assign: {name: v97, op: from_f8e4m3, args: [in40]}}
                       - {Assign: {name: v98, op: multiply, args: [in3, v97]}}
                       - {Assign: {name: v99, op: copy, args: [v98], dtype: f16}}
@@ -2449,17 +2008,7 @@ loops:
                   - {Accum: {name: acc9, value: v111, op: maximum, axes: [a6]}}
               - {Assign: {name: v112, op: divide, args: [acc9, v0]}}
               - {Assign: {name: v113, op: to_f8e4m3, args: [v112], dtype: f8e4m3}}
-              - Write:
-                  output: mul_static_fp4_scale_bits
-                  index:
-                  - {var: a0}
-                  - {var: a5}
-                  - {literal: {value: 0, dtype: int}}
-                  values:
-                  - v113
-                  value_dtype: null
-                  atomic: false
-                  swizzle: NONE
+              - Write: {output: mul_static_fp4_scale_bits, index: [{var: a0}, {var: a5}, {literal: 0}], values: [v113]}
       name: k_linear_reduce_105826
     inputs: [p_gate_weight_scale_2, x_static_fp4_scale_2, p_up_weight_scale_2, silu_one, mul_static_fp4_floor, mul_static_fp4_shift, mul_static_fp4_scale_2,
       mul_static_fp4_f4_max, p_gate_weight_scale_bits, x_static_fp4_scale_bits, p_gate_weight_bits, x_static_fp4_bits, p_gate_weight_f4_pairs,

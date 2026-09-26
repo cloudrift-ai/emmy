@@ -11,9 +11,7 @@
 #
 # The program is the layer's q_proj cone alone, its normed input made a program input: the whole
 # layer now fuses into one kernel, where this linear is reachable only through a cut route.
-compute_cap:
-- 7
-- 0
+compute_cap: [7, 0]
 programs:
 - inputs: [mul_1]
   outputs: [linear]
@@ -27,7 +25,7 @@ programs:
     outputs: [[p_attn_q_proj_weight_int4_bits, i32, [1]]]
   - id: p_attn_q_proj_weight_int4_bits_bc
     op: tensor.index_map
-    attrs: {out_shape: [8], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
+    attrs: {out_shape: [8], sources: [{input_idx: 0, coord_map: [{literal: 0}]}]}
     inputs: [p_attn_q_proj_weight_int4_bits]
     outputs: [[p_attn_q_proj_weight_int4_bits_bc, i32, [8]]]
   - id: p_attn_q_proj_weight_int4_lane_stride
@@ -36,7 +34,7 @@ programs:
     outputs: [[p_attn_q_proj_weight_int4_lane_stride, i32, [1]]]
   - id: p_attn_q_proj_weight_int4_lane_stride_bc
     op: tensor.index_map
-    attrs: {out_shape: [8], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
+    attrs: {out_shape: [8], sources: [{input_idx: 0, coord_map: [{literal: 0}]}]}
     inputs: [p_attn_q_proj_weight_int4_lane_stride]
     outputs: [[p_attn_q_proj_weight_int4_lane_stride_bc, i32, [8]]]
   - id: p_attn_q_proj_weight_int4_lanes
@@ -45,7 +43,7 @@ programs:
     outputs: [[p_attn_q_proj_weight_int4_lanes, i32, [1]]]
   - id: p_attn_q_proj_weight_int4_lanes_bc
     op: tensor.index_map
-    attrs: {out_shape: [8], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
+    attrs: {out_shape: [8], sources: [{input_idx: 0, coord_map: [{literal: 0}]}]}
     inputs: [p_attn_q_proj_weight_int4_lanes]
     outputs: [[p_attn_q_proj_weight_int4_lanes_bc, i32, [8]]]
   - id: p_attn_q_proj_weight_int4_slots
@@ -83,7 +81,7 @@ programs:
     outputs: [[p_attn_q_proj_weight_integers_mask, i32, [1]]]
   - id: p_attn_q_proj_weight_integers_mask_bc
     op: tensor.index_map
-    attrs: {out_shape: [640, 8, 5120], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
+    attrs: {out_shape: [640, 8, 5120], sources: [{input_idx: 0, coord_map: [{literal: 0}]}]}
     inputs: [p_attn_q_proj_weight_integers_mask]
     outputs: [[p_attn_q_proj_weight_integers_mask_bc, i32, [640, 8, 5120]]]
   - id: p_attn_q_proj_weight_integers_shift_view
@@ -99,11 +97,7 @@ programs:
       - 8
       - 5120
       sources:
-      - input_idx: 0
-        coord_map:
-        - {literal: {value: 0, dtype: int}}
-        - {var: out_coord_1}
-        - {literal: {value: 0, dtype: int}}
+      - {input_idx: 0, coord_map: [{literal: 0}, {var: out_coord_1}, {literal: 0}]}
     inputs: [p_attn_q_proj_weight_integers_shift_view]
     outputs: [[p_attn_q_proj_weight_integers_shift_view_bc, i32, [640, 8, 5120]]]
   - id: p_attn_q_proj_weight_qweight
@@ -129,11 +123,7 @@ programs:
       - 8
       - 5120
       sources:
-      - input_idx: 0
-        coord_map:
-        - {var: out_coord_0}
-        - {literal: {value: 0, dtype: int}}
-        - {var: out_coord_2}
+      - {input_idx: 0, coord_map: [{var: out_coord_0}, {literal: 0}, {var: out_coord_2}]}
     inputs: [p_attn_q_proj_weight_integers_view]
     outputs: [[p_attn_q_proj_weight_integers_view_bc, i32, [640, 8, 5120]]]
   - id: p_attn_q_proj_weight_integers_shifted
@@ -184,11 +174,7 @@ programs:
       - 128
       - 5120
       sources:
-      - input_idx: 0
-        coord_map:
-        - {var: out_coord_0}
-        - {literal: {value: 0, dtype: int}}
-        - {var: out_coord_2}
+      - {input_idx: 0, coord_map: [{var: out_coord_0}, {literal: 0}, {var: out_coord_2}]}
     inputs: [p_attn_q_proj_weight_scales_view]
     outputs: [[p_attn_q_proj_weight_scales_view_bc, f16, [40, 128, 5120]]]
   - id: p_attn_q_proj_weight_scale_values
@@ -202,7 +188,7 @@ programs:
     outputs: [[p_attn_q_proj_weight_zero_bias, i32, [1]]]
   - id: p_attn_q_proj_weight_zero_bias_bc
     op: tensor.index_map
-    attrs: {out_shape: [40, 5120], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
+    attrs: {out_shape: [40, 5120], sources: [{input_idx: 0, coord_map: [{literal: 0}]}]}
     inputs: [p_attn_q_proj_weight_zero_bias]
     outputs: [[p_attn_q_proj_weight_zero_bias_bc, i32, [40, 5120]]]
   - id: p_attn_q_proj_weight_zeros_grouped_mask
@@ -211,7 +197,7 @@ programs:
     outputs: [[p_attn_q_proj_weight_zeros_grouped_mask, i32, [1]]]
   - id: p_attn_q_proj_weight_zeros_grouped_mask_bc
     op: tensor.index_map
-    attrs: {out_shape: [40, 640, 8], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
+    attrs: {out_shape: [40, 640, 8], sources: [{input_idx: 0, coord_map: [{literal: 0}]}]}
     inputs: [p_attn_q_proj_weight_zeros_grouped_mask]
     outputs: [[p_attn_q_proj_weight_zeros_grouped_mask_bc, i32, [40, 640, 8]]]
   - id: p_attn_q_proj_weight_zeros_grouped_shift_view
@@ -227,11 +213,7 @@ programs:
       - 640
       - 8
       sources:
-      - input_idx: 0
-        coord_map:
-        - {literal: {value: 0, dtype: int}}
-        - {literal: {value: 0, dtype: int}}
-        - {var: out_coord_2}
+      - {input_idx: 0, coord_map: [{literal: 0}, {literal: 0}, {var: out_coord_2}]}
     inputs: [p_attn_q_proj_weight_zeros_grouped_shift_view]
     outputs: [[p_attn_q_proj_weight_zeros_grouped_shift_view_bc, i32, [40, 640, 8]]]
   - id: p_attn_q_proj_weight_zeros_grouped_view
@@ -247,11 +229,7 @@ programs:
       - 640
       - 8
       sources:
-      - input_idx: 0
-        coord_map:
-        - {var: out_coord_0}
-        - {var: out_coord_1}
-        - {literal: {value: 0, dtype: int}}
+      - {input_idx: 0, coord_map: [{var: out_coord_0}, {var: out_coord_1}, {literal: 0}]}
     inputs: [p_attn_q_proj_weight_zeros_grouped_view]
     outputs: [[p_attn_q_proj_weight_zeros_grouped_view_bc, i32, [40, 640, 8]]]
   - id: p_attn_q_proj_weight_zeros_grouped_shifted
@@ -287,11 +265,7 @@ programs:
       - 128
       - 5120
       sources:
-      - input_idx: 0
-        coord_map:
-        - {var: out_coord_0}
-        - {literal: {value: 0, dtype: int}}
-        - {var: out_coord_2}
+      - {input_idx: 0, coord_map: [{var: out_coord_0}, {literal: 0}, {var: out_coord_2}]}
     inputs: [p_attn_q_proj_weight_zeros_view]
     outputs: [[p_attn_q_proj_weight_zeros_view_bc, i32, [40, 128, 5120]]]
   - id: p_attn_q_proj_weight_zeros
@@ -324,38 +298,15 @@ programs:
     outputs: [[linear, f16, [1, 512, 5120]]]
 configs:
 - program: 0
-  target:
-    loop: 0
-    origins:
-    - linear
-    - p_attn_q_proj_weight
-    - p_attn_q_proj_weight_centered
-    - p_attn_q_proj_weight_integers
-    - p_attn_q_proj_weight_integers_mask_bc
-    - p_attn_q_proj_weight_integers_nibble
-    - p_attn_q_proj_weight_integers_shift_view_bc
-    - p_attn_q_proj_weight_integers_shifted
-    - p_attn_q_proj_weight_integers_view_bc
-    - p_attn_q_proj_weight_scale_values
-    - p_attn_q_proj_weight_scaled
-    - p_attn_q_proj_weight_scales_view_bc
-    - p_attn_q_proj_weight_values
-    - p_attn_q_proj_weight_zero_bias_bc
-    - p_attn_q_proj_weight_zeros
-    - p_attn_q_proj_weight_zeros_grouped
-    - p_attn_q_proj_weight_zeros_grouped_mask_bc
-    - p_attn_q_proj_weight_zeros_grouped_nibble
-    - p_attn_q_proj_weight_zeros_grouped_shift_view_bc
-    - p_attn_q_proj_weight_zeros_grouped_shifted
-    - p_attn_q_proj_weight_zeros_grouped_view_bc
-    - p_attn_q_proj_weight_zeros_unbiased
-    - p_attn_q_proj_weight_zeros_view
-    - p_attn_q_proj_weight_zeros_view_bc
+  target: {loop: 0, origins: [linear, p_attn_q_proj_weight, p_attn_q_proj_weight_centered, p_attn_q_proj_weight_integers, p_attn_q_proj_weight_integers_mask_bc,
+      p_attn_q_proj_weight_integers_nibble, p_attn_q_proj_weight_integers_shift_view_bc, p_attn_q_proj_weight_integers_shifted, p_attn_q_proj_weight_integers_view_bc,
+      p_attn_q_proj_weight_scale_values, p_attn_q_proj_weight_scaled, p_attn_q_proj_weight_scales_view_bc, p_attn_q_proj_weight_values, p_attn_q_proj_weight_zero_bias_bc,
+      p_attn_q_proj_weight_zeros, p_attn_q_proj_weight_zeros_grouped, p_attn_q_proj_weight_zeros_grouped_mask_bc, p_attn_q_proj_weight_zeros_grouped_nibble,
+      p_attn_q_proj_weight_zeros_grouped_shift_view_bc, p_attn_q_proj_weight_zeros_grouped_shifted, p_attn_q_proj_weight_zeros_grouped_view_bc,
+      p_attn_q_proj_weight_zeros_unbiased, p_attn_q_proj_weight_zeros_view, p_attn_q_proj_weight_zeros_view_bc]}
   realizations:
   - name: k_linear_reduce_8ffcd9
-    bindings: {}
-    pins:
-      FAST_MATH: false
+    pins: {FAST_MATH: false}
     knobs:
       WORK: w2x2
       TILE: mma_m8n8k4_f16_f32/f2x2/k8
@@ -393,7 +344,7 @@ loops:
           outputs: [[p_attn_q_proj_weight_int4_bits, i32, [1]]]
         - id: p_attn_q_proj_weight_int4_bits_bc
           op: tensor.index_map
-          attrs: {out_shape: [8], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
+          attrs: {out_shape: [8], sources: [{input_idx: 0, coord_map: [{literal: 0}]}]}
           inputs: [p_attn_q_proj_weight_int4_bits]
           outputs: [[p_attn_q_proj_weight_int4_bits_bc, i32, [8]]]
         - id: p_attn_q_proj_weight_int4_lane_stride
@@ -402,7 +353,7 @@ loops:
           outputs: [[p_attn_q_proj_weight_int4_lane_stride, i32, [1]]]
         - id: p_attn_q_proj_weight_int4_lane_stride_bc
           op: tensor.index_map
-          attrs: {out_shape: [8], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
+          attrs: {out_shape: [8], sources: [{input_idx: 0, coord_map: [{literal: 0}]}]}
           inputs: [p_attn_q_proj_weight_int4_lane_stride]
           outputs: [[p_attn_q_proj_weight_int4_lane_stride_bc, i32, [8]]]
         - id: p_attn_q_proj_weight_int4_lanes
@@ -411,7 +362,7 @@ loops:
           outputs: [[p_attn_q_proj_weight_int4_lanes, i32, [1]]]
         - id: p_attn_q_proj_weight_int4_lanes_bc
           op: tensor.index_map
-          attrs: {out_shape: [8], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
+          attrs: {out_shape: [8], sources: [{input_idx: 0, coord_map: [{literal: 0}]}]}
           inputs: [p_attn_q_proj_weight_int4_lanes]
           outputs: [[p_attn_q_proj_weight_int4_lanes_bc, i32, [8]]]
         - id: p_attn_q_proj_weight_int4_slots
@@ -507,7 +458,7 @@ loops:
           outputs: [[p_attn_q_proj_weight_int4_bits, i32, [1]]]
         - id: p_attn_q_proj_weight_int4_bits_bc
           op: tensor.index_map
-          attrs: {out_shape: [8], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
+          attrs: {out_shape: [8], sources: [{input_idx: 0, coord_map: [{literal: 0}]}]}
           inputs: [p_attn_q_proj_weight_int4_bits]
           outputs: [[p_attn_q_proj_weight_int4_bits_bc, i32, [8]]]
         - id: p_attn_q_proj_weight_int4_lane_stride
@@ -516,7 +467,7 @@ loops:
           outputs: [[p_attn_q_proj_weight_int4_lane_stride, i32, [1]]]
         - id: p_attn_q_proj_weight_int4_lane_stride_bc
           op: tensor.index_map
-          attrs: {out_shape: [8], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
+          attrs: {out_shape: [8], sources: [{input_idx: 0, coord_map: [{literal: 0}]}]}
           inputs: [p_attn_q_proj_weight_int4_lane_stride]
           outputs: [[p_attn_q_proj_weight_int4_lane_stride_bc, i32, [8]]]
         - id: p_attn_q_proj_weight_int4_lanes
@@ -525,7 +476,7 @@ loops:
           outputs: [[p_attn_q_proj_weight_int4_lanes, i32, [1]]]
         - id: p_attn_q_proj_weight_int4_lanes_bc
           op: tensor.index_map
-          attrs: {out_shape: [8], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
+          attrs: {out_shape: [8], sources: [{input_idx: 0, coord_map: [{literal: 0}]}]}
           inputs: [p_attn_q_proj_weight_int4_lanes]
           outputs: [[p_attn_q_proj_weight_int4_lanes_bc, i32, [8]]]
         - id: p_attn_q_proj_weight_int4_slots
@@ -586,27 +537,9 @@ loops:
     op: loop
     attrs:
       body:
-      - Load:
-          names:
-          - in0
-          input: p_attn_q_proj_weight_integers_mask
-          index:
-          - {literal: {value: 0, dtype: int}}
-          dtype: null
-      - Load:
-          names:
-          - in1
-          input: p_attn_q_proj_weight_zero_bias
-          index:
-          - {literal: {value: 0, dtype: int}}
-          dtype: null
-      - Load:
-          names:
-          - in2
-          input: p_attn_q_proj_weight_zeros_grouped_mask
-          index:
-          - {literal: {value: 0, dtype: int}}
-          dtype: null
+      - {Load: {names: [in0], input: p_attn_q_proj_weight_integers_mask, index: [{literal: 0}]}}
+      - {Load: {names: [in1], input: p_attn_q_proj_weight_zero_bias, index: [{literal: 0}]}}
+      - {Load: {names: [in2], input: p_attn_q_proj_weight_zeros_grouped_mask, index: [{literal: 0}]}}
       - Loop:
           axis: {name: a0, extent: 512}
           body:
@@ -621,10 +554,9 @@ loops:
                       - in3
                       input: p_attn_q_proj_weight_zeros_grouped_shift_view
                       index:
-                      - {literal: {value: 0, dtype: int}}
-                      - {literal: {value: 0, dtype: int}}
+                      - {literal: 0}
+                      - {literal: 0}
                       - {var: a2}
-                      dtype: null
                   - Loop:
                       axis: {name: a3, extent: 5120}
                       body:
@@ -633,22 +565,17 @@ loops:
                           - in4
                           input: p_attn_q_proj_weight_scales_view
                           index:
-                          - {binary: {op: /, left: {var: a3}, right: {literal: {value: 128, dtype: int}}}}
-                          - {literal: {value: 0, dtype: int}}
-                          - binary:
-                              op: +
-                              left: {binary: {op: '*', left: {literal: {value: 8, dtype: int}}, right: {var: a1}}}
-                              right: {var: a2}
-                          dtype: null
+                          - {binary: {op: /, left: {var: a3}, right: {literal: 128}}}
+                          - {literal: 0}
+                          - binary: {op: +, left: {binary: {op: '*', left: {literal: 8}, right: {var: a1}}}, right: {var: a2}}
                       - Load:
                           names:
                           - in5
                           input: p_attn_q_proj_weight_zeros_grouped_view
                           index:
-                          - {binary: {op: /, left: {var: a3}, right: {literal: {value: 128, dtype: int}}}}
+                          - {binary: {op: /, left: {var: a3}, right: {literal: 128}}}
                           - {var: a1}
-                          - {literal: {value: 0, dtype: int}}
-                          dtype: null
+                          - {literal: 0}
                       - {Assign: {name: v0, op: right_shift, args: [in5, in3]}}
                       - {Assign: {name: v1, op: bitwise_and, args: [v0, in2]}}
                       - {Assign: {name: v2, op: add, args: [in1, v1]}}
@@ -657,52 +584,33 @@ loops:
                           - in6
                           input: p_attn_q_proj_weight_integers_view
                           index:
-                          - {binary: {op: /, left: {var: a3}, right: {literal: {value: 8, dtype: int}}}}
-                          - {literal: {value: 0, dtype: int}}
-                          - binary:
-                              op: +
-                              left: {binary: {op: '*', left: {literal: {value: 8, dtype: int}}, right: {var: a1}}}
-                              right: {var: a2}
-                          dtype: null
+                          - {binary: {op: /, left: {var: a3}, right: {literal: 8}}}
+                          - {literal: 0}
+                          - binary: {op: +, left: {binary: {op: '*', left: {literal: 8}, right: {var: a1}}}, right: {var: a2}}
                       - Load:
                           names:
                           - in7
                           input: p_attn_q_proj_weight_integers_shift_view
                           index:
-                          - {literal: {value: 0, dtype: int}}
-                          - {binary: {op: '%', left: {var: a3}, right: {literal: {value: 8, dtype: int}}}}
-                          - {literal: {value: 0, dtype: int}}
-                          dtype: null
+                          - {literal: 0}
+                          - {binary: {op: '%', left: {var: a3}, right: {literal: 8}}}
+                          - {literal: 0}
                       - {Assign: {name: v3, op: right_shift, args: [in6, in7]}}
                       - {Assign: {name: v4, op: bitwise_and, args: [v3, in0]}}
                       - {Assign: {name: v5, op: subtract, args: [v4, v2]}}
                       - {Assign: {name: v6, op: copy, args: [v5], dtype: f16}}
                       - {Assign: {name: v7, op: multiply, args: [in4, v6]}}
-                      - Load:
-                          names:
-                          - in8
-                          input: mul_1
-                          index:
-                          - {literal: {value: 0, dtype: int}}
-                          - {var: a0}
-                          - {var: a3}
-                          dtype: null
+                      - {Load: {names: [in8], input: mul_1, index: [{literal: 0}, {var: a0}, {var: a3}]}}
                       - {Assign: {name: v8, op: multiply, args: [in8, v7], dtype: f32}}
                       - {Accum: {name: acc0, value: v8, axes: [a3]}}
                   - Write:
                       output: linear
                       index:
-                      - {literal: {value: 0, dtype: int}}
+                      - {literal: 0}
                       - {var: a0}
-                      - binary:
-                          op: +
-                          left: {binary: {op: '*', left: {literal: {value: 8, dtype: int}}, right: {var: a1}}}
-                          right: {var: a2}
+                      - binary: {op: +, left: {binary: {op: '*', left: {literal: 8}, right: {var: a1}}}, right: {var: a2}}
                       values:
                       - acc0
-                      value_dtype: null
-                      atomic: false
-                      swizzle: NONE
       name: k_linear_69223f
     inputs: [p_attn_q_proj_weight_zeros_grouped_mask, p_attn_q_proj_weight_zero_bias, p_attn_q_proj_weight_integers_mask, p_attn_q_proj_weight_zeros_grouped_shift_view,
       p_attn_q_proj_weight_zeros_grouped_view, p_attn_q_proj_weight_integers_shift_view, p_attn_q_proj_weight_integers_view, p_attn_q_proj_weight_scales_view,

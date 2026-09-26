@@ -3,9 +3,7 @@
 # through a two-slot TMA ring. Both operands are read through shared-memory matrix descriptors.
 # evidence: the corpus's sm_120 f16-mma-*-tma cases realize the same TMA ring under mma.sync; the descriptor
 # layout is the 128-byte swizzle the ring already deposits (plans/hopper-wgmma.md, "Where things stand").
-compute_cap:
-- 9
-- 0
+compute_cap: [9, 0]
 programs:
 - inputs: [x0, x1]
   outputs: [matmul]
@@ -22,15 +20,10 @@ programs:
     outputs: [[matmul, f16, [128, 64]]]
 configs:
 - program: 0
-  target:
-    loop: 0
-    origins:
-    - matmul
+  target: {loop: 0, origins: [matmul]}
   realizations:
   - name: k_matmul_df52fc
-    bindings: {}
-    pins:
-      FAST_MATH: false
+    pins: {FAST_MATH: false}
     knobs:
       WORK: w8x1
       TILE: wgmma_m64n64k16_f16_f32/f1x8/k4
@@ -61,20 +54,11 @@ loops:
               - Loop:
                   axis: {name: a2, extent: 128}
                   body:
-                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
-                  - {Load: {names: [in1], input: x1, index: [{var: a2}, {var: a1}], dtype: null}}
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}]}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a2}, {var: a1}]}}
                   - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
                   - {Accum: {name: acc0, value: v0, axes: [a2]}}
-              - Write:
-                  output: matmul
-                  index:
-                  - {var: a0}
-                  - {var: a1}
-                  values:
-                  - acc0
-                  value_dtype: null
-                  atomic: false
-                  swizzle: NONE
+              - {Write: {output: matmul, index: [{var: a0}, {var: a1}], values: [acc0]}}
       name: k_matmul_442d08
     inputs: [x1, x0]
     outputs: [[matmul, f16, [128, 64]]]

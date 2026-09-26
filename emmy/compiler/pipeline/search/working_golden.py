@@ -23,6 +23,7 @@ from emmy.compiler.pipeline.search.golden import (
     Realization,
     Target,
     is_repository_golden_path,
+    prepare_traced_graph,
 )
 from emmy.compiler.pipeline.strategy import PipelineStrategy
 
@@ -199,28 +200,6 @@ def whole_origins(coverage: Mapping, program) -> tuple[str, ...]:
     slice that is the kernel's exact Torch twin. Empty for a kernel holding part of an op."""
     origins = tuple(sorted(origin for origin in coverage if origin in program.nodes))
     return origins if origins and all(coverage[origin][2] for origin in origins) else ()
-
-
-def prepare_traced_graph(graph) -> None:
-    """Make a traced graph the pristine program an inventory stores, in place.
-
-    A birth-time speller may mark an internal storage value that has to remain materialized for
-    a faithful target inventory (dynamic activation bits and scale are the first use); promoting
-    it to an auxiliary graph output preserves the boundary without changing normal model outputs.
-    And torch tracing or checkpoint spelling may hand over a graph that already crossed one
-    compiler pipeline and carries implementation-piece provenance; the stable wire persists no
-    provenance, so those selectors would come from one universe and replay after a fresh seed.
-    Re-seeding here is exactly what the wire decoder's reader does, which is what makes a stored
-    program's fresh lowering comparable with the kernels the inventory stored.
-    """
-    from emmy.compiler import provenance  # noqa: PLC0415
-
-    for traced_node in graph.nodes.values():
-        if traced_node.hints.get("trace.materialize") and traced_node.id not in graph.outputs:
-            graph.outputs.append(traced_node.id)
-    for traced_node in graph.nodes.values():
-        traced_node.hints.remove(provenance.PROV)
-    provenance.seed(graph)
 
 
 def kernel_programs(fused) -> list[tuple[str, object]]:

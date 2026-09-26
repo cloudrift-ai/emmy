@@ -241,7 +241,7 @@ def test_trace_writes_deterministic_self_contained_programs(tmp_path) -> None:
     assert first_doc.programs == [original_wire]
     assert first_doc.programs and first_doc.configs
     assert all(set(entry.to_wire()) == {"program", "target", "realizations"} for entry in first_doc.configs)
-    assert all(set(entry.realizations[0].to_wire()) == {"name", "bindings", "pins"} for entry in first_doc.configs)
+    assert all(set(entry.realizations[0].to_wire()) == {"name", "pins"} for entry in first_doc.configs)
     assert all(set(entry.target.to_wire()) == {"loop", "origins"} for entry in first_doc.configs)
 
 
@@ -494,7 +494,7 @@ def test_trace_yaml_uses_compact_graph_rows_but_block_candidate_rows(tmp_path) -
     assert "inputs: [x0, x1]" in text
     assert "outputs: [[x0, f16, [512, 512]]]" in text
     assert "attrs: {has_bias: true}" in text
-    assert "target:\n    loop: 0\n    origins:\n" in text
+    assert "target: {loop: 0, origins: [linear]}" in text
 
 
 def test_trace_refuses_to_replace_existing_yaml(tmp_path) -> None:

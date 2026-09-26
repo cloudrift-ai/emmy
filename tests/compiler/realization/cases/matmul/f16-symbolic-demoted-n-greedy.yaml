@@ -1,6 +1,4 @@
-compute_cap:
-- 12
-- 0
+compute_cap: [12, 0]
 programs:
 - inputs: [x, sx, w, sw]
   outputs: [o]
@@ -33,27 +31,17 @@ programs:
     outputs: [[o, f16, [{sym: seq_len, hint: 512}, {sym: seq_len, hint: 512}]]]
 configs:
 - program: 0
-  target:
-    loop: 0
-    origins:
-    - o
-    - ws
-    - xs
+  target: {loop: 0, origins: [o, ws, xs]}
   realizations:
   - name: k_linear_a6e876
-    bindings: {}
-    pins:
-      FAST_MATH: false
+    pins: {FAST_MATH: false}
     knobs:
       TILE: mma_m16n8k16_f16_f32/f4x8/k8
       WORK: w2x2
       STAGE: d1/smem
       REDUCE: ''
     identity: 1e27fc5fed453e2dc98db180a94ff3295771f1303e1dbd6ade54bded01d65a40
-    latency:
-      NVIDIA GeForce RTX 5090:
-        emmy_us: 22.593454881147903
-        tcompile_us: 6.132999900728464
+    latency: {NVIDIA GeForce RTX 5090: {emmy_us: 22.593454881147903, tcompile_us: 6.132999900728464}}
 loops:
 - inputs: [sw, sx, w, x]
   outputs: [o]
@@ -83,24 +71,15 @@ loops:
               - Loop:
                   axis: {name: a2, extent: 128}
                   body:
-                  - {Load: {names: [in0], input: sw, index: [{var: a1}, {var: a2}], dtype: null}}
-                  - {Load: {names: [in1], input: sx, index: [{var: a0}, {var: a2}], dtype: null}}
-                  - {Load: {names: [in2], input: w, index: [{var: a1}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in0], input: sw, index: [{var: a1}, {var: a2}]}}
+                  - {Load: {names: [in1], input: sx, index: [{var: a0}, {var: a2}]}}
+                  - {Load: {names: [in2], input: w, index: [{var: a1}, {var: a2}]}}
                   - {Assign: {name: v0, op: multiply, args: [in0, in2]}}
-                  - {Load: {names: [in3], input: x, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in3], input: x, index: [{var: a0}, {var: a2}]}}
                   - {Assign: {name: v1, op: multiply, args: [in1, in3]}}
                   - {Assign: {name: v2, op: multiply, args: [v0, v1], dtype: f32}}
                   - {Accum: {name: acc0, value: v2, axes: [a2]}}
-              - Write:
-                  output: o
-                  index:
-                  - {var: a0}
-                  - {var: a1}
-                  values:
-                  - acc0
-                  value_dtype: null
-                  atomic: false
-                  swizzle: NONE
+              - {Write: {output: o, index: [{var: a0}, {var: a1}], values: [acc0]}}
       name: k_linear_40037b
     inputs: [w, sw, x, sx]
     outputs: [[o, f16, [{sym: seq_len, hint: 512}, {sym: seq_len, hint: 512}]]]

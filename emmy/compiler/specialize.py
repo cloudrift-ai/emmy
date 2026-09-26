@@ -22,11 +22,15 @@ def _specialize_expr(value: Mapping, bindings: Mapping[str, int], *, extent: boo
     extents folds a real predicate away (an IndexMap's ``out_coord_1 < 1`` becomes false,
     silently dropping that source), so they simplify with no range at all.
     """
+    return encode(_bound_expr(value, bindings, extent=extent))
+
+
+def _bound_expr(value: Mapping, bindings: Mapping[str, int], *, extent: bool):
     expr = decode(dict(value))
     replacements = {name: Literal(size, "int") for name, size in bindings.items()}
     specialized = expr.substitute(replacements)
     ranges = {name: Interval(1, 1 << 30) for name in specialized.free_vars()} if extent else {}
-    return encode(specialized.simplify(SimplifyCtx(ranges)))
+    return specialized.simplify(SimplifyCtx(ranges))
 
 
 def _specialize_dim(value, bindings: Mapping[str, int]):
@@ -35,10 +39,10 @@ def _specialize_dim(value, bindings: Mapping[str, int]):
         return value
     if "sym" in value:
         return bindings.get(value["sym"], dict(value))
-    expr = _specialize_expr(value["expr"], bindings, extent=True)
-    if set(expr) == {"literal"} and expr["literal"].get("dtype") == "int":
-        return int(expr["literal"]["value"])
-    return {"expr": expr, **({"hint": value["hint"]} if "hint" in value else {})}
+    expr = _bound_expr(value["expr"], bindings, extent=True)
+    if isinstance(expr, Literal) and expr.dtype == "int":
+        return int(expr.value)
+    return {"expr": encode(expr), **({"hint": value["hint"]} if "hint" in value else {})}
 
 
 def _specialize_named_shape(value, bindings: Mapping[str, int]):

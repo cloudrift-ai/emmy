@@ -1,6 +1,4 @@
-compute_cap:
-- 8
-- 9
+compute_cap: [8, 9]
 programs:
 - inputs: [x]
   outputs: [softmax]
@@ -14,15 +12,10 @@ programs:
     outputs: [[softmax, f32, [512, 2048]]]
 configs:
 - program: 0
-  target:
-    loop: 0
-    origins:
-    - softmax
+  target: {loop: 0, origins: [softmax]}
   realizations:
   - name: k_softmax_557c32
-    bindings: {}
-    pins:
-      FAST_MATH: false
+    pins: {FAST_MATH: false}
     knobs:
       WORK: t256
       REDUCE: coop
@@ -45,32 +38,23 @@ loops:
           - Loop:
               axis: {name: a1, extent: 2048}
               body:
-              - {Load: {names: [in0], input: x, index: [{var: a0}, {var: a1}], dtype: null}}
+              - {Load: {names: [in0], input: x, index: [{var: a0}, {var: a1}]}}
               - {Accum: {name: acc0, value: in0, op: maximum, axes: [a1]}}
           - Loop:
               axis: {name: a1, extent: 2048}
               body:
-              - {Load: {names: [in1], input: x, index: [{var: a0}, {var: a1}], dtype: null}}
+              - {Load: {names: [in1], input: x, index: [{var: a0}, {var: a1}]}}
               - {Assign: {name: v0, op: subtract, args: [in1, acc0]}}
               - {Assign: {name: v1, op: exp, args: [v0]}}
               - {Accum: {name: acc1, value: v1, axes: [a1]}}
           - Loop:
               axis: {name: a3, extent: 2048}
               body:
-              - {Load: {names: [in2], input: x, index: [{var: a0}, {var: a3}], dtype: null}}
+              - {Load: {names: [in2], input: x, index: [{var: a0}, {var: a3}]}}
               - {Assign: {name: v2, op: subtract, args: [in2, acc0]}}
               - {Assign: {name: v3, op: exp, args: [v2]}}
               - {Assign: {name: v4, op: divide, args: [v3, acc1]}}
-              - Write:
-                  output: softmax
-                  index:
-                  - {var: a0}
-                  - {var: a3}
-                  values:
-                  - v4
-                  value_dtype: null
-                  atomic: false
-                  swizzle: NONE
+              - {Write: {output: softmax, index: [{var: a0}, {var: a3}], values: [v4]}}
       name: k_softmax_eba8b4
     inputs: [x]
     outputs: [[softmax, f32, [512, 2048]]]

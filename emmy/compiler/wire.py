@@ -12,6 +12,7 @@ without anyone listing the classes. The walker refuses an unknown or missing key
 
 from __future__ import annotations
 
+import inspect
 import typing
 from collections.abc import Iterable, Mapping
 from dataclasses import MISSING, fields
@@ -94,8 +95,15 @@ def _wire_fields(cls: type):
     return [f for f in fields(cls) if f.init and f.name not in cls.wire_skip]
 
 
-def _default_of(f):
-    return f.default if f.default is not MISSING else f.default_factory() if f.default_factory is not MISSING else MISSING
+def _default_of(cls: type, f) -> object:
+    """The value ``f`` takes when the wire leaves it out: the dataclass default, or the class's own constructor's
+    when it defines ``__init__`` itself (a Load's dtype, a Write's atomic flag)."""
+    if f.default is not MISSING:
+        return f.default
+    if f.default_factory is not MISSING:
+        return f.default_factory()
+    parameter = inspect.signature(cls.__init__).parameters.get(f.name)
+    return MISSING if parameter is None or parameter.default is inspect.Parameter.empty else parameter.default
 
 
 def _fields_to_wire(obj: Wire):
@@ -104,7 +112,7 @@ def _fields_to_wire(obj: Wire):
     out = {}
     for f in declared:
         item = getattr(obj, f.name)
-        default = _default_of(f)
+        default = _default_of(cls, f)
         if default is not MISSING and item == default:
             continue
         out[f.name] = _to_wire(item, hints[f.name], f"{cls.__name__}.{f.name}")
@@ -118,7 +126,7 @@ def _fields_from_wire(cls: type, value: object, where: str):
     names = {f.name: f for f in declared}
     if unknown := set(value) - set(names):
         raise ValueError(f"{where}: unknown field(s): {', '.join(sorted(unknown))}")
-    required = {name for name, f in names.items() if _default_of(f) is MISSING}
+    required = {name for name, f in names.items() if _default_of(cls, f) is MISSING}
     if missing := required - set(value):
         raise ValueError(f"{where} missing {', '.join(sorted(missing))}")
     kwargs = {name: _from_wire(hints[name], item, f"{where}.{name}") for name, item in value.items()}

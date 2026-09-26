@@ -1,6 +1,4 @@
-compute_cap:
-- 12
-- 0
+compute_cap: [12, 0]
 programs:
 - inputs: [x, wn, w]
   outputs: [y]
@@ -24,17 +22,10 @@ programs:
     outputs: [[y, f16, [1, 32, 512]]]
 configs:
 - program: 0
-  target:
-    loop: 0
-    origins:
-    - xn
-    - y
+  target: {loop: 0, origins: [xn, y]}
   realizations:
   - name: k_rms_norm_linear_reduce_a5893c
-    bindings: {}
-    pins:
-      FAST_MATH: false
-      PLACE: fuse
+    pins: {FAST_MATH: false, PLACE: fuse}
     knobs:
       REDUCE@inner: ''
       REDUCE@inner.1/map.3/map.1/reduce: coop
@@ -43,9 +34,7 @@ configs:
       STAGE: ''
       RASTER: ''
     identity: 8db9c357594ff5536bfe363d87f9f383338ee74d2c5d0b352f4d1fa32aa6ed0a
-    latency:
-      NVIDIA GeForce RTX 5090:
-        emmy_us: 80.04266520341237
+    latency: {NVIDIA GeForce RTX 5090: {emmy_us: 80.04266520341237}}
 loops:
 - inputs: [w, wn, x]
   outputs: [y]
@@ -71,23 +60,15 @@ loops:
     op: loop
     attrs:
       body:
-      - {Load: {names: [in0], input: xn_eps, index: [{literal: {value: 0, dtype: int}}], dtype: null}}
-      - Load: {names: [in1], input: xn_mean_count, index: [{literal: {value: 0, dtype: int}}], dtype: null}
+      - {Load: {names: [in0], input: xn_eps, index: [{literal: 0}]}}
+      - {Load: {names: [in1], input: xn_mean_count, index: [{literal: 0}]}}
       - Loop:
           axis: {name: a0, extent: 32}
           body:
           - Loop:
               axis: {name: a1, extent: 128}
               body:
-              - Load:
-                  names:
-                  - in2
-                  input: x
-                  index:
-                  - {literal: {value: 0, dtype: int}}
-                  - {var: a0}
-                  - {var: a1}
-                  dtype: null
+              - {Load: {names: [in2], input: x, index: [{literal: 0}, {var: a0}, {var: a1}]}}
               - {Assign: {name: v0, op: multiply, args: [in2, in2]}}
               - {Accum: {name: acc0, value: v0, axes: [a1]}}
           - {Assign: {name: v1, op: divide, args: [acc0, in1]}}
@@ -99,32 +80,14 @@ loops:
               - Loop:
                   axis: {name: a3, extent: 128}
                   body:
-                  - Load:
-                      names:
-                      - in3
-                      input: x
-                      index:
-                      - {literal: {value: 0, dtype: int}}
-                      - {var: a0}
-                      - {var: a3}
-                      dtype: null
+                  - {Load: {names: [in3], input: x, index: [{literal: 0}, {var: a0}, {var: a3}]}}
                   - {Assign: {name: v4, op: multiply, args: [in3, v3]}}
-                  - {Load: {names: [in4], input: w, index: [{var: a2}, {var: a3}], dtype: null}}
-                  - {Load: {names: [in5], input: wn, index: [{var: a3}], dtype: null}}
+                  - {Load: {names: [in4], input: w, index: [{var: a2}, {var: a3}]}}
+                  - {Load: {names: [in5], input: wn, index: [{var: a3}]}}
                   - {Assign: {name: v5, op: multiply, args: [in5, v4]}}
                   - {Assign: {name: v6, op: multiply, args: [in4, v5], dtype: f32}}
                   - {Accum: {name: acc1, value: v6, axes: [a3]}}
-              - Write:
-                  output: y
-                  index:
-                  - {literal: {value: 0, dtype: int}}
-                  - {var: a0}
-                  - {var: a2}
-                  values:
-                  - acc1
-                  value_dtype: null
-                  atomic: false
-                  swizzle: NONE
+              - {Write: {output: y, index: [{literal: 0}, {var: a0}, {var: a2}], values: [acc1]}}
       name: k_rms_norm_linear_reduce_9163bd
     inputs: [xn_mean_count, xn_eps, x, wn, w]
     outputs: [[y, f16, [1, 32, 512]]]

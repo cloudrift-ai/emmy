@@ -4,9 +4,7 @@
 # lowerings of that fold per cell and nvcc refused the kernel (`acc3__c3 has already been declared`) on every card;
 # the prefill SDPA + o_proj + residual target of the golden-bench corpus had no realizable row for that reason
 # (plans/h100-memo-2026-09-10.md, item 5). The seam now lowers the fold once.
-compute_cap:
-- 9
-- 0
+compute_cap: [9, 0]
 programs:
 - inputs: [x0, x1, x2, x3, x4]
   outputs: [add]
@@ -64,19 +62,10 @@ programs:
     outputs: [[add, f16, [1, 64, 128]]]
 configs:
 - program: 0
-  target:
-    loop: 0
-    origins:
-    - add
-    - linear
-    - reshape
-    - scaled_dot_product_attention
-    - transpose
+  target: {loop: 0, origins: [add, linear, reshape, scaled_dot_product_attention, transpose]}
   realizations:
   - name: k_sdpa_linear_reduce_c532cd
-    bindings: {}
-    pins:
-      FAST_MATH: false
+    pins: {FAST_MATH: false}
     knobs:
       WORK: w1x2
       TILE@map.1/inner: mma_m16n8k16_f16_f32/f8x1
@@ -119,27 +108,9 @@ loops:
     op: loop
     attrs:
       body:
-      - Load:
-          names:
-          - in0
-          input: scaled_dot_product_attention_mask_fill_c
-          index:
-          - {literal: {value: 0, dtype: int}}
-          dtype: null
-      - Load:
-          names:
-          - in1
-          input: scaled_dot_product_attention_mask_zero_c
-          index:
-          - {literal: {value: 0, dtype: int}}
-          dtype: null
-      - Load:
-          names:
-          - in2
-          input: scaled_dot_product_attention_scale
-          index:
-          - {literal: {value: 0, dtype: int}}
-          dtype: null
+      - {Load: {names: [in0], input: scaled_dot_product_attention_mask_fill_c, index: [{literal: 0}]}}
+      - {Load: {names: [in1], input: scaled_dot_product_attention_mask_zero_c, index: [{literal: 0}]}}
+      - {Load: {names: [in2], input: scaled_dot_product_attention_scale, index: [{literal: 0}]}}
       - Loop:
           axis: {name: a0, extent: 64}
           body:
@@ -160,21 +131,19 @@ loops:
                               - in3
                               input: x0
                               index:
-                              - {literal: {value: 0, dtype: int}}
-                              - {binary: {op: /, left: {var: a2}, right: {literal: {value: 64, dtype: int}}}}
+                              - {literal: 0}
+                              - {binary: {op: /, left: {var: a2}, right: {literal: 64}}}
                               - {var: a0}
                               - {var: a4}
-                              dtype: null
                           - Load:
                               names:
                               - in4
                               input: x1
                               index:
-                              - {literal: {value: 0, dtype: int}}
-                              - {binary: {op: /, left: {var: a2}, right: {literal: {value: 64, dtype: int}}}}
+                              - {literal: 0}
+                              - {binary: {op: /, left: {var: a2}, right: {literal: 64}}}
                               - {var: a3}
                               - {var: a4}
-                              dtype: null
                           - {Assign: {name: v0, op: multiply, args: [in3, in4], dtype: f32}}
                           - {Accum: {name: acc0, value: v0, axes: [a4]}}
                       - {Assign: {name: v1, op: multiply, args: [acc0, in2]}}
@@ -196,21 +165,19 @@ loops:
                               - in5
                               input: x0
                               index:
-                              - {literal: {value: 0, dtype: int}}
-                              - {binary: {op: /, left: {var: a2}, right: {literal: {value: 64, dtype: int}}}}
+                              - {literal: 0}
+                              - {binary: {op: /, left: {var: a2}, right: {literal: 64}}}
                               - {var: a0}
                               - {var: a6}
-                              dtype: null
                           - Load:
                               names:
                               - in6
                               input: x1
                               index:
-                              - {literal: {value: 0, dtype: int}}
-                              - {binary: {op: /, left: {var: a2}, right: {literal: {value: 64, dtype: int}}}}
+                              - {literal: 0}
+                              - {binary: {op: /, left: {var: a2}, right: {literal: 64}}}
                               - {var: a3}
                               - {var: a6}
-                              dtype: null
                           - {Assign: {name: v4, op: multiply, args: [in5, in6], dtype: f32}}
                           - {Accum: {name: acc2, value: v4, axes: [a6]}}
                       - {Assign: {name: v5, op: multiply, args: [acc2, in2]}}
@@ -234,21 +201,19 @@ loops:
                               - in7
                               input: x0
                               index:
-                              - {literal: {value: 0, dtype: int}}
-                              - {binary: {op: /, left: {var: a2}, right: {literal: {value: 64, dtype: int}}}}
+                              - {literal: 0}
+                              - {binary: {op: /, left: {var: a2}, right: {literal: 64}}}
                               - {var: a0}
                               - {var: a8}
-                              dtype: null
                           - Load:
                               names:
                               - in8
                               input: x1
                               index:
-                              - {literal: {value: 0, dtype: int}}
-                              - {binary: {op: /, left: {var: a2}, right: {literal: {value: 64, dtype: int}}}}
+                              - {literal: 0}
+                              - {binary: {op: /, left: {var: a2}, right: {literal: 64}}}
                               - {var: a3}
                               - {var: a8}
-                              dtype: null
                           - {Assign: {name: v10, op: multiply, args: [in7, in8], dtype: f32}}
                           - {Accum: {name: acc4, value: v10, axes: [a8]}}
                       - {Assign: {name: v11, op: multiply, args: [acc4, in2]}}
@@ -257,11 +222,10 @@ loops:
                           - in9
                           input: x2
                           index:
-                          - {literal: {value: 0, dtype: int}}
-                          - {binary: {op: /, left: {var: a2}, right: {literal: {value: 64, dtype: int}}}}
+                          - {literal: 0}
+                          - {binary: {op: /, left: {var: a2}, right: {literal: 64}}}
                           - {var: a3}
-                          - {binary: {op: '%', left: {var: a2}, right: {literal: {value: 64, dtype: int}}}}
-                          dtype: null
+                          - {binary: {op: '%', left: {var: a2}, right: {literal: 64}}}
                       - Select:
                           name: v12
                           branches:
@@ -273,31 +237,13 @@ loops:
                       - {Assign: {name: v16, op: divide, args: [v15, acc3]}}
                       - {Assign: {name: v17, op: multiply, args: [in9, v16], dtype: f32}}
                       - {Accum: {name: acc5, value: v17, axes: [a3]}}
-                  - {Load: {names: [in10], input: x3, index: [{var: a1}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in10], input: x3, index: [{var: a1}, {var: a2}]}}
                   - {Assign: {name: v18, op: multiply, args: [acc5, in10], dtype: f32}}
                   - {Accum: {name: acc6, value: v18, axes: [a2]}}
               - {Assign: {name: v19, op: copy, args: [acc6], dtype: f16}}
-              - Load:
-                  names:
-                  - in11
-                  input: x4
-                  index:
-                  - {literal: {value: 0, dtype: int}}
-                  - {var: a0}
-                  - {var: a1}
-                  dtype: null
+              - {Load: {names: [in11], input: x4, index: [{literal: 0}, {var: a0}, {var: a1}]}}
               - {Assign: {name: v20, op: add, args: [in11, v19]}}
-              - Write:
-                  output: add
-                  index:
-                  - {literal: {value: 0, dtype: int}}
-                  - {var: a0}
-                  - {var: a1}
-                  values:
-                  - v20
-                  value_dtype: null
-                  atomic: false
-                  swizzle: NONE
+              - {Write: {output: add, index: [{literal: 0}, {var: a0}, {var: a1}], values: [v20]}}
       name: k_sdpa_linear_reduce_7e63bd
     inputs: [scaled_dot_product_attention_scale, scaled_dot_product_attention_mask_fill_c, scaled_dot_product_attention_mask_zero_c, x1, x0, x2,
       x3, x4]

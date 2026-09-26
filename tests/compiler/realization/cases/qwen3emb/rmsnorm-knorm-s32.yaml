@@ -1,6 +1,4 @@
-compute_cap:
-- 12
-- 0
+compute_cap: [12, 0]
 programs:
 - inputs: [x, w]
   outputs: [o]
@@ -17,24 +15,16 @@ programs:
     outputs: [[o, f32, [1, 8, 32, 128]]]
 configs:
 - program: 0
-  target:
-    loop: 0
-    origins:
-    - o
+  target: {loop: 0, origins: [o]}
   realizations:
   - name: k_rms_norm_5ef4da
-    bindings: {}
-    pins:
-      FAST_MATH: false
+    pins: {FAST_MATH: false}
     knobs:
       REDUCE: coop
       RASTER: ''
       WORK: t128
     identity: c4c22fa02f01ef958bf741677f4a01ce87e5741bc483926c8dc16ba509d10fee
-    latency:
-      NVIDIA GeForce RTX 5090:
-        emmy_us: 1.4595555806020546
-        tcompile_us: 2.0494096954838645
+    latency: {NVIDIA GeForce RTX 5090: {emmy_us: 1.4595555806020546, tcompile_us: 2.0494096954838645}}
 loops:
 - inputs: [w, x]
   outputs: [o]
@@ -57,8 +47,8 @@ loops:
     op: loop
     attrs:
       body:
-      - {Load: {names: [in0], input: o_eps, index: [{literal: {value: 0, dtype: int}}], dtype: null}}
-      - Load: {names: [in1], input: o_mean_count, index: [{literal: {value: 0, dtype: int}}], dtype: null}
+      - {Load: {names: [in0], input: o_eps, index: [{literal: 0}]}}
+      - {Load: {names: [in1], input: o_mean_count, index: [{literal: 0}]}}
       - Loop:
           axis: {name: a0, extent: 256}
           body:
@@ -70,11 +60,10 @@ loops:
                   - in2
                   input: x
                   index:
-                  - {literal: {value: 0, dtype: int}}
-                  - {binary: {op: //, left: {var: a0}, right: {literal: {value: 32, dtype: int}}}}
-                  - {binary: {op: '%', left: {var: a0}, right: {literal: {value: 32, dtype: int}}}}
+                  - {literal: 0}
+                  - {binary: {op: //, left: {var: a0}, right: {literal: 32}}}
+                  - {binary: {op: '%', left: {var: a0}, right: {literal: 32}}}
                   - {var: a1}
-                  dtype: null
               - {Assign: {name: v0, op: multiply, args: [in2, in2]}}
               - {Accum: {name: acc0, value: v0, axes: [a1]}}
           - {Assign: {name: v1, op: divide, args: [acc0, in1]}}
@@ -88,26 +77,22 @@ loops:
                   - in3
                   input: x
                   index:
-                  - {literal: {value: 0, dtype: int}}
-                  - {binary: {op: //, left: {var: a0}, right: {literal: {value: 32, dtype: int}}}}
-                  - {binary: {op: '%', left: {var: a0}, right: {literal: {value: 32, dtype: int}}}}
+                  - {literal: 0}
+                  - {binary: {op: //, left: {var: a0}, right: {literal: 32}}}
+                  - {binary: {op: '%', left: {var: a0}, right: {literal: 32}}}
                   - {var: a2}
-                  dtype: null
               - {Assign: {name: v4, op: multiply, args: [in3, v3]}}
-              - {Load: {names: [in4], input: w, index: [{var: a2}], dtype: null}}
+              - {Load: {names: [in4], input: w, index: [{var: a2}]}}
               - {Assign: {name: v5, op: multiply, args: [in4, v4]}}
               - Write:
                   output: o
                   index:
-                  - {literal: {value: 0, dtype: int}}
-                  - {binary: {op: //, left: {var: a0}, right: {literal: {value: 32, dtype: int}}}}
-                  - {binary: {op: '%', left: {var: a0}, right: {literal: {value: 32, dtype: int}}}}
+                  - {literal: 0}
+                  - {binary: {op: //, left: {var: a0}, right: {literal: 32}}}
+                  - {binary: {op: '%', left: {var: a0}, right: {literal: 32}}}
                   - {var: a2}
                   values:
                   - v5
-                  value_dtype: null
-                  atomic: false
-                  swizzle: NONE
       name: k_rms_norm_2b36d2
     inputs: [o_mean_count, o_eps, x, w]
     outputs: [[o, f32, [1, 8, 32, 128]]]

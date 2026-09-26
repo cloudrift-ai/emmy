@@ -18,6 +18,7 @@ from .format import (
     Realization,
     Target,
     kernel_pool_text,
+    prepare_traced_graph,
     program_text,
 )
 from .record import (
@@ -50,6 +51,7 @@ __all__ = [
     "Realization",
     "Target",
     "kernel_pool_text",
+    "prepare_traced_graph",
     "program_text",
     "decode_record",
     "lead_of",

@@ -14,8 +14,9 @@ from pathlib import Path
 import yaml
 
 from emmy import gpu
+from emmy.compiler import provenance
 from emmy.compiler.graph import Graph
-from emmy.compiler.pipeline.knob import family_of
+from emmy.compiler.pipeline.knob import KnobType, family_of, get, validate_family_value, values_equal
 from emmy.compiler.pipeline.search.pins import pins_freeze_cut
 from emmy.compiler.wire import Wire
 
@@ -100,6 +101,22 @@ def _style_program(program: Mapping) -> dict:
     return styled
 
 
+def _style_config(config: Mapping) -> dict:
+    """A config block with its short leaves inline; a schedule (``knobs``) stays one knob per line."""
+    styled = {key: _flow(value) if key == "target" else value for key, value in config.items()}
+    if "realizations" in styled:
+        styled["realizations"] = [
+            {key: value if key == "knobs" else _flow(value) for key, value in row.items()} for row in config["realizations"]
+        ]
+    return styled
+
+
+def _style_block(key: str, value):
+    if key == "configs":
+        return [_style_config(config) for config in value]
+    return _flow(value) if key == "compute_cap" else value
+
+
 class GoldenEntryState(StrEnum):
     INVENTORY = "inventory"
     PROPOSAL = "proposal"
@@ -122,6 +139,26 @@ def _hex(value: object, length: int) -> bool:
 
 def _positive(value: object) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+
+
+def prepare_traced_graph(graph) -> None:
+    """Make a traced graph the pristine program an inventory stores, in place.
+
+    A birth-time speller may mark an internal storage value that has to remain materialized for
+    a faithful target inventory (dynamic activation bits and scale are the first use); promoting
+    it to an auxiliary graph output preserves the boundary without changing normal model outputs.
+    And torch tracing or checkpoint spelling may hand over a graph that already crossed one
+    compiler pipeline and carries implementation-piece provenance; the stable wire persists no
+    provenance, so those selectors would come from one universe and replay after a fresh seed.
+    Re-seeding here is exactly what the wire decoder's reader does, which is what makes a stored
+    program's fresh lowering comparable with the kernels the inventory stored.
+    """
+    for traced_node in graph.nodes.values():
+        if traced_node.hints.get("trace.materialize") and traced_node.id not in graph.outputs:
+            graph.outputs.append(traced_node.id)
+    for traced_node in graph.nodes.values():
+        traced_node.hints.remove(provenance.PROV)
+    provenance.seed(graph)
 
 
 @dataclass(frozen=True)
@@ -176,8 +213,8 @@ class Realization(Wire):
     records — a schedule (``knobs``), a measurement, a kernel-set listing, a card's latencies."""
 
     name: str
-    bindings: dict[str, int]
-    pins: dict[str, bool | int | str]
+    bindings: dict[str, int] = field(default_factory=dict)
+    pins: dict[str, bool | int | str] = field(default_factory=dict)
     knobs: dict[str, bool | int | str] | None = None
     identity: str | None = None
     measurements: Measurements | None = None
@@ -287,7 +324,9 @@ class GoldenFile(Wire):
             raise FileExistsError(f"{destination} already exists; pass overwrite=True to replace it")
         destination.parent.mkdir(parents=True, exist_ok=True)
         blocks = _pool_blocks(self)
-        payload = "".join(blocks[key] if key in blocks else _dump_block(key, value) for key, value in self.to_wire().items())
+        payload = "".join(
+            blocks[key] if key in blocks else _dump_block(key, _style_block(key, value)) for key, value in self.to_wire().items()
+        )
         temporary = None
         mode = destination.stat().st_mode & 0o777 if destination.exists() else 0o644
         try:
@@ -308,7 +347,6 @@ class GoldenFile(Wire):
         row's knobs agree with its pins, a kernel set names its siblings — and, for a ``repository``
         golden, that the file names its card, every row spells a schedule, and none carries working
         ranking metadata."""
-        from emmy.compiler.pipeline.knob import KnobType, get, validate_family_value, values_equal  # noqa: PLC0415
 
         if repository and not self.gpu_name:
             raise ValueError("repository golden requires gpu_name")
@@ -405,7 +443,6 @@ class GoldenFile(Wire):
         """The traced program ``index`` as the compiler receives it — decoded from the wire and prepared
         exactly as the trace inventory writer prepares a fresh trace, so its fresh lowering is
         comparable byte for byte with the targets the golden stores."""
-        from emmy.compiler.pipeline.search.working_golden import prepare_traced_graph  # noqa: PLC0415
 
         graph = Graph.from_wire(self.programs[index])
         prepare_traced_graph(graph)

@@ -5,9 +5,7 @@
 # The schedule is SITE-SCOPED (TILE@map.1/twist.1/inner is the score, TILE@map.1/twist the weighted sum) because a flash
 # tree decides per site. The carrier's scalar register tile is the schedule this case is about: the tier folds the
 # term's own step, so the recipe's three states each get a cell copy and the fp32 target needs no mma atom for them.
-compute_cap:
-- 12
-- 0
+compute_cap: [12, 0]
 programs:
 - inputs: [q, k, v]
   outputs: [o]
@@ -28,15 +26,10 @@ programs:
     outputs: [[o, f32, [1, 16, 128, 128]]]
 configs:
 - program: 0
-  target:
-    loop: 0
-    origins:
-    - o
+  target: {loop: 0, origins: [o]}
   realizations:
   - name: k_sdpa_d4bf3c
-    bindings: {}
-    pins:
-      FAST_MATH: false
+    pins: {FAST_MATH: false}
     knobs:
       TILE@map.1/twist.1/inner: ''
       TILE@map.1/twist: f1
@@ -74,9 +67,9 @@ loops:
     op: loop
     attrs:
       body:
-      - Load: {names: [in0], input: o_mask_fill_c, index: [{literal: {value: 0, dtype: int}}], dtype: null}
-      - Load: {names: [in1], input: o_mask_zero_c, index: [{literal: {value: 0, dtype: int}}], dtype: null}
-      - {Load: {names: [in2], input: o_scale, index: [{literal: {value: 0, dtype: int}}], dtype: null}}
+      - {Load: {names: [in0], input: o_mask_fill_c, index: [{literal: 0}]}}
+      - {Load: {names: [in1], input: o_mask_zero_c, index: [{literal: 0}]}}
+      - {Load: {names: [in2], input: o_scale, index: [{literal: 0}]}}
       - Loop:
           axis: {name: a0, extent: 16}
           body:
@@ -94,21 +87,11 @@ loops:
                           - in3
                           input: k
                           index:
-                          - {literal: {value: 0, dtype: int}}
-                          - {binary: {op: /, left: {var: a0}, right: {literal: {value: 2, dtype: int}}}}
+                          - {literal: 0}
+                          - {binary: {op: /, left: {var: a0}, right: {literal: 2}}}
                           - {var: a2}
                           - {var: a3}
-                          dtype: null
-                      - Load:
-                          names:
-                          - in4
-                          input: q
-                          index:
-                          - {literal: {value: 0, dtype: int}}
-                          - {var: a0}
-                          - {var: a1}
-                          - {var: a3}
-                          dtype: null
+                      - {Load: {names: [in4], input: q, index: [{literal: 0}, {var: a0}, {var: a1}, {var: a3}]}}
                       - {Assign: {name: v0, op: multiply, args: [in3, in4]}}
                       - {Accum: {name: acc0, value: v0, axes: [a3]}}
                   - {Assign: {name: v1, op: multiply, args: [acc0, in2]}}
@@ -130,21 +113,11 @@ loops:
                           - in5
                           input: k
                           index:
-                          - {literal: {value: 0, dtype: int}}
-                          - {binary: {op: /, left: {var: a0}, right: {literal: {value: 2, dtype: int}}}}
+                          - {literal: 0}
+                          - {binary: {op: /, left: {var: a0}, right: {literal: 2}}}
                           - {var: a2}
                           - {var: a5}
-                          dtype: null
-                      - Load:
-                          names:
-                          - in6
-                          input: q
-                          index:
-                          - {literal: {value: 0, dtype: int}}
-                          - {var: a0}
-                          - {var: a1}
-                          - {var: a5}
-                          dtype: null
+                      - {Load: {names: [in6], input: q, index: [{literal: 0}, {var: a0}, {var: a1}, {var: a5}]}}
                       - {Assign: {name: v4, op: multiply, args: [in5, in6]}}
                       - {Accum: {name: acc2, value: v4, axes: [a5]}}
                   - {Assign: {name: v5, op: multiply, args: [acc2, in2]}}
@@ -171,21 +144,11 @@ loops:
                               - in7
                               input: k
                               index:
-                              - {literal: {value: 0, dtype: int}}
-                              - {binary: {op: /, left: {var: a0}, right: {literal: {value: 2, dtype: int}}}}
+                              - {literal: 0}
+                              - {binary: {op: /, left: {var: a0}, right: {literal: 2}}}
                               - {var: a7}
                               - {var: a8}
-                              dtype: null
-                          - Load:
-                              names:
-                              - in8
-                              input: q
-                              index:
-                              - {literal: {value: 0, dtype: int}}
-                              - {var: a0}
-                              - {var: a1}
-                              - {var: a8}
-                              dtype: null
+                          - {Load: {names: [in8], input: q, index: [{literal: 0}, {var: a0}, {var: a1}, {var: a8}]}}
                           - {Assign: {name: v10, op: multiply, args: [in7, in8]}}
                           - {Accum: {name: acc4, value: v10, axes: [a8]}}
                       - {Assign: {name: v11, op: multiply, args: [acc4, in2]}}
@@ -194,11 +157,10 @@ loops:
                           - in9
                           input: v
                           index:
-                          - {literal: {value: 0, dtype: int}}
-                          - {binary: {op: /, left: {var: a0}, right: {literal: {value: 2, dtype: int}}}}
+                          - {literal: 0}
+                          - {binary: {op: /, left: {var: a0}, right: {literal: 2}}}
                           - {var: a7}
                           - {var: a6}
-                          dtype: null
                       - Select:
                           name: v12
                           branches:
@@ -210,18 +172,7 @@ loops:
                       - {Assign: {name: v16, op: divide, args: [v15, acc3]}}
                       - {Assign: {name: v17, op: multiply, args: [in9, v16]}}
                       - {Accum: {name: acc5, value: v17, axes: [a7]}}
-                  - Write:
-                      output: o
-                      index:
-                      - {literal: {value: 0, dtype: int}}
-                      - {var: a0}
-                      - {var: a1}
-                      - {var: a6}
-                      values:
-                      - acc5
-                      value_dtype: null
-                      atomic: false
-                      swizzle: NONE
+                  - {Write: {output: o, index: [{literal: 0}, {var: a0}, {var: a1}, {var: a6}], values: [acc5]}}
       name: k_sdpa_cc1592
     inputs: [o_scale, o_mask_fill_c, o_mask_zero_c, k, q, v]
     outputs: [[o, f32, [1, 16, 128, 128]]]

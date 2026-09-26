@@ -27,7 +27,23 @@ import logging
 from collections import Counter
 from typing import TYPE_CHECKING
 
-from emmy.compiler.pipeline.search.db import SearchDB
+from emmy.compiler.context import FAST_MATH_FLAG, Context
+from emmy.compiler.ir.cuda.ir import CudaOp
+from emmy.compiler.ir.tile import TileOp
+from emmy.compiler.pipeline import CUDA_PASSES, LOWERING_PASSES, Pipeline
+from emmy.compiler.pipeline.fork import iter_leaves, leaf_for
+from emmy.compiler.pipeline.knob import family_of
+from emmy.compiler.pipeline.pipeline import Run, _is_structural_option
+from emmy.compiler.pipeline.search.data.freeze import freeze_source, is_lfs_pointer
+from emmy.compiler.pipeline.search.db import SearchDB, is_placement_knob
+from emmy.compiler.pipeline.search.pins import composed_routes, pinned_knobs, regime_live, spelled_arm, unpinned_decisions
+from emmy.compiler.pipeline.search.policy.terminal_bench import persist_kernel_perf, point_stats
+from emmy.compiler.wire import kernel_tile
+
+from .decode import _set_key, piece_row
+from .format import GoldenFile
+from .record import kernel_set_pins, regime_pins
+from .repository import records_for_card, scope_digest, scope_explicit
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -48,14 +64,8 @@ def import_goldens(
     where that is loud. ``passes`` is the pipeline a target enters: the whole of it for a golden's traced
     slice (the default), the lowering passes alone for a freeze's kernel body, which the Loop passes would
     normalize into another kernel."""
-    from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
-    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.db import is_placement_knob  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden.decode import _set_key  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.pins import regime_live  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.policy.terminal_bench import persist_kernel_perf, point_stats  # noqa: PLC0415
+    # the strategy package imports this module's evidence_db: a real cycle, so the import stays local
     from emmy.compiler.pipeline.search.strategy.two_level import KernelInventory, record_routing  # noqa: PLC0415
-    from emmy.compiler.wire import kernel_tile  # noqa: PLC0415
 
     counts: Counter[str] = Counter()
     consumed: set[str] = set()  # the deploy identities of the kernels a decision replaced: they ran as no kernel
@@ -111,12 +121,6 @@ def _lower(pipeline, ctx: Context, entries: list[GoldenRecord]):
     its row vouches for, either the first leaf when it spells none. The live decision pins are withdrawn: the
     rows filed hold for every pinned compile. The seams an entry marks cut together are one composed
     decision, offered to the cut pass as the deploy offers them."""
-    from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
-    from emmy.compiler.pipeline.fork import iter_leaves, leaf_for  # noqa: PLC0415
-    from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
-    from emmy.compiler.pipeline.pipeline import Run, _is_structural_option  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden import kernel_set_pins, piece_row  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.pins import composed_routes, spelled_arm, unpinned_decisions  # noqa: PLC0415
 
     lead = entries[0]
     spelling = {
@@ -160,11 +164,6 @@ def import_file(db: SearchDB, path: Path) -> Counter:
     sourced by the file's digest (``freeze.freeze_source``). The rows were measured at the deployable opt level
     under their regime's flags, whatever this machine compiles at. A file the instance already holds is skipped;
     a git-LFS pointer in the data's place is refused by name. Returns what became of the entries, by kind."""
-    from emmy.compiler.context import FAST_MATH_FLAG, Context  # noqa: PLC0415
-    from emmy.compiler.pipeline import LOWERING_PASSES  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.data.freeze import freeze_source, is_lfs_pointer  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden import GoldenFile, regime_pins  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
 
     if is_lfs_pointer(path):
         raise ValueError(f"{path} is a git-LFS pointer, not the data: run `git lfs install && git lfs pull` (in CI, check out with lfs)")
@@ -189,7 +188,6 @@ def evidence_db(db: SearchDB | None, ctx: Context) -> SearchDB:
     """The DB a compile under ``ctx`` picks from, holding the golden rows in scope: ``db`` itself, the scope
     imported into it once per golden digest (a scope the file does not hold yet lets the earlier golden rows of
     this card and regime go first); with no ``db``, a fresh in-memory instance holding the scope."""
-    from emmy.compiler.pipeline.search.golden import records_for_card, scope_digest, scope_explicit  # noqa: PLC0415
 
     gpu_name = getattr(ctx, "gpu_name", None) or ""
     records = records_for_card(gpu_name, tuple(ctx.compute_capability)) if gpu_name or scope_explicit() else []
@@ -207,7 +205,6 @@ def evidence_db(db: SearchDB | None, ctx: Context) -> SearchDB:
 
 
 def _import(db: SearchDB, ctx: Context, records: Sequence[GoldenRecord], source: str) -> None:
-    from emmy.compiler.pipeline.search.pins import regime_live  # noqa: PLC0415
 
     counts = import_goldens(db, ctx, records, source=source)
     logger.info(
