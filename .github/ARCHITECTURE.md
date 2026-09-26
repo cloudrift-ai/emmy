@@ -272,7 +272,7 @@ The workflow creates every selected `onboarding`/`untested` shell through the sa
 `emmy recipe create`. Each shell stores its rationale and heat under `model` and a list of one to three candidate
 deployment entries under `matrices`; subsequent runs preserve the task and setups mechanically and refresh heat and
 rationale under the same rule. A shell does not claim qualification. The workflow commits lifecycle updates to the
-rolling branch and uses the API-only `make setup-agent` target for repository helpers plus `gh` for rolling-PR
+rolling branch and uses the `make setup-agent` target, built from the workflow commit, plus `gh` for rolling-PR
 discovery and updates. It never rents a VM. Network operations use bounded retries, and discovery keeps source
 evidence, batched recipe context, retained history, and final output within the inference endpoint's context limit.
 The workflow filters perform only structural batching and manifest assembly; the lifecycle validator retains
