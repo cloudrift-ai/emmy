@@ -8,7 +8,7 @@ serving shell — then A/B against the plain 1Cat container at an equal serving 
 43 layers, `hc_mult` 4, 256 routed experts at top-6 plus one shared, 3 hash-router layers. At TP8 × PP2 the first
 stage owns layers 0–21 and the second 22–42.
 
-## Where it stands (2026-09-26, main at #909)
+## Where it stands (2026-09-26, main at #910)
 
 `main` at `cc2bb92f` (#897) replaced this file. Loop fusion decides its regions from the graph now, the recurrence
 roller rolls the Sinkhorn rounds, and the post block lowers to five kernels per width instead of about thirty-five: a
@@ -26,10 +26,12 @@ prior does not pick) moved them to `/k8`: the expert twin 5.33 → 0.79 ms, the 
 4,096, 16.4 ms → 227 µs symbolic, 1,232 → 115 µs at M=1 and 511 → 114 µs at M=16; the expert rows pass the eager
 check and the post rows' outputs are bit-identical to #897's spelling on the same inputs. Boot45 serves the file
 strict and coherent at 0.734 s per output token, 34.1 s / 14.4 s to first token at 2,155 prompt tokens cold and warm,
-and 1.25 s per layer for a 4,096-token chunk. Boot45's tree predates #903, which dropped two receipts of the M=1 post
-twin's main-kernel route (their schedules tile a row #903's normalization removed): on `main` that twin refuses strict
-at its cut fork and serving rides width 16 for it until a record run on the card replaces them, so decode on `main` as
-merged is slower than boot45.
+and 1.25 s per layer for a 4,096-token chunk. #903 then dropped two receipts of the M=1 post twin's main-kernel route
+(split pieces its normalization re-formed), so on `main` that twin refused strict at its cut fork; the route was
+re-recorded on `main`'s tree (`--record-greedy` under its cut keys: the `hc_fn` projection split `g4a` at 56 µs where
+the old `g8a` set cost 3,048, the four-stream mix unsplit at 2.6 µs), 7,157 µs against 10,151 before #903, the output
+matching the other recorded route on the same inputs. Boot46 (`main` at #910 with it) serves strict and coherent at
+0.600 s per output token, 0.660 s at 2,155 prompt tokens, the M=1 post twin at 8.88 ms per layer (11.88).
 
 What holds the numbers now is the post routes, not the tiles. #897's routes leave this model's recurring defect in
 place: the hyper-connection logits (16,384-long f32 dot products against `hc_fn`) and the four-stream mix are
@@ -70,8 +72,10 @@ checkpoint stays impractical here.
    recorded rows. Boot39 from that tree serves coherent completions at boot38's timings, so gate (c) is green again.
    Still owed: a finite-input replay per twin and an independent reference on `run --golden`, and a boot that reads
    the election's check instead of printing it as a warning.
-4. **Compute the recomputed cones once in the post routes.** Found 2026-09-26, nothing recorded yet. First re-record
-   the two M=1 post receipts #903 dropped (a host tree at `main` after #903), so that twin elects again. Per post twin
+4. **Compute the recomputed cones once in the post routes.** Found 2026-09-26, nothing recorded yet. Six targets
+   carry two route rows under one name from #897's refresh (the width-16, 4,096-width and symbolic post main kernels,
+   the M=1 and width-16 post routing kernels, `pre4096`); `--record-greedy` writes the recorded set's `kernel_set`
+   onto the first row of that name, so drop the stale sibling and its own receipts before recording one. Per post twin
    and per kernel — the routing kernel carries the same logits recompute (4.1 ms of the width-16 twin's 6.5) — take the
    seams that compute the `hc_fn` logits and the four-stream mix once, pick the new pieces' schedules by hand, check
    each set against #897's route on the same inputs (the post targets have no eager reference, so `run --bench`'s exit
@@ -209,6 +213,7 @@ the Emmy arm cannot hold and is no baseline.
 | 09-25 | `cc2bb92f` (#897) + the M=1 pre route (#905, boot43) | 1.15 – 1.19 s | 5.64 / 2.93 s | 39.5 / 17.1 s | 10 min | #897's untuned cut routes; the M=1 post twin deploys from a committed file |
 | 09-26 | + the width-16 expert pieces at `/k8` (boot44) | 0.777 s | 4.73 / 1.93 s | 38.1 / 14.8 s | 10 min | the expert twin 5.33 → 0.79 ms per launch |
 | 09-26 | + every post twin's last matmul at `/k8` (boot45) | 0.734 s | 4.65 / 1.92 s | 34.1 / 14.4 s | 10 min | the 5-token answer alternates "red, yellow, and blue" / "red, yellow, blue", as boot43's two repeats did |
+| 09-26 | `a091dbe7` (#910) + the M=1 post route re-recorded after #903 (boot46) | 0.600 s | 4.74 / 1.91 s | 34.2 / 14.5 s | 9.5 min | the first boot of a post-#909 tree; no runtime device patch (#907) |
 
 The first decode step of a request costs more than a steady one (1.85 s against 0.90 on 09-12, 4.2 s against 2.03 on
 09-15): each layer's programs are CUDA-graph captured on first use. The first compile on each rank is the cold
@@ -228,6 +233,7 @@ The boot's roofline audit, first layer of each stage, per layer:
 | 09-23 / 09-24 | 3.12 ms | not deployed | 7.41 – 8.06 ms | 104 ms |
 | 09-25, #897 | 3.12 ms | 12.96 ms | 34.7 ms | 1,510 ms |
 | 09-26, `/k8` (boot45) | 3.12 ms | 11.88 ms | 34.26 ms | 1,247 ms |
+| 09-26, M=1 post route after #903 (boot46) | 3.11 ms | 8.88 ms | 34.25 ms | 1,249 ms |
 
 A decode step, profiled on 09-19 with torch's profiler over eleven single-stream steps on all sixteen workers (the
 model serves eager, because the hyper-connection routed combine host-syncs): per token about 126 ms of Emmy kernels
@@ -367,7 +373,9 @@ nothing recorded, one card each; `*round.sh` launches sixteen, `*wait.sh` summar
 `cutforks.py GOLDEN TWIN` (every seam a kernel's cut fork offers) and `abroute.sh` / `abseams.sh` (a target under a
 hand-pinned route, not strict). Those respell and carry scripts edit the YAML wire; since #912 a golden is JSON with
 one row per line, so a respell there is one row's JSON rewritten (`json.dumps` of the row reproduces the file's
-spelling).
+spelling). `~/emmy-main-a091dbe7` is `main` at #910 (post-#909/#912, runtime built with `build-a091.sh`, no patch):
+`rec911.sh` records there, `pair911.sh NAME "GOLDEN|PINS|strict-or-loose"...` compares a target's outputs across
+compiles on the same inputs, `seed46.sh` seeds the tune DB through the post-#909 golden package and `boot46.sh` boots.
 
 **Never touch** `~/.cache/emmy/autotune.db` (the real tune DB), `~/emmy`, `~/emmy-dsv4`, `~/emmy-fix-backup`,
 `~/emmy-durations/_verify/gap3-tune/` (partial rows that regress the election — never merge that DB), or
