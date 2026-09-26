@@ -40,7 +40,7 @@ def regenerate_all() -> int:
             refused.append(f"{path.name}: the verdict changed with the derived half ({before} -> {after})")
             continue
         stale.append(path.name)
-        helpers.write_case(path, fresh)
+        fresh.dump(path, overwrite=True)
 
     for message in refused:
         print(f"refused: {message}", file=sys.stderr)
@@ -67,7 +67,7 @@ def complete_all() -> int:
         document = helpers.complete(case.document)
         after = document.configs[0].realizations
         if after != before:
-            helpers.write_case(path, helpers.regenerate(document))
+            helpers.regenerate(document).dump(path, overwrite=True)
             dropped = sum(1 for realization in before if realization not in after)
             print(f"completed {path.relative_to(helpers.CASES_DIR).as_posix()}: +{len(after) - len(before) + dropped} -{dropped} entries")
     return 0

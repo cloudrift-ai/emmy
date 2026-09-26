@@ -146,8 +146,8 @@ the same cubins and the standard-lane pack never exists.
   immutably to their `EMMY_GEN_*` variables in initial warm, every shape fixpoint, the baked image, and verify;
   an extra warm shape's prefill field overrides the pinned bucket. A test rejects any other key, because a
   misspelled one reads as a value nothing consumes.
-  `SERVE_GOLDEN_FILE` names the recipe-local canonical YAML that trace, tune handoff, release audit, and image gate
-  share: `recipes/<model>/golden/<gpu-slug>_<compute-cap>.yaml`, one file per exact GPU.
+  `SERVE_GOLDEN_FILE` names the recipe-local canonical golden file that trace, tune handoff, release audit, and image gate
+  share: `recipes/<model>/golden/<gpu-slug>_<compute-cap>.json`, one file per exact GPU.
   `SERVE_STATIC_ONLY=1` narrows the realization matrix and is fail-closed: it requires runner capacity, decode bucket,
   and scheduler maximum all equal to one, prefill disabled, the M1 tier enabled, capture sizes exactly `[1]`, and no
   warm-shape override outside that same envelope. Without it the audit derives every warm width plus symbolic.

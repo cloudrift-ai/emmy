@@ -530,7 +530,7 @@ def test_moe_probe_recognizes_the_deepseek_published_spelling(tmp_path):
 
 
 _REGIME_GOLDEN = (
-    Path(__file__).resolve().parents[2] / "emmy" / "compiler" / "pipeline" / "search" / "golden" / "records" / "rtx4080_sm89.yaml"
+    Path(__file__).resolve().parents[2] / "emmy" / "compiler" / "pipeline" / "search" / "golden" / "records" / "rtx4080_sm89.json"
 )
 
 

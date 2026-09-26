@@ -20,7 +20,7 @@ def arguments(*flags):
 
 def test_native_dry_run(caplog):
     args, forwarded = arguments(
-        "--native", "--generate", "--dry-run", "--revision", "pinned", "--golden", "working.yaml", "--strict-evidence", "--port", "8123"
+        "--native", "--generate", "--dry-run", "--revision", "pinned", "--golden", "working.json", "--strict-evidence", "--port", "8123"
     )
     with caplog.at_level("INFO"):
         launch(args, forwarded)

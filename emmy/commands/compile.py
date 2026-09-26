@@ -130,7 +130,7 @@ def add_input_args(parser, *, include_dump_dir: bool = True) -> None:
 
 def add_golden_arg(parser) -> None:
     """Register the golden flags every replaying command shares (``run`` / ``compile`` / ``tune`` /
-    ``serve`` spell them the same way): ``--golden PATH`` names the golden YAML whose measured rows
+    ``serve`` spell them the same way): ``--golden PATH`` names the golden file whose measured rows
     feed the evidence index INSTEAD of the repository goldens, ``--realization NAME`` selects one
     realization inside it (or, without ``--golden``, inside the live card's repository corpus),
     ``--strict-evidence`` refuses any fork no measurement decides, and ``--pin-route`` (``compile`` /
@@ -139,7 +139,7 @@ def add_golden_arg(parser) -> None:
         "--golden",
         metavar="PATH",
         help=(
-            "A golden YAML (working or canonical) whose measured rows are the golden evidence this command deploys "
+            "A golden file (working or canonical) whose measured rows are the golden evidence this command deploys "
             "from, instead of the repository goldens: they join the tune DB's rows in the one measured-evidence index "
             "the greedy pick reads. Mutually exclusive with --code / positional input / --ir."
         ),
@@ -510,14 +510,14 @@ def register_compile_command(subparsers):
         help=(
             "With --golden PATH: compile the golden's traced program N (its `programs` entry) instead of a "
             "realization's kernel — the whole layer or serving twin the file recorded, prepared as the trace "
-            "inventory writer prepared it. With --ir loop -o fresh.yaml this writes the kernels the golden must store."
+            "inventory writer prepared it. With --ir loop -o fresh.json this writes the kernels the golden must store."
         ),
     )
     parser.add_argument(
         "--output",
         "-o",
         help=(
-            "Output path for the IR. A `.yaml` path writes the stage as the wire a golden stores — `--ir torch`: the "
+            "Output path for the IR. A `.json` path writes the stage as the wire a golden stores — `--ir torch`: the "
             "traced program; `--ir loop`: one Loop IR program per kernel, sorted by output set, what `emmy golden "
             "kernels PATH --program N` prints — so the two diff; any other path (or none) gets the readable listing."
         ),
@@ -612,7 +612,7 @@ def handle_compile(args):
 
     n_compute = sum(1 for n in result.nodes.values() if not _is_boundary(n.op))
     logger.info("Lowered: %d graph nodes -> %d kernels", initial_count, n_compute)
-    if args.output and args.output.endswith(".yaml"):
+    if args.output and args.output.endswith(".json"):
         content = wire_stage(result, args.ir)
     else:
         content = format_stage(result, args.ir)
@@ -657,7 +657,7 @@ def wire_stage(graph, stage: str) -> str:
         from emmy.compiler.pipeline.search.working_golden import kernel_programs  # noqa: PLC0415
 
         return kernel_pool_text(program.to_wire() for _, program in kernel_programs(graph))
-    logger.error("a .yaml output holds the wire a golden stores, which exists for --ir torch and --ir loop only")
+    logger.error("a .json output holds the wire a golden stores, which exists for --ir torch and --ir loop only")
     sys.exit(2)
 
 

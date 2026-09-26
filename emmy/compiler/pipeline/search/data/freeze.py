@@ -43,6 +43,7 @@ from collections import Counter, defaultdict, deque
 from pathlib import Path
 
 from emmy.compiler.context import FAST_MATH_FLAG
+from emmy.compiler.graph import Graph
 from emmy.compiler.pipeline.knob import METADATA_PREFIXES
 from emmy.compiler.pipeline.search.db import KernelRow, PerfRow, SearchDB, knobs_json
 from emmy.compiler.pipeline.search.features import DEPLOYABLE_OPT
@@ -194,10 +195,10 @@ def impossible_kernel_reason(row: PerfRow) -> str | None:
 
 
 def _gpu_filename(gpu_name: str, cap: tuple[int, int]) -> str:
-    """The per-GPU YAML file name, mirroring the ``golden/`` convention —
-    e.g. ``nvidia_geforce_rtx_4090_sm89.yaml``."""
+    """The per-GPU golden file name, mirroring the ``golden/`` convention —
+    e.g. ``nvidia_geforce_rtx_4090_sm89.json``."""
     slug = re.sub(r"[^a-z0-9]+", "_", gpu_name.lower()).strip("_") or "unknown_gpu"
-    return f"{slug}_sm{cap[0]}{cap[1]}.yaml"
+    return f"{slug}_sm{cap[0]}{cap[1]}.json"
 
 
 def _path_to(kernel: str, kernels: dict[str, KernelRow], parents: dict[str, list[tuple[str, dict]]]) -> tuple | None:
@@ -245,7 +246,7 @@ def _document(gpu_name: str, cap: tuple[int, int], rows: list[PerfRow], kernels:
         # The sizes the rows were benched at are the program's hints; a golden's ``bindings`` would make them static.
         # A parent axis a piece dropped keeps the stored hint: the piece's measurement does not depend on it.
         try:
-            program = rehint_program(kernels[root].loop_ir, dict(members[0].bindings))
+            program = rehint_program(Graph.from_wire(kernels[root].loop_ir), dict(members[0].bindings)).to_wire()
         except ValueError:
             dropped["sizes the program cannot bind"] += len(members)
             continue
@@ -317,7 +318,7 @@ def write_freeze(db_path: Path | str, out_dir: Path | str) -> dict[str, str]:
     if not documents:
         raise RuntimeError(f"no freezable rows in {db_path} — wrong DB, or its rows are in another regime")
     out = Path(out_dir)
-    if out.exists() and not (out.is_dir() and all(p.suffix == ".yaml" for p in out.iterdir())):
+    if out.exists() and not (out.is_dir() and all(p.suffix == ".json" for p in out.iterdir())):
         raise RuntimeError(f"{out} exists and is not a measurement freeze — refusing to replace it")
     tmp = out.with_name(out.name + ".tmp")
     if tmp.exists():
@@ -339,7 +340,6 @@ def freeze_source(path: Path | str) -> str:
 
 def is_lfs_pointer(path: Path | str) -> bool:
     """Whether the payload at ``path`` is a git-LFS pointer rather than the data — what a clone or CI checkout
-    without LFS leaves, three lines that are valid YAML and parse to a string, so the first key lookup would
-    fail with a type error that says nothing about the real problem."""
+    without LFS leaves, three lines that fail to parse with an error that says nothing about the real problem."""
     with Path(path).open("r") as fh:
         return fh.read(len(_LFS_POINTER)) == _LFS_POINTER

@@ -86,7 +86,7 @@ class Case:
 
 
 def case_files() -> list[Path]:
-    return sorted(CASES_DIR.rglob("*.yaml"))
+    return sorted(CASES_DIR.rglob("*.json"))
 
 
 def expectation(path: Path) -> str | None:
@@ -117,8 +117,8 @@ def load_case(path: Path) -> Case:
         if realization.knobs is None:
             raise CaseError(f"{path.name}: every entry must carry a knobs mapping, empty only for a forkless kernel")
     stage = expectation(path)
-    if stage is not None and not evidence_line(path):
-        raise CaseError(f"{path.name}: an open case must carry a leading '# evidence:' comment naming why it should realize")
+    if stage is not None and not evidence_line(document):
+        raise CaseError(f"{path.name}: an open case must carry a note with an 'evidence:' paragraph naming why it should realize")
     records = tuple(document.record(configs[0], realization) for realization in configs[0].realizations)
     return Case(path=path, document=document, records=records, xfail_stage=stage)
 
@@ -128,24 +128,12 @@ def pin_of(record: GoldenRecord) -> dict:
     return {**record.pin_map, **record.knobs}
 
 
-def evidence_line(path: Path) -> str | None:
-    """The case's ``# evidence:`` citation, read out of its leading comment block."""
-    for line in leading_comment(path).splitlines():
-        body = line.lstrip("#").strip()
-        if body.lower().startswith("evidence:"):
-            return body
+def evidence_line(document: GoldenFile) -> str | None:
+    """The case's ``evidence:`` citation: the paragraph of its note that starts with it."""
+    for paragraph in (document.note or "").split("\n\n"):
+        if paragraph.lower().startswith("evidence:"):
+            return paragraph
     return None
-
-
-def leading_comment(path: Path) -> str:
-    """The file's leading ``#`` block. ``dump_golden_file`` is a plain YAML dump and drops
-    comments, so regeneration captures this and re-prepends it."""
-    lines: list[str] = []
-    for line in path.read_text().splitlines(keepends=True):
-        if not line.startswith("#"):
-            break
-        lines.append(line)
-    return "".join(lines)
 
 
 # --- the derived half -------------------------------------------------------------------------
@@ -173,13 +161,13 @@ def regenerate(document: GoldenFile) -> GoldenFile:
     ctx = Context.from_target(tuple(document.compute_cap))
     graph = Graph.from_wire(document.programs[entry.program])
     with tempfile.TemporaryDirectory() as directory:
-        destination = Path(directory) / "regenerated.yaml"
+        destination = Path(directory) / "regenerated.json"
         write_trace_inventory(graph, destination, ctx=ctx, model=document.model)
         fresh = GoldenFile.load(destination)
 
     matched = _matching_entry(fresh, entry, document.loops[entry.target.loop])
     # A case keeps its own kernel only: the regenerated pool holds every kernel of the program.
-    rebuilt = replace(fresh, loops=[fresh.loops[matched.target.loop]], configs=[matched])
+    rebuilt = replace(fresh, note=document.note, loops=[fresh.loops[matched.target.loop]], configs=[matched])
     matched.target = replace(matched.target, loop=0)
     rows = []
     for index, realization in enumerate(entry.realizations):
@@ -277,14 +265,6 @@ def canonical_knobs(knobs: dict) -> dict:
         except ValueError as exc:
             raise CaseError(f"knob {name}={value!r} is not a spelling this compiler's codec accepts: {exc}") from exc
     return canonical
-
-
-def write_case(path: Path, document: GoldenFile) -> None:
-    """Persist a regenerated case, restoring the leading comment block the YAML dump drops."""
-    comment = leading_comment(path)
-    document.dump(path, overwrite=True)
-    if comment:
-        path.write_text(comment + path.read_text())
 
 
 # --- the four oracles -------------------------------------------------------------------------

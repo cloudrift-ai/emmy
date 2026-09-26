@@ -22,11 +22,9 @@ CASES_DIR = Path("tests/compiler/realization/cases")
 
 def compute_cap_of(path: Path) -> tuple[int, int] | None:
     """The capability a case declares, read without loading the compiler."""
-    import yaml  # noqa: PLC0415
-
     try:
-        document = yaml.safe_load(path.read_text())
-    except (OSError, yaml.YAMLError):
+        document = json.loads(path.read_text())
+    except (OSError, ValueError):
         return None
     cap = (document or {}).get("compute_cap")
     if isinstance(cap, list) and len(cap) == 2 and all(isinstance(part, int) for part in cap):
@@ -42,7 +40,7 @@ def selectable(workspace: Path, cap: tuple[int, int]) -> list[Path]:
     newer card. And open cases are excluded, because their schedule never runs and demanding a
     latency for one would be a false attribution.
     """
-    return sorted(path for path in (workspace / CASES_DIR).rglob("*.yaml") if "_xfail" not in path.stem and compute_cap_of(path) == cap)
+    return sorted(path for path in (workspace / CASES_DIR).rglob("*.json") if "_xfail" not in path.stem and compute_cap_of(path) == cap)
 
 
 def choose_gpu(available: list[str], seed: int) -> str | None:
@@ -87,12 +85,10 @@ def _without_latency(document: object) -> object:
 
 
 def _at_head(workspace: Path, path: str) -> object:
-    import yaml  # noqa: PLC0415
-
     result = subprocess.run(["git", "show", f"HEAD:{path}"], cwd=workspace, capture_output=True, text=True)
     if result.returncode != 0:
         return None
-    return yaml.safe_load(result.stdout)
+    return json.loads(result.stdout)
 
 
 def validate_diff(workspace: Path) -> list[str]:
@@ -102,8 +98,6 @@ def validate_diff(workspace: Path) -> list[str]:
     from both revisions and require the rest to be equal. A textual check would have to model the
     dump's indentation, and would pass or fail on formatting rather than on meaning.
     """
-    import yaml  # noqa: PLC0415
-
     offenders: list[str] = []
     for path in changed_files(workspace):
         before = _at_head(workspace, path)
@@ -111,8 +105,8 @@ def validate_diff(workspace: Path) -> list[str]:
             offenders.append(f"{path}: a timing run may not add a case")
             continue
         try:
-            after = yaml.safe_load((workspace / path).read_text())
-        except (OSError, yaml.YAMLError) as exc:
+            after = json.loads((workspace / path).read_text())
+        except (OSError, ValueError) as exc:
             offenders.append(f"{path}: unreadable after the run ({exc})")
             continue
         if _without_latency(before) != _without_latency(after):

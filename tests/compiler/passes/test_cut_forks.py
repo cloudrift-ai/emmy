@@ -193,7 +193,7 @@ def _case_match(case: str) -> tuple[Match, Graph]:
 
 
 def _nested_attention_cut(pins: dict[str, str]) -> Graph:
-    match, graph = _case_match("attention/rmsnorm-gqa-b-cut.yaml")
+    match, graph = _case_match("attention/rmsnorm-gqa-b-cut.json")
     with pinned_knobs(pins):
         result = _CUT.rewrite(match, graph.nodes[match.root_node_id])
     options = result if isinstance(result, list) else [result]
@@ -428,7 +428,7 @@ def test_composed_scoped_place_pins_cut_together_and_foreign_pins_are_skipped() 
     seam and one consumer, with a producer reading another seam's workspace when its value nests
     inside it — while a pin whose site path exists on no kernel here is another kernel's and is
     skipped, never an error."""
-    match, graph = _case_match("attention/rmsnorm-qk-sdpa-composed-cut.yaml")
+    match, graph = _case_match("attention/rmsnorm-qk-sdpa-composed-cut.json")
     pins = {
         "PLACE@map.1/twist.1/inner.1/map": "cut",  # the normalized-Q cone
         "PLACE@map.1/twist.1/inner.2/map": "cut",  # the normalized-K cone
@@ -452,7 +452,7 @@ def test_composed_scoped_place_pins_cut_together_and_foreign_pins_are_skipped() 
 
 
 def test_bare_and_scoped_place_cuts_compose_in_one_decision() -> None:
-    match, graph = _case_match("attention/rmsnorm-qk-sdpa-composed-cut.yaml")
+    match, graph = _case_match("attention/rmsnorm-qk-sdpa-composed-cut.json")
     pins = {"PLACE": "cut", "PLACE@map.1/twist.1/inner.2/map": "cut"}
 
     with pinned_knobs(pins):
@@ -1051,7 +1051,7 @@ def test_a_scalar_operand_is_no_seam() -> None:
 def test_every_seam_is_an_unpinned_arm() -> None:
     """The unpinned fork offers every cuttable seam as its own structural arm, spelled by the same
     key the pin path resolves."""
-    match, graph = _case_match("attention/rmsnorm-qk-sdpa-composed-cut.yaml")
+    match, graph = _case_match("attention/rmsnorm-qk-sdpa-composed-cut.json")
     node = next(node for node in graph.nodes.values() if isinstance(node.op, TileOp))
     options = _CUT.rewrite(match, node)
     arms = [dict(option.knobs) for option in options if "cut" in option.knobs.values()]
@@ -1094,7 +1094,7 @@ def test_disjoint_output_sweeps_offer_an_output_owning_seam() -> None:
     """The NVFP4 encode writes packed codes over the feature axis and one block scale per 16 of
     them. No axis rides both stores, so the fused kernel promotes nothing and its contractions get
     no output-axis pair. Each branch owns one store, and owning it is what gives the piece a grid."""
-    tile = case_target_tile("fused/nvfp4-gate-up-requant-place-cut.yaml")
+    tile = case_target_tile("fused/nvfp4-gate-up-requant-place-cut.json")
     owning = {seam.spelling: seam for seam in cuttable_seams(tile) if seam.owned is not None}
 
     assert set(owning) == {"PLACE@map.1/map", "PLACE@map.2/map"}
@@ -1107,7 +1107,7 @@ def test_output_owning_cut_leaves_single_output_pieces_that_promote() -> None:
     """Realizing it gives two kernels, each writing ONE of the kernel's own outputs — no workspace
     between them — and each binding the sweep its store rides as a grid axis. Rank two is what the
     contraction sites need to name an ``(m, n)`` pair at all."""
-    fragment = _realized("fused/nvfp4-gate-up-requant-place-cut.yaml", "PLACE@map.1/map")
+    fragment = _realized("fused/nvfp4-gate-up-requant-place-cut.json", "PLACE@map.1/map")
     pieces = [node for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
 
     assert len(pieces) == 2
@@ -1256,7 +1256,7 @@ def test_an_output_owning_cut_is_declined_where_no_piece_would_gain_a_grid_axis(
     """The same partition over a purely pointwise quantize: both branches own a store, but neither
     holds a contraction reading it, so promotion has nothing to lift and splitting would buy a
     second launch and no grid. The seams keep their workspace reading."""
-    tile = case_target_tile("fused/nvfp4-quantize-cut-shared-normalizer.yaml")
+    tile = case_target_tile("fused/nvfp4-quantize-cut-shared-normalizer.json")
 
     assert len(tile.output_specs) == 2
     assert all(seam.owned is None for seam in cuttable_seams(tile))
@@ -1265,7 +1265,7 @@ def test_an_output_owning_cut_is_declined_where_no_piece_would_gain_a_grid_axis(
 # ---- the full-projection cut --------------------------------------------------------------------- #
 
 #: The serving W4A4 MLP shape, whose requant projection owns more outputs than the binder can bind.
-_REQUANT = "fused/nvfp4-gate-up-requant-place-cut.yaml"
+_REQUANT = "fused/nvfp4-gate-up-requant-place-cut.json"
 
 
 def _cut_arms(graph: Graph, node) -> list:

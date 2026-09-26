@@ -48,7 +48,7 @@ def _parameters():
             # its own context, which is the OOM-and-cascade the serial chain exists to prevent.
             marks = [requires_cuda] if stage in ("built", "correct") else []
             if case.xfail_stage == stage:
-                marks.append(pytest.mark.xfail(strict=True, reason=f"known gap — {helpers.evidence_line(path)}"))
+                marks.append(pytest.mark.xfail(strict=True, reason=f"known gap — {helpers.evidence_line(case.document)}"))
             elif case.xfail_stage is not None and STAGES.index(stage) > STAGES.index(case.xfail_stage):
                 # The schedule never realizes, so the stages past the gap have nothing to run.
                 marks.append(pytest.mark.skip(reason=f"open case: the gap at {case.xfail_stage} blocks {stage}"))
@@ -107,7 +107,7 @@ def test_volta_compute_fill_offers_no_prefetch_ring():
     the enumeration must never offer it — asked on the one program known to offer the fill."""
     from dataclasses import replace
 
-    case = helpers.load_case(helpers.CASES_DIR / "matmul" / "volta-gptq-cone-d1smem.yaml")
+    case = helpers.load_case(helpers.CASES_DIR / "matmul" / "volta-gptq-cone-d1smem.json")
     assert helpers.offered(case) is None, "the depth-1 fill is offered"
     (record,) = case.records
     ringed = replace(record, knobs={**record.knobs, "STAGE": "d2/smem"})

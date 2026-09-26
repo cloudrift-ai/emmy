@@ -685,25 +685,25 @@ def test_platform_update_preserves_other_platform_snapshot(tmp_path):
 def _corpus_case(workspace, name):
     path = workspace / onboarding_artifacts.CORPUS_CASE_DIR / name
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("compute_cap: [12, 0]\n")
+    path.write_text('{"compute_cap": [12, 0]}\n')
     return path.relative_to(workspace)
 
 
 def test_corpus_case_is_an_allowed_artifact(tmp_path):
-    """A ``.yaml`` under the corpus is allowed even though ``tests/`` otherwise takes only Python."""
-    _corpus_case(tmp_path, "matmul/f16-warp-splitk.yaml")
+    """A ``.json`` case under the corpus is allowed even though ``tests/`` otherwise takes only Python."""
+    _corpus_case(tmp_path, "matmul/f16-warp-splitk.json")
 
-    resolved = onboarding_artifacts._relative_artifact(tmp_path, "tests/compiler/realization/cases/matmul/f16-warp-splitk.yaml")
+    resolved = onboarding_artifacts._relative_artifact(tmp_path, "tests/compiler/realization/cases/matmul/f16-warp-splitk.json")
 
-    assert resolved == Path("tests/compiler/realization/cases/matmul/f16-warp-splitk.yaml")
+    assert resolved == Path("tests/compiler/realization/cases/matmul/f16-warp-splitk.json")
 
 
 def test_corpus_case_rejects_an_unknown_expected_failure_stage(tmp_path):
     """The filename is semantic, so a typo must not quietly become a closed case."""
-    _corpus_case(tmp_path, "matmul/lockout_xfail_offerd.yaml")
+    _corpus_case(tmp_path, "matmul/lockout_xfail_offerd.json")
 
     with pytest.raises(ValueError, match="unknown expected-failure stage"):
-        onboarding_artifacts._relative_artifact(tmp_path, "tests/compiler/realization/cases/matmul/lockout_xfail_offerd.yaml")
+        onboarding_artifacts._relative_artifact(tmp_path, "tests/compiler/realization/cases/matmul/lockout_xfail_offerd.json")
 
 
 def test_non_corpus_yaml_under_tests_is_still_rejected(tmp_path):
@@ -724,7 +724,7 @@ def test_corpus_cases_are_the_focused_test_for_a_compiler_fix(tmp_path):
     subprocess.run(["git", "add", "emmy/compatibility.py"], cwd=tmp_path, check=True)
     subprocess.run(["git", "commit", "-qm", "baseline"], cwd=tmp_path, check=True)
     implementation.write_text("VALUE = 'after'\n")
-    case = _corpus_case(tmp_path, "matmul/lockout.yaml")
+    case = _corpus_case(tmp_path, "matmul/lockout.json")
 
     onboarding_artifacts.stage_artifacts(tmp_path, [Path("emmy/compatibility.py"), case])
 
@@ -736,6 +736,6 @@ def test_corpus_cases_do_not_consume_the_small_fix_budget(tmp_path):
     baseline.write_text("baseline\n")
     subprocess.run(["git", "add", "README.md"], cwd=tmp_path, check=True)
     subprocess.run(["git", "commit", "-qm", "baseline"], cwd=tmp_path, check=True)
-    cases = [_corpus_case(tmp_path, f"matmul/case_{index}.yaml") for index in range(onboarding_artifacts.MAX_IMPLEMENTATION_FILES + 3)]
+    cases = [_corpus_case(tmp_path, f"matmul/case_{index}.json") for index in range(onboarding_artifacts.MAX_IMPLEMENTATION_FILES + 3)]
 
     onboarding_artifacts.stage_artifacts(tmp_path, cases)

@@ -499,7 +499,7 @@ def test_makefile_uses_eval_golden_as_the_release_gate():
 def test_release_config_realizations_include_pinned_and_warm_decode_prefill(tmp_path):
     config = tmp_path / "model.env"
     config.write_text(
-        f"SERVE_MODEL=org/model\nSERVE_GPU=NVIDIA-Test\nSERVE_GOLDEN_FILE={tmp_path / 'golden.yaml'}\n"
+        f"SERVE_MODEL=org/model\nSERVE_GPU=NVIDIA-Test\nSERVE_GOLDEN_FILE={tmp_path / 'golden.json'}\n"
         "SERVE_MAX_NUM_BATCHED_TOKENS=96\nSERVE_DECODE_BUCKET=32\nSERVE_PREFILL_CAPACITY=96\nSERVE_PREFILL_BUCKET=0\n"
         'SERVE_WARM_SHAPES="8:2048:2056 64::4096 32:512:544:fm"\n'
     )
@@ -518,7 +518,7 @@ def test_release_config_realizations_include_pinned_and_warm_decode_prefill(tmp_
 def test_release_config_uses_capacity_as_default_prefill_bucket(tmp_path):
     config = tmp_path / "model.env"
     config.write_text(
-        f"SERVE_MODEL=org/model\nSERVE_GPU=NVIDIA-Test\nSERVE_GOLDEN_FILE={tmp_path / 'golden.yaml'}\n"
+        f"SERVE_MODEL=org/model\nSERVE_GPU=NVIDIA-Test\nSERVE_GOLDEN_FILE={tmp_path / 'golden.json'}\n"
         "SERVE_MAX_NUM_BATCHED_TOKENS=96\nSERVE_DECODE_BUCKET=32\nSERVE_PREFILL_CAPACITY=96\n"
     )
     serving = load_serving_config(config)
@@ -528,7 +528,7 @@ def test_release_config_uses_capacity_as_default_prefill_bucket(tmp_path):
 def test_release_config_rejects_zero_prefill_capacity(tmp_path):
     config = tmp_path / "model.env"
     config.write_text(
-        f"SERVE_MODEL=org/model\nSERVE_GPU=NVIDIA-Test\nSERVE_GOLDEN_FILE={tmp_path / 'golden.yaml'}\n"
+        f"SERVE_MODEL=org/model\nSERVE_GPU=NVIDIA-Test\nSERVE_GOLDEN_FILE={tmp_path / 'golden.json'}\n"
         "SERVE_MAX_NUM_BATCHED_TOKENS=32\nSERVE_DECODE_BUCKET=32\nSERVE_PREFILL_CAPACITY=0\n"
     )
     with pytest.raises(ValueError, match="SERVE_PREFILL_CAPACITY must be >= 1"):
@@ -538,7 +538,7 @@ def test_release_config_rejects_zero_prefill_capacity(tmp_path):
 def test_static_only_config_rejects_release_without_m1_proof(tmp_path):
     config = tmp_path / "model.env"
     config.write_text(
-        f"SERVE_MODEL=org/model\nSERVE_GPU=NVIDIA-Test\nSERVE_GOLDEN_FILE={tmp_path / 'golden.yaml'}\n"
+        f"SERVE_MODEL=org/model\nSERVE_GPU=NVIDIA-Test\nSERVE_GOLDEN_FILE={tmp_path / 'golden.json'}\n"
         "SERVE_STATIC_ONLY=1\n"
         "SERVE_MAX_NUM_BATCHED_TOKENS=1\n"
         "SERVE_DECODE_BUCKET=1\n"

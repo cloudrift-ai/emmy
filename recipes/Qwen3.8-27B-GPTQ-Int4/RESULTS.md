@@ -79,7 +79,7 @@ throughput choice. TP2 divides cleanly: 24 attention heads / 2 = 12, 4 key/value
 
 ## Emmy
 
-`golden/v100_sm70.yaml` carries **48 recorded rows over 46 targets** of decoder layer 0 — the Gated DeltaNet
+`golden/v100_sm70.json` carries **48 recorded rows over 46 targets** of decoder layer 0 — the Gated DeltaNet
 archetype, 48 of the model's 64 layers. **36 beat eager PyTorch, 2 are at parity, 8 lose.** Recorded on **one V100
 SXM3 32GB**, not on the SXM2 16GB pair the serving lane above ran on: both are sm_70 and the kernels are the same,
 but the card is a different SKU, so read the golden as compiler evidence for Volta rather than as a measurement of

@@ -33,10 +33,10 @@ _STAMPS = {
 #: One case per kind of kernel: a fused kernel, a twisted one, a cut into formed pieces, an attention split
 #: whose pieces are formed from no loop op.
 CASES = (
-    "fused/norm-linear-f16-scalar-reduce.yaml",
-    "attention/sdpa-hd128-softmax-v-mma.yaml",
-    "fused/linear-add-place-cut-sm70.yaml",
-    "attention/sdpa-gqa-decode-split-kv.yaml",
+    "fused/norm-linear-f16-scalar-reduce.json",
+    "attention/sdpa-hd128-softmax-v-mma.json",
+    "fused/linear-add-place-cut-sm70.json",
+    "attention/sdpa-gqa-decode-split-kv.json",
 )
 
 
@@ -125,13 +125,13 @@ def test_a_freeze_is_a_golden_file_per_card_that_re_lowers_to_the_rows_it_was_wr
     the file stores neither."""
 
     documents, dropped = freeze_documents(tuned)
-    assert dropped == {} and set(documents) == {"nvidia_geforce_rtx_5090_sm120.yaml", "nvidia_tesla_v100_sxm2_16gb_sm70.yaml"}
+    assert dropped == {} and set(documents) == {"nvidia_geforce_rtx_5090_sm120.json", "nvidia_tesla_v100_sxm2_16gb_sm70.json"}
     for document in documents.values():
         GoldenFile.from_wire(document).check()
     definitions = _definitions(tuned)
     unformed = {identity for identity, (_deploy, _stamps, formed) in definitions.items() if not formed}
     assert unformed, "the attention split mints pieces no loop op forms"
-    rtx = documents["nvidia_geforce_rtx_5090_sm120.yaml"]
+    rtx = documents["nvidia_geforce_rtx_5090_sm120.json"]
     routes = [config for config in rtx["configs"] if any("kernel_set" in entry for entry in config["realizations"])]
     [route] = routes
     [decision] = [entry for entry in route["realizations"] if "measurements" not in entry]
@@ -187,7 +187,7 @@ def test_both_precision_lanes_freeze_as_pinned_rows_and_import_apart(tmp_path) -
     write_freeze(path, tmp_path / "freeze")
     db.close()
     again = SearchDB()
-    import_file(again, next((tmp_path / "freeze").glob("*.yaml")))
+    import_file(again, next((tmp_path / "freeze").glob("*.json")))
     lanes = sorted((r.flags, r.stats.median) for r in again.iter_perf_rows())
     assert lanes == [("", row.stats.median), ("--use_fast_math", row.stats.median)]
 
@@ -202,7 +202,7 @@ def test_a_kernel_benched_at_two_sizes_freezes_as_two_programs(tmp_path) -> None
     from tests.compiler.pipeline.search.helpers import CARDS
 
     path = tmp_path / "autotune.db"
-    db = tuned_db(path, ("reduce/combine-amax-ilp-symbolic.yaml",))
+    db = tuned_db(path, ("reduce/combine-amax-ilp-symbolic.json",))
     [row] = list(db.iter_perf_rows())
     assert row.bindings == {"seq_len": 512}
     with pinned_knobs({"FAST_MATH": row.flags != ""}):
@@ -218,7 +218,7 @@ def test_a_kernel_benched_at_two_sizes_freezes_as_two_programs(tmp_path) -> None
     write_freeze(path, tmp_path / "freeze")
     db.close()
     again = SearchDB()
-    import_file(again, next((tmp_path / "freeze").glob("*.yaml")))
+    import_file(again, next((tmp_path / "freeze").glob("*.json")))
     assert sorted(r.bindings["seq_len"] for r in again.iter_perf_rows()) == [128, 512]
     assert {r.kernel for r in again.iter_perf_rows()} == {row.kernel}
 
@@ -251,7 +251,7 @@ def test_write_freeze_refuses_to_replace_a_directory_that_is_not_a_freeze(tuned,
     assert (target / "notes.txt").exists()
     write_freeze(tuned_path, tmp_path / "freeze")
     write_freeze(tuned_path, tmp_path / "freeze")  # a freeze replaces a freeze
-    assert GoldenFile.load(next((tmp_path / "freeze").glob("*.yaml")))
+    assert GoldenFile.load(next((tmp_path / "freeze").glob("*.json")))
 
 
 def test_an_lfs_pointer_is_named_rather_than_parsed(tmp_path) -> None:
@@ -259,7 +259,7 @@ def test_an_lfs_pointer_is_named_rather_than_parsed(tmp_path) -> None:
     valid YAML — it parses to a string, and the first key lookup fails with a type error that says nothing
     about the real problem. This is how a checked-in freeze once reached ``main`` with red CI."""
 
-    pointer = tmp_path / "nvidia_geforce_rtx_5090_sm120.yaml"
+    pointer = tmp_path / "nvidia_geforce_rtx_5090_sm120.json"
     pointer.write_text("version https://git-lfs.github.com/spec/v1\noid sha256:abc\nsize 1\n")
     with pytest.raises(ValueError, match="git-LFS pointer"):
         import_file(SearchDB(), pointer)
@@ -277,7 +277,7 @@ def test_the_rtx_5090_hardware_goldens_rows_round_trip_through_a_freeze(tmp_path
     from emmy.compiler.pipeline.search.pins import pinned_knobs
     from tests.compiler.pipeline.search.helpers import GPU_5090
 
-    path = _RECORDS_DIR / "rtx5090_sm120.yaml"
+    path = _RECORDS_DIR / "rtx5090_sm120.json"
     records = GoldenFile.load(path).records()
     tuned_path = tmp_path / "autotune.db"
     tuned = SearchDB(tuned_path)
@@ -285,7 +285,7 @@ def test_the_rtx_5090_hardware_goldens_rows_round_trip_through_a_freeze(tmp_path
         counts = import_goldens(tuned, Context.from_target((12, 0), gpu_name=GPU_5090, compile_flags=""), records, source="measured")
     assert counts["perf rows"] >= 30
     documents, dropped = freeze_documents(tuned)
-    assert dropped == {} and list(documents) == ["nvidia_geforce_rtx_5090_sm120.yaml"]
+    assert dropped == {} and list(documents) == ["nvidia_geforce_rtx_5090_sm120.json"]
     [name] = write_freeze(tuned_path, tmp_path / "freeze")
     again = SearchDB()
     counts = import_file(again, tmp_path / "freeze" / name)

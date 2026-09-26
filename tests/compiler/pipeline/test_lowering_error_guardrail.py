@@ -227,7 +227,7 @@ def test_unlowered_terminal_is_bench_fail_despite_cached_residual_kernel():
     from tests.compiler.helpers import case_target_tile
 
     g = _graph_with_tile()
-    tile = case_target_tile("fused/norm-linear-f16-scalar-reduce.yaml")
+    tile = case_target_tile("fused/norm-linear-f16-scalar-reduce.json")
     cuda = CudaOp(kernel_source="__global__ void k_fin() {}", kernel_name="k_fin", source=tile)
     g.add_node(op=cuda, inputs=["y"], output=Tensor("z", (4,), "f32"), node_id="z")
     g.outputs = ["z"]

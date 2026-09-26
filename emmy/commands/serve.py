@@ -92,7 +92,7 @@ def _add_own_flags(parser, *, suppress_defaults: bool) -> None:
         "--golden",
         metavar="PATH",
         default=d(None),
-        help="A golden YAML whose measured rows are the golden evidence every program this boot compiles deploys "
+        help="A golden file whose measured rows are the golden evidence every program this boot compiles deploys "
         "from, instead of the repository goldens (published to the vLLM child as EMMY_GOLDEN_FILE).",
     )
     parser.add_argument(

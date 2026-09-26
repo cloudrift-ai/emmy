@@ -84,7 +84,7 @@ def test_pack_keys_on_the_golden_rows(tmp_path, monkeypatch):
     fork. Found 2026-09-19: a re-recorded Gemma 4 decode golden booted the previous image's plans from a shared pack
     directory, and the serving run measured the old kernels."""
     plan = _plan()
-    golden = tmp_path / "golden.yaml"
+    golden = tmp_path / "golden.json"
     golden.write_text("rows: before\n")
     monkeypatch.setenv("EMMY_GOLDEN_FILE", str(golden))
     before = pack_path(tmp_path, _KEY)

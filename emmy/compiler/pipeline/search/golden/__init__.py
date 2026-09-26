@@ -1,4 +1,4 @@
-"""Golden YAML: the evidence store — its file format, the record consumers read, its strict decode, the seam that
+"""Golden file: the evidence store — its file format, the record consumers read, its strict decode, the seam that
 files its rows into the tune DB a compile reads (``evidence``), and the repository index. One module per job; this
 package is the public surface."""
 

@@ -155,7 +155,7 @@ def main() -> int:
         "--gpu-mem-util", default="0.9", help="vLLM --gpu-memory-utilization (lower to leave room for the emmy runner's on-GPU weights)."
     )
     ap.add_argument("--health-timeout", type=int, default=1800, help="seconds to wait for first-boot compile.")
-    ap.add_argument("--golden", help="golden YAML whose measured routes the serving comparison must deploy.")
+    ap.add_argument("--golden", help="golden file whose measured routes the serving comparison must deploy.")
     ap.add_argument("--enforce-eager", action="store_true", help="forward vLLM --enforce-eager to the serving subprocess.")
     ap.add_argument(
         "--decode-bucket",

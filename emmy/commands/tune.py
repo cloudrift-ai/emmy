@@ -56,7 +56,7 @@ def register_tune_command(subparsers):
         "--golden",
         metavar="PATH",
         help=(
-            "Tune every target in a working golden YAML file. Each target is reconstructed from embedded stable "
+            "Tune every target in a working golden file. Each target is reconstructed from embedded stable "
             "Torch IR plus provenance, or from its Loop IR fallback. Entries with a knobs mapping are measured before MCTS and ranking "
             "results are written back to the working file."
         ),

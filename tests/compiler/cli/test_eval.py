@@ -14,8 +14,8 @@ def test_eval_golden_requires_exact_file_and_serving_config(run_cli, tmp_path):
     assert rc == 2
     assert "--golden" in stdout + stderr
 
-    golden = tmp_path / "given.yaml"
-    configured = tmp_path / "configured.yaml"
+    golden = tmp_path / "given.json"
+    configured = tmp_path / "configured.json"
     config = tmp_path / "release.env"
     config.write_text(
         f"SERVE_MODEL=org/model\nSERVE_GPU=NVIDIA-Test\nSERVE_GOLDEN_FILE={configured}\n"
@@ -29,7 +29,7 @@ def test_eval_golden_requires_exact_file_and_serving_config(run_cli, tmp_path):
 def test_serving_config_derives_standard_and_fast_math_realizations(tmp_path):
     from emmy.serving.release import load_serving_config
 
-    golden = tmp_path / "golden.yaml"
+    golden = tmp_path / "golden.json"
     config = tmp_path / "release.env"
     config.write_text(
         f"SERVE_MODEL=org/model\nSERVE_GPU=NVIDIA-Test\nSERVE_GOLDEN_FILE={golden}\n"
@@ -74,7 +74,7 @@ def test_eval_golden_audits_file_scoped_static_release(monkeypatch, tmp_path):
     from emmy.compiler.pipeline import Pipeline
     from emmy.compiler.pipeline.search import golden as golden_mod
 
-    golden = tmp_path / "golden.yaml"
+    golden = tmp_path / "golden.json"
     _write_release_golden(
         golden,
         [
@@ -128,7 +128,7 @@ def test_eval_golden_rejects_a_missing_config_realization(monkeypatch, tmp_path)
     import emmy.commands.eval as eval_cmd
     from emmy.compiler.context import Context
 
-    golden = tmp_path / "golden.yaml"
+    golden = tmp_path / "golden.json"
     _write_release_golden(
         golden,
         [
@@ -169,7 +169,7 @@ def test_eval_golden_fails_when_a_twin_is_not_decided_by_the_golden_rows(monkeyp
     from emmy.compiler.pipeline import Pipeline
     from emmy.compiler.pipeline.search.policy.greedy import EvidenceError
 
-    golden = tmp_path / "golden.yaml"
+    golden = tmp_path / "golden.json"
     _write_release_golden(
         golden,
         [
@@ -236,7 +236,7 @@ def test_eval_golden_compiles_a_static_twin_only_in_the_lanes_that_warm_its_widt
             for name, bindings in names_and_bindings
         ]
 
-    golden = tmp_path / "golden.yaml"
+    golden = tmp_path / "golden.json"
     GoldenFile.from_wire(
         {
             "gpu_name": "NVIDIA GeForce RTX 4090",

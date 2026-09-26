@@ -59,15 +59,14 @@ def map_exprs(stmt: Stmt, fn: Callable[[Expr], Expr]) -> Stmt:
     stride — and not to nested bodies, which :meth:`Body.map` reaches on its own."""
     from dataclasses import fields, replace  # noqa: PLC0415
 
-    from emmy.compiler.ir.expr import _ExprOps  # noqa: PLC0415
     from emmy.compiler.ir.stmt.leaves import SelectBranch  # noqa: PLC0415
 
     changes = {}
     for f in fields(stmt):
         value = getattr(stmt, f.name)
-        if isinstance(value, _ExprOps):
+        if isinstance(value, Expr):
             new = fn(value)
-        elif isinstance(value, tuple) and value and all(isinstance(item, _ExprOps) for item in value):
+        elif isinstance(value, tuple) and value and all(isinstance(item, Expr) for item in value):
             new = tuple(fn(item) for item in value)
         elif isinstance(value, tuple) and value and all(isinstance(item, SelectBranch) for item in value):
             new = tuple(replace(branch, select=fn(branch.select)) for branch in value)

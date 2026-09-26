@@ -1611,7 +1611,7 @@ def _write_ab_json(
 
     Each kernel row carries ``record_knobs`` — the realized tuning knobs with the exact complete
     classic row validated by :func:`~emmy.compiler.pipeline.knob.complete_kernel_row` — the map
-    to copy verbatim into a golden YAML ``knobs:`` entry. Failure states are fields, not absences: the greedy
+    to copy verbatim into a golden file ``knobs:`` entry. Failure states are fields, not absences: the greedy
     block carries ``status`` (``"bench_fail"`` + ``error`` when the deploy failed) and each
     pinned row its ``status`` (``ok`` / ``pin_unmatched`` / ``bench_fail``) with ``us`` /
     ``total_us`` null where nothing was measured.

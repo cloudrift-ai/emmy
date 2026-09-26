@@ -39,7 +39,7 @@ relevant `ARCHITECTURE.md` before answering.
 - `HF_TOKEN` environment variable for HuggingFace model downloads
 - `EMMY_DUMP_DIR` environment variable (optional) — when set, compiler stages dump intermediate debug artifacts
   (graphs, CUDA kernels, execution plans) to this directory. Frontend provenance slices used by `tune --bench` stay
-  in memory; stable Torch IR is persisted only inside golden YAML. Kernels are named after the operations they realize
+  in memory; stable Torch IR is persisted only inside golden files. Kernels are named after the operations they realize
   (`k_rms_norm`, `k_sdpa_reduce`).
 - `EMMY_FREEZE_DIR` environment variable (optional) — overrides the measurement freeze `emmy dataset import` loads
   into the dataset DB by default, the instance `emmy eval prior --dataset db` reads. Defaults to
@@ -191,7 +191,7 @@ it before answering any CLI-flag question. Quickstart for the common paths:
 | `emmy bench recipes/* [--filter KEY=PATTERN] [--no-teardown]` | deploy + benchmark + teardown across cloud VMs; `teardown <run_dir>` cleans up afterwards |
 | `emmy vm create gpu --gpu NAME --gpu-count N` | provision a GPU VM by name (also `vm create/delete {gcp,cloudrift}`) |
 | `emmy serve <model> [--generate] [--bench] [vllm flags…]` | serve via vLLM, or opt into native text serving with `--generate --native` |
-| `emmy compile <model_or_ir> [--layer N] [--ir STAGE] [--dynamic …] [--target sm_NN]`, `emmy compile --golden PATH --program N --ir loop -o fresh.yaml` | trace + run the compiler; print or save any IR stage; lower a golden's stored program and write the stage as the golden's wire |
+| `emmy compile <model_or_ir> [--layer N] [--ir STAGE] [--dynamic …] [--target sm_NN]`, `emmy compile --golden PATH --program N --ir loop -o fresh.json` | trace + run the compiler; print or save any IR stage; lower a golden's stored program and write the stage as the golden's wire |
 | `emmy run <model_or_ir_or_--code> [--bench]` | compile + execute on the CUDA backend, check accuracy, optionally bench vs eager / `torch.compile` |
 | `emmy tune <target> [--bench] [--gpus N]` | two-level autotune; writes the online prior + tune DB |
 | `emmy eval {knobs,prior,golden,variants,failures} [--dataset {golden,db}]` | inspect the priors / tune DB |

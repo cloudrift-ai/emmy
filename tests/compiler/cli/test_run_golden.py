@@ -21,20 +21,20 @@ def test_run_golden_schema_matches_compile():
     """``run`` spells golden selection the way every replaying command does: ``--golden PATH`` is
     the file, ``--realization NAME`` the row inside it — one pair, one meaning, on ``run`` /
     ``compile`` / ``tune`` / ``serve`` alike."""
-    args = _parser().parse_args(["run", "--golden", "working.yaml", "--realization", "linear.layer0", "--gpu-arch", "sm_90"])
+    args = _parser().parse_args(["run", "--golden", "working.json", "--realization", "linear.layer0", "--gpu-arch", "sm_90"])
 
-    assert args.golden == "working.yaml"
+    assert args.golden == "working.json"
     assert args.realization == "linear.layer0"
     assert args.gpu_arch == "sm_90"
     for removed in ("all_targets", "repeats", "require_kernel_source", "golden_target", "golden_file"):
         assert not hasattr(args, removed)
     with pytest.raises(SystemExit):
-        _parser().parse_args(["run", "--golden-file", "working.yaml"])
+        _parser().parse_args(["run", "--golden-file", "working.json"])
 
 
 def _args(tmp_path, **updates):
     values = {
-        "golden": str(tmp_path / "working.yaml"),
+        "golden": str(tmp_path / "working.json"),
         "realization": None,
         "input": None,
         "code": None,
@@ -86,7 +86,7 @@ def test_golden_runs_every_distinct_target_in_process(monkeypatch, tmp_path):
     run_mod._run_golden_targets(_args(tmp_path))
 
     assert [args.realization for args in calls] == ["linear.layer0", "linear.layer1"]
-    assert all(args.golden.endswith("working.yaml") and args._explicit_realization is False for args in calls)
+    assert all(args.golden.endswith("working.json") and args._explicit_realization is False for args in calls)
 
 
 def test_golden_walk_benches_each_target_once_not_its_receipts(monkeypatch, tmp_path):
@@ -302,7 +302,7 @@ def test_resolve_golden_arg_prefers_the_document_the_caller_loaded(monkeypatch, 
 
     args = SimpleNamespace(
         realization="missing",
-        golden=str(tmp_path / "absent.yaml"),
+        golden=str(tmp_path / "absent.json"),
         _golden_document=_EMPTY,
         input=None,
         code=None,
@@ -328,7 +328,7 @@ def test_record_latency_ignores_a_child_receipt_of_the_same_target():
         bench=object(),
         sample=SimpleNamespace(name="linear.layer0.abcdef123456", knobs={"WORK": "w1x1"}, pins={"FAST_MATH": True}),
     )
-    args = SimpleNamespace(golden="working.yaml", realization="linear.layer0")
+    args = SimpleNamespace(golden="working.json", realization="linear.layer0")
     with mock.patch.object(run_mod, "_bench_total_us", side_effect=AssertionError("a receipt's timing is not the program's")):
         with mock.patch("emmy.compiler.pipeline.search.working_golden.record_latency", lambda *a, **kw: seen.update(kw)):
             run_mod._record_golden_latency(args, {"Emmy": 12.5, "Eager PyTorch": 30.0}, [receipt])
@@ -340,10 +340,10 @@ def test_record_latency_ignores_a_child_receipt_of_the_same_target():
 def test_record_greedy_is_a_golden_bench_flag(run_cli):
     """``--record-greedy`` writes the greedy pick's kernel set back into the benched golden, so
     like ``--record`` it is refused without the file and the bench that measure it."""
-    args = _parser().parse_args(["run", "--golden", "working.yaml", "--realization", "linear.layer0", "--bench", "--record-greedy"])
+    args = _parser().parse_args(["run", "--golden", "working.json", "--realization", "linear.layer0", "--bench", "--record-greedy"])
     assert args.record_greedy is True
 
-    rc, stdout, stderr = run_cli("run", "--golden", "working.yaml", "--realization", "linear.layer0", "--record-greedy")
+    rc, stdout, stderr = run_cli("run", "--golden", "working.json", "--realization", "linear.layer0", "--record-greedy")
 
     assert rc == 2
     assert "--record-greedy requires --golden PATH and --bench" in stdout + stderr
@@ -390,7 +390,7 @@ def test_record_refuses_a_row_benched_without_a_reference(tmp_path):
         sample=sample,
         flags=[f"{run_mod.UNVERIFIED_ROW}: greedy run/bench failed"],
     )
-    args = SimpleNamespace(golden=str(tmp_path / "g.yaml"), realization="pinned.row")
+    args = SimpleNamespace(golden=str(tmp_path / "g.json"), realization="pinned.row")
     with pytest.raises(SystemExit) as exc:
         run_mod._record_golden_latency(args, {"Emmy": 1000.0}, [gb])
     assert exc.value.code == 2

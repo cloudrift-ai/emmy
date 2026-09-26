@@ -30,7 +30,7 @@ A DeepSeek V4 layer takes the attention-sublayer seam instead of the q/k/v one: 
 normalized ``[num_tokens, hidden]`` input of the 1Cat fork's paged MLA attention, and ``post`` takes that
 sublayer's output back (see ``hyper_connection_seam``).
 
-Consumed by ``emmy eval golden GOLDEN_YAML --serving-config PATH`` and the serving-image release gate. Note the traced
+Consumed by ``emmy eval golden GOLDEN_FILE --serving-config PATH`` and the serving-image release gate. Note the traced
 graph tracks the installed ``transformers`` modeling code: a transformers bump that
 changes the model's forward changes these twins — exactly as it would change serving.
 """
