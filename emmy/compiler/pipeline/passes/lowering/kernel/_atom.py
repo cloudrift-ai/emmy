@@ -3190,6 +3190,9 @@ class _FlashOps(_MmaOps):
         m, _ = mn
         atom = self._score_atom
         a_load = next(edge for edge in self.inner[0].operands if m.axis.name in edge.free_axes).as_slab().load
+        # The row stride off the address (:func:`_direct_operand`): a query stored [row, head, dim]
+        # strides its rows by every head's dim, not by the one head dim its last extent holds.
+        _, ldm = _direct_operand(a_load, self.inputs, k_name=self._score_k.name, own=m.axis.name, legacy=(True, 0))
         out: list[Stmt] = []
         for i in range(m.reg):
             for t in range(self._score_steps()):
@@ -3202,6 +3205,7 @@ class _FlashOps(_MmaOps):
                         src_index=tuple(sigma.apply(e) for e in a_load.index),
                         role="a",
                         staged=False,
+                        ldm=ldm,
                         gmem_guard=_guard(m, offset[0].base(i)),
                         fragment_layout=atom.fragment_layout,
                     )
@@ -3219,12 +3223,14 @@ class _FlashOps(_MmaOps):
         col = BinaryExpr("+", base, Literal(j * atom.atom_n, "int"))
         if key is None:
             sigma = Sigma({self.k_axis.name: col, self._score_k.name: k})
+            trans, ldm = _direct_operand(b_load, self.inputs, k_name=self._score_k.name, own=self.k_axis.name, legacy=(trans, 0))
             return LdmatrixLoad(
                 frag=self.frag(f"_kb{j}"),
                 src_buffer=b_load.input,
                 src_index=tuple(sigma.apply(e) for e in b_load.index),
                 role="b",
                 staged=False,
+                ldm=ldm,
                 b_trans=trans,
                 gmem_guard=None if bound is None else (col, bound),
                 fragment_layout=atom.fragment_layout,
@@ -3323,13 +3329,16 @@ class _FlashOps(_MmaOps):
         owns, and a slab written N-major swaps the two and takes the plain ldmatrix."""
         atom = self.tile.atom
         if value is None:
+            legacy = (self.c.as_contraction().b_trans, 0)
+            trans, ldm = _direct_operand(v_load, self.inputs, k_name=self.k_axis.name, own=n.axis.name, legacy=legacy)
             return LdmatrixLoad(
                 frag=self.frag(f"_b{j}_{t}"),
                 src_buffer=v_load.input,
                 src_index=tuple(Sigma({self.k_axis.name: row, n.axis.name: offset[1].base(j)}).apply(e) for e in v_load.index),
                 role="b",
                 staged=False,
-                b_trans=self.c.as_contraction().b_trans,
+                ldm=ldm,
+                b_trans=trans,
                 gmem_guard=_guard(n, offset[1].base(j)),
                 k_zero=None if bound is None else (row, bound),
                 fragment_layout=atom.fragment_layout,
