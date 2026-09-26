@@ -201,17 +201,17 @@ def resolve_golden_arg(args) -> None:
     if program is not None:
         # A stored traced program as the input, prepared as the inventory writer prepared it, so the
         # loop stage is what ``emmy golden kernels`` must equal for the file to be current.
-        from emmy.compiler.pipeline.search.golden import load_golden, load_golden_records, stored_program  # noqa: PLC0415
+        from emmy.compiler.pipeline.search.golden import GoldenFile  # noqa: PLC0415
 
         if not golden_file or name or args.code or args.input:
             logger.error("--program N selects a traced program inside --golden PATH and excludes --realization / --code / positional input")
             sys.exit(2)
-        document = load_golden(golden_file)
-        if not 0 <= program < len(document["programs"]):
-            logger.error("--program %d: %s stores %d program(s)", program, golden_file, len(document["programs"]))
+        document = GoldenFile.load(golden_file)
+        if not 0 <= program < len(document.programs):
+            logger.error("--program %d: %s stores %d program(s)", program, golden_file, len(document.programs))
             sys.exit(2)
-        args._golden_graph = stored_program(document, program)
-        args._golden_records = load_golden_records(document)
+        args._golden_graph = document.program(program)
+        args._golden_records = document.records()
         return
     if golden_file and not name:
         logger.error("--golden PATH requires --realization NAME here (run --golden PATH alone walks every realization)")
@@ -230,14 +230,7 @@ def resolve_golden_arg(args) -> None:
     if getattr(args, "dynamic", None):
         logger.error("--dynamic is incompatible with --golden (a dynamic golden's spec is part of its config)")
         sys.exit(2)
-    from emmy.compiler.pipeline.search.golden import (
-        GOLDEN_RECORDS,
-        GoldenEntryState,
-        golden_set_state,
-        goldens_for_live_gpu,
-        load_golden,
-        load_golden_records,
-    )
+    from emmy.compiler.pipeline.search.golden import GoldenEntryState, GoldenFile, golden_records, goldens_for_live_gpu
 
     # Canonical replay scopes to the live card as before. An explicit working file is
     # intentionally literal: no repository union and no live-card filtering, because its
@@ -250,15 +243,15 @@ def resolve_golden_arg(args) -> None:
         document = getattr(args, "_golden_document", None)
         if document is None:
             try:
-                document = load_golden(golden_file)
+                document = GoldenFile.load(golden_file)
             except ValueError as exc:
                 logger.error(str(exc))
                 sys.exit(2)
-        records = load_golden_records(document)
+        records = document.records()
         available = records
     else:
         records = goldens_for_live_gpu()
-        available = GOLDEN_RECORDS
+        available = golden_records()
 
     exact = [index for index, record in enumerate(records) if record.name == name]
     match_indexes = exact or [index for index, record in enumerate(records) if name in record.name]
@@ -286,11 +279,7 @@ def resolve_golden_arg(args) -> None:
     args._golden_records = [record for record in records if record.target_key == matches[0].target_key]
     pinned = matches
     if document is not None:
-        states = {
-            realization["name"]: golden_set_state(realization, config["realizations"])
-            for config in document["configs"]
-            for realization in config["realizations"]
-        }
+        states = {row.name: row.kernel_set_state(entry.realizations) for entry in document.configs for row in entry.realizations}
         verified = [record for record in matches if states.get(record.name) is GoldenEntryState.VERIFIED]
         winners = [record for record in matches if record.ranking is not None and record.ranking.get("tune_winner") is True]
         valid_winner = (
@@ -665,10 +654,9 @@ def wire_stage(graph, stage: str) -> str:
     if stage == "torch":
         return program_text(graph)
     if stage == "loop":
-        from emmy.compiler.loop_wire import loop_graph_to_wire  # noqa: PLC0415
         from emmy.compiler.pipeline.search.working_golden import kernel_programs  # noqa: PLC0415
 
-        return kernel_pool_text(loop_graph_to_wire(program) for _, program in kernel_programs(graph))
+        return kernel_pool_text(program.to_wire() for _, program in kernel_programs(graph))
     logger.error("a .yaml output holds the wire a golden stores, which exists for --ir torch and --ir loop only")
     sys.exit(2)
 

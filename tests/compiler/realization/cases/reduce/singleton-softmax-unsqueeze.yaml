@@ -1,36 +1,16 @@
 # Reduced from Qwen3-0.6B decode on an RTX 5090: fusion hoists the singleton value outside the max/sum loops.
-compute_cap:
-- 12
-- 0
+compute_cap: [12, 0]
 programs:
 - inputs: [x]
   outputs: [softmax]
   nodes:
   - id: softmax_c1
     op: constant
-    attrs:
-      name: softmax_c1
-      value: -1.0
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
+    attrs: {name: softmax_c1, value: -1.0}
     outputs: [[softmax_c1, f32, [1]]]
   - id: unsqueeze_c1
     op: constant
-    attrs:
-      name: unsqueeze_c1
-      value: -1.0
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
+    attrs: {name: unsqueeze_c1, value: -1.0}
     outputs: [[unsqueeze_c1, f32, [1]]]
   - id: x
     op: input
@@ -42,21 +22,14 @@ programs:
     outputs: [[unsqueeze, f32, [4, 1]]]
   - id: softmax
     op: torch.softmax
-    attrs: {axis: -1}
     inputs: [unsqueeze]
     outputs: [[softmax, f32, [4, 1]]]
 configs:
 - program: 0
-  target:
-    loop: 0
-    origins:
-    - softmax
-    - unsqueeze
+  target: {loop: 0, origins: [softmax, unsqueeze]}
   realizations:
   - name: k_softmax_834f63
-    bindings: {}
-    pins:
-      FAST_MATH: false
+    pins: {FAST_MATH: false}
     knobs: {}
     identity: 74f9e75edec568edbdcea2d15f6230a61e18b296823ea92f2d2fc6ac2d2cd3b3
 loops:
@@ -70,29 +43,14 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 4}, window: null}}
-            body:
-              body:
-              - class: Load
-                fields: {names: {tuple: [in0]}, input: x, index: {tuple: [{expr: {var: a0}}]}, dtype: null}
-              - class: Assign
-                fields: {name: v0, op: {elementwise: subtract}, args: {tuple: [in0, in0]}, dtype: null}
-              - {class: Assign, fields: {name: v1, op: {elementwise: exp}, args: {tuple: [v0]}, dtype: null}}
-              - class: Assign
-                fields: {name: v2, op: {elementwise: divide}, args: {tuple: [v1, v1]}, dtype: null}
-              - class: Write
-                fields:
-                  output: softmax
-                  index: {tuple: [{expr: {var: a0}}, {expr: {literal: {value: 0, dtype: int}}}]}
-                  values: {tuple: [v2]}
-                  value_dtype: null
-                  atomic: false
-                  swizzle: NONE
-            unroll: false
-            seed: true
+      - Loop:
+          axis: {name: a0, extent: 4}
+          body:
+          - {Load: {names: [in0], input: x, index: [{var: a0}]}}
+          - {Assign: {name: v0, op: subtract, args: [in0, in0]}}
+          - {Assign: {name: v1, op: exp, args: [v0]}}
+          - {Assign: {name: v2, op: divide, args: [v1, v1]}}
+          - {Write: {output: softmax, index: [{var: a0}, {literal: 0}], values: [v2]}}
       name: k_softmax_834f63
     inputs: [x]
     outputs: [[softmax, f32, [4, 1]]]

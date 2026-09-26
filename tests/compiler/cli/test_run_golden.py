@@ -8,6 +8,7 @@ from unittest import mock
 import pytest
 
 from emmy.commands import run as run_mod
+from emmy.compiler.pipeline.search.golden import GoldenFile
 
 
 def _parser():
@@ -64,12 +65,16 @@ def _records(names):
     ]
 
 
+#: A golden with no targets: the tests below patch the records a load yields.
+_EMPTY = GoldenFile(compute_cap=(8, 9), programs=[], configs=[])
+
+
 def _patch_records(monkeypatch, names):
     from emmy.compiler.pipeline.search import golden
 
     rows = _records(names)
-    monkeypatch.setattr(golden, "load_golden_file", lambda _path, **_: {})
-    monkeypatch.setattr(golden, "load_golden_records", lambda _document: rows)
+    monkeypatch.setattr(golden.GoldenFile, "load", classmethod(lambda _cls, _path, **_: _EMPTY))
+    monkeypatch.setattr(golden.GoldenFile, "records", lambda _self: rows)
     return rows
 
 
@@ -120,8 +125,8 @@ def test_golden_walk_without_seeds_benches_the_row_pricing_the_whole_target(monk
         row("post16.k_a.1111.m16.cccc", True, 7.0),
     ]
     rows += [row("pre1.k_b.2222.m1.dddd", False, 30.0), row("pre1.k_b.2222.m1.eeee", False, 20.0)]
-    monkeypatch.setattr(golden, "load_golden_file", lambda _path, **_: {})
-    monkeypatch.setattr(golden, "load_golden_records", lambda _document: rows)
+    monkeypatch.setattr(golden.GoldenFile, "load", classmethod(lambda _cls, _path, **_: _EMPTY))
+    monkeypatch.setattr(golden.GoldenFile, "records", lambda _self: rows)
     calls = []
     monkeypatch.setattr(run_mod, "_handle_run_once", calls.append)
 
@@ -272,9 +277,9 @@ def test_golden_document_is_parsed_once_for_every_target(monkeypatch, tmp_path):
     from emmy.compiler.pipeline.search import golden
 
     loads = []
-    document = {"configs": []}
-    monkeypatch.setattr(golden, "load_golden_file", lambda _path, **_: loads.append(_path) or document)
-    monkeypatch.setattr(golden, "load_golden_records", lambda _document: _records(("a", "b", "c")))
+    document = _EMPTY
+    monkeypatch.setattr(golden.GoldenFile, "load", classmethod(lambda _cls, _path, **_: loads.append(_path) or document))
+    monkeypatch.setattr(golden.GoldenFile, "records", lambda _self: _records(("a", "b", "c")))
     calls = []
     monkeypatch.setattr(run_mod, "_handle_run_once", calls.append)
 
@@ -289,16 +294,16 @@ def test_resolve_golden_arg_prefers_the_document_the_caller_loaded(monkeypatch, 
     from emmy.commands import compile as compile_mod
     from emmy.compiler.pipeline.search import golden
 
-    def _explode(_path, **_kwargs):
+    def _explode(_cls, _path, **_kwargs):
         raise AssertionError("load_golden_file must not be called when a document is supplied")
 
-    monkeypatch.setattr(golden, "load_golden_file", _explode)
-    monkeypatch.setattr(golden, "load_golden_records", lambda _document: [])
+    monkeypatch.setattr(golden.GoldenFile, "load", classmethod(_explode))
+    monkeypatch.setattr(golden.GoldenFile, "records", lambda _self: [])
 
     args = SimpleNamespace(
         realization="missing",
         golden=str(tmp_path / "absent.yaml"),
-        _golden_document={"configs": []},
+        _golden_document=_EMPTY,
         input=None,
         code=None,
         ir=None,

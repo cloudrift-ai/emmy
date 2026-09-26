@@ -36,6 +36,8 @@ from emmy.compiler.dim import Dim, to_dim
 from emmy.compiler.dtype import get as get_dtype
 from emmy.compiler.ir.base import Op, _keepdim_axis
 from emmy.compiler.ir.elementwise import _REDUCE_SPELLING, ElementwiseImpl
+from emmy.compiler.ir.expr import Expr
+from emmy.compiler.wire import Wire
 
 # ---------------------------------------------------------------------------
 # Value construction / conversion
@@ -49,6 +51,8 @@ class RangeOp(Op):
     This is the tensor-IR counterpart of ``range`` / ``arange``. The dtype is explicit
     because the op has no input from which the interpreter could derive it.
     """
+
+    wire_tag = "tensor.range"
 
     start: int = 0
     stop: int = 0
@@ -72,6 +76,8 @@ class RangeOp(Op):
 class CastOp(Op):
     """Numerically convert every input element to ``dtype``."""
 
+    wire_tag = "tensor.cast"
+
     dtype: str = "f32"
 
     def __post_init__(self) -> None:
@@ -88,6 +94,8 @@ class CastOp(Op):
 @dataclass(frozen=True)
 class BitcastOp(Op):
     """Reinterpret every input element as a same-width ``dtype`` without changing bits."""
+
+    wire_tag = "tensor.bitcast"
 
     dtype: str = "u16"
 
@@ -146,6 +154,8 @@ class ElementwiseOp(_ElementwiseImplOp):
     arity + commutativity + (for reducer use) identity.
     """
 
+    wire_tag = "tensor.elementwise"
+
     @property
     def arity(self) -> int:
         return self.op.arity
@@ -203,6 +213,8 @@ class ReduceOp(ReduceLikeOp):
     the reduced dimension (concrete int or symbolic name).
     """
 
+    wire_tag = "tensor.reduce"
+
     @property
     def identity(self) -> float:
         return self.op.identity if self.op.identity is not None else 0.0
@@ -217,6 +229,8 @@ class ReduceOp(ReduceLikeOp):
 @dataclass(frozen=True)
 class ScanOp(ReduceLikeOp):
     """Cumulative application of an associative binary op along an axis."""
+
+    wire_tag = "tensor.scan"
 
     def infer_output_shape(self, input_shapes: list[tuple]) -> tuple:
         return tuple(input_shapes[0])  # scan preserves shape
@@ -236,6 +250,8 @@ class ScanOp(ReduceLikeOp):
 @dataclass(frozen=True)
 class GatherOp(Op):
     """Read elements from arbitrary positions along an axis."""
+
+    wire_tag = "tensor.gather"
 
     axis: int | str = 0
 
@@ -264,6 +280,8 @@ class GatherOp(Op):
 class ScatterOp(Op):
     """Write (or reduce) values into arbitrary positions along an axis."""
 
+    wire_tag = "tensor.scatter"
+
     axis: int | str = 0
     reduce_fn: str | None = None  # None = overwrite, "sum" = scatter-add
 
@@ -286,7 +304,7 @@ class ScatterOp(Op):
 
 
 @dataclass
-class IndexSource:
+class IndexSource(Wire):
     """One input source for an IndexMapOp.
 
     ``coord_map[i]`` is an ``Expr`` producing the input's i-th index from
@@ -300,8 +318,8 @@ class IndexSource:
     """
 
     input_idx: int  # position in IndexMapOp's input list
-    coord_map: tuple  # tuple[Expr, ...] — kept untyped to avoid forward-reference clutter
-    select: object | None = None  # Expr | None
+    coord_map: tuple[Expr, ...]
+    select: Expr | None = None  # Expr | None
 
 
 @dataclass(frozen=True)
@@ -313,6 +331,8 @@ class IndexMapOp(Op):
     Multi-source forms (cat) use ``select`` on each source to pick which
     output positions read which input.
     """
+
+    wire_tag = "tensor.index_map"
 
     out_shape: tuple[Dim, ...] = ()
     sources: tuple[IndexSource, ...] = ()

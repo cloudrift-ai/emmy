@@ -122,7 +122,7 @@ def _build(records, monkeypatch, **kwargs):
         sample = ctx.pool_sample
         return Candidates(list(rows), len(rows)) if sample is None else sample.take(rows)
 
-    monkeypatch.setattr(fit_cmd, "GOLDEN_RECORDS", records)
+    monkeypatch.setattr(fit_cmd, "golden_records", lambda: records)
     monkeypatch.setattr(fit_cmd, "Context", _StubContext)
     monkeypatch.setattr(fit_cmd, "enumerate_graph", enumerate_stub)
     monkeypatch.setattr(fit_cmd, "_shape_group", lambda g: "S(free=512,red=512)")  # noqa: ARG005

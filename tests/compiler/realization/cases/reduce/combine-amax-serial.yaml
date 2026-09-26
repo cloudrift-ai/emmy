@@ -1,6 +1,4 @@
-compute_cap:
-- 12
-- 0
+compute_cap: [12, 0]
 programs:
 - inputs: [x]
   outputs: [amax]
@@ -10,27 +8,19 @@ programs:
     outputs: [[x, f32, [4, 1024]]]
   - id: amax
     op: tensor.reduce
-    attrs: {op: {__elementwise__: amax}, axis: 1}
+    attrs: {op: amax, axis: 1}
     inputs: [x]
     outputs: [[amax, f32, [4, 1]]]
 configs:
 - program: 0
-  target:
-    loop: 0
-    origins:
-    - amax
+  target: {loop: 0, origins: [amax]}
   realizations:
   - name: k_amax_reduce
-    bindings: {}
-    pins:
-      FAST_MATH: false
+    pins: {FAST_MATH: false}
     knobs:
       REDUCE: ''
     identity: 63d7399bb9372e7fbb4f674cbb56733d13d97fea5a0ee2d3f5e49a23d831619b
-    latency:
-      NVIDIA GeForce RTX 5090:
-        emmy_us: 9.668660395353744
-        tcompile_us: 2.0487588856060044
+    latency: {NVIDIA GeForce RTX 5090: {emmy_us: 9.668660395353744, tcompile_us: 2.0487588856060044}}
 loops:
 - inputs: [x]
   outputs: [amax]
@@ -42,43 +32,15 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 4}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 4}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 1024}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 1024}, window: null}}
-                  body:
-                    body:
-                    - class: Load
-                      fields:
-                        names: {tuple: [in0]}
-                        input: x
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        dtype: null
-                    - class: Accum
-                      fields:
-                        name: acc0
-                        value: in0
-                        op: {elementwise: maximum}
-                        dtype: null
-                        axes: {tuple: [a1]}
-                        base: null
-                  unroll: false
-                  seed: true
-              - class: Write
-                fields:
-                  output: amax
-                  index: {tuple: [{expr: {var: a0}}, {expr: {literal: {value: 0, dtype: int}}}]}
-                  values: {tuple: [acc0]}
-                  value_dtype: null
-                  atomic: false
-                  swizzle: NONE
-            unroll: false
-            seed: true
+              - {Load: {names: [in0], input: x, index: [{var: a0}, {var: a1}]}}
+              - {Accum: {name: acc0, value: in0, op: maximum, axes: [a1]}}
+          - {Write: {output: amax, index: [{var: a0}, {literal: 0}], values: [acc0]}}
       name: k_amax_reduce
     inputs: [x]
     outputs: [[amax, f32, [4, 1]]]

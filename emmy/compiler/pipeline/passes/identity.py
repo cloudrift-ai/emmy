@@ -164,13 +164,13 @@ def _identity_body(op) -> Body | None:
 
 
 def kernel_stamps(wire: dict) -> dict[str, float]:
-    """The ``S_*`` features of the kernel a ``loop_wire.kernel_wire`` wire defines: :func:`structure_features`
+    """The ``S_*`` features of the kernel a ``wire.kernel_wire`` wire defines: :func:`structure_features`
     of its body, the dtype half read off the wire's own buffers. What a ``kernel`` row stores for a tile
     nothing stamped; a stamped tile's row carries the strategy's own stamps, which are the same features:
     the wire holds the body the kernel was formed from, the body the strategy stamps."""
-    from emmy.compiler.loop_wire import loop_graph_from_wire  # noqa: PLC0415
+    from emmy.compiler.graph import Graph  # noqa: PLC0415
 
-    graph = loop_graph_from_wire(wire)
+    graph = Graph.from_wire(wire)
     [node] = [node for node in graph.nodes.values() if isinstance(node.op, LoopOp)]
     return structure_features(node.op.body, graph)
 

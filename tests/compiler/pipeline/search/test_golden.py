@@ -9,7 +9,6 @@ the fresh lowering, is red until ``emmy golden restamp`` rewrites the file, whic
 """
 
 import difflib
-import os
 from collections import Counter
 from contextlib import nullcontext
 from pathlib import Path
@@ -17,23 +16,8 @@ from pathlib import Path
 import pytest
 
 from emmy.compiler.pipeline.search import golden
-from emmy.compiler.pipeline.search.golden import (
-    _HARDWARE_GOLDENS_DIR,
-    _records_of,
-    _repository_golden_paths,
-    decode_record,
-    flush_identity_store,
-    scope_digest,
-    siblings_of,
-)
-
-
-@pytest.fixture(scope="module", autouse=True)
-def _persist_derivations():
-    """Persist what this module derived once per worker rather than once per row: the memo is keyed
-    by compiler fingerprint and record content, so the next run re-derives only what changed."""
-    yield
-    flush_identity_store()
+from emmy.compiler.pipeline.search.golden import decode_record, scope_digest, siblings_of
+from emmy.compiler.pipeline.search.golden.repository import _RECORDS_DIR, _records_of, _repository_golden_paths
 
 
 def _decode(record, records) -> str | None:
@@ -58,7 +42,7 @@ def _labels(records) -> list[str]:
 
 def _golden_id(path: Path) -> str:
     """A golden file's id: its name for a hardware golden, ``<recipe>/<name>`` for a model golden."""
-    return path.name if path.parent == _HARDWARE_GOLDENS_DIR else f"{path.parent.parent.name}/{path.name}"
+    return path.name if path.parent == _RECORDS_DIR else f"{path.parent.parent.name}/{path.name}"
 
 
 def _row_parameters():
@@ -93,7 +77,7 @@ def test_scope_digest_follows_the_cards_rows_only(tmp_path, monkeypatch) -> None
     other = tmp_path / "other.yaml"
     mine.write_text("gpu_name: NVIDIA H100 80GB HBM3\nrows: 1\n")
     other.write_text("gpu_name: NVIDIA GeForce RTX 5090\nrows: 1\n")
-    monkeypatch.setattr(golden, "_repository_golden_paths", lambda: nullcontext([mine, other]))
+    monkeypatch.setattr(golden.repository, "_repository_golden_paths", lambda: nullcontext([mine, other]))
     monkeypatch.delenv("EMMY_GOLDEN_FILE", raising=False)
     card = "NVIDIA H100 80GB"
     base = scope_digest(card)
@@ -123,7 +107,7 @@ def test_decode_ignores_off_anchors_but_not_a_decided_value() -> None:
 
     # The smallest target on the card, named rather than searched for: every assertion below decodes
     # the record again, so the row this stands on decides what the test costs.
-    records = _records_of(_HARDWARE_GOLDENS_DIR / "rtx5090_sm120.yaml")
+    records = _records_of(_RECORDS_DIR / "rtx5090_sm120.yaml")
     named = [r for r in records if r.name == "matmul.square.512" and any(v == "" for v in r.knobs.values())]
     record = next((r for r in named if _decode(r, records) is None), None)
     assert record is not None, "matmul.square.512 records no decoding row carrying an OFF anchor to compare against"
@@ -150,13 +134,11 @@ def test_a_pool_that_holds_the_recorded_row_is_not_walked_whole(monkeypatch) -> 
 
     from emmy.compiler.pipeline import fork
     from emmy.compiler.pipeline.knob import schedule_match_key
-    from emmy.compiler.pipeline.search import golden
-    from emmy.compiler.pipeline.search.golden import _replay, _unmatched_reason, piece_row, unmatched_reason
-
-    monkeypatch.setattr(golden, "_REPLAY_CACHE", {})
+    from emmy.compiler.pipeline.search.golden import piece_row, unmatched_reason
+    from emmy.compiler.pipeline.search.golden.decode import _replay, _unmatched_reason
 
     # The same smallest target the anchor test stands on: every assertion here replays it.
-    records = _records_of(_HARDWARE_GOLDENS_DIR / "rtx5090_sm120.yaml")
+    records = _records_of(_RECORDS_DIR / "rtx5090_sm120.yaml")
     record = next(r for r in records if r.name == "matmul.square.512" and _decode(r, records) is None)
     siblings = siblings_of(record, records)
 
@@ -189,7 +171,6 @@ def test_a_pool_that_holds_the_recorded_row_is_not_walked_whole(monkeypatch) -> 
     pairs = set().union(*(summary[1] for summary in miss.offered.values()))
     assert not miss.rows, "a miss retains no candidate rows"
     assert _unmatched_reason(absent, keys, pairs) == unmatched_reason(absent, full)
-    assert not golden._REPLAY_CACHE, "requested-row results cannot serve a different recording and must not accumulate"
 
     respelled = replace(record, knobs={**record.knobs, "WORK@missing": record.knobs["WORK"]})
     reason = _decode(respelled, records)
@@ -205,7 +186,7 @@ def test_a_row_with_only_an_invalid_offered_value_reports_a_semantic_miss() -> N
     """
     from dataclasses import replace
 
-    records = _records_of(_HARDWARE_GOLDENS_DIR / "rtx5090_sm120.yaml")
+    records = _records_of(_RECORDS_DIR / "rtx5090_sm120.yaml")
     record = next(r for r in records if r.name == "matmul.square.512" and _decode(r, records) is None)
     decided = next(key for key, value in record.knobs.items() if value not in ("", "0"))
     invalid = replace(record, knobs={decided: "not-a-real-value"})
@@ -222,7 +203,7 @@ def test_a_row_whose_every_site_is_re_spelled_still_gets_a_verdict() -> None:
     behind them, then indexed the pair it never filed."""
     from dataclasses import replace
 
-    records = _records_of(_HARDWARE_GOLDENS_DIR / "rtx5090_sm120.yaml")
+    records = _records_of(_RECORDS_DIR / "rtx5090_sm120.yaml")
     record = next(r for r in records if r.name == "matmul.square.512" and _decode(r, records) is None)
     respelled = replace(record, knobs={f"{key}@missing": value for key, value in record.knobs.items() if value not in ("", "0")})
     reason = _decode(respelled, records)
@@ -239,7 +220,8 @@ def test_a_sibling_sharing_the_target_identity_cannot_silence_the_lead_cut() -> 
     from dataclasses import replace
 
     from emmy.compiler.pipeline.knob import schedule_match_key
-    from emmy.compiler.pipeline.search.golden import _replay, piece_row
+    from emmy.compiler.pipeline.search.golden import piece_row
+    from emmy.compiler.pipeline.search.golden.decode import _replay
 
     def decodes(record, siblings) -> bool:  # the replay itself: the decode's verdict is memoized per record
         wanted = schedule_match_key(piece_row(record.knobs))
@@ -256,58 +238,6 @@ def test_a_sibling_sharing_the_target_identity_cannot_silence_the_lead_cut() -> 
     impostor = replace(other, identity=lead.identity)
     beside = [lead, *(impostor if m is other else m for m in siblings if m is not receipt)]
     assert decodes(receipt, beside), "and beside a receipt stamped with the lead's identity"
-
-
-def test_compiler_fingerprint_ignores_mtime_so_two_checkouts_share_one_memo(tmp_path):
-    """Two byte-identical trees fingerprint alike however their mtimes differ.
-
-    The identity memo is one file per fingerprint, and every checkout of the same revision reads it:
-    an agent worktree beside the main tree, the re-exported host tree a serving container mounts.
-    Keyed by mtime those checkouts disagreed, so each discarded the other's derivations and the
-    next process re-derived every identity from scratch.
-    """
-    from emmy.compiler.pipeline.search.golden import _tree_fingerprint
-
-    first, second = tmp_path / "a", tmp_path / "b"
-    for root in (first, second):
-        (root / "pkg").mkdir(parents=True)
-        (root / "pkg" / "rule.py").write_text("VALUE = 1\n")
-    stamp = (1, 1)
-    os.utime(second / "pkg" / "rule.py", stamp)
-
-    assert _tree_fingerprint(first) == _tree_fingerprint(second)
-
-    # Same length and the SAME mtime as the equal case: only content differs, so a fingerprint that
-    # went back to hashing metadata would fail here instead of passing unnoticed.
-    (second / "pkg" / "rule.py").write_text("VALUE = 2\n")
-    os.utime(second / "pkg" / "rule.py", stamp)
-    assert _tree_fingerprint(first) != _tree_fingerprint(second)
-
-
-def test_a_flush_from_another_compiler_tree_keeps_this_trees_derivations(tmp_path, monkeypatch):
-    """Two compiler revisions sharing one cache directory each keep what they derived.
-
-    The memo was one file holding one fingerprint, so a process from any other tree replaced it
-    whole. On the serving host a one-row replay from an older tree, run between two boots of the
-    same tree, cost the second boot every replay the first had derived: 851 s, then 859 s.
-    """
-    from emmy import config
-    from emmy.compiler.pipeline.search import golden
-
-    monkeypatch.setattr(config, "_CACHE_ROOT", tmp_path)
-
-    def derive(fingerprint: str, key: str) -> dict:
-        monkeypatch.setattr(golden, "_compiler_fingerprint", lambda: fingerprint)
-        monkeypatch.setattr(golden, "_IDENTITY_STORE", None)
-        kept = dict(golden._identity_store()["entries"])
-        golden._identity_store()["entries"][key] = None
-        monkeypatch.setattr(golden, "_IDENTITY_STORE_DIRTY", True)
-        flush_identity_store()
-        return kept
-
-    derive("serving tree", "boot")
-    derive("another tree", "replay")
-    assert "boot" in derive("serving tree", "next boot")
 
 
 def test_a_red_row_says_which_of_the_three_kinds_of_churn_moved_it() -> None:
@@ -343,6 +273,42 @@ def test_the_narrowing_reading_outranks_the_respelling_one() -> None:
     assert "re-spelling" in both and "NARROWING" not in both
 
 
+def _kernel_parameters():
+    """One parameter per stored kernel of every repository golden, named by the first row that targets it."""
+    from emmy.compiler.pipeline.search.golden.repository import _document_of
+
+    parameters = []
+    with _repository_golden_paths() as paths:
+        for path in sorted(paths, key=_golden_id):
+            document, _ = _document_of(path)
+            for index in range(len(document.loops)):
+                name = next((entry.realizations[0].name for entry in document.configs if entry.target.loop == index), f"loop-{index}")
+                parameters.append(pytest.param(path, index, id=f"{_golden_id(path)}/{name}"))
+    return parameters
+
+
+@pytest.mark.parametrize(("path", "index"), _kernel_parameters())
+def test_stored_kernel_is_a_fixed_point_of_normalization(path: Path, index: int) -> None:
+    """A stored kernel must come back byte for byte from a decode: decoding builds a Loop op, whose
+    constructor normalizes the body, so a kernel that decodes to different wire is one the current
+    normalizer spells differently. A load keeps the pools as wires and never decodes, and this is
+    the premise that lets it: until ``emmy golden restamp`` rewrites such a kernel, every consumer
+    reads a body the compiler would not produce, and its rows are evidence for a kernel that does
+    not exist. Cheaper than the fresh-lowering test above, which lowers the whole program, and
+    narrower: it says whether the normalizer moved, not whether the lowering did."""
+    from emmy.compiler.graph import Graph
+    from emmy.compiler.pipeline.search.golden import kernel_pool_text
+    from emmy.compiler.pipeline.search.golden.repository import _document_of
+
+    document, _ = _document_of(path)
+    stored = document.loops[index]
+    rewritten = Graph.from_wire(stored).to_wire()
+    diff = difflib.unified_diff(
+        kernel_pool_text([stored]).splitlines(), kernel_pool_text([rewritten]).splitlines(), "stored", "normalized", lineterm=""
+    )
+    assert rewritten == stored, "\n".join(diff)
+
+
 def _golden_parameters():
     parameters = []
     with _repository_golden_paths() as paths:
@@ -367,14 +333,15 @@ def test_stored_targets_are_the_fresh_lowering(path: Path, program: int) -> None
     is the loop passes alone, GPU-free, so this holds on any machine; one node per program, so a
     whole-layer trace costs its own minutes and nothing queues behind the widest file.
     """
-    from emmy.compiler.pipeline.search.golden import _document_of, kernel_pool_text, stored_kernels
+    from emmy.compiler.pipeline.search.golden import kernel_pool_text
+    from emmy.compiler.pipeline.search.golden.repository import _document_of
     from emmy.compiler.pipeline.search.restamp import fresh_kernel_digests, fresh_kernels, stale_reasons
 
     document, _ = _document_of(path)
     stale = stale_reasons(document, program, fresh_kernel_digests(document, program))
     if stale:
         fresh = fresh_kernels(document, [program])[program]
-        stored = stored_kernels(document, program)
+        stored = document.kernels(program)
         matched = [fresh[frozenset(kernel["outputs"])] for kernel in stored if frozenset(kernel["outputs"]) in fresh]
         diff = difflib.unified_diff(
             kernel_pool_text(stored).splitlines(),

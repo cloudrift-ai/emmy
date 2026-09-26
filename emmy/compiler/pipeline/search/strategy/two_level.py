@@ -41,7 +41,6 @@ from typing import TYPE_CHECKING
 from emmy.compiler.context import Context
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.loop_wire import kernel_bindings
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, LOWERING_PASSES, Pass, Pipeline, TuningSearch
 from emmy.compiler.pipeline.knob import complete_kernel_row
 from emmy.compiler.pipeline.passes.identity import IdentityStrategy
@@ -50,6 +49,7 @@ from emmy.compiler.pipeline.search.db import PerfStats, SearchDB, knobs_json
 from emmy.compiler.pipeline.search.slice import single_node_graph
 from emmy.compiler.pipeline.search.strategy.base import SearchStrategy
 from emmy.compiler.pipeline.strategy import PipelineStrategy, SplicedEvent, SpliceEvent, discovered_strategies
+from emmy.compiler.wire import kernel_bindings
 
 if TYPE_CHECKING:
     from emmy.compiler.graph import Graph

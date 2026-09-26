@@ -638,14 +638,14 @@ def _run_golden_targets(args) -> None:
     """
     from copy import copy  # noqa: PLC0415
 
-    from emmy.compiler.pipeline.search.golden import lead_of, load_golden, load_golden_records  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import GoldenFile, lead_of  # noqa: PLC0415
 
     if args.input or args.code or args.ir:
         logger.error("--golden is mutually exclusive with positional input / --code / --ir")
         sys.exit(2)
     try:
-        document = load_golden(args.golden)
-        records = load_golden_records(document)
+        document = GoldenFile.load(args.golden)
+        records = document.records()
     except (OSError, ValueError) as exc:
         logger.error("cannot load --golden %s: %s", args.golden, exc)
         sys.exit(2)
@@ -864,15 +864,15 @@ def _lane(knobs: dict) -> str:
     pins BOTH the std and the ``[fm]`` config recorded under one name; comparing a pinned ``[fm]``
     latency against a ``"std"`` greedy manufactures a phantom regression, so every A/B row (and the
     greedy it's compared to) carries its lane and the parser filters to matching lanes."""
-    from emmy.compiler.pipeline.knob import get  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden import fast_math_knobs, precision_trading_pins  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import fast_math_knobs, precision_trading_pins  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.space import PRECISION_KNOBS  # noqa: PLC0415
 
     input_pins = {}
-    for name in ("FAST_MATH", "FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA"):
-        if name not in knobs:
+    for knob in PRECISION_KNOBS:
+        if knob.name not in knobs:
             continue
-        raw = knobs[name]
-        input_pins[name] = raw if isinstance(raw, bool) else get(name).parse(str(raw))
+        raw = knobs[knob.name]
+        input_pins[knob.name] = raw if isinstance(raw, bool) else knob.parse(str(raw))
     return "fm" if fast_math_knobs(knobs) or precision_trading_pins(input_pins) else "std"
 
 
@@ -3004,7 +3004,7 @@ def _flatten_tensors(value):
 def _collect_sym_env(graphs) -> dict[str, int]:
     """Every symbolic dim var appearing in ``graphs`` bound to the size the backend resolves it to
     when benching without supplied inputs (:func:`symbolic_bindings`, the tune DB's rule too)."""
-    from emmy.compiler.loop_wire import symbolic_bindings
+    from emmy.compiler.wire import symbolic_bindings
 
     return symbolic_bindings(node.output for gph in graphs for node in gph.nodes.values())
 

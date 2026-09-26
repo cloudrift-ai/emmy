@@ -1,6 +1,4 @@
-compute_cap:
-- 12
-- 0
+compute_cap: [12, 0]
 programs:
 - inputs: [a, b]
   outputs: [o]
@@ -13,36 +11,25 @@ programs:
     outputs: [[b, f32, [64, 64]]]
   - id: ab
     op: torch.matmul
-    attrs: {has_bias: false}
     inputs: [a, b]
     outputs: [[ab, f32, [1, 64, 64]]]
   - id: o
     op: tensor.elementwise
-    attrs: {op: {__elementwise__: relu}}
+    attrs: {op: relu}
     inputs: [ab]
     outputs: [[o, f32, [1, 64, 64]]]
 configs:
 - program: 0
-  target:
-    loop: 0
-    origins:
-    - ab
-    - o
+  target: {loop: 0, origins: [ab, o]}
   realizations:
   - name: k_matmul_8612e4
-    bindings: {}
-    pins:
-      FAST_MATH: false
-      PLACE: fuse
+    pins: {FAST_MATH: false, PLACE: fuse}
     knobs:
       TILE: f2x2
       WORK: t16x16
       REDUCE: ''
     identity: 6d1a86f66eb7f593b22a0504b8c43a4a439f99d1a24ca0c243bf0ed792764345
-    latency:
-      NVIDIA GeForce RTX 5090:
-        emmy_us: 1.9038779134968764
-        tcompile_us: 4.0824151826354695
+    latency: {NVIDIA GeForce RTX 5090: {emmy_us: 1.9038779134968764, tcompile_us: 4.0824151826354695}}
 loops:
 - inputs: [a, b]
   outputs: [o]
@@ -57,53 +44,21 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 64}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 64}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 64}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 64}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: a
-                              index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: b
-                              index: {tuple: [{expr: {var: a2}}, {expr: {var: a1}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: null}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - {class: Assign, fields: {name: v1, op: {elementwise: relu}, args: {tuple: [acc0]}, dtype: null}}
-                    - class: Write
-                      fields:
-                        output: o
-                        index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [v1]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - {Load: {names: [in0], input: a, index: [{literal: 0}, {var: a0}, {var: a2}]}}
+                  - {Load: {names: [in1], input: b, index: [{var: a2}, {var: a1}]}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1]}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - {Assign: {name: v1, op: relu, args: [acc0]}}
+              - {Write: {output: o, index: [{literal: 0}, {var: a0}, {var: a1}], values: [v1]}}
       name: k_matmul_8612e4
     inputs: [b, a]
     outputs: [[o, f32, [1, 64, 64]]]

@@ -1,6 +1,4 @@
-compute_cap:
-- 12
-- 0
+compute_cap: [12, 0]
 programs:
 - inputs: [x, w]
   outputs: [o]
@@ -13,26 +11,19 @@ programs:
     outputs: [[x, f16, [128, 256]]]
   - id: xr
     op: torch.reshape
-    attrs: {shape: {__tuple__: [256, 128]}}
+    attrs: {shape: [256, 128]}
     inputs: [x]
     outputs: [[xr, f16, [256, 128]]]
   - id: o
     op: torch.matmul
-    attrs: {has_bias: false}
     inputs: [xr, w]
     outputs: [[o, f16, [256, 64]]]
 configs:
 - program: 0
-  target:
-    loop: 0
-    origins:
-    - o
-    - xr
+  target: {loop: 0, origins: [o, xr]}
   realizations:
   - name: k_matmul_99a64f
-    bindings: {}
-    pins:
-      FAST_MATH: false
+    pins: {FAST_MATH: false}
     knobs:
       WORK: t32
       TILE: f1
@@ -40,10 +31,7 @@ configs:
       STAGE: d2/smem-async
       RASTER: ''
     identity: 469fca02357acb0dad02401b18b20ec243896cc65e7f9240c64202cc86f1d178
-    latency:
-      NVIDIA GeForce RTX 5090:
-        emmy_us: 1.754263582883275
-        tcompile_us: 2.0503002291753982
+    latency: {NVIDIA GeForce RTX 5090: {emmy_us: 1.754263582883275, tcompile_us: 2.0503002291753982}}
 loops:
 - inputs: [w, x]
   outputs: [o]
@@ -58,63 +46,30 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 256}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 256}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 64}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 128}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 128}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: x
-                              index:
-                                tuple:
-                                - {expr: {binary: {op: //, left: {var: a0}, right: {literal: {value: 2, dtype: int}}}}}
-                                - expr:
-                                    binary:
-                                      op: +
-                                      left:
-                                        binary:
-                                          op: '*'
-                                          left: {binary: {op: '%', left: {var: a0}, right: {literal: {value: 2, dtype: int}}}}
-                                          right: {literal: {value: 128, dtype: int}}
-                                      right: {var: a2}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: w
-                              index: {tuple: [{expr: {var: a2}}, {expr: {var: a1}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Write
-                      fields:
-                        output: o
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - Load:
+                      names:
+                      - in0
+                      input: x
+                      index:
+                      - {binary: {op: //, left: {var: a0}, right: {literal: 2}}}
+                      - binary:
+                          op: +
+                          left:
+                            binary: {op: '*', left: {binary: {op: '%', left: {var: a0}, right: {literal: 2}}}, right: {literal: 128}}
+                          right: {var: a2}
+                  - {Load: {names: [in1], input: w, index: [{var: a2}, {var: a1}]}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - {Write: {output: o, index: [{var: a0}, {var: a1}], values: [acc0]}}
       name: k_matmul_7d81a2
     inputs: [w, x]
     outputs: [[o, f16, [256, 64]]]

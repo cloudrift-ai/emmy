@@ -210,17 +210,6 @@ def freeze_path() -> Path:
     return Path(__file__).resolve().parent / "compiler" / "pipeline" / "search" / "freezes"
 
 
-def golden_identity_cache_path(fingerprint: str) -> Path:
-    """The derived golden store — ``~/.cache/emmy/golden_identity.<fingerprint>.json``, one file per
-    compiler fingerprint so two compiler revisions sharing this directory never replace each other's
-    derivations. Purely a memo, keyed by per-record content digests, of what the golden import
-    derives from a record: its kernel identity (``kernel_identity``), its strict-decode verdict, and
-    its evidence replay (``golden._replay`` — the rows a record files under which kernels, about two
-    seconds per multi-kernel record to derive); safe to delete at any time, and nothing prunes the
-    file of a compiler that is gone."""
-    return _CACHE_ROOT / f"golden_identity.{fingerprint[:16]}.json"
-
-
 def online_path() -> Path:
     """Online-prior checkpoint file: ``EMMY_ONLINE_FILE`` →
     ``~/.cache/emmy/online.json``. A single JSON file (not

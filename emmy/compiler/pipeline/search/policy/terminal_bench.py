@@ -14,9 +14,9 @@ import statistics
 from emmy.compiler.backend.cuda.program import compile_budget_overrun
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.cuda.ir import CudaOp
-from emmy.compiler.loop_wire import formed_from, kernel_bindings, kernel_tile, kernel_wire
 from emmy.compiler.pipeline.passes.identity import kernel_stamps
 from emmy.compiler.pipeline.search.db import KernelRow, PerfStats
+from emmy.compiler.wire import formed_from, kernel_bindings, kernel_tile, kernel_wire
 
 # The engine logger keeps the existing ``[tune]`` log channel and verbosity toggles.
 logger = logging.getLogger("emmy.compiler.pipeline")

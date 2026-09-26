@@ -24,6 +24,7 @@ from emmy.compiler.ir.stmt.base import (
     render_index,
     select_to_ternary,
 )
+from emmy.compiler.wire import Wire
 
 
 def _resolve_value(name: str, ctx: RenderCtx) -> str:
@@ -909,7 +910,7 @@ class Write(Stmt):
 
 
 @dataclass(frozen=True)
-class SelectBranch:
+class SelectBranch(Wire):
     """One branch of a ``Select`` body statement."""
 
     value: str  # SSA name when predicate holds

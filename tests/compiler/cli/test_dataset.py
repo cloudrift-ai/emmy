@@ -77,9 +77,9 @@ def _instance(path):
     """A DB as the tuner writes it: two real tile kernels with their measurements, one cut on the first that
     minted the second, on a registry card."""
     from emmy.compiler.context import Context
-    from emmy.compiler.loop_wire import kernel_bindings
     from emmy.compiler.pipeline.search.db import PerfStats
     from emmy.compiler.pipeline.search.policy.terminal_bench import kernel_row as tile_row
+    from emmy.compiler.wire import kernel_bindings
     from tests.compiler.helpers import case_target_tile
     from tests.compiler.pipeline.search.helpers import GPU_5090
 

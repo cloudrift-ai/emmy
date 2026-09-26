@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from emmy.compiler.pipeline.search.golden import GoldenFile
 from tests.compiler.helpers import loop_target
 
 
@@ -47,24 +48,20 @@ def test_serving_config_derives_standard_and_fast_math_realizations(tmp_path):
 
 def _write_release_golden(path: Path, realizations: list[dict]) -> None:
     from emmy.commands.trace import trace_inline_code
-    from emmy.compiler.pipeline.search.golden import GoldenFileValidation, dump_golden_file
-    from emmy.compiler.torch_wire import graph_to_wire
 
     graph = trace_inline_code("torch.relu(torch.randn(8))")["graph"]
     terminal = graph.producer(graph.outputs[0])
     loops: list[dict] = []
-    dump_golden_file(
+    GoldenFile.from_wire(
         {
             "gpu_name": "NVIDIA GeForce RTX 4090",
             "compute_cap": [8, 9],
             "model": "org/model",
-            "programs": [graph_to_wire(graph)],
+            "programs": [graph.to_wire()],
             "configs": [{"program": 0, "target": loop_target(graph, [terminal.id], loops, (8, 9)), "realizations": realizations}],
             "loops": loops,
-        },
-        path,
-        validation=GoldenFileValidation.REPOSITORY,
-    )
+        }
+    ).dump(path, repository=True)
 
 
 def test_eval_golden_audits_file_scoped_static_release(monkeypatch, tmp_path):
@@ -109,7 +106,7 @@ def test_eval_golden_audits_file_scoped_static_release(monkeypatch, tmp_path):
     def fake_run(self, graph, *, ctx=None, **_kwargs):
         # What the gate's compile sees: the lane's rows as the only golden scope, strict on, the
         # live card's context.
-        scope = {(record.bindings, record.pins) for record in golden_mod.RECORDS_OVERRIDE}
+        scope = {(record.bindings, record.pins) for record in golden_mod.repository.RECORDS_OVERRIDE}
         captured["compiles"].append((graph, ctx, emmy_config.strict_evidence(), scope))
         return graph
 
@@ -120,7 +117,7 @@ def test_eval_golden_audits_file_scoped_static_release(monkeypatch, tmp_path):
 
     assert captured["capture"] == ("org/model", {"decode_bucket": 1, "prefill_bucket": 0, "symbolic": False, "static_only": True})
     assert captured["compiles"] == [(twin, ctx, True, {((("num_tokens", 1),), (("FAST_MATH", False),))})]
-    assert golden_mod.RECORDS_OVERRIDE is None and not emmy_config.strict_evidence()
+    assert golden_mod.repository.RECORDS_OVERRIDE is None and not emmy_config.strict_evidence()
 
 
 def test_eval_golden_rejects_a_missing_config_realization(monkeypatch, tmp_path):
@@ -222,8 +219,6 @@ def test_eval_golden_compiles_a_static_twin_only_in_the_lanes_that_warm_its_widt
     from emmy.commands.trace import trace_inline_code
     from emmy.compiler.context import Context
     from emmy.compiler.pipeline import Pipeline
-    from emmy.compiler.pipeline.search.golden import GoldenFileValidation, dump_golden_file
-    from emmy.compiler.torch_wire import graph_to_wire
 
     graph = trace_inline_code("torch.relu(torch.randn(8))")["graph"]
     loops: list[dict] = []
@@ -242,22 +237,20 @@ def test_eval_golden_compiles_a_static_twin_only_in_the_lanes_that_warm_its_widt
         ]
 
     golden = tmp_path / "golden.yaml"
-    dump_golden_file(
+    GoldenFile.from_wire(
         {
             "gpu_name": "NVIDIA GeForce RTX 4090",
             "compute_cap": [8, 9],
             "model": "org/model",
-            "programs": [graph_to_wire(graph)],
+            "programs": [graph.to_wire()],
             "configs": [
                 {"program": 0, "target": target, "realizations": rows(("pre8.m8", {"num_tokens": 8}))},
                 {"program": 0, "target": target, "realizations": rows(("pre64.m64.fm", {"num_tokens": 64}))},
                 {"program": 0, "target": target, "realizations": rows(("pre-sym.dynamic", {}), ("pre-sym.dynamic.fm", {}))},
             ],
             "loops": loops,
-        },
-        golden,
-        validation=GoldenFileValidation.REPOSITORY,
-    )
+        }
+    ).dump(golden, repository=True)
     config = tmp_path / "release.env"
     config.write_text(
         f'SERVE_MODEL=org/model\nSERVE_GPU="NVIDIA GeForce RTX 4090"\nSERVE_GOLDEN_FILE={golden}\n'
@@ -306,9 +299,7 @@ def test_offer_audit_flags_unrealized_entries(monkeypatch, caplog):
     from emmy.compiler.ir.schedule.classic import refusals as classic
     from emmy.compiler.ir.schedule.classic import sites as classic_sites
     from emmy.compiler.pipeline.knob import complete_kernel_row
-    from emmy.compiler.pipeline.search.golden import load_golden_records
-    from emmy.compiler.pipeline.search.golden_eval import enumerate_graph
-    from emmy.compiler.torch_wire import graph_to_wire
+    from emmy.compiler.pipeline.search.ranking import enumerate_graph
 
     gpu, cap = "NVIDIA GeForce RTX 5090", (12, 0)
     with config.nvcc_flags_override(""):  # the deployable -O3 regime the tier is gated on
@@ -334,14 +325,15 @@ def test_offer_audit_flags_unrealized_entries(monkeypatch, caplog):
         return row
 
     def records(graph, name, entries):
+
         origins = [nid for nid, node in graph.nodes.items() if not isinstance(node.op, InputOp)]
         loops: list[dict] = []
-        return load_golden_records(
+        return GoldenFile.from_wire(
             {
                 "gpu_name": gpu,
                 "compute_cap": list(cap),
                 "model": "org/model",
-                "programs": [graph_to_wire(graph)],
+                "programs": [graph.to_wire()],
                 "loops": loops,
                 "configs": [
                     {
@@ -360,7 +352,7 @@ def test_offer_audit_flags_unrealized_entries(monkeypatch, caplog):
                     }
                 ],
             }
-        )
+        ).records()
 
     def matmul(m):
         code = f"torch.matmul(torch.randn({m},128, dtype=torch.float16), torch.randn(128,{m}, dtype=torch.float16))"

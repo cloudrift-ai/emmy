@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from emmy.compiler.context import Context
 from emmy.compiler.graph import Graph
 from emmy.compiler.pipeline.fork import DeferredFork, Fork
-from emmy.compiler.pipeline.search.golden_eval import enumerate_graph
+from emmy.compiler.pipeline.search.ranking import enumerate_graph
 
 
 @dataclass(frozen=True)

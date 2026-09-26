@@ -27,6 +27,7 @@ from typing import Any
 
 from emmy.compiler.ir.base import ConstantOp, InputOp, Op
 from emmy.compiler.tensor import Tensor
+from emmy.compiler.wire import Wire, tag_of, wire_class
 
 # ---------------------------------------------------------------------------
 # Hints
@@ -200,9 +201,7 @@ def _serialize_field(v):
     if isinstance(v, ElementwiseImpl):
         return v.name
     if isinstance(v, Dim):
-        from emmy.compiler.torch_wire import dim_to_wire
-
-        return {"__dim__": dim_to_wire(v)}
+        return {"__dim__": v.to_wire()}
     if isinstance(v, Body):
         # Body is a ``tuple`` subclass; downcast to plain tuple so
         # JSON encodes element-by-element rather than via ``__repr__``
@@ -230,9 +229,9 @@ def _deserialize_field(k, v):
     from emmy.compiler.ir.elementwise import ElementwiseImpl
 
     if isinstance(v, dict) and set(v) == {"__dim__"}:
-        from emmy.compiler.torch_wire import dim_from_wire
+        from emmy.compiler.dim import Dim
 
-        return dim_from_wire(v["__dim__"])
+        return Dim.from_wire(v["__dim__"])
 
     if k == "op" and isinstance(v, str):
         # A bare name (``"add"``) is an ``ElementwiseImpl``; a constructor repr
@@ -574,7 +573,7 @@ class SpliceReceipt:
     consumed_hints: dict[str, Hints]
 
 
-class Graph:
+class Graph(Wire):
     """Directed acyclic compute graph of tensor operations.
 
     Stores both directions of each edge: every ``Node`` carries its
@@ -583,6 +582,62 @@ class Graph:
     Mutation methods keep both sides consistent, so forward walks
     (``users`` / ``consumers``) are O(1) per hop.
     """
+
+    wire_tag = "program"
+
+    def to_wire(self) -> dict:
+        """The graph as a golden stores it: nodes in topological order, each ``{id, op, attrs, inputs, outputs}``."""
+        nodes = []
+        for node_id in self.topological_order():
+            node = self.nodes[node_id]
+            item: dict = {"id": node_id, "op": tag_of(type(node.op))}
+            if attrs := node.op.to_wire():
+                item["attrs"] = attrs
+            if node.inputs:
+                item["inputs"] = list(node.inputs)
+            item["outputs"] = [tensor.to_wire() for tensor in node.outputs]
+            nodes.append(item)
+        return {"inputs": list(self.inputs), "outputs": list(self.outputs), "nodes": nodes}
+
+    @classmethod
+    def from_wire(cls, value: object, where: str = "program") -> Graph:
+        if not isinstance(value, dict):
+            raise ValueError(f"{where} must be a mapping")
+        if unknown := set(value) - {"inputs", "outputs", "nodes"}:
+            raise ValueError(f"{where}: unknown field(s): {', '.join(sorted(unknown))}")
+        nodes = value.get("nodes")
+        if not isinstance(nodes, list):
+            raise ValueError(f"{where} nodes must be a list")
+        graph = cls()
+        for index, item in enumerate(nodes):
+            node_where = f"{where}.nodes[{index}]"
+            if not isinstance(item, dict):
+                raise ValueError(f"{node_where} must be a mapping")
+            if unknown := set(item) - {"id", "op", "attrs", "inputs", "outputs"}:
+                raise ValueError(f"{node_where}: unknown field(s): {', '.join(sorted(unknown))}")
+            node_id, inputs, outputs = item.get("id"), item.get("inputs", []), item.get("outputs")
+            if not isinstance(node_id, str) or not node_id:
+                raise ValueError(f"{node_where} requires a non-empty id")
+            if not isinstance(inputs, list) or not all(isinstance(name, str) for name in inputs):
+                raise ValueError(f"{node_where} inputs must be string names")
+            if not isinstance(outputs, list) or not outputs:
+                raise ValueError(f"{node_where} outputs must be a non-empty list")
+            op_cls = wire_class(item.get("op"))
+            if op_cls is None or not issubclass(op_cls, Op):
+                raise ValueError(f"{node_where} has unknown op {item.get('op')!r}")
+            op = op_cls.from_wire(item.get("attrs", {}), f"{node_where} {item['op']}")
+            tensors = tuple(Tensor.from_wire(output, node_where) for output in outputs)
+            try:
+                graph.add_node(op, list(inputs), outputs=tensors, node_id=node_id)
+            except ValueError as exc:
+                raise ValueError(f"{node_where} is invalid: {exc}") from exc
+        graph.inputs = list(value.get("inputs", []))
+        graph.outputs = list(value.get("outputs", []))
+        for name in (*graph.inputs, *graph.outputs):
+            if graph.buffer(name) is None:
+                raise ValueError(f"{where} references unknown boundary buffer {name!r}")
+        graph.topological_order()  # validate acyclicity
+        return graph
 
     def __init__(self) -> None:
         self.nodes: dict[str, Node] = {}

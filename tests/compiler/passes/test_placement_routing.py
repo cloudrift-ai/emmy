@@ -18,7 +18,7 @@ from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.frontend.ir import MatmulOp, RmsNormOp
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 from emmy.compiler.pipeline.pipeline import Run
-from emmy.compiler.pipeline.search.golden import GoldenRecord
+from emmy.compiler.pipeline.search.golden import GoldenRecord, Measurements
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from tests.compiler.helpers import direct_classic_leaf
 
@@ -83,7 +83,7 @@ def test_place_only_golden_rows_are_routing_rows() -> None:
         bindings=(),
         pins=(("FAST_MATH", False),),
         knobs={},
-        measurements={"emmy_us": 1.0, "reference_us": 1.0, "reference_backend": "test"},
+        measurements=Measurements(emmy_us=1.0, reference_us=1.0, reference_backend="test"),
         ranking=None,
     )
     assert replace(base, knobs={"PLACE@inner.1/map": "cut"}).is_routing

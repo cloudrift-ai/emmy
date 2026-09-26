@@ -24,6 +24,7 @@ from typing import NamedTuple
 import numpy as np
 
 from emmy.compiler.dtype import decode_f4, decode_f8, encode_f4, encode_f8
+from emmy.compiler.wire import Wire
 
 
 # Names whose callable isn't a plain ``getattr(np, name)`` — non-numpy
@@ -115,7 +116,7 @@ _ARITY: dict[str, int] = {
 }
 
 
-class ElementwiseImpl:
+class ElementwiseImpl(Wire):
     """Named scalar op — name + numpy callable + arity + reducer metadata.
 
     Construction resolves the callable from ``_NAME_TO_FN`` (non-numpy
@@ -127,6 +128,17 @@ class ElementwiseImpl:
     gates (split-K, cooperative tree-combine) query instead of matching op
     names.
     """
+
+    wire_tag = "elementwise"
+
+    def to_wire(self) -> str:
+        return self.name
+
+    @classmethod
+    def from_wire(cls, value: object, where: str = "elementwise") -> ElementwiseImpl:
+        if not isinstance(value, str):
+            raise ValueError(f"{where} must be an op name")
+        return cls(value)
 
     # Commutative ops — binary combines where ``op(a, b) == op(b, a)``.
     _COMMUTATIVE: frozenset[str] = frozenset({"add", "multiply", "maximum", "minimum", "amax", "sum", "prod"})

@@ -9,9 +9,9 @@ from emmy.compiler.context import Context
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda.ir import CudaOp
-from emmy.compiler.loop_wire import kernel_bindings, kernel_tile
 from emmy.compiler.pipeline.search.db import SearchDB
 from emmy.compiler.pipeline.search.policy.terminal_bench import bench_terminal_async
+from emmy.compiler.wire import kernel_bindings, kernel_tile
 from tests.compiler.helpers import case_target_tile
 
 # A perf row is filed under the tile kernel a CUDA kernel was rendered from, so every synthetic kernel

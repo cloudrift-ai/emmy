@@ -1,6 +1,4 @@
-compute_cap:
-- 12
-- 0
+compute_cap: [12, 0]
 programs:
 - inputs: [a, b]
   outputs: [c]
@@ -13,29 +11,20 @@ programs:
     outputs: [[b, f32, [64, 64]]]
   - id: c
     op: torch.matmul
-    attrs: {has_bias: false}
     inputs: [a, b]
     outputs: [[c, f32, [64, 64]]]
 configs:
 - program: 0
-  target:
-    loop: 0
-    origins:
-    - c
+  target: {loop: 0, origins: [c]}
   realizations:
   - name: k_matmul_d4bced
-    bindings: {}
-    pins:
-      FAST_MATH: false
+    pins: {FAST_MATH: false}
     knobs:
       TILE: f2x2
       WORK: t16x8
       STAGE: ''
     identity: 2fc9383f74063b9e3272eb6493c230db386919e27a9f7446337b53df478e0a23
-    latency:
-      NVIDIA GeForce RTX 5090:
-        emmy_us: 2.001378722563535
-        tcompile_us: 2.9748918174149153
+    latency: {NVIDIA GeForce RTX 5090: {emmy_us: 2.001378722563535, tcompile_us: 2.9748918174149153}}
 loops:
 - inputs: [a, b]
   outputs: [c]
@@ -50,52 +39,20 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 64}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 64}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 64}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 64}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: a
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: b
-                              index: {tuple: [{expr: {var: a2}}, {expr: {var: a1}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: null}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Write
-                      fields:
-                        output: c
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - {Load: {names: [in0], input: a, index: [{var: a0}, {var: a2}]}}
+                  - {Load: {names: [in1], input: b, index: [{var: a2}, {var: a1}]}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1]}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - {Write: {output: c, index: [{var: a0}, {var: a1}], values: [acc0]}}
       name: k_matmul_d4bced
     inputs: [b, a]
     outputs: [[c, f32, [64, 64]]]

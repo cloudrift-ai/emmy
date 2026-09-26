@@ -15,8 +15,8 @@ import pytest
 from emmy.compiler.pipeline.knob import METADATA_PREFIXES
 from emmy.compiler.pipeline.search.data.freeze import REGIME_PINS, freeze_documents, freeze_reason, freeze_source, regime_of, write_freeze
 from emmy.compiler.pipeline.search.db import SearchDB, knobs_json
-from emmy.compiler.pipeline.search.golden import load_golden_file, load_golden_records, validate_golden_file
-from emmy.compiler.pipeline.search.golden_import import import_file
+from emmy.compiler.pipeline.search.golden import GoldenFile
+from emmy.compiler.pipeline.search.golden.evidence import import_file
 from tests.compiler.pipeline.search.helpers import F16_MATMUL_FEATS, impossible_staged_feats, tuned_db
 from tests.compiler.pipeline.search.helpers import perf_row as _row
 
@@ -127,7 +127,7 @@ def test_a_freeze_is_a_golden_file_per_card_that_re_lowers_to_the_rows_it_was_wr
     documents, dropped = freeze_documents(tuned)
     assert dropped == {} and set(documents) == {"nvidia_geforce_rtx_5090_sm120.yaml", "nvidia_tesla_v100_sxm2_16gb_sm70.yaml"}
     for document in documents.values():
-        validate_golden_file(document)
+        GoldenFile.from_wire(document).check()
     definitions = _definitions(tuned)
     unformed = {identity for identity, (_deploy, _stamps, formed) in definitions.items() if not formed}
     assert unformed, "the attention split mints pieces no loop op forms"
@@ -182,7 +182,7 @@ def test_both_precision_lanes_freeze_as_pinned_rows_and_import_apart(tmp_path) -
     [document] = documents.values()
     entries = [entry for config in document["configs"] for entry in config["realizations"]]
     assert sorted(entry["pins"]["FAST_MATH"] for entry in entries) == [False, True]
-    records = load_golden_records(document)
+    records = GoldenFile.from_wire(document).records()
     assert {tuple(name for name, _value in record.pins) for record in records} == {("FAST_MATH",)}
     write_freeze(path, tmp_path / "freeze")
     db.close()
@@ -197,8 +197,8 @@ def test_a_kernel_benched_at_two_sizes_freezes_as_two_programs(tmp_path) -> None
     and name another kernel: the same symbolic kernel benched at two sizes is two loop programs, and each row comes
     back at the size it was benched at."""
     from emmy.compiler.context import Context
-    from emmy.compiler.loop_wire import symbolic_vars
     from emmy.compiler.pipeline.search.pins import pinned_knobs
+    from emmy.compiler.wire import symbolic_vars
     from tests.compiler.pipeline.search.helpers import CARDS
 
     path = tmp_path / "autotune.db"
@@ -251,7 +251,7 @@ def test_write_freeze_refuses_to_replace_a_directory_that_is_not_a_freeze(tuned,
     assert (target / "notes.txt").exists()
     write_freeze(tuned_path, tmp_path / "freeze")
     write_freeze(tuned_path, tmp_path / "freeze")  # a freeze replaces a freeze
-    assert load_golden_file(next((tmp_path / "freeze").glob("*.yaml")))
+    assert GoldenFile.load(next((tmp_path / "freeze").glob("*.yaml")))
 
 
 def test_an_lfs_pointer_is_named_rather_than_parsed(tmp_path) -> None:
@@ -272,13 +272,13 @@ def test_the_rtx_5090_hardware_goldens_rows_round_trip_through_a_freeze(tmp_path
     same file imported straight from the repository, its traced slices entering at the lowering passes, files the
     same rows too: a golden file is a source ``emmy dataset import`` accepts."""
     from emmy.compiler.context import Context
-    from emmy.compiler.pipeline.search.golden import _HARDWARE_GOLDENS_DIR
-    from emmy.compiler.pipeline.search.golden_import import import_goldens
+    from emmy.compiler.pipeline.search.golden.evidence import import_goldens
+    from emmy.compiler.pipeline.search.golden.repository import _RECORDS_DIR
     from emmy.compiler.pipeline.search.pins import pinned_knobs
     from tests.compiler.pipeline.search.helpers import GPU_5090
 
-    path = _HARDWARE_GOLDENS_DIR / "rtx5090_sm120.yaml"
-    records = load_golden_records(load_golden_file(path))
+    path = _RECORDS_DIR / "rtx5090_sm120.yaml"
+    records = GoldenFile.load(path).records()
     tuned_path = tmp_path / "autotune.db"
     tuned = SearchDB(tuned_path)
     with pinned_knobs({"FAST_MATH": False}):

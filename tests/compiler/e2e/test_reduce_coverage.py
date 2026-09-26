@@ -109,7 +109,7 @@ def test_transposed_coop_band_is_offered_on_a_non_divisible_sweep(n_out, monkeyp
     them, so no golden could record the band on such a shape."""
     from emmy.commands.trace import graph_from_code
     from emmy.compiler.context import Context
-    from emmy.compiler.pipeline.search.golden_eval import enumerate_graph
+    from emmy.compiler.pipeline.search.ranking import enumerate_graph
 
     for var in ("EMMY_TILE", "EMMY_WORK", "EMMY_STAGE", "EMMY_REDUCE"):
         monkeypatch.delenv(var, raising=False)

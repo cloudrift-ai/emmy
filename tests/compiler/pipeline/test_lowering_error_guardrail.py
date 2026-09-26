@@ -223,7 +223,7 @@ def test_unlowered_terminal_is_bench_fail_despite_cached_residual_kernel():
 
     # ``x -> y (TileOp) -> z (CudaOp)`` — the split shape: an un-lowered partial
     # feeding a lowered finalize whose perf row is already cached.
-    from emmy.compiler.loop_wire import kernel_bindings
+    from emmy.compiler.wire import kernel_bindings
     from tests.compiler.helpers import case_target_tile
 
     g = _graph_with_tile()

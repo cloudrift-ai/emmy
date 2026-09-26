@@ -2,9 +2,7 @@
 # width issues 16 B cp.async chunks at f32 spacing over f16 memory — misaligned addresses
 # and overlapped data. Each slab, fill and descriptor must be sized by its own operand's
 # width. The strides here are 16 B-aligned, so the fill itself is what is under test.
-compute_cap:
-- 12
-- 0
+compute_cap: [12, 0]
 programs:
 - inputs: [a, b]
   outputs: [c]
@@ -17,20 +15,14 @@ programs:
     outputs: [[b, f16, [128, 96]]]
   - id: c
     op: torch.matmul
-    attrs: {has_bias: false}
     inputs: [a, b]
     outputs: [[c, f32, [64, 96]]]
 configs:
 - program: 0
-  target:
-    loop: 0
-    origins:
-    - c
+  target: {loop: 0, origins: [c]}
   realizations:
   - name: k_matmul_186335
-    bindings: {}
-    pins:
-      FAST_MATH: false
+    pins: {FAST_MATH: false}
     knobs:
       TILE: f2x4
       WORK: t16x8
@@ -50,52 +42,20 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 64}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 64}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 96}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 96}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 128}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 128}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: a
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: b
-                              index: {tuple: [{expr: {var: a2}}, {expr: {var: a1}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: null}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Write
-                      fields:
-                        output: c
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - {Load: {names: [in0], input: a, index: [{var: a0}, {var: a2}]}}
+                  - {Load: {names: [in1], input: b, index: [{var: a2}, {var: a1}]}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1]}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - {Write: {output: c, index: [{var: a0}, {var: a1}], values: [acc0]}}
       name: k_matmul_186335
     inputs: [b, a]
     outputs: [[c, f32, [64, 96]]]

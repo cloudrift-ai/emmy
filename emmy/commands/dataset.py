@@ -7,7 +7,7 @@ A dataset DB is the tune DB's schema in its own file (``EMMY_DATASET_DB``): the 
 - ``import`` loads golden-shaped sources into it: a measurement freeze directory (the checked-in one by
   default) or any golden file, and a tune DB file, which is frozen first (the way a card's measurements
   from a rented GPU reach the dataset). Every kernel is re-lowered from its definition by the current
-  compiler (``golden_import.import_goldens``), so the instance holds today's identities and stamps whatever
+  compiler (``golden.evidence.import_goldens``), so the instance holds today's identities and stamps whatever
   compiler wrote the source. A file's rows are sourced by its digest, and a file the instance already holds
   is skipped: ``--fresh`` rebuilds from nothing.
 - ``freeze`` writes a DB instance's admitted rows as a directory of golden files, one per card — the
@@ -60,7 +60,7 @@ def register_dataset_command(subparsers) -> None:
 def handle_dataset_import(args) -> None:
     from emmy.compiler.pipeline.search.data.freeze import write_freeze  # noqa: PLC0415
     from emmy.compiler.pipeline.search.db import SearchDB  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden_import import import_file  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden.evidence import import_file  # noqa: PLC0415
 
     db_path = Path(args.db).expanduser() if args.db else config.dataset_db_path()
     sources = [Path(s).expanduser() for s in args.sources] or [config.freeze_path()]

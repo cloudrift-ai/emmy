@@ -7,7 +7,7 @@ golden file's shape: one document per card, its ``loops`` pool holding each kern
 per kernel set and binding, a realization per measured row — its schedule row, the regime it was measured
 under (``FAST_MATH`` on or off, the two a golden records) and its median. Nothing the compiler computed is
 stored: no identity a reader has to trust, no stamps spelled in one featurizer's vocabulary. ``emmy dataset
-import`` re-lowers every kernel from its definition (``golden_import.import_goldens``, entering at the
+import`` re-lowers every kernel from its definition (``golden.evidence.import_goldens``, entering at the
 lowering passes as the tuner runs a slice), so the dataset DB's identities and stamps are the current
 compiler's, and a compiler change is a re-import, never a re-collection.
 
@@ -43,11 +43,11 @@ from collections import Counter, defaultdict, deque
 from pathlib import Path
 
 from emmy.compiler.context import FAST_MATH_FLAG
-from emmy.compiler.loop_wire import intern_wire
 from emmy.compiler.pipeline.knob import METADATA_PREFIXES
 from emmy.compiler.pipeline.search.db import KernelRow, PerfRow, SearchDB, knobs_json
 from emmy.compiler.pipeline.search.features import DEPLOYABLE_OPT
 from emmy.compiler.specialize import rehint_program
+from emmy.compiler.wire import intern_wire
 
 logger = logging.getLogger(__name__)
 
@@ -305,7 +305,7 @@ def write_freeze(db_path: Path | str, out_dir: Path | str) -> dict[str, str]:
     survives the filter — a zero-row freeze means the wrong DB, not an empty dataset. An existing ``out_dir``
     is replaced only when it is itself a freeze (holds golden files and nothing else) — anything else is
     refused rather than deleted."""
-    from emmy.compiler.pipeline.search.golden import dump_golden_file  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import GoldenFile  # noqa: PLC0415
 
     db = SearchDB.open_readonly(db_path)
     try:
@@ -325,7 +325,7 @@ def write_freeze(db_path: Path | str, out_dir: Path | str) -> dict[str, str]:
     tmp.mkdir(parents=True)
     digests = {}
     for name, document in sorted(documents.items()):
-        digests[name] = hashlib.sha256(dump_golden_file(document, tmp / name).read_bytes()).hexdigest()
+        digests[name] = hashlib.sha256(GoldenFile.from_wire(document).dump(tmp / name).read_bytes()).hexdigest()
     if out.exists():
         shutil.rmtree(out)
     tmp.replace(out)

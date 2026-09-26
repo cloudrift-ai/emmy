@@ -14,7 +14,7 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import Conv1dOp, LinearOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.tensor.ir import CastOp, ElementwiseOp, GatherOp
-from emmy.compiler.pipeline.search.golden import load_golden_file, load_golden_records
+from emmy.compiler.pipeline.search.golden import GoldenFile
 from emmy.compiler.pipeline.search.working_golden import (
     append_trace_inventory,
     load_working_targets,
@@ -101,8 +101,8 @@ def test_trace_serving_twins_writes_one_exact_inventory_with_explicit_provenance
         )
     )
 
-    document = load_golden_file(output)
-    records = load_golden_records(document)
+    document = GoldenFile.load(output)
+    records = document.records()
     # The audit's graph set (``emmy eval golden``): the symbolic programs plus the config's static widths.
     assert captured == {
         "model": str(tmp_path / "local-checkpoint"),
@@ -111,7 +111,7 @@ def test_trace_serving_twins_writes_one_exact_inventory_with_explicit_provenance
         "extra_widths": (1, 64, 512, 1024),
         "symbolic": True,
     }
-    assert document["model"] == "cloudriftai/model-exl3@0123456789abcdef0123456789abcdef01234567"
+    assert document.model == "cloudriftai/model-exl3@0123456789abcdef0123456789abcdef01234567"
     assert {record.name.split(".", 1)[0] for record in records} == {"pre1@b2", "expert512@b2"}
     assert all(record.loop_wire is not None for record in records)
     assert all(torch_ref.is_runnable(record.reference_program) for record in records)
@@ -162,7 +162,7 @@ def test_trace_serving_twins_static_only_release_forwards_exact_scope(monkeypatc
         "symbolic": False,
         "static_only": True,
     }
-    records = load_golden_records(load_golden_file(output))
+    records = GoldenFile.load(output).records()
     assert {(record.bindings, record.pins) for record in records} == {((("num_tokens", 1),), (("FAST_MATH", False),))}
 
 
@@ -186,7 +186,7 @@ def test_trace_command_writes_only_golden_yaml(monkeypatch, tmp_path) -> None:
     monkeypatch.chdir(tmp_path)
     output = tmp_path / "trace.yaml"
     handle_trace(_parser().parse_args(["trace", "some/model", "-o", str(output)]))
-    records = load_golden_records(load_golden_file(output))
+    records = GoldenFile.load(output).records()
     assert records and all(record.program.nodes for record in records)
     assert sorted(path.name for path in tmp_path.iterdir()) == ["trace.yaml"]
 
@@ -215,34 +215,34 @@ def test_trace_quantize_spells_before_writing_inventory(monkeypatch, tmp_path) -
     handle_trace(_parser().parse_args(["trace", "--code", "unused", "--quantize", "nvfp4", "--target", "sm_89", "-o", str(output)]))
 
     assert seen == {"architecture_only": False, "quantize": (graph, bundle)}
-    assert load_golden_file(output)["model_quant_digest"] == "0123456789abcdef"
+    assert GoldenFile.load(output).model_quant_digest == "0123456789abcdef"
 
 
 def test_trace_accepts_debug_graph_json_as_input_but_emits_yaml(monkeypatch, tmp_path) -> None:
+
     source_graph = trace_inline_code("torch.relu(torch.randn(8))")["graph"]
     source = tmp_path / "source.json"
     source.write_text(json.dumps(source_graph.to_dict()))
     output = tmp_path / "working.yaml"
     handle_trace(_parser().parse_args(["trace", str(source), "-o", str(output)]))
-    assert load_golden_records(load_golden_file(output))
+    assert GoldenFile.load(output).records()
     assert json.loads(source.read_text()) == source_graph.to_dict()
 
 
 def test_trace_writes_deterministic_self_contained_programs(tmp_path) -> None:
-    from emmy.compiler.torch_wire import graph_to_wire
 
     graph = trace_inline_code("torch.relu(torch.randn(16,32))")["graph"]
-    original_wire = graph_to_wire(graph)
+    original_wire = graph.to_wire()
     first, second = tmp_path / "first.yaml", tmp_path / "second.yaml"
     write_trace_inventory(graph.copy(), first, model="org/model", ctx=_TARGET_CTX)
     write_trace_inventory(graph.copy(), second, model="org/model", ctx=_TARGET_CTX)
-    first_doc, second_doc = load_golden_file(first), load_golden_file(second)
+    first_doc, second_doc = GoldenFile.load(first), GoldenFile.load(second)
     assert first_doc == second_doc
-    assert first_doc["programs"] == [original_wire]
-    assert first_doc["programs"] and first_doc["configs"]
-    assert all(set(entry) == {"program", "target", "realizations"} for entry in first_doc["configs"])
-    assert all(set(entry["realizations"][0]) == {"name", "bindings", "pins"} for entry in first_doc["configs"])
-    assert all(set(entry["target"]) == {"loop", "origins"} for entry in first_doc["configs"])
+    assert first_doc.programs == [original_wire]
+    assert first_doc.programs and first_doc.configs
+    assert all(set(entry.to_wire()) == {"program", "target", "realizations"} for entry in first_doc.configs)
+    assert all(set(entry.realizations[0].to_wire()) == {"name", "pins"} for entry in first_doc.configs)
+    assert all(set(entry.target.to_wire()) == {"loop", "origins"} for entry in first_doc.configs)
 
 
 def test_trace_inventory_replays_depthwise_conv1d_program(tmp_path) -> None:
@@ -263,10 +263,11 @@ def test_trace_inventory_replays_depthwise_conv1d_program(tmp_path) -> None:
 
     assert targets
     expected = Conv1dOp(stride=1, padding=3, dilation=1, groups=8)
-    assert all(record.origins == ("conv",) and record.program.nodes["conv"].op == expected for record in load_golden_records(document))
+    assert all(record.origins == ("conv",) and record.program.nodes["conv"].op == expected for record in document.records())
 
 
 def test_trace_keeps_materialized_storage_outputs_and_quant_digest(tmp_path) -> None:
+
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (4, 32), "f16"), node_id="x")
     bits = graph.add_node(ElementwiseOp("to_f8e4m3"), ["x"], Tensor("x_bits", (4, 32), "f8e4m3"), node_id="x_bits")
@@ -281,15 +282,16 @@ def test_trace_keeps_materialized_storage_outputs_and_quant_digest(tmp_path) -> 
         ctx=_TARGET_CTX,
         model_quant_digest="0123456789abcdef",
     )
-    document = load_golden_file(path)
+    document = GoldenFile.load(path)
 
     assert result.target_count == 1
-    assert document["model_quant_digest"] == "0123456789abcdef"
-    assert "x_bits" in document["programs"][0]["outputs"]
-    assert document["configs"][0]["target"]["origins"] == ["out", "x_bits"]
+    assert document.model_quant_digest == "0123456789abcdef"
+    assert "x_bits" in document.programs[0]["outputs"]
+    assert document.configs[0].target.origins == ("out", "x_bits")
 
 
 def test_trace_target_resolves_in_original_multi_op_fusion_context(tmp_path) -> None:
+
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (16, 64), "f16"), node_id="x")
     graph.add_node(InputOp(), [], Tensor("w1", (32, 64), "f16"), node_id="w1")
@@ -301,10 +303,10 @@ def test_trace_target_resolves_in_original_multi_op_fusion_context(tmp_path) -> 
 
     path = tmp_path / "working.yaml"
     write_trace_inventory(graph, path, ctx=_TARGET_CTX)
-    document = load_golden_file(path)
-    (record,) = load_golden_records(document)
+    document = GoldenFile.load(path)
+    (record,) = document.records()
 
-    assert len(document["programs"]) == 1
+    assert len(document.programs) == 1
     assert set(record.origins) == {"gate", "up", "out"}
     assert record.shape_key.reduce_max == 64
 
@@ -315,12 +317,13 @@ def test_trace_inventory_keeps_fused_sdpa_as_one_frontend_target(tmp_path) -> No
     Placement separately exposes fused and shared-score materialization siblings; the source
     inventory remains one frontend program so either structural form can be tuned in context.
     """
+
     graph = trace_inline_code(
         "F.scaled_dot_product_attention(torch.randn(1,2,8,16), torch.randn(1,2,8,16), torch.randn(1,2,8,16), is_causal=True)"
     )["graph"]
     path = tmp_path / "working.yaml"
     write_trace_inventory(graph, path, ctx=_TARGET_CTX)
-    records = load_golden_records(load_golden_file(path))
+    records = GoldenFile.load(path).records()
     assert len(records) == 1
     (record,) = records
     assert record.loop_index is not None
@@ -329,6 +332,7 @@ def test_trace_inventory_keeps_fused_sdpa_as_one_frontend_target(tmp_path) -> No
 
 
 def test_trace_serializes_gather_target_with_a_torch_reference_mapping(tmp_path) -> None:
+
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (4, 8)), node_id="x")
     graph.add_node(InputOp(), [], Tensor("index", (4, 8), "i64"), node_id="index")
@@ -338,12 +342,13 @@ def test_trace_serializes_gather_target_with_a_torch_reference_mapping(tmp_path)
 
     path = tmp_path / "working.yaml"
     write_trace_inventory(graph, path, ctx=_TARGET_CTX)
-    (record,) = load_golden_records(load_golden_file(path))
+    (record,) = GoldenFile.load(path).records()
     assert record.origin_ops == ("tensor.gather",)
     assert record.program.nodes["gather"].op == GatherOp(axis=1)
 
 
 def test_trace_inventory_keeps_every_kernel_even_without_cache_keys(monkeypatch, tmp_path) -> None:
+
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x0", (16,)), node_id="x0")
     graph.add_node(InputOp(), [], Tensor("x1", (16,)), node_id="x1")
@@ -354,7 +359,7 @@ def test_trace_inventory_keeps_every_kernel_even_without_cache_keys(monkeypatch,
 
     path = tmp_path / "working.yaml"
     result = write_trace_inventory(graph, path, ctx=_TARGET_CTX)
-    records = load_golden_records(load_golden_file(path))
+    records = GoldenFile.load(path).records()
 
     assert result.target_count == 2
     assert len(records) == 2
@@ -362,6 +367,7 @@ def test_trace_inventory_keeps_every_kernel_even_without_cache_keys(monkeypatch,
 
 
 def test_trace_inventory_embeds_loop_ir_when_frontend_provenance_is_missing(monkeypatch, tmp_path) -> None:
+
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (16,)), node_id="x")
     graph.add_node(ElementwiseOp("relu"), ["x"], Tensor("y", (16,)), node_id="y")
@@ -370,11 +376,11 @@ def test_trace_inventory_embeds_loop_ir_when_frontend_provenance_is_missing(monk
 
     path = tmp_path / "working.yaml"
     write_trace_inventory(graph, path, ctx=_TARGET_CTX)
-    document = load_golden_file(path)
-    (record,) = load_golden_records(document)
+    document = GoldenFile.load(path)
+    (record,) = document.records()
 
-    assert set(document) == {"compute_cap", "programs", "loops", "configs"}
-    assert document["configs"][0]["target"] == {"loop": 0}
+    assert set(document.to_wire()) == {"compute_cap", "programs", "loops", "configs"}
+    assert document.configs[0].target.to_wire() == {"loop": 0}
     assert record.origins == ()
     assert isinstance(record.target_program.nodes["y"].op, LoopOp)
     assert record.structural_features["S_pw_relu"] == 1.0
@@ -386,14 +392,16 @@ def test_trace_inventory_embeds_loop_ir_when_frontend_provenance_is_missing(monk
 def test_trace_inventory_stamps_the_card_its_context_is_for(tmp_path) -> None:
     """The pinned contexts above leave ``gpu_name`` out, so one test names a registered card
     and checks the stamp deterministically, instead of it depending on the runner's device."""
+
     graph = trace_inline_code("torch.relu(torch.randn(8))")["graph"]
     path = tmp_path / "working.yaml"
     write_trace_inventory(graph, path, ctx=Context.from_target((8, 9), gpu_name="NVIDIA GeForce RTX 4090"))
 
-    assert load_golden_file(path)["gpu_name"] == "NVIDIA GeForce RTX 4090"
+    assert GoldenFile.load(path).gpu_name == "NVIDIA GeForce RTX 4090"
 
 
 def test_trace_inventory_stores_the_kernel_and_its_traced_ops(tmp_path) -> None:
+
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (16,)), node_id="x")
     graph.add_node(ElementwiseOp("relu"), ["x"], Tensor("y", (16,)), node_id="y")
@@ -401,7 +409,7 @@ def test_trace_inventory_stores_the_kernel_and_its_traced_ops(tmp_path) -> None:
 
     path = tmp_path / "working.yaml"
     write_trace_inventory(graph, path, ctx=_TARGET_CTX)
-    (record,) = load_golden_records(load_golden_file(path))
+    (record,) = GoldenFile.load(path).records()
 
     assert record.origins == ("y",)
     assert record.pin_map == {"FAST_MATH": True}
@@ -412,6 +420,7 @@ def test_trace_inventory_stores_the_kernel_and_its_traced_ops(tmp_path) -> None:
 
 
 def test_a_stored_kernel_holding_part_of_an_op_has_no_pytorch_reference(monkeypatch, tmp_path) -> None:
+
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (16,)), node_id="x")
     graph.add_node(ElementwiseOp("relu"), ["x"], Tensor("y", (16,)), node_id="y")
@@ -420,13 +429,14 @@ def test_a_stored_kernel_holding_part_of_an_op_has_no_pytorch_reference(monkeypa
     monkeypatch.setattr(provenance, "coverage", lambda prov, _totals: {origin: (1, 2, False) for origin in prov})
     write_trace_inventory(graph, path, ctx=_TARGET_CTX)
 
-    (record,) = load_golden_records(load_golden_file(path))
+    (record,) = GoldenFile.load(path).records()
 
     assert record.origins == (), "a kernel holding part of an op keeps no traced ops"
     assert record.reference_program is None
 
 
 def test_exact_loop_targets_disambiguate_same_body_at_distinct_cast_boundaries(tmp_path) -> None:
+
     graph = Graph()
     outputs = []
     for suffix in ("a", "b"):
@@ -452,28 +462,29 @@ def test_exact_loop_targets_disambiguate_same_body_at_distinct_cast_boundaries(t
 
     path = tmp_path / "working.yaml"
     write_trace_inventory(graph, path, ctx=_TARGET_CTX)
-    names = [record.name for record in load_golden_records(load_golden_file(path))]
+    names = [record.name for record in GoldenFile.load(path).records()]
     assert len(names) == len(set(names))
 
 
 def test_combined_trace_inventory_deduplicates_identical_loop_targets(tmp_path) -> None:
+
     graph = trace_inline_code("torch.relu(torch.randn(8))")["graph"]
     path = tmp_path / "combined.yaml"
     result = write_trace_inventories({"pre1": graph, "pre8": graph.copy()}, path, model="org/model@revision", ctx=_TARGET_CTX)
-    document = load_golden_file(path)
-    records = load_golden_records(document)
+    document = GoldenFile.load(path)
+    records = document.records()
 
     assert result.target_count == 1
-    assert len(document["loops"]) == len(records) == 1
+    assert len(document.loops) == len(records) == 1
     assert records[0].name.startswith("pre1.")
-    assert document["model"] == "org/model@revision"
+    assert document.model == "org/model@revision"
 
 
 def test_trace_yaml_uses_compact_graph_rows_but_block_candidate_rows(tmp_path) -> None:
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x0", (512, 512), "f16"), node_id="x0")
     graph.add_node(InputOp(), [], Tensor("x1", (512, 512), "f16"), node_id="x1")
-    graph.add_node(LinearOp(), ["x0", "x1"], Tensor("linear", (512, 512), "f16"), node_id="linear")
+    graph.add_node(LinearOp(has_bias=True), ["x0", "x1"], Tensor("linear", (512, 512), "f16"), node_id="linear")
     graph.inputs, graph.outputs = ["x0", "x1"], ["linear"]
 
     path = tmp_path / "working.yaml"
@@ -482,8 +493,8 @@ def test_trace_yaml_uses_compact_graph_rows_but_block_candidate_rows(tmp_path) -
 
     assert "inputs: [x0, x1]" in text
     assert "outputs: [[x0, f16, [512, 512]]]" in text
-    assert "attrs: {has_bias: false}" in text
-    assert "target:\n    loop: 0\n    origins:\n" in text
+    assert "attrs: {has_bias: true}" in text
+    assert "target: {loop: 0, origins: [linear]}" in text
 
 
 def test_trace_refuses_to_replace_existing_yaml(tmp_path) -> None:
@@ -495,6 +506,7 @@ def test_trace_refuses_to_replace_existing_yaml(tmp_path) -> None:
 
 
 def test_append_collects_separately_traced_paths_into_one_inventory(tmp_path) -> None:
+
     relu = trace_inline_code("torch.relu(torch.randn(8))")["graph"]
     sigmoid = trace_inline_code("torch.sigmoid(torch.randn(16))")["graph"]
     path = tmp_path / "working.yaml"
@@ -502,26 +514,27 @@ def test_append_collects_separately_traced_paths_into_one_inventory(tmp_path) ->
     write_trace_inventory(relu, path, model="org/model@revision", ctx=_TARGET_CTX)
     result = append_trace_inventory(sigmoid, path, ctx=_TARGET_CTX)
 
-    document = load_golden_file(path)
-    records = load_golden_records(document)
+    document = GoldenFile.load(path)
+    records = document.records()
     assert result.target_count == 1
-    assert len(document["programs"]) == len(records) == 2
+    assert len(document.programs) == len(records) == 2
     # A later path keeps the provenance the inventory was opened with.
-    assert document["model"] == "org/model@revision"
+    assert document.model == "org/model@revision"
     # Each target still resolves against the program it was traced in.
-    assert {entry["program"] for entry in document["configs"]} == {0, 1}
+    assert {entry.program for entry in document.configs} == {0, 1}
 
 
 def test_append_keeps_a_kernel_already_covered_once(tmp_path) -> None:
+
     graph = trace_inline_code("torch.relu(torch.randn(8))")["graph"]
     path = tmp_path / "working.yaml"
 
     write_trace_inventory(graph.copy(), path, ctx=_TARGET_CTX)
     result = append_trace_inventory(graph.copy(), path, ctx=_TARGET_CTX)
 
-    document = load_golden_file(path)
+    document = GoldenFile.load(path)
     assert result.target_count == 0
-    assert len(document["loops"]) == len(load_golden_records(document)) == 1
+    assert len(document.loops) == len(document.records()) == 1
 
 
 def test_append_rejects_an_inventory_traced_for_another_card(tmp_path) -> None:

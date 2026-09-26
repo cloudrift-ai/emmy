@@ -1,22 +1,11 @@
-compute_cap:
-- 12
-- 0
+compute_cap: [12, 0]
 programs:
 - inputs: [x]
   outputs: [softmax]
   nodes:
   - id: softmax_c1
     op: constant
-    attrs:
-      name: softmax_c1
-      value: 1.0
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
+    attrs: {name: softmax_c1, value: 1.0}
     outputs: [[softmax_c1, f32, [1]]]
   - id: x
     op: input
@@ -28,23 +17,15 @@ programs:
     outputs: [[softmax, f32, [4, {sym: seq_len, hint: 512}]]]
 configs:
 - program: 0
-  target:
-    loop: 0
-    origins:
-    - softmax
+  target: {loop: 0, origins: [softmax]}
   realizations:
   - name: k_softmax_73feb6
-    bindings: {}
-    pins:
-      FAST_MATH: false
+    pins: {FAST_MATH: false}
     knobs:
       REDUCE: coop
       WORK: t32
     identity: 22ff10a34c43e47b3a3f3208921d5972a563d4aba37d68abf66426bde7e4f5bf
-    latency:
-      NVIDIA GeForce RTX 5090:
-        emmy_us: 1.809797101262687
-        tcompile_us: 2.05019517435562
+    latency: {NVIDIA GeForce RTX 5090: {emmy_us: 1.809797101262687, tcompile_us: 2.05019517435562}}
 loops:
 - inputs: [x]
   outputs: [softmax]
@@ -56,79 +37,29 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 4}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 4}
+          body:
+          - Loop:
+              axis: {name: a1, extent: {sym: seq_len, hint: 512}}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
-                  body:
-                    body:
-                    - class: Load
-                      fields:
-                        names: {tuple: [in0]}
-                        input: x
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        dtype: null
-                    - class: Accum
-                      fields:
-                        name: acc0
-                        value: in0
-                        op: {elementwise: maximum}
-                        dtype: null
-                        axes: {tuple: [a1]}
-                        base: null
-                  unroll: false
-                  seed: true
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
-                  body:
-                    body:
-                    - class: Load
-                      fields:
-                        names: {tuple: [in1]}
-                        input: x
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        dtype: null
-                    - class: Assign
-                      fields: {name: v0, op: {elementwise: subtract}, args: {tuple: [in1, acc0]}, dtype: null}
-                    - {class: Assign, fields: {name: v1, op: {elementwise: exp}, args: {tuple: [v0]}, dtype: null}}
-                    - class: Accum
-                      fields: {name: acc1, value: v1, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
-                  unroll: false
-                  seed: true
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a3, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
-                  body:
-                    body:
-                    - class: Load
-                      fields:
-                        names: {tuple: [in2]}
-                        input: x
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a3}}]}
-                        dtype: null
-                    - class: Assign
-                      fields: {name: v2, op: {elementwise: subtract}, args: {tuple: [in2, acc0]}, dtype: null}
-                    - {class: Assign, fields: {name: v3, op: {elementwise: exp}, args: {tuple: [v2]}, dtype: null}}
-                    - class: Assign
-                      fields: {name: v4, op: {elementwise: divide}, args: {tuple: [v3, acc1]}, dtype: null}
-                    - class: Write
-                      fields:
-                        output: softmax
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a3}}]}
-                        values: {tuple: [v4]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+              - {Load: {names: [in0], input: x, index: [{var: a0}, {var: a1}]}}
+              - {Accum: {name: acc0, value: in0, op: maximum, axes: [a1]}}
+          - Loop:
+              axis: {name: a1, extent: {sym: seq_len, hint: 512}}
+              body:
+              - {Load: {names: [in1], input: x, index: [{var: a0}, {var: a1}]}}
+              - {Assign: {name: v0, op: subtract, args: [in1, acc0]}}
+              - {Assign: {name: v1, op: exp, args: [v0]}}
+              - {Accum: {name: acc1, value: v1, axes: [a1]}}
+          - Loop:
+              axis: {name: a3, extent: {sym: seq_len, hint: 512}}
+              body:
+              - {Load: {names: [in2], input: x, index: [{var: a0}, {var: a3}]}}
+              - {Assign: {name: v2, op: subtract, args: [in2, acc0]}}
+              - {Assign: {name: v3, op: exp, args: [v2]}}
+              - {Assign: {name: v4, op: divide, args: [v3, acc1]}}
+              - {Write: {output: softmax, index: [{var: a0}, {var: a3}], values: [v4]}}
       name: k_softmax_694c1b
     inputs: [x]
     outputs: [[softmax, f32, [4, {sym: seq_len, hint: 512}]]]
