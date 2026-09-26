@@ -67,8 +67,9 @@ buffer then binds and reads back like any other, its flat bytes scattered into a
 strided copy per page. A host may instead bind a table of its own (`set_external`), and then owns the pages behind
 it. `alloc_pages` re-pages a buffer at a count of the caller's choosing, because a step's buffer spans its chunk while
 the cache spans a request and the plan knows only the page's shape; `read_page` copies one such page back. The
-`start` a step writes at is an ordinary runtime argument, set through the symbol environment (`set_env`) like any
-other.
+`start` a step writes at is either an ordinary runtime argument, set through the symbol environment (`set_env`) like
+any other, or an i64 scalar the kernel reads from device memory, which the runtime binds like any input — the form
+the native token step uses so that it replays as one graph at every position.
 
 `scripts/export_paged_pack.py` exports a pack whose one program is a step of a cache fill;
 `crates/emmy-runtime/tests/paged.rs` runs it against a real device when `EMMY_PAGED_PACK` points at the result, and
