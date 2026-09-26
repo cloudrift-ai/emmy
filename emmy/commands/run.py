@@ -864,15 +864,15 @@ def _lane(knobs: dict) -> str:
     pins BOTH the std and the ``[fm]`` config recorded under one name; comparing a pinned ``[fm]``
     latency against a ``"std"`` greedy manufactures a phantom regression, so every A/B row (and the
     greedy it's compared to) carries its lane and the parser filters to matching lanes."""
-    from emmy.compiler.pipeline.knob import get  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden import fast_math_knobs, precision_trading_pins  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import fast_math_knobs, precision_trading_pins  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.space import PRECISION_KNOBS  # noqa: PLC0415
 
     input_pins = {}
-    for name in ("FAST_MATH", "FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA"):
-        if name not in knobs:
+    for knob in PRECISION_KNOBS:
+        if knob.name not in knobs:
             continue
-        raw = knobs[name]
-        input_pins[name] = raw if isinstance(raw, bool) else get(name).parse(str(raw))
+        raw = knobs[knob.name]
+        input_pins[knob.name] = raw if isinstance(raw, bool) else knob.parse(str(raw))
     return "fm" if fast_math_knobs(knobs) or precision_trading_pins(input_pins) else "std"
 
 

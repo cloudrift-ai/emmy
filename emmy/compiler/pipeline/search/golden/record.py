@@ -6,50 +6,18 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
-from emmy import config
 from emmy.compiler.graph import Graph
 from emmy.compiler.pipeline.knob import family_of
 from emmy.compiler.pipeline.search.data.shape import ShapeKey
+from emmy.compiler.pipeline.search.pins import pins_freeze_cut
 from emmy.compiler.structural import digest
 
 if TYPE_CHECKING:
     from .format import Latency, Measurements
-
-
-def fast_math_knobs(knobs: Mapping) -> bool:
-    """Whether recorded knobs select a precision-trading realization."""
-    from emmy.compiler.ir.schedule import Tile, Work  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.space import FAST_EXP  # noqa: PLC0415
-
-    for key, value in knobs.items():
-        spelling = str(value)
-        if family_of(str(key)) == "TILE" and spelling:
-            try:
-                plan = Tile.parse(spelling, Work(kind="warp", units=(1, 1)))
-            except ValueError:
-                plan = None
-            if plan is not None and plan.is_warp and plan.atom.operand_dtype("c").nbytes == 2:
-                return True
-        if key == FAST_EXP.name and spelling.casefold() in {"true", "1", "yes", "on"}:
-            return True
-    return False
-
-
-def precision_trading_pins(pins: Mapping) -> bool:
-    """Whether recorded pins enable a precision-trading compiler or NVCC policy."""
-    umbrella = bool(pins.get("FAST_MATH", False))
-    return umbrella or any(bool(pins.get(name, False)) for name in ("FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA"))
-
-
-def pins_freeze_cut(pins: Mapping) -> bool:
-    """Whether the input pins freeze any placement cut (a ``PLACE…=cut`` pin) — the ONE spelling
-    of the predicate behind both the loader's receipt validation and :attr:`GoldenRecord.is_receipt`."""
-
-    return any(family_of(str(name)) == "PLACE" and str(value) == "cut" for name, value in pins.items())
 
 
 @dataclass(frozen=True)
@@ -411,42 +379,3 @@ def _derive_structural_features(record: GoldenRecord) -> tuple[tuple[str, float]
     if len(signatures) != 1:
         raise ValueError(f"{record.name}: target resolves to {len(signatures)} structural targets")
     return next(iter(signatures))
-
-
-#: The precision-trading pin universe the regime check covers in BOTH directions — a record
-#: that omits one of these was measured with it OFF, and must not deploy when it is live-ON.
-_PRECISION_PINS = ("FAST_MATH", "FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA")
-
-
-def regime_live(record: GoldenRecord) -> bool:
-    """Whether the record's input-pin regime IS the live one — exact per pin: a BOOL pin compares
-    against its effective precision policy (other BOOLs default off), anything else against the raw env
-    string. Strict BOTH ways: a record measured under FAST_MATH is no evidence for a standard
-    deploy, and a standard record none under a live precision-trading pin — the precision universe
-    (:data:`_PRECISION_PINS`, umbrella semantics per ``space.precision_pin``) is compared even for
-    pins the record omits (omitted = measured OFF). ``PLACE`` pins are the record's route, not a
-    regime."""
-    from emmy.compiler.pipeline.knob import KnobType, registry  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.space import precision_pin  # noqa: PLC0415
-
-    knobs = registry()
-    pins = record.pin_map
-    for name, value in pins.items():
-        if family_of(str(name)) == "PLACE":
-            continue
-        kn = knobs.get(str(name))
-        raw = kn.raw() if kn is not None else config.knob_raw(str(name))
-        if kn is not None and kn.type is KnobType.BOOL:
-            live = precision_pin(kn) if name in _PRECISION_PINS else kn.parse(raw) if raw is not None else False
-            if bool(value) != live:
-                return False
-        elif (raw or "") != str(value):
-            return False
-    umbrella = bool(pins.get("FAST_MATH", False))
-    for name in _PRECISION_PINS:
-        recorded = bool(pins.get(name, umbrella))
-        kn = knobs.get(name)
-        live = bool(precision_pin(kn)) if kn is not None else False
-        if recorded != live:
-            return False
-    return True

@@ -51,8 +51,8 @@ def import_goldens(
     from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline  # noqa: PLC0415
     from emmy.compiler.pipeline.search.db import is_placement_knob  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden import regime_live  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden.decode import _set_key  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import regime_live  # noqa: PLC0415
     from emmy.compiler.pipeline.search.policy.terminal_bench import persist_kernel_perf, point_stats  # noqa: PLC0415
     from emmy.compiler.pipeline.search.strategy.two_level import KernelInventory, record_routing  # noqa: PLC0415
     from emmy.compiler.wire import kernel_tile  # noqa: PLC0415
@@ -207,7 +207,7 @@ def evidence_db(db: SearchDB | None, ctx: Context) -> SearchDB:
 
 
 def _import(db: SearchDB, ctx: Context, records: Sequence[GoldenRecord], source: str) -> None:
-    from emmy.compiler.pipeline.search.golden import regime_live  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import regime_live  # noqa: PLC0415
 
     counts = import_goldens(db, ctx, records, source=source)
     logger.info(

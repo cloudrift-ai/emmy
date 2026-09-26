@@ -23,11 +23,7 @@ from .format import (
 from .identity import kernel_identity
 from .record import (
     GoldenRecord,
-    fast_math_knobs,
     kernel_set_pins,
-    pins_freeze_cut,
-    precision_trading_pins,
-    regime_live,
     regime_pins,
     shared_regime_pins,
 )
@@ -46,11 +42,7 @@ from .repository import (
 
 __all__ = [
     "GoldenRecord",
-    "fast_math_knobs",
     "kernel_set_pins",
-    "pins_freeze_cut",
-    "precision_trading_pins",
-    "regime_live",
     "regime_pins",
     "shared_regime_pins",
     "Config",

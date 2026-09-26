@@ -144,7 +144,7 @@ def test_a_compile_imports_its_scope_once_and_lets_a_re_recorded_files_rows_go(t
             assert [row.stats.median for row in db.iter_perf_rows()] == [1.0]
 
 
-def test_a_compile_without_a_db_picks_from_one_in_memory_instance_per_scope() -> None:
+def test_a_compile_without_a_db_picks_from_an_instance_holding_its_scope() -> None:
     """A scope is its records' content, target included: a case and its symbolic twin spell the same names,
     pins and knobs over different programs, and each compile picks from its own rows."""
     case = corpus.load_case(corpus.CASES_DIR / "fused/norm-linear-f16-scalar-reduce.yaml")
@@ -152,10 +152,9 @@ def test_a_compile_without_a_db_picks_from_one_in_memory_instance_per_scope() ->
     ctx = case.context()
     with pinned_knobs(_regime(record)):
         with records_override([record]):
-            db = evidence_db(None, ctx)
-            assert evidence_db(None, ctx) is db and len(list(db.iter_perf_rows())) == 1
+            assert len(list(evidence_db(None, ctx).iter_perf_rows())) == 1
         with records_override([replace(record, measurements=replace(_MEASURED, emmy_us=2.0))]):
-            assert evidence_db(None, ctx) is not db
+            assert [row.stats.mean for row in evidence_db(None, ctx).iter_perf_rows()] == [2.0]
         with records_override([]):
             assert not list(evidence_db(None, ctx).iter_perf_rows())
     twins = [corpus.load_case(corpus.CASES_DIR / f"reduce/combine-amax-ilp-coop{suffix}.yaml") for suffix in ("", "-symbolic")]
@@ -181,8 +180,8 @@ def test_the_rtx_5090_hardware_golden_deploys_from_the_db(tmp_path) -> None:
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
     from emmy.compiler.pipeline.knob import schedule_row_key
     from emmy.compiler.pipeline.search.db import is_placement_knob
-    from emmy.compiler.pipeline.search.golden import regime_live
     from emmy.compiler.pipeline.search.golden.repository import _HARDWARE_GOLDENS_DIR
+    from emmy.compiler.pipeline.search.pins import regime_live
     from emmy.compiler.wire import kernel_tile
     from tests.compiler.pipeline.search.helpers import GPU_5090
 

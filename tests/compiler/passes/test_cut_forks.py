@@ -706,7 +706,7 @@ def test_receipt_validation_requires_child_identity_and_place_pins_stay_live(mon
     monkeypatch.setenv("EMMY_FAST_MATH", "0")
     from types import SimpleNamespace
 
-    from emmy.compiler.pipeline.search.golden import regime_live
+    from emmy.compiler.pipeline.search.pins import regime_live
 
     fields = _receipt_fields()
     loops: list[dict] = []

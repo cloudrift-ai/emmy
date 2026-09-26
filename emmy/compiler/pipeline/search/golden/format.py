@@ -16,9 +16,10 @@ import yaml
 from emmy import gpu
 from emmy.compiler.graph import Graph
 from emmy.compiler.pipeline.knob import family_of
+from emmy.compiler.pipeline.search.pins import pins_freeze_cut
 from emmy.compiler.wire import Wire
 
-from .record import GoldenRecord, pins_freeze_cut
+from .record import GoldenRecord
 
 _SAFE_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 

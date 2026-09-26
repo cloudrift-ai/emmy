@@ -557,7 +557,7 @@ At a **schedule fork** (one kernel's row):
    card's repository files, or the file `--golden PATH` names, once per golden digest into the tune DB — created on
    first use — or into an in-memory instance when the compile has none; a re-recorded file changes the digest, and its
    earlier rows on this card and regime are let go first. Every MEASURED record in the live input regime
-   (`golden.regime_live`) lands as the rows of the kernels it decides, keyed by their exact identity: a plain record as
+   (`pins.regime_live`) lands as the rows of the kernels it decides, keyed by their exact identity: a plain record as
    its one kernel's schedule row, a child-identity receipt as the row of the kernel its identity names (an empty row
    too: a piece the pick took no knobs on is recorded as `knobs: {}`, and that row spells its fused, unsplit arm), a
    routing record as the routing rows its decision took. A record whose row spells a cross-CTA split over a set it
@@ -1429,7 +1429,7 @@ the same schedule spelling cannot acquire that receipt. As evidence a receipt is
 signature of the kernel the cut was offered
 on and its schedule row under the child's (both read off the record's replay, `golden._replay`, whose evidence half
 persists in the derived golden store beside identities and verdicts). The regime check
-(`golden.regime_live`) skips PLACE pins — the route is the record's kernel-set decision, not an input regime — and
+(`pins.regime_live`) skips PLACE pins — the route is the record's kernel-set decision, not an input regime — and
 validation rejects a realization that schedules behind pinned cuts without a stored identity. A stored identity equal
 to the target's own lift is the corpus's derived stamp, not a receipt, and keeps the pooled decode.
 

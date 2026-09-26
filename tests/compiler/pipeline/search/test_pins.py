@@ -10,8 +10,7 @@ from emmy.compiler.pipeline.search.pins import spelled_arm, unreproducible_pin_f
 def test_recorded_precision_pins_preserve_the_default_and_overrides(monkeypatch):
     from types import SimpleNamespace
 
-    from emmy.compiler.pipeline.search.golden import regime_live
-    from emmy.compiler.pipeline.search.pins import measured_precision_pins
+    from emmy.compiler.pipeline.search.pins import measured_precision_pins, regime_live
 
     for name in ("FAST_MATH", "FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA"):
         monkeypatch.delenv(f"EMMY_{name}", raising=False)

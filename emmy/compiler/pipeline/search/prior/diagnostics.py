@@ -135,7 +135,8 @@ def golden_deploy_perf(prior, kernel_filter: str | None = None) -> dict[str, flo
     Goldens are scoped to the live card (:func:`goldens_for_live_gpu`) so a multi-GPU
     goldens dir doesn't make a name's per-card entries collide on the GPU-blind
     ``ShapeKey`` (e.g. RTX 5090 / RTX PRO 6000 both ``(12, 0)``)."""
-    from emmy.compiler.pipeline.search.golden import fast_math_knobs, goldens_for_live_gpu, precision_trading_pins
+    from emmy.compiler.pipeline.search.golden import goldens_for_live_gpu
+    from emmy.compiler.pipeline.search.pins import fast_math_knobs, precision_trading_pins
 
     GOLDEN_RECORDS = goldens_for_live_gpu()
 
