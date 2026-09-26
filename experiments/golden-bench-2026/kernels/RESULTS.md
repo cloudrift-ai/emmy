@@ -15,27 +15,32 @@ H100.
 One card each: A100-SXM4-40GB (GCP `a2-highgpu-1g`), H100 80GB HBM3 (GCP `a3-highgpu-1g`, SPOT), V100-SXM2-16GB
 (CloudRift). Deployable `-O3`, `EMMY_FAST_MATH=0`. Each golden is a fresh `emmy trace` of the layer. Its route was
 benched under a `WORK` sweep into one tune DB per card, then recorded with `--record-greedy`, so every piece takes the
-fastest measured row. Timings below are an UNPINNED replay of the committed file at model level (`emmy run
-Qwen/Qwen3-0.6B --layer 0`, `EMMY_GOLDEN_FILE` the file), eager and `torch.compile` in the same process, 10 warmups,
-100 iterations. The same replay under `--strict` matches eager on all but 26-47 of 524,288 outputs, each one f16 ulp
-off, which main shows too.
+fastest measured row. The s1 files are the exception: their kernel set is the prior's, recorded from an empty tune DB,
+because that is the set that splits the GEMV pieces (see below). Timings below are an UNPINNED replay of the committed
+file at model level (`emmy run Qwen/Qwen3-0.6B --layer 0`, `EMMY_GOLDEN_FILE` the file), eager and `torch.compile` in
+the same process, 10 warmups, 100 iterations. The same replay under `--strict` matches eager on all but 28-40 of
+524,288 outputs at s512, each one f16 ulp off, which main shows too; the s1 files match it exactly.
+
+An orphaned bench worker from another checkout held the A100 at full load for the first half of this pass. Every A100
+number below was measured after it was stopped; the earlier A100 baselines (eager 785, `torch.compile` 429 at s512)
+were more than twice too slow, and the A100 "before" figure was measured under the same load.
 
 ### Result summary
 
 | card | s512 before | s512 after | eager | torch.compile |
 | --- | ---: | ---: | ---: | ---: |
-| A100 | 1467 | **323** | 785 | 429 |
-| H100 | 1026 | **230** | 200 | 80 |
-| V100 | 3471 | **1231** | 1115 | 642 |
+| A100 | 1467 (loaded GPU) | **323** | 352 | 193 |
+| H100 | 1026 | **231** | 200 | 80 |
+| V100 | 3471 | **1153** | 1116 | 636 |
 
-| card | s1 after | eager | torch.compile |
-| --- | ---: | ---: | ---: |
-| A100 | 255 | 332 | 105 |
-| H100 | 128 | 111 | 32 |
+| card | s1 after | without splits | eager | torch.compile |
+| --- | ---: | ---: | ---: | ---: |
+| A100 | **205** | 271 | 150 | 52 |
+| H100 | **88** | 133 | 110 | 32 |
 
 The s512 route cuts every seam except the score, the probabilities and the softmax statistics, so attention is one
-twisted-carrier piece: 41.8 us on the A100 and 21.6 on the H100 on tensor cores with a staged key and value. The V100
-takes the same cuts on its own evidence; its attention piece is 417 us, the Volta chunk tier without cp.async.
+twisted-carrier piece: 42.1 us on the A100 and 22.1 on the H100 on tensor cores with a staged key and value. The V100
+takes the same cuts on its own evidence; its attention piece is 391 us, the Volta chunk tier without cp.async.
 
 ### What the pass found
 
@@ -54,16 +59,21 @@ takes the same cuts on its own evidence; its attention piece is 417 us, the Volt
   are f16 workspaces, which the flash tier stages.
 - **The flash tier read its hoisted query at the wrong row stride.** A query stored `[seq, head, dim]` strides its rows
   by every head's dim; the tier took the trailing extent and disagreed with eager on 487k of 524k outputs.
-- **Cross-CTA split GEMV pieces return wrong answers at s1, on main too.** The committed s1 files replayed at 55 us on
-  the H100 but disagreed with eager on 1016 of 1024 outputs; a `g8k` split re-recorded here failed the same way. The new
-  s1 files carry no split. s1 still loses to `torch.compile` mostly on one piece: the q and k projections and their
-  rotate-half copies lower as ONE six-channel GEMV that reads its weights three times.
+- **Cross-CTA split GEMV pieces returned wrong answers at s1, on main too** (#918). The old s1 files replayed at 55 us
+  on the H100 but disagreed with eager on 1015 of 1024 outputs: a re-formed split partial lost its unit row and tiled
+  the partition coordinate as M. With that fixed, five GEMV pieces split in each s1 file.
+- **The evidence pick never takes a split it has measured.** Recorded from the sweep's tune DB, the s1 route chose no
+  split (A100 271 us, H100 133) although the same sweep measured split pieces faster (a 52 us GEMV as a 21 us partial
+  plus a 1.4 us finalize). The tune DB holds perf rows for the pieces but no routing row, so nothing prices the split
+  arm. The committed s1 files take the prior's set instead; forcing `g8k` or `g16k` on every piece is slower.
+- **s1 still loses to `torch.compile`** mostly on one piece: the q and k projections and their rotate-half copies lower
+  as ONE six-channel GEMV that reads its weights three times (81 us on the A100 under the prior's schedule).
 
 ### Systems and provenance
 
 - A100-SXM4-40GB `bench-keep-a100-0921-1621-6784`, H100 80GB HBM3 `bench-gb-h100-0924-1252-99aa` (GCP, driver 580.173,
   nvcc 12.9); V100-SXM2-16GB at `185.165.50.75` (CloudRift, driver 580.178, nvcc 12.9).
-- Source: PR #914 on main `a091dbe7`.
+- Source: PR #914 on main `2c016a3a` with the #918 split fix.
 
 ### Durable files
 
