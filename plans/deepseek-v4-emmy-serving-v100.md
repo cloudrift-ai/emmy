@@ -365,8 +365,9 @@ identity that is a piece row's suffix), `ab908.sh` / `abpost.sh` (one piece resp
 nothing recorded, one card each; `*round.sh` launches sixteen, `*wait.sh` summarizes), `rec908.sh` / `recpost908.sh`
 (respell and `--record-greedy --strict-evidence`), `pair908.sh` (the same-input output comparison above); cut routes:
 `cutforks.py GOLDEN TWIN` (every seam a kernel's cut fork offers) and `abroute.sh` / `abseams.sh` (a target under a
-hand-pinned route, not strict). Those respell and carry scripts edit the YAML wire; since #912 a golden is JSON with one row per
-line, so a respell there is one row's JSON rewritten (`json.dumps` of the row reproduces the file's spelling).
+hand-pinned route, not strict). Those respell and carry scripts edit the YAML wire; since #912 a golden is JSON with
+one row per line, so a respell there is one row's JSON rewritten (`json.dumps` of the row reproduces the file's
+spelling).
 
 **Never touch** `~/.cache/emmy/autotune.db` (the real tune DB), `~/emmy`, `~/emmy-dsv4`, `~/emmy-fix-backup`,
 `~/emmy-durations/_verify/gap3-tune/` (partial rows that regress the election — never merge that DB), or
