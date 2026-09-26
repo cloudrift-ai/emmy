@@ -9,9 +9,9 @@ from emmy.compiler.context import Context
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda.ir import CudaOp
-from emmy.compiler.loop_wire import kernel_bindings, kernel_tile
 from emmy.compiler.pipeline.search.db import SearchDB
 from emmy.compiler.pipeline.search.policy.terminal_bench import bench_terminal_async
+from emmy.compiler.wire import kernel_bindings, kernel_tile
 from tests.compiler.helpers import case_target_tile
 
 # A perf row is filed under the tile kernel a CUDA kernel was rendered from, so every synthetic kernel
@@ -287,9 +287,11 @@ async def test_search_cache_replay_preserves_patience() -> None:
 def test_a_kernel_row_carries_the_stamps_the_deploy_joins_on() -> None:
     """The row's ``S_*`` stamps are the identity strategy's — written at the fusion boundary onto the fused
     loop body — because that is what the deploy's fork signature and the golden replay key evidence by. For
-    a twisted kernel (online softmax) they differ from the features of the stored derived body, and a row
-    stamped from the wire would never price its own fork: the RTX 5090 hardware golden's softmax and
-    attention rows fell to the prior that way, at eighty times the compile time."""
+    a twisted kernel (online softmax) the body the twist derives spells another reduction, so a row stamped
+    from that body would never price its own fork: the RTX 5090 hardware golden's softmax and attention rows
+    fell to the prior that way, at eighty times the compile time. The wire holds the fused body the kernel
+    was formed from, whose features are the stamps."""
+    from emmy.compiler.pipeline.fork import SCHEDULE_FORK_STAMPS
     from emmy.compiler.pipeline.passes.identity import kernel_stamps
     from emmy.compiler.pipeline.search.policy.terminal_bench import kernel_row
     from tests.compiler.realization import helpers as corpus
@@ -303,4 +305,6 @@ def test_a_kernel_row_carries_the_stamps_the_deploy_joins_on() -> None:
     assert row.stamps == {k: float(v) for k, v in cuda.knobs.items() if k.startswith("S_")}, (
         "the strategy's stamps, as the kernel carries them"
     )
-    assert row.stamps != kernel_stamps(row.loop_ir), "a twisted kernel's derived body spells another reduction"
+    # The enumeration's own stamps (``S_warp_eligible``) ride beside the body's features.
+    structural = {k: v for k, v in row.stamps.items() if k not in SCHEDULE_FORK_STAMPS}
+    assert row.formed and structural == kernel_stamps(row.loop_ir), "the wire is the body the stamps were taken from"

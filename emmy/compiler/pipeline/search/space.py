@@ -256,6 +256,11 @@ FP8_MMA = Knob(
 )
 
 
+#: The precision-trading family: the umbrella and the knobs that follow it (:func:`precision_pin`) — what a
+#: recorded regime is compared on, in both directions, and what sorts a row into the fast-math lane.
+PRECISION_KNOBS = (FAST_MATH, FAST_EXP, F16_MMA_F32_ACC, FP8_MMA)
+
+
 def precision_pin(knob: Knob) -> bool:
     """The effective pin for a precision-trading BOOL ``knob``: its own ``EMMY_<NAME>`` pin when
     set, else the ``FAST_MATH`` umbrella pin, else its enabled default."""

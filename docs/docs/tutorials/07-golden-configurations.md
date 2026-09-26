@@ -27,7 +27,7 @@ They do three jobs at once:
 ## What one looks like
 
 Model golden configurations live under `recipes/<model>/golden/`, in one file per exact GPU model and compute
-capability. Model-agnostic hardware goldens remain under `emmy/compiler/pipeline/search/golden/`. A file embeds its
+capability. The maintained model-agnostic golden records live under `emmy/compiler/pipeline/search/golden/records/`. A file embeds its
 program pool, then lists structural targets whose realization arrays hold bindings, regimes, schedules, and paired
 measurements:
 
@@ -48,8 +48,8 @@ configs:
         measurements: {emmy_us: 26.7, reference_us: 19.8, reference_backend: cublas}
 ```
 
-The program and target identify the structural kernel. Empty `bindings` keep the program symbolic; a mapping such as
-`num_tokens: 32` specializes that symbolic dimension before lowering. `pins` applies registered knob values before
+The program and target identify the structural kernel. A row with no `bindings` keeps the program symbolic; a mapping
+such as `num_tokens: 32` specializes that symbolic dimension before lowering. `pins` applies registered knob values before
 enumeration; `knobs` records the configuration selected and measured inside that regime. The knobs use the exact
 spelling from [the forks page](./03-forks-and-knobs.md), and `measurements` records the candidate beside a named
 reference. `FAST_MATH` follows this same rule and appears under `pins`; it has no dedicated realization field. Keeping

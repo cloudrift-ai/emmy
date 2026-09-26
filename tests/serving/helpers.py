@@ -233,7 +233,7 @@ def golden_records() -> list:
     from dataclasses import replace
 
     from emmy.compiler.context import Context
-    from emmy.compiler.pipeline.search.golden import load_golden_file, load_golden_records
+    from emmy.compiler.pipeline.search.golden import GoldenFile, Measurements
 
     if not GOLDEN.exists():
         raise FileNotFoundError(f"{GOLDEN} is missing; regenerate with `python -m tests.serving.regen`")
@@ -245,9 +245,9 @@ def golden_records() -> list:
             record,
             compute_cap=cap,
             gpu_name="",
-            measurements=record.measurements or {"emmy_us": 1.0, "reference_us": 1.0, "reference_backend": "serving-lane"},
+            measurements=record.measurements or Measurements(emmy_us=1.0, reference_us=1.0, reference_backend="serving-lane"),
         )
-        for record in load_golden_records(load_golden_file(GOLDEN))
+        for record in GoldenFile.load(GOLDEN).records()
     ]
 
 

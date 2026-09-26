@@ -24,7 +24,7 @@ evidence exists, because measured rows descend directly whatever the pool size.
 
 **Greedy is ranked by evidence and by nothing else.** Measured rows first —
 the reservoir, then the tune DB's rows, the golden rows in scope imported among them
-(``golden_import``), compared on µs alone — then the fitted prior; every measured row is a
+(``golden.evidence``), compared on µs alone — then the fitted prior; every measured row is a
 recording of something that ran. There is no hand-written step: no leaf is
 promoted, demoted, withheld or given a head start here, and no fallback
 default is chosen for being safe. Where nothing measured and no prior speaks
@@ -480,7 +480,7 @@ _EMPTY_MEASURED = _Measured({}, {})
 def _db_measured_index_build(db, ctx) -> _Measured:
     """Every measured row this compile may deploy, split into what ranks and what disqualifies: the
     DB's CUDA ``perf`` rows for this compile's regime — the tune's own and the golden rows in scope,
-    imported among them before the compile picks (``golden_import.evidence_db``); ``db`` may be
+    imported among them before the compile picks (``evidence.evidence_db``); ``db`` may be
     ``None`` on a probe that reads no evidence.
 
     Rows are indexed by their ``S_*`` structural signature (stringified values because perf knobs
@@ -662,9 +662,9 @@ def _route_candidates(fp: ForkPoint, index: _Measured, db) -> list[tuple[object,
     (:meth:`SearchDB.priced_arms`). The option is the cut pass's own offer; the pieces it mints
     are brand-new kernels whose own forks consult their own rows. A schedule fork has none."""
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
-    from emmy.compiler.loop_wire import kernel_bindings  # noqa: PLC0415
     from emmy.compiler.pipeline.pipeline import _structural_domain  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import spelled_arm  # noqa: PLC0415
+    from emmy.compiler.wire import kernel_bindings  # noqa: PLC0415
 
     root = fp.root_op
     if not isinstance(root, TileOp) or root.op is None or _schedule_fork(fp):

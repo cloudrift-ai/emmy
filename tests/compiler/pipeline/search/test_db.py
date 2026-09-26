@@ -210,7 +210,7 @@ def test_a_file_missing_one_table_is_re_created_by_a_writer_and_refused_by_a_rea
     path = tmp_path / "autotune.db"
     db = SearchDB(path)
     db.record_kernel(kernel_row("k"))
-    db.record_perf_rows([perf_row("k", us=60.0)])
+    db.record_perf_row(perf_row("k", us=60.0))
     db._conn.execute("PRAGMA foreign_keys = OFF")
     db._conn.execute("DROP TABLE routing")
     db.close()
@@ -239,9 +239,9 @@ def test_a_file_another_emmy_wrote_is_re_created_whole_by_a_writer_and_refused_b
     tables = {r[0] for r in db._conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     assert tables == {"kernel", "kernel_feature", "context", "schedule", "schedule_knob", "placement", "placement_knob", "routing", "perf"}
     with pytest.raises(sqlite3.IntegrityError):
-        db.record_perf_rows([perf_row("ghost", us=1.0)])  # no kernel row behind it
+        db.record_perf_row(perf_row("ghost", us=1.0))  # no kernel row behind it
     db.record_kernel(kernel_row("k"))
-    db.record_perf_rows([perf_row("k", us=60.0, captured=True)])
+    db.record_perf_row(perf_row("k", us=60.0, captured=True))
     db.close()
 
     ro = SearchDB.open_readonly(path)

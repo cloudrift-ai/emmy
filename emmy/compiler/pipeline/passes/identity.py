@@ -17,6 +17,10 @@ materialized into ``op.knobs`` once per kernel, at birth:
   exp-family cluster (``on_rebind`` of a lowering pass): the ``S_*`` row stays, the exact
   identity is re-derived, so the kernel's forks, its rows and its stored definition name it alike.
 
+The ``S_*`` row of every kernel is the features of the loop body it was formed from — the fused loop op's for
+a kernel the lift threads it in as ``source``, the loop nest a cut or split piece was re-formed through — which
+is the body its ``kernel`` row stores, so re-lowering that definition stamps the kernel the same.
+
 Materializing into knobs (rather than compute-on-read everywhere) is deliberate: the stamped row
 rides the engine's rebind knob-merge into every later dialect, which is what keeps a terminal
 CudaOp's cache key, its DB rows, and the prior's feature columns carrying the loop-birth
@@ -96,7 +100,7 @@ class IdentityStrategy(PipelineStrategy):
             # Fragment buffers carry the operand Tensors (the pieces' builders add them), so the
             # dtype features read the same values the assembled graph would give. A kernel lifted
             # from a loop op has a body of its own (a twisted reduction is rewritten), and its
-            # exact identity is re-derived from it: the ``S_*`` row stays the fused body's.
+            # exact identity is re-derived from it: the ``S_*`` row stays the body's it was formed from.
             self._stamp(node, e.fragment, exact=lifted)
 
     def on_rebind(self, e: RebindEvent) -> None:
@@ -154,17 +158,19 @@ def _identity_body(op) -> Body | None:
         return op.body
     if not isinstance(op, TileOp):
         return getattr(op, "body", None)
-    return op.loop_body
+    # A tile formed from a loop op (a piece a cut re-formed) is featured from that body — the definition its
+    # kernel row stores — not from the derived body a later lowering rewrite may still change.
+    return op.source.body if isinstance(op.source, LoopOp) else op.loop_body
 
 
 def kernel_stamps(wire: dict) -> dict[str, float]:
-    """The ``S_*`` features of the kernel a ``loop_wire.kernel_wire`` wire defines: :func:`structure_features`
+    """The ``S_*`` features of the kernel a ``wire.kernel_wire`` wire defines: :func:`structure_features`
     of its body, the dtype half read off the wire's own buffers. What a ``kernel`` row stores for a tile
-    nothing stamped; a stamped tile's row carries the strategy's own stamps, which for a twisted kernel
-    are features of the fused body before the twist, not of the derived one the wire holds."""
-    from emmy.compiler.loop_wire import loop_graph_from_wire  # noqa: PLC0415
+    nothing stamped; a stamped tile's row carries the strategy's own stamps, which are the same features:
+    the wire holds the body the kernel was formed from, the body the strategy stamps."""
+    from emmy.compiler.graph import Graph  # noqa: PLC0415
 
-    graph = loop_graph_from_wire(wire)
+    graph = Graph.from_wire(wire)
     [node] = [node for node in graph.nodes.values() if isinstance(node.op, LoopOp)]
     return structure_features(node.op.body, graph)
 

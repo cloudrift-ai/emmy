@@ -104,6 +104,8 @@ class LoopOp(BodyOp):
     matcher's ``with_io`` rebind.
     """
 
+    wire_tag = "loop"
+
     def __post_init__(self) -> None:
         Op.__post_init__(self)  # BodyOp's coerce+seed is replaced below, not chained
         from emmy.compiler.ir.stmt import normalize_body

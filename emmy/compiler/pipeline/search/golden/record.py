@@ -1,0 +1,381 @@
+"""One row of a golden as the evidence consumers read it — the flattened record — with the pin helpers that
+read a row's regime, and the record's compiler-facing derivations: its stored kernel through the current loop
+passes, its lift to Tile IR, its structural features."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from collections.abc import Sequence
+from dataclasses import dataclass, replace
+from functools import cached_property
+from typing import TYPE_CHECKING
+
+from emmy import gpu
+from emmy.compiler.context import Context
+from emmy.compiler.dim import DEFAULT_SEQ_HINT
+from emmy.compiler.graph import Graph
+from emmy.compiler.ir.base import InputOp
+from emmy.compiler.ir.loop import LoopOp
+from emmy.compiler.pipeline import LOOP_PASSES, CompilerDump, Pipeline
+from emmy.compiler.pipeline.knob import STRUCT_PREFIX, family_of, tuning_knob_items
+from emmy.compiler.pipeline.passes.tile._fromloop import lift_loop_op, lift_serial
+from emmy.compiler.pipeline.passes.tile._twist import rewrite_twisted
+from emmy.compiler.pipeline.search.data.shape import ShapeKey
+from emmy.compiler.pipeline.search.pins import pins_freeze_cut, stampable_reduce
+from emmy.compiler.specialize import specialize_program
+from emmy.compiler.structural import digest
+
+if TYPE_CHECKING:
+    from .format import Latency, Measurements
+
+
+@dataclass(frozen=True)
+class GoldenRecord:
+    name: str
+    gpu_name: str
+    compute_cap: tuple[int, int]
+    model: str | None
+    #: The traced program the target's ``origins`` name — the Torch twin a bench compares against — and its index
+    #: in the document's pool; ``None`` for a target recorded from a measurement alone.
+    program_index: int | None
+    program_wire: dict | None
+    origins: tuple[str, ...]
+    bindings: tuple[tuple[str, int], ...]
+    pins: tuple[tuple[str, object], ...]
+    knobs: dict
+    measurements: Measurements | None
+    ranking: dict | None
+    loop_index: int | None = None
+    loop_wire: dict | None = None
+    #: Which config entry of its document the record came from. A config is one kernel set of one target: several
+    #: configs can hold one loop (a target's fused rows, and each route's receipts), and each is its own set.
+    config_index: int = 0
+    #: The record's stored deploy identity (``identity_key(with_io=True)``, see :attr:`kernel_identity`), when the
+    #: file keeps one. Model inventories mostly do not; the realization corpus does, because a new
+    #: fingerprint fact must show up as a diff there rather than silently re-key a checked-in
+    #: reproducer. A stored identity is the strict decode's kernel selector, and it is how a
+    #: **child-identity schedule receipt** names its kernel: a record whose pins freeze a cut lowers
+    #: to several kernels, and only the stored identity says which child this row's schedule
+    #: decorates (and so which kernel's ``S_*`` signature its row is evidence under).
+    identity: str | None = None
+    #: The routing rows this realization's kernel set holds, by name — what ``record_greedy_pick``
+    #: listed for it, in the order the compile took the decisions. A realization listing them
+    #: usually carries no measurement of its own: those rows and the target's schedule-carrying
+    #: rows hold the measurements, so they decide whether it verifies (:meth:`Realization.kernel_set_state`),
+    #: what its replay spells (:func:`_replay`) and what a bench of it pins
+    #: (:func:`kernel_set_pins`). Empty where the compile took no kernel-set decision, leaving a
+    #: realization that carries its own measured row and needs no listing.
+    kernel_set: tuple[str, ...] = ()
+    #: Measured microseconds per ``Context.hardware_id``: ``{card: Latency}``. A model golden is one
+    #: file per card and uses the flat ``measurements`` block instead; a corpus case is one file
+    #: across many cards, which a flat block cannot hold.
+    latency: dict[str, Latency] | None = None
+
+    @cached_property
+    def kernel_identity(self) -> str | None:
+        """The record's kernel identity under the CURRENT compiler — the strict decode's and the drift
+        key (``identity_key(with_io=True)``). A STORED identity is returned as-is: it is how a
+        child-identity receipt names the one split child its schedule decorates (the target's own lift
+        stops at the pre-cut kernel and cannot say), and a stale stored identity selects nothing — the
+        strict decode is where that fails loudly. Without one, the identity is derived as the lift of the
+        record's ONE target kernel, through the exact total lift the live compile uses
+        (``_fromloop.lift_loop_op``). ``None`` when the record cannot carry a deploy identity: the target
+        lowers to several kernels (a schedule row decorates exactly one), or selection/lifting fails —
+        best-effort here (a corpus row must never break a compile); nightly strict decoding is where
+        failure is loud. Deploy never joins on this key: a record deploys as measured rows, matched by
+        ``S_*`` features plus the exact ``I_kernel`` stamp, off the rows the golden import files
+        (``golden.evidence``)."""
+        if self.identity is not None:
+            return self.identity
+        try:
+            return _lifted_target(self).identity_key(with_io=True)
+        except Exception:  # noqa: BLE001 — see above; the decode tripwire re-derives loudly
+            return None
+
+    @property
+    def is_routing(self) -> bool:
+        """Whether this row records a kernel-set decision — a placement cut, or a cross-CTA split's
+        ``g<n>`` arm, which mints its pieces the same way — rather than a kernel schedule."""
+
+        def arm(key: str, value) -> bool:
+            family = family_of(str(key))
+            return family == "PLACE" or (family == "REDUCE" and stampable_reduce(str(value)) == "")
+
+        return bool(self.knobs) and all(arm(key, value) for key, value in self.knobs.items())
+
+    @property
+    def is_receipt(self) -> bool:
+        """Whether this row is a child-identity schedule receipt: a schedule row recorded behind
+        pinned cut(s), whose stored ``identity`` names the child kernel the row decorates."""
+        return self.identity is not None and not self.is_routing and pins_freeze_cut(dict(self.pins))
+
+    @property
+    def route(self) -> dict[str, str]:
+        """The placement this record carries — every ``PLACE`` key of its pins and knobs, spelled
+        as recorded. A routing row keeps it in ``knobs``; a receipt, a corpus case or an ``--ab``
+        row freezes it in ``pins``. Empty for a plain schedule row, which says the kernel it
+        decorates ran fused."""
+        route = {str(key): str(value) for key, value in self.pins if family_of(str(key)) == "PLACE"}
+        route.update((str(key), str(value)) for key, value in self.knobs.items() if family_of(str(key)) == "PLACE")
+        return route
+
+    @property
+    def schedule_row(self) -> dict[str, str]:
+        """The schedule half of the record — its decided tuning knobs minus the route, as the evidence
+        index carries them (an OFF ``''`` is a decided value and stays)."""
+
+        return {key: value for key, value in tuning_knob_items(self.knobs) if family_of(key) != "PLACE"}
+
+    @cached_property
+    def pool_group(self) -> tuple:
+        """Which candidate pool this record belongs to — the ONE place that question is answered, so every
+        consumer that groups goldens groups them the same way. (A grouping key over RECORDS —
+        distinct from the scheduler's per-compile ``pool_id`` stamp.)
+
+        Composed from the target kernels' identity keys — the one identity function — around the
+        card and the record's pin regime: per fused kernel, the structural variant key
+        (``identity_key(with_io=True, with_knobs=True)`` — cluster siblings share a schedule
+        space, so they rightly share a pool) folded with the symbolic-dim hints the enumeration
+        sizes against. Node-id spelling never enters, so two recordings of one program made in
+        different sessions FUSE — the wire-digest key this replaces split them — and any fact
+        that changes the kernels shows up in their keys, so the key stays sufficient. It keys on
+        what the enumeration READS, never on what it produced, so it does not go stale when the
+        scheduler changes; bindings stay out (they bind replay values, not the space).
+
+        Best-effort like every record-side derivation: a target the current compiler no longer
+        lowers falls back to the persisted wire's digest, so a stale record still groups
+        deterministically (alone) instead of breaking a fit."""
+
+        try:
+            _lowered, nodes = _target_kernel_nodes(self)
+            kernels = tuple(
+                sorted(
+                    digest(
+                        op.identity_key(with_io=True, with_knobs=True) or "",
+                        tuple(
+                            d.hint or DEFAULT_SEQ_HINT
+                            for t in (*op.inputs.values(), *op.outputs.values())
+                            for d in t.shape
+                            if not d.is_static
+                        ),
+                    )
+                    for op in (node.op for node in nodes)
+                )
+            )
+        except Exception:  # noqa: BLE001 — a stale record must never break the fit's dataset build
+            kernels = (hashlib.blake2b(json.dumps(self.loop_wire, sort_keys=True).encode(), digest_size=16).digest(),)
+        return (self.gpu_name, tuple(self.compute_cap), kernels, self.pin_key)
+
+    @cached_property
+    def pin_key(self) -> tuple:
+        """This record's pins as a hashable tuple — already sorted, as the loader stores them."""
+        return tuple((k, str(v)) for k, v in self.pins)
+
+    @cached_property
+    def program(self):
+        """The stable Torch IR payload, decoded once per record."""
+        if self.program_wire is None:
+            raise ValueError(f"{self.name}: the target was recorded from a measurement alone and has no traced program")
+        return Graph.from_wire(self.program_wire)
+
+    @cached_property
+    def kernel_graph(self):
+        """The stored kernel's Loop IR, unspecialized — decoded (and so normalized) once per record."""
+        return Graph.from_wire(self.loop_wire)
+
+    @cached_property
+    def target_program(self):
+        """The stored kernel as a standalone program, specialized to this record's bindings."""
+
+        return specialize_program(self.kernel_graph, dict(self.bindings))
+
+    @cached_property
+    def reference_program(self):
+        """The PyTorch slice the stored kernel is compared against: the traced ops it came from
+        (``origins``) with the kernel's outputs in its order. ``None`` when the golden keeps no
+        traced ops for it, or when they are no exact twin — the kernel writes a value the ops do not
+        compute, or the slice and kernel have different boundary inputs. Comparison only: the stored
+        kernel stays the identity."""
+
+        if not self.origins:
+            return None
+        kernel = self.kernel_graph
+        computed = {buffer for origin in self.origins for buffer in self.program.nodes[origin].buffer_names()}
+        reads = CompilerDump.frontend_reproducer_from_origins(self.program, set(self.origins)).inputs
+        bound = {node_id for node_id, node in kernel.nodes.items() if isinstance(node.op, InputOp)}
+        if not (set(kernel.outputs) <= computed and set(reads) == bound):
+            return None
+        graph = specialize_program(CompilerDump.frontend_reproducer_from_origins(self.program, set(self.origins)), dict(self.bindings))
+        graph.outputs = list(kernel.outputs)
+        return graph
+
+    @property
+    def target_key(self) -> tuple:
+        """Document-local identity shared by candidate rows for one target."""
+        return ("loop", self.loop_index)
+
+    @property
+    def pin_map(self) -> dict[str, object]:
+        return dict(self.pins)
+
+    @cached_property
+    def shape_key(self) -> ShapeKey:
+        """The arithmetic-identity descriptor for eval / diagnostics grouping, derived from the
+        lowered target's stamped histogram. NOT the deploy join key — that is
+        :attr:`kernel_identity` (strict structural identity); this key only groups eval rows."""
+        return ShapeKey.from_s_features(self.structural_features)
+
+    @cached_property
+    def structural_features(self) -> dict[str, float]:
+        """The exact replay target lowered, and its one ``S_*`` row recovered."""
+
+        _lowered, nodes = _target_kernel_nodes(self)
+        signatures = {
+            tuple(
+                sorted(
+                    (name, float(value)) for name, value in (getattr(node.op, "knobs", {}) or {}).items() if name.startswith(STRUCT_PREFIX)
+                )
+            )
+            for node in nodes
+        }
+        signatures.discard(())
+        if len(signatures) != 1:
+            raise ValueError(f"{self.name}: target resolves to {len(signatures)} structural targets")
+        return dict(next(iter(signatures)))
+
+    @cached_property
+    def origin_ops(self) -> tuple[str, ...]:
+        if not self.origins or self.program_wire is None:
+            return ()
+        by_id = {node["id"]: node["op"] for node in self.program_wire["nodes"]}
+        return tuple(by_id[origin] for origin in self.origins)
+
+    @cached_property
+    def dtype(self) -> str:
+        """Public dtype spelling of the stored kernel's first output."""
+        graph = self.target_program
+        tensor = graph.buffer(graph.outputs[0])
+        if tensor is None:
+            raise ValueError(f"{self.name}: Loop IR target has no output tensor")
+        output_dtype = tensor.dtype.name
+        return {"f16": "fp16", "f32": "fp32"}.get(output_dtype, output_dtype)
+
+    @property
+    def is_matmul(self) -> bool:
+        """Whether this target is a plain frontend contraction — read off the STORED origin
+        operations alone (a fused norm→linear names its norm origin too, so the subset test
+        separates them), never by lowering the target: an eval listing must classify a record
+        the current compiler can no longer lower."""
+        return bool(self.origin_ops) and set(self.origin_ops) <= {"torch.matmul", "torch.linear"}
+
+    @property
+    def emmy_us(self) -> float:
+        return float(self.measurements.emmy_us) if self.measurements is not None else 0.0
+
+    @property
+    def reference_us(self) -> float:
+        return float(self.measurements.reference_us or 0.0) if self.measurements is not None else 0.0
+
+    @property
+    def reference_backend(self) -> str | None:
+        return self.measurements.reference_backend if self.measurements is not None else None
+
+    @property
+    def dynamic(self) -> bool:
+        return self.shape_key.is_dyn
+
+    @property
+    def sm_count(self) -> int | None:
+        spec = gpu.by_name(self.gpu_name)
+        return spec.sm_count if spec else None
+
+
+def regime_pins(record: GoldenRecord) -> dict:
+    """The record's INPUT pin regime — its pins minus the route: the precision knobs (``FAST_MATH``
+    and friends) a replay publishes to the environment so the record reads as live evidence
+    (:func:`regime_live`). The schedule row and the route never travel this way; they are
+    measured rows the evidence pick joins to the kernel they were recorded for."""
+    return {str(key): value for key, value in record.pins if family_of(str(key)) != "PLACE"}
+
+
+def kernel_set_pins(record: GoldenRecord, records: Sequence[GoldenRecord]) -> dict:
+    """The arms of the routing rows ``record``'s ``kernel_set`` lists, as one hand pin — what a
+    bench of that realization publishes so the compile reaches the kernel set the recording
+    measured.
+
+    A routing row's knobs ARE its arm — a placement cut's ``PLACE@seam: cut`` or a cross-CTA
+    split's ``REDUCE`` value — so both kinds travel. A cascade's later decisions are taken on the
+    pieces the earlier ones mint, and a scoped ``PLACE`` pin that resolves on no kernel addresses
+    another kernel of the graph (``030_cut._placement_restriction``), so publishing every routing
+    row's keys at once reproduces the whole cascade rather than only its first step. Empty for a
+    record that names no route, which is the ordinary row whose own knobs are its pin.
+
+    Both precision lanes record their rows under one name, so a listed name resolves inside the
+    record's own regime first: the standard lane's split is not the fast-math lane's.
+
+    A row naming a piece a cut minted publishes only its ``PLACE`` keys. Its other knobs address
+    that piece by identity, not by seam: published as a hand pin they would reach every kernel of
+    the graph (two pieces' splits collapsing onto the last value, a piece that cannot split
+    refusing). Its row decides that piece by identity instead, as evidence."""
+    regime = regime_pins(record)
+    by_name: dict[str, GoldenRecord] = {}
+    for other in records:
+        if other.name not in by_name or regime_pins(other) == regime:
+            by_name[other.name] = other
+    pins: dict[str, str] = {}
+    for name in record.kernel_set:
+        referenced = by_name.get(name)
+        if referenced is None:
+            continue
+        own_kernel = referenced.identity in (None, record.identity)
+        pins.update({str(key): str(value) for key, value in referenced.knobs.items() if own_kernel or family_of(str(key)) == "PLACE"})
+    return pins
+
+
+def shared_regime_pins(records: Sequence[GoldenRecord]) -> dict:
+    """The one input regime every record shares, or ``{}`` when they disagree — a compile publishes
+    a regime only when the records it replays agree on it, because choosing one would silently
+    change which realization was requested."""
+    regimes = {tuple(sorted(regime_pins(record).items())) for record in records}
+    return dict(regimes.pop()) if len(regimes) == 1 else {}
+
+
+def _target_kernel_nodes(record: GoldenRecord):
+    """The record's stored kernel through the CURRENT loop passes: ``(lowered graph, nodes)``, one
+    node per kernel the stored Loop IR lowers to. Raises when it lowers to none — the strict
+    tripwire's loud case."""
+
+    ctx = Context.from_target(record.compute_cap, gpu_name=record.gpu_name or None)
+    lowered = Pipeline.build(LOOP_PASSES).run(record.target_program.copy(), ctx=ctx)
+    # One kernel per PRODUCER, not per output: a multi-output kernel (an NVFP4 re-encode emits
+    # packed codes beside their block scales) produces several of the graph's outputs, and
+    # counting it once per output made a single-kernel target read as "lowers to N kernels".
+    producers = (lowered.producer(output) for output in lowered.outputs)
+    nodes = list({node.id: node for node in producers if node is not None and isinstance(node.op, LoopOp)}.values())
+    if not nodes:
+        raise ValueError(f"{record.name}: the persisted target selects no kernel after lowering")
+    return lowered, nodes
+
+
+def _lifted_target(record: GoldenRecord):
+    """Lift the record's single selected kernel to Tile IR — the tree the cut pass schedules: the
+    lift, then the twist rewrite, exactly as ``tile/lift`` runs them. A placement key is
+    spelled on that tree, so decoding it against the lift alone would name sites the fused
+    single-pass carrier no longer has."""
+
+    lowered, nodes = _target_kernel_nodes(record)
+    if len(nodes) != 1:
+        raise ValueError(f"{record.name}: target lowers to {len(nodes)} kernels — a row decorates exactly one")
+    node = nodes[0]
+    node.op = node.op.with_io(lowered, node)
+    # A serial kernel lifts its carried states as state buffers, as ``tile/lift`` does.
+    tile = lift_serial(node.op, name=node.id, prefix=node.id)[0] if node.op.body.carries else lift_loop_op(node.op, name=node.id)
+    tile = replace(tile, op=rewrite_twisted(tile.op, tile.axes))
+    # A fork's root op is always matcher-refreshed (``_match_at`` runs ``with_io`` on every matched
+    # node before the rule that offers the fork), so the record side mirrors the io through that
+    # same call rather than a hand-rolled map: a multi-output kernel — an NVFP4 re-encode emits
+    # packed codes beside their block scales — is bound to every one of the node's output buffers,
+    # and the dtype half of the deploy identity (``identity_key(with_io=True)``) reads the same
+    # output fingerprint on both sides.
+    return tile.with_io(lowered, node)

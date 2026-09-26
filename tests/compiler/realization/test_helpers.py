@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from emmy.compiler.pipeline.search.golden import Config, GoldenFile, Target
 from tests.compiler.realization import helpers
 
 
@@ -54,12 +55,12 @@ def test_reference_and_lowered_weights_share_the_source_before_transpose() -> No
 
 def test_regeneration_matches_typed_compute_without_a_provenance_name() -> None:
     case = helpers.load_case(helpers.CASES_DIR / "pointwise/relu-vectorized-interleaved-sm89.yaml")
-    kernel = case.document["loops"][0]
+    kernel = case.document.loops[0]
     renamed = deepcopy(kernel)
     compute = next(node for node in renamed["nodes"] if node["op"] == "loop")
     compute["attrs"]["name"] = "renamed_kernel"
-    entry = {"target": {"loop": 0}}
-    fresh = {"configs": [entry], "loops": [renamed]}
+    entry = Config(program=0, target=Target(loop=0), realizations=[])
+    fresh = GoldenFile(compute_cap=(8, 9), programs=[], configs=[entry], loops=[renamed])
     assert helpers._matching_entry(fresh, entry, kernel) == entry
 
     compute["outputs"][0][1] = "f16"

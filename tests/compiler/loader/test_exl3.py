@@ -679,7 +679,7 @@ def test_computed_b_lane_offers_the_cross_cta_split(monkeypatch):
     """The computed-B warp lane admits the cross-CTA split — no GPU, the OFFER only.
 
     RE-EXPRESSED against the structural split fork: the cross-CTA ``g`` half is a kernel-set
-    decision (``030_cut``), never a schedule row — ``golden_eval``'s rows spell no ``g`` by
+    decision (``030_cut``), never a schedule row — ``ranking``'s rows spell no ``g`` by
     design. The offer is asked of ``split_forks`` itself to isolate computed-B legality from the
     placement domain and later scheduling. The pinned realization is covered by
     ``test_computed_b_split_k_matches_decoded_linear`` and

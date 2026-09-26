@@ -19,7 +19,7 @@ from emmy.compiler.pipeline.fork import stamp_signature
 from emmy.compiler.pipeline.knob import KERNEL_IDENTITY, family_of
 from emmy.compiler.pipeline.pipeline import Decision, LoweringError, Run
 from emmy.compiler.pipeline.search.db import SearchDB
-from emmy.compiler.pipeline.search.golden_import import evidence_db
+from emmy.compiler.pipeline.search.golden.evidence import evidence_db
 from emmy.compiler.pipeline.search.pins import PLACEMENT_DECISIONS_HINT, composed_routes
 from emmy.compiler.pipeline.search.policy.greedy import _strip_fork_stamps, greedy_decide, logger, tile_identity
 from emmy.compiler.pipeline.search.strategy.base import SearchStrategy
@@ -81,7 +81,7 @@ class GreedyStrategy(SearchStrategy):
         complete = pipeline.lowers_to_cuda
         blocked: dict[str, set[frozenset]] = {}
         # The evidence is the DB: the tune DB's rows, and the golden rows in scope imported among them
-        # (``golden_import.evidence_db``). Only a pipeline that reaches the cut pass consults it: the
+        # (``evidence.evidence_db``). Only a pipeline that reaches the cut pass consults it: the
         # loop-level lowerings a golden record's derivations run (hundreds per file) never do, and
         # must not pay the import. A stored decision that marks several seams of one kernel is the
         # composed decision a pinned compile consumed them as; the cut pass offers that arm beside

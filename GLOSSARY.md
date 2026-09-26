@@ -316,16 +316,20 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Kernel set listing** — The `kernel_set` field: the names of the routing rows one realization's kernel set holds,
   in the order the compile took the decisions, one row per decision — a placement cut or a cross-CTA split. `run
   --record-greedy` writes the list when it records a kernel set, beside a receipt per kernel. The listing realization
-  usually holds no measurement itself, so `golden_set_state` counts it verified only when every row it lists carries
+  usually holds no measurement itself, so `Realization.kernel_set_state` counts it verified only when every row it lists carries
   measurements and so does every schedule-carrying row of the same target, and a bench of it publishes the listed
   rows' knobs as its pin. A realization that also holds a measured row of its own verifies on that row; the list still
   says what its kernel set held.
+- **Wire** — The YAML-safe data an object is stored as, in a golden file or a tune DB row: a program, a kernel, an
+  expression, a dim. Every IR class writes and reads its own wire through one mixin and one walker
+  (`emmy/compiler/wire.py`), and a golden file is the wire of the classes that declare it.
 - **Working golden file** — A mutable local YAML inventory used to exchange program targets, unmeasured
   realizations, proposed knob rows, and tune ranking feedback. It is search state; only its measured rows are
   evidence, and only when a command names the file with `--golden PATH`.
 - **Canonical golden file** — A reviewed per-GPU YAML. Model goldens live at
-  `recipes/<model>/golden/<gpu-slug>_<compute-cap>.yaml`; model-agnostic hardware goldens remain under
-  `emmy/compiler/pipeline/search/golden/`. Every realization contains verified deployable measurements; `emmy tune`
+  `recipes/<model>/golden/<gpu-slug>_<compute-cap>.yaml`; the maintained model-agnostic golden records live under
+  `emmy/compiler/pipeline/search/golden/records/`. Every realization contains verified deployable measurements; `emmy
+  tune`
   refuses to mutate these files directly. The files for the live card are the golden evidence an ordinary compile
   reads.
 - **Evidence** — A compatible recorded measurement used to select between candidates: a reservoir row or a tune
@@ -348,12 +352,13 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Dataset DB** — A database with the tuning database's tables in a file of its own (`EMMY_DATASET_DB`), filled by
   `emmy dataset import` from measurement freezes and tuning databases. The measurement-data readers (`emmy eval
   prior --dataset db`) read it; no compile does, so what is imported into it can never change a deploy.
-- **Measurement freeze** — A fixed snapshot of collected measurements: a directory of per-GPU files, plus the
-  definitions of the kernels they measure, carrying a checksum and a record of which vocabulary version its rows are
-  written in. The tuning database and the reservoir are local to one machine and are rewritten as tuning continues,
-  so a number computed over either cannot be checked by anyone else. A freeze is identical wherever it is read, which
-  is what makes two models' scores a fair comparison and a reported score something a reader can reproduce. When one
-  is kept with the repository it is what `emmy dataset import` loads into the dataset DB by default; none is at the
+- **Measurement freeze** — A fixed snapshot of collected measurements, written as a golden file per GPU: each
+  kernel's definition and its measured schedule rows, with the regime each was measured under and its median, and
+  nothing the compiler computed. The tuning database and the reservoir are local to one machine and are rewritten as
+  tuning continues, so a number computed over either cannot be checked by anyone else. A freeze is identical wherever
+  it is read, which is what makes two models' scores a fair comparison and a reported score something a reader can
+  reproduce, and `emmy dataset import` re-lowers every kernel from its definition, so a compiler change is a re-import.
+  When one is kept with the repository it is what the import loads into the dataset DB by default; none is at the
   moment.
 - **Deploy evidence hierarchy** — The fixed order in which an ordinary compile answers a tuning choice: measured
   evidence first — the reservoir, then the tune database's rows, the golden rows in scope imported among them, the

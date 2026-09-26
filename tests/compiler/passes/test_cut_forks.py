@@ -22,7 +22,6 @@ from emmy.compiler.ir.stmt import Assign, Load, Write
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.path import resolve
-from emmy.compiler.loop_wire import loop_graph_to_wire
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, TILE_PASSES, Match, Pipeline, Rule
 from emmy.compiler.pipeline.fork import Fork
 from emmy.compiler.pipeline.passes.tile._cut import (
@@ -34,17 +33,10 @@ from emmy.compiler.pipeline.passes.tile._cut import (
     realize,
 )
 from emmy.compiler.pipeline.pipeline import RuleSkipped, Run, _is_structural_option
-from emmy.compiler.pipeline.search.golden import (
-    GoldenRecord,
-    _lifted_target,
-    _replay,
-    _target_kernel_nodes,
-    decode_record,
-    kernel_identity,
-    validate_golden_file,
-)
+from emmy.compiler.pipeline.search.golden import GoldenFile, GoldenRecord, Measurements, decode_record
+from emmy.compiler.pipeline.search.golden.decode import _replay
+from emmy.compiler.pipeline.search.golden.record import _lifted_target, _target_kernel_nodes
 from emmy.compiler.pipeline.search.pins import pinned_knobs
-from emmy.compiler.torch_wire import graph_to_wire
 from tests.compiler.helpers import case_target_tile, direct_classic_leaf, loop_record_fields, loop_target, requires_cuda
 from tests.compiler.terms import contraction, projection, reduction, slab
 
@@ -338,7 +330,7 @@ def test_sdpa_score_cut_is_offered_and_pinned_cut_lowers() -> None:
 
 
 def test_recorded_sdpa_cut_decodes_exactly_and_stale_path_fails_loudly() -> None:
-    wire = graph_to_wire(_sdpa_graph())
+    wire = _sdpa_graph().to_wire()
     fields = {
         "name": "sdpa.route",
         "gpu_name": "",
@@ -509,7 +501,7 @@ def _receipt_fields() -> dict:
         "compute_cap": (12, 0),
         "model": None,
         "program_index": 0,
-        "program_wire": graph_to_wire(_sdpa_graph()),
+        "program_wire": _sdpa_graph().to_wire(),
         **loop_record_fields(_sdpa_graph(), ["out"]),
         "bindings": (),
         "pins": (("PLACE@map.1/twist.1/inner", "cut"),),
@@ -535,7 +527,7 @@ def test_child_identity_receipts_decode_per_child_and_join_by_stored_identity() 
 
     receipt = GoldenRecord(knobs=dict(row_a), identity=id_a, **fields)
     assert decode_record(receipt) is None
-    assert kernel_identity(receipt) == id_a
+    assert receipt.kernel_identity == id_a
 
     sibling = GoldenRecord(knobs=dict(row_a), identity=id_b, **fields)
     reason = decode_record(sibling)
@@ -629,10 +621,10 @@ def test_child_identity_receipt_selects_one_kernel_from_multi_kernel_loop_target
     loop = Pipeline.build(LOOP_PASSES).run(graph.copy(), ctx=_CTX)
     fields = {
         **_receipt_fields(),
-        "program_wire": graph_to_wire(graph),
+        "program_wire": graph.to_wire(),
         "origins": (),
         "loop_index": 0,
-        "loop_wire": loop_graph_to_wire(loop),
+        "loop_wire": loop.to_wire(),
     }
     parent = GoldenRecord(knobs={}, **fields)
     with pytest.raises(ValueError, match="target lowers to 2 kernels"):
@@ -651,9 +643,9 @@ def test_import_files_each_row_under_the_kernel_it_decides(monkeypatch) -> None:
     piece inherits nothing from the kernel it replaced."""
     monkeypatch.setenv("EMMY_FAST_MATH", "0")
     from emmy.compiler.pipeline.search.db import SearchDB
-    from emmy.compiler.pipeline.search.golden_import import import_goldens
+    from emmy.compiler.pipeline.search.golden.evidence import import_goldens
 
-    fields = {**_receipt_fields(), "measurements": {"emmy_us": 1.0, "reference_us": 2.0, "reference_backend": "torch"}}
+    fields = {**_receipt_fields(), "measurements": Measurements(emmy_us=1.0, reference_us=2.0, reference_backend="torch")}
     route = {"PLACE@map.1/twist.1/inner": "cut"}
     routing = GoldenRecord(knobs=route, **{**fields, "pins": ()})
     parent = GoldenRecord(knobs={}, **fields)
@@ -693,16 +685,16 @@ def test_multi_output_kernel_record_derives_the_identity_its_live_fork_carries()
         **_receipt_fields(),
         "name": "fused.multi_output",
         "pins": (),
-        "program_wire": graph_to_wire(graph),
+        "program_wire": graph.to_wire(),
         "origins": (),
         "loop_index": 0,
-        "loop_wire": loop_graph_to_wire(loop),
+        "loop_wire": loop.to_wire(),
     }
     record = GoldenRecord(knobs={}, **fields)
     _lowered, nodes = _target_kernel_nodes(record)
     assert len(nodes) == 1 and len(nodes[0].outputs) == 2, "the fused target must be ONE kernel writing two buffers"
 
-    identity = kernel_identity(record)
+    identity = record.kernel_identity
     rows = _replay(record, exhaustive=True).rows
     assert identity in rows, "the derived identity names no kernel the live resolve offers"
     # The join is the subject; spelling one of that kernel's own rows shows the record decodes
@@ -714,7 +706,7 @@ def test_receipt_validation_requires_child_identity_and_place_pins_stay_live(mon
     monkeypatch.setenv("EMMY_FAST_MATH", "0")
     from types import SimpleNamespace
 
-    from emmy.compiler.pipeline.search.golden import regime_live
+    from emmy.compiler.pipeline.search.pins import regime_live
 
     fields = _receipt_fields()
     loops: list[dict] = []
@@ -733,9 +725,9 @@ def test_receipt_validation_requires_child_identity_and_place_pins_stay_live(mon
         ],
     }
     with pytest.raises(ValueError, match="child-identity schedule receipt"):
-        validate_golden_file(document)
+        GoldenFile.from_wire(document).check()
     document["configs"][0]["realizations"][0]["identity"] = "0" * 64
-    validate_golden_file(document)
+    GoldenFile.from_wire(document).check()
     receipt = SimpleNamespace(pin_map={"PLACE@map.1/twist.1/inner": "cut"})
     assert regime_live(receipt), "a receipt's routing pins are its route, never a dead env regime"
 
@@ -751,7 +743,7 @@ def test_pool_group_fuses_node_id_respellings_and_keys_on_pins() -> None:
         respelled.rename_node(nid, f"session2_{nid}")
     twin_fields = {
         **fields,
-        "program_wire": graph_to_wire(respelled),
+        "program_wire": respelled.to_wire(),
         **loop_record_fields(respelled, [f"session2_{o}" for o in fields["origins"]]),
     }
     a = GoldenRecord(knobs={}, **fields)
@@ -802,13 +794,13 @@ def _routing_record(knobs: dict, *, name: str = "sdpa.route") -> GoldenRecord:
         compute_cap=(12, 0),
         model=None,
         program_index=0,
-        program_wire=graph_to_wire(_sdpa_graph()),
+        program_wire=_sdpa_graph().to_wire(),
         **loop_record_fields(_sdpa_graph(), ["out"]),
         bindings=(),
         pins=(),
         knobs=knobs,
         identity=_sdpa_kernel_identity(),
-        measurements={"emmy_us": 1.0, "reference_us": 2.0, "reference_backend": "torch"},
+        measurements=Measurements(emmy_us=1.0, reference_us=2.0, reference_backend="torch"),
         ranking=None,
     )
 
@@ -821,7 +813,7 @@ def _deploy_kernels(records: list) -> list[str]:
     evidence in any nvcc regime: a golden row is scoped by the card and by its own input pins
     (``regime_live``), never by the optimization level the suite compiles at."""
     from emmy.compiler.pipeline.search.golden import records_override
-    from emmy.compiler.pipeline.search.golden_import import evidence_db
+    from emmy.compiler.pipeline.search.golden.evidence import evidence_db
     from emmy.compiler.pipeline.search.policy.greedy import greedy_decide
 
     ctx = Context.from_target((12, 0), gpu_name=_ROUTING_CARD)
@@ -1510,7 +1502,7 @@ def test_a_decision_consumes_the_key_that_spelled_it_on_import(monkeypatch) -> N
     one decision the recording took, not a cut at every piece that offers a seam."""
     monkeypatch.setenv("EMMY_FAST_MATH", "0")
     from emmy.compiler.pipeline.search.db import SearchDB
-    from emmy.compiler.pipeline.search.golden_import import import_goldens
+    from emmy.compiler.pipeline.search.golden.evidence import import_goldens
 
     db = SearchDB()
     counts = import_goldens(

@@ -4,12 +4,14 @@ freeze, and check that one's tables agree with themselves.
 A dataset DB is the tune DB's schema in its own file (``EMMY_DATASET_DB``): the measurement-data readers
 (``eval prior``) read it, and no compile ever does, so what is imported into it cannot change a deploy.
 
-- ``import`` loads sources into it: a measurement freeze directory (the checked-in one by default) or
-  a tune DB file, whose CUDA ``perf`` rows, ``kernel`` rows and ``routing`` rows are copied over
-  (the way a card's measurements from a rented GPU reach the dataset). Rows keep the source they
-  arrived from, and the upsert is the tune DB's own, so importing the same source twice changes nothing.
-- ``freeze`` writes a DB instance's admitted rows as a digest-pinned freeze directory — the artifact
-  that gets checked in, so a reported number is one anyone can reproduce.
+- ``import`` loads golden-shaped sources into it: a measurement freeze directory (the checked-in one by
+  default) or any golden file, and a tune DB file, which is frozen first (the way a card's measurements
+  from a rented GPU reach the dataset). Every kernel is re-lowered from its definition by the current
+  compiler (``golden.evidence.import_goldens``), so the instance holds today's identities and stamps whatever
+  compiler wrote the source. A file's rows are sourced by its digest, and a file the instance already holds
+  is skipped: ``--fresh`` rebuilds from nothing.
+- ``freeze`` writes a DB instance's admitted rows as a directory of golden files, one per card — the
+  artifact that gets checked in, so a reported number is one anyone can reproduce.
 - ``check`` counts the rows of an instance whose tables disagree with themselves (a knob row's digest, a
   reference, a card, the two knob vocabularies). A DB is a cache: a row the current code disagrees with is
   re-tuned or re-imported, so nothing here decodes what the compiler wrote.
@@ -20,9 +22,9 @@ default one that does not hold the checked-in freeze, with the command that fixe
 
 from __future__ import annotations
 
-import json
 import logging
 import sys
+import tempfile
 from pathlib import Path
 
 from emmy import config
@@ -31,24 +33,23 @@ logger = logging.getLogger(__name__)
 
 
 def register_dataset_command(subparsers) -> None:
-    parser = subparsers.add_parser("dataset", help="Fill a dataset DB from freezes / tune DBs, or freeze one")
+    parser = subparsers.add_parser("dataset", help="Fill a dataset DB from freezes, golden files and tune DBs, or freeze one")
     sub = parser.add_subparsers(dest="dataset_target", required=True)
 
-    pi = sub.add_parser("import", help="Import measurement freezes and tune DBs into a dataset DB")
+    pi = sub.add_parser("import", help="Import measurement freezes, golden files and tune DBs into a dataset DB")
     pi.add_argument(
         "sources",
         nargs="*",
-        help="Freeze directories and tune DB files to import. Default: the checked-in measurement freeze "
+        help="Freeze directories, golden files and tune DB files to import. Default: the checked-in measurement freeze "
         "(EMMY_FREEZE_DIR, else search/freezes/).",
     )
     pi.add_argument("--db", help="Dataset DB to fill (default: EMMY_DATASET_DB or ~/.cache/emmy/dataset.db).")
     pi.add_argument("--fresh", action="store_true", help="Delete the dataset DB first, so it holds exactly these sources.")
     pi.set_defaults(func=handle_dataset_import)
 
-    pf = sub.add_parser("freeze", help="Write a DB instance's admitted rows as a digest-pinned measurement freeze")
+    pf = sub.add_parser("freeze", help="Write a DB instance's admitted rows as a measurement freeze: a golden file per card")
     pf.add_argument("--db", help="DB instance to freeze (default: EMMY_DATASET_DB or ~/.cache/emmy/dataset.db).")
     pf.add_argument("--out", required=True, help="Freeze directory to write (an existing freeze there is replaced).")
-    pf.add_argument("--note", default="", help="Freeform collection-policy note stamped into the manifest.")
     pf.set_defaults(func=handle_dataset_freeze)
 
     pc = sub.add_parser("check", help="Count the rows of a DB instance whose tables disagree with themselves")
@@ -57,14 +58,15 @@ def register_dataset_command(subparsers) -> None:
 
 
 def handle_dataset_import(args) -> None:
-    from emmy.compiler.pipeline.search.data.freeze import load_freeze  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.data.freeze import write_freeze  # noqa: PLC0415
     from emmy.compiler.pipeline.search.db import SearchDB  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden.evidence import import_file  # noqa: PLC0415
 
     db_path = Path(args.db).expanduser() if args.db else config.dataset_db_path()
     sources = [Path(s).expanduser() for s in args.sources] or [config.freeze_path()]
     for src in sources:
         if not src.exists():
-            logger.error("no freeze directory or tune DB at %s", src)
+            logger.error("no freeze directory, golden file or tune DB at %s", src)
             sys.exit(2)
     if args.fresh:
         for suffix in ("", "-wal", "-shm"):
@@ -72,30 +74,22 @@ def handle_dataset_import(args) -> None:
     db = SearchDB(db_path)
     try:
         for src in sources:
-            if src.is_dir():
-                frozen = load_freeze(src)
-                k = db.record_kernels(frozen.kernels)
-                s = db.record_routings(frozen.routing)
-                n = db.record_perf_rows(frozen.perf)
-                logger.info(
-                    "imported %d row(s), %d kernel(s), %d routing row(s) from freeze %s (sha256 %s)",
-                    n,
-                    k,
-                    s,
-                    src,
-                    frozen.manifest["sha256"],
-                )
-                continue
-            tune_db = SearchDB.open_readonly(src)
-            try:
-                k = db.record_kernels(tune_db.iter_kernels())
-                s = db.record_routings(tune_db.iter_routing())
-                # A tune DB's golden rows are the golden files' (a compile imports them there), and the
-                # golden dataset holds those already: the dataset DB takes the tune's own measurements.
-                n = db.record_perf_rows(row for row in tune_db.iter_perf_rows(backend="cuda") if not row.source.startswith("golden:"))
-            finally:
-                tune_db.close()
-            logger.info("imported %d row(s), %d kernel(s), %d routing row(s) from tune DB %s", n, k, s, src)
+            if src.is_dir() or src.suffix == ".yaml":
+                files = sorted(src.glob("*.yaml")) if src.is_dir() else [src]
+                if not files:
+                    logger.error("no golden files in %s", src)
+                    sys.exit(2)
+            else:
+                # A tune DB is frozen first, so what reaches the dataset is what a freeze of it would hold.
+                frozen = Path(tempfile.mkdtemp()) / "freeze"
+                write_freeze(src, frozen)
+                files = sorted(frozen.glob("*.yaml"))
+            for path in files:
+                try:
+                    import_file(db, path)
+                except ValueError as exc:
+                    logger.error("%s", exc)
+                    sys.exit(2)
     finally:
         db.close()
     logger.info("dataset DB: %s", db_path)
@@ -109,19 +103,10 @@ def handle_dataset_freeze(args) -> None:
         logger.error("no DB at %s", db_path)
         sys.exit(2)
     out = Path(args.out).expanduser()
-    manifest = write_freeze(db_path, out, note=args.note)
-    counts = manifest["counts"]
-    logger.info(
-        "froze %d row(s) (%d ok + %d bench_fail), %d kernel(s), %d routing row(s) from %s",
-        counts["rows"],
-        counts["ok"],
-        counts["bench_fail"],
-        counts["kernels"],
-        counts["routing"],
-        db_path,
-    )
-    logger.info("  per card: %s", ", ".join(f"{gpu}: {n}" for gpu, n in counts["per_gpu"].items()))
-    logger.info("  commit %s, sha256 %s over %d file(s) -> %s/", manifest["repo_commit"], manifest["sha256"], len(manifest["files"]), out)
+    digests = write_freeze(db_path, out)
+    for name, digest in digests.items():
+        logger.info("froze %s (sha256 %s)", name, digest)
+    logger.info("%d file(s) from %s -> %s/", len(digests), db_path, out)
 
 
 def handle_dataset_check(args) -> None:
@@ -142,8 +127,9 @@ def dataset_db(db_arg: str | None) -> Path:
     """The DB instance a measurement-data reader reads: ``--db`` when given, else the dataset DB.
 
     Exits with the fixing command when the file is missing, or when the DEFAULT dataset DB does not hold
-    the checked-in measurement freeze — a report computed over another freeze's rows, or an old one's,
-    would carry today's label and yesterday's numbers. An explicit ``--db`` is read as it is."""
+    every file of the checked-in measurement freeze — a report computed over another freeze's rows, or an
+    old one's, would carry today's label and yesterday's numbers. An explicit ``--db`` is read as it is."""
+    from emmy.compiler.pipeline.search.data.freeze import freeze_source  # noqa: PLC0415
     from emmy.compiler.pipeline.search.db import SearchDB  # noqa: PLC0415
 
     if db_arg:
@@ -156,15 +142,16 @@ def dataset_db(db_arg: str | None) -> Path:
     if not path.is_file():
         logger.error("no dataset DB at %s — run `emmy dataset import` to fill it from the measurement freeze", path)
         sys.exit(2)
-    manifest = config.freeze_path() / "manifest.json"
-    if manifest.is_file():
-        want = f"freeze:{json.loads(manifest.read_text())['sha256'][:12]}"
+    freeze = config.freeze_path()
+    want = {freeze_source(f) for f in sorted(freeze.glob("*.yaml"))} if freeze.is_dir() else set()
+    if want:
         db = SearchDB.open_readonly(path)
         try:
             held = db.perf_sources()
         finally:
             db.close()
-        if want not in held:
-            logger.error("dataset DB %s does not hold the current measurement freeze (%s) — run `emmy dataset import --fresh`", path, want)
+        if not want <= set(held):
+            missing = ", ".join(sorted(want - set(held)))
+            logger.error("dataset DB %s lacks the current measurement freeze (%s) — run `emmy dataset import --fresh`", path, missing)
             sys.exit(2)
     return path

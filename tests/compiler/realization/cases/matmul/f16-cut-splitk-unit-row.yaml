@@ -1,7 +1,5 @@
 # evidence: split-K after a placement cut dropped a unit row and emitted an undefined partition index in the B load.
-compute_cap:
-- 8
-- 0
+compute_cap: [8, 0]
 programs:
 - inputs: [x0, x1, x2]
   outputs: [add]
@@ -14,7 +12,6 @@ programs:
     outputs: [[x1, f16, [64, 64]]]
   - id: linear
     op: torch.linear
-    attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[linear, f16, [1, 1, 64]]]
   - id: x2
@@ -22,22 +19,15 @@ programs:
     outputs: [[x2, f16, [1, 1, 64]]]
   - id: add
     op: tensor.elementwise
-    attrs: {op: {__elementwise__: add}}
+    attrs: {op: add}
     inputs: [linear, x2]
     outputs: [[add, f16, [1, 1, 64]]]
 configs:
 - program: 0
-  target:
-    loop: 0
-    origins:
-    - add
-    - linear
+  target: {loop: 0, origins: [add, linear]}
   realizations:
   - name: k_linear_85ba40
-    bindings: {}
-    pins:
-      FAST_MATH: false
-      PLACE: cut
+    pins: {FAST_MATH: false, PLACE: cut}
     knobs:
       WORK: w2x1
       TILE: mma_m16n8k16_f16_f32/f1x4/k8
@@ -52,27 +42,21 @@ configs:
       LOOPIFY: '0'
     identity: 5455670d91827ddadd8a695bae8b4ea882895835a9021d396699eb4b973a11b3
   - name: k_linear_85ba40.0d50704129f8
-    bindings: {}
-    pins:
-      FAST_MATH: false
+    pins: {FAST_MATH: false}
     knobs:
       WORK: ''
       TILE: ''
       RASTER: ''
     identity: 0d50704129f8cfef0bb021fcb927150eb69b3329c81351bacd5d5a8d72ffe77a
   - name: k_linear_85ba40.5e4aef382673
-    bindings: {}
-    pins:
-      FAST_MATH: false
+    pins: {FAST_MATH: false}
     knobs:
       WORK: ''
       REDUCE: ''
       RASTER: ''
     identity: 5e4aef38267310d8249623d7a07e2d7d32a693d46c952ba04576ae9b3102bea5
   - name: k_linear_85ba40.f74d48321560
-    bindings: {}
-    pins:
-      FAST_MATH: false
+    pins: {FAST_MATH: false}
     knobs:
       WORK: w2x1
       TILE: mma_m16n8k16_f16_f32/f1x4/k8
@@ -97,67 +81,20 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 64}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 64}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 64}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null}}
-                  body:
-                    body:
-                    - class: Load
-                      fields:
-                        names: {tuple: [in0]}
-                        input: x0
-                        index:
-                          tuple:
-                          - {expr: {literal: {value: 0, dtype: int}}}
-                          - {expr: {literal: {value: 0, dtype: int}}}
-                          - {expr: {var: a1}}
-                        dtype: null
-                    - class: Load
-                      fields:
-                        names: {tuple: [in1]}
-                        input: x1
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        dtype: null
-                    - class: Assign
-                      fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                    - class: Accum
-                      fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
-                  unroll: false
-                  seed: true
-              - class: Assign
-                fields: {name: v1, op: {elementwise: copy}, args: {tuple: [acc0]}, dtype: {dtype: f16}}
-              - class: Load
-                fields:
-                  names: {tuple: [in2]}
-                  input: x2
-                  index:
-                    tuple:
-                    - {expr: {literal: {value: 0, dtype: int}}}
-                    - {expr: {literal: {value: 0, dtype: int}}}
-                    - {expr: {var: a0}}
-                  dtype: null
-              - class: Assign
-                fields: {name: v2, op: {elementwise: add}, args: {tuple: [in2, v1]}, dtype: null}
-              - class: Write
-                fields:
-                  output: add
-                  index:
-                    tuple:
-                    - {expr: {literal: {value: 0, dtype: int}}}
-                    - {expr: {literal: {value: 0, dtype: int}}}
-                    - {expr: {var: a0}}
-                  values: {tuple: [v2]}
-                  value_dtype: null
-                  atomic: false
-                  swizzle: NONE
-            unroll: false
-            seed: true
+              - {Load: {names: [in0], input: x0, index: [{literal: 0}, {literal: 0}, {var: a1}]}}
+              - {Load: {names: [in1], input: x1, index: [{var: a0}, {var: a1}]}}
+              - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+              - {Accum: {name: acc0, value: v0, axes: [a1]}}
+          - {Assign: {name: v1, op: copy, args: [acc0], dtype: f16}}
+          - {Load: {names: [in2], input: x2, index: [{literal: 0}, {literal: 0}, {var: a0}]}}
+          - {Assign: {name: v2, op: add, args: [in2, v1]}}
+          - {Write: {output: add, index: [{literal: 0}, {literal: 0}, {var: a0}], values: [v2]}}
       name: k_linear_318efd
     inputs: [x1, x0, x2]
     outputs: [[add, f16, [1, 1, 64]]]

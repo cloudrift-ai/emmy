@@ -24,6 +24,7 @@ import numpy as np
 from frozendict import frozendict
 
 from emmy.compiler.structural import digest
+from emmy.compiler.wire import Wire
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -61,7 +62,7 @@ def buffer_types(op: Op) -> dict[str, tuple[str, tuple[str, ...]]]:
 
 
 @dataclass(frozen=True)
-class Op:
+class Op(Wire):
     """Base class for all operations.
 
     ``source`` is the predecessor op in any rewrite chain — the engine
@@ -84,6 +85,9 @@ class Op:
     instead. Excluded from equality / repr — pure derived view of the
     surrounding graph at match time.
     """
+
+    #: Runtime state the wire never carries: the rewrite chain, the knobs, the io maps the matcher binds.
+    wire_skip = frozenset({"source", "knobs", "inputs", "outputs"})
 
     #: Frozen + eq would auto-derive a field-walk hash (hashing whole bodies); ops stay
     #: UNHASHABLE, as they were — semantic comparison is :meth:`identity_key`, never ``hash``.
@@ -246,6 +250,8 @@ class Op:
 class InputOp(Op):
     """Sentinel for graph input tensors (no computation)."""
 
+    wire_tag = "input"
+
     def infer_output_shape(self, input_shapes: list[tuple]) -> tuple:
         raise NotImplementedError("InputOp has no inputs; use node.output.shape directly")
 
@@ -293,8 +299,10 @@ class ConstantOp(Op):
     ``value is None`` so they correctly treat it as non-static (the backend resolves it).
     """
 
+    wire_tag = "constant"
+
     name: str
-    value: float | int | None = None  # a STATIC scalar (None ⇒ not a static constant)
+    value: float | int | bool | None = None  # a STATIC scalar (None ⇒ not a static constant)
     context_value: Expr | None = None  # a RUNTIME scalar bound from context (sym_values); see class doc
     load_ops: tuple[Op, ...] = ()
     source_path: str | None = None

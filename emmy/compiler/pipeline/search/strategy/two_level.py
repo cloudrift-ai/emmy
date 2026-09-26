@@ -41,8 +41,7 @@ from typing import TYPE_CHECKING
 from emmy.compiler.context import Context
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.loop_wire import kernel_bindings
-from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pass, Pipeline, TuningSearch
+from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, LOWERING_PASSES, Pass, Pipeline, TuningSearch
 from emmy.compiler.pipeline.knob import complete_kernel_row
 from emmy.compiler.pipeline.passes.identity import IdentityStrategy
 from emmy.compiler.pipeline.pipeline import Run, variant_label
@@ -50,18 +49,12 @@ from emmy.compiler.pipeline.search.db import PerfStats, SearchDB, knobs_json
 from emmy.compiler.pipeline.search.slice import single_node_graph
 from emmy.compiler.pipeline.search.strategy.base import SearchStrategy
 from emmy.compiler.pipeline.strategy import PipelineStrategy, SplicedEvent, SpliceEvent, discovered_strategies
+from emmy.compiler.wire import kernel_bindings
 
 if TYPE_CHECKING:
     from emmy.compiler.graph import Graph
 
 logger = logging.getLogger(__name__)
-
-# Lowering-only passes (post-fusion): ``tile → kernel → cuda``. The inner per-op search runs
-# these on a single-node slice so the finalized LoopOp body — and thus its kernel identity — is
-# never re-touched by ``loop/fusion``, which is what keeps inner-tuned ``perf`` rows transferable
-# to the assembled graph. Sliced as the tail of ``CUDA_PASSES`` so it tracks pass-list edits
-# automatically.
-LOWERING_PASSES = CUDA_PASSES[len(LOOP_PASSES) :]
 
 
 def outer_pipeline() -> Pipeline:

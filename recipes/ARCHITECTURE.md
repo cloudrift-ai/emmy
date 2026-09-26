@@ -29,7 +29,7 @@ A reviewed model golden belongs beside the recipe whose exact checkpoint it desc
 Keep exactly one file per exact GPU in each recipe. The recipe directory already identifies the model, so the file
 name identifies only the GPU and compute capability; merge new realizations into that file instead of adding a second
 model- or run-suffixed YAML. Preserve the document's exact model and optional revision provenance. Model-agnostic
-hardware/kernel goldens have no recipe owner and remain under `emmy/compiler/pipeline/search/golden/`.
+the maintained golden records have no recipe owner and live under `emmy/compiler/pipeline/search/golden/records/`.
 
 If complete compiler qualification produces a model golden before serving qualification produces a runnable recipe,
 create the normal `onboarding`/`untested` shell first and store the golden beneath it. The nightly `onboard-model`

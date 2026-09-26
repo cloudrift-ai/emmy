@@ -1,6 +1,4 @@
-compute_cap:
-- 12
-- 0
+compute_cap: [12, 0]
 programs:
 - inputs: [x]
   outputs: [sqrt]
@@ -10,53 +8,38 @@ programs:
     outputs: [[x, f32, [4, 1024]]]
   - id: mul
     op: tensor.elementwise
-    attrs: {op: {__elementwise__: multiply}}
+    attrs: {op: multiply}
     inputs: [x, x]
     outputs: [[mul, f32, [4, 1024]]]
   - id: sum_1
     op: tensor.reduce
-    attrs: {op: {__elementwise__: sum}, axis: 1}
+    attrs: {axis: 1}
     inputs: [mul]
     outputs: [[sum_1, f32, [4, 1]]]
   - id: sqrt
     op: tensor.elementwise
-    attrs: {op: {__elementwise__: sqrt}}
+    attrs: {op: sqrt}
     inputs: [sum_1]
     outputs: [[sqrt, f32, [4, 1]]]
 configs:
 - program: 0
-  target:
-    loop: 0
-    origins:
-    - mul
-    - sqrt
-    - sum_1
+  target: {loop: 0, origins: [mul, sqrt, sum_1]}
   realizations:
   - name: k_sqrt_reduce
-    bindings: {}
-    pins:
-      FAST_MATH: false
-      PLACE: fuse
+    pins: {FAST_MATH: false, PLACE: fuse}
     knobs:
       REDUCE: g2k
     identity: bda8252c8a4ed9346718b160251383bac46615052e070fe00d27b5df7558fd17
-    latency:
-      NVIDIA GeForce RTX 5090:
-        emmy_us: 8.184049440466838
-        tcompile_us: 2.049394173197227
+    latency: {NVIDIA GeForce RTX 5090: {emmy_us: 8.184049440466838, tcompile_us: 2.049394173197227}}
   - name: k_sqrt_reduce.44833ca5c32a
-    bindings: {}
-    pins:
-      FAST_MATH: false
+    pins: {FAST_MATH: false}
     knobs:
       WORK: ''
       REDUCE: ''
       RASTER: ''
     identity: 44833ca5c32a0479ffede1146ccdf16a0b9ecbd64197579c0854ad7a0a9a41de
   - name: k_sqrt_reduce.dc4f85ea743f
-    bindings: {}
-    pins:
-      FAST_MATH: false
+    pins: {FAST_MATH: false}
     knobs:
       WORK: ''
       REDUCE: ''
@@ -73,40 +56,17 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 4}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 4}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 1024}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 1024}, window: null}}
-                  body:
-                    body:
-                    - class: Load
-                      fields:
-                        names: {tuple: [in0]}
-                        input: x
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        dtype: null
-                    - class: Assign
-                      fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in0]}, dtype: null}
-                    - class: Accum
-                      fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
-                  unroll: false
-                  seed: true
-              - {class: Assign, fields: {name: v1, op: {elementwise: sqrt}, args: {tuple: [acc0]}, dtype: null}}
-              - class: Write
-                fields:
-                  output: sqrt
-                  index: {tuple: [{expr: {var: a0}}, {expr: {literal: {value: 0, dtype: int}}}]}
-                  values: {tuple: [v1]}
-                  value_dtype: null
-                  atomic: false
-                  swizzle: NONE
-            unroll: false
-            seed: true
+              - {Load: {names: [in0], input: x, index: [{var: a0}, {var: a1}]}}
+              - {Assign: {name: v0, op: multiply, args: [in0, in0]}}
+              - {Accum: {name: acc0, value: v0, axes: [a1]}}
+          - {Assign: {name: v1, op: sqrt, args: [acc0]}}
+          - {Write: {output: sqrt, index: [{var: a0}, {literal: 0}], values: [v1]}}
       name: k_sqrt_reduce
     inputs: [x]
     outputs: [[sqrt, f32, [4, 1]]]

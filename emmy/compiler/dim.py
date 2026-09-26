@@ -40,6 +40,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Interval, Literal, SimplifyCtx, Var
+from emmy.compiler.wire import Wire, decode, encode
 
 # Default "expected size" for a symbolic dim when none is supplied explicitly.
 # Atomic symbolic Dims (input axes like ``Dim("seq_len")``) carry this so the
@@ -90,7 +91,28 @@ def _simplify(expr: Expr) -> Expr:
 
 
 @dataclass(frozen=True, init=False, eq=False)
-class Dim:
+class Dim(Wire):
+    wire_tag = "dim"
+
+    def to_wire(self):
+        """``int`` for a static dim, ``{sym, hint}`` for a bare symbol, ``{expr, hint}`` for a composite."""
+        if isinstance(self.expr, Literal) and self.expr.dtype == "int":
+            return int(self.expr.value)
+        out = {"sym": self.expr.name} if isinstance(self.expr, Var) else {"expr": encode(self.expr)}
+        if self.hint is not None:
+            out["hint"] = self.hint
+        return out
+
+    @classmethod
+    def from_wire(cls, value: object, where: str = "dim") -> Dim:
+        if isinstance(value, int) and not isinstance(value, bool):
+            return cls(value)
+        keys = set(value) if isinstance(value, dict) else set()
+        if not (("sym" in keys and keys <= {"sym", "hint"}) or ("expr" in keys and keys <= {"expr", "hint"})):
+            raise ValueError(f"{where} must be an integer, {{sym, hint}} or {{expr, hint}}")
+        hint = int(value["hint"]) if value.get("hint") is not None else None
+        return cls(str(value["sym"]), hint=hint) if "sym" in keys else cls(decode(value["expr"]), hint=hint)
+
     expr: Expr
     # Advisory "expected size" for a symbolic dim — the value the tuner /
     # partition planner pretends the axis has when picking tile sizes (set

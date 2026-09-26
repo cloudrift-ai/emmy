@@ -350,8 +350,9 @@ three proposed deployment matrix entries. Disabled recipes are not deployable or
 
 Canonical model goldens live beside their recipe at `recipes/<model>/golden/<gpu-slug>_<compute-cap>.yaml`, with one
 file per exact GPU. A model with complete compiler evidence but no serving recipe receives an `onboarding`/`untested`
-recipe shell before its golden is committed. Model-agnostic hardware goldens remain under
-`emmy/compiler/pipeline/search/golden/`. `make test` strictly decodes both kinds row by row, with no GPU needed, so a
+recipe shell before its golden is committed. The maintained golden records, model-agnostic rows for the offline prior and the tests, live under
+`emmy/compiler/pipeline/search/golden/records/`. `make test` strictly decodes both kinds row by row, with no GPU
+needed, so a
 compiler change that strands a recorded row fails the suite.
 
 Generic workload (run any tool on the VM, pull back result files):

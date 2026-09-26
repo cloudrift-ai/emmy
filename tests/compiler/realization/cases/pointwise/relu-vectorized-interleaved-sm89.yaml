@@ -1,6 +1,4 @@
-compute_cap:
-- 8
-- 9
+compute_cap: [8, 9]
 programs:
 - inputs: [x]
   outputs: [relu]
@@ -10,20 +8,15 @@ programs:
     outputs: [[x, f32, [512, 4096]]]
   - id: relu
     op: tensor.elementwise
-    attrs: {op: {__elementwise__: relu}}
+    attrs: {op: relu}
     inputs: [x]
     outputs: [[relu, f32, [512, 4096]]]
 configs:
 - program: 0
-  target:
-    loop: 0
-    origins:
-    - relu
+  target: {loop: 0, origins: [relu]}
   realizations:
   - name: k_relu_pointwise
-    bindings: {}
-    pins:
-      FAST_MATH: false
+    pins: {FAST_MATH: false}
     knobs:
       WORK: ''
       FAST_EXP: 'False'
@@ -43,35 +36,24 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 2097152}, window: null}}
-            body:
-              body:
-              - class: Load
-                fields:
-                  names: {tuple: [in0]}
-                  input: x
-                  index:
-                    tuple:
-                    - {expr: {binary: {op: //, left: {var: a0}, right: {literal: {value: 4096, dtype: int}}}}}
-                    - {expr: {binary: {op: '%', left: {var: a0}, right: {literal: {value: 4096, dtype: int}}}}}
-                  dtype: null
-              - {class: Assign, fields: {name: v0, op: {elementwise: relu}, args: {tuple: [in0]}, dtype: null}}
-              - class: Write
-                fields:
-                  output: relu
-                  index:
-                    tuple:
-                    - {expr: {binary: {op: //, left: {var: a0}, right: {literal: {value: 4096, dtype: int}}}}}
-                    - {expr: {binary: {op: '%', left: {var: a0}, right: {literal: {value: 4096, dtype: int}}}}}
-                  values: {tuple: [v0]}
-                  value_dtype: null
-                  atomic: false
-                  swizzle: NONE
-            unroll: false
-            seed: true
+      - Loop:
+          axis: {name: a0, extent: 2097152}
+          body:
+          - Load:
+              names:
+              - in0
+              input: x
+              index:
+              - {binary: {op: //, left: {var: a0}, right: {literal: 4096}}}
+              - {binary: {op: '%', left: {var: a0}, right: {literal: 4096}}}
+          - {Assign: {name: v0, op: relu, args: [in0]}}
+          - Write:
+              output: relu
+              index:
+              - {binary: {op: //, left: {var: a0}, right: {literal: 4096}}}
+              - {binary: {op: '%', left: {var: a0}, right: {literal: 4096}}}
+              values:
+              - v0
       name: k_relu_pointwise
     inputs: [x]
     outputs: [[relu, f32, [512, 4096]]]

@@ -1,6 +1,4 @@
-compute_cap:
-- 12
-- 0
+compute_cap: [12, 0]
 programs:
 - inputs: [x0, x1]
   outputs: [matmul]
@@ -13,32 +11,20 @@ programs:
     outputs: [[x1, f32, [1024, 16]]]
   - id: matmul
     op: torch.matmul
-    attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[matmul, f32, [8, 16]]]
 configs:
 - program: 0
-  target:
-    loop: 0
-    origins:
-    - matmul
+  target: {loop: 0, origins: [matmul]}
   realizations:
   - name: k_matmul_edd56e
-    bindings: {}
-    pins:
-      FAST_MATH: false
-      PLACE: fuse
+    pins: {FAST_MATH: false, PLACE: fuse}
     knobs:
       REDUCE: g2k
     identity: 6a5dde8beaeb12afafe881714f580bcc74e706c108351d3769d12bf28a5a9eb4
-    latency:
-      NVIDIA GeForce RTX 5090:
-        emmy_us: 14.32768865065141
-        tcompile_us: 4.1000759052390325
+    latency: {NVIDIA GeForce RTX 5090: {emmy_us: 14.32768865065141, tcompile_us: 4.1000759052390325}}
   - name: k_matmul_edd56e.1af735990d6f
-    bindings: {}
-    pins:
-      FAST_MATH: false
+    pins: {FAST_MATH: false}
     knobs:
       WORK: ''
       TILE: ''
@@ -47,9 +33,7 @@ configs:
       RASTER: ''
     identity: 1af735990d6f6e54e47932d8af47009409c27744786b332bfa6ecf5aa1916fb8
   - name: k_matmul_edd56e.5da9c01457d2
-    bindings: {}
-    pins:
-      FAST_MATH: false
+    pins: {FAST_MATH: false}
     knobs:
       WORK: ''
       REDUCE: ''
@@ -69,52 +53,20 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 8}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 8}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 16}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 16}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 1024}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 1024}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: x0
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: x1
-                              index: {tuple: [{expr: {var: a2}}, {expr: {var: a1}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: null}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Write
-                      fields:
-                        output: matmul
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}]}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a2}, {var: a1}]}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1]}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - {Write: {output: matmul, index: [{var: a0}, {var: a1}], values: [acc0]}}
       name: k_matmul_edd56e
     inputs: [x1, x0]
     outputs: [[matmul, f32, [8, 16]]]

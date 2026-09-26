@@ -18,7 +18,7 @@ the split arm is priced once the pieces are benched (``run --golden PATH --bench
 
 :func:`evidence_db` is the compile's seam: the golden rows in scope (``golden.records_for_card``) are imported
 once per golden digest into the tune DB the compile reads — a re-recorded file changes the digest, and the
-file's earlier rows are let go first — or into a memoized in-memory instance when the compile has no DB.
+file's earlier rows are let go first — or into a fresh in-memory instance when the compile has no DB.
 """
 
 from __future__ import annotations
@@ -27,10 +27,27 @@ import logging
 from collections import Counter
 from typing import TYPE_CHECKING
 
-from emmy.compiler.pipeline.search.db import SearchDB
+from emmy.compiler.context import FAST_MATH_FLAG, Context
+from emmy.compiler.ir.cuda.ir import CudaOp
+from emmy.compiler.ir.tile import TileOp
+from emmy.compiler.pipeline import CUDA_PASSES, LOWERING_PASSES, Pipeline
+from emmy.compiler.pipeline.fork import iter_leaves, leaf_for
+from emmy.compiler.pipeline.knob import family_of
+from emmy.compiler.pipeline.pipeline import Run, _is_structural_option
+from emmy.compiler.pipeline.search.data.freeze import freeze_source, is_lfs_pointer
+from emmy.compiler.pipeline.search.db import SearchDB, is_placement_knob
+from emmy.compiler.pipeline.search.pins import composed_routes, pinned_knobs, regime_live, spelled_arm, unpinned_decisions
+from emmy.compiler.pipeline.search.policy.terminal_bench import persist_kernel_perf, point_stats
+from emmy.compiler.wire import kernel_tile
+
+from .decode import _set_key, piece_row
+from .format import GoldenFile
+from .record import kernel_set_pins, regime_pins
+from .repository import records_for_card, scope_digest, scope_explicit
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from pathlib import Path
 
     from emmy.compiler.context import Context
     from emmy.compiler.pipeline.search.golden import GoldenRecord
@@ -38,17 +55,16 @@ if TYPE_CHECKING:
 logger = logging.getLogger("emmy.compiler.pipeline")
 
 
-def import_goldens(db: SearchDB, ctx: Context, records: Sequence[GoldenRecord], *, source: str) -> Counter:
+def import_goldens(
+    db: SearchDB, ctx: Context, records: Sequence[GoldenRecord], *, source: str, passes: Sequence[str] | None = None
+) -> Counter:
     """Write ``records``' measurements into ``db`` under ``ctx``'s card and regime, ``source`` on every perf
     row. Only a measured entry in the live input regime (``golden.regime_live``) is evidence. Returns what
     became of the entries, by kind. A set the current compiler cannot lower is skipped: the strict decode is
-    where that is loud."""
-    from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
-    from emmy.compiler.loop_wire import kernel_tile  # noqa: PLC0415
-    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.db import is_placement_knob  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden import _set_key, regime_live  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.policy.terminal_bench import persist_kernel_perf, point_stats  # noqa: PLC0415
+    where that is loud. ``passes`` is the pipeline a target enters: the whole of it for a golden's traced
+    slice (the default), the lowering passes alone for a freeze's kernel body, which the Loop passes would
+    normalize into another kernel."""
+    # the strategy package imports this module's evidence_db: a real cycle, so the import stays local
     from emmy.compiler.pipeline.search.strategy.two_level import KernelInventory, record_routing  # noqa: PLC0415
 
     counts: Counter[str] = Counter()
@@ -59,7 +75,7 @@ def import_goldens(db: SearchDB, ctx: Context, records: Sequence[GoldenRecord], 
         consumed.add(parent.identity_key(with_io=True))
         counts["routing rows"] += 1
 
-    pipeline = Pipeline.build(CUDA_PASSES).with_strategies(KernelInventory(on_routing=on_routing))
+    pipeline = Pipeline.build(list(passes) if passes is not None else CUDA_PASSES).with_strategies(KernelInventory(on_routing=on_routing))
     sets: dict[tuple, list[GoldenRecord]] = {}
     for record in records:
         sets.setdefault(_set_key(record), []).append(record)
@@ -105,12 +121,6 @@ def _lower(pipeline, ctx: Context, entries: list[GoldenRecord]):
     its row vouches for, either the first leaf when it spells none. The live decision pins are withdrawn: the
     rows filed hold for every pinned compile. The seams an entry marks cut together are one composed
     decision, offered to the cut pass as the deploy offers them."""
-    from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
-    from emmy.compiler.pipeline.fork import iter_leaves, leaf_for  # noqa: PLC0415
-    from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
-    from emmy.compiler.pipeline.pipeline import Run, _is_structural_option  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden import kernel_set_pins, piece_row  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.pins import composed_routes, spelled_arm, unpinned_decisions  # noqa: PLC0415
 
     lead = entries[0]
     spelling = {
@@ -147,45 +157,54 @@ def _lower(pipeline, ctx: Context, entries: list[GoldenRecord]):
     return graph
 
 
-#: The one in-memory instance a DB-less compile picks from, keyed by golden scope, card and regime.
-_IN_MEMORY: dict[tuple, SearchDB] = {}
-#: The ``(DB file, golden scope, card, regime)`` imports this process has done — one query per compile is one too many
-#: for a serve boot's hundred compiles.
-_IMPORTED: set[tuple] = set()
+def import_file(db: SearchDB, path: Path) -> Counter:
+    """Import one golden-shaped file — a freeze's card file, or a golden file — into ``db``: every kernel
+    re-lowered from its definition through the lowering passes alone (a stored kernel body must not meet the
+    Loop passes, which would normalize it into another kernel), once per regime the file's rows record, its rows
+    sourced by the file's digest (``freeze.freeze_source``). The rows were measured at the deployable opt level
+    under their regime's flags, whatever this machine compiles at. A file the instance already holds is skipped;
+    a git-LFS pointer in the data's place is refused by name. Returns what became of the entries, by kind."""
+
+    if is_lfs_pointer(path):
+        raise ValueError(f"{path} is a git-LFS pointer, not the data: run `git lfs install && git lfs pull` (in CI, check out with lfs)")
+    source = freeze_source(path)
+    if source in db.perf_sources():
+        logger.info("%s is already held (%s)", path.name, source)
+        return Counter()
+    document = GoldenFile.load(path)
+    records = document.records()
+    cap, gpu_name = tuple(document.compute_cap), document.gpu_name
+    counts: Counter = Counter()
+    for regime in sorted({tuple(sorted(regime_pins(record).items())) for record in records}):
+        with pinned_knobs(dict(regime)):
+            ctx = Context.from_target(cap, gpu_name=gpu_name, compile_flags=FAST_MATH_FLAG if dict(regime).get("FAST_MATH") else "")
+            in_regime = [record for record in records if tuple(sorted(regime_pins(record).items())) == regime]
+            counts += import_goldens(db, ctx, in_regime, source=source, passes=LOWERING_PASSES)
+    logger.info("imported %s as %s: %s", path.name, source, ", ".join(f"{n} {what}" for what, n in sorted(counts.items())) or "nothing")
+    return counts
 
 
 def evidence_db(db: SearchDB | None, ctx: Context) -> SearchDB:
     """The DB a compile under ``ctx`` picks from, holding the golden rows in scope: ``db`` itself, the scope
     imported into it once per golden digest (a scope the file does not hold yet lets the earlier golden rows of
-    this card and regime go first); with no ``db``, an in-memory instance holding the scope, memoized on it."""
-    from emmy.compiler.pipeline.search.golden import records_for_card, scope_digest, scope_explicit  # noqa: PLC0415
+    this card and regime go first); with no ``db``, a fresh in-memory instance holding the scope."""
 
     gpu_name = getattr(ctx, "gpu_name", None) or ""
     records = records_for_card(gpu_name, tuple(ctx.compute_capability)) if gpu_name or scope_explicit() else []
     if not records:
         return db if db is not None else SearchDB()
     source = f"golden:{scope_digest(gpu_name)[:12]}"
-    regime = (ctx.structural_key(), ctx.hardware_id())
     if db is None:
-        key = (source, *regime)
-        if key not in _IN_MEMORY:
-            _IN_MEMORY.clear()
-            _IN_MEMORY[key] = fresh = SearchDB()
-            _import(fresh, ctx, records, source)
-        return _IN_MEMORY[key]
-    path = getattr(db, "_path", None)
-    key = (str(path), source, *regime)
-    if (path is None or key not in _IMPORTED) and source not in db.perf_sources(ctx):
+        fresh = SearchDB()
+        _import(fresh, ctx, records, source)
+        return fresh
+    if source not in db.perf_sources(ctx):
         db.forget_perf(ctx, "golden:")
-        # The scopes just forgotten on this card and regime are no longer in the file, whatever this process remembers.
-        _IMPORTED.difference_update({done for done in _IMPORTED if done[0] == str(path) and done[2:] == regime})
         _import(db, ctx, records, source)
-    _IMPORTED.add(key)
     return db
 
 
 def _import(db: SearchDB, ctx: Context, records: Sequence[GoldenRecord], source: str) -> None:
-    from emmy.compiler.pipeline.search.golden import regime_live  # noqa: PLC0415
 
     counts = import_goldens(db, ctx, records, source=source)
     logger.info(

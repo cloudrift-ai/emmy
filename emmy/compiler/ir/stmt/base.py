@@ -17,6 +17,7 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr, CastExpr, Expr, FuncCallExpr, Literal, SimplifyCtx, TernaryExpr, Var
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.structural import Structural
+from emmy.compiler.wire import Wire
 
 if TYPE_CHECKING:
     from emmy.compiler.ir.stmt.body import Body
@@ -463,7 +464,7 @@ def _is_one(e: Expr) -> bool:
 # ---------------------------------------------------------------------------
 
 
-class Stmt(Structural):
+class Stmt(Structural, Wire):
     """Base class for IR body statements.
 
     Every concrete Stmt implements:
