@@ -16,9 +16,10 @@ Cache buffers use the persistent output role, without joining the public logits/
 identify their writes so Python scratch allocation preserves the same dependencies as native execution.
 
 CUDA source lives in the packaged `kernels.cu` resource, loaded by Python during artifact preparation.
-Small CUDA kernels provide embedding lookup, default full rotary embedding, contiguous cache writes, causal grouped
-query attention, and GPU sampling. Attention keeps dot products, scores, probabilities, and value accumulation in
-FP32, rounding only its output to FP16. This avoids losing near-tied scores at large magnitudes. These kernels favor
+Small CUDA kernels provide embedding lookup, default full rotary embedding, paged cache writes, causal grouped
+query attention over the paged cache, and GPU sampling. Attention keeps dot products, scores, probabilities, and
+value accumulation in FP32, rounding only its output to FP16. This avoids losing near-tied scores at large
+magnitudes. These kernels favor
 accuracy over speed. Residual sums stay in FP32 through the existing attention-split wrappers; normalization casts
 back to FP16 before each projection. Rotary constants come from the checkpoint's own module in FP32. Rotation also
 uses FP32 intermediates and rounds only the query/key outputs to FP16. The existing standalone exporter bundles all
@@ -36,10 +37,15 @@ writing each token's keys and values once at its absolute position; it never rec
 reads the previous GPU-selected token. The host updates one position scalar and reads one selected token after the
 prompt is consumed. Full logits are downloaded only through the explicit diagnostic operation.
 
-The cache has one preallocated contiguous K and V array per layer. A new request resets the position and prompt
-length. Attention can only read positions already overwritten by that request, so clearing the entire cache is
-unnecessary. Activations and scratch remain allocated for the model lifetime; this version does not reuse storage
-between layers or deduplicate the embedding and tied output-head weight copies.
+The cache is one paged K and one paged V buffer per layer: the plan declares them paged along the token axis with
+`page_tokens` tokens per page (`export_model(page_tokens=…)`, `emmy generate --page-tokens`), the two cache kernels
+resolve a position to a page and a slot inside it, and the runtime allocates every page at load and binds the page
+tables (see the runtime's paged-buffer contract). The default page spans the whole context, so the table has one
+entry and the addressing is that of the contiguous array it replaces; a smaller page changes only the addressing,
+never the tokens generated. A new request resets the position and prompt length. Attention can only read positions
+already overwritten by that request, so clearing the entire cache is unnecessary. Activations and scratch remain
+allocated for the model lifetime; this version does not reuse storage between layers or deduplicate the embedding and
+tied output-head weight copies.
 
 Graph capture records one step without executing a warmup. Replaying the graph advances the model exactly once,
 including when capture is first enabled during decode. All addresses remain stable across positions and requests.

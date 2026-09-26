@@ -314,7 +314,7 @@ def test_rotary_rounds_only_the_output(tmp_path):
     data = {"q": q, "k": k, "v": v, "cosine": cosine, "sine": sine, "position": np.array([0], np.int64)}
     source = (
         "#define HIDDEN 32\n#define HEADS 4\n#define KV_HEADS 2\n#define HEAD_DIM 128\n"
-        "#define VOCAB 32\n#define SCALE 0.08838834764831845f\n" + SOURCE
+        "#define VOCAB 32\n#define SCALE 0.08838834764831845f\n#define PAGE_TOKENS 1\n" + SOURCE
     )
     buffers = [
         BufferSpec(n, tuple(Dim(x) for x in a.shape), I64 if n == "position" else F32 if n in ("cosine", "sine") else F16, "input")
@@ -322,7 +322,8 @@ def test_rotary_rounds_only_the_output(tmp_path):
     ]
     outputs = {"rotated": q, "keys": k, "values": v}
     buffers += [BufferSpec(n, tuple(Dim(x) for x in a.shape), F16, "output") for n, a in outputs.items()]
-    args = tuple(data) + tuple(outputs)
+    # The cache kernels address K and V through page tables; one page holds this one position.
+    args = tuple(data) + ("rotated", "keys__pages", "values__pages")
     plan = ExecutionPlan(
         "cuda",
         list(data),
@@ -332,6 +333,7 @@ def test_rotary_rounds_only_the_output(tmp_path):
         {},
         [LaunchSpec("rope", "native_rope_cache", args, ((4,), (1,), (1,)), ((128,), (1,), (1,)), 0, ())],
         {"native_rope_cache": KernelSpec(source=source)},
+        paged={"keys": (0, 2, None), "values": (0, 2, None)},
     )
     with gpu_lock():
         root = save_executable(tmp_path / "rope", {"rope": plan}, bindings={"rope": {n: a.tobytes() for n, a in data.items()}}, key={})
@@ -355,8 +357,9 @@ def test_rotary_rounds_only_the_output(tmp_path):
         np.testing.assert_array_equal(np.fromfile(tmp_path / "values", np.float16).reshape(v.shape), v)
 
 
+@pytest.mark.parametrize("page_tokens", [4096, 128], ids=["one_page", "paged"])
 @pytest.mark.parametrize("near_tie", [False, True], ids=["random", "near_tie"])
-def test_attention_reads_only_the_written_cache_prefix(tmp_path, near_tie):
+def test_attention_reads_only_the_written_cache_prefix(tmp_path, near_tie, page_tokens):
     from emmy.compiler.backend.pack import save_executable
     from emmy.compiler.backend.plan import BufferSpec, ExecutionPlan, KernelSpec, LaunchSpec
     from emmy.compiler.dim import Dim
@@ -380,11 +383,13 @@ def test_attention_reads_only_the_written_cache_prefix(tmp_path, near_tie):
         values[0] = 1
     source = (
         "#define HIDDEN 32\n#define HEADS 4\n#define KV_HEADS 2\n#define HEAD_DIM 128\n"
-        "#define VOCAB 32\n#define SCALE 0.08838834764831845f\n" + SOURCE
+        f"#define VOCAB 32\n#define SCALE 0.08838834764831845f\n#define PAGE_TOKENS {page_tokens}\n" + SOURCE
     )
     data = {"q": query, "k": keys, "v": values, "position": np.array([0], np.int64)}
     buffers = [BufferSpec(n, tuple(Dim(x) for x in a.shape), I64 if n == "position" else F16, "input") for n, a in data.items()]
     buffers.append(BufferSpec("attention", (Dim(4), Dim(128)), F16, "output"))
+    # K and V are paged along the token axis: the runtime pages them at load, the bound bytes
+    # land in those pages, and the kernel reads them through the page tables.
     plan = ExecutionPlan(
         "cuda",
         list(data),
@@ -396,7 +401,7 @@ def test_attention_reads_only_the_written_cache_prefix(tmp_path, near_tie):
             LaunchSpec(
                 "attention",
                 "native_attention",
-                (*data, "attention"),
+                ("q", "k__pages", "v__pages", "position", "attention"),
                 ((4,), (1,), (1,)),
                 ((128,), (1,), (1,)),
                 MAX_CONTEXT * 4,
@@ -405,6 +410,7 @@ def test_attention_reads_only_the_written_cache_prefix(tmp_path, near_tie):
             )
         ],
         {"native_attention": KernelSpec(source=source)},
+        paged={"k": (0, page_tokens, None), "v": (0, page_tokens, None)},
     )
     with gpu_lock():
         root = save_executable(
