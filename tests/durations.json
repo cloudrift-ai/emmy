@@ -2845,5 +2845,7 @@
  "tests/compiler/realization/test_realization.py::test_realization[attention/sdpa-gqa-decode-split-kv.json-offered]": 2.2,
  "tests/compiler/realization/test_realization.py::test_realization[attention/sdpa-gqa-decode-split-kv.json-realized]": 1.8,
  "tests/compiler/realization/test_realization.py::test_realization[attention/sdpa-hd128-staged-value.json-offered]": 1.3,
- "tests/compiler/realization/test_realization.py::test_realization[attention/sdpa-hd256-f16acc-value-wide-row.json-realized]": 1.33
+ "tests/compiler/realization/test_realization.py::test_realization[attention/sdpa-hd256-f16acc-value-wide-row.json-realized]": 1.33,
+ "tests/compiler/e2e/test_matmul_coverage.py::test_matvec_splitk_matches_the_reference@cuda": 4.98,
+ "tests/compiler/passes/test_split_fresh_kernels.py::test_a_matvec_partial_tiles_its_unit_row_not_the_partition": 4.73
 }
