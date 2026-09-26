@@ -709,24 +709,31 @@ def _substitute_and_fold(produced: Fold, name: str, sigma: Sigma, ctx: SimplifyC
 
 
 def _divmod_in_edge(edge: Fold, name: str, factor: int) -> tuple[bool, bool]:
-    """``(the edge reads name / factor, the edge reads name % factor)`` anywhere under it."""
-    div = mod = False
+    """``(the edge reads name / factor, the edge reads name's low part)`` anywhere under it.
+
+    The low part is ``name % factor`` or ``name`` itself: a plain read depends on both halves, as
+    a workspace indexed by the fused name does when a cut materialized one operand at it."""
+    div = low = False
     pending = [edge]
     while pending:
         term = pending.pop()
         pending.extend(term.operands)
         for stmt in term.lift.body.iter():
             for expr in stmt.exprs():
+                uses = covered = 0
                 for part in expr.subterms():
+                    uses += isinstance(part, Var) and part.name == name
                     if (
                         isinstance(part, BinaryExpr)
                         and part.left == Var(name)
                         and isinstance(part.right, Literal)
                         and part.right.value == factor
                     ):
+                        covered += 1
                         div = div or part.op in ("/", "//")
-                        mod = mod or part.op == "%"
-    return div, mod
+                        low = low or part.op == "%"
+                low = low or uses > covered
+    return div, low
 
 
 def _straddles_a_contraction(produced: Fold, name: str, factor: int) -> bool:
@@ -758,8 +765,9 @@ def _straddles_a_contraction(produced: Fold, name: str, factor: int) -> bool:
 
 
 def _fused_pair_factor(produced: Fold, axes: tuple) -> tuple[str, int] | None:
-    """A grid coordinate read ONLY as ``i / c`` beside ``i % c`` is TWO coordinates wearing one
-    name — ``(the axis, c)``, or ``None``.
+    """A grid coordinate read as ``i / c`` beside ``i % c`` or ``i`` itself is TWO coordinates
+    wearing one name — ``(the axis, c)``, or ``None``. The plain read is a workspace a cut stored
+    at the fused index: the other operand of the same contraction still reads ``i / c``.
 
     Attention's (head, head-dim) pair arrives fused: the projection downstream reshapes the
     attention output to one flat width, and a cut inherits that spelling. While the pair stays
@@ -804,7 +812,7 @@ def _fused_pair_factor(produced: Fold, axes: tuple) -> tuple[str, int] | None:
                             elif part.op == "%":
                                 remainders.add(int(part.right.value))
                                 covered += 1
-        if len(divisors) == 1 and divisors == remainders and uses == covered and uses:
+        if len(divisors) == 1 and remainders <= divisors and (remainders or uses > covered):
             (factor,) = divisors
             if 1 < factor < extent and extent % factor == 0 and _straddles_a_contraction(produced, name, factor):
                 return name, factor
