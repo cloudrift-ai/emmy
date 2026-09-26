@@ -947,6 +947,54 @@ def test_a_clustered_value_cut_once_computes_the_right_answer(m: int) -> None:
     np.testing.assert_allclose(got, expected, rtol=2e-2, atol=2e-1)
 
 
+def _column_seam(column, spelling: str) -> CutSite:
+    """A cone reading its weight at ``column``, an expression of the captured ``n``."""
+    node = projection((), (Load(name="w", input="w", index=(column, Var("k"))),), results=("w",))
+    return CutSite(node=node, spelling=spelling, axes=(Axis("n", 8), Axis("k", 8)), dtypes=(F16,))
+
+
+def test_copies_read_at_shifted_columns_cluster_onto_the_plain_read() -> None:
+    """RoPE's rotate-half reads one projection at its own column and at the two half-shifted ones:
+    one value at three addresses. The plain copy computes it, and each shifted copy reads its
+    workspace at the column expression it spelled."""
+    from emmy.compiler.ir.expr import Literal, TernaryExpr
+    from emmy.compiler.pipeline.passes.tile._cut import _cluster_value_seams
+
+    n, low = Var("n"), Var("n").lt(4)
+    lower = TernaryExpr(cond=low, if_true=Literal(0, "int"), if_false=n + Literal(-4, "int"))
+    upper = Literal(4, "int") + TernaryExpr(cond=low, if_true=n, if_false=Literal(0, "int"))
+    seams = [_column_seam(lower, "PLACE@map.1/inner"), _column_seam(upper, "PLACE@map.2/inner"), _column_seam(n, "PLACE@map.3/inner")]
+
+    (clustered,) = _cluster_value_seams(seams, (Axis("n", 8), Axis("k", 8)))
+
+    assert clustered.spelling == "PLACE@map.3/inner"
+    assert sorted(dict(pairs)["n"].pretty() for _, pairs, _ in clustered.siblings) == sorted((lower.pretty(), upper.pretty()))
+
+
+def test_a_column_read_past_the_plain_copy_is_not_its_value() -> None:
+    """A shifted read reaching past the plain copy's axis reads columns that copy never computes."""
+    from emmy.compiler.ir.expr import Literal
+    from emmy.compiler.pipeline.passes.tile._cut import _cluster_value_seams
+
+    seams = [_column_seam(Var("n") + Literal(4, "int"), "PLACE@map.1/inner"), _column_seam(Var("n"), "PLACE@map.2/inner")]
+
+    assert not any(seam.siblings for seam in _cluster_value_seams(seams, (Axis("n", 8), Axis("k", 8))))
+
+
+def test_a_conversion_to_the_dtype_a_workspace_stores_reads_the_workspace_itself() -> None:
+    """A reader's rounding of a value the workspace already stores rounded is a no-op copy; left in
+    place it keeps the edge a computed cone, which the chunk tier refuses for its streamed value."""
+    from emmy.compiler.dtype import F32
+    from emmy.compiler.pipeline.passes.tile._cut import _without_identity_casts
+
+    rounded = projection((slab("x", "ws", "m"),), (Assign(name="y", op="copy", args=("x",), dtype=F16),), ("y",))
+    root = projection((rounded,), (Assign(name="z", op="exp", args=("y",)),), ("z",))
+
+    kept = _without_identity_casts(root, {"ws": F16}).operands[0]
+    assert kept.as_slab() is not None and kept.exposes == ("y",)
+    assert _without_identity_casts(root, {"ws": F32}) is root
+
+
 def test_a_row_spelled_at_any_occurrence_of_a_clustered_value_names_its_cut() -> None:
     """The arm that cuts a clustered seam spells every occurrence, and a route recorded at one of
     them — a row from before the clustering, a pin at the copy a hand found — selects that arm."""
