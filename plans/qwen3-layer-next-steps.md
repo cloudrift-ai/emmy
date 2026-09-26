@@ -51,7 +51,7 @@ about 30 MB of weights, about 9 µs at the H100's bandwidth, against 73 µs of k
    holds perf rows for the pieces and no routing row, so nothing prices the split arm. The #914 s1 files work around it
    by recording the prior's set from an empty tune DB, which leaves the A100's six-channel GEMV on a poor schedule
    (81 µs under the prior against 47 µs measured). Fixing the pricing gives both at once.
-2. **The six-channel q/k GEMV at s1** (47.7 µs on the H100, the largest s1 piece). The q and k projections and their
+2. **The six-channel q/k GEMV at s1** (the largest A100 s1 piece). The q and k projections and their
    rotate-half copies lower as one GEMV with six channels that reads the q and k weights three times. Find why the
    route leaves the rotate-half copies inside the projection instead of reading the projection's workspace; a cut at
    the projection seam should make it one read of each weight.
