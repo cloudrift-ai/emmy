@@ -694,7 +694,8 @@ class CompiledProgram:
         """Point one operand at ``tensor``'s memory: a buffer chained onto another program's (a
         producer's output onto a consumer's input, so the consumer's device upload becomes a
         self-copy skip), or an operand the plan never declares as a buffer — an indirect
-        operand's pointer table or selector, which only the caller can supply. A buffer's
+        operand's pointer table or selector, or a paged buffer's page table (``<name>__pages``,
+        the device addresses of its pages), which only the caller can supply. A buffer's
         tensor must be contiguous and at least as large as its region; the runtime drops any
         captured graph, since it baked the old address."""
         if not _is_device_tensor(tensor) or not tensor.is_contiguous():

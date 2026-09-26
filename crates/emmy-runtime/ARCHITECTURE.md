@@ -41,14 +41,43 @@ directory. The whole plan grammar is read: an `int` literal, a `"name"` variable
   largest first, deterministically. The host lends memory for every region or the runtime allocates and zeroes its
   own; a region that survives a rebind keeps its contents. Empty buffers have an address but return zero bytes.
 - Ordered launch arguments follow `args`. An indirect operand expands in place to its table pointer, selector pointer
-  and slot — operands the host binds by address, which the plan never declares as buffers. A TMA descriptor is
-  encoded per environment at the source buffer's resolved shape (a prefix-packed symbolic source has the resolved
-  strides, not the allocation's) and passed as a pointer to its 128 bytes. `zero_outputs` clears a buffer before its
-  launch; `zero_prologues` records zeroing performed inside the kernel and adds no extra memset.
+  and slot — operands the host binds by address, which the plan never declares as buffers; a paged buffer's page
+  table (below) is bound the same way. A TMA descriptor is encoded per environment at the source buffer's resolved
+  shape (a prefix-packed symbolic source has the resolved strides, not the allocation's) and passed as a pointer to
+  its 128 bytes. `zero_outputs` clears a buffer before its launch; `zero_prologues` records zeroing performed inside
+  the kernel and adds no extra memset.
 - Cubins must load on the live device. A pack's recorded architecture must equal the device's exact
   `sm_<major><minor>`; an in-process program was compiled for the live device by the host.
 - A timed launch whose completion event misses its deadline raises `HungKernel`; a launch that reports zero elapsed
   time is a degenerate no-op and raises, so it can never win a benchmark.
+
+## Paged buffers
+
+A KV cache stops being one allocation as soon as it belongs to a request rather than to a program. A plan may therefore
+declare an input or output buffer **paged** (`paged: {name: {axis, page, start}}`): cut along one axis every `page`
+elements, with an optional `start` naming the runtime argument that shifts a write's coordinate into the cache's own.
+The compiler renames that buffer's launch argument to `<name>__pages`, so what the kernel receives is a table of page
+pointers rather than one base, and every read and write resolves its page before its offset inside one. Shapes are
+unchanged — the declaration says how the memory is reached, not what it holds.
+
+A paged buffer has no place in the layout: no region, no placement, nothing to zero per launch. Its table is an
+operand the plan names but never declares, bound like an indirect operand's. A load gives every paged buffer zeroed
+pages of the runtime's own spanning its declared shape — a cache covering the context — and binds their table; the
+buffer then binds and reads back like any other, its flat bytes scattered into and gathered from those pages one
+strided copy per page. A host may instead bind a table of its own (`set_external`), and then owns the pages behind
+it. `alloc_pages` re-pages a buffer at a count of the caller's choosing, because a step's buffer spans its chunk while
+the cache spans a request and the plan knows only the page's shape; `read_page` copies one such page back. The
+`start` a step writes at is an ordinary runtime argument, set through the symbol environment (`set_env`) like any
+other.
+
+`scripts/export_paged_pack.py` exports a pack whose one program is a step of a cache fill;
+`crates/emmy-runtime/tests/paged.rs` runs it against a real device when `EMMY_PAGED_PACK` points at the result, and
+skips otherwise, because the pack needs a compiler this crate does not have.
+
+Residency is deliberately absent. Whether a page lives in device or host memory would be a property of a page, and
+nothing above it would change; which processor runs a launch is a separate axis again, and belongs on the launch, not
+on the buffer. Neither exists yet, and a host-resident page read by a CUDA kernel crosses PCIe per access, so neither
+is worth building before there is something to measure.
 
 ## Artifact contract
 

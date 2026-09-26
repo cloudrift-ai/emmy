@@ -140,6 +140,8 @@ impl Generator {
             artifact.program.outputs == ["logits", "next_token"],
             "invalid generation outputs"
         );
+        // The KV cache is the paged buffers' pages, which the load sized to the context and
+        // which a request keeps from prompt to EOS.
         Ok(Self {
             executor: Executor::load(device, artifact)?,
             config,

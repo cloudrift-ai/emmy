@@ -139,8 +139,7 @@ def test_paged_read_matches_the_contiguous_read():
     """Reading K/V from a table of four 8-key pages gives bit-identical results to reading them
     from one contiguous 32-key buffer. Only the addressing differs, so anything but equality is
     an addressing bug."""
-    pytest.importorskip("cupy")
-    import cupy as cp
+    import torch
 
     from emmy.compiler.backend.cuda.program import CompiledProgram
     from emmy.compiler.backend.gpu_lock import gpu_lock
@@ -154,10 +153,11 @@ def test_paged_read_matches_the_contiguous_read():
         contiguous.run_once()
         reference = contiguous.outputs()[out_name].copy()
 
+        # The paged K and V carry no bytes of their own: only their tables are bound.
         program = CompiledProgram.build(paged, dict(feed))
         pages: list = []  # keep every page alive: the table holds raw device pointers
         for name in ("k", "v"):
-            program.arrays[f"{name}__pages"] = _split_into_pages(cp, feed[name], pages)
+            program.alias_buffer(f"{name}__pages", _split_into_pages(torch, feed[name], pages))
         program.run_once()
         got = program.outputs()[out_name]
 
@@ -171,8 +171,6 @@ def test_cache_filled_in_chunks_then_attended():
     reads the whole cache back through the same table. The result must equal the same pipeline
     run on one contiguous buffer — a wrong page, a wrong offset or a disagreeing layout between
     the write and the read all break it."""
-    pytest.importorskip("cupy")
-    import cupy as cp
     import torch
 
     from emmy.compiler.backend.cuda.program import CompiledProgram
@@ -186,32 +184,38 @@ def test_cache_filled_in_chunks_then_attended():
     reader = _compile_read(paged=True)
 
     with gpu_lock():
-        cache = [cp.zeros((1, KV_HEADS, PAGE, HEAD_DIM), dtype=cp.float32) for _ in range(SEQ // PAGE)]
-        table = cp.asarray(np.array([page.data.ptr for page in cache], dtype=np.uint64))
+        cache = [torch.zeros((1, KV_HEADS, PAGE, HEAD_DIM), dtype=torch.float32, device="cuda") for _ in range(SEQ // PAGE)]
+        table = _table(torch, cache)
+        torch.cuda.synchronize()  # the zero fill is on torch's stream, which the runtime's launches do not wait on
 
-        chunk = np.ascontiguousarray(kin.numpy()[:, :, :CHUNK, :])
-        step = CompiledProgram.build(writer, {writer.inputs[0]: chunk})
-        step.arrays[f"{writer.outputs[0]}__pages"] = table
+        step = CompiledProgram.build(writer, {writer.inputs[0]: np.ascontiguousarray(kin.numpy()[:, :, :CHUNK, :])})
+        step.alias_buffer(f"{writer.outputs[0]}__pages", table)
         for past in range(0, SEQ, CHUNK):
-            step.arrays[writer.inputs[0]].set(np.ascontiguousarray(kin.numpy()[:, :, past : past + CHUNK, :]))
+            step.upload_prefix({writer.inputs[0]: np.ascontiguousarray(kin.numpy()[:, :, past : past + CHUNK, :])})
             step.set_sym_values({"past": past})
             step.run_once()
 
         feed = {name: t.numpy() for name, t in zip(("q", "k", "v", "mask"), (q, kin, v, mask), strict=True)}
         attend = CompiledProgram.build(reader, feed)
         values: list = []  # keep V's pages alive for as long as its table is bound
-        attend.arrays["k__pages"] = table  # the pages the four steps just filled
-        attend.arrays["v__pages"] = _split_into_pages(cp, v.numpy(), values)
+        attend.alias_buffer("k__pages", table)  # the pages the four steps just filled
+        attend.alias_buffer("v__pages", _split_into_pages(torch, v.numpy(), values))
         attend.run_once()
         got = attend.outputs()[reader.outputs[0]]
 
     np.testing.assert_allclose(got, reference, rtol=1e-5, atol=1e-5)
 
 
-def _split_into_pages(cp, array, keep: list):
+def _table(torch, pages: list):
+    """The device table one buffer addresses through: its pages' addresses, in cache order."""
+    return torch.tensor([page.data_ptr() for page in pages], dtype=torch.int64, device="cuda")
+
+
+def _split_into_pages(torch, array, keep: list):
     """A page table over ``array``'s key axis. Pages are appended to ``keep`` so the device memory
     the table points at outlives the call; pass a list that stays alive for as long as the table."""
     start = len(keep)
     for offset in range(0, SEQ, PAGE):
-        keep.append(cp.ascontiguousarray(cp.asarray(array[:, :, offset : offset + PAGE, :])))
-    return cp.asarray(np.array([page.data.ptr for page in keep[start:]], dtype=np.uint64))
+        keep.append(torch.from_numpy(np.ascontiguousarray(array[:, :, offset : offset + PAGE, :])).cuda())
+    torch.cuda.synchronize()  # the copies are on torch's stream, which the runtime's launches do not wait on
+    return _table(torch, keep[start:])

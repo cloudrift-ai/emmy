@@ -5,7 +5,9 @@
 //! (a torch tensor the serving runner owns). Launches go to the executor's own stream, or to a
 //! stream the host adopted for the duration of a call.
 
-use crate::artifact::{Artifact, Env, Layout, Placement, Program, Tma, dimensions, dtype_bytes};
+use crate::artifact::{
+    Artifact, Env, Layout, Paging, Placement, Program, Tma, dimensions, dtype_bytes,
+};
 use anyhow::{Context, Result, bail, ensure};
 use cudarc::driver::{CudaContext, CudaEvent, CudaGraph, CudaStream, result, sys};
 use serde::Serialize;
@@ -511,8 +513,11 @@ pub struct Executor {
     layout: Layout,
     regions: BTreeMap<String, Region>,
     /// Operands the plan names but never declares as buffers — an indirect operand's pointer
-    /// table and selector — bound by the host by address.
+    /// table and selector, a paged buffer's page table — bound by the host by address, or
+    /// filled here from pages of the runtime's own.
     externals: BTreeMap<String, Region>,
+    /// The pages the runtime allocated for a paged buffer, in the order its table lists them.
+    pages: BTreeMap<String, Vec<Region>>,
     bound: BTreeSet<String>,
     descriptors: BTreeMap<EnvKey, BTreeMap<(usize, String), Descriptor>>,
     /// Whole-program graphs by symbol environment, most recently used last.
@@ -587,6 +592,7 @@ impl Executor {
             layout: Layout::default(),
             regions: BTreeMap::new(),
             externals: BTreeMap::new(),
+            pages: BTreeMap::new(),
             bound: BTreeSet::new(),
             descriptors: BTreeMap::new(),
             graphs: Vec::new(),
@@ -595,6 +601,13 @@ impl Executor {
             window: None,
         };
         executor.provision(layout, regions.as_ref())?;
+        // A paged buffer starts with pages of the runtime's own spanning its declared shape —
+        // a KV cache covering the context — until a host binds a table of its own.
+        for name in executor.program.paged.keys().cloned().collect::<Vec<_>>() {
+            let count = executor.program.paged[&name]
+                .page_count(executor.program.buffer(&name)?, &executor.env)?;
+            executor.alloc_pages(&name, count)?;
+        }
         executor.own_stream.synchronize()?;
         let allocation_ms = started.elapsed().as_secs_f64() * MILLISECONDS_PER_SECOND;
         let started = Instant::now();
@@ -668,10 +681,24 @@ impl Executor {
     }
 
     fn placement(&self, name: &str) -> Result<&Placement> {
-        self.layout
-            .buffers
-            .get(name)
-            .with_context(|| format!("unknown buffer {name}"))
+        self.layout.buffers.get(name).with_context(|| {
+            if let Some(paged) = self.paged_table(name) {
+                format!("paged buffer {paged} has no page table bound")
+            } else if self.program.paged.contains_key(name) {
+                format!("buffer {name} is paged: it has no single allocation")
+            } else {
+                format!("unknown buffer {name}")
+            }
+        })
+    }
+
+    /// The paged buffer whose page table `name` is.
+    fn paged_table(&self, name: &str) -> Option<&str> {
+        self.program
+            .paged
+            .keys()
+            .map(String::as_str)
+            .find(|paged| Paging::table(paged) == name)
     }
 
     fn address(&self, name: &str) -> Result<u64> {
@@ -687,11 +714,13 @@ impl Executor {
     }
 
     /// Bind an operand the plan never declares as a buffer (an indirect operand's table or
-    /// selector) to memory the host lends.
+    /// selector, a paged buffer's page table) to memory the host lends.
     pub fn set_external(&mut self, name: &str, ptr: u64, len: usize) -> Result<()> {
         self.context.bind_to_thread()?;
+        let paged = self.paged_table(name).map(str::to_owned);
         ensure!(
             self.layout.buffers.contains_key(name)
+                || paged.is_some()
                 || self
                     .program
                     .launches
@@ -704,6 +733,126 @@ impl Executor {
         self.launch_graphs = None;
         self.externals
             .insert(name.to_owned(), Region::lent(ptr, len));
+        if let Some(paged) = paged {
+            // The table is what binds a paged buffer: there is no slab to upload into.
+            self.pages.remove(&paged);
+            self.bound.insert(paged);
+        }
+        Ok(())
+    }
+
+    pub fn page_bytes(&self, name: &str) -> Result<usize> {
+        let paging = self
+            .program
+            .paged
+            .get(name)
+            .with_context(|| format!("buffer {name} is not paged"))?;
+        paging.page_bytes(self.program.buffer(name)?, &self.env)
+    }
+
+    /// Give a paged buffer `count` zeroed pages of the runtime's own and bind their table in
+    /// place of the buffer's pointer. A load gives every paged buffer the pages its declared
+    /// shape spans; a step whose buffer spans a chunk of a larger cache re-pages it here.
+    pub fn alloc_pages(&mut self, name: &str, count: usize) -> Result<()> {
+        self.context.bind_to_thread()?;
+        ensure!(count > 0, "a paged buffer needs at least one page");
+        let bytes = self.page_bytes(name)?;
+        self.synchronize()?;
+        self.graphs.clear();
+        self.launch_graphs = None;
+        let stream = self.own_stream.cu_stream();
+        let pages = (0..count)
+            .map(|_| Region::allocate(bytes, stream))
+            .collect::<Result<Vec<_>>>()?;
+        let addresses: Vec<u8> = pages.iter().flat_map(|p| p.ptr.to_le_bytes()).collect();
+        let table = Region::allocate(addresses.len(), stream)?;
+        unsafe {
+            result::memcpy_htod_async(table.ptr, &addresses, stream)?;
+            result::stream::synchronize(stream)?;
+        }
+        self.externals.insert(Paging::table(name), table);
+        self.pages.insert(name.to_owned(), pages);
+        self.bound.insert(name.to_owned());
+        Ok(())
+    }
+
+    /// Copy one of a paged buffer's runtime-owned pages back to the host.
+    pub fn read_page(&self, name: &str, page: usize) -> Result<Vec<u8>> {
+        self.context.bind_to_thread()?;
+        let region = self
+            .pages
+            .get(name)
+            .with_context(|| format!("buffer {name} has no pages of the runtime's own"))?
+            .get(page)
+            .context("page index out of range")?;
+        let stream = self.stream();
+        let mut bytes = vec![0u8; region.len];
+        unsafe {
+            result::memcpy_dtoh_async(&mut bytes, region.ptr, stream)?;
+            result::stream::synchronize(stream)?;
+        }
+        Ok(bytes)
+    }
+
+    /// Move a paged buffer's flat host bytes into its pages (`to_pages`) or gather them back:
+    /// one strided copy per page, since a page holds, for every index before the paged axis,
+    /// one `page`-row slab of the flat array. Only pages of the runtime's own can be copied
+    /// through; a host that bound a table of its own reads and writes its pages itself.
+    fn copy_pages(
+        &self,
+        name: &str,
+        host: *mut u8,
+        len: usize,
+        to_pages: bool,
+        stream: sys::CUstream,
+    ) -> Result<()> {
+        let pages = self.pages.get(name).with_context(|| {
+            format!("paged buffer {name} is addressed through the host's own pages")
+        })?;
+        let paging = &self.program.paged[name];
+        let (outer, extent, row) = paging.geometry(self.program.buffer(name)?, &self.env)?;
+        ensure!(
+            len == outer * extent * row,
+            "{len} bytes do not fill paged buffer {name} ({} bytes)",
+            outer * extent * row
+        );
+        let page = usize::try_from(paging.page)?;
+        ensure!(
+            pages.len() * page >= extent,
+            "paged buffer {name} spans {extent} rows, its {} pages hold {}",
+            pages.len(),
+            pages.len() * page
+        );
+        for (index, region) in pages.iter().enumerate().take(extent.div_ceil(page)) {
+            let flat = unsafe { host.add(index * page * row) };
+            let mut copy = sys::CUDA_MEMCPY2D {
+                srcXInBytes: 0,
+                srcY: 0,
+                srcMemoryType: sys::CUmemorytype::CU_MEMORYTYPE_DEVICE,
+                srcHost: std::ptr::null(),
+                srcDevice: region.ptr,
+                srcArray: std::ptr::null_mut(),
+                srcPitch: page * row,
+                dstXInBytes: 0,
+                dstY: 0,
+                dstMemoryType: sys::CUmemorytype::CU_MEMORYTYPE_HOST,
+                dstHost: flat.cast(),
+                dstDevice: 0,
+                dstArray: std::ptr::null_mut(),
+                dstPitch: extent * row,
+                WidthInBytes: page.min(extent - index * page) * row,
+                Height: outer,
+            };
+            if to_pages {
+                (copy.srcMemoryType, copy.dstMemoryType) = (copy.dstMemoryType, copy.srcMemoryType);
+                (copy.srcHost, copy.dstHost) = (flat.cast(), std::ptr::null_mut());
+                (copy.srcDevice, copy.dstDevice) = (0, region.ptr);
+                (copy.srcPitch, copy.dstPitch) = (copy.dstPitch, copy.srcPitch);
+            }
+            unsafe {
+                sys::cuMemcpy2DAsync_v2(&copy, stream).result()?;
+            }
+        }
         Ok(())
     }
 
@@ -731,22 +880,26 @@ impl Executor {
     }
 
     fn upload(&mut self, name: &str, bytes: &[u8]) -> Result<()> {
-        let placement = self.placement(name)?;
-        ensure!(
-            bytes.len() <= placement.bytes,
-            "{} bytes exceed buffer {name} ({} bytes)",
-            bytes.len(),
-            placement.bytes
-        );
         // Host uploads always go through the executor's own stream and complete before this
         // returns: the caller may release the host slice, and a host stream the runtime
         // adopted may be recording a graph, which a pageable copy or a synchronize would
         // break. The upload lands before any later launch on any stream.
-        let dst = self.address(name)?;
         let stream = self.own_stream.cu_stream();
-        if !bytes.is_empty() {
-            unsafe {
-                result::memcpy_htod_async(dst, bytes, stream)?;
+        if self.program.paged.contains_key(name) {
+            self.copy_pages(name, bytes.as_ptr().cast_mut(), bytes.len(), true, stream)?;
+        } else {
+            let placement = self.placement(name)?;
+            ensure!(
+                bytes.len() <= placement.bytes,
+                "{} bytes exceed buffer {name} ({} bytes)",
+                bytes.len(),
+                placement.bytes
+            );
+            let dst = self.address(name)?;
+            if !bytes.is_empty() {
+                unsafe {
+                    result::memcpy_htod_async(dst, bytes, stream)?;
+                }
             }
         }
         unsafe {
@@ -770,6 +923,10 @@ impl Executor {
     /// is the buffer skips the copy: a producer's output chained onto the consumer's input.
     pub fn bind_device(&mut self, name: &str, src: u64, nbytes: usize) -> Result<()> {
         self.context.bind_to_thread()?;
+        ensure!(
+            !self.program.paged.contains_key(name),
+            "paged buffer {name} takes host bytes or a page table, not a device copy"
+        );
         let placement = self.placement(name)?;
         ensure!(
             nbytes <= placement.bytes,
@@ -802,11 +959,7 @@ impl Executor {
         self.env = full_env;
         self.provision(layout, regions.as_ref())?;
         for (name, data) in &bindings {
-            let role = &self.program.buffer(name)?.role;
-            ensure!(
-                role == "input" || role == "constant",
-                "only inputs and constants may be bound: {name}"
-            );
+            self.program.check_bindable(name)?;
             self.upload(name, data)?;
         }
         self.apply_runtime_constants()
@@ -818,6 +971,9 @@ impl Executor {
         let mut merged = self.env.clone();
         merged.extend(env);
         for buffer in &self.program.buffers {
+            if self.program.paged.contains_key(&buffer.name) {
+                continue;
+            }
             let placement = self.placement(&buffer.name)?;
             let need = buffer.byte_len(&merged)?;
             ensure!(
@@ -1269,12 +1425,17 @@ impl Executor {
     /// completed.
     pub fn read(&self, name: &str) -> Result<Vec<u8>> {
         self.context.bind_to_thread()?;
-        let placement = self.placement(name)?;
         let stream = self.stream();
-        let mut bytes = vec![0u8; placement.bytes];
-        if !bytes.is_empty() {
-            unsafe {
-                result::memcpy_dtoh_async(&mut bytes, self.address(name)?, stream)?;
+        let mut bytes;
+        if self.program.paged.contains_key(name) {
+            bytes = vec![0u8; self.program.buffer(name)?.byte_len(&self.env)?];
+            self.copy_pages(name, bytes.as_mut_ptr(), bytes.len(), false, stream)?;
+        } else {
+            bytes = vec![0u8; self.placement(name)?.bytes];
+            if !bytes.is_empty() {
+                unsafe {
+                    result::memcpy_dtoh_async(&mut bytes, self.address(name)?, stream)?;
+                }
             }
         }
         unsafe {

@@ -187,6 +187,59 @@ impl Buffer {
     }
 }
 
+/// How one buffer is virtualized: not one allocation but a table of equal-sized pages, cut
+/// along `axis` every `page` elements. `start` names the runtime argument that shifts the
+/// buffer's own coordinate to an absolute one, which is how a step writes only its new rows.
+/// The plan says what shape a page has; whose pages they are is the host's or the runtime's.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Paging {
+    pub axis: usize,
+    pub page: u64,
+    #[serde(default)]
+    pub start: Option<String>,
+}
+
+impl Paging {
+    /// The launch operand that carries the page table in place of the buffer's pointer.
+    pub fn table(name: &str) -> String {
+        format!("{name}__pages")
+    }
+
+    /// How the buffer's flat bytes split into pages under `env`: `(outer, extent, row)` — the
+    /// product of the axes before the paged one, the paged axis' extent, and the bytes of
+    /// everything after it. A page holds, for each of the `outer` indices, `page` rows.
+    pub fn geometry(&self, buffer: &Buffer, env: &Env) -> Result<(usize, usize, usize)> {
+        let shape = buffer.resolve_shape(env)?;
+        ensure!(
+            self.axis < shape.len() && self.page > 0,
+            "invalid paging for {}",
+            buffer.name
+        );
+        let outer: i64 = shape[..self.axis].iter().product();
+        let row =
+            shape[self.axis + 1..].iter().product::<i64>() * dtype_bytes(&buffer.dtype)? as i64;
+        Ok((
+            usize::try_from(outer)?,
+            usize::try_from(shape[self.axis])?,
+            usize::try_from(row)?,
+        ))
+    }
+
+    /// One page's byte size: the buffer's shape with the paged axis cut to `page`.
+    pub fn page_bytes(&self, buffer: &Buffer, env: &Env) -> Result<usize> {
+        let (outer, _, row) = self.geometry(buffer, env)?;
+        Ok(outer * usize::try_from(self.page)? * row)
+    }
+
+    /// How many pages the buffer's declared shape spans. A cache-shaped buffer means that
+    /// literally; a step's chunk-shaped one does not, and its caller sizes the cache itself.
+    pub fn page_count(&self, buffer: &Buffer, env: &Env) -> Result<usize> {
+        let (_, extent, _) = self.geometry(buffer, env)?;
+        Ok(extent.div_ceil(usize::try_from(self.page)?))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Indirect {
     pub arg: String,
@@ -256,6 +309,8 @@ pub struct Program {
     pub launches: Vec<Launch>,
     pub kernels: BTreeMap<String, Kernel>,
     pub weights: BTreeSet<String>,
+    /// Buffers reached through a page table instead of one allocation.
+    pub paged: BTreeMap<String, Paging>,
     /// Symbolic axis name → the input buffer and dimension it is read from.
     pub bindings: BTreeMap<String, (String, usize)>,
     pub hints: BTreeMap<String, i64>,
@@ -359,6 +414,8 @@ struct RawPlan {
     kernels: BTreeMap<String, RawKernel>,
     #[serde(default)]
     weights: BTreeMap<String, Value>,
+    #[serde(default)]
+    paged: BTreeMap<String, Paging>,
     #[serde(default)]
     symbols: Option<RawSymbols>,
 }
@@ -484,6 +541,7 @@ impl Program {
                 })
                 .collect(),
             weights: raw.weights.into_keys().collect(),
+            paged: raw.paged,
             bindings: symbols.bindings,
             hints: symbols.hints,
             caps: symbols.caps,
@@ -538,6 +596,20 @@ impl Program {
                 "symbolic axis {axis} reads past the rank of {buffer}"
             );
         }
+        // A paged buffer is what a kernel reads or writes through a table: only inputs and
+        // outputs, never a slab the runtime would allocate or zero.
+        let tables: BTreeSet<String> = self.paged.keys().map(|n| Paging::table(n)).collect();
+        for (name, paging) in &self.paged {
+            let buffer = self.buffer(name)?;
+            ensure!(
+                ["input", "output"].contains(&buffer.role.as_str()),
+                "only inputs and outputs may be paged: {name}"
+            );
+            ensure!(
+                paging.axis < buffer.shape.len() && paging.page > 0,
+                "invalid paging for {name}"
+            );
+        }
         for launch in &self.launches {
             ensure!(
                 self.kernels.contains_key(&launch.kernel),
@@ -547,8 +619,15 @@ impl Program {
             let descriptors: BTreeSet<&str> = launch.tma.iter().map(|t| t.name.as_str()).collect();
             for name in &launch.args {
                 ensure!(
-                    names.contains(name.as_str()) || descriptors.contains(name.as_str()),
+                    names.contains(name.as_str())
+                        || descriptors.contains(name.as_str())
+                        || tables.contains(name),
                     "unknown launch buffer {name}"
+                );
+                ensure!(
+                    !self.paged.contains_key(name),
+                    "paged buffer {name} has no pointer to pass; its launch must name {}",
+                    Paging::table(name)
                 );
             }
             for name in launch
@@ -560,6 +639,12 @@ impl Program {
                 ensure!(
                     names.contains(name.as_str()),
                     "unknown launch buffer {name}"
+                );
+            }
+            for name in launch.zero_outputs.iter().chain(&launch.zero_prologues) {
+                ensure!(
+                    !self.paged.contains_key(name),
+                    "paged buffer {name} cannot be zero-initialized per launch"
                 );
             }
             // An indirect operand's table and selector are operands the host binds by address
@@ -599,6 +684,16 @@ impl Program {
             .with_context(|| format!("unknown buffer {name}"))
     }
 
+    /// Whether `name` may start from host bytes: an input or a constant.
+    pub fn check_bindable(&self, name: &str) -> Result<()> {
+        let role = &self.buffer(name)?.role;
+        ensure!(
+            role == "input" || role == "constant",
+            "only inputs and constants may be bound: {name}"
+        );
+        Ok(())
+    }
+
     /// The environment a program runs at when nothing binds its axes: every hint.
     pub fn default_env(&self) -> Env {
         self.hints.clone()
@@ -606,7 +701,8 @@ impl Program {
 
     /// Every buffer's placement under `env`. Scratch buffers share one slab: a buffer is live
     /// from the launch that first writes it to the last launch that reads it, and buffers whose
-    /// intervals do not overlap share bytes (largest first, deterministic).
+    /// intervals do not overlap share bytes (largest first, deterministic). A paged buffer has
+    /// no place here: it is reached through its table.
     pub fn layout(&self, env: &Env) -> Result<Layout> {
         let mut layout = Layout::default();
         let scratch: BTreeSet<&str> = self
@@ -616,7 +712,7 @@ impl Program {
             .map(|b| b.name.as_str())
             .collect();
         for buffer in &self.buffers {
-            if buffer.role == "scratch" {
+            if buffer.role == "scratch" || self.paged.contains_key(&buffer.name) {
                 continue;
             }
             let bytes = buffer.byte_len(env)?;
@@ -796,12 +892,7 @@ impl Artifact {
             ensure!(binaries.contains_key(name), "no cubin for kernel {name}");
         }
         for name in bindings.keys() {
-            ensure!(
-                program
-                    .buffer(name)
-                    .map(|b| b.role == "input" || b.role == "constant")?,
-                "only inputs and constants may be bound: {name}"
-            );
+            program.check_bindable(name)?;
         }
         Ok(Self {
             program,
@@ -829,12 +920,7 @@ impl Artifact {
             .as_object()
             .context("missing binding index")?
         {
-            ensure!(
-                parsed
-                    .buffer(name)
-                    .map(|b| b.role == "input" || b.role == "constant")?,
-                "only inputs and constants may be bound: {name}"
-            );
+            parsed.check_bindable(name)?;
             bindings.insert(
                 name.clone(),
                 std::fs::read(member(
@@ -918,6 +1004,64 @@ mod tests {
         let mut unknown = example();
         unknown["launches"][0]["unrecognized_abi"] = json!(true);
         assert!(Program::parse(&unknown.to_string()).is_err());
+    }
+
+    /// One step of a cache fill: `k` holds the four keys this step produces, and `past` says
+    /// where in the cache — pages the plan never sizes — they land.
+    fn paged_example() -> Value {
+        json!({
+            "format": 1, "backend": "cuda", "inputs": ["x"], "outputs": ["k"],
+            "buffers": [
+                {"name":"x", "shape":[1,2,4,8], "dtype":"f32", "role":"input"},
+                {"name":"k", "shape":[1,2,4,8], "dtype":"f32", "role":"output"}
+            ],
+            "constants": {}, "runtime_constants": {}, "weights": {},
+            "paged": {"k": {"axis": 2, "page": 8, "start": "past"}},
+            "kernels": {"fill": {"binary_key":"ab", "arch_specific":false}},
+            "symbols": {"bindings":{},"hints":{},"caps":{}},
+            "launches": [{"node_id":"k", "kernel":"fill", "args":["x","k__pages"], "writes":["k"],
+                "grid":[[1],[1],[1]],"block":[[32],[1],[1]],"smem":0,
+                "zero_outputs":[],"runtime_args":["past"],"cuda":{"tma":[]}}]
+        })
+    }
+
+    #[test]
+    fn paged_buffer_is_reached_through_its_table_and_has_no_place_in_the_layout() {
+        let program = Program::parse(&paged_example().to_string()).unwrap();
+        let layout = program.layout(&Env::new()).unwrap();
+        assert!(!layout.regions.contains_key("output:k") && !layout.buffers.contains_key("k"));
+        assert_eq!(layout.buffers["x"].bytes, 256);
+        // One page is the buffer's shape with the paged axis cut to the page size — so a step
+        // whose own buffer spans four keys still sizes the cache's eight-key pages correctly,
+        // and its own four keys fit in one of them.
+        let paging = &program.paged["k"];
+        let k = program.buffer("k").unwrap();
+        assert_eq!(paging.geometry(k, &Env::new()).unwrap(), (2, 4, 32));
+        assert_eq!(paging.page_bytes(k, &Env::new()).unwrap(), 2 * 8 * 8 * 4);
+        assert_eq!(paging.page_count(k, &Env::new()).unwrap(), 1);
+        assert_eq!(Paging::table("k"), "k__pages");
+    }
+
+    #[test]
+    fn paging_rejects_geometry_and_arguments_it_cannot_honor() {
+        for (pointer, value) in [
+            // The launch must name the table; the buffer itself has no pointer to pass.
+            ("/launches/0/args/1", json!("k")),
+            // Zeroing a paged buffer would memset a slab that does not exist.
+            ("/launches/0/zero_outputs", json!(["k"])),
+            // The axis must exist and a page must hold something.
+            ("/paged/k/axis", json!(9)),
+            ("/paged/k/page", json!(0)),
+            // Only what a kernel reads or writes can be paged.
+            ("/paged", json!({"missing": {"axis": 0, "page": 1}})),
+        ] {
+            let mut bad = paged_example();
+            *bad.pointer_mut(pointer).unwrap() = value;
+            assert!(
+                Program::parse(&bad.to_string()).is_err(),
+                "accepted {pointer}"
+            );
+        }
     }
 
     #[test]
