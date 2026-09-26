@@ -23,6 +23,7 @@ from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.stmt import Body, Load, Loop, Stmt, Write
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline.passes.tile._fromloop import lift_loop_op
+from emmy.compiler.pipeline.passes.tile._twist import rewrite_twisted
 
 ROW_AXIS = "_row"
 
@@ -114,3 +115,45 @@ def lift_kernel(loop: LoopOp, *, name: str) -> TileOp:
         if binds_the_row(bound, ROW_AXIS):
             return bound
     return tile
+
+
+def reformed(piece: TileOp) -> TileOp:
+    """``piece`` formed as its own kernel: its tree lowered to the closed loop nest and lifted
+    again, the way a kernel fusion had ended at a graph edge is formed.
+
+    A piece minted by replacing cones in the parent's tree keeps the parent's structure, and that
+    structure was formed around what is now a workspace read: a decoder half's gate and up
+    contractions are two terms when a contraction feeds the norm ahead of them, and one twin term
+    with both channels once the o_proj result is a load. The twin is the term the warp tier tiles;
+    two terms give one of them the scalar tier. Formed fresh, the piece is the kernel the same
+    program gets on its own, which is also the kernel the card's rows were recorded on. A nest the
+    lift cannot take whole keeps the piece as minted.
+
+    A piece the rank rule left a SWEEP (``promoted_sweep``) keeps its minted form too. Re-forming
+    walks the piece out to a full loop nest and lifts it back, and that nest opens the sweep loop
+    AROUND the statistic the minted term holds beside it — the re-lifted reduce then reads the sweep
+    axis, the rank rule promotes it, and the piece is back to folding its row statistic per output
+    cell. The hoist is the form the reform is meant to preserve, so a piece that already has it is
+    not re-formed."""
+    if any(store.sweep for store in piece.output_specs):
+        return piece
+    body = piece.op.lower(bound=frozenset(), stores=piece.output_specs, axes=piece.axes)
+    try:
+        # Through the LoopOp's normalization: that is where two reduce loops over one axis become
+        # one loop with two accumulators, the twin the lift forms one term from.
+        formed = lift_kernel(LoopOp(body=body), name=piece.name)
+    except ValueError:
+        return piece
+    # The lift peels every outer plain loop into the grid, a store's sweep included when nothing
+    # sits ahead of it; the piece keeps the grid it was minted with, and an axis peeled past it
+    # goes back to being the sweep of the stores that ride it.
+    grid, peeled = formed.place.free[: len(piece.place.free)], formed.place.free[len(piece.place.free) :]
+    specs = tuple(
+        replace(spec, sweep=(*spec.sweep, *(axis for axis in peeled if any(axis.name in index.free_vars() for index in spec.write.index))))
+        for spec in formed.output_specs
+    )
+    place = replace(formed.place, free=grid)
+    # The loop op the piece was formed from rides as its ``source``, as a fused kernel's does: the body a
+    # kernel row stores and a freeze re-lowers is the one the lift was given.
+    loop = LoopOp(body=body, name=piece.name)
+    return replace(piece, op=rewrite_twisted(formed.op, formed.axes), place=place, axes=formed.axes, output_specs=specs, source=loop)

@@ -14,7 +14,7 @@ import statistics
 from emmy.compiler.backend.cuda.program import compile_budget_overrun
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.cuda.ir import CudaOp
-from emmy.compiler.loop_wire import kernel_bindings, kernel_tile, kernel_wire
+from emmy.compiler.loop_wire import formed_from, kernel_bindings, kernel_tile, kernel_wire
 from emmy.compiler.pipeline.passes.identity import kernel_stamps
 from emmy.compiler.pipeline.search.db import KernelRow, PerfStats
 
@@ -251,11 +251,11 @@ def kernel_key(cuda_op) -> tuple | None:
 
 def kernel_row(tile, name: str) -> KernelRow:
     """The ``kernel`` row of a tile kernel: both identities, its wire, the C name it was rendered
-    under, and its ``S_*`` stamps — the ones the identity strategy wrote onto it at the fusion
-    boundary, which every reader joins evidence on (the deploy's fork signature, the golden replay's
-    kernel signature). They are features of the fused loop body the kernel was lifted from, not of the
-    stored wire: a twisted kernel's derived body spells its reduction differently. A tile nothing
-    stamped (a test's lifted target) gets the features of its wire instead (:func:`kernel_stamps`)."""
+    under, whether the wire is the body it was formed from, and its ``S_*`` stamps — the ones the
+    identity strategy wrote onto it, which every reader joins evidence on (the deploy's fork signature,
+    the golden replay's kernel signature). They are features of the body the kernel was formed from, the
+    one the wire holds, so re-lowering the wire stamps the kernel the same. A tile nothing stamped (a
+    test's lifted target) gets the features of its wire instead (:func:`kernel_stamps`)."""
     wire = kernel_wire(tile)
     stamped = {str(k): float(v) for k, v in (tile.knobs or {}).items() if str(k).startswith("S_")}
     return KernelRow(
@@ -264,6 +264,7 @@ def kernel_row(tile, name: str) -> KernelRow:
         loop_ir=wire,
         name=name,
         stamps=stamped or kernel_stamps(wire),
+        formed=formed_from(tile) is not None,
     )
 
 

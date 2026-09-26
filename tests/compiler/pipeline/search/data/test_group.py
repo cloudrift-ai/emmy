@@ -117,11 +117,14 @@ def test_every_row_is_either_grouped_or_counted():
     rows = [
         _row("a", us=500.0, knobs=_feats()),
         _row("b", us=1e9, knobs=_feats(TILE="f4x4"), status="bench_fail"),
-        _row("c", us=200.0, knobs=_feats(TILE="f8x8"), flags="--use_fast_math"),
+        _row("c", us=200.0, knobs=_feats(TILE="f8x8"), opt=1),
+        _row("d", us=300.0, knobs=_feats(TILE="f8x8"), flags="--use_fast_math"),  # the other precision regime: its own pool
+        _row("e", us=400.0, knobs=_feats(TILE="f2x4"), flags="-lineinfo"),  # not a regime: pools with the plain row
     ]
     groups, dropped = group_measured(rows)
     assert sum(len(g.feats) for g in groups) + sum(dropped.values()) == len(rows)
-    assert dropped == {"bench_fail": 1, "non-default compiler flags": 1}
+    assert dropped == {"bench_fail": 1, "non-deployable regime (H_opt=1)": 1}
+    assert [g.latency_us.tolist() for g in groups] == [[500.0, 400.0], [300.0]]
 
 
 # --- the two label kinds -----------------------------------------------------------

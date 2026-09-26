@@ -1,48 +1,33 @@
-"""Measurement freeze — a digest-pinned snapshot of a DB instance's ``perf`` rows.
+"""Measurement freeze — a DB instance's admitted rows as a golden file per card, re-lowered on import.
 
-A tune DB is a live store (tunes and imports write into it), so a model fit or evaluated directly
-from it is not reproducible: two runs of the same fitter can see different data. A *freeze* is a
-snapshot extracted from a DB instance whose digest pins exactly which measurements a fit saw — the
-fit becomes a pure function of (repo, freeze digest).
+A tune DB is a live store (tunes and imports write into it), so a model fit or evaluated straight from it is
+not reproducible. A *freeze* is the snapshot a reported number is computed over — identical wherever it is
+read — and the training data the priors are fit on (``eval prior --dataset db``). It is written in the
+golden file's shape: one document per card, its ``loops`` pool holding each kernel's definition, one config
+per kernel set and binding, a realization per measured row — its schedule row, the regime it was measured
+under (``FAST_MATH`` on or off, the two a golden records) and its median. Nothing the compiler computed is
+stored: no identity a reader has to trust, no stamps spelled in one featurizer's vocabulary. ``emmy dataset
+import`` re-lowers every kernel from its definition (``golden_import.import_goldens``, entering at the
+lowering passes as the tuner runs a slice), so the dataset DB's identities and stamps are the current
+compiler's, and a compiler change is a re-import, never a re-collection.
 
-Freeze v6 is a DIRECTORY of per-GPU YAML files — a ``gpu_name`` / ``compute_cap`` header plus a
-``configs`` list — beside a ``manifest.json`` carrying provenance and content digests. It stores the
-DB's natural keys and none of its ids. Each row is a ``perf`` row minus what its file header already
-says: the kernel it measured (exact identity), the sizes its symbolic dims were bound to, its schedule
-row (the in-kernel knobs, never a stamp), the opt level and the residual compiler flags, the status,
-the latency statistics, ``captured``, ``measured_at`` and a failure's ``error``. Two card-independent
-files ride beside them: ``kernels.yaml`` (the ``kernel`` row of every kernel a frozen row or a routing
-row names — both identities, the Loop IR wire, the C name and its ``S_*`` stamps) and
-``routing.yaml`` (every ``routing`` row: parent, arm, pieces in order), so an import can enumerate
-from the freeze alone. The manifest lists every file with its kind (``perf``, ``kernels``,
-``routing``) and its digest. Device ``H_*`` features are never stored: readers derive them from the
-card (``data.sample.measured_features``).
+A kernel's definition is its ``kernel`` row's wire: the body it was formed from, which the lowering passes
+take back to the kernel (``KernelRow.formed``). A piece carved from a twisted tree has no such body; its rows
+are written under the nearest formed ancestor the routing table reaches — a routing entry per decision on the
+path, the rows as receipts naming their kernel and listing the entries in ``kernel_set`` — the way a golden
+records a kernel set, and nothing else is written that way.
 
-What freezes (see :func:`freeze_reason`): every CUDA row measured in the deployable regime on a
-card the GPU registry knows that passes the physical-plausibility predicates. ``bench_fail`` rows
-are kept as durable negatives. The featurizer version the stamps are spelled in is the manifest's,
-not a row's: a freeze from another featurizer generation refuses to load rather than being re-read
-under today's vocabulary.
+What freezes (:func:`freeze_reason`): every ``ok`` CUDA row measured on a card the GPU registry knows, at the
+deployable opt level, that passes the physical-plausibility predicates; the fast-math flag decides which of
+the two precision regimes a row is in, and no other compiler flag is stored or gated on. A failed bench is
+not a measurement; the tune DB keeps it. A row a compile imported from a golden file is the file's, and is
+not frozen again.
 
-Determinism contract: freezing the same rows twice yields the same digests. Every row
-serializes to one canonical JSON line (sorted keys, fixed separators, ``allow_nan=False``);
-rows within a file sort by that line (total, content-derived order); the per-file
-``sha256`` covers exactly those lines — NOT the YAML bytes, so integrity is content-level
-and immune to YAML style — and the manifest's top-level ``sha256`` folds the sorted
-per-file digests. ``created_at`` never enters any digest.
-
-:func:`load_freeze` hard-errors — never a silent fallback — on a missing/foreign/corrupt
-manifest, a ``freeze_ver`` or ``feat_ver`` mismatch, a manifest-listed file missing, or a per-file
-digest mismatch. It is not a reader's entry point: ``emmy dataset import`` loads a freeze into a DB
-instance (each row's ``source`` naming the freeze's digest), and every reader reads the instance.
-
-A checked-in freeze lives at ``search/freezes/``, which is what ``config.freeze_path()`` resolves
-to — the default source of ``emmy dataset import``: the prior's evaluation corpus should be an
-artifact, not whatever a machine happens to hold. Its payload YAML is tracked in git LFS (multi-MB
-per card); its manifest is plain git so the digest and the version stamps stay diffable. It is
-deliberately not wheel package-data — a wheel install never fits or evaluates a prior. None is
-checked in at the moment: the RTX 5090 rows predate the kernel table and are re-collected through
-the ``perf`` writer.
+Freezing the same rows twice yields the same bytes: rows sort by content and the golden dump is
+deterministic. A file's identity is its bytes — ``emmy dataset import`` sources its rows as
+``freeze:<sha256[:12]>`` of the file (:func:`freeze_source`), which is what ``commands.dataset.dataset_db``
+checks the default dataset DB holds for every file of the checked-in freeze directory
+(``config.freeze_path``, payload in git LFS).
 
 Produced by ``emmy dataset freeze``.
 """
@@ -50,64 +35,57 @@ Produced by ``emmy dataset freeze``.
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import math
 import re
 import shutil
-import subprocess
-from collections import Counter
-from datetime import UTC, datetime
+from collections import Counter, defaultdict, deque
 from pathlib import Path
-from typing import NamedTuple
 
-import yaml
-
-from emmy.compiler.pipeline.knob import KERNEL_IDENTITY, METADATA_PREFIXES
-from emmy.compiler.pipeline.search.db import KernelRow, PerfRow, PerfStats, RoutingRow, SearchDB
-from emmy.compiler.pipeline.search.features import DEPLOYABLE_OPT, FEATURIZER_VERSION
+from emmy.compiler.context import FAST_MATH_FLAG
+from emmy.compiler.loop_wire import intern_wire
+from emmy.compiler.pipeline.knob import METADATA_PREFIXES
+from emmy.compiler.pipeline.search.db import KernelRow, PerfRow, SearchDB, knobs_json
+from emmy.compiler.pipeline.search.features import DEPLOYABLE_OPT
+from emmy.compiler.specialize import rehint_program
 
 logger = logging.getLogger(__name__)
 
-FREEZE_KIND = "emmy-measurement-freeze"
-FREEZE_VER = 6
-MANIFEST_NAME = "manifest.json"
-KERNELS_NAME = "kernels.yaml"
-ROUTING_NAME = "routing.yaml"
+_LFS_POINTER = "version https://git-lfs.github.com/spec/v1"
+
+#: The two precision regimes a golden records — fast math off, and on (the default since #868) — by the one
+#: compiler flag that decides them, each mapped to the input pin a freeze row carries.
+REGIME_PINS = {"": {"FAST_MATH": False}, FAST_MATH_FLAG: {"FAST_MATH": True}}
 
 
-class Freeze(NamedTuple):
-    """What :func:`load_freeze` read: the manifest and the three tables' rows."""
-
-    manifest: dict
-    perf: list[PerfRow]
-    kernels: list[KernelRow]
-    routing: list[RoutingRow]
+def regime_of(flags: str) -> str:
+    """The regime a row's residual compiler flags put it in — a key of :data:`REGIME_PINS`. The fast-math flag is
+    the one flag that is a regime; any other flag a row was compiled with is not, and is not what a freeze
+    stores."""
+    return FAST_MATH_FLAG if FAST_MATH_FLAG in flags.split() else ""
 
 
 def freeze_reason(row: PerfRow) -> str | None:
     """Why ``row`` is excluded from a measurement freeze and from every measured-pool reader, or
     ``None`` to keep it.
 
-    THE admission filter, and nothing else — keep every row measured in the DEPLOYABLE regime, on a
-    card the GPU registry knows, that passes the shared plausibility predicates. ``bench_fail`` rows
-    reach the keep path by construction: both predicates return ``None`` for non-``ok`` rows, so
-    failures are kept as negative examples without a special case.
+    THE admission filter, and nothing else — keep every ``ok`` row measured at the DEPLOYABLE opt level, on a
+    card the GPU registry knows, that passes the shared plausibility predicates.
 
-    The regime gate is what keeps a freeze a fair yardstick. A freeze is the corpus a reported
+    The opt-level gate is what keeps a freeze a fair yardstick. A freeze is the corpus a reported
     prior number is computed over, and a measurement taken under a non-deployable opt level
     answers a question nothing asks: nothing trains on it (``Prior.add_rows``) and no deploy
     reads it. Kept, it would put half a card's pools in a lane no one runs, so half the headline
-    number would describe a regime that does not exist. The same goes for extra compiler flags: a
-    row measured under any was measured in some other regime."""
+    number would describe a regime that does not exist. Of the other compiler flags only fast math
+    is a regime (:func:`regime_of`); the rest a freeze neither stores nor gates on."""
     from emmy import gpu  # noqa: PLC0415
 
     if gpu.by_name(row.gpu) is None:
         return "unknown card (not in the GPU registry)"
     if row.opt != DEPLOYABLE_OPT:
         return f"non-deployable regime (H_opt={row.opt:g})"
-    if row.flags:
-        return "non-default compiler flags"
+    if row.status != "ok":
+        return f"{row.status}: not a measurement"
     reason = implausible_value_reason(row)
     if reason is not None:
         return f"implausible value: {reason}"
@@ -215,40 +193,6 @@ def impossible_kernel_reason(row: PerfRow) -> str | None:
     return None
 
 
-def _row_payload(row: PerfRow) -> dict:
-    """One freeze row: the ``perf`` row minus what its file header holds (card, compute capability) and
-    minus the kernel's stamps, which its ``kernel`` row carries."""
-    s = row.stats
-    return {
-        "kernel": row.kernel,
-        "bindings": row.bindings,
-        "knobs": {k: v for k, v in row.knobs.items() if not k.startswith(METADATA_PREFIXES)},
-        "opt": row.opt,
-        "flags": row.flags,
-        "status": row.status,
-        "stats": {"median": s.median, "min": s.min, "max": s.max, "mean": s.mean, "variance": s.variance, "n_samples": s.n_samples},
-        "captured": row.captured,
-        "measured_at": row.measured_at,
-        "error": row.error,
-    }
-
-
-_KERNEL_FIELDS = ("exact_identity", "structural_identity", "loop_ir", "name", "stamps")
-
-
-def _kernel_payload(k: KernelRow) -> dict:
-    """One ``kernels.yaml`` row: the kernel row's columns by name, its stamps as the float dict they are."""
-    return {field: getattr(k, field) for field in _KERNEL_FIELDS}
-
-
-def _row_line(payload: dict) -> bytes:
-    """A payload's canonical JSON line (bytes) — sorted keys, fixed separators, no NaN
-    tokens (``allow_nan=False`` hard-errors instead of emitting nonstandard JSON). This
-    exact spelling is the row sort order AND the digested content, so determinism and
-    integrity are content-level, immune to YAML style."""
-    return (json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n").encode()
-
-
 def _gpu_filename(gpu_name: str, cap: tuple[int, int]) -> str:
     """The per-GPU YAML file name, mirroring the ``golden/`` convention —
     e.g. ``nvidia_geforce_rtx_4090_sm89.yaml``."""
@@ -256,241 +200,146 @@ def _gpu_filename(gpu_name: str, cap: tuple[int, int]) -> str:
     return f"{slug}_sm{cap[0]}{cap[1]}.yaml"
 
 
-def _repo_commit() -> str:
-    """``git rev-parse HEAD`` of the checkout this module runs from, ``-dirty``-suffixed
-    when the tree has uncommitted changes; ``"unknown"`` outside a repo / without git."""
-    here = Path(__file__).resolve().parent
-    try:
-        sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=here, capture_output=True, text=True, timeout=10)
-        if sha.returncode != 0:
-            return "unknown"
-        dirty = subprocess.run(["git", "status", "--porcelain"], cwd=here, capture_output=True, text=True, timeout=10)
-        if dirty.returncode != 0:
-            return "unknown"  # dirtiness undeterminable — never stamp a clean-tree claim we can't back
-        return sha.stdout.strip() + ("-dirty" if dirty.stdout.strip() else "")
-    except (OSError, subprocess.SubprocessError):
-        return "unknown"
+def _path_to(kernel: str, kernels: dict[str, KernelRow], parents: dict[str, list[tuple[str, dict]]]) -> tuple | None:
+    """The decisions from the nearest formed kernel down to ``kernel``, as ``(parent, arm)`` pairs: ``()`` when the
+    kernel is formed itself, ``None`` when no formed kernel reaches it through the routing table."""
+    if kernels[kernel].formed:
+        return ()
+    seen = {kernel}
+    queue: deque[tuple[str, tuple]] = deque([(kernel, ())])
+    while queue:
+        child, path = queue.popleft()
+        for parent, arm in parents.get(child, ()):
+            if parent in seen:
+                continue
+            step = ((parent, arm), *path)
+            if kernels[parent].formed:
+                return step
+            seen.add(parent)
+            queue.append((parent, step))
+    return None
 
 
-def _write_rows(tmp: Path, name: str, payloads: list[dict], doc: dict, key: str) -> tuple[str, int]:
-    """Write one freeze file — ``doc`` with its ``key`` holding ``payloads`` in canonical order — and
-    return its content digest and row count."""
-    payloads = sorted(payloads, key=_row_line)
-    digest = hashlib.sha256()
-    for p in payloads:
-        digest.update(_row_line(p))
-    (tmp / name).write_text(yaml.safe_dump({**doc, key: payloads}, sort_keys=True, width=120))
-    return digest.hexdigest(), len(payloads)
+def _schedule_row(row: PerfRow) -> dict[str, str]:
+    return {str(k): str(v) for k, v in row.knobs.items() if not str(k).startswith(METADATA_PREFIXES)}
 
 
-def write_freeze(db_path: Path | str, out_dir: Path | str, *, note: str = "") -> dict:
-    """Read the DB instance at ``db_path`` read-only — its CUDA ``perf`` rows filtered through
-    :func:`freeze_reason`, the ``kernel`` rows those rows and the routing rows name, every
-    ``routing`` row — and atomically write the freeze DIRECTORY at ``out_dir``: one
-    per-``(gpu, compute_cap)`` YAML file, the two definition files when there is anything to put in
-    them, plus ``manifest.json``. Returns the manifest dict (so a caller reports counts + digest
-    without re-reading). Hard-errors when nothing survives the filter — a zero-row freeze means the
-    wrong DB, not an empty dataset. An existing ``out_dir`` is replaced only when it is itself a
-    freeze (has a manifest) — anything else is refused rather than deleted."""
+def _document(gpu_name: str, cap: tuple[int, int], rows: list[PerfRow], kernels: dict[str, KernelRow], parents, dropped: Counter) -> dict:
+    """One card's golden document: a config per kernel set, size and regime, in content order."""
+    sets: dict[tuple, list[PerfRow]] = defaultdict(list)
+    paths: dict[tuple, tuple] = {}
+    for row in rows:
+        path = _path_to(row.kernel, kernels, parents)
+        if path is None:
+            dropped["no formed kernel reaches it"] += 1
+            continue
+        root = path[0][0] if path else row.kernel
+        key = (root, tuple((parent, knobs_json(arm)) for parent, arm in path), knobs_json(row.bindings), regime_of(row.flags))
+        sets[key].append(row)
+        paths[key] = path
+    loops: list[dict] = []
+    configs: list[dict] = []
+    for key in sorted(sets):
+        root, _route, _bindings, regime = key
+        path, members = paths[key], sorted(sets[key], key=lambda r: (r.kernel, knobs_json(r.knobs)))
+        # The sizes the rows were benched at are the program's hints; a golden's ``bindings`` would make them static.
+        # A parent axis a piece dropped keeps the stored hint: the piece's measurement does not depend on it.
+        try:
+            program = rehint_program(kernels[root].loop_ir, dict(members[0].bindings))
+        except ValueError:
+            dropped["sizes the program cannot bind"] += len(members)
+            continue
+        pins = REGIME_PINS[regime]
+        realizations: list[dict] = []
+        for step, (parent, arm) in enumerate(path):
+            name = f"{kernels[parent].name}.{parent[:12]}.route{step}"
+            identity = kernels[parent].structural_identity
+            realizations.append({"name": name, "bindings": {}, "pins": pins, "knobs": dict(arm), "identity": identity})
+        routes = [entry["name"] for entry in realizations]
+        for n, row in enumerate(members):
+            realizations.append(
+                {
+                    "name": f"{kernels[row.kernel].name}.{row.kernel[:12]}.{n}",
+                    "bindings": {},
+                    "pins": pins,
+                    "knobs": _schedule_row(row),
+                    "identity": kernels[row.kernel].structural_identity,
+                    "measurements": {"emmy_us": row.stats.median},
+                    **({"kernel_set": routes} if routes else {}),
+                }
+            )
+        configs.append({"target": {"loop": intern_wire(loops, program)}, "realizations": realizations})
+    return {"gpu_name": gpu_name, "compute_cap": list(cap), "loops": loops, "configs": configs}
+
+
+def freeze_documents(db: SearchDB) -> tuple[dict[str, dict], Counter]:
+    """The DB's admitted rows as one golden document per card, keyed by the card's file name, and the count
+    of the rows left out, by reason."""
+    kernels = {k.exact_identity: k for k in db.iter_kernels()}
+    parents: dict[str, list[tuple[str, dict]]] = defaultdict(list)
+    for decision in db.iter_routing():
+        for child in decision.children:
+            parents[child].append((decision.parent, decision.arm))
+    dropped: Counter[str] = Counter()
+    by_card: dict[tuple[str, tuple[int, int]], list[PerfRow]] = defaultdict(list)
+    for row in db.iter_perf_rows(backend="cuda"):
+        if row.source.startswith("golden:"):
+            dropped["a golden file's row"] += 1
+            continue
+        reason = freeze_reason(row)
+        if reason is not None:
+            dropped[reason.split(":")[0]] += 1
+            continue
+        by_card[(row.gpu, divmod(row.cc, 10))].append(row)
+    documents = {}
+    for (gpu_name, cap), rows in sorted(by_card.items()):
+        document = _document(gpu_name, cap, rows, kernels, parents, dropped)
+        if document["configs"]:
+            documents[_gpu_filename(gpu_name, cap)] = document
+    return documents, dropped
+
+
+def write_freeze(db_path: Path | str, out_dir: Path | str) -> dict[str, str]:
+    """Read the DB instance at ``db_path`` read-only and atomically write the freeze DIRECTORY at
+    ``out_dir``: one golden document per card. Returns each file's name and digest. Hard-errors when nothing
+    survives the filter — a zero-row freeze means the wrong DB, not an empty dataset. An existing ``out_dir``
+    is replaced only when it is itself a freeze (holds golden files and nothing else) — anything else is
+    refused rather than deleted."""
+    from emmy.compiler.pipeline.search.golden import dump_golden_file  # noqa: PLC0415
+
     db = SearchDB.open_readonly(db_path)
     try:
-        rows = list(db.iter_perf_rows(backend="cuda"))
-        kernels = list(db.iter_kernels())
-        routing = list(db.iter_routing())
+        documents, dropped = freeze_documents(db)
     finally:
         db.close()
-    kept = []
-    dropped: Counter[str] = Counter()
-    for row in rows:
-        reason = freeze_reason(row)
-        if reason is None:
-            kept.append(row)
-        else:
-            dropped[reason.split(":")[0]] += 1
     for reason, n in dropped.most_common():
-        logger.info("[freeze] dropped %d row(s): %s", n, reason)
-    if not kept:
-        raise RuntimeError(
-            f"no freezable rows in {db_path} — wrong DB, or its rows predate the card key or the current featurizer vocabulary"
-        )
-
-    by_card: dict[tuple[str, tuple[int, int]], list] = {}
-    for row in kept:
-        by_card.setdefault((row.gpu, divmod(row.cc, 10)), []).append(row)
-
+        logger.info("[freeze] left out %d row(s): %s", n, reason)
+    if not documents:
+        raise RuntimeError(f"no freezable rows in {db_path} — wrong DB, or its rows are in another regime")
     out = Path(out_dir)
+    if out.exists() and not (out.is_dir() and all(p.suffix == ".yaml" for p in out.iterdir())):
+        raise RuntimeError(f"{out} exists and is not a measurement freeze — refusing to replace it")
     tmp = out.with_name(out.name + ".tmp")
     if tmp.exists():
         shutil.rmtree(tmp)
     tmp.mkdir(parents=True)
-
-    files: dict[str, dict] = {}
-    for (gpu, cap), card_rows in sorted(by_card.items(), key=lambda kv: kv[0]):
-        name = _gpu_filename(gpu, cap)
-        if name in files:
-            raise RuntimeError(f"freeze file name collision: {name} (cards {files[name]['gpu_name']!r} and {gpu!r})")
-        digest, n = _write_rows(tmp, name, [_row_payload(r) for r in card_rows], {"gpu_name": gpu, "compute_cap": list(cap)}, "configs")
-        files[name] = {"kind": "perf", "gpu_name": gpu, "compute_cap": list(cap), "rows": n, "sha256": digest}
-    # Definitions are card-independent: the kernels the frozen rows and the routing rows name, and
-    # every routing row. A kernel nothing names is not part of what the freeze pins.
-    named = {r.kernel for r in kept} | {s.parent for s in routing} | {c for s in routing for c in s.children}
-    definitions = (
-        (KERNELS_NAME, "kernels", [_kernel_payload(k) for k in kernels if k.exact_identity in named]),
-        (ROUTING_NAME, "routing", [{"parent": s.parent, "arm": s.arm, "children": list(s.children)} for s in routing]),
-    )
-    for name, kind, payloads in definitions:
-        if payloads:
-            digest, n = _write_rows(tmp, name, payloads, {}, kind)
-            files[name] = {"kind": kind, "rows": n, "sha256": digest}
-
-    top = hashlib.sha256()
-    for name in sorted(files):
-        top.update(files[name]["sha256"].encode())
-    per_gpu = Counter(r.gpu for r in kept)
-    manifest = {
-        "kind": FREEZE_KIND,
-        "freeze_ver": FREEZE_VER,
-        "feat_ver": FEATURIZER_VERSION,
-        "knob_ver": FEATURIZER_VERSION,
-        "encoding_ver": FEATURIZER_VERSION,
-        "repo_commit": _repo_commit(),
-        "source_db": str(Path(db_path).resolve()),
-        "policy_note": note,
-        "counts": {
-            "rows": len(kept),
-            "ok": sum(1 for r in kept if r.status == "ok"),
-            "bench_fail": sum(1 for r in kept if r.status == "bench_fail"),
-            "per_gpu": {g: per_gpu[g] for g in sorted(per_gpu)},
-            "kernels": files.get(KERNELS_NAME, {}).get("rows", 0),
-            "routing": files.get(ROUTING_NAME, {}).get("rows", 0),
-        },
-        "files": files,
-        "created_at": datetime.now(UTC).isoformat(),
-        "sha256": top.hexdigest(),
-    }
-    (tmp / MANIFEST_NAME).write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
-
+    digests = {}
+    for name, document in sorted(documents.items()):
+        digests[name] = hashlib.sha256(dump_golden_file(document, tmp / name).read_bytes()).hexdigest()
     if out.exists():
-        if not (out.is_dir() and (out / MANIFEST_NAME).exists()):
-            shutil.rmtree(tmp)
-            raise RuntimeError(f"{out} exists and is not a measurement freeze — refusing to replace it")
         shutil.rmtree(out)
     tmp.replace(out)
-    return manifest
+    return digests
 
 
-_FILE_KEYS = {"perf": "configs", "kernels": "kernels", "routing": "routing"}
+def freeze_source(path: Path | str) -> str:
+    """The ``source`` an import files a freeze file's rows under: the file's own bytes, digested."""
+    return f"freeze:{hashlib.sha256(Path(path).read_bytes()).hexdigest()[:12]}"
 
 
-def _read_rows(p: Path, name: str, info: dict, regen: str) -> tuple[dict, list[dict]]:
-    """One freeze file, verified: its document and its rows, or a hard error naming what is wrong."""
-    key = _FILE_KEYS.get(info.get("kind"))
-    if key is None:
-        raise RuntimeError(f"measurement freeze {p}: {name} has the unknown file kind {info.get('kind')!r} — {regen}")
-    fpath = p / name
-    if not fpath.exists():
-        raise RuntimeError(f"measurement freeze {p} is missing {name} (listed in the manifest) — {regen}")
-    text = fpath.read_text()
-    if text.startswith("version https://git-lfs.github.com/spec/v1"):
-        # The payload files are LFS-tracked. A clone or CI checkout without LFS leaves a
-        # three-line pointer here, and a pointer is valid YAML — it parses to a string and the
-        # first key lookup below fails as ``TypeError: string indices must be integers``, which
-        # says nothing about the real problem. Name it instead.
-        raise RuntimeError(
-            f"measurement freeze {p}: {name} is a git-LFS pointer, not the data. Run `git lfs install && "
-            f"git lfs pull`; in CI, check out with `lfs: true`."
-        )
-    doc = yaml.safe_load(text)
-    if not isinstance(doc, dict) or key not in doc:
-        raise RuntimeError(f"measurement freeze {p}: {name} is not a freeze payload document — {regen}")
-    payloads = doc.get(key) or []
-    file_digest = hashlib.sha256()
-    for payload in payloads:
-        file_digest.update(_row_line(payload))
-    if file_digest.hexdigest() != info.get("sha256"):
-        raise RuntimeError(f"measurement freeze {p} is corrupt: {name} row digest != manifest — {regen}")
-    return doc, payloads
-
-
-def load_freeze(path: Path | str) -> Freeze:
-    """Parse + verify the freeze directory at ``path``: the manifest, the ``kernel`` rows, the ``routing``
-    rows and the ``perf`` rows (each keyed by its file's card, its ``knobs`` the kernel's stamps, its exact
-    identity and its schedule row — the flat row a DB reader gives — and sourced ``freeze:<digest>``). Hard
-    ``RuntimeError`` — never a silent fallback — on any integrity failure."""
-    p = Path(path)
-    regen = "re-freeze with `emmy dataset freeze`"
-    mpath = p / MANIFEST_NAME
-    if not mpath.exists():
-        raise RuntimeError(f"{p} is not a measurement freeze (no {MANIFEST_NAME}) — {regen}")
-    try:
-        manifest = json.loads(mpath.read_text())
-    except (OSError, json.JSONDecodeError) as e:
-        raise RuntimeError(f"measurement freeze {p} has a corrupt manifest: {e} — {regen}") from e
-    if not isinstance(manifest, dict) or manifest.get("kind") != FREEZE_KIND:
-        raise RuntimeError(f"{p} is not a measurement freeze (manifest kind != {FREEZE_KIND!r}) — {regen}")
-    if manifest.get("freeze_ver") != FREEZE_VER:
-        raise RuntimeError(f"measurement freeze {p} has freeze_ver={manifest.get('freeze_ver')!r}, this code reads {FREEZE_VER} — {regen}")
-    if manifest.get("feat_ver") != FEATURIZER_VERSION:
-        raise RuntimeError(
-            f"measurement freeze {p} has feat_ver={manifest.get('feat_ver')!r}, this featurizer is {FEATURIZER_VERSION} — {regen}"
-        )
-
-    source = f"freeze:{manifest['sha256'][:12]}"
-    frozen = Freeze(manifest, [], [], [])
-    files = manifest.get("files", {})
-    # Definitions first: a perf row's stamps are read off its kernel row.
-    by_kind: dict[str, list[tuple[str, dict, list[dict]]]] = {}
-    for name in sorted(files):
-        doc, payloads = _read_rows(p, name, files[name], regen)
-        by_kind.setdefault(files[name]["kind"], []).append((name, doc, payloads))
-    for name, _doc, payloads in by_kind.get("kernels", ()):
-        for payload in payloads:
-            if not (
-                all(isinstance(payload.get(f), str) for f in ("exact_identity", "structural_identity", "name"))
-                and all(isinstance(payload.get(f), dict) for f in ("loop_ir", "stamps"))
-            ):
-                raise RuntimeError(f"measurement freeze {p}: {name} row lacks a kernel definition — {regen}")
-            frozen.kernels.append(KernelRow(**{f: payload[f] for f in _KERNEL_FIELDS}))
-    stamps = {k.exact_identity: k.stamps for k in frozen.kernels}
-    for name, _doc, payloads in by_kind.get("routing", ()):
-        for payload in payloads:
-            if not (
-                isinstance(payload.get("parent"), str)
-                and isinstance(payload.get("arm"), dict)
-                and isinstance(payload.get("children"), list)
-            ):
-                raise RuntimeError(f"measurement freeze {p}: {name} row lacks parent/arm/children — {regen}")
-            frozen.routing.append(RoutingRow(parent=payload["parent"], arm=payload["arm"], children=tuple(payload["children"])))
-    for name, doc, payloads in by_kind.get("perf", ()):
-        gpu_name, (major, minor) = doc["gpu_name"], doc["compute_cap"]
-        cc = major * 10 + minor
-        for payload in payloads:
-            if not (
-                isinstance(payload.get("kernel"), str)
-                and isinstance(payload.get("bindings"), dict)
-                and isinstance(payload.get("knobs"), dict)
-            ):
-                raise RuntimeError(f"measurement freeze {p}: {name} row lacks kernel/bindings/knobs — {regen}")
-            if payload["kernel"] not in stamps:
-                raise RuntimeError(
-                    f"measurement freeze {p}: {name} names kernel {payload['kernel']!r}, which {KERNELS_NAME} lacks — {regen}"
-                )
-            frozen.perf.append(
-                PerfRow(
-                    gpu=gpu_name,
-                    cc=cc,
-                    opt=int(payload["opt"]),
-                    flags=str(payload["flags"]),
-                    kernel=payload["kernel"],
-                    bindings=payload["bindings"],
-                    knobs={**stamps[payload["kernel"]], KERNEL_IDENTITY: payload["kernel"], **payload["knobs"]},
-                    backend="cuda",
-                    status=payload["status"],
-                    stats=PerfStats(**payload["stats"]),
-                    measured_at=payload["measured_at"],
-                    captured=bool(payload["captured"]),
-                    error=payload["error"],
-                    source=source,
-                )
-            )
-    return frozen
+def is_lfs_pointer(path: Path | str) -> bool:
+    """Whether the payload at ``path`` is a git-LFS pointer rather than the data — what a clone or CI checkout
+    without LFS leaves, three lines that are valid YAML and parse to a string, so the first key lookup would
+    fail with a type error that says nothing about the real problem."""
+    with Path(path).open("r") as fh:
+        return fh.read(len(_LFS_POINTER)) == _LFS_POINTER

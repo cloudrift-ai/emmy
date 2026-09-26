@@ -31,6 +31,7 @@ from emmy.compiler.pipeline.search.db import SearchDB
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from pathlib import Path
 
     from emmy.compiler.context import Context
     from emmy.compiler.pipeline.search.golden import GoldenRecord
@@ -38,11 +39,15 @@ if TYPE_CHECKING:
 logger = logging.getLogger("emmy.compiler.pipeline")
 
 
-def import_goldens(db: SearchDB, ctx: Context, records: Sequence[GoldenRecord], *, source: str) -> Counter:
+def import_goldens(
+    db: SearchDB, ctx: Context, records: Sequence[GoldenRecord], *, source: str, passes: Sequence[str] | None = None
+) -> Counter:
     """Write ``records``' measurements into ``db`` under ``ctx``'s card and regime, ``source`` on every perf
     row. Only a measured entry in the live input regime (``golden.regime_live``) is evidence. Returns what
     became of the entries, by kind. A set the current compiler cannot lower is skipped: the strict decode is
-    where that is loud."""
+    where that is loud. ``passes`` is the pipeline a target enters: the whole of it for a golden's traced
+    slice (the default), the lowering passes alone for a freeze's kernel body, which the Loop passes would
+    normalize into another kernel."""
     from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
     from emmy.compiler.loop_wire import kernel_tile  # noqa: PLC0415
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline  # noqa: PLC0415
@@ -59,7 +64,7 @@ def import_goldens(db: SearchDB, ctx: Context, records: Sequence[GoldenRecord], 
         consumed.add(parent.identity_key(with_io=True))
         counts["routing rows"] += 1
 
-    pipeline = Pipeline.build(CUDA_PASSES).with_strategies(KernelInventory(on_routing=on_routing))
+    pipeline = Pipeline.build(list(passes) if passes is not None else CUDA_PASSES).with_strategies(KernelInventory(on_routing=on_routing))
     sets: dict[tuple, list[GoldenRecord]] = {}
     for record in records:
         sets.setdefault(_set_key(record), []).append(record)
@@ -145,6 +150,38 @@ def _lower(pipeline, ctx: Context, entries: list[GoldenRecord]):
     with unpinned_decisions(), composed_routes(composed):
         graph, _trace = Run(pipeline=pipeline, ctx=ctx).resolve(lead.target_program.copy(), decide)
     return graph
+
+
+def import_file(db: SearchDB, path: Path) -> Counter:
+    """Import one golden-shaped file — a freeze's card file, or a golden file — into ``db``: every kernel
+    re-lowered from its definition through the lowering passes alone (a stored kernel body must not meet the
+    Loop passes, which would normalize it into another kernel), once per regime the file's rows record, its rows
+    sourced by the file's digest (``freeze.freeze_source``). The rows were measured at the deployable opt level
+    under their regime's flags, whatever this machine compiles at. A file the instance already holds is skipped;
+    a git-LFS pointer in the data's place is refused by name. Returns what became of the entries, by kind."""
+    from emmy.compiler.context import FAST_MATH_FLAG, Context  # noqa: PLC0415
+    from emmy.compiler.pipeline import LOWERING_PASSES  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.data.freeze import freeze_source, is_lfs_pointer  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import load_golden_file, load_golden_records, regime_pins  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
+
+    if is_lfs_pointer(path):
+        raise ValueError(f"{path} is a git-LFS pointer, not the data: run `git lfs install && git lfs pull` (in CI, check out with lfs)")
+    source = freeze_source(path)
+    if source in db.perf_sources():
+        logger.info("%s is already held (%s)", path.name, source)
+        return Counter()
+    document = load_golden_file(path)
+    records = load_golden_records(document)
+    cap, gpu_name = tuple(document["compute_cap"]), document.get("gpu_name") or None
+    counts: Counter = Counter()
+    for regime in sorted({tuple(sorted(regime_pins(record).items())) for record in records}):
+        with pinned_knobs(dict(regime)):
+            ctx = Context.from_target(cap, gpu_name=gpu_name, compile_flags=FAST_MATH_FLAG if dict(regime).get("FAST_MATH") else "")
+            in_regime = [record for record in records if tuple(sorted(regime_pins(record).items())) == regime]
+            counts += import_goldens(db, ctx, in_regime, source=source, passes=LOWERING_PASSES)
+    logger.info("imported %s as %s: %s", path.name, source, ", ".join(f"{n} {what}" for what, n in sorted(counts.items())) or "nothing")
+    return counts
 
 
 #: The one in-memory instance a DB-less compile picks from, keyed by golden scope, card and regime.

@@ -348,12 +348,13 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Dataset DB** — A database with the tuning database's tables in a file of its own (`EMMY_DATASET_DB`), filled by
   `emmy dataset import` from measurement freezes and tuning databases. The measurement-data readers (`emmy eval
   prior --dataset db`) read it; no compile does, so what is imported into it can never change a deploy.
-- **Measurement freeze** — A fixed snapshot of collected measurements: a directory of per-GPU files, plus the
-  definitions of the kernels they measure, carrying a checksum and a record of which vocabulary version its rows are
-  written in. The tuning database and the reservoir are local to one machine and are rewritten as tuning continues,
-  so a number computed over either cannot be checked by anyone else. A freeze is identical wherever it is read, which
-  is what makes two models' scores a fair comparison and a reported score something a reader can reproduce. When one
-  is kept with the repository it is what `emmy dataset import` loads into the dataset DB by default; none is at the
+- **Measurement freeze** — A fixed snapshot of collected measurements, written as a golden file per GPU: each
+  kernel's definition and its measured schedule rows, with the regime each was measured under and its median, and
+  nothing the compiler computed. The tuning database and the reservoir are local to one machine and are rewritten as
+  tuning continues, so a number computed over either cannot be checked by anyone else. A freeze is identical wherever
+  it is read, which is what makes two models' scores a fair comparison and a reported score something a reader can
+  reproduce, and `emmy dataset import` re-lowers every kernel from its definition, so a compiler change is a re-import.
+  When one is kept with the repository it is what the import loads into the dataset DB by default; none is at the
   moment.
 - **Deploy evidence hierarchy** — The fixed order in which an ordinary compile answers a tuning choice: measured
   evidence first — the reservoir, then the tune database's rows, the golden rows in scope imported among them, the

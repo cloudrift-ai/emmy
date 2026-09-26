@@ -100,4 +100,31 @@ def specialize_program(graph, bindings: Mapping[str, int], *, loop: bool = False
     return graph_from_wire(_specialize_wire(graph_to_wire(graph), bindings))
 
 
-__all__ = ["specialize_program"]
+def rehint_program(wire: dict, sizes: Mapping[str, int]) -> dict:
+    """``wire`` with its symbolic dims' hints set to ``sizes`` — the sizes a measurement bound them to — so the
+    program stays symbolic and a bench of it binds those sizes (``loop_wire.symbolic_bindings``). Binding them
+    instead (:func:`specialize_program`) makes the dims static, another kernel. A dim spelled as an expression
+    takes the expression's value at those sizes, and one over a name ``sizes`` lacks is an error; a plain symbolic
+    dim ``sizes`` does not name keeps its hint."""
+
+    def walk(value):
+        if isinstance(value, list):
+            return [walk(item) for item in value]
+        if not isinstance(value, Mapping):
+            return value
+        keys = set(value)
+        # A hinted dim is the one two-key mapping a wire holds: a body's tagged values have one key each.
+        if keys == {"sym", "hint"}:
+            return {**value, "hint": sizes.get(value["sym"], value["hint"])}
+        if keys == {"expr", "hint"}:
+            expr = expr_from_wire(dict(value["expr"]))
+            missing = sorted(set(expr.free_vars()) - set(sizes))
+            if missing:
+                raise ValueError(f"no size for {', '.join(missing)} in the dim {expr.pretty()}")
+            return {"expr": value["expr"], "hint": int(expr.eval(dict(sizes)))}
+        return {key: walk(item) for key, item in value.items()}
+
+    return walk(wire)
+
+
+__all__ = ["rehint_program", "specialize_program"]
