@@ -57,12 +57,21 @@ def make_run_cmd(server, ssh_key, ssh_port, dry_run=False, *, local=False):
         proc = None
         try:
             use_pipe = not stream or log_output
-            proc = await asyncio.create_subprocess_exec(
-                *argv,
-                start_new_session=local,
-                stdout=asyncio.subprocess.PIPE if use_pipe else None,
-                stderr=asyncio.subprocess.PIPE if use_pipe else None,
+            spawn = asyncio.ensure_future(
+                asyncio.create_subprocess_exec(
+                    *argv,
+                    start_new_session=local,
+                    stdout=asyncio.subprocess.PIPE if use_pipe else None,
+                    stderr=asyncio.subprocess.PIPE if use_pipe else None,
+                )
             )
+            try:
+                proc = await asyncio.shield(spawn)
+            except asyncio.CancelledError:
+                # A cancel landing mid-spawn would make asyncio close the transport, which kills the
+                # shell alone; finish the spawn so the handler below reaches the whole group.
+                proc = await spawn
+                raise
 
             if log_output:
                 stdout_lines, stderr_lines = [], []
