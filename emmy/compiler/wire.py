@@ -102,8 +102,18 @@ def _default_of(cls: type, f) -> object:
         return f.default
     if f.default_factory is not MISSING:
         return f.default_factory()
-    parameter = inspect.signature(cls.__init__).parameters.get(f.name)
-    return MISSING if parameter is None or parameter.default is inspect.Parameter.empty else parameter.default
+    return _init_defaults(cls).get(f.name, MISSING)
+
+
+_INIT_DEFAULTS: dict[type, dict[str, object]] = {}
+
+
+def _init_defaults(cls: type) -> dict[str, object]:
+    """The defaults ``cls.__init__`` declares, read once per class: the signature is costly to build."""
+    if cls not in _INIT_DEFAULTS:
+        parameters = inspect.signature(cls.__init__).parameters.values()
+        _INIT_DEFAULTS[cls] = {p.name: p.default for p in parameters if p.default is not inspect.Parameter.empty}
+    return _INIT_DEFAULTS[cls]
 
 
 def _fields_to_wire(obj: Wire):
