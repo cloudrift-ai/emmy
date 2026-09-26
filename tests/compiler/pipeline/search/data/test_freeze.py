@@ -273,11 +273,11 @@ def test_the_rtx_5090_hardware_goldens_rows_round_trip_through_a_freeze(tmp_path
     same rows too: a golden file is a source ``emmy dataset import`` accepts."""
     from emmy.compiler.context import Context
     from emmy.compiler.pipeline.search.golden.evidence import import_goldens
-    from emmy.compiler.pipeline.search.golden.repository import _HARDWARE_GOLDENS_DIR
+    from emmy.compiler.pipeline.search.golden.repository import _RECORDS_DIR
     from emmy.compiler.pipeline.search.pins import pinned_knobs
     from tests.compiler.pipeline.search.helpers import GPU_5090
 
-    path = _HARDWARE_GOLDENS_DIR / "rtx5090_sm120.yaml"
+    path = _RECORDS_DIR / "rtx5090_sm120.yaml"
     records = GoldenFile.load(path).records()
     tuned_path = tmp_path / "autotune.db"
     tuned = SearchDB(tuned_path)
