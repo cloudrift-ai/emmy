@@ -6375,7 +6375,7 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-  - name: k_p_attn_k_norm_weight_bc_pointwise.c7d0f14e249d.fc8dd8227387
+  - name: k_p_attn_k_norm_weight_bc_pointwise.c7d0f14e249d.6f7e6e45b089
     bindings: {}
     pins:
       FAST_MATH: false
@@ -6383,10 +6383,10 @@ configs:
       WORK: ''
       TILE: f4
       RASTER: ''
-    identity: 57f2843e47ddda88a71fed65e4a2788096df65dd201a1fc2b2f90153b9b54d0e
+    identity: 6f7e6e45b0891a977f06262005a488ba23b20335d34c33d017359fca107c2933
     measurements:
-      emmy_us: 1.0361287700300523
-      reference_us: 1.0372471138135735
+      emmy_us: 1.16429909645954
+      reference_us: 1.1632261159536723
       reference_backend: same-input-greedy
 - program: 0
   target:
@@ -6396,18 +6396,18 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-  - name: k_p_input_layernorm_weight_bc_pointwise.591b8ed6e2e9.c4645aed7f10
+  - name: k_p_input_layernorm_weight_bc_pointwise.591b8ed6e2e9.b6c4eae0f56f
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
       WORK: ''
-      TILE: f4
+      TILE: f2
       RASTER: ''
-    identity: 8b8379974b99ee39ae4bc25f5aa7d6e7ffd8dad9527d6c997110fcce9af9f784
+    identity: b6c4eae0f56ff8cb84669c114a310438892a3a4f8dae9a393492f86f95619a33
     measurements:
-      emmy_us: 1.276480800965253
-      reference_us: 1.2768531363281406
+      emmy_us: 1.156682959832381
+      reference_us: 1.156180304598946
       reference_backend: same-input-greedy
 - program: 0
   target:
@@ -6417,18 +6417,18 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-  - name: k_p_post_attention_layernorm_weight_bc_pointwise.591b8ed6e2e9.c4645aed7f10
+  - name: k_p_post_attention_layernorm_weight_bc_pointwise.591b8ed6e2e9.b6c4eae0f56f
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
       WORK: ''
-      TILE: f4
+      TILE: f2
       RASTER: ''
-    identity: 8b8379974b99ee39ae4bc25f5aa7d6e7ffd8dad9527d6c997110fcce9af9f784
+    identity: b6c4eae0f56ff8cb84669c114a310438892a3a4f8dae9a393492f86f95619a33
     measurements:
-      emmy_us: 1.276107588437089
-      reference_us: 1.2760716478538023
+      emmy_us: 1.158809315326602
+      reference_us: 1.1551111108726924
       reference_backend: same-input-greedy
 - program: 0
   target:
@@ -6459,18 +6459,18 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-  - name: k_mul_1_pointwise.cc03d23722ad.1a096b593896
+  - name: k_mul_1_pointwise.cc03d23722ad.7b7d73cedcd4
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
       WORK: ''
-      TILE: f4
+      TILE: f2
       RASTER: ''
-    identity: 32e92d2f53c674b1c5a739b64537d71e80812baf4d9b98871ff056c448d13efd
+    identity: 7b7d73cedcd4157514d6c50cc87ec2d6ee6f9845ecf779f5af6bc0c6f6f013b4
     measurements:
-      emmy_us: 1.0170264666532063
-      reference_us: 1.016635455327704
+      emmy_us: 1.1201077438765503
+      reference_us: 1.1188879007715815
       reference_backend: same-input-greedy
 - program: 0
   target:
@@ -6480,16 +6480,16 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: false
-  - name: k_mul_11_pointwise.cc03d23722ad.1a096b593896
+  - name: k_mul_11_pointwise.cc03d23722ad.7b7d73cedcd4
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
       WORK: ''
-      TILE: f4
+      TILE: f2
       RASTER: ''
-    identity: 32e92d2f53c674b1c5a739b64537d71e80812baf4d9b98871ff056c448d13efd
+    identity: 7b7d73cedcd4157514d6c50cc87ec2d6ee6f9845ecf779f5af6bc0c6f6f013b4
     measurements:
-      emmy_us: 0.9872838486313937
-      reference_us: 0.9879842106061489
+      emmy_us: 1.002441747600295
+      reference_us: 1.0034078797785058
       reference_backend: same-input-greedy
