@@ -8,6 +8,7 @@ import torch
 
 from emmy import emmy_runtime
 from emmy.compiler.backend.cuda import device as devices
+from tests.compiler.helpers import requires_cuda
 
 
 @pytest.fixture
@@ -70,3 +71,22 @@ def test_context_probe_checks_only_the_selected_device(runtime_devices, monkeypa
     bad.synchronize.assert_not_called()
     monkeypatch.setattr(torch.cuda, "current_device", lambda: 7)
     assert devices.context_poisoned()
+
+
+@requires_cuda
+def test_execution_after_device_switch():
+    if not torch.cuda.is_available() or torch.cuda.device_count() < 2:
+        pytest.skip("requires two visible CUDA devices")
+    from emmy.compiler.backend.cuda.program import CompiledProgram
+    from emmy.compiler.backend.gpu_lock import gpu_lock
+    from tests.compiler.backend.test_program import _make_add_graph
+
+    with gpu_lock():
+        for ordinal in (0, 1, 0):
+            with torch.cuda.device(ordinal):
+                a = torch.arange(8, dtype=torch.float32, device="cuda")
+                b = torch.full_like(a, ordinal + 1)
+                program = CompiledProgram.build(_make_add_graph(), {"A": a, "B": b})
+                program.iter_once()
+                torch.testing.assert_close(torch.from_numpy(program.outputs()["C"]), (a + b).cpu())
+                assert torch.cuda.current_device() == ordinal
