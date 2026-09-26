@@ -2715,5 +2715,7 @@
  "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[gemma-4-12B-it/rtx5090_sm120.json/pre4096.k_linear_mean_reduce_61bb9a.m4096.fm.2b1cf1006425]": 7.6,
  "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[gemma-4-12B-it/rtx5090_sm120.json/pre4096.k_linear_mean_reduce_61bb9a.m4096.fm.4176b7aa64cb]": 6.2,
  "tests/compiler/pipeline/search/test_golden.py::test_stored_targets_are_the_fresh_lowering[gemma-4-12B-it/rtx5090_sm120.json/program-25]": 6.6,
- "tests/compiler/pipeline/search/test_golden.py::test_stored_targets_are_the_fresh_lowering[gemma-4-12B-it/rtx5090_sm120.json/program-37]": 6.2
+ "tests/compiler/pipeline/search/test_golden.py::test_stored_targets_are_the_fresh_lowering[gemma-4-12B-it/rtx5090_sm120.json/program-37]": 6.2,
+ "tests/compiler/e2e/test_matmul_coverage.py::test_matvec_splitk_matches_the_reference@cuda": 4.98,
+ "tests/compiler/passes/test_split_fresh_kernels.py::test_a_matvec_partial_tiles_its_unit_row_not_the_partition": 4.73
 }
