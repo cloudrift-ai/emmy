@@ -183,14 +183,14 @@ and atomic ranking persistence to `compiler/pipeline/search/working_golden.py`. 
 handlers retain only the workflow's argument validation and user-facing error/reporting.
 
 `emmy trace MODEL -o PATH` lowers through post-fusion Loop IR and writes one self-contained golden file inventory.
-The YAML embeds stable frontend Torch IR programs and emits one target row for every post-fusion kernel occurrence;
+The file embeds stable frontend Torch IR programs and emits one target row for every post-fusion kernel occurrence;
 structurally identical occurrences are not collapsed and a missing cache key never drops a target. Every target is its
 kernel's standalone Loop IR, stored in `loops` and selected by index, with the frontend provenance origins beside it
 (`target: {loop, origins}`) when it computes every one of them whole — the traced ops a benchmark compares it against.
 Flash score producers absorbed into their consumer are stored as part of that one fused target rather than as a second
 kernel. Trace records neither knobs nor timings,
 refuses replacement, and never writes a traced Graph JSON or provenance sidecar. Quantized traces store their
-checkpoint-declaration digest in the same YAML.
+checkpoint-declaration digest in the same file.
 
 `emmy trace LOCAL_CHECKPOINT --serving-twins --serving-config PATH -o PATH` is the release inventory variant. It
 calls the config/allocation-metadata-only `serving.twins.capture_twin_graphs` path, combines every distinct
@@ -208,8 +208,8 @@ directly by `tune --golden PATH` and verified by `run --golden PATH [--realizati
 
 `emmy golden check [PATH…]` names the stored targets of a golden that a fresh lowering of its own programs no longer
 writes. It is two existing commands diffed per traced program: `emmy golden kernels PATH --program N` prints the Loop
-IR pool the golden stores, sorted by output set, and `emmy compile --golden PATH --program N --ir loop -o fresh.yaml`
-writes the same pool lowered fresh from the stored program (a `.yaml` output path is the wire a golden stores, for
+IR pool the golden stores, sorted by output set, and `emmy compile --golden PATH --program N --ir loop -o fresh.json`
+writes the same pool lowered fresh from the stored program (a `.json` output path is the wire a golden stores, for
 `--ir torch` the traced program and for `--ir loop` the kernel pool; any other path gets the readable listing). The
 check restricts the diff to the targets the file stores. `emmy golden restamp [PATH…]` rewrites the golden onto that
 lowering; `check` and `restamp` default to every repository golden, none of the three needs a card, and the
@@ -347,7 +347,7 @@ knob rows into either baseline as proposals. Canonical goldens remain the common
 
 `emmy eval golden --golden GOLDEN_FILE --serving-config PATH` is the release audit. The env must name that exact
 canonical file. The command validates the nested schema and model provenance, requires the live GPU to match both the
-config and YAML, proves that every structural target has every config-derived realization its twin reaches (the width
+config and the golden file, proves that every structural target has every config-derived realization its twin reaches (the width
 rows of a static twin, the dynamic rows of a symbolic one), validates the recorded rows, and re-traces the exact
 static/symbolic precision matrix. A warm shape names its lane (the ``:fm`` suffix), so a served process in a lane
 compiles the static twins of that lane's widths and nothing else; the serving-matrix compile asks the same of each

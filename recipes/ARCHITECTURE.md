@@ -24,7 +24,7 @@ all lifecycle states because they remain deploy evidence. `RESULTS.md` and local
 
 A reviewed model golden belongs beside the recipe whose exact checkpoint it describes:
 
-`recipes/<model>/golden/<gpu-slug>_<compute-cap>.yaml`
+`recipes/<model>/golden/<gpu-slug>_<compute-cap>.json`
 
 Keep exactly one file per exact GPU in each recipe. The recipe directory already identifies the model, so the file
 name identifies only the GPU and compute capability; merge new realizations into that file instead of adding a second
@@ -142,7 +142,7 @@ sweep rather than guessing (`release-serving-image` skill, Step 4).
    [`docker/vllm-emmy-serve/ARCHITECTURE.md`](../docker/vllm-emmy-serve/ARCHITECTURE.md). The headroom sweep there
    produces the shape the recipe must match.
 2. Add `recipes/<model>/recipe.yaml` pinning that image and that shape, one variant, no `benchmark:` block.
-3. Store each qualified GPU's compiler evidence in `recipes/<model>/golden/<gpu-slug>_<compute-cap>.yaml`.
+3. Store each qualified GPU's compiler evidence in `recipes/<model>/golden/<gpu-slug>_<compute-cap>.json`.
 4. If a configuration choice needs justifying, put the A/B in `experiments/<model>/<name>/` and reference the
    finding from the recipe's header comment — not the grid itself.
 

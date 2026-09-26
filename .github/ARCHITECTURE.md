@@ -184,7 +184,7 @@ implementation/test/architecture files and 500 changed lines, and any Python sou
 change. Broader changes fail artifact validation and remain follow-up work.
 
 The agent returns an atomic manifest. `.github/scripts/onboarding_artifacts.py` accepts only declared changes under the
-allowed recipe (including `golden/<gpu-slug>_<compute-cap>.yaml`), experiment, serving-image, and bounded
+allowed recipe (including `golden/<gpu-slug>_<compute-cap>.json`), experiment, serving-image, and bounded
 implementation/test paths. The validator requires the shared experiment recipe and report plus the exact
 `results_<gpu-short>x<gpu-count>.tar.gz` archive, and it opens that archive to require matching current-platform row
 records.
