@@ -85,8 +85,9 @@ checkpoint stays impractical here.
    so recording a new route there still needs the stale sibling and its own receipts dropped first. Re-recording a
    realization under a different route appends the new decision row and points the seed's `kernel_set` at it while
    the seed keeps its old knobs; fold the decision row into the seed (`fold_route.py`) and drop the old route's
-   receipts, which the decode test names. Per post twin and per kernel — the routing kernel carries the same logits recompute (4.1 ms of the width-16 twin's 6.5) — take the
-   seams that compute the `hc_fn` logits and the four-stream mix once, pick the new pieces' schedules by hand, check
+   receipts, which the decode test names. Per post twin and per kernel — the routing kernel carries the same logits
+   recompute (4.1 ms of the width-16 twin's 6.5) — take the seams that compute the `hc_fn` logits and the four-stream
+   mix once, pick the new pieces' schedules by hand, check
    each set against #897's route on the same inputs (the post targets have no eager reference, so `run --bench`'s exit
    code proves nothing about them), record with `--record-greedy` under the route as `EMMY_KNOBS` pins, and boot. On the
    width-16 main kernel: the two logits seams (`PLACE@map.1/map.1/twist.1/inner`, `PLACE@map.1/map.2/inner`) take the
