@@ -30,13 +30,15 @@ setup: venv/.setup-complete
 
 setup-agent: venv/.setup-agent-complete
 
-venv/.setup-agent-complete: pyproject.toml
+# The agent workflows install the exact workflow commit (AGENT_SOURCE), not the checked-out branch.
+AGENT_SOURCE ?= .
+venv/.setup-agent-complete: $(AGENT_SOURCE)/pyproject.toml
 	@if [ ! -x "venv/bin/python" ]; then \
 		echo "Creating virtual environment..."; \
 		python3.12 -m venv venv --prompt "emmy"; \
 	fi
 	@echo "Installing API-agent workflow dependencies..."
-	./venv/bin/pip install -e .
+	./venv/bin/pip install -e "$(AGENT_SOURCE)"
 	@touch $@
 
 # Keep the completion marker inside the venv so an interrupted dependency install
