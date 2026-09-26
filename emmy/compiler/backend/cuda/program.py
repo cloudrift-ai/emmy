@@ -476,6 +476,7 @@ class CompiledProgram:
             return None
         layout = self.program.layout(sym_values)
         regions: dict[str, tuple[int, int]] = {}
+        fresh = False
         for name, nbytes in layout["regions"].items():
             role, _, buffer = name.partition(":")
             src = input_data.get(buffer) if buffer else None
@@ -489,8 +490,13 @@ class CompiledProgram:
                 tensor = self._tensors.get(name)
                 if tensor is None or tensor.numel() < max(1, nbytes):
                     tensor = _new_backing(nbytes)
+            fresh |= tensor is not self._tensors.get(name)
             self._tensors[name] = tensor
             regions[name] = (tensor.data_ptr(), tensor.numel() * tensor.element_size())
+        if fresh:
+            # A new region's zero fill is queued on torch's stream, which the runtime's launches do not
+            # wait on: finish it first, or it can land after a kernel has written the region.
+            torch_module().cuda.current_stream().synchronize()
         return regions
 
     def rebind(self, input_data: dict) -> None:
