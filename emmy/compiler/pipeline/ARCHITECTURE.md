@@ -1308,7 +1308,7 @@ writes — and nothing else is written that way.
   `commands/dataset.dataset_db` refuses a default dataset DB that does not hold every file of the checked-in freeze,
   when one is, with the command that fixes it.
 - **Importing re-lowers.** `emmy dataset import` reads a freeze directory, a golden file or a tune DB (frozen first,
-  so one path serves all) and hands each file's records to the golden importer (`golden_import.import_goldens`) once
+  so one path serves all) and hands each file's records to the golden importer (`golden.evidence.import_goldens`) once
   per regime the file holds, entering at the LOWERING passes as the tuner runs a slice. Every kernel comes back with
   the current compiler's exact identity and stamps, and a definition the compiler no longer lowers is counted, not
   guessed at. A compiler change is therefore a re-import (`--fresh`), never a re-collection.

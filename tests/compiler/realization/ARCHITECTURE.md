@@ -68,7 +68,6 @@ configs:
   target: {loop: 0, origins: [c]}
   realizations:
   - name: k_matmul_5b7645
-    bindings: {}
     pins: {FAST_MATH: true}
     knobs: {WORK: w2x2, TILE: mma_m16n8k16_f16_f16/f4x8/k2, REDUCE: g2k, STAGE: ''}
     identity: 0302cbd2c129ae1851d5f529621a752756f6181d0d4cbaf57eb22f85028d11c2
@@ -111,7 +110,7 @@ Four spelling rules decide what a case actually asserts:
 - **A placement is an entry of its own.** `PLACE@seam: cut` in the `knobs` of an entry whose identity is the kernel
   the cut is offered on; the golden validator refuses a placement key beside a schedule row. Older cases carry the
   route in the first entry's `pins`, which the replay reads the same way.
-- **Binding a symbolic dimension specializes the program.** A case with `bindings: {}` keeps its symbolic axis and runs
+- **Binding a symbolic dimension specializes the program.** A case with no `bindings` keeps its symbolic axis and runs
   at the dimension's own `Dim` hint — the size `emmy run` already resolves a symbolic reproducer to. The corpus has no
   spelling for "compile at the hint, run at some other size", so a sweep of one symbolic kernel across many runtime
   sizes stays in Python.
