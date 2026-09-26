@@ -320,6 +320,9 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   measurements and so does every schedule-carrying row of the same target, and a bench of it publishes the listed
   rows' knobs as its pin. A realization that also holds a measured row of its own verifies on that row; the list still
   says what its kernel set held.
+- **Wire** — The YAML-safe data an object is stored as, in a golden file or a tune DB row: a program, a kernel, an
+  expression, a dim. Every IR class writes and reads its own wire through one mixin and one walker
+  (`emmy/compiler/wire.py`), and a golden file is the wire of the classes that declare it.
 - **Working golden file** — A mutable local YAML inventory used to exchange program targets, unmeasured
   realizations, proposed knob rows, and tune ranking feedback. It is search state; only its measured rows are
   evidence, and only when a command names the file with `--golden PATH`.
