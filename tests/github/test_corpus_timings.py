@@ -5,7 +5,6 @@ import json
 import subprocess
 from pathlib import Path
 
-
 MODULE_PATH = Path(__file__).parents[2] / ".github" / "scripts" / "corpus_timings.py"
 SPEC = importlib.util.spec_from_file_location("corpus_timings", MODULE_PATH)
 corpus_timings = importlib.util.module_from_spec(SPEC)

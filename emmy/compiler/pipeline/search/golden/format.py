@@ -21,6 +21,7 @@ from emmy.compiler.wire import Wire
 
 from .record import GoldenRecord
 
+
 class GoldenEntryState(StrEnum):
     INVENTORY = "inventory"
     PROPOSAL = "proposal"

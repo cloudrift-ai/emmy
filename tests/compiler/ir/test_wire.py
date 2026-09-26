@@ -59,7 +59,10 @@ from emmy.compiler.wire import decode, encode, intern
         (Literal(True, "bool"), "true"),
         (BinaryExpr("+", Var("s"), Literal(2, "int")), "s + 2"),
         (BinaryExpr("+", Var("a1"), Literal(-1, "int")), "a1 + -1"),
-        (BinaryExpr("+", BinaryExpr("*", BinaryExpr("/", Var("a5"), Literal(128, "int")), Literal(128, "int")), Var("a6")), "a5 / 128 * 128 + a6"),
+        (
+            BinaryExpr("+", BinaryExpr("*", BinaryExpr("/", Var("a5"), Literal(128, "int")), Literal(128, "int")), Var("a6")),
+            "a5 / 128 * 128 + a6",
+        ),
         (BinaryExpr("-", Var("a"), BinaryExpr("-", Var("b"), Var("c"))), "a - (b - c)"),
         (BinaryExpr("*", BinaryExpr("+", Var("a"), Var("b")), Var("c")), "(a + b) * c"),
         (BinaryExpr("^", Var("a"), BinaryExpr("+", Var("b"), Var("c"))), "a ^ b + c"),

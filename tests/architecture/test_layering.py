@@ -304,9 +304,7 @@ def test_a_new_fingerprint_fact_moves_the_corpus() -> None:
     cases = sorted((_REPO_ROOT / "tests/compiler/realization/cases").rglob("*.json"))
     assert cases, "the realization corpus is empty, so nothing would notice an identity change"
     unstamped = [
-        path.relative_to(_REPO_ROOT).as_posix()
-        for path in cases
-        if not re.search(r'"identity": "[0-9a-f]{64}"', path.read_text())
+        path.relative_to(_REPO_ROOT).as_posix() for path in cases if not re.search(r'"identity": "[0-9a-f]{64}"', path.read_text())
     ]
     assert not unstamped, (
         "every corpus case must carry an `identity:` stamp, or a new fingerprint fact re-keys it "

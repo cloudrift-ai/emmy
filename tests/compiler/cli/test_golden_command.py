@@ -135,7 +135,7 @@ def test_kernels_and_a_json_compile_output_are_the_same_pool_for_a_current_golde
     compiled = run_cli("compile", "--golden", str(golden), "--program", "0", "--ir", "loop", "-o", str(fresh))
     stored = run_cli("golden", "kernels", str(golden), "--program", "0")
     assert compiled[0] == 0 and stored[0] == 0, (compiled[2], stored[2])
-    assert stored[1] == fresh.read_text() and "\"op\":\"loop\"" in stored[1]
+    assert stored[1] == fresh.read_text() and '"op":"loop"' in stored[1]
     program = tmp_path / "program.json"
     assert run_cli("compile", "--golden", str(golden), "--program", "0", "--ir", "torch", "-o", str(program))[0] == 0
     assert json.loads(program.read_text()) == json.loads(golden.read_text())["programs"][0], "the torch stage is the stored program"

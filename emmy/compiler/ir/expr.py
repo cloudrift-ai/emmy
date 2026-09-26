@@ -485,9 +485,7 @@ class BinaryExpr(Expr):
 
 #: Every GPU built-in's name — the renderer's ``_BUILTIN_TO_CUDA`` spells each. The expression reader tells a
 #: built-in from a variable by this set, so no variable may take one of these names.
-BUILTINS = frozenset(
-    {f"{kind}.{axis}" for kind in ("thread_idx", "block_idx", "block_dim", "grid_dim") for axis in "xyz"} | {"warp_size"}
-)
+BUILTINS = frozenset({f"{kind}.{axis}" for kind in ("thread_idx", "block_idx", "block_dim", "grid_dim") for axis in "xyz"} | {"warp_size"})
 
 
 @dataclass(frozen=True)
@@ -686,8 +684,6 @@ class FlatIndex(Expr):
 
     def range(self, ctx: SimplifyCtx) -> Interval | None:
         return None
-
-
 
 
 # ---------------------------------------------------------------------------

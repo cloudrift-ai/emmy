@@ -7,7 +7,8 @@ holds that class's payload bare; a field whose annotation is a base class, a uni
 ``dict`` is an opaque payload kept as it is (a program pool's entries). A class whose wire is not its fields — a dim,
 a tensor, a body, a graph, a leaf type — overrides ``to_wire`` / ``from_wire``. ``wire_tag`` names the class on the
 wire, the class name by default; every wire class registers its tag when it is defined, so a tagged payload decodes
-without anyone listing the classes. A subclass that inherits its base's codec goes by the base's tag. The walker refuses an unknown or missing key by path.
+without anyone listing the classes; a subclass that inherits its base's codec goes by the base's tag (an expression
+node is its text). The walker refuses an unknown or missing key by path.
 """
 
 from __future__ import annotations
