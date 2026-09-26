@@ -2731,5 +2731,7 @@
  "tests/serving/native/test_generation_gpu.py::test_gpu_greedy_exact_reduction[1]@cuda": 0.25,
  "tests/serving/native/test_generation_gpu.py::test_gpu_greedy_exact_reduction[31]@cuda": 0.25,
  "tests/compiler/e2e/test_matmul_coverage.py::test_matvec_splitk_matches_the_reference@cuda": 4.98,
- "tests/compiler/passes/test_split_fresh_kernels.py::test_a_matvec_partial_tiles_its_unit_row_not_the_partition": 4.73
+ "tests/compiler/passes/test_split_fresh_kernels.py::test_a_matvec_partial_tiles_its_unit_row_not_the_partition": 4.73,
+ "tests/compiler/e2e/test_attention_coverage.py::test_chunk_tier_reads_a_query_whose_rows_stride_over_every_head@cuda": 1.2,
+ "tests/compiler/passes/test_spell_store_rounding.py::test_a_reshaped_matmul_result_keeps_its_rounding_into_the_next_matmul": 0.73
 }
