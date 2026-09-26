@@ -1,5 +1,75 @@
 # Golden-bench kernel corpus
 
+## Three cards — the whole layer as one fused kernel, with a flash-shaped route (2026-09-26)
+
+### Question and scope
+
+Since #897 the Qwen3-0.6B layer lowers to one fused kernel, and the recorded route cut all 31 of its seams: it
+materialized the whole attention matrix, and its P.V piece ran as scalar code over 1,048,576 blocks. The layer took
+1026 us on the H100 and 1467 us on the A100. This pass asks what keeps that route slow and whether a flash-shaped route
+is reachable. It covers Qwen3-0.6B layer 0 at s512 on an A100, an H100 and a V100 SXM2, and at s1 on the A100 and
+H100.
+
+### Protocol
+
+One card each: A100-SXM4-40GB (GCP `a2-highgpu-1g`), H100 80GB HBM3 (GCP `a3-highgpu-1g`, SPOT), V100-SXM2-16GB
+(CloudRift). Deployable `-O3`, `EMMY_FAST_MATH=0`. Each golden is a fresh `emmy trace` of the layer. Its route was
+benched under a `WORK` sweep into one tune DB per card, then recorded with `--record-greedy`, so every piece takes the
+fastest measured row. Timings below are an UNPINNED replay of the committed file at model level (`emmy run
+Qwen/Qwen3-0.6B --layer 0`, `EMMY_GOLDEN_FILE` the file), eager and `torch.compile` in the same process, 10 warmups,
+100 iterations. The same replay under `--strict` matches eager on all but 26-47 of 524,288 outputs, each one f16 ulp
+off, which main shows too.
+
+### Result summary
+
+| card | s512 before | s512 after | eager | torch.compile |
+| --- | ---: | ---: | ---: | ---: |
+| A100 | 1467 | **323** | 785 | 429 |
+| H100 | 1026 | **230** | 200 | 80 |
+| V100 | 3471 | **1231** | 1115 | 642 |
+
+| card | s1 after | eager | torch.compile |
+| --- | ---: | ---: | ---: |
+| A100 | 255 | 332 | 105 |
+| H100 | 128 | 111 | 32 |
+
+The s512 route cuts every seam except the score, the probabilities and the softmax statistics, so attention is one
+twisted-carrier piece: 41.8 us on the A100 and 21.6 on the H100 on tensor cores with a staged key and value. The V100
+takes the same cuts on its own evidence; its attention piece is 417 us, the Volta chunk tier without cp.async.
+
+### What the pass found
+
+- **P.V ran scalar because its V read the fused channel plainly.** A cut V projection stores its workspace at the
+  o_proj's flat channel, so the fused-pair split, which asked for `i % d`, declined, and the piece re-walked the keys per
+  channel. It now splits on a plain read too: 839 us to 95.
+- **Rotate-half computed q and k three times, and the post-attention statistic computed o_proj again.** Seam clustering
+  now abstracts a coordinate read through one expression, and compares forms by substitution instead of renaming, so a
+  loop inside a cone that re-binds a captured name keeps its own variable.
+- **A delegated zero-init ran on CTA 0 alone** and cost the V projection piece 130 us for a 4 MB accumulator; every
+  thread of the grid now writes a stride.
+- **The RoPE pieces were uncoalesced** (39 us on the H100): a re-formed piece with no contraction now takes its store's
+  write order as its grid order.
+- **Fusion dropped the f16 rounding of the V projection and attention output** where a reshape composed into the
+  consumer. With it spelled, and a reducing seam stored at the dtype its readers convert to, V and the attention output
+  are f16 workspaces, which the flash tier stages.
+- **The flash tier read its hoisted query at the wrong row stride.** A query stored `[seq, head, dim]` strides its rows
+  by every head's dim; the tier took the trailing extent and disagreed with eager on 487k of 524k outputs.
+- **Cross-CTA split GEMV pieces return wrong answers at s1, on main too.** The committed s1 files replayed at 55 us on
+  the H100 but disagreed with eager on 1016 of 1024 outputs; a `g8k` split re-recorded here failed the same way. The new
+  s1 files carry no split. s1 still loses to `torch.compile` mostly on one piece: the q and k projections and their
+  rotate-half copies lower as ONE six-channel GEMV that reads its weights three times.
+
+### Systems and provenance
+
+- A100-SXM4-40GB `bench-keep-a100-0921-1621-6784`, H100 80GB HBM3 `bench-gb-h100-0924-1252-99aa` (GCP, driver 580.173,
+  nvcc 12.9); V100-SXM2-16GB at `185.165.50.75` (CloudRift, driver 580.178, nvcc 12.9).
+- Source: PR #914 on main `a091dbe7`.
+
+### Durable files
+
+- Goldens: `golden/qwen3-06b-s512_{a100,h100,v100}.golden.json`, `golden/qwen3-06b-s1_{a100,h100}.golden.json`.
+- No archive: the recipe was not re-run; the sections below remain the lane evidence for everything else.
+
 ## Three cards — the score target computed its operands (2026-09-24)
 
 ### Question and scope
