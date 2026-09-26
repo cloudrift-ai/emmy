@@ -209,6 +209,17 @@ def test_split_reductions_remain_fold_trees(monkeypatch, graph) -> None:
     assert not any(_contains_raw_loop(piece.op) for piece in pieces)
 
 
+def test_a_matvec_partial_tiles_its_unit_row_not_the_partition(monkeypatch) -> None:
+    """Both operands of a matvec's partial read the partition coordinate, so it is the pair's only
+    shared axis and never a row: B changes with it. The partial keeps the unit row its kernel had,
+    and that row, not the partition, is the tile's M."""
+    monkeypatch.setenv("EMMY_REDUCE", "g2k")
+    (partial,) = [piece for piece in _tile_pieces(_matmul(m=1)) if len(piece.place.free) > 1]
+    (node,) = [node for node in partial.views if node.as_contraction() is not None]
+    m, _ = sched_of(partial)._mn_for(node)
+    assert m.extent == Dim(1) and m.name not in node.as_contraction().shared_axes
+
+
 def test_each_piece_decides_its_own_row(monkeypatch) -> None:
     """The pieces reach the schedule fork independently — each gets its own decision in the trace
     and leaves with a full schedule row. (Before, the partial arrived pre-decided and the finalize
