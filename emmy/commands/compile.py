@@ -230,7 +230,7 @@ def resolve_golden_arg(args) -> None:
     if getattr(args, "dynamic", None):
         logger.error("--dynamic is incompatible with --golden (a dynamic golden's spec is part of its config)")
         sys.exit(2)
-    from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS, GoldenEntryState, GoldenFile, goldens_for_live_gpu
+    from emmy.compiler.pipeline.search.golden import GoldenEntryState, GoldenFile, golden_records, goldens_for_live_gpu
 
     # Canonical replay scopes to the live card as before. An explicit working file is
     # intentionally literal: no repository union and no live-card filtering, because its
@@ -251,7 +251,7 @@ def resolve_golden_arg(args) -> None:
         available = records
     else:
         records = goldens_for_live_gpu()
-        available = GOLDEN_RECORDS
+        available = golden_records()
 
     exact = [index for index, record in enumerate(records) if record.name == name]
     match_indexes = exact or [index for index, record in enumerate(records) if name in record.name]

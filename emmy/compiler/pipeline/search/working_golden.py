@@ -359,7 +359,7 @@ def load_working_targets(path: str | Path, *, kernel: str | None = None) -> tupl
                     code=None,
                     input=None,
                     dynamic=None,
-                    bindings=record.binding_map,
+                    bindings=dict(record.bindings),
                     pins=record.pin_map,
                     program=record.target_program,
                 )

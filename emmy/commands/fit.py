@@ -35,7 +35,7 @@ from emmy import config, storage
 from emmy.compiler.context import Context
 from emmy.compiler.pipeline.search import features
 from emmy.compiler.pipeline.search.data.group import DEFAULT_FEATURES, GoldenGroup, feature_view, pack_features
-from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS, GoldenRecord
+from emmy.compiler.pipeline.search.golden import GoldenRecord, golden_records
 from emmy.compiler.pipeline.search.pool import DEFAULT_SAMPLE, PoolSample
 from emmy.compiler.pipeline.search.prior.fit import catboost as fit_catboost
 from emmy.compiler.pipeline.search.prior.fit import cv as fit_cv
@@ -246,12 +246,12 @@ def build_golden_groups(
     ctxs: dict[tuple, Context] = {}
     # The keep-sets are precomputed BEFORE the loop because a bucket's obligation spans the whole
     # corpus: the pool a golden opens may also carry a later golden's recorded row.
-    keeps = _keep_sets(GOLDEN_RECORDS) if sample > 0 else {}
+    keeps = _keep_sets(golden_records()) if sample > 0 else {}
     # Group the records by the pool each will enumerate (:attr:`GoldenRecord.pool_group`) before touching
     # the scheduler, so each enumeration is paid once. Insertion order is corpus order, so the groups
     # come out in the order they always did.
     by_pool: dict[tuple, list] = defaultdict(list)
-    for g in GOLDEN_RECORDS:
+    for g in golden_records():
         if kernel is None or kernel in g.name:
             by_pool[g.pool_group].append(g)
 

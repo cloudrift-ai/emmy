@@ -8,7 +8,7 @@ from typing import NamedTuple
 
 from emmy.compiler.pipeline.knob import family_of
 
-from .record import GoldenRecord, _lifted_target, _record_cache_key, kernel_set_pins
+from .record import GoldenRecord, _lifted_target, kernel_set_pins
 
 
 def unmatched_reason(row: Sequence[tuple[str, str]], candidates) -> str:
@@ -165,6 +165,10 @@ def lead_of(record: GoldenRecord, records: Sequence[GoldenRecord]) -> GoldenReco
     target's own entry: it decides every fork no entry names by identity."""
     key = _set_key(record)
     return next(other for other in records if _set_key(other) == key)
+
+
+def _record_cache_key(record: GoldenRecord) -> tuple:
+    return (id(record.loop_wire), record.target_key, record.compute_cap, record.bindings)
 
 
 def _set_key(record: GoldenRecord) -> tuple:

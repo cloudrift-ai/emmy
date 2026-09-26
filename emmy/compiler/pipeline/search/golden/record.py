@@ -194,6 +194,7 @@ class GoldenRecord:
         kernel stays the identity."""
         from emmy.compiler.ir.base import InputOp  # noqa: PLC0415
         from emmy.compiler.pipeline import CompilerDump  # noqa: PLC0415
+        from emmy.compiler.specialize import specialize_program  # noqa: PLC0415
 
         if not self.origins:
             return None
@@ -203,24 +204,14 @@ class GoldenRecord:
         bound = {node_id for node_id, node in kernel.nodes.items() if isinstance(node.op, InputOp)}
         if not (set(kernel.outputs) <= computed and set(reads) == bound):
             return None
-        graph = self._frontend_slice(self.origins)
+        graph = specialize_program(CompilerDump.frontend_reproducer_from_origins(self.program, set(self.origins)), dict(self.bindings))
         graph.outputs = list(kernel.outputs)
         return graph
-
-    def _frontend_slice(self, origins):
-        from emmy.compiler.pipeline import CompilerDump  # noqa: PLC0415
-        from emmy.compiler.specialize import specialize_program  # noqa: PLC0415
-
-        return specialize_program(CompilerDump.frontend_reproducer_from_origins(self.program, set(origins)), dict(self.bindings))
 
     @property
     def target_key(self) -> tuple:
         """Document-local identity shared by candidate rows for one target."""
         return ("loop", self.loop_index)
-
-    @property
-    def binding_map(self) -> dict[str, int]:
-        return dict(self.bindings)
 
     @property
     def pin_map(self) -> dict[str, object]:
@@ -235,8 +226,22 @@ class GoldenRecord:
 
     @cached_property
     def structural_features(self) -> dict[str, float]:
-        """Current compiler features, derived lazily through target provenance."""
-        return dict(_derive_structural_features(self))
+        """The exact replay target lowered, and its one ``S_*`` row recovered."""
+        from emmy.compiler.pipeline.knob import STRUCT_PREFIX  # noqa: PLC0415
+
+        _lowered, nodes = _target_kernel_nodes(self)
+        signatures = {
+            tuple(
+                sorted(
+                    (name, float(value)) for name, value in (getattr(node.op, "knobs", {}) or {}).items() if name.startswith(STRUCT_PREFIX)
+                )
+            )
+            for node in nodes
+        }
+        signatures.discard(())
+        if len(signatures) != 1:
+            raise ValueError(f"{self.name}: target resolves to {len(signatures)} structural targets")
+        return dict(next(iter(signatures)))
 
     @cached_property
     def origin_ops(self) -> tuple[str, ...]:
@@ -337,10 +342,6 @@ def shared_regime_pins(records: Sequence[GoldenRecord]) -> dict:
     return dict(regimes.pop()) if len(regimes) == 1 else {}
 
 
-def _record_cache_key(record: GoldenRecord) -> tuple:
-    return (id(record.loop_wire), record.target_key, record.compute_cap, record.bindings)
-
-
 def _target_kernel_nodes(record: GoldenRecord):
     """The record's stored kernel through the CURRENT loop passes: ``(lowered graph, nodes)``, one
     node per kernel the stored Loop IR lowers to. Raises when it lowers to none — the strict
@@ -384,20 +385,3 @@ def _lifted_target(record: GoldenRecord):
     # and the dtype half of the deploy identity (``identity_key(with_io=True)``) reads the same
     # output fingerprint on both sides.
     return tile.with_io(lowered, node)
-
-
-def _derive_structural_features(record: GoldenRecord) -> tuple[tuple[str, float], ...]:
-    """Lower the exact replay target and recover its unique ``S_*`` row."""
-    from emmy.compiler.pipeline.knob import STRUCT_PREFIX  # noqa: PLC0415
-
-    _lowered, nodes = _target_kernel_nodes(record)
-    signatures = {
-        tuple(
-            sorted((name, float(value)) for name, value in (getattr(node.op, "knobs", {}) or {}).items() if name.startswith(STRUCT_PREFIX))
-        )
-        for node in nodes
-    }
-    signatures.discard(())
-    if len(signatures) != 1:
-        raise ValueError(f"{record.name}: target resolves to {len(signatures)} structural targets")
-    return next(iter(signatures))

@@ -6,8 +6,9 @@ from __future__ import annotations
 import hashlib
 import json
 import tempfile
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Sequence
 from contextlib import contextmanager
+from functools import cache
 from pathlib import Path
 
 import yaml
@@ -129,7 +130,7 @@ def _scoped(records: Sequence[GoldenRecord], gpu_name: str, compute_cap: tuple[i
 def records_for_card(gpu_name: str, compute_cap: tuple[int, int]) -> list[GoldenRecord]:
     """The golden records the evidence index loads for ONE card: the installed scope when one is set
     (:data:`RECORDS_OVERRIDE`, else ``EMMY_GOLDEN_FILE`` — a file, or none when set empty), otherwise
-    the repository files, loading only that card's (header sniff). ``GOLDEN_RECORDS`` stays the full corpus for the eval / fit
+    the repository files, loading only that card's (header sniff). ``golden_records()`` stays the full corpus for the eval / fit
     consumers."""
     gpu_name = gpu.canonical_name(gpu_name)
     if RECORDS_OVERRIDE is not None:
@@ -198,54 +199,20 @@ def _records_of(path: Path) -> list[GoldenRecord]:
     return _document_of(path)[1]
 
 
-def _load_goldens() -> list[GoldenRecord]:
-    records: list[GoldenRecord] = []
+@cache
+def golden_records() -> tuple[GoldenRecord, ...]:
+    """Every row of every repository golden, loaded on first use — the corpus the eval and fit consumers read."""
     with _repository_golden_paths() as paths:
-        for path in paths:
-            records.extend(_records_of(path))
-    return records
-
-
-class _LazyGoldenRecords(Sequence[GoldenRecord]):
-    """Load the repository corpus only when a consumer asks for evidence."""
-
-    def __init__(self, loader: Callable[[], list[GoldenRecord]]) -> None:
-        self._loader = loader
-
-    @property
-    def _records(self) -> tuple[GoldenRecord, ...]:
-        return tuple(self._loader())
-
-    def __getitem__(self, index: int | slice) -> GoldenRecord | tuple[GoldenRecord, ...]:
-        return self._records[index]
-
-    def __iter__(self) -> Iterator[GoldenRecord]:
-        return iter(self._records)
-
-    def __len__(self) -> int:
-        return len(self._records)
-
-
-GOLDEN_RECORDS: Sequence[GoldenRecord] = _LazyGoldenRecords(_load_goldens)
-
-
-def goldens_by_name(name: str) -> list[GoldenRecord]:
-    """Every record with an exact name; names need not be unique."""
-    return [record for record in GOLDEN_RECORDS if record.name == name]
+        return tuple(record for path in paths for record in _records_of(path))
 
 
 def goldens_for_live_gpu() -> list[GoldenRecord]:
-    """Goldens for the live card, or all records when no card is visible."""
-    live = live_recorded_goldens()
-    return list(GOLDEN_RECORDS) if live is None else (live or list(GOLDEN_RECORDS))
-
-
-def live_recorded_goldens() -> list[GoldenRecord] | None:
-    """The live card's own records, ``None`` when no CUDA card is visible."""
+    """The live card's own rows, or every row when no CUDA card is visible or none are recorded for it."""
     key = _live_gpu_key()
+    records = list(golden_records())
     if key is None:
-        return None
-    return [record for record in GOLDEN_RECORDS if record.gpu_name == key[0] and record.compute_cap == key[1]]
+        return records
+    return [record for record in records if record.gpu_name == key[0] and record.compute_cap == key[1]] or records
 
 
 def _live_gpu_key() -> tuple[str, tuple[int, int]] | None:

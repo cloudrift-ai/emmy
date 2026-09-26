@@ -31,14 +31,14 @@ def _golden_coverage(groups: dict) -> tuple[int, int]:
     keys*, not per-config rows, so multiple knob sets for one shape — and the same
     shape recurring across per-GPU golden files (``ShapeKey`` is GPU-blind) — count
     once."""
-    from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import golden_records  # noqa: PLC0415
 
     have = set()
     for sig in groups:
         d = dict(sig)
         if is_matmul(d):
             have.add(ShapeKey.from_s_features(d))
-    golden_keys = {g.shape_key for g in GOLDEN_RECORDS if g.is_matmul}
+    golden_keys = {g.shape_key for g in golden_records() if g.is_matmul}
     covered = sum(1 for k in golden_keys if k in have)
     return covered, len(golden_keys)
 

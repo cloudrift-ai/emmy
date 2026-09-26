@@ -452,7 +452,7 @@ def test_selected_records_scope_the_tier_and_a_split_regime_publishes_nothing(mo
     # Without --golden PATH the live card's repository corpus is searched, and its matches scope the tier the same way.
     records = document.records()
     monkeypatch.setattr(golden, "goldens_for_live_gpu", lambda: records)
-    monkeypatch.setattr(golden, "GOLDEN_RECORDS", records)
+    monkeypatch.setattr(golden, "golden_records", lambda: records)
     canonical = _args(path, golden=None)
     resolve_golden_arg(canonical)
     assert [record.name for record in canonical._golden_records] == ["working.relu", "working.relu"]
