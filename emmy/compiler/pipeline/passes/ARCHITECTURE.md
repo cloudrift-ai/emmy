@@ -446,8 +446,9 @@ that direct private copy inherits the same accumulator dtype. Actual computation
 untyped, so normalization and softmax keep their f32 state until their own public result store. Fusion and placement
 then preserve the typed `copy` as an ordinary statement rather than reconstructing a boundary from graph topology.
 The frontend's index-map composition can delete the public buffer a decomposition's transient reduce stood behind (a
-linear's result under its reshape, composed into the consumer's operand map); the transient buffer is then the value's
-only storage, so it becomes public and its rounding is spelled like any other.
+linear's result under its reshape, composed into the consumer's operand map). When the consumer's own result is
+transient too, the transient buffer is then the value's only storage, so it becomes public and its rounding is spelled
+like any other; a composition whose consumer writes a public buffer keeps its spelling.
 
 FP16/BF16 matmul decomposition declares its product at FP32 before reduction. Widening only the accumulator loses
 precision or overflows at each half-precision multiply, even when the dot product is representable. The explicit
