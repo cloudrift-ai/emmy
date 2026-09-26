@@ -15,15 +15,19 @@ new compiler or runtime alias format. Unsupported symbolic, indirect, and descri
 Cache buffers use the persistent output role, without joining the public logits/token output list. Custom launches
 identify their writes so Python scratch allocation preserves the same dependencies as native execution.
 
-CUDA source lives in the packaged `kernels.cu` resource, loaded by Python during artifact preparation.
-Small CUDA kernels provide embedding lookup, default full rotary embedding, paged cache writes, causal grouped
-query attention over the paged cache, and GPU sampling. Attention keeps dot products, scores, probabilities, and
-value accumulation in FP32, rounding only its output to FP16. This avoids losing near-tied scores at large
-magnitudes. These kernels favor
-accuracy over speed. Residual sums stay in FP32 through the existing attention-split wrappers; normalization casts
-back to FP16 before each projection. Rotary constants come from the checkpoint's own module in FP32. Rotation also
-uses FP32 intermediates and rounds only the query/key outputs to FP16. The existing standalone exporter bundles all
-binaries and weight bytes. Generation metadata lives in the pack key and has its own version.
+The glue between the projections is compiled too, from three small traced modules in `prepare.py`: the embedding
+gathers the prompt's token at this position while the prompt lasts and the previous step's selection after it, the
+rotary module rotates q and k at this position and hands k and v to the cache pages, and attention runs causal
+grouped-query attention over the whole cache with every position past this one masked. All three read the position
+from device memory, including the cache write, whose paged start is the `position` input rather than a host symbol,
+so a token step is one launch sequence at every position and replays as one graph. Only sampling stays hand-written
+CUDA, in the packaged `kernels.cu` resource: argmax, the logit histogram and the seeded draw are data-dependent
+control flow with no traced op. Attention keeps dot products, scores, probabilities, and value accumulation in FP32,
+rounding only its output to FP16. This avoids losing near-tied scores at large magnitudes. Residual sums stay in FP32
+through the existing attention-split wrappers; normalization casts back to FP16 before each projection. Rotary
+constants come from the checkpoint's own module in FP32. Rotation also uses FP32 intermediates and rounds only the
+query/key outputs to FP16. The existing standalone exporter bundles all binaries and weight bytes. Generation metadata
+lives in the pack key and has its own version.
 
 Preparation rejects other model families, quantization, sliding attention, non-default rotary schemes, training mode,
 and non-FP16 or non-CPU parameters. Context capacity must fit both the model and the current 4,096-token limit.
@@ -37,10 +41,11 @@ writing each token's keys and values once at its absolute position; it never rec
 reads the previous GPU-selected token. The host updates one position scalar and reads one selected token after the
 prompt is consumed. Full logits are downloaded only through the explicit diagnostic operation.
 
-The cache is one paged K and one paged V buffer per layer: the plan declares them paged along the token axis with
-`page_tokens` tokens per page (`export_model(page_tokens=…)`, `emmy generate --page-tokens`), the two cache kernels
-resolve a position to a page and a slot inside it, and the runtime allocates every page at load and binds the page
-tables (see the runtime's paged-buffer contract). The default page spans the whole context, so the table has one
+The cache is one paged K and one paged V buffer per layer, shaped `[1, kv_heads, context, head_dim]` and paged along
+the token axis with `page_tokens` tokens per page (`export_model(page_tokens=…)`, `emmy generate --page-tokens`).
+The rotary program writes one token of each through the page tables at `position`, the attention program reads all
+of them through the same tables, and the runtime allocates every page at load and binds the tables (see the
+runtime's paged-buffer contract). The default page spans the whole context, so the table has one
 entry and the addressing is that of the contiguous array it replaces; a smaller page changes only the addressing,
 never the tokens generated. A new request resets the position and prompt length. Attention can only read positions
 already overwritten by that request, so clearing the entire cache is unnecessary. Activations and scratch remain

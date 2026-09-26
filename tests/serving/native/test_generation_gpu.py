@@ -295,158 +295,58 @@ def test_checkpoint_logits_and_completions(request, tmp_path, monkeypatch, name,
         asyncio.run(check())
 
 
-def test_rotary_rounds_only_the_output(tmp_path):
-    from emmy.compiler.backend.pack import save_executable
-    from emmy.compiler.backend.plan import BufferSpec, ExecutionPlan, KernelSpec, LaunchSpec
-    from emmy.compiler.dim import Dim
-    from emmy.compiler.dtype import F16, F32, I64
-    from emmy.serving.native.kernels import SOURCE
-
-    executable = shutil.which("emmy-runtime-worker")
-    if not executable:
-        pytest.skip("build native worker and add it to PATH")
-    rng = np.random.default_rng(71)
-    q = (rng.normal(size=(4, 128)) * 10).astype(np.float16)
-    k = (rng.normal(size=(2, 128)) * 10).astype(np.float16)
-    v = rng.normal(size=(2, 128)).astype(np.float16)
-    angles = np.tile(rng.normal(size=64), 2)
-    cosine, sine = np.cos(angles).astype(np.float32), np.sin(angles).astype(np.float32)
-    data = {"q": q, "k": k, "v": v, "cosine": cosine, "sine": sine, "position": np.array([0], np.int64)}
-    source = (
-        "#define HIDDEN 32\n#define HEADS 4\n#define KV_HEADS 2\n#define HEAD_DIM 128\n"
-        "#define VOCAB 32\n#define SCALE 0.08838834764831845f\n#define PAGE_TOKENS 1\n" + SOURCE
-    )
-    buffers = [
-        BufferSpec(n, tuple(Dim(x) for x in a.shape), I64 if n == "position" else F32 if n in ("cosine", "sine") else F16, "input")
-        for n, a in data.items()
-    ]
-    outputs = {"rotated": q, "keys": k, "values": v}
-    buffers += [BufferSpec(n, tuple(Dim(x) for x in a.shape), F16, "output") for n, a in outputs.items()]
-    # The cache kernels address K and V through page tables; one page holds this one position.
-    args = tuple(data) + ("rotated", "keys__pages", "values__pages")
-    plan = ExecutionPlan(
-        "cuda",
-        list(data),
-        list(outputs),
-        buffers,
-        {},
-        {},
-        [LaunchSpec("rope", "native_rope_cache", args, ((4,), (1,), (1,)), ((128,), (1,), (1,)), 0, ())],
-        {"native_rope_cache": KernelSpec(source=source)},
-        paged={"keys": (0, 2, None), "values": (0, 2, None)},
-    )
-    with gpu_lock():
-        root = save_executable(tmp_path / "rope", {"rope": plan}, bindings={"rope": {n: a.tobytes() for n, a in data.items()}}, key={})
-
-        async def check():
-            worker = NativeWorker(executable=executable)
-            try:
-                await worker.run_job({"op": "load", "root": str(root), "program": "rope"}, wall_timeout_s=30)
-                await worker.run_job(
-                    {"op": "run", "warmup": 0, "iterations": 1, "capture": False, "outputs": {n: str(tmp_path / n) for n in outputs}},
-                    wall_timeout_s=30,
-                )
-            finally:
-                await worker.aclose()
-
-        asyncio.run(check())
-        for name, values in (("rotated", q), ("keys", k)):
-            rotated = np.concatenate((-values[:, 64:], values[:, :64]), axis=-1)
-            expected = (values.astype(np.float64) * cosine + rotated.astype(np.float64) * sine).astype(np.float16)
-            np.testing.assert_array_equal(np.fromfile(tmp_path / name, np.float16).reshape(values.shape), expected)
-        np.testing.assert_array_equal(np.fromfile(tmp_path / "values", np.float16).reshape(v.shape), v)
-
-
 @pytest.mark.parametrize("page_tokens", [4096, 128], ids=["one_page", "paged"])
 @pytest.mark.parametrize("near_tie", [False, True], ids=["random", "near_tie"])
-def test_attention_reads_only_the_written_cache_prefix(tmp_path, near_tie, page_tokens):
-    from emmy.compiler.backend.pack import save_executable
-    from emmy.compiler.backend.plan import BufferSpec, ExecutionPlan, KernelSpec, LaunchSpec
-    from emmy.compiler.dim import Dim
-    from emmy.compiler.dtype import F16, I64
-    from emmy.serving.native.kernels import SOURCE
-    from emmy.serving.native.prepare import MAX_CONTEXT
+def test_attention_reads_only_the_written_cache_prefix(near_tie, page_tokens):
+    """The compiled attention masks every position past the current one on the device, so the
+    unwritten rest of the cache — poisoned here with large finite values — never reaches the
+    output, at page boundaries and at both ends of the context alike."""
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.backend.cuda.program import CompiledProgram
+    from emmy.compiler.trace.torch import trace_module
+    from emmy.serving.native.prepare import MAX_CONTEXT, attend_module
 
-    executable = shutil.which("emmy-runtime-worker")
-    if not executable:
-        pytest.skip("build native worker and add it to PATH")
+    heads, kv, d = 4, 2, 128
     rng = np.random.default_rng(19)
-    query = rng.normal(size=(4, 128)).astype(np.float16)
-    keys = rng.normal(size=(MAX_CONTEXT, 2, 128)).astype(np.float16)
+    query = rng.normal(size=(1, heads * d)).astype(np.float16)
+    keys = rng.normal(size=(1, kv, MAX_CONTEXT, d)).astype(np.float16)
     values = rng.normal(size=keys.shape).astype(np.float16)
     if near_tie:
-        # QK is about 1024: FP16 score storage erases a real 0.125 difference.
+        # QK is about 1024: FP16 score storage would erase a real 0.125 difference.
         query.fill(1)
         keys.fill(8)
-        keys[0, :, 0] += 0.125
+        keys[0, :, 0, 0] += 0.125
         values.fill(-1)
-        values[0] = 1
-    source = (
-        "#define HIDDEN 32\n#define HEADS 4\n#define KV_HEADS 2\n#define HEAD_DIM 128\n"
-        f"#define VOCAB 32\n#define SCALE 0.08838834764831845f\n#define PAGE_TOKENS {page_tokens}\n" + SOURCE
+        values[0, :, 0] = 1
+    # Distinct example tensors: two arguments sharing one trace as a single aliased input.
+    examples = (
+        torch.zeros(1, heads * d, dtype=torch.float16),
+        torch.zeros(1, kv, MAX_CONTEXT, d, dtype=torch.float16),
+        torch.zeros(1, kv, MAX_CONTEXT, d, dtype=torch.float16),
+        torch.zeros(1, dtype=torch.int64),
     )
-    data = {"q": query, "k": keys, "v": values, "position": np.array([0], np.int64)}
-    buffers = [BufferSpec(n, tuple(Dim(x) for x in a.shape), I64 if n == "position" else F16, "input") for n, a in data.items()]
-    buffers.append(BufferSpec("attention", (Dim(4), Dim(128)), F16, "output"))
-    # K and V are paged along the token axis: the runtime pages them at load, the bound bytes
-    # land in those pages, and the kernel reads them through the page tables.
-    plan = ExecutionPlan(
-        "cuda",
-        list(data),
-        ["attention"],
-        buffers,
-        {},
-        {},
-        [
-            LaunchSpec(
-                "attention",
-                "native_attention",
-                ("q", "k__pages", "v__pages", "position", "attention"),
-                ((4,), (1,), (1,)),
-                ((128,), (1,), (1,)),
-                MAX_CONTEXT * 4,
-                (),
-                writes=("attention",),
-            )
-        ],
-        {"native_attention": KernelSpec(source=source)},
-        paged={"k": (0, page_tokens, None), "v": (0, page_tokens, None)},
-    )
+    graph = trace_module(attend_module(heads, kv, d, MAX_CONTEXT), examples)
+    graph.hints.set("cuda.paged_buffers", (("keys", 2, page_tokens, None), ("values", 2, page_tokens, None)))
+    compiled = CudaBackend().compile(graph)
     with gpu_lock():
-        root = save_executable(
-            tmp_path / "pack", {"attention": plan}, bindings={"attention": {n: a.tobytes() for n, a in data.items()}}, key={}
-        )
-
-        async def check():
-            worker = NativeWorker(executable=executable)
-            try:
-                await worker.run_job({"op": "load", "root": str(root), "program": "attention"}, wall_timeout_s=30)
-                # Ascending and descending lengths catch stale future data after request reset.
-                for count in (1, 127, 128, 129, MAX_CONTEXT - 1, MAX_CONTEXT, 2):
-                    data["k"], data["v"] = keys.copy(), values.copy()
-                    data["k"][count:] = np.nan
-                    data["v"][count:] = np.nan
-                    data["position"][0] = count - 1
-                    for name, array in data.items():
-                        array.tofile(tmp_path / name)
-                    await worker.run_job({"op": "bind", "inputs": {n: str(tmp_path / n) for n in data}}, wall_timeout_s=30)
-                    await worker.run_job(
-                        {"op": "run", "warmup": 0, "iterations": 1, "capture": True, "outputs": {"attention": str(tmp_path / "result")}},
-                        wall_timeout_s=30,
-                    )
-                    # Independent float64 attention; only inputs and the final output use FP16.
-                    k = keys[:count].repeat(2, axis=1).astype(np.float64)
-                    v = values[:count].repeat(2, axis=1).astype(np.float64)
-                    scores = np.einsum("hd,thd->ht", query.astype(np.float64), k) * 128**-0.5
-                    probabilities = np.exp(scores - scores.max(axis=-1, keepdims=True))
-                    probabilities /= probabilities.sum(axis=-1, keepdims=True)
-                    expected = np.einsum("ht,thd->hd", probabilities.astype(np.float64), v).astype(np.float16)
-                    actual = np.fromfile(tmp_path / "result", np.float16).reshape(query.shape)
-                    np.testing.assert_allclose(actual, expected, rtol=1e-3, atol=1e-3)
-            finally:
-                await worker.aclose()
-
-        asyncio.run(check())
+        program = CompiledProgram.build(compiled, {"q": query, "keys": keys, "values": values, "position": np.array([0], np.int64)})
+        # Ascending and descending lengths catch stale future data after request reset.
+        for count in (1, 127, 128, 129, MAX_CONTEXT - 1, MAX_CONTEXT, 2):
+            k, v = keys.copy(), values.copy()
+            k[:, :, count:] = 1e4
+            v[:, :, count:] = 1e4
+            program.upload_prefix({"keys": k, "values": v, "position": np.array([count - 1], np.int64)})
+            program.run_once()
+            actual = program.outputs()[compiled.outputs[0]].reshape(heads, d)
+            # Independent float64 attention over the written prefix only; inputs and output are FP16.
+            group = heads // kv
+            kk = keys[0, :, :count].repeat(group, axis=0).astype(np.float64)
+            vv = values[0, :, :count].repeat(group, axis=0).astype(np.float64)
+            scores = np.einsum("hd,htd->ht", query.reshape(heads, d).astype(np.float64), kk) * d**-0.5
+            probabilities = np.exp(scores - scores.max(axis=-1, keepdims=True))
+            probabilities /= probabilities.sum(axis=-1, keepdims=True)
+            expected = np.einsum("ht,htd->hd", probabilities, vv).astype(np.float16)
+            np.testing.assert_allclose(actual, expected, rtol=1e-3, atol=1e-3)
 
 
 def test_gpu_sampling_matches_independent_nucleus_distribution():

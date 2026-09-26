@@ -102,9 +102,14 @@ def rewrite(match: Match, root: Node) -> CudaOp | None:
     # than to one contiguous slab. Shapes are untouched, so the schedule search never sees it.
     scope = {*kernel.inputs, *kernel.outputs}
     paged = tuple(entry for entry in match.graph.hints.get("cuda.paged_buffers", ()) if entry[0] in scope)
-    # A page start is a runtime ``int`` the caller supplies per step (``past``): it names no axis,
-    # so no shape carries it and the signature has to take it on the paged buffer's behalf.
-    runtime_args = tuple(dict.fromkeys((*runtime_args, *(start for *_, start in paged if start is not None))))
+    # A page start is where a step's rows land in the cache. Naming a graph tensor — an i64 scalar
+    # the kernel reads in its preamble — keeps the step one replayable graph, since nothing on the
+    # host changes between positions; any other name is a runtime ``int`` the caller supplies per
+    # step (``past``), which names no axis, so no shape carries it and the signature takes it on
+    # the paged buffer's behalf.
+    starts = tuple(dict.fromkeys(start for *_, start in paged if start is not None))
+    device_starts = tuple(start for start in starts if start in match.graph.nodes)
+    runtime_args = tuple(dict.fromkeys((*runtime_args, *(start for start in starts if start not in device_starts))))
     if paged:
         # A paged buffer has no base pointer to take: only ``Load`` / ``Write`` resolve a page,
         # so any other stmt touching it (a TMA descriptor, a cp.async stage) would need a base
@@ -120,7 +125,9 @@ def rewrite(match: Match, root: Node) -> CudaOp | None:
         zeroed = sorted(names & {*_atomic_outputs(kernel), *(zp.dst for zp in kernel.body.iter_of_type(ZeroPrologue))})
         if zeroed:
             raise NotImplementedError(f"paged buffer(s) {zeroed} are zero-initialized per launch, which has no page table to clear")
-    source = render_kernelop(kernel, tensors=tensors, runtime_args=runtime_args, indirect_inputs=indirect, paged_buffers=paged)
+    source = render_kernelop(
+        kernel, tensors=tensors, runtime_args=runtime_args, indirect_inputs=indirect, paged_buffers=paged, device_starts=device_starts
+    )
 
     # A cooperative tile fixes the per-CTA thread count (``coop · ∏block-cells``): one CTA
     # per output-cell group, ``blockDim = block_threads``, ``gridDim = N / block_threads``
@@ -148,7 +155,13 @@ def rewrite(match: Match, root: Node) -> CudaOp | None:
     def _bound(n: str) -> str:
         return f"{n}__pages" if n in paged_names else n
 
-    arg_order = (*(_bound(n) for n in kernel.inputs), *(_bound(n) for n in kernel.outputs), *(d.name for d in tma_descs))
+    # A device start the kernel does not otherwise read is one more pointer after the outputs.
+    arg_order = (
+        *(_bound(n) for n in kernel.inputs),
+        *(_bound(n) for n in kernel.outputs),
+        *(s for s in device_starts if s not in kernel.inputs),
+        *(d.name for d in tma_descs),
+    )
     return CudaOp(
         kernel_source=source,
         kernel_name=name,

@@ -72,14 +72,31 @@ def _compile_read(paged: bool):
     return CudaBackend().compile(graph)
 
 
-def _compile_write(*, rows: int = SEQ, start: str | None = None):
-    """Compile the producer of ``rows`` new keys, writing them into a page table at ``start``."""
+def _cache_write_at():
+    """The same producer taking its position as an i64 scalar in device memory."""
+    import torch
+    import torch.nn as nn
+
+    class CacheWriteAt(nn.Module):
+        def forward(self, kin, past):
+            return torch.where(past >= 0, torch.tanh(kin), kin)
+
+    return CacheWriteAt()
+
+
+def _compile_write(*, rows: int = SEQ, start: str | None = None, device_start: bool = False):
+    """Compile the producer of ``rows`` new keys, writing them into a page table at ``start`` — a
+    runtime symbol, or with ``device_start`` the graph's own ``past`` input scalar."""
     import torch
 
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.trace.torch import trace_module
 
-    graph = trace_module(_cache_write(), (torch.zeros(1, KV_HEADS, rows, HEAD_DIM),))
+    example = torch.zeros(1, KV_HEADS, rows, HEAD_DIM)
+    if device_start:
+        graph = trace_module(_cache_write_at(), (example, torch.zeros(1, dtype=torch.int64)))
+    else:
+        graph = trace_module(_cache_write(), (example,))
     graph.hints.set("cuda.paged_buffers", ((graph.outputs[0], 2, PAGE, start),))
     return CudaBackend().compile(graph)
 
@@ -134,6 +151,21 @@ def test_paged_output_writes_at_a_runtime_start():
     assert f"{name}__pages" in kernel.arg_order and name not in kernel.arg_order
 
 
+def test_paged_output_start_can_live_on_the_device():
+    """A ``start`` naming a graph input is read off the device in the kernel's preamble instead of
+    arriving as a runtime ``int``: nothing on the host changes between positions, so a token step
+    stays one replayable graph."""
+    pytest.importorskip("torch")
+    compiled = _compile_write(rows=CHUNK, start="past", device_start=True)
+    (kernel,) = _kernels(compiled)
+
+    signature = _signature(kernel)
+    assert "const long long* past" in signature, signature
+    assert "int past" not in signature and not kernel.runtime_args
+    assert "const int past__at = (int)past[0];" in kernel.kernel_source
+    assert "past__at" in kernel.kernel_source.split("__pages[", 1)[1].split("]", 1)[0]
+
+
 @requires_cuda
 def test_paged_read_matches_the_contiguous_read():
     """Reading K/V from a table of four 8-key pages gives bit-identical results to reading them
@@ -165,12 +197,13 @@ def test_paged_read_matches_the_contiguous_read():
 
 
 @requires_cuda
-def test_cache_filled_in_chunks_then_attended():
+@pytest.mark.parametrize("device_start", [False, True], ids=["symbol", "device"])
+def test_cache_filled_in_chunks_then_attended(device_start):
     """End to end. The cache starts empty as a table of pages; four steps each compute CHUNK new
-    keys and write them at their absolute position through one ``start`` symbol; then attention
-    reads the whole cache back through the same table. The result must equal the same pipeline
-    run on one contiguous buffer — a wrong page, a wrong offset or a disagreeing layout between
-    the write and the read all break it."""
+    keys and write them at their absolute position through one ``start`` — a symbol the host sets
+    per step, or a scalar it uploads; then attention reads the whole cache back through the same
+    table. The result must equal the same pipeline run on one contiguous buffer — a wrong page, a
+    wrong offset or a disagreeing layout between the write and the read all break it."""
     import torch
 
     from emmy.compiler.backend.cuda.program import CompiledProgram
@@ -180,7 +213,7 @@ def test_cache_filled_in_chunks_then_attended():
     with torch.no_grad():
         reference = _attention()(q, _cache_write()(kin), v, mask).numpy()
 
-    writer = _compile_write(rows=CHUNK, start="past")
+    writer = _compile_write(rows=CHUNK, start="past", device_start=device_start)
     reader = _compile_read(paged=True)
 
     with gpu_lock():
@@ -191,8 +224,12 @@ def test_cache_filled_in_chunks_then_attended():
         step = CompiledProgram.build(writer, {writer.inputs[0]: np.ascontiguousarray(kin.numpy()[:, :, :CHUNK, :])})
         step.alias_buffer(f"{writer.outputs[0]}__pages", table)
         for past in range(0, SEQ, CHUNK):
-            step.upload_prefix({writer.inputs[0]: np.ascontiguousarray(kin.numpy()[:, :, past : past + CHUNK, :])})
-            step.set_sym_values({"past": past})
+            chunk = {writer.inputs[0]: np.ascontiguousarray(kin.numpy()[:, :, past : past + CHUNK, :])}
+            if device_start:
+                step.upload_prefix({**chunk, "past": np.array([past], dtype=np.int64)})
+            else:
+                step.upload_prefix(chunk)
+                step.set_sym_values({"past": past})
             step.run_once()
 
         feed = {name: t.numpy() for name, t in zip(("q", "k", "v", "mask"), (q, kin, v, mask), strict=True)}
