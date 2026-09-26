@@ -82,10 +82,10 @@ checkpoint stays impractical here.
    single request's prefill rides it. Five targets still carry two route rows under one name from #897's refresh (the
    width-16, 4,096-width and symbolic post main kernels, the width-16 post routing kernel, `pre4096`); since #917
    `--record-greedy` puts the kernel set on the row the recorded route lands on and refuses when that is none of them,
-   so recording a new route there still needs the stale sibling and its own receipts dropped first. Re-recording a realization under a different route appends the new
-   decision row and points the seed's `kernel_set` at it while the seed keeps its old knobs; fold the decision row into
-   the seed (`fold_route.py`) and drop the old route's receipts, which the decode test names. Per post twin
-   and per kernel — the routing kernel carries the same logits recompute (4.1 ms of the width-16 twin's 6.5) — take the
+   so recording a new route there still needs the stale sibling and its own receipts dropped first. Re-recording a
+   realization under a different route appends the new decision row and points the seed's `kernel_set` at it while
+   the seed keeps its old knobs; fold the decision row into the seed (`fold_route.py`) and drop the old route's
+   receipts, which the decode test names. Per post twin and per kernel — the routing kernel carries the same logits recompute (4.1 ms of the width-16 twin's 6.5) — take the
    seams that compute the `hc_fn` logits and the four-stream mix once, pick the new pieces' schedules by hand, check
    each set against #897's route on the same inputs (the post targets have no eager reference, so `run --bench`'s exit
    code proves nothing about them), record with `--record-greedy` under the route as `EMMY_KNOBS` pins, and boot. On the
