@@ -23,12 +23,13 @@ picks), so that twin rides width 16.
 This round re-tiled what #897 recorded at the tensor core's default K chunk. The width-16 expert pieces and every post
 twin's last matmul ran `mma` tiles without `/k8`, one `m8n8k4` step per shared-memory stage; hand-picked sweeps (the
 prior does not pick) moved them to `/k8`: the expert twin 5.33 → 0.79 ms, the last matmul 263 ms → 1.48 ms at width
-4,096, 16.4 ms → 227 µs symbolic, 1,232 → 114 µs at M=1 and 511 → 115 µs at M=16, every output bit-identical to #897's
-spelling on the same inputs. Boot45 serves the file strict and coherent at 0.734 s per output token, 34.1 s / 14.4 s to
-first token at 2,155 prompt tokens cold and warm, and 1.25 s per layer for a 4,096-token chunk. Boot45's tree predates
-#903, which dropped two receipts of the M=1 post twin's main-kernel route (their schedules tile a row #903's
-normalization removed): on `main` that twin refuses strict at its cut fork and serving rides width 16 for it until a
-record run on the card replaces them, so decode on `main` as merged is slower than boot45.
+4,096, 16.4 ms → 227 µs symbolic, 1,232 → 115 µs at M=1 and 511 → 114 µs at M=16; the expert rows pass the eager
+check and the post rows' outputs are bit-identical to #897's spelling on the same inputs. Boot45 serves the file
+strict and coherent at 0.734 s per output token, 34.1 s / 14.4 s to first token at 2,155 prompt tokens cold and warm,
+and 1.25 s per layer for a 4,096-token chunk. Boot45's tree predates #903, which dropped two receipts of the M=1 post
+twin's main-kernel route (their schedules tile a row #903's normalization removed): on `main` that twin refuses strict
+at its cut fork and serving rides width 16 for it until a record run on the card replaces them, so decode on `main` as
+merged is slower than boot45.
 
 What holds the numbers now is the post routes, not the tiles. #897's routes leave this model's recurring defect in
 place: the hyper-connection logits (16,384-long f32 dot products against `hc_fn`) and the four-stream mix are
@@ -267,8 +268,8 @@ only once concurrent prompts fill a step.
   suffix: one `m8n8k4` step per shared-memory stage). The width-16 expert gate/up piece `w4x1 f1x4 d1/smem` 3,861 µs →
   `w2x1 f1x1/k8 d1/smem` 506 µs, its down piece `w2x4 f1x1` 1,464 → `w2x2 f1x1/k8` 279 µs (the same spelling at `/k2`,
   `/k4`, `/k8`: 1,008, 530, 307 µs); each post twin's last matmul lead `w4x2 f2x2/k8 d2/smem` at width 4,096 (263 ms →
-  1.48 ms), `w2x4 f4x2/k8 d2/smem` symbolic (16.4 ms → 227 µs), `w2x1 f1x1/k8 d2/smem` at M=1 (1,232 → 114 µs) and `w2x2
-  f1x1/k8 d2/smem` at M=16 (511 → 115 µs). Only those last-matmul leads offer `/k8` in the post twins; the other
+  1.48 ms), `w2x4 f4x2/k8 d2/smem` symbolic (16.4 ms → 227 µs), `w2x1 f1x1/k8 d2/smem` at M=1 (1,232 → 115 µs) and `w2x2
+  f1x1/k8 d2/smem` at M=16 (511 → 114 µs). Only those last-matmul leads offer `/k8` in the post twins; the other
   tensor-core pieces there offer `bk` 1 at `d1/smem` alone. Two rounds of sixteen cards per twin family, repeated within
   1%; the expert still runs about twice its 09-20 kernels (410 / 159 µs), which is #897's lowering, not the schedule.
 - **`k_div_35`**: the pre-#813 rows put two cooperative reduces on seams the codec no longer allows together; one
