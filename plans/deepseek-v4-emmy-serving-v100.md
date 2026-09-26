@@ -8,38 +8,33 @@ serving shell — then A/B against the plain 1Cat container at an equal serving 
 43 layers, `hc_mult` 4, 256 routed experts at top-6 plus one shared, 3 hash-router layers. At TP8 × PP2 the first
 stage owns layers 0–21 and the second 22–42.
 
-## Where it stands (2026-09-25, main at #897)
+## Where it stands (2026-09-26, main at #908)
 
 `main` at `cc2bb92f` (#897) replaced this file. Loop fusion decides its regions from the graph now, the recurrence
 roller rolls the Sinkhorn rounds, and the post block lowers to five kernels per width instead of about thirty-five: a
 routing kernel (`k_linear_softmax_mean_reduce`), the two rolled Sinkhorn chains (`k_div_1_steps0_reduce`,
 `k_div_40_steps0_reduce`), the main kernel (`k_linear_matmul_softmax_mean_reduce`) and a last matmul kernel; the
-expert and pre twins are one kernel each. Every row this plan's rounds recorded named a kernel that no longer exists,
-so #897's refresh re-recorded the file on this card at every width — 28 targets, 142 rows, every one measured, the
-post twins under hand-picked cut routes (the M=1 post twin's fused row reads 20.35 ms, its deployed cut route 1.52 ms)
-— and the strict decode, the fresh-lowering check (`emmy golden check`, which replaced the strict-xfail list) and the
-GPU-less election of every twin program pass on it, except the two M=1 tiers. Their route rows carry a measurement but
-no receipt for the pieces the route cuts, so #888's pricing has nothing to price and both refuse at the target's own
-cut fork; the pre twin's refusal is fatal in serving, the expert's is not. This round records the M=1 pre route on the
-card (`run --record-greedy` under its cut keys as `EMMY_KNOBS` pins): six rows, the set at 313 µs with the residual
-piece 307 of it, and the twin elects. The M=1 expert route's record ran past the bench's 600 s of GPU time under the
-prior's picks for its pieces and stays unrecorded, so that twin rides width 16 as it has since #829. Boot43 — `main`
-at #897 with the six rows, the tune DB seeded with one import so the sixteen workers do not race on it, and the
-host-only patch handing the Rust runtime torch's device — served strict in about ten minutes with the M=1 post twin
-deployed for the first time from a committed file: coherent completions (boot39's), 1.15–1.19 s per output token
-against boot42's 0.56–0.62, 5.64 s / 2.93 s to first token at 5 prompt tokens cold and warm (3.49 / 0.76 before), 39.5
-s / 17.1 s at 2,155 (68.2 / 5.66); the roofline audit reads post.decode.m1 12.96 ms, post.decode.m16 34.7 ms (7.54
-before), pre.chunk.m4096 3.12 ms (unchanged) and post.chunk.m4096 1,510 ms (102.3 before) per layer. #897's cut routes
-are the baselines its refresh recorded, not tuned sets: decode is twice as slow and a 4,096-token chunk fifteen times
-slower than the kernel sets they replaced, and closing that gap is the work now.
+expert and pre twins are one kernel each. #897's refresh re-recorded the file on this card at every width, the post
+twins under hand-picked cut routes, and #905 recorded the M=1 pre route those rows could not price: boot43 served
+strict and coherent at 1.15 s per output token (0.56 on the file before #897) and 1.51 s per layer for a 4,096-token
+chunk (0.10). The M=1 expert route stays unrecorded (its record ran past the bench's 600 s under the prior's piece
+picks), so that twin rides width 16.
 
-Three things hold the numbers. Fast math became the default (#868) while serving published no precision pin, so every
-boot needed the regime pinned off by hand — closed by `serve --golden` publishing the rows' regime to its workers. The
-fresh divide kernels run serial, 36 to 250 times slower than the old cooperative rows and up to 40 times slower than
-eager: #863 lowers them to chains of nested four-element folds recomputed per element, so the one long reduce axis the
-transposed cooperative reduce needs is gone (the build defect that hid this, a name declared twice under any
-cooperative reduce, is fixed by #895); that is most of the 0.215 → 0.56 s. And the prior's cooperative picks cost 10
-to 100 times wherever nothing is measured.
+This round re-tiled what #897 recorded at the tensor core's default K chunk. The width-16 expert pieces and every post
+twin's last matmul ran `mma` tiles without `/k8`, one `m8n8k4` step per shared-memory stage; hand-picked sweeps (the
+prior does not pick) moved them to `/k8`: the expert twin 5.33 → 0.79 ms, the last matmul 263 ms → 1.48 ms at width
+4,096, 16.4 ms → 227 µs symbolic, 1,232 → 114 µs at M=1 and 511 → 115 µs at M=16, every output bit-identical to #897's
+spelling on the same inputs. Boot45 serves the file strict and coherent at 0.734 s per output token, 34.1 s / 14.4 s to
+first token at 2,155 prompt tokens cold and warm, and 1.25 s per layer for a 4,096-token chunk.
+
+What holds the numbers now is the post routes, not the tiles. #897's routes leave this model's recurring defect in
+place: the hyper-connection logits (16,384-long f32 dot products against `hc_fn`) and the four-stream mix are
+recomputed inside sweeps that do not depend on them — five dot products per output cell of the mixing softmax, and the
+whole updated residual once per output column of each `hc_fn` projection. The cut pass offers the seams that compute
+each once and the routes do not take them: on the width-16 main kernel, #897's route plus the two logits seams and
+one stream-mix seam measures 1.46 ms against 28.7 (unrecorded, the new pieces on the prior's schedules). Missing
+tensor-core tiles are a small part of it: those contractions read f32 operands, which no Volta atom takes, or contract
+over the four streams (K=4), where a tensor core buys nothing.
 
 Stages −1 to 3 are done, and Stage 0's question — can the compiler serve this model — is answered yes. Gate (c),
 coherent completions, passed on the old tree, was red on `main` from #829 to #893 without anyone seeing it, and is
@@ -71,17 +66,16 @@ checkpoint stays impractical here.
    recorded rows. Boot39 from that tree serves coherent completions at boot38's timings, so gate (c) is green again.
    Still owed: a finite-input replay per twin and an independent reference on `run --golden`, and a boot that reads
    the election's check instead of printing it as a warning.
-4. **The sweep-transposed cooperative reduce on the divide kernels.** The build defect under any cooperative reduce is
-   fixed (#895), and what the old rows did is now read off their kernels: before #863 each divide kernel's Sinkhorn nest
-   was lifted under one `inner` site, and its `coop-t` row put eight lanes on the four-element reduce and the other
-   thirty-two across the sweep, so a block finished thirty-two rows at once (11.3 µs for the symbolic `k_div_50`); the
-   plain `coop` row (width 16, 11.7 µs) put all 128 threads on the four-element axis, four of them active. `main` lifts
-   the same Loop IR — #863 did not change it — into nested `reduce` sites, one per four-element fold, which offer `coop`
-   but no transposed layout (a `coop-t` pin is quietly taken as `coop`), so the symbolic and width-4,096 divide sets that
-   were never re-tuned still run at 1.5 ms and 7.9 ms against 11 and 32 µs before, while the width-16 rows (8.5 µs) hold
-   and the sets this round tuned found cuts that recover most of it (post4096's k_div_18 32.5 µs). The item is a
-   transposed layout on a nested reduce site, or one site over the nest again, for the symbolic post twin's remaining
-   divide sets; it is most of what separates 0.56 s from 0.215 s per token.
+4. **Compute the recomputed cones once in the post routes.** Found 2026-09-26, nothing recorded yet. Per post twin and
+   per kernel — the routing kernel carries the same logits recompute (4.1 ms of the width-16 twin's 6.5) — take the
+   seams that compute the `hc_fn` logits and the four-stream mix once, pick the new pieces' schedules by hand, check
+   each set against #897's route on the same inputs (the post targets have no eager reference, so `run --bench`'s exit
+   code proves nothing about them), record with `--record-greedy` under the route as `EMMY_KNOBS` pins, and boot. On the
+   width-16 main kernel: the two logits seams (`PLACE@map.1/map.1/twist.1/inner`, `PLACE@map.1/map.2/inner`) take the
+   running-maximum piece from 6,949 to 2 µs and add a 1.1 ms logits kernel (28.7 → 23.0 ms); the stream-mix seam
+   `PLACE@map.1/map.1/twist.1/inner.2/map.1/reduce` (two other spellings name the same node) then removes both f32
+   `hc_fn` pieces, 14.3 and 7.2 ms (→ 1.46 ms). 36 of that kernel's 52 unused seams were not tried. The divide kernels
+   this item used to name run 41–532 µs per launch since #897's roller and are not where the time is.
 5. **Stage 4 — image and release plumbing.** Bake FROM the immutable 1Cat digest with `cupy-cuda12x` under its own
    image identity — not the Makefile's default version/tag for a 1Cat 1.2.3 base — labelled with the 1Cat digest and
    source SHA, Emmy SHA, checkpoint revision and CUDA/NVRTC versions; carry the fork's `VLLM_SM70_*` variables with
@@ -207,6 +201,9 @@ the Emmy arm cannot hold and is no baseline.
 | 09-24 | + #893 | 0.53 – 0.58 s | 3.49 / 0.70 s | 68.1 / 5.54 s | 27 min | coherent again |
 | 09-25 | `6c79e1d4` (#898), every row in (boot40) | 0.31 – 0.34 s | 3.53 / 0.76 s | 68.3 / 5.70 s | 16 min | the M=1 post twin deploys for the first time; its tuned k_div_18 set is wrong and the text degrades after six tokens |
 | 09-25 | as committed (boot42) | 0.56 – 0.62 s | 3.49 / 0.76 s | 68.2 / 5.66 s | 15 min | coherent; the M=1 post twin refuses at k_div_18 and rides width 16, as before |
+| 09-25 | `cc2bb92f` (#897) + the M=1 pre route (#905, boot43) | 1.15 – 1.19 s | 5.64 / 2.93 s | 39.5 / 17.1 s | 10 min | #897's untuned cut routes; the M=1 post twin deploys from a committed file |
+| 09-26 | + the width-16 expert pieces at `/k8` (boot44) | 0.777 s | 4.73 / 1.93 s | 38.1 / 14.8 s | 10 min | the expert twin 5.33 → 0.79 ms per launch |
+| 09-26 | + every post twin's last matmul at `/k8` (boot45) | 0.734 s | 4.65 / 1.92 s | 34.1 / 14.4 s | 10 min | the 5-token answer alternates "red, yellow, and blue" / "red, yellow, blue", as boot43's two repeats did |
 
 The first decode step of a request costs more than a steady one (1.85 s against 0.90 on 09-12, 4.2 s against 2.03 on
 09-15): each layer's programs are CUDA-graph captured on first use. The first compile on each rank is the cold
@@ -225,6 +222,7 @@ The boot's roofline audit, first layer of each stage, per layer:
 | 09-19, tiled | 3.10 ms | 3.2 – 3.9 ms | 12.5 ms | 172.8 ms |
 | 09-23 / 09-24 | 3.12 ms | not deployed | 7.41 – 8.06 ms | 104 ms |
 | 09-25, #897 | 3.12 ms | 12.96 ms | 34.7 ms | 1,510 ms |
+| 09-26, `/k8` (boot45) | 3.12 ms | 11.88 ms | 34.26 ms | 1,247 ms |
 
 A decode step, profiled on 09-19 with torch's profiler over eleven single-stream steps on all sixteen workers (the
 model serves eager, because the hyper-connection routed combine host-syncs): per token about 126 ms of Emmy kernels
@@ -261,6 +259,14 @@ only once concurrent prompts fill a step.
   on Volta (wrong answers on nine of sixteen measured grids), and the re-tile at depth 1 measures 490 µs; the symbolic
   expert twin's root piece offers no tensor-core tile since then (20.4 ms against 1.8 ms) and is what a single
   request's prefill pays.
+- **The tensor core's K chunk after #897.** #897's refresh recorded `mma` tiles at the default `bk` of 1 (no `/kN`
+  suffix: one `m8n8k4` step per shared-memory stage). The width-16 expert gate/up piece `w4x1 f1x4 d1/smem` 3,861 µs →
+  `w2x1 f1x1/k8 d1/smem` 506 µs, its down piece `w2x4 f1x1` 1,464 → `w2x2 f1x1/k8` 279 µs (the same spelling at `/k2`,
+  `/k4`, `/k8`: 1,008, 530, 307 µs); each post twin's last matmul lead `w4x2 f2x2/k8 d2/smem` at width 4,096 (263 ms →
+  1.48 ms), `w2x4 f4x2/k8 d2/smem` symbolic (16.4 ms → 227 µs), `w2x1 f1x1/k8 d2/smem` at M=1 (1,232 → 114 µs) and `w2x2
+  f1x1/k8 d2/smem` at M=16 (511 → 115 µs). Only those last-matmul leads offer `/k8` in the post twins; the other
+  tensor-core pieces there offer `bk` 1 at `d1/smem` alone. Two rounds of sixteen cards per twin family, repeated within
+  1%; the expert still runs about twice its 09-20 kernels (410 / 159 µs), which is #897's lowering, not the schedule.
 - **`k_div_35`**: the pre-#813 rows put two cooperative reduces on seams the codec no longer allows together; one
   `coop-t` seam measured 16.7 / 2.5 / 53.5 µs at dynamic / m16 / m4096 against main's picks of 140 / 4.7 / 492 µs.
 - **The restamp round (09-22, rec34, on `dab7bce9`)**, per layer against the old file on the #860 tree: post m1 406 →
@@ -277,7 +283,11 @@ the long prompt's completion unchanged word for word, which was the only correct
 32/32, short 5/32 (` Spain` −1.114 against ` Italy` −1.324, the same near-tie as in August), long 1/32 (` is` −1.075
 against `.` −0.869, which agreed on all 32 in August); its layer-level half never ran. Gate (c) was red from #829
 (09-20) to #893 without anyone seeing it, because the election's random-input check prints as a non-fatal warning and
-no boot reads it; the width-4,096 post twin's check returns NaN since 09-17 and is still unexplained.
+no boot reads it; the width-4,096 post twin's check returns NaN since 09-17 and is still unexplained. A post target
+has no eager reference, so `run --bench` compares a pinned row against the greedy of the same file and its exit code
+proves nothing; the `/k8` post rows were checked by compiling each target strict from both goldens and running both on
+the same seeded inputs (host `pair908.py`): bit-identical, and at width 4,096 the same 3,257 non-finite cells in the
+same places on both (f16 overflow of random inputs at 65,504).
 
 ### Compiler defects met on the way
 
@@ -343,7 +353,14 @@ the per-kernel bests plateau, strip the DB's self-loop decisions with `dbcycles.
 tune-DB seed as `seed43.sh GOLDEN` and the boot as `boot43.sh GOLDEN` (the seeded DB, the host device patch
 `patch_device_host.py TREE` applied to the tree first, `probe43.sh` for the timings). On the Mac, `elect88.py GOLDEN
 [TWIN…]` is the strict election of every twin program under the file's card and `forks88.py` the list of every fork a
-twin would refuse.
+twin would refuse. `main` at #907 opens the runtime on torch's current device, so a tree at or after it needs no
+device patch; `~/emmy-main-cc2bb92f` predates it and carries the patch. Hand-picked schedule sweeps: `offers908.py` /
+`mmaoffers.py GOLDEN TWIN OUT.json` (on the Mac: every leaf a twin's schedule forks offer, keyed by the structural
+identity that is a piece row's suffix), `ab908.sh` / `abpost.sh` (one piece respelled in a scratch golden, strict,
+nothing recorded, one card each; `*round.sh` launches sixteen, `*wait.sh` summarizes), `rec908.sh` / `recpost908.sh`
+(respell and `--record-greedy --strict-evidence`), `pair908.sh` (the same-input output comparison above); cut routes:
+`cutforks.py GOLDEN TWIN` (every seam a kernel's cut fork offers) and `abroute.sh` / `abseams.sh` (a target under a
+hand-pinned route, not strict).
 
 **Never touch** `~/.cache/emmy/autotune.db` (the real tune DB), `~/emmy`, `~/emmy-dsv4`, `~/emmy-fix-backup`,
 `~/emmy-durations/_verify/gap3-tune/` (partial rows that regress the election — never merge that DB), or
