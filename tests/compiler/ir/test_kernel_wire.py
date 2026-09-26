@@ -23,17 +23,17 @@ from emmy.compiler.wire import formed_from, kernel_bindings, kernel_tile, kernel
 from tests.compiler.realization import helpers as corpus
 
 CASES = (
-    "fused/norm-linear-f16-scalar-reduce.yaml",
-    "fused/linear-add-place-cut-sm70.yaml",
-    "reduce/cross-cta-matmul-kernel.yaml",
-    "reduce/sinkhorn-nested-cut-derived-read-sm70.yaml",
-    "matmul/f16-cut-splitk-unit-row.yaml",
-    "attention/sdpa-hd128-softmax-v-mma.yaml",
+    "fused/norm-linear-f16-scalar-reduce.json",
+    "fused/linear-add-place-cut-sm70.json",
+    "reduce/cross-cta-matmul-kernel.json",
+    "reduce/sinkhorn-nested-cut-derived-read-sm70.json",
+    "matmul/f16-cut-splitk-unit-row.json",
+    "attention/sdpa-hd128-softmax-v-mma.json",
 )
 #: Pieces carved from a twisted attention tree: the decode split-KV pair and an attention cut piece.
 UNFORMED_CASES = (
-    "attention/sdpa-gqa-decode-split-kv.yaml",
-    "attention/rmsnorm-qk-sdpa-stat-cut.yaml",
+    "attention/sdpa-gqa-decode-split-kv.json",
+    "attention/rmsnorm-qk-sdpa-stat-cut.json",
 )
 
 
@@ -97,7 +97,7 @@ def test_a_piece_of_a_twisted_kernel_keeps_a_wire_that_names_its_symbolic_dims(c
 
 
 def test_bindings_are_the_hints_a_bench_sizes_a_symbolic_kernel_by():
-    case = corpus.load_case(corpus.CASES_DIR / "reduce/combine-amax-ilp-symbolic.yaml")
+    case = corpus.load_case(corpus.CASES_DIR / "reduce/combine-amax-ilp-symbolic.json")
     graph, _taken = corpus.lowered(case, case.context())
     [cuda] = [node.op for node in graph.nodes.values() if isinstance(node.op, CudaOp)]
     tile = kernel_tile(cuda)
@@ -106,6 +106,6 @@ def test_bindings_are_the_hints_a_bench_sizes_a_symbolic_kernel_by():
     assert all(isinstance(size, int) and size > 0 for size in bindings.values())
     assert symbolic_vars(kernel_wire(tile)) == set(bindings)
     # A static kernel binds nothing: two rows of it never differ by size.
-    static = corpus.load_case(corpus.CASES_DIR / "fused/norm-linear-f16-scalar-reduce.yaml")
+    static = corpus.load_case(corpus.CASES_DIR / "fused/norm-linear-f16-scalar-reduce.json")
     static_graph, _taken = corpus.lowered(static, static.context())
     assert all(kernel_bindings(kernel_tile(node.op)) == {} for node in static_graph.nodes.values() if isinstance(node.op, CudaOp))

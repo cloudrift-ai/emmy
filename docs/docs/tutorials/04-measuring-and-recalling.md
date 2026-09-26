@@ -106,7 +106,7 @@ ls -la ~/.cache/emmy/
 Model golden configuration files live beside their recipes, one file per exact GPU model and compute capability:
 
 ```bash
-find recipes -path '*/golden/*.yaml' -print
+find recipes -path '*/golden/*.json' -print
 ```
 
 The central `emmy/compiler/pipeline/search/golden/` directory contains only model-agnostic hardware goldens.

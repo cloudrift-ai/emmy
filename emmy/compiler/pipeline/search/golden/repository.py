@@ -11,12 +11,10 @@ from contextlib import contextmanager
 from functools import cache
 from pathlib import Path
 
-import yaml
-
 from emmy import config, gpu
 from emmy.recipe.bundled import default_recipe_root
 
-from .format import _SAFE_LOADER, GoldenFile
+from .format import GoldenFile
 from .record import GoldenRecord
 
 #: The maintained golden records, one file per card: model-agnostic rows the offline prior trains on, the tests
@@ -44,25 +42,23 @@ def is_repository_golden_path(path: str | Path) -> bool:
 def _repository_golden_paths():
     """Yield model-agnostic hardware goldens plus recipe-local model goldens."""
     with default_recipe_root() as recipe_root:
-        paths = list(_RECORDS_DIR.glob("*.yaml"))
+        paths = list(_RECORDS_DIR.glob("*.json"))
         if recipe_root is not None:
-            paths.extend(recipe_root.glob(f"*/{_RECIPE_GOLDEN_DIR}/*.yaml"))
+            paths.extend(recipe_root.glob(f"*/{_RECIPE_GOLDEN_DIR}/*.json"))
         yield sorted(paths)
 
 
 def _file_gpu_name(path: Path) -> str | None:
-    """The document's ``gpu_name`` read off the file HEAD without parsing the body — the dump
-    writes it as the first key, so a card-scoped consumer can skip foreign multi-megabyte files
-    (the whole-corpus parse is the dominant first-evidence cost). ``None`` when the head does not
-    carry it — the caller falls back to the full parse."""
+    """The document's ``gpu_name`` read off the file's first line without parsing the body — the dump
+    writes it there alone, so a card-scoped consumer can skip foreign multi-megabyte files (the
+    whole-corpus parse is the dominant first-evidence cost). ``None`` when the head does not carry
+    it — the caller falls back to the full parse."""
     try:
-        head = path.open("r").read(256)
-    except OSError:
+        with path.open() as handle:
+            head = handle.readline().rstrip()
+        return gpu.canonical_name(str(json.loads(head.removesuffix(",") + "}")["gpu_name"]))
+    except (OSError, ValueError, KeyError):
         return None
-    for line in head.splitlines():
-        if line.startswith("gpu_name:"):
-            return gpu.canonical_name(str(yaml.load(line, Loader=_SAFE_LOADER)["gpu_name"]))
-    return None
 
 
 #: Optional scope override for :func:`records_for_card` — the golden rows the evidence index loads.

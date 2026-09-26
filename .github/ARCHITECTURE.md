@@ -157,7 +157,7 @@ the agent a 23.5-hour deadline so artifact validation and cleanup retain 30 minu
 budget. It has no step cap: a capped agent can only answer in text once it reaches the cap, so it never writes its
 summary. An agent that ends without a summary fails its step, and the failure notice says so. For the selected
 recipe and GPU, the same nightly qualification validates the recipe-local golden schema, strictly decodes every stored
-row, and replays it on the exact card; pull-request tests do not load checked-in golden YAML. The shared serving
+row, and replays it on the exact card; pull-request tests do not load checked-in golden files. The shared serving
 experiment retains one LFS archive per exact GPU platform plus one cumulative `RESULTS.md`; each archive includes its
 system-only row records, and a run replaces only its platform snapshot. Ignored dated run directories, loose benchmark
 output, top-level row-record copies, and qualification summaries are not repository artifacts. An Emmy-tuned prebuilt
@@ -184,7 +184,7 @@ implementation/test/architecture files and 500 changed lines, and any Python sou
 change. Broader changes fail artifact validation and remain follow-up work.
 
 The agent returns an atomic manifest. `.github/scripts/onboarding_artifacts.py` accepts only declared changes under the
-allowed recipe (including `golden/<gpu-slug>_<compute-cap>.yaml`), experiment, serving-image, and bounded
+allowed recipe (including `golden/<gpu-slug>_<compute-cap>.json`), experiment, serving-image, and bounded
 implementation/test paths. The validator requires the shared experiment recipe and report plus the exact
 `results_<gpu-short>x<gpu-count>.tar.gz` archive, and it opens that archive to require matching current-platform row
 records.

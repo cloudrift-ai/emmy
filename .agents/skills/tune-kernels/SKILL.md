@@ -1,14 +1,14 @@
 ---
 name: tune-kernels
 description: >-
-  Tune Emmy kernels for a Hugging Face model, traced IR, or golden YAML. Use when asked to tune a model or golden
+  Tune Emmy kernels for a Hugging Face model, traced IR, or golden file. Use when asked to tune a model or golden
   set, seed MCTS with model-proposed knob configurations, compare hybrid proposals against MCTS-only search,
   diagnose slow or failing kernels, refresh per-GPU goldens, or produce a per-kernel tuning findings report.
 ---
 
 # Tune Emmy kernels
 
-Use one golden YAML format throughout the workflow. Keep its two trust levels separate:
+Use one golden file format throughout the workflow. Keep its two trust levels separate:
 
 - A **working golden** is an untracked experiment artifact. Each structural target contains a `realizations` array;
   each realization has named dimension `bindings`, explicit registered input `pins`, and optional knob proposals,
@@ -20,14 +20,14 @@ Use one golden YAML format throughout the workflow. Keep its two trust levels se
   `emmy/compiler/pipeline/search/golden/`.
 
 `pins` and `knobs` are both registered knob mappings with different times of application: `pins` constrains candidate
-enumeration, while `knobs` records the winner measured inside that regime. `FAST_MATH` has no special YAML field; write
+enumeration, while `knobs` records the winner measured inside that regime. `FAST_MATH` has no special field; write
 it under `pins` exactly like any other input knob.
 
 `emmy tune --golden PATH` rejects canonical repository paths because it updates its input. Copy a canonical file to
-a fresh `_tune/<run>/working.yaml` first. Do not commit a trace-created working golden automatically; leave that
+a fresh `_tune/<run>/working.json` first. Do not commit a trace-created working golden automatically; leave that
 decision to the author or agent after validation.
 
-`--golden PATH` is one flag on `run`, `compile`, `tune`, `serve` and `eval golden`: the golden YAML whose measured
+`--golden PATH` is one flag on `run`, `compile`, `tune`, `serve` and `eval golden`: the golden file whose measured
 rows are the golden evidence that command deploys from, instead of the repository's per-card goldens. There is one
 deploy mechanism, the measured-evidence pick: a golden row is a measured row in the same index the tune DB feeds,
 never a separate authoritative tier. `--realization NAME` (`run`, `compile`, `tune`) selects one realization by
@@ -90,7 +90,7 @@ done > "$LOCAL_MANIFEST"
 RSYNC_RSH="ssh -i $SSH_KEY -p $SSH_PORT -o IdentitiesOnly=yes" \
   rsync -a --from0 --files-from="$LOCAL_MANIFEST" ./ "$REMOTE:$REMOTE_ROOT/repo/"
 RSYNC_RSH="ssh -i $SSH_KEY -p $SSH_PORT -o IdentitiesOnly=yes" \
-  rsync -a --relative _tune/<run>/working.yaml "$REMOTE:$REMOTE_ROOT/repo/"
+  rsync -a --relative _tune/<run>/working.json "$REMOTE:$REMOTE_ROOT/repo/"
 "${SSH[@]}" "$REMOTE" "mkdir -p '$REMOTE_ROOT/tmp' && cd '$REMOTE_ROOT/repo' && \
   TMPDIR='$REMOTE_ROOT/tmp' PIP_NO_CACHE_DIR=1 make setup"
 ```
@@ -105,7 +105,7 @@ Run long remote commands in a task-named `tmux` session or detached process, rec
 caller deadline, and poll logs. Scope Hugging Face or other required credentials to the command without printing
 them; remove any task-owned temporary credential file during cleanup.
 
-On success and failure, rsync back working YAML files, logs, DB/prior snapshots, O3 JSON, and
+On success and failure, rsync back working golden files, logs, DB/prior snapshots, O3 JSON, and
 reports before cleanup. Stop only the recorded task-owned session/process, tear down any skill-created serving
 workload through Emmy, then remove only the recorded scratch directory after validating its task-specific prefix.
 Leave the VM running and return cleanup ownership to the caller.
@@ -121,24 +121,24 @@ expanding to a whole model. Never describe a single-layer result as whole-model 
 
 Choose the input:
 
-1. **Existing golden YAML:** copy it to the work directory. It is self-contained.
+1. **Existing golden file:** copy it to the work directory. It is self-contained.
 2. **Hugging Face model with no working golden:** create the inventory once:
 
    ```bash
-   emmy trace <model> [--layer N] -o _tune/<run>/working.yaml
+   emmy trace <model> [--layer N] -o _tune/<run>/working.json
    ```
 
    The command refuses replacement and embeds every distinct post-fusion target, with one inventory realization and
-   no knobs or measurements. On a supplied host, run it from the remote checkout, rsync the YAML back before
+   no knobs or measurements. On a supplied host, run it from the remote checkout, rsync the golden file back before
    proposing candidates, then rsync the completed arm files to the same remote paths.
    Preserve that skeleton even if tuning later fails.
-3. **Existing Graph/Torch IR:** pass it through `emmy trace <ir.json> -o _tune/<run>/working.yaml`; do not hand-write
+3. **Existing Graph/Torch IR:** pass it through `emmy trace <ir.json> -o _tune/<run>/working.json`; do not hand-write
    a second persistence format.
 
 For a serving release, derive the entire matrix from the pinned env and capture every structural target once:
 
 ```bash
-emmy trace <checkpoint> --serving-twins --serving-config <models/slug.env> -o _tune/<run>/working.yaml
+emmy trace <checkpoint> --serving-twins --serving-config <models/slug.env> -o _tune/<run>/working.json
 ```
 
 Do not add or remove serving widths or pin regimes by hand. The config is authoritative for decode, prefill, M=1,
@@ -170,8 +170,8 @@ a precision-trading candidate never replaces the standard deploy path.
 Create an inventory-only base with one row per target and no knobs, timings, or `ranking`. Then create two working
 files from that exact base:
 
-- `mcts.yaml`: no agent-added proposals;
-- `hybrid.yaml`: the same file plus agent-added proposals.
+- `mcts.json`: no agent-added proposals;
+- `hybrid.json`: the same file plus agent-added proposals.
 
 Do not copy knob-bearing canonical rows into either arm: canonical goldens remain the common implicit deploy context
 consulted by Emmy, while copied rows would reserve candidate slots and corrupt the equal-budget comparison. Existing
@@ -193,7 +193,7 @@ Multiple targets share the backend-slot queue and one prior, so keep them in one
 ```bash
 EMMY_TUNE_DB=<arm.db> EMMY_ONLINE_FILE=<arm-online.json> \
   EMMY_CUBIN_CACHE=<arm-cubin-dir> \
-  emmy tune --golden <arm.yaml> --devices 0,1 --max-candidates <B> \
+  emmy tune --golden <arm.json> --devices 0,1 --max-candidates <B> \
   --patience <P> --seed <S> --dump-dir <arm-dump> 2>&1 | tee <arm.log>
 ```
 
@@ -230,7 +230,7 @@ inherited O1 override:
 
 ```bash
 CUDA_VISIBLE_DEVICES=<selected-ordinal> EMMY_NVCC_FLAGS= \
-  emmy run --golden _tune/<run>/working.yaml --realization <realization-name> \
+  emmy run --golden _tune/<run>/working.json --realization <realization-name> \
   --bench --bench-backends eager,emmy \
   --ab "<fully realized knobs>" --json _tune/<run>/verification/<candidate>.json
 ```
@@ -282,7 +282,7 @@ For a serving golden, run the unified release audit on the pinned GPU; it valida
 the exact config-derived realization matrix before reproducing and auditing it:
 
 ```bash
-emmy eval golden --golden <canonical-golden.yaml> --serving-config <models/slug.env>
+emmy eval golden --golden <canonical-golden.json> --serving-config <models/slug.env>
 emmy eval prior --dataset golden --kernel <substring>
 ```
 

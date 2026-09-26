@@ -1,0 +1,12 @@
+{"compute_cap": [12, 0],
+ "programs": [
+  {"inputs":["x"],"outputs":["softmax"],"nodes":[{"id":"softmax_c1","op":"constant","attrs":{"name":"softmax_c1","value":1.0},"outputs":[["softmax_c1","f32",[1]]]},{"id":"x","op":"input","outputs":[["x","f32",[4,1024]]]},{"id":"softmax","op":"torch.softmax","attrs":{"axis":1},"inputs":["x"],"outputs":[["softmax","f32",[4,1024]]]}]}
+ ],
+ "configs": [
+  {"program": 0, "target": {"loop": 0, "origins": ["softmax"]}, "realizations": [
+   {"name": "k_softmax_b2bf51", "pins": {"FAST_MATH": false}, "knobs": {"REDUCE": "coop", "WORK": "t32"}, "identity": "e02a75b02a5df26fb051f9a60a17667c4275f5e8ffd67684c7de4b7bd3b6a52d", "latency": {"NVIDIA GeForce RTX 5090": {"emmy_us": 2.6556595842889013, "tcompile_us": 2.0489528516386044}}}
+  ]}
+ ],
+ "loops": [
+  {"inputs":["x"],"outputs":["softmax"],"nodes":[{"id":"x","op":"input","outputs":[["x","f32",[4,1024]]]},{"id":"softmax","op":"loop","attrs":{"body":[{"Loop":{"axis":{"name":"a0","extent":4},"body":[{"Loop":{"axis":{"name":"a1","extent":1024},"body":[{"Load":{"names":["in0"],"input":"x","index":["a0","a1"]}},{"Accum":{"name":"acc0","value":"in0","op":"maximum","axes":["a1"]}}]}},{"Loop":{"axis":{"name":"a1","extent":1024},"body":[{"Load":{"names":["in1"],"input":"x","index":["a0","a1"]}},{"Assign":{"name":"v0","op":"subtract","args":["in1","acc0"]}},{"Assign":{"name":"v1","op":"exp","args":["v0"]}},{"Accum":{"name":"acc1","value":"v1","axes":["a1"]}}]}},{"Loop":{"axis":{"name":"a3","extent":1024},"body":[{"Load":{"names":["in2"],"input":"x","index":["a0","a3"]}},{"Assign":{"name":"v2","op":"subtract","args":["in2","acc0"]}},{"Assign":{"name":"v3","op":"exp","args":["v2"]}},{"Assign":{"name":"v4","op":"divide","args":["v3","acc1"]}},{"Write":{"output":"softmax","index":["a0","a3"],"values":["v4"]}}]}}]}}],"name":"k_softmax_e01478"},"inputs":["x"],"outputs":[["softmax","f32",[4,1024]]]}]}
+ ]}

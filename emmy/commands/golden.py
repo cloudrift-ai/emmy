@@ -2,7 +2,7 @@
 
 ``check`` names the stored targets the current compiler no longer lowers the golden's programs to:
 per traced program, the diff between ``kernels`` (the Loop IR pool the golden stores) and
-``emmy compile --golden PATH --program N --ir loop -o fresh.yaml`` (the same pool lowered fresh), restricted
+``emmy compile --golden PATH --program N --ir loop -o fresh.json`` (the same pool lowered fresh), restricted
 to the targets the file stores. ``restamp`` rewrites the golden onto that lowering
 (``compiler/pipeline/search/restamp.py`` decides what each row keeps). All are GPU-free; ``check``
 and ``restamp`` default to every repository golden, and the ``refresh-golden`` skill is the flow
@@ -40,7 +40,7 @@ def register_golden_command(subparsers) -> None:
     pk = sub.add_parser(
         "kernels",
         help="Print the Loop IR kernels a golden stores, as its pool sorted by output set — what "
-        "`emmy compile --golden PATH --program N --ir loop -o fresh.yaml` must write for the file to be current",
+        "`emmy compile --golden PATH --program N --ir loop -o fresh.json` must write for the file to be current",
     )
     pk.add_argument("path", help="The golden file.")
     pk.add_argument("--program", type=int, metavar="N", help="Only the targets of traced program N.")

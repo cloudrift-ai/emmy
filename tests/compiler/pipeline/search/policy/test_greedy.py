@@ -427,7 +427,7 @@ def _cut_fork(db_ctx):
     """A placement fork on a real tile kernel: the fuse arm and one cut, the shape the cut pass offers."""
     from tests.compiler.helpers import case_target_tile
 
-    tile = case_target_tile("fused/norm-linear-f16-scalar-reduce.yaml")
+    tile = case_target_tile("fused/norm-linear-f16-scalar-reduce.json")
     fuse = DeferredFork(materialize=lambda: None, knobs={"PLACE": "fuse"})
     cut = DeferredFork(materialize=lambda: None, knobs={"PLACE@map.1/map": "cut"}, structural=True)
     return SimpleNamespace(options=[fuse, cut], node_id="node", root_op=tile, ctx=db_ctx), tile, fuse, cut

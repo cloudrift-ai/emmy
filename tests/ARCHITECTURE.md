@@ -124,9 +124,9 @@ the shared module already provides.
   serving-twin matrix for a named checkpoint and GPU. The serving-image release workflow owns exact
   model/revision/card qualification. Retain a small model fixture only when it proves reusable behavior that a
   synthetic input cannot.
-- **Do not load checked-in golden YAML in the default suite — except the realization corpus.** Unit tests use
+- **Do not load checked-in golden files in the default suite — except the realization corpus.** Unit tests use
   synthetic records and working files, and the nightly `onboard-model` workflow owns repository schema validation,
-  strict decode, and exact-GPU replay for `recipes/*/golden/*.yaml`. `tests/compiler/realization/cases/` differs on
+  strict decode, and exact-GPU replay for `recipes/*/golden/*.json`. `tests/compiler/realization/cases/` differs on
   both counts that motivated the rule: its files are hand-minimized reproducers or a small capability baseline from a
   model-agnostic hardware golden, and they carry no measurement claim, so nothing about them is card-specific. They
   also target a **declared** capability rather than the live card — `Context.from_target(compute_cap)` — so the

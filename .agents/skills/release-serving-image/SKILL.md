@@ -77,7 +77,7 @@ For an existing release, run `make serve-config MODEL=<id>`. The config must nam
 They are one contract: do not accept separate model, GPU, revision, or width arguments later in the workflow.
 
 For a new release with no config yet, resolve the model and GPU from the singleton recipe, record the intended config
-path and recipe-local canonical path `recipes/<model>/golden/<gpu-slug>_<compute-cap>.yaml`, and let the headroom sweep
+path and recipe-local canonical path `recipes/<model>/golden/<gpu-slug>_<compute-cap>.json`, and let the headroom sweep
 in Step 3 create the config. The realization contract is not sealed until then; do not invent interim widths or run
 the golden audit against them.
 

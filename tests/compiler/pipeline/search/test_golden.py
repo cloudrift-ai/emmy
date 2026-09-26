@@ -73,17 +73,17 @@ def test_recorded_row_decodes(path: Path, label: str) -> None:
 def test_scope_digest_follows_the_cards_rows_only(tmp_path, monkeypatch) -> None:
     """The digest a serving pack keys on moves with the rows this card's compile reads and with nothing else: another
     card's file, or a file scope that names a different file."""
-    mine = tmp_path / "mine.yaml"
-    other = tmp_path / "other.yaml"
-    mine.write_text("gpu_name: NVIDIA H100 80GB HBM3\nrows: 1\n")
-    other.write_text("gpu_name: NVIDIA GeForce RTX 5090\nrows: 1\n")
+    mine = tmp_path / "mine.json"
+    other = tmp_path / "other.json"
+    mine.write_text('{"gpu_name": "NVIDIA H100 80GB HBM3",\n "rows": 1}\n')
+    other.write_text('{"gpu_name": "NVIDIA GeForce RTX 5090",\n "rows": 1}\n')
     monkeypatch.setattr(golden.repository, "_repository_golden_paths", lambda: nullcontext([mine, other]))
     monkeypatch.delenv("EMMY_GOLDEN_FILE", raising=False)
     card = "NVIDIA H100 80GB"
     base = scope_digest(card)
-    other.write_text("gpu_name: NVIDIA GeForce RTX 5090\nrows: 2\n")
+    other.write_text('{"gpu_name": "NVIDIA GeForce RTX 5090",\n "rows": 2}\n')
     assert scope_digest(card) == base
-    mine.write_text("gpu_name: NVIDIA H100 80GB HBM3\nrows: 2\n")
+    mine.write_text('{"gpu_name": "NVIDIA H100 80GB HBM3",\n "rows": 2}\n')
     changed = scope_digest(card)
     assert changed != base
     monkeypatch.setenv("EMMY_GOLDEN_FILE", str(other))
@@ -107,7 +107,7 @@ def test_decode_ignores_off_anchors_but_not_a_decided_value() -> None:
 
     # The smallest target on the card, named rather than searched for: every assertion below decodes
     # the record again, so the row this stands on decides what the test costs.
-    records = _records_of(_RECORDS_DIR / "rtx5090_sm120.yaml")
+    records = _records_of(_RECORDS_DIR / "rtx5090_sm120.json")
     named = [r for r in records if r.name == "matmul.square.512" and any(v == "" for v in r.knobs.values())]
     record = next((r for r in named if _decode(r, records) is None), None)
     assert record is not None, "matmul.square.512 records no decoding row carrying an OFF anchor to compare against"
@@ -138,7 +138,7 @@ def test_a_pool_that_holds_the_recorded_row_is_not_walked_whole(monkeypatch) -> 
     from emmy.compiler.pipeline.search.golden.decode import _replay, _unmatched_reason
 
     # The same smallest target the anchor test stands on: every assertion here replays it.
-    records = _records_of(_RECORDS_DIR / "rtx5090_sm120.yaml")
+    records = _records_of(_RECORDS_DIR / "rtx5090_sm120.json")
     record = next(r for r in records if r.name == "matmul.square.512" and _decode(r, records) is None)
     siblings = siblings_of(record, records)
 
@@ -186,7 +186,7 @@ def test_a_row_with_only_an_invalid_offered_value_reports_a_semantic_miss() -> N
     """
     from dataclasses import replace
 
-    records = _records_of(_RECORDS_DIR / "rtx5090_sm120.yaml")
+    records = _records_of(_RECORDS_DIR / "rtx5090_sm120.json")
     record = next(r for r in records if r.name == "matmul.square.512" and _decode(r, records) is None)
     decided = next(key for key, value in record.knobs.items() if value not in ("", "0"))
     invalid = replace(record, knobs={decided: "not-a-real-value"})
@@ -203,7 +203,7 @@ def test_a_row_whose_every_site_is_re_spelled_still_gets_a_verdict() -> None:
     behind them, then indexed the pair it never filed."""
     from dataclasses import replace
 
-    records = _records_of(_RECORDS_DIR / "rtx5090_sm120.yaml")
+    records = _records_of(_RECORDS_DIR / "rtx5090_sm120.json")
     record = next(r for r in records if r.name == "matmul.square.512" and _decode(r, records) is None)
     respelled = replace(record, knobs={f"{key}@missing": value for key, value in record.knobs.items() if value not in ("", "0")})
     reason = _decode(respelled, records)
@@ -227,7 +227,7 @@ def test_a_sibling_sharing_the_target_identity_cannot_silence_the_lead_cut() -> 
         wanted = schedule_match_key(piece_row(record.knobs))
         return any(_replay(record, siblings=siblings, exhaustive=True, wanted=wanted).rows.values())
 
-    golden = Path(__file__).parents[4] / "recipes" / "DeepSeek-V4-Flash-0731" / "golden" / "v100_sm70.yaml"
+    golden = Path(__file__).parents[4] / "recipes" / "DeepSeek-V4-Flash-0731" / "golden" / "v100_sm70.json"
     records = _records_of(golden)
     lead = next(r for r in records if r.name == "pre16.k_linear_mean_reduce_03c479.8caa25e24052.m16.dc6db94ec8ea.dc6db94ec8ea")
     siblings = siblings_of(lead, records)
@@ -323,7 +323,7 @@ def _golden_parameters():
 def test_stored_targets_are_the_fresh_lowering(path: Path, program: int) -> None:
     """Every stored target of a repository golden must be a kernel the current compiler lowers the
     golden's own traced program to — byte for byte: per traced program, ``emmy golden kernels PATH
-    --program N`` against ``emmy compile --golden PATH --program N --ir loop -o fresh.yaml``, restricted to
+    --program N`` against ``emmy compile --golden PATH --program N --ir loop -o fresh.json``, restricted to
     the targets the file stores (``emmy golden check``; ``emmy golden restamp`` is the fix).
 
     A golden's rows are evidence for the kernels its stored Loop IR names, and a deploy keys them by
@@ -347,7 +347,7 @@ def test_stored_targets_are_the_fresh_lowering(path: Path, program: int) -> None
             kernel_pool_text(stored).splitlines(),
             kernel_pool_text(matched).splitlines(),
             f"emmy golden kernels {path} --program {program}",
-            f"emmy compile --golden {path} --program {program} --ir loop -o fresh.yaml",
+            f"emmy compile --golden {path} --program {program} --ir loop -o fresh.json",
             lineterm="",
         )
         pytest.fail("targets not the fresh lowering:\n  " + "\n  ".join(stale) + "\n" + "\n".join(diff), pytrace=False)
@@ -361,7 +361,7 @@ def test_a_stored_identity_the_compiler_re_keyed_is_refused() -> None:
 
     from tests.compiler.realization import helpers as corpus
 
-    case = corpus.load_case(corpus.CASES_DIR / "fused/norm-linear-f16-scalar-reduce.yaml")
+    case = corpus.load_case(corpus.CASES_DIR / "fused/norm-linear-f16-scalar-reduce.json")
     record = case.record
     assert _decode(record, case.records) is None
     stale = replace(record, identity="0" * 64)

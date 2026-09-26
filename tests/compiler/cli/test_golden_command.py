@@ -5,23 +5,23 @@ microseconds, and a target no fresh kernel writes is dropped with its rows."""
 
 from __future__ import annotations
 
+import json
 import shutil
 from argparse import Namespace
 
 import pytest
-import yaml
 
 from emmy.commands.golden import handle_golden_check, handle_golden_restamp
 from emmy.compiler.pipeline.search.golden import GoldenEntryState, GoldenFile
 from emmy.compiler.pipeline.search.golden.repository import _RECORDS_DIR
 
 #: Eight square matmuls with one measured row each — the smallest repository golden, and current.
-_SMALLEST = _RECORDS_DIR / "rtx4080_sm89.yaml"
+_SMALLEST = _RECORDS_DIR / "rtx4080_sm89.json"
 
 
 @pytest.fixture
 def golden(tmp_path):
-    path = tmp_path / "golden.yaml"
+    path = tmp_path / "golden.json"
     shutil.copy(_SMALLEST, path)
     return path
 
@@ -45,10 +45,10 @@ def _rename_output(document, index: int) -> None:
 
 
 def _make_stale(path) -> None:
-    document = yaml.safe_load(path.read_text())
+    document = json.loads(path.read_text())
     document["configs"][0]["target"]["loop"] = 1  # the 512 target claims the 1024 kernel's Loop IR
     _rename_output(document, 2)  # the 2048 target's stored loop writes an output no fresh kernel does
-    path.write_text(yaml.safe_dump(document, sort_keys=False))
+    path.write_text(json.dumps(document))
 
 
 def test_check_passes_a_current_golden_and_names_each_stale_target(golden, caplog):
@@ -85,11 +85,11 @@ def test_restamp_rewrites_the_golden_onto_the_fresh_lowering(golden, caplog):
 def test_restamp_drops_a_kernel_set_row_whose_members_lose_their_measurements(golden, caplog):
     """A kernel-set row carries no schedule of its own; once its member is demoted it spells nothing."""
     _make_stale(golden)
-    document = yaml.safe_load(golden.read_text())
+    document = json.loads(golden.read_text())
     realizations = document["configs"][0]["realizations"]
     lead = {key: value for key, value in realizations[0].items() if key not in ("knobs", "measurements", "identity")}
     realizations.append({**lead, "name": "matmul.square.512.set", "kernel_set": [realizations[0]["name"]]})
-    golden.write_text(yaml.safe_dump(document, sort_keys=False))
+    golden.write_text(json.dumps(document))
     with caplog.at_level("INFO"):
         handle_golden_restamp(Namespace(paths=[str(golden)]))
     assert "matmul.square.512.set: its kernel set lost its measurements" in caplog.text
@@ -100,14 +100,14 @@ def test_restamp_drops_a_kernel_set_row_whose_members_lose_their_measurements(go
 def test_restamp_keeps_the_piece_rows_of_a_kernel_set_whose_target_only_reordered_its_inputs(tmp_path, caplog):
     """A piece row names a kernel of its set, not the target: re-keying it to the fresh target's
     identity made it decode against the whole kernel, and every piece of a cut or split set was lost."""
-    document = yaml.safe_load((_RECORDS_DIR / "rtx5090_sm120.yaml").read_text())
+    document = json.loads((_RECORDS_DIR / "rtx5090_sm120.json").read_text())
     entry = next(entry for entry in document["configs"] if entry["realizations"][0]["name"] == "attention.hd128.gqa.decode.split")
     loop = document["loops"][entry["target"]["loop"]]
     loop["inputs"] = loop["inputs"][::-1]  # the stale lowering: the same kernel with its inputs in another order
     document.update(programs=[document["programs"][entry["program"]]], loops=[loop])
     document["configs"] = [{**entry, "program": 0, "target": {**entry["target"], "loop": 0}}]
-    path = tmp_path / "golden.yaml"
-    path.write_text(yaml.safe_dump(document, sort_keys=False))
+    path = tmp_path / "golden.json"
+    path.write_text(json.dumps(document))
     assert _check(path) == 1
     with caplog.at_level("INFO"):
         handle_golden_restamp(Namespace(paths=[str(path)]))
@@ -117,10 +117,10 @@ def test_restamp_keeps_the_piece_rows_of_a_kernel_set_whose_target_only_reordere
 
 
 def test_restamp_refuses_to_write_a_golden_nothing_survives_in(golden, caplog):
-    document = yaml.safe_load(golden.read_text())
+    document = json.loads(golden.read_text())
     for index in range(len(document["programs"])):
         _rename_output(document, index)
-    golden.write_text(yaml.safe_dump(document, sort_keys=False))
+    golden.write_text(json.dumps(document))
     before = golden.read_bytes()
     with caplog.at_level("ERROR"), pytest.raises(SystemExit):
         handle_golden_restamp(Namespace(paths=[str(golden)]))
@@ -128,16 +128,16 @@ def test_restamp_refuses_to_write_a_golden_nothing_survives_in(golden, caplog):
     assert golden.read_bytes() == before, "deleting or re-recording the file is a decision, not a restamp"
 
 
-def test_kernels_and_a_yaml_compile_output_are_the_same_pool_for_a_current_golden(golden, run_cli, tmp_path):
+def test_kernels_and_a_json_compile_output_are_the_same_pool_for_a_current_golden(golden, run_cli, tmp_path):
     """``emmy golden check`` in two commands: the stored pool and the fresh lowering's pool are one text
     while the file is current, and they part once a stored target is not the fresh lowering."""
-    fresh = tmp_path / "fresh.yaml"
+    fresh = tmp_path / "fresh.json"
     compiled = run_cli("compile", "--golden", str(golden), "--program", "0", "--ir", "loop", "-o", str(fresh))
     stored = run_cli("golden", "kernels", str(golden), "--program", "0")
     assert compiled[0] == 0 and stored[0] == 0, (compiled[2], stored[2])
-    assert stored[1] == fresh.read_text() and "op: loop" in stored[1]
-    program = tmp_path / "program.yaml"
+    assert stored[1] == fresh.read_text() and '"op":"loop"' in stored[1]
+    program = tmp_path / "program.json"
     assert run_cli("compile", "--golden", str(golden), "--program", "0", "--ir", "torch", "-o", str(program))[0] == 0
-    assert yaml.safe_load(program.read_text()) == yaml.safe_load(golden.read_text())["programs"][0], "the torch stage is the stored program"
+    assert json.loads(program.read_text()) == json.loads(golden.read_text())["programs"][0], "the torch stage is the stored program"
     _make_stale(golden)
     assert run_cli("golden", "kernels", str(golden), "--program", "0")[1] != fresh.read_text(), "the 512 target now claims the 1024 kernel"

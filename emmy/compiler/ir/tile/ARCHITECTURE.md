@@ -134,7 +134,7 @@ none of them. A term with NO reduce satisfies that second ground vacuously, and 
 placement has no free axis at all — a kernel with no free axis launches one block whatever it does, so its shared
 sweep is the only axis the launch could spread over. Where the placement already has an axis, a bare elementwise sweep
 stays a sweep: the kernel materializer distributes exactly that across a worker inventory, and binding it here would
-decide for the schedule that measured the alternative (`cases/reduce/rms-norm-cut-sweep-work.yaml`, 885.9 us walked in
+decide for the schedule that measured the alternative (`cases/reduce/rms-norm-cut-sweep-work.json`, 885.9 us walked in
 one thread against 4.2 us split across 512). The complement is what the reduce clause protects: a reduce that does NOT
 read the axis is the row's statistic, evaluated once for the whole sweep, and binding the sweep would recompute it per
 output element, which is why softmax's maximum and rms-norm's sum of squares keep their loops.

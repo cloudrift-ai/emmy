@@ -302,8 +302,10 @@ def _build_2d_matmul_graph(dims: dict):
 # ``cp.async`` copies at misaligned global addresses — ``CUDA_ERROR_MISALIGNED_ADDRESS`` + a 1 s
 # watchdog hang at runtime. The scalar stage resolver's 16 B inner-stride gate (previously
 # TMA-only) now covers cp.async too: an invalid stage pin refuses instead of silently lowering a
-# different gmem-direct schedule.
-_ODD_STRIDE_CPASYNC_KNOBS = {"TILE": "f2x4", "WORK": "t16x8", "STAGE": "d2/smem-async"}
+# different gmem-direct schedule. ``REDUCE`` declines the cross-CTA split: a split lowers the matmul
+# to a multiply and a reduce kernel, neither a contraction, so the stage pin would meet no stage fork
+# and the greedy — with an empty prior — takes that route.
+_ODD_STRIDE_CPASYNC_KNOBS = {"TILE": "f2x4", "WORK": "t16x8", "STAGE": "d2/smem-async", "REDUCE": ""}
 
 
 @requires_cuda
