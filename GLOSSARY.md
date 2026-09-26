@@ -320,14 +320,14 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   measurements and so does every schedule-carrying row of the same target, and a bench of it publishes the listed
   rows' knobs as its pin. A realization that also holds a measured row of its own verifies on that row; the list still
   says what its kernel set held.
-- **Wire** — The YAML-safe data an object is stored as, in a golden file or a tune DB row: a program, a kernel, an
+- **Wire** — The JSON-safe data an object is stored as, in a golden file or a tune DB row: a program, a kernel, an
   expression, a dim. Every IR class writes and reads its own wire through one mixin and one walker
   (`emmy/compiler/wire.py`), and a golden file is the wire of the classes that declare it.
-- **Working golden file** — A mutable local YAML inventory used to exchange program targets, unmeasured
+- **Working golden file** — A mutable local JSON inventory used to exchange program targets, unmeasured
   realizations, proposed knob rows, and tune ranking feedback. It is search state; only its measured rows are
   evidence, and only when a command names the file with `--golden PATH`.
-- **Canonical golden file** — A reviewed per-GPU YAML. Model goldens live at
-  `recipes/<model>/golden/<gpu-slug>_<compute-cap>.yaml`; the maintained model-agnostic golden records live under
+- **Canonical golden file** — A reviewed per-GPU golden file. Model goldens live at
+  `recipes/<model>/golden/<gpu-slug>_<compute-cap>.json`; the maintained model-agnostic golden records live under
   `emmy/compiler/pipeline/search/golden/records/`. Every realization contains verified deployable measurements; `emmy
   tune`
   refuses to mutate these files directly. The files for the live card are the golden evidence an ordinary compile

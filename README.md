@@ -51,17 +51,17 @@ emmy compile -c "nn.RMSNorm(2048)(torch.randn(1,32,2048))"
 # Benchmark kernel on a local GPU
 emmy run --bench --profile -c "torch.nn.Softmax(dim=-1)(torch.randn(1, 28, 2048, 2048))"
 # Trace a dynamic model layer into an unmeasured working golden for remote tuning
-emmy trace Qwen/Qwen3-0.6B --layer 0 --dynamic seq_len@x:1 -o _tune/qwen3/working.yaml
+emmy trace Qwen/Qwen3-0.6B --layer 0 --dynamic seq_len@x:1 -o _tune/qwen3/working.json
 # Measure proposed rows, then spend the remaining per-kernel budget on MCTS
-emmy tune --golden _tune/qwen3/working.yaml --devices 0,1 --max-candidates 64
+emmy tune --golden _tune/qwen3/working.json --devices 0,1 --max-candidates 64
 # Bench every realization and record the measurements as deploy evidence (add --realization NAME to select one)
-emmy run --golden _tune/qwen3/working.yaml --bench --strict --json _tune/qwen3/results
+emmy run --golden _tune/qwen3/working.json --bench --strict --json _tune/qwen3/results
 # Record the kernel set the greedy pick took for one realization as measured rows a strict compile picks again
-emmy run --golden _tune/qwen3/working.yaml --realization mlp.layer0 --bench --record-greedy
+emmy run --golden _tune/qwen3/working.json --realization mlp.layer0 --bench --record-greedy
 # Capture one symbolic serving inventory with every release realization, then validate it on the pinned GPU
 emmy trace /models/gemma --serving-twins --serving-config docker/vllm-emmy-serve/models/gemma-4-12b-it.env \
-  -o _tune/gemma/working.yaml
-emmy eval golden --golden recipes/gemma-4-12B-it/golden/rtx5090_sm120.yaml \
+  -o _tune/gemma/working.json
+emmy eval golden --golden recipes/gemma-4-12B-it/golden/rtx5090_sm120.json \
   --serving-config docker/vllm-emmy-serve/models/gemma-4-12b-it.env
 ```
 
@@ -348,7 +348,7 @@ every recipe's `model` block. Useful lower-priority recipes stay runnable as `be
 unusable models become `obsolete`. Every promising new model becomes an `onboarding` plus `untested` shell with up to
 three proposed deployment matrix entries. Disabled recipes are not deployable or bundled.
 
-Canonical model goldens live beside their recipe at `recipes/<model>/golden/<gpu-slug>_<compute-cap>.yaml`, with one
+Canonical model goldens live beside their recipe at `recipes/<model>/golden/<gpu-slug>_<compute-cap>.json`, with one
 file per exact GPU. A model with complete compiler evidence but no serving recipe receives an `onboarding`/`untested`
 recipe shell before its golden is committed. The maintained golden records, model-agnostic rows for the offline prior and the tests, live under
 `emmy/compiler/pipeline/search/golden/records/`. `make test` strictly decodes both kinds row by row, with no GPU

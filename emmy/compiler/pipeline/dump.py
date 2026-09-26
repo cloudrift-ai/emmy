@@ -52,7 +52,7 @@ class CompilerDump:
         self._rule_texts: dict[tuple[int, str, str], list[str]] = {}
         # Pristine, pre-decomposition Torch-dialect snapshot and the frontend
         # slices recovered for final CUDA kernels.  The latter stay in memory;
-        # Torch IR persistence belongs exclusively to golden YAML.
+        # Torch IR persistence belongs exclusively to golden files.
         self._input_graph: Graph | None = None
         self._frontend_reproducers: dict[str, Graph] = {}
 
@@ -211,7 +211,7 @@ class CompilerDump:
     def frontend_reproducer_from_origins(cls, input_graph: Graph, origins: set[str]) -> Graph:
         """Build the standalone tuning slice selected by stable frontend origins.
 
-        Golden YAML persists the complete frontend program so provenance is
+        A golden file persists the complete frontend program so provenance is
         reconstructed in its original fusion context.  Tuning still wants a
         small runnable graph; derive that disposable view at load time rather
         than persisting a second program or a sidecar.

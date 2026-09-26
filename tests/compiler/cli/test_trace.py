@@ -15,6 +15,7 @@ from emmy.compiler.ir.frontend.ir import Conv1dOp, LinearOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.tensor.ir import CastOp, ElementwiseOp, GatherOp
 from emmy.compiler.pipeline.search.golden import GoldenFile
+from emmy.compiler.pipeline.search.golden.repository import _file_gpu_name
 from emmy.compiler.pipeline.search.working_golden import (
     append_trace_inventory,
     load_working_targets,
@@ -35,12 +36,12 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def test_trace_parser_has_one_golden_yaml_output() -> None:
-    args = _parser().parse_args(["trace", "some/model", "-o", "work.yaml"])
-    assert args.output == "work.yaml"
+def test_trace_parser_has_one_golden_output() -> None:
+    args = _parser().parse_args(["trace", "some/model", "-o", "work.json"])
+    assert args.output == "work.json"
     assert not hasattr(args, "golden_output")
     with pytest.raises(SystemExit):
-        _parser().parse_args(["trace", "some/model", "--golden-output", "legacy.yaml"])
+        _parser().parse_args(["trace", "some/model", "--golden-output", "legacy.json"])
 
 
 def test_trace_parser_shares_model_adapter_and_dynamic_inputs() -> None:
@@ -51,7 +52,7 @@ def test_trace_parser_shares_model_adapter_and_dynamic_inputs() -> None:
 
 
 def test_trace_serving_twins_requires_a_model_input() -> None:
-    args = _parser().parse_args(["trace", "--serving-twins", "-o", "work.yaml"])
+    args = _parser().parse_args(["trace", "--serving-twins", "-o", "work.json"])
     with pytest.raises(SystemExit) as exc:
         handle_trace(args)
     assert exc.value.code == 2
@@ -78,7 +79,7 @@ def test_trace_serving_twins_writes_one_exact_inventory_with_explicit_provenance
         return graphs
 
     monkeypatch.setattr(twins, "capture_twin_graphs", fake_capture)
-    output = tmp_path / "serving.yaml"
+    output = tmp_path / "serving.json"
     config = tmp_path / "release.env"
     config.write_text(
         f"SERVE_MODEL=cloudriftai/model-exl3\nSERVE_REVISION=0123456789abcdef0123456789abcdef01234567\n"
@@ -134,7 +135,7 @@ def test_trace_serving_twins_static_only_release_forwards_exact_scope(monkeypatc
         return graphs
 
     monkeypatch.setattr(twins, "capture_twin_graphs", fake_capture)
-    output = tmp_path / "static.yaml"
+    output = tmp_path / "static.json"
     config = tmp_path / "static.env"
     config.write_text(
         f"SERVE_MODEL=org/model\nSERVE_GPU=NVIDIA-Test\nSERVE_GOLDEN_FILE={output}\nSERVE_STATIC_ONLY=1\n"
@@ -169,7 +170,7 @@ def test_trace_serving_twins_static_only_release_forwards_exact_scope(monkeypatc
 def test_trace_static_only_release_rejects_unsafe_config(tmp_path) -> None:
     config = tmp_path / "bad.env"
     config.write_text(
-        "SERVE_MODEL=org/model\nSERVE_GPU=NVIDIA-Test\nSERVE_GOLDEN_FILE=golden.yaml\nSERVE_STATIC_ONLY=1\n"
+        "SERVE_MODEL=org/model\nSERVE_GPU=NVIDIA-Test\nSERVE_GOLDEN_FILE=golden.json\nSERVE_STATIC_ONLY=1\n"
         "SERVE_MAX_NUM_BATCHED_TOKENS=8\nSERVE_DECODE_BUCKET=1\n"
     )
     args = _parser().parse_args(["trace", "org/model", "--serving-twins", "--serving-config", str(config)])
@@ -178,17 +179,17 @@ def test_trace_static_only_release_rejects_unsafe_config(tmp_path) -> None:
     assert exc.value.code == 2
 
 
-def test_trace_command_writes_only_golden_yaml(monkeypatch, tmp_path) -> None:
+def test_trace_command_writes_only_a_golden_file(monkeypatch, tmp_path) -> None:
     import emmy.commands.compile as compile_command
 
     graph = trace_inline_code("torch.relu(torch.randn(8))")["graph"]
     monkeypatch.setattr(compile_command, "load_or_trace", lambda _args, **_kwargs: (graph, "auto-name", (None, (), {})))
     monkeypatch.chdir(tmp_path)
-    output = tmp_path / "trace.yaml"
+    output = tmp_path / "trace.json"
     handle_trace(_parser().parse_args(["trace", "some/model", "-o", str(output)]))
     records = GoldenFile.load(output).records()
     assert records and all(record.program.nodes for record in records)
-    assert sorted(path.name for path in tmp_path.iterdir()) == ["trace.yaml"]
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["trace.json"]
 
 
 def test_trace_quantize_spells_before_writing_inventory(monkeypatch, tmp_path) -> None:
@@ -211,19 +212,19 @@ def test_trace_quantize_spells_before_writing_inventory(monkeypatch, tmp_path) -
     monkeypatch.setattr(compile_command, "_quantize_traced", quantize_traced)
     monkeypatch.setattr(quant_loader, "checkpoint_quant_digest", lambda path: "0123456789abcdef")
 
-    output = tmp_path / "trace.yaml"
+    output = tmp_path / "trace.json"
     handle_trace(_parser().parse_args(["trace", "--code", "unused", "--quantize", "nvfp4", "--target", "sm_89", "-o", str(output)]))
 
     assert seen == {"architecture_only": False, "quantize": (graph, bundle)}
     assert GoldenFile.load(output).model_quant_digest == "0123456789abcdef"
 
 
-def test_trace_accepts_debug_graph_json_as_input_but_emits_yaml(monkeypatch, tmp_path) -> None:
+def test_trace_accepts_debug_graph_json_as_input_but_emits_a_golden_file(monkeypatch, tmp_path) -> None:
 
     source_graph = trace_inline_code("torch.relu(torch.randn(8))")["graph"]
     source = tmp_path / "source.json"
     source.write_text(json.dumps(source_graph.to_dict()))
-    output = tmp_path / "working.yaml"
+    output = tmp_path / "working.json"
     handle_trace(_parser().parse_args(["trace", str(source), "-o", str(output)]))
     assert GoldenFile.load(output).records()
     assert json.loads(source.read_text()) == source_graph.to_dict()
@@ -233,7 +234,7 @@ def test_trace_writes_deterministic_self_contained_programs(tmp_path) -> None:
 
     graph = trace_inline_code("torch.relu(torch.randn(16,32))")["graph"]
     original_wire = graph.to_wire()
-    first, second = tmp_path / "first.yaml", tmp_path / "second.yaml"
+    first, second = tmp_path / "first.json", tmp_path / "second.json"
     write_trace_inventory(graph.copy(), first, model="org/model", ctx=_TARGET_CTX)
     write_trace_inventory(graph.copy(), second, model="org/model", ctx=_TARGET_CTX)
     first_doc, second_doc = GoldenFile.load(first), GoldenFile.load(second)
@@ -257,7 +258,7 @@ def test_trace_inventory_replays_depthwise_conv1d_program(tmp_path) -> None:
     )
     graph.inputs, graph.outputs = ["x", "weight"], ["conv"]
 
-    path = tmp_path / "conv1d.yaml"
+    path = tmp_path / "conv1d.json"
     write_trace_inventory(graph, path, ctx=_TARGET_CTX)
     document, targets = load_working_targets(path)
 
@@ -275,7 +276,7 @@ def test_trace_keeps_materialized_storage_outputs_and_quant_digest(tmp_path) -> 
     graph.add_node(ElementwiseOp("from_f8e4m3"), [bits], Tensor("out", (4, 32), "f16"), node_id="out")
     graph.inputs, graph.outputs = ["x"], ["out"]
 
-    path = tmp_path / "working.yaml"
+    path = tmp_path / "working.json"
     result = write_trace_inventory(
         graph,
         path,
@@ -301,7 +302,7 @@ def test_trace_target_resolves_in_original_multi_op_fusion_context(tmp_path) -> 
     graph.add_node(ElementwiseOp("multiply"), ["gate", "up"], Tensor("out", (16, 32), "f16"), node_id="out")
     graph.inputs, graph.outputs = ["x", "w1", "w2"], ["out"]
 
-    path = tmp_path / "working.yaml"
+    path = tmp_path / "working.json"
     write_trace_inventory(graph, path, ctx=_TARGET_CTX)
     document = GoldenFile.load(path)
     (record,) = document.records()
@@ -321,7 +322,7 @@ def test_trace_inventory_keeps_fused_sdpa_as_one_frontend_target(tmp_path) -> No
     graph = trace_inline_code(
         "F.scaled_dot_product_attention(torch.randn(1,2,8,16), torch.randn(1,2,8,16), torch.randn(1,2,8,16), is_causal=True)"
     )["graph"]
-    path = tmp_path / "working.yaml"
+    path = tmp_path / "working.json"
     write_trace_inventory(graph, path, ctx=_TARGET_CTX)
     records = GoldenFile.load(path).records()
     assert len(records) == 1
@@ -340,7 +341,7 @@ def test_trace_serializes_gather_target_with_a_torch_reference_mapping(tmp_path)
     graph.inputs, graph.outputs = ["x", "index"], ["gather"]
     assert torch_ref.is_runnable(graph) is True
 
-    path = tmp_path / "working.yaml"
+    path = tmp_path / "working.json"
     write_trace_inventory(graph, path, ctx=_TARGET_CTX)
     (record,) = GoldenFile.load(path).records()
     assert record.origin_ops == ("tensor.gather",)
@@ -357,7 +358,7 @@ def test_trace_inventory_keeps_every_kernel_even_without_cache_keys(monkeypatch,
     graph.inputs, graph.outputs = ["x0", "x1"], ["y0", "y1"]
     monkeypatch.setattr(LoopOp, "identity_key", lambda _self, **_kw: None)
 
-    path = tmp_path / "working.yaml"
+    path = tmp_path / "working.json"
     result = write_trace_inventory(graph, path, ctx=_TARGET_CTX)
     records = GoldenFile.load(path).records()
 
@@ -374,7 +375,7 @@ def test_trace_inventory_embeds_loop_ir_when_frontend_provenance_is_missing(monk
     graph.inputs, graph.outputs = ["x"], ["y"]
     monkeypatch.setattr(provenance, "seed", lambda _graph: None)
 
-    path = tmp_path / "working.yaml"
+    path = tmp_path / "working.json"
     write_trace_inventory(graph, path, ctx=_TARGET_CTX)
     document = GoldenFile.load(path)
     (record,) = document.records()
@@ -394,7 +395,7 @@ def test_trace_inventory_stamps_the_card_its_context_is_for(tmp_path) -> None:
     and checks the stamp deterministically, instead of it depending on the runner's device."""
 
     graph = trace_inline_code("torch.relu(torch.randn(8))")["graph"]
-    path = tmp_path / "working.yaml"
+    path = tmp_path / "working.json"
     write_trace_inventory(graph, path, ctx=Context.from_target((8, 9), gpu_name="NVIDIA GeForce RTX 4090"))
 
     assert GoldenFile.load(path).gpu_name == "NVIDIA GeForce RTX 4090"
@@ -407,7 +408,7 @@ def test_trace_inventory_stores_the_kernel_and_its_traced_ops(tmp_path) -> None:
     graph.add_node(ElementwiseOp("relu"), ["x"], Tensor("y", (16,)), node_id="y")
     graph.inputs, graph.outputs = ["x"], ["y"]
 
-    path = tmp_path / "working.yaml"
+    path = tmp_path / "working.json"
     write_trace_inventory(graph, path, ctx=_TARGET_CTX)
     (record,) = GoldenFile.load(path).records()
 
@@ -425,7 +426,7 @@ def test_a_stored_kernel_holding_part_of_an_op_has_no_pytorch_reference(monkeypa
     graph.add_node(InputOp(), [], Tensor("x", (16,)), node_id="x")
     graph.add_node(ElementwiseOp("relu"), ["x"], Tensor("y", (16,)), node_id="y")
     graph.inputs, graph.outputs = ["x"], ["y"]
-    path = tmp_path / "working.yaml"
+    path = tmp_path / "working.json"
     monkeypatch.setattr(provenance, "coverage", lambda prov, _totals: {origin: (1, 2, False) for origin in prov})
     write_trace_inventory(graph, path, ctx=_TARGET_CTX)
 
@@ -460,7 +461,7 @@ def test_exact_loop_targets_disambiguate_same_body_at_distinct_cast_boundaries(t
         outputs.append(f"scaled_{suffix}")
     graph.outputs = outputs
 
-    path = tmp_path / "working.yaml"
+    path = tmp_path / "working.json"
     write_trace_inventory(graph, path, ctx=_TARGET_CTX)
     names = [record.name for record in GoldenFile.load(path).records()]
     assert len(names) == len(set(names))
@@ -469,7 +470,7 @@ def test_exact_loop_targets_disambiguate_same_body_at_distinct_cast_boundaries(t
 def test_combined_trace_inventory_deduplicates_identical_loop_targets(tmp_path) -> None:
 
     graph = trace_inline_code("torch.relu(torch.randn(8))")["graph"]
-    path = tmp_path / "combined.yaml"
+    path = tmp_path / "combined.json"
     result = write_trace_inventories({"pre1": graph, "pre8": graph.copy()}, path, model="org/model@revision", ctx=_TARGET_CTX)
     document = GoldenFile.load(path)
     records = document.records()
@@ -480,26 +481,38 @@ def test_combined_trace_inventory_deduplicates_identical_loop_targets(tmp_path) 
     assert document.model == "org/model@revision"
 
 
-def test_trace_yaml_uses_compact_graph_rows_but_block_candidate_rows(tmp_path) -> None:
+def test_a_golden_file_holds_a_pool_entry_and_a_realization_per_line(tmp_path) -> None:
+    """A diff of a golden lands on the entry that changed: every program, kernel and row is a line of its own, and
+    the card's name is the first line alone, which a card-scoped reader parses without the body."""
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x0", (512, 512), "f16"), node_id="x0")
     graph.add_node(InputOp(), [], Tensor("x1", (512, 512), "f16"), node_id="x1")
     graph.add_node(LinearOp(has_bias=True), ["x0", "x1"], Tensor("linear", (512, 512), "f16"), node_id="linear")
     graph.inputs, graph.outputs = ["x0", "x1"], ["linear"]
 
-    path = tmp_path / "working.yaml"
+    path = tmp_path / "working.json"
     write_trace_inventory(graph, path, ctx=_TARGET_CTX)
+    document = GoldenFile.load(path)
+    document.gpu_name = "NVIDIA GeForce RTX 5090"
+    document.dump(path, overwrite=True)
     text = path.read_text()
+    lines = text.splitlines()
 
-    assert "inputs: [x0, x1]" in text
-    assert "outputs: [[x0, f16, [512, 512]]]" in text
-    assert "attrs: {has_bias: true}" in text
-    assert "target: {loop: 0, origins: [linear]}" in text
+    def entry(line: str):
+        return json.loads(line.strip().removesuffix(","))
+
+    wire = json.loads(text)
+    assert entry(lines[lines.index(' "programs": [') + 1]) == wire["programs"][0]
+    assert entry(lines[lines.index(' "loops": [') + 1]) == wire["loops"][0]
+    config = lines[lines.index(' "configs": [') + 1]
+    assert config == '  {"program": 0, "target": {"loop": 0, "origins": ["linear"]}, "realizations": ['
+    assert entry(lines[lines.index(config) + 1]) == wire["configs"][0]["realizations"][0]
+    assert _file_gpu_name(path) == "NVIDIA GeForce RTX 5090"
 
 
-def test_trace_refuses_to_replace_existing_yaml(tmp_path) -> None:
+def test_trace_refuses_to_replace_an_existing_golden(tmp_path) -> None:
     graph = trace_inline_code("torch.relu(torch.randn(8))")["graph"]
-    path = tmp_path / "working.yaml"
+    path = tmp_path / "working.json"
     write_trace_inventory(graph, path, ctx=_TARGET_CTX)
     with pytest.raises(FileExistsError, match="refusing to replace"):
         write_trace_inventory(graph, path, ctx=_TARGET_CTX)
@@ -509,7 +522,7 @@ def test_append_collects_separately_traced_paths_into_one_inventory(tmp_path) ->
 
     relu = trace_inline_code("torch.relu(torch.randn(8))")["graph"]
     sigmoid = trace_inline_code("torch.sigmoid(torch.randn(16))")["graph"]
-    path = tmp_path / "working.yaml"
+    path = tmp_path / "working.json"
 
     write_trace_inventory(relu, path, model="org/model@revision", ctx=_TARGET_CTX)
     result = append_trace_inventory(sigmoid, path, ctx=_TARGET_CTX)
@@ -527,7 +540,7 @@ def test_append_collects_separately_traced_paths_into_one_inventory(tmp_path) ->
 def test_append_keeps_a_kernel_already_covered_once(tmp_path) -> None:
 
     graph = trace_inline_code("torch.relu(torch.randn(8))")["graph"]
-    path = tmp_path / "working.yaml"
+    path = tmp_path / "working.json"
 
     write_trace_inventory(graph.copy(), path, ctx=_TARGET_CTX)
     result = append_trace_inventory(graph.copy(), path, ctx=_TARGET_CTX)
@@ -539,7 +552,7 @@ def test_append_keeps_a_kernel_already_covered_once(tmp_path) -> None:
 
 def test_append_rejects_an_inventory_traced_for_another_card(tmp_path) -> None:
     graph = trace_inline_code("torch.relu(torch.randn(8))")["graph"]
-    path = tmp_path / "working.yaml"
+    path = tmp_path / "working.json"
     write_trace_inventory(graph.copy(), path, ctx=_TARGET_CTX)
     with pytest.raises(ValueError, match="compute capability"):
         append_trace_inventory(graph.copy(), path, ctx=Context.from_target((7, 0)))

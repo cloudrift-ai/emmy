@@ -270,6 +270,8 @@ _COLS = {
 }
 # Tables an older emmy wrote that nothing reads any more, dropped alongside the rest on a re-create.
 _OBSOLETE_TABLES = ("loop_op", "tile_op", "kernel_op", "cuda_op", "lowering", "kernel_set")
+#: The wire the ``kernel`` table's Loop IR is written in (``PRAGMA user_version``); a file holding another is re-created.
+_WIRE_VERSION = 1
 # Drop order respects the foreign keys; create order is the reverse.
 _DROP_ORDER = ("perf", "routing", "placement_knob", "placement", "schedule_knob", "schedule", "kernel_feature", "context", "kernel")
 
@@ -352,6 +354,7 @@ class SearchDB:
                 self._conn.execute(_DDL[table])
             for stmt in _INDEXES:
                 self._conn.execute(stmt)
+            self._conn.execute(f"PRAGMA user_version = {_WIRE_VERSION}")
         self._conn.execute("PRAGMA foreign_keys = ON")
 
     def _columns(self, table: str) -> set[str]:
@@ -361,9 +364,11 @@ class SearchDB:
     def _mismatched(self) -> bool:
         """Whether the file's tables are not exactly this DDL's: a table with other columns (a file another
         emmy wrote), or some of the tables without the rest (a creation that was interrupted, or an emmy one
-        table older) — either would fail on the first read of what is missing."""
+        table older), or a kernel wire another emmy spelled — any of them would fail on the first read."""
         present = {table: self._columns(table) for table in _COLS}
         if any(cols and cols != set(_COLS[table]) for table, cols in present.items()):
+            return True
+        if any(present.values()) and self._conn.execute("PRAGMA user_version").fetchone()[0] != _WIRE_VERSION:
             return True
         return 0 < sum(bool(cols) for cols in present.values()) < len(present)
 

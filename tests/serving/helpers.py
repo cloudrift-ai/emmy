@@ -24,7 +24,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from pathlib import Path
 
-GOLDEN = Path(__file__).parent / "goldens" / "serving.golden.yaml"
+GOLDEN = Path(__file__).parent / "goldens" / "serving.golden.json"
 
 
 def qwen3_config(layers: int):

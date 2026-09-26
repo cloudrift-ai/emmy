@@ -1,7 +1,7 @@
 ---
 name: refresh-golden
 description: >-
-  Refresh one repository golden YAML, several, or all of them after a compiler change left them stale: a stale
+  Refresh one repository golden file, several, or all of them after a compiler change left them stale: a stale
   golden's stored targets are no longer what a fresh lowering of its own programs writes. Use when `emmy golden
   check` or the fresh-lowering test in `make test` names a golden, or when asked to restamp, re-measure, re-record or
   delete a golden. Works file by file: restamps with the CLI where
@@ -12,7 +12,7 @@ description: >-
 
 The unit of work is one golden file. The input is a golden path, a list of them, or nothing, which means every
 repository golden — the same argument shape `emmy golden check` and `emmy golden restamp` take. A repository golden is
-a hardware golden under `emmy/compiler/pipeline/search/golden/` or a recipe's `recipes/<model>/golden/<card>.yaml`,
+a hardware golden under `emmy/compiler/pipeline/search/golden/` or a recipe's `recipes/<model>/golden/<card>.json`,
 and it answers two questions in `make test`, both without a card:
 
 1. **Does every row still decode?** Each recorded schedule row must equal an enumerated leaf of its stored kernel.
@@ -41,7 +41,7 @@ whole-layer traces and take minutes each. Group step 3 by card so one rental mea
 ### 1. Measure the drift
 
 ```bash
-emmy golden check recipes/<model>/golden/<card>.yaml
+emmy golden check recipes/<model>/golden/<card>.json
 ```
 
 Read the reason on each stale target:
@@ -54,9 +54,9 @@ Read the reason on each stale target:
 To see what moved, diff the two pools of one program, the stored one and the fresh one:
 
 ```bash
-emmy golden kernels recipes/<model>/golden/<card>.yaml --program <N> > stored.yaml
-emmy compile --golden recipes/<model>/golden/<card>.yaml --program <N> --ir loop -o fresh.yaml
-diff stored.yaml fresh.yaml
+emmy golden kernels recipes/<model>/golden/<card>.json --program <N> > stored.json
+emmy compile --golden recipes/<model>/golden/<card>.json --program <N> --ir loop -o fresh.json
+diff stored.json fresh.json
 ```
 
 Name the compiler change that moved the lowering (`git log` over `emmy/compiler/pipeline/passes/`) and say whether it
@@ -66,7 +66,7 @@ does — is a regression to report, not a golden to refresh; stop there for ever
 ### 2. Restamp what the CLI can
 
 ```bash
-emmy golden restamp recipes/<model>/golden/<card>.yaml    # rewrites the file in place; no card needed
+emmy golden restamp recipes/<model>/golden/<card>.json    # rewrites the file in place; no card needed
 ```
 
 It replaces each stored target with the fresh Loop IR, re-keys a row naming the target to the fresh target (a row naming
@@ -88,16 +88,16 @@ Commit the rewritten file with the report's counts in the message. Then run the 
 ./venv/bin/pytest tests/compiler/pipeline/search/test_golden.py -k "<file id>" -n auto --dist=loadgroup
 ```
 
-The file id is the hardware golden's name (`h100_sm90.yaml`) or `<recipe>/<name>` for a model golden.
+The file id is the hardware golden's name (`h100_sm90.json`) or `<recipe>/<name>` for a model golden.
 
 ### 3. Measure the file's proposals on its card
 
 The measurement writers refuse a canonical path, so work on a copy; one copy per file, one run per proposal row:
 
 ```bash
-mkdir -p _tune/<run> && cp recipes/<model>/golden/<card>.yaml _tune/<run>/working.yaml
+mkdir -p _tune/<run> && cp recipes/<model>/golden/<card>.json _tune/<run>/working.json
 EMMY_NVCC_FLAGS= EMMY_KNOBS="PLACE=fuse,<the row's knobs, every family spelled>" \
-  emmy run --golden _tune/<run>/working.yaml --realization <exact row name> --bench --record-greedy
+  emmy run --golden _tune/<run>/working.json --realization <exact row name> --bench --record-greedy
 ```
 
 Under `EMMY_KNOBS` the greedy pick is the pin, so `--record-greedy` appends a measured receipt of that row's kernel
@@ -145,6 +145,6 @@ One row per file in the PR body, plus the compiler change that moved the lowerin
 
 | File | Targets restamped / dropped | Rows kept / demoted / dropped | Measured on | State |
 | --- | --- | --- | --- | --- |
-| `h100_sm90.yaml` | 15 / 8 of 45 | 22 / 20 / 8 | — | proposals await an H100 |
+| `h100_sm90.json` | 15 / 8 of 45 | 22 / 20 / 8 | — | proposals await an H100 |
 
 `State` is one of: refreshed, proposals await `<card>`, needs re-record, proposed for deletion, stopped on a loss.

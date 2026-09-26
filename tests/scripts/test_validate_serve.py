@@ -21,7 +21,7 @@ def test_serving_reference_deploys_the_named_golden_at_the_named_decode_width(mo
         port="8000",
         gpu_mem_util="0.82",
         max_num_batched_tokens="256",
-        golden="sweep.yaml",
+        golden="sweep.json",
         decode_bucket=16,
         enforce_eager=True,
     )
@@ -42,7 +42,7 @@ def test_serving_reference_deploys_the_named_golden_at_the_named_decode_width(mo
         "--max-num-batched-tokens",
         "256",
         "--golden",
-        "sweep.yaml",
+        "sweep.json",
         "--enforce-eager",
     ]
     assert env["EMMY_GEN_DECODE_BUCKET"] == "16"

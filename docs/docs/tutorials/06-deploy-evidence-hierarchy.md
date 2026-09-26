@@ -161,7 +161,7 @@ correlate.
 - **The warnings.** Measured evidence for a kernel that overlaps none of the offered options is logged loudly.
 - **The record of the resolution.** Each decided fork records what was chosen and the time of whichever row decided
   it — a measured time when a measurement decided, a predicted one otherwise.
-- **The release gate.** `emmy eval golden --golden GOLDEN_YAML --serving-config PATH` strictly decodes each of
+- **The release gate.** `emmy eval golden --golden GOLDEN_FILE --serving-config PATH` strictly decodes each of
   the file's entries and compiles the exact serving matrix on the pinned GPU with the file's rows as the only
   evidence, under strict evidence. That is the subject of the next page.
 - **Strict evidence.** `--strict-evidence` on `run`, `compile` or `serve` refuses to let the prior decide at all, so
@@ -173,7 +173,7 @@ The audit below validates one canonical file against the release configuration a
 programs and freshly traced serving matrix:
 
 ```bash
-emmy eval golden --golden <canonical-golden.yaml> --serving-config <models/slug.env>
+emmy eval golden --golden <canonical-golden.json> --serving-config <models/slug.env>
 ```
 
 The next page explains how to read the result.

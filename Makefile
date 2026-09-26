@@ -224,7 +224,7 @@ serve-config-guard:
 		echo "  Fill every measured checkpoint, serving, and revision value before warming or baking."; \
 		exit 1)
 	@test -n "$(SERVE_GOLDEN_FILE)" -a -f "$(SERVE_GOLDEN_FILE)" || ( \
-		echo "ERROR: $(SERVE_CONFIG) must set SERVE_GOLDEN_FILE to an existing canonical golden YAML."; \
+		echo "ERROR: $(SERVE_CONFIG) must set SERVE_GOLDEN_FILE to an existing canonical golden file."; \
 		exit 1)
 
 # The goldens are the top tier of the fork-resolution evidence hierarchy. Validate the exact

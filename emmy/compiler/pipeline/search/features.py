@@ -2,7 +2,7 @@
 
 :func:`knob_features` is the single featurizer over a whole knob dict (the ``D_*`` engineered
 geometry / occupancy family, the ``MMA_*`` atom expansion, the ``S_*`` / ``H_*`` pass-throughs);
-:func:`tile_signature` is the schema-agnostic structural identity used to join golden YAML rows
+:func:`tile_signature` is the schema-agnostic structural identity used to join golden file rows
 against enumerated candidates; :data:`ROUTING_FEATURES` and :func:`is_dynamic_row` are the routing stamp's
 spelling and its one reader. Lives in the same package as :mod:`.space` so the whole search space
 (dimensions × values × encoding) is analyzable in one place; the ``Knob`` descriptor / registry /
@@ -492,7 +492,7 @@ class _Decomp:
     finalize: str = "atomic"
     # The ``coop-t`` transposed cooperative band (k-major matvec lane mapping) — a different
     # kernel from the interleaved ``coop`` at the same width, so it must reach both the features
-    # and the ``tile_signature`` identity (``coop-t`` goldens are recorded in the per-GPU YAMLs).
+    # and the ``tile_signature`` identity (``coop-t`` goldens are recorded in the per-GPU golden files).
     coop_transposed: bool = False
 
 
@@ -526,7 +526,7 @@ def tile_signature(knobs: dict) -> tuple:
     K-chunk, the primary reduce decomposition, and the atom kind — read from the native codec
     knobs (``TILE`` / ``REDUCE`` / ``STAGE``, either exact-site or bare analytical values). Two configs
     with equal signatures are the same kernel variant whichever key form spelled them, so this
-    is the bridge for matching a recorded golden YAML row against the native enumeration's
+    is the bridge for matching a recorded golden file row against the native enumeration's
     candidate rows (``emmy fit``'s golden group builder / ``search/ranking.evaluate_record``).
     The K-chunk (``Tile.bk``) is part of the identity — without it every ``k<n>`` sibling in
     a warp pool joined ambiguously (a golden recorded at ``k4`` matched the ``k1`` candidate).

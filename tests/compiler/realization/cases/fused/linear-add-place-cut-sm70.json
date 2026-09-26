@@ -1,0 +1,15 @@
+{"compute_cap": [7, 0],
+ "note": "evidence: A measured PLACE=cut route for the Qwen3 down projection must remain a deployable two-kernel realization.",
+ "programs": [
+  {"inputs":["add_5","mul_12","p_mlp_down_proj_weight"],"outputs":["add_7"],"nodes":[{"id":"add_5","op":"input","outputs":[["add_5","f16",[1,512,1024]]]},{"id":"mul_12","op":"input","outputs":[["mul_12","f16",[1,512,3072]]]},{"id":"p_mlp_down_proj_weight","op":"input","outputs":[["p_mlp_down_proj_weight","f16",[1024,3072]]]},{"id":"linear_6","op":"torch.linear","inputs":["mul_12","p_mlp_down_proj_weight"],"outputs":[["linear_6","f16",[1,512,1024]]]},{"id":"add_7","op":"tensor.elementwise","attrs":{"op":"add"},"inputs":["add_5","linear_6"],"outputs":[["add_7","f16",[1,512,1024]]]}]}
+ ],
+ "configs": [
+  {"program": 0, "target": {"loop": 0, "origins": ["add_7", "linear_6"]}, "realizations": [
+   {"name": "k_linear_57a5ae", "pins": {"FAST_MATH": false, "PLACE": "cut"}, "knobs": {}, "identity": "c5937ab9fb2fb12e4ef92db8bc9741963b0a42ffb30d5dc273dbfc9f6cf914a3"},
+   {"name": "k_linear_57a5ae.7d7012ef6970", "pins": {"FAST_MATH": false}, "knobs": {"WORK": "", "RASTER": ""}, "identity": "7d7012ef6970a8c06bd3ef65e5d1003ce8ed590d1407b1dd29d24c07526a18de"},
+   {"name": "k_linear_57a5ae.f9e1084fe5fb", "pins": {"FAST_MATH": false}, "knobs": {"WORK": "", "TILE": "", "REDUCE": "", "STAGE": "", "RASTER": ""}, "identity": "83efa34fae16c4148f0aaa80a90aba4bc1685f5cc045edeff5169e8688ee2db9"}
+  ]}
+ ],
+ "loops": [
+  {"inputs":["add_5","mul_12","p_mlp_down_proj_weight"],"outputs":["add_7"],"nodes":[{"id":"add_5","op":"input","outputs":[["add_5","f16",[1,512,1024]]]},{"id":"mul_12","op":"input","outputs":[["mul_12","f16",[1,512,3072]]]},{"id":"p_mlp_down_proj_weight","op":"input","outputs":[["p_mlp_down_proj_weight","f16",[1024,3072]]]},{"id":"add_7","op":"loop","attrs":{"body":[{"Loop":{"axis":{"name":"a0","extent":512},"body":[{"Loop":{"axis":{"name":"a1","extent":1024},"body":[{"Loop":{"axis":{"name":"a2","extent":3072},"body":[{"Load":{"names":["in0"],"input":"mul_12","index":["0","a0","a2"]}},{"Load":{"names":["in1"],"input":"p_mlp_down_proj_weight","index":["a1","a2"]}},{"Assign":{"name":"v0","op":"multiply","args":["in0","in1"],"dtype":"f32"}},{"Accum":{"name":"acc0","value":"v0","axes":["a2"]}}]}},{"Assign":{"name":"v1","op":"copy","args":["acc0"],"dtype":"f16"}},{"Load":{"names":["in2"],"input":"add_5","index":["0","a0","a1"]}},{"Assign":{"name":"v2","op":"add","args":["in2","v1"]}},{"Write":{"output":"add_7","index":["0","a0","a1"],"values":["v2"]}}]}}]}}],"name":"k_linear_de38ed"},"inputs":["p_mlp_down_proj_weight","mul_12","add_5"],"outputs":[["add_7","f16",[1,512,1024]]]}]}
+ ]}

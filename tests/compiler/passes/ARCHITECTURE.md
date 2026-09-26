@@ -177,7 +177,7 @@ This group is the ONLY coverage the output-owning cut has, and the corpus delibe
 multi-root kernel a real grid — the NVFP4 encode's packed-code piece then has six contraction roots offering ~1400
 rows each, and their composition is past enumerating. Pinning the contraction seams beside it shrinks every piece to
 at most two roots and does enumerate, and a route spelled on the parent's tree replays from evidence since the cut
-pass offers the composed arm a measured route row names (`attention/rmsnorm-qk-sdpa-composed-cut.yaml` closed that
+pass offers the composed arm a measured route row names (`attention/rmsnorm-qk-sdpa-composed-cut.json` closed that
 gap). So the numerics of a cut kernel set stay unproven on hardware until the first holds; the tests here prove the
 structure only.
 The recipe program's monoid laws are covered

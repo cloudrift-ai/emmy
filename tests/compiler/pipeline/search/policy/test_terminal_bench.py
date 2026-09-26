@@ -17,9 +17,9 @@ from tests.compiler.helpers import case_target_tile
 # A perf row is filed under the tile kernel a CUDA kernel was rendered from, so every synthetic kernel
 # here stands on a real tile — two kernels that must not share a row stand on two different ones.
 _CASES = {
-    "k": "fused/norm-linear-f16-scalar-reduce.yaml",
-    "k_innocent": "fused/norm-linear-f16-scalar-reduce.yaml",
-    "k_culprit": "matmul/f16-mma-f16acc-gmem.yaml",
+    "k": "fused/norm-linear-f16-scalar-reduce.json",
+    "k_innocent": "fused/norm-linear-f16-scalar-reduce.json",
+    "k_culprit": "matmul/f16-mma-f16acc-gmem.json",
 }
 
 
@@ -296,7 +296,7 @@ def test_a_kernel_row_carries_the_stamps_the_deploy_joins_on() -> None:
     from emmy.compiler.pipeline.search.policy.terminal_bench import kernel_row
     from tests.compiler.realization import helpers as corpus
 
-    case = corpus.load_case(corpus.CASES_DIR / "attention/sdpa-hd128-softmax-v-mma.yaml")
+    case = corpus.load_case(corpus.CASES_DIR / "attention/sdpa-hd128-softmax-v-mma.json")
     graph, _taken = corpus.lowered(case, case.context())
     [cuda] = [node.op for node in graph.nodes.values() if isinstance(node.op, CudaOp)]
     tile = kernel_tile(cuda)

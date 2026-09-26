@@ -75,7 +75,7 @@ def test_stages_only_runnable_recipes(fake_repo):
         model = fake_repo / "recipes" / name
         model.mkdir(parents=True)
         (model / "recipe.yaml").write_text(f"tags: {tags!r}\nmodel:\n  huggingface: org/{name}\n")
-        golden = model / "golden" / "rtx5090_sm120.yaml"
+        golden = model / "golden" / "rtx5090_sm120.json"
         golden.parent.mkdir()
         golden.write_text("gpu_name: NVIDIA GeForce RTX 5090\n")
 
@@ -87,7 +87,7 @@ def test_stages_only_runnable_recipes(fake_repo):
     assert not (staged / "obsolete" / "recipe.yaml").exists()
     assert not (staged / "onboarding" / "recipe.yaml").exists()
     assert all(
-        (staged / name / "golden" / "rtx5090_sm120.yaml").is_file() for name in ("maintained", "best-effort", "obsolete", "onboarding")
+        (staged / name / "golden" / "rtx5090_sm120.json").is_file() for name in ("maintained", "best-effort", "obsolete", "onboarding")
     )
 
 

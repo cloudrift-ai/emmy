@@ -317,7 +317,7 @@ removed.
 
 ```bash
 emmy trace Qwen/Qwen3.8-27B-FP8 --layer 0 --target sm_70 -o layer0.yaml     # and --layer 3
-emmy run --golden recipes/Qwen3.8-27B-FP8/golden/v100_sm70.yaml --bench --bench-backends eager,tcompile,emmy
+emmy run --golden recipes/Qwen3.8-27B-FP8/golden/v100_sm70.json --bench --bench-backends eager,tcompile,emmy
 ```
 
 On a Volta host, install a torch build that still ships `sm_70` kernels (`torch==2.13.0+cu126`) and preload a CUDA 12

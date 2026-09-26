@@ -205,7 +205,7 @@ def promoted_sweep(op, output_specs: tuple[OutputSpec, ...], *, free: tuple[Axis
       has an axis, a bare elementwise sweep stays a sweep — the kernel materializer distributes
       exactly that across a worker inventory (``_lane_close``, the close a cooperating reduce's
       projection takes), and binding it here would decide for the schedule that measured the
-      alternative (``cases/reduce/rms-norm-cut-sweep-work.yaml``: 885.9 us walked in one thread,
+      alternative (``cases/reduce/rms-norm-cut-sweep-work.json``: 885.9 us walked in one thread,
       4.2 us split across 512).
 
     The complement is what the reduce clause protects: a reduce that does NOT read the axis is the
