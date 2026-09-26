@@ -817,7 +817,7 @@ def test_record_greedy_pick_names_the_row_a_decision_lands_on(tmp_path, monkeypa
 
 
 def test_record_greedy_pick_seeds_the_same_named_row_whose_route_the_compile_took(tmp_path, monkeypatch):
-    """One name can hold two route rows for one target — a refresh records each route it measured.
+    """One name can hold two routing rows for one target — a refresh records each route it measured.
     The seed is the row whose knobs are the route the compile took, the row its decision lands on:
     seeding the first same-named row instead left that row's knobs spelling one route and its
     ``kernel_set`` naming another. A route no same-named row records leaves no seed to pick."""

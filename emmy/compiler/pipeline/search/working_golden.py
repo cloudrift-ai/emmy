@@ -676,7 +676,7 @@ def _record_rows(destination: Path, name: str, *, decisions, kernels, reference_
         return {**{key: value for key, value in seed.pins.items() if family_of(str(key)) != "PLACE"}, **measured_precision_pins()}
 
     if decisions and len(seeds) > 1:
-        # One name can hold several route rows for one target. The seed is the one whose route the
+        # One name can hold several routing rows for one target. The seed is the one whose route the
         # compile took — the row its decision lands on; any other ends up with knobs spelling one
         # route and a kernel set naming another.
         identity, knobs = decisions[0][:2]

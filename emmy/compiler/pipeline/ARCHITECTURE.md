@@ -1454,7 +1454,10 @@ kernel it lowered from, its realized schedule row, its own isolated launch timin
 input regime with the greedy comparison row as `same-input-greedy` reference. The PRECISION gates on that regime are
 the compile's own, not the seed's (`pins.measured_precision_pins`): a row measured with the reduced-accumulate or
 native-fp8 cell offered has to say so, or the replay republishes a regime that no longer enumerates it — measured
-evidence for a pick nothing can take again. A nested cut is a routing row of the
+evidence for a pick nothing can take again. Where several realizations share the name — a refresh can record two
+routes of one target side by side — the seed is the one the compile's first decision lands on, and the recorder
+refuses when that is not exactly one row: any other seed ends up with knobs spelling one route and a `kernel_set`
+naming another. A nested cut is a routing row of the
 piece it was offered on, so a cascade of cuts is as many routing rows, and the replay walks the set together: the entry
 whose identity a fork's kernel carries decides that fork — where several carry it, as a routing row and a plain row of
 one target do under the canonical identity, the one spelling a route — and the set's lead decides the rest. Receipts
