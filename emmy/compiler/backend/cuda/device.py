@@ -1,22 +1,37 @@
 """The live CUDA device, reached through the runtime's context.
 
-One context per process, created on first use. ``CUDA_VISIBLE_DEVICES`` is how a pinned
-worker selects its card, so ordinal 0 is always the right device here.
+Contexts follow torch's current logical device. A worker restricted by ``CUDA_VISIBLE_DEVICES``
+still selects logical zero; without CUDA-capable torch, the runtime uses that visible device.
 """
 
 from __future__ import annotations
 
-_DEVICE = None
+_DEVICES = {}
+
+
+def torch_module():
+    """torch, or ``None`` when it is missing or sees no device — the runtime then allocates."""
+    try:
+        import torch  # noqa: PLC0415
+
+        return torch if torch.cuda.is_available() else None
+    except ImportError:
+        return None
+
+
+def _ordinal():
+    torch = torch_module()
+    return torch.cuda.current_device() if torch is not None else 0
 
 
 def device():
-    """The process's CUDA context, created on first use."""
-    global _DEVICE
-    if _DEVICE is None:
+    """The host's current logical CUDA device, cached independently of other devices."""
+    ordinal = _ordinal()
+    if ordinal not in _DEVICES:
         from emmy import emmy_runtime  # noqa: PLC0415 — the extension loads the driver lazily
 
-        _DEVICE = emmy_runtime.Device(0)
-    return _DEVICE
+        _DEVICES[ordinal] = emmy_runtime.Device(ordinal)
+    return _DEVICES[ordinal]
 
 
 def compute_capability() -> tuple[int, int] | None:
@@ -49,10 +64,12 @@ def context_poisoned() -> bool:
     ``False`` when no context was ever created here. A synchronize surfaces the sticky
     status an earlier illegal access left behind; it would block on a hung kernel, so a
     caller that knows a kernel hung must not probe."""
-    if _DEVICE is None:
+    if not _DEVICES:
         return False
     try:
-        _DEVICE.synchronize()
+        current = _DEVICES.get(_ordinal())
+        if current is not None:
+            current.synchronize()
     except Exception:  # noqa: BLE001 — any driver error here means the context is unusable
         return True
     return False

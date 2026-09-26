@@ -39,7 +39,7 @@ import numpy as np
 from emmy import config, emmy_runtime
 from emmy.compiler.backend import BenchmarkResult, LaunchTime, RunResult
 from emmy.compiler.backend.cuda import nvcc
-from emmy.compiler.backend.cuda.device import device
+from emmy.compiler.backend.cuda.device import device, torch_module
 from emmy.compiler.backend.plan import BufferSpec as _Buffer
 from emmy.compiler.backend.plan import ExecutionPlan, KernelSpec, apply_weight_loads, plan_from_graph, plan_to_dict
 from emmy.compiler.backend.plan import LaunchSpec as _Launch
@@ -226,16 +226,6 @@ def _resolve_symbolic(plan: ExecutionPlan, input_data: dict) -> dict[str, int]:
 # ---------------------------------------------------------------------------
 # Memory: torch tensors lent to the runtime, pooled across programs
 # ---------------------------------------------------------------------------
-
-
-def _torch():
-    """torch, or ``None`` when it is missing or sees no device — the runtime then allocates."""
-    try:
-        import torch  # noqa: PLC0415
-
-        return torch if torch.cuda.is_available() else None
-    except ImportError:
-        return None
 
 
 def _torch_dtype(np_dtype):
@@ -482,7 +472,7 @@ class CompiledProgram:
         already backed by a large enough tensor is kept (a rebind that grows nothing keeps every
         address); the arena pools everything but constants; a constant bound to a device tensor
         is that tensor."""
-        if _torch() is None:
+        if torch_module() is None:
             return None
         layout = self.program.layout(sym_values)
         regions: dict[str, tuple[int, int]] = {}
@@ -537,7 +527,7 @@ class CompiledProgram:
         """:meth:`on_stream` for torch's current stream when torch sees the device, else a
         no-op — the bench and run paths, where peer torch work (the eager reference, the
         interleaved torch benches) must stay ordered with the program's launches."""
-        torch = _torch()
+        torch = torch_module()
         if torch is None:
             yield
             return
