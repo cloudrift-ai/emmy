@@ -8,6 +8,7 @@ import hashlib
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
+from functools import cached_property
 from typing import TYPE_CHECKING
 
 from emmy.compiler.graph import Graph
@@ -98,7 +99,7 @@ class GoldenRecord:
 
         return {key: value for key, value in tuning_knob_items(self.knobs) if family_of(key) != "PLACE"}
 
-    @property
+    @cached_property
     def pool_group(self) -> tuple:
         """Which candidate pool this record belongs to — the ONE place that question is answered, so every
         consumer that groups goldens groups them the same way. (A grouping key over RECORDS —
@@ -139,31 +140,31 @@ class GoldenRecord:
             kernels = (hashlib.blake2b(json.dumps(self.loop_wire, sort_keys=True).encode(), digest_size=16).digest(),)
         return (self.gpu_name, tuple(self.compute_cap), kernels, self.pin_key)
 
-    @property
+    @cached_property
     def pin_key(self) -> tuple:
         """This record's pins as a hashable tuple — already sorted, as the loader stores them."""
         return tuple((k, str(v)) for k, v in self.pins)
 
-    @property
+    @cached_property
     def program(self):
-        """The stable Torch IR payload, decoded."""
+        """The stable Torch IR payload, decoded once per record."""
         if self.program_wire is None:
             raise ValueError(f"{self.name}: the target was recorded from a measurement alone and has no traced program")
         return Graph.from_wire(self.program_wire)
 
-    @property
+    @cached_property
     def kernel_graph(self):
-        """The stored kernel's Loop IR, unspecialized."""
+        """The stored kernel's Loop IR, unspecialized — decoded (and so normalized) once per record."""
         return Graph.from_wire(self.loop_wire)
 
-    @property
+    @cached_property
     def target_program(self):
         """The stored kernel as a standalone program, specialized to this record's bindings."""
         from emmy.compiler.specialize import specialize_program  # noqa: PLC0415
 
         return specialize_program(self.kernel_graph, dict(self.bindings))
 
-    @property
+    @cached_property
     def reference_program(self):
         """The PyTorch slice the stored kernel is compared against: the traced ops it came from
         (``origins``) with the kernel's outputs in its order. ``None`` when the golden keeps no
@@ -204,26 +205,26 @@ class GoldenRecord:
     def pin_map(self) -> dict[str, object]:
         return dict(self.pins)
 
-    @property
+    @cached_property
     def shape_key(self) -> ShapeKey:
         """The arithmetic-identity descriptor for eval / diagnostics grouping, derived from the
         lowered target's stamped histogram. NOT the deploy join key — that is
         :func:`kernel_identity` (strict structural identity); this key only groups eval rows."""
         return ShapeKey.from_s_features(self.structural_features)
 
-    @property
+    @cached_property
     def structural_features(self) -> dict[str, float]:
         """Current compiler features, derived lazily through target provenance."""
         return dict(_derive_structural_features(self))
 
-    @property
+    @cached_property
     def origin_ops(self) -> tuple[str, ...]:
         if not self.origins or self.program_wire is None:
             return ()
         by_id = {node["id"]: node["op"] for node in self.program_wire["nodes"]}
         return tuple(by_id[origin] for origin in self.origins)
 
-    @property
+    @cached_property
     def dtype(self) -> str:
         """Public dtype spelling of the stored kernel's first output."""
         graph = self.target_program
