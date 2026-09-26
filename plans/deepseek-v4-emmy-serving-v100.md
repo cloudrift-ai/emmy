@@ -8,30 +8,30 @@ serving shell — then A/B against the plain 1Cat container at an equal serving 
 43 layers, `hc_mult` 4, 256 routed experts at top-6 plus one shared, 3 hash-router layers. At TP8 × PP2 the first
 stage owns layers 0–21 and the second 22–42.
 
-## Where it stands (2026-09-24)
+## Where it stands (2026-09-25, main at #897)
 
-`main` at `1494e4be` carries this model's golden restamped onto the compiler's fresh lowering: #875 restored the
-fusion #863 had changed, #878 re-lowered every stored target and re-keyed the rows, and a gate
-(`test_stored_targets_are_the_fresh_lowering`) now decodes every repository golden's stored targets against a fresh
-lowering so the drift cannot return unseen. The file holds 454 measured rows over 149 targets; the deploy's evidence
-index reads 437 of them, and 318 of the 335 kernels the nine serving twins mint have a measured row. Of the seventeen
-without, eleven are the single-token expert and pre twins' pieces, whose refusal that tier survives by riding the
-wider one, and six are the pieces #883 re-shaped in the three post twins, whose refusal ends the boot. The durable
-record of every boot, election and A/B was
-`experiments/golden-bench-2026/serving_deepseek_v4_flash_0731_v100x16/RESULTS.md` until #896 removed this lane from
-`main` on 2026-09-24; it survives in `main`'s history at bc58445ef, and what of it the work still rests on is
-condensed under "The record" below.
-
-It serves strict from the repository golden, but slower and worse than the tree before #863 did. Boot36b (main plus
-#875 at #869, 2026-09-23, fast math pinned off): 0.73 s to first token warm at 5 prompt tokens and 5.5 s at 2,155;
-0.56 s per output token, against 0.215 s on the last boot of the old tree and about 0.15 s for the pinned fork. Its
-completions were worse than that boot's and the width-16 expert twin's random-input check reported 9,931 outliers over
-a budget of 4; both are #829's staging defect, fixed by #893 (item 2), after which boot39 serves coherent text at the
-same timings. The width-4,096 post twin's reproducer still returns NaN. Boot37 (`main` as merged, 2026-09-24) did not
-serve: seventeen minutes in, the symbolic post twin's compile refused at one of the pieces #883 re-shaped — the piece
-opens a cut fork of its own, a kernel-set decision strict cannot take without a row, and a post twin has no wider tier
-to ride — so `main` as merged did not boot strict until the three post leads were recorded again (boot38, item 1
-below); their cut receipts still carry the old pieces' time.
+`main` at `cc2bb92f` (#897) replaced this file. Loop fusion decides its regions from the graph now, the recurrence
+roller rolls the Sinkhorn rounds, and the post block lowers to five kernels per width instead of about thirty-five: a
+routing kernel (`k_linear_softmax_mean_reduce`), the two rolled Sinkhorn chains (`k_div_1_steps0_reduce`,
+`k_div_40_steps0_reduce`), the main kernel (`k_linear_matmul_softmax_mean_reduce`) and a last matmul kernel; the
+expert and pre twins are one kernel each. Every row this plan's rounds recorded named a kernel that no longer exists,
+so #897's refresh re-recorded the file on this card at every width — 28 targets, 142 rows, every one measured, the
+post twins under hand-picked cut routes (the M=1 post twin's fused row reads 20.35 ms, its deployed cut route 1.52 ms)
+— and the strict decode, the fresh-lowering check (`emmy golden check`, which replaced the strict-xfail list) and the
+GPU-less election of every twin program pass on it, except the two M=1 tiers. Their route rows carry a measurement but
+no receipt for the pieces the route cuts, so #888's pricing has nothing to price and both refuse at the target's own
+cut fork; the pre twin's refusal is fatal in serving, the expert's is not. This round records the M=1 pre route on the
+card (`run --record-greedy` under its cut keys as `EMMY_KNOBS` pins): six rows, the set at 313 µs with the residual
+piece 307 of it, and the twin elects. The M=1 expert route's record ran past the bench's 600 s of GPU time under the
+prior's picks for its pieces and stays unrecorded, so that twin rides width 16 as it has since #829. Boot43 — `main`
+at #897 with the six rows, the tune DB seeded with one import so the sixteen workers do not race on it, and the
+host-only patch handing the Rust runtime torch's device — served strict in about ten minutes with the M=1 post twin
+deployed for the first time from a committed file: coherent completions (boot39's), 1.15–1.19 s per output token
+against boot42's 0.56–0.62, 5.64 s / 2.93 s to first token at 5 prompt tokens cold and warm (3.49 / 0.76 before), 39.5
+s / 17.1 s at 2,155 (68.2 / 5.66); the roofline audit reads post.decode.m1 12.96 ms, post.decode.m16 34.7 ms (7.54
+before), pre.chunk.m4096 3.12 ms (unchanged) and post.chunk.m4096 1,510 ms (102.3 before) per layer. #897's cut routes
+are the baselines its refresh recorded, not tuned sets: decode is twice as slow and a 4,096-token chunk fifteen times
+slower than the kernel sets they replaced, and closing that gap is the work now.
 
 Three things hold the numbers. Fast math became the default (#868) while serving published no precision pin, so every
 boot needed the regime pinned off by hand — closed by `serve --golden` publishing the rows' regime to its workers. The
@@ -49,13 +49,21 @@ checkpoint stays impractical here.
 
 ## What is left, in order
 
-1. **Boot `main` with the six pieces recorded.** Done 2026-09-24: the pieces #883 re-shaped are recorded serial, at
+1. **Boot `main` after #888, #898 and #897.** Done 2026-09-25 (#905). The first form of this round re-recorded the
+   post and M=1 pre pieces after #888 and #898 (37 rows dropped, 43 added, the tuned divide sets at a fraction of the
+   dead rows' time, boot42 coherent at boot39's 0.56 s per token); #897 then replaced every kernel this file names and
+   re-recorded it, so those rows went with the kernels and the round's record is this plan. What ships is #897's file
+   plus the M=1 pre route's receipts, and the boot of it: boot43 serves strict in about ten minutes, coherent, at 1.15
+   s per output token and 1.51 s per layer for a 4,096-token chunk — twice and fifteen times boot42's, #897's untuned
+   cut routes. The M=1 post tier's divide rows are #897's now, recorded under cut routes; whether they are right needs
+   the eager comparison per width-1 set that `run --golden` has only where a target keeps a runnable frontend slice.
+2. **Boot `main` with the six pieces recorded.** Done 2026-09-24: the pieces #883 re-shaped are recorded serial, at
    199 and 178 µs on the symbolic twin, 6 and 6 µs at width 16 and 1.4 and 1.6 ms at width 4,096 (the old
    register-split row cost 39.7 ms and was never in the deployed route), all three post leads elect strict from the
    file, and boot38 serves in thirteen minutes at the same numbers as boot36b: 0.71 s to first token warm at 5 prompt
    tokens, 5.5 s at 2,155, 0.53–0.58 s per output token, the width-4,096 post twin at 104 ms per layer, the
    completions degraded.
-2. **Correctness on `main`.** Found and fixed 2026-09-24 (#893): since #829 the expert cut piece's compute-filled B
+3. **Correctness on `main`.** Found and fixed 2026-09-24 (#893): since #829 the expert cut piece's compute-filled B
    slab staged the producer edge's last result for every channel, so both tensor-core B tiles held the up half and the
    twins computed the up projection twice; the width-16 expert twin's random-input check failed by 70% of the output's
    peak and single-token decode served noise. Bisected by pinning the twin's recorded tile on one host tree per
@@ -63,16 +71,18 @@ checkpoint stays impractical here.
    recorded rows. Boot39 from that tree serves coherent completions at boot38's timings, so gate (c) is green again.
    Still owed: a finite-input replay per twin and an independent reference on `run --golden`, and a boot that reads
    the election's check instead of printing it as a warning.
-3. **The transposed cooperative reduce on the fresh divide kernels.** The build defect under any cooperative reduce is
-   fixed (#895, 2026-09-24: the one-value-per-name sweep now reaches nested scopes), and the six divide leads build
-   and run under it on the V100 — at the serial rows' speed, because the only site the fresh kernels offer is the
-   four-element inner reduce. The rows that made these kernels fast before #863 (7.6 µs at width 16, 49 µs symbolic,
-   32 µs at width 4,096, against 270 µs, 1.5 ms and 7.8 ms serial today, and eager PyTorch's 150 to 200 µs) were
-   `coop-t` over one long reduce axis, and the kernels #863 lowers to have none: their Tile IR is a chain of nested
-   four-element folds recomputed per element of the sweep around them (a `coop-t` pin is quietly taken as `coop`). The
-   item is the reduction normalization that fragments the axis, not a schedule; undoing it for these kernels is what
-   brings decode back near 1.5× the fork.
-4. **Stage 4 — image and release plumbing.** Bake FROM the immutable 1Cat digest with `cupy-cuda12x` under its own
+4. **The sweep-transposed cooperative reduce on the divide kernels.** The build defect under any cooperative reduce is
+   fixed (#895), and what the old rows did is now read off their kernels: before #863 each divide kernel's Sinkhorn nest
+   was lifted under one `inner` site, and its `coop-t` row put eight lanes on the four-element reduce and the other
+   thirty-two across the sweep, so a block finished thirty-two rows at once (11.3 µs for the symbolic `k_div_50`); the
+   plain `coop` row (width 16, 11.7 µs) put all 128 threads on the four-element axis, four of them active. `main` lifts
+   the same Loop IR — #863 did not change it — into nested `reduce` sites, one per four-element fold, which offer `coop`
+   but no transposed layout (a `coop-t` pin is quietly taken as `coop`), so the symbolic and width-4,096 divide sets that
+   were never re-tuned still run at 1.5 ms and 7.9 ms against 11 and 32 µs before, while the width-16 rows (8.5 µs) hold
+   and the sets this round tuned found cuts that recover most of it (post4096's k_div_18 32.5 µs). The item is a
+   transposed layout on a nested reduce site, or one site over the nest again, for the symbolic post twin's remaining
+   divide sets; it is most of what separates 0.56 s from 0.215 s per token.
+5. **Stage 4 — image and release plumbing.** Bake FROM the immutable 1Cat digest with `cupy-cuda12x` under its own
    image identity — not the Makefile's default version/tag for a 1Cat 1.2.3 base — labelled with the 1Cat digest and
    source SHA, Emmy SHA, checkpoint revision and CUDA/NVRTC versions; carry the fork's `VLLM_SM70_*` variables with
    `--tensor-parallel-size 8 --pipeline-parallel-size 2 --distributed-executor-backend mp`. The pinned config
@@ -85,12 +95,12 @@ checkpoint stays impractical here.
    resident on a first-stage card and 31.75 on a second-stage one of 32, KV cache 76,337 tokens on the first stage and
    78,722 on the second; KV capacity is not a bytes-per-token constant here, since sliding layers cache a 128-token
    window and the compressed layers cache compressed entries.
-5. **Stage 5 — the A/B, the deliverable.** One `emmy bench` run over both arms at one envelope with their order
+6. **Stage 5 — the A/B, the deliverable.** One `emmy bench` run over both arms at one envelope with their order
    alternated inside each repeat, the way the RTX 5090 gemma-4 experiment balances time and thermal drift, against
    immutable image digests and one checkpoint revision. Profile in a separate run — profiling the fork's multi-stream
    execution perturbs the A/B — with a per-phase split (expert dispatch, attention, stream mixing) so Stage 6's
    hypothesis is grounded.
-6. **Stage 6 — MXFP4 expert inputs**, only if Stage 5's profile shows expert weight streaming dominates and a
+7. **Stage 6 — MXFP4 expert inputs**, only if Stage 5's profile shows expert weight streaming dominates and a
    fused-unpack GEMM can plausibly beat TurboMind's on Volta. `main` spells native MXFP4 expert twins; this checkpoint
    needs its declaration mapped onto that spelling (`quant_method: fp8` with `expert_dtype: fp4`, packed as `w1.weight
    I8 [out, in/2]` with `.scale [out, in/32]`), plus tuning.
@@ -106,45 +116,49 @@ lockout #813 names.
   slow: `pre1` at M=1 ran 29.7 s per layer until a cut was recorded, and no compiler capability was missing. Read the
   golden's rows per program and shape, take the minimum per kernel, and treat a shape carrying one candidate as the
   smell; `emmy compile --golden PATH --realization NAME --ir loop` prints the Loop IR, where the recurring defect on
-  this model is a dot product inside a sweep it does not depend on.
-- **A green strict decode is not a deploy.** The decode is pooled — a row passes when any kernel of its set enumerates
-  it — while the deploy keys every row under the kernel it decides. Before any boot, run the deploy's own evidence
-  index under the recorded regime and, per twin, the kernels the route mints against the rows that vouch for them: a
-  cut arm is eligible only when every piece has a row, a row spelling a split or a cut whose pieces have no rows can
-  still win its fork on a retime, an empty schedule row is no evidence, and a schedule row carrying the identity a cut
-  fork is offered on prices the fused arm with a piece's timing.
-- **A compiler change can re-shape the kernels a golden names.** #863 changed this model's fusion (36 → 45 kernels per
-  post twin) and normalized the stored Loop IR, #864 dropped rows in a restamp, #883 split a fused grid pair in two
-  pieces per post twin. `emmy trace --serving-twins` on the tree, diffed against the golden's kernel families, sees
-  the first before a record; the fresh-lowering gate sees the second on any machine. A row on a kernel whose body
-  changed is dropped, not re-keyed, and if the new kernel opens a cut fork the twin refuses until it is recorded
-  (boot37); a row whose kernel only changed identity is re-keyed and re-anchored — its OFF sites completed against the
-  new kernel, or a strict election realizes a 28 ms cooperative reduce under a serial row.
-- **Never re-record a red row to make it green**, and the prior must never decide a production election.
-  `--strict-evidence` is the gate; no pricing floor, bound, clamp or hand-edited price; no benchmark scripts (`emmy
-  run --bench --json`, `emmy compile`, `emmy tune` only — a missing capability is a flag to add). Every harness fix
-  ships as a minimal PR with a red-then-green test. The launcher leaves prefix caching on, so a repeated prompt's time
-  to first token is a cache hit; cold numbers come from a prompt the server has not seen.
-- **Reproducing a boot failure without a boot.** A twin's Graph IR is the golden's `programs[i]` entry
-  (`graph_from_wire`, then `specialize_program` for a static width); serving compiles it with `CudaBackend.compile`
-  and then `plan_from_graph`, and only that pair shows a plan-time failure — `emmy compile --ir cuda` and a `--golden
-  --realization` replay stop before it. Host CPU compiles need `~/emmy-durations/venv` with `PYTHONPATH` set to the
-  tree under test and `LD_PRELOAD=/usr/local/cuda-12.9/lib64/libnvrtc.so.12`, and a card visible: golden evidence is
-  keyed by the live card's name, so `CUDA_VISIBLE_DEVICES=""` empties it.
-- **Pin mechanics.** Under `EMMY_KNOBS` the cut pass visits only the root: every `PLACE@seam=cut` that resolves on the
-  root joins one composed decision, a key naming no root seam is silently skipped, and a `PLACE` pin REPLACES the
-  whole placement decision rather than adding to it. A GPU-less `--target sm_70` compile on a Mac featurizes with the
-  default card's 170 SMs and elects differently from the live V100's 80, so every election replay runs on the host
-  CPU.
-- **Three more things that each cost a day.** A `perf` row times one CUDA op, so under a schedule that splits a kernel
-  it is a fragment, and only the boot audit's ratio says whether the program moved. `emmy tune` defaults to a 2 s
-  cumulative bench budget, which a kernel near 1 s per launch exhausts on warm-up, recording zero valid latencies
-  while appearing to search; `EMMY_BENCH_RUN_TIMEOUT_S` raises it. A replay must use the golden the boot uses: benched
-  against a file with no rows for it, a kernel the boot runs in 42 ms hung for a minute.
-- **Two deadlines bound any forward pass** under two-stage pipelining, because the second stage blocks on the first
-  for the whole traversal: `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS` (default 300) is raisable; the NCCL collective
-  watchdog at 600 s is compiled in, and `TORCH_NCCL_ASYNC_ERROR_HANDLING=0` does not suppress it. A forward that needs
-  more than 600 s cannot be measured at PP2 at all.
+  this model is a dot product inside a sweep it does not depend on. - **A green strict decode is not a deploy.** The
+  decode is pooled — a row passes when any kernel of its set enumerates it — while the deploy keys every row under the
+  kernel it decides. Before any boot, run the deploy's own evidence index under the recorded regime and, per twin, the
+  kernels the route mints against the rows that vouch for them: a cut arm is eligible only when every piece has a row,
+  a row spelling a split or a cut whose pieces have no rows can still win its fork on a retime, an empty schedule row
+  is no evidence, and a schedule row carrying the identity a cut fork is offered on prices the fused arm with a
+  piece's timing. - **A compiler change can re-shape the kernels a golden names.** #863 changed this model's fusion
+  (36 → 45 kernels per post twin) and normalized the stored Loop IR, #864 dropped rows in a restamp, #883 split a
+  fused grid pair in two pieces per post twin, #888 stopped a lead's row standing in for a piece with none, #898
+  removed the grid tier nineteen divide-piece rows were composed against and merged with those rows red. `emmy trace
+  --serving-twins` on the tree, diffed against the golden's kernel families, sees a fusion change before a record; the
+  fresh-lowering gate sees a stored-target drift on any machine; and the GPU-less strict election of every twin
+  program under the file's own card is the one audit that sees all of these before a boot — the pooled decode saw none
+  of them, and logging every refusal instead of raising the first names every set to re-record in one pass. A row on a
+  kernel whose body changed is dropped, not re-keyed, and if the new kernel opens a cut fork the twin refuses until it
+  is recorded (boot37); a row whose kernel only changed identity is re-keyed and re-anchored — its OFF sites completed
+  against the new kernel, or a strict election realizes a 28 ms cooperative reduce under a serial row. - **Never
+  re-record a red row to make it green**, and the prior must never decide a production election. `--strict-evidence`
+  is the gate; no pricing floor, bound, clamp or hand-edited price; no benchmark scripts (`emmy run --bench --json`,
+  `emmy compile`, `emmy tune` only — a missing capability is a flag to add). Every harness fix ships as a minimal PR
+  with a red-then-green test. The launcher leaves prefix caching on, so a repeated prompt's time to first token is a
+  cache hit; cold numbers come from a prompt the server has not seen. - **Reproducing a boot failure without a boot.**
+  A twin's Graph IR is the golden's `programs[i]` entry (`graph_from_wire`, then `specialize_program` for a static
+  width); serving compiles it with `CudaBackend.compile` and then `plan_from_graph`, and only that pair shows a
+  plan-time failure — `emmy compile --ir cuda` and a `--golden --realization` replay stop before it. Host CPU compiles
+  need `~/emmy-durations/venv` with `PYTHONPATH` set to the tree under test and
+  `LD_PRELOAD=/usr/local/cuda-12.9/lib64/libnvrtc.so.12`, and a card visible: golden evidence is keyed by the live
+  card's name, so `CUDA_VISIBLE_DEVICES=""` empties it. - **Pin mechanics.** Under `EMMY_KNOBS` the cut pass visits
+  only the root: every `PLACE@seam=cut` that resolves on the root joins one composed decision, a key naming no root
+  seam is silently skipped, and a `PLACE` pin REPLACES the whole placement decision rather than adding to it. A
+  GPU-less `--target sm_70` compile on a Mac featurizes with the default card's 170 SMs and elects differently from
+  the live V100's 80, so every election replay runs on the host CPU. - **Three more things that each cost a day.** A
+  `perf` row times one CUDA op, so under a schedule that splits a kernel it is a fragment, and only the boot audit's
+  ratio says whether the program moved. `emmy tune` defaults to a 2 s cumulative bench budget, which a kernel near 1 s
+  per launch exhausts on warm-up, recording zero valid latencies while appearing to search; `EMMY_BENCH_RUN_TIMEOUT_S`
+  raises it. A replay must use the golden the boot uses: benched against a file with no rows for it, a kernel the boot
+  runs in 42 ms hung for a minute. - **Two deadlines bound any forward pass** under two-stage pipelining, because the
+  second stage blocks on the first for the whole traversal: `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS` (default 300) is
+  raisable; the NCCL collective watchdog at 600 s is compiled in, and `TORCH_NCCL_ASYNC_ERROR_HANDLING=0` does not
+  suppress it. A forward that needs more than 600 s cannot be measured at PP2 at all. #897 replaced every kernel the
+  file named and re-recorded it; a file another agent re-recorded still needs the GPU-less election before a boot —
+  #897's M=1 route rows carried a measurement and no piece receipt, and #880's rows carried identities no kernel on
+  `main` minted.
 
 ## The record
 
@@ -191,6 +205,8 @@ the Emmy arm cannot hold and is no baseline.
 | 09-24 | `1494e4be` as merged | died | | | 17 min | #883's re-shaped pieces open cut forks no row spells |
 | 09-24 | + the six pieces' rows (#892) | 0.53 – 0.58 s | 3.50 / 0.71 s | 68.0 / 5.52 s | 13 min | serves; text degraded |
 | 09-24 | + #893 | 0.53 – 0.58 s | 3.49 / 0.70 s | 68.1 / 5.54 s | 27 min | coherent again |
+| 09-25 | `6c79e1d4` (#898), every row in (boot40) | 0.31 – 0.34 s | 3.53 / 0.76 s | 68.3 / 5.70 s | 16 min | the M=1 post twin deploys for the first time; its tuned k_div_18 set is wrong and the text degrades after six tokens |
+| 09-25 | as committed (boot42) | 0.56 – 0.62 s | 3.49 / 0.76 s | 68.2 / 5.66 s | 15 min | coherent; the M=1 post twin refuses at k_div_18 and rides width 16, as before |
 
 The first decode step of a request costs more than a steady one (1.85 s against 0.90 on 09-12, 4.2 s against 2.03 on
 09-15): each layer's programs are CUDA-graph captured on first use. The first compile on each rank is the cold
@@ -208,6 +224,7 @@ The boot's roofline audit, first layer of each stage, per layer:
 | 09-18 | 25.4 ms | 3.2 – 3.6 ms | 13.6 ms | 599 ms |
 | 09-19, tiled | 3.10 ms | 3.2 – 3.9 ms | 12.5 ms | 172.8 ms |
 | 09-23 / 09-24 | 3.12 ms | not deployed | 7.41 – 8.06 ms | 104 ms |
+| 09-25, #897 | 3.12 ms | 12.96 ms | 34.7 ms | 1,510 ms |
 
 A decode step, profiled on 09-19 with torch's profiler over eleven single-stream steps on all sixteen workers (the
 model serves eager, because the hyper-connection routed combine host-syncs): per token about 126 ms of Emmy kernels
@@ -276,7 +293,24 @@ scopes (#895). Open: a replay from another compiler tree wipes the one-fingerpri
 normalization lowers the divide kernels to chains of nested four-element folds (item 3); the M=1 expert twin offers no
 schedule knob under its cut and its residual runs 1.04 s per launch; the m256 expert twin is absent from the golden
 because the runner's expert prefill tier is a hardcoded constant the serving config cannot declare; the dynamic-width
-Sinkhorn twin cannot take its cut (a reshape lowering lockout #813 names).
+Sinkhorn twin cannot take its cut (a reshape lowering lockout #813 names); #898 removed the tier the divide pieces'
+rows were composed against and merged with the suite red on them (nineteen rows here, twenty-nine over three recipes),
+by decision, so re-recording on the card was the only fix; a compile reading a tune DB that holds a kernel-set
+decision whose piece is the parent itself (every tune DB this round produced held one to four) recurses without end
+between pricing the arm and pricing the piece, since #888; a tune candidate's serial cut piece fails nvcc with an
+undefined re-spelled name (`in0__s0`) in hundreds of candidates, the one-value-per-name sweep renaming a use whose
+define is not emitted in that scope; `tune --realization` matches a substring, so a width-1 lead also selects the
+width-16 rows and file order decides which is tuned first; an interrupted tune writes nothing into the golden, and its
+DB is harvested with `run --record-greedy` under `EMMY_TUNE_DB` pointing at it; since #885 the Rust runtime opens
+`Device(0)` in every serve worker, on the premise that a worker selects its card through `CUDA_VISIBLE_DEVICES` while
+vLLM's workers select theirs with `torch.cuda.set_device`, so a TP8 × PP2 boot of `main` runs GPU 0 out of memory at
+weight load — boot40 ran with a host-only patch handing the runtime torch's current device, and the repo fix belongs
+to the runtime; and the sixteen workers' imports of the golden into the shared tune DB race on its unique keys, so a
+boot seeds the DB with one full-scope import first (`seed41.sh`); #880's re-record of the three post sets carries four
+identities no kernel on `main` mints and refuses all three post twins at the main kernel's second occurrence, where
+this round's rows on the fresh loops elect; a route row recorded with `--record` alone (a measurement, no
+`kernel_set`, no receipt per piece) prices nothing under #888, and both of #897's M=1 route rows were that; the M=1
+expert route's `--record-greedy` under its one cut pin runs past 600 s of GPU time on the prior's piece picks.
 
 ### Not established
 
@@ -298,6 +332,18 @@ before recording anything. A boot can equally mount a revision-named copy (`~/em
 Serving evidence, golden copies, boot, record and probe scripts live in `~/serve-evidence/`. The compiler tree for
 tuning work is `~/emmy-durations/` with its own `./venv`, and `py-spy` there is the tool that names a stalled program
 (`sudo -n ~/emmy-durations/venv/bin/py-spy dump --locals --pid PID`, one dump per rank, simultaneously).
+
+**A post-#885 tree in the serving image.** The image has no cargo, so a tree that needs the Rust runtime
+(`emmy.emmy_runtime`) is built once inside it: `~/serve-evidence/build-cc2b.sh` runs rustup in a throwaway container
+over the mounted tree and leaves the extension in the tree (`~/emmy-main-cc2bb92f` is `main` at #897 built this way,
+`~/emmy-main-6c79e1d4` main at #898); later containers `pip install -e .` without cargo and import it. Records run as
+`rec43.sh DEVICE TAG GOLDEN "LEAD|K=V,..."` (a lead under its route as `EMMY_KNOBS` pins, `--record-greedy`, one copy
+of the golden per container), tunes as `tune40.sh` (interrupt with `docker exec C pkill -INT -f "emmy.emmy tune"` once
+the per-kernel bests plateau, strip the DB's self-loop decisions with `dbcycles.py`, harvest with `rec42.sh`), the
+tune-DB seed as `seed43.sh GOLDEN` and the boot as `boot43.sh GOLDEN` (the seeded DB, the host device patch
+`patch_device_host.py TREE` applied to the tree first, `probe43.sh` for the timings). On the Mac, `elect88.py GOLDEN
+[TWIN…]` is the strict election of every twin program under the file's card and `forks88.py` the list of every fork a
+twin would refuse.
 
 **Never touch** `~/.cache/emmy/autotune.db` (the real tune DB), `~/emmy`, `~/emmy-dsv4`, `~/emmy-fix-backup`,
 `~/emmy-durations/_verify/gap3-tune/` (partial rows that regress the election — never merge that DB), or

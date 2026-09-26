@@ -2424,6 +2424,8 @@
  "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[DeepSeek-V4-Flash-0731/v100_sm70.yaml/post-sym.k_linear_matmul_softmax_mean_reduce_6b6c3e.dynamic.1404464ea9ad]": 6.0,
  "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[DeepSeek-V4-Flash-0731/v100_sm70.yaml/post-sym.k_linear_matmul_softmax_mean_reduce_6b6c3e.dynamic.a5ed6c7f3a96]": 5.9,
  "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[gemma-4-12B-it/rtx5090_sm120.yaml/post192.k_linear_mean_reduce_4a2088.m192.31801a8357a6.4f2d1e7facc1]": 5.2,
+ "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[gemma-4-12B-it/rtx5090_sm120.yaml/post4096.k_linear_mean_reduce_d67bb1.m4096.90fe943acf98]": 5.1,
+ "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[gemma-4-12B-it/rtx5090_sm120.yaml/post2048.k_linear_mean_reduce_11098a.m2048.fm.703e0e319205]": 5.0,
  "tests/compiler/passes/test_roll_recurrence.py::test_a_recurrence_from_a_traced_state_with_alternating_steps_rolls_and_matches_eager": 5.1,
  "tests/compiler/cli/test_golden_file_replay.py::test_recorded_greedy_pick_is_picked_again_under_strict_evidence[NVIDIA": 22.07,
  "tests/compiler/pipeline/search/test_two_level_strategy.py::test_a_measured_cut_is_priced_from_its_pieces_and_writes_no_row_of_its_own": 2.66,
