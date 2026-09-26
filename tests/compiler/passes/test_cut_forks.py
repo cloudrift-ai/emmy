@@ -981,6 +981,20 @@ def test_a_column_read_past_the_plain_copy_is_not_its_value() -> None:
     assert not any(seam.siblings for seam in _cluster_value_seams(seams, (Axis("n", 8), Axis("k", 8))))
 
 
+def test_a_conversion_to_the_dtype_a_workspace_stores_reads_the_workspace_itself() -> None:
+    """A reader's rounding of a value the workspace already stores rounded is a no-op copy; left in
+    place it keeps the edge a computed cone, which the chunk tier refuses for its streamed value."""
+    from emmy.compiler.dtype import F32
+    from emmy.compiler.pipeline.passes.tile._cut import _without_identity_casts
+
+    rounded = projection((slab("x", "ws", "m"),), (Assign(name="y", op="copy", args=("x",), dtype=F16),), ("y",))
+    root = projection((rounded,), (Assign(name="z", op="exp", args=("y",)),), ("z",))
+
+    kept = _without_identity_casts(root, {"ws": F16}).operands[0]
+    assert kept.as_slab() is not None and kept.exposes == ("y",)
+    assert _without_identity_casts(root, {"ws": F32}) is root
+
+
 def test_a_row_spelled_at_any_occurrence_of_a_clustered_value_names_its_cut() -> None:
     """The arm that cuts a clustered seam spells every occurrence, and a route recorded at one of
     them — a row from before the clustering, a pin at the copy a hand found — selects that arm."""

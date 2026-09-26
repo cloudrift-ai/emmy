@@ -708,6 +708,25 @@ def _replace_fold(node: Fold, targets: dict[int, tuple], renamed: dict[str, str]
     return _follow_reads(node, replace(node, operands=operands, lift=lift), renamed)
 
 
+def _without_identity_casts(node: Fold, dtypes: dict[str, object]) -> Fold:
+    """``node`` with each projection that only converts one workspace read to the dtype that workspace
+    already stores replaced by the read itself, under the projection's name. A reader's rounding
+    becomes such a copy once the workspace stores the rounded dtype (:func:`_narrowed_reads`), and
+    left in place it keeps the edge a computed cone: the chunk tier streams V only from a slab."""
+    targets: dict[int, tuple] = {}
+    for site in sites(node)[1:]:
+        proj = site.node
+        if not isinstance(proj, Fold) or proj.axis is not None or len(proj.operands) != 1 or len(proj.lift.body) != 1:
+            continue
+        (stmt,) = proj.lift.body
+        slab = proj.operands[0].as_slab() if isinstance(proj.operands[0], Fold) else None
+        if slab is None or not isinstance(stmt, Assign) or stmt.op != ElementwiseImpl("copy") or stmt.args != proj.lift.params[:1]:
+            continue
+        if dtypes.get(slab.load.input) == stmt.dtype:
+            targets[id(proj)] = (Fold.slab(replace(slab.load, names=(stmt.name,))),)
+    return _replace_fold(node, targets, {}) if targets else node
+
+
 def _kept_components(tile: TileOp) -> dict[int, tuple[str, ...]]:
     """Per stored edge, the result components its READERS take — what :meth:`Fold.lower` places.
 
@@ -1184,6 +1203,8 @@ def realize(
     # read the workspace like any other consumer. Containment is strict, so order is free.
     everything = {target: loads for *_, replacements in pieces for target, loads in replacements.items()}
     parent_fold = _replace_fold(tile.op, everything, read_names)
+    stored = {buffer: dtype for seam, *_, buffers, _ in pieces for buffer, dtype in zip(buffers, seam.dtypes, strict=False)}
+    parent_fold = _without_identity_casts(parent_fold, stored)
     specs = tuple(
         replace(store, write=replace(store.write, values=tuple(read_names.get(value, value) for value in store.write.values)))
         for store in tile.output_specs
@@ -1194,7 +1215,7 @@ def realize(
         # A piece that reads another seam's workspace re-spells what it derives from it too, and
         # its own stores name those values.
         derived: dict[str, str] = {}
-        produced = _replace_fold(produced, others, derived) if others else produced
+        produced = _without_identity_casts(_replace_fold(produced, others, derived) if others else produced, stored)
         if strides:
             produced = rewrite_stmt(produced, lambda name: name, Sigma({name: Var(name) * stride for name, stride in strides.items()}))
         index = tuple(Var(axis.name) for axis in axes)
