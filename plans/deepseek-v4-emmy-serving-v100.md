@@ -80,9 +80,9 @@ checkpoint stays impractical here.
    → 27 µs; hand-picked `t512 coop` / `t512 coop/r4` on the three heaviest new pieces, which the prior had at 2–3×;
    boot47 0.244 s per token). Left: the width-16, 4,096-width and symbolic twins, the symbolic one first because a
    single request's prefill rides it. Five targets still carry two route rows under one name from #897's refresh (the
-   width-16, 4,096-width and symbolic post main kernels, the width-16 post routing kernel, `pre4096`);
-   `--record-greedy` writes the recorded set's `kernel_set` onto the first row of that name, so drop the stale sibling
-   and its own receipts before recording one. Re-recording a realization under a different route appends the new
+   width-16, 4,096-width and symbolic post main kernels, the width-16 post routing kernel, `pre4096`); since #917
+   `--record-greedy` puts the kernel set on the row the recorded route lands on and refuses when that is none of them,
+   so recording a new route there still needs the stale sibling and its own receipts dropped first. Re-recording a realization under a different route appends the new
    decision row and points the seed's `kernel_set` at it while the seed keeps its old knobs; fold the decision row into
    the seed (`fold_route.py`) and drop the old route's receipts, which the decode test names. Per post twin
    and per kernel — the routing kernel carries the same logits recompute (4.1 ms of the width-16 twin's 6.5) — take the
