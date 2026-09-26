@@ -8,7 +8,7 @@ serving shell — then A/B against the plain 1Cat container at an equal serving 
 43 layers, `hc_mult` 4, 256 routed experts at top-6 plus one shared, 3 hash-router layers. At TP8 × PP2 the first
 stage owns layers 0–21 and the second 22–42.
 
-## Where it stands (2026-09-26, main at #908)
+## Where it stands (2026-09-26, main at #909)
 
 `main` at `cc2bb92f` (#897) replaced this file. Loop fusion decides its regions from the graph now, the recurrence
 roller rolls the Sinkhorn rounds, and the post block lowers to five kernels per width instead of about thirty-five: a
@@ -25,7 +25,10 @@ twin's last matmul ran `mma` tiles without `/k8`, one `m8n8k4` step per shared-m
 prior does not pick) moved them to `/k8`: the expert twin 5.33 → 0.79 ms, the last matmul 263 ms → 1.48 ms at width
 4,096, 16.4 ms → 227 µs symbolic, 1,232 → 114 µs at M=1 and 511 → 115 µs at M=16, every output bit-identical to #897's
 spelling on the same inputs. Boot45 serves the file strict and coherent at 0.734 s per output token, 34.1 s / 14.4 s to
-first token at 2,155 prompt tokens cold and warm, and 1.25 s per layer for a 4,096-token chunk.
+first token at 2,155 prompt tokens cold and warm, and 1.25 s per layer for a 4,096-token chunk. Boot45's tree predates
+#903, which dropped two receipts of the M=1 post twin's main-kernel route (their schedules tile a row #903's
+normalization removed): on `main` that twin refuses strict at its cut fork and serving rides width 16 for it until a
+record run on the card replaces them, so decode on `main` as merged is slower than boot45.
 
 What holds the numbers now is the post routes, not the tiles. #897's routes leave this model's recurring defect in
 place: the hyper-connection logits (16,384-long f32 dot products against `hc_fn`) and the four-stream mix are
@@ -66,8 +69,9 @@ checkpoint stays impractical here.
    recorded rows. Boot39 from that tree serves coherent completions at boot38's timings, so gate (c) is green again.
    Still owed: a finite-input replay per twin and an independent reference on `run --golden`, and a boot that reads
    the election's check instead of printing it as a warning.
-4. **Compute the recomputed cones once in the post routes.** Found 2026-09-26, nothing recorded yet. Per post twin and
-   per kernel — the routing kernel carries the same logits recompute (4.1 ms of the width-16 twin's 6.5) — take the
+4. **Compute the recomputed cones once in the post routes.** Found 2026-09-26, nothing recorded yet. First re-record
+   the two M=1 post receipts #903 dropped (a host tree at `main` after #903), so that twin elects again. Per post twin
+   and per kernel — the routing kernel carries the same logits recompute (4.1 ms of the width-16 twin's 6.5) — take the
    seams that compute the `hc_fn` logits and the four-stream mix once, pick the new pieces' schedules by hand, check
    each set against #897's route on the same inputs (the post targets have no eager reference, so `run --bench`'s exit
    code proves nothing about them), record with `--record-greedy` under the route as `EMMY_KNOBS` pins, and boot. On the
