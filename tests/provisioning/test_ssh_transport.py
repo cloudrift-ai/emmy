@@ -17,7 +17,7 @@ async def test_local_command_kills_descendants(tmp_path, mode):
     if mode != "exit":
         command += "; wait"
     job = asyncio.create_task(run(command, stream=False, timeout=0.2))
-    while not pid_file.exists():
+    while not (pid_file.exists() and pid_file.read_text().strip()):  # the redirect creates the file before echo fills it
         await asyncio.sleep(0.005)
     child = int(pid_file.read_text())
     if mode == "cancel":
@@ -47,7 +47,7 @@ async def test_local_command_cancelled_during_spawn_kills_descendants(tmp_path, 
     run = make_run_cmd(None, None, None, local=True)
     job = asyncio.create_task(run(f"sleep 60 >/dev/null 2>&1 & echo $! > {pid_file}; wait", stream=False))
     await spawned.wait()
-    while not pid_file.exists():
+    while not (pid_file.exists() and pid_file.read_text().strip()):  # the redirect creates the file before echo fills it
         await asyncio.sleep(0.005)
     job.cancel()
     release.set()
