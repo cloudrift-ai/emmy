@@ -37,6 +37,7 @@ from emmy.compiler.dtype import get as get_dtype
 from emmy.compiler.graph import Graph, Node
 from emmy.compiler.ir.axis import Axis, Dim
 from emmy.compiler.ir.base import InputOp
+from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Interval, Literal, SimplifyCtx, Var
 from emmy.compiler.ir.pure.fold import (
     Fold,
@@ -195,7 +196,9 @@ def _fed_store_dtype(tile: TileOp, consumer: Fold):
     return fed.pop() if len(fed) == 1 else None
 
 
-def _workspace_dtypes(node: Fold, tile: TileOp, consumer: Fold | None, table: dict[int, tuple]) -> tuple | None:
+def _workspace_dtypes(
+    node: Fold, tile: TileOp, consumer: Fold | None, table: dict[int, tuple], readers: dict[str, object] | None = None
+) -> tuple | None:
     """The cut workspace's per-component dtypes, or ``None`` when they cannot be determined.
     Reduction carrier precision is a Kernel IR policy — every Fold state is f32 until lowering
     stamps the concrete Accum/Init pair; a zero-axis value has no carrier and is inferred from its
@@ -205,16 +208,35 @@ def _workspace_dtypes(node: Fold, tile: TileOp, consumer: Fold | None, table: di
     carrier its cone computed in (only the ``a`` edge has a converting fill, so an f32 workspace on
     a ``b`` edge could feed no warp atom). That exception is a ZERO-AXIS cone's; a REDUCING operand
     would have been no slab fused either, so it keeps the f32 carrier (:func:`cuttable_seams` names
-    which edges the exception reaches). A seam whose dtypes stay undetermined is not offered: the
+    which edges the exception reaches). A reducing component every reader only converts to one
+    narrower dtype (``readers``, :func:`_narrowed_reads`) stores that dtype: the conversion happens
+    once in the piece instead of in every reader, the value is the same, and a 16-bit workspace is
+    one a warp atom's copy transports can stage. A seam whose dtypes stay undetermined is not offered: the
     offer and the realization must agree, and a raise past the offer would kill the compile."""
     names = node.exposes
     if consumer is not None:
         dtype = _fed_store_dtype(tile, consumer)
         return None if dtype is None else (dtype,) * len(names)
-    dtypes = (F32,) * len(names) if node.axis is not None else table.get(id(node), ())
+    dtypes = tuple((readers or {}).get(name, F32) for name in names) if node.axis is not None else table.get(id(node), ())
     if len(dtypes) != len(names) or any(dtype is None for dtype in dtypes):
         return None
     return dtypes
+
+
+def _narrowed_reads(tile: TileOp) -> dict[str, object]:
+    """Each stored value whose every read is a conversion to one narrower dtype, mapped to that dtype.
+    A reduce's result is an f32 accumulator; the rounding its source program performed reads it back
+    through such a conversion (``loop/lifting/090_spell_store_rounding``)."""
+    casts: dict[str, set] = {}
+    for site in sites(tile.op):
+        for stmt in site.node.lift.body.iter():
+            narrowing = isinstance(stmt, Assign) and stmt.op == ElementwiseImpl("copy") and stmt.dtype is not None and len(stmt.args) == 1
+            for name in Body((stmt,)).ssa_uses:
+                casts.setdefault(name, set()).add(stmt.dtype if narrowing and stmt.dtype.nbytes < 4 else None)
+    for store in tile.output_specs:
+        for name in store.write.values:
+            casts.setdefault(name, set()).add(None)
+    return {name: dtype for name, found in casts.items() if len(found) == 1 and (dtype := next(iter(found))) is not None}
 
 
 def _dtype_table(tile: TileOp) -> dict[int, tuple]:
@@ -294,6 +316,7 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
     dtype_table: dict[int, tuple] = {}
     if isinstance(tile.op, Fold):
         dtype_table = _dtype_table(tile)
+    narrowed = _narrowed_reads(tile)
     taken = _kept_components(tile)
     out: list[CutSite] = []
     seen: set[int] = set()
@@ -336,7 +359,7 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
         if owned is not None:
             dtypes = ()  # the piece writes the kernel's own outputs; there is no workspace to type
         else:
-            dtypes = (frontier.dtype,) if frontier is not None else _workspace_dtypes(node, tile, consumer, dtype_table)
+            dtypes = (frontier.dtype,) if frontier is not None else _workspace_dtypes(node, tile, consumer, dtype_table, narrowed)
             if dtypes is None:
                 continue
         seen.add(id(node))
