@@ -487,7 +487,11 @@ def _value_forms(seam: CutSite, axes: tuple) -> tuple[tuple, dict[str, Expr]]:
 
     scoped = tuple(axis.name for axis in seam.axes if axis.name in seam.node.free_axes)
     names = {name: f"_s{position}" for position, name in enumerate(scoped)}
-    body = Body(tuple(stmt.rewrite(lambda name: names.get(name, name)) for stmt in seam.node.lower(bound=frozenset(scoped), axes=axes)))
+    # Substituted, not renamed: a loop inside the cone may bind a captured name again (the o_proj
+    # copy under the post-attention statistic reuses its reduce axis inside the V projection's
+    # norm), and that loop keeps its own variable.
+    captured = Sigma({name: Var(spelled) for name, spelled in names.items()})
+    body = Body(tuple(rewrite_stmt(stmt, lambda name: name, captured) for stmt in seam.node.lower(bound=frozenset(scoped), axes=axes)))
     reads = _coordinate_reads(body, tuple(names.values()))
     if reads:
         sigma = _AbstractingSigma({name: Var(name) for name in reads})
