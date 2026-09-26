@@ -11,7 +11,7 @@ def _release_config(path: Path, **overrides: str) -> Path:
     values = {
         "SERVE_MODEL": "org/model",
         "SERVE_GPU": "NVIDIA-Test",
-        "SERVE_GOLDEN_FILE": str(path.with_suffix(".golden.yaml")),
+        "SERVE_GOLDEN_FILE": str(path.with_suffix(".golden.json")),
         "SERVE_STATIC_ONLY": "1",
         "SERVE_MAX_NUM_BATCHED_TOKENS": "1",
         "SERVE_DECODE_BUCKET": "1",

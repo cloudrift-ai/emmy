@@ -1,8 +1,9 @@
-"""The golden file: the classes that declare it — their wire is :mod:`emmy.compiler.wire`'s — the YAML layout a dump
+"""The golden file: the classes that declare it — their wire is :mod:`emmy.compiler.wire`'s — the JSON layout a dump
 writes, and the rules that cross objects (:meth:`GoldenFile.check`)."""
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import tempfile
@@ -10,8 +11,6 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, fields
 from enum import StrEnum
 from pathlib import Path
-
-import yaml
 
 from emmy import gpu
 from emmy.compiler import provenance
@@ -22,101 +21,6 @@ from emmy.compiler.wire import Wire
 
 from .record import GoldenRecord
 
-_SAFE_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
-
-
-class _FlowSequence(list):
-    """A YAML sequence rendered inline without changing the loaded schema."""
-
-
-class _FlowMapping(dict):
-    """A YAML mapping rendered inline without changing the loaded schema."""
-
-
-class _GoldenDumper(yaml.SafeDumper):
-    pass
-
-
-_GoldenDumper.add_representer(
-    _FlowSequence,
-    lambda dumper, value: dumper.represent_sequence("tag:yaml.org,2002:seq", value, flow_style=True),
-)
-_GoldenDumper.add_representer(
-    _FlowMapping,
-    lambda dumper, value: dumper.represent_mapping("tag:yaml.org,2002:map", value, flow_style=True),
-)
-
-
-def _flow(value):
-    if isinstance(value, list):
-        return _FlowSequence(_flow(item) for item in value)
-    if isinstance(value, Mapping):
-        return _FlowMapping((key, _flow(item)) for key, item in value.items())
-    return value
-
-
-def _is_program(value: Mapping) -> bool:
-    """A program nested inside a wire value — a constant's source graph."""
-    return set(value) == {"inputs", "outputs", "nodes"}
-
-
-def _short_flow(value: object) -> bool:
-    if isinstance(value, Mapping):
-        if _is_program(value):
-            return False
-        return len(repr(value)) <= 120 and all(_short_flow(item) for item in value.values())
-    if isinstance(value, list):
-        return len(repr(value)) <= 120 and all(_short_flow(item) for item in value)
-    return value is None or isinstance(value, (str, int, float, bool))
-
-
-def _style_wire_value(value):
-    if isinstance(value, Mapping):
-        if _is_program(value):
-            return _style_program(value)
-        styled = {key: _style_wire_value(item) for key, item in value.items()}
-        return _flow(styled) if _short_flow(value) else styled
-    if isinstance(value, list):
-        return [_style_wire_value(item) for item in value]
-    return value
-
-
-def _style_program(program: Mapping) -> dict:
-    styled_nodes = []
-    for source in program["nodes"]:
-        node = dict(source)
-        if "attrs" in node:
-            node["attrs"] = _style_wire_value(node["attrs"])
-        if "inputs" in node:
-            node["inputs"] = _flow(node["inputs"])
-        node["outputs"] = _flow(node["outputs"])
-        styled_nodes.append(node)
-    styled = {
-        "inputs": _flow(program["inputs"]),
-        "outputs": _flow(program["outputs"]),
-        "nodes": styled_nodes,
-    }
-    if "hints" in program:
-        styled["hints"] = _flow(program["hints"])
-    return styled
-
-
-def _style_config(config: Mapping) -> dict:
-    """A config block with its short leaves inline; a schedule (``knobs``) stays one knob per line."""
-    styled = {key: _flow(value) if key == "target" else value for key, value in config.items()}
-    if "realizations" in styled:
-        styled["realizations"] = [
-            {key: value if key == "knobs" else _flow(value) for key, value in row.items()} for row in config["realizations"]
-        ]
-    return styled
-
-
-def _style_block(key: str, value):
-    if key == "configs":
-        return [_style_config(config) for config in value]
-    return _flow(value) if key == "compute_cap" else value
-
-
 class GoldenEntryState(StrEnum):
     INVENTORY = "inventory"
     PROPOSAL = "proposal"
@@ -125,7 +29,7 @@ class GoldenEntryState(StrEnum):
 
 # --- the golden file, as classes --------------------------------------------------------------
 #
-# The file's shape is declared here and nowhere else: one generic walker turns the parsed YAML into
+# The file's shape is declared here and nowhere else: one generic walker turns the parsed JSON into
 # these objects (``from_wire``) and back (``to_wire``), refusing unknown or missing keys with the
 # path, and the leaf rules — a positive number, a hex digest — live in the constructors. Only the
 # rules that cross objects stay as code, in ``GoldenFile.check``. The program and Loop IR pools stay
@@ -286,12 +190,14 @@ class Config(Wire):
 class GoldenFile(Wire):
     """A golden document: the card, the model, the program and Loop IR pools, one config per stored
     target. ``gpu_name`` comes first on the wire so a card-scoped reader can skip a foreign file
-    off its head (:func:`_file_gpu_name`)."""
+    off its head (:func:`_file_gpu_name`). ``note`` is free text for the reader — a corpus case's
+    evidence citation."""
 
     gpu_name: str | None = None
     compute_cap: tuple[int, int]
     model: str | None = None
     model_quant_digest: str | None = None
+    note: str | None = None
     programs: list[dict] = field(default_factory=list)
     configs: list[Config]
     loops: list[dict] = field(default_factory=list)
@@ -308,9 +214,9 @@ class GoldenFile(Wire):
 
         source = Path(path)
         try:
-            document = cls.from_wire(yaml.load(source.read_text(), Loader=_SAFE_LOADER))
+            document = cls.from_wire(json.loads(source.read_text()))
             document.check(repository=is_repository_golden_path(source) if repository is None else repository)
-        except (OSError, yaml.YAMLError, ValueError) as exc:
+        except (OSError, ValueError) as exc:
             raise ValueError(f"invalid golden file {source}: {exc}") from exc
         return document
 
@@ -323,10 +229,7 @@ class GoldenFile(Wire):
         if destination.exists() and not overwrite:
             raise FileExistsError(f"{destination} already exists; pass overwrite=True to replace it")
         destination.parent.mkdir(parents=True, exist_ok=True)
-        blocks = _pool_blocks(self)
-        payload = "".join(
-            blocks[key] if key in blocks else _dump_block(key, _style_block(key, value)) for key, value in self.to_wire().items()
-        )
+        payload = _document_text(self.to_wire())
         temporary = None
         mode = destination.stat().st_mode & 0o777 if destination.exists() else 0o644
         try:
@@ -458,29 +361,45 @@ class GoldenFile(Wire):
 _POOL_KEYS = ("programs", "loops")
 
 
-def _dump_block(key: str, value: object) -> str:
-    """One top-level key as YAML. Block-style keys concatenate into exactly the document
-    ``yaml.dump`` writes for the whole mapping, so a block can be reused verbatim."""
-    return yaml.dump({key: value}, Dumper=_GoldenDumper, sort_keys=False, width=140)
+def _compact(value: object) -> str:
+    return json.dumps(value, separators=(",", ":"))
 
 
-def _pool_blocks(document: GoldenFile) -> dict[str, str]:
-    """The serialized program and loop pools."""
-    pools = [getattr(document, key) for key in _POOL_KEYS]
-    return {
-        key: _dump_block(key, [_style_program(program) for program in pool]) for key, pool in zip(_POOL_KEYS, pools, strict=True) if pool
-    }
+def _lines(entries: Iterable[str], indent: str) -> str:
+    """A JSON list with one entry per line, so a diff lands on the entry that changed."""
+    return "[\n" + ",\n".join(indent + entry for entry in entries) + f"\n{indent[:-1]}]"
+
+
+def _config_text(config: Mapping) -> str:
+    head = json.dumps({key: value for key, value in config.items() if key != "realizations"})
+    return f'{head[:-1]}, "realizations": {_lines((json.dumps(row) for row in config["realizations"]), "   ")}}}'
+
+
+def _document_text(wire: Mapping) -> str:
+    """A golden as JSON a diff reads: a header key per line, the first on the opening line (``gpu_name``, which
+    :func:`_file_gpu_name` reads alone), a config per line with a realization per line beneath it, and a pool
+    entry per line."""
+    items = []
+    for key, value in wire.items():
+        if key in _POOL_KEYS:
+            text = _lines(map(_compact, value), "  ")
+        elif key == "configs":
+            text = _lines(map(_config_text, value), "  ")
+        else:
+            text = json.dumps(value)
+        items.append(f"{json.dumps(key)}: {text}")
+    return "{" + ",\n ".join(items) + "}\n"
 
 
 def program_text(graph) -> str:
-    """A traced program as the wire a golden stores in ``programs`` — ``emmy compile --ir torch -o file.yaml``."""
-    return yaml.dump(_style_program(graph.to_wire()), Dumper=_GoldenDumper, sort_keys=False, width=140)
+    """A traced program as the wire a golden stores in ``programs`` — ``emmy compile --ir torch -o file.json``."""
+    return _compact(graph.to_wire()) + "\n"
 
 
 def kernel_pool_text(kernels: Iterable[Mapping]) -> str:
     """Loop IR kernels as the pool a golden stores them in, sorted by output set, so two pools diff
     line by line whatever order their kernels came in: what ``emmy golden kernels`` prints for a
-    golden and ``emmy compile --golden PATH --program N --ir loop -o fresh.yaml`` writes for its fresh
+    golden and ``emmy compile --golden PATH --program N --ir loop -o fresh.json`` writes for its fresh
     lowering."""
     ordered = sorted(kernels, key=lambda kernel: sorted(kernel["outputs"]))
-    return yaml.dump([_style_program(kernel) for kernel in ordered], Dumper=_GoldenDumper, sort_keys=False, width=140)
+    return _lines(map(_compact, ordered), " ") + "\n"

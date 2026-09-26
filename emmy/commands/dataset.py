@@ -74,8 +74,8 @@ def handle_dataset_import(args) -> None:
     db = SearchDB(db_path)
     try:
         for src in sources:
-            if src.is_dir() or src.suffix == ".yaml":
-                files = sorted(src.glob("*.yaml")) if src.is_dir() else [src]
+            if src.is_dir() or src.suffix == ".json":
+                files = sorted(src.glob("*.json")) if src.is_dir() else [src]
                 if not files:
                     logger.error("no golden files in %s", src)
                     sys.exit(2)
@@ -83,7 +83,7 @@ def handle_dataset_import(args) -> None:
                 # A tune DB is frozen first, so what reaches the dataset is what a freeze of it would hold.
                 frozen = Path(tempfile.mkdtemp()) / "freeze"
                 write_freeze(src, frozen)
-                files = sorted(frozen.glob("*.yaml"))
+                files = sorted(frozen.glob("*.json"))
             for path in files:
                 try:
                     import_file(db, path)
@@ -143,7 +143,7 @@ def dataset_db(db_arg: str | None) -> Path:
         logger.error("no dataset DB at %s — run `emmy dataset import` to fill it from the measurement freeze", path)
         sys.exit(2)
     freeze = config.freeze_path()
-    want = {freeze_source(f) for f in sorted(freeze.glob("*.yaml"))} if freeze.is_dir() else set()
+    want = {freeze_source(f) for f in sorted(freeze.glob("*.json"))} if freeze.is_dir() else set()
     if want:
         db = SearchDB.open_readonly(path)
         try:

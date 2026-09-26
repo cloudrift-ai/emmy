@@ -1,0 +1,16 @@
+{"compute_cap": [8, 0],
+ "note": "evidence: split-K after a placement cut dropped a unit row and emitted an undefined partition index in the B load.",
+ "programs": [
+  {"inputs":["x0","x1","x2"],"outputs":["add"],"nodes":[{"id":"x0","op":"input","outputs":[["x0","f16",[1,1,64]]]},{"id":"x1","op":"input","outputs":[["x1","f16",[64,64]]]},{"id":"linear","op":"torch.linear","inputs":["x0","x1"],"outputs":[["linear","f16",[1,1,64]]]},{"id":"x2","op":"input","outputs":[["x2","f16",[1,1,64]]]},{"id":"add","op":"tensor.elementwise","attrs":{"op":"add"},"inputs":["linear","x2"],"outputs":[["add","f16",[1,1,64]]]}]}
+ ],
+ "configs": [
+  {"program": 0, "target": {"loop": 0, "origins": ["add", "linear"]}, "realizations": [
+   {"name": "k_linear_85ba40", "pins": {"FAST_MATH": false, "PLACE": "cut"}, "knobs": {"WORK": "w2x1", "TILE": "mma_m16n8k16_f16_f32/f1x4/k8", "REDUCE": "g2k", "STAGE": "", "RASTER": "", "FAST_EXP": "False", "VECTORIZE_LOADS": "True", "VECTORIZE_STORES": "True", "INTERLEAVE_LOADS": "True", "PAIR_LDMATRIX": "True", "LOOPIFY": "0"}, "identity": "5455670d91827ddadd8a695bae8b4ea882895835a9021d396699eb4b973a11b3"},
+   {"name": "k_linear_85ba40.0d50704129f8", "pins": {"FAST_MATH": false}, "knobs": {"WORK": "", "TILE": "", "RASTER": ""}, "identity": "0d50704129f8cfef0bb021fcb927150eb69b3329c81351bacd5d5a8d72ffe77a"},
+   {"name": "k_linear_85ba40.5e4aef382673", "pins": {"FAST_MATH": false}, "knobs": {"WORK": "", "REDUCE": "", "RASTER": ""}, "identity": "5e4aef38267310d8249623d7a07e2d7d32a693d46c952ba04576ae9b3102bea5"},
+   {"name": "k_linear_85ba40.f74d48321560", "pins": {"FAST_MATH": false}, "knobs": {"WORK": "w2x1", "TILE": "mma_m16n8k16_f16_f32/f1x4/k8", "REDUCE": "", "STAGE": "", "RASTER": ""}, "identity": "f74d483215605d038b6a42b84852b84a55cd9ea4f3fb189b3149e44eea7baf72"}
+  ]}
+ ],
+ "loops": [
+  {"inputs":["x0","x1","x2"],"outputs":["add"],"nodes":[{"id":"x0","op":"input","outputs":[["x0","f16",[1,1,64]]]},{"id":"x1","op":"input","outputs":[["x1","f16",[64,64]]]},{"id":"x2","op":"input","outputs":[["x2","f16",[1,1,64]]]},{"id":"add","op":"loop","attrs":{"body":[{"Loop":{"axis":{"name":"a0","extent":64},"body":[{"Loop":{"axis":{"name":"a1","extent":64},"body":[{"Load":{"names":["in0"],"input":"x0","index":["0","0","a1"]}},{"Load":{"names":["in1"],"input":"x1","index":["a0","a1"]}},{"Assign":{"name":"v0","op":"multiply","args":["in0","in1"],"dtype":"f32"}},{"Accum":{"name":"acc0","value":"v0","axes":["a1"]}}]}},{"Assign":{"name":"v1","op":"copy","args":["acc0"],"dtype":"f16"}},{"Load":{"names":["in2"],"input":"x2","index":["0","0","a0"]}},{"Assign":{"name":"v2","op":"add","args":["in2","v1"]}},{"Write":{"output":"add","index":["0","0","a0"],"values":["v2"]}}]}}],"name":"k_linear_318efd"},"inputs":["x1","x0","x2"],"outputs":[["add","f16",[1,1,64]]]}]}
+ ]}

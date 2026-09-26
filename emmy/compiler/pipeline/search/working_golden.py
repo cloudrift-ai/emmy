@@ -1,6 +1,6 @@
 """Mutable working-golden inventories, candidates, and ranking feedback.
 
-This module owns the untrusted side of the golden YAML workflow: trace inventory
+This module owns the untrusted side of the golden file workflow: trace inventory
 generation, target reconstruction, exact proposal measurement, and atomic ranking
 persistence. CLI commands only validate argument combinations and report errors.
 """

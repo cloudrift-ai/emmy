@@ -52,7 +52,7 @@ from emmy.compiler.structural import digest
 
 def fresh_kernels(document: GoldenFile, programs: Sequence[int] | None = None) -> dict[int, dict[frozenset, dict]]:
     """The kernels a fresh lowering of each stored program writes, keyed by output set, per program
-    index — ``emmy compile --golden PATH --program N --ir loop -o fresh.yaml``, as data."""
+    index — ``emmy compile --golden PATH --program N --ir loop -o fresh.json``, as data."""
 
     ctx = Context.from_target(tuple(document.compute_cap), gpu_name=document.gpu_name)
     fresh: dict[int, dict[frozenset, dict]] = {}

@@ -11,7 +11,7 @@ Five subcommands:
   The summaries are assembled by ``search/prior/report.py`` and rendered here; ``emmy fit``
   writes the same summaries into its ``metrics.json``, so a fit and an eval state the golden
   screen with one implementation rather than two that agree by coincidence.
-- ``eval golden``    — validate one canonical golden YAML against the pinned serving
+- ``eval golden``    — validate one canonical golden file against the pinned serving
   configuration and live GPU, then reproduce its rows and audit the exact serving matrix.
 - ``eval variants``  — per-kernel leaderboard of the tune DB's measured variants
   (fastest first) and the config the prior deploys marked + ranked.
@@ -126,9 +126,9 @@ def register_eval_command(subparsers) -> None:
 
     pg = sub.add_parser(
         "golden",
-        help="Validate one golden YAML against its pinned serving configuration and the live target GPU",
+        help="Validate one golden file against its pinned serving configuration and the live target GPU",
     )
-    pg.add_argument("--golden", required=True, metavar="PATH", help="The exact canonical golden YAML to validate.")
+    pg.add_argument("--golden", required=True, metavar="PATH", help="The exact canonical golden file to validate.")
     pg.add_argument(
         "--serving-config",
         required=True,

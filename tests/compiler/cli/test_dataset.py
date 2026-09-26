@@ -15,14 +15,14 @@ from emmy.compiler.pipeline.search.db import RoutingRow, SearchDB, knobs_json
 from emmy.compiler.structural import digest
 from tests.compiler.pipeline.search.helpers import tuned_db
 
-_CASE = "fused/norm-linear-f16-scalar-reduce.yaml"
+_CASE = "fused/norm-linear-f16-scalar-reduce.json"
 
 
 def _freeze(tmp_path, name: str, us: float):
     """A freeze of one measured kernel at ``us``, written under ``name``."""
     tuned_db(tmp_path / f"{name}.db", (_CASE,), us=us).close()
     write_freeze(tmp_path / f"{name}.db", tmp_path / name)
-    return {freeze_source(path) for path in (tmp_path / name).glob("*.yaml")}
+    return {freeze_source(path) for path in (tmp_path / name).glob("*.json")}
 
 
 def test_the_default_dataset_holds_the_checked_in_freeze_or_is_refused(tmp_path, monkeypatch):
@@ -54,7 +54,7 @@ def test_a_tune_db_is_frozen_and_re_lowered_on_import(tmp_path):
     """A tune DB's rows reach the dataset the way a freeze of it would: re-lowered from each kernel's
     definition and sourced by the frozen file's digest. A golden row a compile imported into the tune DB
     stays behind — the golden file holds it — and a file the instance already holds is not imported twice."""
-    tune = tuned_db(tmp_path / "autotune.db", (_CASE, "fused/linear-add-place-cut-sm70.yaml"))
+    tune = tuned_db(tmp_path / "autotune.db", (_CASE, "fused/linear-add-place-cut-sm70.json"))
     [plain] = [row for row in tune.iter_perf_rows() if row.cc == 120]
     tune.record_perf_row(dataclasses.replace(plain, knobs={**plain.knobs, "WORK": "t8"}, source="golden:abcdef012345"))
     measured = sorted((row.kernel, knobs_json(row.bindings), row.stats.median) for row in tune.iter_perf_rows() if row.source == "measured")
@@ -84,8 +84,8 @@ def _instance(path):
     from tests.compiler.pipeline.search.helpers import GPU_5090
 
     ctx = Context.from_target((12, 0), gpu_name=GPU_5090)
-    parent = case_target_tile("fused/norm-linear-f16-scalar-reduce.yaml")
-    piece = case_target_tile("matmul/f16-mma-f16acc-gmem.yaml")
+    parent = case_target_tile("fused/norm-linear-f16-scalar-reduce.json")
+    piece = case_target_tile("matmul/f16-mma-f16acc-gmem.json")
     db = SearchDB(path)
     for tile, name in ((parent, "k_parent"), (piece, "k_piece")):
         db.record_kernel(tile_row(tile, name))

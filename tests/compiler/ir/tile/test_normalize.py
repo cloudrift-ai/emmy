@@ -207,7 +207,7 @@ def _swept_reduce(*, per_cell: bool) -> TileOp:
 def test_a_pointwise_sweep_stays_a_loop_for_the_worker_split() -> None:
     """A kernel whose only work IS the sweep keeps it. Nothing folds, so nothing would be
     replicated by binding it — but the kernel materializer already distributes a bare output sweep
-    across a worker inventory, and `cases/reduce/rms-norm-cut-sweep-work.yaml` pins the row that
+    across a worker inventory, and `cases/reduce/rms-norm-cut-sweep-work.json` pins the row that
     does it (885.9 us walking the sweep in one thread, 4.2 us split across 512). Taking the axis
     onto the grid here would decide that for the schedule instead of offering it."""
     body = (Load(name="v", input="x", index=(Var("m"), Var("n"))), Assign(name="out_v", op="negative", args=("v",)))
@@ -310,7 +310,7 @@ def test_matvec_keeps_its_unit_row_beside_grouped_columns() -> None:
 
 def test_promoted_attention_output_sweep_closes_the_a100_b_seam_idempotently() -> None:
     """The reduced Qwen3 target needs its promoted value-width axis to close computed B."""
-    tile = case_target_tile("attention/rmsnorm-gqa-b-cut.yaml")
+    tile = case_target_tile("attention/rmsnorm-gqa-b-cut.json")
     reconstructed = TileOp(op=tile.op, name=tile.name, place=tile.place, axes=tile.axes, output_specs=tile.output_specs)
 
     assert tuple(axis.extent for axis in tile.place.free) == (Dim(4), Dim(4), Dim(16))
@@ -525,7 +525,7 @@ def test_normalization_shares_structurally_identical_cones() -> None:
     sites (attention's softmax statistics, once in the weight cone and once in the epilogue) are
     one object, so placement sees one value and a composed cut materializes it once. Severed
     sharing is the recompute class PR #679 measured at three orders of magnitude."""
-    tile = case_target_tile("attention/rmsnorm-qk-sdpa-composed-cut.yaml")
+    tile = case_target_tile("attention/rmsnorm-qk-sdpa-composed-cut.json")
 
     by_identity = {id(site.node): site.node for site in sites(tile.op)}
     by_value: dict[tuple, list[Fold]] = {}

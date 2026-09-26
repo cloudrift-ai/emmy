@@ -95,7 +95,7 @@ emmy tune ─┬─ sweep benches ─────────▶ perf table   (a
 run --bench pinned/golden/--ab rows ──▶ perf table   (autotune.db) ─┘    (reservoir first, then perf + golden rows on
                                                                          µs) — schedule AND kernel-set forks
 emmy dataset import ◀─ freezes, tune DBs ────▶ dataset DB (dataset.db) ─▶ emmy eval prior --dataset db (never a deploy)
-recorded from those rows ────────────▶ recipe-local / hardware golden YAML ─┬▶ greedy compile (golden rows: the
+recorded from those rows ────────────▶ recipe-local / hardware golden file ─┬▶ greedy compile (golden rows: the
                                                                             │  card's files, or --golden PATH)
                                                                             └─ emmy fit ─▶ offline_weights.json (repo)
                                        offline_weights.json ──────────────▶ greedy compile, the prior (cold)
@@ -1489,7 +1489,7 @@ linear fork must be TUNED on the `F.linear` snippet, and why a canonical entry (
 stored `torch.linear` edge is the served layout, and the smem compute fill stages every B fold channel via cp.async
 on either layout; once the computed A is cut away, the copy transports stage every channel on their own.
 
-**Provenance validation.** `emmy eval golden --golden GOLDEN_YAML --serving-config PATH` derives model, revision,
+**Provenance validation.** `emmy eval golden --golden GOLDEN_FILE --serving-config PATH` derives model, revision,
 GPU, canonical file, precision regimes, and reachable static/symbolic widths from one pinned env, requires that exact
 file and live GPU, validates that every structural target contains every expected realization, and compiles the
 serving twins with the file's rows as the only evidence under strict evidence (Part 3): a twin with a fork no row
@@ -1559,7 +1559,7 @@ past its budget, so nothing about it was measured and the row is reported but ne
 `status: bench_fail` and an `error`, with null timings), so a sweep's judgments can be traced to flagged fields
 instead of to parsed terminal text. Each kernel row also carries **`record_knobs`**: the tuning knobs the compile
 actually produced, validated as one complete exact classic row by `knob.complete_kernel_row`. That is the map to
-copy verbatim into a golden YAML `knobs:` entry; no recording helper fills absent choices or drops scopes. Golden
+copy verbatim into a golden file `knobs:` entry; no recording helper fills absent choices or drops scopes. Golden
 rows attach to the run's SHAPE rather than to a kernel node, so a pinned row
 whose shape matches no greedy kernel — because greedy deployed a split partial+finalize pair — still prints and still
 lands in the record.

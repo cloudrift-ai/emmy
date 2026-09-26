@@ -301,12 +301,12 @@ def test_a_new_fingerprint_fact_moves_the_corpus() -> None:
     modeling fix, an io fact — must show up as a corpus diff rather than silently re-keying every
     checked-in reproducer.
     """
-    cases = sorted((_REPO_ROOT / "tests/compiler/realization/cases").rglob("*.yaml"))
+    cases = sorted((_REPO_ROOT / "tests/compiler/realization/cases").rglob("*.json"))
     assert cases, "the realization corpus is empty, so nothing would notice an identity change"
     unstamped = [
         path.relative_to(_REPO_ROOT).as_posix()
         for path in cases
-        if not re.search(r"^\s+identity: [0-9a-f]{64}$", path.read_text(), re.MULTILINE)
+        if not re.search(r'"identity": "[0-9a-f]{64}"', path.read_text())
     ]
     assert not unstamped, (
         "every corpus case must carry an `identity:` stamp, or a new fingerprint fact re-keys it "

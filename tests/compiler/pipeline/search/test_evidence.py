@@ -47,7 +47,7 @@ def _schedule(row) -> dict:
 def test_a_plain_entry_is_its_kernels_row() -> None:
     """One target, one kernel, one entry: the row is the entry's schedule row as recorded, keyed on the
     kernel the target lowers to, captured, under the golden's source."""
-    db, ctx, [record], counts = _imported("fused/norm-linear-f16-scalar-reduce.yaml")
+    db, ctx, [record], counts = _imported("fused/norm-linear-f16-scalar-reduce.json")
 
     assert counts == {"perf rows": 1}
     [row] = db.iter_perf_rows()
@@ -61,7 +61,7 @@ def test_a_cut_is_routing_rows_priced_by_the_receipts_of_its_pieces() -> None:
     """The leading entry pins the cut and names the parent, which ran as no kernel and gets no row; each
     piece's receipt is that piece's row. At the parent's fork the decision is priced as the sum of the
     pieces' rows, the read the deploy pick uses."""
-    db, ctx, records, counts = _imported("fused/linear-add-place-cut-sm70.yaml")
+    db, ctx, records, counts = _imported("fused/linear-add-place-cut-sm70.json")
     receipts = [record for record in records if record.identity != records[0].identity]
 
     assert counts["routing rows"] >= 1 and counts["kernels a decision replaced"] == 1
@@ -79,7 +79,7 @@ def test_a_split_timed_as_a_whole_is_routing_rows_only() -> None:
     """A split entry is a routing row: its time is the set's, which is no piece's, so nothing lands in
     perf for it and the arm is priced only by receipts of the pieces (none here: the case's receipts
     name kernels the current compiler no longer mints, and a stale identity writes nothing)."""
-    db, _ctx, records, counts = _imported("reduce/cross-cta-matmul-kernel.yaml")
+    db, _ctx, records, counts = _imported("reduce/cross-cta-matmul-kernel.json")
 
     assert records[0].is_routing and counts["routing rows"] >= 1
     assert counts["perf rows"] + counts.get("identities no kernel carries", 0) == len(records) - 1
@@ -87,7 +87,7 @@ def test_a_split_timed_as_a_whole_is_routing_rows_only() -> None:
 
 
 def test_an_unmeasured_or_foreign_regime_entry_writes_nothing() -> None:
-    case = corpus.load_case(corpus.CASES_DIR / "fused/norm-linear-f16-scalar-reduce.yaml")
+    case = corpus.load_case(corpus.CASES_DIR / "fused/norm-linear-f16-scalar-reduce.json")
     db, ctx = SearchDB(), case.context()
     [record] = _records(case)
 
@@ -102,15 +102,15 @@ def test_an_entry_naming_a_kernel_the_compiler_no_longer_mints_writes_nothing() 
     """A stored identity the compiler has re-keyed is a golden to fix, not a row to guess a kernel
     for: on a one-kernel target as behind a cut, the entry writes nothing and is counted, so no
     time is ever filed under a kernel the entry did not measure."""
-    case = corpus.load_case(corpus.CASES_DIR / "fused/norm-linear-f16-scalar-reduce.yaml")
+    case = corpus.load_case(corpus.CASES_DIR / "fused/norm-linear-f16-scalar-reduce.json")
     db, ctx = SearchDB(), case.context()
     [record] = _records(case)
     with pinned_knobs(_regime(record)):
         counts = import_goldens(db, ctx, [replace(record, identity="0" * 64)], source="golden:test")
     assert counts == {"identities no kernel carries": 1} and not list(db.iter_perf_rows())
-    cut = corpus.load_case(corpus.CASES_DIR / "fused/linear-add-place-cut-sm70.yaml")
+    cut = corpus.load_case(corpus.CASES_DIR / "fused/linear-add-place-cut-sm70.json")
     lead, first, *rest = _records(cut)
-    _db, _ctx, _records_, counts = _imported("fused/linear-add-place-cut-sm70.yaml", [lead, replace(first, identity="0" * 64), *rest])
+    _db, _ctx, _records_, counts = _imported("fused/linear-add-place-cut-sm70.json", [lead, replace(first, identity="0" * 64), *rest])
     assert counts["identities no kernel carries"] == 1 and counts["perf rows"] == len(rest)
 
 
@@ -118,7 +118,7 @@ def test_a_compile_imports_its_scope_once_and_lets_a_re_recorded_files_rows_go(t
     """The tune DB imports a golden scope once per digest; a scope the DB has not seen replaces the
     earlier golden rows of that card and regime (keep-best would keep a stale faster row), and an
     empty scope deletes nothing."""
-    case = corpus.load_case(corpus.CASES_DIR / "fused/norm-linear-f16-scalar-reduce.yaml")
+    case = corpus.load_case(corpus.CASES_DIR / "fused/norm-linear-f16-scalar-reduce.json")
     [record] = _records(case)
     ctx = case.context()
     db = SearchDB(tmp_path / "tune.db")
@@ -147,7 +147,7 @@ def test_a_compile_imports_its_scope_once_and_lets_a_re_recorded_files_rows_go(t
 def test_a_compile_without_a_db_picks_from_an_instance_holding_its_scope() -> None:
     """A scope is its records' content, target included: a case and its symbolic twin spell the same names,
     pins and knobs over different programs, and each compile picks from its own rows."""
-    case = corpus.load_case(corpus.CASES_DIR / "fused/norm-linear-f16-scalar-reduce.yaml")
+    case = corpus.load_case(corpus.CASES_DIR / "fused/norm-linear-f16-scalar-reduce.json")
     [record] = _records(case)
     ctx = case.context()
     with pinned_knobs(_regime(record)):
@@ -157,7 +157,7 @@ def test_a_compile_without_a_db_picks_from_an_instance_holding_its_scope() -> No
             assert [row.stats.mean for row in evidence_db(None, ctx).iter_perf_rows()] == [2.0]
         with records_override([]):
             assert not list(evidence_db(None, ctx).iter_perf_rows())
-    twins = [corpus.load_case(corpus.CASES_DIR / f"reduce/combine-amax-ilp-coop{suffix}.yaml") for suffix in ("", "-symbolic")]
+    twins = [corpus.load_case(corpus.CASES_DIR / f"reduce/combine-amax-ilp-coop{suffix}.json") for suffix in ("", "-symbolic")]
     assert [record.name for record in twins[0].records] == [record.name for record in twins[1].records]
     kernels = []
     for twin in twins:
@@ -188,7 +188,7 @@ def test_the_rtx_5090_hardware_golden_deploys_from_the_db(tmp_path) -> None:
     def splits(record) -> bool:
         return not record.is_routing and any(is_placement_knob(key, value) for key, value in record.schedule_row.items())
 
-    records = GoldenFile.load(_RECORDS_DIR / "rtx5090_sm120.yaml").records()
+    records = GoldenFile.load(_RECORDS_DIR / "rtx5090_sm120.json").records()
     ctx = Context.from_target((12, 0), gpu_name=GPU_5090)
     db = SearchDB()
     with pinned_knobs({"FAST_MATH": False}):
@@ -226,7 +226,7 @@ def test_a_measurement_taken_here_is_never_replaced_by_an_import(tmp_path) -> No
     from emmy.compiler.pipeline.search.db import PerfStats
     from emmy.compiler.pipeline.search.policy.terminal_bench import point_stats
 
-    case = corpus.load_case(corpus.CASES_DIR / "fused/norm-linear-f16-scalar-reduce.yaml")
+    case = corpus.load_case(corpus.CASES_DIR / "fused/norm-linear-f16-scalar-reduce.json")
     [record] = _records(case)
     ctx = case.context()
     scratch, db = SearchDB(), SearchDB(tmp_path / "tune.db")

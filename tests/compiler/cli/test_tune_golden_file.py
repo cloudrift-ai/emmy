@@ -95,7 +95,7 @@ def _classic_row(*, work: str = "", tile: str = "", reduce: str = "", stage: str
 
 
 def test_working_file_groups_candidate_rows_and_recovers_embedded_program(tmp_path):
-    path = tmp_path / "trace.yaml"
+    path = tmp_path / "trace.json"
     _document(_matmul("mm"), _matmul("mm", knobs={"TILE": "f2x2"})).dump(path)
 
     document, targets = load_working_targets(path)
@@ -109,7 +109,7 @@ def test_working_file_groups_candidate_rows_and_recovers_embedded_program(tmp_pa
 
 
 def test_working_file_keeps_distinct_input_pin_regimes_separate(tmp_path):
-    path = tmp_path / "trace.yaml"
+    path = tmp_path / "trace.json"
     _document(
         _matmul("mm", pins={"FAST_MATH": False}),
         _matmul("mm", pins={"FAST_MATH": True}),
@@ -121,7 +121,7 @@ def test_working_file_keeps_distinct_input_pin_regimes_separate(tmp_path):
 
 
 def test_empty_knob_map_is_a_forkless_proposal_not_inventory(tmp_path):
-    path = tmp_path / "working.yaml"
+    path = tmp_path / "working.json"
     _document(_matmul("mm"), _matmul("mm", knobs={})).dump(path)
 
     loaded_document, targets = load_working_targets(path)
@@ -148,13 +148,13 @@ def test_working_file_rejects_legacy_reproducer_field():
         GoldenFile.from_wire(wire)
 
 
-def test_working_file_rejects_missing_yaml_cleanly(tmp_path):
+def test_working_file_rejects_a_missing_file_cleanly(tmp_path):
     with pytest.raises(ValueError, match="invalid golden file"):
-        load_working_targets(tmp_path / "missing.yaml")
+        load_working_targets(tmp_path / "missing.json")
 
 
 def test_working_file_is_mutually_exclusive_with_direct_input(tmp_path):
-    path = tmp_path / "working.yaml"
+    path = tmp_path / "working.json"
     _document(_matmul("mm")).dump(path)
     with pytest.raises(SystemExit) as exc:
         tune.handle_tune(_args(path, code="torch.ones(1)", max_candidates=None))
@@ -162,7 +162,7 @@ def test_working_file_is_mutually_exclusive_with_direct_input(tmp_path):
 
 
 def test_ranking_write_preserves_verified_and_records_actual_searched_winner(tmp_path):
-    path = tmp_path / "working.yaml"
+    path = tmp_path / "working.json"
     verified = _matmul("mm", knobs={"TILE": "f2x2"}, emmy_us=9.0, cublas_us=10.0)
     verified["latency"] = {"old-gpu": {"emmy_us": 9.0, "tcompile_us": 8.0}}
     proposal = _matmul("mm", knobs={"TILE": "f4x2"})
@@ -203,7 +203,7 @@ def test_ranking_write_preserves_verified_and_records_actual_searched_winner(tmp
 
 
 def test_record_latency_selects_the_measured_row_not_its_same_named_sibling(tmp_path):
-    path = tmp_path / "working.yaml"
+    path = tmp_path / "working.json"
     document = _document(
         _matmul("mm", knobs={"TILE": "f2x2"}),
         _matmul("mm", knobs={"TILE": "f4x2"}),
@@ -231,7 +231,7 @@ def test_record_latency_selects_the_measured_row_not_its_same_named_sibling(tmp_
 
 
 def test_direct_winner_promotes_matching_proposal(tmp_path):
-    path = tmp_path / "working.yaml"
+    path = tmp_path / "working.json"
     proposal = _matmul("mm", knobs={"TILE": "f4x2"})
     document = _document(proposal)
     document.dump(path)
@@ -258,7 +258,7 @@ def test_direct_winner_promotes_matching_proposal(tmp_path):
 
 
 def test_incremental_persist_matches_a_full_dump_and_still_checks_realizations(tmp_path):
-    path = tmp_path / "working.yaml"
+    path = tmp_path / "working.json"
     _document(_matmul("mm"), _matmul("mm", knobs={"TILE": "f2x2"})).dump(path)
     document, targets = load_working_targets(path)
     target = targets[0]
@@ -267,7 +267,7 @@ def test_incremental_persist_matches_a_full_dump_and_still_checks_realizations(t
     # ``tune`` persists per target and reuses the pools it loaded; the file must still be the
     # one a full revalidating dump of the same document writes.
     persist_proposal_rankings(path, document, target, rankings)
-    canonical = tmp_path / "canonical.yaml"
+    canonical = tmp_path / "canonical.json"
     document.dump(canonical)
     assert path.read_bytes() == canonical.read_bytes()
 
@@ -277,7 +277,7 @@ def test_incremental_persist_matches_a_full_dump_and_still_checks_realizations(t
 
 
 def test_ambiguous_multi_cuda_winner_is_not_annotated(tmp_path):
-    path = tmp_path / "working.yaml"
+    path = tmp_path / "working.json"
     _document(_matmul("mm")).dump(path)
     document, targets = load_working_targets(path)
     result = SimpleNamespace(best_reward=SimpleNamespace(searched_winner=lambda: None), assembled=object())
@@ -291,7 +291,7 @@ def test_ambiguous_multi_cuda_winner_is_not_annotated(tmp_path):
 
 
 def test_structural_multi_cuda_winner_persists_its_exact_replay_row(tmp_path):
-    path = tmp_path / "working.yaml"
+    path = tmp_path / "working.json"
     _document(_matmul("mm")).dump(path)
     document, targets = load_working_targets(path)
     route = {
@@ -359,7 +359,7 @@ def test_structural_multi_cuda_proposal_keeps_ranking_without_parent_perf(tmp_pa
         Tensor("finalize", (1,)),
         node_id="finalize",
     )
-    path = tmp_path / "working.yaml"
+    path = tmp_path / "working.json"
     _document(_matmul("mm"), _matmul("mm", knobs=route)).dump(path)
     document, targets = load_working_targets(path)
     stable_graph = targets[0].program
@@ -498,9 +498,9 @@ def test_working_file_rejects_canonical_path_and_symlink(monkeypatch, tmp_path):
 
     hardware_dir = tmp_path / "hardware-goldens"
     hardware_dir.mkdir()
-    hardware = hardware_dir / "gpu.yaml"
+    hardware = hardware_dir / "gpu.json"
     recipe_root = tmp_path / "recipes"
-    recipe = recipe_root / "model" / "golden" / "gpu.yaml"
+    recipe = recipe_root / "model" / "golden" / "gpu.json"
     _document(_matmul("hardware")).dump(hardware)
     _document(_matmul("recipe")).dump(recipe)
 
@@ -510,7 +510,7 @@ def test_working_file_rejects_canonical_path_and_symlink(monkeypatch, tmp_path):
 
     monkeypatch.setattr(golden.repository, "_RECORDS_DIR", hardware_dir)
     monkeypatch.setattr(golden.repository, "default_recipe_root", default_recipe_root)
-    alias = tmp_path / "canonical-link.yaml"
+    alias = tmp_path / "canonical-link.json"
     alias.symlink_to(recipe)
     for path in (hardware, recipe, alias):
         with pytest.raises(ValueError, match="canonical repository goldens"):
@@ -519,7 +519,7 @@ def test_working_file_rejects_canonical_path_and_symlink(monkeypatch, tmp_path):
 
 def test_copied_verified_rows_resolve_as_working_candidates(tmp_path):
     document = _document(_matmul("mm", knobs={"TILE": "f2x2"}, emmy_us=9.0, cublas_us=10.0))
-    copied = tmp_path / "copied.yaml"
+    copied = tmp_path / "copied.json"
     document.dump(copied)
 
     _loaded, targets = load_working_targets(copied)
@@ -671,7 +671,7 @@ def test_multi_gpu_working_sweep_shares_slots_and_prior_across_targets(monkeypat
         code=None,
         input=None,
         dynamic=None,
-        golden="working.yaml",
+        golden="working.json",
         patience=4,
         explore_eps=0.0,
         ucb_c=1.4,
@@ -717,7 +717,7 @@ def test_record_greedy_pick_appends_routing_rows_and_receipts_once(tmp_path, mon
     from emmy.compiler.pipeline.search.golden import GoldenEntryState
     from emmy.compiler.pipeline.search.working_golden import record_greedy_pick
 
-    path = tmp_path / "working.yaml"
+    path = tmp_path / "working.json"
     _document(_matmul("mm", pins={"FAST_MATH": True})).dump(path)
     root, piece = "1" * 64, "a" * 64
     decisions = [(root, {"PLACE@map.1/map": "cut"}, 30.0, 33.0)]
@@ -762,7 +762,7 @@ def test_record_greedy_pick_drops_the_superseded_kernel_set(tmp_path):
     """
     from emmy.compiler.pipeline.search.working_golden import record_greedy_pick
 
-    path = tmp_path / "working.yaml"
+    path = tmp_path / "working.json"
     _document(_matmul("mm", pins={"FAST_MATH": True})).dump(path)
     first = record_greedy_pick(
         path,
@@ -794,7 +794,7 @@ def test_record_greedy_pick_names_the_row_a_decision_lands_on(tmp_path, monkeypa
     out, which silently loses the measurement that was just taken."""
     from emmy.compiler.pipeline.search.working_golden import record_greedy_pick
 
-    path = tmp_path / "working.yaml"
+    path = tmp_path / "working.json"
     root = "1" * 64
     monkeypatch.setenv("EMMY_FAST_MATH", "0")
     seed = _matmul("mm", pins={"FAST_MATH": False}, knobs={"PLACE@map.1/map": "cut"})
@@ -820,7 +820,7 @@ def test_record_greedy_pick_does_not_alias_rows_between_input_regimes(tmp_path, 
     """Rows with the same route and schedule remain distinct when their pins differ."""
     from emmy.compiler.pipeline.search.working_golden import record_greedy_pick
 
-    path = tmp_path / "working.yaml"
+    path = tmp_path / "working.json"
     _document(
         _matmul("mm.strict", pins={"FAST_MATH": False}),
         _matmul("mm.fast", pins={"FAST_MATH": True}),
@@ -848,7 +848,7 @@ def test_a_recorder_keeps_the_rows_another_writer_added_after_it_read(tmp_path):
     ``--record-greedy``'s rows, which one run writes one after the other."""
     from emmy.compiler.pipeline.search.working_golden import record_greedy_pick, record_latency
 
-    path = tmp_path / "working.yaml"
+    path = tmp_path / "working.json"
     _document(_matmul("mm", pins={"FAST_MATH": True})).dump(path)
     row = {"WORK": "", "RASTER": ""}
     first = record_greedy_pick(path, "mm", decisions=[], kernels=[("a" * 64, row, 1.0, 2.0)], reference_backend="same-input-greedy")

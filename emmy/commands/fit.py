@@ -279,7 +279,7 @@ def build_golden_groups(
             continue
         # Each member locates its OWN recorded config in the shared pool, by schema-agnostic structural
         # signature (free-axis slots + reduce decomp + atom) — the candidate rows use the native
-        # ``MOVE@element`` keys while the golden YAML records legacy GEMM-letter keys, so comparing
+        # ``MOVE@element`` keys while the golden file records legacy GEMM-letter keys, so comparing
         # key-value tuples directly never matches. A member that misses is dropped on its own; the pool
         # still stands for the members that hit.
         goldens, namer = [], None
