@@ -38,7 +38,6 @@ from emmy.compiler.pipeline.search.golden import (
     Measurements,
     Realization,
     decode_record,
-    kernel_identity,
     siblings_of,
     sole_evidence,
 )
@@ -178,8 +177,8 @@ def _rekeyed_rows(document: GoldenFile, entry: Config, wire: dict, report: Resta
     # names a piece of the target's kernel set (a receipt, or a piece row beside its routing row):
     # it stays as stored, and the decode below keeps the row only if the fresh set still mints that
     # piece under the set's own rows.
-    old_key = kernel_identity(replace(old_records[0], identity=None))
-    new_key = kernel_identity(replace(new_records[0], identity=None))
+    old_key = replace(old_records[0], identity=None).kernel_identity
+    new_key = replace(new_records[0], identity=None).kernel_identity
     survivors = [
         replace(new, identity=new_key) if old.identity == old_key else new for old, new in zip(old_records, new_records, strict=True)
     ]

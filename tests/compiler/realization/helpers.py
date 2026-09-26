@@ -29,7 +29,6 @@ from emmy.compiler.pipeline.search.golden import (
     Measurements,
     Realization,
     decode_record,
-    kernel_identity,
     siblings_of,
     sole_evidence,
 )
@@ -194,7 +193,7 @@ def regenerate(document: GoldenFile) -> GoldenFile:
             knobs=canonical_knobs(realization.knobs),
             latency=dict(realization.latency) if realization.latency is not None else None,
         )
-        row.identity = realization.identity if index else kernel_identity(rebuilt.record(matched, row))
+        row.identity = realization.identity if index else rebuilt.record(matched, row).kernel_identity
         rows.append(row)
     matched.realizations = rows
     return rebuilt

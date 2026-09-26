@@ -20,7 +20,6 @@ from .format import (
     kernel_pool_text,
     program_text,
 )
-from .identity import kernel_identity
 from .record import (
     GoldenRecord,
     kernel_set_pins,
@@ -54,7 +53,6 @@ __all__ = [
     "Target",
     "kernel_pool_text",
     "program_text",
-    "kernel_identity",
     "decode_record",
     "lead_of",
     "piece_row",

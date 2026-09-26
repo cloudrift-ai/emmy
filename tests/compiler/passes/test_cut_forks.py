@@ -33,7 +33,7 @@ from emmy.compiler.pipeline.passes.tile._cut import (
     realize,
 )
 from emmy.compiler.pipeline.pipeline import RuleSkipped, Run, _is_structural_option
-from emmy.compiler.pipeline.search.golden import GoldenFile, GoldenRecord, Measurements, decode_record, kernel_identity
+from emmy.compiler.pipeline.search.golden import GoldenFile, GoldenRecord, Measurements, decode_record
 from emmy.compiler.pipeline.search.golden.decode import _replay
 from emmy.compiler.pipeline.search.golden.record import _lifted_target, _target_kernel_nodes
 from emmy.compiler.pipeline.search.pins import pinned_knobs
@@ -527,7 +527,7 @@ def test_child_identity_receipts_decode_per_child_and_join_by_stored_identity() 
 
     receipt = GoldenRecord(knobs=dict(row_a), identity=id_a, **fields)
     assert decode_record(receipt) is None
-    assert kernel_identity(receipt) == id_a
+    assert receipt.kernel_identity == id_a
 
     sibling = GoldenRecord(knobs=dict(row_a), identity=id_b, **fields)
     reason = decode_record(sibling)
@@ -694,7 +694,7 @@ def test_multi_output_kernel_record_derives_the_identity_its_live_fork_carries()
     _lowered, nodes = _target_kernel_nodes(record)
     assert len(nodes) == 1 and len(nodes[0].outputs) == 2, "the fused target must be ONE kernel writing two buffers"
 
-    identity = kernel_identity(record)
+    identity = record.kernel_identity
     rows = _replay(record, exhaustive=True).rows
     assert identity in rows, "the derived identity names no kernel the live resolve offers"
     # The join is the subject; spelling one of that kernel's own rows shows the record decodes

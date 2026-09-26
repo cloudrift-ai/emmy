@@ -42,7 +42,7 @@ class GoldenRecord:
     #: Which config entry of its document the record came from. A config is one kernel set of one target: several
     #: configs can hold one loop (a target's fused rows, and each route's receipts), and each is its own set.
     config_index: int = 0
-    #: The record's stored deploy identity (``identity_key(with_io=True)``, see :func:`kernel_identity`), when the
+    #: The record's stored deploy identity (``identity_key(with_io=True)``, see :attr:`kernel_identity`), when the
     #: file keeps one. Model inventories mostly do not; the realization corpus does, because a new
     #: fingerprint fact must show up as a diff there rather than silently re-key a checked-in
     #: reproducer. A stored identity is the strict decode's kernel selector, and it is how a
@@ -62,6 +62,27 @@ class GoldenRecord:
     #: file per card and uses the flat ``measurements`` block instead; a corpus case is one file
     #: across many cards, which a flat block cannot hold.
     latency: dict[str, Latency] | None = None
+
+    @cached_property
+    def kernel_identity(self) -> str | None:
+        """The record's kernel identity under the CURRENT compiler — the strict decode's and the drift
+        key (``identity_key(with_io=True)``). A STORED identity is returned as-is: it is how a
+        child-identity receipt names the one split child its schedule decorates (the target's own lift
+        stops at the pre-cut kernel and cannot say), and a stale stored identity selects nothing — the
+        strict decode is where that fails loudly. Without one, the identity is derived as the lift of the
+        record's ONE target kernel, through the exact total lift the live compile uses
+        (``_fromloop.lift_loop_op``). ``None`` when the record cannot carry a deploy identity: the target
+        lowers to several kernels (a schedule row decorates exactly one), or selection/lifting fails —
+        best-effort here (a corpus row must never break a compile); nightly strict decoding is where
+        failure is loud. Deploy never joins on this key: a record deploys as measured rows, matched by
+        ``S_*`` features plus the exact ``I_kernel`` stamp, off the rows the golden import files
+        (``golden.evidence``)."""
+        if self.identity is not None:
+            return self.identity
+        try:
+            return _lifted_target(self).identity_key(with_io=True)
+        except Exception:  # noqa: BLE001 — see above; the decode tripwire re-derives loudly
+            return None
 
     @property
     def is_routing(self) -> bool:
@@ -209,7 +230,7 @@ class GoldenRecord:
     def shape_key(self) -> ShapeKey:
         """The arithmetic-identity descriptor for eval / diagnostics grouping, derived from the
         lowered target's stamped histogram. NOT the deploy join key — that is
-        :func:`kernel_identity` (strict structural identity); this key only groups eval rows."""
+        :attr:`kernel_identity` (strict structural identity); this key only groups eval rows."""
         return ShapeKey.from_s_features(self.structural_features)
 
     @cached_property

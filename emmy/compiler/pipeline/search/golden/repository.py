@@ -179,10 +179,19 @@ def scope_digest(gpu_name: str) -> str:
     return sha.hexdigest()[:16]
 
 
+_DOCUMENT_MEMO: dict[Path, tuple[GoldenFile, list[GoldenRecord]]] = {}
+
+
 def _document_of(path: Path) -> tuple[GoldenFile, list[GoldenRecord]]:
-    """A golden parsed: (document, records)."""
-    document = GoldenFile.load(Path(path))
-    return document, document.records()
+    """A golden parsed once per process: ``(document, records)``. The parse is the whole cost of a load — the
+    36 MB FP8 golden takes 16 s — and the test collection reads every file three times, every row test once
+    more; nothing derived is kept here, so nothing here can go stale within a process."""
+    path = Path(path)
+    cached = _DOCUMENT_MEMO.get(path)
+    if cached is None:
+        document = GoldenFile.load(path)
+        cached = _DOCUMENT_MEMO.setdefault(path, (document, document.records()))
+    return cached
 
 
 def _records_of(path: Path) -> list[GoldenRecord]:

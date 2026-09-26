@@ -847,14 +847,13 @@ def test_replay_keys_its_cache_by_the_entry_identity(tmp_path):
     spelling recurs on a residual as earlier cuts renumber its tree — and each replays its own
     fork: the entry naming the kernel a fork is offered on reports the arm it spelled there, and a
     same-spelled sibling naming another kernel reports none."""
-    from emmy.compiler.pipeline.search.golden import kernel_identity
     from emmy.compiler.pipeline.search.golden.decode import _replay
 
     path = tmp_path / "working-route.yaml"
     document = _working_placement_route(path)
     entry = document.configs[0]
     routing = document.record(entry, entry.realizations[0])
-    owner = replace(routing, identity=kernel_identity(routing))
+    owner = replace(routing, identity=routing.kernel_identity)
     other = replace(owner, name="working.other", identity="f" * 64)
 
     assert len(_replay(owner, siblings=(other,), lead=owner).arms) == 1
