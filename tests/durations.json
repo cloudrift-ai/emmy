@@ -2434,5 +2434,7 @@
  "tests/compiler/realization/test_realization.py::test_realization[fused/nvfp4-gate-up-requant-place-cut.yaml-built]@cuda": 1.1,
  "tests/compiler/realization/test_realization.py::test_realization[reduce/coop-t-matvec-n512.yaml-built]@cuda": 1.05,
  "tests/compiler/realization/test_realization.py::test_realization[matmul/imap-slice-a-gmem.yaml-built]@cuda": 1.03,
- "tests/serving/test_deepseek_native_loader.py::test_eager_layer_twin_materializes_experts_in_the_modules_own_orientation": 6.0
+ "tests/serving/test_deepseek_native_loader.py::test_eager_layer_twin_materializes_experts_in_the_modules_own_orientation": 6.0,
+ "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[gemma-4-12B-it/rtx5090_sm120.yaml/post2048-global.k_linear_mean_reduce_7ffa03.m2048.fm.703e0e319205]": 5.7,
+ "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[gemma-4-12B-it/rtx5090_sm120.yaml/post4096-global.k_linear_mean_reduce_ca9893.m4096.725ddb322962]": 5.0
 }
