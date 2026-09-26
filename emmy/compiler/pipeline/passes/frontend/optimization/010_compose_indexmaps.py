@@ -104,11 +104,20 @@ def rewrite(match: Match, producer: Node, consumer: Node) -> Graph | None:
 
     # The producer's buffer goes away with it. When it was PUBLIC and its input is a decomposition's
     # transient buffer of the same dtype (a linear's reduce under its reshape), that input is now
-    # the only storage of the public value: its rounding is the source program's, so it stops
-    # being transient and the store rounding pass spells it.
-    source = graph.buffer(producer_input_id)
-    public = graph.buffer(producer.id)
-    if source is not None and public is not None and source.transient and not public.transient and source.dtype == public.dtype:
+    # the only storage of the public value. Where the composed read feeds further computation (a
+    # decomposition's own transient operand map: the V projection into attention), the source
+    # program rounds there, so the input stops being transient and the store rounding pass spells
+    # it. A composed read that is itself a public buffer rounds at its own store already.
+    source, public, read = graph.buffer(producer_input_id), graph.buffer(producer.id), graph.buffer(consumer.id)
+    if (
+        source is not None
+        and public is not None
+        and read is not None
+        and source.transient
+        and not public.transient
+        and read.transient
+        and source.dtype == public.dtype
+    ):
         source.transient = False
 
     match.output = consumer.id
