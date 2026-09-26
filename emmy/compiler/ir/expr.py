@@ -23,12 +23,14 @@ from dataclasses import dataclass, field, fields, replace
 
 import numpy as np
 
+from emmy.compiler.wire import Wire, alias
+
 # ---------------------------------------------------------------------------
 # Operator overloading mixin
 # ---------------------------------------------------------------------------
 
 
-class _ExprOps:
+class _ExprOps(Wire):
     """Mixin that adds arithmetic and comparison operators to Expr nodes.
 
     Returns BinaryExpr nodes, enabling::
@@ -228,6 +230,17 @@ def apply_binop(op: str, lv: object, rv: object) -> object:
 class Var(_ExprOps):
     """Variable reference."""
 
+    wire_tag = "var"
+
+    def to_wire(self) -> str:
+        return self.name
+
+    @classmethod
+    def from_wire(cls, value: object, where: str = "var") -> Var:
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"{where} must be a non-empty name")
+        return cls(value)
+
     name: str
 
     def eval(self, env: dict[str, object]) -> object:
@@ -269,7 +282,9 @@ class Var(_ExprOps):
 class Literal(_ExprOps):
     """Numeric constant."""
 
-    value: int | float
+    wire_tag = "literal"
+
+    value: int | float | bool
     dtype: str = "float"
 
     def eval(self, env: dict[str, object]) -> object:
@@ -322,6 +337,8 @@ class BinaryExpr(_ExprOps):
     / ``np.logical_or`` when the operand is an ndarray (scalar bool
     coercion would raise).
     """
+
+    wire_tag = "binary"
 
     op: str  # "+", "-", "*", "/", "//", "%", "<", "<=", ">", ">=", "==", "&&", "||", "^"
     left: Expr
@@ -468,6 +485,17 @@ class Builtin(_ExprOps):
     time. Calling ``eval`` raises.
     """
 
+    wire_tag = "builtin"
+
+    def to_wire(self) -> str:
+        return self.name
+
+    @classmethod
+    def from_wire(cls, value: object, where: str = "builtin") -> Builtin:
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"{where} must be a non-empty name")
+        return cls(value)
+
     name: str
 
     def eval(self, env: dict[str, object]) -> object:
@@ -502,6 +530,8 @@ class FuncCallExpr(_ExprOps):
     emitter's ``_translate_intrinsic`` rewrites the same name to the
     ``f``-suffixed libm spelling at source-render time.
     """
+
+    wire_tag = "call"
 
     name: str
     args: tuple[Expr, ...]
@@ -548,6 +578,8 @@ class TernaryExpr(_ExprOps):
     directly; ``TernaryExpr.eval`` only supports scalar ``cond``.
     """
 
+    wire_tag = "ternary"
+
     cond: Expr
     if_true: Expr
     if_false: Expr
@@ -591,6 +623,8 @@ class TernaryExpr(_ExprOps):
 @dataclass(frozen=True)
 class CastExpr(_ExprOps):
     """Type cast of an inner expression to ``dtype`` (e.g. ``"int"``, ``"float"``)."""
+
+    wire_tag = "cast"
 
     dtype: str
     expr: Expr
@@ -659,6 +693,7 @@ class FlatIndex(_ExprOps):
 
 
 Expr = Var | Literal | BinaryExpr | Builtin | FuncCallExpr | TernaryExpr | CastExpr | FlatIndex
+alias("Expr", Expr)
 
 
 # ---------------------------------------------------------------------------

@@ -121,10 +121,11 @@ def case_target_tile(case: str):
 
     A case records one entry per kernel of the set it realizes and every entry decorates the same
     target, so the first entry names it."""
-    from emmy.compiler.pipeline.search.golden import _lifted_target, load_golden_file, load_golden_records
+    from emmy.compiler.pipeline.search.golden import GoldenFile
+    from emmy.compiler.pipeline.search.golden.record import _lifted_target
 
     path = Path(__file__).parent / "realization/cases" / case
-    record, *_ = load_golden_records(load_golden_file(path))
+    record, *_ = GoldenFile.load(path).records()
     return _lifted_target(record)
 
 
@@ -333,8 +334,8 @@ def loop_target(graph, origins, loops: list[dict], compute_cap=(12, 0)) -> dict:
     interned into ``loops``, with ``origins`` beside it as provenance — what the recorder writes."""
     from emmy.compiler import provenance  # noqa: PLC0415
     from emmy.compiler.context import Context  # noqa: PLC0415
-    from emmy.compiler.loop_wire import intern_loop_program  # noqa: PLC0415
     from emmy.compiler.pipeline.search.working_golden import lowered_kernels  # noqa: PLC0415
+    from emmy.compiler.wire import intern  # noqa: PLC0415
 
     lowered = graph.copy()
     provenance.seed(lowered)
@@ -345,7 +346,7 @@ def loop_target(graph, origins, loops: list[dict], compute_cap=(12, 0)) -> dict:
         for node_id, program in kernels
         if {origin for origin in provenance.get(fused.nodes[node_id]) if origin in graph.nodes} == wanted
     )
-    return {"loop": intern_loop_program(loops, program), "origins": list(origins)}
+    return {"loop": intern(loops, program), "origins": list(origins)}
 
 
 def loop_record_fields(graph, origins, compute_cap=(12, 0)) -> dict:

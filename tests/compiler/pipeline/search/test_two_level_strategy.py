@@ -29,12 +29,12 @@ from emmy.compiler.ir.frontend.ir import MatmulOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.loop_wire import kernel_tile
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.search.db import SearchDB
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from emmy.compiler.pipeline.search.slice import single_node_graph
 from emmy.compiler.pipeline.search.strategy.two_level import InnerReward, KernelInventory, OpResult, _kernel_nodes
+from emmy.compiler.wire import kernel_tile
 from tests.compiler.helpers import run_inner_reward, run_two_level
 
 # Moderate patience: each kernel explores several variants then stops on stagnation (the fake

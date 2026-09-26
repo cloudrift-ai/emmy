@@ -166,7 +166,7 @@ def _bench_corpus_case(case: Case, *, profile: bool) -> PerfRow:
     """
     facts = helpers.describe(case)
     recorded = helpers.recorded_latency(case, helpers.live_hardware_id())
-    stored = float(recorded["emmy_us"]) if recorded else None
+    stored = float(recorded.emmy_us) if recorded else None
     with tempfile.TemporaryDirectory(prefix=f"emmy_perf_{case.path.stem}_") as tmp:
         record = None
         samples: list[float] = []

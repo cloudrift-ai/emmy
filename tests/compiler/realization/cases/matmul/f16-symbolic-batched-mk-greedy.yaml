@@ -13,7 +13,6 @@ programs:
     outputs: [[xnb, f16, [16, {sym: seq_len, hint: 512}, 128]]]
   - id: o
     op: torch.matmul
-    attrs: {has_bias: false}
     inputs: [xna, xnb]
     outputs: [[o, f16, [16, {sym: seq_len, hint: 512}, 128]]]
 configs:
@@ -51,59 +50,33 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 16}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 16}
+          body:
+          - Loop:
+              axis: {name: a1, extent: {sym: seq_len, hint: 512}}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 128}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 128}, window: null}}
-                        body:
-                          body:
-                          - class: Loop
-                            fields:
-                              axis: {class: Axis, fields: {name: a3, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
-                              body:
-                                body:
-                                - class: Load
-                                  fields:
-                                    names: {tuple: [in0]}
-                                    input: xna
-                                    index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}, {expr: {var: a3}}]}
-                                    dtype: null
-                                - class: Load
-                                  fields:
-                                    names: {tuple: [in1]}
-                                    input: xnb
-                                    index: {tuple: [{expr: {var: a0}}, {expr: {var: a3}}, {expr: {var: a2}}]}
-                                    dtype: null
-                                - class: Assign
-                                  fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                                - class: Accum
-                                  fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a3]}, base: null}
-                              unroll: false
-                              seed: true
-                          - class: Write
-                            fields:
-                              output: o
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}, {expr: {var: a2}}]}
-                              values: {tuple: [acc0]}
-                              value_dtype: null
-                              atomic: false
-                              swizzle: NONE
-                        unroll: false
-                        seed: true
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - Loop:
+                      axis: {name: a3, extent: {sym: seq_len, hint: 512}}
+                      body:
+                      - {Load: {names: [in0], input: xna, index: [{var: a0}, {var: a1}, {var: a3}], dtype: null}}
+                      - {Load: {names: [in1], input: xnb, index: [{var: a0}, {var: a3}, {var: a2}], dtype: null}}
+                      - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                      - {Accum: {name: acc0, value: v0, axes: [a3]}}
+                  - Write:
+                      output: o
+                      index:
+                      - {var: a0}
+                      - {var: a1}
+                      - {var: a2}
+                      values:
+                      - acc0
+                      value_dtype: null
+                      atomic: false
+                      swizzle: NONE
       name: k_matmul_63b321
     inputs: [xnb, xna]
     outputs: [[o, f16, [16, {sym: seq_len, hint: 512}, 128]]]

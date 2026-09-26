@@ -638,14 +638,14 @@ def _run_golden_targets(args) -> None:
     """
     from copy import copy  # noqa: PLC0415
 
-    from emmy.compiler.pipeline.search.golden import lead_of, load_golden, load_golden_records  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import GoldenFile, lead_of  # noqa: PLC0415
 
     if args.input or args.code or args.ir:
         logger.error("--golden is mutually exclusive with positional input / --code / --ir")
         sys.exit(2)
     try:
-        document = load_golden(args.golden)
-        records = load_golden_records(document)
+        document = GoldenFile.load(args.golden)
+        records = document.records()
     except (OSError, ValueError) as exc:
         logger.error("cannot load --golden %s: %s", args.golden, exc)
         sys.exit(2)
@@ -3004,7 +3004,7 @@ def _flatten_tensors(value):
 def _collect_sym_env(graphs) -> dict[str, int]:
     """Every symbolic dim var appearing in ``graphs`` bound to the size the backend resolves it to
     when benching without supplied inputs (:func:`symbolic_bindings`, the tune DB's rule too)."""
-    from emmy.compiler.loop_wire import symbolic_bindings
+    from emmy.compiler.wire import symbolic_bindings
 
     return symbolic_bindings(node.output for gph in graphs for node in gph.nodes.values())
 

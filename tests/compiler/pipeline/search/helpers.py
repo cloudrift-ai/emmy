@@ -111,11 +111,12 @@ def tuned_db(path, cases: tuple[str, ...], *, source: str = "measured", us: floa
 
     from emmy.compiler.context import FAST_MATH_FLAG, Context
     from emmy.compiler.pipeline.knob import KERNEL_DECISION_FAMILIES, family_of
-    from emmy.compiler.pipeline.search.golden_import import import_goldens
+    from emmy.compiler.pipeline.search.golden import Measurements
+    from emmy.compiler.pipeline.search.golden.evidence import import_goldens
     from emmy.compiler.pipeline.search.pins import pinned_knobs
     from tests.compiler.realization import helpers as corpus
 
-    measured = {"emmy_us": us, "reference_us": us, "reference_backend": "corpus"}
+    measured = Measurements(emmy_us=us, reference_us=us, reference_backend="corpus")
     db = SearchDB(path)
     for case_path in cases:
         case = corpus.load_case(corpus.CASES_DIR / case_path)

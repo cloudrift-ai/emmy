@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -57,9 +58,10 @@ def _captured_graphs() -> dict:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from emmy.compiler.pipeline.search.golden import GoldenFile  # noqa: PLC0415
+
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     from emmy.compiler.context import Context
-    from emmy.compiler.pipeline.search.golden import dump_golden_file, load_golden_file
     from emmy.compiler.pipeline.search.working_golden import write_trace_inventories
     from tests.compiler.realization import helpers as corpus
     from tests.serving import helpers
@@ -71,14 +73,13 @@ def main(argv: list[str] | None = None) -> int:
     scratch = destination.with_suffix(".inventory.tmp")
     scratch.unlink(missing_ok=True)
     write_trace_inventories(graphs, scratch, ctx=Context.probe())
-    document = load_golden_file(scratch)
+    document = GoldenFile.load(scratch)
     scratch.unlink(missing_ok=True)
 
-    for index, entry in enumerate(document["configs"]):
-        single = {**document, "configs": [entry]}
-        document["configs"][index] = corpus.complete(single)["configs"][0]
-        logger.info("[regen]   target %d: %d realization(s)", index, len(document["configs"][index]["realizations"]))
-    dump_golden_file(document, destination, overwrite=True)
+    for index, entry in enumerate(document.configs):
+        document.configs[index] = corpus.complete(replace(document, configs=[entry])).configs[0]
+        logger.info("[regen]   target %d: %d realization(s)", index, len(document.configs[index].realizations))
+    document.dump(destination, overwrite=True)
     logger.info("[regen] wrote %s", destination)
     return 0
 

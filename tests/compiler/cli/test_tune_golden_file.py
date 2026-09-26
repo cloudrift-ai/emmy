@@ -18,7 +18,7 @@ from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.search.db import PerfStats, SearchDB
-from emmy.compiler.pipeline.search.golden import dump_golden_file, load_golden_file
+from emmy.compiler.pipeline.search.golden import GoldenFile, Latency, Target
 from emmy.compiler.pipeline.search.policy.mcts import SearchNode, SearchTree, TuningSearch
 from emmy.compiler.pipeline.search.strategy.two_level import InnerReward, OpResult
 from emmy.compiler.pipeline.search.working_golden import (
@@ -31,7 +31,7 @@ from emmy.compiler.pipeline.search.working_golden import (
     record_latency,
     validate_working_gpu,
 )
-from emmy.compiler.torch_wire import intern_program
+from emmy.compiler.wire import intern
 from tests.compiler.helpers import loop_target
 from tests.compiler.pipeline.search.helpers import kernel_row
 
@@ -74,13 +74,13 @@ def _document(*entries):
     graph.inputs, graph.outputs = ["x", "w"], ["matmul"]
     programs = []
     loops: list[dict] = []
-    program_index = intern_program(programs, graph)
+    program_index = intern(programs, graph)
     config = {
         "program": program_index,
         "target": loop_target(graph, ["matmul"], loops, (8, 9)),
         "realizations": [dict(entry) for entry in entries],
     }
-    return {"compute_cap": [8, 9], "programs": programs, "configs": [config], "loops": loops}
+    return GoldenFile.from_wire({"compute_cap": [8, 9], "programs": programs, "configs": [config], "loops": loops})
 
 
 def _classic_row(*, work: str = "", tile: str = "", reduce: str = "", stage: str = "", raster: str = "") -> dict[str, str]:
@@ -96,11 +96,11 @@ def _classic_row(*, work: str = "", tile: str = "", reduce: str = "", stage: str
 
 def test_working_file_groups_candidate_rows_and_recovers_embedded_program(tmp_path):
     path = tmp_path / "trace.yaml"
-    dump_golden_file(_document(_matmul("mm"), _matmul("mm", knobs={"TILE": "f2x2"})), path)
+    _document(_matmul("mm"), _matmul("mm", knobs={"TILE": "f2x2"})).dump(path)
 
     document, targets = load_working_targets(path)
 
-    assert document["configs"][0]["realizations"][0]["name"] == "mm"
+    assert document.configs[0].realizations[0].name == "mm"
     assert len(targets) == 1
     mm = targets[0]
     assert mm.code is None and mm.input is None and isinstance(mm.program.producer(mm.program.outputs[0]).op, LoopOp)
@@ -110,13 +110,10 @@ def test_working_file_groups_candidate_rows_and_recovers_embedded_program(tmp_pa
 
 def test_working_file_keeps_distinct_input_pin_regimes_separate(tmp_path):
     path = tmp_path / "trace.yaml"
-    dump_golden_file(
-        _document(
-            _matmul("mm", pins={"FAST_MATH": False}),
-            _matmul("mm", pins={"FAST_MATH": True}),
-        ),
-        path,
-    )
+    _document(
+        _matmul("mm", pins={"FAST_MATH": False}),
+        _matmul("mm", pins={"FAST_MATH": True}),
+    ).dump(path)
 
     _, targets = load_working_targets(path)
 
@@ -125,13 +122,13 @@ def test_working_file_keeps_distinct_input_pin_regimes_separate(tmp_path):
 
 def test_empty_knob_map_is_a_forkless_proposal_not_inventory(tmp_path):
     path = tmp_path / "working.yaml"
-    dump_golden_file(_document(_matmul("mm"), _matmul("mm", knobs={})), path)
+    _document(_matmul("mm"), _matmul("mm", knobs={})).dump(path)
 
     loaded_document, targets = load_working_targets(path)
 
     assert targets[0].entry_indexes == [(0, 0), (0, 1)]
     assert targets[0].proposals == [((0, 1), {})]
-    assert set(loaded_document) == {"compute_cap", "programs", "configs", "loops"}
+    assert set(loaded_document.to_wire()) == {"compute_cap", "programs", "configs", "loops"}
 
 
 def test_multi_cuda_realized_knobs_must_be_conflict_free():
@@ -144,12 +141,11 @@ def test_multi_cuda_realized_knobs_must_be_conflict_free():
     assert realized_tuning_knobs(graph)["TILE"] == "f2x2"
 
 
-def test_working_file_rejects_legacy_reproducer_field(tmp_path):
-    path = tmp_path / "trace.yaml"
-    document = _document(_matmul("mm"))
-    document["configs"][0]["reproducer"] = "missing.json"
+def test_working_file_rejects_legacy_reproducer_field():
+    wire = _document(_matmul("mm")).to_wire()
+    wire["configs"][0]["reproducer"] = "missing.json"
     with pytest.raises(ValueError, match="unknown field"):
-        dump_golden_file(document, path)
+        GoldenFile.from_wire(wire)
 
 
 def test_working_file_rejects_missing_yaml_cleanly(tmp_path):
@@ -159,7 +155,7 @@ def test_working_file_rejects_missing_yaml_cleanly(tmp_path):
 
 def test_working_file_is_mutually_exclusive_with_direct_input(tmp_path):
     path = tmp_path / "working.yaml"
-    dump_golden_file(_document(_matmul("mm")), path)
+    _document(_matmul("mm")).dump(path)
     with pytest.raises(SystemExit) as exc:
         tune.handle_tune(_args(path, code="torch.ones(1)", max_candidates=None))
     assert exc.value.code == 2
@@ -171,7 +167,7 @@ def test_ranking_write_preserves_verified_and_records_actual_searched_winner(tmp
     verified["latency"] = {"old-gpu": {"emmy_us": 9.0, "tcompile_us": 8.0}}
     proposal = _matmul("mm", knobs={"TILE": "f4x2"})
     document = _document(verified, proposal)
-    dump_golden_file(document, path)
+    document.dump(path)
     document, targets = load_working_targets(path)
     target = targets[0]
     rankings = [
@@ -192,18 +188,18 @@ def test_ranking_write_preserves_verified_and_records_actual_searched_winner(tmp
         compile_flags="-Xcicc -O1",
     )
 
-    got = load_golden_file(path)
-    realizations = got["configs"][0]["realizations"]
-    assert "ranking" not in realizations[0]
-    assert realizations[0]["measurements"]["emmy_us"] == 9.0
-    assert realizations[1]["ranking"]["source"] == "proposal"
-    assert realizations[1]["ranking"]["latency_us"] == 8.0
+    got = GoldenFile.load(path)
+    realizations = got.configs[0].realizations
+    assert realizations[0].ranking is None
+    assert realizations[0].measurements.emmy_us == 9.0
+    assert realizations[1].ranking["source"] == "proposal"
+    assert realizations[1].ranking["latency_us"] == 8.0
     winner = realizations[2]
-    assert winner["knobs"] == {"TILE": "f8x2"}
-    assert winner["ranking"]["source"] == "tune"
-    assert winner["ranking"]["tune_winner"] is True
-    assert "measurements" not in winner
-    assert "latency" not in winner
+    assert winner.knobs == {"TILE": "f8x2"}
+    assert winner.ranking["source"] == "tune"
+    assert winner.ranking["tune_winner"] is True
+    assert winner.measurements is None
+    assert winner.latency is None
 
 
 def test_record_latency_selects_the_measured_row_not_its_same_named_sibling(tmp_path):
@@ -212,7 +208,7 @@ def test_record_latency_selects_the_measured_row_not_its_same_named_sibling(tmp_
         _matmul("mm", knobs={"TILE": "f2x2"}),
         _matmul("mm", knobs={"TILE": "f4x2"}),
     )
-    dump_golden_file(document, path)
+    document.dump(path)
 
     record_latency(
         path,
@@ -225,20 +221,20 @@ def test_record_latency_selects_the_measured_row_not_its_same_named_sibling(tmp_
         pins={"FAST_MATH": False},
     )
 
-    realizations = load_golden_file(path)["configs"][0]["realizations"]
-    assert "latency" not in realizations[0]
-    assert realizations[1]["latency"] == {"test-gpu": {"emmy_us": 7.5, "tcompile_us": 8.0, "eager_us": 9.0}}
+    realizations = GoldenFile.load(path).configs[0].realizations
+    assert realizations[0].latency is None
+    assert realizations[1].latency == {"test-gpu": Latency(emmy_us=7.5, tcompile_us=8.0, eager_us=9.0)}
 
     # A timing the run did not take is left out, not faked.
     record_latency(path, "mm", hardware_id="test-gpu", emmy_us=7.0, tcompile_us=None, eager_us=9.5, knobs={"TILE": "f4x2"})
-    assert load_golden_file(path)["configs"][0]["realizations"][1]["latency"] == {"test-gpu": {"emmy_us": 7.0, "eager_us": 9.5}}
+    assert GoldenFile.load(path).configs[0].realizations[1].latency == {"test-gpu": Latency(emmy_us=7.0, eager_us=9.5)}
 
 
 def test_direct_winner_promotes_matching_proposal(tmp_path):
     path = tmp_path / "working.yaml"
     proposal = _matmul("mm", knobs={"TILE": "f4x2"})
     document = _document(proposal)
-    dump_golden_file(document, path)
+    document.dump(path)
     document, targets = load_working_targets(path)
     target = targets[0]
 
@@ -250,8 +246,8 @@ def test_direct_winner_promotes_matching_proposal(tmp_path):
     )
     persist_tune_winner(path, document, target, ({"TILE": "f4x2"}, 7.5), compile_flags="-O1")
 
-    winner = load_golden_file(path)["configs"][0]["realizations"][0]
-    assert winner["ranking"] == {
+    winner = GoldenFile.load(path).configs[0].realizations[0]
+    assert winner.ranking == {
         "status": "ok",
         "latency_us": 7.5,
         "compile_flags": "-O1",
@@ -263,7 +259,7 @@ def test_direct_winner_promotes_matching_proposal(tmp_path):
 
 def test_incremental_persist_matches_a_full_dump_and_still_checks_realizations(tmp_path):
     path = tmp_path / "working.yaml"
-    dump_golden_file(_document(_matmul("mm"), _matmul("mm", knobs={"TILE": "f2x2"})), path)
+    _document(_matmul("mm"), _matmul("mm", knobs={"TILE": "f2x2"})).dump(path)
     document, targets = load_working_targets(path)
     target = targets[0]
     rankings = [{"status": "ok", "latency_us": 8.0, "compile_flags": "-O1", "measured_knobs": {"TILE": "f2x2"}}] * len(target.proposals)
@@ -272,31 +268,31 @@ def test_incremental_persist_matches_a_full_dump_and_still_checks_realizations(t
     # one a full revalidating dump of the same document writes.
     persist_proposal_rankings(path, document, target, rankings)
     canonical = tmp_path / "canonical.yaml"
-    dump_golden_file(document, canonical)
+    document.dump(canonical)
     assert path.read_bytes() == canonical.read_bytes()
 
-    document["configs"][0]["realizations"][0]["pins"] = "not-a-mapping"
-    with pytest.raises(ValueError, match="pins must be a mapping"):
+    document.configs[0].realizations[0].pins = {"NOT_A_KNOB": True}
+    with pytest.raises(ValueError, match="pins names unknown knob"):
         persist_proposal_rankings(path, document, target, rankings)
 
 
 def test_ambiguous_multi_cuda_winner_is_not_annotated(tmp_path):
     path = tmp_path / "working.yaml"
-    dump_golden_file(_document(_matmul("mm")), path)
+    _document(_matmul("mm")).dump(path)
     document, targets = load_working_targets(path)
     result = SimpleNamespace(best_reward=SimpleNamespace(searched_winner=lambda: None), assembled=object())
 
     persist_tune_winner(path, document, targets[0], result.best_reward.searched_winner(), compile_flags="-O1")
 
-    got = load_golden_file(path)
-    assert len(got["configs"]) == 1
-    assert got["configs"][0]["realizations"][0]["name"] == "mm"
-    assert got["configs"][0]["target"] == {"loop": 0, "origins": ["matmul"]}
+    got = GoldenFile.load(path)
+    assert len(got.configs) == 1
+    assert got.configs[0].realizations[0].name == "mm"
+    assert got.configs[0].target == Target(loop=0, origins=("matmul",))
 
 
 def test_structural_multi_cuda_winner_persists_its_exact_replay_row(tmp_path):
     path = tmp_path / "working.yaml"
-    dump_golden_file(_document(_matmul("mm")), path)
+    _document(_matmul("mm")).dump(path)
     document, targets = load_working_targets(path)
     route = {
         "WORK": "w1x1",
@@ -323,9 +319,9 @@ def test_structural_multi_cuda_winner_persists_its_exact_replay_row(tmp_path):
 
     persist_tune_winner(path, document, targets[0], reward.searched_winner(), compile_flags="-O1")
 
-    realizations = load_golden_file(path)["configs"][0]["realizations"]
-    assert realizations[1]["knobs"] == route
-    assert realizations[1]["ranking"] == {
+    realizations = GoldenFile.load(path).configs[0].realizations
+    assert realizations[1].knobs == route
+    assert realizations[1].ranking == {
         "status": "ok",
         "latency_us": 6.0,
         "compile_flags": "-O1",
@@ -364,7 +360,7 @@ def test_structural_multi_cuda_proposal_keeps_ranking_without_parent_perf(tmp_pa
         node_id="finalize",
     )
     path = tmp_path / "working.yaml"
-    dump_golden_file(_document(_matmul("mm"), _matmul("mm", knobs=route)), path)
+    _document(_matmul("mm"), _matmul("mm", knobs=route)).dump(path)
     document, targets = load_working_targets(path)
     stable_graph = targets[0].program
     loop_graph = Pipeline.build(LOOP_PASSES).run(stable_graph.copy(), ctx=Context((8, 9)))
@@ -470,10 +466,10 @@ def test_structural_multi_cuda_proposal_keeps_ranking_without_parent_perf(tmp_pa
     reloaded_db.close()
     persist_proposal_rankings(path, document, targets[0], rankings)
     reloaded, reloaded_targets = load_working_targets(path)
-    proposal = reloaded["configs"][0]["realizations"][1]
-    assert proposal["knobs"] == route
-    assert proposal["ranking"]["measured_knobs"] == route
-    assert proposal["ranking"]["status"] == "ok"
+    proposal = reloaded.configs[0].realizations[1]
+    assert proposal.knobs == route
+    assert proposal.ranking["measured_knobs"] == route
+    assert proposal.ranking["status"] == "ok"
     assert reloaded_targets[0].proposals == [((0, 1), route)]
 
     nonstructural = {key: value for key, value in route.items() if key != "REDUCE"}
@@ -505,15 +501,15 @@ def test_working_file_rejects_canonical_path_and_symlink(monkeypatch, tmp_path):
     hardware = hardware_dir / "gpu.yaml"
     recipe_root = tmp_path / "recipes"
     recipe = recipe_root / "model" / "golden" / "gpu.yaml"
-    dump_golden_file(_document(_matmul("hardware")), hardware)
-    dump_golden_file(_document(_matmul("recipe")), recipe)
+    _document(_matmul("hardware")).dump(hardware)
+    _document(_matmul("recipe")).dump(recipe)
 
     @contextmanager
     def default_recipe_root():
         yield recipe_root
 
-    monkeypatch.setattr(golden, "_HARDWARE_GOLDENS_DIR", hardware_dir)
-    monkeypatch.setattr(golden, "default_recipe_root", default_recipe_root)
+    monkeypatch.setattr(golden.repository, "_HARDWARE_GOLDENS_DIR", hardware_dir)
+    monkeypatch.setattr(golden.repository, "default_recipe_root", default_recipe_root)
     alias = tmp_path / "canonical-link.yaml"
     alias.symlink_to(recipe)
     for path in (hardware, recipe, alias):
@@ -524,29 +520,33 @@ def test_working_file_rejects_canonical_path_and_symlink(monkeypatch, tmp_path):
 def test_copied_verified_rows_resolve_as_working_candidates(tmp_path):
     document = _document(_matmul("mm", knobs={"TILE": "f2x2"}, emmy_us=9.0, cublas_us=10.0))
     copied = tmp_path / "copied.yaml"
-    dump_golden_file(document, copied)
+    document.dump(copied)
 
     _loaded, targets = load_working_targets(copied)
 
     proposal_indexes = {path for target in targets for path, _knobs in target.proposals}
     expected = {
         (config_index, realization_index)
-        for config_index, config in enumerate(document["configs"])
-        for realization_index, _realization in enumerate(config["realizations"])
+        for config_index, entry in enumerate(document.configs)
+        for realization_index, _realization in enumerate(entry.realizations)
     }
     assert proposal_indexes == expected
 
 
 def test_working_gpu_guard_allows_portable_trace_and_rejects_mismatch():
     ctx = SimpleNamespace(compute_capability=(9, 0), gpu_name="NVIDIA H100 80GB HBM3")
-    validate_working_gpu({"compute_cap": [0, 0]}, ctx)
-    validate_working_gpu({"compute_cap": [9, 0], "gpu_name": "NVIDIA H100 80GB HBM3"}, ctx)
-    validate_working_gpu({"compute_cap": [9, 0], "gpu_name": "NVIDIA H100 80GB"}, ctx)
+
+    def header(cap, gpu_name=None):
+        return GoldenFile(compute_cap=cap, gpu_name=gpu_name, programs=[], configs=[])
+
+    validate_working_gpu(header((0, 0)), ctx)
+    validate_working_gpu(header((9, 0), "NVIDIA H100 80GB HBM3"), ctx)
+    validate_working_gpu(header((9, 0), "NVIDIA H100 80GB"), ctx)
 
     with pytest.raises(ValueError, match="compute capability"):
-        validate_working_gpu({"compute_cap": [8, 0]}, ctx)
+        validate_working_gpu(header((8, 0)), ctx)
     with pytest.raises(ValueError, match="targets NVIDIA V100"):
-        validate_working_gpu({"compute_cap": [9, 0], "gpu_name": "NVIDIA V100"}, ctx)
+        validate_working_gpu(header((9, 0), "NVIDIA V100"), ctx)
 
 
 def test_multi_target_dump_uses_stable_sibling_directories(tmp_path):
@@ -714,11 +714,11 @@ def test_record_greedy_pick_appends_routing_rows_and_receipts_once(tmp_path, mon
     seed's input regime. A re-record of a row already there replaces its timings instead of
     duplicating it, and a canonical repository golden is never written."""
     from emmy.compiler.pipeline.search import working_golden
-    from emmy.compiler.pipeline.search.golden import GoldenEntryState, golden_entry_state
+    from emmy.compiler.pipeline.search.golden import GoldenEntryState
     from emmy.compiler.pipeline.search.working_golden import record_greedy_pick
 
     path = tmp_path / "working.yaml"
-    dump_golden_file(_document(_matmul("mm", pins={"FAST_MATH": True})), path)
+    _document(_matmul("mm", pins={"FAST_MATH": True})).dump(path)
     root, piece = "1" * 64, "a" * 64
     decisions = [(root, {"PLACE@map.1/map": "cut"}, 30.0, 33.0)]
     kernels = [(piece, _classic_row(work="w1x1"), 10.0, 11.0), ("b" * 64, {"WORK": "", "RASTER": ""}, 20.0, 22.0)]
@@ -726,9 +726,9 @@ def test_record_greedy_pick_appends_routing_rows_and_receipts_once(tmp_path, mon
     written = record_greedy_pick(path, "mm", decisions=decisions, kernels=kernels, reference_backend="same-input-greedy")
 
     assert written == ["mm.111111111111", "mm.aaaaaaaaaaaa", "mm.bbbbbbbbbbbb"]
-    realizations = load_golden_file(path)["configs"][0]["realizations"]
-    assert [row["name"] for row in realizations] == ["mm", *written]
-    assert realizations[1] == {
+    realizations = GoldenFile.load(path).configs[0].realizations
+    assert [row.name for row in realizations] == ["mm", *written]
+    assert realizations[1].to_wire() == {
         "name": "mm.111111111111",
         "bindings": {},
         "pins": {"FAST_MATH": True},
@@ -736,14 +736,14 @@ def test_record_greedy_pick_appends_routing_rows_and_receipts_once(tmp_path, mon
         "identity": root,
         "measurements": {"emmy_us": 30.0, "reference_us": 33.0, "reference_backend": "same-input-greedy"},
     }
-    assert realizations[3]["knobs"] == {"WORK": "", "RASTER": ""} and realizations[3]["measurements"]["emmy_us"] == 20.0
-    assert all(golden_entry_state(row) is GoldenEntryState.VERIFIED for row in realizations[1:])
+    assert realizations[3].knobs == {"WORK": "", "RASTER": ""} and realizations[3].measurements.emmy_us == 20.0
+    assert all(row.state is GoldenEntryState.VERIFIED for row in realizations[1:])
 
     kernels[0] = (piece, _classic_row(work="w1x1"), 9.0, 11.5)
     assert record_greedy_pick(path, "mm", decisions=decisions, kernels=kernels, reference_backend="same-input-greedy") == written
-    realizations = load_golden_file(path)["configs"][0]["realizations"]
-    assert [row["name"] for row in realizations] == ["mm", *written]
-    assert realizations[2]["measurements"] == {"emmy_us": 9.0, "reference_us": 11.5, "reference_backend": "same-input-greedy"}
+    realizations = GoldenFile.load(path).configs[0].realizations
+    assert [row.name for row in realizations] == ["mm", *written]
+    assert realizations[2].measurements.to_wire() == {"emmy_us": 9.0, "reference_us": 11.5, "reference_backend": "same-input-greedy"}
 
     monkeypatch.setattr(working_golden, "is_repository_golden_path", lambda _path: True)
     with pytest.raises(ValueError, match="canonical repository golden"):
@@ -764,7 +764,7 @@ def test_record_greedy_pick_drops_the_superseded_kernel_set(tmp_path):
     from emmy.compiler.pipeline.search.working_golden import record_greedy_pick
 
     path = tmp_path / "working.yaml"
-    dump_golden_file(_document(_matmul("mm", pins={"FAST_MATH": True})), path)
+    _document(_matmul("mm", pins={"FAST_MATH": True})).dump(path)
     first = record_greedy_pick(
         path,
         "mm",
@@ -780,11 +780,11 @@ def test_record_greedy_pick_drops_the_superseded_kernel_set(tmp_path):
         reference_backend="same-input-greedy",
     )
 
-    document = load_golden_file(path)
-    realizations = document["configs"][0]["realizations"]
-    assert [row["name"] for row in realizations] == ["mm", *second]
-    assert document["configs"][0]["realizations"][0]["kernel_set"] == second[:1]
-    assert not set(first) & {row["name"] for row in realizations}, "the superseded route's rows stayed"
+    document = GoldenFile.load(path)
+    realizations = document.configs[0].realizations
+    assert [row.name for row in realizations] == ["mm", *second]
+    assert document.configs[0].realizations[0].kernel_set == tuple(second[:1])
+    assert not set(first) & {row.name for row in realizations}, "the superseded route's rows stayed"
 
 
 def test_record_greedy_pick_names_the_row_a_decision_lands_on(tmp_path, monkeypatch):
@@ -800,7 +800,7 @@ def test_record_greedy_pick_names_the_row_a_decision_lands_on(tmp_path, monkeypa
     monkeypatch.setenv("EMMY_FAST_MATH", "0")
     seed = _matmul("mm", pins={"FAST_MATH": False}, knobs={"PLACE@map.1/map": "cut"})
     seed["identity"] = root
-    dump_golden_file(_document(seed), path)
+    _document(seed).dump(path)
 
     written = record_greedy_pick(
         path,
@@ -811,10 +811,10 @@ def test_record_greedy_pick_names_the_row_a_decision_lands_on(tmp_path, monkeypa
     )
 
     assert written[0] == "mm"
-    realizations = load_golden_file(path)["configs"][0]["realizations"]
-    assert [row["name"] for row in realizations] == ["mm", "mm.aaaaaaaaaaaa"]
-    assert realizations[0]["kernel_set"] == ["mm"]
-    assert realizations[0]["measurements"]["emmy_us"] == 30.0
+    realizations = GoldenFile.load(path).configs[0].realizations
+    assert [row.name for row in realizations] == ["mm", "mm.aaaaaaaaaaaa"]
+    assert realizations[0].kernel_set == ("mm",)
+    assert realizations[0].measurements.emmy_us == 30.0
 
 
 def test_record_greedy_pick_does_not_alias_rows_between_input_regimes(tmp_path, monkeypatch):
@@ -822,13 +822,10 @@ def test_record_greedy_pick_does_not_alias_rows_between_input_regimes(tmp_path, 
     from emmy.compiler.pipeline.search.working_golden import record_greedy_pick
 
     path = tmp_path / "working.yaml"
-    dump_golden_file(
-        _document(
-            _matmul("mm.strict", pins={"FAST_MATH": False}),
-            _matmul("mm.fast", pins={"FAST_MATH": True}),
-        ),
-        path,
-    )
+    _document(
+        _matmul("mm.strict", pins={"FAST_MATH": False}),
+        _matmul("mm.fast", pins={"FAST_MATH": True}),
+    ).dump(path)
     identity = "1" * 64
     decisions = [(identity, {"PLACE@map.1/map": "cut"}, 30.0, 33.0)]
     monkeypatch.setenv("EMMY_FAST_MATH", "0")
@@ -836,12 +833,12 @@ def test_record_greedy_pick_does_not_alias_rows_between_input_regimes(tmp_path, 
     monkeypatch.setenv("EMMY_FAST_MATH", "1")
     fast_names = record_greedy_pick(path, "mm.fast", decisions=decisions, kernels=[], reference_backend="same-input-greedy")
 
-    realizations = load_golden_file(path)["configs"][0]["realizations"]
+    realizations = GoldenFile.load(path).configs[0].realizations
     assert strict_names != fast_names
-    assert next(row for row in realizations if row["name"] == "mm.strict")["kernel_set"] == strict_names
-    assert next(row for row in realizations if row["name"] == "mm.fast")["kernel_set"] == fast_names
-    assert next(row for row in realizations if row["name"] == strict_names[0])["pins"] == {"FAST_MATH": False}
-    assert next(row for row in realizations if row["name"] == fast_names[0])["pins"] == {"FAST_MATH": True}
+    assert next(row for row in realizations if row.name == "mm.strict").kernel_set == tuple(strict_names)
+    assert next(row for row in realizations if row.name == "mm.fast").kernel_set == tuple(fast_names)
+    assert next(row for row in realizations if row.name == strict_names[0]).pins == {"FAST_MATH": False}
+    assert next(row for row in realizations if row.name == fast_names[0]).pins == {"FAST_MATH": True}
 
 
 def test_a_recorder_keeps_the_rows_another_writer_added_after_it_read(tmp_path):
@@ -853,12 +850,12 @@ def test_a_recorder_keeps_the_rows_another_writer_added_after_it_read(tmp_path):
     from emmy.compiler.pipeline.search.working_golden import record_greedy_pick, record_latency
 
     path = tmp_path / "working.yaml"
-    dump_golden_file(_document(_matmul("mm", pins={"FAST_MATH": True})), path)
+    _document(_matmul("mm", pins={"FAST_MATH": True})).dump(path)
     row = {"WORK": "", "RASTER": ""}
     first = record_greedy_pick(path, "mm", decisions=[], kernels=[("a" * 64, row, 1.0, 2.0)], reference_backend="same-input-greedy")
     second = record_greedy_pick(path, "mm", decisions=[], kernels=[("b" * 64, row, 3.0, 4.0)], reference_backend="same-input-greedy")
     record_latency(path, "mm", hardware_id="test-gpu", emmy_us=7.5, tcompile_us=8.0)
 
-    realizations = load_golden_file(path)["configs"][0]["realizations"]
-    assert [entry["name"] for entry in realizations] == ["mm", *first, *second]
-    assert realizations[0]["latency"] == {"test-gpu": {"emmy_us": 7.5, "tcompile_us": 8.0}}
+    realizations = GoldenFile.load(path).configs[0].realizations
+    assert [entry.name for entry in realizations] == ["mm", *first, *second]
+    assert realizations[0].latency == {"test-gpu": Latency(emmy_us=7.5, tcompile_us=8.0)}

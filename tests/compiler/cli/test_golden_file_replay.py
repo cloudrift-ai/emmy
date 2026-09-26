@@ -16,9 +16,9 @@ from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.frontend.ir import MatmulOp, ReshapeOp, RmsNormOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
-from emmy.compiler.loop_wire import kernel_bindings, kernel_tile, loop_graph_from_wire, loop_graph_to_wire
-from emmy.compiler.pipeline.search.golden import dump_golden_file, load_golden_file
+from emmy.compiler.pipeline.search.golden import GoldenFile, Measurements, Realization, Target
 from emmy.compiler.pipeline.search.working_golden import write_trace_inventory
+from emmy.compiler.wire import kernel_bindings, kernel_tile
 from tests.compiler.helpers import loop_target
 
 
@@ -32,32 +32,28 @@ def _working_loop(path, *, state="inventory", pins=None):
         path,
         ctx=Context.from_target((8, 9)),
     )
-    document = load_golden_file(path)
-    entry = document["configs"][0]
-    entry["target"].pop("origins")  # an exact Loop target with no Torch twin
-    realization = entry["realizations"][0]
-    realization["name"] = "working.relu"
+    document = GoldenFile.load(path)
+    entry = document.configs[0]
+    entry.target = Target(loop=entry.target.loop)  # an exact Loop target with no Torch twin
+    realization = entry.realizations[0]
+    realization.name = "working.relu"
     if pins is not None:
-        realization["pins"] = pins
+        realization.pins = pins
     if state in {"proposal", "tuned", "verified"}:
-        realization["knobs"] = {"WORK": "w1x1"}
+        realization.knobs = {"WORK": "w1x1"}
     if state == "tuned":
-        realization["ranking"] = {
+        realization.ranking = {
             "source": "tune",
             "status": "ok",
             "tune_winner": True,
             "measured_knobs": {"WORK": "w1x1"},
         }
     if state == "verified":
-        realization["measurements"] = {
-            "emmy_us": 1.0,
-            "reference_us": 2.0,
-            "reference_backend": "torch",
-        }
-    loop = loop_graph_from_wire(document["loops"][entry["target"]["loop"]])
+        realization.measurements = Measurements(emmy_us=1.0, reference_us=2.0, reference_backend="torch")
+    loop = Graph.from_wire(document.loops[entry.target.loop])
     loop.nodes["y"].op = replace(loop.nodes["y"].op, name="working_exact_loop")
-    document["loops"][entry["target"]["loop"]] = loop_graph_to_wire(loop)
-    dump_golden_file(document, path, overwrite=True)
+    document.loops[entry.target.loop] = loop.to_wire()
+    document.dump(path, overwrite=True)
     return document
 
 
@@ -80,13 +76,13 @@ def _working_placement_route(path):
     )
     graph.inputs, graph.outputs = ["x", "wn", "w"], ["y"]
     write_trace_inventory(graph, path, ctx=Context.from_target((8, 9)))
-    document = load_golden_file(path)
-    realization = document["configs"][0]["realizations"][0]
-    realization["name"] = "working.route"
-    realization["pins"] = {"FAST_MATH": False}
-    realization["knobs"] = {"PLACE@inner.1/map": "cut"}  # a routing row: the measured price of that kernel set
-    realization["measurements"] = {"emmy_us": 1.0, "reference_us": 2.0, "reference_backend": "torch"}
-    dump_golden_file(document, path, overwrite=True)
+    document = GoldenFile.load(path)
+    realization = document.configs[0].realizations[0]
+    realization.name = "working.route"
+    realization.pins = {"FAST_MATH": False}
+    realization.knobs = {"PLACE@inner.1/map": "cut"}  # a routing row: the measured price of that kernel set
+    realization.measurements = Measurements(emmy_us=1.0, reference_us=2.0, reference_backend="torch")
+    document.dump(path, overwrite=True)
     return document
 
 
@@ -182,12 +178,12 @@ def test_dynamic_realization_uses_its_own_reference_instead_of_the_first_sibling
 
     path = tmp_path / "working-dynamic.yaml"
     write_trace_inventory(graph, path, ctx=Context.from_target((8, 9)))
-    document = load_golden_file(path)
-    document["configs"][0]["realizations"] = [
-        {"name": "working.m1", "bindings": {"num_tokens": 1}, "pins": {"FAST_MATH": False}},
-        {"name": "working.dynamic", "bindings": {}, "pins": {"FAST_MATH": False}},
+    document = GoldenFile.load(path)
+    document.configs[0].realizations = [
+        Realization(name="working.m1", bindings={"num_tokens": 1}, pins={"FAST_MATH": False}),
+        Realization(name="working.dynamic", bindings={}, pins={"FAST_MATH": False}),
     ]
-    dump_golden_file(document, path, overwrite=True)
+    document.dump(path, overwrite=True)
 
     args = _args(path, realization="working.dynamic")
     resolve_golden_arg(args)
@@ -208,13 +204,13 @@ def test_duplicate_name_requires_target_scoped_working_file(tmp_path, caplog):
 
     path = tmp_path / "working.yaml"
     document = _working_loop(path)
-    second = copy.deepcopy(document["configs"][0])
-    loop = loop_graph_from_wire(document["loops"][second["target"]["loop"]])
+    second = copy.deepcopy(document.configs[0])
+    loop = Graph.from_wire(document.loops[second.target.loop])
     loop.nodes["y"].op = replace(loop.nodes["y"].op, name="working_second_loop")
-    second["target"]["loop"] = len(document["loops"])
-    document["loops"].append(loop_graph_to_wire(loop))
-    document["configs"].append(second)
-    dump_golden_file(document, path, overwrite=True)
+    second.target = replace(second.target, loop=len(document.loops))
+    document.loops.append(loop.to_wire())
+    document.configs.append(second)
+    document.dump(path, overwrite=True)
 
     with pytest.raises(SystemExit) as exc:
         resolve_golden_arg(_args(path))
@@ -222,9 +218,9 @@ def test_duplicate_name_requires_target_scoped_working_file(tmp_path, caplog):
     assert "resolves to 2 different embedded program targets" in caplog.text
 
     scoped = copy.deepcopy(document)
-    scoped["configs"] = [scoped["configs"][1]]
+    scoped.configs = [scoped.configs[1]]
     scoped_path = tmp_path / "working-scoped.yaml"
-    dump_golden_file(scoped, scoped_path, overwrite=True)
+    scoped.dump(scoped_path, overwrite=True)
     args = _args(scoped_path)
     resolve_golden_arg(args)
     assert args._golden_graph.nodes["y"].op.name == "working_second_loop"
@@ -266,7 +262,6 @@ def test_named_frontend_kernel_set_child_stays_pinned_after_greedy_compile(tmp_p
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
     from emmy.compiler.pipeline.search.golden import records_override
     from emmy.compiler.pipeline.search.pins import pinned_knobs
-    from emmy.compiler.torch_wire import graph_to_wire
 
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (Dim(64), Dim(64)), dtype=F16), node_id="x")
@@ -277,10 +272,10 @@ def test_named_frontend_kernel_set_child_stays_pinned_after_greedy_compile(tmp_p
     incumbent = {"WORK": "t32x8", "TILE": "f2x6", "REDUCE": "", "STAGE": "", "RASTER": ""}
     path = tmp_path / "working-kernel-set.yaml"
     loops: list[dict] = []
-    dump_golden_file(
+    GoldenFile.from_wire(
         {
             "compute_cap": [8, 9],
-            "programs": [graph_to_wire(graph)],
+            "programs": [graph.to_wire()],
             "loops": loops,
             "configs": [
                 {
@@ -309,10 +304,8 @@ def test_named_frontend_kernel_set_child_stays_pinned_after_greedy_compile(tmp_p
                     ],
                 }
             ],
-        },
-        path,
-        overwrite=True,
-    )
+        }
+    ).dump(path, overwrite=True)
     args = _args(path, realization="working.parent")
     resolve_golden_arg(args)
     (sample,) = args.golden_configs
@@ -381,7 +374,6 @@ def test_a_kernel_set_name_resolves_inside_the_realization_own_precision_lane(tm
     """Both lanes record their rows under one name; the standard seed must not replay the fast-math split."""
     from emmy.commands.compile import resolve_golden_arg
     from emmy.commands.run import _sample_replay_knobs
-    from emmy.compiler.torch_wire import graph_to_wire
 
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (Dim(64), Dim(64)), dtype=F16), node_id="x")
@@ -391,10 +383,10 @@ def test_a_kernel_set_name_resolves_inside_the_realization_own_precision_lane(tm
     measured = {"measurements": {"emmy_us": 1.0, "reference_us": 2.0, "reference_backend": "torch"}}
     path = tmp_path / "working-two-lanes.yaml"
     loops: list[dict] = []
-    dump_golden_file(
+    GoldenFile.from_wire(
         {
             "compute_cap": [8, 9],
-            "programs": [graph_to_wire(graph)],
+            "programs": [graph.to_wire()],
             "loops": loops,
             "configs": [
                 {
@@ -407,10 +399,8 @@ def test_a_kernel_set_name_resolves_inside_the_realization_own_precision_lane(tm
                     ],
                 }
             ],
-        },
-        path,
-        overwrite=True,
-    )
+        }
+    ).dump(path, overwrite=True)
     args = _args(path, realization="seed")
     resolve_golden_arg(args)
     (sample,) = args.golden_configs
@@ -443,10 +433,10 @@ def test_selected_records_scope_the_tier_and_a_split_regime_publishes_nothing(mo
 
     path = tmp_path / "working.yaml"
     document = _working_loop(path, pins={"FAST_MATH": False, "PLACE@inner.1/map": "cut"})
-    second = copy.deepcopy(document["configs"][0]["realizations"][0])
-    second["pins"]["FAST_MATH"] = True
-    document["configs"][0]["realizations"].append(second)
-    dump_golden_file(document, path, overwrite=True)
+    second = copy.deepcopy(document.configs[0].realizations[0])
+    second.pins["FAST_MATH"] = True
+    document.configs[0].realizations.append(second)
+    document.dump(path, overwrite=True)
     args = _args(path)
 
     resolve_golden_arg(args)
@@ -460,7 +450,7 @@ def test_selected_records_scope_the_tier_and_a_split_regime_publishes_nothing(mo
     assert shared_regime_pins(args._golden_records[:1]) == {"FAST_MATH": False}
 
     # Without --golden PATH the live card's repository corpus is searched, and its matches scope the tier the same way.
-    records = golden.load_golden_records(document)
+    records = document.records()
     monkeypatch.setattr(golden, "goldens_for_live_gpu", lambda: records)
     monkeypatch.setattr(golden, "GOLDEN_RECORDS", records)
     canonical = _args(path, golden=None)
@@ -502,8 +492,8 @@ def test_working_invalid_direct_tune_winner_is_rejected(tmp_path):
 
     path = tmp_path / "working.yaml"
     document = _working_loop(path, state="tuned")
-    document["configs"][0]["realizations"][0]["ranking"]["measured_knobs"] = {"WORK": "w2x2"}
-    dump_golden_file(document, path, overwrite=True)
+    document.configs[0].realizations[0].ranking["measured_knobs"] = {"WORK": "w2x2"}
+    document.dump(path, overwrite=True)
 
     with pytest.raises(SystemExit, match="2"):
         resolve_golden_arg(_args(path))
@@ -571,7 +561,6 @@ def test_constant_cast_fragment_has_no_whole_op_reference(tmp_path, monkeypatch)
     from emmy.compiler import pipeline
     from emmy.compiler.ir.expr import Var
     from emmy.compiler.ir.tensor.ir import IndexMapOp, IndexSource
-    from emmy.compiler.pipeline.search.golden import load_golden_records
 
     # Keep the cast boundary that a larger unfusable consumer region leaves behind.
     monkeypatch.setattr(pipeline, "LOOP_PASSES", [p for p in pipeline.LOOP_PASSES if p != "loop/fusion"])
@@ -586,7 +575,7 @@ def test_constant_cast_fragment_has_no_whole_op_reference(tmp_path, monkeypatch)
     graph.outputs = ["out"]
     path = tmp_path / "cast.yaml"
     write_trace_inventory(graph, path, ctx=Context.from_target((7, 0)))
-    records = load_golden_records(load_golden_file(path))
+    records = GoldenFile.load(path).records()
     fragment = next(record for record in records if record.target_program.inputs == ["out_cast"])
     assert fragment.reference_program is None
 
@@ -698,7 +687,7 @@ def test_embedded_loop_pins_receive_greedy_output_reference(monkeypatch, tmp_pat
     async def fake_pinned(_backend, _source, _pins, **kwargs):
         from emmy.compiler.pipeline.search import golden
 
-        scopes.append(golden.RECORDS_OVERRIDE)  # the pinned rows compile under the target's own records
+        scopes.append(golden.repository.RECORDS_OVERRIDE)  # the pinned rows compile under the target's own records
         seen["ref"] = kwargs["ref"]
         if kwargs["strict_correctness"]:
             seen["strict_reference"] = kwargs["strict_reference"]
@@ -858,12 +847,13 @@ def test_replay_keys_its_cache_by_the_entry_identity(tmp_path):
     spelling recurs on a residual as earlier cuts renumber its tree — and each replays its own
     fork: the entry naming the kernel a fork is offered on reports the arm it spelled there, and a
     same-spelled sibling naming another kernel reports none."""
-    from emmy.compiler.pipeline.search.golden import _replay, golden_record_from_entry, kernel_identity
+    from emmy.compiler.pipeline.search.golden import kernel_identity
+    from emmy.compiler.pipeline.search.golden.decode import _replay
 
     path = tmp_path / "working-route.yaml"
     document = _working_placement_route(path)
-    entry = document["configs"][0]
-    routing = golden_record_from_entry(document, entry, entry["realizations"][0])
+    entry = document.configs[0]
+    routing = document.record(entry, entry.realizations[0])
     owner = replace(routing, identity=kernel_identity(routing))
     other = replace(owner, name="working.other", identity="f" * 64)
 
@@ -895,22 +885,16 @@ def test_recorded_greedy_pick_is_picked_again_under_strict_evidence(tmp_path, ca
     monkeypatch.setenv("EMMY_FAST_MATH", "0")
     from emmy import config
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
-    from emmy.compiler.pipeline.search.golden import (
-        GoldenEntryState,
-        golden_entry_state,
-        golden_record_from_entry,
-        records_override,
-        sole_evidence,
-    )
+    from emmy.compiler.pipeline.search.golden import GoldenEntryState, records_override, sole_evidence
     from emmy.compiler.pipeline.search.pins import pinned_knobs
     from emmy.compiler.pipeline.search.working_golden import greedy_pick_rows, record_greedy_pick
 
     path = tmp_path / "working-route.yaml"
     document = _working_placement_route(path)
-    document.update(gpu_name=card, compute_cap=list(cap))
-    dump_golden_file(document, path, overwrite=True)
-    entry = document["configs"][0]
-    seed = golden_record_from_entry(document, entry, entry["realizations"][0])
+    document.gpu_name, document.compute_cap = card, tuple(cap)
+    document.dump(path, overwrite=True)
+    entry = document.configs[0]
+    seed = document.record(entry, entry.realizations[0])
     ctx = Context.from_target(cap, gpu_name=card)
     watcher, taken = _decision_watcher()
     # The pick to record: the routing row's route pinned decides the cut, the prior the pieces' schedules.
@@ -929,12 +913,12 @@ def test_recorded_greedy_pick_is_picked_again_under_strict_evidence(tmp_path, ca
         reference_backend="same-input-greedy",
     )
 
-    reloaded = load_golden_file(path)
-    added = [row for row in reloaded["configs"][0]["realizations"] if row["name"] in written]
+    reloaded = GoldenFile.load(path)
+    added = [row for row in reloaded.configs[0].realizations if row.name in written]
     assert len(added) == len(rows) + len(taken)
-    assert all(golden_entry_state(row) is GoldenEntryState.VERIFIED and row["identity"] for row in added)
-    assert all(row["pins"] == {"FAST_MATH": False} for row in added)
-    records = [golden_record_from_entry(reloaded, reloaded["configs"][0], row) for row in added]
+    assert all(row.state is GoldenEntryState.VERIFIED and row.identity for row in added)
+    assert all(row.pins == {"FAST_MATH": False} for row in added)
+    records = [reloaded.record(reloaded.configs[0], row) for row in added]
     with sole_evidence(records), pinned_knobs({"FAST_MATH": False}), config.strict_evidence_override(True):
         again = Pipeline.build(CUDA_PASSES).run(seed.target_program.copy(), ctx=ctx, db=None)
     assert greedy_pick_rows(again) == rows
@@ -950,14 +934,14 @@ def test_recorded_composed_pick_is_picked_again_under_strict_evidence(tmp_path, 
     monkeypatch.setenv("EMMY_FAST_MATH", "0")
     from emmy import config
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
-    from emmy.compiler.pipeline.search.golden import golden_record_from_entry, records_override, sole_evidence
+    from emmy.compiler.pipeline.search.golden import records_override, sole_evidence
     from emmy.compiler.pipeline.search.pins import pinned_knobs
     from emmy.compiler.pipeline.search.working_golden import greedy_pick_rows, record_greedy_pick
 
     path = tmp_path / "working-route.yaml"
     document = _working_placement_route(path)
-    entry = document["configs"][0]
-    seed = golden_record_from_entry(document, entry, entry["realizations"][0])
+    entry = document.configs[0]
+    seed = document.record(entry, entry.realizations[0])
     ctx = Context.from_target((8, 9))
     both = {"PLACE@inner.1/map": "cut", "PLACE@inner.1/map.3/map": "cut"}
     watcher, taken = _decision_watcher()
@@ -973,9 +957,9 @@ def test_recorded_composed_pick_is_picked_again_under_strict_evidence(tmp_path, 
         kernels=[(identity, row, 1.0, 2.0) for identity, row in rows],
         reference_backend="same-input-greedy",
     )
-    reloaded = load_golden_file(path)
-    added = [row for row in reloaded["configs"][0]["realizations"] if row["name"] in written]
-    records = [golden_record_from_entry(reloaded, reloaded["configs"][0], row) for row in added]
+    reloaded = GoldenFile.load(path)
+    added = [row for row in reloaded.configs[0].realizations if row.name in written]
+    records = [reloaded.record(reloaded.configs[0], row) for row in added]
     with sole_evidence(records), pinned_knobs({"FAST_MATH": False}), config.strict_evidence_override(True):
         again = Pipeline.build(CUDA_PASSES).run(seed.target_program.copy(), ctx=ctx, db=None)
     assert greedy_pick_rows(again) == rows
@@ -995,7 +979,6 @@ def test_run_records_the_greedy_pick_of_an_embedded_golden(monkeypatch, tmp_path
     from emmy.commands import run as run_module
     from emmy.commands.compile import resolve_golden_arg
     from emmy.compiler import target as target_mod
-    from emmy.compiler.pipeline.search.golden import golden_record_from_entry
 
     path = tmp_path / "working-route.yaml"
     _working_placement_route(path)
@@ -1074,17 +1057,17 @@ def test_run_records_the_greedy_pick_of_an_embedded_golden(monkeypatch, tmp_path
         target_mod.set_target(None)
 
     assert recorded["benches"] == [] and recorded["iso"].status == "ok"
-    document = load_golden_file(path)
-    added = document["configs"][0]["realizations"][1:]
-    routing = [row for row in added if golden_record_from_entry(document, document["configs"][0], row).is_routing]
-    receipts = [row for row in added if not golden_record_from_entry(document, document["configs"][0], row).is_routing]
-    assert routing[0]["knobs"] == {"PLACE@inner.1/map": "cut"} and len(receipts) >= 2
+    document = GoldenFile.load(path)
+    added = document.configs[0].realizations[1:]
+    routing = [row for row in added if document.record(document.configs[0], row).is_routing]
+    receipts = [row for row in added if not document.record(document.configs[0], row).is_routing]
+    assert routing[0].knobs == {"PLACE@inner.1/map": "cut"} and len(receipts) >= 2
     total = sum(range(1, len(receipts) + 1))
     # The root's cut produced every kernel; the residual's cross-CTA split (whichever ``g<n>`` the
     # prior picked) produced every kernel but the piece the cut minted ahead of it (the first
     # launch), so its row is priced without it.
-    assert len(routing) == 2 and re.fullmatch(r"g\d+[ak]", routing[1]["knobs"]["REDUCE"])
-    assert [row["measurements"] for row in routing] == [
+    assert len(routing) == 2 and re.fullmatch(r"g\d+[ak]", routing[1].knobs["REDUCE"])
+    assert [row.measurements.to_wire() for row in routing] == [
         {"emmy_us": pytest.approx(total * 1.0), "reference_us": pytest.approx(total * 2.0), "reference_backend": "same-input-greedy"},
         {
             "emmy_us": pytest.approx((total - 1) * 1.0),
@@ -1092,7 +1075,7 @@ def test_run_records_the_greedy_pick_of_an_embedded_golden(monkeypatch, tmp_path
             "reference_backend": "same-input-greedy",
         },
     ]
-    assert [row["measurements"] for row in receipts] == [
+    assert [row.measurements.to_wire() for row in receipts] == [
         {"emmy_us": pytest.approx((i + 1) * 1.0), "reference_us": pytest.approx((i + 1) * 2.0), "reference_backend": "same-input-greedy"}
         for i in range(len(receipts))
     ]

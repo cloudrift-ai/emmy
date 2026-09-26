@@ -1,4 +1,4 @@
-"""Stable trace-stage Torch IR wire codec."""
+"""Every IR object on the wire — expressions, dims, ops, programs and Loop IR kernels — round-trips through its class."""
 
 from __future__ import annotations
 
@@ -9,7 +9,9 @@ import pytest
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph
+from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import ConstantOp, InputOp
+from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, Builtin, CastExpr, FuncCallExpr, Literal, TernaryExpr, Var
 from emmy.compiler.ir.frontend.ir import (
     CatOp,
@@ -26,6 +28,8 @@ from emmy.compiler.ir.frontend.ir import (
     TransposeOp,
     UnsqueezeOp,
 )
+from emmy.compiler.ir.loop import LoopOp
+from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tensor.ir import (
     BitcastOp,
     CastOp,
@@ -39,17 +43,7 @@ from emmy.compiler.ir.tensor.ir import (
     ScatterOp,
 )
 from emmy.compiler.tensor import Tensor
-from emmy.compiler.torch_wire import (
-    dim_from_wire,
-    dim_to_wire,
-    expr_from_wire,
-    expr_to_wire,
-    graph_from_wire,
-    graph_to_wire,
-    intern_program,
-    op_from_wire,
-    op_to_wire,
-)
+from emmy.compiler.wire import decode, encode, intern
 
 
 @pytest.mark.parametrize(
@@ -65,12 +59,12 @@ from emmy.compiler.torch_wire import (
     ],
 )
 def test_expression_round_trip(expr):
-    assert expr_from_wire(expr_to_wire(expr)) == expr
+    assert decode(encode(expr)) == expr
 
 
 def test_dimension_round_trip_preserves_composite_expression_and_hint():
     dims = [Dim(32), Dim("seq", hint=17), Dim(BinaryExpr("*", Var("seq"), Literal(2, "int")))]
-    restored = [dim_from_wire(dim_to_wire(dim)) for dim in dims]
+    restored = [Dim.from_wire(dim.to_wire()) for dim in dims]
     assert [dim.expr for dim in restored] == [dim.expr for dim in dims]
     assert [dim.hint for dim in restored] == [dim.hint for dim in dims]
 
@@ -116,19 +110,16 @@ def test_dimension_round_trip_preserves_composite_expression_and_hint():
     ],
 )
 def test_operation_round_trip(op):
-    restored = op_from_wire(json.loads(json.dumps(op_to_wire(op))))
+    restored = decode(json.loads(json.dumps(encode(op))))
     assert restored == op
 
 
 def test_conv1d_operation_wire_schema_round_trip():
     op = Conv1dOp(stride=2, padding=3, dilation=4, groups=5)
-    wire = op_to_wire(op)
+    wire = encode(op)
 
-    assert wire == {
-        "op": "torch.conv1d",
-        "attrs": {"stride": 2, "padding": 3, "dilation": 4, "groups": 5},
-    }
-    assert op_from_wire(json.loads(json.dumps(wire))) == op
+    assert wire == {"torch.conv1d": {"stride": 2, "padding": 3, "dilation": 4, "groups": 5}}
+    assert decode(json.loads(json.dumps(wire))) == op
 
 
 def _program() -> Graph:
@@ -142,7 +133,7 @@ def _program() -> Graph:
 
 
 def test_program_round_trip_is_deterministic():
-    wire = graph_to_wire(_program())
+    wire = _program().to_wire()
     assert set(wire) == {"inputs", "outputs", "nodes"}
     assert [node["id"] for node in wire["nodes"]] == ["one", "x", "y"]
     input_node = wire["nodes"][1]
@@ -153,15 +144,15 @@ def test_program_round_trip_is_deterministic():
     }
     assert "attrs" not in input_node
     assert "inputs" not in input_node
-    restored = graph_from_wire(json.loads(json.dumps(wire)))
-    assert graph_to_wire(restored) == wire
+    restored = Graph.from_wire(json.loads(json.dumps(wire)))
+    assert restored.to_wire() == wire
 
 
 def test_program_pool_uses_document_local_indexes_and_deduplicates():
     programs = []
-    assert intern_program(programs, _program()) == 0
-    assert intern_program(programs, _program()) == 0
-    assert programs == [graph_to_wire(_program())]
+    assert intern(programs, _program()) == 0
+    assert intern(programs, _program()) == 0
+    assert programs == [_program().to_wire()]
 
 
 def test_constant_nested_load_ops_and_source_program_round_trip():
@@ -176,25 +167,55 @@ def test_constant_nested_load_ops_and_source_program_round_trip():
         source_graph=source,
     )
 
-    wire = op_to_wire(original)
-    restored = op_from_wire(json.loads(json.dumps(wire)))
+    wire = encode(original)
+    restored = decode(json.loads(json.dumps(wire)))
 
-    assert op_to_wire(restored) == wire
+    assert encode(restored) == wire
 
 
 def test_program_rejects_unknown_ops_and_fields():
-    wire = graph_to_wire(_program())
+    wire = _program().to_wire()
     unknown_op = copy.deepcopy(wire)
     unknown_op["nodes"][-1]["op"] = "torch.future"
     with pytest.raises(ValueError, match="unknown op"):
-        graph_from_wire(unknown_op)
+        Graph.from_wire(unknown_op)
 
     unknown_field = copy.deepcopy(wire)
     unknown_field["nodes"][-1]["attrs"]["future"] = True
     with pytest.raises(ValueError, match="unknown field"):
-        graph_from_wire(unknown_field)
+        Graph.from_wire(unknown_field)
 
     removed_version = copy.deepcopy(wire)
     removed_version["ir_version"] = 1
     with pytest.raises(ValueError, match="unknown field"):
-        graph_from_wire(removed_version)
+        Graph.from_wire(removed_version)
+
+
+def test_loop_graph_round_trip_preserves_structural_body_and_composite_dims() -> None:
+    extent = Dim(BinaryExpr("*", Var("seq"), Literal(2, "int")))
+    body = Body(
+        (
+            Loop(
+                Axis("a0", extent),
+                Body(
+                    (
+                        Load(name="in0", input="x", index=(Var("a0"),)),
+                        Assign(name="v0", op=ElementwiseImpl("relu"), args=("in0",)),
+                        Write(output="y", index=(Var("a0"),), value="v0"),
+                    )
+                ),
+            ),
+        )
+    )
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (extent,), "f16"), node_id="x")
+    graph.add_node(LoopOp(body=body, name="k_relu"), ["x"], Tensor("y", (extent,), "f16"), node_id="y")
+    graph.inputs, graph.outputs = ["x"], ["y"]
+
+    wire = json.loads(json.dumps(graph.to_wire()))
+    restored = Graph.from_wire(wire)
+
+    assert restored.nodes["y"].op.body == body
+    assert restored.nodes["y"].op.name == "k_relu"
+    assert restored.buffer("y").shape == (extent,)
+    assert restored.to_wire() == wire

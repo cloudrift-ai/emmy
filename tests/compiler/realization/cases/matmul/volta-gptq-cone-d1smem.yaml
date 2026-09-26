@@ -23,392 +23,303 @@ programs:
     outputs: [[mul_1, f16, [1, 512, 5120]]]
   - id: p_attn_q_proj_weight_int4_bits
     op: constant
-    attrs:
-      name: p_attn_q_proj_weight_int4_bits
-      value: 4
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
+    attrs: {name: p_attn_q_proj_weight_int4_bits, value: 4}
     outputs: [[p_attn_q_proj_weight_int4_bits, i32, [1]]]
   - id: p_attn_q_proj_weight_int4_bits_bc
     op: tensor.index_map
-    attrs:
-      out_shape: {__tuple__: [{__dim__: 8}]}
-      sources:
-        __tuple__:
-        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    attrs: {out_shape: [8], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
     inputs: [p_attn_q_proj_weight_int4_bits]
     outputs: [[p_attn_q_proj_weight_int4_bits_bc, i32, [8]]]
   - id: p_attn_q_proj_weight_int4_lane_stride
     op: constant
-    attrs:
-      name: p_attn_q_proj_weight_int4_lane_stride
-      value: 32
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
+    attrs: {name: p_attn_q_proj_weight_int4_lane_stride, value: 32}
     outputs: [[p_attn_q_proj_weight_int4_lane_stride, i32, [1]]]
   - id: p_attn_q_proj_weight_int4_lane_stride_bc
     op: tensor.index_map
-    attrs:
-      out_shape: {__tuple__: [{__dim__: 8}]}
-      sources:
-        __tuple__:
-        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    attrs: {out_shape: [8], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
     inputs: [p_attn_q_proj_weight_int4_lane_stride]
     outputs: [[p_attn_q_proj_weight_int4_lane_stride_bc, i32, [8]]]
   - id: p_attn_q_proj_weight_int4_lanes
     op: constant
-    attrs:
-      name: p_attn_q_proj_weight_int4_lanes
-      value: 1
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
+    attrs: {name: p_attn_q_proj_weight_int4_lanes, value: 1}
     outputs: [[p_attn_q_proj_weight_int4_lanes, i32, [1]]]
   - id: p_attn_q_proj_weight_int4_lanes_bc
     op: tensor.index_map
-    attrs:
-      out_shape: {__tuple__: [{__dim__: 8}]}
-      sources:
-        __tuple__:
-        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    attrs: {out_shape: [8], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
     inputs: [p_attn_q_proj_weight_int4_lanes]
     outputs: [[p_attn_q_proj_weight_int4_lanes_bc, i32, [8]]]
   - id: p_attn_q_proj_weight_int4_slots
     op: tensor.range
-    attrs: {start: 0, stop: 8, step: 1, dtype: i32}
+    attrs: {stop: 8, dtype: i32}
     outputs: [[p_attn_q_proj_weight_int4_slots, i32, [8]]]
   - id: p_attn_q_proj_weight_int4_lane
     op: tensor.elementwise
-    attrs: {op: {__elementwise__: remainder}}
+    attrs: {op: remainder}
     inputs: [p_attn_q_proj_weight_int4_slots, p_attn_q_proj_weight_int4_lanes_bc]
     outputs: [[p_attn_q_proj_weight_int4_lane, i32, [8]]]
   - id: p_attn_q_proj_weight_int4_lane_shift
     op: tensor.elementwise
-    attrs: {op: {__elementwise__: multiply}}
+    attrs: {op: multiply}
     inputs: [p_attn_q_proj_weight_int4_lane, p_attn_q_proj_weight_int4_lane_stride_bc]
     outputs: [[p_attn_q_proj_weight_int4_lane_shift, i32, [8]]]
   - id: p_attn_q_proj_weight_int4_run
     op: tensor.elementwise
-    attrs: {op: {__elementwise__: floor_divide}}
+    attrs: {op: floor_divide}
     inputs: [p_attn_q_proj_weight_int4_slots, p_attn_q_proj_weight_int4_lanes_bc]
     outputs: [[p_attn_q_proj_weight_int4_run, i32, [8]]]
   - id: p_attn_q_proj_weight_int4_run_shift
     op: tensor.elementwise
-    attrs: {op: {__elementwise__: multiply}}
+    attrs: {op: multiply}
     inputs: [p_attn_q_proj_weight_int4_run, p_attn_q_proj_weight_int4_bits_bc]
     outputs: [[p_attn_q_proj_weight_int4_run_shift, i32, [8]]]
   - id: p_attn_q_proj_weight_int4_shifts
     op: tensor.elementwise
-    attrs: {op: {__elementwise__: add}}
+    attrs: {op: add}
     inputs: [p_attn_q_proj_weight_int4_lane_shift, p_attn_q_proj_weight_int4_run_shift]
     outputs: [[p_attn_q_proj_weight_int4_shifts, i32, [8]]]
   - id: p_attn_q_proj_weight_integers_mask
     op: constant
-    attrs:
-      name: p_attn_q_proj_weight_integers_mask
-      value: 15
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
+    attrs: {name: p_attn_q_proj_weight_integers_mask, value: 15}
     outputs: [[p_attn_q_proj_weight_integers_mask, i32, [1]]]
   - id: p_attn_q_proj_weight_integers_mask_bc
     op: tensor.index_map
-    attrs:
-      out_shape: {__tuple__: [{__dim__: 640}, {__dim__: 8}, {__dim__: 5120}]}
-      sources:
-        __tuple__:
-        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    attrs: {out_shape: [640, 8, 5120], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
     inputs: [p_attn_q_proj_weight_integers_mask]
     outputs: [[p_attn_q_proj_weight_integers_mask_bc, i32, [640, 8, 5120]]]
   - id: p_attn_q_proj_weight_integers_shift_view
     op: torch.reshape
-    attrs: {shape: {__tuple__: [1, 8, 1]}}
+    attrs: {shape: [1, 8, 1]}
     inputs: [p_attn_q_proj_weight_int4_shifts]
     outputs: [[p_attn_q_proj_weight_integers_shift_view, i32, [1, 8, 1]]]
   - id: p_attn_q_proj_weight_integers_shift_view_bc
     op: tensor.index_map
     attrs:
-      out_shape: {__tuple__: [{__dim__: 640}, {__dim__: 8}, {__dim__: 5120}]}
+      out_shape:
+      - 640
+      - 8
+      - 5120
       sources:
-        __tuple__:
-        - __index_source__:
-            input_idx: 0
-            coord_map:
-            - {literal: {value: 0, dtype: int}}
-            - {var: out_coord_1}
-            - {literal: {value: 0, dtype: int}}
-            select: null
+      - input_idx: 0
+        coord_map:
+        - {literal: {value: 0, dtype: int}}
+        - {var: out_coord_1}
+        - {literal: {value: 0, dtype: int}}
     inputs: [p_attn_q_proj_weight_integers_shift_view]
     outputs: [[p_attn_q_proj_weight_integers_shift_view_bc, i32, [640, 8, 5120]]]
   - id: p_attn_q_proj_weight_qweight
     op: constant
     attrs:
       name: p_attn_q_proj_weight_qweight
-      value: null
-      context_value: null
-      load_ops: {__tuple__: []}
       source_path: model.layers.0.self_attn.q_proj.qweight
-      source_parts: {__tuple__: []}
-      source_shape: {__tuple__: [640, 5120]}
+      source_shape:
+      - 640
+      - 5120
       source_dtype: i32
-      source_graph: null
     outputs: [[p_attn_q_proj_weight_qweight, i32, [640, 5120]]]
   - id: p_attn_q_proj_weight_integers_view
     op: torch.reshape
-    attrs: {shape: {__tuple__: [640, 1, 5120]}}
+    attrs: {shape: [640, 1, 5120]}
     inputs: [p_attn_q_proj_weight_qweight]
     outputs: [[p_attn_q_proj_weight_integers_view, i32, [640, 1, 5120]]]
   - id: p_attn_q_proj_weight_integers_view_bc
     op: tensor.index_map
     attrs:
-      out_shape: {__tuple__: [{__dim__: 640}, {__dim__: 8}, {__dim__: 5120}]}
+      out_shape:
+      - 640
+      - 8
+      - 5120
       sources:
-        __tuple__:
-        - __index_source__:
-            input_idx: 0
-            coord_map:
-            - {var: out_coord_0}
-            - {literal: {value: 0, dtype: int}}
-            - {var: out_coord_2}
-            select: null
+      - input_idx: 0
+        coord_map:
+        - {var: out_coord_0}
+        - {literal: {value: 0, dtype: int}}
+        - {var: out_coord_2}
     inputs: [p_attn_q_proj_weight_integers_view]
     outputs: [[p_attn_q_proj_weight_integers_view_bc, i32, [640, 8, 5120]]]
   - id: p_attn_q_proj_weight_integers_shifted
     op: tensor.elementwise
-    attrs: {op: {__elementwise__: right_shift}}
+    attrs: {op: right_shift}
     inputs: [p_attn_q_proj_weight_integers_view_bc, p_attn_q_proj_weight_integers_shift_view_bc]
     outputs: [[p_attn_q_proj_weight_integers_shifted, i32, [640, 8, 5120]]]
   - id: p_attn_q_proj_weight_integers_nibble
     op: tensor.elementwise
-    attrs: {op: {__elementwise__: bitwise_and}}
+    attrs: {op: bitwise_and}
     inputs: [p_attn_q_proj_weight_integers_shifted, p_attn_q_proj_weight_integers_mask_bc]
     outputs: [[p_attn_q_proj_weight_integers_nibble, i32, [640, 8, 5120]]]
   - id: p_attn_q_proj_weight_integers
     op: torch.reshape
-    attrs: {shape: {__tuple__: [5120, 5120]}}
+    attrs: {shape: [5120, 5120]}
     inputs: [p_attn_q_proj_weight_integers_nibble]
     outputs: [[p_attn_q_proj_weight_integers, i32, [5120, 5120]]]
   - id: p_attn_q_proj_weight_qzeros
     op: constant
     attrs:
       name: p_attn_q_proj_weight_qzeros
-      value: null
-      context_value: null
-      load_ops: {__tuple__: []}
       source_path: model.layers.0.self_attn.q_proj.qzeros
-      source_parts: {__tuple__: []}
-      source_shape: {__tuple__: [40, 640]}
+      source_shape:
+      - 40
+      - 640
       source_dtype: i32
-      source_graph: null
     outputs: [[p_attn_q_proj_weight_qzeros, i32, [40, 640]]]
   - id: p_attn_q_proj_weight_scales
     op: constant
     attrs:
       name: p_attn_q_proj_weight_scales
-      value: null
-      context_value: null
-      load_ops: {__tuple__: []}
       source_path: model.layers.0.self_attn.q_proj.scales
-      source_parts: {__tuple__: []}
-      source_shape: {__tuple__: [40, 5120]}
+      source_shape:
+      - 40
+      - 5120
       source_dtype: f16
-      source_graph: null
     outputs: [[p_attn_q_proj_weight_scales, f16, [40, 5120]]]
   - id: p_attn_q_proj_weight_scales_view
     op: torch.reshape
-    attrs: {shape: {__tuple__: [40, 1, 5120]}}
+    attrs: {shape: [40, 1, 5120]}
     inputs: [p_attn_q_proj_weight_scales]
     outputs: [[p_attn_q_proj_weight_scales_view, f16, [40, 1, 5120]]]
   - id: p_attn_q_proj_weight_scales_view_bc
     op: tensor.index_map
     attrs:
-      out_shape: {__tuple__: [{__dim__: 40}, {__dim__: 128}, {__dim__: 5120}]}
+      out_shape:
+      - 40
+      - 128
+      - 5120
       sources:
-        __tuple__:
-        - __index_source__:
-            input_idx: 0
-            coord_map:
-            - {var: out_coord_0}
-            - {literal: {value: 0, dtype: int}}
-            - {var: out_coord_2}
-            select: null
+      - input_idx: 0
+        coord_map:
+        - {var: out_coord_0}
+        - {literal: {value: 0, dtype: int}}
+        - {var: out_coord_2}
     inputs: [p_attn_q_proj_weight_scales_view]
     outputs: [[p_attn_q_proj_weight_scales_view_bc, f16, [40, 128, 5120]]]
   - id: p_attn_q_proj_weight_scale_values
     op: torch.reshape
-    attrs: {shape: {__tuple__: [5120, 5120]}}
+    attrs: {shape: [5120, 5120]}
     inputs: [p_attn_q_proj_weight_scales_view_bc]
     outputs: [[p_attn_q_proj_weight_scale_values, f16, [5120, 5120]]]
   - id: p_attn_q_proj_weight_zero_bias
     op: constant
-    attrs:
-      name: p_attn_q_proj_weight_zero_bias
-      value: 1
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
+    attrs: {name: p_attn_q_proj_weight_zero_bias, value: 1}
     outputs: [[p_attn_q_proj_weight_zero_bias, i32, [1]]]
   - id: p_attn_q_proj_weight_zero_bias_bc
     op: tensor.index_map
-    attrs:
-      out_shape: {__tuple__: [{__dim__: 40}, {__dim__: 5120}]}
-      sources:
-        __tuple__:
-        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    attrs: {out_shape: [40, 5120], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
     inputs: [p_attn_q_proj_weight_zero_bias]
     outputs: [[p_attn_q_proj_weight_zero_bias_bc, i32, [40, 5120]]]
   - id: p_attn_q_proj_weight_zeros_grouped_mask
     op: constant
-    attrs:
-      name: p_attn_q_proj_weight_zeros_grouped_mask
-      value: 15
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
+    attrs: {name: p_attn_q_proj_weight_zeros_grouped_mask, value: 15}
     outputs: [[p_attn_q_proj_weight_zeros_grouped_mask, i32, [1]]]
   - id: p_attn_q_proj_weight_zeros_grouped_mask_bc
     op: tensor.index_map
-    attrs:
-      out_shape: {__tuple__: [{__dim__: 40}, {__dim__: 640}, {__dim__: 8}]}
-      sources:
-        __tuple__:
-        - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
+    attrs: {out_shape: [40, 640, 8], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
     inputs: [p_attn_q_proj_weight_zeros_grouped_mask]
     outputs: [[p_attn_q_proj_weight_zeros_grouped_mask_bc, i32, [40, 640, 8]]]
   - id: p_attn_q_proj_weight_zeros_grouped_shift_view
     op: torch.reshape
-    attrs: {shape: {__tuple__: [1, 1, 8]}}
+    attrs: {shape: [1, 1, 8]}
     inputs: [p_attn_q_proj_weight_int4_shifts]
     outputs: [[p_attn_q_proj_weight_zeros_grouped_shift_view, i32, [1, 1, 8]]]
   - id: p_attn_q_proj_weight_zeros_grouped_shift_view_bc
     op: tensor.index_map
     attrs:
-      out_shape: {__tuple__: [{__dim__: 40}, {__dim__: 640}, {__dim__: 8}]}
+      out_shape:
+      - 40
+      - 640
+      - 8
       sources:
-        __tuple__:
-        - __index_source__:
-            input_idx: 0
-            coord_map:
-            - {literal: {value: 0, dtype: int}}
-            - {literal: {value: 0, dtype: int}}
-            - {var: out_coord_2}
-            select: null
+      - input_idx: 0
+        coord_map:
+        - {literal: {value: 0, dtype: int}}
+        - {literal: {value: 0, dtype: int}}
+        - {var: out_coord_2}
     inputs: [p_attn_q_proj_weight_zeros_grouped_shift_view]
     outputs: [[p_attn_q_proj_weight_zeros_grouped_shift_view_bc, i32, [40, 640, 8]]]
   - id: p_attn_q_proj_weight_zeros_grouped_view
     op: torch.reshape
-    attrs: {shape: {__tuple__: [40, 640, 1]}}
+    attrs: {shape: [40, 640, 1]}
     inputs: [p_attn_q_proj_weight_qzeros]
     outputs: [[p_attn_q_proj_weight_zeros_grouped_view, i32, [40, 640, 1]]]
   - id: p_attn_q_proj_weight_zeros_grouped_view_bc
     op: tensor.index_map
     attrs:
-      out_shape: {__tuple__: [{__dim__: 40}, {__dim__: 640}, {__dim__: 8}]}
+      out_shape:
+      - 40
+      - 640
+      - 8
       sources:
-        __tuple__:
-        - __index_source__:
-            input_idx: 0
-            coord_map:
-            - {var: out_coord_0}
-            - {var: out_coord_1}
-            - {literal: {value: 0, dtype: int}}
-            select: null
+      - input_idx: 0
+        coord_map:
+        - {var: out_coord_0}
+        - {var: out_coord_1}
+        - {literal: {value: 0, dtype: int}}
     inputs: [p_attn_q_proj_weight_zeros_grouped_view]
     outputs: [[p_attn_q_proj_weight_zeros_grouped_view_bc, i32, [40, 640, 8]]]
   - id: p_attn_q_proj_weight_zeros_grouped_shifted
     op: tensor.elementwise
-    attrs: {op: {__elementwise__: right_shift}}
+    attrs: {op: right_shift}
     inputs: [p_attn_q_proj_weight_zeros_grouped_view_bc, p_attn_q_proj_weight_zeros_grouped_shift_view_bc]
     outputs: [[p_attn_q_proj_weight_zeros_grouped_shifted, i32, [40, 640, 8]]]
   - id: p_attn_q_proj_weight_zeros_grouped_nibble
     op: tensor.elementwise
-    attrs: {op: {__elementwise__: bitwise_and}}
+    attrs: {op: bitwise_and}
     inputs: [p_attn_q_proj_weight_zeros_grouped_shifted, p_attn_q_proj_weight_zeros_grouped_mask_bc]
     outputs: [[p_attn_q_proj_weight_zeros_grouped_nibble, i32, [40, 640, 8]]]
   - id: p_attn_q_proj_weight_zeros_grouped
     op: torch.reshape
-    attrs: {shape: {__tuple__: [40, 5120]}}
+    attrs: {shape: [40, 5120]}
     inputs: [p_attn_q_proj_weight_zeros_grouped_nibble]
     outputs: [[p_attn_q_proj_weight_zeros_grouped, i32, [40, 5120]]]
   - id: p_attn_q_proj_weight_zeros_unbiased
     op: tensor.elementwise
-    attrs: {op: {__elementwise__: add}}
+    attrs: {op: add}
     inputs: [p_attn_q_proj_weight_zeros_grouped, p_attn_q_proj_weight_zero_bias_bc]
     outputs: [[p_attn_q_proj_weight_zeros_unbiased, i32, [40, 5120]]]
   - id: p_attn_q_proj_weight_zeros_view
     op: torch.reshape
-    attrs: {shape: {__tuple__: [40, 1, 5120]}}
+    attrs: {shape: [40, 1, 5120]}
     inputs: [p_attn_q_proj_weight_zeros_unbiased]
     outputs: [[p_attn_q_proj_weight_zeros_view, i32, [40, 1, 5120]]]
   - id: p_attn_q_proj_weight_zeros_view_bc
     op: tensor.index_map
     attrs:
-      out_shape: {__tuple__: [{__dim__: 40}, {__dim__: 128}, {__dim__: 5120}]}
+      out_shape:
+      - 40
+      - 128
+      - 5120
       sources:
-        __tuple__:
-        - __index_source__:
-            input_idx: 0
-            coord_map:
-            - {var: out_coord_0}
-            - {literal: {value: 0, dtype: int}}
-            - {var: out_coord_2}
-            select: null
+      - input_idx: 0
+        coord_map:
+        - {var: out_coord_0}
+        - {literal: {value: 0, dtype: int}}
+        - {var: out_coord_2}
     inputs: [p_attn_q_proj_weight_zeros_view]
     outputs: [[p_attn_q_proj_weight_zeros_view_bc, i32, [40, 128, 5120]]]
   - id: p_attn_q_proj_weight_zeros
     op: torch.reshape
-    attrs: {shape: {__tuple__: [5120, 5120]}}
+    attrs: {shape: [5120, 5120]}
     inputs: [p_attn_q_proj_weight_zeros_view_bc]
     outputs: [[p_attn_q_proj_weight_zeros, i32, [5120, 5120]]]
   - id: p_attn_q_proj_weight_centered
     op: tensor.elementwise
-    attrs: {op: {__elementwise__: subtract}}
+    attrs: {op: subtract}
     inputs: [p_attn_q_proj_weight_integers, p_attn_q_proj_weight_zeros]
     outputs: [[p_attn_q_proj_weight_centered, i32, [5120, 5120]]]
   - id: p_attn_q_proj_weight_values
     op: tensor.elementwise
-    attrs: {op: {__elementwise__: copy}}
     inputs: [p_attn_q_proj_weight_centered]
     outputs: [[p_attn_q_proj_weight_values, f16, [5120, 5120]]]
   - id: p_attn_q_proj_weight_scaled
     op: tensor.elementwise
-    attrs: {op: {__elementwise__: multiply}}
+    attrs: {op: multiply}
     inputs: [p_attn_q_proj_weight_values, p_attn_q_proj_weight_scale_values]
     outputs: [[p_attn_q_proj_weight_scaled, f16, [5120, 5120]]]
   - id: p_attn_q_proj_weight
     op: torch.transpose
-    attrs: {axes: {__tuple__: [1, 0]}}
+    attrs: {axes: [1, 0]}
     inputs: [p_attn_q_proj_weight_scaled]
     outputs: [[p_attn_q_proj_weight, f16, [5120, 5120]]]
   - id: linear
     op: torch.linear
-    attrs: {has_bias: false}
     inputs: [mul_1, p_attn_q_proj_weight]
     outputs: [[linear, f16, [1, 512, 5120]]]
 configs:
@@ -461,491 +372,337 @@ loops:
     outputs: [[mul_1, f16, [1, 512, 5120]]]
   - id: p_attn_q_proj_weight_integers_mask
     op: constant
-    attrs:
-      name: p_attn_q_proj_weight_integers_mask
-      value: 15
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
+    attrs: {name: p_attn_q_proj_weight_integers_mask, value: 15}
     outputs: [[p_attn_q_proj_weight_integers_mask, i32, [1]]]
   - id: p_attn_q_proj_weight_integers_shift_view
     op: constant
     attrs:
       name: p_attn_q_proj_weight_int4_shifts
-      value: null
-      context_value: null
-      load_ops: {__tuple__: [{__op__: {op: torch.reshape, attrs: {shape: {__tuple__: [1, 8, 1]}}}}]}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: {__tuple__: [8]}
+      load_ops:
+      - {torch.reshape: {shape: [1, 8, 1]}}
+      source_shape:
+      - 8
       source_dtype: i32
       source_graph:
-        __program__:
-          inputs: []
-          outputs: [p_attn_q_proj_weight_int4_shifts]
-          nodes:
-          - id: p_attn_q_proj_weight_int4_bits
-            op: constant
-            attrs:
-              name: p_attn_q_proj_weight_int4_bits
-              value: 4
-              context_value: null
-              load_ops: {__tuple__: []}
-              source_path: null
-              source_parts: {__tuple__: []}
-              source_shape: null
-              source_dtype: null
-              source_graph: null
-            outputs: [[p_attn_q_proj_weight_int4_bits, i32, [1]]]
-          - id: p_attn_q_proj_weight_int4_bits_bc
-            op: tensor.index_map
-            attrs:
-              out_shape: {__tuple__: [{__dim__: 8}]}
-              sources:
-                __tuple__:
-                - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
-            inputs: [p_attn_q_proj_weight_int4_bits]
-            outputs: [[p_attn_q_proj_weight_int4_bits_bc, i32, [8]]]
-          - id: p_attn_q_proj_weight_int4_lane_stride
-            op: constant
-            attrs:
-              name: p_attn_q_proj_weight_int4_lane_stride
-              value: 32
-              context_value: null
-              load_ops: {__tuple__: []}
-              source_path: null
-              source_parts: {__tuple__: []}
-              source_shape: null
-              source_dtype: null
-              source_graph: null
-            outputs: [[p_attn_q_proj_weight_int4_lane_stride, i32, [1]]]
-          - id: p_attn_q_proj_weight_int4_lane_stride_bc
-            op: tensor.index_map
-            attrs:
-              out_shape: {__tuple__: [{__dim__: 8}]}
-              sources:
-                __tuple__:
-                - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
-            inputs: [p_attn_q_proj_weight_int4_lane_stride]
-            outputs: [[p_attn_q_proj_weight_int4_lane_stride_bc, i32, [8]]]
-          - id: p_attn_q_proj_weight_int4_lanes
-            op: constant
-            attrs:
-              name: p_attn_q_proj_weight_int4_lanes
-              value: 1
-              context_value: null
-              load_ops: {__tuple__: []}
-              source_path: null
-              source_parts: {__tuple__: []}
-              source_shape: null
-              source_dtype: null
-              source_graph: null
-            outputs: [[p_attn_q_proj_weight_int4_lanes, i32, [1]]]
-          - id: p_attn_q_proj_weight_int4_lanes_bc
-            op: tensor.index_map
-            attrs:
-              out_shape: {__tuple__: [{__dim__: 8}]}
-              sources:
-                __tuple__:
-                - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
-            inputs: [p_attn_q_proj_weight_int4_lanes]
-            outputs: [[p_attn_q_proj_weight_int4_lanes_bc, i32, [8]]]
-          - id: p_attn_q_proj_weight_int4_slots
-            op: constant
-            attrs:
-              name: p_attn_q_proj_weight_int4_slots
-              value: null
-              context_value: null
-              load_ops: {__tuple__: []}
-              source_path: null
-              source_parts: {__tuple__: []}
-              source_shape: {__tuple__: [8]}
-              source_dtype: i32
-              source_graph:
-                __program__:
-                  inputs: []
-                  outputs: [p_attn_q_proj_weight_int4_slots]
-                  nodes:
-                  - id: p_attn_q_proj_weight_int4_slots
-                    op: tensor.range
-                    attrs: {start: 0, stop: 8, step: 1, dtype: i32}
-                    outputs: [[p_attn_q_proj_weight_int4_slots, i32, [8]]]
-            outputs: [[p_attn_q_proj_weight_int4_slots, i32, [8]]]
-          - id: p_attn_q_proj_weight_int4_lane
-            op: tensor.elementwise
-            attrs: {op: {__elementwise__: remainder}}
-            inputs: [p_attn_q_proj_weight_int4_slots, p_attn_q_proj_weight_int4_lanes_bc]
-            outputs: [[p_attn_q_proj_weight_int4_lane, i32, [8]]]
-          - id: p_attn_q_proj_weight_int4_lane_shift
-            op: tensor.elementwise
-            attrs: {op: {__elementwise__: multiply}}
-            inputs: [p_attn_q_proj_weight_int4_lane, p_attn_q_proj_weight_int4_lane_stride_bc]
-            outputs: [[p_attn_q_proj_weight_int4_lane_shift, i32, [8]]]
-          - id: p_attn_q_proj_weight_int4_run
-            op: tensor.elementwise
-            attrs: {op: {__elementwise__: floor_divide}}
-            inputs: [p_attn_q_proj_weight_int4_slots, p_attn_q_proj_weight_int4_lanes_bc]
-            outputs: [[p_attn_q_proj_weight_int4_run, i32, [8]]]
-          - id: p_attn_q_proj_weight_int4_run_shift
-            op: tensor.elementwise
-            attrs: {op: {__elementwise__: multiply}}
-            inputs: [p_attn_q_proj_weight_int4_run, p_attn_q_proj_weight_int4_bits_bc]
-            outputs: [[p_attn_q_proj_weight_int4_run_shift, i32, [8]]]
-          - id: p_attn_q_proj_weight_int4_shifts
-            op: tensor.elementwise
-            attrs: {op: {__elementwise__: add}}
-            inputs: [p_attn_q_proj_weight_int4_lane_shift, p_attn_q_proj_weight_int4_run_shift]
-            outputs: [[p_attn_q_proj_weight_int4_shifts, i32, [8]]]
+        inputs: []
+        outputs: [p_attn_q_proj_weight_int4_shifts]
+        nodes:
+        - id: p_attn_q_proj_weight_int4_bits
+          op: constant
+          attrs: {name: p_attn_q_proj_weight_int4_bits, value: 4}
+          outputs: [[p_attn_q_proj_weight_int4_bits, i32, [1]]]
+        - id: p_attn_q_proj_weight_int4_bits_bc
+          op: tensor.index_map
+          attrs: {out_shape: [8], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
+          inputs: [p_attn_q_proj_weight_int4_bits]
+          outputs: [[p_attn_q_proj_weight_int4_bits_bc, i32, [8]]]
+        - id: p_attn_q_proj_weight_int4_lane_stride
+          op: constant
+          attrs: {name: p_attn_q_proj_weight_int4_lane_stride, value: 32}
+          outputs: [[p_attn_q_proj_weight_int4_lane_stride, i32, [1]]]
+        - id: p_attn_q_proj_weight_int4_lane_stride_bc
+          op: tensor.index_map
+          attrs: {out_shape: [8], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
+          inputs: [p_attn_q_proj_weight_int4_lane_stride]
+          outputs: [[p_attn_q_proj_weight_int4_lane_stride_bc, i32, [8]]]
+        - id: p_attn_q_proj_weight_int4_lanes
+          op: constant
+          attrs: {name: p_attn_q_proj_weight_int4_lanes, value: 1}
+          outputs: [[p_attn_q_proj_weight_int4_lanes, i32, [1]]]
+        - id: p_attn_q_proj_weight_int4_lanes_bc
+          op: tensor.index_map
+          attrs: {out_shape: [8], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
+          inputs: [p_attn_q_proj_weight_int4_lanes]
+          outputs: [[p_attn_q_proj_weight_int4_lanes_bc, i32, [8]]]
+        - id: p_attn_q_proj_weight_int4_slots
+          op: constant
+          attrs:
+            name: p_attn_q_proj_weight_int4_slots
+            source_shape:
+            - 8
+            source_dtype: i32
+            source_graph:
+              inputs: []
+              outputs: [p_attn_q_proj_weight_int4_slots]
+              nodes:
+              - id: p_attn_q_proj_weight_int4_slots
+                op: tensor.range
+                attrs: {stop: 8, dtype: i32}
+                outputs: [[p_attn_q_proj_weight_int4_slots, i32, [8]]]
+          outputs: [[p_attn_q_proj_weight_int4_slots, i32, [8]]]
+        - id: p_attn_q_proj_weight_int4_lane
+          op: tensor.elementwise
+          attrs: {op: remainder}
+          inputs: [p_attn_q_proj_weight_int4_slots, p_attn_q_proj_weight_int4_lanes_bc]
+          outputs: [[p_attn_q_proj_weight_int4_lane, i32, [8]]]
+        - id: p_attn_q_proj_weight_int4_lane_shift
+          op: tensor.elementwise
+          attrs: {op: multiply}
+          inputs: [p_attn_q_proj_weight_int4_lane, p_attn_q_proj_weight_int4_lane_stride_bc]
+          outputs: [[p_attn_q_proj_weight_int4_lane_shift, i32, [8]]]
+        - id: p_attn_q_proj_weight_int4_run
+          op: tensor.elementwise
+          attrs: {op: floor_divide}
+          inputs: [p_attn_q_proj_weight_int4_slots, p_attn_q_proj_weight_int4_lanes_bc]
+          outputs: [[p_attn_q_proj_weight_int4_run, i32, [8]]]
+        - id: p_attn_q_proj_weight_int4_run_shift
+          op: tensor.elementwise
+          attrs: {op: multiply}
+          inputs: [p_attn_q_proj_weight_int4_run, p_attn_q_proj_weight_int4_bits_bc]
+          outputs: [[p_attn_q_proj_weight_int4_run_shift, i32, [8]]]
+        - id: p_attn_q_proj_weight_int4_shifts
+          op: tensor.elementwise
+          attrs: {op: add}
+          inputs: [p_attn_q_proj_weight_int4_lane_shift, p_attn_q_proj_weight_int4_run_shift]
+          outputs: [[p_attn_q_proj_weight_int4_shifts, i32, [8]]]
     outputs: [[p_attn_q_proj_weight_integers_shift_view, i32, [1, 8, 1]]]
   - id: p_attn_q_proj_weight_integers_view
     op: constant
     attrs:
       name: p_attn_q_proj_weight_qweight
-      value: null
-      context_value: null
-      load_ops: {__tuple__: [{__op__: {op: torch.reshape, attrs: {shape: {__tuple__: [640, 1, 5120]}}}}]}
+      load_ops:
+      - {torch.reshape: {shape: [640, 1, 5120]}}
       source_path: model.layers.0.self_attn.q_proj.qweight
-      source_parts: {__tuple__: []}
-      source_shape: {__tuple__: [640, 5120]}
+      source_shape:
+      - 640
+      - 5120
       source_dtype: i32
-      source_graph: null
     outputs: [[p_attn_q_proj_weight_integers_view, i32, [640, 1, 5120]]]
   - id: p_attn_q_proj_weight_scales_view
     op: constant
     attrs:
       name: p_attn_q_proj_weight_scales
-      value: null
-      context_value: null
-      load_ops: {__tuple__: [{__op__: {op: torch.reshape, attrs: {shape: {__tuple__: [40, 1, 5120]}}}}]}
+      load_ops:
+      - {torch.reshape: {shape: [40, 1, 5120]}}
       source_path: model.layers.0.self_attn.q_proj.scales
-      source_parts: {__tuple__: []}
-      source_shape: {__tuple__: [40, 5120]}
+      source_shape:
+      - 40
+      - 5120
       source_dtype: f16
-      source_graph: null
     outputs: [[p_attn_q_proj_weight_scales_view, f16, [40, 1, 5120]]]
   - id: p_attn_q_proj_weight_zero_bias
     op: constant
-    attrs:
-      name: p_attn_q_proj_weight_zero_bias
-      value: 1
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
+    attrs: {name: p_attn_q_proj_weight_zero_bias, value: 1}
     outputs: [[p_attn_q_proj_weight_zero_bias, i32, [1]]]
   - id: p_attn_q_proj_weight_zeros_grouped_mask
     op: constant
-    attrs:
-      name: p_attn_q_proj_weight_zeros_grouped_mask
-      value: 15
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
+    attrs: {name: p_attn_q_proj_weight_zeros_grouped_mask, value: 15}
     outputs: [[p_attn_q_proj_weight_zeros_grouped_mask, i32, [1]]]
   - id: p_attn_q_proj_weight_zeros_grouped_shift_view
     op: constant
     attrs:
       name: p_attn_q_proj_weight_int4_shifts
-      value: null
-      context_value: null
-      load_ops: {__tuple__: [{__op__: {op: torch.reshape, attrs: {shape: {__tuple__: [1, 1, 8]}}}}]}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: {__tuple__: [8]}
+      load_ops:
+      - {torch.reshape: {shape: [1, 1, 8]}}
+      source_shape:
+      - 8
       source_dtype: i32
       source_graph:
-        __program__:
-          inputs: []
-          outputs: [p_attn_q_proj_weight_int4_shifts]
-          nodes:
-          - id: p_attn_q_proj_weight_int4_bits
-            op: constant
-            attrs:
-              name: p_attn_q_proj_weight_int4_bits
-              value: 4
-              context_value: null
-              load_ops: {__tuple__: []}
-              source_path: null
-              source_parts: {__tuple__: []}
-              source_shape: null
-              source_dtype: null
-              source_graph: null
-            outputs: [[p_attn_q_proj_weight_int4_bits, i32, [1]]]
-          - id: p_attn_q_proj_weight_int4_bits_bc
-            op: tensor.index_map
-            attrs:
-              out_shape: {__tuple__: [{__dim__: 8}]}
-              sources:
-                __tuple__:
-                - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
-            inputs: [p_attn_q_proj_weight_int4_bits]
-            outputs: [[p_attn_q_proj_weight_int4_bits_bc, i32, [8]]]
-          - id: p_attn_q_proj_weight_int4_lane_stride
-            op: constant
-            attrs:
-              name: p_attn_q_proj_weight_int4_lane_stride
-              value: 32
-              context_value: null
-              load_ops: {__tuple__: []}
-              source_path: null
-              source_parts: {__tuple__: []}
-              source_shape: null
-              source_dtype: null
-              source_graph: null
-            outputs: [[p_attn_q_proj_weight_int4_lane_stride, i32, [1]]]
-          - id: p_attn_q_proj_weight_int4_lane_stride_bc
-            op: tensor.index_map
-            attrs:
-              out_shape: {__tuple__: [{__dim__: 8}]}
-              sources:
-                __tuple__:
-                - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
-            inputs: [p_attn_q_proj_weight_int4_lane_stride]
-            outputs: [[p_attn_q_proj_weight_int4_lane_stride_bc, i32, [8]]]
-          - id: p_attn_q_proj_weight_int4_lanes
-            op: constant
-            attrs:
-              name: p_attn_q_proj_weight_int4_lanes
-              value: 1
-              context_value: null
-              load_ops: {__tuple__: []}
-              source_path: null
-              source_parts: {__tuple__: []}
-              source_shape: null
-              source_dtype: null
-              source_graph: null
-            outputs: [[p_attn_q_proj_weight_int4_lanes, i32, [1]]]
-          - id: p_attn_q_proj_weight_int4_lanes_bc
-            op: tensor.index_map
-            attrs:
-              out_shape: {__tuple__: [{__dim__: 8}]}
-              sources:
-                __tuple__:
-                - {__index_source__: {input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}], select: null}}
-            inputs: [p_attn_q_proj_weight_int4_lanes]
-            outputs: [[p_attn_q_proj_weight_int4_lanes_bc, i32, [8]]]
-          - id: p_attn_q_proj_weight_int4_slots
-            op: constant
-            attrs:
-              name: p_attn_q_proj_weight_int4_slots
-              value: null
-              context_value: null
-              load_ops: {__tuple__: []}
-              source_path: null
-              source_parts: {__tuple__: []}
-              source_shape: {__tuple__: [8]}
-              source_dtype: i32
-              source_graph:
-                __program__:
-                  inputs: []
-                  outputs: [p_attn_q_proj_weight_int4_slots]
-                  nodes:
-                  - id: p_attn_q_proj_weight_int4_slots
-                    op: tensor.range
-                    attrs: {start: 0, stop: 8, step: 1, dtype: i32}
-                    outputs: [[p_attn_q_proj_weight_int4_slots, i32, [8]]]
-            outputs: [[p_attn_q_proj_weight_int4_slots, i32, [8]]]
-          - id: p_attn_q_proj_weight_int4_lane
-            op: tensor.elementwise
-            attrs: {op: {__elementwise__: remainder}}
-            inputs: [p_attn_q_proj_weight_int4_slots, p_attn_q_proj_weight_int4_lanes_bc]
-            outputs: [[p_attn_q_proj_weight_int4_lane, i32, [8]]]
-          - id: p_attn_q_proj_weight_int4_lane_shift
-            op: tensor.elementwise
-            attrs: {op: {__elementwise__: multiply}}
-            inputs: [p_attn_q_proj_weight_int4_lane, p_attn_q_proj_weight_int4_lane_stride_bc]
-            outputs: [[p_attn_q_proj_weight_int4_lane_shift, i32, [8]]]
-          - id: p_attn_q_proj_weight_int4_run
-            op: tensor.elementwise
-            attrs: {op: {__elementwise__: floor_divide}}
-            inputs: [p_attn_q_proj_weight_int4_slots, p_attn_q_proj_weight_int4_lanes_bc]
-            outputs: [[p_attn_q_proj_weight_int4_run, i32, [8]]]
-          - id: p_attn_q_proj_weight_int4_run_shift
-            op: tensor.elementwise
-            attrs: {op: {__elementwise__: multiply}}
-            inputs: [p_attn_q_proj_weight_int4_run, p_attn_q_proj_weight_int4_bits_bc]
-            outputs: [[p_attn_q_proj_weight_int4_run_shift, i32, [8]]]
-          - id: p_attn_q_proj_weight_int4_shifts
-            op: tensor.elementwise
-            attrs: {op: {__elementwise__: add}}
-            inputs: [p_attn_q_proj_weight_int4_lane_shift, p_attn_q_proj_weight_int4_run_shift]
-            outputs: [[p_attn_q_proj_weight_int4_shifts, i32, [8]]]
+        inputs: []
+        outputs: [p_attn_q_proj_weight_int4_shifts]
+        nodes:
+        - id: p_attn_q_proj_weight_int4_bits
+          op: constant
+          attrs: {name: p_attn_q_proj_weight_int4_bits, value: 4}
+          outputs: [[p_attn_q_proj_weight_int4_bits, i32, [1]]]
+        - id: p_attn_q_proj_weight_int4_bits_bc
+          op: tensor.index_map
+          attrs: {out_shape: [8], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
+          inputs: [p_attn_q_proj_weight_int4_bits]
+          outputs: [[p_attn_q_proj_weight_int4_bits_bc, i32, [8]]]
+        - id: p_attn_q_proj_weight_int4_lane_stride
+          op: constant
+          attrs: {name: p_attn_q_proj_weight_int4_lane_stride, value: 32}
+          outputs: [[p_attn_q_proj_weight_int4_lane_stride, i32, [1]]]
+        - id: p_attn_q_proj_weight_int4_lane_stride_bc
+          op: tensor.index_map
+          attrs: {out_shape: [8], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
+          inputs: [p_attn_q_proj_weight_int4_lane_stride]
+          outputs: [[p_attn_q_proj_weight_int4_lane_stride_bc, i32, [8]]]
+        - id: p_attn_q_proj_weight_int4_lanes
+          op: constant
+          attrs: {name: p_attn_q_proj_weight_int4_lanes, value: 1}
+          outputs: [[p_attn_q_proj_weight_int4_lanes, i32, [1]]]
+        - id: p_attn_q_proj_weight_int4_lanes_bc
+          op: tensor.index_map
+          attrs: {out_shape: [8], sources: [{input_idx: 0, coord_map: [{literal: {value: 0, dtype: int}}]}]}
+          inputs: [p_attn_q_proj_weight_int4_lanes]
+          outputs: [[p_attn_q_proj_weight_int4_lanes_bc, i32, [8]]]
+        - id: p_attn_q_proj_weight_int4_slots
+          op: constant
+          attrs:
+            name: p_attn_q_proj_weight_int4_slots
+            source_shape:
+            - 8
+            source_dtype: i32
+            source_graph:
+              inputs: []
+              outputs: [p_attn_q_proj_weight_int4_slots]
+              nodes:
+              - id: p_attn_q_proj_weight_int4_slots
+                op: tensor.range
+                attrs: {stop: 8, dtype: i32}
+                outputs: [[p_attn_q_proj_weight_int4_slots, i32, [8]]]
+          outputs: [[p_attn_q_proj_weight_int4_slots, i32, [8]]]
+        - id: p_attn_q_proj_weight_int4_lane
+          op: tensor.elementwise
+          attrs: {op: remainder}
+          inputs: [p_attn_q_proj_weight_int4_slots, p_attn_q_proj_weight_int4_lanes_bc]
+          outputs: [[p_attn_q_proj_weight_int4_lane, i32, [8]]]
+        - id: p_attn_q_proj_weight_int4_lane_shift
+          op: tensor.elementwise
+          attrs: {op: multiply}
+          inputs: [p_attn_q_proj_weight_int4_lane, p_attn_q_proj_weight_int4_lane_stride_bc]
+          outputs: [[p_attn_q_proj_weight_int4_lane_shift, i32, [8]]]
+        - id: p_attn_q_proj_weight_int4_run
+          op: tensor.elementwise
+          attrs: {op: floor_divide}
+          inputs: [p_attn_q_proj_weight_int4_slots, p_attn_q_proj_weight_int4_lanes_bc]
+          outputs: [[p_attn_q_proj_weight_int4_run, i32, [8]]]
+        - id: p_attn_q_proj_weight_int4_run_shift
+          op: tensor.elementwise
+          attrs: {op: multiply}
+          inputs: [p_attn_q_proj_weight_int4_run, p_attn_q_proj_weight_int4_bits_bc]
+          outputs: [[p_attn_q_proj_weight_int4_run_shift, i32, [8]]]
+        - id: p_attn_q_proj_weight_int4_shifts
+          op: tensor.elementwise
+          attrs: {op: add}
+          inputs: [p_attn_q_proj_weight_int4_lane_shift, p_attn_q_proj_weight_int4_run_shift]
+          outputs: [[p_attn_q_proj_weight_int4_shifts, i32, [8]]]
     outputs: [[p_attn_q_proj_weight_zeros_grouped_shift_view, i32, [1, 1, 8]]]
   - id: p_attn_q_proj_weight_zeros_grouped_view
     op: constant
     attrs:
       name: p_attn_q_proj_weight_qzeros
-      value: null
-      context_value: null
-      load_ops: {__tuple__: [{__op__: {op: torch.reshape, attrs: {shape: {__tuple__: [40, 640, 1]}}}}]}
+      load_ops:
+      - {torch.reshape: {shape: [40, 640, 1]}}
       source_path: model.layers.0.self_attn.q_proj.qzeros
-      source_parts: {__tuple__: []}
-      source_shape: {__tuple__: [40, 640]}
+      source_shape:
+      - 40
+      - 640
       source_dtype: i32
-      source_graph: null
     outputs: [[p_attn_q_proj_weight_zeros_grouped_view, i32, [40, 640, 1]]]
   - id: linear
     op: loop
     attrs:
       body:
-        body:
-        - class: Load
-          fields:
-            names: {tuple: [in0]}
-            input: p_attn_q_proj_weight_integers_mask
-            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
-            dtype: null
-        - class: Load
-          fields:
-            names: {tuple: [in1]}
-            input: p_attn_q_proj_weight_zero_bias
-            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
-            dtype: null
-        - class: Load
-          fields:
-            names: {tuple: [in2]}
-            input: p_attn_q_proj_weight_zeros_grouped_mask
-            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
-            dtype: null
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 512}, window: null}}
-            body:
+      - Load:
+          names:
+          - in0
+          input: p_attn_q_proj_weight_integers_mask
+          index:
+          - {literal: {value: 0, dtype: int}}
+          dtype: null
+      - Load:
+          names:
+          - in1
+          input: p_attn_q_proj_weight_zero_bias
+          index:
+          - {literal: {value: 0, dtype: int}}
+          dtype: null
+      - Load:
+          names:
+          - in2
+          input: p_attn_q_proj_weight_zeros_grouped_mask
+          index:
+          - {literal: {value: 0, dtype: int}}
+          dtype: null
+      - Loop:
+          axis: {name: a0, extent: 512}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 640}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 640}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 8}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 8}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in3]}
-                              input: p_attn_q_proj_weight_zeros_grouped_shift_view
-                              index:
-                                tuple:
-                                - {expr: {literal: {value: 0, dtype: int}}}
-                                - {expr: {literal: {value: 0, dtype: int}}}
-                                - {expr: {var: a2}}
-                              dtype: null
-                          - class: Loop
-                            fields:
-                              axis: {class: Axis, fields: {name: a3, extent: {dim: 5120}, window: null}}
-                              body:
-                                body:
-                                - class: Load
-                                  fields:
-                                    names: {tuple: [in4]}
-                                    input: p_attn_q_proj_weight_scales_view
-                                    index:
-                                      tuple:
-                                      - {expr: {binary: {op: /, left: {var: a3}, right: {literal: {value: 128, dtype: int}}}}}
-                                      - {expr: {literal: {value: 0, dtype: int}}}
-                                      - expr:
-                                          binary:
-                                            op: +
-                                            left: {binary: {op: '*', left: {literal: {value: 8, dtype: int}}, right: {var: a1}}}
-                                            right: {var: a2}
-                                    dtype: null
-                                - class: Load
-                                  fields:
-                                    names: {tuple: [in5]}
-                                    input: p_attn_q_proj_weight_zeros_grouped_view
-                                    index:
-                                      tuple:
-                                      - {expr: {binary: {op: /, left: {var: a3}, right: {literal: {value: 128, dtype: int}}}}}
-                                      - {expr: {var: a1}}
-                                      - {expr: {literal: {value: 0, dtype: int}}}
-                                    dtype: null
-                                - class: Assign
-                                  fields: {name: v0, op: {elementwise: right_shift}, args: {tuple: [in5, in3]}, dtype: null}
-                                - class: Assign
-                                  fields: {name: v1, op: {elementwise: bitwise_and}, args: {tuple: [v0, in2]}, dtype: null}
-                                - class: Assign
-                                  fields: {name: v2, op: {elementwise: add}, args: {tuple: [in1, v1]}, dtype: null}
-                                - class: Load
-                                  fields:
-                                    names: {tuple: [in6]}
-                                    input: p_attn_q_proj_weight_integers_view
-                                    index:
-                                      tuple:
-                                      - {expr: {binary: {op: /, left: {var: a3}, right: {literal: {value: 8, dtype: int}}}}}
-                                      - {expr: {literal: {value: 0, dtype: int}}}
-                                      - expr:
-                                          binary:
-                                            op: +
-                                            left: {binary: {op: '*', left: {literal: {value: 8, dtype: int}}, right: {var: a1}}}
-                                            right: {var: a2}
-                                    dtype: null
-                                - class: Load
-                                  fields:
-                                    names: {tuple: [in7]}
-                                    input: p_attn_q_proj_weight_integers_shift_view
-                                    index:
-                                      tuple:
-                                      - {expr: {literal: {value: 0, dtype: int}}}
-                                      - {expr: {binary: {op: '%', left: {var: a3}, right: {literal: {value: 8, dtype: int}}}}}
-                                      - {expr: {literal: {value: 0, dtype: int}}}
-                                    dtype: null
-                                - class: Assign
-                                  fields: {name: v3, op: {elementwise: right_shift}, args: {tuple: [in6, in7]}, dtype: null}
-                                - class: Assign
-                                  fields: {name: v4, op: {elementwise: bitwise_and}, args: {tuple: [v3, in0]}, dtype: null}
-                                - class: Assign
-                                  fields: {name: v5, op: {elementwise: subtract}, args: {tuple: [v4, v2]}, dtype: null}
-                                - class: Assign
-                                  fields: {name: v6, op: {elementwise: copy}, args: {tuple: [v5]}, dtype: {dtype: f16}}
-                                - class: Assign
-                                  fields: {name: v7, op: {elementwise: multiply}, args: {tuple: [in4, v6]}, dtype: null}
-                                - class: Load
-                                  fields:
-                                    names: {tuple: [in8]}
-                                    input: mul_1
-                                    index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a0}}, {expr: {var: a3}}]}
-                                    dtype: null
-                                - class: Assign
-                                  fields: {name: v8, op: {elementwise: multiply}, args: {tuple: [in8, v7]}, dtype: {dtype: f32}}
-                                - class: Accum
-                                  fields: {name: acc0, value: v8, op: {elementwise: add}, dtype: null, axes: {tuple: [a3]}, base: null}
-                              unroll: false
-                              seed: true
-                          - class: Write
-                            fields:
-                              output: linear
-                              index:
-                                tuple:
-                                - {expr: {literal: {value: 0, dtype: int}}}
-                                - {expr: {var: a0}}
-                                - expr:
-                                    binary:
-                                      op: +
-                                      left: {binary: {op: '*', left: {literal: {value: 8, dtype: int}}, right: {var: a1}}}
-                                      right: {var: a2}
-                              values: {tuple: [acc0]}
-                              value_dtype: null
-                              atomic: false
-                              swizzle: NONE
-                        unroll: false
-                        seed: true
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - Load:
+                      names:
+                      - in3
+                      input: p_attn_q_proj_weight_zeros_grouped_shift_view
+                      index:
+                      - {literal: {value: 0, dtype: int}}
+                      - {literal: {value: 0, dtype: int}}
+                      - {var: a2}
+                      dtype: null
+                  - Loop:
+                      axis: {name: a3, extent: 5120}
+                      body:
+                      - Load:
+                          names:
+                          - in4
+                          input: p_attn_q_proj_weight_scales_view
+                          index:
+                          - {binary: {op: /, left: {var: a3}, right: {literal: {value: 128, dtype: int}}}}
+                          - {literal: {value: 0, dtype: int}}
+                          - binary:
+                              op: +
+                              left: {binary: {op: '*', left: {literal: {value: 8, dtype: int}}, right: {var: a1}}}
+                              right: {var: a2}
+                          dtype: null
+                      - Load:
+                          names:
+                          - in5
+                          input: p_attn_q_proj_weight_zeros_grouped_view
+                          index:
+                          - {binary: {op: /, left: {var: a3}, right: {literal: {value: 128, dtype: int}}}}
+                          - {var: a1}
+                          - {literal: {value: 0, dtype: int}}
+                          dtype: null
+                      - {Assign: {name: v0, op: right_shift, args: [in5, in3]}}
+                      - {Assign: {name: v1, op: bitwise_and, args: [v0, in2]}}
+                      - {Assign: {name: v2, op: add, args: [in1, v1]}}
+                      - Load:
+                          names:
+                          - in6
+                          input: p_attn_q_proj_weight_integers_view
+                          index:
+                          - {binary: {op: /, left: {var: a3}, right: {literal: {value: 8, dtype: int}}}}
+                          - {literal: {value: 0, dtype: int}}
+                          - binary:
+                              op: +
+                              left: {binary: {op: '*', left: {literal: {value: 8, dtype: int}}, right: {var: a1}}}
+                              right: {var: a2}
+                          dtype: null
+                      - Load:
+                          names:
+                          - in7
+                          input: p_attn_q_proj_weight_integers_shift_view
+                          index:
+                          - {literal: {value: 0, dtype: int}}
+                          - {binary: {op: '%', left: {var: a3}, right: {literal: {value: 8, dtype: int}}}}
+                          - {literal: {value: 0, dtype: int}}
+                          dtype: null
+                      - {Assign: {name: v3, op: right_shift, args: [in6, in7]}}
+                      - {Assign: {name: v4, op: bitwise_and, args: [v3, in0]}}
+                      - {Assign: {name: v5, op: subtract, args: [v4, v2]}}
+                      - {Assign: {name: v6, op: copy, args: [v5], dtype: f16}}
+                      - {Assign: {name: v7, op: multiply, args: [in4, v6]}}
+                      - Load:
+                          names:
+                          - in8
+                          input: mul_1
+                          index:
+                          - {literal: {value: 0, dtype: int}}
+                          - {var: a0}
+                          - {var: a3}
+                          dtype: null
+                      - {Assign: {name: v8, op: multiply, args: [in8, v7], dtype: f32}}
+                      - {Accum: {name: acc0, value: v8, axes: [a3]}}
+                  - Write:
+                      output: linear
+                      index:
+                      - {literal: {value: 0, dtype: int}}
+                      - {var: a0}
+                      - binary:
+                          op: +
+                          left: {binary: {op: '*', left: {literal: {value: 8, dtype: int}}, right: {var: a1}}}
+                          right: {var: a2}
+                      values:
+                      - acc0
+                      value_dtype: null
+                      atomic: false
+                      swizzle: NONE
       name: k_linear_69223f
     inputs: [p_attn_q_proj_weight_zeros_grouped_mask, p_attn_q_proj_weight_zero_bias, p_attn_q_proj_weight_integers_mask, p_attn_q_proj_weight_zeros_grouped_shift_view,
       p_attn_q_proj_weight_zeros_grouped_view, p_attn_q_proj_weight_integers_shift_view, p_attn_q_proj_weight_integers_view, p_attn_q_proj_weight_scales_view,

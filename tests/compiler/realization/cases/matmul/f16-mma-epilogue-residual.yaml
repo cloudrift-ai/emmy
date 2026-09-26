@@ -13,7 +13,6 @@ programs:
     outputs: [[b, f16, [128, 128]]]
   - id: ab
     op: torch.matmul
-    attrs: {has_bias: false}
     inputs: [a, b]
     outputs: [[ab, f32, [128, 128]]]
   - id: r
@@ -21,7 +20,7 @@ programs:
     outputs: [[r, f32, [128, 128]]]
   - id: c
     op: tensor.elementwise
-    attrs: {op: {__elementwise__: add}}
+    attrs: {op: add}
     inputs: [ab, r]
     outputs: [[c, f32, [128, 128]]]
 configs:
@@ -63,60 +62,31 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 128}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 128}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 128}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 128}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 128}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 128}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: a
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: b
-                              index: {tuple: [{expr: {var: a2}}, {expr: {var: a1}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Load
-                      fields:
-                        names: {tuple: [in2]}
-                        input: r
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        dtype: null
-                    - class: Assign
-                      fields: {name: v1, op: {elementwise: add}, args: {tuple: [acc0, in2]}, dtype: null}
-                    - class: Write
-                      fields:
-                        output: c
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [v1]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - {Load: {names: [in0], input: a, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: b, index: [{var: a2}, {var: a1}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - {Load: {names: [in2], input: r, index: [{var: a0}, {var: a1}], dtype: null}}
+              - {Assign: {name: v1, op: add, args: [acc0, in2]}}
+              - Write:
+                  output: c
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - v1
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
       name: k_matmul_a574e5
     inputs: [b, a, r]
     outputs: [[c, f32, [128, 128]]]

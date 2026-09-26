@@ -78,7 +78,7 @@ lifetimes, and telling them apart is the single most useful thing to learn early
 
 | Store | Where it lives | Written by | Consulted by |
 |-------|----------------|------------|--------------|
-| **Golden configs** | model YAML under `recipes/<model>/golden/`; model-agnostic YAML under `search/golden/` | promoted from deployable `run --bench` golden / `--ab` rows (Part 7) | greedy compile — measured rows in the one evidence index (the per-card files, or `--golden PATH`); `run --golden PATH --bench` measures them; `emmy fit` trains the offline prior on them; `emmy eval` datasets |
+| **Golden configs** | model YAML under `recipes/<model>/golden/`; model-agnostic YAML under `search/golden/hardware/` | promoted from deployable `run --bench` golden / `--ab` rows (Part 7) | greedy compile — measured rows in the one evidence index (the per-card files, or `--golden PATH`); `run --golden PATH --bench` measures them; `emmy fit` trains the offline prior on them; `emmy eval` datasets |
 | **Reservoir** | inside the online prior checkpoint (`~/.cache/emmy/online.json`) — the sample of past measurements the model trains on | `emmy tune` — every deployable-regime training row | greedy compile (measured evidence, consulted first); the online prior's own refits |
 | **`perf` table** | the tune DB (`~/.cache/emmy/autotune.db`), beside the `kernel` and `routing` rows its rows are of | `emmy tune` — one measurement per compilable kernel it benched, at the sweep's flags; `run --bench` — every clean pinned row (golden / `--ab`) and the greedy re-bench, per kernel, through the tuner's own writer | greedy compile (measured evidence); the per-variant replay cache |
 | **Dataset DB** | `~/.cache/emmy/dataset.db` — the same tables in a file of their own | `emmy dataset import`, from measurement freezes (`search/freezes/` when one is checked in), golden files and tune DB files — every kernel re-lowered from its definition | `emmy eval prior --dataset db` — **never** a deploy |
@@ -175,7 +175,7 @@ Everything in this table recurs on nearly every page below. The rest of the docu
 | `search/prior/` | The ONE ranking path: a `Prior` ABC with the cold `OfflinePrior` and the `OnlinePrior` composed behind `FallbackPrior` (`load_prior`). `linear_model.py` holds `LinearModel`, the offline prior's scoring function as a value object — the one definition the fitter optimizes and the deploy path ranks by. `diagnostics.py` backs the `eval` reachability / calibration reports; `fit/` is the offline fitter, split by responsibility — `linear.py` trainer, `cv.py` fold harness, `tables.py` the rank-table rendering, `run.py` the pure `emmy fit` run harness. The candidate pool it all trains over is `search/data/group.Group`, one layer down: a pool is data, not a fitter detail. |
 | `search/metrics.py` | What a scored candidate pool is worth, as pure functions over numbers: golden ranks and their tie conventions, `topk_pick` / `topk_regret` against measured latencies, and Spearman ρ. No model, no I/O, no strings, so the callers cannot each hold a slightly different definition — the rank metrics, the three calibration paths and the reachability ratio all resolve here. Rendering lives with the caller (`prior/fit/tables.py` for the fit's rank tables; the other top-k summaries have not been unified yet). |
 | `search/data/` | The harmonized read-view over the three data sources (golden records / DB `perf` rows / prior reservoir): `Sample`, `Dataset`, the derived `ShapeKey` index, and `group.py`'s `Group` — one candidate pool packed as a matrix plus one label per row. The base says nothing about what the labels mean, which is all a ranking metric needs; `GoldenGroup` is the subclass whose labels MARK rows (`golden_ids`) rather than measure them, and only it can be asked which rows are the answer. `group_measured` builds base groups from benched node rows, labelled with measured µs. Nothing here imports `search/prior/`: a group carries every column it was given, and each model class narrows to the ones it wants when it asks for the matrix — `TREE_FEATURES`, the view argued entirely from what a tree can re-derive, lives with the CatBoost trainer for the same reason. |
-| `search/golden.py` | Generic program-backed records, a repository corpus loaded on first evidence access, stable-format validation, and lazy provenance-derived structural indexes (see Part 7). |
+| `search/golden/` | The golden package, one module per job: the file format (`format`), the flattened record and its derivations (`record`), the strict decode (`decode`), the identity memo (`identity`), the repository index and evidence scope (`repository`); see Part 7. |
 | `slice.py` | Isolates one finalized kernel into a standalone graph (used by the inner tune and structural pricing). |
 | `dump.py`, `rule_diff.py` | The dump and `-vv` presentation layers (see the end of this file). |
 | `passes/{frontend,loop,lowering}/` | The rules themselves — documented in [`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md); a per-pass overview table is near the end of this file. |
@@ -553,7 +553,7 @@ At a **schedule fork** (one kernel's row):
    the DB path and mtime, the context key and the card. It holds the DB's CUDA `perf` rows for this
    compile's context key (one lane, because a sweep measures in the regime a deploy compiles in; rows from a
    deliberately non-deployable `--nvcc-flags` run key elsewhere and are simply never consulted) — the tune's own and
-   the **golden rows** in scope, which the compile imports before it picks (`golden_import.evidence_db`): the live
+   the **golden rows** in scope, which the compile imports before it picks (`golden.evidence.evidence_db`): the live
    card's repository files, or the file `--golden PATH` names, once per golden digest into the tune DB — created on
    first use — or into an in-memory instance when the compile has none; a re-recorded file changes the digest, and its
    earlier rows on this card and regime are let go first. Every MEASURED record in the live input regime
@@ -688,7 +688,7 @@ pinned measurement (`run --golden PATH --bench`, `--ab`), training data for the 
 `emmy eval` datasets, and regression reference points.
 
 At deploy a record is tune DB rows, nothing more, and every row is keyed by the kernel it decides
-(`golden_import.import_goldens`). A target's entries in one input regime — the ones that walk one kernel set together
+(`golden.evidence.import_goldens`). A target's entries in one input regime — the ones that walk one kernel set together
 (`golden.siblings_of`) — are lowered once, under the record's pins (the environment it was measured under) and with
 the live decision pins withdrawn (`pins.unpinned_decisions` — the rows filed hold for every pinned compile; the live
 pins decide the live forks, where a row they contradict finds no leaf), each entry deciding the forks of the kernel it
@@ -1227,12 +1227,12 @@ don't invent a third:
 
 **`SearchDB`** (`db.py`) is a SQLite store — one schema in several instances. The tune DB (`EMMY_TUNE_DB`) is what
 compile reads and tune writes — a compile creates it on first use and imports the golden rows in scope into it before
-it picks (`golden_import`); the dataset DB (`EMMY_DATASET_DB`) holds the same tables filled by `emmy dataset
+it picks (`golden/evidence.py`); the dataset DB (`EMMY_DATASET_DB`) holds the same tables filled by `emmy dataset
 import`, and is what the measurement-data readers read, so an import there can never change a deploy. The tables hold
 compilable kernels, the decisions that minted them, and measurements of them — nothing else.
 
 - **`kernel`** — one row per kernel, keyed by its exact identity: the clustered deploy identity beside it, its Loop IR
-  wire (`loop_wire.kernel_wire` — the one-node program of the loop body the kernel was formed from, bound to its own
+  wire (`wire.kernel_wire` — the one-node program of the loop body the kernel was formed from, bound to its own
   buffers), its C name and `formed`; **`kernel_feature`** holds its `S_*` stamps — the identity strategy's, which
   every evidence join keys on, and the features of that same body. The lowering passes take a formed kernel's wire
   back to the kernel — the lift, the twist and the identity strategy give it the same exact identity and stamps
@@ -1360,36 +1360,53 @@ evidence for the greedy compile (Part 3), pinned measurement (`run --golden PATH
 training data for the offline prior, and a regression reference. This Part covers the record format, its layout
 obligations, and the checks that keep the A/B honest.
 
-`golden.py` holds one generic `GoldenRecord` per realization. A structural config references a stable frontend Torch
-IR program by its document-local list index, and its target IS a kernel: an index into the document's `loops` pool,
-which stores that standalone post-fusion Loop IR. A replay, a strict decode and an evidence import start from the
-stored kernel and never re-lower the program. The frontend provenance origins ride beside it (`target: {loop,
+`golden/record.py` holds one generic `GoldenRecord` per realization. A structural config references a stable frontend
+Torch IR program by its document-local list index, and its target IS a kernel: an index into the document's `loops`
+pool, which stores that standalone post-fusion Loop IR. A replay, a strict decode and an evidence import start from
+the stored kernel and never re-lower the program. The frontend provenance origins ride beside it (`target: {loop,
 origins}`) when the kernel computes every one of them whole, so they are its exact Torch twin; they select nothing and
-serve only as the Torch reference. A kernel holding part of an op keeps none.
-Current lowering derives the `S_*` histogram, `ShapeKey`, dtype classification, dynamic status, and operation kind
-lazily; none is serialized. There are no kernel-kind classes or snippet generators.
+serve only as the Torch reference. A kernel holding part of an op keeps none. Current lowering derives the `S_*`
+histogram, `ShapeKey`, dtype classification, dynamic status, and operation kind lazily; none is serialized. There are
+no kernel-kind classes or snippet generators.
 
 **Repository goldens are the entire compatibility boundary.** The embedded Torch IR has no independent version field.
 The golden document has no format version either. When the YAML schema or its Torch IR encoding changes, regenerate
 every recipe-local and model-agnostic repository golden in the same change. The loader does not carry migrations or
 legacy decoders for working files outside the repository; keeping the checked-in corpus loadable is the compatibility
-gate. Programs are
-a plain list and structural configs refer to them by integer index; no program digest or persistent identifier is
-stored. Loop IR
-fallbacks are implementation-level rather than a compatibility promise and follow the same regenerate-the-corpus
-invariant. Frontend graph nodes omit empty `attrs` / `inputs`, store tensors as `[name, dtype, shape]`, and encode static
-dimensions as integers to keep the persistence surface small.
+gate. Programs are a plain list and structural configs refer to them by integer index; no program digest or persistent
+identifier is stored. Loop IR fallbacks are implementation-level rather than a compatibility promise and follow the
+same regenerate-the-corpus invariant. Frontend graph nodes omit empty `attrs` / `inputs`, store tensors as `[name,
+dtype, shape]`, and encode static dimensions as integers to keep the persistence surface small.
 
 **One YAML format serves working candidates and reviewed goldens, but the trust boundaries differ.** Each structural
 config contains only `model`, `program`, `target`, and a non-empty `realizations` array. A realization contains its
-name, positive named dimension `bindings`, and explicit registered input `pins`, plus optional `knobs`, `measurements`,
-and working-only `ranking`. `pins` defines the enumeration regime; `knobs` records the configuration selected and
-measured inside that regime. Empty bindings retain the symbolic program; non-empty bindings specialize it before
-lowering. A working realization may be inventory-only, a proposal, or verified. Repository promotion requires an
-explicit knob mapping (possibly empty for a forkless anchor) and paired positive finite Emmy/reference timings on
-every realization. Missing, one-sided, zero, NaN, infinite measurements, and ranking metadata are rejected before
-they become trusted deploy evidence. `load_golden_file` and `dump_golden_file` validate this format without mutating
-the parsed entries, and dumping refuses replacement unless its caller opts in explicitly.
+name, positive named dimension `bindings`, and explicit registered input `pins`, plus optional `knobs`,
+`measurements`, and working-only `ranking`. `pins` defines the enumeration regime; `knobs` records the configuration
+selected and measured inside that regime. Empty bindings retain the symbolic program; non-empty bindings specialize it
+before lowering. A working realization may be inventory-only, a proposal, or verified. Repository promotion requires
+an explicit knob mapping (possibly empty for a forkless anchor) and paired positive finite Emmy/reference timings on
+every realization. Missing, one-sided, zero, NaN, infinite measurements, and ranking metadata are rejected before they
+become trusted deploy evidence. The format is declared once, as the `GoldenFile` classes in `golden/format.py`
+(`Config`, `Target`, `Realization`, `Measurements`, `Latency`): one type-directed walker reads the parsed YAML into
+them and writes them back (every class's `from_wire` / `to_wire`), refusing an unknown or missing key by its path, the
+leaf rules (a positive number, a hex digest) live in the constructors, and `GoldenFile.check` holds only the rules
+that cross objects — pool references resolve, pins name known knobs, a kernel set names its siblings, and what a
+repository file may hold. `GoldenFile.load` reads a file, checked as a repository golden when it lives in the
+repository and as a working file otherwise; `GoldenFile.dump` writes one the same way and refuses replacement unless
+its caller opts in explicitly. The program and Loop IR pools stay wires: decoding a kernel builds a Loop op, whose
+construction normalizes the body, and that runs once, where a record's kernel graph is read, never at load — a
+whole-model golden loads in the time of its YAML parse.
+
+**Every IR object writes its own wire.** `emmy/compiler/wire.py` holds one mixin, `Wire`, and one walker. A dataclass
+that mixes it in gets its wire from its init fields (minus the runtime ones it names in `wire_skip`), written by their
+annotations: a field whose annotation names one wire class holds that class's payload bare, a field whose annotation is
+a base class, a union or `Any` holds `{tag: payload}`, and a field at its default is omitted. A class whose wire is not
+its fields — `Dim`, `Tensor`, `Body`, `Graph`, `DataType`, `ElementwiseImpl`, `Var`, `Builtin` — overrides `to_wire` /
+`from_wire`. Every wire class registers its tag (`wire_tag`; the class name by default, the stable `torch.linear` /
+`tensor.reduce` / `loop` names for ops) when it is defined, so a tagged payload decodes without anyone listing the
+classes. A program is `Graph.to_wire()` — nodes in topological order, `{id, op, attrs, inputs, outputs}` — and a
+kernel the same one-node program (`wire.kernel_wire`); `encode` / `decode` serve a standalone expression or dim. There
+is no per-op field table and no second dialect: the Torch program and the Loop IR kernel use the same tags.
 A promoted classic row is already complete: bare `WORK` and `RASTER`, with `TILE`, `REDUCE`, and `STAGE` bare when
 their family has one applicable node and route-qualified (`TILE@map.1/inner`) only when the family is ambiguous.
 `STAGE` records one

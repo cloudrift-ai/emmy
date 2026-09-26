@@ -1,0 +1,3274 @@
+gpu_name: NVIDIA GeForce RTX 4090
+compute_cap:
+- 8
+- 9
+programs:
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f32, [512, 512]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f32, [512, 512]]]
+  - id: matmul
+    op: torch.matmul
+    inputs: [x0, x1]
+    outputs: [[matmul, f32, [512, 512]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f32, [1024, 1024]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f32, [1024, 1024]]]
+  - id: matmul
+    op: torch.matmul
+    inputs: [x0, x1]
+    outputs: [[matmul, f32, [1024, 1024]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f32, [2048, 2048]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f32, [2048, 2048]]]
+  - id: matmul
+    op: torch.matmul
+    inputs: [x0, x1]
+    outputs: [[matmul, f32, [2048, 2048]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f32, [4096, 4096]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f32, [4096, 4096]]]
+  - id: matmul
+    op: torch.matmul
+    inputs: [x0, x1]
+    outputs: [[matmul, f32, [4096, 4096]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [512, 512]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [512, 512]]]
+  - id: matmul
+    op: torch.matmul
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [512, 512]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [1024, 1024]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [1024, 1024]]]
+  - id: matmul
+    op: torch.matmul
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [1024, 1024]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [2048, 2048]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [2048, 2048]]]
+  - id: matmul
+    op: torch.matmul
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [2048, 2048]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [4096, 4096]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [4096, 4096]]]
+  - id: matmul
+    op: torch.matmul
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [4096, 4096]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f32, [{sym: seq_len, hint: 512}, 512]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f32, [512, 512]]]
+  - id: matmul
+    op: torch.matmul
+    inputs: [x0, x1]
+    outputs: [[matmul, f32, [{sym: seq_len, hint: 512}, 512]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [512, 4096]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [4096, 12288]]]
+  - id: matmul
+    op: torch.matmul
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [512, 12288]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [512, 4096]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [4096, 4096]]]
+  - id: matmul
+    op: torch.matmul
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [512, 4096]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [512, 4096]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [4096, 28672]]]
+  - id: matmul
+    op: torch.matmul
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [512, 28672]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [512, 14336]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [14336, 4096]]]
+  - id: matmul
+    op: torch.matmul
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [512, 4096]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [{sym: seq_len, hint: 512}, 4096]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [4096, 12288]]]
+  - id: matmul
+    op: torch.matmul
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [{sym: seq_len, hint: 512}, 12288]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [{sym: seq_len, hint: 512}, 4096]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [4096, 4096]]]
+  - id: matmul
+    op: torch.matmul
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [{sym: seq_len, hint: 512}, 4096]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [{sym: seq_len, hint: 512}, 4096]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [4096, 28672]]]
+  - id: matmul
+    op: torch.matmul
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [{sym: seq_len, hint: 512}, 28672]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [{sym: seq_len, hint: 512}, 14336]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [14336, 4096]]]
+  - id: matmul
+    op: torch.matmul
+    inputs: [x0, x1]
+    outputs: [[matmul, f16, [{sym: seq_len, hint: 512}, 4096]]]
+- inputs: [x]
+  outputs: [relu]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [512, 4096]]]
+  - id: relu
+    op: tensor.elementwise
+    attrs: {op: relu}
+    inputs: [x]
+    outputs: [[relu, f32, [512, 4096]]]
+- inputs: [x]
+  outputs: [relu]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [512, 16384]]]
+  - id: relu
+    op: tensor.elementwise
+    attrs: {op: relu}
+    inputs: [x]
+    outputs: [[relu, f32, [512, 16384]]]
+- inputs: [x]
+  outputs: [relu]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [{sym: seq_len, hint: 512}, 4096]]]
+  - id: relu
+    op: tensor.elementwise
+    attrs: {op: relu}
+    inputs: [x]
+    outputs: [[relu, f32, [{sym: seq_len, hint: 512}, 4096]]]
+- inputs: [x]
+  outputs: [relu]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [{sym: seq_len, hint: 512}, 16384]]]
+  - id: relu
+    op: tensor.elementwise
+    attrs: {op: relu}
+    inputs: [x]
+    outputs: [[relu, f32, [{sym: seq_len, hint: 512}, 16384]]]
+- inputs: [x]
+  outputs: [softmax]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [512, 2048]]]
+  - id: softmax
+    op: torch.softmax
+    inputs: [x]
+    outputs: [[softmax, f32, [512, 2048]]]
+- inputs: [x]
+  outputs: [softmax]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [512, 8192]]]
+  - id: softmax
+    op: torch.softmax
+    inputs: [x]
+    outputs: [[softmax, f32, [512, 8192]]]
+- inputs: [x]
+  outputs: [softmax]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [{sym: seq_len, hint: 512}, 2048]]]
+  - id: softmax
+    op: torch.softmax
+    inputs: [x]
+    outputs: [[softmax, f32, [{sym: seq_len, hint: 512}, 2048]]]
+- inputs: [x]
+  outputs: [softmax]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [{sym: seq_len, hint: 512}, 8192]]]
+  - id: softmax
+    op: torch.softmax
+    inputs: [x]
+    outputs: [[softmax, f32, [{sym: seq_len, hint: 512}, 8192]]]
+- inputs: [x]
+  outputs: [sum_1]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [512, 2048]]]
+  - id: sum_1_keepdim
+    op: tensor.reduce
+    attrs: {axis: -1}
+    inputs: [x]
+    outputs: [[sum_1_keepdim, f32, [512, 1]]]
+  - id: sum_1
+    op: tensor.index_map
+    attrs:
+      out_shape:
+      - 512
+      sources:
+      - {input_idx: 0, coord_map: [{var: out_coord_0}, {literal: {value: 0, dtype: int}}]}
+    inputs: [sum_1_keepdim]
+    outputs: [[sum_1, f32, [512]]]
+- inputs: [x]
+  outputs: [sum_1]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [512, 8192]]]
+  - id: sum_1_keepdim
+    op: tensor.reduce
+    attrs: {axis: -1}
+    inputs: [x]
+    outputs: [[sum_1_keepdim, f32, [512, 1]]]
+  - id: sum_1
+    op: tensor.index_map
+    attrs:
+      out_shape:
+      - 512
+      sources:
+      - {input_idx: 0, coord_map: [{var: out_coord_0}, {literal: {value: 0, dtype: int}}]}
+    inputs: [sum_1_keepdim]
+    outputs: [[sum_1, f32, [512]]]
+- inputs: [x]
+  outputs: [sum_1]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [{sym: seq_len, hint: 512}, 2048]]]
+  - id: sum_1_keepdim
+    op: tensor.reduce
+    attrs: {axis: -1}
+    inputs: [x]
+    outputs: [[sum_1_keepdim, f32, [{sym: seq_len, hint: 512}, 1]]]
+  - id: sum_1
+    op: tensor.index_map
+    attrs:
+      out_shape:
+      - {sym: seq_len, hint: 512}
+      sources:
+      - {input_idx: 0, coord_map: [{var: out_coord_0}, {literal: {value: 0, dtype: int}}]}
+    inputs: [sum_1_keepdim]
+    outputs: [[sum_1, f32, [{sym: seq_len, hint: 512}]]]
+- inputs: [x]
+  outputs: [sum_1]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [{sym: seq_len, hint: 512}, 8192]]]
+  - id: sum_1_keepdim
+    op: tensor.reduce
+    attrs: {axis: -1}
+    inputs: [x]
+    outputs: [[sum_1_keepdim, f32, [{sym: seq_len, hint: 512}, 1]]]
+  - id: sum_1
+    op: tensor.index_map
+    attrs:
+      out_shape:
+      - {sym: seq_len, hint: 512}
+      sources:
+      - {input_idx: 0, coord_map: [{var: out_coord_0}, {literal: {value: 0, dtype: int}}]}
+    inputs: [sum_1_keepdim]
+    outputs: [[sum_1, f32, [{sym: seq_len, hint: 512}]]]
+- inputs: [x]
+  outputs: [rms_norm]
+  nodes:
+  - id: p_weight
+    op: constant
+    attrs: {name: p_weight, source_path: weight, source_shape: [2048], source_dtype: float32}
+    outputs: [[p_weight, f32, [2048]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [512, 2048]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    inputs: [x, p_weight]
+    outputs: [[rms_norm, f32, [512, 2048]]]
+- inputs: [x]
+  outputs: [rms_norm]
+  nodes:
+  - id: p_weight
+    op: constant
+    attrs: {name: p_weight, source_path: weight, source_shape: [4096], source_dtype: float32}
+    outputs: [[p_weight, f32, [4096]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [512, 4096]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    inputs: [x, p_weight]
+    outputs: [[rms_norm, f32, [512, 4096]]]
+- inputs: [x]
+  outputs: [rms_norm]
+  nodes:
+  - id: p_weight
+    op: constant
+    attrs: {name: p_weight, source_path: weight, source_shape: [8192], source_dtype: float32}
+    outputs: [[p_weight, f32, [8192]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [512, 8192]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    inputs: [x, p_weight]
+    outputs: [[rms_norm, f32, [512, 8192]]]
+- inputs: [x]
+  outputs: [rms_norm]
+  nodes:
+  - id: p_weight
+    op: constant
+    attrs: {name: p_weight, source_path: weight, source_shape: [2048], source_dtype: float32}
+    outputs: [[p_weight, f32, [2048]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [{sym: seq_len, hint: 512}, 2048]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    inputs: [x, p_weight]
+    outputs: [[rms_norm, f32, [{sym: seq_len, hint: 512}, 2048]]]
+- inputs: [x]
+  outputs: [rms_norm]
+  nodes:
+  - id: p_weight
+    op: constant
+    attrs: {name: p_weight, source_path: weight, source_shape: [4096], source_dtype: float32}
+    outputs: [[p_weight, f32, [4096]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [{sym: seq_len, hint: 512}, 4096]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    inputs: [x, p_weight]
+    outputs: [[rms_norm, f32, [{sym: seq_len, hint: 512}, 4096]]]
+- inputs: [x]
+  outputs: [rms_norm]
+  nodes:
+  - id: p_weight
+    op: constant
+    attrs: {name: p_weight, source_path: weight, source_shape: [8192], source_dtype: float32}
+    outputs: [[p_weight, f32, [8192]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [{sym: seq_len, hint: 512}, 8192]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    inputs: [x, p_weight]
+    outputs: [[rms_norm, f32, [{sym: seq_len, hint: 512}, 8192]]]
+- inputs: [x]
+  outputs: [rms_norm]
+  nodes:
+  - id: p_weight
+    op: constant
+    attrs: {name: p_weight, source_path: weight, source_shape: [3840], source_dtype: float32}
+    outputs: [[p_weight, f32, [3840]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [512, 3840]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    inputs: [x, p_weight]
+    outputs: [[rms_norm, f32, [512, 3840]]]
+- inputs: [x]
+  outputs: [rms_norm]
+  nodes:
+  - id: p_weight
+    op: constant
+    attrs: {name: p_weight, source_path: weight, source_shape: [256], source_dtype: float32}
+    outputs: [[p_weight, f32, [256]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [4096, 256]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    inputs: [x, p_weight]
+    outputs: [[rms_norm, f32, [4096, 256]]]
+- inputs: [x]
+  outputs: [rms_norm]
+  nodes:
+  - id: p_weight
+    op: constant
+    attrs: {name: p_weight, source_path: weight, source_shape: [3840], source_dtype: float32}
+    outputs: [[p_weight, f32, [3840]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [{sym: seq_len, hint: 512}, 3840]]]
+  - id: rms_norm
+    op: torch.rms_norm
+    inputs: [x, p_weight]
+    outputs: [[rms_norm, f32, [{sym: seq_len, hint: 512}, 3840]]]
+- inputs: [x0, x1, x2]
+  outputs: [scaled_dot_product_attention]
+  nodes:
+  - id: scaled_dot_product_attention_c3
+    op: constant
+    attrs: {name: scaled_dot_product_attention_c3, value: 0.0}
+    outputs: [[scaled_dot_product_attention_c3, f16, [1]]]
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [1, 16, 512, 256]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [1, 16, 512, 256]]]
+  - id: x2
+    op: input
+    outputs: [[x2, f16, [1, 16, 512, 256]]]
+  - id: scaled_dot_product_attention
+    op: torch.sdpa
+    attrs: {is_causal: true}
+    inputs: [x0, x1, x2]
+    outputs: [[scaled_dot_product_attention, f16, [1, 16, 512, 256]]]
+configs:
+- program: 0
+  target:
+    loop: 0
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.square.512
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t16x8
+      TILE: f4x8
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/smem-async
+    measurements:
+      emmy_us: 10.1
+      reference_us: 10.8
+      reference_backend: cublas
+- program: 1
+  target:
+    loop: 1
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.square.1024
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t32x8
+      TILE: f4x10
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/smem-async
+    measurements:
+      emmy_us: 58.5
+      reference_us: 45.4
+      reference_backend: cublas
+- program: 2
+  target:
+    loop: 2
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.square.2048
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t32x16
+      TILE: f4x8
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/smem-async
+    measurements:
+      emmy_us: 359.1
+      reference_us: 320.0
+      reference_backend: cublas
+- program: 3
+  target:
+    loop: 3
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.square.4096
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t32x8
+      TILE: f4x26
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/smem-async
+    measurements:
+      emmy_us: 2727.9
+      reference_us: 2458.6
+      reference_backend: cublas
+- program: 4
+  target:
+    loop: 4
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.square.512.fp16
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x2
+      TILE: mma_m16n8k16_f16_f32/f2x2/k4
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/smem-async/p2
+    measurements:
+      emmy_us: 4.9
+      reference_us: 5.8
+      reference_backend: cublas
+  - name: matmul.square.512.fp16
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x2
+      TILE: mma_m16n8k16_f16_f32/f4x2/k2
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/smem-async
+    measurements:
+      emmy_us: 6.0
+      reference_us: 5.8
+      reference_backend: cublas
+  - name: matmul.square.512.fp16
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w1x2
+      TILE: mma_m16n8k16_f16_f16/f2x2/k4
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/smem-async/p2
+    measurements:
+      emmy_us: 4.8
+      reference_us: 5.8
+      reference_backend: cublas
+- program: 5
+  target:
+    loop: 5
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.square.1024.fp16
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x2
+      TILE: mma_m16n8k16_f16_f32/f4x4/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/smem-async
+    measurements:
+      emmy_us: 20.4
+      reference_us: 18.1
+      reference_backend: cublas
+  - name: matmul.square.1024.fp16
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w1x2
+      TILE: mma_m16n8k16_f16_f16/f4x4/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/smem-async
+    measurements:
+      emmy_us: 15.8
+      reference_us: 18.1
+      reference_backend: cublas
+- program: 6
+  target:
+    loop: 6
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.square.2048.fp16
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x4
+      TILE: mma_m16n8k16_f16_f32/f4x4
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/smem-async
+    measurements:
+      emmy_us: 123.4
+      reference_us: 115.2
+      reference_backend: cublas
+  - name: matmul.square.2048.fp16
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/smem-async
+    measurements:
+      emmy_us: 82.7
+      reference_us: 115.2
+      reference_backend: cublas
+- program: 7
+  target:
+    loop: 7
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.square.4096.fp16
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x4
+      TILE: mma_m16n8k16_f16_f32/f4x8
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/smem-async
+    measurements:
+      emmy_us: 869.4
+      reference_us: 822.3
+      reference_backend: cublas
+  - name: matmul.square.4096.fp16
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/smem-async
+    measurements:
+      emmy_us: 603.1
+      reference_us: 822.3
+      reference_backend: cublas
+- program: 8
+  target:
+    loop: 8
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.square.512.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t16x8
+      TILE: f4x8
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/smem-async
+    measurements:
+      emmy_us: 10.6
+      reference_us: 10.8
+      reference_backend: cublas
+- program: 9
+  target:
+    loop: 9
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.qkv.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x4/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/smem-async
+    measurements:
+      emmy_us: 343.7
+      reference_us: 328.0
+      reference_backend: cublas
+  - name: matmul.qkv.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: g2k
+      RASTER: gm8
+      STAGE: d2/smem-async
+    measurements:
+      emmy_us: 267.7
+      reference_us: 328.0
+      reference_backend: cublas
+  - name: matmul.qkv.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x8/k2
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/smem-async
+    measurements:
+      emmy_us: 362.0
+      reference_us: 328.0
+      reference_backend: cublas
+- program: 10
+  target:
+    loop: 10
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.o_proj.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w1x4
+      TILE: mma_m16n8k16_f16_f32/f4x4
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/smem-async
+    measurements:
+      emmy_us: 119.9
+      reference_us: 119.0
+      reference_backend: cublas
+  - name: matmul.o_proj.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x4/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/smem-async/p2
+    measurements:
+      emmy_us: 108.7
+      reference_us: 119.0
+      reference_backend: cublas
+  - name: matmul.o_proj.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/smem-async
+    measurements:
+      emmy_us: 88.4
+      reference_us: 119.0
+      reference_backend: cublas
+- program: 11
+  target:
+    loop: 11
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.mlp_gate_up.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f2x8/k2
+      REDUCE: ''
+      RASTER: gm8
+      STAGE: d2/smem-async
+    measurements:
+      emmy_us: 803.8
+      reference_us: 721.0
+      reference_backend: cublas
+  - name: matmul.mlp_gate_up.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x1
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/smem-async
+    measurements:
+      emmy_us: 664.6
+      reference_us: 721.0
+      reference_backend: cublas
+  - name: matmul.mlp_gate_up.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x1
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/smem-async/p2
+    measurements:
+      emmy_us: 648.2
+      reference_us: 721.0
+      reference_backend: cublas
+- program: 12
+  target:
+    loop: 12
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.mlp_down.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x8
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/smem-async
+    measurements:
+      emmy_us: 371.0
+      reference_us: 388.0
+      reference_backend: cublas
+  - name: matmul.mlp_down.h4096
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/smem-async
+    measurements:
+      emmy_us: 274.0
+      reference_us: 388.0
+      reference_backend: cublas
+- program: 13
+  target:
+    loop: 13
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.qkv.h4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x4/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/smem-async
+    measurements:
+      emmy_us: 343.0
+      reference_us: 330.0
+      reference_backend: cublas
+  - name: matmul.qkv.h4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/smem-async
+    measurements:
+      emmy_us: 298.9
+      reference_us: 330.0
+      reference_backend: cublas
+- program: 14
+  target:
+    loop: 14
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.o_proj.h4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x8
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/smem-async
+    measurements:
+      emmy_us: 119.5
+      reference_us: 112.0
+      reference_backend: cublas
+  - name: matmul.o_proj.h4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/smem-async
+    measurements:
+      emmy_us: 89.3
+      reference_us: 112.0
+      reference_backend: cublas
+- program: 15
+  target:
+    loop: 15
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.mlp_gate_up.h4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w4x1
+      TILE: mma_m16n8k16_f16_f32/f4x8/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/smem-async
+    measurements:
+      emmy_us: 923.6
+      reference_us: 742.0
+      reference_backend: cublas
+  - name: matmul.mlp_gate_up.h4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w4x1
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: ''
+      RASTER: ''
+      STAGE: d2/smem-async
+    measurements:
+      emmy_us: 665.6
+      reference_us: 742.0
+      reference_backend: cublas
+- program: 16
+  target:
+    loop: 16
+    origins:
+    - matmul
+  realizations:
+  - name: matmul.mlp_down.h4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f32/f4x8
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/smem-async
+    measurements:
+      emmy_us: 376.4
+      reference_us: 388.0
+      reference_backend: cublas
+  - name: matmul.mlp_down.h4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: w2x2
+      TILE: mma_m16n8k16_f16_f16/f4x8/k2
+      REDUCE: g2k
+      RASTER: ''
+      STAGE: d2/smem-async
+    measurements:
+      emmy_us: 275.5
+      reference_us: 388.0
+      reference_backend: cublas
+- program: 17
+  target:
+    loop: 17
+    origins:
+    - relu
+  realizations:
+  - name: pointwise.n4096
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      FAST_EXP: false
+      TILE: ''
+      INTERLEAVE_LOADS: true
+      RASTER: ''
+      VECTORIZE_LOADS: true
+    measurements:
+      emmy_us: 4.6
+      reference_us: 5.0
+      reference_backend: torch-eager
+- program: 18
+  target:
+    loop: 18
+    origins:
+    - relu
+  realizations:
+  - name: pointwise.n16384
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+      RASTER: ''
+    measurements:
+      emmy_us: 16.3
+      reference_us: 18.0
+      reference_backend: torch-eager
+- program: 19
+  target:
+    loop: 19
+    origins:
+    - relu
+  realizations:
+  - name: pointwise.n4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f2
+      RASTER: ''
+    measurements:
+      emmy_us: 4.6
+      reference_us: 5.0
+      reference_backend: torch-eager
+- program: 20
+  target:
+    loop: 20
+    origins:
+    - relu
+  realizations:
+  - name: pointwise.n16384.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: f4
+      RASTER: ''
+    measurements:
+      emmy_us: 16.5
+      reference_us: 19.0
+      reference_backend: torch-eager
+- program: 21
+  target:
+    loop: 21
+    origins:
+    - softmax
+  realizations:
+  - name: softmax.k2048
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      REDUCE: coop
+      RASTER: ''
+- program: 22
+  target:
+    loop: 22
+    origins:
+    - softmax
+  realizations:
+  - name: softmax.k8192
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t512
+      REDUCE: coop
+      RASTER: ''
+- program: 23
+  target:
+    loop: 23
+    origins:
+    - softmax
+  realizations:
+  - name: softmax.k2048.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t128
+      REDUCE: coop
+      RASTER: ''
+- program: 24
+  target:
+    loop: 24
+    origins:
+    - softmax
+  realizations:
+  - name: softmax.k8192.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      REDUCE: coop
+      RASTER: ''
+- program: 25
+  target:
+    loop: 25
+    origins:
+    - sum_1
+    - sum_1_keepdim
+  realizations:
+  - name: reduce.k2048
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t128
+      REDUCE: coop
+      RASTER: ''
+    measurements:
+      emmy_us: 2.1
+      reference_us: 4.0
+      reference_backend: torch-eager
+- program: 26
+  target:
+    loop: 26
+    origins:
+    - sum_1
+    - sum_1_keepdim
+  realizations:
+  - name: reduce.k8192
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      REDUCE: coop
+      RASTER: ''
+    measurements:
+      emmy_us: 4.5
+      reference_us: 7.0
+      reference_backend: torch-eager
+- program: 27
+  target:
+    loop: 27
+    origins:
+    - sum_1
+    - sum_1_keepdim
+  realizations:
+  - name: reduce.k2048.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t128
+      REDUCE: coop
+      RASTER: ''
+    measurements:
+      emmy_us: 2.1
+      reference_us: 4.0
+      reference_backend: torch-eager
+- program: 28
+  target:
+    loop: 28
+    origins:
+    - sum_1
+    - sum_1_keepdim
+  realizations:
+  - name: reduce.k8192.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      REDUCE: coop
+      RASTER: ''
+    measurements:
+      emmy_us: 4.6
+      reference_us: 7.0
+      reference_backend: torch-eager
+- program: 29
+  target:
+    loop: 29
+    origins:
+    - rms_norm
+  realizations:
+  - name: rms_norm.k2048
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      REDUCE: coop
+      RASTER: ''
+- program: 30
+  target:
+    loop: 30
+    origins:
+    - rms_norm
+  realizations:
+  - name: rms_norm.k4096
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      REDUCE: coop
+      RASTER: ''
+- program: 31
+  target:
+    loop: 31
+    origins:
+    - rms_norm
+  realizations:
+  - name: rms_norm.k8192
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      REDUCE: coop
+      RASTER: ''
+- program: 32
+  target:
+    loop: 32
+    origins:
+    - rms_norm
+  realizations:
+  - name: rms_norm.k2048.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      REDUCE: coop
+      RASTER: ''
+- program: 33
+  target:
+    loop: 33
+    origins:
+    - rms_norm
+  realizations:
+  - name: rms_norm.k4096.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      REDUCE: coop
+      RASTER: ''
+- program: 34
+  target:
+    loop: 34
+    origins:
+    - rms_norm
+  realizations:
+  - name: rms_norm.k8192.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      REDUCE: coop
+      RASTER: ''
+- program: 35
+  target:
+    loop: 35
+    origins:
+    - rms_norm
+  realizations:
+  - name: rms_norm.k3840
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      REDUCE: coop
+      RASTER: ''
+- program: 36
+  target:
+    loop: 36
+    origins:
+    - rms_norm
+  realizations:
+  - name: gemma4_12b.qknorm.k256
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t64
+      REDUCE: coop
+      RASTER: ''
+- program: 37
+  target:
+    loop: 37
+    origins:
+    - rms_norm
+  realizations:
+  - name: rms_norm.k3840.dynM
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: t256
+      REDUCE: coop
+      RASTER: ''
+- program: 38
+  target:
+    loop: 38
+    origins:
+    - scaled_dot_product_attention
+  realizations:
+  - name: attention.hd256.causal.fused
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE@map.1/twist: mma_m16n8k16_f16_f32/f1x32/k2
+      TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x4/k4
+      REDUCE@map.1/twist: ''
+      REDUCE@map.1/twist.1/inner: ''
+      STAGE@map.1/twist: d2/smem-async
+      STAGE@map.1/twist.1/inner: d2/smem-async
+      WORK: w4x1
+      RASTER: ''
+    identity: 71bcd24f04686b5be00905bae36cd2b0a4140eb713d087b07cb1a3f59a51ab2a
+    measurements:
+      emmy_us: 44.02763769030571
+      reference_us: 44.357817620038986
+      reference_backend: same-input-greedy
+  - name: attention.hd256.causal.fused
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      TILE@map.1/twist: mma_m16n8k16_f16_f16/f1x32/k2
+      TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x4/k2
+      REDUCE@map.1/twist: ''
+      REDUCE@map.1/twist.1/inner: ''
+      STAGE@map.1/twist: d2/smem-async
+      STAGE@map.1/twist.1/inner: d2/smem-async
+      WORK: w4x1
+      RASTER: ''
+    identity: 71bcd24f04686b5be00905bae36cd2b0a4140eb713d087b07cb1a3f59a51ab2a
+    measurements:
+      emmy_us: 40.405333042144775
+      reference_us: 41.64266586303711
+      reference_backend: same-input-greedy
+loops:
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f32, [512, 512]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f32, [512, 512]]]
+  - id: matmul
+    op: loop
+    attrs:
+      body:
+      - Loop:
+          axis: {name: a0, extent: 512}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 512}
+              body:
+              - Loop:
+                  axis: {name: a2, extent: 512}
+                  body:
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a2}, {var: a1}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1]}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: matmul
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
+      name: k_matmul_2967be
+    inputs: [x1, x0]
+    outputs: [[matmul, f32, [512, 512]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f32, [1024, 1024]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f32, [1024, 1024]]]
+  - id: matmul
+    op: loop
+    attrs:
+      body:
+      - Loop:
+          axis: {name: a0, extent: 1024}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 1024}
+              body:
+              - Loop:
+                  axis: {name: a2, extent: 1024}
+                  body:
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a2}, {var: a1}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1]}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: matmul
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
+      name: k_matmul_3e2f2e
+    inputs: [x1, x0]
+    outputs: [[matmul, f32, [1024, 1024]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f32, [2048, 2048]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f32, [2048, 2048]]]
+  - id: matmul
+    op: loop
+    attrs:
+      body:
+      - Loop:
+          axis: {name: a0, extent: 2048}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 2048}
+              body:
+              - Loop:
+                  axis: {name: a2, extent: 2048}
+                  body:
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a2}, {var: a1}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1]}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: matmul
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
+      name: k_matmul_e45c09
+    inputs: [x1, x0]
+    outputs: [[matmul, f32, [2048, 2048]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f32, [4096, 4096]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f32, [4096, 4096]]]
+  - id: matmul
+    op: loop
+    attrs:
+      body:
+      - Loop:
+          axis: {name: a0, extent: 4096}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 4096}
+              body:
+              - Loop:
+                  axis: {name: a2, extent: 4096}
+                  body:
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a2}, {var: a1}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1]}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: matmul
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
+      name: k_matmul_5904ca
+    inputs: [x1, x0]
+    outputs: [[matmul, f32, [4096, 4096]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [512, 512]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [512, 512]]]
+  - id: matmul
+    op: loop
+    attrs:
+      body:
+      - Loop:
+          axis: {name: a0, extent: 512}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 512}
+              body:
+              - Loop:
+                  axis: {name: a2, extent: 512}
+                  body:
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a2}, {var: a1}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: matmul
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
+      name: k_matmul_8cc2bd
+    inputs: [x1, x0]
+    outputs: [[matmul, f16, [512, 512]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [1024, 1024]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [1024, 1024]]]
+  - id: matmul
+    op: loop
+    attrs:
+      body:
+      - Loop:
+          axis: {name: a0, extent: 1024}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 1024}
+              body:
+              - Loop:
+                  axis: {name: a2, extent: 1024}
+                  body:
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a2}, {var: a1}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: matmul
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
+      name: k_matmul_c12c19
+    inputs: [x1, x0]
+    outputs: [[matmul, f16, [1024, 1024]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [2048, 2048]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [2048, 2048]]]
+  - id: matmul
+    op: loop
+    attrs:
+      body:
+      - Loop:
+          axis: {name: a0, extent: 2048}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 2048}
+              body:
+              - Loop:
+                  axis: {name: a2, extent: 2048}
+                  body:
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a2}, {var: a1}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: matmul
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
+      name: k_matmul_e29718
+    inputs: [x1, x0]
+    outputs: [[matmul, f16, [2048, 2048]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [4096, 4096]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [4096, 4096]]]
+  - id: matmul
+    op: loop
+    attrs:
+      body:
+      - Loop:
+          axis: {name: a0, extent: 4096}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 4096}
+              body:
+              - Loop:
+                  axis: {name: a2, extent: 4096}
+                  body:
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a2}, {var: a1}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: matmul
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
+      name: k_matmul_014310
+    inputs: [x1, x0]
+    outputs: [[matmul, f16, [4096, 4096]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f32, [{sym: seq_len, hint: 512}, 512]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f32, [512, 512]]]
+  - id: matmul
+    op: loop
+    attrs:
+      body:
+      - Loop:
+          axis: {name: a0, extent: {sym: seq_len, hint: 512}}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 512}
+              body:
+              - Loop:
+                  axis: {name: a2, extent: 512}
+                  body:
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a2}, {var: a1}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1]}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: matmul
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
+      name: k_matmul_7bc9f7
+    inputs: [x1, x0]
+    outputs: [[matmul, f32, [{sym: seq_len, hint: 512}, 512]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [512, 4096]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [4096, 12288]]]
+  - id: matmul
+    op: loop
+    attrs:
+      body:
+      - Loop:
+          axis: {name: a0, extent: 512}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 12288}
+              body:
+              - Loop:
+                  axis: {name: a2, extent: 4096}
+                  body:
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a2}, {var: a1}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: matmul
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
+      name: k_matmul_e92a63
+    inputs: [x1, x0]
+    outputs: [[matmul, f16, [512, 12288]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [512, 4096]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [4096, 4096]]]
+  - id: matmul
+    op: loop
+    attrs:
+      body:
+      - Loop:
+          axis: {name: a0, extent: 512}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 4096}
+              body:
+              - Loop:
+                  axis: {name: a2, extent: 4096}
+                  body:
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a2}, {var: a1}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: matmul
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
+      name: k_matmul_afac18
+    inputs: [x1, x0]
+    outputs: [[matmul, f16, [512, 4096]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [512, 4096]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [4096, 28672]]]
+  - id: matmul
+    op: loop
+    attrs:
+      body:
+      - Loop:
+          axis: {name: a0, extent: 512}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 28672}
+              body:
+              - Loop:
+                  axis: {name: a2, extent: 4096}
+                  body:
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a2}, {var: a1}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: matmul
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
+      name: k_matmul_ca0539
+    inputs: [x1, x0]
+    outputs: [[matmul, f16, [512, 28672]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [512, 14336]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [14336, 4096]]]
+  - id: matmul
+    op: loop
+    attrs:
+      body:
+      - Loop:
+          axis: {name: a0, extent: 512}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 4096}
+              body:
+              - Loop:
+                  axis: {name: a2, extent: 14336}
+                  body:
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a2}, {var: a1}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: matmul
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
+      name: k_matmul_5d5c27
+    inputs: [x1, x0]
+    outputs: [[matmul, f16, [512, 4096]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [{sym: seq_len, hint: 512}, 4096]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [4096, 12288]]]
+  - id: matmul
+    op: loop
+    attrs:
+      body:
+      - Loop:
+          axis: {name: a0, extent: {sym: seq_len, hint: 512}}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 12288}
+              body:
+              - Loop:
+                  axis: {name: a2, extent: 4096}
+                  body:
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a2}, {var: a1}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: matmul
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
+      name: k_matmul_04d015
+    inputs: [x1, x0]
+    outputs: [[matmul, f16, [{sym: seq_len, hint: 512}, 12288]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [{sym: seq_len, hint: 512}, 4096]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [4096, 4096]]]
+  - id: matmul
+    op: loop
+    attrs:
+      body:
+      - Loop:
+          axis: {name: a0, extent: {sym: seq_len, hint: 512}}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 4096}
+              body:
+              - Loop:
+                  axis: {name: a2, extent: 4096}
+                  body:
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a2}, {var: a1}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: matmul
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
+      name: k_matmul_45d531
+    inputs: [x1, x0]
+    outputs: [[matmul, f16, [{sym: seq_len, hint: 512}, 4096]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [{sym: seq_len, hint: 512}, 4096]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [4096, 28672]]]
+  - id: matmul
+    op: loop
+    attrs:
+      body:
+      - Loop:
+          axis: {name: a0, extent: {sym: seq_len, hint: 512}}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 28672}
+              body:
+              - Loop:
+                  axis: {name: a2, extent: 4096}
+                  body:
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a2}, {var: a1}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: matmul
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
+      name: k_matmul_9f5bb1
+    inputs: [x1, x0]
+    outputs: [[matmul, f16, [{sym: seq_len, hint: 512}, 28672]]]
+- inputs: [x0, x1]
+  outputs: [matmul]
+  nodes:
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [{sym: seq_len, hint: 512}, 14336]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [14336, 4096]]]
+  - id: matmul
+    op: loop
+    attrs:
+      body:
+      - Loop:
+          axis: {name: a0, extent: {sym: seq_len, hint: 512}}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 4096}
+              body:
+              - Loop:
+                  axis: {name: a2, extent: 14336}
+                  body:
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a2}, {var: a1}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: matmul
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
+      name: k_matmul_76a878
+    inputs: [x1, x0]
+    outputs: [[matmul, f16, [{sym: seq_len, hint: 512}, 4096]]]
+- inputs: [x]
+  outputs: [relu]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [512, 4096]]]
+  - id: relu
+    op: loop
+    attrs:
+      body:
+      - Loop:
+          axis: {name: a0, extent: 2097152}
+          body:
+          - Load:
+              names:
+              - in0
+              input: x
+              index:
+              - {binary: {op: //, left: {var: a0}, right: {literal: {value: 4096, dtype: int}}}}
+              - {binary: {op: '%', left: {var: a0}, right: {literal: {value: 4096, dtype: int}}}}
+              dtype: null
+          - {Assign: {name: v0, op: relu, args: [in0]}}
+          - Write:
+              output: relu
+              index:
+              - {binary: {op: //, left: {var: a0}, right: {literal: {value: 4096, dtype: int}}}}
+              - {binary: {op: '%', left: {var: a0}, right: {literal: {value: 4096, dtype: int}}}}
+              values:
+              - v0
+              value_dtype: null
+              atomic: false
+              swizzle: NONE
+      name: k_relu_pointwise
+    inputs: [x]
+    outputs: [[relu, f32, [512, 4096]]]
+- inputs: [x]
+  outputs: [relu]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [512, 16384]]]
+  - id: relu
+    op: loop
+    attrs:
+      body:
+      - Loop:
+          axis: {name: a0, extent: 8388608}
+          body:
+          - Load:
+              names:
+              - in0
+              input: x
+              index:
+              - {binary: {op: //, left: {var: a0}, right: {literal: {value: 16384, dtype: int}}}}
+              - {binary: {op: '%', left: {var: a0}, right: {literal: {value: 16384, dtype: int}}}}
+              dtype: null
+          - {Assign: {name: v0, op: relu, args: [in0]}}
+          - Write:
+              output: relu
+              index:
+              - {binary: {op: //, left: {var: a0}, right: {literal: {value: 16384, dtype: int}}}}
+              - {binary: {op: '%', left: {var: a0}, right: {literal: {value: 16384, dtype: int}}}}
+              values:
+              - v0
+              value_dtype: null
+              atomic: false
+              swizzle: NONE
+      name: k_relu_pointwise
+    inputs: [x]
+    outputs: [[relu, f32, [512, 16384]]]
+- inputs: [x]
+  outputs: [relu]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [{sym: seq_len, hint: 512}, 4096]]]
+  - id: relu
+    op: loop
+    attrs:
+      body:
+      - Loop:
+          axis: {name: a0, extent: {sym: seq_len, hint: 512}}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 4096}
+              body:
+              - {Load: {names: [in0], input: x, index: [{var: a0}, {var: a1}], dtype: null}}
+              - {Assign: {name: v0, op: relu, args: [in0]}}
+              - Write:
+                  output: relu
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - v0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
+      name: k_relu_pointwise
+    inputs: [x]
+    outputs: [[relu, f32, [{sym: seq_len, hint: 512}, 4096]]]
+- inputs: [x]
+  outputs: [relu]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [{sym: seq_len, hint: 512}, 16384]]]
+  - id: relu
+    op: loop
+    attrs:
+      body:
+      - Loop:
+          axis: {name: a0, extent: {sym: seq_len, hint: 512}}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 16384}
+              body:
+              - {Load: {names: [in0], input: x, index: [{var: a0}, {var: a1}], dtype: null}}
+              - {Assign: {name: v0, op: relu, args: [in0]}}
+              - Write:
+                  output: relu
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - v0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
+      name: k_relu_pointwise
+    inputs: [x]
+    outputs: [[relu, f32, [{sym: seq_len, hint: 512}, 16384]]]
+- inputs: [x]
+  outputs: [softmax]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [512, 2048]]]
+  - id: softmax
+    op: loop
+    attrs:
+      body:
+      - Loop:
+          axis: {name: a0, extent: 512}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 2048}
+              body:
+              - {Load: {names: [in0], input: x, index: [{var: a0}, {var: a1}], dtype: null}}
+              - {Accum: {name: acc0, value: in0, op: maximum, axes: [a1]}}
+          - Loop:
+              axis: {name: a1, extent: 2048}
+              body:
+              - {Load: {names: [in1], input: x, index: [{var: a0}, {var: a1}], dtype: null}}
+              - {Assign: {name: v0, op: subtract, args: [in1, acc0]}}
+              - {Assign: {name: v1, op: exp, args: [v0]}}
+              - {Accum: {name: acc1, value: v1, axes: [a1]}}
+          - Loop:
+              axis: {name: a3, extent: 2048}
+              body:
+              - {Load: {names: [in2], input: x, index: [{var: a0}, {var: a3}], dtype: null}}
+              - {Assign: {name: v2, op: subtract, args: [in2, acc0]}}
+              - {Assign: {name: v3, op: exp, args: [v2]}}
+              - {Assign: {name: v4, op: divide, args: [v3, acc1]}}
+              - Write:
+                  output: softmax
+                  index:
+                  - {var: a0}
+                  - {var: a3}
+                  values:
+                  - v4
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
+      name: k_softmax_eba8b4
+    inputs: [x]
+    outputs: [[softmax, f32, [512, 2048]]]
+- inputs: [x]
+  outputs: [softmax]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [512, 8192]]]
+  - id: softmax
+    op: loop
+    attrs:
+      body:
+      - Loop:
+          axis: {name: a0, extent: 512}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 8192}
+              body:
+              - {Load: {names: [in0], input: x, index: [{var: a0}, {var: a1}], dtype: null}}
+              - {Accum: {name: acc0, value: in0, op: maximum, axes: [a1]}}
+          - Loop:
+              axis: {name: a1, extent: 8192}
+              body:
+              - {Load: {names: [in1], input: x, index: [{var: a0}, {var: a1}], dtype: null}}
+              - {Assign: {name: v0, op: subtract, args: [in1, acc0]}}
+              - {Assign: {name: v1, op: exp, args: [v0]}}
+              - {Accum: {name: acc1, value: v1, axes: [a1]}}
+          - Loop:
+              axis: {name: a3, extent: 8192}
+              body:
+              - {Load: {names: [in2], input: x, index: [{var: a0}, {var: a3}], dtype: null}}
+              - {Assign: {name: v2, op: subtract, args: [in2, acc0]}}
+              - {Assign: {name: v3, op: exp, args: [v2]}}
+              - {Assign: {name: v4, op: divide, args: [v3, acc1]}}
+              - Write:
+                  output: softmax
+                  index:
+                  - {var: a0}
+                  - {var: a3}
+                  values:
+                  - v4
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
+      name: k_softmax_6a9038
+    inputs: [x]
+    outputs: [[softmax, f32, [512, 8192]]]
+- inputs: [x]
+  outputs: [softmax]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [{sym: seq_len, hint: 512}, 2048]]]
+  - id: softmax
+    op: loop
+    attrs:
+      body:
+      - Loop:
+          axis: {name: a0, extent: {sym: seq_len, hint: 512}}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 2048}
+              body:
+              - {Load: {names: [in0], input: x, index: [{var: a0}, {var: a1}], dtype: null}}
+              - {Accum: {name: acc0, value: in0, op: maximum, axes: [a1]}}
+          - Loop:
+              axis: {name: a1, extent: 2048}
+              body:
+              - {Load: {names: [in1], input: x, index: [{var: a0}, {var: a1}], dtype: null}}
+              - {Assign: {name: v0, op: subtract, args: [in1, acc0]}}
+              - {Assign: {name: v1, op: exp, args: [v0]}}
+              - {Accum: {name: acc1, value: v1, axes: [a1]}}
+          - Loop:
+              axis: {name: a3, extent: 2048}
+              body:
+              - {Load: {names: [in2], input: x, index: [{var: a0}, {var: a3}], dtype: null}}
+              - {Assign: {name: v2, op: subtract, args: [in2, acc0]}}
+              - {Assign: {name: v3, op: exp, args: [v2]}}
+              - {Assign: {name: v4, op: divide, args: [v3, acc1]}}
+              - Write:
+                  output: softmax
+                  index:
+                  - {var: a0}
+                  - {var: a3}
+                  values:
+                  - v4
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
+      name: k_softmax_6b2248
+    inputs: [x]
+    outputs: [[softmax, f32, [{sym: seq_len, hint: 512}, 2048]]]
+- inputs: [x]
+  outputs: [softmax]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [{sym: seq_len, hint: 512}, 8192]]]
+  - id: softmax
+    op: loop
+    attrs:
+      body:
+      - Loop:
+          axis: {name: a0, extent: {sym: seq_len, hint: 512}}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 8192}
+              body:
+              - {Load: {names: [in0], input: x, index: [{var: a0}, {var: a1}], dtype: null}}
+              - {Accum: {name: acc0, value: in0, op: maximum, axes: [a1]}}
+          - Loop:
+              axis: {name: a1, extent: 8192}
+              body:
+              - {Load: {names: [in1], input: x, index: [{var: a0}, {var: a1}], dtype: null}}
+              - {Assign: {name: v0, op: subtract, args: [in1, acc0]}}
+              - {Assign: {name: v1, op: exp, args: [v0]}}
+              - {Accum: {name: acc1, value: v1, axes: [a1]}}
+          - Loop:
+              axis: {name: a3, extent: 8192}
+              body:
+              - {Load: {names: [in2], input: x, index: [{var: a0}, {var: a3}], dtype: null}}
+              - {Assign: {name: v2, op: subtract, args: [in2, acc0]}}
+              - {Assign: {name: v3, op: exp, args: [v2]}}
+              - {Assign: {name: v4, op: divide, args: [v3, acc1]}}
+              - Write:
+                  output: softmax
+                  index:
+                  - {var: a0}
+                  - {var: a3}
+                  values:
+                  - v4
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
+      name: k_softmax_985923
+    inputs: [x]
+    outputs: [[softmax, f32, [{sym: seq_len, hint: 512}, 8192]]]
+- inputs: [x]
+  outputs: [sum_1]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [512, 2048]]]
+  - id: sum_1
+    op: loop
+    attrs:
+      body:
+      - Loop:
+          axis: {name: a0, extent: 512}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 2048}
+              body:
+              - {Load: {names: [in0], input: x, index: [{var: a0}, {var: a1}], dtype: null}}
+              - {Accum: {name: acc0, value: in0, axes: [a1]}}
+          - Write:
+              output: sum_1
+              index:
+              - {var: a0}
+              values:
+              - acc0
+              value_dtype: null
+              atomic: false
+              swizzle: NONE
+      name: k_sum_1_reduce
+    inputs: [x]
+    outputs: [[sum_1, f32, [512]]]
+- inputs: [x]
+  outputs: [sum_1]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [512, 8192]]]
+  - id: sum_1
+    op: loop
+    attrs:
+      body:
+      - Loop:
+          axis: {name: a0, extent: 512}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 8192}
+              body:
+              - {Load: {names: [in0], input: x, index: [{var: a0}, {var: a1}], dtype: null}}
+              - {Accum: {name: acc0, value: in0, axes: [a1]}}
+          - Write:
+              output: sum_1
+              index:
+              - {var: a0}
+              values:
+              - acc0
+              value_dtype: null
+              atomic: false
+              swizzle: NONE
+      name: k_sum_1_reduce
+    inputs: [x]
+    outputs: [[sum_1, f32, [512]]]
+- inputs: [x]
+  outputs: [sum_1]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [{sym: seq_len, hint: 512}, 2048]]]
+  - id: sum_1
+    op: loop
+    attrs:
+      body:
+      - Loop:
+          axis: {name: a0, extent: {sym: seq_len, hint: 512}}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 2048}
+              body:
+              - {Load: {names: [in0], input: x, index: [{var: a0}, {var: a1}], dtype: null}}
+              - {Accum: {name: acc0, value: in0, axes: [a1]}}
+          - Write:
+              output: sum_1
+              index:
+              - {var: a0}
+              values:
+              - acc0
+              value_dtype: null
+              atomic: false
+              swizzle: NONE
+      name: k_sum_1_reduce
+    inputs: [x]
+    outputs: [[sum_1, f32, [{sym: seq_len, hint: 512}]]]
+- inputs: [x]
+  outputs: [sum_1]
+  nodes:
+  - id: x
+    op: input
+    outputs: [[x, f32, [{sym: seq_len, hint: 512}, 8192]]]
+  - id: sum_1
+    op: loop
+    attrs:
+      body:
+      - Loop:
+          axis: {name: a0, extent: {sym: seq_len, hint: 512}}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 8192}
+              body:
+              - {Load: {names: [in0], input: x, index: [{var: a0}, {var: a1}], dtype: null}}
+              - {Accum: {name: acc0, value: in0, axes: [a1]}}
+          - Write:
+              output: sum_1
+              index:
+              - {var: a0}
+              values:
+              - acc0
+              value_dtype: null
+              atomic: false
+              swizzle: NONE
+      name: k_sum_1_reduce
+    inputs: [x]
+    outputs: [[sum_1, f32, [{sym: seq_len, hint: 512}]]]
+- inputs: [x]
+  outputs: [rms_norm]
+  nodes:
+  - id: p_weight
+    op: constant
+    attrs: {name: p_weight, source_path: weight, source_shape: [2048], source_dtype: float32}
+    outputs: [[p_weight, f32, [2048]]]
+  - id: rms_norm_eps
+    op: constant
+    attrs: {name: rms_norm_eps, value: 1.0e-06}
+    outputs: [[rms_norm_eps, f32, [1]]]
+  - id: rms_norm_mean_count
+    op: constant
+    attrs: {name: rms_norm_mean_count, value: 2048.0}
+    outputs: [[rms_norm_mean_count, f32, [1]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [512, 2048]]]
+  - id: rms_norm
+    op: loop
+    attrs:
+      body:
+      - Load: {names: [in0], input: rms_norm_eps, index: [{literal: {value: 0, dtype: int}}], dtype: null}
+      - Load: {names: [in1], input: rms_norm_mean_count, index: [{literal: {value: 0, dtype: int}}], dtype: null}
+      - Loop:
+          axis: {name: a0, extent: 512}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 2048}
+              body:
+              - {Load: {names: [in2], input: x, index: [{var: a0}, {var: a1}], dtype: null}}
+              - {Assign: {name: v0, op: multiply, args: [in2, in2]}}
+              - {Accum: {name: acc0, value: v0, axes: [a1]}}
+          - {Assign: {name: v1, op: divide, args: [acc0, in1]}}
+          - {Assign: {name: v2, op: add, args: [in0, v1]}}
+          - {Assign: {name: v3, op: rsqrt, args: [v2]}}
+          - Loop:
+              axis: {name: a2, extent: 2048}
+              body:
+              - {Load: {names: [in3], input: x, index: [{var: a0}, {var: a2}], dtype: null}}
+              - {Assign: {name: v4, op: multiply, args: [in3, v3]}}
+              - {Load: {names: [in4], input: p_weight, index: [{var: a2}], dtype: null}}
+              - {Assign: {name: v5, op: multiply, args: [in4, v4]}}
+              - Write:
+                  output: rms_norm
+                  index:
+                  - {var: a0}
+                  - {var: a2}
+                  values:
+                  - v5
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
+      name: k_rms_norm_a414c9
+    inputs: [rms_norm_mean_count, rms_norm_eps, x, p_weight]
+    outputs: [[rms_norm, f32, [512, 2048]]]
+- inputs: [x]
+  outputs: [rms_norm]
+  nodes:
+  - id: p_weight
+    op: constant
+    attrs: {name: p_weight, source_path: weight, source_shape: [4096], source_dtype: float32}
+    outputs: [[p_weight, f32, [4096]]]
+  - id: rms_norm_eps
+    op: constant
+    attrs: {name: rms_norm_eps, value: 1.0e-06}
+    outputs: [[rms_norm_eps, f32, [1]]]
+  - id: rms_norm_mean_count
+    op: constant
+    attrs: {name: rms_norm_mean_count, value: 4096.0}
+    outputs: [[rms_norm_mean_count, f32, [1]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [512, 4096]]]
+  - id: rms_norm
+    op: loop
+    attrs:
+      body:
+      - Load: {names: [in0], input: rms_norm_eps, index: [{literal: {value: 0, dtype: int}}], dtype: null}
+      - Load: {names: [in1], input: rms_norm_mean_count, index: [{literal: {value: 0, dtype: int}}], dtype: null}
+      - Loop:
+          axis: {name: a0, extent: 512}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 4096}
+              body:
+              - {Load: {names: [in2], input: x, index: [{var: a0}, {var: a1}], dtype: null}}
+              - {Assign: {name: v0, op: multiply, args: [in2, in2]}}
+              - {Accum: {name: acc0, value: v0, axes: [a1]}}
+          - {Assign: {name: v1, op: divide, args: [acc0, in1]}}
+          - {Assign: {name: v2, op: add, args: [in0, v1]}}
+          - {Assign: {name: v3, op: rsqrt, args: [v2]}}
+          - Loop:
+              axis: {name: a2, extent: 4096}
+              body:
+              - {Load: {names: [in3], input: x, index: [{var: a0}, {var: a2}], dtype: null}}
+              - {Assign: {name: v4, op: multiply, args: [in3, v3]}}
+              - {Load: {names: [in4], input: p_weight, index: [{var: a2}], dtype: null}}
+              - {Assign: {name: v5, op: multiply, args: [in4, v4]}}
+              - Write:
+                  output: rms_norm
+                  index:
+                  - {var: a0}
+                  - {var: a2}
+                  values:
+                  - v5
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
+      name: k_rms_norm_7f9133
+    inputs: [rms_norm_mean_count, rms_norm_eps, x, p_weight]
+    outputs: [[rms_norm, f32, [512, 4096]]]
+- inputs: [x]
+  outputs: [rms_norm]
+  nodes:
+  - id: p_weight
+    op: constant
+    attrs: {name: p_weight, source_path: weight, source_shape: [8192], source_dtype: float32}
+    outputs: [[p_weight, f32, [8192]]]
+  - id: rms_norm_eps
+    op: constant
+    attrs: {name: rms_norm_eps, value: 1.0e-06}
+    outputs: [[rms_norm_eps, f32, [1]]]
+  - id: rms_norm_mean_count
+    op: constant
+    attrs: {name: rms_norm_mean_count, value: 8192.0}
+    outputs: [[rms_norm_mean_count, f32, [1]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [512, 8192]]]
+  - id: rms_norm
+    op: loop
+    attrs:
+      body:
+      - Load: {names: [in0], input: rms_norm_eps, index: [{literal: {value: 0, dtype: int}}], dtype: null}
+      - Load: {names: [in1], input: rms_norm_mean_count, index: [{literal: {value: 0, dtype: int}}], dtype: null}
+      - Loop:
+          axis: {name: a0, extent: 512}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 8192}
+              body:
+              - {Load: {names: [in2], input: x, index: [{var: a0}, {var: a1}], dtype: null}}
+              - {Assign: {name: v0, op: multiply, args: [in2, in2]}}
+              - {Accum: {name: acc0, value: v0, axes: [a1]}}
+          - {Assign: {name: v1, op: divide, args: [acc0, in1]}}
+          - {Assign: {name: v2, op: add, args: [in0, v1]}}
+          - {Assign: {name: v3, op: rsqrt, args: [v2]}}
+          - Loop:
+              axis: {name: a2, extent: 8192}
+              body:
+              - {Load: {names: [in3], input: x, index: [{var: a0}, {var: a2}], dtype: null}}
+              - {Assign: {name: v4, op: multiply, args: [in3, v3]}}
+              - {Load: {names: [in4], input: p_weight, index: [{var: a2}], dtype: null}}
+              - {Assign: {name: v5, op: multiply, args: [in4, v4]}}
+              - Write:
+                  output: rms_norm
+                  index:
+                  - {var: a0}
+                  - {var: a2}
+                  values:
+                  - v5
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
+      name: k_rms_norm_c74b04
+    inputs: [rms_norm_mean_count, rms_norm_eps, x, p_weight]
+    outputs: [[rms_norm, f32, [512, 8192]]]
+- inputs: [x]
+  outputs: [rms_norm]
+  nodes:
+  - id: p_weight
+    op: constant
+    attrs: {name: p_weight, source_path: weight, source_shape: [2048], source_dtype: float32}
+    outputs: [[p_weight, f32, [2048]]]
+  - id: rms_norm_eps
+    op: constant
+    attrs: {name: rms_norm_eps, value: 1.0e-06}
+    outputs: [[rms_norm_eps, f32, [1]]]
+  - id: rms_norm_mean_count
+    op: constant
+    attrs: {name: rms_norm_mean_count, value: 2048.0}
+    outputs: [[rms_norm_mean_count, f32, [1]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [{sym: seq_len, hint: 512}, 2048]]]
+  - id: rms_norm
+    op: loop
+    attrs:
+      body:
+      - Load: {names: [in0], input: rms_norm_eps, index: [{literal: {value: 0, dtype: int}}], dtype: null}
+      - Load: {names: [in1], input: rms_norm_mean_count, index: [{literal: {value: 0, dtype: int}}], dtype: null}
+      - Loop:
+          axis: {name: a0, extent: {sym: seq_len, hint: 512}}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 2048}
+              body:
+              - {Load: {names: [in2], input: x, index: [{var: a0}, {var: a1}], dtype: null}}
+              - {Assign: {name: v0, op: multiply, args: [in2, in2]}}
+              - {Accum: {name: acc0, value: v0, axes: [a1]}}
+          - {Assign: {name: v1, op: divide, args: [acc0, in1]}}
+          - {Assign: {name: v2, op: add, args: [in0, v1]}}
+          - {Assign: {name: v3, op: rsqrt, args: [v2]}}
+          - Loop:
+              axis: {name: a2, extent: 2048}
+              body:
+              - {Load: {names: [in3], input: x, index: [{var: a0}, {var: a2}], dtype: null}}
+              - {Assign: {name: v4, op: multiply, args: [in3, v3]}}
+              - {Load: {names: [in4], input: p_weight, index: [{var: a2}], dtype: null}}
+              - {Assign: {name: v5, op: multiply, args: [in4, v4]}}
+              - Write:
+                  output: rms_norm
+                  index:
+                  - {var: a0}
+                  - {var: a2}
+                  values:
+                  - v5
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
+      name: k_rms_norm_198dd3
+    inputs: [rms_norm_mean_count, rms_norm_eps, x, p_weight]
+    outputs: [[rms_norm, f32, [{sym: seq_len, hint: 512}, 2048]]]
+- inputs: [x]
+  outputs: [rms_norm]
+  nodes:
+  - id: p_weight
+    op: constant
+    attrs: {name: p_weight, source_path: weight, source_shape: [4096], source_dtype: float32}
+    outputs: [[p_weight, f32, [4096]]]
+  - id: rms_norm_eps
+    op: constant
+    attrs: {name: rms_norm_eps, value: 1.0e-06}
+    outputs: [[rms_norm_eps, f32, [1]]]
+  - id: rms_norm_mean_count
+    op: constant
+    attrs: {name: rms_norm_mean_count, value: 4096.0}
+    outputs: [[rms_norm_mean_count, f32, [1]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [{sym: seq_len, hint: 512}, 4096]]]
+  - id: rms_norm
+    op: loop
+    attrs:
+      body:
+      - Load: {names: [in0], input: rms_norm_eps, index: [{literal: {value: 0, dtype: int}}], dtype: null}
+      - Load: {names: [in1], input: rms_norm_mean_count, index: [{literal: {value: 0, dtype: int}}], dtype: null}
+      - Loop:
+          axis: {name: a0, extent: {sym: seq_len, hint: 512}}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 4096}
+              body:
+              - {Load: {names: [in2], input: x, index: [{var: a0}, {var: a1}], dtype: null}}
+              - {Assign: {name: v0, op: multiply, args: [in2, in2]}}
+              - {Accum: {name: acc0, value: v0, axes: [a1]}}
+          - {Assign: {name: v1, op: divide, args: [acc0, in1]}}
+          - {Assign: {name: v2, op: add, args: [in0, v1]}}
+          - {Assign: {name: v3, op: rsqrt, args: [v2]}}
+          - Loop:
+              axis: {name: a2, extent: 4096}
+              body:
+              - {Load: {names: [in3], input: x, index: [{var: a0}, {var: a2}], dtype: null}}
+              - {Assign: {name: v4, op: multiply, args: [in3, v3]}}
+              - {Load: {names: [in4], input: p_weight, index: [{var: a2}], dtype: null}}
+              - {Assign: {name: v5, op: multiply, args: [in4, v4]}}
+              - Write:
+                  output: rms_norm
+                  index:
+                  - {var: a0}
+                  - {var: a2}
+                  values:
+                  - v5
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
+      name: k_rms_norm_eadfc0
+    inputs: [rms_norm_mean_count, rms_norm_eps, x, p_weight]
+    outputs: [[rms_norm, f32, [{sym: seq_len, hint: 512}, 4096]]]
+- inputs: [x]
+  outputs: [rms_norm]
+  nodes:
+  - id: p_weight
+    op: constant
+    attrs: {name: p_weight, source_path: weight, source_shape: [8192], source_dtype: float32}
+    outputs: [[p_weight, f32, [8192]]]
+  - id: rms_norm_eps
+    op: constant
+    attrs: {name: rms_norm_eps, value: 1.0e-06}
+    outputs: [[rms_norm_eps, f32, [1]]]
+  - id: rms_norm_mean_count
+    op: constant
+    attrs: {name: rms_norm_mean_count, value: 8192.0}
+    outputs: [[rms_norm_mean_count, f32, [1]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [{sym: seq_len, hint: 512}, 8192]]]
+  - id: rms_norm
+    op: loop
+    attrs:
+      body:
+      - Load: {names: [in0], input: rms_norm_eps, index: [{literal: {value: 0, dtype: int}}], dtype: null}
+      - Load: {names: [in1], input: rms_norm_mean_count, index: [{literal: {value: 0, dtype: int}}], dtype: null}
+      - Loop:
+          axis: {name: a0, extent: {sym: seq_len, hint: 512}}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 8192}
+              body:
+              - {Load: {names: [in2], input: x, index: [{var: a0}, {var: a1}], dtype: null}}
+              - {Assign: {name: v0, op: multiply, args: [in2, in2]}}
+              - {Accum: {name: acc0, value: v0, axes: [a1]}}
+          - {Assign: {name: v1, op: divide, args: [acc0, in1]}}
+          - {Assign: {name: v2, op: add, args: [in0, v1]}}
+          - {Assign: {name: v3, op: rsqrt, args: [v2]}}
+          - Loop:
+              axis: {name: a2, extent: 8192}
+              body:
+              - {Load: {names: [in3], input: x, index: [{var: a0}, {var: a2}], dtype: null}}
+              - {Assign: {name: v4, op: multiply, args: [in3, v3]}}
+              - {Load: {names: [in4], input: p_weight, index: [{var: a2}], dtype: null}}
+              - {Assign: {name: v5, op: multiply, args: [in4, v4]}}
+              - Write:
+                  output: rms_norm
+                  index:
+                  - {var: a0}
+                  - {var: a2}
+                  values:
+                  - v5
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
+      name: k_rms_norm_3a45cb
+    inputs: [rms_norm_mean_count, rms_norm_eps, x, p_weight]
+    outputs: [[rms_norm, f32, [{sym: seq_len, hint: 512}, 8192]]]
+- inputs: [x]
+  outputs: [rms_norm]
+  nodes:
+  - id: p_weight
+    op: constant
+    attrs: {name: p_weight, source_path: weight, source_shape: [3840], source_dtype: float32}
+    outputs: [[p_weight, f32, [3840]]]
+  - id: rms_norm_eps
+    op: constant
+    attrs: {name: rms_norm_eps, value: 1.0e-06}
+    outputs: [[rms_norm_eps, f32, [1]]]
+  - id: rms_norm_mean_count
+    op: constant
+    attrs: {name: rms_norm_mean_count, value: 3840.0}
+    outputs: [[rms_norm_mean_count, f32, [1]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [512, 3840]]]
+  - id: rms_norm
+    op: loop
+    attrs:
+      body:
+      - Load: {names: [in0], input: rms_norm_eps, index: [{literal: {value: 0, dtype: int}}], dtype: null}
+      - Load: {names: [in1], input: rms_norm_mean_count, index: [{literal: {value: 0, dtype: int}}], dtype: null}
+      - Loop:
+          axis: {name: a0, extent: 512}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 3840}
+              body:
+              - {Load: {names: [in2], input: x, index: [{var: a0}, {var: a1}], dtype: null}}
+              - {Assign: {name: v0, op: multiply, args: [in2, in2]}}
+              - {Accum: {name: acc0, value: v0, axes: [a1]}}
+          - {Assign: {name: v1, op: divide, args: [acc0, in1]}}
+          - {Assign: {name: v2, op: add, args: [in0, v1]}}
+          - {Assign: {name: v3, op: rsqrt, args: [v2]}}
+          - Loop:
+              axis: {name: a2, extent: 3840}
+              body:
+              - {Load: {names: [in3], input: x, index: [{var: a0}, {var: a2}], dtype: null}}
+              - {Assign: {name: v4, op: multiply, args: [in3, v3]}}
+              - {Load: {names: [in4], input: p_weight, index: [{var: a2}], dtype: null}}
+              - {Assign: {name: v5, op: multiply, args: [in4, v4]}}
+              - Write:
+                  output: rms_norm
+                  index:
+                  - {var: a0}
+                  - {var: a2}
+                  values:
+                  - v5
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
+      name: k_rms_norm_4ff057
+    inputs: [rms_norm_mean_count, rms_norm_eps, x, p_weight]
+    outputs: [[rms_norm, f32, [512, 3840]]]
+- inputs: [x]
+  outputs: [rms_norm]
+  nodes:
+  - id: p_weight
+    op: constant
+    attrs: {name: p_weight, source_path: weight, source_shape: [256], source_dtype: float32}
+    outputs: [[p_weight, f32, [256]]]
+  - id: rms_norm_eps
+    op: constant
+    attrs: {name: rms_norm_eps, value: 1.0e-06}
+    outputs: [[rms_norm_eps, f32, [1]]]
+  - id: rms_norm_mean_count
+    op: constant
+    attrs: {name: rms_norm_mean_count, value: 256.0}
+    outputs: [[rms_norm_mean_count, f32, [1]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [4096, 256]]]
+  - id: rms_norm
+    op: loop
+    attrs:
+      body:
+      - Load: {names: [in0], input: rms_norm_eps, index: [{literal: {value: 0, dtype: int}}], dtype: null}
+      - Load: {names: [in1], input: rms_norm_mean_count, index: [{literal: {value: 0, dtype: int}}], dtype: null}
+      - Loop:
+          axis: {name: a0, extent: 4096}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 256}
+              body:
+              - {Load: {names: [in2], input: x, index: [{var: a0}, {var: a1}], dtype: null}}
+              - {Assign: {name: v0, op: multiply, args: [in2, in2]}}
+              - {Accum: {name: acc0, value: v0, axes: [a1]}}
+          - {Assign: {name: v1, op: divide, args: [acc0, in1]}}
+          - {Assign: {name: v2, op: add, args: [in0, v1]}}
+          - {Assign: {name: v3, op: rsqrt, args: [v2]}}
+          - Loop:
+              axis: {name: a2, extent: 256}
+              body:
+              - {Load: {names: [in3], input: x, index: [{var: a0}, {var: a2}], dtype: null}}
+              - {Assign: {name: v4, op: multiply, args: [in3, v3]}}
+              - {Load: {names: [in4], input: p_weight, index: [{var: a2}], dtype: null}}
+              - {Assign: {name: v5, op: multiply, args: [in4, v4]}}
+              - Write:
+                  output: rms_norm
+                  index:
+                  - {var: a0}
+                  - {var: a2}
+                  values:
+                  - v5
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
+      name: k_rms_norm_e503de
+    inputs: [rms_norm_mean_count, rms_norm_eps, x, p_weight]
+    outputs: [[rms_norm, f32, [4096, 256]]]
+- inputs: [x]
+  outputs: [rms_norm]
+  nodes:
+  - id: p_weight
+    op: constant
+    attrs: {name: p_weight, source_path: weight, source_shape: [3840], source_dtype: float32}
+    outputs: [[p_weight, f32, [3840]]]
+  - id: rms_norm_eps
+    op: constant
+    attrs: {name: rms_norm_eps, value: 1.0e-06}
+    outputs: [[rms_norm_eps, f32, [1]]]
+  - id: rms_norm_mean_count
+    op: constant
+    attrs: {name: rms_norm_mean_count, value: 3840.0}
+    outputs: [[rms_norm_mean_count, f32, [1]]]
+  - id: x
+    op: input
+    outputs: [[x, f32, [{sym: seq_len, hint: 512}, 3840]]]
+  - id: rms_norm
+    op: loop
+    attrs:
+      body:
+      - Load: {names: [in0], input: rms_norm_eps, index: [{literal: {value: 0, dtype: int}}], dtype: null}
+      - Load: {names: [in1], input: rms_norm_mean_count, index: [{literal: {value: 0, dtype: int}}], dtype: null}
+      - Loop:
+          axis: {name: a0, extent: {sym: seq_len, hint: 512}}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 3840}
+              body:
+              - {Load: {names: [in2], input: x, index: [{var: a0}, {var: a1}], dtype: null}}
+              - {Assign: {name: v0, op: multiply, args: [in2, in2]}}
+              - {Accum: {name: acc0, value: v0, axes: [a1]}}
+          - {Assign: {name: v1, op: divide, args: [acc0, in1]}}
+          - {Assign: {name: v2, op: add, args: [in0, v1]}}
+          - {Assign: {name: v3, op: rsqrt, args: [v2]}}
+          - Loop:
+              axis: {name: a2, extent: 3840}
+              body:
+              - {Load: {names: [in3], input: x, index: [{var: a0}, {var: a2}], dtype: null}}
+              - {Assign: {name: v4, op: multiply, args: [in3, v3]}}
+              - {Load: {names: [in4], input: p_weight, index: [{var: a2}], dtype: null}}
+              - {Assign: {name: v5, op: multiply, args: [in4, v4]}}
+              - Write:
+                  output: rms_norm
+                  index:
+                  - {var: a0}
+                  - {var: a2}
+                  values:
+                  - v5
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
+      name: k_rms_norm_58938f
+    inputs: [rms_norm_mean_count, rms_norm_eps, x, p_weight]
+    outputs: [[rms_norm, f32, [{sym: seq_len, hint: 512}, 3840]]]
+- inputs: [x0, x1, x2]
+  outputs: [scaled_dot_product_attention]
+  nodes:
+  - id: scaled_dot_product_attention_mask_fill_c
+    op: constant
+    attrs: {name: scaled_dot_product_attention_mask_fill_c, value: -1000000000.0}
+    outputs: [[scaled_dot_product_attention_mask_fill_c, f16, [1]]]
+  - id: scaled_dot_product_attention_mask_zero_c
+    op: constant
+    attrs: {name: scaled_dot_product_attention_mask_zero_c, value: 0.0}
+    outputs: [[scaled_dot_product_attention_mask_zero_c, f16, [1]]]
+  - id: scaled_dot_product_attention_scale
+    op: constant
+    attrs: {name: scaled_dot_product_attention_scale, value: 0.0625}
+    outputs: [[scaled_dot_product_attention_scale, f16, [1]]]
+  - id: x0
+    op: input
+    outputs: [[x0, f16, [1, 16, 512, 256]]]
+  - id: x1
+    op: input
+    outputs: [[x1, f16, [1, 16, 512, 256]]]
+  - id: x2
+    op: input
+    outputs: [[x2, f16, [1, 16, 512, 256]]]
+  - id: scaled_dot_product_attention
+    op: loop
+    attrs:
+      body:
+      - Load:
+          names:
+          - in0
+          input: scaled_dot_product_attention_mask_fill_c
+          index:
+          - {literal: {value: 0, dtype: int}}
+          dtype: null
+      - Load:
+          names:
+          - in1
+          input: scaled_dot_product_attention_mask_zero_c
+          index:
+          - {literal: {value: 0, dtype: int}}
+          dtype: null
+      - Load:
+          names:
+          - in2
+          input: scaled_dot_product_attention_scale
+          index:
+          - {literal: {value: 0, dtype: int}}
+          dtype: null
+      - Loop:
+          axis: {name: a0, extent: 16}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 512}
+              body:
+              - Loop:
+                  axis: {name: a2, extent: 512}
+                  body:
+                  - Loop:
+                      axis: {name: a3, extent: 256}
+                      body:
+                      - Load:
+                          names:
+                          - in3
+                          input: x0
+                          index:
+                          - {literal: {value: 0, dtype: int}}
+                          - {var: a0}
+                          - {var: a1}
+                          - {var: a3}
+                          dtype: null
+                      - Load:
+                          names:
+                          - in4
+                          input: x1
+                          index:
+                          - {literal: {value: 0, dtype: int}}
+                          - {var: a0}
+                          - {var: a2}
+                          - {var: a3}
+                          dtype: null
+                      - {Assign: {name: v0, op: multiply, args: [in3, in4], dtype: f32}}
+                      - {Accum: {name: acc0, value: v0, axes: [a3]}}
+                  - {Assign: {name: v1, op: multiply, args: [acc0, in2]}}
+                  - Select:
+                      name: v2
+                      branches:
+                      - {value: in1, select: {binary: {op: <=, left: {var: a2}, right: {var: a1}}}}
+                      - {value: in0, select: {binary: {op: <, left: {var: a1}, right: {var: a2}}}}
+                  - {Assign: {name: v3, op: add, args: [v1, v2]}}
+                  - {Accum: {name: acc1, value: v3, op: maximum, axes: [a2]}}
+              - Loop:
+                  axis: {name: a2, extent: 512}
+                  body:
+                  - Loop:
+                      axis: {name: a5, extent: 256}
+                      body:
+                      - Load:
+                          names:
+                          - in5
+                          input: x0
+                          index:
+                          - {literal: {value: 0, dtype: int}}
+                          - {var: a0}
+                          - {var: a1}
+                          - {var: a5}
+                          dtype: null
+                      - Load:
+                          names:
+                          - in6
+                          input: x1
+                          index:
+                          - {literal: {value: 0, dtype: int}}
+                          - {var: a0}
+                          - {var: a2}
+                          - {var: a5}
+                          dtype: null
+                      - {Assign: {name: v4, op: multiply, args: [in5, in6], dtype: f32}}
+                      - {Accum: {name: acc2, value: v4, axes: [a5]}}
+                  - {Assign: {name: v5, op: multiply, args: [acc2, in2]}}
+                  - Select:
+                      name: v6
+                      branches:
+                      - {value: in1, select: {binary: {op: <=, left: {var: a2}, right: {var: a1}}}}
+                      - {value: in0, select: {binary: {op: <, left: {var: a1}, right: {var: a2}}}}
+                  - {Assign: {name: v7, op: add, args: [v5, v6]}}
+                  - {Assign: {name: v8, op: subtract, args: [v7, acc1]}}
+                  - {Assign: {name: v9, op: exp, args: [v8]}}
+                  - {Accum: {name: acc3, value: v9, axes: [a2]}}
+              - Loop:
+                  axis: {name: a6, extent: 256}
+                  body:
+                  - Loop:
+                      axis: {name: a7, extent: 512}
+                      body:
+                      - Loop:
+                          axis: {name: a8, extent: 256}
+                          body:
+                          - Load:
+                              names:
+                              - in7
+                              input: x0
+                              index:
+                              - {literal: {value: 0, dtype: int}}
+                              - {var: a0}
+                              - {var: a1}
+                              - {var: a8}
+                              dtype: null
+                          - Load:
+                              names:
+                              - in8
+                              input: x1
+                              index:
+                              - {literal: {value: 0, dtype: int}}
+                              - {var: a0}
+                              - {var: a7}
+                              - {var: a8}
+                              dtype: null
+                          - {Assign: {name: v10, op: multiply, args: [in7, in8], dtype: f32}}
+                          - {Accum: {name: acc4, value: v10, axes: [a8]}}
+                      - {Assign: {name: v11, op: multiply, args: [acc4, in2]}}
+                      - Load:
+                          names:
+                          - in9
+                          input: x2
+                          index:
+                          - {literal: {value: 0, dtype: int}}
+                          - {var: a0}
+                          - {var: a7}
+                          - {var: a6}
+                          dtype: null
+                      - Select:
+                          name: v12
+                          branches:
+                          - {value: in1, select: {binary: {op: <=, left: {var: a7}, right: {var: a1}}}}
+                          - {value: in0, select: {binary: {op: <, left: {var: a1}, right: {var: a7}}}}
+                      - {Assign: {name: v13, op: add, args: [v11, v12]}}
+                      - {Assign: {name: v14, op: subtract, args: [v13, acc1]}}
+                      - {Assign: {name: v15, op: exp, args: [v14]}}
+                      - {Assign: {name: v16, op: divide, args: [v15, acc3]}}
+                      - {Assign: {name: v17, op: multiply, args: [in9, v16], dtype: f32}}
+                      - {Accum: {name: acc5, value: v17, axes: [a7]}}
+                  - Write:
+                      output: scaled_dot_product_attention
+                      index:
+                      - {literal: {value: 0, dtype: int}}
+                      - {var: a0}
+                      - {var: a1}
+                      - {var: a6}
+                      values:
+                      - acc5
+                      value_dtype: null
+                      atomic: false
+                      swizzle: NONE
+      name: k_sdpa_96c531
+    inputs: [scaled_dot_product_attention_scale, scaled_dot_product_attention_mask_fill_c, scaled_dot_product_attention_mask_zero_c, x1, x0, x2]
+    outputs: [[scaled_dot_product_attention, f16, [1, 16, 512, 256]]]

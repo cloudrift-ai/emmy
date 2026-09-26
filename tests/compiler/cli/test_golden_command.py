@@ -12,7 +12,8 @@ import pytest
 import yaml
 
 from emmy.commands.golden import handle_golden_check, handle_golden_restamp
-from emmy.compiler.pipeline.search.golden import _HARDWARE_GOLDENS_DIR, GoldenEntryState, golden_entry_state, load_golden_file
+from emmy.compiler.pipeline.search.golden import GoldenEntryState, GoldenFile
+from emmy.compiler.pipeline.search.golden.repository import _HARDWARE_GOLDENS_DIR
 
 #: Eight square matmuls with one measured row each — the smallest repository golden, and current.
 _SMALLEST = _HARDWARE_GOLDENS_DIR / "rtx4080_sm89.yaml"
@@ -66,11 +67,11 @@ def test_restamp_rewrites_the_golden_onto_the_fresh_lowering(golden, caplog):
         handle_golden_restamp(Namespace(paths=[str(golden)]))
     assert _check(golden) == 0, "the restamped file is the fresh lowering"
 
-    document = load_golden_file(golden)
-    rows = {entry["realizations"][0]["name"]: entry["realizations"][0] for entry in document["configs"]}
+    document = GoldenFile.load(golden)
+    rows = {entry.realizations[0].name: entry.realizations[0] for entry in document.configs}
     assert "matmul.square.2048" not in rows, "a target no fresh kernel writes is dropped"
-    assert len(rows) == 7 and len(document["loops"]) == 7 and len(document["programs"]) == 7, "and its pools go with it"
-    states = {name: golden_entry_state(row) for name, row in rows.items()}
+    assert len(rows) == 7 and len(document.loops) == 7 and len(document.programs) == 7, "and its pools go with it"
+    states = {name: row.state for name, row in rows.items()}
     assert states.pop("matmul.square.512") is GoldenEntryState.PROPOSAL, "measured on another kernel: the row keeps its schedule only"
     assert set(states.values()) == {GoldenEntryState.VERIFIED}, "a target that was already the fresh lowering keeps its measurement"
     assert "1 of 8 targets restamped, 1 dropped; 7 rows kept" in caplog.text  # nine rows: one target holds two
@@ -92,7 +93,7 @@ def test_restamp_drops_a_kernel_set_row_whose_members_lose_their_measurements(go
     with caplog.at_level("INFO"):
         handle_golden_restamp(Namespace(paths=[str(golden)]))
     assert "matmul.square.512.set: its kernel set lost its measurements" in caplog.text
-    names = [row["name"] for row in load_golden_file(golden)["configs"][0]["realizations"]]
+    names = [row.name for row in GoldenFile.load(golden).configs[0].realizations]
     assert names == ["matmul.square.512"], "the file stays a valid repository golden"
 
 
@@ -111,8 +112,8 @@ def test_restamp_keeps_the_piece_rows_of_a_kernel_set_whose_target_only_reordere
     with caplog.at_level("INFO"):
         handle_golden_restamp(Namespace(paths=[str(path)]))
     assert "1 of 1 targets restamped, 0 dropped; 3 rows kept" in caplog.text
-    rows = load_golden_file(path)["configs"][0]["realizations"]
-    assert [row.get("identity") for row in rows] == [row.get("identity") for row in entry["realizations"]], "each piece keeps its own"
+    rows = GoldenFile.load(path).configs[0].realizations
+    assert [row.identity for row in rows] == [row.get("identity") for row in entry["realizations"]], "each piece keeps its own"
 
 
 def test_restamp_refuses_to_write_a_golden_nothing_survives_in(golden, caplog):

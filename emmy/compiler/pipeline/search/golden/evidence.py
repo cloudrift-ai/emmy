@@ -49,12 +49,13 @@ def import_goldens(
     slice (the default), the lowering passes alone for a freeze's kernel body, which the Loop passes would
     normalize into another kernel."""
     from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
-    from emmy.compiler.loop_wire import kernel_tile  # noqa: PLC0415
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline  # noqa: PLC0415
     from emmy.compiler.pipeline.search.db import is_placement_knob  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden import _set_key, regime_live  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import regime_live  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden.decode import _set_key  # noqa: PLC0415
     from emmy.compiler.pipeline.search.policy.terminal_bench import persist_kernel_perf, point_stats  # noqa: PLC0415
     from emmy.compiler.pipeline.search.strategy.two_level import KernelInventory, record_routing  # noqa: PLC0415
+    from emmy.compiler.wire import kernel_tile  # noqa: PLC0415
 
     counts: Counter[str] = Counter()
     consumed: set[str] = set()  # the deploy identities of the kernels a decision replaced: they ran as no kernel
@@ -162,7 +163,7 @@ def import_file(db: SearchDB, path: Path) -> Counter:
     from emmy.compiler.context import FAST_MATH_FLAG, Context  # noqa: PLC0415
     from emmy.compiler.pipeline import LOWERING_PASSES  # noqa: PLC0415
     from emmy.compiler.pipeline.search.data.freeze import freeze_source, is_lfs_pointer  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden import load_golden_file, load_golden_records, regime_pins  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import GoldenFile, regime_pins  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
 
     if is_lfs_pointer(path):
@@ -171,9 +172,9 @@ def import_file(db: SearchDB, path: Path) -> Counter:
     if source in db.perf_sources():
         logger.info("%s is already held (%s)", path.name, source)
         return Counter()
-    document = load_golden_file(path)
-    records = load_golden_records(document)
-    cap, gpu_name = tuple(document["compute_cap"]), document.get("gpu_name") or None
+    document = GoldenFile.load(path)
+    records = document.records()
+    cap, gpu_name = tuple(document.compute_cap), document.gpu_name
     counts: Counter = Counter()
     for regime in sorted({tuple(sorted(regime_pins(record).items())) for record in records}):
         with pinned_knobs(dict(regime)):

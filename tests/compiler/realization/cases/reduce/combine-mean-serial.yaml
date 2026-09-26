@@ -37,16 +37,7 @@ loops:
   nodes:
   - id: mean_count
     op: constant
-    attrs:
-      name: mean_count
-      value: 1024.0
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
+    attrs: {name: mean_count, value: 1024.0}
     outputs: [[mean_count, f32, [1]]]
   - id: x
     op: input
@@ -55,45 +46,26 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Load
-          fields:
-            names: {tuple: [in0]}
-            input: mean_count
-            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
-            dtype: null
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 4}, window: null}}
-            body:
+      - {Load: {names: [in0], input: mean_count, index: [{literal: {value: 0, dtype: int}}], dtype: null}}
+      - Loop:
+          axis: {name: a0, extent: 4}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 1024}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 1024}, window: null}}
-                  body:
-                    body:
-                    - class: Load
-                      fields:
-                        names: {tuple: [in1]}
-                        input: x
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        dtype: null
-                    - class: Accum
-                      fields: {name: acc0, value: in1, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
-                  unroll: false
-                  seed: true
-              - class: Assign
-                fields: {name: v0, op: {elementwise: divide}, args: {tuple: [acc0, in0]}, dtype: null}
-              - class: Write
-                fields:
-                  output: mean
-                  index: {tuple: [{expr: {var: a0}}, {expr: {literal: {value: 0, dtype: int}}}]}
-                  values: {tuple: [v0]}
-                  value_dtype: null
-                  atomic: false
-                  swizzle: NONE
-            unroll: false
-            seed: true
+              - {Load: {names: [in1], input: x, index: [{var: a0}, {var: a1}], dtype: null}}
+              - {Accum: {name: acc0, value: in1, axes: [a1]}}
+          - {Assign: {name: v0, op: divide, args: [acc0, in0]}}
+          - Write:
+              output: mean
+              index:
+              - {var: a0}
+              - {literal: {value: 0, dtype: int}}
+              values:
+              - v0
+              value_dtype: null
+              atomic: false
+              swizzle: NONE
       name: k_mean_e09901
     inputs: [mean_count, x]
     outputs: [[mean, f32, [4, 1]]]

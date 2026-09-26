@@ -316,7 +316,7 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Kernel set listing** — The `kernel_set` field: the names of the routing rows one realization's kernel set holds,
   in the order the compile took the decisions, one row per decision — a placement cut or a cross-CTA split. `run
   --record-greedy` writes the list when it records a kernel set, beside a receipt per kernel. The listing realization
-  usually holds no measurement itself, so `golden_set_state` counts it verified only when every row it lists carries
+  usually holds no measurement itself, so `Realization.kernel_set_state` counts it verified only when every row it lists carries
   measurements and so does every schedule-carrying row of the same target, and a bench of it publishes the listed
   rows' knobs as its pin. A realization that also holds a measured row of its own verifies on that row; the list still
   says what its kernel set held.
@@ -325,7 +325,8 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   evidence, and only when a command names the file with `--golden PATH`.
 - **Canonical golden file** — A reviewed per-GPU YAML. Model goldens live at
   `recipes/<model>/golden/<gpu-slug>_<compute-cap>.yaml`; model-agnostic hardware goldens remain under
-  `emmy/compiler/pipeline/search/golden/`. Every realization contains verified deployable measurements; `emmy tune`
+  `emmy/compiler/pipeline/search/golden/hardware/`. Every realization contains verified deployable measurements; `emmy
+  tune`
   refuses to mutate these files directly. The files for the live card are the golden evidence an ordinary compile
   reads.
 - **Evidence** — A compatible recorded measurement used to select between candidates: a reservoir row or a tune

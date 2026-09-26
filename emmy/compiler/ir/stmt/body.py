@@ -31,6 +31,7 @@ from functools import cached_property
 from heapq import heappop, heappush
 
 from emmy.compiler.ir.stmt.base import Stmt
+from emmy.compiler.wire import Wire, decode, encode
 from emmy.utils import cached_method
 
 
@@ -128,7 +129,7 @@ def free_names(s: Stmt) -> frozenset[str]:
     return frozenset(reads - defs)
 
 
-class Body(tuple[Stmt, ...]):
+class Body(tuple[Stmt, ...], Wire):
     """Immutable Stmt sequence. Tuple-subclass so existing tuple-shaped
     APIs accept Body for free; preserves its own type through
     :meth:`__getitem__` slicing and :meth:`__add__` concatenation so
@@ -144,6 +145,21 @@ class Body(tuple[Stmt, ...]):
     but Body counts are bounded by the number of kernel bodies in a
     pipeline run (tens to hundreds), so it's not a concern.
     """
+
+    wire_tag = "body"
+
+    def to_wire(self) -> list:
+        """The statements, each tagged by its class."""
+        return [encode(stmt) for stmt in self]
+
+    @classmethod
+    def from_wire(cls, value: object, where: str = "body") -> Body:
+        if not isinstance(value, list):
+            raise ValueError(f"{where} must be a list of statements")
+        try:
+            return cls(decode(item) for item in value)
+        except TypeError as exc:
+            raise ValueError(f"{where}: {exc}") from exc
 
     def __new__(cls, stmts: Iterable[Stmt] = ()) -> Body:
         members = tuple(stmts)

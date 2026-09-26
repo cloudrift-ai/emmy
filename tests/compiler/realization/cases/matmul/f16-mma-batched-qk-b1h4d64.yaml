@@ -10,7 +10,7 @@ programs:
     outputs: [[k, f16, [1, 4, 128, 64]]]
   - id: kt
     op: torch.transpose
-    attrs: {axes: {__tuple__: [0, 1, 3, 2]}}
+    attrs: {axes: [0, 1, 3, 2]}
     inputs: [k]
     outputs: [[kt, f16, [1, 4, 64, 128]]]
   - id: q
@@ -18,7 +18,6 @@ programs:
     outputs: [[q, f16, [1, 4, 128, 64]]]
   - id: c
     op: torch.matmul
-    attrs: {has_bias: false}
     inputs: [q, kt]
     outputs: [[c, f32, [1, 4, 128, 128]]]
 configs:
@@ -55,74 +54,52 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 4}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 4}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 128}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 128}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 128}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 128}, window: null}}
-                        body:
-                          body:
-                          - class: Loop
-                            fields:
-                              axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null}}
-                              body:
-                                body:
-                                - class: Load
-                                  fields:
-                                    names: {tuple: [in0]}
-                                    input: k
-                                    index:
-                                      tuple:
-                                      - {expr: {literal: {value: 0, dtype: int}}}
-                                      - {expr: {var: a0}}
-                                      - {expr: {var: a2}}
-                                      - {expr: {var: a3}}
-                                    dtype: null
-                                - class: Load
-                                  fields:
-                                    names: {tuple: [in1]}
-                                    input: q
-                                    index:
-                                      tuple:
-                                      - {expr: {literal: {value: 0, dtype: int}}}
-                                      - {expr: {var: a0}}
-                                      - {expr: {var: a1}}
-                                      - {expr: {var: a3}}
-                                    dtype: null
-                                - class: Assign
-                                  fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                                - class: Accum
-                                  fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a3]}, base: null}
-                              unroll: false
-                              seed: true
-                          - class: Write
-                            fields:
-                              output: c
-                              index:
-                                tuple:
-                                - {expr: {literal: {value: 0, dtype: int}}}
-                                - {expr: {var: a0}}
-                                - {expr: {var: a1}}
-                                - {expr: {var: a2}}
-                              values: {tuple: [acc0]}
-                              value_dtype: null
-                              atomic: false
-                              swizzle: NONE
-                        unroll: false
-                        seed: true
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - Loop:
+                      axis: {name: a3, extent: 64}
+                      body:
+                      - Load:
+                          names:
+                          - in0
+                          input: k
+                          index:
+                          - {literal: {value: 0, dtype: int}}
+                          - {var: a0}
+                          - {var: a2}
+                          - {var: a3}
+                          dtype: null
+                      - Load:
+                          names:
+                          - in1
+                          input: q
+                          index:
+                          - {literal: {value: 0, dtype: int}}
+                          - {var: a0}
+                          - {var: a1}
+                          - {var: a3}
+                          dtype: null
+                      - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                      - {Accum: {name: acc0, value: v0, axes: [a3]}}
+                  - Write:
+                      output: c
+                      index:
+                      - {literal: {value: 0, dtype: int}}
+                      - {var: a0}
+                      - {var: a1}
+                      - {var: a2}
+                      values:
+                      - acc0
+                      value_dtype: null
+                      atomic: false
+                      swizzle: NONE
       name: k_matmul_1775af
     inputs: [k, q]
     outputs: [[c, f32, [1, 4, 128, 128]]]

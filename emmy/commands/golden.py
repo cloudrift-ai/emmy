@@ -48,7 +48,7 @@ def register_golden_command(subparsers) -> None:
 
 
 def _goldens(paths: list[str]) -> list[Path]:
-    from emmy.compiler.pipeline.search.golden import _repository_golden_paths  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden.repository import _repository_golden_paths  # noqa: PLC0415
 
     if paths:
         return [Path(path).expanduser() for path in paths]
@@ -57,18 +57,18 @@ def _goldens(paths: list[str]) -> list[Path]:
 
 
 def handle_golden_check(args) -> None:
-    from emmy.compiler.pipeline.search.golden import load_golden  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import GoldenFile  # noqa: PLC0415
     from emmy.compiler.pipeline.search.restamp import stale_targets  # noqa: PLC0415
 
     failed = False
     for path in _goldens(args.paths):
-        document = load_golden(path)
+        document = GoldenFile.load(path)
         stale = list(stale_targets(document))
         if not stale:
-            logger.info("%s: every stored target is the fresh lowering (%d)", path, len(document["configs"]))
+            logger.info("%s: every stored target is the fresh lowering (%d)", path, len(document.configs))
             continue
         failed = True
-        logger.error("%s: %d of %d stored targets are not the fresh lowering", path, len(stale), len(document["configs"]))
+        logger.error("%s: %d of %d stored targets are not the fresh lowering", path, len(stale), len(document.configs))
         for reason in stale[:_SHOWN]:
             logger.error("  %s", reason)
         if len(stale) > _SHOWN:
@@ -78,12 +78,12 @@ def handle_golden_check(args) -> None:
 
 
 def handle_golden_restamp(args) -> None:
-    from emmy.compiler.pipeline.search.golden import dump_golden_file, golden_validation, load_golden  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import GoldenFile  # noqa: PLC0415
     from emmy.compiler.pipeline.search.restamp import restamp  # noqa: PLC0415
 
     failed = False
     for path in _goldens(args.paths):
-        document, report = restamp(load_golden(path))
+        document, report = restamp(GoldenFile.load(path))
         if not report.changed:
             logger.info("%s: already the fresh lowering (%d targets)", path, report.targets)
             continue
@@ -93,17 +93,17 @@ def handle_golden_restamp(args) -> None:
             logger.error("%s: no target survives the fresh lowering; delete the file or re-record it on its card", path)
             failed = True
             continue
-        dump_golden_file(document, path, validation=golden_validation(path), overwrite=True)
+        document.dump(path, overwrite=True)
     if failed:
         sys.exit(1)
 
 
 def handle_golden_kernels(args) -> None:
-    from emmy.compiler.pipeline.search.golden import kernel_pool_text, load_golden, stored_kernels  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import GoldenFile, kernel_pool_text  # noqa: PLC0415
 
     path = Path(args.path).expanduser()
-    document = load_golden(path)
-    if args.program is not None and not 0 <= args.program < len(document["programs"]):
-        logger.error("--program %d: %s stores %d program(s)", args.program, path, len(document["programs"]))
+    document = GoldenFile.load(path)
+    if args.program is not None and not 0 <= args.program < len(document.programs):
+        logger.error("--program %d: %s stores %d program(s)", args.program, path, len(document.programs))
         sys.exit(2)
-    sys.stdout.write(kernel_pool_text(stored_kernels(document, args.program)))
+    sys.stdout.write(kernel_pool_text(document.kernels(args.program)))

@@ -10,7 +10,7 @@ programs:
     outputs: [[x, f32, [64, 128]]]
   - id: cumsum
     op: tensor.scan
-    attrs: {op: {__elementwise__: sum}, axis: -1}
+    attrs: {axis: -1}
     inputs: [x]
     outputs: [[cumsum, f32, [64, 128]]]
 configs:
@@ -39,37 +39,24 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 64}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 64}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 128}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 128}, window: null}}
-                  body:
-                    body:
-                    - class: Load
-                      fields:
-                        names: {tuple: [in0]}
-                        input: x
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        dtype: null
-                    - class: Accum
-                      fields: {name: acc0, value: in0, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
-                    - class: Write
-                      fields:
-                        output: cumsum
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+              - {Load: {names: [in0], input: x, index: [{var: a0}, {var: a1}], dtype: null}}
+              - {Accum: {name: acc0, value: in0, axes: [a1]}}
+              - Write:
+                  output: cumsum
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
       name: k_cumsum_reduce
     inputs: [x]
     outputs: [[cumsum, f32, [64, 128]]]

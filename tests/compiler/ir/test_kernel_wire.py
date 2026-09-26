@@ -15,9 +15,11 @@ from __future__ import annotations
 
 import pytest
 
+from emmy.compiler.graph import Graph
 from emmy.compiler.ir.cuda.ir import CudaOp
-from emmy.compiler.loop_wire import formed_from, kernel_bindings, kernel_tile, kernel_wire, loop_graph_from_wire, symbolic_vars
-from emmy.compiler.pipeline.search.golden import _replay, kernel_identity, lead_of, siblings_of
+from emmy.compiler.pipeline.search.golden import kernel_identity, lead_of, siblings_of
+from emmy.compiler.pipeline.search.golden.decode import _replay
+from emmy.compiler.wire import formed_from, kernel_bindings, kernel_tile, kernel_wire, symbolic_vars
 from tests.compiler.realization import helpers as corpus
 
 CASES = (
@@ -44,7 +46,7 @@ def _relowered(wire: dict, ctx):
 
     run = Run(pipeline=Pipeline.build(LOWERING_PASSES), ctx=ctx)
     with unpinned_decisions():
-        graph, _trace = run.resolve(loop_graph_from_wire(wire), lambda fp: next(iter_leaves(fp.options)))
+        graph, _trace = run.resolve(Graph.from_wire(wire), lambda fp: next(iter_leaves(fp.options)))
     return [kernel_tile(node.op) for node in graph.nodes.values() if isinstance(node.op, CudaOp)]
 
 

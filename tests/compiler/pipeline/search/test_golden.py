@@ -17,15 +17,8 @@ from pathlib import Path
 import pytest
 
 from emmy.compiler.pipeline.search import golden
-from emmy.compiler.pipeline.search.golden import (
-    _HARDWARE_GOLDENS_DIR,
-    _records_of,
-    _repository_golden_paths,
-    decode_record,
-    flush_identity_store,
-    scope_digest,
-    siblings_of,
-)
+from emmy.compiler.pipeline.search.golden import decode_record, flush_identity_store, scope_digest, siblings_of
+from emmy.compiler.pipeline.search.golden.repository import _HARDWARE_GOLDENS_DIR, _records_of, _repository_golden_paths
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -93,7 +86,7 @@ def test_scope_digest_follows_the_cards_rows_only(tmp_path, monkeypatch) -> None
     other = tmp_path / "other.yaml"
     mine.write_text("gpu_name: NVIDIA H100 80GB HBM3\nrows: 1\n")
     other.write_text("gpu_name: NVIDIA GeForce RTX 5090\nrows: 1\n")
-    monkeypatch.setattr(golden, "_repository_golden_paths", lambda: nullcontext([mine, other]))
+    monkeypatch.setattr(golden.repository, "_repository_golden_paths", lambda: nullcontext([mine, other]))
     monkeypatch.delenv("EMMY_GOLDEN_FILE", raising=False)
     card = "NVIDIA H100 80GB"
     base = scope_digest(card)
@@ -151,9 +144,10 @@ def test_a_pool_that_holds_the_recorded_row_is_not_walked_whole(monkeypatch) -> 
     from emmy.compiler.pipeline import fork
     from emmy.compiler.pipeline.knob import schedule_match_key
     from emmy.compiler.pipeline.search import golden
-    from emmy.compiler.pipeline.search.golden import _replay, _unmatched_reason, piece_row, unmatched_reason
+    from emmy.compiler.pipeline.search.golden import piece_row, unmatched_reason
+    from emmy.compiler.pipeline.search.golden.decode import _replay, _unmatched_reason
 
-    monkeypatch.setattr(golden, "_REPLAY_CACHE", {})
+    monkeypatch.setattr(golden.decode, "_REPLAY_CACHE", {})
 
     # The same smallest target the anchor test stands on: every assertion here replays it.
     records = _records_of(_HARDWARE_GOLDENS_DIR / "rtx5090_sm120.yaml")
@@ -189,7 +183,7 @@ def test_a_pool_that_holds_the_recorded_row_is_not_walked_whole(monkeypatch) -> 
     pairs = set().union(*(summary[1] for summary in miss.offered.values()))
     assert not miss.rows, "a miss retains no candidate rows"
     assert _unmatched_reason(absent, keys, pairs) == unmatched_reason(absent, full)
-    assert not golden._REPLAY_CACHE, "requested-row results cannot serve a different recording and must not accumulate"
+    assert not golden.decode._REPLAY_CACHE, "requested-row results cannot serve a different recording and must not accumulate"
 
     respelled = replace(record, knobs={**record.knobs, "WORK@missing": record.knobs["WORK"]})
     reason = _decode(respelled, records)
@@ -239,7 +233,8 @@ def test_a_sibling_sharing_the_target_identity_cannot_silence_the_lead_cut() -> 
     from dataclasses import replace
 
     from emmy.compiler.pipeline.knob import schedule_match_key
-    from emmy.compiler.pipeline.search.golden import _replay, piece_row
+    from emmy.compiler.pipeline.search.golden import piece_row
+    from emmy.compiler.pipeline.search.golden.decode import _replay
 
     def decodes(record, siblings) -> bool:  # the replay itself: the decode's verdict is memoized per record
         wanted = schedule_match_key(piece_row(record.knobs))
@@ -266,7 +261,7 @@ def test_compiler_fingerprint_ignores_mtime_so_two_checkouts_share_one_memo(tmp_
     Keyed by mtime those checkouts disagreed, so each discarded the other's derivations and the
     next process re-derived every identity from scratch.
     """
-    from emmy.compiler.pipeline.search.golden import _tree_fingerprint
+    from emmy.compiler.pipeline.search.golden.identity import _tree_fingerprint
 
     first, second = tmp_path / "a", tmp_path / "b"
     for root in (first, second):
@@ -297,11 +292,11 @@ def test_a_flush_from_another_compiler_tree_keeps_this_trees_derivations(tmp_pat
     monkeypatch.setattr(config, "_CACHE_ROOT", tmp_path)
 
     def derive(fingerprint: str, key: str) -> dict:
-        monkeypatch.setattr(golden, "_compiler_fingerprint", lambda: fingerprint)
-        monkeypatch.setattr(golden, "_IDENTITY_STORE", None)
-        kept = dict(golden._identity_store()["entries"])
-        golden._identity_store()["entries"][key] = None
-        monkeypatch.setattr(golden, "_IDENTITY_STORE_DIRTY", True)
+        monkeypatch.setattr(golden.identity, "_compiler_fingerprint", lambda: fingerprint)
+        monkeypatch.setattr(golden.identity, "_IDENTITY_STORE", None)
+        kept = dict(golden.identity._identity_store()["entries"])
+        golden.identity._identity_store()["entries"][key] = None
+        monkeypatch.setattr(golden.identity, "_IDENTITY_STORE_DIRTY", True)
         flush_identity_store()
         return kept
 
@@ -367,14 +362,15 @@ def test_stored_targets_are_the_fresh_lowering(path: Path, program: int) -> None
     is the loop passes alone, GPU-free, so this holds on any machine; one node per program, so a
     whole-layer trace costs its own minutes and nothing queues behind the widest file.
     """
-    from emmy.compiler.pipeline.search.golden import _document_of, kernel_pool_text, stored_kernels
+    from emmy.compiler.pipeline.search.golden import kernel_pool_text
+    from emmy.compiler.pipeline.search.golden.repository import _document_of
     from emmy.compiler.pipeline.search.restamp import fresh_kernel_digests, fresh_kernels, stale_reasons
 
     document, _ = _document_of(path)
     stale = stale_reasons(document, program, fresh_kernel_digests(document, program))
     if stale:
         fresh = fresh_kernels(document, [program])[program]
-        stored = stored_kernels(document, program)
+        stored = document.kernels(program)
         matched = [fresh[frozenset(kernel["outputs"])] for kernel in stored if frozenset(kernel["outputs"]) in fresh]
         diff = difflib.unified_diff(
             kernel_pool_text(stored).splitlines(),

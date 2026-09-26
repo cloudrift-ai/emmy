@@ -16,28 +16,28 @@ programs:
     outputs: [[x1, f16, [2048, 1024]]]
   - id: linear
     op: torch.linear
-    attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[linear, f16, [1, 1, 2048]]]
   - id: reshape
     op: torch.reshape
-    attrs: {shape: {__tuple__: [1, 1, 16, 128]}}
+    attrs: {shape: [1, 1, 16, 128]}
     inputs: [linear]
     outputs: [[reshape, f16, [1, 1, 16, 128]]]
   - id: to
     op: tensor.index_map
     attrs:
-      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 1}, {__dim__: 16}, {__dim__: 128}]}
+      out_shape:
+      - 1
+      - 1
+      - 16
+      - 128
       sources:
-        __tuple__:
-        - __index_source__:
-            input_idx: 0
-            coord_map:
-            - {var: out_coord_0}
-            - {var: out_coord_1}
-            - {var: out_coord_2}
-            - {var: out_coord_3}
-            select: null
+      - input_idx: 0
+        coord_map:
+        - {var: out_coord_0}
+        - {var: out_coord_1}
+        - {var: out_coord_2}
+        - {var: out_coord_3}
     inputs: [reshape]
     outputs: [[to, f32, [1, 1, 16, 128]]]
 configs:
@@ -75,58 +75,38 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 2048}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 2048}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 1024}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 1024}, window: null}}
-                  body:
-                    body:
-                    - class: Load
-                      fields:
-                        names: {tuple: [in0]}
-                        input: x0
-                        index:
-                          tuple:
-                          - {expr: {literal: {value: 0, dtype: int}}}
-                          - {expr: {literal: {value: 0, dtype: int}}}
-                          - {expr: {var: a1}}
-                        dtype: null
-                    - class: Load
-                      fields:
-                        names: {tuple: [in1]}
-                        input: x1
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        dtype: null
-                    - class: Assign
-                      fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                    - class: Accum
-                      fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
-                  unroll: false
-                  seed: true
-              - class: Assign
-                fields: {name: v1, op: {elementwise: copy}, args: {tuple: [acc0]}, dtype: {dtype: f16}}
-              - class: Assign
-                fields: {name: v2, op: {elementwise: copy}, args: {tuple: [v1]}, dtype: {dtype: f32}}
-              - class: Write
-                fields:
-                  output: to
+              - Load:
+                  names:
+                  - in0
+                  input: x0
                   index:
-                    tuple:
-                    - {expr: {literal: {value: 0, dtype: int}}}
-                    - {expr: {literal: {value: 0, dtype: int}}}
-                    - {expr: {binary: {op: //, left: {var: a0}, right: {literal: {value: 128, dtype: int}}}}}
-                    - {expr: {binary: {op: '%', left: {var: a0}, right: {literal: {value: 128, dtype: int}}}}}
-                  values: {tuple: [v2]}
-                  value_dtype: null
-                  atomic: false
-                  swizzle: NONE
-            unroll: false
-            seed: true
+                  - {literal: {value: 0, dtype: int}}
+                  - {literal: {value: 0, dtype: int}}
+                  - {var: a1}
+                  dtype: null
+              - {Load: {names: [in1], input: x1, index: [{var: a0}, {var: a1}], dtype: null}}
+              - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+              - {Accum: {name: acc0, value: v0, axes: [a1]}}
+          - {Assign: {name: v1, op: copy, args: [acc0], dtype: f16}}
+          - {Assign: {name: v2, op: copy, args: [v1], dtype: f32}}
+          - Write:
+              output: to
+              index:
+              - {literal: {value: 0, dtype: int}}
+              - {literal: {value: 0, dtype: int}}
+              - {binary: {op: //, left: {var: a0}, right: {literal: {value: 128, dtype: int}}}}
+              - {binary: {op: '%', left: {var: a0}, right: {literal: {value: 128, dtype: int}}}}
+              values:
+              - v2
+              value_dtype: null
+              atomic: false
+              swizzle: NONE
       name: k_linear_742465
     inputs: [x1, x0]
     outputs: [[to, f32, [1, 1, 16, 128]]]

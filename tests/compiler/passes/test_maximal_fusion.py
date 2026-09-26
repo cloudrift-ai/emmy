@@ -337,7 +337,7 @@ _MAX_TRACED_NODES = 200
 
 
 def _repository_goldens() -> list:
-    from emmy.compiler.pipeline.search.golden import _repository_golden_paths
+    from emmy.compiler.pipeline.search.golden.repository import _repository_golden_paths
 
     with _repository_golden_paths() as paths:
         return [pytest.param(path, id=f"{path.parent.parent.name}/{path.name}") for path in paths]
@@ -348,14 +348,12 @@ def test_every_boundary_of_a_golden_program_is_a_correctness_boundary(path) -> N
     """The traced programs the repository goldens store are real models' layers: none of them has
     an edge between two kernels that fusion could have merged. One program per traced size — a
     golden stores the same layer at many widths."""
-    import yaml
+    from emmy.compiler.pipeline.search.golden import GoldenFile  # noqa: PLC0415
 
-    from emmy.compiler.pipeline.search.golden import _SAFE_LOADER, stored_program
-
-    document = yaml.load(path.read_text(), Loader=_SAFE_LOADER)
+    document = GoldenFile.load(path)
     sizes: set[int] = set()
-    for index in range(len(document["programs"])):
-        graph = stored_program(document, index)
+    for index in range(len(document.programs)):
+        graph = document.program(index)
         if len(graph.nodes) <= _MAX_TRACED_NODES and len(graph.nodes) not in sizes:
             sizes.add(len(graph.nodes))
             assert _unexplained_boundaries(Pipeline.build(LOOP_PASSES).run(graph)) == [], f"program {index}"

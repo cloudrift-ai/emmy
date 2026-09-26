@@ -18,17 +18,18 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
-import yaml
 
 from emmy.compiler.context import Context
 from emmy.compiler.pipeline.knob import KERNEL_DECISION_FAMILIES, family_of, validate_family_value
 from emmy.compiler.pipeline.search.golden import (
+    Config,
+    GoldenFile,
     GoldenRecord,
+    Latency,
+    Measurements,
+    Realization,
     decode_record,
-    dump_golden_file,
-    golden_record_from_entry,
     kernel_identity,
-    load_golden_file,
     siblings_of,
     sole_evidence,
 )
@@ -60,7 +61,7 @@ class Case:
     one per further kernel of the set), and its expectation."""
 
     path: Path
-    document: dict
+    document: GoldenFile
     records: tuple[GoldenRecord, ...]
     #: The stage this case is expected to fail at, or ``None`` when every stage must pass.
     xfail_stage: str | None
@@ -77,7 +78,7 @@ class Case:
 
     @property
     def compute_cap(self) -> tuple[int, int]:
-        return tuple(self.document["compute_cap"])
+        return tuple(self.document.compute_cap)
 
     def context(self) -> Context:
         """The case's own context — its declared capability, never the live card's. This is what
@@ -107,19 +108,19 @@ def expectation(path: Path) -> str | None:
 def load_case(path: Path) -> Case:
     """Load one case, enforcing the one-config / one-realization invariant the harness relies on."""
     try:
-        document = load_golden_file(path)
+        document = GoldenFile.load(path)
     except ValueError as exc:
         raise CaseError(str(exc)) from exc
-    configs = document["configs"]
-    if len(configs) != 1 or not configs[0]["realizations"]:
+    configs = document.configs
+    if len(configs) != 1 or not configs[0].realizations:
         raise CaseError(f"{path.name}: a case holds exactly one config with at least one realization")
-    for realization in configs[0]["realizations"]:
-        if "knobs" not in realization:
+    for realization in configs[0].realizations:
+        if realization.knobs is None:
             raise CaseError(f"{path.name}: every entry must carry a knobs mapping, empty only for a forkless kernel")
     stage = expectation(path)
     if stage is not None and not evidence_line(path):
         raise CaseError(f"{path.name}: an open case must carry a leading '# evidence:' comment naming why it should realize")
-    records = tuple(golden_record_from_entry(document, configs[0], realization) for realization in configs[0]["realizations"])
+    records = tuple(document.record(configs[0], realization) for realization in configs[0].realizations)
     return Case(path=path, document=document, records=records, xfail_stage=stage)
 
 
@@ -159,57 +160,47 @@ def leading_comment(path: Path) -> str:
 # compiler change moves it and a pointer to a row (``--realization``) keeps landing.
 
 
-def regenerate(document: dict) -> dict:
+def regenerate(document: GoldenFile) -> GoldenFile:
     """The case document as the current compiler would derive it, authored fields preserved.
 
     Runs the inventory writer through the library under an explicit ``Context.from_target`` — not
     through ``emmy trace``, which stamps ``gpu_name`` from the live card and needs torch. The
     result is machine-independent, so this check fires and its fix works on any box.
     """
+    from emmy.compiler.graph import Graph  # noqa: PLC0415
     from emmy.compiler.pipeline.search.working_golden import write_trace_inventory  # noqa: PLC0415
-    from emmy.compiler.torch_wire import graph_from_wire  # noqa: PLC0415
 
-    entry = document["configs"][0]
-    realizations = entry["realizations"]
-    ctx = Context.from_target(tuple(document["compute_cap"]))
-    graph = graph_from_wire(document["programs"][entry["program"]])
+    entry = document.configs[0]
+    ctx = Context.from_target(tuple(document.compute_cap))
+    graph = Graph.from_wire(document.programs[entry.program])
     with tempfile.TemporaryDirectory() as directory:
         destination = Path(directory) / "regenerated.yaml"
-        write_trace_inventory(graph, destination, ctx=ctx, model=document.get("model"))
-        fresh = yaml.safe_load(destination.read_text())
+        write_trace_inventory(graph, destination, ctx=ctx, model=document.model)
+        fresh = GoldenFile.load(destination)
 
-    matched = _matching_entry(fresh, entry, document["loops"][entry["target"]["loop"]])
-    rebuilt = dict(fresh)
+    matched = _matching_entry(fresh, entry, document.loops[entry.target.loop])
     # A case keeps its own kernel only: the regenerated pool holds every kernel of the program.
-    rebuilt["loops"] = [fresh["loops"][matched["target"]["loop"]]]
-    matched["target"] = {**matched["target"], "loop": 0}
-    rebuilt["configs"] = [matched]
-    template = dict(matched["realizations"][0])
+    rebuilt = replace(fresh, loops=[fresh.loops[matched.target.loop]], configs=[matched])
+    matched.target = replace(matched.target, loop=0)
     rows = []
-    for index, realization in enumerate(realizations):
+    for index, realization in enumerate(entry.realizations):
         # Every entry keeps the name it was authored with; a further entry decides another kernel
-        # of the set and keeps its identity too.
-        row = dict(template) if index == 0 else {}
-        if "name" in realization:
-            row["name"] = realization["name"]
-        row["bindings"] = dict(realization.get("bindings") or {})
-        row["pins"] = dict(realization.get("pins") or {})
-        row["knobs"] = canonical_knobs(realization["knobs"])
-        identity = realization.get("identity") if index else kernel_identity(golden_record_from_entry(rebuilt, matched, row))
-        if identity is not None:
-            row["identity"] = identity
-        if realization.get("latency") is not None:
-            # Measured on a card, never derived from the program: a regeneration on a CPU box must
-            # not erase a 4090's recorded timings.
-            row["latency"] = dict(realization["latency"])
+        # of the set and keeps its identity too. A latency is measured on a card, never derived
+        # from the program: a regeneration on a CPU box must not erase a 4090's recorded timings.
+        row = Realization(
+            name=realization.name,
+            bindings=dict(realization.bindings),
+            pins=dict(realization.pins),
+            knobs=canonical_knobs(realization.knobs),
+            latency=dict(realization.latency) if realization.latency is not None else None,
+        )
+        row.identity = realization.identity if index else kernel_identity(rebuilt.record(matched, row))
         rows.append(row)
-    matched["realizations"] = rows
-    if document.get("model") is not None:
-        rebuilt["model"] = document["model"]
+    matched.realizations = rows
     return rebuilt
 
 
-def complete(document: dict) -> dict:
+def complete(document: GoldenFile) -> GoldenFile:
     """The case with an entry for every kernel of its set, each named by identity.
 
     The set is replayed the way the deploy reads it (``golden._replay`` with the entries as one
@@ -222,10 +213,11 @@ def complete(document: dict) -> dict:
     Authoring, not derivation — the added rows are enumerable schedules of those kernels, and the
     case pins them from then on."""
     from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden import _replay, lead_of, siblings_of  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import lead_of, siblings_of  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden.decode import _replay  # noqa: PLC0415
 
-    entry = document["configs"][0]
-    records = [golden_record_from_entry(document, entry, realization) for realization in entry["realizations"]]
+    entry = document.configs[0]
+    records = [document.record(entry, realization) for realization in entry.realizations]
     primary = records[0]
     replay = _replay(primary, siblings=siblings_of(primary, records), lead=lead_of(primary, records))
     kernels = set(replay.kernels)
@@ -233,47 +225,47 @@ def complete(document: dict) -> dict:
     # decision replaced. Neither is a kernel the set ran as, and both stay.
     kept = [
         realization
-        for record, realization in zip(records, entry["realizations"], strict=True)
+        for record, realization in zip(records, entry.realizations, strict=True)
         if record is primary or record.is_routing or record.identity in kernels
     ]
     covered = {record.identity for record in records if record.identity in kernels}
     regime = {key: value for key, value in primary.pin_map.items() if family_of(str(key)) != "PLACE"}
     added = [
-        {
-            "name": f"{primary.name}.{identity[:12]}",
-            "bindings": dict(primary.bindings),
-            "pins": dict(regime),
-            "knobs": dict(replay.realized.get(identity, {})),
-            "identity": identity,
-        }
+        Realization(
+            name=f"{primary.name}.{identity[:12]}",
+            bindings=dict(primary.bindings),
+            pins=dict(regime),
+            knobs=dict(replay.realized.get(identity, {})),
+            identity=identity,
+        )
         for identity in sorted(kernels - covered)
     ]
     if added or len(kept) != len(records):
-        entry["realizations"] = [*kept, *added]
+        entry.realizations = [*kept, *added]
     return document
 
 
-def _matching_entry(fresh: dict, entry: dict, kernel: dict) -> dict:
+def _matching_entry(fresh: GoldenFile, entry: Config, kernel: dict) -> Config:
     """The regenerated config for the stored kernel: the one from the same traced ops, or, for a
     kernel that keeps none, the one with the same exact typed Loop identity."""
+    from emmy.compiler.graph import Graph  # noqa: PLC0415
     from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
-    from emmy.compiler.loop_wire import loop_graph_from_wire  # noqa: PLC0415
 
     def identity(wire):
-        graph = loop_graph_from_wire(wire)
+        graph = Graph.from_wire(wire)
         return tuple(
             node.op.with_io(graph, node).identity_key(structural=False, with_io=True)
             for node in graph.nodes.values()
             if isinstance(node.op, LoopOp)
         )
 
-    origins = entry["target"].get("origins")
-    key = identity(kernel) if origins is None else None
-    for candidate in fresh["configs"]:
-        target = candidate["target"]
-        if (target.get("origins") == origins) if origins is not None else identity(fresh["loops"][target["loop"]]) == key:
-            return dict(candidate)
-    offered = ", ".join(repr(candidate["target"].get("origins")) for candidate in fresh["configs"])
+    origins = entry.target.origins
+    key = identity(kernel) if not origins else None
+    for candidate in fresh.configs:
+        target = candidate.target
+        if (target.origins == origins) if origins else identity(fresh.loops[target.loop]) == key:
+            return replace(candidate)
+    offered = ", ".join(repr(candidate.target.origins) for candidate in fresh.configs)
     raise CaseError(f"no kernel of the program matches the stored one (traced ops {origins!r}); the program now forms {offered}")
 
 
@@ -288,10 +280,10 @@ def canonical_knobs(knobs: dict) -> dict:
     return canonical
 
 
-def write_case(path: Path, document: dict) -> None:
+def write_case(path: Path, document: GoldenFile) -> None:
     """Persist a regenerated case, restoring the leading comment block the YAML dump drops."""
     comment = leading_comment(path)
-    dump_golden_file(document, path, overwrite=True)
+    document.dump(path, overwrite=True)
     if comment:
         path.write_text(comment + path.read_text())
 
@@ -313,7 +305,7 @@ def evidence_scope(case: Case):
     decides is an ``EvidenceError`` naming the kernel, never a prior's guess.
     """
     records = [
-        replace(record, measurements={"emmy_us": 1.0, "reference_us": 1.0, "reference_backend": "corpus"})
+        replace(record, measurements=Measurements(emmy_us=1.0, reference_us=1.0, reference_backend="corpus"))
         if record.measurements is None
         else record
         for record in case.records
@@ -589,7 +581,7 @@ def live_hardware_id() -> str:
     return Context.probe().hardware_id()
 
 
-def recorded_latency(case: Case, hardware_id: str) -> dict | None:
+def recorded_latency(case: Case, hardware_id: str) -> Latency | None:
     return (case.record.latency or {}).get(hardware_id)
 
 

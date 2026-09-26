@@ -9,7 +9,7 @@ Tables (the DDL is the reference):
 - ``kernel`` — one row per compilable kernel, keyed by its EXACT identity (``identity_key(structural=False,
   with_io=True)``: the digest of the normalized body's form plus each buffer's dtype and hint-free shape).
   The clustered deploy identity (``identity_key(with_io=True)``, pointwise ops merged — the identity
-  golden receipts store) is beside it, with the kernel's Loop IR wire (``loop_wire.kernel_wire``: the body
+  golden receipts store) is beside it, with the kernel's Loop IR wire (``wire.kernel_wire``: the body
   it was formed from, which the lowering passes take back to the kernel — ``formed`` — or, for a piece
   carved from a twisted tree, its derived body, which only its parent's program reaches) and its C name. A
   piece a cut or a split minted is a row like any other, so the same kernel reached from two parents has
@@ -686,7 +686,7 @@ class SearchDB:
         when it was cut again, so a nested cut prices through and no cut piece needs a row. A decision has no
         measurement of its own; this is its price wherever one is read (the tuner's reward, the deploy pick's
         ballot)."""
-        from emmy.compiler.loop_wire import symbolic_vars  # noqa: PLC0415
+        from emmy.compiler.wire import symbolic_vars  # noqa: PLC0415
 
         pieces: dict[int, list[tuple[str, str]]] = {}
         for pid, child, wire in self._conn.execute(

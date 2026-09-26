@@ -53,8 +53,8 @@ def regenerate_all() -> int:
 
 def _records(document: dict) -> tuple:
     """The regenerated document's entries as records, the way ``load_case`` reads them."""
-    entry = document["configs"][0]
-    return tuple(helpers.golden_record_from_entry(document, entry, realization) for realization in entry["realizations"])
+    entry = document.configs[0]
+    return tuple(helpers.golden_record_from_entry(document, entry, realization) for realization in entry.realizations)
 
 
 def complete_all() -> int:
@@ -63,9 +63,9 @@ def complete_all() -> int:
     it runs only when asked (``make test-corpus-regen COMPLETE=1``)."""
     for path in helpers.case_files():
         case = helpers.load_case(path)
-        before = list(case.document["configs"][0]["realizations"])
+        before = list(case.document.configs[0].realizations)
         document = helpers.complete(case.document)
-        after = document["configs"][0]["realizations"]
+        after = document.configs[0].realizations
         if after != before:
             helpers.write_case(path, helpers.regenerate(document))
             dropped = sum(1 for realization in before if realization not in after)

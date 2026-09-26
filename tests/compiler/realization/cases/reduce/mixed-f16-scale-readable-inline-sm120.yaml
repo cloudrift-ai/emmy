@@ -19,17 +19,17 @@ programs:
     outputs: [[x, f16, [4, 128]]]
   - id: sum
     op: tensor.reduce
-    attrs: {op: {__elementwise__: sum}, axis: 1}
+    attrs: {axis: 1}
     inputs: [x]
     outputs: [[sum, f32, [4, 1]]]
   - id: mul
     op: tensor.elementwise
-    attrs: {op: {__elementwise__: multiply}}
+    attrs: {op: multiply}
     inputs: [sum, scale]
     outputs: [[mul, f32, [4, 1]]]
   - id: out
     op: tensor.elementwise
-    attrs: {op: {__elementwise__: add}}
+    attrs: {op: add}
     inputs: [bias, mul]
     outputs: [[out, f32, [4, 1]]]
 configs:
@@ -66,53 +66,28 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 4}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 4}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 128}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 128}, window: null}}
-                  body:
-                    body:
-                    - class: Load
-                      fields:
-                        names: {tuple: [in0]}
-                        input: x
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        dtype: null
-                    - class: Accum
-                      fields: {name: acc0, value: in0, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
-                  unroll: false
-                  seed: true
-              - class: Load
-                fields:
-                  names: {tuple: [in1]}
-                  input: bias
-                  index: {tuple: [{expr: {var: a0}}, {expr: {literal: {value: 0, dtype: int}}}]}
-                  dtype: null
-              - class: Load
-                fields:
-                  names: {tuple: [in2]}
-                  input: scale
-                  index: {tuple: [{expr: {var: a0}}, {expr: {literal: {value: 0, dtype: int}}}]}
-                  dtype: null
-              - class: Assign
-                fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [acc0, in2]}, dtype: null}
-              - class: Assign
-                fields: {name: v1, op: {elementwise: add}, args: {tuple: [in1, v0]}, dtype: null}
-              - class: Write
-                fields:
-                  output: out
-                  index: {tuple: [{expr: {var: a0}}, {expr: {literal: {value: 0, dtype: int}}}]}
-                  values: {tuple: [v1]}
-                  value_dtype: null
-                  atomic: false
-                  swizzle: NONE
-            unroll: false
-            seed: true
+              - {Load: {names: [in0], input: x, index: [{var: a0}, {var: a1}], dtype: null}}
+              - {Accum: {name: acc0, value: in0, axes: [a1]}}
+          - Load: {names: [in1], input: bias, index: [{var: a0}, {literal: {value: 0, dtype: int}}], dtype: null}
+          - Load: {names: [in2], input: scale, index: [{var: a0}, {literal: {value: 0, dtype: int}}], dtype: null}
+          - {Assign: {name: v0, op: multiply, args: [acc0, in2]}}
+          - {Assign: {name: v1, op: add, args: [in1, v0]}}
+          - Write:
+              output: out
+              index:
+              - {var: a0}
+              - {literal: {value: 0, dtype: int}}
+              values:
+              - v1
+              value_dtype: null
+              atomic: false
+              swizzle: NONE
       name: k_out_reduce
     inputs: [x, scale, bias]
     outputs: [[out, f32, [4, 1]]]

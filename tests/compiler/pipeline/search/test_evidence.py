@@ -1,4 +1,4 @@
-"""Golden records become tune DB rows before a compile picks (``golden_import``).
+"""Golden records become tune DB rows before a compile picks (``golden.evidence``).
 
 Every kind of entry a golden file holds lands where the deploy reads it: a plain entry as its one
 kernel's perf row, a receipt as the row of the kernel its identity names, a cut as routing rows with
@@ -14,12 +14,12 @@ import pytest
 
 from emmy.compiler.pipeline.knob import KERNEL_DECISION_FAMILIES, family_of
 from emmy.compiler.pipeline.search.db import SearchDB
-from emmy.compiler.pipeline.search.golden import records_override
-from emmy.compiler.pipeline.search.golden_import import evidence_db, import_goldens
+from emmy.compiler.pipeline.search.golden import GoldenFile, Measurements, records_override
+from emmy.compiler.pipeline.search.golden.evidence import evidence_db, import_goldens
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from tests.compiler.realization import helpers as corpus
 
-_MEASURED = {"emmy_us": 1.0, "reference_us": 1.0, "reference_backend": "corpus"}
+_MEASURED = Measurements(emmy_us=1.0, reference_us=1.0, reference_backend="corpus")
 
 
 def _records(case):
@@ -129,7 +129,7 @@ def test_a_compile_imports_its_scope_once_and_lets_a_re_recorded_files_rows_go(t
             assert row.stats.median == 1.0
             first = db.perf_sources()
             assert evidence_db(db, ctx) is db and db.perf_sources() == first
-        slower = replace(record, measurements={**_MEASURED, "emmy_us": 2.0})
+        slower = replace(record, measurements=replace(_MEASURED, emmy_us=2.0))
         with records_override([slower]):
             assert evidence_db(db, ctx) is db
             [row] = db.iter_perf_rows()
@@ -154,7 +154,7 @@ def test_a_compile_without_a_db_picks_from_one_in_memory_instance_per_scope() ->
         with records_override([record]):
             db = evidence_db(None, ctx)
             assert evidence_db(None, ctx) is db and len(list(db.iter_perf_rows())) == 1
-        with records_override([replace(record, measurements={**_MEASURED, "emmy_us": 2.0})]):
+        with records_override([replace(record, measurements=replace(_MEASURED, emmy_us=2.0))]):
             assert evidence_db(None, ctx) is not db
         with records_override([]):
             assert not list(evidence_db(None, ctx).iter_perf_rows())
@@ -167,7 +167,7 @@ def test_a_compile_without_a_db_picks_from_one_in_memory_instance_per_scope() ->
     assert kernels[0] and kernels[1] and kernels[0].isdisjoint(kernels[1])
 
 
-@pytest.mark.xdist_group("golden_import_rtx5090")
+@pytest.mark.xdist_group("golden_evidence_rtx5090")
 def test_the_rtx_5090_hardware_golden_deploys_from_the_db(tmp_path) -> None:
     """The card's repository golden, imported into a fresh DB: every measured record in the standard regime
     is rows — a single-kernel record its kernel's row (an attention record whose stored identity the
@@ -178,17 +178,18 @@ def test_the_rtx_5090_hardware_golden_deploys_from_the_db(tmp_path) -> None:
     from emmy import config
     from emmy.compiler.context import Context
     from emmy.compiler.ir.cuda.ir import CudaOp
-    from emmy.compiler.loop_wire import kernel_tile
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
     from emmy.compiler.pipeline.knob import schedule_row_key
     from emmy.compiler.pipeline.search.db import is_placement_knob
-    from emmy.compiler.pipeline.search.golden import _HARDWARE_GOLDENS_DIR, load_golden_file, load_golden_records, regime_live
+    from emmy.compiler.pipeline.search.golden import regime_live
+    from emmy.compiler.pipeline.search.golden.repository import _HARDWARE_GOLDENS_DIR
+    from emmy.compiler.wire import kernel_tile
     from tests.compiler.pipeline.search.helpers import GPU_5090
 
     def splits(record) -> bool:
         return not record.is_routing and any(is_placement_knob(key, value) for key, value in record.schedule_row.items())
 
-    records = load_golden_records(load_golden_file(_HARDWARE_GOLDENS_DIR / "rtx5090_sm120.yaml"))
+    records = GoldenFile.load(_HARDWARE_GOLDENS_DIR / "rtx5090_sm120.yaml").records()
     ctx = Context.from_target((12, 0), gpu_name=GPU_5090)
     db = SearchDB()
     with pinned_knobs({"FAST_MATH": False}):
@@ -254,7 +255,7 @@ def test_a_measurement_taken_here_is_never_replaced_by_an_import(tmp_path) -> No
             captured=True,
             source="golden:x",
         )
-        with records_override([replace(record, measurements={**_MEASURED, "emmy_us": 0.5})]):
+        with records_override([replace(record, measurements=replace(_MEASURED, emmy_us=0.5))]):
             evidence_db(db, ctx)
         [row] = db.iter_perf_rows()
         assert (row.stats.median, row.source) == (9.0, "measured")

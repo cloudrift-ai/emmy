@@ -15,23 +15,19 @@ programs:
     op: constant
     attrs:
       name: p_mlp_down_proj_weight
-      value: null
-      context_value: null
-      load_ops: {__tuple__: []}
       source_path: mlp.down_proj.weight
-      source_parts: {__tuple__: []}
-      source_shape: {__tuple__: [1024, 3072]}
+      source_shape:
+      - 1024
+      - 3072
       source_dtype: float16
-      source_graph: null
     outputs: [[p_mlp_down_proj_weight, f16, [1024, 3072]]]
   - id: linear_6
     op: torch.linear
-    attrs: {has_bias: false}
     inputs: [mul_12, p_mlp_down_proj_weight]
     outputs: [[linear_6, f16, [1, 1, 1024]]]
   - id: add_7
     op: tensor.elementwise
-    attrs: {op: {__elementwise__: add}}
+    attrs: {op: add}
     inputs: [add_5, linear_6]
     outputs: [[add_7, f16, [1, 1, 1024]]]
 configs:
@@ -80,14 +76,13 @@ loops:
     op: constant
     attrs:
       name: p_mlp_down_proj_weight
-      value: null
-      context_value: null
-      load_ops: {__tuple__: [{__op__: {op: torch.transpose, attrs: {axes: {__tuple__: [-2, -1]}}}}]}
+      load_ops:
+      - {torch.transpose: {axes: [-2, -1]}}
       source_path: mlp.down_proj.weight
-      source_parts: {__tuple__: []}
-      source_shape: {__tuple__: [1024, 3072]}
+      source_shape:
+      - 1024
+      - 3072
       source_dtype: float16
-      source_graph: null
     outputs: [[linear_6_wt, f16, [3072, 1024]]]
   - id: mul_12
     op: input
@@ -96,67 +91,46 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 1024}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 1024}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 3072}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 3072}, window: null}}
-                  body:
-                    body:
-                    - class: Load
-                      fields:
-                        names: {tuple: [in0]}
-                        input: mul_12
-                        index:
-                          tuple:
-                          - {expr: {literal: {value: 0, dtype: int}}}
-                          - {expr: {literal: {value: 0, dtype: int}}}
-                          - {expr: {var: a1}}
-                        dtype: null
-                    - class: Load
-                      fields:
-                        names: {tuple: [in1]}
-                        input: linear_6_wt
-                        index: {tuple: [{expr: {var: a1}}, {expr: {var: a0}}]}
-                        dtype: null
-                    - class: Assign
-                      fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                    - class: Accum
-                      fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
-                  unroll: false
-                  seed: true
-              - class: Assign
-                fields: {name: v1, op: {elementwise: copy}, args: {tuple: [acc0]}, dtype: {dtype: f16}}
-              - class: Load
-                fields:
-                  names: {tuple: [in2]}
-                  input: add_5
+              - Load:
+                  names:
+                  - in0
+                  input: mul_12
                   index:
-                    tuple:
-                    - {expr: {literal: {value: 0, dtype: int}}}
-                    - {expr: {literal: {value: 0, dtype: int}}}
-                    - {expr: {var: a0}}
+                  - {literal: {value: 0, dtype: int}}
+                  - {literal: {value: 0, dtype: int}}
+                  - {var: a1}
                   dtype: null
-              - class: Assign
-                fields: {name: v2, op: {elementwise: add}, args: {tuple: [in2, v1]}, dtype: null}
-              - class: Write
-                fields:
-                  output: add_7
-                  index:
-                    tuple:
-                    - {expr: {literal: {value: 0, dtype: int}}}
-                    - {expr: {literal: {value: 0, dtype: int}}}
-                    - {expr: {var: a0}}
-                  values: {tuple: [v2]}
-                  value_dtype: null
-                  atomic: false
-                  swizzle: NONE
-            unroll: false
-            seed: true
+              - {Load: {names: [in1], input: linear_6_wt, index: [{var: a1}, {var: a0}], dtype: null}}
+              - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+              - {Accum: {name: acc0, value: v0, axes: [a1]}}
+          - {Assign: {name: v1, op: copy, args: [acc0], dtype: f16}}
+          - Load:
+              names:
+              - in2
+              input: add_5
+              index:
+              - {literal: {value: 0, dtype: int}}
+              - {literal: {value: 0, dtype: int}}
+              - {var: a0}
+              dtype: null
+          - {Assign: {name: v2, op: add, args: [in2, v1]}}
+          - Write:
+              output: add_7
+              index:
+              - {literal: {value: 0, dtype: int}}
+              - {literal: {value: 0, dtype: int}}
+              - {var: a0}
+              values:
+              - v2
+              value_dtype: null
+              atomic: false
+              swizzle: NONE
       name: k_linear_9807df
     inputs: [linear_6_wt, mul_12, add_5]
     outputs: [[add_7, f16, [1, 1, 1024]]]

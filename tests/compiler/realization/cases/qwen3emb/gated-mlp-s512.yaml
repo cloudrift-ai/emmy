@@ -16,22 +16,20 @@ programs:
     outputs: [[x, f32, [1, 512, 1024]]]
   - id: gate
     op: torch.matmul
-    attrs: {has_bias: false}
     inputs: [x, wg]
     outputs: [[gate, f32, [1, 512, 3072]]]
   - id: sg
     op: tensor.elementwise
-    attrs: {op: {__elementwise__: silu}}
+    attrs: {op: silu}
     inputs: [gate]
     outputs: [[sg, f32, [1, 512, 3072]]]
   - id: up
     op: torch.matmul
-    attrs: {has_bias: false}
     inputs: [x, wu]
     outputs: [[up, f32, [1, 512, 3072]]]
   - id: o
     op: tensor.elementwise
-    attrs: {op: {__elementwise__: multiply}}
+    attrs: {op: multiply}
     inputs: [sg, up]
     outputs: [[o, f32, [1, 512, 3072]]]
 configs:
@@ -64,16 +62,7 @@ loops:
   nodes:
   - id: sg_one
     op: constant
-    attrs:
-      name: sg_one
-      value: 1.0
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
+    attrs: {name: sg_one, value: 1.0}
     outputs: [[sg_one, f32, [1]]]
   - id: wg
     op: input
@@ -88,77 +77,47 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Load
-          fields:
-            names: {tuple: [in0]}
-            input: sg_one
-            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
-            dtype: null
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 512}, window: null}}
-            body:
+      - {Load: {names: [in0], input: sg_one, index: [{literal: {value: 0, dtype: int}}], dtype: null}}
+      - Loop:
+          axis: {name: a0, extent: 512}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 3072}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 3072}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 1024}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 1024}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: x
-                              index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in2]}
-                              input: wg
-                              index: {tuple: [{expr: {var: a2}}, {expr: {var: a1}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in1, in2]}, dtype: null}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                          - class: Load
-                            fields:
-                              names: {tuple: [in3]}
-                              input: wu
-                              index: {tuple: [{expr: {var: a2}}, {expr: {var: a1}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v1, op: {elementwise: multiply}, args: {tuple: [in1, in3]}, dtype: null}
-                          - class: Accum
-                            fields: {name: acc1, value: v1, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Assign
-                      fields: {name: v2, op: {elementwise: negative}, args: {tuple: [acc0]}, dtype: null}
-                    - {class: Assign, fields: {name: v3, op: {elementwise: exp}, args: {tuple: [v2]}, dtype: null}}
-                    - class: Assign
-                      fields: {name: v4, op: {elementwise: add}, args: {tuple: [in0, v3]}, dtype: null}
-                    - class: Assign
-                      fields: {name: v5, op: {elementwise: divide}, args: {tuple: [acc0, v4]}, dtype: null}
-                    - class: Assign
-                      fields: {name: v6, op: {elementwise: multiply}, args: {tuple: [acc1, v5]}, dtype: null}
-                    - class: Write
-                      fields:
-                        output: o
-                        index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [v6]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - Load:
+                      names:
+                      - in1
+                      input: x
+                      index:
+                      - {literal: {value: 0, dtype: int}}
+                      - {var: a0}
+                      - {var: a2}
+                      dtype: null
+                  - {Load: {names: [in2], input: wg, index: [{var: a2}, {var: a1}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in1, in2]}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+                  - {Load: {names: [in3], input: wu, index: [{var: a2}, {var: a1}], dtype: null}}
+                  - {Assign: {name: v1, op: multiply, args: [in1, in3]}}
+                  - {Accum: {name: acc1, value: v1, axes: [a2]}}
+              - {Assign: {name: v2, op: negative, args: [acc0]}}
+              - {Assign: {name: v3, op: exp, args: [v2]}}
+              - {Assign: {name: v4, op: add, args: [in0, v3]}}
+              - {Assign: {name: v5, op: divide, args: [acc0, v4]}}
+              - {Assign: {name: v6, op: multiply, args: [acc1, v5]}}
+              - Write:
+                  output: o
+                  index:
+                  - {literal: {value: 0, dtype: int}}
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - v6
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
       name: k_matmul_reduce_17f7d4
     inputs: [sg_one, wg, x, wu]
     outputs: [[o, f32, [1, 512, 3072]]]

@@ -16,385 +16,143 @@ programs:
   - id: select_14
     op: tensor.index_map
     attrs:
-      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 48}, {__dim__: 8}, {__dim__: 64}]}
+      out_shape:
+      - 1
+      - 48
+      - 8
+      - 64
       sources:
-        __tuple__:
-        - __index_source__:
-            input_idx: 0
-            coord_map:
-            - {var: out_coord_0}
-            - {var: out_coord_1}
-            - {var: out_coord_2}
-            - {literal: {value: 8, dtype: int}}
-            - {var: out_coord_3}
-            select: null
+      - input_idx: 0
+        coord_map:
+        - {var: out_coord_0}
+        - {var: out_coord_1}
+        - {var: out_coord_2}
+        - {literal: {value: 8, dtype: int}}
+        - {var: out_coord_3}
     inputs: [copy__6_base]
     outputs: [[select_14, f32, [1, 48, 8, 64]]]
   - id: slice_30_c1
     op: constant
-    attrs:
-      name: slice_30_c1
-      value: 3.0
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
+    attrs: {name: slice_30_c1, value: 3.0}
     outputs: [[slice_30_c1, f32, [1]]]
   - id: slice_30_c2
     op: constant
-    attrs:
-      name: slice_30_c2
-      value: 0.0
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
+    attrs: {name: slice_30_c2, value: 0.0}
     outputs: [[slice_30_c2, f32, [1]]]
   - id: slice_30_c3
     op: constant
-    attrs:
-      name: slice_30_c3
-      value: 8.0
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
+    attrs: {name: slice_30_c3, value: 8.0}
     outputs: [[slice_30_c3, f32, [1]]]
   - id: slice_30
     op: torch.slice
-    attrs: {shape: {__tuple__: [1, 48, 8, 8]}, dim: 3, start: 0}
+    attrs: {shape: [1, 48, 8, 8], dim: 3, start: 0}
     inputs: [select_14, slice_30_c1, slice_30_c2, slice_30_c3]
     outputs: [[slice_30, f32, [1, 48, 8, 8]]]
   - id: slice_31_c1
     op: constant
-    attrs:
-      name: slice_31_c1
-      value: 3.0
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
+    attrs: {name: slice_31_c1, value: 3.0}
     outputs: [[slice_31_c1, f32, [1]]]
   - id: slice_31_c2
     op: constant
-    attrs:
-      name: slice_31_c2
-      value: 0.0
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
+    attrs: {name: slice_31_c2, value: 0.0}
     outputs: [[slice_31_c2, f32, [1]]]
   - id: slice_31_c3
     op: constant
-    attrs:
-      name: slice_31_c3
-      value: 8.0
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
+    attrs: {name: slice_31_c3, value: 8.0}
     outputs: [[slice_31_c3, f32, [1]]]
   - id: slice_31
     op: torch.slice
-    attrs: {shape: {__tuple__: [1, 48, 8, 8, 64]}, dim: 3, start: 0}
+    attrs: {shape: [1, 48, 8, 8, 64], dim: 3, start: 0}
     inputs: [copy__6_base, slice_31_c1, slice_31_c2, slice_31_c3]
     outputs: [[slice_31, f32, [1, 48, 8, 8, 64]]]
   - id: slice_32_c1
     op: constant
-    attrs:
-      name: slice_32_c1
-      value: 4.0
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
+    attrs: {name: slice_32_c1, value: 4.0}
     outputs: [[slice_32_c1, f32, [1]]]
   - id: slice_32_c2
     op: constant
-    attrs:
-      name: slice_32_c2
-      value: 0.0
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
+    attrs: {name: slice_32_c2, value: 0.0}
     outputs: [[slice_32_c2, f32, [1]]]
   - id: slice_32_c3
     op: constant
-    attrs:
-      name: slice_32_c3
-      value: 8.0
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
+    attrs: {name: slice_32_c3, value: 8.0}
     outputs: [[slice_32_c3, f32, [1]]]
   - id: slice_32
     op: torch.slice
-    attrs: {shape: {__tuple__: [1, 48, 8, 8, 8]}, dim: 4, start: 0}
+    attrs: {shape: [1, 48, 8, 8, 8], dim: 4, start: 0}
     inputs: [slice_31, slice_32_c1, slice_32_c2, slice_32_c3]
     outputs: [[slice_32, f32, [1, 48, 8, 8, 8]]]
   - id: slice_34_c1
     op: constant
-    attrs:
-      name: slice_34_c1
-      value: 3.0
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
+    attrs: {name: slice_34_c1, value: 3.0}
     outputs: [[slice_34_c1, f32, [1]]]
   - id: slice_34_c2
     op: constant
-    attrs:
-      name: slice_34_c2
-      value: 0.0
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
+    attrs: {name: slice_34_c2, value: 0.0}
     outputs: [[slice_34_c2, f32, [1]]]
   - id: slice_34_c3
     op: constant
-    attrs:
-      name: slice_34_c3
-      value: 9.0
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
+    attrs: {name: slice_34_c3, value: 9.0}
     outputs: [[slice_34_c3, f32, [1]]]
   - id: slice_35_c1
     op: constant
-    attrs:
-      name: slice_35_c1
-      value: 3.0
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
+    attrs: {name: slice_35_c1, value: 3.0}
     outputs: [[slice_35_c1, f32, [1]]]
   - id: slice_35_c2
     op: constant
-    attrs:
-      name: slice_35_c2
-      value: 0.0
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
+    attrs: {name: slice_35_c2, value: 0.0}
     outputs: [[slice_35_c2, f32, [1]]]
   - id: slice_35_c3
     op: constant
-    attrs:
-      name: slice_35_c3
-      value: 9.0
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
+    attrs: {name: slice_35_c3, value: 9.0}
     outputs: [[slice_35_c3, f32, [1]]]
   - id: slice_36_c1
     op: constant
-    attrs:
-      name: slice_36_c1
-      value: 4.0
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
+    attrs: {name: slice_36_c1, value: 4.0}
     outputs: [[slice_36_c1, f32, [1]]]
   - id: slice_36_c2
     op: constant
-    attrs:
-      name: slice_36_c2
-      value: 0.0
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
+    attrs: {name: slice_36_c2, value: 0.0}
     outputs: [[slice_36_c2, f32, [1]]]
   - id: slice_36_c3
     op: constant
-    attrs:
-      name: slice_36_c3
-      value: 9.0
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
+    attrs: {name: slice_36_c3, value: 9.0}
     outputs: [[slice_36_c3, f32, [1]]]
   - id: slice_38_c1
     op: constant
-    attrs:
-      name: slice_38_c1
-      value: 3.0
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
+    attrs: {name: slice_38_c1, value: 3.0}
     outputs: [[slice_38_c1, f32, [1]]]
   - id: slice_38_c2
     op: constant
-    attrs:
-      name: slice_38_c2
-      value: 0.0
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
+    attrs: {name: slice_38_c2, value: 0.0}
     outputs: [[slice_38_c2, f32, [1]]]
   - id: slice_38_c3
     op: constant
-    attrs:
-      name: slice_38_c3
-      value: 10.0
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
+    attrs: {name: slice_38_c3, value: 10.0}
     outputs: [[slice_38_c3, f32, [1]]]
   - id: slice_39_c1
     op: constant
-    attrs:
-      name: slice_39_c1
-      value: 3.0
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
+    attrs: {name: slice_39_c1, value: 3.0}
     outputs: [[slice_39_c1, f32, [1]]]
   - id: slice_39_c2
     op: constant
-    attrs:
-      name: slice_39_c2
-      value: 0.0
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
+    attrs: {name: slice_39_c2, value: 0.0}
     outputs: [[slice_39_c2, f32, [1]]]
   - id: slice_39_c3
     op: constant
-    attrs:
-      name: slice_39_c3
-      value: 10.0
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
+    attrs: {name: slice_39_c3, value: 10.0}
     outputs: [[slice_39_c3, f32, [1]]]
   - id: slice_40_c1
     op: constant
-    attrs:
-      name: slice_40_c1
-      value: 4.0
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
+    attrs: {name: slice_40_c1, value: 4.0}
     outputs: [[slice_40_c1, f32, [1]]]
   - id: slice_40_c2
     op: constant
-    attrs:
-      name: slice_40_c2
-      value: 0.0
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
+    attrs: {name: slice_40_c2, value: 0.0}
     outputs: [[slice_40_c2, f32, [1]]]
   - id: slice_40_c3
     op: constant
-    attrs:
-      name: slice_40_c3
-      value: 10.0
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
+    attrs: {name: slice_40_c3, value: 10.0}
     outputs: [[slice_40_c3, f32, [1]]]
   - id: unsqueeze_11
     op: torch.unsqueeze
@@ -404,254 +162,86 @@ programs:
   - id: unsqueeze_11_bc
     op: tensor.index_map
     attrs:
-      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 48}, {__dim__: 8}, {__dim__: 8}, {__dim__: 8}]}
+      out_shape:
+      - 1
+      - 48
+      - 8
+      - 8
+      - 8
       sources:
-        __tuple__:
-        - __index_source__:
-            input_idx: 0
-            coord_map:
-            - {var: out_coord_0}
-            - {var: out_coord_1}
-            - {var: out_coord_2}
-            - {var: out_coord_3}
-            - {literal: {value: 0, dtype: int}}
-            select: null
+      - input_idx: 0
+        coord_map:
+        - {var: out_coord_0}
+        - {var: out_coord_1}
+        - {var: out_coord_2}
+        - {var: out_coord_3}
+        - {literal: {value: 0, dtype: int}}
     inputs: [unsqueeze_11]
     outputs: [[unsqueeze_11_bc, f32, [1, 48, 8, 8, 8]]]
   - id: mul_18
     op: tensor.elementwise
-    attrs: {op: {__elementwise__: multiply}}
+    attrs: {op: multiply}
     inputs: [unsqueeze_11_bc, slice_32]
     outputs: [[mul_18, f32, [1, 48, 8, 8, 8]]]
   - id: sum_10_keepdim
     op: tensor.reduce
-    attrs: {op: {__elementwise__: sum}, axis: -2}
+    attrs: {axis: -2}
     inputs: [mul_18]
     outputs: [[sum_10_keepdim, f32, [1, 48, 8, 1, 8]]]
   - id: sum_10
     op: tensor.index_map
     attrs:
-      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 48}, {__dim__: 8}, {__dim__: 8}]}
+      out_shape:
+      - 1
+      - 48
+      - 8
+      - 8
       sources:
-        __tuple__:
-        - __index_source__:
-            input_idx: 0
-            coord_map:
-            - {var: out_coord_0}
-            - {var: out_coord_1}
-            - {var: out_coord_2}
-            - {literal: {value: 0, dtype: int}}
-            - {var: out_coord_3}
-            select: null
+      - input_idx: 0
+        coord_map:
+        - {var: out_coord_0}
+        - {var: out_coord_1}
+        - {var: out_coord_2}
+        - {literal: {value: 0, dtype: int}}
+        - {var: out_coord_3}
     inputs: [sum_10_keepdim]
     outputs: [[sum_10, f32, [1, 48, 8, 8]]]
   - id: add_12
     op: tensor.elementwise
-    attrs: {op: {__elementwise__: add}}
+    attrs: {op: add}
     inputs: [slice_30, sum_10]
     outputs: [[add_12, f32, [1, 48, 8, 8]]]
   - id: copy__7
     op: tensor.index_map
     attrs:
-      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 48}, {__dim__: 8}, {__dim__: 8}]}
+      out_shape:
+      - 1
+      - 48
+      - 8
+      - 8
       sources:
-        __tuple__:
-        - __index_source__:
-            input_idx: 0
-            coord_map:
-            - {var: out_coord_0}
-            - {var: out_coord_1}
-            - {var: out_coord_2}
-            - {var: out_coord_3}
-            select: null
+      - input_idx: 0
+        coord_map:
+        - {var: out_coord_0}
+        - {var: out_coord_1}
+        - {var: out_coord_2}
+        - {var: out_coord_3}
     inputs: [add_12]
     outputs: [[copy__7, f32, [1, 48, 8, 8]]]
   - id: copy__7_base
     op: tensor.index_map
     attrs:
-      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 48}, {__dim__: 8}, {__dim__: 64}, {__dim__: 64}]}
+      out_shape:
+      - 1
+      - 48
+      - 8
+      - 64
+      - 64
       sources:
-        __tuple__:
-        - __index_source__:
-            input_idx: 0
-            coord_map:
-            - ternary:
-                cond:
-                  binary:
-                    op: '&&'
-                    left:
-                      binary:
-                        op: '&&'
-                        left:
-                          binary:
-                            op: '&&'
-                            left:
-                              binary:
-                                op: '&&'
-                                left:
-                                  binary:
-                                    op: '&&'
-                                    left: {literal: {value: true, dtype: bool}}
-                                    right:
-                                      binary:
-                                        op: '&&'
-                                        left: {binary: {op: '>=', left: {var: out_coord_0}, right: {literal: {value: 0, dtype: int}}}}
-                                        right: {binary: {op: <, left: {var: out_coord_0}, right: {literal: {value: 1, dtype: int}}}}
-                                right:
-                                  binary:
-                                    op: '&&'
-                                    left: {binary: {op: '>=', left: {var: out_coord_1}, right: {literal: {value: 0, dtype: int}}}}
-                                    right: {binary: {op: <, left: {var: out_coord_1}, right: {literal: {value: 48, dtype: int}}}}
-                            right:
-                              binary:
-                                op: '&&'
-                                left: {binary: {op: '>=', left: {var: out_coord_2}, right: {literal: {value: 0, dtype: int}}}}
-                                right: {binary: {op: <, left: {var: out_coord_2}, right: {literal: {value: 8, dtype: int}}}}
-                        right:
-                          binary:
-                            op: '&&'
-                            left: {binary: {op: '>=', left: {var: out_coord_3}, right: {literal: {value: 8, dtype: int}}}}
-                            right: {binary: {op: <, left: {var: out_coord_3}, right: {literal: {value: 9, dtype: int}}}}
-                    right:
-                      binary:
-                        op: '&&'
-                        left: {binary: {op: '>=', left: {var: out_coord_4}, right: {literal: {value: 0, dtype: int}}}}
-                        right: {binary: {op: <, left: {var: out_coord_4}, right: {literal: {value: 8, dtype: int}}}}
-                if_true: {var: out_coord_0}
-                if_false: {literal: {value: 0, dtype: int}}
-            - ternary:
-                cond:
-                  binary:
-                    op: '&&'
-                    left:
-                      binary:
-                        op: '&&'
-                        left:
-                          binary:
-                            op: '&&'
-                            left:
-                              binary:
-                                op: '&&'
-                                left:
-                                  binary:
-                                    op: '&&'
-                                    left: {literal: {value: true, dtype: bool}}
-                                    right:
-                                      binary:
-                                        op: '&&'
-                                        left: {binary: {op: '>=', left: {var: out_coord_0}, right: {literal: {value: 0, dtype: int}}}}
-                                        right: {binary: {op: <, left: {var: out_coord_0}, right: {literal: {value: 1, dtype: int}}}}
-                                right:
-                                  binary:
-                                    op: '&&'
-                                    left: {binary: {op: '>=', left: {var: out_coord_1}, right: {literal: {value: 0, dtype: int}}}}
-                                    right: {binary: {op: <, left: {var: out_coord_1}, right: {literal: {value: 48, dtype: int}}}}
-                            right:
-                              binary:
-                                op: '&&'
-                                left: {binary: {op: '>=', left: {var: out_coord_2}, right: {literal: {value: 0, dtype: int}}}}
-                                right: {binary: {op: <, left: {var: out_coord_2}, right: {literal: {value: 8, dtype: int}}}}
-                        right:
-                          binary:
-                            op: '&&'
-                            left: {binary: {op: '>=', left: {var: out_coord_3}, right: {literal: {value: 8, dtype: int}}}}
-                            right: {binary: {op: <, left: {var: out_coord_3}, right: {literal: {value: 9, dtype: int}}}}
-                    right:
-                      binary:
-                        op: '&&'
-                        left: {binary: {op: '>=', left: {var: out_coord_4}, right: {literal: {value: 0, dtype: int}}}}
-                        right: {binary: {op: <, left: {var: out_coord_4}, right: {literal: {value: 8, dtype: int}}}}
-                if_true: {var: out_coord_1}
-                if_false: {literal: {value: 0, dtype: int}}
-            - ternary:
-                cond:
-                  binary:
-                    op: '&&'
-                    left:
-                      binary:
-                        op: '&&'
-                        left:
-                          binary:
-                            op: '&&'
-                            left:
-                              binary:
-                                op: '&&'
-                                left:
-                                  binary:
-                                    op: '&&'
-                                    left: {literal: {value: true, dtype: bool}}
-                                    right:
-                                      binary:
-                                        op: '&&'
-                                        left: {binary: {op: '>=', left: {var: out_coord_0}, right: {literal: {value: 0, dtype: int}}}}
-                                        right: {binary: {op: <, left: {var: out_coord_0}, right: {literal: {value: 1, dtype: int}}}}
-                                right:
-                                  binary:
-                                    op: '&&'
-                                    left: {binary: {op: '>=', left: {var: out_coord_1}, right: {literal: {value: 0, dtype: int}}}}
-                                    right: {binary: {op: <, left: {var: out_coord_1}, right: {literal: {value: 48, dtype: int}}}}
-                            right:
-                              binary:
-                                op: '&&'
-                                left: {binary: {op: '>=', left: {var: out_coord_2}, right: {literal: {value: 0, dtype: int}}}}
-                                right: {binary: {op: <, left: {var: out_coord_2}, right: {literal: {value: 8, dtype: int}}}}
-                        right:
-                          binary:
-                            op: '&&'
-                            left: {binary: {op: '>=', left: {var: out_coord_3}, right: {literal: {value: 8, dtype: int}}}}
-                            right: {binary: {op: <, left: {var: out_coord_3}, right: {literal: {value: 9, dtype: int}}}}
-                    right:
-                      binary:
-                        op: '&&'
-                        left: {binary: {op: '>=', left: {var: out_coord_4}, right: {literal: {value: 0, dtype: int}}}}
-                        right: {binary: {op: <, left: {var: out_coord_4}, right: {literal: {value: 8, dtype: int}}}}
-                if_true: {var: out_coord_2}
-                if_false: {literal: {value: 0, dtype: int}}
-            - ternary:
-                cond:
-                  binary:
-                    op: '&&'
-                    left:
-                      binary:
-                        op: '&&'
-                        left:
-                          binary:
-                            op: '&&'
-                            left:
-                              binary:
-                                op: '&&'
-                                left:
-                                  binary:
-                                    op: '&&'
-                                    left: {literal: {value: true, dtype: bool}}
-                                    right:
-                                      binary:
-                                        op: '&&'
-                                        left: {binary: {op: '>=', left: {var: out_coord_0}, right: {literal: {value: 0, dtype: int}}}}
-                                        right: {binary: {op: <, left: {var: out_coord_0}, right: {literal: {value: 1, dtype: int}}}}
-                                right:
-                                  binary:
-                                    op: '&&'
-                                    left: {binary: {op: '>=', left: {var: out_coord_1}, right: {literal: {value: 0, dtype: int}}}}
-                                    right: {binary: {op: <, left: {var: out_coord_1}, right: {literal: {value: 48, dtype: int}}}}
-                            right:
-                              binary:
-                                op: '&&'
-                                left: {binary: {op: '>=', left: {var: out_coord_2}, right: {literal: {value: 0, dtype: int}}}}
-                                right: {binary: {op: <, left: {var: out_coord_2}, right: {literal: {value: 8, dtype: int}}}}
-                        right:
-                          binary:
-                            op: '&&'
-                            left: {binary: {op: '>=', left: {var: out_coord_3}, right: {literal: {value: 8, dtype: int}}}}
-                            right: {binary: {op: <, left: {var: out_coord_3}, right: {literal: {value: 9, dtype: int}}}}
-                    right:
-                      binary:
-                        op: '&&'
-                        left: {binary: {op: '>=', left: {var: out_coord_4}, right: {literal: {value: 0, dtype: int}}}}
-                        right: {binary: {op: <, left: {var: out_coord_4}, right: {literal: {value: 8, dtype: int}}}}
-                if_true: {var: out_coord_4}
-                if_false: {literal: {value: 0, dtype: int}}
-            select:
+      - input_idx: 0
+        coord_map:
+        - ternary:
+            cond:
               binary:
                 op: '&&'
                 left:
@@ -692,47 +282,221 @@ programs:
                     op: '&&'
                     left: {binary: {op: '>=', left: {var: out_coord_4}, right: {literal: {value: 0, dtype: int}}}}
                     right: {binary: {op: <, left: {var: out_coord_4}, right: {literal: {value: 8, dtype: int}}}}
-        - __index_source__:
-            input_idx: 1
-            coord_map:
-            - {var: out_coord_0}
-            - {var: out_coord_1}
-            - {var: out_coord_2}
-            - {var: out_coord_3}
-            - {var: out_coord_4}
-            select: null
+            if_true: {var: out_coord_0}
+            if_false: {literal: {value: 0, dtype: int}}
+        - ternary:
+            cond:
+              binary:
+                op: '&&'
+                left:
+                  binary:
+                    op: '&&'
+                    left:
+                      binary:
+                        op: '&&'
+                        left:
+                          binary:
+                            op: '&&'
+                            left:
+                              binary:
+                                op: '&&'
+                                left: {literal: {value: true, dtype: bool}}
+                                right:
+                                  binary:
+                                    op: '&&'
+                                    left: {binary: {op: '>=', left: {var: out_coord_0}, right: {literal: {value: 0, dtype: int}}}}
+                                    right: {binary: {op: <, left: {var: out_coord_0}, right: {literal: {value: 1, dtype: int}}}}
+                            right:
+                              binary:
+                                op: '&&'
+                                left: {binary: {op: '>=', left: {var: out_coord_1}, right: {literal: {value: 0, dtype: int}}}}
+                                right: {binary: {op: <, left: {var: out_coord_1}, right: {literal: {value: 48, dtype: int}}}}
+                        right:
+                          binary:
+                            op: '&&'
+                            left: {binary: {op: '>=', left: {var: out_coord_2}, right: {literal: {value: 0, dtype: int}}}}
+                            right: {binary: {op: <, left: {var: out_coord_2}, right: {literal: {value: 8, dtype: int}}}}
+                    right:
+                      binary:
+                        op: '&&'
+                        left: {binary: {op: '>=', left: {var: out_coord_3}, right: {literal: {value: 8, dtype: int}}}}
+                        right: {binary: {op: <, left: {var: out_coord_3}, right: {literal: {value: 9, dtype: int}}}}
+                right:
+                  binary:
+                    op: '&&'
+                    left: {binary: {op: '>=', left: {var: out_coord_4}, right: {literal: {value: 0, dtype: int}}}}
+                    right: {binary: {op: <, left: {var: out_coord_4}, right: {literal: {value: 8, dtype: int}}}}
+            if_true: {var: out_coord_1}
+            if_false: {literal: {value: 0, dtype: int}}
+        - ternary:
+            cond:
+              binary:
+                op: '&&'
+                left:
+                  binary:
+                    op: '&&'
+                    left:
+                      binary:
+                        op: '&&'
+                        left:
+                          binary:
+                            op: '&&'
+                            left:
+                              binary:
+                                op: '&&'
+                                left: {literal: {value: true, dtype: bool}}
+                                right:
+                                  binary:
+                                    op: '&&'
+                                    left: {binary: {op: '>=', left: {var: out_coord_0}, right: {literal: {value: 0, dtype: int}}}}
+                                    right: {binary: {op: <, left: {var: out_coord_0}, right: {literal: {value: 1, dtype: int}}}}
+                            right:
+                              binary:
+                                op: '&&'
+                                left: {binary: {op: '>=', left: {var: out_coord_1}, right: {literal: {value: 0, dtype: int}}}}
+                                right: {binary: {op: <, left: {var: out_coord_1}, right: {literal: {value: 48, dtype: int}}}}
+                        right:
+                          binary:
+                            op: '&&'
+                            left: {binary: {op: '>=', left: {var: out_coord_2}, right: {literal: {value: 0, dtype: int}}}}
+                            right: {binary: {op: <, left: {var: out_coord_2}, right: {literal: {value: 8, dtype: int}}}}
+                    right:
+                      binary:
+                        op: '&&'
+                        left: {binary: {op: '>=', left: {var: out_coord_3}, right: {literal: {value: 8, dtype: int}}}}
+                        right: {binary: {op: <, left: {var: out_coord_3}, right: {literal: {value: 9, dtype: int}}}}
+                right:
+                  binary:
+                    op: '&&'
+                    left: {binary: {op: '>=', left: {var: out_coord_4}, right: {literal: {value: 0, dtype: int}}}}
+                    right: {binary: {op: <, left: {var: out_coord_4}, right: {literal: {value: 8, dtype: int}}}}
+            if_true: {var: out_coord_2}
+            if_false: {literal: {value: 0, dtype: int}}
+        - ternary:
+            cond:
+              binary:
+                op: '&&'
+                left:
+                  binary:
+                    op: '&&'
+                    left:
+                      binary:
+                        op: '&&'
+                        left:
+                          binary:
+                            op: '&&'
+                            left:
+                              binary:
+                                op: '&&'
+                                left: {literal: {value: true, dtype: bool}}
+                                right:
+                                  binary:
+                                    op: '&&'
+                                    left: {binary: {op: '>=', left: {var: out_coord_0}, right: {literal: {value: 0, dtype: int}}}}
+                                    right: {binary: {op: <, left: {var: out_coord_0}, right: {literal: {value: 1, dtype: int}}}}
+                            right:
+                              binary:
+                                op: '&&'
+                                left: {binary: {op: '>=', left: {var: out_coord_1}, right: {literal: {value: 0, dtype: int}}}}
+                                right: {binary: {op: <, left: {var: out_coord_1}, right: {literal: {value: 48, dtype: int}}}}
+                        right:
+                          binary:
+                            op: '&&'
+                            left: {binary: {op: '>=', left: {var: out_coord_2}, right: {literal: {value: 0, dtype: int}}}}
+                            right: {binary: {op: <, left: {var: out_coord_2}, right: {literal: {value: 8, dtype: int}}}}
+                    right:
+                      binary:
+                        op: '&&'
+                        left: {binary: {op: '>=', left: {var: out_coord_3}, right: {literal: {value: 8, dtype: int}}}}
+                        right: {binary: {op: <, left: {var: out_coord_3}, right: {literal: {value: 9, dtype: int}}}}
+                right:
+                  binary:
+                    op: '&&'
+                    left: {binary: {op: '>=', left: {var: out_coord_4}, right: {literal: {value: 0, dtype: int}}}}
+                    right: {binary: {op: <, left: {var: out_coord_4}, right: {literal: {value: 8, dtype: int}}}}
+            if_true: {var: out_coord_4}
+            if_false: {literal: {value: 0, dtype: int}}
+        select:
+          binary:
+            op: '&&'
+            left:
+              binary:
+                op: '&&'
+                left:
+                  binary:
+                    op: '&&'
+                    left:
+                      binary:
+                        op: '&&'
+                        left:
+                          binary:
+                            op: '&&'
+                            left: {literal: {value: true, dtype: bool}}
+                            right:
+                              binary:
+                                op: '&&'
+                                left: {binary: {op: '>=', left: {var: out_coord_0}, right: {literal: {value: 0, dtype: int}}}}
+                                right: {binary: {op: <, left: {var: out_coord_0}, right: {literal: {value: 1, dtype: int}}}}
+                        right:
+                          binary:
+                            op: '&&'
+                            left: {binary: {op: '>=', left: {var: out_coord_1}, right: {literal: {value: 0, dtype: int}}}}
+                            right: {binary: {op: <, left: {var: out_coord_1}, right: {literal: {value: 48, dtype: int}}}}
+                    right:
+                      binary:
+                        op: '&&'
+                        left: {binary: {op: '>=', left: {var: out_coord_2}, right: {literal: {value: 0, dtype: int}}}}
+                        right: {binary: {op: <, left: {var: out_coord_2}, right: {literal: {value: 8, dtype: int}}}}
+                right:
+                  binary:
+                    op: '&&'
+                    left: {binary: {op: '>=', left: {var: out_coord_3}, right: {literal: {value: 8, dtype: int}}}}
+                    right: {binary: {op: <, left: {var: out_coord_3}, right: {literal: {value: 9, dtype: int}}}}
+            right:
+              binary:
+                op: '&&'
+                left: {binary: {op: '>=', left: {var: out_coord_4}, right: {literal: {value: 0, dtype: int}}}}
+                right: {binary: {op: <, left: {var: out_coord_4}, right: {literal: {value: 8, dtype: int}}}}
+      - input_idx: 1
+        coord_map:
+        - {var: out_coord_0}
+        - {var: out_coord_1}
+        - {var: out_coord_2}
+        - {var: out_coord_3}
+        - {var: out_coord_4}
     inputs: [copy__7, copy__6_base]
     outputs: [[copy__7_base, f32, [1, 48, 8, 64, 64]]]
   - id: select_16
     op: tensor.index_map
     attrs:
-      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 48}, {__dim__: 8}, {__dim__: 64}]}
+      out_shape:
+      - 1
+      - 48
+      - 8
+      - 64
       sources:
-        __tuple__:
-        - __index_source__:
-            input_idx: 0
-            coord_map:
-            - {var: out_coord_0}
-            - {var: out_coord_1}
-            - {var: out_coord_2}
-            - {literal: {value: 9, dtype: int}}
-            - {var: out_coord_3}
-            select: null
+      - input_idx: 0
+        coord_map:
+        - {var: out_coord_0}
+        - {var: out_coord_1}
+        - {var: out_coord_2}
+        - {literal: {value: 9, dtype: int}}
+        - {var: out_coord_3}
     inputs: [copy__7_base]
     outputs: [[select_16, f32, [1, 48, 8, 64]]]
   - id: slice_34
     op: torch.slice
-    attrs: {shape: {__tuple__: [1, 48, 8, 9]}, dim: 3, start: 0}
+    attrs: {shape: [1, 48, 8, 9], dim: 3, start: 0}
     inputs: [select_16, slice_34_c1, slice_34_c2, slice_34_c3]
     outputs: [[slice_34, f32, [1, 48, 8, 9]]]
   - id: slice_35
     op: torch.slice
-    attrs: {shape: {__tuple__: [1, 48, 8, 9, 64]}, dim: 3, start: 0}
+    attrs: {shape: [1, 48, 8, 9, 64], dim: 3, start: 0}
     inputs: [copy__7_base, slice_35_c1, slice_35_c2, slice_35_c3]
     outputs: [[slice_35, f32, [1, 48, 8, 9, 64]]]
   - id: slice_36
     op: torch.slice
-    attrs: {shape: {__tuple__: [1, 48, 8, 9, 9]}, dim: 4, start: 0}
+    attrs: {shape: [1, 48, 8, 9, 9], dim: 4, start: 0}
     inputs: [slice_35, slice_36_c1, slice_36_c2, slice_36_c3]
     outputs: [[slice_36, f32, [1, 48, 8, 9, 9]]]
   - id: unsqueeze_12
@@ -743,254 +507,86 @@ programs:
   - id: unsqueeze_12_bc
     op: tensor.index_map
     attrs:
-      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 48}, {__dim__: 8}, {__dim__: 9}, {__dim__: 9}]}
+      out_shape:
+      - 1
+      - 48
+      - 8
+      - 9
+      - 9
       sources:
-        __tuple__:
-        - __index_source__:
-            input_idx: 0
-            coord_map:
-            - {var: out_coord_0}
-            - {var: out_coord_1}
-            - {var: out_coord_2}
-            - {var: out_coord_3}
-            - {literal: {value: 0, dtype: int}}
-            select: null
+      - input_idx: 0
+        coord_map:
+        - {var: out_coord_0}
+        - {var: out_coord_1}
+        - {var: out_coord_2}
+        - {var: out_coord_3}
+        - {literal: {value: 0, dtype: int}}
     inputs: [unsqueeze_12]
     outputs: [[unsqueeze_12_bc, f32, [1, 48, 8, 9, 9]]]
   - id: mul_19
     op: tensor.elementwise
-    attrs: {op: {__elementwise__: multiply}}
+    attrs: {op: multiply}
     inputs: [unsqueeze_12_bc, slice_36]
     outputs: [[mul_19, f32, [1, 48, 8, 9, 9]]]
   - id: sum_11_keepdim
     op: tensor.reduce
-    attrs: {op: {__elementwise__: sum}, axis: -2}
+    attrs: {axis: -2}
     inputs: [mul_19]
     outputs: [[sum_11_keepdim, f32, [1, 48, 8, 1, 9]]]
   - id: sum_11
     op: tensor.index_map
     attrs:
-      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 48}, {__dim__: 8}, {__dim__: 9}]}
+      out_shape:
+      - 1
+      - 48
+      - 8
+      - 9
       sources:
-        __tuple__:
-        - __index_source__:
-            input_idx: 0
-            coord_map:
-            - {var: out_coord_0}
-            - {var: out_coord_1}
-            - {var: out_coord_2}
-            - {literal: {value: 0, dtype: int}}
-            - {var: out_coord_3}
-            select: null
+      - input_idx: 0
+        coord_map:
+        - {var: out_coord_0}
+        - {var: out_coord_1}
+        - {var: out_coord_2}
+        - {literal: {value: 0, dtype: int}}
+        - {var: out_coord_3}
     inputs: [sum_11_keepdim]
     outputs: [[sum_11, f32, [1, 48, 8, 9]]]
   - id: add_13
     op: tensor.elementwise
-    attrs: {op: {__elementwise__: add}}
+    attrs: {op: add}
     inputs: [slice_34, sum_11]
     outputs: [[add_13, f32, [1, 48, 8, 9]]]
   - id: copy__8
     op: tensor.index_map
     attrs:
-      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 48}, {__dim__: 8}, {__dim__: 9}]}
+      out_shape:
+      - 1
+      - 48
+      - 8
+      - 9
       sources:
-        __tuple__:
-        - __index_source__:
-            input_idx: 0
-            coord_map:
-            - {var: out_coord_0}
-            - {var: out_coord_1}
-            - {var: out_coord_2}
-            - {var: out_coord_3}
-            select: null
+      - input_idx: 0
+        coord_map:
+        - {var: out_coord_0}
+        - {var: out_coord_1}
+        - {var: out_coord_2}
+        - {var: out_coord_3}
     inputs: [add_13]
     outputs: [[copy__8, f32, [1, 48, 8, 9]]]
   - id: copy__8_base
     op: tensor.index_map
     attrs:
-      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 48}, {__dim__: 8}, {__dim__: 64}, {__dim__: 64}]}
+      out_shape:
+      - 1
+      - 48
+      - 8
+      - 64
+      - 64
       sources:
-        __tuple__:
-        - __index_source__:
-            input_idx: 0
-            coord_map:
-            - ternary:
-                cond:
-                  binary:
-                    op: '&&'
-                    left:
-                      binary:
-                        op: '&&'
-                        left:
-                          binary:
-                            op: '&&'
-                            left:
-                              binary:
-                                op: '&&'
-                                left:
-                                  binary:
-                                    op: '&&'
-                                    left: {literal: {value: true, dtype: bool}}
-                                    right:
-                                      binary:
-                                        op: '&&'
-                                        left: {binary: {op: '>=', left: {var: out_coord_0}, right: {literal: {value: 0, dtype: int}}}}
-                                        right: {binary: {op: <, left: {var: out_coord_0}, right: {literal: {value: 1, dtype: int}}}}
-                                right:
-                                  binary:
-                                    op: '&&'
-                                    left: {binary: {op: '>=', left: {var: out_coord_1}, right: {literal: {value: 0, dtype: int}}}}
-                                    right: {binary: {op: <, left: {var: out_coord_1}, right: {literal: {value: 48, dtype: int}}}}
-                            right:
-                              binary:
-                                op: '&&'
-                                left: {binary: {op: '>=', left: {var: out_coord_2}, right: {literal: {value: 0, dtype: int}}}}
-                                right: {binary: {op: <, left: {var: out_coord_2}, right: {literal: {value: 8, dtype: int}}}}
-                        right:
-                          binary:
-                            op: '&&'
-                            left: {binary: {op: '>=', left: {var: out_coord_3}, right: {literal: {value: 9, dtype: int}}}}
-                            right: {binary: {op: <, left: {var: out_coord_3}, right: {literal: {value: 10, dtype: int}}}}
-                    right:
-                      binary:
-                        op: '&&'
-                        left: {binary: {op: '>=', left: {var: out_coord_4}, right: {literal: {value: 0, dtype: int}}}}
-                        right: {binary: {op: <, left: {var: out_coord_4}, right: {literal: {value: 9, dtype: int}}}}
-                if_true: {var: out_coord_0}
-                if_false: {literal: {value: 0, dtype: int}}
-            - ternary:
-                cond:
-                  binary:
-                    op: '&&'
-                    left:
-                      binary:
-                        op: '&&'
-                        left:
-                          binary:
-                            op: '&&'
-                            left:
-                              binary:
-                                op: '&&'
-                                left:
-                                  binary:
-                                    op: '&&'
-                                    left: {literal: {value: true, dtype: bool}}
-                                    right:
-                                      binary:
-                                        op: '&&'
-                                        left: {binary: {op: '>=', left: {var: out_coord_0}, right: {literal: {value: 0, dtype: int}}}}
-                                        right: {binary: {op: <, left: {var: out_coord_0}, right: {literal: {value: 1, dtype: int}}}}
-                                right:
-                                  binary:
-                                    op: '&&'
-                                    left: {binary: {op: '>=', left: {var: out_coord_1}, right: {literal: {value: 0, dtype: int}}}}
-                                    right: {binary: {op: <, left: {var: out_coord_1}, right: {literal: {value: 48, dtype: int}}}}
-                            right:
-                              binary:
-                                op: '&&'
-                                left: {binary: {op: '>=', left: {var: out_coord_2}, right: {literal: {value: 0, dtype: int}}}}
-                                right: {binary: {op: <, left: {var: out_coord_2}, right: {literal: {value: 8, dtype: int}}}}
-                        right:
-                          binary:
-                            op: '&&'
-                            left: {binary: {op: '>=', left: {var: out_coord_3}, right: {literal: {value: 9, dtype: int}}}}
-                            right: {binary: {op: <, left: {var: out_coord_3}, right: {literal: {value: 10, dtype: int}}}}
-                    right:
-                      binary:
-                        op: '&&'
-                        left: {binary: {op: '>=', left: {var: out_coord_4}, right: {literal: {value: 0, dtype: int}}}}
-                        right: {binary: {op: <, left: {var: out_coord_4}, right: {literal: {value: 9, dtype: int}}}}
-                if_true: {var: out_coord_1}
-                if_false: {literal: {value: 0, dtype: int}}
-            - ternary:
-                cond:
-                  binary:
-                    op: '&&'
-                    left:
-                      binary:
-                        op: '&&'
-                        left:
-                          binary:
-                            op: '&&'
-                            left:
-                              binary:
-                                op: '&&'
-                                left:
-                                  binary:
-                                    op: '&&'
-                                    left: {literal: {value: true, dtype: bool}}
-                                    right:
-                                      binary:
-                                        op: '&&'
-                                        left: {binary: {op: '>=', left: {var: out_coord_0}, right: {literal: {value: 0, dtype: int}}}}
-                                        right: {binary: {op: <, left: {var: out_coord_0}, right: {literal: {value: 1, dtype: int}}}}
-                                right:
-                                  binary:
-                                    op: '&&'
-                                    left: {binary: {op: '>=', left: {var: out_coord_1}, right: {literal: {value: 0, dtype: int}}}}
-                                    right: {binary: {op: <, left: {var: out_coord_1}, right: {literal: {value: 48, dtype: int}}}}
-                            right:
-                              binary:
-                                op: '&&'
-                                left: {binary: {op: '>=', left: {var: out_coord_2}, right: {literal: {value: 0, dtype: int}}}}
-                                right: {binary: {op: <, left: {var: out_coord_2}, right: {literal: {value: 8, dtype: int}}}}
-                        right:
-                          binary:
-                            op: '&&'
-                            left: {binary: {op: '>=', left: {var: out_coord_3}, right: {literal: {value: 9, dtype: int}}}}
-                            right: {binary: {op: <, left: {var: out_coord_3}, right: {literal: {value: 10, dtype: int}}}}
-                    right:
-                      binary:
-                        op: '&&'
-                        left: {binary: {op: '>=', left: {var: out_coord_4}, right: {literal: {value: 0, dtype: int}}}}
-                        right: {binary: {op: <, left: {var: out_coord_4}, right: {literal: {value: 9, dtype: int}}}}
-                if_true: {var: out_coord_2}
-                if_false: {literal: {value: 0, dtype: int}}
-            - ternary:
-                cond:
-                  binary:
-                    op: '&&'
-                    left:
-                      binary:
-                        op: '&&'
-                        left:
-                          binary:
-                            op: '&&'
-                            left:
-                              binary:
-                                op: '&&'
-                                left:
-                                  binary:
-                                    op: '&&'
-                                    left: {literal: {value: true, dtype: bool}}
-                                    right:
-                                      binary:
-                                        op: '&&'
-                                        left: {binary: {op: '>=', left: {var: out_coord_0}, right: {literal: {value: 0, dtype: int}}}}
-                                        right: {binary: {op: <, left: {var: out_coord_0}, right: {literal: {value: 1, dtype: int}}}}
-                                right:
-                                  binary:
-                                    op: '&&'
-                                    left: {binary: {op: '>=', left: {var: out_coord_1}, right: {literal: {value: 0, dtype: int}}}}
-                                    right: {binary: {op: <, left: {var: out_coord_1}, right: {literal: {value: 48, dtype: int}}}}
-                            right:
-                              binary:
-                                op: '&&'
-                                left: {binary: {op: '>=', left: {var: out_coord_2}, right: {literal: {value: 0, dtype: int}}}}
-                                right: {binary: {op: <, left: {var: out_coord_2}, right: {literal: {value: 8, dtype: int}}}}
-                        right:
-                          binary:
-                            op: '&&'
-                            left: {binary: {op: '>=', left: {var: out_coord_3}, right: {literal: {value: 9, dtype: int}}}}
-                            right: {binary: {op: <, left: {var: out_coord_3}, right: {literal: {value: 10, dtype: int}}}}
-                    right:
-                      binary:
-                        op: '&&'
-                        left: {binary: {op: '>=', left: {var: out_coord_4}, right: {literal: {value: 0, dtype: int}}}}
-                        right: {binary: {op: <, left: {var: out_coord_4}, right: {literal: {value: 9, dtype: int}}}}
-                if_true: {var: out_coord_4}
-                if_false: {literal: {value: 0, dtype: int}}
-            select:
+      - input_idx: 0
+        coord_map:
+        - ternary:
+            cond:
               binary:
                 op: '&&'
                 left:
@@ -1031,47 +627,221 @@ programs:
                     op: '&&'
                     left: {binary: {op: '>=', left: {var: out_coord_4}, right: {literal: {value: 0, dtype: int}}}}
                     right: {binary: {op: <, left: {var: out_coord_4}, right: {literal: {value: 9, dtype: int}}}}
-        - __index_source__:
-            input_idx: 1
-            coord_map:
-            - {var: out_coord_0}
-            - {var: out_coord_1}
-            - {var: out_coord_2}
-            - {var: out_coord_3}
-            - {var: out_coord_4}
-            select: null
+            if_true: {var: out_coord_0}
+            if_false: {literal: {value: 0, dtype: int}}
+        - ternary:
+            cond:
+              binary:
+                op: '&&'
+                left:
+                  binary:
+                    op: '&&'
+                    left:
+                      binary:
+                        op: '&&'
+                        left:
+                          binary:
+                            op: '&&'
+                            left:
+                              binary:
+                                op: '&&'
+                                left: {literal: {value: true, dtype: bool}}
+                                right:
+                                  binary:
+                                    op: '&&'
+                                    left: {binary: {op: '>=', left: {var: out_coord_0}, right: {literal: {value: 0, dtype: int}}}}
+                                    right: {binary: {op: <, left: {var: out_coord_0}, right: {literal: {value: 1, dtype: int}}}}
+                            right:
+                              binary:
+                                op: '&&'
+                                left: {binary: {op: '>=', left: {var: out_coord_1}, right: {literal: {value: 0, dtype: int}}}}
+                                right: {binary: {op: <, left: {var: out_coord_1}, right: {literal: {value: 48, dtype: int}}}}
+                        right:
+                          binary:
+                            op: '&&'
+                            left: {binary: {op: '>=', left: {var: out_coord_2}, right: {literal: {value: 0, dtype: int}}}}
+                            right: {binary: {op: <, left: {var: out_coord_2}, right: {literal: {value: 8, dtype: int}}}}
+                    right:
+                      binary:
+                        op: '&&'
+                        left: {binary: {op: '>=', left: {var: out_coord_3}, right: {literal: {value: 9, dtype: int}}}}
+                        right: {binary: {op: <, left: {var: out_coord_3}, right: {literal: {value: 10, dtype: int}}}}
+                right:
+                  binary:
+                    op: '&&'
+                    left: {binary: {op: '>=', left: {var: out_coord_4}, right: {literal: {value: 0, dtype: int}}}}
+                    right: {binary: {op: <, left: {var: out_coord_4}, right: {literal: {value: 9, dtype: int}}}}
+            if_true: {var: out_coord_1}
+            if_false: {literal: {value: 0, dtype: int}}
+        - ternary:
+            cond:
+              binary:
+                op: '&&'
+                left:
+                  binary:
+                    op: '&&'
+                    left:
+                      binary:
+                        op: '&&'
+                        left:
+                          binary:
+                            op: '&&'
+                            left:
+                              binary:
+                                op: '&&'
+                                left: {literal: {value: true, dtype: bool}}
+                                right:
+                                  binary:
+                                    op: '&&'
+                                    left: {binary: {op: '>=', left: {var: out_coord_0}, right: {literal: {value: 0, dtype: int}}}}
+                                    right: {binary: {op: <, left: {var: out_coord_0}, right: {literal: {value: 1, dtype: int}}}}
+                            right:
+                              binary:
+                                op: '&&'
+                                left: {binary: {op: '>=', left: {var: out_coord_1}, right: {literal: {value: 0, dtype: int}}}}
+                                right: {binary: {op: <, left: {var: out_coord_1}, right: {literal: {value: 48, dtype: int}}}}
+                        right:
+                          binary:
+                            op: '&&'
+                            left: {binary: {op: '>=', left: {var: out_coord_2}, right: {literal: {value: 0, dtype: int}}}}
+                            right: {binary: {op: <, left: {var: out_coord_2}, right: {literal: {value: 8, dtype: int}}}}
+                    right:
+                      binary:
+                        op: '&&'
+                        left: {binary: {op: '>=', left: {var: out_coord_3}, right: {literal: {value: 9, dtype: int}}}}
+                        right: {binary: {op: <, left: {var: out_coord_3}, right: {literal: {value: 10, dtype: int}}}}
+                right:
+                  binary:
+                    op: '&&'
+                    left: {binary: {op: '>=', left: {var: out_coord_4}, right: {literal: {value: 0, dtype: int}}}}
+                    right: {binary: {op: <, left: {var: out_coord_4}, right: {literal: {value: 9, dtype: int}}}}
+            if_true: {var: out_coord_2}
+            if_false: {literal: {value: 0, dtype: int}}
+        - ternary:
+            cond:
+              binary:
+                op: '&&'
+                left:
+                  binary:
+                    op: '&&'
+                    left:
+                      binary:
+                        op: '&&'
+                        left:
+                          binary:
+                            op: '&&'
+                            left:
+                              binary:
+                                op: '&&'
+                                left: {literal: {value: true, dtype: bool}}
+                                right:
+                                  binary:
+                                    op: '&&'
+                                    left: {binary: {op: '>=', left: {var: out_coord_0}, right: {literal: {value: 0, dtype: int}}}}
+                                    right: {binary: {op: <, left: {var: out_coord_0}, right: {literal: {value: 1, dtype: int}}}}
+                            right:
+                              binary:
+                                op: '&&'
+                                left: {binary: {op: '>=', left: {var: out_coord_1}, right: {literal: {value: 0, dtype: int}}}}
+                                right: {binary: {op: <, left: {var: out_coord_1}, right: {literal: {value: 48, dtype: int}}}}
+                        right:
+                          binary:
+                            op: '&&'
+                            left: {binary: {op: '>=', left: {var: out_coord_2}, right: {literal: {value: 0, dtype: int}}}}
+                            right: {binary: {op: <, left: {var: out_coord_2}, right: {literal: {value: 8, dtype: int}}}}
+                    right:
+                      binary:
+                        op: '&&'
+                        left: {binary: {op: '>=', left: {var: out_coord_3}, right: {literal: {value: 9, dtype: int}}}}
+                        right: {binary: {op: <, left: {var: out_coord_3}, right: {literal: {value: 10, dtype: int}}}}
+                right:
+                  binary:
+                    op: '&&'
+                    left: {binary: {op: '>=', left: {var: out_coord_4}, right: {literal: {value: 0, dtype: int}}}}
+                    right: {binary: {op: <, left: {var: out_coord_4}, right: {literal: {value: 9, dtype: int}}}}
+            if_true: {var: out_coord_4}
+            if_false: {literal: {value: 0, dtype: int}}
+        select:
+          binary:
+            op: '&&'
+            left:
+              binary:
+                op: '&&'
+                left:
+                  binary:
+                    op: '&&'
+                    left:
+                      binary:
+                        op: '&&'
+                        left:
+                          binary:
+                            op: '&&'
+                            left: {literal: {value: true, dtype: bool}}
+                            right:
+                              binary:
+                                op: '&&'
+                                left: {binary: {op: '>=', left: {var: out_coord_0}, right: {literal: {value: 0, dtype: int}}}}
+                                right: {binary: {op: <, left: {var: out_coord_0}, right: {literal: {value: 1, dtype: int}}}}
+                        right:
+                          binary:
+                            op: '&&'
+                            left: {binary: {op: '>=', left: {var: out_coord_1}, right: {literal: {value: 0, dtype: int}}}}
+                            right: {binary: {op: <, left: {var: out_coord_1}, right: {literal: {value: 48, dtype: int}}}}
+                    right:
+                      binary:
+                        op: '&&'
+                        left: {binary: {op: '>=', left: {var: out_coord_2}, right: {literal: {value: 0, dtype: int}}}}
+                        right: {binary: {op: <, left: {var: out_coord_2}, right: {literal: {value: 8, dtype: int}}}}
+                right:
+                  binary:
+                    op: '&&'
+                    left: {binary: {op: '>=', left: {var: out_coord_3}, right: {literal: {value: 9, dtype: int}}}}
+                    right: {binary: {op: <, left: {var: out_coord_3}, right: {literal: {value: 10, dtype: int}}}}
+            right:
+              binary:
+                op: '&&'
+                left: {binary: {op: '>=', left: {var: out_coord_4}, right: {literal: {value: 0, dtype: int}}}}
+                right: {binary: {op: <, left: {var: out_coord_4}, right: {literal: {value: 9, dtype: int}}}}
+      - input_idx: 1
+        coord_map:
+        - {var: out_coord_0}
+        - {var: out_coord_1}
+        - {var: out_coord_2}
+        - {var: out_coord_3}
+        - {var: out_coord_4}
     inputs: [copy__8, copy__7_base]
     outputs: [[copy__8_base, f32, [1, 48, 8, 64, 64]]]
   - id: select_18
     op: tensor.index_map
     attrs:
-      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 48}, {__dim__: 8}, {__dim__: 64}]}
+      out_shape:
+      - 1
+      - 48
+      - 8
+      - 64
       sources:
-        __tuple__:
-        - __index_source__:
-            input_idx: 0
-            coord_map:
-            - {var: out_coord_0}
-            - {var: out_coord_1}
-            - {var: out_coord_2}
-            - {literal: {value: 10, dtype: int}}
-            - {var: out_coord_3}
-            select: null
+      - input_idx: 0
+        coord_map:
+        - {var: out_coord_0}
+        - {var: out_coord_1}
+        - {var: out_coord_2}
+        - {literal: {value: 10, dtype: int}}
+        - {var: out_coord_3}
     inputs: [copy__8_base]
     outputs: [[select_18, f32, [1, 48, 8, 64]]]
   - id: slice_38
     op: torch.slice
-    attrs: {shape: {__tuple__: [1, 48, 8, 10]}, dim: 3, start: 0}
+    attrs: {shape: [1, 48, 8, 10], dim: 3, start: 0}
     inputs: [select_18, slice_38_c1, slice_38_c2, slice_38_c3]
     outputs: [[slice_38, f32, [1, 48, 8, 10]]]
   - id: slice_39
     op: torch.slice
-    attrs: {shape: {__tuple__: [1, 48, 8, 10, 64]}, dim: 3, start: 0}
+    attrs: {shape: [1, 48, 8, 10, 64], dim: 3, start: 0}
     inputs: [copy__8_base, slice_39_c1, slice_39_c2, slice_39_c3]
     outputs: [[slice_39, f32, [1, 48, 8, 10, 64]]]
   - id: slice_40
     op: torch.slice
-    attrs: {shape: {__tuple__: [1, 48, 8, 10, 10]}, dim: 4, start: 0}
+    attrs: {shape: [1, 48, 8, 10, 10], dim: 4, start: 0}
     inputs: [slice_39, slice_40_c1, slice_40_c2, slice_40_c3]
     outputs: [[slice_40, f32, [1, 48, 8, 10, 10]]]
   - id: unsqueeze_13
@@ -1082,50 +852,53 @@ programs:
   - id: unsqueeze_13_bc
     op: tensor.index_map
     attrs:
-      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 48}, {__dim__: 8}, {__dim__: 10}, {__dim__: 10}]}
+      out_shape:
+      - 1
+      - 48
+      - 8
+      - 10
+      - 10
       sources:
-        __tuple__:
-        - __index_source__:
-            input_idx: 0
-            coord_map:
-            - {var: out_coord_0}
-            - {var: out_coord_1}
-            - {var: out_coord_2}
-            - {var: out_coord_3}
-            - {literal: {value: 0, dtype: int}}
-            select: null
+      - input_idx: 0
+        coord_map:
+        - {var: out_coord_0}
+        - {var: out_coord_1}
+        - {var: out_coord_2}
+        - {var: out_coord_3}
+        - {literal: {value: 0, dtype: int}}
     inputs: [unsqueeze_13]
     outputs: [[unsqueeze_13_bc, f32, [1, 48, 8, 10, 10]]]
   - id: mul_20
     op: tensor.elementwise
-    attrs: {op: {__elementwise__: multiply}}
+    attrs: {op: multiply}
     inputs: [unsqueeze_13_bc, slice_40]
     outputs: [[mul_20, f32, [1, 48, 8, 10, 10]]]
   - id: sum_12_keepdim
     op: tensor.reduce
-    attrs: {op: {__elementwise__: sum}, axis: -2}
+    attrs: {axis: -2}
     inputs: [mul_20]
     outputs: [[sum_12_keepdim, f32, [1, 48, 8, 1, 10]]]
   - id: sum_12
     op: tensor.index_map
     attrs:
-      out_shape: {__tuple__: [{__dim__: 1}, {__dim__: 48}, {__dim__: 8}, {__dim__: 10}]}
+      out_shape:
+      - 1
+      - 48
+      - 8
+      - 10
       sources:
-        __tuple__:
-        - __index_source__:
-            input_idx: 0
-            coord_map:
-            - {var: out_coord_0}
-            - {var: out_coord_1}
-            - {var: out_coord_2}
-            - {literal: {value: 0, dtype: int}}
-            - {var: out_coord_3}
-            select: null
+      - input_idx: 0
+        coord_map:
+        - {var: out_coord_0}
+        - {var: out_coord_1}
+        - {var: out_coord_2}
+        - {literal: {value: 0, dtype: int}}
+        - {var: out_coord_3}
     inputs: [sum_12_keepdim]
     outputs: [[sum_12, f32, [1, 48, 8, 10]]]
   - id: add_14
     op: tensor.elementwise
-    attrs: {op: {__elementwise__: add}}
+    attrs: {op: add}
     inputs: [slice_38, sum_12]
     outputs: [[add_14, f32, [1, 48, 8, 10]]]
 configs:
@@ -1186,120 +959,94 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 384}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 384}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 10}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 10}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 10}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 10}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: copy__7_base__steps0
-                              index:
-                                tuple:
-                                - {expr: {literal: {value: 1, dtype: int}}}
-                                - {expr: {literal: {value: 0, dtype: int}}}
-                                - {expr: {binary: {op: //, left: {var: a0}, right: {literal: {value: 8, dtype: int}}}}}
-                                - {expr: {binary: {op: '%', left: {var: a0}, right: {literal: {value: 8, dtype: int}}}}}
-                                - {expr: {literal: {value: 10, dtype: int}}}
-                                - {expr: {var: a2}}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: copy__7_base__steps0
-                              index:
-                                tuple:
-                                - {expr: {literal: {value: 1, dtype: int}}}
-                                - {expr: {literal: {value: 0, dtype: int}}}
-                                - {expr: {binary: {op: //, left: {var: a0}, right: {literal: {value: 8, dtype: int}}}}}
-                                - {expr: {binary: {op: '%', left: {var: a0}, right: {literal: {value: 8, dtype: int}}}}}
-                                - {expr: {var: a2}}
-                                - {expr: {var: a1}}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: null}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Load
-                      fields:
-                        names: {tuple: [in2]}
-                        input: copy__7_base__steps0
-                        index:
-                          tuple:
-                          - {expr: {literal: {value: 1, dtype: int}}}
-                          - {expr: {literal: {value: 0, dtype: int}}}
-                          - {expr: {binary: {op: //, left: {var: a0}, right: {literal: {value: 8, dtype: int}}}}}
-                          - {expr: {binary: {op: '%', left: {var: a0}, right: {literal: {value: 8, dtype: int}}}}}
-                          - {expr: {literal: {value: 10, dtype: int}}}
-                          - {expr: {var: a1}}
-                        dtype: null
-                    - class: Assign
-                      fields: {name: v1, op: {elementwise: add}, args: {tuple: [acc0, in2]}, dtype: null}
-                    - class: Write
-                      fields:
-                        output: add_14
-                        index:
-                          tuple:
-                          - {expr: {literal: {value: 0, dtype: int}}}
-                          - {expr: {binary: {op: //, left: {var: a0}, right: {literal: {value: 8, dtype: int}}}}}
-                          - {expr: {binary: {op: '%', left: {var: a0}, right: {literal: {value: 8, dtype: int}}}}}
-                          - {expr: {var: a1}}
-                        values: {tuple: [v1]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a3, extent: {dim: 4096}, window: null}}
-                  body:
-                    body:
-                    - class: Load
-                      fields:
-                        names: {tuple: [in3]}
-                        input: copy__7_base__steps0
-                        index:
-                          tuple:
-                          - {expr: {literal: {value: 1, dtype: int}}}
-                          - {expr: {literal: {value: 0, dtype: int}}}
-                          - {expr: {binary: {op: //, left: {var: a0}, right: {literal: {value: 8, dtype: int}}}}}
-                          - {expr: {binary: {op: '%', left: {var: a0}, right: {literal: {value: 8, dtype: int}}}}}
-                          - {expr: {binary: {op: //, left: {var: a3}, right: {literal: {value: 64, dtype: int}}}}}
-                          - {expr: {binary: {op: '%', left: {var: a3}, right: {literal: {value: 64, dtype: int}}}}}
-                        dtype: null
-                    - class: Write
-                      fields:
-                        output: copy__8_base
-                        index:
-                          tuple:
-                          - {expr: {literal: {value: 0, dtype: int}}}
-                          - {expr: {binary: {op: //, left: {var: a0}, right: {literal: {value: 8, dtype: int}}}}}
-                          - {expr: {binary: {op: '%', left: {var: a0}, right: {literal: {value: 8, dtype: int}}}}}
-                          - {expr: {binary: {op: //, left: {var: a3}, right: {literal: {value: 64, dtype: int}}}}}
-                          - {expr: {binary: {op: '%', left: {var: a3}, right: {literal: {value: 64, dtype: int}}}}}
-                        values: {tuple: [in3]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - Load:
+                      names:
+                      - in0
+                      input: copy__7_base__steps0
+                      index:
+                      - {literal: {value: 1, dtype: int}}
+                      - {literal: {value: 0, dtype: int}}
+                      - {binary: {op: //, left: {var: a0}, right: {literal: {value: 8, dtype: int}}}}
+                      - {binary: {op: '%', left: {var: a0}, right: {literal: {value: 8, dtype: int}}}}
+                      - {literal: {value: 10, dtype: int}}
+                      - {var: a2}
+                      dtype: null
+                  - Load:
+                      names:
+                      - in1
+                      input: copy__7_base__steps0
+                      index:
+                      - {literal: {value: 1, dtype: int}}
+                      - {literal: {value: 0, dtype: int}}
+                      - {binary: {op: //, left: {var: a0}, right: {literal: {value: 8, dtype: int}}}}
+                      - {binary: {op: '%', left: {var: a0}, right: {literal: {value: 8, dtype: int}}}}
+                      - {var: a2}
+                      - {var: a1}
+                      dtype: null
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1]}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Load:
+                  names:
+                  - in2
+                  input: copy__7_base__steps0
+                  index:
+                  - {literal: {value: 1, dtype: int}}
+                  - {literal: {value: 0, dtype: int}}
+                  - {binary: {op: //, left: {var: a0}, right: {literal: {value: 8, dtype: int}}}}
+                  - {binary: {op: '%', left: {var: a0}, right: {literal: {value: 8, dtype: int}}}}
+                  - {literal: {value: 10, dtype: int}}
+                  - {var: a1}
+                  dtype: null
+              - {Assign: {name: v1, op: add, args: [acc0, in2]}}
+              - Write:
+                  output: add_14
+                  index:
+                  - {literal: {value: 0, dtype: int}}
+                  - {binary: {op: //, left: {var: a0}, right: {literal: {value: 8, dtype: int}}}}
+                  - {binary: {op: '%', left: {var: a0}, right: {literal: {value: 8, dtype: int}}}}
+                  - {var: a1}
+                  values:
+                  - v1
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
+          - Loop:
+              axis: {name: a3, extent: 4096}
+              body:
+              - Load:
+                  names:
+                  - in3
+                  input: copy__7_base__steps0
+                  index:
+                  - {literal: {value: 1, dtype: int}}
+                  - {literal: {value: 0, dtype: int}}
+                  - {binary: {op: //, left: {var: a0}, right: {literal: {value: 8, dtype: int}}}}
+                  - {binary: {op: '%', left: {var: a0}, right: {literal: {value: 8, dtype: int}}}}
+                  - {binary: {op: //, left: {var: a3}, right: {literal: {value: 64, dtype: int}}}}
+                  - {binary: {op: '%', left: {var: a3}, right: {literal: {value: 64, dtype: int}}}}
+                  dtype: null
+              - Write:
+                  output: copy__8_base
+                  index:
+                  - {literal: {value: 0, dtype: int}}
+                  - {binary: {op: //, left: {var: a0}, right: {literal: {value: 8, dtype: int}}}}
+                  - {binary: {op: '%', left: {var: a0}, right: {literal: {value: 8, dtype: int}}}}
+                  - {binary: {op: //, left: {var: a3}, right: {literal: {value: 64, dtype: int}}}}
+                  - {binary: {op: '%', left: {var: a3}, right: {literal: {value: 64, dtype: int}}}}
+                  values:
+                  - in3
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
       name: k_slice_unsqueeze_reduce_034e35
     inputs: [copy__7_base__steps0]
     outputs: [[copy__8_base, f32, [1, 48, 8, 64, 64]], [add_14, f32, [1, 48, 8, 10]]]

@@ -36,13 +36,13 @@ from emmy.compiler.context import Context
 from emmy.compiler.pipeline.search import features
 from emmy.compiler.pipeline.search.data.group import DEFAULT_FEATURES, GoldenGroup, feature_view, pack_features
 from emmy.compiler.pipeline.search.golden import GOLDEN_RECORDS, GoldenRecord
-from emmy.compiler.pipeline.search.golden_eval import enumerate_graph
 from emmy.compiler.pipeline.search.pool import DEFAULT_SAMPLE, PoolSample
 from emmy.compiler.pipeline.search.prior.fit import catboost as fit_catboost
 from emmy.compiler.pipeline.search.prior.fit import cv as fit_cv
 from emmy.compiler.pipeline.search.prior.fit import linear as fit_linear
 from emmy.compiler.pipeline.search.prior.fit.run import run_fit
 from emmy.compiler.pipeline.search.prior.linear_model import LinearModel
+from emmy.compiler.pipeline.search.ranking import enumerate_graph
 
 logger = logging.getLogger(__name__)
 
@@ -201,7 +201,7 @@ def build_golden_groups(
     :func:`_pool_identity`; every group is built knowing all of its goldens. This logs how many goldens merged, and the caller records
     groups against positives in the metrics header.
 
-    Matmul goldens enumerate via ``golden_eval.enumerate_graph`` — the SAME gate-narrowed
+    Matmul goldens enumerate via ``ranking.enumerate_graph`` — the SAME gate-narrowed
     pool ``eval prior --dataset golden`` and the greedy deploy rank over (fp32 → thread tier,
     fp16/bf16 → warp tier; the block-DAG rework moved the scalar↔warp choice to a
     structural fork, so a real fp16 matmul ranks within the warp tier alone, no

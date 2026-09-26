@@ -14,7 +14,6 @@ programs:
     outputs: [[x1, f16, [16384, 3072]]]
   - id: linear
     op: torch.linear
-    attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[linear, f16, [32, 16384]]]
 - inputs: [x0, x1]
@@ -28,7 +27,6 @@ programs:
     outputs: [[x1, f16, [16384, 3072]]]
   - id: linear
     op: torch.linear
-    attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[linear, f16, [128, 16384]]]
 - inputs: [x0, x1]
@@ -42,7 +40,6 @@ programs:
     outputs: [[x1, f16, [16384, 3072]]]
   - id: linear
     op: torch.linear
-    attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[linear, f16, [512, 16384]]]
 - inputs: [x0, x1]
@@ -56,7 +53,6 @@ programs:
     outputs: [[x1, f16, [16384, 3072]]]
   - id: linear
     op: torch.linear
-    attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[linear, f16, [{sym: seq_len, hint: 512}, 16384]]]
 - inputs: [x0, x1]
@@ -70,7 +66,6 @@ programs:
     outputs: [[x1, f16, [512, 3072]]]
   - id: linear
     op: torch.linear
-    attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[linear, f16, [32, 512]]]
 - inputs: [x0, x1]
@@ -84,7 +79,6 @@ programs:
     outputs: [[x1, f16, [512, 3072]]]
   - id: linear
     op: torch.linear
-    attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[linear, f16, [128, 512]]]
 - inputs: [x0, x1]
@@ -98,7 +92,6 @@ programs:
     outputs: [[x1, f16, [512, 3072]]]
   - id: linear
     op: torch.linear
-    attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[linear, f16, [512, 512]]]
 - inputs: [x0, x1]
@@ -112,7 +105,6 @@ programs:
     outputs: [[x1, f16, [512, 3072]]]
   - id: linear
     op: torch.linear
-    attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[linear, f16, [{sym: seq_len, hint: 512}, 512]]]
 - inputs: [x0, x1]
@@ -126,7 +118,6 @@ programs:
     outputs: [[x1, f16, [3072, 8192]]]
   - id: linear
     op: torch.linear
-    attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[linear, f16, [32, 3072]]]
 - inputs: [x0, x1]
@@ -140,7 +131,6 @@ programs:
     outputs: [[x1, f16, [3072, 8192]]]
   - id: linear
     op: torch.linear
-    attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[linear, f16, [128, 3072]]]
 - inputs: [x0, x1]
@@ -154,7 +144,6 @@ programs:
     outputs: [[x1, f16, [3072, 8192]]]
   - id: linear
     op: torch.linear
-    attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[linear, f16, [512, 3072]]]
 - inputs: [x0, x1]
@@ -168,7 +157,6 @@ programs:
     outputs: [[x1, f16, [3072, 8192]]]
   - id: linear
     op: torch.linear
-    attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[linear, f16, [{sym: seq_len, hint: 512}, 3072]]]
 - inputs: [x0, x1]
@@ -182,7 +170,6 @@ programs:
     outputs: [[x1, f16, [12288, 3072]]]
   - id: linear
     op: torch.linear
-    attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[linear, f16, [32, 12288]]]
 - inputs: [x0, x1]
@@ -196,7 +183,6 @@ programs:
     outputs: [[x1, f16, [12288, 3072]]]
   - id: linear
     op: torch.linear
-    attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[linear, f16, [128, 12288]]]
 - inputs: [x0, x1]
@@ -210,7 +196,6 @@ programs:
     outputs: [[x1, f16, [12288, 3072]]]
   - id: linear
     op: torch.linear
-    attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[linear, f16, [512, 12288]]]
 - inputs: [x0, x1]
@@ -224,7 +209,6 @@ programs:
     outputs: [[x1, f16, [12288, 3072]]]
   - id: linear
     op: torch.linear
-    attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[linear, f16, [{sym: seq_len, hint: 512}, 12288]]]
 - inputs: [x0, x1]
@@ -238,7 +222,6 @@ programs:
     outputs: [[x1, f16, [8192, 3072]]]
   - id: linear
     op: torch.linear
-    attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[linear, f16, [32, 8192]]]
 - inputs: [x0, x1]
@@ -252,7 +235,6 @@ programs:
     outputs: [[x1, f16, [8192, 3072]]]
   - id: linear
     op: torch.linear
-    attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[linear, f16, [128, 8192]]]
 - inputs: [x0, x1]
@@ -266,7 +248,6 @@ programs:
     outputs: [[x1, f16, [8192, 3072]]]
   - id: linear
     op: torch.linear
-    attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[linear, f16, [512, 8192]]]
 - inputs: [x0, x1]
@@ -280,7 +261,6 @@ programs:
     outputs: [[x1, f16, [8192, 3072]]]
   - id: linear
     op: torch.linear
-    attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[linear, f16, [{sym: seq_len, hint: 512}, 8192]]]
 - inputs: [x0, x1]
@@ -294,7 +274,6 @@ programs:
     outputs: [[x1, f16, [64, 3072]]]
   - id: linear
     op: torch.linear
-    attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[linear, f16, [32, 64]]]
 - inputs: [x0, x1]
@@ -308,7 +287,6 @@ programs:
     outputs: [[x1, f16, [64, 3072]]]
   - id: linear
     op: torch.linear
-    attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[linear, f16, [128, 64]]]
 - inputs: [x0, x1]
@@ -322,7 +300,6 @@ programs:
     outputs: [[x1, f16, [64, 3072]]]
   - id: linear
     op: torch.linear
-    attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[linear, f16, [512, 64]]]
 - inputs: [x0, x1]
@@ -336,7 +313,6 @@ programs:
     outputs: [[x1, f16, [64, 3072]]]
   - id: linear
     op: torch.linear
-    attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[linear, f16, [{sym: seq_len, hint: 512}, 64]]]
 - inputs: [x0, x1]
@@ -350,7 +326,6 @@ programs:
     outputs: [[x1, f16, [256, 3072]]]
   - id: linear
     op: torch.linear
-    attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[linear, f16, [32, 256]]]
 - inputs: [x0, x1]
@@ -364,7 +339,6 @@ programs:
     outputs: [[x1, f16, [256, 3072]]]
   - id: linear
     op: torch.linear
-    attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[linear, f16, [128, 256]]]
 - inputs: [x0, x1]
@@ -378,7 +352,6 @@ programs:
     outputs: [[x1, f16, [256, 3072]]]
   - id: linear
     op: torch.linear
-    attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[linear, f16, [512, 256]]]
 - inputs: [x0, x1]
@@ -392,7 +365,6 @@ programs:
     outputs: [[x1, f16, [256, 3072]]]
   - id: linear
     op: torch.linear
-    attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[linear, f16, [{sym: seq_len, hint: 512}, 256]]]
 - inputs: [x0, x1]
@@ -406,7 +378,6 @@ programs:
     outputs: [[x1, f16, [2048, 3072]]]
   - id: linear
     op: torch.linear
-    attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[linear, f16, [32, 2048]]]
 - inputs: [x0, x1]
@@ -420,7 +391,6 @@ programs:
     outputs: [[x1, f16, [2048, 3072]]]
   - id: linear
     op: torch.linear
-    attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[linear, f16, [128, 2048]]]
 - inputs: [x0, x1]
@@ -434,7 +404,6 @@ programs:
     outputs: [[x1, f16, [2048, 3072]]]
   - id: linear
     op: torch.linear
-    attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[linear, f16, [512, 2048]]]
 - inputs: [x0, x1]
@@ -448,7 +417,6 @@ programs:
     outputs: [[x1, f16, [2048, 3072]]]
   - id: linear
     op: torch.linear
-    attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[linear, f16, [{sym: seq_len, hint: 512}, 2048]]]
 - inputs: [x0, x1]
@@ -462,7 +430,6 @@ programs:
     outputs: [[x1, f16, [3072, 1024]]]
   - id: linear
     op: torch.linear
-    attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[linear, f16, [32, 3072]]]
 - inputs: [x0, x1]
@@ -476,7 +443,6 @@ programs:
     outputs: [[x1, f16, [3072, 1024]]]
   - id: linear
     op: torch.linear
-    attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[linear, f16, [128, 3072]]]
 - inputs: [x0, x1]
@@ -490,7 +456,6 @@ programs:
     outputs: [[x1, f16, [3072, 1024]]]
   - id: linear
     op: torch.linear
-    attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[linear, f16, [512, 3072]]]
 - inputs: [x0, x1]
@@ -504,7 +469,6 @@ programs:
     outputs: [[x1, f16, [3072, 1024]]]
   - id: linear
     op: torch.linear
-    attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[linear, f16, [{sym: seq_len, hint: 512}, 3072]]]
 - inputs: [x0, x1]
@@ -518,7 +482,6 @@ programs:
     outputs: [[x1, f16, [1024, 3072]]]
   - id: linear
     op: torch.linear
-    attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[linear, f16, [32, 1024]]]
 - inputs: [x0, x1]
@@ -532,7 +495,6 @@ programs:
     outputs: [[x1, f16, [1024, 3072]]]
   - id: linear
     op: torch.linear
-    attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[linear, f16, [128, 1024]]]
 - inputs: [x0, x1]
@@ -546,7 +508,6 @@ programs:
     outputs: [[x1, f16, [1024, 3072]]]
   - id: linear
     op: torch.linear
-    attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[linear, f16, [512, 1024]]]
 - inputs: [x0, x1]
@@ -560,7 +521,6 @@ programs:
     outputs: [[x1, f16, [1024, 3072]]]
   - id: linear
     op: torch.linear
-    attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[linear, f16, [{sym: seq_len, hint: 512}, 1024]]]
 - inputs: [x0, x1]
@@ -574,7 +534,6 @@ programs:
     outputs: [[x1, f16, [248320, 3072]]]
   - id: linear
     op: torch.linear
-    attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[linear, f16, [32, 248320]]]
 - inputs: [x0, x1]
@@ -588,7 +547,6 @@ programs:
     outputs: [[x1, f16, [248320, 3072]]]
   - id: linear
     op: torch.linear
-    attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[linear, f16, [128, 248320]]]
 - inputs: [x0, x1]
@@ -602,7 +560,6 @@ programs:
     outputs: [[x1, f16, [248320, 3072]]]
   - id: linear
     op: torch.linear
-    attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[linear, f16, [512, 248320]]]
 - inputs: [x0, x1]
@@ -616,7 +573,6 @@ programs:
     outputs: [[x1, f16, [248320, 3072]]]
   - id: linear
     op: torch.linear
-    attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[linear, f16, [{sym: seq_len, hint: 512}, 248320]]]
 configs:
@@ -1591,52 +1547,29 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 32}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 32}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 16384}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 16384}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 3072}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 3072}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: x0
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: x1
-                              index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Write
-                      fields:
-                        output: linear
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: linear
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
       name: k_linear_fbb4cb
     inputs: [x1, x0]
     outputs: [[linear, f16, [32, 16384]]]
@@ -1653,52 +1586,29 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 128}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 128}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 16384}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 16384}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 3072}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 3072}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: x0
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: x1
-                              index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Write
-                      fields:
-                        output: linear
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: linear
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
       name: k_linear_e52a7e
     inputs: [x1, x0]
     outputs: [[linear, f16, [128, 16384]]]
@@ -1715,52 +1625,29 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 512}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 512}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 16384}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 16384}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 3072}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 3072}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: x0
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: x1
-                              index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Write
-                      fields:
-                        output: linear
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: linear
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
       name: k_linear_de06ad
     inputs: [x1, x0]
     outputs: [[linear, f16, [512, 16384]]]
@@ -1777,52 +1664,29 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: {sym: seq_len, hint: 512}}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 16384}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 16384}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 3072}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 3072}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: x0
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: x1
-                              index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Write
-                      fields:
-                        output: linear
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: linear
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
       name: k_linear_0efb5d
     inputs: [x1, x0]
     outputs: [[linear, f16, [{sym: seq_len, hint: 512}, 16384]]]
@@ -1839,52 +1703,29 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 32}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 32}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 512}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 512}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 3072}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 3072}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: x0
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: x1
-                              index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Write
-                      fields:
-                        output: linear
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: linear
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
       name: k_linear_3cc0e8
     inputs: [x1, x0]
     outputs: [[linear, f16, [32, 512]]]
@@ -1901,52 +1742,29 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 128}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 128}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 512}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 512}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 3072}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 3072}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: x0
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: x1
-                              index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Write
-                      fields:
-                        output: linear
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: linear
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
       name: k_linear_d10562
     inputs: [x1, x0]
     outputs: [[linear, f16, [128, 512]]]
@@ -1963,52 +1781,29 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 512}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 512}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 512}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 512}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 3072}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 3072}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: x0
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: x1
-                              index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Write
-                      fields:
-                        output: linear
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: linear
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
       name: k_linear_7fcdcc
     inputs: [x1, x0]
     outputs: [[linear, f16, [512, 512]]]
@@ -2025,52 +1820,29 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: {sym: seq_len, hint: 512}}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 512}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 512}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 3072}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 3072}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: x0
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: x1
-                              index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Write
-                      fields:
-                        output: linear
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: linear
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
       name: k_linear_6dc320
     inputs: [x1, x0]
     outputs: [[linear, f16, [{sym: seq_len, hint: 512}, 512]]]
@@ -2087,52 +1859,29 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 32}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 32}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 3072}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 3072}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 8192}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 8192}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: x0
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: x1
-                              index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Write
-                      fields:
-                        output: linear
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: linear
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
       name: k_linear_3dddee
     inputs: [x1, x0]
     outputs: [[linear, f16, [32, 3072]]]
@@ -2149,52 +1898,29 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 128}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 128}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 3072}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 3072}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 8192}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 8192}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: x0
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: x1
-                              index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Write
-                      fields:
-                        output: linear
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: linear
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
       name: k_linear_14f5c9
     inputs: [x1, x0]
     outputs: [[linear, f16, [128, 3072]]]
@@ -2211,52 +1937,29 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 512}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 512}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 3072}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 3072}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 8192}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 8192}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: x0
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: x1
-                              index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Write
-                      fields:
-                        output: linear
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: linear
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
       name: k_linear_750d86
     inputs: [x1, x0]
     outputs: [[linear, f16, [512, 3072]]]
@@ -2273,52 +1976,29 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: {sym: seq_len, hint: 512}}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 3072}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 3072}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 8192}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 8192}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: x0
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: x1
-                              index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Write
-                      fields:
-                        output: linear
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: linear
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
       name: k_linear_6e4348
     inputs: [x1, x0]
     outputs: [[linear, f16, [{sym: seq_len, hint: 512}, 3072]]]
@@ -2335,52 +2015,29 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 32}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 32}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 12288}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 12288}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 3072}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 3072}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: x0
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: x1
-                              index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Write
-                      fields:
-                        output: linear
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: linear
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
       name: k_linear_1e5cff
     inputs: [x1, x0]
     outputs: [[linear, f16, [32, 12288]]]
@@ -2397,52 +2054,29 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 128}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 128}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 12288}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 12288}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 3072}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 3072}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: x0
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: x1
-                              index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Write
-                      fields:
-                        output: linear
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: linear
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
       name: k_linear_364b7d
     inputs: [x1, x0]
     outputs: [[linear, f16, [128, 12288]]]
@@ -2459,52 +2093,29 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 512}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 512}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 12288}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 12288}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 3072}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 3072}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: x0
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: x1
-                              index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Write
-                      fields:
-                        output: linear
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: linear
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
       name: k_linear_63923e
     inputs: [x1, x0]
     outputs: [[linear, f16, [512, 12288]]]
@@ -2521,52 +2132,29 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: {sym: seq_len, hint: 512}}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 12288}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 12288}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 3072}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 3072}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: x0
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: x1
-                              index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Write
-                      fields:
-                        output: linear
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: linear
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
       name: k_linear_10f1a9
     inputs: [x1, x0]
     outputs: [[linear, f16, [{sym: seq_len, hint: 512}, 12288]]]
@@ -2583,52 +2171,29 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 32}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 32}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 8192}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 8192}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 3072}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 3072}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: x0
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: x1
-                              index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Write
-                      fields:
-                        output: linear
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: linear
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
       name: k_linear_07f06d
     inputs: [x1, x0]
     outputs: [[linear, f16, [32, 8192]]]
@@ -2645,52 +2210,29 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 128}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 128}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 8192}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 8192}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 3072}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 3072}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: x0
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: x1
-                              index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Write
-                      fields:
-                        output: linear
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: linear
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
       name: k_linear_cb6fbd
     inputs: [x1, x0]
     outputs: [[linear, f16, [128, 8192]]]
@@ -2707,52 +2249,29 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 512}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 512}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 8192}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 8192}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 3072}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 3072}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: x0
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: x1
-                              index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Write
-                      fields:
-                        output: linear
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: linear
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
       name: k_linear_d3bfc9
     inputs: [x1, x0]
     outputs: [[linear, f16, [512, 8192]]]
@@ -2769,52 +2288,29 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: {sym: seq_len, hint: 512}}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 8192}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 8192}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 3072}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 3072}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: x0
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: x1
-                              index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Write
-                      fields:
-                        output: linear
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: linear
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
       name: k_linear_cda14b
     inputs: [x1, x0]
     outputs: [[linear, f16, [{sym: seq_len, hint: 512}, 8192]]]
@@ -2831,52 +2327,29 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 32}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 32}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 64}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 3072}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 3072}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: x0
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: x1
-                              index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Write
-                      fields:
-                        output: linear
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: linear
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
       name: k_linear_d1d516
     inputs: [x1, x0]
     outputs: [[linear, f16, [32, 64]]]
@@ -2893,52 +2366,29 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 128}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 128}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 64}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 3072}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 3072}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: x0
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: x1
-                              index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Write
-                      fields:
-                        output: linear
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: linear
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
       name: k_linear_97f1dc
     inputs: [x1, x0]
     outputs: [[linear, f16, [128, 64]]]
@@ -2955,52 +2405,29 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 512}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 512}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 64}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 3072}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 3072}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: x0
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: x1
-                              index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Write
-                      fields:
-                        output: linear
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: linear
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
       name: k_linear_240105
     inputs: [x1, x0]
     outputs: [[linear, f16, [512, 64]]]
@@ -3017,52 +2444,29 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: {sym: seq_len, hint: 512}}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 64}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 3072}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 3072}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: x0
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: x1
-                              index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Write
-                      fields:
-                        output: linear
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: linear
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
       name: k_linear_70ba79
     inputs: [x1, x0]
     outputs: [[linear, f16, [{sym: seq_len, hint: 512}, 64]]]
@@ -3079,52 +2483,29 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 32}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 32}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 256}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 256}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 3072}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 3072}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: x0
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: x1
-                              index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Write
-                      fields:
-                        output: linear
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: linear
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
       name: k_linear_c8b351
     inputs: [x1, x0]
     outputs: [[linear, f16, [32, 256]]]
@@ -3141,52 +2522,29 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 128}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 128}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 256}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 256}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 3072}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 3072}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: x0
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: x1
-                              index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Write
-                      fields:
-                        output: linear
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: linear
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
       name: k_linear_386a5e
     inputs: [x1, x0]
     outputs: [[linear, f16, [128, 256]]]
@@ -3203,52 +2561,29 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 512}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 512}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 256}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 256}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 3072}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 3072}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: x0
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: x1
-                              index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Write
-                      fields:
-                        output: linear
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: linear
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
       name: k_linear_b0415a
     inputs: [x1, x0]
     outputs: [[linear, f16, [512, 256]]]
@@ -3265,52 +2600,29 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: {sym: seq_len, hint: 512}}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 256}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 256}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 3072}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 3072}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: x0
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: x1
-                              index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Write
-                      fields:
-                        output: linear
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: linear
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
       name: k_linear_fa3202
     inputs: [x1, x0]
     outputs: [[linear, f16, [{sym: seq_len, hint: 512}, 256]]]
@@ -3327,52 +2639,29 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 32}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 32}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 2048}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 2048}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 3072}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 3072}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: x0
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: x1
-                              index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Write
-                      fields:
-                        output: linear
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: linear
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
       name: k_linear_5c415b
     inputs: [x1, x0]
     outputs: [[linear, f16, [32, 2048]]]
@@ -3389,52 +2678,29 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 128}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 128}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 2048}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 2048}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 3072}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 3072}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: x0
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: x1
-                              index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Write
-                      fields:
-                        output: linear
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: linear
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
       name: k_linear_2f9c2a
     inputs: [x1, x0]
     outputs: [[linear, f16, [128, 2048]]]
@@ -3451,52 +2717,29 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 512}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 512}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 2048}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 2048}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 3072}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 3072}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: x0
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: x1
-                              index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Write
-                      fields:
-                        output: linear
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: linear
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
       name: k_linear_74009f
     inputs: [x1, x0]
     outputs: [[linear, f16, [512, 2048]]]
@@ -3513,52 +2756,29 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: {sym: seq_len, hint: 512}}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 2048}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 2048}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 3072}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 3072}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: x0
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: x1
-                              index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Write
-                      fields:
-                        output: linear
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: linear
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
       name: k_linear_f62b4b
     inputs: [x1, x0]
     outputs: [[linear, f16, [{sym: seq_len, hint: 512}, 2048]]]
@@ -3575,52 +2795,29 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 32}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 32}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 3072}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 3072}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 1024}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 1024}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: x0
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: x1
-                              index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Write
-                      fields:
-                        output: linear
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: linear
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
       name: k_linear_a749b1
     inputs: [x1, x0]
     outputs: [[linear, f16, [32, 3072]]]
@@ -3637,52 +2834,29 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 128}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 128}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 3072}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 3072}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 1024}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 1024}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: x0
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: x1
-                              index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Write
-                      fields:
-                        output: linear
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: linear
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
       name: k_linear_a0326c
     inputs: [x1, x0]
     outputs: [[linear, f16, [128, 3072]]]
@@ -3699,52 +2873,29 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 512}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 512}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 3072}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 3072}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 1024}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 1024}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: x0
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: x1
-                              index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Write
-                      fields:
-                        output: linear
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: linear
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
       name: k_linear_e0ba1d
     inputs: [x1, x0]
     outputs: [[linear, f16, [512, 3072]]]
@@ -3761,52 +2912,29 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: {sym: seq_len, hint: 512}}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 3072}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 3072}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 1024}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 1024}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: x0
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: x1
-                              index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Write
-                      fields:
-                        output: linear
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: linear
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
       name: k_linear_c72cda
     inputs: [x1, x0]
     outputs: [[linear, f16, [{sym: seq_len, hint: 512}, 3072]]]
@@ -3823,52 +2951,29 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 32}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 32}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 1024}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 1024}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 3072}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 3072}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: x0
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: x1
-                              index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Write
-                      fields:
-                        output: linear
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: linear
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
       name: k_linear_07af63
     inputs: [x1, x0]
     outputs: [[linear, f16, [32, 1024]]]
@@ -3885,52 +2990,29 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 128}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 128}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 1024}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 1024}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 3072}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 3072}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: x0
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: x1
-                              index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Write
-                      fields:
-                        output: linear
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: linear
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
       name: k_linear_8447fd
     inputs: [x1, x0]
     outputs: [[linear, f16, [128, 1024]]]
@@ -3947,52 +3029,29 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 512}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 512}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 1024}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 1024}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 3072}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 3072}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: x0
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: x1
-                              index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Write
-                      fields:
-                        output: linear
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: linear
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
       name: k_linear_9901c9
     inputs: [x1, x0]
     outputs: [[linear, f16, [512, 1024]]]
@@ -4009,52 +3068,29 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: {sym: seq_len, hint: 512}}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 1024}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 1024}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 3072}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 3072}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: x0
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: x1
-                              index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Write
-                      fields:
-                        output: linear
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: linear
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
       name: k_linear_12093d
     inputs: [x1, x0]
     outputs: [[linear, f16, [{sym: seq_len, hint: 512}, 1024]]]
@@ -4071,52 +3107,29 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 32}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 32}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 248320}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 248320}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 3072}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 3072}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: x0
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: x1
-                              index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Write
-                      fields:
-                        output: linear
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: linear
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
       name: k_linear_a9c599
     inputs: [x1, x0]
     outputs: [[linear, f16, [32, 248320]]]
@@ -4133,52 +3146,29 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 128}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 128}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 248320}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 248320}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 3072}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 3072}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: x0
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: x1
-                              index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Write
-                      fields:
-                        output: linear
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: linear
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
       name: k_linear_171601
     inputs: [x1, x0]
     outputs: [[linear, f16, [128, 248320]]]
@@ -4195,52 +3185,29 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 512}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 512}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 248320}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 248320}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 3072}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 3072}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: x0
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: x1
-                              index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Write
-                      fields:
-                        output: linear
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: linear
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
       name: k_linear_b8fe1b
     inputs: [x1, x0]
     outputs: [[linear, f16, [512, 248320]]]
@@ -4257,52 +3224,29 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: {sym: seq_len, hint: 512}}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: {sym: seq_len, hint: 512}}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 248320}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 248320}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 3072}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 3072}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in0]}
-                              input: x0
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Load
-                            fields:
-                              names: {tuple: [in1]}
-                              input: x1
-                              index: {tuple: [{expr: {var: a1}}, {expr: {var: a2}}]}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a2]}, base: null}
-                        unroll: false
-                        seed: true
-                    - class: Write
-                      fields:
-                        output: linear
-                        index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}]}
-                        values: {tuple: [acc0]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}], dtype: null}}
+                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}], dtype: null}}
+                  - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                  - {Accum: {name: acc0, value: v0, axes: [a2]}}
+              - Write:
+                  output: linear
+                  index:
+                  - {var: a0}
+                  - {var: a1}
+                  values:
+                  - acc0
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
       name: k_linear_a77527
     inputs: [x1, x0]
     outputs: [[linear, f16, [{sym: seq_len, hint: 512}, 248320]]]

@@ -62,7 +62,7 @@ def golden_prior_eval(prior, kernel_filter: str | None = None) -> str:
     sweep's finding 6). Deploy reality is ``Prior.pick`` (measured -O3 evidence
     first); the faithful deploy check is ``eval golden``'s real greedy compile."""
     from emmy.compiler.context import Context  # noqa: PLC0415
-    from emmy.compiler.pipeline.search import golden_eval  # noqa: PLC0415
+    from emmy.compiler.pipeline.search import ranking  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden import goldens_for_live_gpu  # noqa: PLC0415
 
     GOLDEN_RECORDS = goldens_for_live_gpu()  # live card only — see golden_deploy_perf
@@ -95,7 +95,7 @@ def golden_prior_eval(prior, kernel_filter: str | None = None) -> str:
         base = {**ctx.features(), **s_feats}
         # ``evaluate_record`` ranks by descending score; the prior predicts latency
         # (lower = better), so negate to rank the predicted-fastest config first.
-        ranked = golden_eval.evaluate_record(g, ctx, scorer=lambda r, b=base: -prior.mean_score({**b, **r}))
+        ranked = ranking.evaluate_record(g, ctx, scorer=lambda r, b=base: -prior.mean_score({**b, **r}))
         rank, pool = ranked.rank, ranked.pool
         if rank is None:
             skipped.append((g.name, f"recorded knobs not in the enumeration ({pool} rows) — pin/dtype mismatch?"))
@@ -135,12 +135,7 @@ def golden_deploy_perf(prior, kernel_filter: str | None = None) -> dict[str, flo
     Goldens are scoped to the live card (:func:`goldens_for_live_gpu`) so a multi-GPU
     goldens dir doesn't make a name's per-card entries collide on the GPU-blind
     ``ShapeKey`` (e.g. RTX 5090 / RTX PRO 6000 both ``(12, 0)``)."""
-    from emmy.compiler.pipeline.search.golden import (
-        # noqa: PLC0415,
-        fast_math_knobs,
-        goldens_for_live_gpu,
-        precision_trading_pins,
-    )
+    from emmy.compiler.pipeline.search.golden import fast_math_knobs, goldens_for_live_gpu, precision_trading_pins
 
     GOLDEN_RECORDS = goldens_for_live_gpu()
 

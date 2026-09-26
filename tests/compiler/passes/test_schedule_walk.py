@@ -35,9 +35,9 @@ from emmy.compiler.ir.tile.ops import Sched
 from emmy.compiler.pipeline.fork import iter_leaves
 from emmy.compiler.pipeline.knob import family_of
 from emmy.compiler.pipeline.passes.tile._fromloop import fold_from_loop, scan_from_loop
-from emmy.compiler.pipeline.search.golden_eval import enumerate_graph
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from emmy.compiler.pipeline.search.pool import PoolSample
+from emmy.compiler.pipeline.search.ranking import enumerate_graph
 from tests.compiler.terms import contraction, projection, reduction, slab
 
 _CC = (12, 0)

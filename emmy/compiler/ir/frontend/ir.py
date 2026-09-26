@@ -40,6 +40,8 @@ class TransposeOp(Op):
     ``permute``/``transpose`` overloads.
     """
 
+    wire_tag = "torch.transpose"
+
     axes: tuple[int, ...]
 
     def infer_output_shape(self, input_shapes: list[tuple]) -> tuple:
@@ -66,6 +68,8 @@ class TransposeOp(Op):
 @dataclass(frozen=True)
 class ReshapeOp(Op):
     """Reshape tensor without changing data."""
+
+    wire_tag = "torch.reshape"
 
     shape: tuple[int | str, ...]
 
@@ -114,6 +118,8 @@ class SliceOp(Op):
     from the tracer; consumers fall back to it when ``dim is None``.
     """
 
+    wire_tag = "torch.slice"
+
     shape: tuple[int | str, ...]
     dim: int | None = None
     start: int | None = None
@@ -145,6 +151,8 @@ class CatOp(Op):
     Inputs: [dim_const, tensor_1, tensor_2, ...] where dim_const
     is a scalar ConstantOp indicating the concat axis.
     """
+
+    wire_tag = "torch.cat"
 
     def infer_output_shape(self, input_shapes: list[tuple]) -> tuple:
         # Tensor inputs are all but the trailing scalar dim-constant.
@@ -184,6 +192,8 @@ class CatOp(Op):
 class UnsqueezeOp(Op):
     """PyTorch aten.unsqueeze: add a size-1 dimension."""
 
+    wire_tag = "torch.unsqueeze"
+
     dim: int = 0
 
     def infer_output_shape(self, input_shapes: list[tuple]) -> tuple:
@@ -206,6 +216,8 @@ class UnsqueezeOp(Op):
 class LinearOp(Op):
     """PyTorch aten.linear: output = x @ weight.T [+ bias]."""
 
+    wire_tag = "torch.linear"
+
     has_bias: bool = False
 
     def infer_output_shape(self, input_shapes: list[tuple]) -> tuple:
@@ -224,6 +236,8 @@ class LinearOp(Op):
 @dataclass(frozen=True)
 class MatmulOp(Op):
     """PyTorch aten.mm/matmul/addmm: output = A @ B [+ bias]."""
+
+    wire_tag = "torch.matmul"
 
     has_bias: bool = False
 
@@ -258,6 +272,8 @@ class SdpaOp(Op):
     explicit ``scale=1.0`` (its q_norm absorbs the scaling) — dropping the kwarg
     silently re-scales the logits by ``1/sqrt(d)`` and redistributes the whole
     softmax."""
+
+    wire_tag = "torch.sdpa"
 
     is_causal: bool = False
     sliding_window: int | None = None
@@ -315,6 +331,8 @@ class MeanOp(Op):
     decomposition rule rewrites it into sum + div.
     """
 
+    wire_tag = "torch.mean"
+
     axis: int | str = -1
 
     def infer_output_shape(self, input_shapes: list[tuple]) -> tuple:
@@ -332,6 +350,8 @@ class RmsNormOp(Op):
     default when the optional constant isn't present. Decomposed by
     ``passes/frontend/decomposition/080_rms_norm.py``.
     """
+
+    wire_tag = "torch.rms_norm"
 
     eps: float = 1e-6
 
@@ -353,6 +373,8 @@ class LayerNormOp(Op):
     the tracer peels the trailing ``eps`` constant into the op's own field.
     Decomposed by ``passes/frontend/decomposition/085_layer_norm.py``.
     """
+
+    wire_tag = "torch.layer_norm"
 
     eps: float = 1e-5
 
@@ -377,6 +399,8 @@ class SoftmaxOp(Op):
 
     Decomposed by ``passes/frontend/decomposition/100_softmax.py``.
     """
+
+    wire_tag = "torch.softmax"
 
     axis: int | str = -1
 
@@ -439,6 +463,8 @@ class Conv1dOp(Op):
 
     Anything between those two is rejected at trace time rather than silently lowered.
     """
+
+    wire_tag = "torch.conv1d"
 
     stride: int = 1
     padding: int = 0

@@ -11,29 +11,11 @@ programs:
   nodes:
   - id: transpose_c1
     op: constant
-    attrs:
-      name: transpose_c1
-      value: -1.0
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
+    attrs: {name: transpose_c1, value: -1.0}
     outputs: [[transpose_c1, f16, [1]]]
   - id: transpose_c2
     op: constant
-    attrs:
-      name: transpose_c2
-      value: -2.0
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
+    attrs: {name: transpose_c2, value: -2.0}
     outputs: [[transpose_c2, f16, [1]]]
   - id: x0
     op: input
@@ -43,12 +25,11 @@ programs:
     outputs: [[x1, f16, [8, 1024, 128]]]
   - id: matmul
     op: torch.matmul
-    attrs: {has_bias: false}
     inputs: [x0, x1]
     outputs: [[matmul, f16, [8, 512, 128]]]
   - id: transpose
     op: torch.transpose
-    attrs: {axes: {__tuple__: [-1, -2]}}
+    attrs: {axes: [-1, -2]}
     inputs: [matmul]
     outputs: [[transpose, f16, [8, 128, 512]]]
 configs:
@@ -85,59 +66,41 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 8}, window: null}}
-            body:
+      - Loop:
+          axis: {name: a0, extent: 8}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 128}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 128}, window: null}}
+              - Loop:
+                  axis: {name: a2, extent: 512}
                   body:
-                    body:
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 512}, window: null}}
-                        body:
-                          body:
-                          - class: Loop
-                            fields:
-                              axis: {class: Axis, fields: {name: a3, extent: {dim: 1024}, window: null}}
-                              body:
-                                body:
-                                - class: Load
-                                  fields:
-                                    names: {tuple: [in0]}
-                                    input: x0
-                                    index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a2}}, {expr: {var: a3}}]}
-                                    dtype: null
-                                - class: Load
-                                  fields:
-                                    names: {tuple: [in1]}
-                                    input: x1
-                                    index: {tuple: [{expr: {var: a0}}, {expr: {var: a3}}, {expr: {var: a1}}]}
-                                    dtype: null
-                                - class: Assign
-                                  fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in0, in1]}, dtype: {dtype: f32}}
-                                - class: Accum
-                                  fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a3]}, base: null}
-                              unroll: false
-                              seed: true
-                          - class: Write
-                            fields:
-                              output: transpose
-                              index: {tuple: [{expr: {var: a0}}, {expr: {var: a1}}, {expr: {var: a2}}]}
-                              values: {tuple: [acc0]}
-                              value_dtype: null
-                              atomic: false
-                              swizzle: NONE
-                        unroll: false
-                        seed: true
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+                  - Loop:
+                      axis: {name: a3, extent: 1024}
+                      body:
+                      - Load:
+                          names:
+                          - in0
+                          input: x0
+                          index:
+                          - {literal: {value: 0, dtype: int}}
+                          - {var: a2}
+                          - {var: a3}
+                          dtype: null
+                      - {Load: {names: [in1], input: x1, index: [{var: a0}, {var: a3}, {var: a1}], dtype: null}}
+                      - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
+                      - {Accum: {name: acc0, value: v0, axes: [a3]}}
+                  - Write:
+                      output: transpose
+                      index:
+                      - {var: a0}
+                      - {var: a1}
+                      - {var: a2}
+                      values:
+                      - acc0
+                      value_dtype: null
+                      atomic: false
+                      swizzle: NONE
       name: k_matmul_5c4fa5
     inputs: [x1, x0]
     outputs: [[transpose, f16, [8, 128, 512]]]

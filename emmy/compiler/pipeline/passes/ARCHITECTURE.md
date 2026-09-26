@@ -371,7 +371,7 @@ left absent — otherwise two rows of one kernel would carry different family vo
 would not join them. A schedule row also ALWAYS spells the kernel-global `WORK` (the leaf writes it unconditionally,
 empty when nothing claimed an inventory), and a structural arm's knob delta — a cut, the cross-CTA split's `g`-half
 or its unsplit receipt — never does: that is the one stated marker consumers use to tell a complete schedule row
-from a kernel-set decision (`search/golden_eval` filters on it). The same reasoning puts the structural
+from a kernel-set decision (`search/ranking` filters on it). The same reasoning puts the structural
 `S_warp_eligible` stamp on the row prefix: it is read off
 the sites' own atoms, not off the rows, so a pin naming the scalar tier cannot erase "tensor cores were on offer here"
 from the rows it does enumerate.

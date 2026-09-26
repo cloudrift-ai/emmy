@@ -13,7 +13,6 @@ programs:
     outputs: [[x, f32, [1, 512, 1024]]]
   - id: o
     op: torch.rms_norm
-    attrs: {eps: 1.0e-06}
     inputs: [x, w]
     outputs: [[o, f32, [1, 512, 1024]]]
 configs:
@@ -42,29 +41,11 @@ loops:
   nodes:
   - id: o_eps
     op: constant
-    attrs:
-      name: o_eps
-      value: 1.0e-06
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
+    attrs: {name: o_eps, value: 1.0e-06}
     outputs: [[o_eps, f32, [1]]]
   - id: o_mean_count
     op: constant
-    attrs:
-      name: o_mean_count
-      value: 1024.0
-      context_value: null
-      load_ops: {__tuple__: []}
-      source_path: null
-      source_parts: {__tuple__: []}
-      source_shape: null
-      source_dtype: null
-      source_graph: null
+    attrs: {name: o_mean_count, value: 1024.0}
     outputs: [[o_mean_count, f32, [1]]]
   - id: w
     op: input
@@ -76,75 +57,54 @@ loops:
     op: loop
     attrs:
       body:
-        body:
-        - class: Load
-          fields:
-            names: {tuple: [in0]}
-            input: o_eps
-            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
-            dtype: null
-        - class: Load
-          fields:
-            names: {tuple: [in1]}
-            input: o_mean_count
-            index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}]}
-            dtype: null
-        - class: Loop
-          fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 512}, window: null}}
-            body:
+      - {Load: {names: [in0], input: o_eps, index: [{literal: {value: 0, dtype: int}}], dtype: null}}
+      - Load: {names: [in1], input: o_mean_count, index: [{literal: {value: 0, dtype: int}}], dtype: null}
+      - Loop:
+          axis: {name: a0, extent: 512}
+          body:
+          - Loop:
+              axis: {name: a1, extent: 1024}
               body:
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 1024}, window: null}}
-                  body:
-                    body:
-                    - class: Load
-                      fields:
-                        names: {tuple: [in2]}
-                        input: x
-                        index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a0}}, {expr: {var: a1}}]}
-                        dtype: null
-                    - class: Assign
-                      fields: {name: v0, op: {elementwise: multiply}, args: {tuple: [in2, in2]}, dtype: null}
-                    - class: Accum
-                      fields: {name: acc0, value: v0, op: {elementwise: add}, dtype: null, axes: {tuple: [a1]}, base: null}
-                  unroll: false
-                  seed: true
-              - class: Assign
-                fields: {name: v1, op: {elementwise: divide}, args: {tuple: [acc0, in1]}, dtype: null}
-              - class: Assign
-                fields: {name: v2, op: {elementwise: add}, args: {tuple: [in0, v1]}, dtype: null}
-              - {class: Assign, fields: {name: v3, op: {elementwise: rsqrt}, args: {tuple: [v2]}, dtype: null}}
-              - class: Loop
-                fields:
-                  axis: {class: Axis, fields: {name: a2, extent: {dim: 1024}, window: null}}
-                  body:
-                    body:
-                    - class: Load
-                      fields:
-                        names: {tuple: [in3]}
-                        input: x
-                        index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a0}}, {expr: {var: a2}}]}
-                        dtype: null
-                    - class: Assign
-                      fields: {name: v4, op: {elementwise: multiply}, args: {tuple: [in3, v3]}, dtype: null}
-                    - class: Load
-                      fields: {names: {tuple: [in4]}, input: w, index: {tuple: [{expr: {var: a2}}]}, dtype: null}
-                    - class: Assign
-                      fields: {name: v5, op: {elementwise: multiply}, args: {tuple: [in4, v4]}, dtype: null}
-                    - class: Write
-                      fields:
-                        output: o
-                        index: {tuple: [{expr: {literal: {value: 0, dtype: int}}}, {expr: {var: a0}}, {expr: {var: a2}}]}
-                        values: {tuple: [v5]}
-                        value_dtype: null
-                        atomic: false
-                        swizzle: NONE
-                  unroll: false
-                  seed: true
-            unroll: false
-            seed: true
+              - Load:
+                  names:
+                  - in2
+                  input: x
+                  index:
+                  - {literal: {value: 0, dtype: int}}
+                  - {var: a0}
+                  - {var: a1}
+                  dtype: null
+              - {Assign: {name: v0, op: multiply, args: [in2, in2]}}
+              - {Accum: {name: acc0, value: v0, axes: [a1]}}
+          - {Assign: {name: v1, op: divide, args: [acc0, in1]}}
+          - {Assign: {name: v2, op: add, args: [in0, v1]}}
+          - {Assign: {name: v3, op: rsqrt, args: [v2]}}
+          - Loop:
+              axis: {name: a2, extent: 1024}
+              body:
+              - Load:
+                  names:
+                  - in3
+                  input: x
+                  index:
+                  - {literal: {value: 0, dtype: int}}
+                  - {var: a0}
+                  - {var: a2}
+                  dtype: null
+              - {Assign: {name: v4, op: multiply, args: [in3, v3]}}
+              - {Load: {names: [in4], input: w, index: [{var: a2}], dtype: null}}
+              - {Assign: {name: v5, op: multiply, args: [in4, v4]}}
+              - Write:
+                  output: o
+                  index:
+                  - {literal: {value: 0, dtype: int}}
+                  - {var: a0}
+                  - {var: a2}
+                  values:
+                  - v5
+                  value_dtype: null
+                  atomic: false
+                  swizzle: NONE
       name: k_rms_norm_1647c5
     inputs: [o_mean_count, o_eps, x, w]
     outputs: [[o, f32, [1, 512, 1024]]]
