@@ -65,7 +65,7 @@ loops:
     op: loop
     attrs:
       body:
-      - {Load: {names: [in0], input: sg_one, index: [{literal: 0}]}}
+      - {Load: {names: [in0], input: sg_one, index: ['0']}}
       - Loop:
           axis: {name: a0, extent: 128}
           body:
@@ -75,11 +75,11 @@ loops:
               - Loop:
                   axis: {name: a2, extent: 1024}
                   body:
-                  - {Load: {names: [in1], input: x, index: [{literal: 0}, {var: a0}, {var: a2}]}}
-                  - {Load: {names: [in2], input: wg, index: [{var: a2}, {var: a1}]}}
+                  - {Load: {names: [in1], input: x, index: ['0', a0, a2]}}
+                  - {Load: {names: [in2], input: wg, index: [a2, a1]}}
                   - {Assign: {name: v0, op: multiply, args: [in1, in2]}}
                   - {Accum: {name: acc0, value: v0, axes: [a2]}}
-                  - {Load: {names: [in3], input: wu, index: [{var: a2}, {var: a1}]}}
+                  - {Load: {names: [in3], input: wu, index: [a2, a1]}}
                   - {Assign: {name: v1, op: multiply, args: [in1, in3]}}
                   - {Accum: {name: acc1, value: v1, axes: [a2]}}
               - {Assign: {name: v2, op: negative, args: [acc0]}}
@@ -87,7 +87,7 @@ loops:
               - {Assign: {name: v4, op: add, args: [in0, v3]}}
               - {Assign: {name: v5, op: divide, args: [acc0, v4]}}
               - {Assign: {name: v6, op: multiply, args: [acc1, v5]}}
-              - {Write: {output: o, index: [{literal: 0}, {var: a0}, {var: a1}], values: [v6]}}
+              - {Write: {output: o, index: ['0', a0, a1], values: [v6]}}
       name: k_matmul_reduce_410433
     inputs: [sg_one, wg, x, wu]
     outputs: [[o, f32, [1, 128, 3072]]]

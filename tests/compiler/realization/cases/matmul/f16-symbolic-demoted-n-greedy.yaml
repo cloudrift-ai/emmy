@@ -71,15 +71,15 @@ loops:
               - Loop:
                   axis: {name: a2, extent: 128}
                   body:
-                  - {Load: {names: [in0], input: sw, index: [{var: a1}, {var: a2}]}}
-                  - {Load: {names: [in1], input: sx, index: [{var: a0}, {var: a2}]}}
-                  - {Load: {names: [in2], input: w, index: [{var: a1}, {var: a2}]}}
+                  - {Load: {names: [in0], input: sw, index: [a1, a2]}}
+                  - {Load: {names: [in1], input: sx, index: [a0, a2]}}
+                  - {Load: {names: [in2], input: w, index: [a1, a2]}}
                   - {Assign: {name: v0, op: multiply, args: [in0, in2]}}
-                  - {Load: {names: [in3], input: x, index: [{var: a0}, {var: a2}]}}
+                  - {Load: {names: [in3], input: x, index: [a0, a2]}}
                   - {Assign: {name: v1, op: multiply, args: [in1, in3]}}
                   - {Assign: {name: v2, op: multiply, args: [v0, v1], dtype: f32}}
                   - {Accum: {name: acc0, value: v2, axes: [a2]}}
-              - {Write: {output: o, index: [{var: a0}, {var: a1}], values: [acc0]}}
+              - {Write: {output: o, index: [a0, a1], values: [acc0]}}
       name: k_linear_40037b
     inputs: [w, sw, x, sx]
     outputs: [[o, f16, [{sym: seq_len, hint: 512}, {sym: seq_len, hint: 512}]]]

@@ -61,13 +61,13 @@ loops:
               - Loop:
                   axis: {name: a2, extent: 3072}
                   body:
-                  - {Load: {names: [in0], input: a, index: [{literal: 0}, {var: a0}, {var: a2}]}}
-                  - {Load: {names: [in1], input: b, index: [{var: a2}, {var: a1}]}}
+                  - {Load: {names: [in0], input: a, index: ['0', a0, a2]}}
+                  - {Load: {names: [in1], input: b, index: [a2, a1]}}
                   - {Assign: {name: v0, op: multiply, args: [in0, in1]}}
                   - {Accum: {name: acc0, value: v0, axes: [a2]}}
-              - {Load: {names: [in2], input: r, index: [{literal: 0}, {var: a0}, {var: a1}]}}
+              - {Load: {names: [in2], input: r, index: ['0', a0, a1]}}
               - {Assign: {name: v1, op: add, args: [acc0, in2]}}
-              - {Write: {output: o, index: [{literal: 0}, {var: a0}, {var: a1}], values: [v1]}}
+              - {Write: {output: o, index: ['0', a0, a1], values: [v1]}}
       name: k_matmul_b1a888
     inputs: [b, a, r]
     outputs: [[o, f32, [1, 128, 1024]]]

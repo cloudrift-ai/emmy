@@ -372,11 +372,11 @@ loops:
           - Loop:
               axis: {name: a1, extent: 2048}
               body:
-              - {Load: {names: [in0], input: x0, index: [{literal: 0}, {var: a1}]}}
-              - {Load: {names: [in1], input: x1, index: [{var: a0}, {var: a1}]}}
+              - {Load: {names: [in0], input: x0, index: ['0', a1]}}
+              - {Load: {names: [in1], input: x1, index: [a0, a1]}}
               - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
               - {Accum: {name: acc0, value: v0, axes: [a1]}}
-          - {Write: {output: linear, index: [{literal: 0}, {var: a0}], values: [acc0]}}
+          - {Write: {output: linear, index: ['0', a0], values: [acc0]}}
       name: k_linear_ea7658
     inputs: [x1, x0]
     outputs: [[linear, f16, [1, 2048]]]
@@ -399,11 +399,11 @@ loops:
           - Loop:
               axis: {name: a1, extent: 1024}
               body:
-              - {Load: {names: [in0], input: x0, index: [{literal: 0}, {var: a1}]}}
-              - {Load: {names: [in1], input: x1, index: [{var: a0}, {var: a1}]}}
+              - {Load: {names: [in0], input: x0, index: ['0', a1]}}
+              - {Load: {names: [in1], input: x1, index: [a0, a1]}}
               - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
               - {Accum: {name: acc0, value: v0, axes: [a1]}}
-          - {Write: {output: linear, index: [{literal: 0}, {var: a0}], values: [acc0]}}
+          - {Write: {output: linear, index: ['0', a0], values: [acc0]}}
       name: k_linear_ebaafc
     inputs: [x1, x0]
     outputs: [[linear, f16, [1, 2048]]]
@@ -429,11 +429,11 @@ loops:
               - Loop:
                   axis: {name: a2, extent: 2048}
                   body:
-                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}]}}
-                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}]}}
+                  - {Load: {names: [in0], input: x0, index: [a0, a2]}}
+                  - {Load: {names: [in1], input: x1, index: [a1, a2]}}
                   - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
                   - {Accum: {name: acc0, value: v0, axes: [a2]}}
-              - {Write: {output: linear, index: [{var: a0}, {var: a1}], values: [acc0]}}
+              - {Write: {output: linear, index: [a0, a1], values: [acc0]}}
       name: k_linear_85301c
     inputs: [x1, x0]
     outputs: [[linear, f16, [16, 4096]]]
@@ -459,11 +459,11 @@ loops:
               - Loop:
                   axis: {name: a2, extent: 2048}
                   body:
-                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}]}}
-                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}]}}
+                  - {Load: {names: [in0], input: x0, index: [a0, a2]}}
+                  - {Load: {names: [in1], input: x1, index: [a1, a2]}}
                   - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
                   - {Accum: {name: acc0, value: v0, axes: [a2]}}
-              - {Write: {output: linear, index: [{var: a0}, {var: a1}], values: [acc0]}}
+              - {Write: {output: linear, index: [a0, a1], values: [acc0]}}
       name: k_linear_872cef
     inputs: [x1, x0]
     outputs: [[linear, f16, [16, 2048]]]
@@ -489,11 +489,11 @@ loops:
               - Loop:
                   axis: {name: a2, extent: 1024}
                   body:
-                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}]}}
-                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}]}}
+                  - {Load: {names: [in0], input: x0, index: [a0, a2]}}
+                  - {Load: {names: [in1], input: x1, index: [a1, a2]}}
                   - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
                   - {Accum: {name: acc0, value: v0, axes: [a2]}}
-              - {Write: {output: linear, index: [{var: a0}, {var: a1}], values: [acc0]}}
+              - {Write: {output: linear, index: [a0, a1], values: [acc0]}}
       name: k_linear_8fa4cf
     inputs: [x1, x0]
     outputs: [[linear, f16, [16, 2048]]]
@@ -519,15 +519,15 @@ loops:
     op: loop
     attrs:
       body:
-      - {Load: {names: [in0], input: rms_norm_eps, index: [{literal: 0}]}}
-      - {Load: {names: [in1], input: rms_norm_mean_count, index: [{literal: 0}]}}
+      - {Load: {names: [in0], input: rms_norm_eps, index: ['0']}}
+      - {Load: {names: [in1], input: rms_norm_mean_count, index: ['0']}}
       - Loop:
           axis: {name: a0, extent: 16}
           body:
           - Loop:
               axis: {name: a1, extent: 2048}
               body:
-              - {Load: {names: [in2], input: x, index: [{var: a0}, {var: a1}]}}
+              - {Load: {names: [in2], input: x, index: [a0, a1]}}
               - {Assign: {name: v0, op: multiply, args: [in2, in2]}}
               - {Accum: {name: acc0, value: v0, axes: [a1]}}
           - {Assign: {name: v1, op: divide, args: [acc0, in1]}}
@@ -536,11 +536,11 @@ loops:
           - Loop:
               axis: {name: a2, extent: 2048}
               body:
-              - {Load: {names: [in3], input: x, index: [{var: a0}, {var: a2}]}}
+              - {Load: {names: [in3], input: x, index: [a0, a2]}}
               - {Assign: {name: v4, op: multiply, args: [in3, v3]}}
-              - {Load: {names: [in4], input: p_weight, index: [{var: a2}]}}
+              - {Load: {names: [in4], input: p_weight, index: [a2]}}
               - {Assign: {name: v5, op: multiply, args: [in4, v4]}}
-              - {Write: {output: rms_norm, index: [{var: a0}, {var: a2}], values: [v5]}}
+              - {Write: {output: rms_norm, index: [a0, a2], values: [v5]}}
       name: k_rms_norm_023144
     inputs: [rms_norm_mean_count, rms_norm_eps, x, p_weight]
     outputs: [[rms_norm, f32, [16, 2048]]]
@@ -563,11 +563,11 @@ loops:
           - Loop:
               axis: {name: a1, extent: 2048}
               body:
-              - {Load: {names: [in0], input: x0, index: [{literal: 0}, {var: a1}]}}
-              - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a0}]}}
+              - {Load: {names: [in0], input: x0, index: ['0', a1]}}
+              - {Load: {names: [in1], input: x1, index: [a1, a0]}}
               - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
               - {Accum: {name: acc0, value: v0, axes: [a1]}}
-          - {Write: {output: matmul, index: [{literal: 0}, {var: a0}], values: [acc0]}}
+          - {Write: {output: matmul, index: ['0', a0], values: [acc0]}}
       name: k_matmul_104943
     inputs: [x1, x0]
     outputs: [[matmul, f16, [1, 4096]]]
@@ -590,11 +590,11 @@ loops:
           - Loop:
               axis: {name: a1, extent: 2048}
               body:
-              - {Load: {names: [in0], input: x0, index: [{literal: 0}, {var: a1}]}}
-              - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a0}]}}
+              - {Load: {names: [in0], input: x0, index: ['0', a1]}}
+              - {Load: {names: [in1], input: x1, index: [a1, a0]}}
               - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
               - {Accum: {name: acc0, value: v0, axes: [a1]}}
-          - {Write: {output: matmul, index: [{literal: 0}, {var: a0}], values: [acc0]}}
+          - {Write: {output: matmul, index: ['0', a0], values: [acc0]}}
       name: k_matmul_672564
     inputs: [x1, x0]
     outputs: [[matmul, f16, [1, 2048]]]
@@ -623,22 +623,22 @@ loops:
       - Loop:
           axis: {name: a0, extent: 2048}
           body:
-          - {Load: {names: [in0], input: x, index: [{literal: 0}, {var: a0}]}}
+          - {Load: {names: [in0], input: x, index: ['0', a0]}}
           - {Assign: {name: v0, op: multiply, args: [in0, in0]}}
           - {Accum: {name: acc0, value: v0, axes: [a0]}}
-      - {Load: {names: [in1], input: rms_norm_eps, index: [{literal: 0}]}}
-      - {Load: {names: [in2], input: rms_norm_mean_count, index: [{literal: 0}]}}
+      - {Load: {names: [in1], input: rms_norm_eps, index: ['0']}}
+      - {Load: {names: [in2], input: rms_norm_mean_count, index: ['0']}}
       - {Assign: {name: v1, op: divide, args: [acc0, in2]}}
       - {Assign: {name: v2, op: add, args: [in1, v1]}}
       - {Assign: {name: v3, op: rsqrt, args: [v2]}}
       - Loop:
           axis: {name: a1, extent: 2048}
           body:
-          - {Load: {names: [in3], input: x, index: [{literal: 0}, {var: a1}]}}
+          - {Load: {names: [in3], input: x, index: ['0', a1]}}
           - {Assign: {name: v4, op: multiply, args: [in3, v3]}}
-          - {Load: {names: [in4], input: p_weight, index: [{var: a1}]}}
+          - {Load: {names: [in4], input: p_weight, index: [a1]}}
           - {Assign: {name: v5, op: multiply, args: [in4, v4]}}
-          - {Write: {output: rms_norm, index: [{literal: 0}, {var: a1}], values: [v5]}}
+          - {Write: {output: rms_norm, index: ['0', a1], values: [v5]}}
       name: k_rms_norm_297d2f
     inputs: [rms_norm_mean_count, x, rms_norm_eps, p_weight]
     outputs: [[rms_norm, f32, [1, 2048]]]
@@ -664,11 +664,11 @@ loops:
               - Loop:
                   axis: {name: a2, extent: 2048}
                   body:
-                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}]}}
-                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}]}}
+                  - {Load: {names: [in0], input: x0, index: [a0, a2]}}
+                  - {Load: {names: [in1], input: x1, index: [a1, a2]}}
                   - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
                   - {Accum: {name: acc0, value: v0, axes: [a2]}}
-              - {Write: {output: linear, index: [{var: a0}, {var: a1}], values: [acc0]}}
+              - {Write: {output: linear, index: [a0, a1], values: [acc0]}}
       name: k_linear_12c6fb
     inputs: [x1, x0]
     outputs: [[linear, f16, [256, 2048]]]
@@ -694,11 +694,11 @@ loops:
               - Loop:
                   axis: {name: a2, extent: 1024}
                   body:
-                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}]}}
-                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}]}}
+                  - {Load: {names: [in0], input: x0, index: [a0, a2]}}
+                  - {Load: {names: [in1], input: x1, index: [a1, a2]}}
                   - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
                   - {Accum: {name: acc0, value: v0, axes: [a2]}}
-              - {Write: {output: linear, index: [{var: a0}, {var: a1}], values: [acc0]}}
+              - {Write: {output: linear, index: [a0, a1], values: [acc0]}}
       name: k_linear_27bc46
     inputs: [x1, x0]
     outputs: [[linear, f16, [256, 2048]]]
@@ -724,11 +724,11 @@ loops:
               - Loop:
                   axis: {name: a2, extent: 2048}
                   body:
-                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}]}}
-                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}]}}
+                  - {Load: {names: [in0], input: x0, index: [a0, a2]}}
+                  - {Load: {names: [in1], input: x1, index: [a1, a2]}}
                   - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
                   - {Accum: {name: acc0, value: v0, axes: [a2]}}
-              - {Write: {output: linear, index: [{var: a0}, {var: a1}], values: [acc0]}}
+              - {Write: {output: linear, index: [a0, a1], values: [acc0]}}
       name: k_linear_c9d4e7
     inputs: [x1, x0]
     outputs: [[linear, f16, [{sym: seq_len, hint: 512}, 2048]]]
@@ -754,11 +754,11 @@ loops:
               - Loop:
                   axis: {name: a2, extent: 1024}
                   body:
-                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}]}}
-                  - {Load: {names: [in1], input: x1, index: [{var: a1}, {var: a2}]}}
+                  - {Load: {names: [in0], input: x0, index: [a0, a2]}}
+                  - {Load: {names: [in1], input: x1, index: [a1, a2]}}
                   - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
                   - {Accum: {name: acc0, value: v0, axes: [a2]}}
-              - {Write: {output: linear, index: [{var: a0}, {var: a1}], values: [acc0]}}
+              - {Write: {output: linear, index: [a0, a1], values: [acc0]}}
       name: k_linear_299d6e
     inputs: [x1, x0]
     outputs: [[linear, f16, [{sym: seq_len, hint: 512}, 2048]]]

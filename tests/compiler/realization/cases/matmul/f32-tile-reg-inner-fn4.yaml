@@ -47,11 +47,11 @@ loops:
               - Loop:
                   axis: {name: a2, extent: 64}
                   body:
-                  - {Load: {names: [in0], input: a, index: [{literal: 0}, {var: a0}, {var: a2}]}}
-                  - {Load: {names: [in1], input: b, index: [{var: a2}, {var: a1}]}}
+                  - {Load: {names: [in0], input: a, index: ['0', a0, a2]}}
+                  - {Load: {names: [in1], input: b, index: [a2, a1]}}
                   - {Assign: {name: v0, op: multiply, args: [in0, in1]}}
                   - {Accum: {name: acc0, value: v0, axes: [a2]}}
-              - {Write: {output: c, index: [{literal: 0}, {var: a0}, {var: a1}], values: [acc0]}}
+              - {Write: {output: c, index: ['0', a0, a1], values: [acc0]}}
       name: k_matmul_722f51
     inputs: [b, a]
     outputs: [[c, f32, [1, 64, 64]]]

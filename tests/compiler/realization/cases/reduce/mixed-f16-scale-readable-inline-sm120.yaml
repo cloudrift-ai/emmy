@@ -63,13 +63,13 @@ loops:
           - Loop:
               axis: {name: a1, extent: 128}
               body:
-              - {Load: {names: [in0], input: x, index: [{var: a0}, {var: a1}]}}
+              - {Load: {names: [in0], input: x, index: [a0, a1]}}
               - {Accum: {name: acc0, value: in0, axes: [a1]}}
-          - {Load: {names: [in1], input: bias, index: [{var: a0}, {literal: 0}]}}
-          - {Load: {names: [in2], input: scale, index: [{var: a0}, {literal: 0}]}}
+          - {Load: {names: [in1], input: bias, index: [a0, '0']}}
+          - {Load: {names: [in2], input: scale, index: [a0, '0']}}
           - {Assign: {name: v0, op: multiply, args: [acc0, in2]}}
           - {Assign: {name: v1, op: add, args: [in1, v0]}}
-          - {Write: {output: out, index: [{var: a0}, {literal: 0}], values: [v1]}}
+          - {Write: {output: out, index: [a0, '0'], values: [v1]}}
       name: k_out_reduce
     inputs: [x, scale, bias]
     outputs: [[out, f32, [4, 1]]]

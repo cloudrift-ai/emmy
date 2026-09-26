@@ -87,14 +87,14 @@ loops:
           - Loop:
               axis: {name: a1, extent: 64}
               body:
-              - {Load: {names: [in0], input: x0, index: [{literal: 0}, {literal: 0}, {var: a1}]}}
-              - {Load: {names: [in1], input: x1, index: [{var: a0}, {var: a1}]}}
+              - {Load: {names: [in0], input: x0, index: ['0', '0', a1]}}
+              - {Load: {names: [in1], input: x1, index: [a0, a1]}}
               - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
               - {Accum: {name: acc0, value: v0, axes: [a1]}}
           - {Assign: {name: v1, op: copy, args: [acc0], dtype: f16}}
-          - {Load: {names: [in2], input: x2, index: [{literal: 0}, {literal: 0}, {var: a0}]}}
+          - {Load: {names: [in2], input: x2, index: ['0', '0', a0]}}
           - {Assign: {name: v2, op: add, args: [in2, v1]}}
-          - {Write: {output: add, index: [{literal: 0}, {literal: 0}, {var: a0}], values: [v2]}}
+          - {Write: {output: add, index: ['0', '0', a0], values: [v2]}}
       name: k_linear_318efd
     inputs: [x1, x0, x2]
     outputs: [[add, f16, [1, 1, 64]]]

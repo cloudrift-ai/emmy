@@ -65,23 +65,11 @@ loops:
                   - Loop:
                       axis: {name: a3, extent: 128}
                       body:
-                      - Load:
-                          names:
-                          - in0
-                          input: w
-                          index:
-                          - binary: {op: +, left: {var: a0}, right: {binary: {op: '*', left: {literal: 2}, right: {var: a3}}}}
-                          - {var: a2}
-                      - {Load: {names: [in1], input: x, index: [{var: a1}, {var: a3}]}}
+                      - {Load: {names: [in0], input: w, index: [a0 + 2 * a3, a2]}}
+                      - {Load: {names: [in1], input: x, index: [a1, a3]}}
                       - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
                       - {Accum: {name: acc0, value: v0, axes: [a3]}}
-                  - Write:
-                      output: o
-                      index:
-                      - {var: a1}
-                      - binary: {op: +, left: {binary: {op: '*', left: {literal: 64}, right: {var: a0}}}, right: {var: a2}}
-                      values:
-                      - acc0
+                  - {Write: {output: o, index: [a1, 64 * a0 + a2], values: [acc0]}}
       name: k_matmul_ec392d
     inputs: [w, x]
     outputs: [[o, f16, [64, 128]]]

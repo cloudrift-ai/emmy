@@ -43,6 +43,7 @@ from collections import Counter, defaultdict, deque
 from pathlib import Path
 
 from emmy.compiler.context import FAST_MATH_FLAG
+from emmy.compiler.graph import Graph
 from emmy.compiler.pipeline.knob import METADATA_PREFIXES
 from emmy.compiler.pipeline.search.db import KernelRow, PerfRow, SearchDB, knobs_json
 from emmy.compiler.pipeline.search.features import DEPLOYABLE_OPT
@@ -245,7 +246,7 @@ def _document(gpu_name: str, cap: tuple[int, int], rows: list[PerfRow], kernels:
         # The sizes the rows were benched at are the program's hints; a golden's ``bindings`` would make them static.
         # A parent axis a piece dropped keeps the stored hint: the piece's measurement does not depend on it.
         try:
-            program = rehint_program(kernels[root].loop_ir, dict(members[0].bindings))
+            program = rehint_program(Graph.from_wire(kernels[root].loop_ir), dict(members[0].bindings)).to_wire()
         except ValueError:
             dropped["sizes the program cannot bind"] += len(members)
             continue

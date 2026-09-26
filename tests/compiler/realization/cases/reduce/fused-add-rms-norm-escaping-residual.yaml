@@ -57,16 +57,16 @@ loops:
     op: loop
     attrs:
       body:
-      - {Load: {names: [in0], input: n_eps, index: [{literal: 0}]}}
-      - {Load: {names: [in1], input: n_mean_count, index: [{literal: 0}]}}
+      - {Load: {names: [in0], input: n_eps, index: ['0']}}
+      - {Load: {names: [in1], input: n_mean_count, index: ['0']}}
       - Loop:
           axis: {name: a0, extent: 8}
           body:
           - Loop:
               axis: {name: a1, extent: 256}
               body:
-              - {Load: {names: [in2], input: r, index: [{var: a0}, {var: a1}]}}
-              - {Load: {names: [in3], input: x, index: [{var: a0}, {var: a1}]}}
+              - {Load: {names: [in2], input: r, index: [a0, a1]}}
+              - {Load: {names: [in3], input: x, index: [a0, a1]}}
               - {Assign: {name: v0, op: add, args: [in2, in3]}}
               - {Assign: {name: v1, op: multiply, args: [v0, v0]}}
               - {Accum: {name: acc0, value: v1, axes: [a1]}}
@@ -76,14 +76,14 @@ loops:
           - Loop:
               axis: {name: a2, extent: 256}
               body:
-              - {Load: {names: [in4], input: r, index: [{var: a0}, {var: a2}]}}
-              - {Load: {names: [in5], input: x, index: [{var: a0}, {var: a2}]}}
+              - {Load: {names: [in4], input: r, index: [a0, a2]}}
+              - {Load: {names: [in5], input: x, index: [a0, a2]}}
               - {Assign: {name: v5, op: add, args: [in4, in5]}}
               - {Assign: {name: v6, op: multiply, args: [v4, v5]}}
-              - {Load: {names: [in6], input: w, index: [{var: a2}]}}
+              - {Load: {names: [in6], input: w, index: [a2]}}
               - {Assign: {name: v7, op: multiply, args: [in6, v6]}}
-              - {Write: {output: h, index: [{var: a0}, {var: a2}], values: [v5]}}
-              - {Write: {output: n, index: [{var: a0}, {var: a2}], values: [v7]}}
+              - {Write: {output: h, index: [a0, a2], values: [v5]}}
+              - {Write: {output: n, index: [a0, a2], values: [v7]}}
       name: k_rms_norm_c541be
     inputs: [n_mean_count, n_eps, x, r, w]
     outputs: [[h, f32, [8, 256]], [n, f32, [8, 256]]]

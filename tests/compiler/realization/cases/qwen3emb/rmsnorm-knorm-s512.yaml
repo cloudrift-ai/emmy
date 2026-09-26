@@ -47,23 +47,15 @@ loops:
     op: loop
     attrs:
       body:
-      - {Load: {names: [in0], input: o_eps, index: [{literal: 0}]}}
-      - {Load: {names: [in1], input: o_mean_count, index: [{literal: 0}]}}
+      - {Load: {names: [in0], input: o_eps, index: ['0']}}
+      - {Load: {names: [in1], input: o_mean_count, index: ['0']}}
       - Loop:
           axis: {name: a0, extent: 4096}
           body:
           - Loop:
               axis: {name: a1, extent: 128}
               body:
-              - Load:
-                  names:
-                  - in2
-                  input: x
-                  index:
-                  - {literal: 0}
-                  - {binary: {op: //, left: {var: a0}, right: {literal: 512}}}
-                  - {binary: {op: '%', left: {var: a0}, right: {literal: 512}}}
-                  - {var: a1}
+              - {Load: {names: [in2], input: x, index: ['0', a0 // 512, a0 % 512, a1]}}
               - {Assign: {name: v0, op: multiply, args: [in2, in2]}}
               - {Accum: {name: acc0, value: v0, axes: [a1]}}
           - {Assign: {name: v1, op: divide, args: [acc0, in1]}}
@@ -72,27 +64,11 @@ loops:
           - Loop:
               axis: {name: a2, extent: 128}
               body:
-              - Load:
-                  names:
-                  - in3
-                  input: x
-                  index:
-                  - {literal: 0}
-                  - {binary: {op: //, left: {var: a0}, right: {literal: 512}}}
-                  - {binary: {op: '%', left: {var: a0}, right: {literal: 512}}}
-                  - {var: a2}
+              - {Load: {names: [in3], input: x, index: ['0', a0 // 512, a0 % 512, a2]}}
               - {Assign: {name: v4, op: multiply, args: [in3, v3]}}
-              - {Load: {names: [in4], input: w, index: [{var: a2}]}}
+              - {Load: {names: [in4], input: w, index: [a2]}}
               - {Assign: {name: v5, op: multiply, args: [in4, v4]}}
-              - Write:
-                  output: o
-                  index:
-                  - {literal: 0}
-                  - {binary: {op: //, left: {var: a0}, right: {literal: 512}}}
-                  - {binary: {op: '%', left: {var: a0}, right: {literal: 512}}}
-                  - {var: a2}
-                  values:
-                  - v5
+              - {Write: {output: o, index: ['0', a0 // 512, a0 % 512, a2], values: [v5]}}
       name: k_rms_norm_5e9b35
     inputs: [o_mean_count, o_eps, x, w]
     outputs: [[o, f32, [1, 8, 512, 128]]]

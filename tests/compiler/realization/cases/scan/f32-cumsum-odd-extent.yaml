@@ -38,9 +38,9 @@ loops:
           - Loop:
               axis: {name: a1, extent: 47}
               body:
-              - {Load: {names: [in0], input: x, index: [{var: a0}, {var: a1}]}}
+              - {Load: {names: [in0], input: x, index: [a0, a1]}}
               - {Accum: {name: acc0, value: in0, axes: [a1]}}
-              - {Write: {output: cumsum, index: [{var: a0}, {var: a1}], values: [acc0]}}
+              - {Write: {output: cumsum, index: [a0, a1], values: [acc0]}}
       name: k_cumsum_reduce
     inputs: [x]
     outputs: [[cumsum, f32, [64, 47]]]

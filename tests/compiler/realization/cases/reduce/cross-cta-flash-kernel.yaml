@@ -66,7 +66,7 @@ loops:
     op: loop
     attrs:
       body:
-      - {Load: {names: [in0], input: scaled_dot_product_attention_scale, index: [{literal: 0}]}}
+      - {Load: {names: [in0], input: scaled_dot_product_attention_scale, index: ['0']}}
       - Loop:
           axis: {name: a0, extent: 4}
           body:
@@ -79,8 +79,8 @@ loops:
                   - Loop:
                       axis: {name: a3, extent: 32}
                       body:
-                      - {Load: {names: [in1], input: x0, index: [{literal: 0}, {var: a0}, {var: a1}, {var: a3}]}}
-                      - {Load: {names: [in2], input: x1, index: [{literal: 0}, {var: a0}, {var: a2}, {var: a3}]}}
+                      - {Load: {names: [in1], input: x0, index: ['0', a0, a1, a3]}}
+                      - {Load: {names: [in2], input: x1, index: ['0', a0, a2, a3]}}
                       - {Assign: {name: v0, op: multiply, args: [in1, in2]}}
                       - {Accum: {name: acc0, value: v0, axes: [a3]}}
                   - {Assign: {name: v1, op: multiply, args: [acc0, in0]}}
@@ -91,8 +91,8 @@ loops:
                   - Loop:
                       axis: {name: a5, extent: 32}
                       body:
-                      - {Load: {names: [in3], input: x0, index: [{literal: 0}, {var: a0}, {var: a1}, {var: a5}]}}
-                      - {Load: {names: [in4], input: x1, index: [{literal: 0}, {var: a0}, {var: a2}, {var: a5}]}}
+                      - {Load: {names: [in3], input: x0, index: ['0', a0, a1, a5]}}
+                      - {Load: {names: [in4], input: x1, index: ['0', a0, a2, a5]}}
                       - {Assign: {name: v2, op: multiply, args: [in3, in4]}}
                       - {Accum: {name: acc2, value: v2, axes: [a5]}}
                   - {Assign: {name: v3, op: multiply, args: [acc2, in0]}}
@@ -108,26 +108,18 @@ loops:
                       - Loop:
                           axis: {name: a8, extent: 32}
                           body:
-                          - {Load: {names: [in5], input: x0, index: [{literal: 0}, {var: a0}, {var: a1}, {var: a8}]}}
-                          - {Load: {names: [in6], input: x1, index: [{literal: 0}, {var: a0}, {var: a7}, {var: a8}]}}
+                          - {Load: {names: [in5], input: x0, index: ['0', a0, a1, a8]}}
+                          - {Load: {names: [in6], input: x1, index: ['0', a0, a7, a8]}}
                           - {Assign: {name: v6, op: multiply, args: [in5, in6]}}
                           - {Accum: {name: acc4, value: v6, axes: [a8]}}
                       - {Assign: {name: v7, op: multiply, args: [acc4, in0]}}
                       - {Assign: {name: v8, op: subtract, args: [v7, acc1]}}
                       - {Assign: {name: v9, op: exp, args: [v8]}}
                       - {Assign: {name: v10, op: divide, args: [v9, acc3]}}
-                      - {Load: {names: [in7], input: x2, index: [{literal: 0}, {var: a0}, {var: a7}, {var: a6}]}}
+                      - {Load: {names: [in7], input: x2, index: ['0', a0, a7, a6]}}
                       - {Assign: {name: v11, op: multiply, args: [in7, v10]}}
                       - {Accum: {name: acc5, value: v11, axes: [a7]}}
-                  - Write:
-                      output: scaled_dot_product_attention
-                      index:
-                      - {literal: 0}
-                      - {var: a0}
-                      - {var: a1}
-                      - {var: a6}
-                      values:
-                      - acc5
+                  - {Write: {output: scaled_dot_product_attention, index: ['0', a0, a1, a6], values: [acc5]}}
       name: k_sdpa_a3a07b
     inputs: [scaled_dot_product_attention_scale, x1, x0, x2]
     outputs: [[scaled_dot_product_attention, f32, [1, 4, 64, 32]]]

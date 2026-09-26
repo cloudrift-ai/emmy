@@ -42,23 +42,23 @@ loops:
           - Loop:
               axis: {name: a1, extent: 64}
               body:
-              - {Load: {names: [in0], input: x, index: [{var: a0}, {var: a1}]}}
+              - {Load: {names: [in0], input: x, index: [a0, a1]}}
               - {Accum: {name: acc0, value: in0, op: maximum, axes: [a1]}}
           - Loop:
               axis: {name: a1, extent: 64}
               body:
-              - {Load: {names: [in1], input: x, index: [{var: a0}, {var: a1}]}}
+              - {Load: {names: [in1], input: x, index: [a0, a1]}}
               - {Assign: {name: v0, op: subtract, args: [in1, acc0]}}
               - {Assign: {name: v1, op: exp, args: [v0]}}
               - {Accum: {name: acc1, value: v1, axes: [a1]}}
           - Loop:
               axis: {name: a3, extent: 64}
               body:
-              - {Load: {names: [in2], input: x, index: [{var: a0}, {var: a3}]}}
+              - {Load: {names: [in2], input: x, index: [a0, a3]}}
               - {Assign: {name: v2, op: subtract, args: [in2, acc0]}}
               - {Assign: {name: v3, op: exp, args: [v2]}}
               - {Assign: {name: v4, op: divide, args: [v3, acc1]}}
-              - {Write: {output: softmax, index: [{var: a0}, {var: a3}], values: [v4]}}
+              - {Write: {output: softmax, index: [a0, a3], values: [v4]}}
       name: k_softmax_d6ce6b
     inputs: [x]
     outputs: [[softmax, f32, [2, 64]]]

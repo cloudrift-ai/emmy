@@ -27,7 +27,7 @@ loops:
   nodes:
   - id: mean_count
     op: constant
-    attrs: {name: mean_count, context_value: {var: seq_len}}
+    attrs: {name: mean_count, context_value: seq_len}
     outputs: [[mean_count, f32, [1]]]
   - id: x
     op: input
@@ -36,17 +36,17 @@ loops:
     op: loop
     attrs:
       body:
-      - {Load: {names: [in0], input: mean_count, index: [{literal: 0}]}}
+      - {Load: {names: [in0], input: mean_count, index: ['0']}}
       - Loop:
           axis: {name: a0, extent: 4}
           body:
           - Loop:
               axis: {name: a1, extent: {sym: seq_len, hint: 512}}
               body:
-              - {Load: {names: [in1], input: x, index: [{var: a0}, {var: a1}]}}
+              - {Load: {names: [in1], input: x, index: [a0, a1]}}
               - {Accum: {name: acc0, value: in1, axes: [a1]}}
           - {Assign: {name: v0, op: divide, args: [acc0, in0]}}
-          - {Write: {output: mean, index: [{var: a0}, {literal: 0}], values: [v0]}}
+          - {Write: {output: mean, index: [a0, '0'], values: [v0]}}
       name: k_mean_fb89d8
     inputs: [mean_count, x]
     outputs: [[mean, f32, [4, 1]]]

@@ -39,9 +39,9 @@ loops:
           - Loop:
               axis: {name: a1, extent: 1024}
               body:
-              - {Load: {names: [in0], input: x, index: [{var: a0}, {var: a1}]}}
+              - {Load: {names: [in0], input: x, index: [a0, a1]}}
               - {Accum: {name: acc0, value: in0, op: maximum, axes: [a1]}}
-          - {Write: {output: amax, index: [{var: a0}, {literal: 0}], values: [acc0]}}
+          - {Write: {output: amax, index: [a0, '0'], values: [acc0]}}
       name: k_amax_reduce
     inputs: [x]
     outputs: [[amax, f32, [4, 1]]]

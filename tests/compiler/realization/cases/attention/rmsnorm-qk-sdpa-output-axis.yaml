@@ -102,13 +102,13 @@ loops:
     op: loop
     attrs:
       body:
-      - {Load: {names: [in0], input: kn_eps, index: [{literal: 0}]}}
-      - {Load: {names: [in1], input: kn_mean_count, index: [{literal: 0}]}}
-      - {Load: {names: [in2], input: out_mask_fill_c, index: [{literal: 0}]}}
-      - {Load: {names: [in3], input: out_mask_zero_c, index: [{literal: 0}]}}
-      - {Load: {names: [in4], input: out_scale, index: [{literal: 0}]}}
-      - {Load: {names: [in5], input: qn_eps, index: [{literal: 0}]}}
-      - {Load: {names: [in6], input: qn_mean_count, index: [{literal: 0}]}}
+      - {Load: {names: [in0], input: kn_eps, index: ['0']}}
+      - {Load: {names: [in1], input: kn_mean_count, index: ['0']}}
+      - {Load: {names: [in2], input: out_mask_fill_c, index: ['0']}}
+      - {Load: {names: [in3], input: out_mask_zero_c, index: ['0']}}
+      - {Load: {names: [in4], input: out_scale, index: ['0']}}
+      - {Load: {names: [in5], input: qn_eps, index: ['0']}}
+      - {Load: {names: [in6], input: qn_mean_count, index: ['0']}}
       - Loop:
           axis: {name: a0, extent: 2}
           body:
@@ -118,7 +118,7 @@ loops:
               - Loop:
                   axis: {name: a2, extent: 16}
                   body:
-                  - {Load: {names: [in7], input: q, index: [{literal: 0}, {var: a0}, {var: a1}, {var: a2}]}}
+                  - {Load: {names: [in7], input: q, index: ['0', a0, a1, a2]}}
                   - {Assign: {name: v0, op: multiply, args: [in7, in7]}}
                   - {Accum: {name: acc0, value: v0, axes: [a2]}}
               - {Assign: {name: v1, op: divide, args: [acc0, in6]}}
@@ -130,7 +130,7 @@ loops:
                   - Loop:
                       axis: {name: a4, extent: 16}
                       body:
-                      - {Load: {names: [in8], input: k, index: [{literal: 0}, {var: a0}, {var: a3}, {var: a4}]}}
+                      - {Load: {names: [in8], input: k, index: ['0', a0, a3, a4]}}
                       - {Assign: {name: v4, op: multiply, args: [in8, in8]}}
                       - {Accum: {name: acc1, value: v4, axes: [a4]}}
                   - {Assign: {name: v5, op: divide, args: [acc1, in1]}}
@@ -139,22 +139,18 @@ loops:
                   - Loop:
                       axis: {name: a4, extent: 16}
                       body:
-                      - {Load: {names: [in9], input: k, index: [{literal: 0}, {var: a0}, {var: a3}, {var: a4}]}}
+                      - {Load: {names: [in9], input: k, index: ['0', a0, a3, a4]}}
                       - {Assign: {name: v8, op: multiply, args: [in9, v7]}}
-                      - {Load: {names: [in10], input: q, index: [{literal: 0}, {var: a0}, {var: a1}, {var: a4}]}}
+                      - {Load: {names: [in10], input: q, index: ['0', a0, a1, a4]}}
                       - {Assign: {name: v9, op: multiply, args: [in10, v3]}}
-                      - {Load: {names: [in11], input: kw, index: [{var: a4}]}}
+                      - {Load: {names: [in11], input: kw, index: [a4]}}
                       - {Assign: {name: v10, op: multiply, args: [in11, v8]}}
-                      - {Load: {names: [in12], input: qw, index: [{var: a4}]}}
+                      - {Load: {names: [in12], input: qw, index: [a4]}}
                       - {Assign: {name: v11, op: multiply, args: [in12, v9]}}
                       - {Assign: {name: v12, op: multiply, args: [v10, v11], dtype: f32}}
                       - {Accum: {name: acc2, value: v12, axes: [a4]}}
                   - {Assign: {name: v13, op: multiply, args: [acc2, in4]}}
-                  - Select:
-                      name: v14
-                      branches:
-                      - {value: in3, select: {binary: {op: <=, left: {var: a3}, right: {var: a1}}}}
-                      - {value: in2, select: {binary: {op: <, left: {var: a1}, right: {var: a3}}}}
+                  - {Select: {name: v14, branches: [{value: in3, select: a3 <= a1}, {value: in2, select: a1 < a3}]}}
                   - {Assign: {name: v15, op: add, args: [v13, v14]}}
                   - {Accum: {name: acc3, value: v15, op: maximum, axes: [a3]}}
               - Loop:
@@ -163,7 +159,7 @@ loops:
                   - Loop:
                       axis: {name: a7, extent: 16}
                       body:
-                      - {Load: {names: [in13], input: k, index: [{literal: 0}, {var: a0}, {var: a3}, {var: a7}]}}
+                      - {Load: {names: [in13], input: k, index: ['0', a0, a3, a7]}}
                       - {Assign: {name: v16, op: multiply, args: [in13, in13]}}
                       - {Accum: {name: acc4, value: v16, axes: [a7]}}
                   - {Assign: {name: v17, op: divide, args: [acc4, in1]}}
@@ -172,22 +168,18 @@ loops:
                   - Loop:
                       axis: {name: a7, extent: 16}
                       body:
-                      - {Load: {names: [in14], input: k, index: [{literal: 0}, {var: a0}, {var: a3}, {var: a7}]}}
+                      - {Load: {names: [in14], input: k, index: ['0', a0, a3, a7]}}
                       - {Assign: {name: v20, op: multiply, args: [in14, v19]}}
-                      - {Load: {names: [in15], input: q, index: [{literal: 0}, {var: a0}, {var: a1}, {var: a7}]}}
+                      - {Load: {names: [in15], input: q, index: ['0', a0, a1, a7]}}
                       - {Assign: {name: v21, op: multiply, args: [in15, v3]}}
-                      - {Load: {names: [in16], input: kw, index: [{var: a7}]}}
+                      - {Load: {names: [in16], input: kw, index: [a7]}}
                       - {Assign: {name: v22, op: multiply, args: [in16, v20]}}
-                      - {Load: {names: [in17], input: qw, index: [{var: a7}]}}
+                      - {Load: {names: [in17], input: qw, index: [a7]}}
                       - {Assign: {name: v23, op: multiply, args: [in17, v21]}}
                       - {Assign: {name: v24, op: multiply, args: [v22, v23], dtype: f32}}
                       - {Accum: {name: acc5, value: v24, axes: [a7]}}
                   - {Assign: {name: v25, op: multiply, args: [acc5, in4]}}
-                  - Select:
-                      name: v26
-                      branches:
-                      - {value: in3, select: {binary: {op: <=, left: {var: a3}, right: {var: a1}}}}
-                      - {value: in2, select: {binary: {op: <, left: {var: a1}, right: {var: a3}}}}
+                  - {Select: {name: v26, branches: [{value: in3, select: a3 <= a1}, {value: in2, select: a1 < a3}]}}
                   - {Assign: {name: v27, op: add, args: [v25, v26]}}
                   - {Assign: {name: v28, op: subtract, args: [v27, acc3]}}
                   - {Assign: {name: v29, op: exp, args: [v28]}}
@@ -201,7 +193,7 @@ loops:
                       - Loop:
                           axis: {name: a11, extent: 16}
                           body:
-                          - {Load: {names: [in18], input: k, index: [{literal: 0}, {var: a0}, {var: a10}, {var: a11}]}}
+                          - {Load: {names: [in18], input: k, index: ['0', a0, a10, a11]}}
                           - {Assign: {name: v30, op: multiply, args: [in18, in18]}}
                           - {Accum: {name: acc7, value: v30, axes: [a11]}}
                       - {Assign: {name: v31, op: divide, args: [acc7, in1]}}
@@ -210,30 +202,26 @@ loops:
                       - Loop:
                           axis: {name: a11, extent: 16}
                           body:
-                          - {Load: {names: [in19], input: k, index: [{literal: 0}, {var: a0}, {var: a10}, {var: a11}]}}
+                          - {Load: {names: [in19], input: k, index: ['0', a0, a10, a11]}}
                           - {Assign: {name: v34, op: multiply, args: [in19, v33]}}
-                          - {Load: {names: [in20], input: q, index: [{literal: 0}, {var: a0}, {var: a1}, {var: a11}]}}
+                          - {Load: {names: [in20], input: q, index: ['0', a0, a1, a11]}}
                           - {Assign: {name: v35, op: multiply, args: [in20, v3]}}
-                          - {Load: {names: [in21], input: kw, index: [{var: a11}]}}
+                          - {Load: {names: [in21], input: kw, index: [a11]}}
                           - {Assign: {name: v36, op: multiply, args: [in21, v34]}}
-                          - {Load: {names: [in22], input: qw, index: [{var: a11}]}}
+                          - {Load: {names: [in22], input: qw, index: [a11]}}
                           - {Assign: {name: v37, op: multiply, args: [in22, v35]}}
                           - {Assign: {name: v38, op: multiply, args: [v36, v37], dtype: f32}}
                           - {Accum: {name: acc8, value: v38, axes: [a11]}}
                       - {Assign: {name: v39, op: multiply, args: [acc8, in4]}}
-                      - {Load: {names: [in23], input: v, index: [{literal: 0}, {var: a0}, {var: a10}, {var: a9}]}}
-                      - Select:
-                          name: v40
-                          branches:
-                          - {value: in3, select: {binary: {op: <=, left: {var: a10}, right: {var: a1}}}}
-                          - {value: in2, select: {binary: {op: <, left: {var: a1}, right: {var: a10}}}}
+                      - {Load: {names: [in23], input: v, index: ['0', a0, a10, a9]}}
+                      - Select: {name: v40, branches: [{value: in3, select: a10 <= a1}, {value: in2, select: a1 < a10}]}
                       - {Assign: {name: v41, op: add, args: [v39, v40]}}
                       - {Assign: {name: v42, op: subtract, args: [v41, acc3]}}
                       - {Assign: {name: v43, op: exp, args: [v42]}}
                       - {Assign: {name: v44, op: divide, args: [v43, acc6]}}
                       - {Assign: {name: v45, op: multiply, args: [in23, v44], dtype: f32}}
                       - {Accum: {name: acc9, value: v45, axes: [a10]}}
-                  - {Write: {output: out, index: [{literal: 0}, {var: a0}, {var: a1}, {var: a9}], values: [acc9]}}
+                  - {Write: {output: out, index: ['0', a0, a1, a9], values: [acc9]}}
       name: k_sdpa_rms_norm_reduce_52a32a
     inputs: [kn_mean_count, qn_mean_count, kn_eps, qn_eps, out_scale, out_mask_fill_c, out_mask_zero_c, q, k, kw, qw, v]
     outputs: [[out, f16, [1, 2, 8, 16]]]

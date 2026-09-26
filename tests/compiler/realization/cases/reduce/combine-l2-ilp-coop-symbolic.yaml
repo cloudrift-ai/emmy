@@ -49,11 +49,11 @@ loops:
           - Loop:
               axis: {name: a1, extent: {sym: seq_len, hint: 512}}
               body:
-              - {Load: {names: [in0], input: x, index: [{var: a0}, {var: a1}]}}
+              - {Load: {names: [in0], input: x, index: [a0, a1]}}
               - {Assign: {name: v0, op: multiply, args: [in0, in0]}}
               - {Accum: {name: acc0, value: v0, axes: [a1]}}
           - {Assign: {name: v1, op: sqrt, args: [acc0]}}
-          - {Write: {output: sqrt, index: [{var: a0}, {literal: 0}], values: [v1]}}
+          - {Write: {output: sqrt, index: [a0, '0'], values: [v1]}}
       name: k_sqrt_reduce
     inputs: [x]
     outputs: [[sqrt, f32, [4, 1]]]

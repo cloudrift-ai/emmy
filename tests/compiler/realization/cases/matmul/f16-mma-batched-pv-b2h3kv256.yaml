@@ -50,35 +50,11 @@ loops:
                   - Loop:
                       axis: {name: a3, extent: 256}
                       body:
-                      - Load:
-                          names:
-                          - in0
-                          input: p
-                          index:
-                          - {binary: {op: //, left: {var: a0}, right: {literal: 3}}}
-                          - {binary: {op: '%', left: {var: a0}, right: {literal: 3}}}
-                          - {var: a1}
-                          - {var: a3}
-                      - Load:
-                          names:
-                          - in1
-                          input: v
-                          index:
-                          - {binary: {op: //, left: {var: a0}, right: {literal: 3}}}
-                          - {binary: {op: '%', left: {var: a0}, right: {literal: 3}}}
-                          - {var: a3}
-                          - {var: a2}
+                      - {Load: {names: [in0], input: p, index: [a0 // 3, a0 % 3, a1, a3]}}
+                      - {Load: {names: [in1], input: v, index: [a0 // 3, a0 % 3, a3, a2]}}
                       - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
                       - {Accum: {name: acc0, value: v0, axes: [a3]}}
-                  - Write:
-                      output: c
-                      index:
-                      - {binary: {op: //, left: {var: a0}, right: {literal: 3}}}
-                      - {binary: {op: '%', left: {var: a0}, right: {literal: 3}}}
-                      - {var: a1}
-                      - {var: a2}
-                      values:
-                      - acc0
+                  - {Write: {output: c, index: [a0 // 3, a0 % 3, a1, a2], values: [acc0]}}
       name: k_matmul_2a15e8
     inputs: [v, p]
     outputs: [[c, f32, [2, 3, 128, 128]]]

@@ -39,21 +39,9 @@ loops:
       - Loop:
           axis: {name: a0, extent: 2097152}
           body:
-          - Load:
-              names:
-              - in0
-              input: x
-              index:
-              - {binary: {op: //, left: {var: a0}, right: {literal: 4096}}}
-              - {binary: {op: '%', left: {var: a0}, right: {literal: 4096}}}
+          - {Load: {names: [in0], input: x, index: [a0 // 4096, a0 % 4096]}}
           - {Assign: {name: v0, op: relu, args: [in0]}}
-          - Write:
-              output: relu
-              index:
-              - {binary: {op: //, left: {var: a0}, right: {literal: 4096}}}
-              - {binary: {op: '%', left: {var: a0}, right: {literal: 4096}}}
-              values:
-              - v0
+          - {Write: {output: relu, index: [a0 // 4096, a0 % 4096], values: [v0]}}
       name: k_relu_pointwise
     inputs: [x]
     outputs: [[relu, f32, [512, 4096]]]

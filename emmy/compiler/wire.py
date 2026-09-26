@@ -7,7 +7,7 @@ holds that class's payload bare; a field whose annotation is a base class, a uni
 ``dict`` is an opaque payload kept as it is (a program pool's entries). A class whose wire is not its fields — a dim,
 a tensor, a body, a graph, a leaf type — overrides ``to_wire`` / ``from_wire``. ``wire_tag`` names the class on the
 wire, the class name by default; every wire class registers its tag when it is defined, so a tagged payload decodes
-without anyone listing the classes. The walker refuses an unknown or missing key by path.
+without anyone listing the classes. A subclass that inherits its base's codec goes by the base's tag. The walker refuses an unknown or missing key by path.
 """
 
 from __future__ import annotations
@@ -15,14 +15,14 @@ from __future__ import annotations
 import inspect
 import typing
 from collections.abc import Iterable, Mapping
-from dataclasses import MISSING, fields
+from dataclasses import MISSING, fields, is_dataclass
 from types import UnionType
 from typing import Any, ClassVar, get_args, get_origin, get_type_hints
 
 _SCALARS = (bool, int, float, str)
 _REGISTRY: dict[str, type] = {}
 _TAG_OF: dict[type, str] = {}
-#: The names an annotation may spell: every wire class, plus the aliases modules register (``Expr``).
+#: The names an annotation may spell: every wire class.
 _NAMESPACE: dict[str, object] = {}
 _HINTS: dict[type, dict[str, object]] = {}
 
@@ -37,13 +37,18 @@ class Wire:
 
     def __init_subclass__(cls, **kwargs) -> None:
         super().__init_subclass__(**kwargs)
+        _NAMESPACE[cls.__name__] = cls
+        owner = next(base for base in cls.__mro__ if "to_wire" in base.__dict__)
+        if owner not in (cls, Wire) and "wire_tag" not in cls.__dict__:
+            # A subclass written by its base's codec goes by the base's tag: an ``Expr`` node is its text.
+            _TAG_OF[cls] = _TAG_OF[owner]
+            return
         tag = cls.__dict__.get("wire_tag") or cls.__name__
         if tag in _REGISTRY and _REGISTRY[tag] is not cls:
             other = _REGISTRY[tag]
             raise TypeError(f"wire tag {tag!r} is claimed by both {other.__module__}.{other.__name__} and {cls.__module__}.{cls.__name__}")
         _REGISTRY[tag] = cls
         _TAG_OF[cls] = tag
-        _NAMESPACE[cls.__name__] = cls
 
     @classmethod
     def from_wire(cls, value: object, where: str | None = None):
@@ -63,11 +68,6 @@ def tag_of(cls: type) -> str:
 def wire_class(tag: object) -> type | None:
     """The class a tag names, or ``None``."""
     return _REGISTRY.get(tag) if isinstance(tag, str) else None
-
-
-def alias(name: str, value: object) -> None:
-    """Let annotations spell ``name`` — a union alias such as ``Expr``, which is no class and registers nothing."""
-    _NAMESPACE[name] = value
 
 
 def encode(value: object):
@@ -294,6 +294,25 @@ def _untagged(value: object, where: str):
     return {key: _untagged(item, where) for key, item in value.items()}
 
 
+def rewrite(value: object, fn):
+    """``value`` with ``fn`` applied to every object inside it, outermost first: ``fn`` answers an object's
+    replacement, or ``None`` to go on into it — a dataclass wire object's wire fields, a container's members. An
+    object nothing inside changed is kept as it is; one that changed is rebuilt the way the reader builds it."""
+    if (replaced := fn(value)) is not None:
+        return replaced
+    if isinstance(value, (tuple, list, frozenset)):
+        items = [rewrite(item, fn) for item in value]
+        return value if all(new is old for new, old in zip(items, value, strict=True)) else type(value)(items)
+    if isinstance(value, dict):
+        items = {key: rewrite(item, fn) for key, item in value.items()}
+        return value if all(items[key] is item for key, item in value.items()) else items
+    if isinstance(value, Wire) and is_dataclass(value):
+        declared = {f.name: getattr(value, f.name) for f in _wire_fields(type(value))}
+        items = {name: rewrite(item, fn) for name, item in declared.items()}
+        return value if all(items[name] is item for name, item in declared.items()) else type(value)(**items)
+    return value
+
+
 # --- graphs and kernels on the wire -----------------------------------------------------------
 
 
@@ -359,6 +378,8 @@ def kernel_wire(tile) -> dict:
 def symbolic_vars(wire: dict) -> set[str]:
     """The symbolic dim vars a kernel wire's buffers name — the keys a measurement of it binds
     (:func:`kernel_bindings`), and what a piece keeps of its parent's bindings."""
+    from emmy.compiler.ir.expr import Expr  # noqa: PLC0415
+
     out: set[str] = set()
     for node in wire["nodes"]:
         for _name, _dtype, dims in node["outputs"]:
@@ -366,7 +387,7 @@ def symbolic_vars(wire: dict) -> set[str]:
                 if isinstance(dim, dict) and "sym" in dim:
                     out.add(str(dim["sym"]))
                 elif isinstance(dim, dict) and "expr" in dim:
-                    out |= set(decode(dim["expr"]).free_vars())
+                    out |= Expr.from_wire(dim["expr"]).free_vars()
     return out
 
 

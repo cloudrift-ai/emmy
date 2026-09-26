@@ -30,12 +30,7 @@ programs:
       - 16
       - 128
       sources:
-      - input_idx: 0
-        coord_map:
-        - {var: out_coord_0}
-        - {var: out_coord_1}
-        - {var: out_coord_2}
-        - {var: out_coord_3}
+      - {input_idx: 0, coord_map: [out_coord_0, out_coord_1, out_coord_2, out_coord_3]}
     inputs: [reshape]
     outputs: [[to, f32, [1, 1, 16, 128]]]
 configs:
@@ -72,21 +67,13 @@ loops:
           - Loop:
               axis: {name: a1, extent: 1024}
               body:
-              - {Load: {names: [in0], input: x0, index: [{literal: 0}, {literal: 0}, {var: a1}]}}
-              - {Load: {names: [in1], input: x1, index: [{var: a0}, {var: a1}]}}
+              - {Load: {names: [in0], input: x0, index: ['0', '0', a1]}}
+              - {Load: {names: [in1], input: x1, index: [a0, a1]}}
               - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
               - {Accum: {name: acc0, value: v0, axes: [a1]}}
           - {Assign: {name: v1, op: copy, args: [acc0], dtype: f16}}
           - {Assign: {name: v2, op: copy, args: [v1], dtype: f32}}
-          - Write:
-              output: to
-              index:
-              - {literal: 0}
-              - {literal: 0}
-              - {binary: {op: //, left: {var: a0}, right: {literal: 128}}}
-              - {binary: {op: '%', left: {var: a0}, right: {literal: 128}}}
-              values:
-              - v2
+          - {Write: {output: to, index: ['0', '0', a0 // 128, a0 % 128], values: [v2]}}
       name: k_linear_742465
     inputs: [x1, x0]
     outputs: [[to, f32, [1, 1, 16, 128]]]

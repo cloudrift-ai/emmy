@@ -259,11 +259,11 @@ loops:
               - Loop:
                   axis: {name: a2, extent: 512}
                   body:
-                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}]}}
-                  - {Load: {names: [in1], input: x1, index: [{var: a2}, {var: a1}]}}
+                  - {Load: {names: [in0], input: x0, index: [a0, a2]}}
+                  - {Load: {names: [in1], input: x1, index: [a2, a1]}}
                   - {Assign: {name: v0, op: multiply, args: [in0, in1]}}
                   - {Accum: {name: acc0, value: v0, axes: [a2]}}
-              - {Write: {output: matmul, index: [{var: a0}, {var: a1}], values: [acc0]}}
+              - {Write: {output: matmul, index: [a0, a1], values: [acc0]}}
       name: k_matmul_2967be
     inputs: [x1, x0]
     outputs: [[matmul, f32, [512, 512]]]
@@ -289,11 +289,11 @@ loops:
               - Loop:
                   axis: {name: a2, extent: 1024}
                   body:
-                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}]}}
-                  - {Load: {names: [in1], input: x1, index: [{var: a2}, {var: a1}]}}
+                  - {Load: {names: [in0], input: x0, index: [a0, a2]}}
+                  - {Load: {names: [in1], input: x1, index: [a2, a1]}}
                   - {Assign: {name: v0, op: multiply, args: [in0, in1]}}
                   - {Accum: {name: acc0, value: v0, axes: [a2]}}
-              - {Write: {output: matmul, index: [{var: a0}, {var: a1}], values: [acc0]}}
+              - {Write: {output: matmul, index: [a0, a1], values: [acc0]}}
       name: k_matmul_3e2f2e
     inputs: [x1, x0]
     outputs: [[matmul, f32, [1024, 1024]]]
@@ -319,11 +319,11 @@ loops:
               - Loop:
                   axis: {name: a2, extent: 2048}
                   body:
-                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}]}}
-                  - {Load: {names: [in1], input: x1, index: [{var: a2}, {var: a1}]}}
+                  - {Load: {names: [in0], input: x0, index: [a0, a2]}}
+                  - {Load: {names: [in1], input: x1, index: [a2, a1]}}
                   - {Assign: {name: v0, op: multiply, args: [in0, in1]}}
                   - {Accum: {name: acc0, value: v0, axes: [a2]}}
-              - {Write: {output: matmul, index: [{var: a0}, {var: a1}], values: [acc0]}}
+              - {Write: {output: matmul, index: [a0, a1], values: [acc0]}}
       name: k_matmul_e45c09
     inputs: [x1, x0]
     outputs: [[matmul, f32, [2048, 2048]]]
@@ -349,11 +349,11 @@ loops:
               - Loop:
                   axis: {name: a2, extent: 4096}
                   body:
-                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}]}}
-                  - {Load: {names: [in1], input: x1, index: [{var: a2}, {var: a1}]}}
+                  - {Load: {names: [in0], input: x0, index: [a0, a2]}}
+                  - {Load: {names: [in1], input: x1, index: [a2, a1]}}
                   - {Assign: {name: v0, op: multiply, args: [in0, in1]}}
                   - {Accum: {name: acc0, value: v0, axes: [a2]}}
-              - {Write: {output: matmul, index: [{var: a0}, {var: a1}], values: [acc0]}}
+              - {Write: {output: matmul, index: [a0, a1], values: [acc0]}}
       name: k_matmul_5904ca
     inputs: [x1, x0]
     outputs: [[matmul, f32, [4096, 4096]]]
@@ -379,11 +379,11 @@ loops:
               - Loop:
                   axis: {name: a2, extent: 512}
                   body:
-                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}]}}
-                  - {Load: {names: [in1], input: x1, index: [{var: a2}, {var: a1}]}}
+                  - {Load: {names: [in0], input: x0, index: [a0, a2]}}
+                  - {Load: {names: [in1], input: x1, index: [a2, a1]}}
                   - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
                   - {Accum: {name: acc0, value: v0, axes: [a2]}}
-              - {Write: {output: matmul, index: [{var: a0}, {var: a1}], values: [acc0]}}
+              - {Write: {output: matmul, index: [a0, a1], values: [acc0]}}
       name: k_matmul_8cc2bd
     inputs: [x1, x0]
     outputs: [[matmul, f16, [512, 512]]]
@@ -409,11 +409,11 @@ loops:
               - Loop:
                   axis: {name: a2, extent: 1024}
                   body:
-                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}]}}
-                  - {Load: {names: [in1], input: x1, index: [{var: a2}, {var: a1}]}}
+                  - {Load: {names: [in0], input: x0, index: [a0, a2]}}
+                  - {Load: {names: [in1], input: x1, index: [a2, a1]}}
                   - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
                   - {Accum: {name: acc0, value: v0, axes: [a2]}}
-              - {Write: {output: matmul, index: [{var: a0}, {var: a1}], values: [acc0]}}
+              - {Write: {output: matmul, index: [a0, a1], values: [acc0]}}
       name: k_matmul_c12c19
     inputs: [x1, x0]
     outputs: [[matmul, f16, [1024, 1024]]]
@@ -439,11 +439,11 @@ loops:
               - Loop:
                   axis: {name: a2, extent: 2048}
                   body:
-                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}]}}
-                  - {Load: {names: [in1], input: x1, index: [{var: a2}, {var: a1}]}}
+                  - {Load: {names: [in0], input: x0, index: [a0, a2]}}
+                  - {Load: {names: [in1], input: x1, index: [a2, a1]}}
                   - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
                   - {Accum: {name: acc0, value: v0, axes: [a2]}}
-              - {Write: {output: matmul, index: [{var: a0}, {var: a1}], values: [acc0]}}
+              - {Write: {output: matmul, index: [a0, a1], values: [acc0]}}
       name: k_matmul_e29718
     inputs: [x1, x0]
     outputs: [[matmul, f16, [2048, 2048]]]
@@ -469,11 +469,11 @@ loops:
               - Loop:
                   axis: {name: a2, extent: 4096}
                   body:
-                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}]}}
-                  - {Load: {names: [in1], input: x1, index: [{var: a2}, {var: a1}]}}
+                  - {Load: {names: [in0], input: x0, index: [a0, a2]}}
+                  - {Load: {names: [in1], input: x1, index: [a2, a1]}}
                   - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
                   - {Accum: {name: acc0, value: v0, axes: [a2]}}
-              - {Write: {output: matmul, index: [{var: a0}, {var: a1}], values: [acc0]}}
+              - {Write: {output: matmul, index: [a0, a1], values: [acc0]}}
       name: k_matmul_014310
     inputs: [x1, x0]
     outputs: [[matmul, f16, [4096, 4096]]]
@@ -499,11 +499,11 @@ loops:
               - Loop:
                   axis: {name: a2, extent: 512}
                   body:
-                  - {Load: {names: [in0], input: x0, index: [{var: a0}, {var: a2}]}}
-                  - {Load: {names: [in1], input: x1, index: [{var: a2}, {var: a1}]}}
+                  - {Load: {names: [in0], input: x0, index: [a0, a2]}}
+                  - {Load: {names: [in1], input: x1, index: [a2, a1]}}
                   - {Assign: {name: v0, op: multiply, args: [in0, in1]}}
                   - {Accum: {name: acc0, value: v0, axes: [a2]}}
-              - {Write: {output: matmul, index: [{var: a0}, {var: a1}], values: [acc0]}}
+              - {Write: {output: matmul, index: [a0, a1], values: [acc0]}}
       name: k_matmul_7bc9f7
     inputs: [x1, x0]
     outputs: [[matmul, f32, [{sym: seq_len, hint: 512}, 512]]]

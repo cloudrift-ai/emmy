@@ -55,11 +55,11 @@ loops:
                   - Loop:
                       axis: {name: a3, extent: 64}
                       body:
-                      - {Load: {names: [in0], input: k, index: [{literal: 0}, {var: a0}, {var: a2}, {var: a3}]}}
-                      - {Load: {names: [in1], input: q, index: [{literal: 0}, {var: a0}, {var: a1}, {var: a3}]}}
+                      - {Load: {names: [in0], input: k, index: ['0', a0, a2, a3]}}
+                      - {Load: {names: [in1], input: q, index: ['0', a0, a1, a3]}}
                       - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
                       - {Accum: {name: acc0, value: v0, axes: [a3]}}
-                  - {Write: {output: c, index: [{literal: 0}, {var: a0}, {var: a1}, {var: a2}], values: [acc0]}}
+                  - {Write: {output: c, index: ['0', a0, a1, a2], values: [acc0]}}
       name: k_matmul_1775af
     inputs: [k, q]
     outputs: [[c, f32, [1, 4, 128, 128]]]

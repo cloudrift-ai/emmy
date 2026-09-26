@@ -70,11 +70,11 @@ loops:
                   - Loop:
                       axis: {name: a3, extent: 1024}
                       body:
-                      - {Load: {names: [in0], input: x0, index: [{literal: 0}, {var: a2}, {var: a3}]}}
-                      - {Load: {names: [in1], input: x1, index: [{var: a0}, {var: a3}, {var: a1}]}}
+                      - {Load: {names: [in0], input: x0, index: ['0', a2, a3]}}
+                      - {Load: {names: [in1], input: x1, index: [a0, a3, a1]}}
                       - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
                       - {Accum: {name: acc0, value: v0, axes: [a3]}}
-                  - {Write: {output: transpose, index: [{var: a0}, {var: a1}, {var: a2}], values: [acc0]}}
+                  - {Write: {output: transpose, index: [a0, a1, a2], values: [acc0]}}
       name: k_matmul_5c4fa5
     inputs: [x1, x0]
     outputs: [[transpose, f16, [8, 128, 512]]]

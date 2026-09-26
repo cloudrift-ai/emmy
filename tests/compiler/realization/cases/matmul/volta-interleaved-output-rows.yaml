@@ -20,11 +20,7 @@ programs:
       - 96
       - 32
       sources:
-      - input_idx: 0
-        coord_map:
-        - {binary: {op: '%', left: {var: out_coord_0}, right: {literal: 3}}}
-        - {binary: {op: //, left: {var: out_coord_0}, right: {literal: 3}}}
-        - {var: out_coord_1}
+      - {input_idx: 0, coord_map: [out_coord_0 % 3, out_coord_0 // 3, out_coord_1]}
     inputs: [mm]
     outputs: [[out, f16, [96, 32]]]
 configs:
@@ -65,17 +61,11 @@ loops:
                   - Loop:
                       axis: {name: a3, extent: 32}
                       body:
-                      - {Load: {names: [in0], input: a, index: [{var: a1}, {var: a0}, {var: a3}]}}
-                      - {Load: {names: [in1], input: b, index: [{var: a1}, {var: a3}, {var: a2}]}}
+                      - {Load: {names: [in0], input: a, index: [a1, a0, a3]}}
+                      - {Load: {names: [in1], input: b, index: [a1, a3, a2]}}
                       - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
                       - {Accum: {name: acc0, value: v0, axes: [a3]}}
-                  - Write:
-                      output: out
-                      index:
-                      - binary: {op: +, left: {binary: {op: '*', left: {literal: 3}, right: {var: a0}}}, right: {var: a1}}
-                      - {var: a2}
-                      values:
-                      - acc0
+                  - {Write: {output: out, index: [3 * a0 + a1, a2], values: [acc0]}}
       name: k_matmul_57f8b4
     inputs: [b, a]
     outputs: [[out, f16, [96, 32]]]

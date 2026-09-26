@@ -60,15 +60,15 @@ loops:
     op: loop
     attrs:
       body:
-      - {Load: {names: [in0], input: xn_eps, index: [{literal: 0}]}}
-      - {Load: {names: [in1], input: xn_mean_count, index: [{literal: 0}]}}
+      - {Load: {names: [in0], input: xn_eps, index: ['0']}}
+      - {Load: {names: [in1], input: xn_mean_count, index: ['0']}}
       - Loop:
           axis: {name: a0, extent: 32}
           body:
           - Loop:
               axis: {name: a1, extent: 128}
               body:
-              - {Load: {names: [in2], input: x, index: [{literal: 0}, {var: a0}, {var: a1}]}}
+              - {Load: {names: [in2], input: x, index: ['0', a0, a1]}}
               - {Assign: {name: v0, op: multiply, args: [in2, in2]}}
               - {Accum: {name: acc0, value: v0, axes: [a1]}}
           - {Assign: {name: v1, op: divide, args: [acc0, in1]}}
@@ -80,14 +80,14 @@ loops:
               - Loop:
                   axis: {name: a3, extent: 128}
                   body:
-                  - {Load: {names: [in3], input: x, index: [{literal: 0}, {var: a0}, {var: a3}]}}
+                  - {Load: {names: [in3], input: x, index: ['0', a0, a3]}}
                   - {Assign: {name: v4, op: multiply, args: [in3, v3]}}
-                  - {Load: {names: [in4], input: w, index: [{var: a2}, {var: a3}]}}
-                  - {Load: {names: [in5], input: wn, index: [{var: a3}]}}
+                  - {Load: {names: [in4], input: w, index: [a2, a3]}}
+                  - {Load: {names: [in5], input: wn, index: [a3]}}
                   - {Assign: {name: v5, op: multiply, args: [in5, v4]}}
                   - {Assign: {name: v6, op: multiply, args: [in4, v5], dtype: f32}}
                   - {Accum: {name: acc1, value: v6, axes: [a3]}}
-              - {Write: {output: y, index: [{literal: 0}, {var: a0}, {var: a2}], values: [acc1]}}
+              - {Write: {output: y, index: ['0', a0, a2], values: [acc1]}}
       name: k_rms_norm_linear_reduce_9163bd
     inputs: [xn_mean_count, xn_eps, x, wn, w]
     outputs: [[y, f16, [1, 32, 512]]]

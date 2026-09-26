@@ -85,14 +85,14 @@ loops:
           - Loop:
               axis: {name: a1, extent: 3072}
               body:
-              - {Load: {names: [in0], input: mul_12, index: [{literal: 0}, {literal: 0}, {var: a1}]}}
-              - {Load: {names: [in1], input: linear_6_wt, index: [{var: a1}, {var: a0}]}}
+              - {Load: {names: [in0], input: mul_12, index: ['0', '0', a1]}}
+              - {Load: {names: [in1], input: linear_6_wt, index: [a1, a0]}}
               - {Assign: {name: v0, op: multiply, args: [in0, in1], dtype: f32}}
               - {Accum: {name: acc0, value: v0, axes: [a1]}}
           - {Assign: {name: v1, op: copy, args: [acc0], dtype: f16}}
-          - {Load: {names: [in2], input: add_5, index: [{literal: 0}, {literal: 0}, {var: a0}]}}
+          - {Load: {names: [in2], input: add_5, index: ['0', '0', a0]}}
           - {Assign: {name: v2, op: add, args: [in2, v1]}}
-          - {Write: {output: add_7, index: [{literal: 0}, {literal: 0}, {var: a0}], values: [v2]}}
+          - {Write: {output: add_7, index: ['0', '0', a0], values: [v2]}}
       name: k_linear_9807df
     inputs: [linear_6_wt, mul_12, add_5]
     outputs: [[add_7, f16, [1, 1, 1024]]]

@@ -6,7 +6,7 @@ Backend-agnostic expression sublanguage used by:
 - ``Mux.select`` / ``MuxBranch.select`` (``ir.loop``): coord predicates.
 - Tile IR (``ir.tile``): array indices, loop bounds, ternary selects.
 
-The ``_ExprOps`` mixin adds Python operator overloading so expressions can be
+The ``Expr`` base class adds Python operator overloading so expressions can be
 built as arithmetic (``Var("i") * 4 + Var("j")``) and comparisons
 (``Var("i").lt(Var("n"))``). Each concrete node implements ``eval(env)`` for
 evaluation against a name → value environment (scalars or ndarrays).
@@ -19,25 +19,46 @@ on the same AST.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field, fields, replace
 
 import numpy as np
 
-from emmy.compiler.wire import Wire, alias
+from emmy.compiler.wire import Wire
 
 # ---------------------------------------------------------------------------
-# Operator overloading mixin
+# The base class: operators and the wire
 # ---------------------------------------------------------------------------
 
 
-class _ExprOps(Wire):
-    """Mixin that adds arithmetic and comparison operators to Expr nodes.
+class Expr(Wire):
+    """The base class of every expression node: arithmetic and comparison operators, and the wire.
 
-    Returns BinaryExpr nodes, enabling::
+    The operators return BinaryExpr nodes, enabling::
 
         Var("row") * Var("cols") + Var("j")   # → BinaryExpr("+", BinaryExpr("*", ...), ...)
         Var("i").lt(Var("n"))                   # → BinaryExpr("<", ...)
+
+    On the wire an expression is its C-like text, ``((a5 / 128) * 128) + a6`` written as
+    ``a5 / 128 * 128 + a6`` — parentheses only where :data:`_PRECEDENCE` needs them (:func:`parse`).
     """
+
+    wire_tag = "expr"
+
+    def to_wire(self) -> str:
+        return _spell(self, 0)
+
+    @classmethod
+    def from_wire(cls, value: object, where: str = "expr") -> Expr:
+        if not isinstance(value, str):
+            raise ValueError(f"{where} must be an expression's text, got {value!r}")
+        try:
+            expr = parse(value)
+        except ValueError as exc:
+            raise ValueError(f"{where}: {exc}") from exc
+        if not isinstance(expr, cls):
+            raise ValueError(f"{where} must be a {cls.__name__}, got {value!r}")
+        return expr
 
     def __add__(self, other: Expr) -> BinaryExpr:
         return BinaryExpr("+", self, _coerce(other))
@@ -120,7 +141,7 @@ class _ExprOps(Wire):
         for f in fields(self):
             v = getattr(self, f.name)
             for child in v if isinstance(v, (tuple, list)) else (v,):
-                if isinstance(child, _ExprOps):
+                if isinstance(child, Expr):
                     yield from child.subterms()
 
     def rebuild(self, fn) -> Expr:  # noqa: ANN001 — Expr -> Expr
@@ -128,10 +149,10 @@ class _ExprOps(Wire):
         changes = {}
         for f in fields(self):
             v = getattr(self, f.name)
-            if isinstance(v, _ExprOps):
+            if isinstance(v, Expr):
                 new = v.rebuild(fn)
-            elif isinstance(v, (tuple, list)) and any(isinstance(c, _ExprOps) for c in v):
-                new = type(v)(c.rebuild(fn) if isinstance(c, _ExprOps) else c for c in v)
+            elif isinstance(v, (tuple, list)) and any(isinstance(c, Expr) for c in v):
+                new = type(v)(c.rebuild(fn) if isinstance(c, Expr) else c for c in v)
             else:
                 continue
             if new != v:
@@ -227,19 +248,8 @@ def apply_binop(op: str, lv: object, rv: object) -> object:
 
 
 @dataclass(frozen=True)
-class Var(_ExprOps):
+class Var(Expr):
     """Variable reference."""
-
-    wire_tag = "var"
-
-    def to_wire(self) -> str:
-        return self.name
-
-    @classmethod
-    def from_wire(cls, value: object, where: str = "var") -> Var:
-        if not isinstance(value, str) or not value:
-            raise ValueError(f"{where} must be a non-empty name")
-        return cls(value)
 
     name: str
 
@@ -279,26 +289,11 @@ class Var(_ExprOps):
 
 
 @dataclass(frozen=True)
-class Literal(_ExprOps):
+class Literal(Expr):
     """Numeric constant."""
-
-    wire_tag = "literal"
 
     value: int | float | bool
     dtype: str = "float"
-
-    def to_wire(self):
-        """The bare value when its dtype is the value's own kind — ``3``, ``0.5``, ``true`` — else ``{value, dtype}``."""
-        own = {int: "int", float: "float", bool: "bool"}[type(self.value)]
-        return self.value if own == self.dtype else {"value": self.value, "dtype": self.dtype}
-
-    @classmethod
-    def from_wire(cls, value: object, where: str = "literal") -> Literal:
-        if isinstance(value, (bool, int, float)):
-            return cls(value, {bool: "bool", int: "int", float: "float"}[type(value)])
-        if not isinstance(value, dict) or set(value) - {"value", "dtype"} or "value" not in value:
-            raise ValueError(f"{where} must be a number or {{value, dtype}}")
-        return cls(value["value"], value.get("dtype", "float"))
 
     def eval(self, env: dict[str, object]) -> object:
         return self.value
@@ -340,7 +335,7 @@ class Literal(_ExprOps):
 
 
 @dataclass(frozen=True)
-class BinaryExpr(_ExprOps):
+class BinaryExpr(Expr):
     """Binary operation.
 
     Evaluates ``left`` and ``right`` in ``env`` then applies the op.
@@ -350,8 +345,6 @@ class BinaryExpr(_ExprOps):
     / ``np.logical_or`` when the operand is an ndarray (scalar bool
     coercion would raise).
     """
-
-    wire_tag = "binary"
 
     op: str  # "+", "-", "*", "/", "//", "%", "<", "<=", ">", ">=", "==", "&&", "||", "^"
     left: Expr
@@ -490,24 +483,20 @@ class BinaryExpr(_ExprOps):
         return None
 
 
+#: Every GPU built-in's name — the renderer's ``_BUILTIN_TO_CUDA`` spells each. The expression reader tells a
+#: built-in from a variable by this set, so no variable may take one of these names.
+BUILTINS = frozenset(
+    {f"{kind}.{axis}" for kind in ("thread_idx", "block_idx", "block_dim", "grid_dim") for axis in "xyz"} | {"warp_size"}
+)
+
+
 @dataclass(frozen=True)
-class Builtin(_ExprOps):
+class Builtin(Expr):
     """GPU built-in variable (threadIdx.x, blockIdx.y, blockDim.x, etc.).
 
     Not evaluable outside a kernel — GPU codegen substitutes these at emit
     time. Calling ``eval`` raises.
     """
-
-    wire_tag = "builtin"
-
-    def to_wire(self) -> str:
-        return self.name
-
-    @classmethod
-    def from_wire(cls, value: object, where: str = "builtin") -> Builtin:
-        if not isinstance(value, str) or not value:
-            raise ValueError(f"{where} must be a non-empty name")
-        return cls(value)
 
     name: str
 
@@ -534,7 +523,7 @@ class Builtin(_ExprOps):
 
 
 @dataclass(frozen=True)
-class FuncCallExpr(_ExprOps):
+class FuncCallExpr(Expr):
     """Intrinsic / math function call.
 
     ``name`` is an ``ElementwiseImpl`` registry name (numpy-aligned: ``exp`` /
@@ -543,8 +532,6 @@ class FuncCallExpr(_ExprOps):
     emitter's ``_translate_intrinsic`` rewrites the same name to the
     ``f``-suffixed libm spelling at source-render time.
     """
-
-    wire_tag = "call"
 
     name: str
     args: tuple[Expr, ...]
@@ -583,15 +570,13 @@ class FuncCallExpr(_ExprOps):
 
 
 @dataclass(frozen=True)
-class TernaryExpr(_ExprOps):
+class TernaryExpr(Expr):
     """TernaryExpr expression: cond ? if_true : if_false.
 
     Uses Python's conditional: when ``cond`` evaluates to an ndarray,
     callers that want elementwise selection should use ``np.where``
     directly; ``TernaryExpr.eval`` only supports scalar ``cond``.
     """
-
-    wire_tag = "ternary"
 
     cond: Expr
     if_true: Expr
@@ -634,10 +619,8 @@ class TernaryExpr(_ExprOps):
 
 
 @dataclass(frozen=True)
-class CastExpr(_ExprOps):
+class CastExpr(Expr):
     """Type cast of an inner expression to ``dtype`` (e.g. ``"int"``, ``"float"``)."""
-
-    wire_tag = "cast"
 
     dtype: str
     expr: Expr
@@ -670,7 +653,7 @@ class CastExpr(_ExprOps):
 
 
 @dataclass(frozen=True)
-class FlatIndex(_ExprOps):
+class FlatIndex(Expr):
     """The row-major element offset of coordinate ``index`` in ``buffer``.
 
     Flattened against the buffer's declared shape when rendered — Kernel IR never bakes shapes
@@ -705,8 +688,6 @@ class FlatIndex(_ExprOps):
         return None
 
 
-Expr = Var | Literal | BinaryExpr | Builtin | FuncCallExpr | TernaryExpr | CastExpr | FlatIndex
-alias("Expr", Expr)
 
 
 # ---------------------------------------------------------------------------
@@ -745,6 +726,171 @@ def _float_lit(v: float) -> str:
     if "." not in s and "e" not in s and "E" not in s and "inf" not in s and "nan" not in s:
         s += ".0"
     return f"{s}f"
+
+
+# ---------------------------------------------------------------------------
+# The text an expression is on the wire
+# ---------------------------------------------------------------------------
+
+#: How tightly an atom binds: a cast's operand is written at this level, so anything but an atom is parenthesized.
+_ATOM = 100
+_NAME = re.compile(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?")
+_TOKEN = re.compile(
+    r"\s*(?:(?P<number>\d+(?:\.\d*)?(?:[eE][+-]?\d+)?)|(?P<name>[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?)"
+    r"|(?P<op>\|\||&&|==|!=|<=|>=|<<|>>|//|[-+*/%<>^&|?:(),]))"
+)
+
+
+def _spell(expr: Expr, parent: int) -> str:
+    """``expr``'s text, parenthesized when it binds looser than ``parent`` (a binary operator's precedence, a
+    ternary's 0, :data:`_ATOM`)."""
+    match expr:
+        case Var(name):
+            if name in BUILTINS or name in ("true", "false") or not _NAME.fullmatch(name):
+                raise ValueError(f"the variable name {name!r} has no spelling: the reader would not read it back as a variable")
+            return name
+        case Builtin(name):
+            if name not in BUILTINS:
+                raise ValueError(f"{name!r} is no GPU built-in")
+            return name
+        case Literal(value, dtype):
+            text = _literal_text(value, dtype)
+            return f"({text})" if text.startswith("-") and parent == _ATOM else text
+        case BinaryExpr(op, left, right):
+            if op not in _PRECEDENCE:
+                raise ValueError(f"the operator {op!r} has no spelling")
+            prec = _PRECEDENCE[op]
+            text = f"{_spell(left, prec)} {op} {_spell(right, prec + 1)}"
+            return f"({text})" if prec < parent else text
+        case FuncCallExpr(name, args):
+            return f"{name}({', '.join(_spell(arg, 0) for arg in args)})"
+        case TernaryExpr(cond, if_true, if_false):
+            text = f"{_spell(cond, 1)} ? {_spell(if_true, 0)} : {_spell(if_false, 0)}"
+            return f"({text})" if parent > 0 else text
+        case CastExpr(dtype, inner):
+            return f"({dtype}){_spell(inner, _ATOM)}"
+    raise ValueError(f"a {type(expr).__name__} has no wire spelling")
+
+
+def _literal_text(value: object, dtype: str) -> str:
+    """A literal written by its dtype: ``3``, ``0.5`` / ``2.0`` (always a point or an exponent), ``true``."""
+    if dtype == "bool":
+        return "true" if value else "false"
+    if dtype == "int" and int(value) == value:
+        return str(int(value))
+    if dtype == "float" and np.isfinite(value):
+        return repr(float(value))
+    raise ValueError(f"the literal {value!r} of dtype {dtype!r} has no spelling")
+
+
+def parse(text: str) -> Expr:
+    """The expression ``text`` spells — :meth:`Expr.to_wire`'s inverse, by precedence climbing over
+    :data:`_PRECEDENCE`. A parse error names its position in the text."""
+    return _Parser(text).parse()
+
+
+class _Parser:
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.tokens: list[tuple[str, str, int]] = []
+        position = 0
+        while text[position:].strip():
+            match = _TOKEN.match(text, position)
+            if match is None:
+                raise self.error("unexpected character", len(text) - len(text[position:].lstrip()))
+            kind = match.lastgroup
+            self.tokens.append((kind, match.group(kind), match.start(kind)))
+            position = match.end()
+        self.index = 0
+
+    def error(self, message: str, position: int | None = None) -> ValueError:
+        if position is None:
+            position = self.tokens[self.index][2] if self.index < len(self.tokens) else len(self.text)
+        return ValueError(f"{message} at position {position} of {self.text!r}")
+
+    def peek(self, ahead: int = 0) -> tuple[str, str, int] | None:
+        index = self.index + ahead
+        return self.tokens[index] if index < len(self.tokens) else None
+
+    def take(self) -> tuple[str, str, int]:
+        token = self.peek()
+        if token is None:
+            raise self.error("unexpected end")
+        self.index += 1
+        return token
+
+    def expect(self, op: str) -> None:
+        token = self.peek()
+        if token is None or token[:2] != ("op", op):
+            raise self.error(f"expected {op!r}")
+        self.index += 1
+
+    def at(self, op: str, ahead: int = 0) -> bool:
+        token = self.peek(ahead)
+        return token is not None and token[:2] == ("op", op)
+
+    def parse(self) -> Expr:
+        expr = self.ternary()
+        if self.peek() is not None:
+            raise self.error("unexpected text")
+        return expr
+
+    def ternary(self) -> Expr:
+        cond = self.binary(1)
+        if not self.at("?"):
+            return cond
+        self.index += 1
+        if_true = self.ternary()
+        self.expect(":")
+        return TernaryExpr(cond, if_true, self.ternary())
+
+    def binary(self, least: int) -> Expr:
+        left = self.operand()
+        while (token := self.peek()) is not None and token[0] == "op" and _PRECEDENCE.get(token[1], 0) >= least:
+            self.index += 1
+            left = BinaryExpr(token[1], left, self.binary(_PRECEDENCE[token[1]] + 1))
+        return left
+
+    def operand(self) -> Expr:
+        kind, value, _position = self.take()
+        if kind == "number":
+            return _number(value)
+        if kind == "op" and value == "-" and (token := self.peek()) is not None and token[0] == "number":
+            self.index += 1
+            return _number(f"-{token[1]}")
+        if kind == "name":
+            if value in ("true", "false"):
+                return Literal(value == "true", "bool")
+            if self.at("("):
+                self.index += 1
+                args = []
+                while not self.at(")"):
+                    if args:
+                        self.expect(",")
+                    args.append(self.ternary())
+                self.index += 1
+                return FuncCallExpr(value, tuple(args))
+            return Builtin(value) if value in BUILTINS else Var(value)
+        if kind == "op" and value == "(":
+            # ``(dtype)`` followed by an operand is a cast; the writer never parenthesizes a lone name otherwise.
+            if (token := self.peek()) is not None and token[0] == "name" and self.at(")", 1) and self._starts_operand(2):
+                self.index += 2
+                return CastExpr(token[1], self.operand())
+            inner = self.ternary()
+            self.expect(")")
+            return inner
+        self.index -= 1
+        raise self.error("expected an operand")
+
+    def _starts_operand(self, ahead: int) -> bool:
+        token = self.peek(ahead)
+        return token is not None and (token[0] in ("number", "name") or token[1] == "(")
+
+
+def _number(text: str) -> Literal:
+    if any(mark in text for mark in ".eE"):
+        return Literal(float(text), "float")
+    return Literal(int(text), "int")
 
 
 # ---------------------------------------------------------------------------

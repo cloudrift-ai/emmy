@@ -86,7 +86,7 @@ loops:
     op: loop
     attrs:
       body:
-      - {Load: {names: [in0], input: scaled_dot_product_attention_scale, index: [{literal: 0}]}}
+      - {Load: {names: [in0], input: scaled_dot_product_attention_scale, index: ['0']}}
       - Loop:
           axis: {name: a0, extent: 8}
           body:
@@ -99,16 +99,8 @@ loops:
                   - Loop:
                       axis: {name: a3, extent: 128}
                       body:
-                      - Load:
-                          names:
-                          - in1
-                          input: q
-                          index:
-                          - {literal: 0}
-                          - binary: {op: +, left: {binary: {op: '*', left: {literal: 8}, right: {var: a0}}}, right: {var: a1}}
-                          - {literal: 0}
-                          - {var: a3}
-                      - {Load: {names: [in2], input: k, index: [{literal: 0}, {var: a0}, {var: a2}, {var: a3}]}}
+                      - {Load: {names: [in1], input: q, index: ['0', 8 * a0 + a1, '0', a3]}}
+                      - {Load: {names: [in2], input: k, index: ['0', a0, a2, a3]}}
                       - {Assign: {name: v0, op: multiply, args: [in1, in2], dtype: f32}}
                       - {Accum: {name: acc0, value: v0, axes: [a3]}}
                   - {Assign: {name: v1, op: multiply, args: [acc0, in0]}}
@@ -119,16 +111,8 @@ loops:
                   - Loop:
                       axis: {name: a5, extent: 128}
                       body:
-                      - Load:
-                          names:
-                          - in3
-                          input: q
-                          index:
-                          - {literal: 0}
-                          - binary: {op: +, left: {binary: {op: '*', left: {literal: 8}, right: {var: a0}}}, right: {var: a1}}
-                          - {literal: 0}
-                          - {var: a5}
-                      - {Load: {names: [in4], input: k, index: [{literal: 0}, {var: a0}, {var: a2}, {var: a5}]}}
+                      - {Load: {names: [in3], input: q, index: ['0', 8 * a0 + a1, '0', a5]}}
+                      - {Load: {names: [in4], input: k, index: ['0', a0, a2, a5]}}
                       - {Assign: {name: v2, op: multiply, args: [in3, in4], dtype: f32}}
                       - {Accum: {name: acc2, value: v2, axes: [a5]}}
                   - {Assign: {name: v3, op: multiply, args: [acc2, in0]}}
@@ -144,34 +128,18 @@ loops:
                       - Loop:
                           axis: {name: a8, extent: 128}
                           body:
-                          - Load:
-                              names:
-                              - in5
-                              input: q
-                              index:
-                              - {literal: 0}
-                              - binary: {op: +, left: {binary: {op: '*', left: {literal: 8}, right: {var: a0}}}, right: {var: a1}}
-                              - {literal: 0}
-                              - {var: a8}
-                          - {Load: {names: [in6], input: k, index: [{literal: 0}, {var: a0}, {var: a7}, {var: a8}]}}
+                          - {Load: {names: [in5], input: q, index: ['0', 8 * a0 + a1, '0', a8]}}
+                          - {Load: {names: [in6], input: k, index: ['0', a0, a7, a8]}}
                           - {Assign: {name: v6, op: multiply, args: [in5, in6], dtype: f32}}
                           - {Accum: {name: acc4, value: v6, axes: [a8]}}
                       - {Assign: {name: v7, op: multiply, args: [acc4, in0]}}
                       - {Assign: {name: v8, op: subtract, args: [v7, acc1]}}
                       - {Assign: {name: v9, op: exp, args: [v8]}}
                       - {Assign: {name: v10, op: divide, args: [v9, acc3]}}
-                      - {Load: {names: [in7], input: v, index: [{literal: 0}, {var: a0}, {var: a7}, {var: a6}]}}
+                      - {Load: {names: [in7], input: v, index: ['0', a0, a7, a6]}}
                       - {Assign: {name: v11, op: multiply, args: [in7, v10], dtype: f32}}
                       - {Accum: {name: acc5, value: v11, axes: [a7]}}
-                  - Write:
-                      output: reshape_3
-                      index:
-                      - {literal: 0}
-                      - binary: {op: +, left: {binary: {op: '*', left: {literal: 8}, right: {var: a0}}}, right: {var: a1}}
-                      - {literal: 0}
-                      - {var: a6}
-                      values:
-                      - acc5
+                  - {Write: {output: reshape_3, index: ['0', 8 * a0 + a1, '0', a6], values: [acc5]}}
       name: k_sdpa_56d13f
     inputs: [scaled_dot_product_attention_scale, k, q, v]
     outputs: [[reshape_3, f16, [1, 64, 1, 128]]]

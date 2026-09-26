@@ -39,9 +39,9 @@ loops:
           - Loop:
               axis: {name: a1, extent: 256}
               body:
-              - {Load: {names: [in0], input: x, index: [{var: a0}, {var: a1}]}}
+              - {Load: {names: [in0], input: x, index: [a0, a1]}}
               - {Accum: {name: acc0, value: in0, axes: [a1]}}
-          - {Write: {output: sum_1, index: [{var: a0}, {literal: 0}], values: [acc0]}}
+          - {Write: {output: sum_1, index: [a0, '0'], values: [acc0]}}
       name: k_sum_1_reduce
     inputs: [x]
     outputs: [[sum_1, f32, [{sym: rows, hint: 512}, 1]]]

@@ -12,7 +12,7 @@ from emmy.compiler.graph import Graph
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import BinaryExpr, Builtin, CastExpr, FuncCallExpr, Literal, TernaryExpr, Var
+from emmy.compiler.ir.expr import BinaryExpr, Builtin, CastExpr, Expr, FuncCallExpr, Literal, TernaryExpr, Var
 from emmy.compiler.ir.frontend.ir import (
     CatOp,
     Conv1dOp,
@@ -47,19 +47,48 @@ from emmy.compiler.wire import decode, encode, intern
 
 
 @pytest.mark.parametrize(
-    "expr",
+    ("expr", "text"),
     [
-        Var("s"),
-        Builtin("thread_idx_x"),
-        Literal(3, "int"),
-        BinaryExpr("+", Var("s"), Literal(2, "int")),
-        FuncCallExpr("maximum", (Var("x"), Literal(0.0))),
-        TernaryExpr(Var("p"), Literal(1, "int"), Literal(0, "int")),
-        CastExpr("int", Var("x")),
+        (Var("s"), "s"),
+        (Builtin("thread_idx.x"), "thread_idx.x"),
+        (Literal(3, "int"), "3"),
+        (Literal(-1, "int"), "-1"),
+        (Literal(0.5), "0.5"),
+        (Literal(2, "float"), "2.0"),
+        (Literal(1e-05), "1e-05"),
+        (Literal(True, "bool"), "true"),
+        (BinaryExpr("+", Var("s"), Literal(2, "int")), "s + 2"),
+        (BinaryExpr("+", Var("a1"), Literal(-1, "int")), "a1 + -1"),
+        (BinaryExpr("+", BinaryExpr("*", BinaryExpr("/", Var("a5"), Literal(128, "int")), Literal(128, "int")), Var("a6")), "a5 / 128 * 128 + a6"),
+        (BinaryExpr("-", Var("a"), BinaryExpr("-", Var("b"), Var("c"))), "a - (b - c)"),
+        (BinaryExpr("*", BinaryExpr("+", Var("a"), Var("b")), Var("c")), "(a + b) * c"),
+        (BinaryExpr("^", Var("a"), BinaryExpr("+", Var("b"), Var("c"))), "a ^ b + c"),
+        (BinaryExpr("+", BinaryExpr("^", Var("a"), Var("b")), Var("c")), "(a ^ b) + c"),
+        (BinaryExpr("&", Var("a"), BinaryExpr("*", Var("b"), Var("c"))), "a & b * c"),
+        (BinaryExpr("*", BinaryExpr("&", Var("a"), Var("b")), Var("c")), "(a & b) * c"),
+        (BinaryExpr("//", Var("a"), Literal(2, "int")), "a // 2"),
+        (FuncCallExpr("maximum", (Var("x"), Literal(0.0))), "maximum(x, 0.0)"),
+        (TernaryExpr(Var("p"), Literal(1, "int"), Literal(0, "int")), "p ? 1 : 0"),
+        (BinaryExpr("+", TernaryExpr(Var("p"), Var("a"), Var("b")), Literal(1, "int")), "(p ? a : b) + 1"),
+        (CastExpr("int", Var("x")), "(int)x"),
+        (CastExpr("int", BinaryExpr("+", Var("x"), Literal(1, "int"))), "(int)(x + 1)"),
+        (CastExpr("int", Literal(-1, "int")), "(int)(-1)"),
     ],
 )
-def test_expression_round_trip(expr):
+def test_expression_round_trip(expr, text):
+    assert expr.to_wire() == text
+    assert Expr.from_wire(text) == expr
     assert decode(encode(expr)) == expr
+
+
+def test_expression_parse_error_names_its_position():
+    with pytest.raises(ValueError, match="position 4"):
+        Expr.from_wire("a + * b")
+
+
+def test_a_variable_spelled_like_a_builtin_has_no_text():
+    with pytest.raises(ValueError, match="no spelling"):
+        Var("thread_idx.x").to_wire()
 
 
 def test_dimension_round_trip_preserves_composite_expression_and_hint():
