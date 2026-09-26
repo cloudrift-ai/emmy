@@ -59,7 +59,7 @@ def name() -> str | None:
 
 
 def context_poisoned() -> bool:
-    """Whether this process's context is in a sticky-error state.
+    """Whether the selected device's existing context is in a sticky-error state.
 
     ``False`` when no context was ever created here. A synchronize surfaces the sticky
     status an earlier illegal access left behind; it would block on a hung kernel, so a

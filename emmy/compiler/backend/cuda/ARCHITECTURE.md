@@ -11,7 +11,7 @@ CUDA-specific dispatch. Shared backend contract lives in
 cuda/
 ├── backend.py        # CudaBackend(Backend) — drives lowering + delegates execution
 ├── nvcc.py           # offline `nvcc --cubin` compile into the content-addressed cubin cache
-├── device.py         # the process's one CUDA context, reached through the runtime
+├── device.py         # runtime contexts cached per logical GPU selected by the host
 ├── program.py        # the facade over the runtime: plan + cubins + host bytes in, outputs and timings out
 └── _bench_worker.py  # the SIGKILL-able child that hosts benches and the torch comparison
 ```
@@ -20,6 +20,11 @@ Execution itself lives in the Rust runtime (`crates/emmy-runtime`, hosted in-pro
 `emmy.emmy_runtime` extension built from `crates/emmy-runtime-py`): the memory layout, launches, symbolic geometry, TMA descriptors,
 graphs, events and the hung-launch deadline. This package allocates the memory — torch tensors the runtime borrows —
 and turns host arrays into the bytes a buffer starts from.
+
+The Python host follows `torch.cuda.current_device()` and caches a runtime context for each logical ordinal.
+This includes vLLM workers that see multiple GPUs and select their card with `torch.cuda.set_device`. Workers pinned
+with `CUDA_VISIBLE_DEVICES` still use logical zero. Without CUDA-capable torch, runtime selection defaults to zero.
+Context failure probes inspect only an existing context for the selected device; they never create one.
 
 ## Compile
 

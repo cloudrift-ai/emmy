@@ -7,7 +7,7 @@ The crate has no HTTP, tokenizer, model framework, compiler, or Python dependenc
 ## Two hosts, one library
 
 - **In-process** through `crates/emmy-runtime-py`, the `emmy.emmy_runtime` extension (PyO3, `abi3`) that
-  `emmy/compiler/backend/cuda/program.py` imports. It exposes `Device` (one context and one stream per process, its
+  `emmy/compiler/backend/cuda/program.py` imports. It exposes `Device` (one context and one stream per logical GPU, its
   properties, a context synchronize that surfaces a sticky error, kernel resource attributes read off a cubin, pointer
   attributes), `Program` (a parsed plan and its layout per environment) and `Executor` (load with lent or owned
   memory, bind by bytes or device address, rebind at a new environment, set the environment, adopt a host stream,
