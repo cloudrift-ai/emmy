@@ -22,14 +22,17 @@ def options(arguments):
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--revision")
     parser.add_argument("--max-model-len", type=int, default=DEFAULT_CONTEXT)
+    parser.add_argument("--page-tokens", type=int, help="Tokens of KV cache per page (default: one page spanning the context)")
     parser.add_argument("--native-pack", type=Path)
     args = parser.parse_args(arguments)
     if not 1 <= args.max_model_len <= DEFAULT_CONTEXT or not 1 <= args.port <= 65535:
         raise ValueError("native context must be 1–4096 and port must be 1–65535")
+    if args.page_tokens is not None and (not 1 <= args.page_tokens <= args.max_model_len or args.max_model_len % args.page_tokens):
+        raise ValueError("native page size must divide the context")
     return args
 
 
-def prepare(model, revision, root, context, golden, strict):
+def prepare(model, revision, root, context, golden, strict, page_tokens=None):
     """Export weights and the same checkpoint's tokenizer/template into one serving bundle."""
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -45,7 +48,7 @@ def prepare(model, revision, root, context, golden, strict):
     eos = lm.generation_config.eos_token_id
     eos = [eos] if isinstance(eos, int) else (eos or [])
     with gpu_lock(), config.golden_file_override(golden), config.strict_evidence_override(strict):
-        export_model(lm, root, context_length=context, eos_ids=eos)
+        export_model(lm, root, context_length=context, page_tokens=page_tokens, eos_ids=eos)
     tokenizer.backend_tokenizer.save(str(root / "tokenizer.json"))
     (root / "chat_template.jinja").write_text(tokenizer.chat_template)
     (root / "serving.json").write_text(json.dumps({"model": model, "revision": revision, "context_length": context}))
@@ -80,8 +83,8 @@ def launch(args, arguments):
     if pinned and opts.revision and pinned != opts.revision:
         raise ValueError("conflicting model revisions")
     revision = opts.revision or pinned
-    if opts.native_pack and (args.golden or args.strict_evidence):
-        raise ValueError("golden and strict evidence apply to preparation, not an existing native pack")
+    if opts.native_pack and (args.golden or args.strict_evidence or opts.page_tokens is not None):
+        raise ValueError("golden, strict evidence and page size apply to preparation, not an existing native pack")
     root = opts.native_pack or Path(tempfile.gettempdir()) / "emmy-native-prepare"
     serve = command(model, opts, root)
     bench = build_bench_cmd(
@@ -97,10 +100,11 @@ def launch(args, arguments):
     if args.dry_run:
         if not opts.native_pack:
             logger.info(
-                "Prepare native artifact: model=%s revision=%s context=%d golden=%s strict=%s",
+                "Prepare native artifact: model=%s revision=%s context=%d page_tokens=%s golden=%s strict=%s",
                 model,
                 revision,
                 opts.max_model_len,
+                opts.page_tokens,
                 args.golden,
                 args.strict_evidence,
             )
@@ -118,7 +122,7 @@ def launch(args, arguments):
     else:
         # Export publishes a fresh directory. Keep the resulting bundle for deliberate reuse.
         root = Path(tempfile.mkdtemp(prefix="emmy-native-")) / "artifact"
-        prepare(model, revision, root, opts.max_model_len, args.golden, args.strict_evidence)
+        prepare(model, revision, root, opts.max_model_len, args.golden, args.strict_evidence, page_tokens=opts.page_tokens)
         logger.info("Prepared native serving artifact: %s", root)
     serve = command(model, opts, root.resolve(), binary)
     env = _child_env()

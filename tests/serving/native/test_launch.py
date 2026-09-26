@@ -50,3 +50,19 @@ def test_native_command_and_capacity():
     assert command("model", opts, opts.native_pack)[-2:] == ["--max-model-len", "128"]
     with pytest.raises(ValueError):
         options(["--max-model-len", "4097"])
+
+
+def test_native_page_size_divides_the_context(caplog):
+    """The page size is a preparation choice: it must divide the context, it is logged with the
+    other preparation settings, and it cannot be applied to an already prepared pack."""
+    assert options(["--max-model-len", "128", "--page-tokens", "16"]).page_tokens == 16
+    for page in ("0", "48", "129"):
+        with pytest.raises(ValueError):
+            options(["--max-model-len", "128", "--page-tokens", page])
+    args, forwarded = arguments("--native", "--generate", "--dry-run", "--page-tokens", "16")
+    with caplog.at_level("INFO"):
+        launch(args, forwarded)
+    assert "page_tokens=16" in caplog.text
+    args, forwarded = arguments("--native", "--generate", "--dry-run", "--native-pack", "/tmp/prepared", "--page-tokens", "16")
+    with pytest.raises(ValueError):
+        launch(args, forwarded)
