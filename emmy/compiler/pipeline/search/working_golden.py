@@ -668,12 +668,27 @@ def _record_rows(destination: Path, name: str, *, decisions, kernels, reference_
     seeds = [(entry, realization) for entry in document.configs for realization in entry.realizations if realization.name == name]
     if not seeds:
         raise ValueError(f"{destination} has no realization named {name!r}")
+
+    def regime_of(seed: Realization) -> dict:
+        # The seed's regime, with the precision gates the compile ACTUALLY enumerated under laid over
+        # it: a row measured with the reduced-accumulate cell offered must say so, or a replay
+        # republishes a regime that no longer offers it (``measured_precision_pins``).
+        return {**{key: value for key, value in seed.pins.items() if family_of(str(key)) != "PLACE"}, **measured_precision_pins()}
+
+    if decisions and len(seeds) > 1:
+        # One name can hold several route rows for one target. The seed is the one whose route the
+        # compile took — the row its decision lands on; any other ends up with knobs spelling one
+        # route and a kernel set naming another.
+        identity, knobs = decisions[0][:2]
+        route = (identity, canonical_row_key(knobs))
+        seeds = [(e, r) for e, r in seeds if r.pins == regime_of(r) and (r.identity, canonical_row_key(r.knobs or {})) == route]
+        if len(seeds) != 1:
+            raise ValueError(
+                f"{destination} holds several realizations named {name!r} and {len(seeds)} of them record the route the "
+                f"compile took ({identity[:12]} {dict(knobs)}) under its pins; exactly one must, to carry the kernel set"
+            )
     entry, seed = seeds[0]
-    # The seed's regime, with the precision gates the compile ACTUALLY enumerated under laid over
-    # it: a row measured with the reduced-accumulate cell offered must say so, or a replay
-    # republishes a regime that no longer offers it (``measured_precision_pins``).
-    regime = {key: value for key, value in seed.pins.items() if family_of(str(key)) != "PLACE"}
-    regime.update(measured_precision_pins())
+    regime = regime_of(seed)
     written: list[str] = []
     for identity, knobs, emmy_us, reference_us in (*decisions, *kernels):
         row = Realization(

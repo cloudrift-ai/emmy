@@ -816,6 +816,42 @@ def test_record_greedy_pick_names_the_row_a_decision_lands_on(tmp_path, monkeypa
     assert realizations[0].measurements.emmy_us == 30.0
 
 
+def test_record_greedy_pick_seeds_the_same_named_row_whose_route_the_compile_took(tmp_path, monkeypatch):
+    """One name can hold two route rows for one target — a refresh records each route it measured.
+    The seed is the row whose knobs are the route the compile took, the row its decision lands on:
+    seeding the first same-named row instead left that row's knobs spelling one route and its
+    ``kernel_set`` naming another. A route no same-named row records leaves no seed to pick."""
+    from emmy.compiler.pipeline.search.working_golden import record_greedy_pick
+
+    path = tmp_path / "working.json"
+    root = "1" * 64
+    monkeypatch.setenv("EMMY_FAST_MATH", "0")
+    routes = [{"PLACE@map.1/map": "cut"}, {"PLACE@map.1/map": "cut", "PLACE@map.2/map": "cut"}]
+    rows = [_matmul("mm", knobs=route, emmy_us=us, cublas_us=us) for route, us in zip(routes, (28.5, 10.2), strict=True)]
+    for row in rows:
+        row["identity"] = root
+    _document(*rows).dump(path)
+    first = GoldenFile.load(path).configs[0].realizations[0].to_wire()
+
+    def record(route):
+        return record_greedy_pick(
+            path,
+            "mm",
+            decisions=[(root, route, 9.0, 9.5)],
+            kernels=[("a" * 64, _classic_row(work="w1x1"), 9.0, 9.5)],
+            reference_backend="same-input-greedy",
+        )
+
+    assert record(routes[1])[0] == "mm"
+    realizations = GoldenFile.load(path).configs[0].realizations
+    assert realizations[0].to_wire() == first
+    assert realizations[1].knobs == routes[1] and realizations[1].kernel_set == ("mm",)
+    assert realizations[1].measurements.emmy_us == 9.0
+
+    with pytest.raises(ValueError, match="route the compile took"):
+        record({"PLACE@map.2/map": "cut"})
+
+
 def test_record_greedy_pick_does_not_alias_rows_between_input_regimes(tmp_path, monkeypatch):
     """Rows with the same route and schedule remain distinct when their pins differ."""
     from emmy.compiler.pipeline.search.working_golden import record_greedy_pick
