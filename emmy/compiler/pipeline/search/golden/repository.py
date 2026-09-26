@@ -1,5 +1,5 @@
-"""The repository's goldens: where they live, which of them a card reads, the per-process document memo, and the
-evidence scope a compile installs over them."""
+"""The repository's goldens: where they live, which of them a card reads, and the evidence scope a compile installs
+over them."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ import json
 import tempfile
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
-from functools import cached_property
 from pathlib import Path
 
 import yaml
@@ -130,7 +129,7 @@ def records_for_card(gpu_name: str, compute_cap: tuple[int, int]) -> list[Golden
     """The golden records the evidence index loads for ONE card: the installed scope when one is set
     (:data:`RECORDS_OVERRIDE`, else ``EMMY_GOLDEN_FILE`` — a file, or none when set empty), otherwise
     the repository files, loading only that card's (header sniff). ``GOLDEN_RECORDS`` stays the full corpus for the eval / fit
-    consumers; both share the per-path document memo so nothing parses twice."""
+    consumers."""
     gpu_name = gpu.canonical_name(gpu_name)
     if RECORDS_OVERRIDE is not None:
         return _scoped(RECORDS_OVERRIDE, gpu_name, compute_cap)
@@ -179,17 +178,10 @@ def scope_digest(gpu_name: str) -> str:
     return sha.hexdigest()[:16]
 
 
-_DOCUMENT_MEMO: dict[Path, tuple[GoldenFile, list[GoldenRecord]]] = {}
-
-
 def _document_of(path: Path) -> tuple[GoldenFile, list[GoldenRecord]]:
-    """A golden parsed once per process: (document, records)."""
-    path = Path(path)
-    cached = _DOCUMENT_MEMO.get(path)
-    if cached is None:
-        document = GoldenFile.load(path)
-        cached = _DOCUMENT_MEMO.setdefault(path, (document, document.records()))
-    return cached
+    """A golden parsed: (document, records)."""
+    document = GoldenFile.load(Path(path))
+    return document, document.records()
 
 
 def _records_of(path: Path) -> list[GoldenRecord]:
@@ -210,7 +202,7 @@ class _LazyGoldenRecords(Sequence[GoldenRecord]):
     def __init__(self, loader: Callable[[], list[GoldenRecord]]) -> None:
         self._loader = loader
 
-    @cached_property
+    @property
     def _records(self) -> tuple[GoldenRecord, ...]:
         return tuple(self._loader())
 

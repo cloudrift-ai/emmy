@@ -20,10 +20,7 @@ from .format import (
     kernel_pool_text,
     program_text,
 )
-from .identity import (
-    flush_identity_store,
-    kernel_identity,
-)
+from .identity import kernel_identity
 from .record import (
     GoldenRecord,
     fast_math_knobs,
@@ -65,7 +62,6 @@ __all__ = [
     "Target",
     "kernel_pool_text",
     "program_text",
-    "flush_identity_store",
     "kernel_identity",
     "decode_record",
     "lead_of",

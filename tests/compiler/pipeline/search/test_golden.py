@@ -9,7 +9,6 @@ the fresh lowering, is red until ``emmy golden restamp`` rewrites the file, whic
 """
 
 import difflib
-import os
 from collections import Counter
 from contextlib import nullcontext
 from pathlib import Path
@@ -17,16 +16,8 @@ from pathlib import Path
 import pytest
 
 from emmy.compiler.pipeline.search import golden
-from emmy.compiler.pipeline.search.golden import decode_record, flush_identity_store, scope_digest, siblings_of
+from emmy.compiler.pipeline.search.golden import decode_record, scope_digest, siblings_of
 from emmy.compiler.pipeline.search.golden.repository import _HARDWARE_GOLDENS_DIR, _records_of, _repository_golden_paths
-
-
-@pytest.fixture(scope="module", autouse=True)
-def _persist_derivations():
-    """Persist what this module derived once per worker rather than once per row: the memo is keyed
-    by compiler fingerprint and record content, so the next run re-derives only what changed."""
-    yield
-    flush_identity_store()
 
 
 def _decode(record, records) -> str | None:
@@ -143,11 +134,8 @@ def test_a_pool_that_holds_the_recorded_row_is_not_walked_whole(monkeypatch) -> 
 
     from emmy.compiler.pipeline import fork
     from emmy.compiler.pipeline.knob import schedule_match_key
-    from emmy.compiler.pipeline.search import golden
     from emmy.compiler.pipeline.search.golden import piece_row, unmatched_reason
     from emmy.compiler.pipeline.search.golden.decode import _replay, _unmatched_reason
-
-    monkeypatch.setattr(golden.decode, "_REPLAY_CACHE", {})
 
     # The same smallest target the anchor test stands on: every assertion here replays it.
     records = _records_of(_HARDWARE_GOLDENS_DIR / "rtx5090_sm120.yaml")
@@ -183,7 +171,6 @@ def test_a_pool_that_holds_the_recorded_row_is_not_walked_whole(monkeypatch) -> 
     pairs = set().union(*(summary[1] for summary in miss.offered.values()))
     assert not miss.rows, "a miss retains no candidate rows"
     assert _unmatched_reason(absent, keys, pairs) == unmatched_reason(absent, full)
-    assert not golden.decode._REPLAY_CACHE, "requested-row results cannot serve a different recording and must not accumulate"
 
     respelled = replace(record, knobs={**record.knobs, "WORK@missing": record.knobs["WORK"]})
     reason = _decode(respelled, records)
@@ -251,58 +238,6 @@ def test_a_sibling_sharing_the_target_identity_cannot_silence_the_lead_cut() -> 
     impostor = replace(other, identity=lead.identity)
     beside = [lead, *(impostor if m is other else m for m in siblings if m is not receipt)]
     assert decodes(receipt, beside), "and beside a receipt stamped with the lead's identity"
-
-
-def test_compiler_fingerprint_ignores_mtime_so_two_checkouts_share_one_memo(tmp_path):
-    """Two byte-identical trees fingerprint alike however their mtimes differ.
-
-    The identity memo is one file per fingerprint, and every checkout of the same revision reads it:
-    an agent worktree beside the main tree, the re-exported host tree a serving container mounts.
-    Keyed by mtime those checkouts disagreed, so each discarded the other's derivations and the
-    next process re-derived every identity from scratch.
-    """
-    from emmy.compiler.pipeline.search.golden.identity import _tree_fingerprint
-
-    first, second = tmp_path / "a", tmp_path / "b"
-    for root in (first, second):
-        (root / "pkg").mkdir(parents=True)
-        (root / "pkg" / "rule.py").write_text("VALUE = 1\n")
-    stamp = (1, 1)
-    os.utime(second / "pkg" / "rule.py", stamp)
-
-    assert _tree_fingerprint(first) == _tree_fingerprint(second)
-
-    # Same length and the SAME mtime as the equal case: only content differs, so a fingerprint that
-    # went back to hashing metadata would fail here instead of passing unnoticed.
-    (second / "pkg" / "rule.py").write_text("VALUE = 2\n")
-    os.utime(second / "pkg" / "rule.py", stamp)
-    assert _tree_fingerprint(first) != _tree_fingerprint(second)
-
-
-def test_a_flush_from_another_compiler_tree_keeps_this_trees_derivations(tmp_path, monkeypatch):
-    """Two compiler revisions sharing one cache directory each keep what they derived.
-
-    The memo was one file holding one fingerprint, so a process from any other tree replaced it
-    whole. On the serving host a one-row replay from an older tree, run between two boots of the
-    same tree, cost the second boot every replay the first had derived: 851 s, then 859 s.
-    """
-    from emmy import config
-    from emmy.compiler.pipeline.search import golden
-
-    monkeypatch.setattr(config, "_CACHE_ROOT", tmp_path)
-
-    def derive(fingerprint: str, key: str) -> dict:
-        monkeypatch.setattr(golden.identity, "_compiler_fingerprint", lambda: fingerprint)
-        monkeypatch.setattr(golden.identity, "_IDENTITY_STORE", None)
-        kept = dict(golden.identity._identity_store()["entries"])
-        golden.identity._identity_store()["entries"][key] = None
-        monkeypatch.setattr(golden.identity, "_IDENTITY_STORE_DIRTY", True)
-        flush_identity_store()
-        return kept
-
-    derive("serving tree", "boot")
-    derive("another tree", "replay")
-    assert "boot" in derive("serving tree", "next boot")
 
 
 def test_a_red_row_says_which_of_the_three_kinds_of_churn_moved_it() -> None:

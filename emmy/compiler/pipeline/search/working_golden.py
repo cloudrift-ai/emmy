@@ -580,7 +580,7 @@ def _record_latency_row(destination: Path, name: str, *, hardware_id, emmy_us, t
         raise ValueError(f"{destination} resolves {name!r} to {len(matches)} latency rows; exact knobs and pins must select one")
     timings = Latency(emmy_us=float(emmy_us), **{field: float(us) for field, us in torch_us.items() if us})
     matches[0].latency = {**(matches[0].latency or {}), hardware_id: timings}
-    document.dump(destination, overwrite=True, incremental=True)
+    document.dump(destination, overwrite=True)
 
 
 def kernel_set_prices(kernel_sets: list[tuple[str, tuple[str, ...]]], launch_us: dict[str, float]) -> list[float | None]:
@@ -741,7 +741,7 @@ def _record_rows(destination: Path, name: str, *, decisions, kernels, reference_
             )
         ]
         seed.kernel_set = tuple(written[: len(decisions)])
-    document.dump(destination, overwrite=True, incremental=True)
+    document.dump(destination, overwrite=True)
     return written
 
 
@@ -753,7 +753,7 @@ def persist_proposal_rankings(path: str | Path, document: GoldenFile, target: Wo
         if realization.state == GoldenEntryState.VERIFIED:
             continue
         realization.ranking = {**ranking, "source": "proposal"}
-    document.dump(path, overwrite=True, incremental=True)
+    document.dump(path, overwrite=True)
 
 
 def persist_tune_winner(
@@ -798,4 +798,4 @@ def persist_tune_winner(
                 )
             )
             target.entry_indexes.append((config_index, len(configs[config_index].realizations) - 1))
-    document.dump(path, overwrite=True, incremental=True)
+    document.dump(path, overwrite=True)

@@ -276,15 +276,8 @@ class GoldenFile(Wire):
             raise ValueError(f"invalid golden file {source}: {exc}") from exc
         return document
 
-    def dump(self, path: str | Path, *, repository: bool | None = None, overwrite: bool = False, incremental: bool = False) -> Path:
-        """Write the golden to ``path``, atomically, checked the way :meth:`load` would read it back.
-
-        ``incremental`` is for the repeated working-golden persists of a single loaded document that
-        ``tune`` makes as it records ranking feedback per target: those persists mutate realizations
-        only, so the program and loop pools keep the text they were serialized to instead of being
-        reserialized once per target. The whole document is still checked, and the bytes written are
-        the ones a full dump writes. Canonical dumps leave it off and reserialize everything.
-        """
+    def dump(self, path: str | Path, *, repository: bool | None = None, overwrite: bool = False) -> Path:
+        """Write the golden to ``path``, atomically, checked the way :meth:`load` would read it back."""
         from .repository import is_repository_golden_path  # noqa: PLC0415 — the index reads this module
 
         destination = Path(path)
@@ -292,7 +285,7 @@ class GoldenFile(Wire):
         if destination.exists() and not overwrite:
             raise FileExistsError(f"{destination} already exists; pass overwrite=True to replace it")
         destination.parent.mkdir(parents=True, exist_ok=True)
-        blocks = _pool_blocks(self, reuse=incremental)
+        blocks = _pool_blocks(self)
         payload = "".join(blocks[key] if key in blocks else _dump_block(key, value) for key, value in self.to_wire().items())
         temporary = None
         mode = destination.stat().st_mode & 0o777 if destination.exists() else 0o644
@@ -425,7 +418,6 @@ class GoldenFile(Wire):
 
 
 _POOL_KEYS = ("programs", "loops")
-_POOL_CACHE: tuple[list, dict[str, str]] | None = None
 
 
 def _dump_block(key: str, value: object) -> str:
@@ -434,23 +426,12 @@ def _dump_block(key: str, value: object) -> str:
     return yaml.dump({key: value}, Dumper=_GoldenDumper, sort_keys=False, width=140)
 
 
-def _pool_blocks(document: GoldenFile, *, reuse: bool) -> dict[str, str]:
-    """The serialized program and loop pools, kept across repeated persists of one document.
-
-    Keyed by pool identity, and the cache holds the pools it serialized: a document whose pools
-    are the very objects that were dumped last has the same bytes for them.
-    """
-    global _POOL_CACHE
-
+def _pool_blocks(document: GoldenFile) -> dict[str, str]:
+    """The serialized program and loop pools."""
     pools = [getattr(document, key) for key in _POOL_KEYS]
-    if reuse and _POOL_CACHE is not None and all(cached is pool for cached, pool in zip(_POOL_CACHE[0], pools, strict=True)):
-        return _POOL_CACHE[1]
-    blocks = {
+    return {
         key: _dump_block(key, [_style_program(program) for program in pool]) for key, pool in zip(_POOL_KEYS, pools, strict=True) if pool
     }
-    if reuse:
-        _POOL_CACHE = (pools, blocks)
-    return blocks
 
 
 def program_text(graph) -> str:

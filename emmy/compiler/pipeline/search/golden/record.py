@@ -8,7 +8,6 @@ import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from functools import cached_property
 from typing import TYPE_CHECKING
 
 from emmy import config
@@ -19,9 +18,6 @@ from emmy.compiler.structural import digest
 
 if TYPE_CHECKING:
     from .format import Latency, Measurements
-
-_PROGRAM_GRAPH_CACHE: dict[int, tuple[dict, object]] = {}
-_LOOP_GRAPH_CACHE: dict[int, tuple[dict, object]] = {}
 
 
 def fast_math_knobs(knobs: Mapping) -> bool:
@@ -134,7 +130,7 @@ class GoldenRecord:
 
         return {key: value for key, value in tuning_knob_items(self.knobs) if family_of(key) != "PLACE"}
 
-    @cached_property
+    @property
     def pool_group(self) -> tuple:
         """Which candidate pool this record belongs to — the ONE place that question is answered, so every
         consumer that groups goldens groups them the same way. (A grouping key over RECORDS —
@@ -175,42 +171,31 @@ class GoldenRecord:
             kernels = (hashlib.blake2b(json.dumps(self.loop_wire, sort_keys=True).encode(), digest_size=16).digest(),)
         return (self.gpu_name, tuple(self.compute_cap), kernels, self.pin_key)
 
-    @cached_property
+    @property
     def pin_key(self) -> tuple:
         """This record's pins as a hashable tuple — already sorted, as the loader stores them."""
         return tuple((k, str(v)) for k, v in self.pins)
 
-    @cached_property
+    @property
     def program(self):
-        """Decode the stable Torch IR payload once per embedded program."""
+        """The stable Torch IR payload, decoded."""
         if self.program_wire is None:
             raise ValueError(f"{self.name}: the target was recorded from a measurement alone and has no traced program")
-        key = id(self.program_wire)
-        cached = _PROGRAM_GRAPH_CACHE.get(key)
-        if cached is None or cached[0] is not self.program_wire:
-            graph = Graph.from_wire(self.program_wire)
-            _PROGRAM_GRAPH_CACHE[key] = (self.program_wire, graph)
-            return graph
-        return cached[1]
+        return Graph.from_wire(self.program_wire)
 
     @property
     def kernel_graph(self):
-        """The stored kernel's Loop IR, unspecialized — decoded once per loop payload."""
-        key = id(self.loop_wire)
-        cached = _LOOP_GRAPH_CACHE.get(key)
-        if cached is None or cached[0] is not self.loop_wire:
-            cached = (self.loop_wire, Graph.from_wire(self.loop_wire))
-            _LOOP_GRAPH_CACHE[key] = cached
-        return cached[1]
+        """The stored kernel's Loop IR, unspecialized."""
+        return Graph.from_wire(self.loop_wire)
 
-    @cached_property
+    @property
     def target_program(self):
         """The stored kernel as a standalone program, specialized to this record's bindings."""
         from emmy.compiler.specialize import specialize_program  # noqa: PLC0415
 
         return specialize_program(self.kernel_graph, dict(self.bindings))
 
-    @cached_property
+    @property
     def reference_program(self):
         """The PyTorch slice the stored kernel is compared against: the traced ops it came from
         (``origins``) with the kernel's outputs in its order. ``None`` when the golden keeps no
@@ -251,26 +236,26 @@ class GoldenRecord:
     def pin_map(self) -> dict[str, object]:
         return dict(self.pins)
 
-    @cached_property
+    @property
     def shape_key(self) -> ShapeKey:
         """The arithmetic-identity descriptor for eval / diagnostics grouping, derived from the
         lowered target's stamped histogram. NOT the deploy join key — that is
         :func:`kernel_identity` (strict structural identity); this key only groups eval rows."""
         return ShapeKey.from_s_features(self.structural_features)
 
-    @cached_property
+    @property
     def structural_features(self) -> dict[str, float]:
         """Current compiler features, derived lazily through target provenance."""
         return dict(_derive_structural_features(self))
 
-    @cached_property
+    @property
     def origin_ops(self) -> tuple[str, ...]:
         if not self.origins or self.program_wire is None:
             return ()
         by_id = {node["id"]: node["op"] for node in self.program_wire["nodes"]}
         return tuple(by_id[origin] for origin in self.origins)
 
-    @cached_property
+    @property
     def dtype(self) -> str:
         """Public dtype spelling of the stored kernel's first output."""
         graph = self.target_program
@@ -362,9 +347,6 @@ def shared_regime_pins(records: Sequence[GoldenRecord]) -> dict:
     return dict(regimes.pop()) if len(regimes) == 1 else {}
 
 
-_STRUCTURAL_CACHE: dict[tuple, tuple[tuple[str, float], ...]] = {}
-
-
 def _record_cache_key(record: GoldenRecord) -> tuple:
     return (id(record.loop_wire), record.target_key, record.compute_cap, record.bindings)
 
@@ -416,11 +398,6 @@ def _lifted_target(record: GoldenRecord):
 
 def _derive_structural_features(record: GoldenRecord) -> tuple[tuple[str, float], ...]:
     """Lower the exact replay target and recover its unique ``S_*`` row."""
-    key = (id(record.loop_wire), record.target_key, record.compute_cap, record.bindings)
-    cached = _STRUCTURAL_CACHE.get(key)
-    if cached is not None:
-        return cached
-
     from emmy.compiler.pipeline.knob import STRUCT_PREFIX  # noqa: PLC0415
 
     _lowered, nodes = _target_kernel_nodes(record)
@@ -433,9 +410,7 @@ def _derive_structural_features(record: GoldenRecord) -> tuple[tuple[str, float]
     signatures.discard(())
     if len(signatures) != 1:
         raise ValueError(f"{record.name}: target resolves to {len(signatures)} structural targets")
-    result = next(iter(signatures))
-    _STRUCTURAL_CACHE[key] = result
-    return result
+    return next(iter(signatures))
 
 
 #: The precision-trading pin universe the regime check covers in BOTH directions — a record

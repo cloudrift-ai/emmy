@@ -42,7 +42,6 @@ from emmy.compiler.pipeline.search.golden import (
     siblings_of,
     sole_evidence,
 )
-from emmy.compiler.pipeline.search.golden.identity import _identity_store, remember
 from emmy.compiler.structural import digest
 
 
@@ -66,15 +65,9 @@ def _wire_digest(wire: Mapping) -> str:
 
 def fresh_kernel_digests(document: GoldenFile, program: int) -> dict[str, str]:
     """The fresh lowering of traced ``program`` as ``{sorted output set: Loop IR digest}`` — what the
-    check compares a stored target against — memoized per compiler tree beside the decode verdicts
-    (:func:`~emmy.compiler.pipeline.search.golden.flush_identity_store`), so a run on a tree the
-    machine already lowered this program under pays nothing for it."""
-    store = _identity_store()["lowerings"]
-    key = digest(_wire_digest(document.programs[program]), str(list(document.compute_cap)), document.gpu_name or "")
-    if key not in store:
-        fresh = fresh_kernels(document, [program])[program]
-        remember("lowerings", key, {",".join(sorted(outputs)): _wire_digest(wire) for outputs, wire in fresh.items()})
-    return store[key]
+    check compares a stored target against."""
+    fresh = fresh_kernels(document, [program])[program]
+    return {",".join(sorted(outputs)): _wire_digest(wire) for outputs, wire in fresh.items()}
 
 
 def _entry_name(entry: Config) -> str:

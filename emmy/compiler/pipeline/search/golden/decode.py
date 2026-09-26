@@ -7,17 +7,8 @@ from collections.abc import Mapping, Sequence
 from typing import NamedTuple
 
 from emmy.compiler.pipeline.knob import family_of
-from emmy.compiler.structural import digest
 
-from .identity import _identity_store, _record_fingerprint, remember
 from .record import GoldenRecord, _lifted_target, _record_cache_key, kernel_set_pins
-
-#: One :class:`_Replay` per exact target, pins and spelled knobs — the strict decode walks whole
-#: files, and sibling realizations that spell the same kernel-set decisions share one replay.
-#: Exhaustive strict-decode results are not retained: a miss can contain millions of candidate
-#: rows, and its requested-row cache key means no different recording can reuse it.
-_REPLAY_CACHE: dict[tuple, _Replay] = {}
-_DECODE_CTX_CACHE: dict[tuple, object] = {}
 
 
 def unmatched_reason(row: Sequence[tuple[str, str]], candidates) -> str:
@@ -69,36 +60,12 @@ def decode_record(record: GoldenRecord, siblings: Sequence[GoldenRecord] = ()) -
     that re-keys the kernel turns the row red until the file is re-keyed."""
     from emmy.compiler.pipeline.knob import schedule_match_key  # noqa: PLC0415
 
-    sibling_spelling = tuple(
-        (
-            sibling.name,
-            _record_fingerprint(sibling),
-            tuple(sorted(sibling.knobs.items())),
-            sibling.pins,
-            sibling.identity,
-            sibling.kernel_set,
-        )
-        for sibling in siblings
-    )
-    verdict_key = digest(
-        record.name,
-        _record_fingerprint(record),
-        str(sorted(record.knobs.items())),
-        str(record.pins),
-        record.identity or "",
-        str(record.kernel_set),
-        str(sibling_spelling),
-    )
-    store = _identity_store()
-    verdicts = store.setdefault("verdicts", {})
-    if verdict_key in verdicts:
-        return verdicts[verdict_key]
     tile = None
     try:
         tile = _lifted_target(record)
     except Exception as exc:  # noqa: BLE001 — the reason IS the product here
         if not record.is_receipt:
-            return remember("verdicts", verdict_key, f"{type(exc).__name__}: {exc}")
+            return f"{type(exc).__name__}: {exc}"
     # The piece row, not the recorded one: a ``g<n>`` cross-CTA half names the kernel-set arm the
     # replay already resolved, and the pieces it mints cannot stamp it, so comparing it to a leaf
     # asks a piece to spell its parent's decision.
@@ -111,7 +78,7 @@ def decode_record(record: GoldenRecord, siblings: Sequence[GoldenRecord] = ()) -
     replay = _replay(record, siblings=siblings, lead=lead, exhaustive=True, wanted=row)
     if record.is_routing:
         reason = f"routing key {replay.unresolved[0]!r} does not resolve to an offered cut seam" if replay.unresolved else None
-        return remember("verdicts", verdict_key, reason)
+        return reason
 
     def verdict(replay: _Replay) -> str | None:
         candidates = replay.rows
@@ -132,7 +99,7 @@ def decode_record(record: GoldenRecord, siblings: Sequence[GoldenRecord] = ()) -
     if reason is not None:
         # A miss: replay again walking every fork, so the reason names what the kernels offer.
         reason = verdict(_replay(record, siblings=siblings, lead=lead, exhaustive=True, wanted=row, explain=True))
-    return remember("verdicts", verdict_key, reason)
+    return reason
 
 
 class _Replay(NamedTuple):
@@ -241,7 +208,6 @@ def _replay(
     from emmy.compiler.pipeline import TILE_PASSES, Pipeline  # noqa: PLC0415
     from emmy.compiler.pipeline.fork import exact_schedule_leaf, fork_signature, iter_leaves, leaf_for, leaf_knobs  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import (  # noqa: PLC0415
-        canonical_row_key,
         schedule_match_key,
         schedule_row_key,
         validate_family_value,
@@ -264,31 +230,7 @@ def _replay(
     named = {entry.identity: entry for entry in sorted(siblings, key=lambda entry: bool(entry.route)) if entry.identity is not None}
     if record.identity is not None:
         named[record.identity] = record
-    set_digest = digest(
-        f"lead:{sorted(_spelling(lead).items())}",
-        *(f"{identity}:{sorted(_spelling(entry).items())}" for identity, entry in sorted(named.items())),
-    )
-    # The identity is part of the key: two entries of one set can spell the same row and pins on
-    # different kernels — a seam spelling recurs on a residual as earlier cuts renumber its tree —
-    # and each replays its own fork.
-    # ``wanted`` is part of the key: a pool that answered one key holds only that key, and reusing
-    # it for another question would read a pruned walk as a complete one.
-    cache_key = (
-        _record_cache_key(record),
-        record.pins,
-        canonical_row_key(record.knobs),
-        record.identity,
-        set_digest,
-        exhaustive,
-        wanted,
-    )
-    cached = None if exhaustive else _REPLAY_CACHE.get(cache_key)
-    if cached is not None:
-        return cached
-    ctx_key = (record.compute_cap, record.gpu_name or None)
-    ctx = _DECODE_CTX_CACHE.get(ctx_key)
-    if ctx is None:
-        ctx = _DECODE_CTX_CACHE.setdefault(ctx_key, Context.from_target(ctx_key[0], gpu_name=ctx_key[1]))
+    ctx = Context.from_target(record.compute_cap, gpu_name=record.gpu_name or None)
     spelled = _spelling(record)
     regime = {key: value for key, value in record.pin_map.items() if family_of(str(key)) != "PLACE"}
     pending = {key for key, value in spelled.items() if family_of(key) == "PLACE" and value == "cut"}
@@ -439,6 +381,4 @@ def _replay(
         realized,
         {identity: (frozenset(keys), frozenset(offered_pairs.get(identity, ()))) for identity, keys in offered_keys.items()},
     )
-    if not exhaustive:
-        _REPLAY_CACHE[cache_key] = result
     return result

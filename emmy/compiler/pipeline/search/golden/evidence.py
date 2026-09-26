@@ -18,7 +18,7 @@ the split arm is priced once the pieces are benched (``run --golden PATH --bench
 
 :func:`evidence_db` is the compile's seam: the golden rows in scope (``golden.records_for_card``) are imported
 once per golden digest into the tune DB the compile reads — a re-recorded file changes the digest, and the
-file's earlier rows are let go first — or into a memoized in-memory instance when the compile has no DB.
+file's earlier rows are let go first — or into a fresh in-memory instance when the compile has no DB.
 """
 
 from __future__ import annotations
@@ -185,17 +185,10 @@ def import_file(db: SearchDB, path: Path) -> Counter:
     return counts
 
 
-#: The one in-memory instance a DB-less compile picks from, keyed by golden scope, card and regime.
-_IN_MEMORY: dict[tuple, SearchDB] = {}
-#: The ``(DB file, golden scope, card, regime)`` imports this process has done — one query per compile is one too many
-#: for a serve boot's hundred compiles.
-_IMPORTED: set[tuple] = set()
-
-
 def evidence_db(db: SearchDB | None, ctx: Context) -> SearchDB:
     """The DB a compile under ``ctx`` picks from, holding the golden rows in scope: ``db`` itself, the scope
     imported into it once per golden digest (a scope the file does not hold yet lets the earlier golden rows of
-    this card and regime go first); with no ``db``, an in-memory instance holding the scope, memoized on it."""
+    this card and regime go first); with no ``db``, a fresh in-memory instance holding the scope."""
     from emmy.compiler.pipeline.search.golden import records_for_card, scope_digest, scope_explicit  # noqa: PLC0415
 
     gpu_name = getattr(ctx, "gpu_name", None) or ""
@@ -203,22 +196,13 @@ def evidence_db(db: SearchDB | None, ctx: Context) -> SearchDB:
     if not records:
         return db if db is not None else SearchDB()
     source = f"golden:{scope_digest(gpu_name)[:12]}"
-    regime = (ctx.structural_key(), ctx.hardware_id())
     if db is None:
-        key = (source, *regime)
-        if key not in _IN_MEMORY:
-            _IN_MEMORY.clear()
-            _IN_MEMORY[key] = fresh = SearchDB()
-            _import(fresh, ctx, records, source)
-        return _IN_MEMORY[key]
-    path = getattr(db, "_path", None)
-    key = (str(path), source, *regime)
-    if (path is None or key not in _IMPORTED) and source not in db.perf_sources(ctx):
+        fresh = SearchDB()
+        _import(fresh, ctx, records, source)
+        return fresh
+    if source not in db.perf_sources(ctx):
         db.forget_perf(ctx, "golden:")
-        # The scopes just forgotten on this card and regime are no longer in the file, whatever this process remembers.
-        _IMPORTED.difference_update({done for done in _IMPORTED if done[0] == str(path) and done[2:] == regime})
         _import(db, ctx, records, source)
-    _IMPORTED.add(key)
     return db
 
 
