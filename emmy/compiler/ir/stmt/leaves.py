@@ -13,7 +13,7 @@ from functools import cached_property
 from emmy.compiler.dtype import F32, DataType
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl, reduce_spelling
-from emmy.compiler.ir.expr import BinaryExpr, Expr, FlatIndex, Literal, Var, _float_lit
+from emmy.compiler.ir.expr import BinaryExpr, Expr, FlatIndex, FuncCallExpr, Literal, Var, _float_lit
 from emmy.compiler.ir.stmt.base import (
     _INTEGER_DTYPES,
     RenderCtx,
@@ -46,7 +46,6 @@ def _args_at_dtype(target, args: tuple[str, ...], arg_dtypes: list[str], dst_dt:
     target's conversion intrinsic (e.g. ``__half2float(name)``) by
     parsing ``target.convert``'s output back into a ``FuncCallExpr`` so
     it composes with the Expr renderer."""
-    from emmy.compiler.ir.expr import FuncCallExpr  # noqa: PLC0415
 
     out: list[Expr] = []
     for a, dt in zip(args, arg_dtypes, strict=True):
@@ -68,7 +67,6 @@ def _dtype_intrinsics(target, result_dt: str, expr: Expr) -> dict[str, str]:
     when resolving ``FuncCallExpr.name`` to a target spelling; we patch
     in the dtype-specific spellings while rendering the fp16-native
     path."""
-    from emmy.compiler.ir.expr import FuncCallExpr  # noqa: PLC0415
 
     overrides: dict[str, str] = {}
 
@@ -349,6 +347,9 @@ class Assign(Stmt):
             # precision better than converting each arg to fp16 first.
             args = _args_at_dtype(ctx.target, self.args, arg_dtypes, result_dt)
             expr = op_to_expr(op_name, args, dtype=result_dt)
+            if isinstance(expr, BinaryExpr) and ctx.target.intrinsic(op_name, result_dt) != op_name:
+                # A target that spells this operator as a call (CUDA's non-contracting f16 ``_rn`` ops).
+                expr = FuncCallExpr(op_name, tuple(args))
             saved_intr = ctx.intrinsics
             saved_lit = ctx.literal_default_dtype
             ctx.intrinsics = {**saved_intr, **_dtype_intrinsics(ctx.target, result_dt, expr)}
