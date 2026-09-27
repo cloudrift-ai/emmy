@@ -91,6 +91,28 @@ def test_stages_only_runnable_recipes(fake_repo):
     )
 
 
+def test_the_package_data_ships_everything_staged(fake_repo):
+    """Staging is only half of it: setuptools ships a staged file only if the package-data patterns match
+    it. The goldens became JSON in #912 and the recipe pattern still said YAML, so every wheel since
+    shipped the recipes and no model golden — a serving image warmed from one had no evidence at all."""
+    import fnmatch
+    import tomllib
+
+    model = fake_repo / "recipes" / "model"
+    (model / "golden").mkdir(parents=True)
+    (model / "recipe.yaml").write_text("tags: [maintained]\n")
+    (model / "golden" / "v100_sm70.json").write_text("{}\n")
+    prepare_dist.stage_recipes()
+    staged = [
+        path.relative_to(fake_repo / "emmy" / "recipes").as_posix()
+        for path in (fake_repo / "emmy" / "recipes").rglob("*")
+        if path.is_file()
+    ]
+    patterns = tomllib.loads((PROJECT_ROOT / "pyproject.toml").read_text())["tool"]["setuptools"]["package-data"]["emmy.recipes"]
+    assert sorted(staged) == ["model/golden/v100_sm70.json", "model/recipe.yaml"]
+    assert [path for path in staged if not any(fnmatch.fnmatch(path, pattern) for pattern in patterns)] == []
+
+
 def test_refuses_to_build_a_recipe_less_package(fake_repo):
     (fake_repo / "recipes").mkdir()
 
