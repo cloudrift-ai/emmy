@@ -470,12 +470,17 @@ def kernel_scoped(key: str) -> bool:
 def kernel_pin(family: str, *names: str) -> str | None:
     """The kernel pin of ``family`` that reaches a kernel known by any of ``names``, or ``None``. A
     split's partial is scheduled as a tile with no name of its own, so its graph node id is asked too."""
-    import re  # noqa: PLC0415
-
     for key, value in _environ_pins(family):
-        if kernel_scoped(key) and any(re.search(rf"__{re.escape(axis_of(key))}(_|$)", name) for name in names):
+        if kernel_scoped(key) and any(reaches(key, name) for name in names):
             return value
     return None
+
+
+def reaches(key: str, kernel: str) -> bool:
+    """Whether the kernel pin ``key`` names the kernel (or graph node) called ``kernel``."""
+    import re  # noqa: PLC0415
+
+    return re.search(rf"__{re.escape(axis_of(key) or '')}(_|$)", kernel) is not None
 
 
 def family_pins(family: str, *, kernels: bool = False) -> tuple[tuple[str, str], ...]:
