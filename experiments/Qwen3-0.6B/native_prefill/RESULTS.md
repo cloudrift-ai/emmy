@@ -5,6 +5,29 @@ sequential prefill on one RTX 4080. All 36 paired benchmark completions match. B
 identical one-token decode plans, standard math, FP16 weights and KV storage, and FP32 residuals and attention
 intermediates. The native server still admits one active request. This is not a comparison with stock vLLM.
 
+## Update after merging main
+
+Main commit `6556d75e2` (#914) changes cut workspace dtypes and kernel identities. The targets remain fresh, but
+35 receipts need new identities, covering 24 distinct kernels. Comparing the generated CUDA shows that the cut
+stores now apply the FP16 conversion previously performed by readers. The output-head kernels are unchanged.
+
+Four selected routes were remeasured on the same RTX 4080 with standard math, five warmups, twenty iterations,
+CUDA graphs, and strict eager checks. M=1 pre/post measure 66.2/78.5 µs; M=16 pre/post measure 89.0/129.0 µs.
+The latter are close to the original 89.4/128.6 µs fragment observations. All four accuracy checks pass. The
+current golden keeps 52 rows, including the freshly recorded routes and unchanged output-head evidence. Thirteen
+unselected alternatives with stale timings are retired from the deployable file; the original archive preserves
+their measurements. No prior-led search is used.
+
+All 52 rows strictly decode and all five targets remain fresh. A new width-16 artifact exports from an empty tune
+DB with strict evidence. The short-prompt and both held-out prefill checkpoint cases pass (three checks in
+180.58 seconds). The full suite after the merge passes 7,473 tests and skips 795.
+Python lint, Rust formatting, and Clippy pass.
+
+The serving latency, full checkpoint qualification, and memory figures below describe the original revision and
+artifacts named in the evidence section. They were not remeasured after this merge. Additional fragment records,
+identity mappings, retired alternatives, and validation logs are retained under the archive's `checks/` directory;
+new checkpoint measurements are under `merge-qualification/`.
+
 ## Implementation and reproduction
 
 The checkpoint is `Qwen/Qwen3-0.6B` at revision `c1899de289a04d12100db370d81485cdf75e47ca`. Prefill processes all but
@@ -14,8 +37,8 @@ sampler; the last layer also omits attention and its post-attention fragment. De
 CUDA graphs and scratch slabs, with shared weights, request inputs, and KV allocations.
 
 Generation artifact format 3 requires re-exporting older bundles. `--prefill-size 1` selects sequential execution;
-16 is the default. The [golden](golden/rtx4080_sm89.json) includes the three existing one-token programs and two new
-width-16 programs. Its five targets are fresh, all 65 rows strictly decode, and a fresh tuning database suffices for
+16 is the default. The current [golden](golden/rtx4080_sm89.json) includes the three existing one-token programs and two new
+width-16 programs. Its five targets are fresh, all 52 rows strictly decode, and a fresh tuning database suffices for
 strict-evidence export. All schedules are manually selected from explicit measured candidates. No MCTS or prior-led
 search is used.
 
@@ -72,7 +95,7 @@ normalizations are faster. Two tensor-core proposals for this fragment fail exac
 their fallback observations are not reported as tensor-core results. Post-attention's direct candidate measured
 244.2 µs; the tensor-core gate/up and down projections reduce that to 128.6 µs. A global cooperative post-attention
 candidate fails strict eager agreement at one of 16,384 elements and is excluded. All failed trials remain in the
-archive. The existing one-token evidence is unchanged.
+archive. The original one-token evidence was unchanged in that experiment; the main merge below refreshes affected rows.
 
 ## Numerical qualification
 
