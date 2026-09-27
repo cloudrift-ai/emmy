@@ -114,7 +114,7 @@ class RestampReport:
 
     @property
     def changed(self) -> bool:
-        return bool(self.restamped or self.dropped_targets)
+        return bool(self.restamped or self.dropped_targets or self.rows_dropped)
 
     def lines(self) -> list[str]:
         out = [f"{self.restamped} of {self.targets} targets restamped, {len(self.dropped_targets)} dropped; {self.rows_kept} rows kept"]
@@ -146,15 +146,13 @@ def restamp(document: GoldenFile) -> tuple[GoldenFile | None, RestampReport]:
         if wire is None:
             report.dropped_targets.append(f"{_entry_name(entry)}: no fresh kernel writes its outputs")
             continue
-        if wire == stored:
-            report.rows_kept += len(entry.realizations)
-            configs.append(replace(entry, target=replace(entry.target, loop=intern(stored))))
-            continue
+        # An unchanged target still re-decodes its rows: a piece of its kernel set can take another
+        # identity while the target's own Loop IR stays the same.
         rows = _rekeyed_rows(document, entry, wire, report)
         if not rows:
             report.dropped_targets.append(f"{_entry_name(entry)}: no row survives on the fresh kernel")
             continue
-        report.restamped += 1
+        report.restamped += wire != stored
         configs.append(replace(entry, target=replace(entry.target, loop=intern(wire)), realizations=rows))
     if not configs:
         return None, report
@@ -195,7 +193,7 @@ def _rekeyed_rows(document: GoldenFile, entry: Config, wire: dict, report: Resta
             continue
         row = replace(realization, identity=new.identity if new.identity is not None else realization.identity)
         if row.measurements is not None or row.latency is not None:
-            if _kernel_sources(old, old_records) != _kernel_sources(new, survivors):
+            if wire != document.loops[entry.target.loop] and _kernel_sources(old, old_records) != _kernel_sources(new, survivors):
                 row = replace(row, measurements=None, latency=None)
                 report.rows_demoted.append(old.name)
             else:
