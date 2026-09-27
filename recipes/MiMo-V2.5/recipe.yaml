@@ -3,8 +3,8 @@ tags:
 - untested
 model:
   huggingface: XiaomiMiMo/MiMo-V2.5
-  rationale: Rank 6 OpenRouter open volume (7.07T/wk), 311B omnimodal MoE, MIT license, strong serving demand.
-  heat: 80
+  rationale: "OpenRouter volume halved weekly, supplanted by V2.6; cooling significantly."
+  heat: 35
   task: generate
 matrices:
 - deploy.gpu: NVIDIA B200
