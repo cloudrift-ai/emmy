@@ -46,7 +46,7 @@ the same seams and one more on its last kernel, where the shared expert's down p
 reaches the first token of a 2,155-token prompt in 9.94 s cold and 1.86 s warm (34.1 and 14.4). The width-16 twin took
 the same routes: main kernel 28.7 ms → 111 µs, routing kernel 6.5 ms → 208 µs, last kernel 902 → 153 µs; boot49's audit
 has it at 0.70 ms per layer (34.25), and eight concurrent requests decode at 0.323 s per token. The 4,096-width twin
-took them too: main kernel 1,093 → 9.6 ms, routing kernel 122 → 7.3 ms, last kernel 38.6 → 3.1 ms per launch; boot51's
+took them too: main kernel 1,093 → 8.6 ms, routing kernel 122 → 7.3 ms, last kernel 38.6 → 3.0 ms per launch; boot51's
 audit, on `main` at #914, has it at 20.2 ms per layer (1,251). Missing tensor-core tiles are a small part of it: those
 contractions read f32 operands, which no Volta atom takes, or contract over the four streams (K=4), where a tensor core
 buys nothing.
