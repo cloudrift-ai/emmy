@@ -50,3 +50,9 @@ def test_native_command_and_capacity():
     assert command("model", opts, opts.native_pack)[-2:] == ["--max-model-len", "128"]
     with pytest.raises(ValueError):
         options(["--max-model-len", "4097"])
+
+
+@pytest.mark.parametrize("flags", [["--prefill-size", "0"], ["--prefill-size", "4097"], ["--prefill-size", "16", "--native-pack", "pack"]])
+def test_prefill_size_requires_preparation(flags):
+    with pytest.raises(ValueError, match="prefill size"):
+        options(flags)

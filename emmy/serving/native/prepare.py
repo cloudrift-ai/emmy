@@ -229,11 +229,12 @@ def _program(model, context_length, rows, cache):
     return step
 
 
-def export_model(model, destination, *, context_length=MAX_CONTEXT, eos_ids=(), provenance=None, prefill_size=PREFILL_SIZE):
+def export_model(model, destination, *, context_length=MAX_CONTEXT, eos_ids=(), provenance=None, prefill_size=None):
     """Bundle one-token decode and fixed-width prefill; preparation owns every model operation."""
     from emmy.compiler.backend.plan_cache import PlanTemplateCache
 
     validate_model(model, context_length)
+    prefill_size = PREFILL_SIZE if prefill_size is None else prefill_size
     if type(prefill_size) is not int or not 1 <= prefill_size <= MAX_CONTEXT:
         raise ValueError("prefill size must be within supported context capacity")
     if any(not 0 <= token < model.config.vocab_size for token in eos_ids):
