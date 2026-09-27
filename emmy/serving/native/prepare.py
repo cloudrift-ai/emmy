@@ -14,7 +14,8 @@ from emmy.serving.native.kernels import SOURCE
 
 MAX_CONTEXT = 4096
 CUDA_THREADS = 128
-GENERATION_VERSION = 2
+GENERATION_VERSION = 3
+PREFILL_SIZE = 16
 SAMPLING_BINS = 65536
 
 
@@ -41,9 +42,10 @@ def validate_model(model, context_length):
 
 
 class _Step:
-    def __init__(self):
+    def __init__(self, prefill=False):
         self.plan = ExecutionPlan(
-            "cuda", ["prompt", "prompt_length", "position", "sampling", "seed"], ["logits", "next_token"], [], {}, {}, [], {}
+            "cuda", ["prompt", "prompt_length", "position"] + ([] if prefill else ["sampling", "seed"]),
+            [] if prefill else ["logits", "next_token"], [], {}, {}, [], {}
         )
         self.bindings = {}
 
@@ -53,14 +55,14 @@ class _Step:
             self.bindings[name] = np.ascontiguousarray(data).tobytes()
         return name
 
-    def launch(self, kernel, args, source, *, writes, blocks=1, shared=0, threads=CUDA_THREADS, zero_outputs=()):
+    def launch(self, kernel, args, source, *, writes, blocks=1, rows=1, shared=0, threads=CUDA_THREADS, zero_outputs=()):
         self.plan.kernels[kernel] = KernelSpec(source=source)
         self.plan.launches.append(
             LaunchSpec(
                 kernel,
                 kernel,
                 tuple(args),
-                ((blocks,), (1,), (1,)),
+                ((blocks,), (rows,), (1,)),
                 ((threads,), (1,), (1,)),
                 shared,
                 tuple(zero_outputs),
@@ -120,24 +122,19 @@ class _Step:
             )
 
 
-def export_model(model, destination, *, context_length=MAX_CONTEXT, eos_ids=(), provenance=None):
-    """Compile and bundle a dense Qwen3 checkpoint; no Python operation is needed after export."""
+def _program(model, context_length, rows, cache):
     import torch
 
-    from emmy.compiler.backend.plan_cache import PlanTemplateCache
     from emmy.compiler.trace.huggingface import build_attention_split_wrapper
 
-    validate_model(model, context_length)
     cfg = model.config
-    if any(not 0 <= token < cfg.vocab_size for token in eos_ids):
-        raise ValueError("EOS token outside vocabulary")
-    cache = PlanTemplateCache()
-    step = _Step()
+    step = _Step(prefill=rows > 1)
     h, heads, kv, d, vocab = cfg.hidden_size, cfg.num_attention_heads, cfg.num_key_value_heads, cfg.head_dim, cfg.vocab_size
     source = (
         "\n".join(
             f"#define {key} {value}"
             for key, value in {
+                "PREFILL": int(rows > 1),
                 "HIDDEN": h,
                 "HEADS": heads,
                 "KV_HEADS": kv,
@@ -152,51 +149,58 @@ def export_model(model, destination, *, context_length=MAX_CONTEXT, eos_ids=(), 
     step.buffer("prompt", (context_length,), I64, "input")
     step.buffer("prompt_length", (1,), I64, "input")
     step.buffer("position", (1,), I64, "input")
-    step.buffer("sampling", (2,), F64, "input")
-    step.buffer("seed", (1,), U64, "input")
-    step.buffer("sampling_histogram", (SAMPLING_BINS,), U32)
     step.buffer("next_token", (1,), I64, "output")
-    step.buffer("logits", (1, vocab), F16, "output")
+    if rows == 1:
+        step.buffer("sampling", (2,), F64, "input")
+        step.buffer("seed", (1,), U64, "input")
+        step.buffer("sampling_histogram", (SAMPLING_BINS,), U32)
+        step.buffer("logits", (1, vocab), F16, "output")
     step.buffer("embedding", (vocab, h), role="constant", data=model.model.embed_tokens.weight.detach().numpy())
     with torch.no_grad():
         cosine, sine = model.model.rotary_emb(torch.zeros(1, 1, h, dtype=torch.float32), torch.arange(context_length).reshape(1, -1))
     step.buffer("cosine", (context_length, d), F32, role="constant", data=cosine.numpy())
     step.buffer("sine", (context_length, d), F32, role="constant", data=sine.numpy())
-    hidden = step.buffer("hidden0", (1, h), F32)
+    hidden = step.buffer("hidden0", (rows, h), F32)
     step.launch(
         "native_embed",
         ["prompt", "prompt_length", "position", "next_token", "embedding", hidden],
         source,
         writes=[hidden],
         blocks=(h + CUDA_THREADS - 1) // CUDA_THREADS,
+        rows=rows,
     )
     example = torch.zeros(1, h, dtype=torch.float32)
     for index, layer in enumerate(model.model.layers):
         pre, post = build_attention_split_wrapper(layer, float32_residual=True)
-        names = [step.buffer(f"layer{index}.{name}", (1, width * d)) for name, width in (("q", heads), ("k", kv), ("v", kv))]
+        names = [step.buffer(f"layer{index}.{name}", (rows, width * d)) for name, width in (("q", heads), ("k", kv), ("v", kv))]
         step.compiled(f"pre{index}", pre, (example,), [hidden], names, cache)
-        rotated = step.buffer(f"layer{index}.rotated", (heads * d,))
+        rotated = step.buffer(f"layer{index}.rotated", (rows, heads * d))
         keys = step.buffer(f"layer{index}.keys", (context_length, kv, d), role="output")
         values = step.buffer(f"layer{index}.values", (context_length, kv, d), role="output")
         step.launch(
             "native_rope_cache",
-            [*names, "cosine", "sine", "position", rotated, keys, values],
+            [*names, "cosine", "sine", "position", "prompt_length", rotated, keys, values],
             source,
             writes=[rotated, keys, values],
             blocks=(heads * d + CUDA_THREADS - 1) // CUDA_THREADS,
+            rows=rows,
         )
-        attention = step.buffer(f"layer{index}.attention", (1, heads * d))
+        attention = step.buffer(f"layer{index}.attention", (rows, heads * d))
         step.launch(
             "native_attention",
-            [rotated, keys, values, "position", attention],
+            [rotated, keys, values, "position", "prompt_length", attention],
             source,
             writes=[attention],
             blocks=heads,
+            rows=rows,
             shared=context_length * 4,
         )
-        output = step.buffer(f"hidden{index + 1}", (1, h), F32)
+        output = step.buffer(f"hidden{index + 1}", (rows, h), F32)
         step.compiled(f"post{index}", post, (torch.zeros(1, heads * d, dtype=torch.float16), example), [attention, hidden], [output], cache)
         hidden = output
+
+    if rows > 1:
+        return step
 
     class Head(torch.nn.Sequential):
         def forward(self, hidden):
@@ -219,12 +223,30 @@ def export_model(model, destination, *, context_length=MAX_CONTEXT, eos_ids=(), 
         writes=["next_token"],
         shared=CUDA_THREADS * 4,
     )
+    return step
+
+
+def export_model(model, destination, *, context_length=MAX_CONTEXT, eos_ids=(), provenance=None, prefill_size=PREFILL_SIZE):
+    """Bundle one-token decode and fixed-width prefill; preparation owns every model operation."""
+    from emmy.compiler.backend.plan_cache import PlanTemplateCache
+
+    validate_model(model, context_length)
+    if type(prefill_size) is not int or not 1 <= prefill_size <= MAX_CONTEXT:
+        raise ValueError("prefill size must be within supported context capacity")
+    if any(not 0 <= token < model.config.vocab_size for token in eos_ids):
+        raise ValueError("EOS token outside vocabulary")
+    prefill_size = min(prefill_size, context_length)
+    cache = PlanTemplateCache()
+    programs = {"decode": _program(model, context_length, 1, cache)}
+    if prefill_size > 1:
+        programs["prefill"] = _program(model, context_length, prefill_size, cache)
     return save_executable(
         destination,
-        {"decode": step.plan},
-        bindings={"decode": step.bindings},
-        key={
-            "generation": {"version": GENERATION_VERSION, "context_length": context_length, "vocab_size": vocab, "eos_ids": list(eos_ids)}
-        },
+        {name: step.plan for name, step in programs.items()},
+        bindings={name: step.bindings for name, step in programs.items()},
+        key={"generation": {
+            "version": GENERATION_VERSION, "context_length": context_length,
+            "vocab_size": model.config.vocab_size, "eos_ids": list(eos_ids), "prefill_size": prefill_size,
+        }},
         provenance=provenance,
     )

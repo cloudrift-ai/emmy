@@ -311,13 +311,13 @@ def test_rotary_rounds_only_the_output(tmp_path):
     v = rng.normal(size=(2, 128)).astype(np.float16)
     angles = np.tile(rng.normal(size=64), 2)
     cosine, sine = np.cos(angles).astype(np.float32), np.sin(angles).astype(np.float32)
-    data = {"q": q, "k": k, "v": v, "cosine": cosine, "sine": sine, "position": np.array([0], np.int64)}
+    data = {"q": q, "k": k, "v": v, "cosine": cosine, "sine": sine, "position": np.array([0], np.int64), "length": np.array([1], np.int64)}
     source = (
         "#define HIDDEN 32\n#define HEADS 4\n#define KV_HEADS 2\n#define HEAD_DIM 128\n"
         "#define VOCAB 32\n#define SCALE 0.08838834764831845f\n" + SOURCE
     )
     buffers = [
-        BufferSpec(n, tuple(Dim(x) for x in a.shape), I64 if n == "position" else F32 if n in ("cosine", "sine") else F16, "input")
+        BufferSpec(n, tuple(Dim(x) for x in a.shape), I64 if n in ("position", "length") else F32 if n in ("cosine", "sine") else F16, "input")
         for n, a in data.items()
     ]
     outputs = {"rotated": q, "keys": k, "values": v}
@@ -382,8 +382,8 @@ def test_attention_reads_only_the_written_cache_prefix(tmp_path, near_tie):
         "#define HIDDEN 32\n#define HEADS 4\n#define KV_HEADS 2\n#define HEAD_DIM 128\n"
         "#define VOCAB 32\n#define SCALE 0.08838834764831845f\n" + SOURCE
     )
-    data = {"q": query, "k": keys, "v": values, "position": np.array([0], np.int64)}
-    buffers = [BufferSpec(n, tuple(Dim(x) for x in a.shape), I64 if n == "position" else F16, "input") for n, a in data.items()]
+    data = {"q": query, "k": keys, "v": values, "position": np.array([0], np.int64), "length": np.array([1], np.int64)}
+    buffers = [BufferSpec(n, tuple(Dim(x) for x in a.shape), I64 if n in ("position", "length") else F16, "input") for n, a in data.items()]
     buffers.append(BufferSpec("attention", (Dim(4), Dim(128)), F16, "output"))
     plan = ExecutionPlan(
         "cuda",
