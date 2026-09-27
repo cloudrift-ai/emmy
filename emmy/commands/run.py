@@ -942,7 +942,9 @@ def _wrong_answer_flag(outputs: dict, ref_outputs: dict) -> str | None:
     return None
 
 
-def env_pin_refusal(kernel_knobs: list[dict], placement_knobs: list[dict] | None = None) -> str | None:
+def env_pin_refusal(
+    kernel_knobs: list[dict], placement_knobs: list[dict] | None = None, kernel_names: list[str] | None = None
+) -> str | None:
     """The live ``EMMY_<KNOB>`` pins a compiled graph did not realize, or ``None``.
 
     An ``--ab`` row has always been gated this way (:func:`unreproducible_pin_flag`), because benching a
@@ -961,10 +963,10 @@ def env_pin_refusal(kernel_knobs: list[dict], placement_knobs: list[dict] | None
     from emmy.compiler.pipeline.knob import KERNEL_DECISION_FAMILIES, family_pins  # noqa: PLC0415
 
     pins = {name: value for family in KERNEL_DECISION_FAMILIES for name, value in family_pins(family, kernels=True)}
-    return unreproducible_pin_flag(pins, kernel_knobs, placement_knobs=placement_knobs) if pins else None
+    return unreproducible_pin_flag(pins, kernel_knobs, placement_knobs=placement_knobs, kernel_names=kernel_names) if pins else None
 
 
-def greedy_record_refusal(kernel_knobs: list[dict], accuracy_error: str | None) -> str | None:
+def greedy_record_refusal(kernel_knobs: list[dict], accuracy_error: str | None, kernel_names: list[str] | None = None) -> str | None:
     """Why ``--record-greedy`` must not write this greedy pick, or ``None``.
 
     A recorded row outranks every later compile, so two picks never become one. A row whose answer
@@ -973,7 +975,7 @@ def greedy_record_refusal(kernel_knobs: list[dict], accuracy_error: str | None) 
     the planner's own schedule under the pin's name and lane."""
     if accuracy_error is not None:
         return f"it failed the strict accuracy check: {accuracy_error}"
-    return env_pin_refusal(kernel_knobs)
+    return env_pin_refusal(kernel_knobs, kernel_names=kernel_names)
 
 
 REFERENCE_SELF_DISAGREES = (
@@ -1132,6 +1134,11 @@ def _cuda_knob_dicts(graph) -> list[dict]:
     return [dict(n.op.knobs or {}) for n in _launch_order_cuda_nodes(graph)]
 
 
+def _cuda_kernel_names(graph) -> list[str]:
+    """The node id of each ``CudaOp`` beside :func:`_cuda_knob_dicts` — what a kernel pin names."""
+    return [n.id for n in _launch_order_cuda_nodes(graph)]
+
+
 def _placement_knob_dicts(graph) -> list[dict]:
     """Placement receipts from the final greedy resolution of ``graph``."""
     return list(graph.hints.get(PLACEMENT_DECISIONS_HINT, []))
@@ -1276,11 +1283,13 @@ async def _bench_golden_variants(
         # ``EMMY_KNOBS`` and varies schedules per row, so a row whose compile dropped that route
         # would otherwise bench the planner's own kernel set under the row's name.
         with pinned_knobs(replay_knobs):
+            names = _cuda_kernel_names(g_compiled)
             flag = unreproducible_pin_flag(
                 replay_knobs,
                 _cuda_knob_dicts(g_compiled),
                 placement_knobs=_placement_knob_dicts(g_compiled),
-            ) or env_pin_refusal(_cuda_knob_dicts(g_compiled), _placement_knob_dicts(g_compiled))
+                kernel_names=names,
+            ) or env_pin_refusal(_cuda_knob_dicts(g_compiled), _placement_knob_dicts(g_compiled), names)
         if flag:
             flags.append(f"{flag} — row NOT benched")
             logger.error(
@@ -1707,7 +1716,7 @@ def _write_ab_json(
         "kernels": _kernel_rows(graph, bench),
     }
     # An env pin gates THIS graph, so an unrealized one misrepresents the greedy row itself.
-    env_miss = env_pin_refusal(_cuda_knob_dicts(graph), _placement_knob_dicts(graph))
+    env_miss = env_pin_refusal(_cuda_knob_dicts(graph), _placement_knob_dicts(graph), _cuda_kernel_names(graph))
     if env_miss:
         greedy["flags"] = [f"{env_miss} — the env pin did not realize, so this row is the planner's own pick"]
         logger.error(
@@ -2818,7 +2827,9 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
         # The recording ran before the exit that reports a rejected answer. Only the ANSWER and the pin
         # are grounds to refuse — the other strict errors are about the FILE (a working inventory holds
         # no pinned row yet), and refusing on those would leave a recording walk recording nothing at all.
-        record_refusal = greedy_record_refusal(_cuda_knob_dicts(graph), accuracy_error if strict_correctness else None)
+        record_refusal = greedy_record_refusal(
+            _cuda_knob_dicts(graph), accuracy_error if strict_correctness else None, _cuda_kernel_names(graph)
+        )
         if record_refusal is not None:
             logger.error("not recording the greedy pick of %s — %s", args.realization, record_refusal)
         else:

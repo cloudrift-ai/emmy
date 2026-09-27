@@ -743,9 +743,13 @@ def test_a_kernel_pin_reaches_only_the_piece_it_names(monkeypatch):
 
 
 def test_a_kernel_pin_is_checked_as_its_family():
-    """A realized row does not name its kernel, so a kernel pin is realized when some kernel realized it."""
+    """A kernel pin is checked against the kernels it names; given no names, against every kernel, as a bare pin."""
     from emmy.compiler.pipeline.search.pins import unreproducible_pin_flag
 
     rows = [{"WORK": "w1x16", "REDUCE": ""}, {"WORK": "t128", "REDUCE": "coop-t"}]
     assert unreproducible_pin_flag({"WORK@place_ab12": "t128"}, rows) is None
     assert unreproducible_pin_flag({"WORK@place_ab12": "w4x1"}, rows) is not None
+    # Named, it is asked of the kernels it reaches alone: the piece that ran w1x16 did not realize t128.
+    names = ["add_7__place_ab12_0__partial", "add_7__place_cd34_0__partial"]
+    assert "WORK@place_ab12=t128" in unreproducible_pin_flag({"WORK@place_ab12": "t128"}, rows, kernel_names=names)
+    assert unreproducible_pin_flag({"WORK@place_cd34": "t128"}, rows, kernel_names=names) is None
