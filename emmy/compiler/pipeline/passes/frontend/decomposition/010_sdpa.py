@@ -7,6 +7,7 @@ via integer-divide indexing: ``K[b, q_head // group_size, s, d]``.
 
 import math
 
+from emmy.compiler.dtype import F32
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.base import ConstantOp
 from emmy.compiler.ir.expr import BinaryExpr, Literal, placeholder
@@ -94,11 +95,15 @@ def rewrite(match: Match, root: Node, inp_q: Node, inp_k: Node, inp_v: Node, inp
         scale_value = op_scale
     else:
         scale_value = 1.0 / math.sqrt(head_dim.as_static()) if head_dim.is_static else None
-    scale_bc = const_bc(frag, name=f"{name}_scale", value=scale_value, target_shape=scores_shape, dtype=dtype)
+    # Scores and their softmax are f32 whatever the operand dtype, and so is the scale: torch applies
+    # it at f32 (the flash kernels' float ``softmax_scale``, the math path's upcast). Stored at f16,
+    # 1/sqrt(128) lost 1e-4 of every logit and moved a sixth of the attention outputs one f16 step
+    # off eager. Only P.V's result takes the output dtype.
+    scale_bc = const_bc(frag, name=f"{name}_scale", value=scale_value, target_shape=scores_shape, dtype=F32)
     scaled_id = frag.add_node(
         op=ElementwiseOp(op="multiply"),
         inputs=[qk, scale_bc],
-        output=Tensor(f"{name}_scaled", scores_shape, dtype),
+        output=Tensor(f"{name}_scaled", scores_shape, F32),
     )
 
     # Explicit additive mask: scores += attn_mask (broadcast to scores_shape).
@@ -109,7 +114,7 @@ def rewrite(match: Match, root: Node, inp_q: Node, inp_k: Node, inp_v: Node, inp
         scaled_id = frag.add_node(
             op=ElementwiseOp(op="add"),
             inputs=[scaled_id, mask_bc],
-            output=Tensor(f"{name}_masked", scores_shape, dtype),
+            output=Tensor(f"{name}_masked", scores_shape, F32),
         )
 
     # Coordinate masks — each a single-predicate IndexMapOp Select (0 keep / -1e9 fill) added to the
@@ -143,7 +148,7 @@ def rewrite(match: Match, root: Node, inp_q: Node, inp_k: Node, inp_v: Node, inp
         scaled_id = frag.add_node(
             op=ElementwiseOp(op="add"),
             inputs=[scaled_id, mask_id],
-            output=Tensor(f"{name}_masked{suffix}", scores_shape, dtype),
+            output=Tensor(f"{name}_masked{suffix}", scores_shape, F32),
         )
 
     ndim_scores = len(scores_shape)
@@ -172,7 +177,7 @@ def rewrite(match: Match, root: Node, inp_q: Node, inp_k: Node, inp_v: Node, inp
     # Softmax @ V (with GQA on V).
     v_last = v_shape[-2:] if len(v_shape) >= 2 else v_shape
     v_eff = _maybe_gqa(frag, inp_v, q_batch, v_batch, v_last, name=f"{name}_v_gqa")
-    sv = matmul_decompose(frag, softmax, v_eff, name=name)
+    sv = matmul_decompose(frag, softmax, v_eff, name=name, dtype=dtype)
 
     frag.outputs = [sv.id]
     return frag
