@@ -152,6 +152,13 @@ def reformed(piece: TileOp) -> TileOp:
         replace(spec, sweep=(*spec.sweep, *(axis for axis in peeled if any(axis.name in index.free_vars() for index in spec.write.index))))
         for spec in formed.output_specs
     )
+    # The loop nest carries no buffer shapes, so a row the minted piece announced (an elided unit
+    # dimension) cannot be proven again from it. Without one, a contraction whose only shared axis is
+    # a split partition would tile that partition as its row, and every row past the first would
+    # read the first partition's B.
+    unit = next((axis for axis in piece.place.free if axis.extent.is_static and axis.extent.as_static() == 1), None)
+    if unit is not None and rowless(formed) and not any(axis.extent.is_static and axis.extent.as_static() == 1 for axis in grid):
+        grid = (unit, *grid)
     place = replace(formed.place, free=grid)
     # The loop op the piece was formed from rides as its ``source``, as a fused kernel's does: the body a
     # kernel row stores and a freeze re-lowers is the one the lift was given.
