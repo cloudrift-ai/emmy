@@ -30,7 +30,12 @@ def test_common_kernel_corpus_is_small_and_identical(project_root) -> None:
         "NVIDIA H200 141GB",
         "NVIDIA B200",
     }
-    replayed = {"NVIDIA A100 80GB": "a100", "NVIDIA A100 40GB": "a100", "NVIDIA H100 80GB": "h100"}
+    replayed = {
+        "NVIDIA A100 80GB": "a100",
+        "NVIDIA A100 40GB": "a100",
+        "NVIDIA H100 80GB": "h100",
+        "NVIDIA GeForce RTX 4090": "rtx4090",
+    }
     recipe_dir = _experiment(project_root, "kernels")
     recipe = load_recipe(recipe_dir)
     tasks = _kernel_tasks(project_root, "common")
