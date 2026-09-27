@@ -62,6 +62,7 @@ setup-ci:
 lint: setup
 	./venv/bin/ruff check
 	./venv/bin/ruff format --check
+	./venv/bin/python -m json.tool --sort-keys --indent 1 tests/durations.json | diff -u tests/durations.json -
 
 .PHONY: test-native lint-native
 test-native:
@@ -76,6 +77,7 @@ lint-native:
 format: setup
 	./venv/bin/ruff format
 	./venv/bin/ruff check --fix
+	./venv/bin/python -m json.tool --sort-keys --indent 1 tests/durations.json tests/durations.json
 
 # Compile CUDA kernels at -Xcicc -O1: the CORRECTNESS lane — -O1 changes runtime perf,
 # not numerics, and the deployable perf tests (tests/perf, -m perf) run at -O3 via
