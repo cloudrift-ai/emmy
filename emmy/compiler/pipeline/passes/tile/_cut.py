@@ -795,14 +795,20 @@ def _workspace_axes(seam: CutSite, produced: Fold) -> tuple:
     return tuple(axis for axis in seam.axes if axis.name in read or _unit(axis))
 
 
-def _workspace_strides(produced: Fold, axes: tuple) -> dict[str, int]:
-    """A coordinate used only as ``i // d`` needs one stored value per group of ``d`` cells.
+def _workspace_strides(produced: Fold, axes: tuple) -> dict[str, tuple[int, int]]:
+    """``{coordinate: (keep, drop)}``: a coordinate whose digit ``(i // keep) % drop`` no term reads
+    needs one stored value per group of ``drop`` cells, at ``(i // (keep·drop))·keep + i % keep``.
 
-    Every occurrence must be the numerator of a positive integer division. Different divisors
-    share their greatest common divisor; a direct read or a remainder keeps the full extent.
-    Read the stored terms, including coordinate predicates, before choosing a representative.
+    ``keep`` is 1 for a coordinate used only as ``i // d`` (GQA's k head beside q's): every
+    occurrence the numerator of a positive integer division, ``drop`` their greatest common divisor.
+    A remainder ``i % keep`` beside those divisions is the low digit of a flat (head, head-dim)
+    channel GQA repeats (v, whose repeat the attention reads through the flat width): the divisors
+    must then be multiples of ``keep`` and the stored width is ``keep`` per ``keep·drop`` cells. A
+    direct read, a second modulus or a predicate keeps the full extent. Read the stored terms,
+    including coordinate predicates, before choosing a representative.
     """
     factors = dict.fromkeys((axis.name for axis in axes), 0)
+    moduli: dict[str, set[int]] = {name: set() for name in factors}
     pending = [produced]
     while pending:
         term = pending.pop()
@@ -822,8 +828,44 @@ def _workspace_strides(produced: Fold, axes: tuple) -> dict[str, int]:
                     chains = {id(part): divisor for part in parts if (divisor := _divisor(part, name)) is not None and divisor > 1}
                     inner = {id(part.left) for part in parts if id(part) in chains}
                     divisors = [divisor for key, divisor in chains.items() if key not in inner]
-                    factors[name] = gcd(factors[name], *divisors) if uses == len(divisors) else 1
-    return {name: factor for name, factor in factors.items() if factor > 1}
+                    remainders = [
+                        int(part.right.value)
+                        for part in parts
+                        if isinstance(part, BinaryExpr)
+                        and part.op == "%"
+                        and part.left == Var(name)
+                        and isinstance(part.right, Literal)
+                        and part.right.dtype == "int"
+                        and part.right.value > 1
+                    ]
+                    covered = uses == len(divisors) + len(remainders)
+                    factors[name] = gcd(factors[name], *divisors) if covered else 1
+                    moduli[name].update(remainders if covered else ())
+    extents = {axis.name: axis.extent for axis in axes}
+    strides: dict[str, tuple[int, int]] = {}
+    for name, factor in factors.items():
+        keep = next(iter(moduli[name])) if len(moduli[name]) == 1 else 1
+        if len(moduli[name]) > 1 or factor % keep or factor // keep < 2:
+            continue
+        drop = factor // keep
+        if keep > 1 and not (extents[name].is_static and extents[name].as_static() % factor == 0):
+            continue
+        strides[name] = (keep, drop)
+    return strides
+
+
+def _stored_at(name: str, keep: int, drop: int) -> Expr:
+    """Where cell ``name`` of a :func:`_workspace_strides` coordinate is stored."""
+    if keep == 1:
+        return Var(name) / drop
+    return Var(name) / (keep * drop) * keep + Var(name) % keep
+
+
+def _cell_of(name: str, keep: int, drop: int) -> Expr:
+    """The cell a producer computes at stored position ``name`` — the inverse of :func:`_stored_at`."""
+    if keep == 1:
+        return Var(name) * drop
+    return Var(name) / keep * (keep * drop) + Var(name) % keep
 
 
 def _divisor(expr, name: str) -> int | None:
@@ -1208,8 +1250,10 @@ def realize(
         for number, (names, produced, dtypes, ordinals) in enumerate(groups):
             axes = _workspace_axes(seam, produced)
             strides = _workspace_strides(produced, axes)
-            axes = tuple(replace(axis, extent=axis.extent.ceil_div(strides[axis.name])) if axis.name in strides else axis for axis in axes)
-            index = tuple(Var(axis.name) / strides[axis.name] if axis.name in strides else Var(axis.name) for axis in axes)
+            axes = tuple(
+                replace(axis, extent=axis.extent.ceil_div(strides[axis.name][1])) if axis.name in strides else axis for axis in axes
+            )
+            index = tuple(_stored_at(axis.name, *strides[axis.name]) if axis.name in strides else Var(axis.name) for axis in axes)
             buffers = tuple(f"{root.id}__place_{token}_{i}" for i in ordinals)
             for name, buffer in zip(names, buffers, strict=True) if front is None else ():
                 held.update({position: buffer for position, own in enumerate(child.exposes) if own == name})
@@ -1295,7 +1339,7 @@ def realize(
         derived: dict[str, str] = {}
         produced = _without_identity_casts(_replace_fold(produced, others, derived) if others else produced, stored)
         if strides:
-            produced = rewrite_stmt(produced, lambda name: name, Sigma({name: Var(name) * stride for name, stride in strides.items()}))
+            produced = rewrite_stmt(produced, lambda name: name, Sigma({name: _cell_of(name, *stride) for name, stride in strides.items()}))
         index = tuple(Var(axis.name) for axis in axes)
         produced_pieces.append((seam, produced, axes, index, token, tuple(derived.get(name, name) for name in names), buffers))
 

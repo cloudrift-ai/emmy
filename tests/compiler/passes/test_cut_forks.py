@@ -1122,6 +1122,46 @@ def test_a_rope_projection_cut_once_computes_the_right_answer() -> None:
     np.testing.assert_allclose(got, rope(q) + rope(k), rtol=2e-2, atol=2e-1)
 
 
+def _flat_gqa_graph() -> Graph:
+    """``v = x @ wv`` over two heads of eight, each repeated for two readers, read back through the flat
+    width (``(head, head-dim)`` fused into one channel of 32): GQA's value path into attention's output."""
+    from emmy.commands.trace import graph_from_code
+
+    code = (
+        "(lambda x, wv, c: (torch.matmul(x, wv).view(1, 2, 8).repeat_interleave(2, 1).reshape(1, 32) * c).sum(-1))"
+        "(torch.randn(1, 64, dtype=torch.float16), torch.randn(64, 16, dtype=torch.float16), torch.randn(1, 32, dtype=torch.float16))"
+    )
+    return graph_from_code(code)[0]
+
+
+def test_a_flat_repeated_head_is_stored_once_per_kv_head() -> None:
+    """The repeated head reaches the reader through the flat width, so the projection's column is
+    ``i % 8 + (i // 16) * 8``: its head digit ``(i // 8) % 2`` is never read. Cut at the projection, the
+    piece stores two heads, reads the weight at its own column, and the reader loads the workspace at
+    ``(i // 16) * 8 + i % 8``."""
+    graph = _flat_gqa_graph()
+    (seam,) = [seam for seam in cuttable_seams(_lifted_parent(graph.copy())) if seam.node.as_contraction() is not None]
+    with pinned_knobs({seam.spelling: "cut"}):
+        lowered = Pipeline.build(LOOP_PASSES).run(graph, ctx=_CTX)
+        cut, _ = Run(pipeline=Pipeline.build(["tile/lift", "tile/cut"]), ctx=_CTX).resolve(lowered, lambda fork: fork.options[0])
+    producer, _consumer = (node for node in cut.nodes.values() if isinstance(node.op, TileOp))
+    assert [d.as_static() for d in producer.outputs[0].shape][-1] == 16, "one stored value per kv head column"
+
+
+@requires_cuda
+def test_a_flat_repeated_head_cut_once_computes_the_right_answer() -> None:
+    graph = _flat_gqa_graph()
+    (seam,) = [seam for seam in cuttable_seams(_lifted_parent(graph.copy())) if seam.node.as_contraction() is not None]
+    cut = _lower_cut(graph, seam.spelling)
+    rng = np.random.default_rng(0)
+    x, wv, c = (rng.standard_normal(shape).astype(np.float16) for shape in ((1, 64), (64, 16), (1, 32)))
+    inputs = dict(zip(cut.inputs, (x, wv, c), strict=True))
+    (out_name,) = cut.outputs
+    got = CudaBackend().run(cut, input_data=inputs)[0].outputs[out_name].astype(np.float32)
+    v = np.repeat((x.astype(np.float32) @ wv.astype(np.float32)).reshape(1, 2, 8), 2, axis=1).reshape(1, 32)
+    np.testing.assert_allclose(got, (v * c.astype(np.float32)).sum(-1), rtol=2e-2, atol=5e-1)
+
+
 def test_a_scalar_operand_is_no_seam() -> None:
     """A value uniform over the kernel — an sdpa scale beside its mask fills — offers no cut. The
     piece would be a kernel writing scalars to a workspace so its reader could read them back, and
