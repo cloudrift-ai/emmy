@@ -217,7 +217,7 @@ def export_model(model, destination, *, context_length=MAX_CONTEXT, eos_ids=(), 
         ["logits", "sampling_histogram", "sampling", "seed", "position", "prompt_length", "next_token"],
         source,
         writes=["next_token"],
-        threads=1,
+        shared=CUDA_THREADS * 4,
     )
     return save_executable(
         destination,
