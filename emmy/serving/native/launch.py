@@ -21,6 +21,7 @@ def options(arguments):
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--revision")
+    parser.add_argument("--runner", default="auto", help="vLLM's runner; the native server generates only")
     parser.add_argument("--max-model-len", type=int, default=DEFAULT_CONTEXT)
     parser.add_argument("--page-tokens", type=int, help="Tokens of KV cache per page (default: one page spanning the context)")
     parser.add_argument("--native-pack", type=Path)
@@ -73,13 +74,15 @@ def command(model, opts, root, executable="emmy-server"):
 
 def launch(args, arguments):
     """Select an existing bundle or prepare one, then replace Python with the native server."""
-    from emmy.commands.serve import _child_env, _serve_and_bench, _vllm_bin, build_bench_cmd
+    from emmy.commands.serve import _child_env, _serve_and_bench, _vllm_bin, build_bench_cmd, serving_runner
     from emmy.compiler.loader.safetensors import split_revision
 
-    if not args.generate or args.stock:
-        raise ValueError("--native requires --generate and is incompatible with --stock")
+    if args.stock:
+        raise ValueError("--native is incompatible with --stock")
     opts = options(arguments)
     model, pinned = split_revision(args.model)
+    if serving_runner(model, arguments) != "generate":
+        raise ValueError("--native serves a generate runner only; pass --runner generate for a checkpoint vLLM would pool")
     if pinned and opts.revision and pinned != opts.revision:
         raise ValueError("conflicting model revisions")
     revision = opts.revision or pinned

@@ -47,7 +47,7 @@ command:
     "
     # The same pack shape served over HTTP: prepare with the same page size and golden, then one
     # chat request and one streamed completion through the Rust server.
-    ./venv/bin/emmy serve $hf_model --generate --native --golden $$golden --strict-evidence \
+    ./venv/bin/emmy serve $hf_model --runner generate --native --golden $$golden --strict-evidence \
       --max-model-len $context_length --page-tokens $page_tokens --host 127.0.0.1 --port $port \
       > $task_dir/serve.log 2>&1 &
     server=$$!

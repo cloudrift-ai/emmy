@@ -264,7 +264,7 @@ requested hardware and the exact checkpoint quantization:
    preserved in the deployed graph; reference-only dequantization does not establish deployment support;
 4. the compiler qualification above has complete architecture coverage and its working golden reconstructs and
    lowers on the target compute capability;
-5. representative kernel correctness succeeds, and `emmy serve --generate` or the applicable embedding path can
+5. representative kernel correctness succeeds, and `emmy serve --runner generate` or the applicable embedding path can
    serve the checkpoint.
 
 Record `eligible` or `ineligible` plus the first failed gate in the final recipe report. An ineligible model may still

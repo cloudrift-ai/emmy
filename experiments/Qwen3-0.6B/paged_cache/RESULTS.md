@@ -14,7 +14,7 @@ emmy generate Qwen/Qwen3-0.6B --export-native pack --context-length 256 --page-t
   --golden golden/v100_sm70.json --strict-evidence          # 32-36 s
 emmy generate Qwen/Qwen3-0.6B --native-pack pack --prompt "The capital of France is" --max-new-tokens 8
   ->  Paris. The capital of Italy is Rome
-emmy serve Qwen/Qwen3-0.6B --generate --native --golden golden/v100_sm70.json --strict-evidence \
+emmy serve Qwen/Qwen3-0.6B --runner generate --native --golden golden/v100_sm70.json --strict-evidence \
   --max-model-len 256 --page-tokens 16 --port 8000
 ```
 

@@ -554,12 +554,12 @@ Both `deploy local` and `deploy ssh` auto-detect the target GPU by scanning PCI 
 
 ### `emmy serve`
 
-`--generate --native` selects the experimental Rust text server. Its launcher prepares or reuses a checkpoint-owned
+`--runner generate --native` selects the experimental Rust text server. Its launcher prepares or reuses a checkpoint-owned
 bundle and executes a prebuilt binary. Native arguments are validated separately; vLLM forwarding remains the default.
 See the [native serving contract](../serving/native/ARCHITECTURE.md) for supported options and preparation controls.
 
 
-Serves an embedding model (or a generative chat model via `EmmyGenModel` with `--generate` — `--runner generate` +
+Serves an embedding model (or a generative chat model via `EmmyGenModel` with `--runner generate`, in
 fp16) through vLLM with the emmy plugin flags baked in (`serving/` plugin; needs the `serving` extra). Unrecognized flags forward to `vllm serve`; tokens after a literal `--` forward verbatim (emmy's
 own flags are otherwise extracted wherever they appear — argparse REMAINDER swallows everything after MODEL, so the
 handler re-parses it; see `commands/serve.py::_split_own_flags`). `--max-model-len 4096` (the dynamic-dim cap) is
@@ -612,7 +612,7 @@ the model; raise it when a fresh-serving-shape compile runs longer, e.g. a new p
 combination on a big model, or the kill lands mid-compile and no pack is saved), then
 `vllm bench serve` runs against it (`--max-concurrency` / `--num-prompts` / `--random-input-len` / `--bench-seed`) and
 the server is torn down. The bench backend follows the model: embeddings hit `--backend openai-embeddings --endpoint
-/v1/embeddings`; **`--generate`** hits `--backend openai --endpoint /v1/completions` with `--random-output-len`.
+/v1/embeddings`; **`--runner generate`** hits `--backend openai --endpoint /v1/completions` with `--random-output-len`.
 
 The vLLM child inherits an environment with this interpreter's bin dir prepended to `PATH` (`serve.py::_child_env`):
 invoking `./venv/bin/emmy` by absolute path does not activate the venv, so the generative server's inductor-compile

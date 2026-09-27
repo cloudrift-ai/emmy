@@ -56,15 +56,11 @@ def _add_own_flags(parser, *, suppress_defaults: bool) -> None:
     def d(value):
         return argparse.SUPPRESS if suppress_defaults else value
 
-    parser.add_argument("--native", action="store_true", default=d(False), help="Use the experimental native text server with --generate.")
     parser.add_argument(
-        "--stock", action="store_true", default=d(False), help="Serve stock vLLM kernels instead of the emmy plugin (A/B baseline)."
+        "--native", action="store_true", default=d(False), help="Use the experimental native text server (a generate runner only)."
     )
     parser.add_argument(
-        "--generate",
-        action="store_true",
-        default=d(False),
-        help="Serve a generative (chat) model via EmmyGenModel (--runner generate, fp16) instead of embeddings.",
+        "--stock", action="store_true", default=d(False), help="Serve stock vLLM kernels instead of the emmy plugin (A/B baseline)."
     )
     parser.add_argument(
         "--bench",
@@ -76,7 +72,7 @@ def _add_own_flags(parser, *, suppress_defaults: bool) -> None:
     parser.add_argument("--num-prompts", type=int, default=d(256), help="Bench request count (with --bench).")
     parser.add_argument("--random-input-len", type=int, default=d(512), help="Bench tokens per request (with --bench).")
     parser.add_argument(
-        "--random-output-len", type=int, default=d(128), help="Bench tokens generated per request (with --bench --generate)."
+        "--random-output-len", type=int, default=d(128), help="Bench tokens generated per request (with --bench on a generate runner)."
     )
     parser.add_argument(
         "--bench-seed", type=int, default=d(0), help="Bench prompt-sampling seed (with --bench; `--seed` itself forwards to vllm serve)."
@@ -341,10 +337,45 @@ def _gen_graph_args(vllm_args: list[str], *, model: str | None = None) -> list[s
     return ["--compilation-config", cfg] + backend_args
 
 
+def serving_runner(model: str, vllm_args: list[str]) -> str:
+    """vLLM's runner for this launch, ``generate`` or ``pooling``, resolved the way vLLM resolves
+    ``--runner auto``: an explicit ``--runner`` wins; a ``--convert`` to a pooling task means
+    pooling; a Sentence Transformers checkpoint (a ``modules.json`` beside the weights) pools even
+    when its architecture is a ``*ForCausalLM``; otherwise the architecture's suffix decides, and
+    an unknown one generates. Only the local cache is consulted, so command construction stays
+    hermetic; a checkpoint that is not cached generates unless ``--runner`` says otherwise."""
+    runner = _flag_value(vllm_args, "--runner", "auto")
+    if runner != "auto":
+        return runner
+    if _flag_value(vllm_args, "--convert", "auto") not in ("auto", "none"):
+        return "pooling"
+    try:
+        from huggingface_hub import try_to_load_from_cache  # noqa: PLC0415
+
+        revision = _flag_value(vllm_args, "--revision", "") or None
+        if os.path.isdir(model):
+            if os.path.exists(os.path.join(model, "modules.json")):
+                return "pooling"
+        elif isinstance(try_to_load_from_cache(model, "modules.json", revision=revision), str):
+            return "pooling"
+    except Exception:  # noqa: BLE001 — no hub cache: the architecture decides
+        pass
+    cfg = _local_config(model, vllm_args)
+    for arch in getattr(cfg, "architectures", None) or []:
+        if arch.endswith(("ForCausalLM", "ForConditionalGeneration", "LMHeadModel")):
+            return "generate"
+        if arch.endswith(("Model", "ForSequenceClassification", "ForTokenClassification", "ForRewardModel", "EmbeddingModel")):
+            return "pooling"
+    return "generate"
+
+
 def build_serve_cmd(model: str, *, stock: bool, vllm_args: list[str], generate: bool = False) -> list[str]:
     from emmy import config as emmy_config  # noqa: PLC0415
 
-    cmd = ["vllm", "serve", model, "--runner", "generate" if generate else "pooling"]
+    # The runner is vLLM's own flag: pass it only when the caller did not.
+    cmd = ["vllm", "serve", model]
+    if not _has_flag(vllm_args, "--runner"):
+        cmd += ["--runner", "generate" if generate else "pooling"]
     if not stock and generate:
         cmd += _gen_graph_args(vllm_args, model=model)
         # A checkpoint whose compressed weights emmy's loader owns end to end must be presented
@@ -502,6 +533,7 @@ def handle_serve(args):
         from emmy.serving.native.launch import launch
 
         return launch(args, vllm_args)
+    generate = serving_runner(split_revision(args.model)[0], vllm_args) == "generate"
     # ``<repo>@<revision>`` is emmy's pin spelling — ``compile``, ``pull``, the gen runner and the
     # twins all read it, and a repo publishing one quantization rung per branch is a DIFFERENT
     # model on each, so the default branch is never a safe stand-in. vLLM takes the two apart, and
@@ -511,7 +543,7 @@ def handle_serve(args):
     model, revision = split_revision(args.model)
     if revision and not _has_flag(vllm_args, "--revision"):
         vllm_args = [*vllm_args, "--revision", revision]
-    serve_cmd = build_serve_cmd(model, stock=args.stock, vllm_args=vllm_args, generate=args.generate)
+    serve_cmd = build_serve_cmd(model, stock=args.stock, vllm_args=vllm_args, generate=generate)
     port = _flag_value(vllm_args, "--port", "8000")
     bench_cmd = build_bench_cmd(
         model,
@@ -520,7 +552,7 @@ def handle_serve(args):
         num_prompts=args.num_prompts,
         random_input_len=args.random_input_len,
         seed=args.bench_seed,
-        generate=args.generate,
+        generate=generate,
         random_output_len=args.random_output_len,
     )
 

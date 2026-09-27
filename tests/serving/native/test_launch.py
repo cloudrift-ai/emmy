@@ -20,7 +20,17 @@ def arguments(*flags):
 
 def test_native_dry_run(caplog):
     args, forwarded = arguments(
-        "--native", "--generate", "--dry-run", "--revision", "pinned", "--golden", "working.json", "--strict-evidence", "--port", "8123"
+        "--native",
+        "--runner",
+        "generate",
+        "--dry-run",
+        "--revision",
+        "pinned",
+        "--golden",
+        "working.json",
+        "--strict-evidence",
+        "--port",
+        "8123",
     )
     with caplog.at_level("INFO"):
         launch(args, forwarded)
@@ -31,7 +41,9 @@ def test_native_dry_run(caplog):
     assert "--port 8123" in caplog.text
 
 
-@pytest.mark.parametrize("flags", [("--stock", "--generate"), (), ("--generate", "--revision", "b")])
+@pytest.mark.parametrize(
+    "flags", [("--stock", "--runner", "generate"), ("--runner", "pooling"), ("--runner", "generate", "--revision", "b")]
+)
 def test_native_rejects_incompatible_modes(flags):
     args, forwarded = arguments("--native", "--dry-run", *flags)
     args.model += "@a"
@@ -59,10 +71,10 @@ def test_native_page_size_divides_the_context(caplog):
     for page in ("0", "48", "129"):
         with pytest.raises(ValueError):
             options(["--max-model-len", "128", "--page-tokens", page])
-    args, forwarded = arguments("--native", "--generate", "--dry-run", "--page-tokens", "16")
+    args, forwarded = arguments("--native", "--runner", "generate", "--dry-run", "--page-tokens", "16")
     with caplog.at_level("INFO"):
         launch(args, forwarded)
     assert "page_tokens=16" in caplog.text
-    args, forwarded = arguments("--native", "--generate", "--dry-run", "--native-pack", "/tmp/prepared", "--page-tokens", "16")
+    args, forwarded = arguments("--native", "--runner", "generate", "--dry-run", "--native-pack", "/tmp/prepared", "--page-tokens", "16")
     with pytest.raises(ValueError):
         launch(args, forwarded)

@@ -124,14 +124,14 @@ Performance and production concurrency are separate qualifications.
 
 ## Native HTTP launcher
 
-`emmy serve MODEL --generate --native` prepares the artifact in a fresh temporary directory and executes a prebuilt
+`emmy serve MODEL --runner generate --native` prepares the artifact in a fresh temporary directory and executes a prebuilt
 `emmy-server`. Preparation uses FP16 checkpoint weights, the requested revision, and the existing golden and strict
 compiler-evidence controls. `--native-pack DIR` reuses an already prepared serving bundle; its recorded model,
 revision, and context must match. Preparation-only evidence flags are rejected when reusing a bundle.
 
 Native options are `--host`, `--port`, `--revision`, `--max-model-len`, `--page-tokens`, and `--native-pack`, plus the
 existing Emmy preparation, dry-run, and benchmark controls. Context defaults to 4,096; the page size defaults to one
-page spanning it and, like the compiler evidence flags, applies to preparation, not to a reused pack. `--native` requires `--generate`, rejects
+page spanning it and, like the compiler evidence flags, applies to preparation, not to a reused pack. `--native` requires `--runner generate`, rejects
 `--stock`, and rejects unsupported engine arguments. vLLM forwarding stays unchanged without `--native`. Dry-run
 prints preparation settings and the native command without downloading, compiling, or starting a process.
 
