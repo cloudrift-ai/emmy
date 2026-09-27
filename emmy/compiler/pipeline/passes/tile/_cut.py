@@ -891,7 +891,11 @@ def _divmod_reads(expr, name: str) -> list[tuple[str, int]]:
     divisions (``(i // a) // b`` reads ``i // (a * b)``), ``("%", m)`` per remainder, ``("", 1)``
     per bare use."""
     parts = tuple(expr.subterms())
-    chains = {id(part): divisor for part in parts if isinstance(part, BinaryExpr) and (divisor := _divisor(part, name)) is not None and divisor > 1}
+    chains = {
+        id(part): divisor
+        for part in parts
+        if isinstance(part, BinaryExpr) and (divisor := _divisor(part, name)) is not None and divisor > 1
+    }
     inner = {id(part.left) for part in parts if id(part) in chains}
     reads = [("/", divisor) for key, divisor in chains.items() if key not in inner]
     reads += [
