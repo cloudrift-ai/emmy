@@ -34,6 +34,7 @@ def register_generate_command(subparsers):
     native = parser.add_mutually_exclusive_group()
     native.add_argument("--export-native", metavar="DIR", help="Prepare a standalone cached Qwen3 artifact and exit")
     native.add_argument("--native-pack", metavar="DIR", help="Generate with a prepared Rust artifact")
+    parser.add_argument("--prefill-size", type=int, default=None, help="Native export chunk width (default: 16; 1 disables chunking)")
     parser.add_argument("--context-length", type=int, default=None, help="Native export context capacity (default: 4096)")
     parser.add_argument("--capture", action="store_true", help="Replay native token steps as a CUDA graph")
     parser.add_argument("--timeout", type=float, help="Native worker operation deadline in seconds (default: 120)")
@@ -102,8 +103,8 @@ def handle_generate(args):
             raise ValueError("timeout must be finite and positive")
     if args.capture and not args.native_pack:
         raise ValueError("capture requires --native-pack")
-    if (args.golden or args.strict_evidence or args.context_length is not None) and not args.export_native:
-        raise ValueError("compiler evidence and context capacity require --export-native")
+    if (args.golden or args.strict_evidence or args.context_length is not None or args.prefill_size is not None) and not args.export_native:
+        raise ValueError("compiler evidence, context capacity, and prefill size require --export-native")
     if args.export_native:
         import torch
         from transformers import AutoModelForCausalLM
@@ -117,7 +118,11 @@ def handle_generate(args):
         eos = [eos] if isinstance(eos, int) else (eos or [])
         with gpu_lock(), config.golden_file_override(args.golden), config.strict_evidence_override(args.strict_evidence):
             export_model(
-                model, args.export_native, context_length=MAX_CONTEXT if args.context_length is None else args.context_length, eos_ids=eos
+                model,
+                args.export_native,
+                context_length=MAX_CONTEXT if args.context_length is None else args.context_length,
+                eos_ids=eos,
+                prefill_size=args.prefill_size,
             )
         logger.info("Prepared native artifact at %s", args.export_native)
         return

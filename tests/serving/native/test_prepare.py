@@ -48,7 +48,14 @@ def test_native_only_arguments_fail_before_loading_a_model():
 
     parser = argparse.ArgumentParser()
     register_generate_command(parser.add_subparsers())
-    for options in (["--capture"], ["--timeout", "60"], ["--context-length", "8"], ["--golden", "unused"], ["--strict-evidence"]):
+    for options in (
+        ["--prefill-size", "16"],
+        ["--capture"],
+        ["--timeout", "60"],
+        ["--context-length", "8"],
+        ["--golden", "unused"],
+        ["--strict-evidence"],
+    ):
         with pytest.raises(ValueError, match="require"):
             handle_generate(parser.parse_args(["generate", "unused", *options]))
 

@@ -72,7 +72,7 @@ from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.schedule import Side, Stage, Tile
 from emmy.compiler.ir.schedule.classic.refusals import chunk_partial_columns
 from emmy.compiler.ir.schedule.packing import block_scaled_atom, packed_readings
-from emmy.compiler.ir.schedule.staging import chunk_key_stage
+from emmy.compiler.ir.schedule.staging import chunk_key_stage, chunk_slab_pad
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import (
     Accum,
@@ -3032,7 +3032,9 @@ class _FlashOps(_MmaOps):
         elem = self.tile.atom.operand_dtype("b")
         load = self.c.operands[1].as_slab().load
         trans = self.c.as_contraction().b_trans
-        swizzle = self.slab_swizzles(mn, elem.nbytes)[1]
+        # The Volta blocking copy pads its rows instead: its drain reads no swizzled slab.
+        pad = chunk_slab_pad(self.tile, self.stage.choice)
+        swizzle = "NONE" if pad else self.slab_swizzles(mn, elem.nbytes)[1]
         (value,) = _slab_operands(
             index_srcs=(None, load.index),
             bufs=(None, load.input),
@@ -3043,6 +3045,7 @@ class _FlashOps(_MmaOps):
             swizzles=("NONE", swizzle),
             elems=(None, elem),
             b_trans=trans,
+            pads=(0, pad),
             roles=(1,),
         )
         key = None
@@ -3057,17 +3060,23 @@ class _FlashOps(_MmaOps):
                 k_axis=self.k_axis,
                 bk_elems=bk,
                 base=(Literal(0, "int"), _tile_base(mn)[1]),
-                swizzles=(self.slab_swizzle(span, elem.nbytes), "NONE"),
+                swizzles=("NONE" if pad else self.slab_swizzle(span, elem.nbytes), "NONE"),
                 elems=(elem, None),
                 rows=(False, trans),
+                pads=(pad, 0),
                 roles=(0,),
             )
         cta = _cta(mn, self.tile.atom.lanes, self.tile.launch_threads)
 
         def group(operands: tuple, tag: str = ""):
-            common = dict(operands=operands, slab_dtype=cuda_name(elem), elem_bytes=elem.nbytes, cta=cta)
+            common = dict(slab_dtype=cuda_name(elem), elem_bytes=elem.nbytes, cta=cta)
+            if self.stage.transport == "smem":
+                # Volta: the same slabs, filled by the blocking vector copy the CTA barrier closes.
+                return SyncTransport(operands=(), copy_operands=operands, copy_sync=True, **common)
             # A TMA group parity-waits its own barrier, so two groups in one loop take two names.
-            return TmaTransport(mbar=f"_mbar{tag}", **common) if self.stage.transport == "smem-tma" else CpAsyncTransport(**common)
+            if self.stage.transport == "smem-tma":
+                return TmaTransport(operands=operands, mbar=f"_mbar{tag}", **common)
+            return CpAsyncTransport(operands=operands, **common)
 
         # Two groups buy their kill-point refills only at a SINGLE slot: a deeper ring prefetches
         # both operands at the top of the body whatever the grouping, and a second group there
