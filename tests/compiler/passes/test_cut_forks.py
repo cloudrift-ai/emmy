@@ -1062,55 +1062,64 @@ def test_a_twin_cut_once_serves_its_lone_channel_reader() -> None:
 
 
 def _rope_graph() -> Graph:
-    """``q = x @ w`` over two heads of eight, then RoPE: ``q * cos + rotate_half(q) * sin``. Lifting folds
-    the plain projection and its two half-shifted copies into one three-channel twin."""
+    """RoPE over ``q = x @ wq`` (four heads of eight) and ``k = x @ wk`` (two heads, each read by two):
+    ``t * cos + rotate_half(t) * sin`` for each. Lifting folds both projections and their half-shifted
+    copies into one six-channel twin."""
     from emmy.commands.trace import graph_from_code
 
     code = (
-        "(lambda x, w, c, s: (lambda q: q * c + torch.cat((-q[..., 4:], q[..., :4]), -1) * s)(torch.matmul(x, w).view(1, 2, 8)))"
-        "(torch.randn(1, 64, dtype=torch.float16), torch.randn(64, 16, dtype=torch.float16),"
+        "(lambda x, wq, wk, c, s: (lambda q, k: q * c + torch.cat((-q[..., 4:], q[..., :4]), -1) * s"
+        " + k * c + torch.cat((-k[..., 4:], k[..., :4]), -1) * s)"
+        "(torch.matmul(x, wq).view(1, 4, 8), torch.matmul(x, wk).view(1, 2, 8).repeat_interleave(2, 1)))"
+        "(torch.randn(1, 64, dtype=torch.float16), torch.randn(64, 32, dtype=torch.float16), torch.randn(64, 16, dtype=torch.float16),"
         " torch.randn(1, 1, 8, dtype=torch.float16), torch.randn(1, 1, 8, dtype=torch.float16))"
     )
     return graph_from_code(code)[0]
 
 
-def test_a_twin_channel_read_at_shifted_columns_reads_the_plain_channels_workspace() -> None:
-    """RoPE's rotate-half copies are channels of the projection twin, each reading the weight again. Cut
-    at the projection, the piece computes the plain channel once and the reader loads its workspace
-    at the three columns."""
+def _rope_seam() -> CutSite:
     (seam,) = [seam for seam in cuttable_seams(_lifted_parent(_rope_graph())) if seam.node.as_contraction() is not None]
-    assert len(seam.node.exposes) == 3
+    return seam
+
+
+def test_a_twin_channel_read_at_shifted_columns_reads_the_plain_channels_workspace() -> None:
+    """RoPE's rotate-half copies are channels of the projection twin, each reading its weight again, and
+    the repeated k head reads its weight once per q head. Cut at the projection, each weight is read
+    once: the q piece stores four heads, the k piece two, and the reader loads each workspace at the
+    three columns a copy reads."""
+    seam = _rope_seam()
+    assert len(seam.node.exposes) == 6
     with pinned_knobs({seam.spelling: "cut"}):
         lowered = Pipeline.build(LOOP_PASSES).run(_rope_graph(), ctx=_CTX)
         cut, _ = Run(pipeline=Pipeline.build(["tile/lift", "tile/cut"]), ctx=_CTX).resolve(lowered, lambda fork: fork.options[0])
-    producer, consumer = (node for node in cut.nodes.values() if isinstance(node.op, TileOp))
 
     def loads(node) -> list[tuple[str, str]]:
         body = node.op.op.lower(frozenset(), node.op.output_specs, node.op.axes)
         return [(stmt.input, stmt.index[-1].pretty()) for stmt in body.iter() if isinstance(stmt, Load)]
 
-    (workspace,) = producer.buffer_names()
-    assert [name for name, _ in loads(producer)].count("x1") == 1, "the piece reads the weight once"
-    assert len({column for name, column in loads(consumer) if name == workspace}) == 3, "the reader loads it at three columns"
+    *producers, consumer = (node for node in cut.nodes.values() if isinstance(node.op, TileOp))
+    assert sorted(tuple(d.as_static() for d in node.outputs[0].shape) for node in producers) == [(2, 8), (4, 8)], "k keeps its two heads"
+    assert sorted(name for node in producers for name, _ in loads(node) if name in ("x1", "x2")) == ["x1", "x2"], "each weight is read once"
+    for node in producers:
+        assert len({column for name, column in loads(consumer) if name == node.id}) == 3, "the reader loads a workspace at three columns"
 
 
 @requires_cuda
 def test_a_rope_projection_cut_once_computes_the_right_answer() -> None:
-    graph = _rope_graph()
-    (seam,) = [seam for seam in cuttable_seams(_lifted_parent(graph.copy())) if seam.node.as_contraction() is not None]
-    cut = _lower_cut(graph, seam.spelling)
+    cut = _lower_cut(_rope_graph(), _rope_seam().spelling)
     rng = np.random.default_rng(0)
-    x = rng.standard_normal((1, 64)).astype(np.float16)
-    w = rng.standard_normal((64, 16)).astype(np.float16)
-    c = rng.standard_normal((1, 1, 8)).astype(np.float16)
-    s = rng.standard_normal((1, 1, 8)).astype(np.float16)
-    inputs = dict(zip(cut.inputs, (x, w, c, s), strict=True))
+    x, wq, wk = (rng.standard_normal(shape).astype(np.float16) for shape in ((1, 64), (64, 32), (64, 16)))
+    c, s = (rng.standard_normal((1, 1, 8)).astype(np.float16) for _ in range(2))
+    inputs = dict(zip(cut.inputs, (x, wq, wk, c, s), strict=True))
     (out_name,) = cut.outputs
     got = CudaBackend().run(cut, input_data=inputs)[0].outputs[out_name].astype(np.float32)
-    q = (x.astype(np.float32) @ w.astype(np.float32)).reshape(1, 2, 8)
-    rotated = np.concatenate((-q[..., 4:], q[..., :4]), -1)
-    expected = q * c.astype(np.float32) + rotated * s.astype(np.float32)
-    np.testing.assert_allclose(got, expected, rtol=2e-2, atol=2e-1)
+
+    def rope(t):
+        return t * c.astype(np.float32) + np.concatenate((-t[..., 4:], t[..., :4]), -1) * s.astype(np.float32)
+
+    q = (x.astype(np.float32) @ wq.astype(np.float32)).reshape(1, 4, 8)
+    k = np.repeat((x.astype(np.float32) @ wk.astype(np.float32)).reshape(1, 2, 8), 2, axis=1)
+    np.testing.assert_allclose(got, rope(q) + rope(k), rtol=2e-2, atol=2e-1)
 
 
 def test_a_scalar_operand_is_no_seam() -> None:

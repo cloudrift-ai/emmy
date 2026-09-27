@@ -650,6 +650,13 @@ def _channel_copies(seam: CutSite, axes: tuple) -> dict[int, tuple[int, dict[str
     return copies
 
 
+def _channels(node: Fold, names: tuple[str, ...]) -> Fold:
+    """``node`` computing only the components ``names``, every operand it no longer reads dropped."""
+    from emmy.compiler.ir.tile.normalize import _prune_unread  # noqa: PLC0415
+
+    return _prune_unread(node.exposing(names), frozenset(names))
+
+
 def _unchanged(pieces: tuple, members) -> bool:
     return len(pieces) == len(members) and all(piece is member for piece, member in zip(pieces, members, strict=True))
 
@@ -811,18 +818,23 @@ def _workspace_strides(produced: Fold, axes: tuple) -> dict[str, int]:
                 for expr in stmt.exprs():
                     parts = tuple(expr.subterms())
                     uses = sum(isinstance(part, Var) and part.name == name for part in parts)
-                    divisors = [
-                        int(part.right.value)
-                        for part in parts
-                        if isinstance(part, BinaryExpr)
-                        and part.op in ("/", "//")
-                        and part.left == Var(name)
-                        and isinstance(part.right, Literal)
-                        and part.right.dtype == "int"
-                        and part.right.value > 0
-                    ]
+                    # ``(i // a) // b`` is ``i // (a * b)``: a head index GQA divides again.
+                    chains = {id(part): divisor for part in parts if (divisor := _divisor(part, name)) is not None and divisor > 1}
+                    inner = {id(part.left) for part in parts if id(part) in chains}
+                    divisors = [divisor for key, divisor in chains.items() if key not in inner]
                     factors[name] = gcd(factors[name], *divisors) if uses == len(divisors) else 1
     return {name: factor for name, factor in factors.items() if factor > 1}
+
+
+def _divisor(expr, name: str) -> int | None:
+    """What ``expr`` divides the bare coordinate ``name`` by through positive integer divisions, or ``None``."""
+    if expr == Var(name):
+        return 1
+    if not (isinstance(expr, BinaryExpr) and expr.op in ("/", "//") and isinstance(expr.right, Literal)):
+        return None
+    if expr.right.dtype != "int" or expr.right.value <= 0 or (inner := _divisor(expr.left, name)) is None:
+        return None
+    return inner * int(expr.right.value)
 
 
 class _FoldingSigma(Sigma):
@@ -1163,36 +1175,52 @@ def realize(
         owner = {name: position for position, name in reversed(list(enumerate(child.exposes))) if name in shared}
         slots = tuple(owner.get(name) == position for position, name in enumerate(child.exposes))
         wanted = tuple(name for position, name in enumerate(child.exposes) if slots[position])
-        if front is not None:
-            names = (front.name,)
-            produced = front.producer
-            dtypes = seam.dtypes
-        else:
-            names = wanted
-            produced = child
-            dtypes = tuple(dtype for dtype, keep in zip(seam.dtypes, slots, strict=True) if keep)
-        axes = _workspace_axes(seam, produced)
-        strides = _workspace_strides(produced, axes)
-        axes = tuple(replace(axis, extent=axis.extent.ceil_div(strides[axis.name])) if axis.name in strides else axis for axis in axes)
-        index = tuple(Var(axis.name) / strides[axis.name] if axis.name in strides else Var(axis.name) for axis in axes)
         token = digest(tile.identity_key(structural=False) or "", seam.spelling)[:10]
-        # The ordinal names the component the workspace holds, so a narrowed seam keeps the
-        # spelling of the components it did keep.
-        ordinals = range(len(names)) if front is not None else (i for i, keep in enumerate(slots) if keep)
-        buffers = tuple(f"{root.id}__place_{token}_{i}" for i in ordinals)
+        # One piece per stride: a channel that reads a coordinate only as ``i // d`` where another reads
+        # it plainly (GQA's k beside q) is computed and stored once per group of ``d`` cells by its own
+        # piece, instead of ``d`` times beside the other channel. Channels over different axes stay
+        # one piece: they share the reads a twin folds them over. The ordinal names the component a
+        # workspace holds, so a narrowed seam keeps the spelling of the components it did keep.
+        if front is not None:
+            groups = [((front.name,), front.producer, seam.dtypes, (0,))]
+        else:
+            kept = tuple(position for position in range(len(child.exposes)) if slots[position])
+            by_shape: dict[tuple, list[int]] = {}
+            for position in kept:
+                alone = _channels(child, (child.exposes[position],)) if len(kept) > 1 else child
+                axes = _workspace_axes(seam, alone)
+                by_shape.setdefault((axes, frozenset(_workspace_strides(alone, axes).items())), []).append(position)
+            if len({axes for axes, _ in by_shape}) > 1:
+                by_shape = {None: list(kept)}
+            groups = []
+            for positions in by_shape.values():
+                names = tuple(child.exposes[position] for position in positions)
+                produced = child if len(by_shape) == 1 else _channels(child, names)
+                groups.append((names, produced, tuple(seam.dtypes[position] for position in positions), tuple(positions)))
+        held: dict[int, str] = {}
+        indexes: dict[int, tuple] = {}
+        for number, (names, produced, dtypes, ordinals) in enumerate(groups):
+            axes = _workspace_axes(seam, produced)
+            strides = _workspace_strides(produced, axes)
+            axes = tuple(replace(axis, extent=axis.extent.ceil_div(strides[axis.name])) if axis.name in strides else axis for axis in axes)
+            index = tuple(Var(axis.name) / strides[axis.name] if axis.name in strides else Var(axis.name) for axis in axes)
+            buffers = tuple(f"{root.id}__place_{token}_{i}" for i in ordinals)
+            for name, buffer in zip(names, buffers, strict=True) if front is None else ():
+                held.update({position: buffer for position, own in enumerate(child.exposes) if own == name})
+                indexes.update({position: index for position, own in enumerate(child.exposes) if own == name})
+            pieces.append((replace(seam, dtypes=dtypes), produced, axes, strides, token if number == 0 else f"{token}_{number}", names, buffers))
 
         # SLABS, not bare Loads: these replace an operand edge, and an operand is a term. The
         # workspace read declares the seam axes it indexes, exactly as any other gmem read does.
         # Positional over what the edge exposed, ``None`` where the reader took nothing. A
         # frontier's workspace is the one raw waypoint, which the block below spells instead.
-        by_name = dict(zip(wanted, buffers, strict=True))
-        held = {} if front is not None else {position: by_name[name] for position, name in enumerate(child.exposes) if name in by_name}
-        # Where each component is read back: its own buffer, or the buffer of the channel it copies at
-        # the address the copy computes.
-        held.update({position: held[rep] for position, (rep, _) in copies.items() if rep in held})
-        at = {position: tuple(expr.substitute(mapping) for expr in index) for position, (_, mapping) in copies.items()}
+        # A channel that copies another is read from that channel's buffer at the address it computes.
+        for position, (rep, mapping) in copies.items():
+            if rep in held:
+                held[position] = held[rep]
+                indexes[position] = tuple(expr.substitute(mapping) for expr in indexes[rep])
         loads: tuple = tuple(
-            Fold.slab(Load(name=_read_name(name, token), input=held[position], index=at.get(position, index))) if position in held else None
+            Fold.slab(Load(name=_read_name(name, token), input=held[position], index=indexes[position])) if position in held else None
             for position, name in enumerate(child.exposes)
         )
         if front is not None:
@@ -1209,7 +1237,7 @@ def realize(
         # The names the consumer reads this workspace back under. A frontier seam's workspace holds
         # the raw storage waypoint, so its piece is named after the FRONTIER while the consumer
         # still exposes the cone's decoded results — the rename is over those.
-        read_names.update({name: _read_name(name, token) for name in (names if front is None else child.lift.results)})
+        read_names.update({name: _read_name(name, token) for name in (wanted if front is None else child.lift.results)})
         read_names.update({child.exposes[position]: _read_name(child.exposes[position], token) for position in copies})
         replacements = {id(child): loads}
         for ordinal, (sibling, pairs, channels) in enumerate(seam.siblings):
@@ -1219,13 +1247,13 @@ def realize(
             # reads the component that is its value: a lone contraction reads one channel of the
             # twin it equals.
             mapping = dict(pairs)
-            mapping.update({axis.name: Literal(0, "int") for axis in axes if _unit(axis) and axis.name not in mapping})
+            mapping.update({axis.name: Literal(0, "int") for axis in seam.axes if _unit(axis) and axis.name not in mapping})
             replacements[id(sibling)] = tuple(
                 Fold.slab(
                     Load(
                         name=_read_name(own, token, ordinal),
                         input=held[channel],
-                        index=tuple(expr.substitute(mapping) for expr in at.get(channel, index)),
+                        index=tuple(expr.substitute(mapping) for expr in indexes[channel]),
                     )
                 )
                 if channel in held
@@ -1237,7 +1265,7 @@ def realize(
             for name, channel in zip(sibling.exposes, channels, strict=True):
                 if channel in held:
                     read_names.setdefault(name, _read_name(name, token, ordinal))
-        pieces.append((replace(seam, dtypes=dtypes), produced, axes, strides, token, names, buffers, replacements))
+        pieces[len(pieces) - len(groups) :] = [(*piece, replacements) for piece in pieces[len(pieces) - len(groups) :]]
 
     # Every replacement applies to the consumer AND to every OTHER seam's produced piece: a
     # composed decision may cut a cone nested inside another seam's value (attention's statistics
