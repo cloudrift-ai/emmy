@@ -165,6 +165,9 @@ OPTIONAL_KEYS = {
     "SERVE_V2_MODEL_RUNNER",
     "SERVE_STATIC_ONLY",
     "SERVE_CONSULT_BASELINE",
+    "SERVE_ENV",
+    "SERVE_BASE_IMAGE",
+    "SERVE_RUNTIME_VERSION",
 }
 
 
@@ -359,6 +362,64 @@ def test_serve_sh_renders_the_quantized_moe_invocation(tmp_path):
     assert argv[-2:] == ["--kv-cache-dtype", "fp8_e4m3"], "SERVE_EXTRA_ARGS must word-split into flags"
 
 
+def sourced_config(path: Path) -> dict[str, str]:
+    """The config as warm.sh and verify.sh see it: bash-sourced, quotes stripped."""
+    result = subprocess.run(
+        ["bash", "-c", f'set -a; source "{path}"; env -0'], capture_output=True, text=True, env={"PATH": os.environ["PATH"]}
+    )
+    assert result.returncode == 0, result.stderr
+    return {k: v for k, _, v in (item.partition("=") for item in result.stdout.split("\0") if item) if k.startswith("SERVE_")}
+
+
+def test_serve_sh_renders_the_deepseek_v4_parallel_eager_invocation(tmp_path):
+    """DeepSeek V4 on 16 V100s: the vLLM arguments every strict boot of its golden ran (boot51's
+    non-default args), rendered from the pinned config. The pinned `--enforce-eager` drops the capture
+    config, as a caller's does in emmy serve: the hyper-connection MoE host-syncs every decode step."""
+    config = sourced_config(SERVE_DIR / "models" / "deepseek-v4-flash-0731.env")
+    argv = render_serve_sh(tmp_path, config)
+    assert "--compilation-config" not in argv
+    assert argv == [
+        "-m",
+        "vllm.entrypoints.openai.api_server",
+        "--model",
+        "deepseek-ai/DeepSeek-V4-Flash-0731",
+        "--revision",
+        "7872f01b1d1fe23eabc4c98b48bffcef5a386062",
+        "--runner",
+        "generate",
+        "--dtype",
+        "float16",
+        "--max-model-len",
+        "4096",
+        "--max-num-batched-tokens",
+        "4112",
+        "--gpu-memory-utilization",
+        "0.90",
+        "--no-enable-prefix-caching",
+        "--hf-overrides",
+        '{"architectures": ["EmmyGenModel"]}',
+        *"--tensor-parallel-size 8 --pipeline-parallel-size 2 --distributed-executor-backend mp".split(),
+        *"--kv-cache-dtype fp8 --block-size 256 --tokenizer-mode deepseek_v4 --enforce-eager".split(),
+    ]
+
+
+def test_serve_sh_exports_the_pinned_server_env(tmp_path):
+    """SERVE_ENV reaches the server process, so the warm and the baked image run the fork's switches and
+    strict evidence alike; an unset SERVE_ENV exports nothing."""
+    stub_dir = tmp_path / "env-stub"
+    stub_dir.mkdir()
+    stub = stub_dir / "python3"
+    stub.write_text('#!/bin/sh\nprintf "%s|%s\\n" "${VLLM_SM70_QUANT_BACKEND:-UNSET}" "${EMMY_STRICT_EVIDENCE:-UNSET}"\n')
+    stub.chmod(0o755)
+    base = {"SERVE_MODEL": "org/model", "SERVE_MAX_MODEL_LEN": "128", "SERVE_MAX_NUM_BATCHED_TOKENS": "64", "SERVE_GPU_MEM_UTIL": "0.9"}
+    for extra, want in (({"SERVE_ENV": "VLLM_SM70_QUANT_BACKEND=turbomind EMMY_STRICT_EVIDENCE=1"}, "turbomind|1"), ({}, "UNSET|UNSET")):
+        result = subprocess.run(
+            ["sh", str(SERVE_SCRIPT)], capture_output=True, text=True, env={**base, **extra, "PATH": f"{stub_dir}:{os.environ['PATH']}"}
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == want
+
+
 def test_warm_shape_env_keeps_runner_memory_lane_and_prefill_override_wins():
     env = {
         "SERVE_DECODE_BUCKET": "32",
@@ -439,6 +500,19 @@ def test_runner_memory_config_is_warm_bake_verify_cache_parity():
         assert f"ARG {build_arg}=" in dockerfile and f'{emmy}="${{{build_arg}}}"' in dockerfile
         assert f"--build-arg {build_arg}=$({serve})" in make
         assert serve in verify and emmy in verify
+
+
+def test_server_env_is_warm_bake_verify_parity():
+    """SERVE_ENV is what the warmed and the released servers run under: the warm passes it, the bake bakes
+    it and verify refuses an image baked from another value."""
+    make = (PROJECT_ROOT / "Makefile").read_text()
+    warm = (SERVE_DIR / "warm.sh").read_text()
+    dockerfile = (SERVE_DIR / "Dockerfile").read_text()
+    verify = (SERVE_DIR / "verify.sh").read_text()
+    assert warm.count("-e SERVE_ENV") == 2, "the initial boot and every fixpoint pass"
+    assert "ARG RUNTIME_ENV=" in dockerfile and 'SERVE_ENV="${RUNTIME_ENV}"' in dockerfile
+    assert "--build-arg 'RUNTIME_ENV=$(SERVE_ENV_VALUE)'" in make
+    assert 'check_baked SERVE_ENV "${SERVE_ENV:-}"' in verify
 
 
 def test_release_bakes_and_verifies_the_request_time_triton_cache():

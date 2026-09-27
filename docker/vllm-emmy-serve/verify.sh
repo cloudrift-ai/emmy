@@ -56,6 +56,17 @@ check_baked EMMY_GEN_PREFILL_CAPACITY "${SERVE_PREFILL_CAPACITY:-}"
 check_baked EMMY_GEN_PREFILL_BUCKET "${SERVE_PREFILL_BUCKET:-}"
 check_baked EMMY_GEN_M1_TIER "${SERVE_M1_TIER:-}"
 check_baked SERVE_V2_MODEL_RUNNER "${SERVE_V2_MODEL_RUNNER:-}"
+check_baked SERVE_ENV "${SERVE_ENV:-}"
+
+# A parallel boot runs one worker per card and each loads the pack of its pipeline stage, so every
+# worker must log a hit: one that fell back recompiles its layers on every customer boot while the
+# others' hits pass a single-line grep.
+flag_value() {  # $1 = flag -> its value in SERVE_EXTRA_ARGS, or $2 when absent
+    # shellcheck disable=SC2086 — SERVE_EXTRA_ARGS is a deliberately word-split flag list
+    printf '%s\n' ${SERVE_EXTRA_ARGS:-} | awk -v flag="$1" -v none="$2" 'take { print; found = 1; exit } $0 == flag { take = 1 } END { if (!found) print none }'
+}
+WORKERS=$(( $(flag_value --tensor-parallel-size 1) * $(flag_value --pipeline-parallel-size 1) ))
+pack_hits() { docker logs "$NAME" 2>&1 | grep -c "pack hit" || true; }
 
 PORT="${PORT:-8000}"
 GPUS="all"; [ -n "${GPU_DEVICE:-}" ] && GPUS="device=$GPU_DEVICE"
@@ -104,8 +115,8 @@ after=$(docker exec "$NAME" sh -c "find /opt/emmy/cubin -name '*.cubin' | sort")
 # handler under the bare vLLM entrypoint precisely so it reaches docker logs here.
 pack_baked=$(docker exec "$NAME" sh -c "find /opt/emmy/pack -name manifest.json 2>/dev/null | head -1")
 # grep without -q: under pipefail, -q's early exit can SIGPIPE docker logs on a hit.
-if [ -n "$pack_baked" ] && ! docker logs "$NAME" 2>&1 | grep "pack hit" >/dev/null; then
-    echo "[verify] FAIL — a pack is baked but the boot did not hit it (fell back to full compile):"
+if [ -n "$pack_baked" ] && [ "$(pack_hits)" -lt "$WORKERS" ]; then
+    echo "[verify] FAIL — a pack is baked but $(pack_hits) of $WORKERS worker(s) hit it (the rest fell back to full compile):"
     docker logs "$NAME" 2>&1 | grep -i "\[pack\]" | tail -5 || true
     exit 1
 fi
@@ -115,7 +126,7 @@ if [ "$before" != "$after" ]; then
     diff <(echo "$before") <(echo "$after") || true
     exit 1
 fi
-echo "[verify] PASS — served offline with zero new cubins or request-time Triton JIT ($(echo "$before" | wc -l) prebuilt)${pack_baked:+, pack-hit boot}"
+echo "[verify] PASS — served offline with zero new cubins or request-time Triton JIT ($(echo "$before" | wc -l) prebuilt)${pack_baked:+, pack hit on all $WORKERS worker(s)}"
 
 # ---- the extra shapes ------------------------------------------------------------------
 # Each shape warm.sh baked a pack for must ALSO hit it, for the same reason the pinned shape
@@ -152,8 +163,8 @@ for spec in ${SERVE_WARM_SHAPES:-}; do
         exit 1
     fi
     shape_after=$(docker exec "$NAME" sh -c "find /opt/emmy/cubin -name '*.cubin' | sort")
-    if ! docker logs "$NAME" 2>&1 | grep "pack hit" >/dev/null; then
-        echo "[verify] FAIL — shape $spec baked a pack but its boot did not hit it:"
+    if [ "$(pack_hits)" -lt "$WORKERS" ]; then
+        echo "[verify] FAIL — shape $spec baked a pack but $(pack_hits) of $WORKERS worker(s) hit it:"
         docker logs "$NAME" 2>&1 | grep -i "\[pack\]" | tail -5 || true
         exit 1
     fi

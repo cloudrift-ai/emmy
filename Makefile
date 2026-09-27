@@ -191,6 +191,16 @@ SERVE_GPU_NAME := $(subst ",,$(SERVE_GPU))
 # them): the cudagraph capture ladder and any further pinned vLLM flags.
 SERVE_CAPTURE_SIZES_VALUE := $(subst ",,$(SERVE_CAPTURE_SIZES))
 SERVE_EXTRA_ARGS_VALUE := $(subst ",,$(SERVE_EXTRA_ARGS))
+SERVE_ENV_VALUE := $(subst ",,$(SERVE_ENV))
+# A model served on a runtime other than stock vLLM (DeepSeek V4 on the 1Cat Volta fork) names that
+# runtime's image by digest and its version in the config. The plain image then builds FROM it under a
+# model-scoped tag, not the stock `vllm-emmy:<vllm version>` it is not, and the serving tag carries the
+# runtime's version.
+ifneq ($(SERVE_BASE_IMAGE),)
+VLLM_BASE_IMAGE := $(SERVE_BASE_IMAGE)
+VLLM_VERSION := v$(SERVE_RUNTIME_VERSION)
+VLLM_EMMY_TAG := cloudriftai/vllm-emmy-$(MODEL_SLUG)-base:$(SERVE_RUNTIME_VERSION)-$(shell git rev-parse --short HEAD)
+endif
 
 # What a `make serve-* MODEL=<id>` would act on. The release workflow prints this first, so
 # the model / card / tag under test are on the record before any multi-hour step starts.
@@ -199,7 +209,7 @@ serve-config: serve-config-guard
 	@echo "slug       = $(MODEL_SLUG)"
 	@echo "config     = $(SERVE_CONFIG)"
 	@echo "image tag  = $(SERVE_TAG)"
-	@echo "base image = $(VLLM_EMMY_TAG)"
+	@echo "base image = $(VLLM_EMMY_TAG) (FROM $(VLLM_BASE_IMAGE))"
 	@echo "target GPU = $(SERVE_GPU_NAME)"
 	@echo "goldens    = $(SERVE_GOLDEN_FILE)"
 	@echo "revision   = $(if $(SERVE_REVISION),$(SERVE_REVISION),unpinned - the repo default branch)"
@@ -209,6 +219,7 @@ serve-config: serve-config-guard
 	@echo "runner mem = embed-host $(if $(SERVE_EMBED_HOST),$(SERVE_EMBED_HOST),default), prefill capacity $(if $(SERVE_PREFILL_CAPACITY),$(SERVE_PREFILL_CAPACITY),default), prefill bucket $(if $(SERVE_PREFILL_BUCKET),$(SERVE_PREFILL_BUCKET),default), M1 tier $(if $(SERVE_M1_TIER),$(SERVE_M1_TIER),default)"
 	@echo "golden gate= $(if $(filter 1,$(SERVE_STATIC_ONLY)),static-only M=1,standard widths + symbolic)"
 	@echo "extra args = $(SERVE_EXTRA_ARGS_VALUE)"
+	@echo "server env = $(SERVE_ENV_VALUE)"
 
 serve-models:
 	@echo "Models with a pinned release config ($(SERVE_DIR)/models/):"
@@ -261,6 +272,9 @@ serve-image: git-sha-guard serve-config-guard
 		--build-arg QUANT=$(SERVE_QUANT) \
 		--build-arg 'CAPTURE_SIZES=$(SERVE_CAPTURE_SIZES_VALUE)' \
 		--build-arg 'EXTRA_ARGS=$(SERVE_EXTRA_ARGS_VALUE)' \
+		--build-arg 'RUNTIME_ENV=$(SERVE_ENV_VALUE)' \
+		--build-arg RUNTIME_BASE=$(VLLM_BASE_IMAGE) \
+		--build-arg NVCC_VERSION="$$(docker run --rm --entrypoint nvcc $(VLLM_EMMY_TAG) --version | sed -n 's/.*release \([0-9.]*\).*/\1/p')" \
 		--build-arg EMBED_HOST=$(SERVE_EMBED_HOST) \
 		--build-arg PREFILL_CAPACITY=$(SERVE_PREFILL_CAPACITY) \
 		--build-arg PREFILL_BUCKET=$(SERVE_PREFILL_BUCKET) \

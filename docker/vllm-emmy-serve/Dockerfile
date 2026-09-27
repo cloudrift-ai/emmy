@@ -34,13 +34,34 @@ ENV HF_HOME=/opt/emmy/hf \
 # Weights + tokenizer + config (the HF snapshot — per-tensor identical, but resharded by
 # reshard_snapshot.py when it shipped a >10 GB consolidated file; LICENSE/NOTICE included,
 # so the Apache 2.0 attribution ships with it), then the warmed sm_120/sm_120a cubins.
-# The snapshot ships as four layers that merge into /opt/emmy/hf: Docker Hub 503s the
-# monolithic ~24 GB blob at upload initiation, so split_hf.sh (run by the Makefile
-# before this build) balances it into sub-10 GB parts.
+# The snapshot ships as 24 layers that merge into /opt/emmy/hf: Docker Hub 503s a blob
+# past ~10 GB at upload initiation, so split_hf.sh (run by the Makefile before this build)
+# balances it into sub-10 GB parts — enough for DeepSeek V4 Flash's 156 GB; a smaller
+# model leaves most of them empty.
 COPY warm/hf_parts/p0 /opt/emmy/hf
 COPY warm/hf_parts/p1 /opt/emmy/hf
 COPY warm/hf_parts/p2 /opt/emmy/hf
 COPY warm/hf_parts/p3 /opt/emmy/hf
+COPY warm/hf_parts/p4 /opt/emmy/hf
+COPY warm/hf_parts/p5 /opt/emmy/hf
+COPY warm/hf_parts/p6 /opt/emmy/hf
+COPY warm/hf_parts/p7 /opt/emmy/hf
+COPY warm/hf_parts/p8 /opt/emmy/hf
+COPY warm/hf_parts/p9 /opt/emmy/hf
+COPY warm/hf_parts/p10 /opt/emmy/hf
+COPY warm/hf_parts/p11 /opt/emmy/hf
+COPY warm/hf_parts/p12 /opt/emmy/hf
+COPY warm/hf_parts/p13 /opt/emmy/hf
+COPY warm/hf_parts/p14 /opt/emmy/hf
+COPY warm/hf_parts/p15 /opt/emmy/hf
+COPY warm/hf_parts/p16 /opt/emmy/hf
+COPY warm/hf_parts/p17 /opt/emmy/hf
+COPY warm/hf_parts/p18 /opt/emmy/hf
+COPY warm/hf_parts/p19 /opt/emmy/hf
+COPY warm/hf_parts/p20 /opt/emmy/hf
+COPY warm/hf_parts/p21 /opt/emmy/hf
+COPY warm/hf_parts/p22 /opt/emmy/hf
+COPY warm/hf_parts/p23 /opt/emmy/hf
 COPY warm/cubin /opt/emmy/cubin
 COPY warm/triton /opt/emmy/triton
 # The execution-plan pack (compiler/backend/pack.py) — written by the warm run's first
@@ -76,6 +97,7 @@ ARG PREFILL_CAPACITY=
 ARG PREFILL_BUCKET=
 ARG M1_TIER=
 ARG V2_MODEL_RUNNER=
+ARG RUNTIME_ENV=
 ENV SERVE_REVISION="${REVISION}" \
     SERVE_QUANT="${QUANT}" \
     SERVE_CAPTURE_SIZES="${CAPTURE_SIZES}" \
@@ -84,9 +106,17 @@ ENV SERVE_REVISION="${REVISION}" \
     EMMY_GEN_PREFILL_CAPACITY="${PREFILL_CAPACITY}" \
     EMMY_GEN_PREFILL_BUCKET="${PREFILL_BUCKET}" \
     EMMY_GEN_M1_TIER="${M1_TIER}" \
-    SERVE_V2_MODEL_RUNNER="${V2_MODEL_RUNNER}"
+    SERVE_V2_MODEL_RUNNER="${V2_MODEL_RUNNER}" \
+    SERVE_ENV="${RUNTIME_ENV}"
 
+# The runtime the plain image was built FROM (a digest for a fork) and the toolkit that compiled
+# the baked cubins, beside the CUDA version the runtime's base declares.
+ARG RUNTIME_BASE=
+ARG NVCC_VERSION=
 LABEL ai.emmy.publish.family="${PUBLISH_FAMILY}" \
+      ai.emmy.runtime.base="${RUNTIME_BASE}" \
+      ai.emmy.runtime.cuda="${CUDA_VERSION}" \
+      ai.emmy.runtime.nvcc="${NVCC_VERSION}" \
       ai.emmy.model.id="${MODEL}" \
       ai.emmy.model.revision="${REVISION}" \
       ai.emmy.target.gpu="${TARGET_GPU}" \

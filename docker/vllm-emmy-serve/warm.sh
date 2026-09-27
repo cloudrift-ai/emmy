@@ -139,7 +139,7 @@ docker run -d --name "$NAME" --gpus "$GPUS" --ipc=host -p "$PORT":8000 \
     -e TRITON_CACHE_DIR=/opt/emmy/triton \
     $initial_env \
     -e SERVE_MODEL -e SERVE_MAX_MODEL_LEN -e SERVE_GPU_MEM_UTIL \
-    -e SERVE_REVISION -e SERVE_QUANT -e SERVE_CAPTURE_SIZES -e SERVE_EXTRA_ARGS \
+    -e SERVE_REVISION -e SERVE_QUANT -e SERVE_CAPTURE_SIZES -e SERVE_EXTRA_ARGS -e SERVE_ENV \
     -v "$PWD/warm":/opt/emmy \
     -v "$PWD/serve.sh":/opt/emmy/serve.sh:ro \
     --entrypoint /opt/emmy/serve.sh \
@@ -190,7 +190,7 @@ fixpoint() {  # $1 = label, $2 = shape spec ("" = the pinned shape)
             -e TRITON_CACHE_DIR=/opt/emmy/triton \
             $extra \
             -e SERVE_MODEL -e SERVE_MAX_MODEL_LEN -e SERVE_GPU_MEM_UTIL \
-            -e SERVE_REVISION -e SERVE_QUANT -e SERVE_CAPTURE_SIZES -e SERVE_EXTRA_ARGS \
+            -e SERVE_REVISION -e SERVE_QUANT -e SERVE_CAPTURE_SIZES -e SERVE_EXTRA_ARGS -e SERVE_ENV \
             -v "$PWD/warm":/opt/emmy \
             -v "$PWD/serve.sh":/opt/emmy/serve.sh:ro \
             --entrypoint /opt/emmy/serve.sh \
