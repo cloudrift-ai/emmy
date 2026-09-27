@@ -248,8 +248,9 @@ emmy serve Qwen/Qwen3-Embedding-0.6B --bench --random-input-len 32 --stock
 
 Dense FP16 Qwen3 can be prepared as a standalone artifact and run through the Rust cached-generation loop. This
 single-request path and experimental native HTTP adapter support greedy or seeded temperature/top-p sampling and
-optional CUDA graphs. Residuals and
-attention/rotary intermediates use FP32. It uses sequential prefill; vLLM remains the serving default. See the [native generation contract](emmy/serving/native/ARCHITECTURE.md)
+optional CUDA graphs. Residuals and attention/rotary intermediates use FP32. Prefill uses fixed-width chunks;
+vLLM remains the serving default.
+See the [native generation contract](emmy/serving/native/ARCHITECTURE.md)
 for preparation, commands, limitations, and qualification.
 
 ```bash
@@ -391,8 +392,8 @@ emmy vm delete cloudrift --instance-id <id>
 
 ```bash
 make test      # run the whole pytest suite — takes many minutes, run it once when finishing a PR
-make lint      # ruff check + format check
-make format    # auto-fix
+make lint      # check code and test-duration formatting
+make format    # auto-fix code and sort test durations
 make wheel     # build the sdist and this host's wheel into dist/
 make pypi-dist # dry-run the exact PyPI sdist + wheel build into dist/
 ```

@@ -210,6 +210,22 @@ def test_a_row_whose_every_site_is_re_spelled_still_gets_a_verdict() -> None:
     assert reason is not None and "re-spelling" in reason and "@missing" in reason, reason
 
 
+def test_a_split_row_the_replay_cannot_take_decodes_red() -> None:
+    """A split row names no seam, so it used to decode whatever the replay did with it. Four atomic
+    split rows (two DeepSeek V4, one each Qwen3.8 AWQ and GPTQ) stayed green after #914 stored their
+    kernels' outputs at f16: the kernels took new identities and refuse the atomic arm, and no deploy
+    could take the rows. A spelling of an arm the kernel does not offer is the same miss."""
+    from dataclasses import replace
+
+    records = _records_of(_RECORDS_DIR / "rtx5090_sm120.json")
+    record = next(r for r in records if r.name == "attention.hd128.gqa.decode.split")
+    assert _decode(record, records) is None
+    (key, value), *_ = record.knobs.items()
+    atomic = replace(record, knobs={key: value.replace("k", "a")})  # a twisted carrier has no atomic arm
+    reason = _decode(atomic, records)
+    assert reason is not None and "taken at no fork" in reason and key in reason, reason
+
+
 def test_a_sibling_sharing_the_target_identity_cannot_silence_the_lead_cut() -> None:
     """A receipt decodes behind its lead's cut. The replay finds the entry that decides a fork by
     the fork root's identity, so a plain receipt stamped with its lead's identity — what the #804

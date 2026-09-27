@@ -82,8 +82,9 @@ def decode_record(record: GoldenRecord, siblings: Sequence[GoldenRecord] = ()) -
     lead = next((entry for entry in (record, *siblings) if own is not None and entry.identity == own), None)
     replay = _replay(record, siblings=siblings, lead=lead, exhaustive=True, wanted=row)
     if record.is_routing:
-        reason = f"routing key {replay.unresolved[0]!r} does not resolve to an offered cut seam" if replay.unresolved else None
-        return reason
+        if replay.unresolved:
+            return f"routing key {replay.unresolved[0]!r} does not resolve to an offered cut seam"
+        return _untaken_split(record, replay.arms)
 
     def verdict(replay: _Replay) -> str | None:
         candidates = replay.rows
@@ -105,6 +106,20 @@ def decode_record(record: GoldenRecord, siblings: Sequence[GoldenRecord] = ()) -
         # A miss: replay again walking every fork, so the reason names what the kernels offer.
         reason = verdict(_replay(record, siblings=siblings, lead=lead, exhaustive=True, wanted=row, explain=True))
     return reason
+
+
+def _untaken_split(record: GoldenRecord, arms) -> str | None:
+    """Why a routing row's cross-CTA split is not a decision of the replay, or ``None`` when it is.
+    A split names no seam, so the cut check above cannot fail it: without this, a split row whose
+    kernel is no longer minted, or whose kernel no longer offers that arm (a direct atomic split of
+    an output now stored at 16 bits), decodes while no deploy can ever take it. A bare ``REDUCE`` key
+    spells the split at whichever site the fork offers it, as :func:`spelled_arm` reads it."""
+    taken = {(str(key), str(value)) for _, knobs in arms for key, value in knobs.items()}
+    taken |= {("REDUCE", value) for key, value in taken if family_of(key) == "REDUCE"}
+    for key, value in record.knobs.items():
+        if family_of(str(key)) == "REDUCE" and (str(key), str(value)) not in taken:
+            return f"split {key}={value} is taken at no fork of the replay — its kernel is not minted, or does not offer it"
+    return None
 
 
 class _Replay(NamedTuple):
