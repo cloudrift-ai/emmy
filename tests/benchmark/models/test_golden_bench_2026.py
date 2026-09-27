@@ -22,6 +22,7 @@ def _kernel_tasks(project_root: str, study: str):
 def test_common_kernel_corpus_is_small_and_identical(project_root) -> None:
     platforms = {
         "NVIDIA Tesla V100 SXM3 32GB",
+        "NVIDIA Tesla V100 SXM2 16GB",
         "NVIDIA A100 80GB",
         "NVIDIA A100 40GB",
         "NVIDIA H100 80GB",
@@ -30,7 +31,12 @@ def test_common_kernel_corpus_is_small_and_identical(project_root) -> None:
         "NVIDIA H200 141GB",
         "NVIDIA B200",
     }
-    replayed = {"NVIDIA A100 80GB": "a100", "NVIDIA A100 40GB": "a100", "NVIDIA H100 80GB": "h100"}
+    replayed = {
+        "NVIDIA A100 80GB": "a100",
+        "NVIDIA A100 40GB": "a100",
+        "NVIDIA H100 80GB": "h100",
+        "NVIDIA Tesla V100 SXM2 16GB": "v100",
+    }
     recipe_dir = _experiment(project_root, "kernels")
     recipe = load_recipe(recipe_dir)
     tasks = _kernel_tasks(project_root, "common")
@@ -400,4 +406,4 @@ def test_every_command_variant_renders(project_root) -> None:
             assert "/task" in command
             subprocess.run(["bash", "-n"], input=command, text=True, check=True)
             rendered += 1
-    assert rendered == 69
+    assert rendered == 71
