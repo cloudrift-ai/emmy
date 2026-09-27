@@ -1,0 +1,120 @@
+# Golden-bench kernels: match or beat torch.compile on five cards (2026-09-27)
+
+Supersedes the Qwen3-0.6B layer next-steps plan. The corpus is `experiments/golden-bench-2026/kernels`: Qwen3-0.6B
+layer 0 at sequence lengths 1 and 512. Since #897 the layer lowers to one fused kernel deployed through a cut route,
+so "every kernel" means every (card, shape) cell of that layer, timed end to end.
+
+## Goal and exit criterion
+
+For each of the ten cells — V100, A100, H100, RTX 4090, RTX 5090, each at s1 and s512 — Emmy's end-to-end time is at
+or below `torch.compile`'s, measured in the same process, with the committed golden replayed UNPINNED from a fresh tune
+DB at `-O3`, `EMMY_FAST_MATH=0`, and the replay passing `--strict` against eager. A cell counts only when all three
+hold. The plan is done when the lane (`emmy bench` on the recipe) confirms all ten, run once at the end.
+
+## Scoreboard (µs, end to end)
+
+| card | s512 Emmy | s512 torch.compile | gap | s1 Emmy | s1 torch.compile | gap |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| H100 | 141.5 (#933) | 80 | 1.77× | 88 | 32 | 2.75× |
+| A100 40GB | 323 | 193 | 1.67× | 82 (#930) | 52 | 1.58× |
+| V100 SXM2 | 855 (#932) | 636 | 1.34× | no golden | — | — |
+| RTX 4090 | no golden | — | — | no golden | — | — |
+| RTX 5090 | no golden | — | — | no golden | — | — |
+
+Numbers marked with a PR are from its draft branch, not main. The 4090 and 5090 have had no golden since the old
+nine-target set was retired; their last numbers belong to kernels that no longer exist.
+
+## What bounds each shape
+
+- **s512 is compute bound, and the GEMMs are most of it.** The six projections are about 16 GFLOP. H100 after #933:
+  65.8 µs of GEMM pieces against a whole-layer `torch.compile` of 80; the A100's 186 µs of GEMMs run at about a
+  quarter of the card; the V100's largest GEMM piece sits at 15% occupancy, stalled on global loads. Attention is
+  second (A100 42 µs, H100 22, V100 89 after #932). Norms, RoPE, residuals and the cooperative reduce are a tail of
+  small pieces, each a few µs.
+- **s1 is bandwidth and launch bound.** The layer reads about 31 MB of weights: about 9 µs on the H100 and 21 on the
+  A100 at full bandwidth. The route has about twenty pieces; at 1-2 µs of launch and tail per piece, the piece count
+  alone costs more than the weight read. `torch.compile` gets 32 / 52 µs with fewer, bandwidth-saturating kernels.
+
+## Phases
+
+### 0. Land the open work and set the baseline
+
+1. Merge in order: #931 (split-row decode check), #930 (split pricing, one weight read for q/k), #932 (Volta
+   attention staging), then #933 (H100 wgmma rows) rebased on #930.
+2. #930 changes piece identities, so every committed corpus golden goes stale. Re-record all five on the merged
+   compiler with `--record-greedy --strict` (#932's hand-written timings get replaced by a real record here). Re-record
+   the ten Qwen3.8 AWQ/GPTQ V100 rows #930 leaves red.
+3. Create the missing goldens: V100 s1, RTX 4090 s1/s512, RTX 5090 s1/s512. Trace, sweep `WORK` and splits into a
+   fresh tune DB, record, and add the rows to the recipe.
+4. Fill the scoreboard with same-process eager and `torch.compile`, and a per-piece table per cell from the recorded
+   rows. Also record `torch.compile`'s own kernel list and per-kernel time (profiler) for each cell — that is the
+   per-piece bar.
+
+Exit: every cell has a committed golden, a strict-clean replay, and a measured gap.
+
+### 1. Correctness gate at s512
+
+Model-level `--strict` fails on main at s512 on 28-40 of 524,288 outputs, one f16 step off. The exit criterion needs
+it green. Find the piece that rounds differently from eager (a workspace stored at f16 where eager keeps f32, or the
+reverse) and fix the rounding, not the tolerance.
+
+### 2. s512 GEMM pieces — the largest lever on every card
+
+Bar: per piece, the same GEMM through `torch.mm` (cuBLAS) at the piece's shape and layout. A piece is done at ≤1.1× of
+it.
+
+- **H100.** wgmma rows landed in #933 (`w4x1`, n64, `d4/smem-async`). Open: TMA staging was refused on one piece;
+  5 stages and a producer warp group are illegal on these pieces. Find why and make them legal, then sweep. Also make
+  an illegal pin fail loudly instead of falling to a 366 µs prior pick.
+- **A100, RTX 4090, RTX 5090.** `mma.sync` with cp.async. Profile the slowest piece with `ncu` (sudo) before sweeping:
+  earlier A100 work found deeper rings and wider warp tiles lose, so the gap may be in the cp.async lowering, not the
+  schedule space. The 5090 has TMA; try it there.
+- **V100.** Latency bound at 15% occupancy. Sweep tile and pipeline (`d2` with the blocking vector copy that #932 made
+  legal for attention), watching registers.
+- **Short grids.** The corpus linears have short grids at s512 (a wider N tile halved them on the H100). Evaluate
+  split-K or stream-K for the pieces whose grid is under one wave; #930's pricing now lets a measured split win.
+
+### 3. s512 attention
+
+Bar: `torch.compile`'s attention kernel time from phase 0. H100 (22 µs): the wgmma attention stage of the Hopper plan
+(Q staged once, P in registers). A100 (42 µs): the known cp.async / per-chunk softmax gap; profile first. V100
+(89 µs): deeper staging (depth 2) is refused today. 4090/5090: measure first.
+
+### 4. s512 small-piece tail
+
+Count pieces per cell and compare with `torch.compile`'s kernel count. Fusion stays maximal; the lever is the route:
+prefer cut routes that keep norms, RoPE and residuals as prologues or epilogues of the GEMM pieces. Where the route
+exists but loses on evidence, the fix is the prologue/epilogue lowering, not a fusion gate. Also check the
+cooperative reduce piece (6.4 µs on the H100).
+
+### 5. s1 — bandwidth and piece count
+
+Bar: weight bytes / DRAM bandwidth per card, and `torch.compile`'s time.
+
+1. **Every GEMV at ≥80% of DRAM bandwidth.** Per piece: bytes read / time. Splits are now priced (#930); re-sweep
+   split factors per card.
+2. **Fewer pieces.** At s1 the norm, RoPE and residual work is tiny; routes that keep it inside the GEMV pieces win on
+   launch count. Compare the route's piece count with `torch.compile`'s.
+3. **The first-launch zero-init memset** (about 4 µs per replay on the H100) that the compiler cannot move into an
+   earlier kernel because it is in the program's first launch. Find a place for it or drop the need (a split that
+   writes its partials without a zeroed accumulator).
+4. **Graph replay floor.** Measure an empty route's replay per card, so the gap that is left is attributable.
+
+### 6. Close out
+
+Re-record every golden on the final compiler, replay each cell unpinned under `--strict`, then run the lane once per
+card and write the RESULTS.md section.
+
+## Parallel work
+
+One agent per card owns its host and its cells; compiler fixes land as separate PRs from whichever agent finds them,
+and the others rebase. Every agent works in its own worktree and writes nothing to the main checkout. Cards: H100 and
+A100 on GCP, V100 SXM2 and RTX 4090 on CloudRift. The RTX 5090 needs a rented card: the dev box's 5090 is shared.
+
+## Measurement rules
+
+- Unpinned replay of the committed golden, fresh `EMMY_TUNE_DB`, eager and `torch.compile` in the same process.
+- `nvidia-smi` for foreign processes before every measurement; long warmup on the V100.
+- Quick single-target runs while tuning; the lane only once, at the end.
+- After any Loop IR change, piece rows go stale: expect a per-piece re-record on each card.
+- A slower golden row after a compiler change is a finding, never something to re-record green.
