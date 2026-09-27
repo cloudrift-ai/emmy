@@ -623,6 +623,33 @@ def _read_at(rn: str, mn: str, rep: CutSite, member: CutSite, rep_reads: dict, m
     return read if min(values) >= 0 and max(values) < extent.as_static() else None
 
 
+def _channel_copies(seam: CutSite, axes: tuple) -> dict[int, tuple[int, dict[str, Expr]]]:
+    """The components of ONE seam that are another component read at other coordinates, as
+    ``{position: (position read, {axis: address})}``. Lifting folds every contraction over one input
+    into one twin, so RoPE's rotate-half copies of a projection become channels beside the plain one,
+    and each channel reads the weight again. Compared one component at a time, a copy is the plain
+    channel's value at the address its index expression computes (:func:`_read_at`), so the workspace
+    stores the plain channel and the copy reads it there."""
+    node = seam.node
+    if len(node.exposes) < 2 or node.twist is not None or node.observe is not None or seam.frontier is not None or seam.owned is not None:
+        return {}  # a twisted or observed state is one whole: its components depend on each other
+    scoped = tuple(axis.name for axis in seam.axes if axis.name in seam.node.free_axes)
+    forms = [_value_forms(replace(seam, node=seam.node.exposing((name,))), axes) for name in seam.node.exposes]
+    # Within one value the channel reading the fewest coordinates through an expression holds it.
+    reps = {}
+    for position, ((form,), reads) in sorted(enumerate(forms), key=lambda item: len(item[1][1])):
+        reps.setdefault(form, position)
+    copies: dict[int, tuple[int, dict[str, Expr]]] = {}
+    for position, ((form,), reads) in enumerate(forms):
+        rep = reps[form]
+        if rep == position or seam.dtypes[rep] != seam.dtypes[position]:
+            continue
+        mapping = {name: _read_at(name, name, seam, seam, forms[rep][1], reads) for name in scoped}
+        if all(read is not None for read in mapping.values()):
+            copies[position] = (rep, mapping)
+    return copies
+
+
 def _unchanged(pieces: tuple, members) -> bool:
     return len(pieces) == len(members) and all(piece is member for piece, member in zip(pieces, members, strict=True))
 
@@ -1124,6 +1151,9 @@ def realize(
         for sibling, _, channels in seam.siblings:
             read = taken.get(id(sibling), set(sibling.exposes))
             shared.update(child.exposes[channel] for position, channel in enumerate(channels) if sibling.exposes[position] in read)
+        # A channel that is another channel read elsewhere stores nothing of its own: it reads that one.
+        copies = _channel_copies(seam, tile.axes) if front is None else {}
+        shared = {child.exposes[copies.get(position, (position,))[0]] for position, name in enumerate(child.exposes) if name in shared}
         # ONE workspace per DISTINCT component, not one per position. A carrier seats a component
         # once per reader, so a value two readers share is exposed at SEVERAL positions naming the
         # one accumulator (flash's numerator, read straight and again through its normalizing
@@ -1157,8 +1187,12 @@ def realize(
         # frontier's workspace is the one raw waypoint, which the block below spells instead.
         by_name = dict(zip(wanted, buffers, strict=True))
         held = {} if front is not None else {position: by_name[name] for position, name in enumerate(child.exposes) if name in by_name}
+        # Where each component is read back: its own buffer, or the buffer of the channel it copies at
+        # the address the copy computes.
+        held.update({position: held[rep] for position, (rep, _) in copies.items() if rep in held})
+        at = {position: tuple(expr.substitute(mapping) for expr in index) for position, (_, mapping) in copies.items()}
         loads: tuple = tuple(
-            Fold.slab(Load(name=_read_name(name, token), input=held[position], index=index)) if position in held else None
+            Fold.slab(Load(name=_read_name(name, token), input=held[position], index=at.get(position, index))) if position in held else None
             for position, name in enumerate(child.exposes)
         )
         if front is not None:
@@ -1176,6 +1210,7 @@ def realize(
         # the raw storage waypoint, so its piece is named after the FRONTIER while the consumer
         # still exposes the cone's decoded results — the rename is over those.
         read_names.update({name: _read_name(name, token) for name in (names if front is None else child.lift.results)})
+        read_names.update({child.exposes[position]: _read_name(child.exposes[position], token) for position in copies})
         replacements = {id(child): loads}
         for ordinal, (sibling, pairs, channels) in enumerate(seam.siblings):
             # A clustered duplicate reads the SAME workspace, spelled through its own captured
@@ -1185,9 +1220,16 @@ def realize(
             # twin it equals.
             mapping = dict(pairs)
             mapping.update({axis.name: Literal(0, "int") for axis in axes if _unit(axis) and axis.name not in mapping})
-            sibling_index = tuple(expr.substitute(mapping) for expr in index)
             replacements[id(sibling)] = tuple(
-                Fold.slab(Load(name=_read_name(own, token, ordinal), input=held[channel], index=sibling_index)) if channel in held else None
+                Fold.slab(
+                    Load(
+                        name=_read_name(own, token, ordinal),
+                        input=held[channel],
+                        index=tuple(expr.substitute(mapping) for expr in at.get(channel, index)),
+                    )
+                )
+                if channel in held
+                else None
                 for own, channel in zip(sibling.exposes, channels, strict=True)
             )
             # The representative wins a shared name: a boundary store of a value both occurrences
