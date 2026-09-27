@@ -474,7 +474,7 @@ def test_gpu_sampling_matches_independent_nucleus_distribution():
         ("histogram",),
     )
     sample_args = ("logits", "histogram", "params", "seed", "position", "length", "output")
-    sample_launch = LaunchSpec("output", "native_sample", sample_args, one, one, 0, ())
+    sample_launch = LaunchSpec("output", "native_sample", sample_args, one, ((128,), (1,), (1,)), 128 * 4, ())
     kernels = {name: KernelSpec(source=source) for name in ("native_histogram", "native_sample")}
 
     def program(launches, histogram_role):
@@ -533,3 +533,68 @@ def test_gpu_sampling_matches_independent_nucleus_distribution():
                 both.upload_prefix({"logits": values, "params": np.array([temperature, 1.0], np.float64)})
                 both.run_once()
                 assert int(both.outputs()["output"][0]) == -1
+
+
+@pytest.mark.parametrize("vocab", [1, 31, 128, 129, 151936])
+def test_gpu_greedy_exact_reduction(vocab):
+    from emmy.compiler.backend.cuda.program import CompiledProgram
+    from emmy.compiler.backend.plan import BufferSpec, ExecutionPlan, KernelSpec, LaunchSpec
+    from emmy.compiler.dim import Dim
+    from emmy.compiler.dtype import F16, F64, I64, U32, U64
+    from emmy.serving.native.kernels import SOURCE
+
+    source = (
+        f"#define HIDDEN 32\n#define HEADS 4\n#define KV_HEADS 2\n#define HEAD_DIM 8\n#define VOCAB {vocab}\n#define SCALE 1.0f\n" + SOURCE
+    )
+    buffers = [
+        BufferSpec(name, (Dim(size),), dtype, "input")
+        for name, size, dtype in (
+            ("logits", vocab, F16),
+            ("histogram", 1, U32),
+            ("params", 2, F64),
+            ("seed", 1, U64),
+            ("position", 1, I64),
+            ("length", 1, I64),
+        )
+    ]
+    args = tuple(b.name for b in buffers) + ("output",)
+    launch = LaunchSpec("output", "native_sample", args, ((1,), (1,), (1,)), ((128,), (1,), (1,)), 512, ())
+    plan = ExecutionPlan(
+        "cuda",
+        list(args[:-1]),
+        ["output"],
+        [*buffers, BufferSpec("output", (Dim(1),), I64, "output")],
+        {},
+        {},
+        [launch],
+        {"native_sample": KernelSpec(source=source)},
+    )
+    feed = {b.name: np.zeros(b.resolve_shape({}), b.dtype.np) for b in buffers}
+    rng = np.random.default_rng(42)
+    cases = [rng.normal(size=vocab).astype(np.float16), np.full(vocab, -65504, np.float16)]
+    cases.append(np.resize(np.array([-0.0, 0.0], np.float16), vocab))
+    for index in sorted({min(i, vocab - 1) for i in (0, 31, 32, 127, 128, 511, 512, vocab - 1)}):
+        values = np.full(vocab, -1, np.float16)
+        values[index] = 65504
+        cases.append(values.copy())
+        values[-1] = 65504  # Cross-thread and cross-iteration ties retain the lower token ID.
+        cases.append(values)
+    for invalid in (np.nan, np.inf, -np.inf):
+        for index in (0, vocab - 1):
+            values = np.zeros(vocab, np.float16)
+            values[index] = invalid
+            cases.append(values)
+    with gpu_lock():
+        program = CompiledProgram.build_from_plan(plan, feed)
+        program.capture_program_graph()
+        for values in cases:
+            expected = int(values.argmax()) if np.isfinite(values).all() else -1
+            program.upload_prefix({"logits": values, "length": np.array([1], np.int64)})
+            program.run_once()
+            assert int(program.outputs()["output"][0]) == expected
+            program.replay_program_graph()
+            assert int(program.outputs()["output"][0]) == expected
+            # Intermediate prefill must not replace the previous selection, even for invalid logits.
+            program.upload_prefix({"logits": np.full(vocab, np.nan, np.float16), "length": np.array([2], np.int64)})
+            program.replay_program_graph()
+            assert int(program.outputs()["output"][0]) == expected

@@ -51,15 +51,31 @@ extern "C" __global__ void native_attention(const half* q, const half* k, const 
     }
 }
 __device__ void native_greedy(const half* logits, long long* next) {
-    {
-        float peak = -INFINITY; long long best = 0;
-        for (int i = 0; i < VOCAB; ++i) {
-            float value = __half2float(logits[i]);
-            if (!isfinite(value)) { *next = -1; return; }
-            if (value > peak) { peak = value; best = i; }
-        }
-        *next = best;
+    // One power-of-two block; all threads participate, including when VOCAB is smaller.
+    extern __shared__ int best[];
+    int lane = threadIdx.x, token = -1;
+    float peak = -INFINITY;
+    bool invalid = false;
+    for (int i = lane; i < VOCAB; i += blockDim.x) {
+        float value = __half2float(logits[i]);
+        invalid |= !isfinite(value);
+        if (value > peak) { peak = value; token = i; }
     }
+    if (__syncthreads_or(invalid)) { if (lane == 0) *next = -1; return; }
+    best[lane] = token;
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride; stride /= 2) {
+        if (lane < stride) {
+            int other = best[lane + stride];
+            float value = other < 0 ? -INFINITY : __half2float(logits[other]);
+            if (value > peak || (value == peak && other >= 0 && other < token)) {
+                peak = value; token = other;
+            }
+            best[lane] = token;
+        }
+        __syncthreads();
+    }
+    if (lane == 0) *next = token;
 }
 
 // Every finite FP16 logit has an exact ordered bin. Signed zeros share a bin.
@@ -84,6 +100,7 @@ extern "C" __global__ void native_sample(const half* logits, const unsigned int*
     const long long* length, long long* next) {
     if (*position + 1 < *length) return;
     if (sampling[0] == 0.0) { native_greedy(logits, next); return; }
+    if (threadIdx.x != 0) return;
     if (histogram[0]) { *next = -1; return; }
     int peak = SAMPLING_BINS - 1;
     while (peak > 0 && !histogram[peak]) --peak;
