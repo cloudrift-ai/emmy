@@ -8,7 +8,7 @@ use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 use std::path::Path;
 
-const GENERATION_FORMAT: u32 = 2;
+const GENERATION_FORMAT: u32 = 3;
 const DEFAULT_TEMPERATURE: f64 = 0.0;
 const DEFAULT_TOP_P: f64 = 1.0;
 const DEFAULT_SEED: u64 = 0;
@@ -55,6 +55,7 @@ pub struct Config {
     pub version: u32,
     pub context_length: usize,
     pub vocab_size: usize,
+    pub prefill_size: usize,
     pub eos_ids: Vec<i64>,
 }
 
@@ -67,6 +68,10 @@ impl Config {
         ensure!(
             (1..=MAX_CONTEXT).contains(&self.context_length),
             "unsupported context length"
+        );
+        ensure!(
+            (1..=self.context_length).contains(&self.prefill_size),
+            "invalid prefill size"
         );
         ensure!(
             self.vocab_size > 0 && self.vocab_size <= i64::MAX as usize,
@@ -97,6 +102,8 @@ impl Config {
 }
 
 pub struct Generator {
+    // The borrower drops before the decode executor that owns the shared allocations.
+    prefill: Option<Executor>,
     executor: Executor,
     config: Config,
     position: usize,
@@ -140,8 +147,62 @@ impl Generator {
             artifact.program.outputs == ["logits", "next_token"],
             "invalid generation outputs"
         );
+        let prefill_artifact = if config.prefill_size > 1 {
+            Some(Artifact::load(root, "prefill")?)
+        } else {
+            None
+        };
+        let mut shared = Vec::new();
+        if let Some(prefill) = &prefill_artifact {
+            ensure!(
+                prefill.program.inputs == ["prompt", "prompt_length", "position"]
+                    && prefill.program.outputs.is_empty(),
+                "invalid prefill interface"
+            );
+            for buffer in &prefill.program.buffers {
+                if buffer.role == "scratch"
+                    || (buffer.role == "output"
+                        && !artifact
+                            .program
+                            .buffer(&buffer.name)
+                            .is_ok_and(|b| b.role == "output"))
+                {
+                    continue;
+                }
+                if buffer.role == "constant"
+                    && artifact.bindings.get(&buffer.name) != prefill.bindings.get(&buffer.name)
+                {
+                    continue;
+                }
+                let original = artifact
+                    .program
+                    .buffer(&buffer.name)
+                    .context("missing shared prefill buffer")?;
+                ensure!(
+                    buffer.dtype == original.dtype
+                        && buffer.role == original.role
+                        && buffer.static_shape() == original.static_shape(),
+                    "invalid shared prefill buffer {}",
+                    buffer.name
+                );
+                shared.push(buffer.name.clone());
+            }
+        }
+        let executor = Executor::load(device, artifact)?;
+        let prefill = if let Some(artifact) = prefill_artifact {
+            let mut prefill = Executor::load(device, artifact)?;
+            for name in shared {
+                let view = executor.buffer(&name)?;
+                let region = prefill.layout().buffers[&name].region.clone();
+                prefill.set_region(&region, view.ptr, view.bytes)?;
+            }
+            Some(prefill)
+        } else {
+            None
+        };
         Ok(Self {
-            executor: Executor::load(device, artifact)?,
+            prefill,
+            executor,
             config,
             position: 0,
             prompt_length: 0,
@@ -175,14 +236,43 @@ impl Generator {
         self.executor.bind("prompt", &bytes)?;
         self.executor
             .bind("prompt_length", &(prompt.len() as i64).to_le_bytes())?;
+        if let Some(prefill) = &mut self.prefill {
+            for name in ["prompt", "prompt_length"] {
+                let view = self.executor.buffer(name)?;
+                prefill.bind_device(name, view.ptr, view.bytes)?;
+            }
+        }
         self.position = 0;
         self.prompt_length = prompt.len();
         self.stopped = false;
         Ok(())
     }
 
-    /// Process one prompt or decode token; only generated tokens are observed by the CPU.
+    /// Consume a prefill chunk, or one token on the unchanged decode program.
     pub fn advance(&mut self, capture: bool, ignore_eos: bool) -> Result<Option<i64>> {
+        ensure!(!self.stopped, "generation is stopped");
+        if self.position + 1 < self.prompt_length
+            && let Some(prefill) = &mut self.prefill
+        {
+            self.stopped = true;
+            prefill.bind("position", &(self.position as i64).to_le_bytes())?;
+            prefill.advance(capture)?;
+            self.position += self
+                .config
+                .prefill_size
+                .min(self.prompt_length - self.position - 1);
+            self.stopped = false;
+            return Ok(None);
+        }
+        self.step(capture, ignore_eos)
+    }
+
+    pub fn position(&self) -> usize {
+        self.position
+    }
+
+    /// Diagnostic single-token execution, including during prefill.
+    pub fn step(&mut self, capture: bool, ignore_eos: bool) -> Result<Option<i64>> {
         ensure!(
             !self.stopped && self.position < self.config.context_length,
             "generation is stopped or context is full"
@@ -280,6 +370,7 @@ mod tests {
             version: GENERATION_FORMAT,
             context_length: 8,
             vocab_size: 32,
+            prefill_size: 1,
             eos_ids: vec![31],
         };
         config.validate().unwrap();
@@ -287,6 +378,11 @@ mod tests {
         for prompt in [vec![], vec![-1], vec![32], vec![1; 9]] {
             assert!(config.validate_prompt(&prompt).is_err());
         }
+        for size in [0, 9] {
+            config.prefill_size = size;
+            assert!(config.validate().is_err());
+        }
+        config.prefill_size = 1;
         config.context_length = MAX_CONTEXT + 1;
         assert!(config.validate().is_err());
         config.context_length = 8;
