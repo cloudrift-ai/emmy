@@ -25,7 +25,8 @@ command:
     else
       artifact=$${TUNED_ARTIFACT:?Set TUNED_ARTIFACT to the parallel-sampling bundle}
     fi
-    sha256sum $$artifact/manifest.json $$artifact/serving.json $$artifact/tokenizer.json target/release/emmy-server > $task_dir/identity.txt
+    sha256sum $$artifact/manifest.json $$artifact/plan/decode.json $$artifact/serving.json \
+      $$artifact/tokenizer.json target/release/emmy-server > $task_dir/identity.txt
     if [ "$mode" = profile ]; then
       nsys profile --trace=cuda --cuda-graph-trace=node --sample=none --cpuctxsw=none \
         --duration=20 --force-overwrite=true --output=$task_dir/native \

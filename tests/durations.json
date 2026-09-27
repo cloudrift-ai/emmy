@@ -2715,5 +2715,10 @@
  "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[gemma-4-12B-it/rtx5090_sm120.json/pre4096.k_linear_mean_reduce_61bb9a.m4096.fm.2b1cf1006425]": 7.6,
  "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[gemma-4-12B-it/rtx5090_sm120.json/pre4096.k_linear_mean_reduce_61bb9a.m4096.fm.4176b7aa64cb]": 6.2,
  "tests/compiler/pipeline/search/test_golden.py::test_stored_targets_are_the_fresh_lowering[gemma-4-12B-it/rtx5090_sm120.json/program-25]": 6.6,
- "tests/compiler/pipeline/search/test_golden.py::test_stored_targets_are_the_fresh_lowering[gemma-4-12B-it/rtx5090_sm120.json/program-37]": 6.2
+ "tests/compiler/pipeline/search/test_golden.py::test_stored_targets_are_the_fresh_lowering[gemma-4-12B-it/rtx5090_sm120.json/program-37]": 6.2,
+ "tests/serving/native/test_generation_gpu.py::test_gpu_greedy_exact_reduction[151936]@cuda": 0.31,
+ "tests/serving/native/test_generation_gpu.py::test_gpu_greedy_exact_reduction[128]@cuda": 0.29,
+ "tests/serving/native/test_generation_gpu.py::test_gpu_greedy_exact_reduction[129]@cuda": 0.27,
+ "tests/serving/native/test_generation_gpu.py::test_gpu_greedy_exact_reduction[1]@cuda": 0.25,
+ "tests/serving/native/test_generation_gpu.py::test_gpu_greedy_exact_reduction[31]@cuda": 0.25
 }

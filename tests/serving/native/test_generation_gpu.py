@@ -543,19 +543,31 @@ def test_gpu_greedy_exact_reduction(vocab):
     from emmy.compiler.dtype import F16, F64, I64, U32, U64
     from emmy.serving.native.kernels import SOURCE
 
-    source = f"#define HIDDEN 32\n#define HEADS 4\n#define KV_HEADS 2\n#define HEAD_DIM 8\n#define VOCAB {vocab}\n#define SCALE 1.0f\n" + SOURCE
+    source = (
+        f"#define HIDDEN 32\n#define HEADS 4\n#define KV_HEADS 2\n#define HEAD_DIM 8\n#define VOCAB {vocab}\n#define SCALE 1.0f\n" + SOURCE
+    )
     buffers = [
         BufferSpec(name, (Dim(size),), dtype, "input")
         for name, size, dtype in (
-            ("logits", vocab, F16), ("histogram", 1, U32), ("params", 2, F64),
-            ("seed", 1, U64), ("position", 1, I64), ("length", 1, I64),
+            ("logits", vocab, F16),
+            ("histogram", 1, U32),
+            ("params", 2, F64),
+            ("seed", 1, U64),
+            ("position", 1, I64),
+            ("length", 1, I64),
         )
     ]
     args = tuple(b.name for b in buffers) + ("output",)
     launch = LaunchSpec("output", "native_sample", args, ((1,), (1,), (1,)), ((128,), (1,), (1,)), 512, ())
     plan = ExecutionPlan(
-        "cuda", list(args[:-1]), ["output"], [*buffers, BufferSpec("output", (Dim(1),), I64, "output")],
-        {}, {}, [launch], {"native_sample": KernelSpec(source=source)},
+        "cuda",
+        list(args[:-1]),
+        ["output"],
+        [*buffers, BufferSpec("output", (Dim(1),), I64, "output")],
+        {},
+        {},
+        [launch],
+        {"native_sample": KernelSpec(source=source)},
     )
     feed = {b.name: np.zeros(b.resolve_shape({}), b.dtype.np) for b in buffers}
     rng = np.random.default_rng(42)

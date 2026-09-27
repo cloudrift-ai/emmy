@@ -60,6 +60,13 @@ artifacts must be exported again; the underlying execution-plan format is unchan
 nonnegative, and top-p must lie in `(0, 1]`. Temperature zero selects the lowest token ID among maximum logits.
 Nonfinite logits fail the request. Top-k is unsupported.
 
+Greedy selection uses one 128-thread block. Threads scan disjoint vocabulary strides, then reduce their winning
+indices in shared memory with explicit lowest-ID tie-breaking. Every thread participates in invalid-logit detection
+and the reduction, including vocabularies smaller than the block. Preparation supplies 512 bytes of shared memory.
+Intermediate prefill steps leave the selected token untouched. Positive-temperature selection still runs on thread
+zero after the uniform greedy branch; its probability and RNG calculations are unchanged. Re-export an artifact to
+use the parallel sampler; no artifact version or runtime protocol changes are needed.
+
 For positive temperature, a 65,536-bin histogram orders FP16 logits exactly, combining signed zeros. The sampler
 retains the smallest descending probability prefix reaching top-p, breaking ties by ascending token ID. It samples
 that distribution in token-ID order using float64 probabilities. The histogram costs 256 KiB per loaded model and is
