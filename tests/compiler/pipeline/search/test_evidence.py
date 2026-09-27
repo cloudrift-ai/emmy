@@ -8,6 +8,7 @@ compile's seam imports a scope once per golden digest and lets a re-recorded fil
 
 from __future__ import annotations
 
+import multiprocessing
 from dataclasses import replace
 
 import pytest
@@ -274,8 +275,6 @@ def test_workers_sharing_a_tune_db_import_the_scope_once(tmp_path) -> None:
     golden scope into the same fresh tune DB at its first compile. The check, the forget and the import
     must be one step: two processes that both see the scope missing collide on the rows' unique keys, and
     one that checks while another is mid-import reads a partial scope as imported."""
-    import multiprocessing
-
     ctx = multiprocessing.get_context("spawn")
     workers = 6
     barrier = ctx.Barrier(workers)
