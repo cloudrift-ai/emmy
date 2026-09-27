@@ -362,20 +362,11 @@ def test_serve_sh_renders_the_quantized_moe_invocation(tmp_path):
     assert argv[-2:] == ["--kv-cache-dtype", "fp8_e4m3"], "SERVE_EXTRA_ARGS must word-split into flags"
 
 
-def sourced_config(path: Path) -> dict[str, str]:
-    """The config as warm.sh and verify.sh see it: bash-sourced, quotes stripped."""
-    result = subprocess.run(
-        ["bash", "-c", f'set -a; source "{path}"; env -0'], capture_output=True, text=True, env={"PATH": os.environ["PATH"]}
-    )
-    assert result.returncode == 0, result.stderr
-    return {k: v for k, _, v in (item.partition("=") for item in result.stdout.split("\0") if item) if k.startswith("SERVE_")}
-
-
 def test_serve_sh_renders_the_deepseek_v4_parallel_eager_invocation(tmp_path):
     """DeepSeek V4 on 16 V100s: the vLLM arguments every strict boot of its golden ran (boot51's
     non-default args), rendered from the pinned config. The pinned `--enforce-eager` drops the capture
     config, as a caller's does in emmy serve: the hyper-connection MoE host-syncs every decode step."""
-    config = sourced_config(SERVE_DIR / "models" / "deepseek-v4-flash-0731.env")
+    config = {key: value.strip('"') for key, value in config_values(SERVE_DIR / "models" / "deepseek-v4-flash-0731.env").items()}
     argv = render_serve_sh(tmp_path, config)
     assert "--compilation-config" not in argv
     assert argv == [

@@ -37,7 +37,6 @@ if [ -n "${SERVE_GPU:-}" ] && [ -z "${SKIP_GPU_CHECK:-}" ]; then
     fi
 fi
 
-
 # The pinned checkpoint revision is baked into the image ENV, so every boot below already
 # serves the right rung — but only if this tag was built from THIS config. A tag built
 # before the pin landed (or from another rung) serves different weights and still passes
@@ -88,7 +87,6 @@ before=$(docker exec "$NAME" sh -c "find /opt/emmy/cubin -name '*.cubin' | sort"
 # warmup, even when its binary loads straight from that cache: a runtime whose warmup does not launch
 # its attention kernels (the 1Cat fork) warns on the first request with nothing compiled.
 triton_files() { docker exec "$NAME" sh -c "find /opt/emmy/triton -type f | sort"; }
-jit_warnings() { docker logs "$NAME" 2>&1 | grep -c "Triton kernel JIT compilation during inference" || true; }
 triton_before=$(triton_files)
 
 # With a baked pack the boot skips the compiler frontend entirely and health arrives in
@@ -107,19 +105,14 @@ curl -sf "http://localhost:$PORT/health" >/dev/null || { echo "[verify] timed ou
 # Under HF_HUB_OFFLINE vLLM serves the model under the RESOLVED snapshot path, not the
 # repo id — ask the server for its served name rather than assuming $SERVE_MODEL.
 served=$(curl -sf "http://localhost:$PORT/v1/models" | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"][0]["id"])')
-jit_before=$(jit_warnings)
 curl -sf "http://localhost:$PORT/v1/completions" -H 'Content-Type: application/json' \
     -d "{\"model\": \"$served\", \"prompt\": \"The capital of France is\", \"max_tokens\": 20, \"temperature\": 0}" \
     | head -c 400; echo
-jit_after=$(jit_warnings)
 triton_after=$(triton_files)
 if [ "$triton_before" != "$triton_after" ]; then
     echo "[verify] FAIL — Triton compiled at boot or request time despite the baked warm cache (new cache entries):" >&2
     diff <(echo "$triton_before") <(echo "$triton_after") | tail -10 >&2 || true
     exit 1
-fi
-if [ "$jit_before" != "$jit_after" ]; then
-    echo "[verify] note: $((jit_after - jit_before)) first launch(es) during the request loaded from the baked Triton cache (vLLM's JIT monitor warns; no cache entry was written)"
 fi
 
 after=$(docker exec "$NAME" sh -c "find /opt/emmy/cubin -name '*.cubin' | sort")

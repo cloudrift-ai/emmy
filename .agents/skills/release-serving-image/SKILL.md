@@ -125,7 +125,9 @@ xtrace prints the expanded secret into the log; wrap secret reads in `set +x` �
 ## Step 2 — Base image
 
 `make wheel && make vllm-emmy-image` (~20 min, detached). A pulled `cloudriftai/vllm-emmy:TAG` is acceptable only if
-pushed from the same commit (the wheel is part of the cubin cache key) — when in doubt, build.
+pushed from the same commit (the wheel is part of the cubin cache key) — when in doubt, build. A config that names
+`SERVE_BASE_IMAGE` serves on a fork runtime (DeepSeek V4 on the 1Cat Volta fork): pass `MODEL=<id>`, so the plain
+image builds FROM that digest under the model's `-base` tag.
 
 ## Step 3 — Headroom sweep → pin the model config
 
@@ -162,7 +164,9 @@ the Makefile and `source`d by `warm.sh`/`verify.sh` — so its syntax is the int
   them in full): `SERVE_REVISION` the commit sha to serve — `warm.sh` REFUSES an unpinned revision on any repo with
   more than one branch, because the default branch may be a different variant entirely; `SERVE_QUANT=exl3` for a
   checkpoint whose quantization method vLLM does not have; `SERVE_CAPTURE_SIZES` for the cudagraph ladder, which an
-  MoE model must cap at `[1]`; `SERVE_EXTRA_ARGS` for further pinned flags (e.g. `--kv-cache-dtype fp8_e4m3`).
+  MoE model must cap at `[1]`; `SERVE_EXTRA_ARGS` for further pinned flags (e.g. `--kv-cache-dtype fp8_e4m3`);
+  `SERVE_ENV` for the server's own environment (a fork's switches, `EMMY_STRICT_EVIDENCE=1`); `SERVE_BASE_IMAGE` and
+  `SERVE_RUNTIME_VERSION` for a runtime other than stock vLLM, pinned by digest.
   Set these BEFORE the headroom sweep — they change what the sweep measures — and sweep with the same
   `--revision <sha>` so `emmy serve` derives the same arms from the same checkpoint.
 
