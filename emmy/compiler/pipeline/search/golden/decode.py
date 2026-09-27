@@ -112,9 +112,12 @@ def _untaken_split(record: GoldenRecord, arms) -> str | None:
     """Why a routing row's cross-CTA split is not a decision of the replay, or ``None`` when it is.
     A split names no seam, so the cut check above cannot fail it: without this, a split row whose
     kernel is no longer minted, or whose kernel no longer offers that arm (a direct atomic split of
-    an output now stored at 16 bits), decodes while no deploy can ever take it."""
+    an output now stored at 16 bits), decodes while no deploy can ever take it. A bare ``REDUCE`` key
+    spells the split at whichever site the fork offers it, as :func:`spelled_arm` reads it."""
+    taken = {(str(key), str(value)) for _, knobs in arms for key, value in knobs.items()}
+    taken |= {("REDUCE", value) for key, value in taken if family_of(key) == "REDUCE"}
     for key, value in record.knobs.items():
-        if family_of(str(key)) == "REDUCE" and not any(knobs.get(str(key)) == str(value) for _, knobs in arms):
+        if family_of(str(key)) == "REDUCE" and (str(key), str(value)) not in taken:
             return f"split {key}={value} is taken at no fork of the replay — its kernel is not minted, or does not offer it"
     return None
 
