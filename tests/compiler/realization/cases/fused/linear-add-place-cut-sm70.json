@@ -6,8 +6,8 @@
  "configs": [
   {"program": 0, "target": {"loop": 0, "origins": ["add_7", "linear_6"]}, "realizations": [
    {"name": "k_linear_57a5ae", "pins": {"FAST_MATH": false, "PLACE": "cut"}, "knobs": {}, "identity": "c5937ab9fb2fb12e4ef92db8bc9741963b0a42ffb30d5dc273dbfc9f6cf914a3"},
-   {"name": "k_linear_57a5ae.7d7012ef6970", "pins": {"FAST_MATH": false}, "knobs": {"WORK": "", "RASTER": ""}, "identity": "7d7012ef6970a8c06bd3ef65e5d1003ce8ed590d1407b1dd29d24c07526a18de"},
-   {"name": "k_linear_57a5ae.f9e1084fe5fb", "pins": {"FAST_MATH": false}, "knobs": {"WORK": "", "TILE": "", "REDUCE": "", "STAGE": "", "RASTER": ""}, "identity": "83efa34fae16c4148f0aaa80a90aba4bc1685f5cc045edeff5169e8688ee2db9"}
+   {"name": "k_linear_57a5ae.7d7012ef6970", "pins": {"FAST_MATH": false}, "knobs": {"WORK": "", "RASTER": ""}, "identity": "363991bcc67e14791183239112369817d0c115335072678e3e131eeaf5736d6f"},
+   {"name": "k_linear_57a5ae.f9e1084fe5fb", "pins": {"FAST_MATH": false}, "knobs": {"WORK": "", "TILE": "", "REDUCE": "", "STAGE": "", "RASTER": ""}, "identity": "de63cf56f1638bfd449526d00029edc48189f26fa83fb218c35a9ffd2c705a00"}
   ]}
  ],
  "loops": [

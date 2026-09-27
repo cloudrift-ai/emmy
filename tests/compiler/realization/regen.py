@@ -51,10 +51,10 @@ def regenerate_all() -> int:
     return 1 if refused else 0
 
 
-def _records(document: dict) -> tuple:
+def _records(document) -> tuple:
     """The regenerated document's entries as records, the way ``load_case`` reads them."""
     entry = document.configs[0]
-    return tuple(helpers.golden_record_from_entry(document, entry, realization) for realization in entry.realizations)
+    return tuple(document.record(entry, realization) for realization in entry.realizations)
 
 
 def complete_all() -> int:

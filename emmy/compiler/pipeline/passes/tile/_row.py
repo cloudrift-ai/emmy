@@ -22,6 +22,7 @@ from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.stmt import Body, Load, Loop, Stmt, Write
 from emmy.compiler.ir.tile import TileOp
+from emmy.compiler.ir.tile.path import sites
 from emmy.compiler.pipeline.passes.tile._fromloop import lift_loop_op
 from emmy.compiler.pipeline.passes.tile._twist import rewrite_twisted
 
@@ -148,6 +149,14 @@ def reformed(piece: TileOp) -> TileOp:
     # sits ahead of it; the piece keeps the grid it was minted with, and an axis peeled past it
     # goes back to being the sweep of the stores that ride it.
     grid, peeled = formed.place.free[: len(piece.place.free)], formed.place.free[len(piece.place.free) :]
+    # A piece with no contraction opens its grid in the order the store writes, last axis fastest,
+    # so consecutive threads write consecutive addresses. The lift peels loops in nest order, which
+    # put a RoPE piece's head-dim slowest: uncoalesced, 39 us on the H100 for a 2 MB write. A
+    # contraction's grid order is not linearization only: its last two axes are the fragment's
+    # rows and columns, and reordering them hands the rows to an axis an operand varies over.
+    if not any(site.node.as_contraction() is not None for site in sites(formed.op)):
+        written = [name for spec in formed.output_specs[:1] for index in spec.write.index for name in sorted(index.free_vars())]
+        grid = tuple(sorted(grid, key=lambda axis: written.index(axis.name) if axis.name in written else len(written)))
     specs = tuple(
         replace(spec, sweep=(*spec.sweep, *(axis for axis in peeled if any(axis.name in index.free_vars() for index in spec.write.index))))
         for spec in formed.output_specs

@@ -92,20 +92,28 @@ FORMED AGAIN as a kernel of its own: its tile is lowered to a loop body, normali
 where a statement repeated on both sides of the seam folds to one), and lifted through the same entry as
 `010_lift`, so its sites are the ones its own body earns rather than a slice of the parent's tree — a gate/up piece
 carved out of a fused half is one twin contraction site, not the parent's contraction beside a scalar-only leftover.
-The re-lift keeps the grid the cut minted; the store sweeps it would peel off stay sweeps. A bare `PLACE=cut` pin
+The re-lift keeps the grid the cut minted; the store sweeps it would peel off stay sweeps.
+A piece with no contraction orders that grid as its store writes, last axis fastest, so its threads write
+consecutive addresses; a contraction piece keeps the lift's order, because its last two grid axes are the
+fragment's rows and columns. A bare `PLACE=cut` pin
 names the placement decision, not a site, so it resolves among the CUTTABLE seams (the root-most one) rather than
 through the codec's primary rule over every PLACE site (which can land on an edge no cut realizes — an unclosed cone,
 a seam whose workspace dtypes stay undetermined).
 A seam stands for a VALUE, not only an object: cones computing one value fold into one seam, each duplicate carried
 as a sibling with its capture correspondence, and the cut replaces every one with workspace loads spelled through its
 own axes. Two cones are one value when their lowered bodies share the statement identity of `ir/stmt/identity`
-under the captured axes renamed by position — the tile-node shape does not decide it, because fusion keeps one
+under the captured axes substituted by position (hygienically: a loop inside the cone that binds a captured name
+again keeps its own variable) — the tile-node shape does not decide it, because fusion keeps one
 definition of a value while the lifted tree holds one cone per scope that reads it, and those cones bind the same
 coordinate under different names and in different operand orders (the o_proj result feeds the norm's statistic
 inside a reduce and the residual add at the kernel's free axis). The identity is taken per exposed component, so a
 lone contraction is a CHANNEL of the twin that folds it beside another over the same input (k under the QK-norm's
 reduce, beside the k/v pair): the twin is the representative, the sibling records which component is its value,
-and reads that channel of the shared workspace. An ancestor and its descendant cannot join such a cluster: a
+and reads that channel of the shared workspace. A cone that reads a captured coordinate only through one expression
+of it is compared with that expression abstracted to the bare coordinate: RoPE's rotate-half reads the q projection
+at its own column and at the two half-shifted ones, one value at three addresses. A copy read through an expression
+joins the representative that reads the coordinate plainly and reads its workspace at that expression, when the
+expression's values stay on the representative's axis. An ancestor and its descendant cannot join such a cluster: a
 multi-result ancestor may consume one of the values it exposes, which would make its workspace producer cyclic.
 The arm that cuts a clustered seam spells every occurrence and
 names the seam each spelling stands for, so a route recorded at any occurrence — a row from before the clustering,
@@ -437,6 +445,10 @@ decomposition may place one transient, shape-only buffer between the accumulator
 that direct private copy inherits the same accumulator dtype. Actual computation over private reduction state remains
 untyped, so normalization and softmax keep their f32 state until their own public result store. Fusion and placement
 then preserve the typed `copy` as an ordinary statement rather than reconstructing a boundary from graph topology.
+The frontend's index-map composition can delete the public buffer a decomposition's transient reduce stood behind (a
+linear's result under its reshape, composed into the consumer's operand map). When the consumer's own result is
+transient too, the transient buffer is then the value's only storage, so it becomes public and its rounding is spelled
+like any other; a composition whose consumer writes a public buffer keeps its spelling.
 
 FP16/BF16 matmul decomposition declares its product at FP32 before reduction. Widening only the accumulator loses
 precision or overflows at each half-precision multiply, even when the dot product is representable. The explicit
@@ -656,7 +668,11 @@ that canonical input:
   decided EXPLICITLY — the dtype the consuming contraction's output is stored at (traced through any epilogue to the
   output it feeds, so a sibling output at another width cannot mis-type it), which is the element the fused slab
   would have stored — never the carrier the cone computed in: only the `a` edge has a converting fill, so an f32
-  workspace on a `b` edge could feed no warp atom. One refinement overrides that rule: an operand cone that passes
+  workspace on a `b` edge could feed no warp atom.
+  A REDUCING seam's workspace holds the f32 carrier, except for a component every reader only converts to one narrower
+  dtype (the spelled store rounding above): that component stores the converted dtype, and the cut replaces each
+  reader's now same-dtype conversion with the workspace read itself, so the edge stays a slab the copy transports
+  and the chunk tier's streamed value accept. One refinement overrides that rule: an operand cone that passes
   through a STORAGE FRONTIER — a decode (the `ElementwiseImpl.decodes` trait) of a value the cone itself computes —
   cuts at the frontier instead (`_cut.storage_frontier`): the producer piece is the encode prefix, the workspace holds
   the raw storage bits (exact — the element the graph's own quantize produced), and the consumer keeps the
