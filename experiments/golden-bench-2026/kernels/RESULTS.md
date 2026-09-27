@@ -18,6 +18,24 @@ Protocol: the same unpinned model-level replay as below, both files in one sessi
 projection. `d5` and a `+p4` producer band do not replay on these pieces: their receipts fall back to prior picks
 (366 us) without a message. The s1 file is unchanged: its pieces are one-row GEMVs.
 
+**Where end to end goes past the kernel sum.** An `nsys --cuda-graph-trace=node` trace of each golden replay shows one
+CUDA graph per replay holding every launch, about 0.1 us between kernels inside it, and a boundary between back-to-back
+replays. The rest is kernels running slower in the chain than alone:
+
+| H100 | launches | isolated sum | in-graph kernel sum | replay span | between replays | end to end |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| s512, `mma.sync` rows | 22 | 210.6 | 226.5 | 228.6 | 4.3 | 239.0 |
+| s512, `wgmma` rows | 22 | 140.2 | 133.4 | 135.5 | 4.3 | 144.5 |
+| s1 | 25 | 99.6 | 83.3 | 85.1 | 7.8 | 96.9 |
+
+(Traced runs; nsys adds a few us to each isolated time.) On the old s512 file three single-stage `mma.sync`
+projections ran 7-10 us slower each inside the graph than alone (for example 20.9 → 31.4 us), which is most of that
+file's 34 us gap. Of the `d4` `wgmma` rows, two lose 1-2 us in the chain and the rest hold. At s1 the isolated times
+overstate the eighteen 1-2 us kernels (one-kernel replays), and the boundary holds a memset. That memset is the
+zero-init of an atomic accumulator in the program's first launch, which has no earlier kernel to carry it. It costs
+about 4 us per replay of a single layer, and would be paid once per graph in a whole-model graph. None of this is
+launch overhead that a runtime change would remove.
+
 ## Three cards — the whole layer as one fused kernel, with a flash-shaped route (2026-09-26)
 
 ### Question and scope
