@@ -21,14 +21,19 @@ set -a  # export the SERVE_* config so the -e pass-throughs below carry values
 source "$CONFIG"
 set +a
 
+: "${BASE_IMAGE:?set BASE_IMAGE to the plain vllm-emmy image to warm from}"
+
 # Every cache-key input is card-specific — the live-probed featurization, the golden picks,
 # the memory headroom the config was swept for. A warm on the wrong GPU bakes a cache the
 # released image can never hit, and the failure only surfaces ~30 min later in verify (or
 # worse, never, on a card whose picks happen to coincide). Check it here, cheaply.
 if [ -n "${SERVE_GPU:-}" ] && [ -z "${SKIP_GPU_CHECK:-}" ]; then
-    # `|| true`: under `set -euo pipefail` a missing nvidia-smi would abort the script here
-    # with no message at all, turning a diagnosable "no GPU on this host" into a silent exit.
-    live=$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | sed -n "$(( ${GPU_DEVICE:-0} + 1 ))p" || true)
+    # The name the compiler keys on, from the image's own emmy: nvidia-smi spells some cards
+    # differently from the registry (a V100 reports "Tesla V100-SXM3-32GB", registered as
+    # "NVIDIA Tesla V100 SXM3 32GB"). `|| true`: under `set -euo pipefail` a host with no GPU
+    # would abort the script here with no message at all.
+    live=$(docker run --rm --gpus "device=${GPU_DEVICE:-0}" --entrypoint python3 "$BASE_IMAGE" \
+        -c 'from emmy.gpu import live_name; print(live_name() or "")' 2>/dev/null || true)
     if [ -n "$live" ] && [ "$live" != "$SERVE_GPU" ]; then
         echo "GPU mismatch: config pins '$SERVE_GPU', device ${GPU_DEVICE:-0} is '$live'." >&2
         echo "  Warm and verify must run on the card the config was swept for." >&2
@@ -79,7 +84,6 @@ print(next((b["targetCommit"] for b in bs if b["name"] == "main"), ""))' 2>/dev/
     fi
 fi
 
-: "${BASE_IMAGE:?set BASE_IMAGE to the plain vllm-emmy image to warm from}"
 if [ ! -d "warm/hf/hub/models--${SERVE_MODEL//\//--}" ]; then
     : "${HF_TOKEN:?the gated model download needs HF_TOKEN (or pre-seed warm/hf — see ARCHITECTURE.md)}"
 fi
