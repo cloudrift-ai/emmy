@@ -57,6 +57,7 @@
  "tests/compiler/passes/test_cut_forks.py::test_the_full_projection_cut_leaves_one_contraction_per_piece_on_a_grid": 2.61,
  "tests/compiler/passes/test_maximal_fusion.py::test_an_unfusable_chain_does_not_shatter_the_rest_of_the_region": 1.49,
  "tests/compiler/passes/test_placement_routing.py::test_pinned_transposed_coop_band_still_refuses_without_a_free_axis": 1.25,
+ "tests/compiler/pipeline/search/test_evidence.py::test_workers_sharing_a_tune_db_import_the_scope_once": 0.99,
  "tests/compiler/pipeline/search/test_golden.py::test_a_row_whose_every_site_is_re_spelled_still_gets_a_verdict": 1.49,
  "tests/compiler/pipeline/search/test_golden.py::test_a_row_with_only_an_invalid_offered_value_reports_a_semantic_miss": 1.37,
  "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[DeepSeek-V4-Flash-0731/v100_sm70.json/post-sym.k_linear_matmul_reduce_b61b5c.dynamic.dfe6c2652f19.93a0b036b20c]": 5.1,
