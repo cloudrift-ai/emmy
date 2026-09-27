@@ -8,7 +8,7 @@ serving shell — then A/B against the plain 1Cat container at an equal serving 
 43 layers, `hc_mult` 4, 256 routed experts at top-6 plus one shared, 3 hash-router layers. At TP8 × PP2 the first
 stage owns layers 0–21 and the second 22–42.
 
-## Where it stands (2026-09-27, main at #919)
+## Where it stands (2026-09-27, main at #921)
 
 `main` at `cc2bb92f` (#897) replaced this file. Loop fusion decides its regions from the graph now, the recurrence
 roller rolls the Sinkhorn rounds, and the post block lowers to five kernels per width instead of about thirty-five: a
@@ -43,10 +43,11 @@ serves strict and coherent at 0.244 s per output token (0.299 at 2,155 prompt to
 roofline audit no longer names the M=1 post twin. The symbolic post twin, which a single request's prefill rides, took
 the same seams and one more on its last kernel, where the shared expert's down projection ran once per stream: at the
 512-token hint its main kernel 262 → 1.28 ms, its routing kernel 63.5 → 0.94 ms, its last kernel 10.8 → 0.45 ms. Boot48
-reaches the first token of a 2,155-token prompt in 9.94 s cold and 1.86 s warm (34.1 and 14.4). The width-16 and
-4,096-width post twins still carry the recompute (item 4). Missing tensor-core tiles are a small part of it: those
-contractions read f32 operands, which no Volta atom takes, or contract over the four streams (K=4), where a tensor core
-buys nothing.
+reaches the first token of a 2,155-token prompt in 9.94 s cold and 1.86 s warm (34.1 and 14.4). The width-16 twin took
+the same routes: main kernel 28.7 ms → 111 µs, routing kernel 6.5 ms → 208 µs, last kernel 902 → 153 µs; boot49's audit
+has it at 0.70 ms per layer (34.25), and eight concurrent requests decode at 0.323 s per token. The 4,096-width post
+twin still carries the recompute (item 4). Missing tensor-core tiles are a small part of it: those contractions read f32
+operands, which no Volta atom takes, or contract over the four streams (K=4), where a tensor core buys nothing.
 
 Stages −1 to 3 are done, and Stage 0's question — can the compiler serve this model — is answered yes. Gate (c),
 coherent completions, passed on the old tree, was red on `main` from #829 to #893 without anyone seeing it, and is
@@ -78,25 +79,31 @@ checkpoint stays impractical here.
    recorded rows. Boot39 from that tree serves coherent completions at boot38's timings, so gate (c) is green again.
    Still owed: a finite-input replay per twin and an independent reference on `run --golden`, and a boot that reads
    the election's check instead of printing it as a warning.
-4. **Compute the recomputed cones once in the post routes.** Found 2026-09-26; the M=1 twin is done (#919, boot47
-   0.244 s per token) and the symbolic one (boot48, first token at 2,155 prompt tokens 9.94 s cold, 1.86 s warm). Left:
-   the width-16 and 4,096-width twins. Every post twin spells its seams the same way, so start from the symbolic
-   routes: main kernel +`PLACE@map.1/map.1/twist.1/inner` and `PLACE@map.1/map.1/twist.1/inner.2/map.1/reduce` (13
-   seams), routing kernel +`PLACE@map.1/map.1/reduce.1/inner` (5), last kernel +`PLACE@map.2/inner` (3), which moves
-   the shared expert's down projection out of the four-stream loop into a piece that takes `mma` tiles
-   (`PLACE@map.3/inner` computes it once too, but leaves it under a sweep epilogue no tensor-core tile accepts). The
-   prior's picks are 10–200× off on the new pieces; the symbolic winners: the f32 `hc_fn` projections `t512 coop` (the
-   16-logit one `t64 coop`), the sums of squares `t512 coop`, the down projection unsplit `w2x2 f4x4/k8 d2/smem` (the
-   recorder took an 8-way atomic split at 22×), the four-stream contractions scalar `t32x8 f4` or `t16x8 f4` over `mma`,
-   the routing kernel's residual copy `t256` (its row was empty: 9.9 ms). Four targets still carry two route rows under
-   one name (the width-16 and 4,096-width post main kernels, the width-16 post routing kernel, `pre4096`); drop the
-   stale sibling first, since #917 refuses a new route that lands on neither. A re-record under a different route
-   appends a decision row the seed's `kernel_set` points at: fold it (`fold_route.py`), then a strict `--record-greedy`
-   rewrites the realization's own appended rows to the recorded set and the old route's receipts are left for the
-   strict election to name. Check each set against the old route on the same inputs (`pair919.sh`; `run --bench`'s exit
-   code proves nothing where a target has no eager reference) and boot. Still open inside the symbolic main kernel: the
-   four-stream mix is computed three times into three layouts (123, 149 and 130 µs); a seam that shares one would take
-   about a quarter of that kernel, and none was tried.
+4. **Compute the recomputed cones once in the post routes.** Found 2026-09-26; the M=1 twin is done (#919, boot47 0.244
+   s per token), the symbolic one (#921, boot48, first token at 2,155 prompt tokens 9.94 s cold, 1.86 s warm) and the
+   width-16 one (boot49, 34.25 → 0.70 ms per layer). Left: the 4,096-width twin, whose routes run 1.09 s (main kernel),
+   122 ms (routing) and 38.6 ms (last) per launch. Every post twin spells its seams the same way: main kernel
+   +`PLACE@map.1/map.1/twist.1/inner` and `PLACE@map.1/map.1/twist.1/inner.2/map.1/reduce` (13 seams), routing kernel
+   +`PLACE@map.1/map.1/reduce.1/inner` (5), last kernel +`PLACE@map.2/inner` (3), which moves the shared expert's down
+   projection out of the four-stream loop into a piece that takes `mma` tiles (`PLACE@map.3/inner` computes it once too,
+   but under a sweep epilogue no tensor-core tile accepts). The prior's picks are 10–200× off on the new pieces, and the
+   recorder's atomic splits (`g2a`, `g8a`) lose or tie: every winner so far is unsplit (a `set:` of the split decision
+   row to a schedule in a scratch golden tests it). Winners: the f32 `hc_fn` projections `t512 coop` (at width 16 the
+   4-coefficient one `coop/r2 t256`, the 16-logit ones `t64`–`t512 coop`), the sums of squares `t512 coop`, the
+   four-stream contractions scalar `t32x8 f4` or `t16x8 f4` over `mma`, the routing kernel's residual copy `t256` (its
+   row was empty: 9.9 ms symbolic; 173 µs at width 16, since only one block per token is offered), the down projection
+   `w2x2 f4x4/k8 d2/smem` symbolic and `w2x1 f1x2/k8 d2/smem` at width 16 (the gate/up matmul there too, 115 → 106 µs).
+   Two targets still carry two route rows under one name (the 4,096-width post main kernel, `pre4096`); drop the stale
+   sibling first, since #917 refuses a new route that lands on neither. A re-record under a different route appends a
+   decision row the seed's `kernel_set` points at: fold it (`fold_route.py`), then a strict `--record-greedy` rewrites
+   the realization's own appended rows to the recorded set and the old route's receipts are left for the strict election
+   to name. A strict bench under an atomic split exits 1 on the pinned-row replay ("atomic REDUCE applies the projection
+   epilogue per partition"); its greedy numbers stand. Check each set against the old route on the same inputs
+   (`pair919.sh`; `run --bench`'s exit code proves nothing where a target has no eager reference) and boot. Still open:
+   the symbolic main kernel computes the four-stream mix three times into three layouts (123, 149 and 130 µs), and no
+   seam that shares one was tried. #918 re-maps the M=1 last kernel's root (`WORK t16x8`, output bit-identical on both
+   trees) from 64 to 194 µs per launch, which puts the M=1 post twin back on boot49's audit at 0.66–0.70 ms; the M=1
+   last kernel still recomputes its down projection per stream, and `PLACE@map.2/inner` there would remove that root.
 5. **Stage 4 — image and release plumbing.** Bake FROM the immutable 1Cat digest with `cupy-cuda12x` under its own
    image identity — not the Makefile's default version/tag for a 1Cat 1.2.3 base — labelled with the 1Cat digest and
    source SHA, Emmy SHA, checkpoint revision and CUDA/NVRTC versions; carry the fork's `VLLM_SM70_*` variables with
@@ -228,6 +235,7 @@ the Emmy arm cannot hold and is no baseline.
 | 09-26 | `a091dbe7` (#910) + the M=1 post route re-recorded after #903 (boot46) | 0.600 s | 4.74 / 1.91 s | 34.2 / 14.5 s | 9.5 min | the first boot of a post-#909 tree; no runtime device patch (#907) |
 | 09-26 | + the M=1 post twin's logits and stream mix computed once (boot47) | 0.244 s | 4.66 / 1.91 s | 34.1 / 14.4 s | ~10 min | 2.5× boot46; 1.65× the fork; the M=1 post twin is off the roofline audit's list |
 | 09-27 | `7be6b330` (#919) + the symbolic post twin's logits, stream mix and down projection computed once (boot48) | 0.246 – 0.249 s | 4.67 / 1.92 s | 9.94 / 1.86 s | 9 min | the best time to first token this model has had (18.3 / 2.21 s on 09-19); completions as boot47's |
+| 09-27 | `0a891de2` (#921) + the width-16 post twin's routes (boot49) | 0.247 – 0.253 s | 3.21 / 0.47 s | 9.98 / 1.88 s | 9 min | the 5-token prompt's prefill runs at width 16; eight concurrent requests decode at 0.323 s per token |
 
 The first decode step of a request costs more than a steady one (1.85 s against 0.90 on 09-12, 4.2 s against 2.03 on
 09-15): each layer's programs are CUDA-graph captured on first use. The first compile on each rank is the cold
@@ -250,6 +258,7 @@ The boot's roofline audit, first layer of each stage, per layer:
 | 09-26, M=1 post route after #903 (boot46) | 3.11 ms | 8.88 ms | 34.25 ms | 1,249 ms |
 | 09-26, M=1 post recompute cut (boot47) | 3.11 ms | not listed | 34.25 ms | 1,248 ms |
 | 09-27, symbolic post recompute cut (boot48) | 3.11 ms | not listed | 34.26 ms | 1,249 ms |
+| 09-27, width-16 post recompute cut (boot49; #918's M=1 slowdown) | 3.11 ms | 0.66 – 0.70 ms | 0.70 ms | 1,251 ms |
 
 A decode step, profiled on 09-19 with torch's profiler over eleven single-stream steps on all sixteen workers (the
 model serves eager, because the hyper-connection routed combine host-syncs): per token about 126 ms of Emmy kernels
@@ -398,7 +407,9 @@ row into its seed; `*wait.sh` summarize. `~/emmy-main-7be6b330` is `main` at #91
 recorder); its scripts carry `919` in the name (`abroute919.sh`, `abj919.sh`, `rec919.sh`, `rec919s.sh`, `pair919.sh`,
 `abj919round.sh` for one respelled line per card) and `abe919.sh` / `abe919round.sh` edit a scratch golden with
 `edit_json.py` (`set:`, `add:` for a row a strict A/B needs that no record wrote, `respell:`); `seed48.sh` and
-`boot48.sh` boot there.
+`boot48.sh` boot there. Since #921 those scripts default to `~/emmy-main-0a891de2` (`main` at #921, #918 in);
+`boot49.sh` boots there and `probe49c.sh N` runs N probes at once, so decode runs at width N. Copy a boot script by
+hand, not with a digit `sed`: `s/48/49/` also rewrote the checkpoint revision hash, and the boot died offline.
 
 **Never touch** `~/.cache/emmy/autotune.db` (the real tune DB), `~/emmy`, `~/emmy-dsv4`, `~/emmy-fix-backup`,
 `~/emmy-durations/_verify/gap3-tune/` (partial rows that regress the election — never merge that DB), or
