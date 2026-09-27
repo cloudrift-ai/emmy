@@ -23,13 +23,16 @@ def options(arguments):
     parser.add_argument("--revision")
     parser.add_argument("--max-model-len", type=int, default=DEFAULT_CONTEXT)
     parser.add_argument("--native-pack", type=Path)
+    parser.add_argument("--prefill-size", type=int, help="Native export chunk width (default: 16; 1 disables chunking)")
     args = parser.parse_args(arguments)
     if not 1 <= args.max_model_len <= DEFAULT_CONTEXT or not 1 <= args.port <= 65535:
         raise ValueError("native context must be 1–4096 and port must be 1–65535")
+    if args.prefill_size is not None and (args.native_pack or not 1 <= args.prefill_size <= DEFAULT_CONTEXT):
+        raise ValueError("prefill size requires preparation and must be 1–4096")
     return args
 
 
-def prepare(model, revision, root, context, golden, strict):
+def prepare(model, revision, root, context, golden, strict, *, prefill_size=None):
     """Export weights and the same checkpoint's tokenizer/template into one serving bundle."""
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -45,7 +48,7 @@ def prepare(model, revision, root, context, golden, strict):
     eos = lm.generation_config.eos_token_id
     eos = [eos] if isinstance(eos, int) else (eos or [])
     with gpu_lock(), config.golden_file_override(golden), config.strict_evidence_override(strict):
-        export_model(lm, root, context_length=context, eos_ids=eos)
+        export_model(lm, root, context_length=context, eos_ids=eos, prefill_size=prefill_size)
     tokenizer.backend_tokenizer.save(str(root / "tokenizer.json"))
     (root / "chat_template.jinja").write_text(tokenizer.chat_template)
     (root / "serving.json").write_text(json.dumps({"model": model, "revision": revision, "context_length": context}))
@@ -97,10 +100,11 @@ def launch(args, arguments):
     if args.dry_run:
         if not opts.native_pack:
             logger.info(
-                "Prepare native artifact: model=%s revision=%s context=%d golden=%s strict=%s",
+                "Prepare native artifact: model=%s revision=%s context=%d prefill_size=%s golden=%s strict=%s",
                 model,
                 revision,
                 opts.max_model_len,
+                opts.prefill_size if opts.prefill_size is not None else "default",
                 args.golden,
                 args.strict_evidence,
             )
@@ -118,7 +122,7 @@ def launch(args, arguments):
     else:
         # Export publishes a fresh directory. Keep the resulting bundle for deliberate reuse.
         root = Path(tempfile.mkdtemp(prefix="emmy-native-")) / "artifact"
-        prepare(model, revision, root, opts.max_model_len, args.golden, args.strict_evidence)
+        prepare(model, revision, root, opts.max_model_len, args.golden, args.strict_evidence, prefill_size=opts.prefill_size)
         logger.info("Prepared native serving artifact: %s", root)
     serve = command(model, opts, root.resolve(), binary)
     env = _child_env()

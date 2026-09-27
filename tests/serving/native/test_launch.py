@@ -20,12 +20,24 @@ def arguments(*flags):
 
 def test_native_dry_run(caplog):
     args, forwarded = arguments(
-        "--native", "--generate", "--dry-run", "--revision", "pinned", "--golden", "working.json", "--strict-evidence", "--port", "8123"
+        "--native",
+        "--generate",
+        "--dry-run",
+        "--revision",
+        "pinned",
+        "--golden",
+        "working.json",
+        "--strict-evidence",
+        "--port",
+        "8123",
+        "--prefill-size",
+        "16",
     )
     with caplog.at_level("INFO"):
         launch(args, forwarded)
     assert "revision=pinned" in caplog.text
     assert "strict=True" in caplog.text
+    assert "prefill_size=16" in caplog.text
     assert "emmy-server" in caplog.text
     assert "--max-model-len 4096" in caplog.text
     assert "--port 8123" in caplog.text
@@ -50,3 +62,9 @@ def test_native_command_and_capacity():
     assert command("model", opts, opts.native_pack)[-2:] == ["--max-model-len", "128"]
     with pytest.raises(ValueError):
         options(["--max-model-len", "4097"])
+
+
+@pytest.mark.parametrize("flags", [["--prefill-size", "0"], ["--prefill-size", "4097"], ["--prefill-size", "16", "--native-pack", "pack"]])
+def test_prefill_size_requires_preparation(flags):
+    with pytest.raises(ValueError, match="prefill size"):
+        options(flags)
