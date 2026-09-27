@@ -48,7 +48,7 @@ from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.ops import Sched, carries_partition, head, projection_regions, projection_root, projection_tail
 from emmy.compiler.pipeline import Match
 from emmy.compiler.pipeline.fork import DeferredFork
-from emmy.compiler.pipeline.knob import axis_of, consume_kernel_row
+from emmy.compiler.pipeline.knob import axis_of, consume_kernel_row, kernel_pin
 from emmy.compiler.pipeline.passes.tile._row import reformed
 from emmy.compiler.pipeline.search.space import REDUCE, WORK
 
@@ -223,10 +223,13 @@ def split_forks(match: Match, root: Node, *, unsplit_tile: TileOp | None = None)
     key = Sched(tile).key("REDUCE", node) or "REDUCE"
     unsplit = DeferredFork(lambda: replace(unsplit_tile or tile, split_consumed=True), {key: ""})
     element = axis_of(key)
-    pin = REDUCE.narrow_at(element) if element else REDUCE.raw()
+    pin = kernel_pin("REDUCE", tile.name)
+    if pin is None:
+        pin = REDUCE.narrow_at(element) if element else REDUCE.raw()
     tail = projection_tail(tile)
     if pin is not None:
-        plan = Reduce.parse(pin, Work.parse(WORK.raw()))
+        work = kernel_pin("WORK", tile.name)
+        plan = Reduce.parse(pin, Work.parse(work if work is not None else WORK.raw()))
         if not plan.needs_split:
             return [unsplit]
         _enforce(splitk_width(k_axis, plan.cta))

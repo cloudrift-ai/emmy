@@ -21,6 +21,7 @@ from emmy.compiler.pipeline.knob import (
     family_of,
     get,
     is_off_value,
+    kernel_scoped,
     parse_knob_spec,
     pin_key_matches,
     registry,
@@ -149,6 +150,13 @@ def unreproducible_pin_flag(
     """
     if not any(kernel_knobs) and not any(placement_knobs or []):
         return None
+    # A kernel pin names one piece, and a realized row does not say which kernel it came from, so it
+    # is asked what a bare pin is: that SOME kernel realized it.
+    bare = {name: want for name, want in pinned.items() if not kernel_scoped(name)}
+    for name, want in pinned.items():
+        if kernel_scoped(name):
+            bare.setdefault(family_of(name), want)
+    pinned = bare
     misses: list[str] = []
     for name, want in pinned.items():
         fam = family_of(name)

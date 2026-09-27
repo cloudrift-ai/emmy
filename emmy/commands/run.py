@@ -960,7 +960,7 @@ def env_pin_refusal(kernel_knobs: list[dict], placement_knobs: list[dict] | None
     """
     from emmy.compiler.pipeline.knob import KERNEL_DECISION_FAMILIES, family_pins  # noqa: PLC0415
 
-    pins = {name: value for family in KERNEL_DECISION_FAMILIES for name, value in family_pins(family)}
+    pins = {name: value for family in KERNEL_DECISION_FAMILIES for name, value in family_pins(family, kernels=True)}
     return unreproducible_pin_flag(pins, kernel_knobs, placement_knobs=placement_knobs) if pins else None
 
 
