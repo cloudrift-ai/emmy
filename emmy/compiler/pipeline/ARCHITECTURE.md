@@ -573,7 +573,9 @@ first — over one more kind of evidence. A kernel-set decision is a `routing` r
 or a golden's cut or split imported as one — and its price on this card is the sum of its pieces' fastest rows, each
 piece at its own projection of the fork's bindings, all-or-nothing (`SearchDB.priced_arms` — the same read the
 tuner's reward uses, so the two agree); a decision no piece's row prices is off the measured ballot, which is what a
-golden's cross-CTA split timed as a whole is until its pieces are benched. `greedy._route_candidates` turns EVERY
+golden's cross-CTA split timed as a whole is until its pieces are benched. An offered split or cut that no routing row
+names is priced the same way, from its own pieces' rows, so a sweep that benched a split's partial and finalize (and
+wrote no routing row) still puts that split on the ballot. `greedy._route_candidates` turns EVERY
 measured row of the kernel's signature, and every priced decision on the exact kernel, into a candidate, each one of
 the pass's OWN offered arms: the arm the row spells (`pins.spelled_arm` — a schedule row the fused / unsplit arm,
 since the kernel it decorates ran that way; a routing arm the composed arm that cuts exactly the several offered
