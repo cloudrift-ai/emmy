@@ -795,35 +795,53 @@ def _workspace_axes(seam: CutSite, produced: Fold) -> tuple:
     return tuple(axis for axis in seam.axes if axis.name in read or _unit(axis))
 
 
-def _workspace_strides(produced: Fold, axes: tuple) -> dict[str, int]:
-    """A coordinate used only as ``i // d`` needs one stored value per group of ``d`` cells.
+def _workspace_strides(produced: Fold, axes: tuple) -> dict[str, tuple[int, int]]:
+    """``{coordinate: (d, c)}`` for each coordinate the stored terms read only as ``i // d`` and ``i % c``.
 
-    Every occurrence must be the numerator of a positive integer division. Different divisors
-    share their greatest common divisor; a direct read or a remainder keeps the full extent.
-    Read the stored terms, including coordinate predicates, before choosing a representative.
-    """
-    factors = dict.fromkeys((axis.name for axis in axes), 0)
-    pending = [produced]
-    while pending:
-        term = pending.pop()
-        pending.extend(term.operands)
-        for name in factors:
+    Such a value holds one stored cell per ``(i // d, i % c)``: ``c`` of every ``d`` cells, at
+    ``(i // d) * c + i % c``. With no remainder (``c = 1``) that is one cell per group of ``d``
+    (GQA's k read at the head ``h // 2``); with one it is a fused (head, head-dim) channel whose
+    head is divided again (GQA's v read at ``(i // 128 // 2) * 128 + i % 128``), stored once per
+    kv head instead of once per q head. Different divisors share their greatest common divisor,
+    which the remainder must divide; a direct read, or a coordinate a statement computes with,
+    keeps the full extent. Read the stored terms, including coordinate predicates."""
+    out: dict[str, tuple[int, int]] = {}
+    for axis in axes:
+        name = axis.name
+        reads: set[tuple[str, int]] = set()
+        plain = False
+        pending = [produced]
+        while pending:
+            term = pending.pop()
+            pending.extend(term.operands)
             if name not in term.free_axes:
                 continue
-            if term.observe is not None or name in term.lift.results:
-                factors[name] = 1
+            plain = plain or term.observe is not None or name in term.lift.results
             for stmt in term.lift.body.iter():
-                if not isinstance(stmt, Load) and name in stmt.deps():
-                    factors[name] = 1
+                plain = plain or (not isinstance(stmt, Load) and name in stmt.deps())
                 for expr in stmt.exprs():
-                    parts = tuple(expr.subterms())
-                    uses = sum(isinstance(part, Var) and part.name == name for part in parts)
-                    # ``(i // a) // b`` is ``i // (a * b)``: a head index GQA divides again.
-                    chains = {id(part): divisor for part in parts if (divisor := _divisor(part, name)) is not None and divisor > 1}
-                    inner = {id(part.left) for part in parts if id(part) in chains}
-                    divisors = [divisor for key, divisor in chains.items() if key not in inner]
-                    factors[name] = gcd(factors[name], *divisors) if uses == len(divisors) else 1
-    return {name: factor for name, factor in factors.items() if factor > 1}
+                    reads.update(_divmod_reads(expr, name))
+        divisors = [value for op, value in reads if op == "/"]
+        remainders = {value for op, value in reads if op == "%"}
+        if plain or ("", 1) in reads or not divisors or len(remainders) > 1:
+            continue
+        d, c = gcd(*divisors), next(iter(remainders), 1)
+        if d <= c or d % c or (c > 1 and not (axis.extent.is_static and axis.extent.as_static() % d == 0)):
+            continue
+        out[name] = (d, c)
+    return out
+
+
+def _compressed(axis, stride: tuple[int, int]):
+    """``axis`` with the extent its workspace keeps under :func:`_workspace_strides`' ``(d, c)``."""
+    d, c = stride
+    return replace(axis, extent=axis.extent.ceil_div(d) if c == 1 else Dim(axis.extent.as_static() // d * c))
+
+
+def _compressed_index(name: str, stride: tuple[int, int]) -> Expr:
+    """Where the workspace stores coordinate ``name``'s value: ``(i // d) * c + i % c``."""
+    d, c = stride
+    return Var(name) / d if c == 1 else (Var(name) / d) * c + BinaryExpr("%", Var(name), Literal(c, "int"))
 
 
 def _divisor(expr, name: str) -> int | None:
@@ -1208,8 +1226,8 @@ def realize(
         for number, (names, produced, dtypes, ordinals) in enumerate(groups):
             axes = _workspace_axes(seam, produced)
             strides = _workspace_strides(produced, axes)
-            axes = tuple(replace(axis, extent=axis.extent.ceil_div(strides[axis.name])) if axis.name in strides else axis for axis in axes)
-            index = tuple(Var(axis.name) / strides[axis.name] if axis.name in strides else Var(axis.name) for axis in axes)
+            index = tuple(_compressed_index(axis.name, strides[axis.name]) if axis.name in strides else Var(axis.name) for axis in axes)
+            axes = tuple(_compressed(axis, strides[axis.name]) if axis.name in strides else axis for axis in axes)
             buffers = tuple(f"{root.id}__place_{token}_{i}" for i in ordinals)
             for name, buffer in zip(names, buffers, strict=True) if front is None else ():
                 held.update({position: buffer for position, own in enumerate(child.exposes) if own == name})
@@ -1294,8 +1312,18 @@ def realize(
         # its own stores name those values.
         derived: dict[str, str] = {}
         produced = _without_identity_casts(_replace_fold(produced, others, derived) if others else produced, stored)
-        if strides:
-            produced = rewrite_stmt(produced, lambda name: name, Sigma({name: Var(name) * stride for name, stride in strides.items()}))
+        # The piece sweeps the stored cells: coordinate ``j`` is the original ``(j // c) * d + j % c``,
+        # folded under ``j``'s range so ``i // d`` and ``i % c`` read back as ``j // c`` and ``j % c``.
+        for axis in axes:
+            if (stride := strides.get(axis.name)) is None:
+                continue
+            d, c = stride
+            if c == 1:
+                produced = rewrite_stmt(produced, lambda name: name, Sigma({axis.name: Var(axis.name) * d}))
+                continue
+            folding = _FoldingSigma({axis.name: (Var(axis.name) / c) * d + BinaryExpr("%", Var(axis.name), Literal(c, "int"))})
+            object.__setattr__(folding, "_ctx", SimplifyCtx(ranges={axis.name: Interval(0, axis.extent.as_static() - 1)}))
+            produced = rewrite_stmt(produced, lambda name: name, folding)
         index = tuple(Var(axis.name) for axis in axes)
         produced_pieces.append((seam, produced, axes, index, token, tuple(derived.get(name, name) for name in names), buffers))
 
