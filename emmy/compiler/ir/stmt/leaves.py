@@ -990,9 +990,11 @@ class ZeroPrologue(Stmt):
     costs a CUDA-graph MEMSET node per site. This stmt rides a kernel that launches strictly
     BEFORE the accumulator's kernel in the same stream (a dataflow predecessor — topological
     launch order guarantees it), so stream serialization makes the zero happen-before the
-    atomics and the MEMSET node disappears. CTA 0 alone writes; the zero is over raw 32-bit
-    words (``words = nbytes / 4`` — all-zero bytes are 0.0 in every buffer dtype, the same
-    argument the runtime memset makes), so the render never needs the buffer's dtype.
+    atomics and the MEMSET node disappears. Every thread of the grid writes a stride of it, ahead
+    of the kernel's own work: one CTA alone left the grid waiting on a serial tail (130 us for a
+    4 MB accumulator on the H100). The zero is over raw 32-bit words (``words = nbytes / 4`` —
+    all-zero bytes are 0.0 in every buffer dtype, the same argument the runtime memset makes), so
+    the render never needs the buffer's dtype.
 
     ``dst`` names the target buffer — it joins the carrying kernel's ``outputs`` (and thus its
     signature / ``arg_names``) WITHOUT a graph edge: an edge would be a cycle (the target is
@@ -1014,15 +1016,19 @@ class ZeroPrologue(Stmt):
         return True
 
     def pretty(self, indent: str = "") -> list[str]:
-        return [f"{indent}zero {self.dst}[0:{self.words}w]  (delegated zero-init, CTA 0)"]
+        return [f"{indent}zero {self.dst}[0:{self.words}w]  (delegated zero-init)"]
 
     def render(self, ctx: RenderCtx) -> list[str]:
         pad = _pad(ctx.indent)
         p1 = _pad(ctx.indent + 1)
+        threads = "(int)(blockDim.x * blockDim.y * blockDim.z)"
+        grid = f"{threads} * (int)(gridDim.x * gridDim.y * gridDim.z)"
+        block = "(int)(blockIdx.x + gridDim.x * (blockIdx.y + gridDim.y * blockIdx.z))"
+        thread = "(int)(threadIdx.x + blockDim.x * (threadIdx.y + blockDim.y * threadIdx.z))"
         return [
-            f"{pad}if (blockIdx.x == 0) {{",
+            f"{pad}{{",
             f"{p1}int* _zp_{self.dst} = (int*){self.dst};",
-            f"{p1}for (int _zi = threadIdx.x; _zi < {self.words}; _zi += blockDim.x) _zp_{self.dst}[_zi] = 0;",
+            f"{p1}for (int _zi = {block} * {threads} + {thread}; _zi < {self.words}; _zi += {grid}) _zp_{self.dst}[_zi] = 0;",
             f"{pad}}}",
         ]
 

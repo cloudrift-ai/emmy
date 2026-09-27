@@ -416,6 +416,9 @@ reading then names the tensor's trailing extent as `ldm` and calls the operand N
 reduction axis. Both are wrong, the fragment reads the wrong elements, and nothing raises. `_direct_operand` takes both
 from the operand's FLAT address — each dim's addends scaled by that dim's element stride and simplified — so a reshape
 that splits one coordinate across dims (`x[m / 2, (m % 2) * 128 + k]`) still reads as the `128·m + k` it sums to.
+The flash tier's gmem reads take theirs the same way — the hoisted query fragments and the unstaged key and value:
+a query stored `[seq, head, dim]` strides its rows by every head's dim, and read at its trailing extent the Qwen3-0.6B
+layer's flash piece disagreed with eager on 487k of 524k outputs.
 Wherever the dims separate the two coordinates this says exactly what the dim positions said. Neither coordinate
 unit-stride raises rather than emitting an address the loader cannot express; a symbolic extent leaves the strides of
 every earlier dim unknown and keeps the dim-position reading. The staged transports have their own contracts: a TMA box
