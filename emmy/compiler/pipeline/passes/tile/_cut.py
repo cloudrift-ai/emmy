@@ -637,7 +637,7 @@ def _channel_copies(seam: CutSite, axes: tuple) -> dict[int, tuple[int, dict[str
     forms = [_value_forms(replace(seam, node=seam.node.exposing((name,))), axes) for name in seam.node.exposes]
     # Within one value the channel reading the fewest coordinates through an expression holds it.
     reps = {}
-    for position, ((form,), reads) in sorted(enumerate(forms), key=lambda item: len(item[1][1])):
+    for position, ((form,), _reads) in sorted(enumerate(forms), key=lambda item: len(item[1][1])):
         reps.setdefault(form, position)
     copies: dict[int, tuple[int, dict[str, Expr]]] = {}
     for position, ((form,), reads) in enumerate(forms):
@@ -1208,7 +1208,9 @@ def realize(
             for name, buffer in zip(names, buffers, strict=True) if front is None else ():
                 held.update({position: buffer for position, own in enumerate(child.exposes) if own == name})
                 indexes.update({position: index for position, own in enumerate(child.exposes) if own == name})
-            pieces.append((replace(seam, dtypes=dtypes), produced, axes, strides, token if number == 0 else f"{token}_{number}", names, buffers))
+            pieces.append(
+                (replace(seam, dtypes=dtypes), produced, axes, strides, token if number == 0 else f"{token}_{number}", names, buffers)
+            )
 
         # SLABS, not bare Loads: these replace an operand edge, and an operand is a term. The
         # workspace read declares the seam axes it indexes, exactly as any other gmem read does.
