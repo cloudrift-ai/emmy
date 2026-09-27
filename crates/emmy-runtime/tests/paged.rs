@@ -66,14 +66,21 @@ fn a_step_writes_its_chunk_into_the_pages_it_is_given() {
         let bytes = executor.read_page("cache", page).expect("read page");
         cache.extend(
             bytes
-                .chunks_exact(4)
-                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])),
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| f32::from_le_bytes(*b)),
         );
     }
     // Pages are laid out head-major inside a page, so compare per page rather than flat. The
     // tolerance covers the device's tanh against the host's; a wrong page or offset is off by
     // whole rows, not by a fifth digit.
-    for (page_index, page) in cache.chunks_exact(KV_HEADS * PAGE * ROW).enumerate() {
+    for (page_index, page) in cache
+        .as_chunks::<{ KV_HEADS * PAGE * ROW }>()
+        .0
+        .iter()
+        .enumerate()
+    {
         for head in 0..KV_HEADS {
             for key in 0..PAGE {
                 let absolute = page_index * PAGE + key;
