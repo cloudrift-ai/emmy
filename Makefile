@@ -274,7 +274,7 @@ serve-image: git-sha-guard serve-config-guard
 		--build-arg 'EXTRA_ARGS=$(SERVE_EXTRA_ARGS_VALUE)' \
 		--build-arg 'RUNTIME_ENV=$(SERVE_ENV_VALUE)' \
 		--build-arg RUNTIME_BASE=$(VLLM_BASE_IMAGE) \
-		--build-arg NVCC_VERSION="$$(docker run --rm --entrypoint nvcc $(VLLM_EMMY_TAG) --version | sed -n 's/.*release \([0-9.]*\).*/\1/p')" \
+		--build-arg NVCC_VERSION="$$(docker run --rm --entrypoint nvcc $(VLLM_EMMY_TAG) --version | sed -n 's/.*, V\([0-9.]*\).*/\1/p')" \
 		--build-arg EMBED_HOST=$(SERVE_EMBED_HOST) \
 		--build-arg PREFILL_CAPACITY=$(SERVE_PREFILL_CAPACITY) \
 		--build-arg PREFILL_BUCKET=$(SERVE_PREFILL_BUCKET) \
