@@ -392,8 +392,8 @@ emmy vm delete cloudrift --instance-id <id>
 
 ```bash
 make test      # run the whole pytest suite — takes many minutes, run it once when finishing a PR
-make lint      # ruff check + format check
-make format    # auto-fix
+make lint      # check code and test-duration formatting
+make format    # auto-fix code and sort test durations
 make wheel     # build the sdist and this host's wheel into dist/
 make pypi-dist # dry-run the exact PyPI sdist + wheel build into dist/
 ```
