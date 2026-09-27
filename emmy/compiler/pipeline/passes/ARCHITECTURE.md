@@ -658,7 +658,10 @@ that canonical input:
 
 - **`030_cut`** offers the maximal fused Fold tree and every stored child-Fold seam, each as its own arm (see the
   placement discussion above). A cut writes one workspace per state component and replaces all occurrences of the
-  same canonically shared Fold object with workspace loads.
+  same canonically shared Fold object with workspace loads. A component that is another component read at other
+  coordinates (RoPE's rotate-half channels beside the plain projection) stores nothing: it reads the other one's
+  workspace at the address it computes, so each weight is read once. A channel that reads a coordinate only as
+  `i // d` where another reads it plainly (GQA's k beside q) is computed by its own piece, once per group of `d`.
   Closure and replaceability are semantic gates; operation family, expected speed, row order, and search-space size
   are not. Closure reads the complete lowered statement stream through `Body`'s scope-aware dependence analysis:
   an axis bound by one loop does not scope its siblings, and dead-but-still-emitted statements retain their free axes
