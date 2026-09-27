@@ -15,14 +15,16 @@ hold. The plan is done when the lane (`emmy bench` on the recipe) confirms all t
 
 | card | s512 Emmy | s512 torch.compile | gap | s1 Emmy | s1 torch.compile | gap |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| H100 | 141.5 (#933) | 80 | 1.77× | 88 | 32 | 2.75× |
-| A100 40GB | 323 | 193 | 1.67× | 82 (#930) | 52 | 1.58× |
-| V100 SXM2 | 855 (#932) | 636 | 1.34× | no golden | — | — |
+| H100 | 141.5 | 80 | 1.77× | 88 | 32 | 2.75× |
+| A100 40GB | 323 | 193 | 1.67× | 198 | 51 | 3.9× |
+| V100 SXM2 | 855 | 638 | 1.34× | no golden | — | — |
 | RTX 4090 | no golden | — | — | no golden | — | — |
 | RTX 5090 | no golden | — | — | no golden | — | — |
 
-Numbers marked with a PR are from its draft branch, not main. The 4090 and 5090 have had no golden since the old
-nine-target set was retired; their last numbers belong to kernels that no longer exist.
+Main after #932 and #933, before #930; eager and `torch.compile` re-measured 2026-09-27 on the same hosts. #930 re-forms
+the q/k pieces, so its goldens drop one row each until phase 0 re-records them; a sweep-recorded A100 s1 file on #930
+ran 82 µs, the target for that re-record. The 4090 and 5090 have had no golden since the old nine-target set was
+retired; their last numbers belong to kernels that no longer exist.
 
 ## What bounds each shape
 
@@ -39,11 +41,23 @@ nine-target set was retired; their last numbers belong to kernels that no longer
 
 ### 0. Land the open work and set the baseline
 
-1. Merge in order: #931 (split-row decode check), #930 (split pricing, one weight read for q/k), #932 (Volta
-   attention staging), then #933 (H100 wgmma rows) rebased on #930.
-2. #930 changes piece identities, so every committed corpus golden goes stale. Re-record all five on the merged
-   compiler with `--record-greedy --strict` (#932's hand-written timings get replaced by a real record here). Re-record
-   the ten Qwen3.8 AWQ/GPTQ V100 rows #930 leaves red.
+1. Landed: #931 (split-row decode check), #932 (Volta attention staging), #933 (H100 wgmma rows). #930 (split
+   pricing, one weight read for q/k) lands with its re-formed pieces unrecorded.
+2. Re-record the rows #930's restamp dropped. Each is a q/k piece #930 re-forms:
+   - golden-bench kernels: one row in each of the five goldens (s1 and s512 on the A100 and H100, s512 on the V100);
+   - `recipes/Qwen3.8-27B-AWQ-INT4/golden/v100_sm70.json` on a V100 SXM3, and
+     `recipes/Qwen3.8-27B-GPTQ-Int4/golden/v100_sm70.json` on a V100 SXM2 16GB (the card each file names);
+   - the V100 s512 attention row and whole-set row #932 wrote by hand from a replay: record them with
+     `--record-greedy` in the same pass.
+
+   Record from a sweep, never from the prior. The first attempt (2026-09-27) recorded from the prior and failed: at s1
+   the prior's schedule for the new q/k piece made the A100 layer slower than main (235 vs 198 µs); at s512 on all
+   three cards and on both Qwen3.8 routes the prior chose a pathological split for the re-formed piece, and the runs
+   hung or hit the bench time cap. Sweep the pinned route with `--ab` candidates into a fresh tune DB — split factors at
+   s1, `WORK` shapes at s512, thread tiers on the Qwen3.8 routes with a 600 s run cap and a 60 s per-launch timeout —
+   then `--record-greedy` from a copy of that DB, promote, and verify with an unpinned `--strict` replay. A Qwen3.8
+   piece that cannot get back to its old row's time is a regression of #930 to fix, not a row to accept. The prior's
+   pathological split pick is itself a finding: find why it prices that split cheap.
 3. Create the missing goldens: V100 s1, RTX 4090 s1/s512, RTX 5090 s1/s512. Trace, sweep `WORK` and splits into a
    fresh tune DB, record, and add the rows to the recipe.
 4. Fill the scoreboard with same-process eager and `torch.compile`, and a per-piece table per cell from the recorded
