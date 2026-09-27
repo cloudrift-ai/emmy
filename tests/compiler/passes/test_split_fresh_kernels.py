@@ -37,7 +37,7 @@ from emmy.compiler.ir.tile import OutputSpec, Placement
 from emmy.compiler.ir.tile.ir import TileOp
 from emmy.compiler.ir.tile.ops import sched_of
 from emmy.compiler.pipeline import CUDA_PASSES, TILE_PASSES, Pipeline
-from emmy.compiler.pipeline.fork import iter_leaves
+from emmy.compiler.pipeline.fork import iter_leaves, leaf_knobs
 from emmy.compiler.pipeline.knob import STRUCT_PREFIX, decision_view, family_of
 from emmy.compiler.pipeline.pipeline import Run
 from tests.compiler.terms import contraction
@@ -166,6 +166,24 @@ def test_low_precision_output_refuses_direct_atomic_split(monkeypatch, dtype) ->
     for graph in (_matmul(out_dtype=dtype), _sum(dtype=dtype)):
         with pytest.raises(ValueError, match="direct atomic REDUCE.*output storage"):
             _resolve(TILE_PASSES, graph)
+
+
+@pytest.mark.parametrize(("dtype", "atomic"), [(F16, False), (BF16, False), (F32, True)])
+def test_the_split_offer_has_an_atomic_arm_only_into_f32(dtype, atomic) -> None:
+    """The unpinned offer, not only a pin, withholds the direct atomic arm from a 16-bit output: each
+    CTA's partial would round into the output storage, in whatever order the CTAs land. On a V100
+    an f16 GEMV (1 x 4096 x 4096) split g4a missed eager at rtol=atol=1e-3 on 13% of its outputs and
+    g16a on 28%, where g4k and g16k passed. The deferred f32 finalize stays offered."""
+    offered: set[str] = set()
+
+    def decide(fp):
+        for option in fp.options:
+            offered.update(value for key, value in leaf_knobs(option).items() if family_of(key) == "REDUCE" and value.startswith("g"))
+        return next(iter_leaves(fp.options))
+
+    Run(pipeline=Pipeline.build(TILE_PASSES), ctx=_CTX).resolve(_matmul(out_dtype=dtype), decide)
+    assert any(value.endswith("k") for value in offered), offered
+    assert any(value.endswith("a") for value in offered) == atomic, offered
 
 
 def test_finalize_keeps_projection_input_edges(monkeypatch) -> None:
