@@ -66,6 +66,17 @@ def stage_target(stage: Stage, ctx) -> str | None:
 SPLIT_COPY_DEPTH = 2
 
 
+def chunk_slab_pad(tile: Tile, stage: Stage) -> int:
+    """The row pad, in elements, of a chunk-tier slab the Volta blocking copy fills.
+
+    The Volta drain gathers each lane's four halves at ``row · ldm``, one row per lane, and the
+    chunk tier's slabs are 64 B or 256 B rows: unpadded, every row of a fragment starts on the same
+    bank and one read serializes eight or sixteen ways. Sixteen bytes of pad keep the fill's 16 B
+    vector stores aligned and spread the rows to a two-way conflict at worst. The copy transports
+    of the newer atoms swizzle their slabs instead, and pad nothing."""
+    return 8 if stage.transport == "smem" and tile.atom.sync_copy_staging else 0
+
+
 def _clamp_depth(depth: int, slot_bytes: int, budget: int) -> int:
     """The deepest ring the smem ``budget`` affords at ``slot_bytes`` per ringed slot, never deeper
     than asked. Shared by the warp copy ring and the fill's B-slab ring; the scalar resolver
@@ -171,7 +182,7 @@ def chunk_key_stage(tile: Tile, stage: Stage, inputs, producer, producer_k, k_ax
     ragged = not k_axis.extent.is_static
     copies = (
         _warp_vector_copy(k_axis, span, bk_elems, False, False, ragged=ragged)
-        if stage.transport == "smem-async"
+        if stage.transport == "smem-async" or (stage.transport == "smem" and tile.atom.sync_copy_staging)
         else (
             stage.transport == "smem-tma"
             and _tma_operand_box(slab.load.index, producer_k.name, k_axis.name)
@@ -199,8 +210,9 @@ def _chunk_warp_stage(
     the chunk drain reads 16-bit fragments, and the gmem-direct fragment load converts per element
     correctly today.
 
-    The synchronous ``smem`` transport declines: it is the Volta atom's blocking vector copy, and
-    attention's chunk tier has no sm_70 kernel to serve. A SYMBOLIC key extent does NOT decline —
+    The synchronous ``smem`` transport is the Volta atom's blocking vector copy. It stages the same
+    slabs at one slot, row-padded (:func:`chunk_slab_pad`) because the Volta drain has no swizzled
+    read. A SYMBOLIC key extent does NOT decline —
     see the ragged-tail reading below, which is what lets a serving-shaped attention kernel stage
     at all, though it keeps the single-buffer ring. On a STATIC extent depth is the ordinary budget
     clamp: the chunk loop carries the whole softmax between its fill and its drain, so a deeper ring
@@ -233,13 +245,17 @@ def _chunk_warp_stage(
         and _warp_tma(k_axis, n.axis, n.tile, bk_elems, b_nbytes, b_nbytes, n.mask, view.b_trans, ragged=ragged)
     )
     cp_ok = stage.transport == "smem-async" and vector_copy_ok
-    if not (tma_ok or cp_ok):
+    # Volta has no cp.async: its ``smem`` transport is the blocking vector copy, which moves the
+    # same 16 B chunks, so it asks the same questions.
+    sync_ok = stage.transport == "smem" and atom.sync_copy_staging and vector_copy_ok
+    if not (tma_ok or cp_ok or sync_ok):
         return None
+    pad = chunk_slab_pad(tile, stage)
     b_rows, b_cols = (n.tile, bk_elems) if view.b_trans else (bk_elems, n.tile)
-    slot_bytes = b_rows * b_cols * b_nbytes
+    slot_bytes = b_rows * (b_cols + pad) * b_nbytes
     key = chunk_key_stage(tile, stage, inputs, producer, producer_k, k_axis)
     if key is not None:
-        slot_bytes += bk_elems * key[1] * b_nbytes
+        slot_bytes += bk_elems * (key[1] + pad) * b_nbytes
     if slot_bytes > budget:
         return None
     # A RAGGED stream keeps the single-buffer ring the tail discipline above was written for.
@@ -248,7 +264,9 @@ def _chunk_warp_stage(
     # run this tier at a symbolic key length); at one slot it is correct. What the runtime chunk
     # count does to the prefetch's clamp is not diagnosed, so the depth is refused here rather than
     # offered and left to fail at the card.
-    depth = 1 if ragged else _clamp_depth(stage.depth, slot_bytes, budget)
+    # The blocking copy keeps a single slot: its ring is the register-staged split, whose in-flight
+    # chunk would hold both whole slabs in registers across the softmax.
+    depth = 1 if ragged or sync_ok else _clamp_depth(stage.depth, slot_bytes, budget)
     choice = replace(stage, depth=depth, reg_depth=min(stage.reg_depth, tile.bk))
     return ResolvedStage(choice, bk_elems=bk_elems)
 
@@ -778,6 +796,7 @@ def resolve_fill_stage(
 
 __all__ = [
     "chunk_key_stage",
+    "chunk_slab_pad",
     "computed_operand_copy_dtype",
     "computed_operand_cover",
     "converting_a",

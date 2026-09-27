@@ -352,7 +352,8 @@ class StridedLoop(Stmt):
         )
 
     def binds_axes(self) -> frozenset[str]:
-        return frozenset({self.axis.name})
+        # An ``end`` override is hoisted into the for-init as ``<var>_end``, which the body may read.
+        return frozenset({self.axis.name, f"{self.axis.name}_end"} if self.end is not None else {self.axis.name})
 
     def exprs(self) -> tuple[Expr, ...]:
         out = (self.start, self.step) if isinstance(self.step, Expr) else (self.start,)
