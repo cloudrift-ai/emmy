@@ -739,6 +739,7 @@ def test_a_kernel_pin_reaches_only_the_piece_it_names(monkeypatch):
     assert knob_mod.family_pins("REDUCE") == (("REDUCE", "coop"),)
     assert pin_row("k_x__place_ab12", split_consumed=True) == {"REDUCE": "coop-t"}
     assert pin_row("k_x__place_cd34", split_consumed=False) == {"REDUCE": "coop"}
+    assert pin_row("", "add_7__place_ab12_0__partial", split_consumed=True) == {"REDUCE": "coop-t"}, "a partial by its node id"
 
 
 def test_a_kernel_pin_is_checked_as_its_family():
