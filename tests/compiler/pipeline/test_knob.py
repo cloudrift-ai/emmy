@@ -721,3 +721,30 @@ def test_evidence_row_vouches_reads_a_bare_row_key_like_a_bare_pin() -> None:
     assert not evidence_row_vouches({"WORK": "t32", "REDUCE@map.1/twist": "", "REDUCE@map.1/twist.1/inner": ""}, row), "no site carries it"
     assert evidence_row_vouches({"WORK": "t32", "REDUCE": "coop", "TILE": "f1"}, row), "an exact key compares exactly; TILE is free"
     assert not evidence_row_vouches({"WORK": "t32", "REDUCE": "r4"}, row)
+
+
+def test_a_kernel_pin_reaches_only_the_piece_it_names(monkeypatch):
+    """``REDUCE@place_<token>`` is the REDUCE pin of the one cut piece named ``…__place_<token>`` and of
+    the partial and finalize its split mints; a piece of another token, or a token that only starts the
+    same way, keeps the bare pin. Site readers never see it as a site key."""
+    from importlib import import_module
+
+    pin_row = import_module("emmy.compiler.pipeline.passes.tile.schedule.040_schedule").pin_row
+    monkeypatch.setenv("EMMY_REDUCE", "coop")
+    monkeypatch.setenv("EMMY_REDUCE@place_ab12", "g16k/coop-t")
+    assert knob_mod.kernel_pin("REDUCE", "k_x__place_ab12") == "g16k/coop-t"
+    assert knob_mod.kernel_pin("REDUCE", "k_add_7__place_ab12_0__partial") == "g16k/coop-t"
+    assert knob_mod.kernel_pin("REDUCE", "k_x__place_ab123") is None
+    assert knob_mod.kernel_pin("REDUCE", "k_x__place_cd34") is None
+    assert knob_mod.family_pins("REDUCE") == (("REDUCE", "coop"),)
+    assert pin_row("k_x__place_ab12", split_consumed=True) == {"REDUCE": "coop-t"}
+    assert pin_row("k_x__place_cd34", split_consumed=False) == {"REDUCE": "coop"}
+
+
+def test_a_kernel_pin_is_checked_as_its_family():
+    """A realized row does not name its kernel, so a kernel pin is realized when some kernel realized it."""
+    from emmy.compiler.pipeline.search.pins import unreproducible_pin_flag
+
+    rows = [{"WORK": "w1x16", "REDUCE": ""}, {"WORK": "t128", "REDUCE": "coop-t"}]
+    assert unreproducible_pin_flag({"WORK@place_ab12": "t128"}, rows) is None
+    assert unreproducible_pin_flag({"WORK@place_ab12": "w4x1"}, rows) is not None
