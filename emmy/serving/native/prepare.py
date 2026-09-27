@@ -169,12 +169,13 @@ def _program(model, context_length, rows, cache):
         blocks=(h + CUDA_THREADS - 1) // CUDA_THREADS,
         rows=rows,
     )
-    example = torch.zeros(1, h, dtype=torch.float32)
+    example = torch.zeros(rows, h, dtype=torch.float32)
     for index, layer in enumerate(model.model.layers):
         pre, post = build_attention_split_wrapper(layer, float32_residual=True)
         names = [step.buffer(f"layer{index}.{name}", (rows, width * d)) for name, width in (("q", heads), ("k", kv), ("v", kv))]
         step.compiled(f"pre{index}", pre, (example,), [hidden], names, cache)
-        rotated = step.buffer(f"layer{index}.rotated", (rows, heads * d))
+        last_prefill = rows > 1 and index + 1 == len(model.model.layers)
+        rotated = step.buffer(f"layer{index}.rotated", (rows, heads * d), role="output" if last_prefill else "scratch")
         keys = step.buffer(f"layer{index}.keys", (context_length, kv, d), role="output")
         values = step.buffer(f"layer{index}.values", (context_length, kv, d), role="output")
         step.launch(
@@ -185,6 +186,8 @@ def _program(model, context_length, rows, cache):
             blocks=(heads * d + CUDA_THREADS - 1) // CUDA_THREADS,
             rows=rows,
         )
+        if last_prefill:
+            continue
         attention = step.buffer(f"layer{index}.attention", (rows, heads * d))
         step.launch(
             "native_attention",
@@ -196,7 +199,7 @@ def _program(model, context_length, rows, cache):
             shared=context_length * 4,
         )
         output = step.buffer(f"hidden{index + 1}", (rows, h), F32)
-        step.compiled(f"post{index}", post, (torch.zeros(1, heads * d, dtype=torch.float16), example), [attention, hidden], [output], cache)
+        step.compiled(f"post{index}", post, (torch.zeros(rows, heads * d, dtype=torch.float16), example), [attention, hidden], [output], cache)
         hidden = output
 
     if rows > 1:

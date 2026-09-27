@@ -54,7 +54,7 @@ def test_cached_qwen3_logits_and_generation(tmp_path, monkeypatch):
     model = qwen3_model(2).half()
     model.config._attn_implementation = "eager"
     with gpu_lock():
-        root = export_model(model, tmp_path / "pack", context_length=8)
+        root = export_model(model, tmp_path / "pack", context_length=8, prefill_size=3)
         reference_program = _python_reference(root)
         monkeypatch.setenv("PATH", "/nonexistent")
         model.cuda()
@@ -67,7 +67,7 @@ def test_cached_qwen3_logits_and_generation(tmp_path, monkeypatch):
             logits_path = tmp_path / "logits.bin"
             try:
                 await worker.run_job({"op": "load_generation", "root": str(root)}, wall_timeout_s=30)
-                for capture, prompt in ((False, [1, 2, 3]), (None, [8, 9]), (True, [3]), (True, [4, 5, 6, 7])):
+                for capture, prompt in ((False, [1, 2, 3, 4, 5, 6, 7]), (True, [1, 2, 3, 4, 5, 6]), (None, [8, 9]), (True, [3]), (True, [4, 5, 6, 7])):
                     np.asarray(prompt, np.int64).tofile(path)
                     await worker.run_job({"op": "start_generation", "prompt": str(path)}, wall_timeout_s=30)
                     _reset_python(reference_program, prompt)
@@ -95,6 +95,27 @@ def test_cached_qwen3_logits_and_generation(tmp_path, monkeypatch):
                             selected.append(next_token)
                         else:
                             assert result["token"] is None
+                    # Chunk dispatch advances only valid prompt rows. Reusing captured graphs
+                    # across different tails must neither expose padding nor retain an old cache.
+                    await worker.run_job({"op": "start_generation", "prompt": str(path)}, wall_timeout_s=30)
+                    position = 0
+                    chunked = []
+                    while position < 8:
+                        result = await worker.run_job(
+                            {"op": "generation_step", "prefill": True, "capture": bool(capture), "logits": str(logits_path)},
+                            wall_timeout_s=30,
+                        )
+                        expected_position = position + (min(3, len(prompt) - position - 1) if position < len(prompt) - 1 else 1)
+                        assert result["position"] == expected_position
+                        position = expected_position
+                        if result["token"] is not None:
+                            prefix = prompt + chunked
+                            with torch.no_grad(), _reference_precision(True):
+                                expected = model(torch.tensor([prefix], device="cuda")).logits[0, -1].float().cpu().numpy()
+                            actual = np.fromfile(logits_path, np.float16).astype(np.float32)
+                            np.testing.assert_allclose(actual, expected, rtol=1e-3, atol=1e-3)
+                            chunked.append(result["token"])
+                    assert chunked == selected
                     output = tmp_path / "generated.bin"
                     await worker.run_job(
                         {
@@ -185,7 +206,8 @@ def _logit_errors(actual, expected):
 
 
 @pytest.mark.parametrize("name,text,prompt_length,decode_steps,capture", CHECKPOINT_CASES, ids=[case[0] for case in CHECKPOINT_CASES])
-def test_checkpoint_logits_and_completions(request, tmp_path, monkeypatch, name, text, prompt_length, decode_steps, capture):
+@pytest.mark.parametrize("prefill", [False, True], ids=["sequential", "chunked"])
+def test_checkpoint_logits_and_completions(request, tmp_path, monkeypatch, name, text, prompt_length, decode_steps, capture, prefill):
     import copy
 
     checkpoint = request.config.getoption("--native-checkpoint")
@@ -209,7 +231,7 @@ def test_checkpoint_logits_and_completions(request, tmp_path, monkeypatch, name,
         model.cuda()
         precise.cuda()
         # Include a longer cache history in exact dispatcher parity, exercising dynamic shared memory.
-        reference_program = _python_reference(artifact) if name in ("france", "arithmetic", "heldout_rotary_context") else None
+        reference_program = _python_reference(artifact) if not prefill and name in ("france", "arithmetic", "heldout_rotary_context") else None
         monkeypatch.setenv("PATH", "/nonexistent")
         monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", False)
 
@@ -224,11 +246,15 @@ def test_checkpoint_logits_and_completions(request, tmp_path, monkeypatch, name,
                 if reference_program is not None:
                     _reset_python(reference_program, prompt)
                 prefix, next_token, past, precise_past = [], None, None, None
+                native_position = 0
                 for position in range(len(prompt) + decode_steps):
                     prefix.append(prompt[position] if position < len(prompt) else next_token)
-                    result = await worker.run_job(
-                        {"op": "generation_step", "capture": capture, "logits": str(logits_path)}, wall_timeout_s=30
-                    )
+                    if position == native_position:
+                        result = await worker.run_job(
+                            {"op": "generation_step", "capture": capture, "prefill": prefill, "logits": str(logits_path)},
+                            wall_timeout_s=30,
+                        )
+                        native_position = result["position"]
                     with torch.no_grad(), _reference_precision(True):
                         ids = torch.tensor([[prefix[-1]]], device="cuda")
                         reference = model(ids, past_key_values=past, use_cache=True)
@@ -237,6 +263,8 @@ def test_checkpoint_logits_and_completions(request, tmp_path, monkeypatch, name,
                         accurate = precise(ids, past_key_values=precise_past, use_cache=True)
                         precise_past = accurate.past_key_values
                         fp32 = accurate.logits[0, -1].cpu().numpy()
+                    if prefill and position < len(prompt) - 1:
+                        continue
                     actual = np.fromfile(logits_path, np.float16).astype(np.float32)
                     if reference_program is not None:
                         np.testing.assert_array_equal(actual, _python_step(reference_program, position).astype(np.float32))
@@ -247,6 +275,7 @@ def test_checkpoint_logits_and_completions(request, tmp_path, monkeypatch, name,
                             "case": name,
                             "position": position,
                             "capture": capture,
+                            "prefill": prefill,
                             "prompt_length": len(prompt),
                             "native_fp32": native_error,
                             "hf_fp32": reference_error,
@@ -288,7 +317,9 @@ def test_checkpoint_logits_and_completions(request, tmp_path, monkeypatch, name,
                     await worker.run_job({"op": "start_generation", "prompt": str(path)}, wall_timeout_s=30)
                     for _ in range(3):
                         reset = await worker.run_job({"op": "generation_step", "capture": True}, wall_timeout_s=30)
-                    assert reset["token"] == measurements[2]["native_token"]
+                    with torch.no_grad(), _reference_precision(True):
+                        expected = model(torch.tensor([prompt[:3]], device="cuda")).logits[0, -1]
+                    assert reset["token"] == int(expected.argmax())
             finally:
                 await worker.aclose()
 

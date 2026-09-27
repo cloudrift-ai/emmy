@@ -160,7 +160,13 @@ impl Generator {
                 "invalid prefill interface"
             );
             for buffer in &prefill.program.buffers {
-                if buffer.role == "scratch" {
+                if buffer.role == "scratch"
+                    || (buffer.role == "output"
+                        && !artifact
+                            .program
+                            .buffer(&buffer.name)
+                            .is_ok_and(|b| b.role == "output"))
+                {
                     continue;
                 }
                 if buffer.role == "constant"
@@ -230,6 +236,12 @@ impl Generator {
         self.executor.bind("prompt", &bytes)?;
         self.executor
             .bind("prompt_length", &(prompt.len() as i64).to_le_bytes())?;
+        if let Some(prefill) = &mut self.prefill {
+            for name in ["prompt", "prompt_length"] {
+                let view = self.executor.buffer(name)?;
+                prefill.bind_device(name, view.ptr, view.bytes)?;
+            }
+        }
         self.position = 0;
         self.prompt_length = prompt.len();
         self.stopped = false;
@@ -243,8 +255,7 @@ impl Generator {
             && let Some(prefill) = &mut self.prefill
         {
             self.stopped = true;
-            self.executor
-                .bind("position", &(self.position as i64).to_le_bytes())?;
+            prefill.bind("position", &(self.position as i64).to_le_bytes())?;
             prefill.advance(capture)?;
             self.position += self
                 .config
