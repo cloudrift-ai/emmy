@@ -258,3 +258,33 @@ def test_a_measurement_taken_here_is_never_replaced_by_an_import(tmp_path) -> No
             evidence_db(db, ctx)
         [row] = db.iter_perf_rows()
         assert (row.stats.median, row.source) == (9.0, "measured")
+
+
+def _import_in_a_worker(path, barrier) -> None:
+    """One serving worker's first compile: open the shared tune DB and import the golden scope."""
+    cut = corpus.load_case(corpus.CASES_DIR / "fused/linear-add-place-cut-sm70.json")
+    with pinned_knobs(_regime(cut.record)), records_override(_records(cut)):
+        db = SearchDB(path)
+        barrier.wait()
+        evidence_db(db, cut.context())
+
+
+def test_workers_sharing_a_tune_db_import_the_scope_once(tmp_path) -> None:
+    """A tensor- and pipeline-parallel boot starts one process per card, and every one of them imports the
+    golden scope into the same fresh tune DB at its first compile. The check, the forget and the import
+    must be one step: two processes that both see the scope missing collide on the rows' unique keys, and
+    one that checks while another is mid-import reads a partial scope as imported."""
+    import multiprocessing
+
+    ctx = multiprocessing.get_context("spawn")
+    workers = 6
+    barrier = ctx.Barrier(workers)
+    path = tmp_path / "tune.db"
+    procs = [ctx.Process(target=_import_in_a_worker, args=(path, barrier)) for _ in range(workers)]
+    for proc in procs:
+        proc.start()
+    for proc in procs:
+        proc.join(120)
+    assert [proc.exitcode for proc in procs] == [0] * workers, "a worker raised (its traceback is on stderr)"
+    _db, _ctx, _records_, counts = _imported("fused/linear-add-place-cut-sm70.json")
+    assert len(list(SearchDB(path).iter_perf_rows())) == counts["perf rows"]
