@@ -81,8 +81,8 @@ use the parallel sampler. The runtime protocol version is unchanged.
 For positive temperature, a 65,536-bin histogram orders FP16 logits exactly, combining signed zeros. The sampler
 retains the smallest descending probability prefix reaching top-p, breaking ties by ascending token ID. It samples
 that distribution in token-ID order using float64 probabilities. The histogram costs 256 KiB per loaded model and is
-cleared before every step; no vocabulary-sized buffer crosses to the CPU. This simple implementation has serial
-histogram scans and token selection; it is not a sampling performance claim.
+cleared whenever the one-token program runs; no vocabulary-sized buffer crosses to the CPU. This simple implementation
+has serial histogram scans and token selection; it is not a sampling performance claim.
 
 A SplitMix64 counter combines the request seed and generated-token index. Prefill does not consume random draws.
 Resetting a request resets the counter, and captured and uncaptured execution select the same tokens for identical
