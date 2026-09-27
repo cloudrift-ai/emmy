@@ -83,6 +83,13 @@ trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true' EXIT
 docker run -d --name "$NAME" --gpus "$GPUS" --ipc=host -p "$PORT":8000 "$IMAGE"
 
 before=$(docker exec "$NAME" sh -c "find /opt/emmy/cubin -name '*.cubin' | sort")
+# A Triton compile at boot or request time writes a new entry into the baked cache, which is the
+# signal checked below. vLLM's JIT monitor also warns on a kernel's first launch in a process after
+# warmup, even when its binary loads straight from that cache: a runtime whose warmup does not launch
+# its attention kernels (the 1Cat fork) warns on the first request with nothing compiled.
+triton_files() { docker exec "$NAME" sh -c "find /opt/emmy/triton -type f | sort"; }
+jit_warnings() { docker logs "$NAME" 2>&1 | grep -c "Triton kernel JIT compilation during inference" || true; }
+triton_before=$(triton_files)
 
 # With a baked pack the boot skips the compiler frontend entirely and health arrives in
 # ~weight-load time; without one (pack write skipped at warm) the per-layer CPU
@@ -100,15 +107,19 @@ curl -sf "http://localhost:$PORT/health" >/dev/null || { echo "[verify] timed ou
 # Under HF_HUB_OFFLINE vLLM serves the model under the RESOLVED snapshot path, not the
 # repo id — ask the server for its served name rather than assuming $SERVE_MODEL.
 served=$(curl -sf "http://localhost:$PORT/v1/models" | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"][0]["id"])')
-jit_before=$(docker logs "$NAME" 2>&1 | grep -c "Triton kernel JIT compilation during inference" || true)
+jit_before=$(jit_warnings)
 curl -sf "http://localhost:$PORT/v1/completions" -H 'Content-Type: application/json' \
     -d "{\"model\": \"$served\", \"prompt\": \"The capital of France is\", \"max_tokens\": 20, \"temperature\": 0}" \
     | head -c 400; echo
-jit_after=$(docker logs "$NAME" 2>&1 | grep -c "Triton kernel JIT compilation during inference" || true)
-if [ "$jit_before" != "$jit_after" ]; then
-    echo "[verify] FAIL — request-time Triton JIT ran despite the baked warm cache:" >&2
-    docker logs "$NAME" 2>&1 | grep "Triton kernel JIT compilation during inference" | tail -10 >&2 || true
+jit_after=$(jit_warnings)
+triton_after=$(triton_files)
+if [ "$triton_before" != "$triton_after" ]; then
+    echo "[verify] FAIL — Triton compiled at boot or request time despite the baked warm cache (new cache entries):" >&2
+    diff <(echo "$triton_before") <(echo "$triton_after") | tail -10 >&2 || true
     exit 1
+fi
+if [ "$jit_before" != "$jit_after" ]; then
+    echo "[verify] note: $((jit_after - jit_before)) first launch(es) during the request loaded from the baked Triton cache (vLLM's JIT monitor warns; no cache entry was written)"
 fi
 
 after=$(docker exec "$NAME" sh -c "find /opt/emmy/cubin -name '*.cubin' | sort")
@@ -130,7 +141,7 @@ if [ "$before" != "$after" ]; then
     diff <(echo "$before") <(echo "$after") || true
     exit 1
 fi
-echo "[verify] PASS — served offline with zero new cubins or request-time Triton JIT ($(echo "$before" | wc -l) prebuilt)${pack_baked:+, pack hit on all $WORKERS worker(s)}"
+echo "[verify] PASS — served offline with zero new cubins or Triton compiles ($(echo "$before" | wc -l) prebuilt)${pack_baked:+, pack hit on all $WORKERS worker(s)}"
 
 # ---- the extra shapes ------------------------------------------------------------------
 # Each shape warm.sh baked a pack for must ALSO hit it, for the same reason the pinned shape
@@ -147,6 +158,7 @@ for spec in ${SERVE_WARM_SHAPES:-}; do
     echo "[verify] ---- extra shape $spec ----"
     docker rm -f "$NAME" >/dev/null 2>&1 || true
     docker run -d --name "$NAME" --gpus "$GPUS" --ipc=host -p "$PORT":8000 "${args[@]}" "$IMAGE" >/dev/null
+    shape_triton_before=$(triton_files)
     for _ in $(seq 1 240); do
         if curl -sf "http://localhost:$PORT/health" >/dev/null 2>&1; then break; fi
         if [ -z "$(docker ps -q -f name=$NAME)" ]; then
@@ -156,14 +168,12 @@ for spec in ${SERVE_WARM_SHAPES:-}; do
     done
     curl -sf "http://localhost:$PORT/health" >/dev/null || { echo "[verify] FAIL — shape $spec timed out"; docker logs --tail 50 "$NAME"; exit 1; }
     shape_served=$(curl -sf "http://localhost:$PORT/v1/models" | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"][0]["id"])')
-    shape_jit_before=$(docker logs "$NAME" 2>&1 | grep -c "Triton kernel JIT compilation during inference" || true)
     curl -sf "http://localhost:$PORT/v1/completions" -H 'Content-Type: application/json' \
         -d "{\"model\": \"$shape_served\", \"prompt\": \"The capital of France is\", \"max_tokens\": 20, \"temperature\": 0}" \
         >/dev/null
-    shape_jit_after=$(docker logs "$NAME" 2>&1 | grep -c "Triton kernel JIT compilation during inference" || true)
-    if [ "$shape_jit_before" != "$shape_jit_after" ]; then
-        echo "[verify] FAIL — shape $spec ran request-time Triton JIT despite the baked warm cache:" >&2
-        docker logs "$NAME" 2>&1 | grep "Triton kernel JIT compilation during inference" | tail -10 >&2 || true
+    if [ "$shape_triton_before" != "$(triton_files)" ]; then
+        echo "[verify] FAIL — shape $spec compiled Triton kernels despite the baked warm cache:" >&2
+        diff <(echo "$shape_triton_before") <(triton_files) | tail -10 >&2 || true
         exit 1
     fi
     shape_after=$(docker exec "$NAME" sh -c "find /opt/emmy/cubin -name '*.cubin' | sort")
@@ -173,5 +183,5 @@ for spec in ${SERVE_WARM_SHAPES:-}; do
         exit 1
     fi
     [ "$shape_after" = "$after" ] || { echo "[verify] FAIL — shape $spec compiled new cubins at runtime:"; diff <(echo "$after") <(echo "$shape_after") || true; exit 1; }
-    echo "[verify] PASS — shape $spec: pack-hit boot, zero new cubins or request-time Triton JIT"
+    echo "[verify] PASS — shape $spec: pack-hit boot, zero new cubins or Triton compiles"
 done

@@ -524,8 +524,10 @@ def test_release_bakes_and_verifies_the_request_time_triton_cache():
     assert "TRITON_CACHE_DIR=/opt/emmy/triton" in warm
     assert "COPY warm/triton /opt/emmy/triton" in dockerfile
     assert "TRITON_CACHE_DIR=/opt/emmy/triton" in dockerfile
-    assert "Triton kernel JIT compilation during inference" in verify
-    assert "jit_before" in verify and "jit_after" in verify
+    # The gate is the cache itself: a compile writes an entry. vLLM's JIT monitor also warns on a first
+    # launch that loads from the cache, which a fork runtime's first request does with nothing compiled.
+    assert "find /opt/emmy/triton -type f" in verify
+    assert 'if [ "$triton_before" != "$triton_after" ]' in verify
 
 
 def test_serving_images_carry_canonical_publication_labels():

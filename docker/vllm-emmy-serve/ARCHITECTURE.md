@@ -190,7 +190,10 @@ the same cubins and the standard-lane pack never exists.
 - `verify.sh` — compares the image's baked `SERVE_REVISION` against the config's (a tag built from an older config
   serves different weights and still passes every check below), then cold-starts the **baked** image with no token,
   issues one completion, and diffs the cubin file set before/after: an empty diff proves 100% Emmy cache hit. It
-  also rejects any new vLLM Triton JIT warning emitted by that request; the offline boot proves zero downloads.
+  also fails when the boot or the request writes a new entry into the baked Triton cache, which a compile does; vLLM's
+  JIT monitor also warns on a kernel's first launch in a process, even one loaded straight from that cache, which the
+  1Cat fork's first request does for its attention kernels with nothing compiled, so its warnings are reported, not
+  failed. The offline boot proves zero downloads.
   When a pack is baked, it also asserts the boot **hit** it (a silent fallback to the full compile would still pass the
   cubin check while re-paying the frontend on every customer boot), on every worker: a tensor- and pipeline-parallel
   boot (the TP × PP it reads from `SERVE_EXTRA_ARGS`) logs one hit per worker, since each loads its pipeline stage's
