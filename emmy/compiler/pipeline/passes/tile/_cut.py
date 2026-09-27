@@ -868,8 +868,10 @@ def _substitute_and_fold(produced: Fold, name: str, sigma: Sigma, ctx: SimplifyC
 def _divmod_in_edge(edge: Fold, name: str, factor: int) -> tuple[bool, bool]:
     """``(the edge reads name / factor, the edge reads name's low part)`` anywhere under it.
 
-    The low part is ``name % factor`` or ``name`` itself: a plain read depends on both halves, as
-    a workspace indexed by the fused name does when a cut materialized one operand at it."""
+    A division by a multiple of ``factor`` reads the high part too: ``i // (factor * g)`` is the
+    high part divided again, as GQA's k reads the head. The low part is ``name % factor`` or
+    ``name`` itself: a plain read depends on both halves, as a workspace indexed by the fused
+    name does when a cut materialized one operand at it."""
     div = low = False
     pending = [edge]
     while pending:
@@ -877,20 +879,34 @@ def _divmod_in_edge(edge: Fold, name: str, factor: int) -> tuple[bool, bool]:
         pending.extend(term.operands)
         for stmt in term.lift.body.iter():
             for expr in stmt.exprs():
-                uses = covered = 0
-                for part in expr.subterms():
-                    uses += isinstance(part, Var) and part.name == name
-                    if (
-                        isinstance(part, BinaryExpr)
-                        and part.left == Var(name)
-                        and isinstance(part.right, Literal)
-                        and part.right.value == factor
-                    ):
-                        covered += 1
-                        div = div or part.op in ("/", "//")
-                        low = low or part.op == "%"
-                low = low or uses > covered
+                for op, value in _divmod_reads(expr, name):
+                    high = op == "/" and value % factor == 0
+                    div = div or high
+                    low = low or not high
     return div, low
+
+
+def _divmod_reads(expr, name: str) -> list[tuple[str, int]]:
+    """How ``expr`` reads the coordinate ``name``: ``("/", d)`` per outermost chain of integer
+    divisions (``(i // a) // b`` reads ``i // (a * b)``), ``("%", m)`` per remainder, ``("", 1)``
+    per bare use."""
+    parts = tuple(expr.subterms())
+    chains = {id(part): divisor for part in parts if isinstance(part, BinaryExpr) and (divisor := _divisor(part, name)) is not None and divisor > 1}
+    inner = {id(part.left) for part in parts if id(part) in chains}
+    reads = [("/", divisor) for key, divisor in chains.items() if key not in inner]
+    reads += [
+        ("%", int(part.right.value))
+        for part in parts
+        if isinstance(part, BinaryExpr)
+        and part.op == "%"
+        and part.left == Var(name)
+        and isinstance(part.right, Literal)
+        and part.right.dtype == "int"
+        and isinstance(part.right.value, int)
+        and part.right.value > 1
+    ]
+    uses = sum(isinstance(part, Var) and part.name == name for part in parts)
+    return reads + [("", 1)] * (uses - len(reads))
 
 
 def _straddles_a_contraction(produced: Fold, name: str, factor: int) -> bool:
@@ -941,9 +957,7 @@ def _fused_pair_factor(produced: Fold, axes: tuple) -> tuple[str, int] | None:
         if not axis.extent.is_static:
             continue
         extent = axis.extent.as_static()
-        divisors: set[int] = set()
-        remainders: set[int] = set()
-        uses = covered = 0
+        reads: set[tuple[str, int]] = set()
         pending = [produced]
         while pending:
             term = pending.pop()
@@ -952,25 +966,13 @@ def _fused_pair_factor(produced: Fold, axes: tuple) -> tuple[str, int] | None:
                 continue
             for stmt in term.lift.body.iter():
                 for expr in stmt.exprs():
-                    for part in expr.subterms():
-                        if isinstance(part, Var) and part.name == name:
-                            uses += 1
-                        if (
-                            isinstance(part, BinaryExpr)
-                            and part.left == Var(name)
-                            and isinstance(part.right, Literal)
-                            and part.right.dtype == "int"
-                            and isinstance(part.right.value, int)
-                            and part.right.value > 1
-                        ):
-                            if part.op in ("/", "//"):
-                                divisors.add(int(part.right.value))
-                                covered += 1
-                            elif part.op == "%":
-                                remainders.add(int(part.right.value))
-                                covered += 1
-        if len(divisors) == 1 and remainders <= divisors and (remainders or uses > covered):
-            (factor,) = divisors
+                    reads.update(_divmod_reads(expr, name))
+        divisors = {value for op, value in reads if op == "/"}
+        remainders = {value for op, value in reads if op == "%"}
+        # The pair's factor is the finest division; a coarser one that it divides reads the high
+        # part again (GQA's k at ``head // group``), which the split folds to ``hi // group``.
+        factor = min(divisors, default=0)
+        if divisors and all(value % factor == 0 for value in divisors) and remainders <= {factor} and (remainders or ("", 1) in reads):
             if 1 < factor < extent and extent % factor == 0 and _straddles_a_contraction(produced, name, factor):
                 return name, factor
     return None
