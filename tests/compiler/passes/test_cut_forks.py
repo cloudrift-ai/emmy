@@ -1061,6 +1061,58 @@ def test_a_twin_cut_once_serves_its_lone_channel_reader() -> None:
     np.testing.assert_allclose(got, expected, rtol=2e-2, atol=2e-1)
 
 
+def _rope_graph() -> Graph:
+    """``q = x @ w`` over two heads of eight, then RoPE: ``q * cos + rotate_half(q) * sin``. Lifting folds
+    the plain projection and its two half-shifted copies into one three-channel twin."""
+    from emmy.commands.trace import graph_from_code
+
+    code = (
+        "(lambda x, w, c, s: (lambda q: q * c + torch.cat((-q[..., 4:], q[..., :4]), -1) * s)(torch.matmul(x, w).view(1, 2, 8)))"
+        "(torch.randn(1, 64, dtype=torch.float16), torch.randn(64, 16, dtype=torch.float16),"
+        " torch.randn(1, 1, 8, dtype=torch.float16), torch.randn(1, 1, 8, dtype=torch.float16))"
+    )
+    return graph_from_code(code)[0]
+
+
+def test_a_twin_channel_read_at_shifted_columns_reads_the_plain_channels_workspace() -> None:
+    """RoPE's rotate-half copies are channels of the projection twin, each reading the weight again. Cut
+    at the projection, the piece computes the plain channel once and the reader loads its workspace
+    at the three columns."""
+    (seam,) = [seam for seam in cuttable_seams(_lifted_parent(_rope_graph())) if seam.node.as_contraction() is not None]
+    assert len(seam.node.exposes) == 3
+    with pinned_knobs({seam.spelling: "cut"}):
+        lowered = Pipeline.build(LOOP_PASSES).run(_rope_graph(), ctx=_CTX)
+        cut, _ = Run(pipeline=Pipeline.build(["tile/lift", "tile/cut"]), ctx=_CTX).resolve(lowered, lambda fork: fork.options[0])
+    producer, consumer = (node for node in cut.nodes.values() if isinstance(node.op, TileOp))
+
+    def loads(node) -> list[tuple[str, str]]:
+        body = node.op.op.lower(frozenset(), node.op.output_specs, node.op.axes)
+        return [(stmt.input, stmt.index[-1].pretty()) for stmt in body.iter() if isinstance(stmt, Load)]
+
+    (workspace,) = producer.buffer_names()
+    assert [name for name, _ in loads(producer)].count("x1") == 1, "the piece reads the weight once"
+    assert len({column for name, column in loads(consumer) if name == workspace}) == 3, "the reader loads it at three columns"
+
+
+@requires_cuda
+def test_a_rope_projection_cut_once_computes_the_right_answer() -> None:
+    graph = _rope_graph()
+    (seam,) = [seam for seam in cuttable_seams(_lifted_parent(graph.copy())) if seam.node.as_contraction() is not None]
+    cut = _lower_cut(graph, seam.spelling)
+    rng = np.random.default_rng(0)
+    x = rng.standard_normal((1, 64)).astype(np.float16)
+    w = rng.standard_normal((64, 16)).astype(np.float16)
+    c = rng.standard_normal((1, 1, 8)).astype(np.float16)
+    s = rng.standard_normal((1, 1, 8)).astype(np.float16)
+    inputs = dict(zip(cut.inputs, (x, w, c, s), strict=True))
+    (out_name,) = cut.outputs
+    got = CudaBackend().run(cut, input_data=inputs)[0].outputs[out_name].astype(np.float32)
+    q = (x.astype(np.float32) @ w.astype(np.float32)).reshape(1, 2, 8)
+    rotated = np.concatenate((-q[..., 4:], q[..., :4]), -1)
+    expected = q * c.astype(np.float32) + rotated * s.astype(np.float32)
+    np.testing.assert_allclose(got, expected, rtol=2e-2, atol=2e-1)
+
+
 def test_a_scalar_operand_is_no_seam() -> None:
     """A value uniform over the kernel — an sdpa scale beside its mask fills — offers no cut. The
     piece would be a kernel writing scalars to a workspace so its reader could read them back, and
