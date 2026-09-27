@@ -19,7 +19,7 @@ vLLM benchmark client, not claimed.
 | --- | --- | --- |
 | addressing | per-element page lookup in `Load`/`Write`; `start` shifts a chunk write | per-tile lookup when the page divides the KV tile |
 | kernel forms | scalar and warp-tile attention page; `mma` and TMA staging refuse a paged operand | tensor-core attention over pages |
-| runtime | one table per paged buffer; pages spanning the declared shape; `alloc_pages`, `read_page` | allocator with a free list, per-request page sets, reference counts |
+| runtime | one table per paged buffer; pages spanning the declared shape at load, or a host-bound table | allocator with a free list, per-request page sets, reference counts |
 | native path | one request, one token per step, sequential prefill, page size fixed at export | batch of requests, chunked prefill, admission and scheduling |
 | evidence | V100 rows for the three fragments; the 4080 rows unpaged | paged attention rows per card; a corpus case per form |
 

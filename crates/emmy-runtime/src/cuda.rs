@@ -741,7 +741,7 @@ impl Executor {
         Ok(())
     }
 
-    pub fn page_bytes(&self, name: &str) -> Result<usize> {
+    fn page_bytes(&self, name: &str) -> Result<usize> {
         let paging = self
             .program
             .paged
@@ -751,9 +751,8 @@ impl Executor {
     }
 
     /// Give a paged buffer `count` zeroed pages of the runtime's own and bind their table in
-    /// place of the buffer's pointer. A load gives every paged buffer the pages its declared
-    /// shape spans; a step whose buffer spans a chunk of a larger cache re-pages it here.
-    pub fn alloc_pages(&mut self, name: &str, count: usize) -> Result<()> {
+    /// place of the buffer's pointer.
+    fn alloc_pages(&mut self, name: &str, count: usize) -> Result<()> {
         self.context.bind_to_thread()?;
         ensure!(count > 0, "a paged buffer needs at least one page");
         let bytes = self.page_bytes(name)?;
@@ -774,24 +773,6 @@ impl Executor {
         self.pages.insert(name.to_owned(), pages);
         self.bound.insert(name.to_owned());
         Ok(())
-    }
-
-    /// Copy one of a paged buffer's runtime-owned pages back to the host.
-    pub fn read_page(&self, name: &str, page: usize) -> Result<Vec<u8>> {
-        self.context.bind_to_thread()?;
-        let region = self
-            .pages
-            .get(name)
-            .with_context(|| format!("buffer {name} has no pages of the runtime's own"))?
-            .get(page)
-            .context("page index out of range")?;
-        let stream = self.stream();
-        let mut bytes = vec![0u8; region.len];
-        unsafe {
-            result::memcpy_dtoh_async(&mut bytes, region.ptr, stream)?;
-            result::stream::synchronize(stream)?;
-        }
-        Ok(bytes)
     }
 
     /// Move a paged buffer's flat host bytes into its pages (`to_pages`) or gather them back:
