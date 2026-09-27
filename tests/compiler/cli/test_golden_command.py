@@ -116,6 +116,24 @@ def test_restamp_keeps_the_piece_rows_of_a_kernel_set_whose_target_only_reordere
     assert [row.identity for row in rows] == [row.get("identity") for row in entry["realizations"]], "each piece keeps its own"
 
 
+def test_restamp_drops_a_piece_row_the_fresh_set_no_longer_mints_under_a_current_target(tmp_path, caplog):
+    """A cut can re-form a piece while the target's own Loop IR stays the same: the piece row then names no
+    kernel, and restamp drops it though the target is already the fresh lowering."""
+    document = json.loads((_RECORDS_DIR / "rtx5090_sm120.json").read_text())
+    entry = next(entry for entry in document["configs"] if entry["realizations"][0]["name"] == "attention.hd128.gqa.decode.split")
+    piece = next(row for row in entry["realizations"][1:] if row.get("identity"))
+    piece["identity"] = "0" * len(piece["identity"])
+    document.update(programs=[document["programs"][entry["program"]]], loops=[document["loops"][entry["target"]["loop"]]])
+    document["configs"] = [{**entry, "program": 0, "target": {**entry["target"], "loop": 0}}]
+    path = tmp_path / "golden.json"
+    path.write_text(json.dumps(document))
+    assert _check(path) == 0
+    with caplog.at_level("INFO"):
+        handle_golden_restamp(Namespace(paths=[str(path)]))
+    assert f"dropped row {piece['name']}: stored identity equals none" in caplog.text
+    assert piece["identity"] not in [row.identity for row in GoldenFile.load(path).configs[0].realizations]
+
+
 def test_restamp_refuses_to_write_a_golden_nothing_survives_in(golden, caplog):
     document = json.loads(golden.read_text())
     for index in range(len(document["programs"])):
