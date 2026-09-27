@@ -1,5 +1,23 @@
 # Golden-bench kernel corpus
 
+## H100 — the s512 layer's projections on `wgmma` (2026-09-27)
+
+Every GEMM piece of the H100 s512 route above was recorded on `mma.sync`. The `wgmma` tier is offered for all six of
+them (seven launches: gate and up share one kernel identity), including the pieces that read the RMSNorm output. One
+row wins on every piece: `w4x1`, `wgmma_m64n64k16_f16_f32/f1x8/k4`, `d4/smem-async`, `gm8`.
+
+| H100, s512 | GEMM pieces | kernel sum | end to end | eager |
+| --- | ---: | ---: | ---: | ---: |
+| before (`mma.sync` rows) | 135.6 | 199.8 | 233.5 | 200.9 |
+| after (`wgmma` rows) | 65.8 | 129.4 | **141.5** | 201.4 |
+
+Protocol: the same unpinned model-level replay as below, both files in one session on
+`bench-gb-h100-0924-1252-99aa`. The sweep and the record ran as golden replays under `--strict`, which matched eager
+(max abs error 0.00098). Swapped onto every GEMM receipt at once, the rows measured end to end: `d3` 148.9, `d4` 141.8,
+`d2` 165.3, `d4` without `gm8` 146.0, `m64n128` 155.1, `w8x1` 158.7. `d3/smem-tma` is refused on the first
+projection. `d5` and a `+p4` producer band do not replay on these pieces: their receipts fall back to prior picks
+(366 us) without a message. The s1 file is unchanged: its pieces are one-row GEMVs.
+
 ## Three cards — the whole layer as one fused kernel, with a flash-shaped route (2026-09-26)
 
 ### Question and scope
