@@ -42,15 +42,15 @@ from emmy.compiler.structural import digest
 PATTERN = [Pattern("root", TileOp)]
 
 
-def pin_row(kernel: str, *, split_consumed: bool) -> dict[str, str]:
-    """The environment's schedule pins for the kernel named ``kernel`` as one knob row — the source
+def pin_row(*kernel: str, split_consumed: bool) -> dict[str, str]:
+    """The environment's schedule pins for the kernel known by the names ``kernel`` as one knob row — the source
     every site reads, the same way it reads a golden row. A kernel pin that reaches this kernel is
     its family's bare pin here, in place of the one every kernel reads. A kernel that consumed a
     split (``split_consumed``) reads a ``REDUCE`` pin without the ``g<n>`` half the split already took."""
     row: dict[str, str] = {}
     for family in ("WORK", "TILE", "REDUCE", "STAGE", "RASTER"):
         pins = dict(family_pins(family))
-        if (own := kernel_pin(family, kernel)) is not None:
+        if (own := kernel_pin(family, *kernel)) is not None:
             pins[family] = own
         for key, value in pins.items():
             if split_consumed and family == "REDUCE":
@@ -59,18 +59,19 @@ def pin_row(kernel: str, *, split_consumed: bool) -> dict[str, str]:
     return row
 
 
-def classic_forks(tile: TileOp, name: str, knobs: dict, ctx, *, kernel_set: bool = False) -> list[Fork]:
+def classic_forks(tile: TileOp, name: str, knobs: dict, ctx, *, kernel_set: bool = False, node: str = "") -> list[Fork]:
     """Adapt semantic enumerations to the lazy search tree, sourcing choices from the pins
     where they name a site. Ordered matrix loops may also offer register storage.
 
     ``kernel_set`` says the kernel is one piece of a cut kernel set. A hand pin is published to
     every piece at once, so each takes the values it can and keeps its catalog where it cannot —
     the reading a row published across peer kernels takes — instead of refusing a value that names
-    a sibling piece; the post-compile pin check still asks that SOME kernel realized the pin."""
+    a sibling piece; the post-compile pin check still asks that SOME kernel realized the pin. ``node``
+    is the kernel's graph node id, which a kernel-scoped pin can name where the tile has no name."""
     from emmy.compiler.ir.schedule.register import RegisterCodec, RegisterContext, RegisterProblem, materialize_register  # noqa: PLC0415
     from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC, FP8_MMA, precision_pin  # noqa: PLC0415
 
-    row = pin_row(tile.name, split_consumed=tile.split_consumed or carries_partition(tile))
+    row = pin_row(tile.name, node, split_consumed=tile.split_consumed or carries_partition(tile))
     register = []
     if tile.register_program is not None and not any(value for key, value in row.items() if key not in ("WORK", "TILE", "STAGE")):
         context = RegisterContext(
@@ -152,7 +153,7 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[Fork]:
     )
     # A cut's pieces carry the seam token in their name or read a workspace named by one.
     kernel_set = "__place_" in tile.name or any("__place_" in buffer for buffer in root.inputs)
-    options = classic_forks(tile, tile.name, tile.knobs, ctx, kernel_set=kernel_set)
+    options = classic_forks(tile, tile.name, tile.knobs, ctx, kernel_set=kernel_set, node=root.id)
     if not options:
         raise RuleSkipped("no enumerable schedule row for this term — leave it unmapped")
     return options if len(options) > 1 else options[0]

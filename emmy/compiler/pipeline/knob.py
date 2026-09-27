@@ -467,12 +467,13 @@ def kernel_scoped(key: str) -> bool:
     return (axis_of(key) or "").startswith(KERNEL_SCOPE)
 
 
-def kernel_pin(family: str, kernel: str) -> str | None:
-    """The kernel pin of ``family`` that reaches the kernel named ``kernel``, or ``None``."""
+def kernel_pin(family: str, *names: str) -> str | None:
+    """The kernel pin of ``family`` that reaches a kernel known by any of ``names``, or ``None``. A
+    split's partial is scheduled as a tile with no name of its own, so its graph node id is asked too."""
     import re  # noqa: PLC0415
 
     for key, value in _environ_pins(family):
-        if kernel_scoped(key) and re.search(rf"__{re.escape(axis_of(key))}(_|$)", kernel):
+        if kernel_scoped(key) and any(re.search(rf"__{re.escape(axis_of(key))}(_|$)", name) for name in names):
             return value
     return None
 
