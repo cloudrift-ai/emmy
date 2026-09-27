@@ -1,4 +1,4 @@
-"""Export dense FP16 Qwen3 as one static, stateful token-step execution plan."""
+"""Export dense FP16 Qwen3 as static decode and chunked prefill programs."""
 
 from __future__ import annotations
 
@@ -44,8 +44,14 @@ def validate_model(model, context_length):
 class _Step:
     def __init__(self, prefill=False):
         self.plan = ExecutionPlan(
-            "cuda", ["prompt", "prompt_length", "position"] + ([] if prefill else ["sampling", "seed"]),
-            [] if prefill else ["logits", "next_token"], [], {}, {}, [], {}
+            "cuda",
+            ["prompt", "prompt_length", "position"] + ([] if prefill else ["sampling", "seed"]),
+            [] if prefill else ["logits", "next_token"],
+            [],
+            {},
+            {},
+            [],
+            {},
         )
         self.bindings = {}
 
@@ -174,6 +180,7 @@ def _program(model, context_length, rows, cache):
         pre, post = build_attention_split_wrapper(layer, float32_residual=True)
         names = [step.buffer(f"layer{index}.{name}", (rows, width * d)) for name, width in (("q", heads), ("k", kv), ("v", kv))]
         step.compiled(f"pre{index}", pre, (example,), [hidden], names, cache)
+        # The last layer only needs KV; its rotary query output has no scratch consumer.
         last_prefill = rows > 1 and index + 1 == len(model.model.layers)
         rotated = step.buffer(f"layer{index}.rotated", (rows, heads * d), role="output" if last_prefill else "scratch")
         keys = step.buffer(f"layer{index}.keys", (context_length, kv, d), role="output")
@@ -199,7 +206,9 @@ def _program(model, context_length, rows, cache):
             shared=context_length * 4,
         )
         output = step.buffer(f"hidden{index + 1}", (rows, h), F32)
-        step.compiled(f"post{index}", post, (torch.zeros(rows, heads * d, dtype=torch.float16), example), [attention, hidden], [output], cache)
+        step.compiled(
+            f"post{index}", post, (torch.zeros(rows, heads * d, dtype=torch.float16), example), [attention, hidden], [output], cache
+        )
         hidden = output
 
     if rows > 1:
@@ -248,9 +257,14 @@ def export_model(model, destination, *, context_length=MAX_CONTEXT, eos_ids=(), 
         destination,
         {name: step.plan for name, step in programs.items()},
         bindings={name: step.bindings for name, step in programs.items()},
-        key={"generation": {
-            "version": GENERATION_VERSION, "context_length": context_length,
-            "vocab_size": model.config.vocab_size, "eos_ids": list(eos_ids), "prefill_size": prefill_size,
-        }},
+        key={
+            "generation": {
+                "version": GENERATION_VERSION,
+                "context_length": context_length,
+                "vocab_size": model.config.vocab_size,
+                "eos_ids": list(eos_ids),
+                "prefill_size": prefill_size,
+            }
+        },
         provenance=provenance,
     )

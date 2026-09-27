@@ -378,6 +378,11 @@ mod tests {
         for prompt in [vec![], vec![-1], vec![32], vec![1; 9]] {
             assert!(config.validate_prompt(&prompt).is_err());
         }
+        for size in [0, 9] {
+            config.prefill_size = size;
+            assert!(config.validate().is_err());
+        }
+        config.prefill_size = 1;
         config.context_length = MAX_CONTEXT + 1;
         assert!(config.validate().is_err());
         config.context_length = 8;

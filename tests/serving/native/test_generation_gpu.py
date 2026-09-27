@@ -67,7 +67,14 @@ def test_cached_qwen3_logits_and_generation(tmp_path, monkeypatch):
             logits_path = tmp_path / "logits.bin"
             try:
                 await worker.run_job({"op": "load_generation", "root": str(root)}, wall_timeout_s=30)
-                for capture, prompt in ((False, [1, 2, 3, 4, 5, 6, 7]), (True, [1, 2, 3, 4, 5, 6]), (None, [8, 9]), (True, [3]), (True, [4, 5, 6, 7])):
+                for capture, prompt in (
+                    (False, [1, 2, 3, 4, 5, 6, 7, 8]),
+                    (False, [1, 2, 3, 4, 5, 6, 7]),
+                    (True, [1, 2, 3, 4, 5, 6]),
+                    (None, [8, 9]),
+                    (True, [3]),
+                    (True, [4, 5, 6, 7]),
+                ):
                     np.asarray(prompt, np.int64).tofile(path)
                     await worker.run_job({"op": "start_generation", "prompt": str(path)}, wall_timeout_s=30)
                     _reset_python(reference_program, prompt)
@@ -189,6 +196,9 @@ CHECKPOINT_CASES = (
     ("heldout_context_4096", "The coastal survey records tides, winds, water temperatures, and seabird sightings. ", 4080, 16, False),
     # Selected after the rotary precision fix; also qualifies Python dispatch beyond its old shared-memory limit.
     ("heldout_rotary_context", "The field notebook lists soil samples, rainfall, seed counts, and flowering dates. ", 496, 16, True),
+    # Fixed after distinguishing whole-prompt RMS from the much shorter chunked output window.
+    ("heldout_prefill_tail", "The laboratory log records sample weights, temperatures, and observation times. ", 1007, 24, True),
+    ("heldout_prefill_long", "The archive contains letters, photographs, shipping records, and handwritten notes. ", 4080, 16, False),
 )
 
 
@@ -231,7 +241,9 @@ def test_checkpoint_logits_and_completions(request, tmp_path, monkeypatch, name,
         model.cuda()
         precise.cuda()
         # Include a longer cache history in exact dispatcher parity, exercising dynamic shared memory.
-        reference_program = _python_reference(artifact) if not prefill and name in ("france", "arithmetic", "heldout_rotary_context") else None
+        reference_program = (
+            _python_reference(artifact) if not prefill and name in ("france", "arithmetic", "heldout_rotary_context") else None
+        )
         monkeypatch.setenv("PATH", "/nonexistent")
         monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", False)
 
@@ -239,6 +251,7 @@ def test_checkpoint_logits_and_completions(request, tmp_path, monkeypatch, name,
             worker = NativeWorker(executable=executable)
             path, logits_path = tmp_path / "prompt.bin", tmp_path / "logits.bin"
             measurements = []
+            precise_outputs = []
             try:
                 await worker.run_job({"op": "load_generation", "root": artifact}, wall_timeout_s=60)
                 np.asarray(prompt, np.int64).tofile(path)
@@ -265,6 +278,8 @@ def test_checkpoint_logits_and_completions(request, tmp_path, monkeypatch, name,
                         fp32 = accurate.logits[0, -1].cpu().numpy()
                     if prefill and position < len(prompt) - 1:
                         continue
+                    if prefill:
+                        precise_outputs.append(fp32)
                     actual = np.fromfile(logits_path, np.float16).astype(np.float32)
                     if reference_program is not None:
                         np.testing.assert_array_equal(actual, _python_step(reference_program, position).astype(np.float32))
@@ -295,6 +310,19 @@ def test_checkpoint_logits_and_completions(request, tmp_path, monkeypatch, name,
                     if result["token"] is not None:
                         next_token = result["token"]
                         assert next_token == int(actual.argmax())
+                if prefill:
+                    # Teacher-force the exact observed prefix through one-token execution. A chunk
+                    # exposes no intermediate prompt logits, so its shorter RMS window must also
+                    # be compared with the baseline on that same window, not the old whole prompt.
+                    np.asarray(prefix, np.int64).tofile(path)
+                    await worker.run_job({"op": "start_generation", "prompt": str(path)}, wall_timeout_s=30)
+                    for position in range(len(prefix)):
+                        await worker.run_job({"op": "generation_step", "capture": capture, "logits": str(logits_path)}, wall_timeout_s=30)
+                        if position >= len(prompt) - 1:
+                            index = position - len(prompt) + 1
+                            baseline = np.fromfile(logits_path, np.float16).astype(np.float32)
+                            measurements[index]["sequential_fp32"] = _logit_errors(baseline, precise_outputs[index])
+                    (tmp_path / "measurements.json").write_text(json.dumps(measurements, indent=2))
                 # Experimental acceptance budgets, not a theorem about FP16. A per-prompt
                 # RMS comparison avoids unstable ratios at nearly exact reference positions;
                 # the absolute per-position limits still prohibit hiding an outlier in a mean.
@@ -305,11 +333,13 @@ def test_checkpoint_logits_and_completions(request, tmp_path, monkeypatch, name,
                 for metric in ("relative_l2_error", "probability_tv"):
                     native_rms = np.sqrt(np.mean([row["native_fp32"][metric] ** 2 for row in measurements]))
                     reference_rms = np.sqrt(np.mean([row["hf_fp32"][metric] ** 2 for row in measurements]))
-                    assert native_rms <= max(REFERENCE_ERROR_FACTOR * reference_rms, np.finfo(np.float16).eps), (
+                    sequential_rms = np.sqrt(np.mean([row["sequential_fp32"][metric] ** 2 for row in measurements])) if prefill else 0
+                    assert native_rms <= max(REFERENCE_ERROR_FACTOR * reference_rms, np.finfo(np.float16).eps, sequential_rms), (
                         name,
                         metric,
                         native_rms,
                         reference_rms,
+                        sequential_rms,
                     )
                 if prompt_length is not None and prompt_length >= 1008:
                     # A short request after a full cache must see only its own overwritten prefix.
@@ -348,7 +378,9 @@ def test_rotary_rounds_only_the_output(tmp_path):
         "#define VOCAB 32\n#define SCALE 0.08838834764831845f\n" + SOURCE
     )
     buffers = [
-        BufferSpec(n, tuple(Dim(x) for x in a.shape), I64 if n in ("position", "length") else F32 if n in ("cosine", "sine") else F16, "input")
+        BufferSpec(
+            n, tuple(Dim(x) for x in a.shape), I64 if n in ("position", "length") else F32 if n in ("cosine", "sine") else F16, "input"
+        )
         for n, a in data.items()
     ]
     outputs = {"rotated": q, "keys": k, "values": v}

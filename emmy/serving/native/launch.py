@@ -100,10 +100,11 @@ def launch(args, arguments):
     if args.dry_run:
         if not opts.native_pack:
             logger.info(
-                "Prepare native artifact: model=%s revision=%s context=%d golden=%s strict=%s",
+                "Prepare native artifact: model=%s revision=%s context=%d prefill_size=%s golden=%s strict=%s",
                 model,
                 revision,
                 opts.max_model_len,
+                opts.prefill_size if opts.prefill_size is not None else "default",
                 args.golden,
                 args.strict_evidence,
             )

@@ -20,12 +20,24 @@ def arguments(*flags):
 
 def test_native_dry_run(caplog):
     args, forwarded = arguments(
-        "--native", "--generate", "--dry-run", "--revision", "pinned", "--golden", "working.json", "--strict-evidence", "--port", "8123"
+        "--native",
+        "--generate",
+        "--dry-run",
+        "--revision",
+        "pinned",
+        "--golden",
+        "working.json",
+        "--strict-evidence",
+        "--port",
+        "8123",
+        "--prefill-size",
+        "16",
     )
     with caplog.at_level("INFO"):
         launch(args, forwarded)
     assert "revision=pinned" in caplog.text
     assert "strict=True" in caplog.text
+    assert "prefill_size=16" in caplog.text
     assert "emmy-server" in caplog.text
     assert "--max-model-len 4096" in caplog.text
     assert "--port 8123" in caplog.text
