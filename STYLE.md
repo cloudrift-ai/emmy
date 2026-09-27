@@ -89,6 +89,9 @@ Group imports in this order, separated by blank lines:
 
 Style rules are enforced by [Ruff](https://docs.astral.sh/ruff/), configured in `pyproject.toml`. Run `make lint` to check and `make format` to auto-fix. Enabled rule sets: `E` (pycodestyle), `F` (pyflakes), `W` (warnings), `I` (isort), `UP` (pyupgrade), `B` (bugbear).
 
+The test-duration baseline keeps one JSON entry per line, alphabetized by full node ID. `make format` normalizes
+its formatting without re-measuring tests, and `make lint` checks it.
+
 ### IR statements must be frozen dataclasses
 
 Every concrete `Stmt` subclass — Loop-IR (`Loop`, `StridedLoop`, `Cond`, leaves), Tile-IR (`GridTile`, `ThreadTile`,

@@ -222,6 +222,10 @@ renamed and deleted tests drop out instead of lingering as ghost slots the bucke
 one xdist loadgroup worker: execution stays serial, while CUDA node IDs keep the canonical ``@cuda`` / ``@cuda-cli``
 suffixes the parallel suite uses for lookup. Point it at the whole suite, never a subset.
 
+Keep the JSON entries alphabetized by full node ID, one entry per line, so unrelated additions do not accumulate at
+the end of the file. `make format` restores this order without changing timings; `make lint` checks it. The duration
+writer uses the same format. Sorting reduces avoidable merge conflicts; edits to the same timing still need resolving.
+
 Two things keep it honest. `make test` passes `--durations=0 --durations-min=1`, so every run (CI included) prints every
 test that takes at least 1 s instead of only a fixed-size tail. And the session-end gate in `conftest.py` fails any run
 where a test took **5 s or more without being in the baseline**, naming the offenders and asking for
