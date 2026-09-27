@@ -7,15 +7,12 @@ from dataclasses import replace
 import numpy as np
 
 from emmy.compiler.backend.pack import save_executable
-from emmy.compiler.backend.plan import BufferSpec, ExecutionPlan, KernelSpec, LaunchSpec, plan_from_graph
+from emmy.compiler.backend.plan import BufferSpec, ExecutionPlan, plan_from_graph
 from emmy.compiler.dim import Dim
-from emmy.compiler.dtype import F16, F32, F64, I64, U32, U64
-from emmy.serving.native.kernels import SOURCE
+from emmy.compiler.dtype import F16, F32, I64
 
 MAX_CONTEXT = 4096
-CUDA_THREADS = 128
-GENERATION_VERSION = 2
-SAMPLING_BINS = 65536
+GENERATION_VERSION = 3
 MASK_FILL = -1e9
 
 
@@ -104,9 +101,8 @@ def attend_module(heads, kv_heads, head_dim, context_length):
 
 class _Step:
     def __init__(self):
-        self.plan = ExecutionPlan(
-            "cuda", ["prompt", "prompt_length", "position", "sampling", "seed"], ["logits", "next_token"], [], {}, {}, [], {}
-        )
+        # The step ends at the logits; the runtime selects the token on the host and hands it back.
+        self.plan = ExecutionPlan("cuda", ["prompt", "prompt_length", "position", "next_token"], ["logits"], [], {}, {}, [], {})
         self.bindings = {}
 
     def buffer(self, name, shape, dtype=F16, role="scratch", data=None, page_tokens=None):
@@ -117,21 +113,6 @@ class _Step:
         if page_tokens is not None:
             self.plan.paged[name] = (2, page_tokens, None)
         return name
-
-    def launch(self, kernel, args, source, *, writes, blocks=1, shared=0, threads=CUDA_THREADS, zero_outputs=()):
-        self.plan.kernels[kernel] = KernelSpec(source=source)
-        self.plan.launches.append(
-            LaunchSpec(
-                kernel,
-                kernel,
-                tuple(args),
-                ((blocks,), (1,), (1,)),
-                ((threads,), (1,), (1,)),
-                shared,
-                tuple(zero_outputs),
-                writes=tuple(writes),
-            )
-        )
 
     def compiled(self, prefix, wrapper, examples, inputs, outputs, cache, output_names=(), paged=()):
         """Compile ``wrapper`` and splice its plan in: its inputs and outputs take the step's names,
@@ -222,14 +203,10 @@ def export_model(model, destination, *, context_length=MAX_CONTEXT, page_tokens=
     cache = PlanTemplateCache()
     step = _Step()
     h, heads, kv, d, vocab = cfg.hidden_size, cfg.num_attention_heads, cfg.num_key_value_heads, cfg.head_dim, cfg.vocab_size
-    source = f"#define VOCAB {vocab}\n" + SOURCE
     step.buffer("prompt", (context_length,), I64, "input")
     step.buffer("prompt_length", (1,), I64, "input")
     step.buffer("position", (1,), I64, "input")
-    step.buffer("sampling", (2,), F64, "input")
-    step.buffer("seed", (1,), U64, "input")
-    step.buffer("sampling_histogram", (SAMPLING_BINS,), U32)
-    step.buffer("next_token", (1,), I64, "output")
+    step.buffer("next_token", (1,), I64, "input")
     step.buffer("logits", (1, vocab), F16, "output")
 
     # Example inputs are distinct tensors: the tracer folds two arguments that share one into a
@@ -295,21 +272,6 @@ def export_model(model, destination, *, context_length=MAX_CONTEXT, page_tokens=
 
     head = Head(model.model.norm, model.lm_head)
     step.compiled("head", head, (example,), [hidden], ["logits"], cache)
-    step.launch(
-        "native_histogram",
-        ["logits", "sampling", "position", "prompt_length", "sampling_histogram"],
-        source,
-        writes=["sampling_histogram"],
-        blocks=(vocab + CUDA_THREADS - 1) // CUDA_THREADS,
-        zero_outputs=["sampling_histogram"],
-    )
-    step.launch(
-        "native_sample",
-        ["logits", "sampling_histogram", "sampling", "seed", "position", "prompt_length", "next_token"],
-        source,
-        writes=["next_token"],
-        threads=1,
-    )
     return save_executable(
         destination,
         {"decode": step.plan},

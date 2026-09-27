@@ -343,7 +343,7 @@ fn wait_for_event(event: &CudaEvent, deadline_ms: f64, kernel: &str) -> Result<(
 }
 
 /// IEEE round-to-nearest-even conversion of an f32 to f16 bits.
-fn f16_bits(value: f32) -> u16 {
+pub(crate) fn f16_bits(value: f32) -> u16 {
     let bits = value.to_bits();
     let sign = ((bits >> 16) & 0x8000) as u16;
     let exponent = ((bits >> 23) & 0xff) as i32;

@@ -20,9 +20,10 @@ gathers the prompt's token at this position while the prompt lasts and the previ
 rotary module rotates q and k at this position and hands k and v to the cache pages, and attention runs causal
 grouped-query attention over the whole cache with every position past this one masked. All three read the position
 from device memory, including the cache write, whose paged start is the `position` input rather than a host symbol,
-so a token step is one launch sequence at every position and replays as one graph. Only sampling stays hand-written
-CUDA, in the packaged `kernels.cu` resource: argmax, the logit histogram and the seeded draw are data-dependent
-control flow with no traced op. Attention keeps dot products, scores, probabilities, and value accumulation in FP32,
+so a token step is one launch sequence at every position and replays as one graph. Nothing the device runs is
+hand-written: the step ends at the logits, and the runtime selects the token on the host (below), so the same
+export serves any device the compiler targets. Attention keeps dot products, scores, probabilities, and value
+accumulation in FP32,
 rounding only its output to FP16. This avoids losing near-tied scores at large magnitudes. Residual sums stay in FP32
 through the existing attention-split wrappers; normalization casts back to FP16 before each projection. Rotary
 constants come from the checkpoint's own module in FP32. Rotation also uses FP32 intermediates and rounds only the
@@ -38,8 +39,8 @@ by itself, established numerical correctness or fast schedules.
 
 One token step contains every model layer. The prompt is uploaded once. Prefill processes its tokens sequentially,
 writing each token's keys and values once at its absolute position; it never recomputes the growing prefix. Decode
-reads the previous GPU-selected token. The host updates one position scalar and reads one selected token after the
-prompt is consumed. Full logits are downloaded only through the explicit diagnostic operation.
+embeds the previous step's token, which the host selected from that step's logits and uploaded with the position
+scalar. During prefill the host uploads only the position and the logits stay on the device.
 
 The cache is one paged K and one paged V buffer per layer, shaped `[1, kv_heads, context, head_dim]` and paged along
 the token axis with `page_tokens` tokens per page (`export_model(page_tokens=…)`, `emmy generate --page-tokens`).
@@ -66,16 +67,17 @@ The low-level start/step operations expose logits for parity checks and do not c
 
 ## Sampling contract
 
-Generation artifact version 2 adds a float64 temperature/top-p input and a uint64 seed input. Older generation
-artifacts must be exported again; the underlying execution-plan format is unchanged. Temperature must be finite and
-nonnegative, and top-p must lie in `(0, 1]`. Temperature zero selects the lowest token ID among maximum logits.
-Nonfinite logits fail the request. Top-k is unsupported.
+Generation artifact version 3 ends the step at the logits: the program's inputs are the prompt, its length, the
+position and the previous step's token, its one output the logits, and the runtime selects each token on the host
+from the logits it downloads after a decode step — one vocabulary-sized FP16 transfer per generated token, none
+during prefill. Older generation artifacts must be exported again; the underlying execution-plan format is
+unchanged. Temperature must be finite and nonnegative, and top-p must lie in `(0, 1]`. Temperature zero selects the
+lowest token ID among maximum logits. Nonfinite logits fail the request. Top-k is unsupported.
 
 For positive temperature, a 65,536-bin histogram orders FP16 logits exactly, combining signed zeros. The sampler
 retains the smallest descending probability prefix reaching top-p, breaking ties by ascending token ID. It samples
-that distribution in token-ID order using float64 probabilities. The histogram costs 256 KiB per loaded model and is
-cleared before every step; no vocabulary-sized buffer crosses to the CPU. This simple implementation has serial
-histogram scans and token selection; it is not a sampling performance claim.
+that distribution in token-ID order using float64 probabilities. This simple implementation has serial histogram
+scans and token selection on the host; it is not a sampling performance claim.
 
 A SplitMix64 counter combines the request seed and generated-token index. Prefill does not consume random draws.
 Resetting a request resets the counter, and captured and uncaptured execution select the same tokens for identical

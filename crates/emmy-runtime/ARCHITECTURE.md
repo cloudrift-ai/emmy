@@ -164,11 +164,12 @@ executor. The model remains compiler-prepared; the Rust library has no Qwen3 mat
 The native preparation and attention contract lives in
 [`serving/native/ARCHITECTURE.md`](../../emmy/serving/native/ARCHITECTURE.md).
 
-`start` binds the prompt and sampling controls once and resets request state. `advance` processes exactly one token
-at the current absolute position. Before prompt completion it returns no token; afterward it returns the GPU-selected
-ID, which stays on the GPU for the next step. Its explicit `ignore_eos` control permits fixed-output serving
-benchmarks to continue after EOS; ordinary worker generation retains EOS stopping. `generate` owns the complete
-prompt/decode loop and stops at EOS or the requested output count.
+`start` binds the prompt once, keeps the sampling controls and resets request state. `advance` processes exactly one
+token at the current absolute position. Before prompt completion it returns no token; afterward it downloads the
+step's logits, selects the token on the host — greedy, or the exact-FP16-order nucleus draw the native contract
+describes — and uploads it as the next step's input. Nothing the device runs is hand-written. Its explicit
+`ignore_eos` control permits fixed-output serving benchmarks to continue after EOS; ordinary worker generation
+retains EOS stopping. `generate` owns the complete prompt/decode loop and stops at EOS or the requested output count.
 Prompt plus requested output must fit capacity. `logits` is an explicit diagnostic download. All CUDA operations stay
 inside `cuda`, and a failed step cannot continue the current request.
 
