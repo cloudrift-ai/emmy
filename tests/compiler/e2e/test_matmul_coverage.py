@@ -1198,6 +1198,25 @@ def test_staged_splitk_matches_gmem_direct_bit_for_bit(monkeypatch, transport):
     np.testing.assert_allclose(staged.astype(np.float32).reshape(m, n), ref, rtol=2e-2, atol=2e-2)
 
 
+@requires_cuda
+def test_matvec_splitk_matches_the_reference(monkeypatch):
+    """A one-row matmul split across CTAs: each partition reads its own slice of B. Tiling the
+    partition as the row read every partition's B at the first one's slice."""
+    from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
+
+    k, n = 1024, 256
+    rng = np.random.default_rng(5)
+    a = (rng.standard_normal((1, k)) * 0.1).astype(np.float16)
+    b = (rng.standard_normal((k, n)) * 0.1).astype(np.float16)
+    monkeypatch.setenv("EMMY_REDUCE", "g8k")
+    be = CudaBackend()
+    compiled = be.compile(_splitk_mma_graph(1, k, n))
+    assert "o__partial" in compiled.nodes
+    got = np.asarray(be.run(compiled, input_data={"a": a, "b": b})[0].outputs["o"])
+    ref = a.astype(np.float32) @ b.astype(np.float32)
+    np.testing.assert_allclose(got.astype(np.float32).reshape(1, n), ref, rtol=2e-2, atol=2e-2)
+
+
 # =========================================================================== #
 # Compile-time schedule guards — pins that would silently lower to a wrong / un-launchable
 # kernel. Run the TILE pass only (no GPU): the schedule rejects the pin with a clear
