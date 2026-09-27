@@ -159,8 +159,11 @@ done
 curl -sf "http://localhost:$PORT/health" >/dev/null || { echo "[warm] timed out waiting for /health"; docker logs --tail 50 "$NAME"; exit 1; }
 
 echo "[warm] issuing one completion (covers prefill + decode kernels)..."
+# Under HF_HUB_OFFLINE (a pre-seeded snapshot) vLLM serves the model under its snapshot path, not the
+# repo id — ask the server for its served name, as the fixpoint passes below do.
+served=$(curl -sf "http://localhost:$PORT/v1/models" | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"][0]["id"])')
 curl -sf "http://localhost:$PORT/v1/completions" -H 'Content-Type: application/json' \
-    -d "{\"model\": \"$SERVE_MODEL\", \"prompt\": \"The capital of France is\", \"max_tokens\": 20, \"temperature\": 0}" \
+    -d "{\"model\": \"$served\", \"prompt\": \"The capital of France is\", \"max_tokens\": 20, \"temperature\": 0}" \
     | head -c 400; echo
 
 docker stop "$NAME" >/dev/null
