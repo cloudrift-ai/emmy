@@ -6,8 +6,8 @@ On a Tesla V100-SXM2-16GB (sm_70, CUDA 12.9, driver 580.178) the native path exp
 paged KV cache with no environment pin: every fork of the six compiled fragments — the projections, the head, and
 the embedding, rotary and attention glue that used to be hand-written CUDA — is decided by a measured row of
 [`golden/v100_sm70.json`](golden/v100_sm70.json) under `--strict-evidence`, with the repository goldens out of scope
-and an empty tuning database. At 16-token pages the pack holds 56 paged buffers (28 layers × K, V) and 650 launches;
-only the two sampling kernels are still hand-written.
+and an empty tuning database. At 16-token pages the pack holds 56 paged buffers (28 layers × K, V) and 648 launches.
+Nothing the device runs is hand-written: the step ends at the logits, and the runtime selects each token on the host.
 
 ```
 emmy generate Qwen/Qwen3-0.6B --export-native pack --context-length 256 --page-tokens 16 \
@@ -19,17 +19,19 @@ emmy serve Qwen/Qwen3-0.6B --generate --native --golden golden/v100_sm70.json --
 ```
 
 Two requests against that server, each one shot, wall time on the client including HTTP. The first two columns are
-the hand-written glue kernels with two head schedules; the last is the compiled glue with the direct head:
+the hand-written glue kernels with two head schedules, the third the compiled glue with sampling still on the
+device, the last the compiled glue with the token selected on the host:
 
-| request | steps (prompt + output) | cooperative head | direct head | compiled glue |
-| --- | ---: | ---: | ---: | ---: |
-| chat, "What is the capital of France? Answer in one word." → "Paris" | 24 + 2 | 0.44 s | 0.28 s | 0.31 s |
-| streamed completion, "The capital of France is", 32 tokens | 5 + 32 | 0.81 s | 0.57 s | 0.61 s |
+| request | steps (prompt + output) | cooperative head | direct head | compiled glue | host sampling |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| chat, "What is the capital of France? Answer in one word." → "Paris" | 24 + 2 | 0.44 s | 0.28 s | 0.31 s | 0.30 s |
+| streamed completion, "The capital of France is", 32 tokens | 5 + 32 | 0.81 s | 0.57 s | 0.61 s | 0.42 s |
 
-That is 15–16 ms per token step through the server, about 60 output tokens per second at concurrency one, and every
-run produces the same text ("Paris. The capital of Italy is Rome. The capital of Spain is Madrid. …"). These are
-single requests, not a benchmark: the vLLM benchmark client is not installed on this host, and the recipe's 256- and
-64-token page rows were not run on the card. The paged addressing is not what these numbers measure; the schedule is.
+That is 11–12 ms per token step through the server, about 85 output tokens per second at concurrency one, and every
+run produces the same text ("Paris. The capital of Italy is Rome. The capital of Spain is Madrid. …"). Selecting on
+the host is faster than the kernels it replaced, which walked the vocabulary on a single GPU thread. These are single
+requests, not a benchmark: the vLLM benchmark client is not installed on this host, and the recipe's 256- and 64-token
+page rows were not run on the card. The paged addressing is not what these numbers measure; the schedule is.
 
 ## The schedule
 
