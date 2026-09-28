@@ -516,6 +516,7 @@
  "tests/compiler/passes/test_resident_state.py::test_a_resident_state_matches_the_reference_on_the_gpu[column-t64]@cuda": 24.8,
  "tests/compiler/passes/test_resident_state.py::test_a_resident_state_matches_the_reference_on_the_gpu[solve-t32]@cuda": 24.8,
  "tests/compiler/passes/test_resident_state.py::test_a_resident_state_matches_the_reference_on_the_gpu[solve-t64]@cuda": 24.9,
+ "tests/compiler/passes/test_resident_state.py::test_a_snapshot_read_at_one_step_matches_the_reference_on_the_gpu@cuda": 25.9,
  "tests/compiler/passes/test_roll_recurrence.py::test_a_chain_whose_masks_and_extents_grow_with_the_step_rolls_and_matches_eager": 1.68,
  "tests/compiler/passes/test_roll_recurrence.py::test_a_recurrence_from_a_traced_state_with_alternating_steps_rolls_and_matches_eager": 5.1,
  "tests/compiler/passes/test_roll_recurrence.py::test_an_unrolled_delta_rule_rolls_into_one_kernel_that_carries_its_state": 1.24,
