@@ -9,14 +9,15 @@ kernel-set result good enough for the paper needs the level cells clearly above 
 
 | # | Work | Cells it moves | Expected | GPUs needed | Status |
 | --- | --- | --- | --- | --- | --- |
-| 0 | #930 close-out: drop the `PIECE_FORMATION` ContextVar (one route re-spell), keep a piece's ordinal through a split, restamp | all | none (hygiene) | local RTX 5090 | in progress, `fix/gb-closeout` |
+| 0 | #930 close-out: drop the `PIECE_FORMATION` ContextVar (one route re-spell), keep a piece's ordinal through a split, restamp | all | none (hygiene) | local RTX 5090 | done (in #930) |
 | 1 | mma.sync GEMM: conflict-free fragment loads, fewer loads per mma, a 96-row masked M tile | A100 s512, 4090 s512, 5090 s512 | A100 0.98× → ~1.05×; 4090/5090 margin | A100 (primary), RTX 4090, RTX 5090 | open |
 | 2 | sm_90 GEMM: larger wgmma tiles, TMA staging, a producer warp group | H100 s512 | 0.98× → ~1.15–1.2× | H100 | open |
 | 3 | Programmatic dependent launch between graph kernels | H100 s1, 5090 s1 (+ s512 tails) | ~0.5–1 µs per launch, 16 launches | H100, RTX 5090 | open |
 | 4 | FP8 rows of the recipe (the paper figure's Q/K/V-FP8 bars) | FP8 study | measure | RTX 4090, RTX 5090, H100 | open, only if the figure keeps them |
-| 5 | Final re-record of every golden, unpinned `--strict` replay, lane once per card, RESULTS.md | all | the reported numbers | all five cards + V100 SXM3 (AWQ golden) | after 0–3 |
+| 6 | Re-record goldens the close-out left without rows (below) | Gemma 4 serving, fp8-block corpus | restore evidence | RTX 5090 | open |
+| 5 | Final re-record of every golden, unpinned `--strict` replay, lane once per card, RESULTS.md | all | the reported numbers | all five cards + V100 SXM3 (AWQ golden) | after 1–3 |
 
-Order: 0, then 1 and 2 in parallel (A100 and H100 are separate hosts), then 3, then 5.
+Order: 1 and 2 in parallel (A100 and H100 are separate hosts), then 3, then 5. Item 6 any time on the 5090.
 
 Out of scope: persistent kernels (a persistent GEMV chain was the one lever left for V100 s1 and A100 s1; excluded for
 the paper). V100 s1 stays accepted at 0.85× and A100 s1 level.
@@ -96,11 +97,21 @@ are unrecorded on #930. Trace, sweep, record, and measure on the FP8-capable car
 
 ## 5. Close-out
 
-1. Land item 0 (`fix/gb-closeout`): the route re-spell and split ordinal restamp every golden; the rows whose kernel
-   renders differently lose their µs and are listed per file.
-2. After 1–3 land, re-record every golden on the final compiler from sweeps (fresh tune DB per run), replay each cell
+1. Done (#930): `PIECE_FORMATION` is gone (the fold alone orients a slab-and-computed pair), a split keeps its piece's
+   name and ordinal (`<piece>__partial`, `<piece>`), a `place_<token>` pin matches whole name segments only, and every
+   golden is restamped: 71 routes re-spelled (ten Qwen3-0.6B golden-bench files, 4 DeepSeek-V4 V100 rows, 55 Gemma 4
+   RTX 5090 rows), every key mapped, no stored target changed, no row lost its µs. Pin files written before the
+   re-spell stop matching (piece tokens changed); the 5090's re-mapped ones are `/tmp/gb-rtx5090/s1_v8_pins.final.txt`
+   and `pin512_v7.final.txt`.
+2. Item 6, rows to re-record on the RTX 5090:
+   - `recipes/gemma-4-12B-it/golden/rtx5090_sm120.json`: the `pre1-global` m1 route's 7 pieces, plain and fast-math,
+     28 rows dropped (they lower to other kernel identities now); the routing rows stay, re-spelled.
+   - `qwen3-06b-fp8-block-s1_rtx5090` and `-s512` (golden-bench quantized kernels): stale before the close-out — no
+     fresh kernel writes their targets' outputs, so a restamp keeps nothing. Re-trace and re-record.
+   - Not demoted, same math: `qwen3-06b-s512_v100` renders 2 of 22 kernels (RoPE, SiLU·up) with statements reordered.
+3. After 1–3 land, re-record every golden on the final compiler from sweeps (fresh tune DB per run), replay each cell
    unpinned under `--strict`, run the lane (`emmy bench` on the recipe) once per card, write the RESULTS.md section.
-3. #930 finalization per AGENTS.md: full `make test` (never run on this branch yet), lint, docs, PR body.
+4. #930 finalization per AGENTS.md: full `make test`, lint, docs, PR body.
 
 ## Hosts
 
