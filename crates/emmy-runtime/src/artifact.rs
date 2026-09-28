@@ -269,6 +269,9 @@ pub struct Kernel {
     pub binary_key: Option<String>,
     pub arch_specific: bool,
     pub source: Option<String>,
+    /// The kernel waits on the grid ahead of it before touching memory, so it may launch as a
+    /// programmatic dependent launch.
+    pub dependent_launch: bool,
 }
 
 /// One buffer's place in the layout: a byte range inside a named region.
@@ -330,6 +333,8 @@ struct RawKernel {
     arch_specific: bool,
     #[serde(default)]
     source: Option<String>,
+    #[serde(default)]
+    dependent_launch: bool,
 }
 
 #[derive(Deserialize)]
@@ -527,6 +532,7 @@ impl Program {
                             binary_key: k.binary_key,
                             arch_specific: k.arch_specific,
                             source: k.source,
+                            dependent_launch: k.dependent_launch,
                         },
                     )
                 })
