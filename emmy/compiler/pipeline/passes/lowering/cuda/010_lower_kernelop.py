@@ -12,6 +12,7 @@ here (``010_lift`` defers a symbolic free axis), so the grid stays a static int.
 
 from dataclasses import replace
 
+from emmy.compiler.dtype import I64
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.cuda import CudaOp, TmaDescMeta
@@ -106,8 +107,10 @@ def rewrite(match: Match, root: Node) -> CudaOp | None:
     # kernel reads in its preamble, so the step stays one replayable graph — nothing on the host
     # changes between positions.
     starts = tuple(dict.fromkeys(start for *_, start in paged if start is not None))
-    if unknown := [start for start in starts if start not in match.graph.nodes]:
-        raise ValueError(f"paged start(s) {unknown} must name a graph tensor: the i64 scalar the kernel reads its position from")
+    for start in starts:
+        node = match.graph.nodes.get(start)
+        if node is None or node.output.dtype != I64 or any(d != 1 for d in node.output.shape):
+            raise ValueError(f"paged start {start!r} must name an i64 scalar graph tensor, the position the kernel reads")
     if paged:
         # A paged buffer has no base pointer to take: only ``Load`` / ``Write`` resolve a page,
         # so any other stmt touching it (a TMA descriptor, a cp.async stage) would need a base

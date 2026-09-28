@@ -82,11 +82,13 @@ def launch(args, arguments):
         raise ValueError("--native is incompatible with --stock")
     opts = options(arguments)
     model, pinned = split_revision(args.model)
-    if serving_runner(model, arguments) != "generate":
-        raise ValueError("--native serves a generate runner only; pass --runner generate for a checkpoint vLLM would pool")
     if pinned and opts.revision and pinned != opts.revision:
         raise ValueError("conflicting model revisions")
     revision = opts.revision or pinned
+    # The runner probe reads the pinned checkpoint, so the pin reaches it as vLLM's own flag.
+    probe = arguments if opts.revision or not pinned else [*arguments, "--revision", pinned]
+    if serving_runner(model, probe) != "generate":
+        raise ValueError("--native serves a generate runner only; pass --runner generate for a checkpoint vLLM would pool")
     if opts.native_pack and (args.golden or args.strict_evidence or opts.page_tokens is not None):
         raise ValueError("golden, strict evidence and page size apply to preparation, not an existing native pack")
     root = opts.native_pack or Path(tempfile.gettempdir()) / "emmy-native-prepare"

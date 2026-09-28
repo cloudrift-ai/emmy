@@ -543,7 +543,6 @@ def handle_serve(args):
         from emmy.serving.native.launch import launch
 
         return launch(args, vllm_args)
-    generate = serving_runner(split_revision(args.model)[0], vllm_args) == "generate"
     # ``<repo>@<revision>`` is emmy's pin spelling — ``compile``, ``pull``, the gen runner and the
     # twins all read it, and a repo publishing one quantization rung per branch is a DIFFERENT
     # model on each, so the default branch is never a safe stand-in. vLLM takes the two apart, and
@@ -553,6 +552,8 @@ def handle_serve(args):
     model, revision = split_revision(args.model)
     if revision and not _has_flag(vllm_args, "--revision"):
         vllm_args = [*vllm_args, "--revision", revision]
+    # Resolved after the pin lands in the args, so the probe reads the pinned checkpoint's config.
+    generate = serving_runner(model, vllm_args) == "generate"
     serve_cmd = build_serve_cmd(model, stock=args.stock, vllm_args=vllm_args, generate=generate)
     port = _flag_value(vllm_args, "--port", "8000")
     bench_cmd = build_bench_cmd(

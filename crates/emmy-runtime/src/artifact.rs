@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-const SUPPORTED_PLAN_FORMATS: [u32; 3] = [1, 2, 3];
+const SUPPORTED_PLAN_FORMATS: [u32; 4] = [1, 2, 3, 4];
 const PACK_FORMAT: u32 = 1;
 const STANDALONE_FORMAT: u32 = 1;
 const LAUNCH_DIMENSIONS: usize = 3;
@@ -600,6 +600,12 @@ impl Program {
                 paging.axis < buffer.shape.len() && paging.page > 0,
                 "invalid paging for {name}"
             );
+            // Pages are sized and counted once, at load: a shape the environment could grow
+            // later would leave a table short of pages.
+            ensure!(
+                buffer.static_shape().is_some(),
+                "paged buffer {name} must have a static shape"
+            );
         }
         for launch in &self.launches {
             ensure!(
@@ -1043,6 +1049,8 @@ mod tests {
             ("/paged/k/page", json!(0)),
             // Only what a kernel reads or writes can be paged.
             ("/paged", json!({"missing": {"axis": 0, "page": 1}})),
+            // Pages are counted at load, so the shape cannot follow a symbol.
+            ("/buffers/1/shape/2", json!("n")),
         ] {
             let mut bad = paged_example();
             *bad.pointer_mut(pointer).unwrap() = value;

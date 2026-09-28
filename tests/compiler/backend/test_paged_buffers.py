@@ -99,7 +99,10 @@ def test_paged_hint_reaches_the_kernel_abi():
     """The marked buffers take a page table in place of a pointer, the launcher binds that table
     by name, and every read of them goes through it — codegen only, so no GPU is needed."""
     pytest.importorskip("torch")
-    (kernel,) = _kernels(_compile_read(paged=True))
+    from emmy.compiler.backend.plan import PLAN_FORMAT_PAGED, plan_from_graph, plan_to_dict
+
+    compiled = _compile_read(paged=True)
+    (kernel,) = _kernels(compiled)
 
     signature = _signature(kernel)
     for name in ("k", "v"):
@@ -107,6 +110,8 @@ def test_paged_hint_reaches_the_kernel_abi():
         assert not re.search(rf"const float\* {name}\b", signature), signature
         assert f"{name}__pages[" in kernel.kernel_source
     assert "k__pages" in kernel.arg_order and "k" not in kernel.arg_order
+    # The table is a runtime contract of its own: a plan carrying one serializes as the paged format.
+    assert plan_to_dict(plan_from_graph(compiled))["format"] == PLAN_FORMAT_PAGED
 
 
 def test_unpaged_build_is_byte_identical_to_before():
@@ -136,6 +141,22 @@ def test_paged_output_writes_at_a_device_start():
     assert "const int past__at = (int)past[0];" in kernel.kernel_source
     assert "past__at" in kernel.kernel_source.split("__pages[", 1)[1].split("]", 1)[0]
     assert f"{name}__pages" in kernel.arg_order and name not in kernel.arg_order
+
+
+def test_paged_start_must_be_an_i64_scalar():
+    """The kernel reads the start as one i64 off the device, so the hint may name nothing else."""
+    pytest.importorskip("torch")
+    import torch
+
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.trace.torch import trace_module
+
+    example = torch.zeros(1, KV_HEADS, CHUNK, HEAD_DIM)
+    for past in (torch.zeros(1, dtype=torch.float32), torch.zeros(HEAD_DIM, dtype=torch.int64)):
+        graph = trace_module(_cache_write_at(), (example, past))
+        graph.hints.set("cuda.paged_buffers", ((graph.outputs[0], 2, PAGE, "past"),))
+        with pytest.raises(ValueError, match="i64 scalar"):
+            CudaBackend().compile(graph)
 
 
 @requires_cuda

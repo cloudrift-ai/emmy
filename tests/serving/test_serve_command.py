@@ -572,6 +572,20 @@ def test_serve_refuses_an_environment_pin_that_contradicts_the_golden_regime(mon
         handle_serve(_parse(["serve", MODEL, "--runner", "pooling", "--golden", str(_REGIME_GOLDEN), "--strict-evidence", "--bench"]))
 
 
+def test_serve_resolves_the_runner_of_the_pinned_revision(monkeypatch):
+    """``MODEL@rev`` pins a checkpoint that may differ from the default branch, so the runner probe
+    sees the pin as vLLM's own ``--revision`` before it reads any config."""
+    seen = []
+
+    def runner(model, vllm_args):
+        seen.append((model, list(vllm_args)))
+        return "generate"
+
+    monkeypatch.setattr("emmy.commands.serve.serving_runner", runner)
+    handle_serve(_parse(["serve", f"{MODEL}@abc", "--dry-run"]))
+    assert seen == [(MODEL, ["--revision", "abc"])]
+
+
 def test_serving_runner_resolves_like_vllm(tmp_path):
     """The runner is vLLM's flag: explicit wins, a pooling convert pools, a Sentence Transformers
     checkpoint pools even as a *ForCausalLM, the architecture suffix decides otherwise, and a

@@ -18,6 +18,21 @@ def arguments(*flags):
     return args, forwarded
 
 
+def test_native_probes_the_runner_of_the_pinned_revision(monkeypatch):
+    """The pin in ``MODEL@rev`` reaches the runner probe as ``--revision`` before any config is read."""
+    seen = []
+
+    def runner(model, vllm_args):
+        seen.append((model, list(vllm_args)))
+        return "generate"
+
+    monkeypatch.setattr("emmy.commands.serve.serving_runner", runner)
+    args, forwarded = arguments("--native", "--dry-run")
+    args.model = "Qwen/Qwen3-0.6B@abc"
+    launch(args, forwarded)
+    assert seen == [("Qwen/Qwen3-0.6B", ["--revision", "abc"])]
+
+
 def test_native_dry_run(caplog):
     args, forwarded = arguments(
         "--native",

@@ -726,6 +726,16 @@ impl Executor {
                     .any(|l| l.indirect.iter().any(|i| i.table == name || i.sel == name)),
             "unknown operand {name}"
         );
+        if let Some(paged) = &paged {
+            // Every kernel indexes the table by page: a short one is read past its end.
+            let count =
+                self.program.paged[paged].page_count(self.program.buffer(paged)?, &self.env)?;
+            ensure!(
+                len >= count * size_of::<u64>(),
+                "page table for {paged} holds {} pointers, its {count} pages need one each",
+                len / size_of::<u64>()
+            );
+        }
         self.synchronize()?;
         self.graphs.clear();
         self.launch_graphs = None;

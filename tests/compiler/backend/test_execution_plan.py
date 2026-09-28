@@ -15,6 +15,7 @@ import pytest
 from emmy.compiler.backend.plan import (
     PLAN_FORMAT_GENERATED,
     PLAN_FORMAT_INDIRECT,
+    PLAN_FORMAT_PAGED,
     PLAN_FORMAT_VERSION,
     WeightSpec,
     _encode_load_ops,
@@ -138,7 +139,7 @@ def test_plan_round_trip_preserves_binary_key():
 
 def test_plan_format_version_gate():
     d = plan_to_dict(plan_from_graph(_sample_graph()))
-    d["format"] = max(PLAN_FORMAT_INDIRECT, PLAN_FORMAT_GENERATED) + 1  # past every format the runtime speaks
+    d["format"] = max(PLAN_FORMAT_INDIRECT, PLAN_FORMAT_GENERATED, PLAN_FORMAT_PAGED) + 1  # past every format the runtime speaks
     with pytest.raises(ValueError, match="format"):
         plan_from_dict(d)
 
