@@ -234,9 +234,10 @@ class Reduce:
     @classmethod
     def parse(cls, spec: str | None, work: Work | None) -> Reduce:
         """Decode a ``REDUCE`` value against the kernel's ``WORK`` inventory (inverse of
-        :meth:`spell` — the coop width is ``work.count``, never the string). Empty / ``None`` =
-        the scalar serial fold. An unknown token raises, so a width-carrying spelling (the retired
-        ``b<n>`` embedded-worker grammar) is a loud error, not a silent second reading."""
+        :meth:`spell` — the coop width is the inventory's first unit, never the string; a second
+        unit packs cells per CTA). Empty / ``None`` = the scalar serial fold. An unknown token
+        raises, so a width-carrying spelling (the retired ``b<n>`` embedded-worker grammar) is a
+        loud error, not a silent second reading."""
         s = (spec or "").strip()
         cta, coop, reg, finalize, transposed = 1, 1, 1, "kernel", False
         for t in s.split("/") if s else ():
@@ -249,7 +250,7 @@ class Reduce:
             elif t in ("coop", "coop-t"):
                 if work is None or work.kind != "thread":
                     raise ValueError(f"REDUCE {spec!r}: 'coop' requires a thread WORK inventory (t<N>)")
-                coop, transposed = work.count, t.endswith("-t")
+                coop, transposed = work.units[0], t.endswith("-t")
             elif t.startswith("r") and t[1:].isdigit():
                 reg = _codec_width(t[1:], tok=t, codec="REDUCE")
             else:

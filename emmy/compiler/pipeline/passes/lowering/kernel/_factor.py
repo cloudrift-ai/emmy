@@ -113,6 +113,9 @@ class Ctx:
     # split off ``workers`` and a cooperating reduce off its own ``coop``; this is the third case,
     # where nothing else claims the inventory (see the degenerate arm of :func:`_factorize`).
     sweep_workers: int = 1
+    # Cells of a cooperative reduce one CTA holds — the ``WORK`` inventory's second unit
+    # (``t<coop>x<cells>``, offered only where the combine stays inside a warp).
+    packed_cells: int = 1
     # The device's SM count (0 = unknown) — the one-wave test behind the chunk tier's causal early stop.
     sm_count: int = 0
 
@@ -155,6 +158,14 @@ def _sweep_workers(tile) -> int:
     return work.units[0] if work.kind == "thread" and work.units[1] == 1 else 1
 
 
+def _packed_cells(tile) -> int:
+    """The cells of a cooperative reduce one CTA holds: the thread inventory's second unit."""
+    from emmy.compiler.ir.schedule import Work  # noqa: PLC0415
+
+    work = Work.parse((tile.knobs or {}).get("WORK", "") or "")
+    return work.units[1] if work.kind == "thread" else 1
+
+
 def factorize(tile, root, store=None, sm_count: int = 0) -> Tile:
     """The entry to the recursive emitter — build the ambient :class:`Ctx` from the ``TileOp`` and its
     root graph node, then dispatch its ``op`` into a bound ``Tile`` via :func:`_factorize`. ``out_val``
@@ -190,6 +201,7 @@ def factorize(tile, root, store=None, sm_count: int = 0) -> Tile:
         # (m, n) block grid makes it meaningful.
         raster=Raster.parse((tile.knobs or {}).get("RASTER", "")),
         sweep_workers=_sweep_workers(tile),
+        packed_cells=_packed_cells(tile),
         sm_count=sm_count,
     )
     out_val = _wire(op).name if op is not None else ""
@@ -570,7 +582,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
         if any(member is not op for member, _ in parts):
             state, fold, close, lane = _tile_chain_members(op, parts, ctx, tail, out_val)
             t = replace(t, axes=(lane,)) if lane is not None else t
-            bt = lane.extent.as_static() if lane is not None else None
+            bt = lane.extent.as_static() * ctx.packed_cells if lane is not None else None
         elif plan is None or (plan.coop <= 1 and plan.reg <= 1) or (plan.coop_transposed and chain_form(op)):
             # The TERM places its own stores (``Fold.lower``): a sweep store's loop opens around
             # exactly the terms evaluated over that sweep, so sibling sweeps stay siblings, and a
@@ -606,7 +618,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
         else:
             state, fold, close, lane = _tile_reduce_axis(op, plan, ctx, tail, out_val)
             t = replace(t, axes=(lane,)) if lane is not None else t
-            bt = plan.coop if lane is not None else None
+            bt = plan.coop * ctx.packed_cells if lane is not None else None
 
         def state_decls(_cells):
             return state
