@@ -287,6 +287,11 @@ def _absorbing_consumer(match: Match, root: Node) -> tuple[Node | None, str | No
     reader = graph.nodes[readers[0]]
     if not isinstance(reader.op, TileOp) or any(store.sweep for store in reader.op.output_specs):
         return None, "a consumer finalize sums into a kernel the splicer can re-form"
+    # One split per reader. A second would re-form a reader the first already re-formed, and that
+    # reader never launches, so no row prices the first decision: a kernel set is priced as the sum
+    # of its own pieces, each measured.
+    if any(buf.endswith("__partial") for buf in _loaded(reader)):
+        return None, "the reader already sums another split's partials"
     # The unsplit kernel writes the same value at the same cells as the finalize, one reduce loop
     # shallower: if the splicer cannot inline it into the reader, the finalize will not go either.
     key = (id(tile), id(reader.op))
