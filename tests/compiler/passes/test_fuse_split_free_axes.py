@@ -572,7 +572,5 @@ def test_a_head_pair_splits_when_another_reduction_reads_only_its_factors():
     """One contraction reads the flattened head coordinate whole beside its head; another reads the
     head and dim apart. Only the split lets the second bind its operands, so it still happens."""
     first = _reduce(Load(name="q", input="q", index=(_n(),)), Load(name="h", input="h", index=(_n("/"),)))
-    second = _reduce(
-        Load(name="a", input="a", index=(_n("/"),)), Load(name="b", input="b", index=(_n("%"),)), axis="j"
-    )
+    second = _reduce(Load(name="a", input="a", index=(_n("/"),)), Load(name="b", input="b", index=(_n("%"),)), axis="j")
     assert _split(_n_nest(first, second))
