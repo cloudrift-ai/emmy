@@ -1749,6 +1749,22 @@ def test_a_computed_input_is_a_formed_gemv_pieces_a_operand() -> None:
     assert _warp_atoms(down, _CTX, site.node), "the tensor-core tier is offered"
 
 
+def test_a_split_keeps_the_name_of_the_piece_it_splits() -> None:
+    """A split piece's partial and finalize launch under the piece's own name, so a kernel pin naming
+    the piece (its ordinal included) names both halves; they used to take the name of the workspace
+    buffer, whose ordinal counts components, not pieces."""
+    import re
+
+    down = _mlp_down()
+    token = re.search(r"__place_(\w+)$", down.name).group(1)
+    from emmy.compiler.pipeline.fork import iter_leaves
+
+    with pinned_knobs({**_mlp_cuts(), f"REDUCE@place_{token}": "g4k"}):
+        lowered, _ = Run(Pipeline.build(CUDA_PASSES), _CTX).resolve(_mlp_graph(), lambda fork: next(iter_leaves(fork.options)))
+    names = {node.op.kernel_name for node in lowered.nodes.values() if type(node.op).__name__ == "CudaOp"}
+    assert {down.name, f"{down.name}__partial"} <= names, names
+
+
 def test_a_kernel_pin_that_leaves_no_row_is_refused_by_name() -> None:
     """A kernel-scoped pin the named piece cannot take fails the compile with the pins that did it,
     instead of leaving the piece unscheduled and the pin realized by nothing."""

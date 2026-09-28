@@ -733,13 +733,15 @@ def test_a_kernel_pin_reaches_only_the_piece_it_names(monkeypatch):
     monkeypatch.setenv("EMMY_REDUCE", "coop")
     monkeypatch.setenv("EMMY_REDUCE@place_ab12", "g16k/coop-t")
     assert knob_mod.kernel_pin("REDUCE", "k_x__place_ab12") == "g16k/coop-t"
-    assert knob_mod.kernel_pin("REDUCE", "k_add_7__place_ab12_0__partial") == "g16k/coop-t"
+    assert knob_mod.kernel_pin("REDUCE", "k_x__place_ab12__partial") == "g16k/coop-t"
+    assert knob_mod.kernel_pin("REDUCE", "k_x__place_ab12_1") is None, "a sibling piece of the same seam"
+    assert knob_mod.kernel_pin("REDUCE", "k_x__place_ab12_1__partial") is None
     assert knob_mod.kernel_pin("REDUCE", "k_x__place_ab123") is None
     assert knob_mod.kernel_pin("REDUCE", "k_x__place_cd34") is None
     assert knob_mod.family_pins("REDUCE") == (("REDUCE", "coop"),)
     assert pin_row("k_x__place_ab12", split_consumed=True) == {"REDUCE": "coop-t"}
     assert pin_row("k_x__place_cd34", split_consumed=False) == {"REDUCE": "coop"}
-    assert pin_row("", "add_7__place_ab12_0__partial", split_consumed=True) == {"REDUCE": "coop-t"}, "a partial by its node id"
+    assert pin_row("k_x__place_ab12__partial", "add_7__place_ab12_0__partial", split_consumed=True) == {"REDUCE": "coop-t"}
 
 
 def test_the_most_specific_kernel_pin_wins(monkeypatch):
@@ -749,11 +751,11 @@ def test_the_most_specific_kernel_pin_wins(monkeypatch):
 
     pin_row = import_module("emmy.compiler.pipeline.passes.tile.schedule.040_schedule").pin_row
     monkeypatch.setenv("EMMY_REDUCE@place_ab12", "g8k")
-    monkeypatch.setenv("EMMY_REDUCE@place_ab12_0__partial", "coop-t")
+    monkeypatch.setenv("EMMY_REDUCE@place_ab12__partial", "coop-t")
     assert knob_mod.kernel_pin("REDUCE", "k_x__place_ab12") == "g8k"
-    assert knob_mod.kernel_pin("REDUCE", "k_add_7__place_ab12_0__partial") == "coop-t"
-    assert knob_mod.kernel_pin("REDUCE", "k_add_7__place_ab12_0") == "g8k", "the finalize keeps the piece's pin"
-    assert pin_row("", "add_7__place_ab12_0__partial", split_consumed=True) == {"REDUCE": "coop-t"}
+    assert knob_mod.kernel_pin("REDUCE", "k_x__place_ab12__partial") == "coop-t"
+    assert knob_mod.kernel_pin("REDUCE", "k_x__place_ab12", "add_7__place_ab12_0") == "g8k", "the finalize keeps the piece's pin"
+    assert pin_row("k_x__place_ab12__partial", split_consumed=True) == {"REDUCE": "coop-t"}
 
 
 def test_a_node_pin_reaches_the_uncut_root_and_its_split(monkeypatch):
@@ -782,7 +784,7 @@ def test_a_kernel_pin_is_checked_as_its_family():
     assert unreproducible_pin_flag({"WORK@place_ab12": "t128"}, rows) is None
     assert unreproducible_pin_flag({"WORK@place_ab12": "w4x1"}, rows) is not None
     # Named, it is asked of the kernels it reaches alone: the piece that ran w1x16 did not realize t128.
-    names = ["add_7__place_ab12_0__partial", "add_7__place_cd34_0__partial"]
+    names = ["k_x__place_ab12__partial", "k_x__place_cd34__partial"]
     assert "WORK@place_ab12=t128" in unreproducible_pin_flag({"WORK@place_ab12": "t128"}, rows, kernel_names=names)
     assert unreproducible_pin_flag({"WORK@place_cd34": "t128"}, rows, kernel_names=names) is None
 
