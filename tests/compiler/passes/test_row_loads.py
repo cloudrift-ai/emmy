@@ -74,3 +74,26 @@ def test_a_norm_rope_row_computes_the_right_answer() -> None:
     rotated = torch.cat((-t[..., 64:], t[..., :64]), -1)
     expected = (t * torch.from_numpy(c).float() + rotated * torch.from_numpy(s).float()).numpy()
     np.testing.assert_allclose(got, expected, rtol=2e-2, atol=2e-2)
+
+
+def test_a_lane_loop_unrolls_only_when_its_start_is_below_its_step() -> None:
+    """Unrolling writes coordinates ``start + k·step`` for every ``k < extent / step``; they stay inside the
+    loop only when ``start`` is proven in ``[0, step)``. A start at or past the step (or unknown) keeps the loop."""
+    import importlib
+
+    from emmy.compiler.ir.axis import Axis
+    from emmy.compiler.ir.expr import Interval, Literal, SimplifyCtx, Var
+    from emmy.compiler.ir.stmt import Body, StridedLoop
+    from emmy.compiler.ir.stmt.leaves import Load
+
+    trips = importlib.import_module("emmy.compiler.pipeline.passes.lowering.kernel.047_reuse_lane_loads")._trips
+    body = Body((Load(name="v", input="x", index=(Var("i"),), dtype="float16"),))
+    lanes = SimplifyCtx.empty().extend("lane", Interval(0, 15))
+
+    def loop(start):
+        return StridedLoop(axis=Axis("i", 64), start=start, step=Literal(16, "int"), body=body)
+
+    assert trips(loop(Var("lane")), lanes) == 4
+    assert trips(loop(Literal(0, "int")), lanes) == 4
+    assert trips(loop(Literal(32, "int")), lanes) is None
+    assert trips(loop(Var("unknown")), lanes) is None

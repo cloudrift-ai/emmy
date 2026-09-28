@@ -60,7 +60,7 @@ def _walk(body: Body, written: frozenset[str], ctx: SimplifyCtx) -> Body:
     unrolled: list[Stmt] = []
     changed = False
     for stmt in stmts:
-        trips = _trips(stmt)
+        trips = _trips(stmt, ctx)
         if trips is None:
             unrolled.append(stmt)
             continue
@@ -71,7 +71,7 @@ def _walk(body: Body, written: frozenset[str], ctx: SimplifyCtx) -> Body:
     return Body(tuple(_reuse(unrolled, written, ctx)))
 
 
-def _trips(stmt: Stmt) -> int | None:
+def _trips(stmt: Stmt, ctx: SimplifyCtx) -> int | None:
     """How many trips a short lane loop takes, or ``None`` when it is not one this pass unrolls."""
     if not isinstance(stmt, StridedLoop) or stmt.end is not None or not stmt.axis.extent.is_static:
         return None
@@ -82,7 +82,10 @@ def _trips(stmt: Stmt) -> int | None:
         return None
     if not all(isinstance(s, _FLAT) and not s.nested() for s in stmt.body):
         return None
-    # ``start`` must stay below ``step`` for every trip to be in range: a lane index or zero.
+    # Every unrolled trip stays inside the loop only when ``start`` is proven in ``[0, step)``: a lane index or zero.
+    start = stmt.start.range(ctx)
+    if start is None or start.lo < 0 or start.hi >= step:
+        return None
     return extent // step
 
 
