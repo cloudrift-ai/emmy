@@ -1702,3 +1702,58 @@ def test_cut_piece_sweeps_the_axis_its_row_statistic_is_invariant_in() -> None:
     producer = next(node.op for name, node in fragment.nodes.items() if isinstance(node.op, TileOp) and "__place_" in name)
     assert [axis.name for axis in producer.place.free] == ["m"]
     assert [axis.name for store in producer.output_specs for axis in store.sweep] == ["n"]
+
+
+def _mlp_graph() -> Graph:
+    """``exp(down(silu(x @ wg) * (x @ wu)))`` at one token: cut at the gate/up twin and at the down
+    projection, the down piece's A operand is the computed SiLU product and its weight is laid out
+    ``[k, n]``."""
+    from emmy.commands.trace import graph_from_code
+
+    code = (
+        "(lambda x, wg, wu, wd: torch.matmul(torch.nn.functional.silu(torch.matmul(x, wg)) * torch.matmul(x, wu), wd).exp())"
+        "(torch.randn(1, 64, dtype=torch.float16), torch.randn(64, 256, dtype=torch.float16),"
+        " torch.randn(64, 256, dtype=torch.float16), torch.randn(256, 128, dtype=torch.float16))"
+    )
+    return graph_from_code(code)[0]
+
+
+def _mlp_cuts() -> dict[str, str]:
+    """Both contraction seams cut: the gate/up twin and the down projection."""
+    return {seam.spelling: "cut" for seam in cuttable_seams(_lifted_parent(_mlp_graph())) if seam.node.as_contraction() is not None}
+
+
+def _mlp_down() -> TileOp:
+    with pinned_knobs(_mlp_cuts()):
+        lowered = Pipeline.build(LOOP_PASSES).run(_mlp_graph(), ctx=_CTX)
+        cut, _ = Run(pipeline=Pipeline.build(["tile/lift", "tile/cut"]), ctx=_CTX).resolve(lowered, lambda fork: fork.options[0])
+    (down,) = [
+        node.op
+        for node in cut.nodes.values()
+        if isinstance(node.op, TileOp) and "__place_" in node.op.name and any(t.shape[0] == 256 for t in node.op.inputs.values())
+    ]
+    return down
+
+
+def test_a_computed_input_is_a_formed_gemv_pieces_a_operand() -> None:
+    """A piece formed on its own orients a GEMV with a computed input and a ``[k, n]`` weight so the
+    computed operand is A. With the weight as A no fragment loader reads its k column, and the SiLU
+    down projection lost every tensor-core tier (the RTX 5090 s1 layer: 48 -> 65 us with the prologue
+    fused; 41 us once it is A)."""
+    from emmy.compiler.ir.schedule.classic.refusals import _warp_atoms
+    from emmy.compiler.ir.tile.path import sites
+
+    down = _mlp_down()
+    (site,) = [site for site in sites(down.op) if site.node.as_contraction() is not None]
+    assert site.node.operands[0].as_slab() is None, "the SiLU product is A"
+    assert _warp_atoms(down, _CTX, site.node), "the tensor-core tier is offered"
+
+
+def test_a_kernel_pin_that_leaves_no_row_is_refused_by_name() -> None:
+    """A kernel-scoped pin the named piece cannot take fails the compile with the pins that did it,
+    instead of leaving the piece unscheduled and the pin realized by nothing."""
+    import re
+
+    token = re.search(r"__place_([0-9a-f]+)", _mlp_down().name).group(1)
+    with pytest.raises(ValueError, match="leave no schedule row"):
+        _lower(_mlp_graph(), {**_mlp_cuts(), f"TILE@place_{token}": "mma_m16n8k16_f16_f32/f64x64"})
