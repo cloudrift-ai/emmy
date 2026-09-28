@@ -13,7 +13,7 @@ findings and do not establish production performance or complete model serving.
 
 ## Bug reports
 
-The eight final reports below describe what the investigation found, with reproducers, IR observations and unresolved
+The nine reports below describe what the investigation found, with reproducers, IR observations and unresolved
 questions. Several reports group related symptoms whose causes may need further investigation.
 
 Evidence was reviewed at `a98fd4f8` on 2026-09-28 using saved IR and error logs. The staging and packed-cut repros were
@@ -29,7 +29,9 @@ interference follows because it obstructs combining the explored schedules; the 
 site scopes do not select a piece’s WORK. The inline strict mismatch appears more localized, but its impact on
 checkpoint validation is unestablished. Packed-cut staging may reuse existing transport support; native fp4 TMA needs a new
 staging path and has no demonstrated gain over cp.async here. The computed-f16 TMA gap has a cut workaround and is
-less directly tied to the W4A4 target. Effort and relative importance may change as the causes are established.
+less directly tied to the W4A4 target. Unnecessary NVFP4 decode LUTs come last: every preceding issue is more pressing
+and is provisionally expected to carry a larger performance penalty or deployment impact. The LUT report establishes
+avoidable memory accesses, not a measured speedup. Effort and relative importance may change as causes are established.
 
 | Report | Observed behavior |
 | --- | --- |
@@ -41,8 +43,12 @@ less directly tied to the W4A4 target. Effort and relative importance may change
 | [Packed cut pieces lose staging](nvfp4-qwen-performance/packed-cut-piece-operand-order.md) | Tile IR puts the decoded weight before the computed activation. Only no staging and `d1/smem` remain; a `d2/smem-async` pin fails. |
 | [Native fp4 lacks TMA](nvfp4-qwen-performance/fp4-cell-no-tma.md) | The fp4 contraction accepts `d3/smem-async` but rejects `d2/smem-tma`. W4A16 emits TMA copies of packed weight bytes. |
 | [Computed f16 activation blocks weight TMA](nvfp4-qwen-performance/f16-computed-activation-no-tma.md) | A contraction over `x + 1` offers only no staging, `d1/smem` and `d2/smem`; the TMA pin fails unless the activation is cut out. |
+| [NVFP4 decoding unnecessarily uses LUTs](nvfp4-qwen-performance/nvfp4-decode-luts.md) | Scalar decoding reads global-memory byte-to-pair tables; staged W4A16 MMA reads a constant-memory nibble table. Direct E2M1 conversion can remove those accesses. Cache costs are estimated; no speedup has been measured. Lowest priority. |
 
 ### Follow-up checks and boundaries
+
+The LUT follow-up on 2026-09-29 reproduced scalar W4A4, staged W4A16 MMA and native W4A4 MMA at Loop, Tile and CUDA
+stages in this PR's existing worktree, whose compiler matches `a98fd4f8`. It adds no GPU timing or correctness claim.
 
 The quick CPU-only follow-up confirms two localized defects: WORK cannot be hand-pinned to the desired cut piece
 through existing site scopes, and renaming a one-source B `FragmentRepack` drops its role and breaks rendering.
