@@ -10,8 +10,7 @@ of the canonical nest, and the warp tier's split-store addressability.
 
 The operand ROLE-PURITY section at the end was deleted with ``_classify.bind_bilinear`` and is
 RESTORED against the canonical Fold tree. Its contracts are about correctness, not coverage: a
-composite index that binds as a direct slab load emits code referencing an undefined iteration
-variable, a grouped B address that varies with the output row is not one slab per tile, and trying
+grouped B address that varies with the output row is not one slab per tile, and trying
 the opposite operand orientation is licensed only for a COMMUTATIVE product — reordering a
 noncommutative one computes a different value."""
 
@@ -472,16 +471,16 @@ def test_bilinear_batched_operand_still_binds():
     assert con.operands[0].as_slab().load.input == "x"
 
 
-def test_bilinear_declines_composite_role_expr():
+def test_bilinear_binds_a_composite_role_expr():
     """A third free axis composed into the SAME index expr as the role axis (the split-axis
-    composite) must not bind as the direct B load — the mma slab template cannot address it.
-    Before the per-expr purity check this bound and emitted code referencing an undefined
-    iteration variable."""
+    composite ``4*a1 + n``) binds as the direct B load: each side's own axes stay its role, the
+    tile orients the trailing one and the rest ride the grid, which defines them. The Qwen3.8 AWQ
+    down projection has this shape; refusing it left the piece off the tensor cores."""
     comp = BinaryExpr("+", BinaryExpr("*", Var("a1"), Literal(D, "int")), Var("n"))
     con = _bind(_bilinear_fold((comp, Var("k")), (Var("b"), Var("a0"), Var("k"))), ("b", "a1", "a0", "n"))
-    if con is not None:
-        for edge in con.operands[1:]:
-            assert edge.as_slab() is None, "the impure composite must not become a direct slab load"
+    assert con is not None, "the composite demoted to PLANAR"
+    assert con.as_contraction().right_axes == {"a1", "n"}
+    assert con.operands[1].as_slab().load.input == "w"
 
 
 def test_bilinear_binding_is_independent_of_the_product_argument_order():
