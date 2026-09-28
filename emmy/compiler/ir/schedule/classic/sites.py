@@ -218,7 +218,6 @@ class ClassicNodeSite(Site[ClassicSchedule]):
                 work=self.problem.work,
                 why=lambda plan: _contraction_plan_refusal(node, facts, atoms, plan),
             )
-
             # A tiled plan folds serially per cell; an untiled one takes every per-cell reduction. So a
             # row whose reductions leave out the serial fold (a pinned ``coop`` band) rules the tiled
             # plans out too, instead of letting one realize the pin's site with a serial fold.
