@@ -25,7 +25,7 @@ GPU = "NVIDIA H200 141GB"
 @pytest.mark.parametrize(
     ("workflow", "message"),
     [
-        ("discover-model.yml", '"Complete the attached lifecycle task exactly."'),
+        ("discover-model.yml", '"Complete the attached lifecycle task exactly. Its file is $AGENT_TASK."'),
         ("onboard-model.yml", '"Complete the attached onboarding task exactly."'),
     ],
 )
@@ -135,8 +135,8 @@ def test_model_lifecycle_workflow_posts_discord_summary_from_separate_job(workfl
         assert lifecycle["outputs"]["failure_summary"] == "${{ steps.notice.outputs.failure_summary }}"
         assert notify["env"]["FAILURE_KIND"] == "${{ needs.onboard.outputs.failure_kind }}"
         assert notify["env"]["FAILURE_SUMMARY"] == "${{ needs.onboard.outputs.failure_summary }}"
-        assert "deployment_summary=$(jq -r .deployment_summary" in artifacts["run"]
-        assert "performance_summary=$(jq -r .performance_summary" in artifacts["run"]
+        assert "deployment_summary=$(jq -r '.deployment_summary // empty'" in artifacts["run"]
+        assert "performance_summary=$(jq -r '.performance_summary // empty'" in artifacts["run"]
         notice = next(step for step in lifecycle["steps"] if step.get("id") == "notice")
         assert notice["if"] == "always() && steps.vm.outcome == 'success'"
         assert 'failure.get("regression") is True' in notice["run"]
@@ -166,11 +166,12 @@ def test_onboarding_requires_platform_results_snapshot_and_git_lfs():
     assert "tmpfs|ramfs" in host_setup_script
     assert "8388608" in host_setup_script
     subprocess.run(["bash", "-n"], input=host_setup_script, text=True, check=True)
-    assert "results_<gpu-short>x<gpu-count>.tar.gz" in qualify
-    assert "preserve every other platform" in qualify
-    assert "do not\nretain those records as top-level files" in qualify
+    skill_text = (workspace / ".agents" / "skills" / "onboard-model" / "SKILL.md").read_text()
+    assert "results_<gpu-short>x<gpu-count>.tar.gz" in skill_text
+    assert "A platform run replaces only its own archive" in skill_text
+    assert "never commit those records as\ntop-level files" in skill_text
     assert "`onboard-investigator` subagent" in qualify
-    assert "do not modify or list `.gitattributes`" in qualify
+    assert "touch `.gitattributes`" in qualify
     assert '"$WORKFLOW_SOURCE/.agents/skills/onboard-model/SKILL.md"' in agent_script
     assert '"$WORKFLOW_SOURCE/.agents/skills/tune-kernels/SKILL.md"' in agent_script
     assert '"$WORKFLOW_SOURCE/.agents/skills/run-experiment/SKILL.md"' in agent_script
@@ -387,8 +388,15 @@ def test_onboarding_selects_with_generic_recipe_query():
     assert 'lifecycle == "onboarding"' in script
     assert 'lifecycle == "maintained"' in script
     assert "deployment.availability.cloudrift == true" in script
-    assert "heat desc nulls-last" in script
-    assert "results.last_run_at asc nulls-first" in script
+    tiers = [
+        "pick --filter 'lifecycle == \"onboarding\"' --filter 'heat >= 70'",
+        "--filter 'emmy_serving == false' --filter 'tags not contains \"onboarding-failed\"'",
+        "--filter 'lifecycle == \"onboarding\"' --filter 'tags not contains \"onboarding-failed\"'",
+        "--filter 'tags contains \"onboarding-failed\"' --filter 'lifecycle != \"obsolete\"'",
+        "--filter 'lifecycle == \"maintained\"' --sort 'results.last_run_at asc nulls-first'",
+    ]
+    positions = [script.index(tier) for tier in tiers]
+    assert positions == sorted(positions)
     assert "deployment.index asc" in script
     assert "--candidate" in script
     assert 'lifecycle != "obsolete"' in script
@@ -545,8 +553,8 @@ def test_onboarding_agent_reads_shared_prompts_from_a_compact_task():
     # must never read as putting the host's contents out of reach.
     assert "The caller owns the VM's lifetime, not its contents" in qualify
     assert "`ssh_user` has passwordless sudo" in qualify
-    assert "never add a second root for a platform an existing one already covers" in qualify
-    assert "`recipe.yaml` path, never a directory" in qualify
+    assert "never add a second root\nfor a platform an existing one already covers" in qualify
+    assert "`recipe.yaml` path,\nnever a directory" in qualify
     assert "Use at most four public-web calls" in investigate
     assert "Apply the investigation prompt" in investigator
 

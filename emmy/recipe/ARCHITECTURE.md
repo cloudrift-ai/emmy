@@ -50,7 +50,9 @@ the recipe should no longer be used. Low demand or age alone is not enough. Disc
 `best-effort` recipe. Untagged recipes remain runnable for backward compatibility and are classified by the next
 discovery lifecycle run.
 
-Tag values are unique lowercase kebab-case strings. `onboarding` and `untested` must appear together. The runtime
+Tag values are unique lowercase kebab-case strings. `onboarding` and `untested` must appear together. `onboarding-failed` is
+not a lifecycle state: onboarding adds it when an attempt fails and removes it on success, and nightly selection
+holds such a recipe back until nothing else can run. The runtime
 rejects direct use of disabled recipes, while bulk benchmark enumeration and package staging skip them.
 
 `model.rationale` is descriptive lifecycle metadata. It records why the model currently belongs in the inventory and
@@ -61,7 +63,7 @@ legacy recipes and sorts as null until the next discovery run.
 
 `recipe_catalog()` is the shared repository scan behind `emmy recipe list` and model-discovery validation. The
 versioned JSON document produced by `recipe_inventory_document()` adds the directory name, lifecycle-aware runnable
-state, and each matrix-expanded deployment's effective context length to the identity, tags, task, rationale, and
+state, whether any variant serves through Emmy, and each matrix-expanded deployment's effective context length to the identity, tags, task, rationale, and
 heat.
 This is the machine interface used by other services: consumers reject unknown `schema_version` values, while Emmy
 may add fields without removing or redefining fields in the current version. Editable installs read the checkout's
@@ -83,6 +85,7 @@ The row fields are grouped by ownership:
 | Fields | Meaning |
 |---|---|
 | `model_id`, `name`, `recipe_path`, `tags`, `lifecycle`, `task`, `runnable`, `rationale`, `heat` | Compact catalog metadata |
+| `emmy_serving` | Some matrix variant serves through the Emmy vLLM plugin (an `Emmy*Model` architecture override) |
 | `operation`, `expected_lifecycle` | Lifecycle-derived onboarding or verification action |
 | `deployment.index`, `deployment.gpu`, `deployment.gpu_count`, `deployment.context_length` | One declared or explicitly requested setup |
 | `deployment.availability.cloudrift` | Exact-count capacity reported by CloudRift |
@@ -90,7 +93,7 @@ The row fields are grouped by ownership:
 | `provider.cloudrift.team_access` | Whether the configured key can act for the configured team UUID |
 
 The expression grammar is deliberately constrained rather than evaluated as Python. Predicates use a documented
-field, one of `==`, `!=`, `>`, `>=`, `<`, `<=`, `in`, `contains`, or `matches`, and a JSON value. Sorts use
+field, one of `==`, `!=`, `>`, `>=`, `<`, `<=`, `in`, `contains`, `not contains`, or `matches`, and a JSON value. Sorts use
 `FIELD asc|desc` with an optional `nulls-first|nulls-last`, or `FIELD order JSON_ARRAY`. Repeated filters are logical
 AND; repeated sort keys are applied in command order. The independent versioned JSON result contains `schema_version`
 and `rows`; an empty result is successful, leaving exact-candidate row-count policy to the caller.
