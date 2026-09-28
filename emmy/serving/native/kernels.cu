@@ -66,14 +66,14 @@ extern "C" __global__ void native_attention(const half* q, const half* k, const 
         output[head * HEAD_DIM + d] = __float2half(value);
     }
 }
-__device__ void native_greedy(const half* logits, long long* next) {
+__device__ void native_greedy(const float* logits, long long* next) {
     // One power-of-two block; all threads participate, including when VOCAB is smaller.
     extern __shared__ int best[];
     int lane = threadIdx.x, token = -1;
     float peak = -INFINITY;
     bool invalid = false;
     for (int i = lane; i < VOCAB; i += blockDim.x) {
-        float value = __half2float(logits[i]);
+        float value = logits[i];
         invalid |= !isfinite(value);
         if (value > peak) { peak = value; token = i; }
     }
@@ -83,7 +83,7 @@ __device__ void native_greedy(const half* logits, long long* next) {
     for (int stride = blockDim.x / 2; stride; stride /= 2) {
         if (lane < stride) {
             int other = best[lane + stride];
-            float value = other < 0 ? -INFINITY : __half2float(logits[other]);
+            float value = other < 0 ? -INFINITY : logits[other];
             if (value > peak || (value == peak && other >= 0 && other < token)) {
                 peak = value; token = other;
             }
@@ -94,49 +94,52 @@ __device__ void native_greedy(const half* logits, long long* next) {
     if (lane == 0) *next = token;
 }
 
-// Every finite FP16 logit has an exact ordered bin. Signed zeros share a bin.
-// Bin zero is reserved for invalid logits; neither infinity nor NaN is sampled.
-constexpr int SAMPLING_BINS = 65536;
-__device__ unsigned int logit_bin(half value) {
-    unsigned short bits = __half_as_ushort(value);
-    if ((bits & 0x7fff) == 0) bits = 0;
-    return bits & 0x8000 ? (~bits & 0xffff) : (bits ^ 0x8000);
+// Radix digits preserve every FP32 bit; signed zeros have the same ordered key.
+__device__ unsigned int logit_key(float value) {
+    unsigned int bits = value == 0.0f ? 0u : __float_as_uint(value);
+    return bits & 0x80000000u ? ~bits : (bits ^ 0x80000000u);
 }
-__device__ double bin_value(unsigned int bin) {
-    return __half2float(__ushort_as_half(bin & 0x8000 ? bin ^ 0x8000 : ~bin));
-}
-extern "C" __global__ void native_histogram(const half* logits, const double* sampling,
-    const long long* position, const long long* length, unsigned int* histogram) {
-    if (sampling[0] == 0.0 || *position + 1 < *length) return;
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < VOCAB) atomicAdd(histogram + (isfinite(__half2float(logits[i])) ? logit_bin(logits[i]) : 0), 1u);
-}
-extern "C" __global__ void native_sample(const half* logits, const unsigned int* histogram,
+extern "C" __global__ void native_sample(const float* logits, double* histogram, double* weights,
     const double* sampling, const unsigned long long* seed, const long long* position,
     const long long* length, long long* next) {
     if (*position + 1 < *length) return;
-    if (sampling[0] == 0.0) { native_greedy(logits, next); return; }
+    native_greedy(logits, next);
+    __syncthreads();
+    if (*next < 0 || sampling[0] == 0.0) return;
+    double maximum = logits[*next];
+    for (int i = threadIdx.x; i < VOCAB; i += blockDim.x)
+        weights[i] = exp(((double)logits[i] - maximum) / sampling[0]);
+    __syncthreads();
     if (threadIdx.x != 0) return;
-    if (histogram[0]) { *next = -1; return; }
-    int peak = SAMPLING_BINS - 1;
-    while (peak > 0 && !histogram[peak]) --peak;
-    double maximum = bin_value(peak), total = 0.0;
-    for (int bin = peak; bin > 0; --bin)
-        if (histogram[bin]) total += histogram[bin] * exp((bin_value(bin) - maximum) / sampling[0]);
-    // Include the smallest descending prefix reaching top-p. Equal logits are ordered by token ID.
-    double mass = 0.0;
-    int cutoff = peak;
-    unsigned int ties = 0;
-    for (; cutoff > 0; --cutoff) {
-        if (!histogram[cutoff]) continue;
-        double weight = exp((bin_value(cutoff) - maximum) / sampling[0]);
-        double group = histogram[cutoff] * weight;
-        if (weight > 0.0 && mass + group >= sampling[1] * total) {
-            ties = min(histogram[cutoff], (unsigned int)fmax(1.0, ceil((sampling[1] * total - mass) / weight)));
-            mass += ties * weight;
-            break;
+    double total = 0.0;
+    for (int i = 0; i < VOCAB; ++i) total += weights[i];
+    double remaining = sampling[1] * total, mass = 0.0;
+    unsigned int cutoff = 0, mask = 0, ties = 0;
+    // Refine the cutoff one byte at a time. Each sum has a fixed token order;
+    // no atomic floating-point accumulation can change a seeded selection.
+    for (int shift = 24; shift >= 0; shift -= 8) {
+        for (int bin = 0; bin < 512; ++bin) histogram[bin] = 0.0;
+        for (int i = 0; i < VOCAB; ++i) {
+            unsigned int key = logit_key(logits[i]);
+            if ((key & mask) != cutoff) continue;
+            int bin = (key >> shift) & 255u;
+            histogram[bin] += weights[i];
+            histogram[256 + bin] += 1.0;
         }
-        mass += group;
+        int bin = 255;
+        for (; bin > 0; --bin) {
+            if (histogram[bin] >= remaining) break;
+            remaining -= histogram[bin];
+            mass += histogram[bin];
+        }
+        cutoff |= (unsigned int)bin << shift;
+        mask |= 255u << shift;
+        if (shift == 0 && histogram[bin] > 0.0) {
+            unsigned int count = (unsigned int)histogram[256 + bin];
+            double weight = histogram[bin] / count;
+            ties = min(count, (unsigned int)fmax(1.0, ceil(remaining / weight)));
+            mass += ties * weight;
+        }
     }
     // SplitMix64 counter: request seed and generated-token index, independent of prefill and capture.
     unsigned long long random = *seed + 0x9e3779b97f4a7c15ULL * (unsigned long long)(*position - *length + 2);
@@ -146,10 +149,10 @@ extern "C" __global__ void native_sample(const half* logits, const unsigned int*
     double target = (random >> 11) * 0x1.0p-53 * mass, cumulative = 0.0;
     long long last = -1;
     for (int i = 0; i < VOCAB; ++i) {
-        unsigned int bin = logit_bin(logits[i]);
+        unsigned int bin = logit_key(logits[i]);
         if (bin < (unsigned int)cutoff) continue;
         if (bin == (unsigned int)cutoff) { if (!ties) continue; --ties; }
-        double weight = exp((__half2float(logits[i]) - maximum) / sampling[0]);
+        double weight = weights[i];
         if (weight == 0.0) continue;
         last = i;
         cumulative += weight;
