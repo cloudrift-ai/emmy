@@ -119,7 +119,11 @@ class Knob:
     def __post_init__(self) -> None:
         # Construction IS registration: a module-level ``Knob`` declaration lands in the registry
         # the moment it executes, wherever it lives. First-seen wins, matching the old module-scan
-        # collapse rule (duplicate declarations should agree on type / hints anyway).
+        # collapse rule (duplicate declarations should agree on type / hints anyway). The canonical
+        # declarations in ``search/space.py`` load first, so a throwaway knob built before anything
+        # asked the registry (a test's stand-in) can never claim a canonical name.
+        from emmy.compiler.pipeline.search import space  # noqa: F401, PLC0415 — deferred: space imports knob
+
         _REGISTRY.setdefault(self.name, self)
 
     @property
