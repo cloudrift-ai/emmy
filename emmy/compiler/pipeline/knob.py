@@ -469,11 +469,16 @@ def kernel_scoped(key: str) -> bool:
 
 def kernel_pin(family: str, *names: str) -> str | None:
     """The kernel pin of ``family`` that reaches a kernel known by any of ``names``, or ``None``. A
-    split's partial is scheduled as a tile with no name of its own, so its graph node id is asked too."""
-    for key, value in _environ_pins(family):
-        if kernel_scoped(key) and any(reaches(key, name) for name in names):
-            return value
-    return None
+    split's partial is scheduled as a tile with no name of its own, so its graph node id is asked too.
+    Where several pins reach the kernel the most specific wins: a pin naming a split's partial
+    (``place_<token>_0__partial``) beats the pin naming the piece it was split from (``place_<token>``),
+    which also reaches the partial."""
+    reached = [
+        (len(axis_of(key) or ""), value)
+        for key, value in _environ_pins(family)
+        if kernel_scoped(key) and any(reaches(key, name) for name in names)
+    ]
+    return max(reached, key=lambda pair: pair[0])[1] if reached else None
 
 
 def reaches(key: str, kernel: str) -> bool:
