@@ -512,3 +512,21 @@ def test_square_is_runnable_and_squares():
         out = fn(*inputs)
     assert torch_ref.is_runnable(g)
     torch.testing.assert_close(out, x * x)
+
+
+def test_transposed_half_matmul_preserves_float32_output():
+    from emmy.compiler.trace.torch import trace_module
+
+    class Projection(torch.nn.Module):
+        def forward(self, x, weight):
+            return torch.mm(x, weight.transpose(0, 1), out_dtype=torch.float32)
+
+    x = torch.ones((1, 2), dtype=torch.float16)
+    weight = torch.tensor([[1, 2**-12], [1, 2**-11]], dtype=torch.float16)
+    graph = trace_module(Projection(), (x, weight))
+    reference, inputs = torch_ref.build_callable(graph, {"x": x, "weight": weight})
+    actual = reference(*inputs)
+    torch.testing.assert_close(actual, x.float() @ weight.float().T, rtol=0, atol=0)
+    assert actual.dtype == torch.float32
+    assert actual[0, 1] > actual[0, 0]
+    assert actual.half()[0, 1] == actual.half()[0, 0]
