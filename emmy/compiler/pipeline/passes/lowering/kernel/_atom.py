@@ -60,8 +60,6 @@ from emmy.compiler.ir.kernel.ir import (
     MmaSyncPtx,
     RegFragment,
     RegStore,
-    Smem,
-    Sync,
     WgmmaCommit,
     WgmmaDescriptor,
     WgmmaFence,
@@ -1972,9 +1970,6 @@ class _AtomOps:
     # The launch fits the card in one wave: the chunk tier keeps its stream whole (see ``_factor``).
     one_wave: bool = False
     outputs: object = None
-    # Warp groups of one CTA the chunk tier splits its key stream across (``REDUCE=wg<n>``); 1
-    # everywhere else.
-    groups: int = 1
 
     def frag(self, name: str) -> str:
         """``name`` in this emission's fragment namespace (:attr:`frag_ns`)."""
@@ -2910,16 +2905,9 @@ class _FlashOps(_MmaOps):
         k_first, k_end = _mask_key_bounds(prefix.body, scored_name, key, m.axis.name, offset[0], bk)
         if self.one_wave and (k_first is None or k_end is None):
             k_first = k_end = None
-        # Split across warp groups, one loop step covers ``groups`` chunks and group ``g`` folds the
-        # ``g``-th: the stream steps by the groups' span, and each group's chunk starts ``g`` chunks
-        # in. A band's late start is dropped (the stream is walked from its start; a chunk a group
-        # sees wholly masked folds at the pivot identity and the merge weighs it out).
-        span = bk * self.groups
-        if self.groups > 1:
-            k_first = None
 
         chunk = Axis(name=f"{key.name}__ck", extent=key.extent)
-        base = Var(chunk.name) if self.groups == 1 else BinaryExpr("+", Var(chunk.name), BinaryExpr("*", self._group, Literal(bk, "int")))
+        base = Var(chunk.name)
         select_sigma = Sigma({m.axis.name: Var(FRAG_ROW), key.name: Var(FRAG_COL)})
         # A key extent the chunk does not tile — a symbolic stream, or a static one with a
         # remainder — leaves the last chunk ragged. Its overhanging columns fill with the pivot ⊕'s
@@ -2929,7 +2917,7 @@ class _FlashOps(_MmaOps):
         ragged = not key.extent.is_static or key.extent.as_static() % bk
         bound = key.extent_expr() if ragged else None
 
-        streams = self._streams(mn, span)  # a warp-group split stages every group's chunk in one slot
+        streams = self._streams(mn, bk)
 
         def chunk_segments(slots) -> list[tuple[list[Stmt], frozenset[str]]]:
             """The chunk's body as the skeleton's segments — the score, reading the key's slab at
@@ -3039,8 +3027,6 @@ class _FlashOps(_MmaOps):
         # ``seed=False``: the carrier is declared once outside this loop at the seeds the TERM names
         # — the pivot's is not ``maximum``'s neutral element — so the loop must not re-seed it.
         if streams is None:
-            if self.groups > 1:
-                raise ValueError("a warp-group split reads its key and value from staged slabs")
             gmem = Body(tuple(stmt for stmts, _ in chunk_segments((None,)) for stmt in stmts))
             start = k_first if k_first is not None else Literal(0, "int")
             loop = StridedLoop(axis=chunk, start=start, step=Literal(bk, "int"), body=gmem, unroll=False, seed=False, end=k_end)
@@ -3056,11 +3042,11 @@ class _FlashOps(_MmaOps):
         # overhangs, its value rows read the last valid key, and the boundary mask
         # above has already put those keys at the pivot identity — so they weigh exactly zero and
         # the duplicates fold to nothing, the same discipline the gmem-direct arm carries.
-        k_extent, n_chunks = _chunk_stream(key, span)
+        k_extent, n_chunks = _chunk_stream(key, bk)
         decls, region = pipelined_kloop(
             operands=tuple((transport, self.stage.depth) for transport in streams.transports),
             build_segments=chunk_segments,
-            bk_elems=span,
+            bk_elems=bk,
             n_chunks=n_chunks,
             k_extent=k_extent,
             k0=chunk.name,
@@ -3068,9 +3054,6 @@ class _FlashOps(_MmaOps):
             k_first=k_first,
             seed=False,
         )
-        if self.groups > 1:
-            merge_decls, merge = self._merge_groups(offset, mn)
-            return [*pre, *decls, *merge_decls], [*region, *merge]
         return [*pre, *decls], region
 
     def _streams(self, mn, bk: int):
@@ -3129,7 +3112,7 @@ class _FlashOps(_MmaOps):
                 pads=(pad, 0),
                 roles=(0,),
             )
-        cta = self._block_cta(mn)
+        cta = _cta(mn, self.tile.atom.lanes, self.tile.launch_threads)
 
         def group(operands: tuple, tag: str = ""):
             common = dict(slab_dtype=cuda_name(elem), elem_bytes=elem.nbytes, cta=cta)
@@ -3152,26 +3135,6 @@ class _FlashOps(_MmaOps):
         else:
             transports = (group((value,) if key is None else (key, value)),)
         return _ChunkStreams(value=value, key=key, transports=transports)
-
-    @property
-    def _group(self) -> Expr:
-        """This thread's warp group along a split key stream — ``0`` when it is not split."""
-        return Var(group_axis_name(self.k_axis)) if self.groups > 1 else Literal(0, "int")
-
-    def _own_rows(self, operand) -> Expr:
-        """Where this warp group's chunk starts along a staged slot's keys: a split stream's slot
-        holds every group's chunk back to back (one swizzle atom's keys when the slot stacks atoms)."""
-        keys = operand.shape[1] if operand.trans else operand.shape[0] // operand.atoms
-        return BinaryExpr("*", self._group, Literal(keys // self.groups, "int"))
-
-    def _block_cta(self, mn) -> CtaTile:
-        """The whole CTA as the cooperative fills see it: a split stream's warp groups share every
-        slab, so all of them stripe its fill, the group index above the in-group thread id."""
-        cta = _cta(mn, self.tile.atom.lanes, self.tile.launch_threads)
-        if self.groups == 1:
-            return cta
-        tid = BinaryExpr("+", BinaryExpr("*", self._group, Literal(cta.n_threads, "int")), cta.linear_tid)
-        return CtaTile(linear_tid=tid, n_threads=cta.n_threads * self.groups)
 
     @property
     def _score_atom(self):
@@ -3314,7 +3277,7 @@ class _FlashOps(_MmaOps):
             raise ValueError("the wgmma score stages a whole query tile (an overhanging query tile is not staged)")
         query = self._query_operand(mn)
         elem = self._score_atom.operand_dtype("a")
-        cta = self._block_cta(mn)
+        cta = _cta(mn, self.tile.atom.lanes, self.tile.launch_threads)
         fill = cp_async_fill(
             slab=query.slab,
             shape=query.shape,
@@ -3345,9 +3308,7 @@ class _FlashOps(_MmaOps):
         if key.shape[1] * elem_bytes != 128:
             raise ValueError("the wgmma score reads a key stored one 128-byte swizzle atom per slab row")
         row_cols = key.shape[1] + key.pad_cols
-        chunk = key.shape[0] // key.atoms  # the slot's keys: one atom's rows (every group's chunk)
-        # A split stream's slot holds every group's chunk back to back; this group reads its own.
-        own = BinaryExpr("*", self._group, Literal(chunk // self.groups, "int"))
+        chunk = key.shape[0] // key.atoms  # the chunk's keys: one atom's rows
         query = self._query_operand((m, None))
         q_rows = query.shape[0] // query.atoms  # the CTA's query rows: one atom's rows
         # Each warp group reads its own 64 query rows of the tile.
@@ -3371,7 +3332,7 @@ class _FlashOps(_MmaOps):
             )
             for jg in range(cols // cells):
                 # The step's K lies in atom ``k0 // row_cols``, stacked ``chunk`` rows per atom down.
-                nbase = BinaryExpr("+", Literal(k0 // row_cols * chunk + jg * cells * atom.atom_n, "int"), own)
+                nbase = Literal(k0 // row_cols * chunk + jg * cells * atom.atom_n, "int")
                 index = BinaryExpr(
                     "+", BinaryExpr("*", _slab_row(key, slot, nbase), Literal(row_cols, "int")), Literal(k0 % row_cols, "int")
                 )
@@ -3461,7 +3422,7 @@ class _FlashOps(_MmaOps):
         return LdmatrixLoad(
             frag=self.frag(f"_kb{j}"),
             src_buffer=key.slab,
-            src_index=(_slab_row(key, slot, BinaryExpr("+", Literal(j * atom.atom_n, "int"), self._own_rows(key))), k),
+            src_index=(_slab_row(key, slot, Literal(j * atom.atom_n, "int")), k),
             role="b",
             staged=True,
             ldm=key.shape[1] + key.pad_cols,
@@ -3565,26 +3526,22 @@ class _FlashOps(_MmaOps):
         if not trans and value.shape[1] != atom_cols:
             raise ValueError("the wgmma expectation reads an N-contiguous value stored one 128-byte atom per slab row")
         bk = steps * atom.atom_k
-        # The slot holds every warp group's chunk back to back (``REDUCE=wg<n>``); this group's
-        # keys start ``own`` rows into it.
-        span = bk * self.groups
-        own = BinaryExpr("*", self._group, Literal(bk, "int"))
         out: list[Stmt] = [self._frag(f"_a0_{t}", "a", self._score_tile_atom) for t in range(steps)]
         for t in range(steps):
             out += [FragmentRepack(frag=self.frag(f"_a0_{t}"), srcs=(weights[0, 2 * t], weights[0, 2 * t + 1]), ab_dtype=atom.ab_dtype)]
         out.append(WgmmaFence())
         for t in range(steps):
-            kstep = BinaryExpr("+", Literal(t * atom.atom_k, "int"), own)
+            kstep = Literal(t * atom.atom_k, "int")
             for jg in range(n.reg // cells):
                 nbase = BinaryExpr("+", BinaryExpr("*", Var(n.unit), Literal(n.reg * 8, "int")), Literal(jg * cells * 8, "int"))
                 if trans:  # K-major (tile_n × chunk): the value's column is the slab row, the key the column
-                    cols = span + value.pad_cols
+                    cols = bk + value.pad_cols
                     index = BinaryExpr("+", BinaryExpr("*", _slab_row(value, slot, nbase), Literal(cols, "int")), kstep)
                     lbo, sbo = 16, 8 * cols * elem_bytes
                 else:  # MN-major, atom-major: atom ``nbase / atom`` starts ``chunk`` rows down, the key step its row
-                    row = BinaryExpr("+", BinaryExpr("*", BinaryExpr("/", nbase, Literal(atom_cols, "int")), Literal(span, "int")), kstep)
+                    row = BinaryExpr("+", BinaryExpr("*", BinaryExpr("/", nbase, Literal(atom_cols, "int")), Literal(bk, "int")), kstep)
                     index = BinaryExpr("*", _slab_row(value, slot, row), Literal(atom_cols, "int"))
-                    lbo, sbo = span * atom_cols * elem_bytes, 8 * atom_cols * elem_bytes
+                    lbo, sbo = bk * atom_cols * elem_bytes, 8 * atom_cols * elem_bytes
                 desc = self.frag(f"_dv{jg}_{t}")
                 out.append(
                     WgmmaDescriptor(name=desc, smem=value.slab, smem_index=index, swizzle=value.swizzle, lbo_bytes=lbo, sbo_bytes=sbo)
@@ -3626,7 +3583,7 @@ class _FlashOps(_MmaOps):
                 fragment_layout=atom.fragment_layout,
             )
         within = BinaryExpr("+", BinaryExpr("*", Var(n.unit), Literal(n.reg * atom.atom_n, "int")), Literal(j * atom.atom_n, "int"))
-        step: Expr = BinaryExpr("+", Literal(t * atom.atom_k, "int"), self._own_rows(value))
+        step: Expr = Literal(t * atom.atom_k, "int")
         trans = value.trans
         slab_row = _slab_row(value, slot, within if trans else step)
         return LdmatrixLoad(
@@ -3692,141 +3649,6 @@ class _FlashOps(_MmaOps):
                 )
                 out += stmts
         return out
-
-    def _merge_groups(self, offset, mn) -> tuple[list[Stmt], list[Stmt]]:
-        """Merge a key stream split across warp groups (``REDUCE=wg<n>``) into group 0.
-
-        Each group folded its own chunks into a whole carrier — pivot, row states, expectation —
-        over the same query rows, so the merge is the recipe's own ⊕ of carriers, the one a
-        cross-CTA split's finalize applies: the pivot pair advances, every channel scales by its
-        side's factor and joins through its base ⊕. The other groups hand their carriers over
-        through one shared buffer, laid out as the tile itself — the expectation's columns, then
-        eight per row state — in the fragment's own element map, so a thread reads back exactly
-        the cells its twin in the other group held. Group 0 folds them in order and alone stores."""
-        m, n = mn
-        atom = self.tile.atom
-        layout = frag_layout(atom.fragment_layout)
-        rows_tile, cols_tile = m.units * m.reg * atom.atom_m, n.units * n.reg * atom.atom_n
-        states = [(index, name) for index, name, _seed in self._carried() if index != self._bilinear]
-        ldm = cols_tile + atom.atom_n * len(states)
-        buf = self.frag("_wg_x")
-        decls: list[Stmt] = [Smem(name=buf, extents=(rows_tile * ldm,), dtype="float", align=16)]
-
-        def local(side_offset, r: int) -> Expr:  # a register cell's coordinate within the tile
-            return BinaryExpr("-", side_offset.base(r), side_offset.block_base())
-
-        def cell_at(i: int, col: Expr) -> tuple[Expr, Expr]:
-            return local(offset[0], i), col
-
-        def put(frag: str, i: int, col: Expr) -> Stmt:
-            row, col = cell_at(i, col)
-            return RegStore(
-                dst_buffer=buf,
-                dst_index=(BinaryExpr("+", BinaryExpr("*", row, Literal(ldm, "int")), col),),
-                frag=frag,
-                shape=atom.shape,
-                ldm=ldm,
-                fragment_layout=atom.fragment_layout,
-            )
-
-        def get(out: str, i: int, col: Expr) -> Stmt:
-            row, col = cell_at(i, col)
-            index = BinaryExpr("+", BinaryExpr("*", Var(FRAG_ROW), Literal(ldm, "int")), Var(FRAG_COL))
-            return FragmentApply(
-                out=out, op=ElementwiseImpl("copy"), args=((buf, (index,)),), kinds=(GMEM,), layout=layout, row_base=row, col_base=col
-            )
-
-        def state_col(k: int) -> Expr:
-            return Literal(cols_tile + atom.atom_n * k, "int")
-
-        def value_col(j: int) -> Expr:
-            return local(offset[1], j)
-
-        bilinear = self.c.base.results[self._bilinear]
-        body: list[Stmt] = []
-        for g in range(1, self.groups):
-            hand: list[Stmt] = []  # group g hands its carrier over
-            for i in range(m.reg):
-                for k, (_index, state) in enumerate(states):
-                    held = self.frag(f"_wg_s{k}_{i}")
-                    pair = _row_pair(self.frag(state), i)
-                    hand.append(FragmentApply(out=held, op=ElementwiseImpl("copy"), args=(pair,), kinds=(ROW,), layout=layout))
-                    hand.append(put(held, i, state_col(k)))
-                hand += [put(self.frag(f"_c{i}_{j}"), i, value_col(j)) for j in range(n.reg)]
-            fold: list[Stmt] = []  # group 0 folds it in
-            for i in range(m.reg):
-                other: dict[str, tuple[str, str]] = {}
-                for k, (_index, state) in enumerate(states):
-                    held = self.frag(f"_wg_o{k}_{i}")
-                    fold.append(get(held, i, state_col(k)))
-                    pair = _row_pair(self.frag(f"{state}__wg"), i)
-                    # Every element of the row holds the row's value; the row ⊕ of the pivot reads it back.
-                    fold.append(FragmentRowReduce(top=pair[0], bot=pair[1], frags=(held,), op=self.c.base.components()[0], layout=layout))
-                    other[state] = pair
-                pivot = self.c.base.results[0]
-                stmts, _moved, factors = self._advance_both(i, other[pivot], layout)
-                fold += stmts
-                for index, state in states:
-                    if index == 0:
-                        continue
-                    stmts, scaled = self._scaled_row(index, other[state], factors[1], layout, f"_wg{i}_{state}_")
-                    fold += stmts
-                    fold += self._fold_row(index, i, scaled, factors[0], layout)
-                fold += self._scale_expectation(mn, {i: factors[0]}, layout)
-                for j in range(n.reg):
-                    theirs = self.frag(f"_wg_c{i}_{j}")
-                    fold.append(get(theirs, i, value_col(j)))
-                    stmts, frags, _rows = _residence(
-                        self._scale_program(bilinear, theirs),
-                        frags={theirs: theirs},
-                        rows={_FACTOR: factors[1]},
-                        tag=f"_wg{i}_{j}_",
-                        layout=layout,
-                    )
-                    fold += stmts
-                    fold.append(
-                        FragmentApply(
-                            out=self.frag(f"_c{i}_{j}"),
-                            op=ElementwiseImpl("add"),
-                            args=(self.frag(f"_c{i}_{j}"), frags[_SCALED]),
-                            kinds=(FRAG, FRAG),
-                            in_place=True,
-                            layout=layout,
-                        )
-                    )
-                fold += self._fold_pivot(mn, {i: other[pivot]}, layout)
-            body.append(Cond(cond=BinaryExpr("==", self._group, Literal(g, "int")), body=tuple(hand)))
-            body.append(Sync())
-            body.append(Cond(cond=BinaryExpr("==", self._group, Literal(0, "int")), body=tuple(fold)))
-            body.append(Sync())  # the buffer is free for the next group's hand-over
-        return decls, body
-
-    def _advance_both(self, i: int, other: tuple[str, str], layout) -> tuple[list[Stmt], tuple[str, str], tuple]:
-        """The recipe's pivot advance at row ``i`` between the carrier and another carrier's pivot,
-        with the factor BOTH sides take for the move (the chunk fold needs only the carrier's)."""
-        advance = self._recipe.advance
-        pivot = self.c.base.results[0]
-        bound = {advance.params[0]: pivot, advance.params[1]: _CHUNK_PIVOT}
-        instance = advance.rename(lambda name: bound.get(name, name))
-        rows = {pivot: _row_pair(self.frag(pivot), i), _CHUNK_PIVOT: other}
-        stmts, _frags, rows = _residence(tuple(instance.body), frags={}, rows=rows, tag=f"_wga{i}_", layout=layout)
-        moved, *factors = instance.results
-        return stmts, rows[moved], tuple(rows[factor] for factor in factors)
-
-    def _scale_program(self, state: str, value: str) -> tuple:
-        """The recipe's ``scale`` of ``value`` (standing for carried ``state``) by :data:`_FACTOR`,
-        its result named :data:`_SCALED`."""
-        scale = self._recipe.scale
-        bound = {scale.params[0]: value, scale.params[1]: _FACTOR, scale.results[0]: _SCALED}
-        return tuple(scale.rename(lambda name: bound.get(name, f"{value}__{name}")).body)
-
-    def _scaled_row(self, index: int, value: tuple[str, str], factor: tuple[str, str], layout, tag: str):
-        """Row pair ``value`` of carried state ``index`` scaled to the advanced pivot by ``factor``."""
-        state = self.c.base.results[index]
-        name = f"{state}__wgv"
-        rows = {name: value, _FACTOR: factor}
-        stmts, _frags, rows = _residence(self._scale_program(state, name), frags={}, rows=rows, tag=tag, layout=layout)
-        return stmts, rows[_SCALED]
 
     def _fold_pivot(self, mn, pivots: dict, layout) -> list[Stmt]:
         """Move the carrier's pivot past the chunk's — the pivot's own ⊕, per row."""
@@ -3911,7 +3733,6 @@ def _atom_ops(
     inner: tuple | None = None,
     one_wave: bool = False,
     outputs=None,
-    groups: int = 1,
 ) -> _AtomOps:
     """The **one** atom dispatch — select the codegen strategy off the atom kind. ``c`` is the
     stored algebra, ``tile`` the PLACED schedule slice (``Tile.at``) the geometry derives from."""
@@ -3940,14 +3761,7 @@ def _atom_ops(
         inner,
         one_wave,
         outputs,
-        groups=groups,
     )
-
-
-def group_axis_name(k_axis: Axis) -> str:
-    """The warp-group coordinate of a key stream split across warp groups (``REDUCE=wg<n>``) —
-    one name for the grid axis ``_factor`` binds and the chunk tier reads."""
-    return f"{k_axis.name}_wg"
 
 
 def reduce_codegen(
@@ -3964,7 +3778,6 @@ def reduce_codegen(
     axes: tuple = (),
     inner: tuple | None = None,
     one_wave: bool = False,
-    groups: int = 1,
 ):
     """The reusable, **sink-agnostic** ``(state_decls, reduce_region)`` from the atom strategy — the
     accumulator decls + the contraction K-loop (the ONE :meth:`_AtomOps.reduce` driver: the shared
@@ -3973,19 +3786,7 @@ def reduce_codegen(
     only in the drain leaf — ``ldmatrix`` vs plain ``Load``); ``workers`` splits the staged phases
     across producer / compute warp bands (the resolved :class:`WarpSpec`; ``None`` = uniform)."""
     ops = _atom_ops(
-        c,
-        tile,
-        stage,
-        inputs,
-        workers,
-        seam=seam,
-        lead=lead,
-        frag_ns=frag_ns,
-        k_axis=k_axis,
-        axes=axes,
-        inner=inner,
-        one_wave=one_wave,
-        groups=groups,
+        c, tile, stage, inputs, workers, seam=seam, lead=lead, frag_ns=frag_ns, k_axis=k_axis, axes=axes, inner=inner, one_wave=one_wave
     )
     return ops.state, ops.reduce
 

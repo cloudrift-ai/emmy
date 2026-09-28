@@ -31,7 +31,6 @@ from .refusals import (
     _warp_atoms,
     _warp_plans,
     _wgmma_refusal,
-    group_split_refusal,
 )
 from .schedule import (
     ClassicSchedule,
@@ -221,18 +220,13 @@ class ClassicNodeSite(Site[ClassicSchedule]):
             # A tiled plan folds serially per cell; an untiled one takes every per-cell reduction. So a
             # row whose reductions leave out the serial fold (a pinned ``coop`` band) rules the tiled
             # plans out too, instead of letting one realize the pin's site with a serial fold.
-            def taken(plan: Tile) -> tuple[Reduce, ...]:
-                # An untiled plan takes the per-cell reductions; a tiled one folds serially per cell,
-                # or splits a chunked fold across warp groups when its cell is a warp-group one.
-                if not plan.is_tiled:
-                    return tuple(reduction for reduction in reductions if reduction.groups == 1)
-                return tuple(
-                    reduction
-                    for reduction in reductions
-                    if reduction == Reduce() or (reduction.groups > 1 and group_split_refusal(plan, reduction, facts.k_axis.extent) is None)
-                )
-
-            choices = (ReductionSchedule(plan, reduction) for plan in plans for reduction in taken(plan))
+            serial = Reduce() in reductions
+            choices = (
+                ReductionSchedule(plan, reduction)
+                for plan in plans
+                if serial or not plan.is_tiled
+                for reduction in (reductions if not plan.is_tiled else (Reduce(),))
+            )
         return tuple(choice for choice in choices if self._placed_ok(choice))
 
     def _reductions(self) -> tuple[Reduce, ...]:
