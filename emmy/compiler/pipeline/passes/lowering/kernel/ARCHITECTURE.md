@@ -44,11 +44,12 @@ schedules, and Volta repacking shuffles packed FP16 pairs to reduce the shuffle 
 The materializer removes the private global carry port with a graph splice, preserving the schedule and source
 attribution. External state readers retain a stored output. All output evaluation precedes carry updates. The
 resulting kernel has no serial launch axis; the classic path below retains ordered launches when the state's
-`STAGE` is direct. When it is `smem` (`_resident.py`), the launch grid is the block program's batch axes, each CTA
-declares the block (two copies at `d2`), seeds it cell by cell, and walks the sequential axis in a loop: every
-thread evaluates the step for its strided slice of the cells from the block, then the writes go back into the
-block behind a barrier — after every thread's reads at `d1`, into the other copy at `d2` — and the per-step
-outputs go to global memory from the same write phase.
+scope is the grid. When a CTA holds it (`STATE=cta`, `_resident.py`), the launch grid is the block program's batch
+axes, each CTA declares the block, seeds it cell by cell, and walks the sequential axis in a loop of two phases:
+every thread strides over the cells the step defines, evaluates the step for each from the block and keeps the
+results in a register array; a barrier; then the writes go back into the block and the per-step outputs to
+global memory, the buffers something outside reads also receiving the block's value at the cells the step
+skipped; a second barrier publishes the step.
 
 `factorize` builds the ambient `Ctx` and dispatches `tile.op` through `_factorize`, which peels projecting zero-axis
 `Fold`s and binds each leaf via the ONE root-binding pipeline (`_factor._bind`) — its form is read off the node's

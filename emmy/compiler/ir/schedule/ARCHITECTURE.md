@@ -220,42 +220,53 @@ ordered domains: stored-Fold-edge placement first, then cross-CTA reduction spli
 fresh piece re-enters the same rule. `030_cut` presents its restricted structural frontier through a schedule context;
 `040_schedule` supplies a `ClassicScheduleContext`. Both passes use the same generic `schedule` traversal.
 
-## A carried state's `STAGE`
+## A carried state's scope
 
 A carried state is an operand of its own step: its producer is the kernel's previous step, so its transfer is a
-seed once and then the step writing it in place. Where it lives across the steps of the sequential axis is a
-`STAGE` like any operand's, spelled on the classic kernel site under one key, `STAGE@state` (`STATE_KEY`) — always
-scoped, so a bare `STAGE` pin, which names an operand transport, never moves a state on chip. The key exists on a
-kernel whose placement has a sequential axis and on no other, which is what keeps every other kernel's row
-byte-identical. The sequential axis then has no choice of its own: its loop must enclose every cell a step reads,
-and the residency says which cells those are, so the loop's scope is derived from the transport.
+seed once and then the step writing it in place. What decides everything else about it is the synchronization
+SCOPE that holds it and walks its sequential axis, the bare kernel-scoped `STATE` choice (`StateScope`,
+`STATE_KEY`), spelled on a kernel whose placement has a sequential axis and on no other, which is what keeps every
+other kernel's row byte-identical. A fold's axis already spells its scope in `REDUCE` (serial, `coop<n>`, `g<n>`);
+a state's axis has the same three, and each fact that differs between the arms follows from the scope alone: where
+the state lives, what a step boundary costs, whether a cell the step skips can be left alone, and who stripes the
+cells. The sequential axis therefore has no choice of its own.
 
-| `STAGE@state` | where the state lives | the loop over the steps |
-| --- | --- | --- |
-| `` (direct) | the global buffer, one slot per step | the launch loop: one launch per step, the whole grid in between |
-| `d1/reg` | registers, a warp owns its rows | inside each warp, no synchronization |
-| `d1/smem`, `d2/smem` | shared memory, a CTA owns its block | inside the CTA, a barrier per step (`d2` halves them) |
+| `STATE` | barrier | where the state lives | the loop over the steps | a cell the step skips |
+| --- | --- | --- | --- | --- |
+| `` (grid) | the launch | the global buffer, one slot per step | one launch per step | copied forward |
+| `warp` | none | registers, a warp owns its rows | inside each warp | left alone |
+| `cta` | `__syncthreads` | shared memory, a CTA owns its block | inside the CTA, two barriers a step | left alone |
 
-Shared-memory residency is legal where `BlockProgram` (`ir/schedule/resident.py`) proves the block: exactly one
-carried state with static extents; the state's coordinates split into BATCH positions, which every read takes at
-the CTA's own coordinate, and CELL positions, which a read may address freely; and every read whose batch
-coordinate is guarded (`mask ? b : 0`, the roll's clamped spelling of a read the step then discards) feeds the
-root's results only through a Select branch that same guard picks, so the value is dead exactly when it addressed
-coordinate zero. The kernel site pairs the `smem` arm with a 1-D thread inventory (`WORK=t<n>`, the stride each
-thread walks the block's cells at) and no raster, and the context refuses it beside a tiled or cooperating node:
-the launch grid is the batch axes alone. The block plus its depth must fit the target's static shared-memory cap.
+The grid arm needs the copy because it has no barrier of its own: a Carry says a skipped cell keeps its value,
+which assumes one home updated in place, and in-place update needs every read of a step to finish before its
+writes. A CTA can order that; a launch of many CTAs cannot, so it writes each step into a fresh slot and a fresh
+slot holds the skipped cells only if the step copies them.
+
+The `cta` arm is legal where `BlockProgram` (`ir/schedule/resident.py`) proves the block: exactly one carried state
+with static extents; the state's coordinates split into BATCH positions, which every read takes at the CTA's own
+coordinate, and CELL positions, which a read may address freely; and every read whose batch coordinate is guarded
+(`mask ? b : 0`, the roll's clamped spelling of a read the step then discards) feeds the root's results only
+through a Select branch that same guard picks, so the value is dead exactly when it addressed coordinate zero.
+The same proof reads the STEP DOMAIN: when the stored state value is a Select whose catch-all branch is the cell's
+own previous value, the disjunction of the other branches' predicates is the set of cells the step defines, and
+the resident kernel evaluates and writes nothing else (only when every value the kernel stores is the state's; an
+output written from something else would need the skipped cells evaluated). The kernel site pairs `cta` with a
+1-D thread inventory (`WORK=t<n>`, the stride each thread walks the block's cells at) and no raster, and the
+context refuses it beside a tiled or cooperating node: the launch grid is the batch axes alone. The block must fit
+the target's shared-memory budget; memory is derived from the scope, and a CTA walking a block kept in global
+memory is the arm this spelling does not yet say.
 
 The register tier keeps its own family (`RegisterContext`, its problem, codec and materialization) and spells its
-residency under the same key. It offers one kernel choice for a static ordered loop with one matrix state,
-pointwise operations, and additive matrix contractions; the structural reading (`RegisterProgram`) proves that
-each warp's rows are independent through every contraction, that state reads take the previous step, and that
-output matrices share the same batch coordinates. Folding it into the classic sites is owed: its `TILE` is
+scope under the same key, `STATE=warp`. It offers one kernel choice for a static ordered loop with one matrix
+state, pointwise operations, and additive matrix contractions; the structural reading (`RegisterProgram`) proves
+that each warp's rows are independent through every contraction, that state reads take the previous step, and
+that output matrices share the same batch coordinates. Folding it into the classic sites is owed: its `TILE` is
 kernel-scoped and its geometry is the state's rows, not the grid's.
 
 `WORK=w<M>x1` assigns independent groups of sixteen value rows to warps. `TILE` names an FP16 atom with both
 C→A and C→B repacking support and `f1x<N>`, where `N` covers all state columns. The atom registry supplies
-the fragment geometry: eight columns for m16n8k16, sixteen for Volta m8n8k4. `STAGE@state=d1/reg` gives the carried
-state one register slot across steps; there is no shared-memory ring or operand prefetch. Equal loads, pointwise
+the fragment geometry: eight columns for m16n8k16, sixteen for Volta m8n8k4. The carried state has one register slot
+across steps; there is no shared-memory ring or operand prefetch. Equal loads, pointwise
 operations, and products share FP32 register results within a step. Operand conversions stay beside each MMA
 to shorten their live ranges. All reads finish before the carried slot is updated.
 

@@ -79,8 +79,8 @@ state becomes `Placement.serial`, the state a buffer the node owns and keeps eve
 one launch back (the seed at the first), and the `Carry` a store of its value at this step. The step's own algebra is
 untouched, so a contraction over the previous state lifts as a contraction whose B slab is that buffer. A serial
 kernel stays ONE kernel — `030_cut` offers it no cut and no split — because the runner launches one kernel's steps
-to completion before the next kernel's first, so pieces could not interleave step by step. Where the state lives
-across the steps is its `STAGE` (`STAGE@state`), decided at `040_schedule` with every other classic choice: the
+to completion before the next kernel's first, so pieces could not interleave step by step. Which scope holds the
+state and walks its axis is its `STATE`, decided at `040_schedule` with every other classic choice: the grid's
 launch loop, a warp's registers when every state read stays within its rows, or the CTA's shared memory when every
 read stays within its block. The register arm still goes through its own family and the same lazy fork adapter;
 the ordinary Fold tree and precision gates remain shared.

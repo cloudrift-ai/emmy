@@ -99,8 +99,11 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Serial axis / lagged read** — A recurrence's time as a kernel's sequential axis: a `Placement.serial` axis
   runs once per coordinate, in order, and the kernel may read its own output strictly behind the step it writes
   (`S[c − 1]` while writing `S[c]`). The step is any `Fold`; a Loop IR carried state lifts to this
-  (`tile/lift/010_lift`). Where the state lives across the steps is its `STAGE` (`STAGE@state`): the launch loop
+  (`tile/lift/010_lift`). The scope that holds the state and walks the axis is its `STATE`: the grid's launch loop
   over the global buffer, a warp's registers, or the CTA's shared memory with the loop inside the launch.
+- **Step domain** — The cells a step of a carried state defines, read off a Carry whose catch-all branch keeps the
+  cell's own previous value: the disjunction of the other branches' predicates. A resident kernel evaluates and
+  writes nothing outside it; the launch loop must still copy the skipped cells into each step's slot.
 - **Carried state** — A recurrence's state in Loop IR: `Carry` defines the next value of one cell and names the seed,
   a `Pre` read sees the previous step's value at any cell, and the loop that carries it sits outside the loops
   over its cells. Not a fold: its steps are ordered and its step is any computation, so it has no op.
