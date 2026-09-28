@@ -88,7 +88,7 @@ def classic_forks(tile: TileOp, name: str, knobs: dict, ctx, *, kernel_set: bool
             inherited_knobs=knobs,
             row_prefix={},
             materialize=lambda schedule, selected: materialize_register(tile, schedule, selected),
-            pool_id=digest(tile.identity_key(with_io=True), ctx.structural_key(), "register", schedule_pin_fingerprint()),
+            pool_id=digest(tile.identity_key(with_io=True), ctx.structural_key(), "register", schedule_pin_fingerprint(tile.name, node)),
             sample=getattr(ctx, "pool_sample", None),
         )
     if row.get("STAGE") == "d1/reg" and tile.place.serial:
@@ -116,7 +116,7 @@ def classic_forks(tile: TileOp, name: str, knobs: dict, ctx, *, kernel_set: bool
         ctx.structural_key(),
         tuple((axis.name, repr(axis.extent)) for axis in tile.place.free),
         codec.keys(),
-        schedule_pin_fingerprint(),
+        schedule_pin_fingerprint(tile.name, node),
         tile.split_consumed,
     )
     prefix = dict.fromkeys(SCHEDULE_FORK_STAMPS, 1.0) if problem.warp_eligible else {}
