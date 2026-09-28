@@ -135,7 +135,7 @@ For a **new model** this step *creates* `docker/vllm-emmy-serve/models/<slug>.en
 re-validates it. Policy (decode bucket stays at the model's tuned default): try
 `--max-model-len`/`--max-num-batched-tokens` at 256 → 512 → 1024 → 2048 → 4096 (stop at 4096 — the dynamic-dim
 cap), `--gpu-memory-utilization 0.97`, each via a detached
-`./venv/bin/emmy serve --generate <model> --bench --max-model-len N --max-num-batched-tokens N`. A config **passes**
+`./venv/bin/emmy serve --runner generate <model> --bench --max-model-len N --max-num-batched-tokens N`. A config **passes**
 when the server reaches `/health`, the bench completes, AND the serve log has no `EngineCore encountered a fatal
 error` (the exit code alone hides tail crashes — a drained bench can die after its metrics print; grep the log). It
 **fails** on CUDA OOM, death before health, or a logged engine fatal. Keep the largest passing N. If even 256 fails

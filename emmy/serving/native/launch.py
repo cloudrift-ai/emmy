@@ -21,7 +21,9 @@ def options(arguments):
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--revision")
+    parser.add_argument("--runner", default="auto", help="vLLM's runner; the native server generates only")
     parser.add_argument("--max-model-len", type=int, default=DEFAULT_CONTEXT)
+    parser.add_argument("--page-tokens", type=int, help="Tokens of KV cache per page (default: one page spanning the context)")
     parser.add_argument("--native-pack", type=Path)
     parser.add_argument("--prefill-size", type=int, help="Native export chunk width (default: 16; 1 disables chunking)")
     args = parser.parse_args(arguments)
@@ -32,7 +34,7 @@ def options(arguments):
     return args
 
 
-def prepare(model, revision, root, context, golden, strict, *, prefill_size=None):
+def prepare(model, revision, root, context, golden, strict, *, page_tokens=None, prefill_size=None):
     """Export weights and the same checkpoint's tokenizer/template into one serving bundle."""
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -48,7 +50,7 @@ def prepare(model, revision, root, context, golden, strict, *, prefill_size=None
     eos = lm.generation_config.eos_token_id
     eos = [eos] if isinstance(eos, int) else (eos or [])
     with gpu_lock(), config.golden_file_override(golden), config.strict_evidence_override(strict):
-        export_model(lm, root, context_length=context, eos_ids=eos, prefill_size=prefill_size)
+        export_model(lm, root, context_length=context, page_tokens=page_tokens, eos_ids=eos, prefill_size=prefill_size)
     tokenizer.backend_tokenizer.save(str(root / "tokenizer.json"))
     (root / "chat_template.jinja").write_text(tokenizer.chat_template)
     (root / "serving.json").write_text(json.dumps({"model": model, "revision": revision, "context_length": context}))
@@ -73,18 +75,22 @@ def command(model, opts, root, executable="emmy-server"):
 
 def launch(args, arguments):
     """Select an existing bundle or prepare one, then replace Python with the native server."""
-    from emmy.commands.serve import _child_env, _serve_and_bench, _vllm_bin, build_bench_cmd
+    from emmy.commands.serve import _child_env, _serve_and_bench, _vllm_bin, build_bench_cmd, serving_runner
     from emmy.compiler.loader.safetensors import split_revision
 
-    if not args.generate or args.stock:
-        raise ValueError("--native requires --generate and is incompatible with --stock")
+    if args.stock:
+        raise ValueError("--native is incompatible with --stock")
     opts = options(arguments)
     model, pinned = split_revision(args.model)
     if pinned and opts.revision and pinned != opts.revision:
         raise ValueError("conflicting model revisions")
     revision = opts.revision or pinned
-    if opts.native_pack and (args.golden or args.strict_evidence):
-        raise ValueError("golden and strict evidence apply to preparation, not an existing native pack")
+    # The runner probe reads the pinned checkpoint, so the pin reaches it as vLLM's own flag.
+    probe = arguments if opts.revision or not pinned else [*arguments, "--revision", pinned]
+    if serving_runner(model, probe) != "generate":
+        raise ValueError("--native serves a generate runner only; pass --runner generate for a checkpoint vLLM would pool")
+    if opts.native_pack and (args.golden or args.strict_evidence or opts.page_tokens is not None):
+        raise ValueError("golden, strict evidence and page size apply to preparation, not an existing native pack")
     root = opts.native_pack or Path(tempfile.gettempdir()) / "emmy-native-prepare"
     serve = command(model, opts, root)
     bench = build_bench_cmd(
@@ -100,10 +106,11 @@ def launch(args, arguments):
     if args.dry_run:
         if not opts.native_pack:
             logger.info(
-                "Prepare native artifact: model=%s revision=%s context=%d prefill_size=%s golden=%s strict=%s",
+                "Prepare native artifact: model=%s revision=%s context=%d page_tokens=%s prefill_size=%s golden=%s strict=%s",
                 model,
                 revision,
                 opts.max_model_len,
+                opts.page_tokens,
                 opts.prefill_size if opts.prefill_size is not None else "default",
                 args.golden,
                 args.strict_evidence,
@@ -122,7 +129,16 @@ def launch(args, arguments):
     else:
         # Export publishes a fresh directory. Keep the resulting bundle for deliberate reuse.
         root = Path(tempfile.mkdtemp(prefix="emmy-native-")) / "artifact"
-        prepare(model, revision, root, opts.max_model_len, args.golden, args.strict_evidence, prefill_size=opts.prefill_size)
+        prepare(
+            model,
+            revision,
+            root,
+            opts.max_model_len,
+            args.golden,
+            args.strict_evidence,
+            page_tokens=opts.page_tokens,
+            prefill_size=opts.prefill_size,
+        )
         logger.info("Prepared native serving artifact: %s", root)
     serve = command(model, opts, root.resolve(), binary)
     env = _child_env()

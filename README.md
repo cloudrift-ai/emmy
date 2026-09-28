@@ -256,7 +256,7 @@ for preparation, commands, limitations, and qualification.
 
 ```bash
 make native-dist  # install the archive's matching binaries on PATH
-emmy serve Qwen/Qwen3-0.6B --generate --native --revision REVISION
+emmy serve Qwen/Qwen3-0.6B --runner generate --native --revision REVISION
 ```
 
 Native serving exposes text and chat completions with streaming, stop strings, usage, and one active request.

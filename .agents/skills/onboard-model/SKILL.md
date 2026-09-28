@@ -205,7 +205,7 @@ hardware and exact checkpoint quantization:
 3. the checkpoint quantization has a matching Emmy loader and serving path that keeps the stored representation in
    the deployed graph (reference-only dequantization does not count);
 4. section 2 committed a complete golden;
-5. representative kernel correctness holds, and `emmy serve --generate` or the embedding path serves the checkpoint.
+5. representative kernel correctness holds, and `emmy serve --runner generate` or the embedding path serves the checkpoint.
 
 Record `eligible` or `ineligible` and the first failed gate in the report. An ineligible model can still get a vLLM or
 SGLang recipe; the golden stays either way.

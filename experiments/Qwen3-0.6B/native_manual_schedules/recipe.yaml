@@ -23,7 +23,7 @@ command:
       artifact=$${TUNED_ARTIFACT:?Set TUNED_ARTIFACT to the newly qualified bundle}
     fi
     sha256sum $$artifact/manifest.json $$artifact/serving.json $$artifact/tokenizer.json target/release/emmy-server > $task_dir/identity.txt
-    ./venv/bin/emmy serve $$model --generate --native --native-pack $$artifact --revision $$revision \
+    ./venv/bin/emmy serve $$model --runner generate --native --native-pack $$artifact --revision $$revision \
       --host 127.0.0.1 --port 8128 --max-model-len 4096 > $task_dir/server.log 2>&1 &
     server_pid=$$!
     stop() {

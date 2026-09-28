@@ -53,6 +53,12 @@ PLAN_FORMAT_INDIRECT = 2
 # launches.  Older runtimes reject the plan and safely fall back to a full compile.
 PLAN_FORMAT_GENERATED = 3
 
+# Paged buffers: a plan whose ``paged`` declaration is non-empty passes a page table where its
+# launches name ``<buffer>__pages``, an operand the plan never declares as a buffer. Format 4 is
+# a superset of the formats before it; a runtime that did not know the table would fail to bind
+# it, so the gate refuses the plan up front and the pack loader falls back to a full compile.
+PLAN_FORMAT_PAGED = 4
+
 # Binary ops the on-disk expression grammar admits. Everything a ``Dim`` shape, a ceil-div grid
 # factor, or a runtime-constant expr can contain; anything else fails serialization loudly.
 _EXPR_OPS = ("+", "-", "*", "/", "//", "%")
@@ -169,6 +175,10 @@ class ExecutionPlan:
     launches: list[LaunchSpec]
     kernels: dict[str, KernelSpec]
     weights: dict[str, WeightSpec] = field(default_factory=dict)
+    # Buffers that are a table of equal-sized pages rather than one allocation:
+    # ``name -> (axis, page_size)``. The runtime reaches them through the page table bound
+    # under ``<name>__pages``. Empty for every ordinary program.
+    paged: dict[str, tuple[int, int]] = field(default_factory=dict)
     symbolic_bindings: dict[str, tuple[str, int]] = field(default_factory=dict)
     symbolic_hints: dict[str, int] = field(default_factory=dict)
     symbolic_caps: dict[str, int] = field(default_factory=dict)
@@ -285,6 +295,9 @@ def plan_from_graph(graph: Graph) -> ExecutionPlan:
         launches=launches,
         kernels=kernels,
         weights=weights,
+        # The paging declaration rides the plan so the runtime knows which buffers have no
+        # slab; lowering already renamed their launch args to the table.
+        paged={n: (axis, page) for n, axis, page, _ in graph.hints.get("cuda.paged_buffers", ())},
         symbolic_bindings=graph.symbolic_bindings(),
         symbolic_hints=graph.symbolic_hints(),
         symbolic_caps={},
@@ -465,11 +478,18 @@ def _dim_from_json(v) -> Dim:
 # ---------------------------------------------------------------------------
 
 
+def _paged_to_json(paged: dict[str, tuple[int, int]]) -> dict:
+    """Serialize the paging declaration: which axis a buffer is cut along and the page size."""
+    return {n: {"axis": axis, "page": page} for n, (axis, page) in paged.items()}
+
+
 def plan_to_dict(plan: ExecutionPlan) -> dict:
     has_generated = any(w.generated is not None for w in plan.weights.values())
     return {
         "format": (
-            PLAN_FORMAT_GENERATED
+            PLAN_FORMAT_PAGED
+            if plan.paged
+            else PLAN_FORMAT_GENERATED
             if has_generated
             else PLAN_FORMAT_INDIRECT
             if any(lc.indirect_args for lc in plan.launches)
@@ -514,6 +534,7 @@ def plan_to_dict(plan: ExecutionPlan) -> dict:
             }
             for name, spec in plan.kernels.items()
         },
+        **({"paged": _paged_to_json(plan.paged)} if plan.paged else {}),
         "weights": {
             nid: {
                 **({"path": w.source_path} if w.source_path is not None else {}),
@@ -544,12 +565,12 @@ def plan_to_dict(plan: ExecutionPlan) -> dict:
 
 def plan_from_dict(d: dict) -> ExecutionPlan:
     fmt = d.get("format")
-    if fmt not in (PLAN_FORMAT_VERSION, PLAN_FORMAT_INDIRECT, PLAN_FORMAT_GENERATED):
-        raise ValueError(
-            f"plan format {fmt!r} unsupported (runtime speaks {PLAN_FORMAT_VERSION}, {PLAN_FORMAT_INDIRECT}, and {PLAN_FORMAT_GENERATED})"
-        )
+    if fmt not in (PLAN_FORMAT_VERSION, PLAN_FORMAT_INDIRECT, PLAN_FORMAT_GENERATED, PLAN_FORMAT_PAGED):
+        raise ValueError(f"plan format {fmt!r} unsupported (runtime speaks {PLAN_FORMAT_VERSION} through {PLAN_FORMAT_PAGED})")
     symbols = d.get("symbols", {})
+    paged = {n: (p["axis"], p["page"]) for n, p in d.get("paged", {}).items()}
     return ExecutionPlan(
+        paged=paged,
         backend=d["backend"],
         inputs=list(d["inputs"]),
         outputs=list(d["outputs"]),

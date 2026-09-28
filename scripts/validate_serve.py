@@ -6,7 +6,7 @@ from a server whose output disagrees with HF, because the disagreement gets bake
 
 Runs a **sequential** A/B so a big model still fits one card (HF and emmy are never resident at
 once): compute HF fp16 greedy references in a throwaway subprocess (its GPU memory is fully
-reclaimed on exit), then start ``emmy serve --generate`` in a subprocess, query
+reclaimed on exit), then start ``emmy serve --runner generate`` in a subprocess, query
 ``/v1/completions`` greedily, and compare. Prints a per-prompt side-by-side + a PASS/FAIL on the
 first generated token (the strong correctness signal; fp16 numerics between two runtimes can
 drift a few tokens in, so a full-text match is not required — eyeball the continuations for
@@ -110,7 +110,8 @@ def _serve_invocation(args) -> tuple[list[str], dict[str, str]]:
     cmd = [
         args.emmy,
         "serve",
-        "--generate",
+        "--runner",
+        "generate",
         args.model,
         "--max-model-len",
         args.max_model_len,
@@ -186,7 +187,7 @@ def main() -> int:
         )
     )
 
-    print("[2/3] starting `emmy serve --generate` (first boot compiles every layer — minutes)...", flush=True)
+    print("[2/3] starting `emmy serve --runner generate` (first boot compiles every layer — minutes)...", flush=True)
     serve_cmd, serve_env = _serve_invocation(args)
     serve = subprocess.Popen(serve_cmd, env=serve_env)
     try:

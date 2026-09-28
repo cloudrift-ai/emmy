@@ -118,12 +118,13 @@ class _Causal(torch.nn.Module):
 
 
 class _Gqa(torch.nn.Module):
-    """GQA SDPA. ``enable_gqa=True`` is a bool kwarg the tracer's is_causal scan grabs (the default
-    ``is_causal=False`` is dropped by dynamo), so this traces as GQA **and** causal — the only GQA
-    form reachable through the public torch API here, and the Qwen3-Embedding layer-0 shape."""
+    """Causal GQA SDPA at the Qwen3-Embedding layer-0 shape. The flag used to be spelled
+    ``is_causal=False`` and still traced as causal, because the tracer read ``enable_gqa=True`` —
+    the signature's other bool — as the causal flag; it now reads ``is_causal`` from its own slot,
+    so the fixture says what it means."""
 
     def forward(self, q, k, v):
-        return torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=False, enable_gqa=True)
+        return torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=True, enable_gqa=True)
 
 
 class _Masked(torch.nn.Module):

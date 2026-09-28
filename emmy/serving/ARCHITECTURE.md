@@ -500,9 +500,9 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   dynamo can't trace `data_ptr()`). `forward` branches on `num_tokens`: the decode hot
   path (`≤ bucket`) runs `_forward_device` (q/k/v + attn_out stay CUDA tensors through RoPE + attention, no host
   hop); prefill keeps the numpy path. Select via `--runner generate` +
-  `--hf-overrides '{"architectures":["EmmyGenModel"]}'` + `--dtype float16` (the `serve --generate` branch forces
+  `--hf-overrides '{"architectures":["EmmyGenModel"]}'` + `--dtype float16` (the `serve --runner generate` branch forces
   this for seam coherence). Registered in `__init__.py`. **Whole-step CUDA graphs are the `emmy serve
-  --generate` DEFAULT — decode AND chunk/mixed steps**: no `--enforce-eager`; instead a `--compilation-config`
+  --runner generate` DEFAULT — decode AND chunk/mixed steps**: no `--enforce-eager`; instead a `--compilation-config`
   with `cudagraph_mode: FULL` (full cudagraphs need no torch.compile — vLLM wraps the model in its
   `CUDAGraphWrapper`) and
   `cudagraph_capture_sizes` laddered up to `--max-num-seqs` PLUS token-count chunk rungs spanning the prefill
@@ -637,7 +637,7 @@ Recorded follow-ups, in impact order:
   rotary buffer (`_SlicedRotary` precomputes `DYNAMIC_DIM_MAX + 1` positions).
 - `--enforce-eager`: the **embedding** plugin still serves eager — vLLM never torch.compiles an undecorated OOT
   class, and enforce-eager keeps the engine from capturing around the runner's own kernel launches. The
-  **generative** path no longer needs it: `run_device` is capture-aware and `serve --generate` defaults to
+  **generative** path no longer needs it: `run_device` is capture-aware and `serve --runner generate` defaults to
   whole-step decode graphs (see `gen_runner.py` above).
 - Startup compiles the whole model (~1–2 min for 0.6B warm-cubin-cache; first boot pays nvcc). `EMMY_CUBIN_CACHE`
   persistence across container restarts is what keeps reboots fast. **`EMMY_PACK_DIR`** cuts the rest of the warm
@@ -681,7 +681,7 @@ Recorded follow-ups, in impact order:
   tiny). The GENERATIVE arm has the opposite problem — it needs a real KV cache, and vLLM budgets
   `util × total − currently-used`, so the default 0.90 line can fall below the emmy residents and fail the
   min-KV fit at long `--max-model-len` (gemma-4-12B at mml 8448: 1.37 GiB left of the 1.7 needed). `emmy serve
-  --generate` therefore defaults the emmy arm to `--gpu-memory-utilization 0.97` (stock keeps 0.90; an explicit
+  --runner generate` therefore defaults the emmy arm to `--gpu-memory-utilization 0.97` (stock keeps 0.90; an explicit
   flag wins).
 - **DeepSeek V4 (`deepseek-ai/DeepSeek-V4-Flash-0731`) serves the published checkpoint at TP8 × PP2.**
   The pieces above — the fork's attention hosted per layer, the native-naming loader lane with its `.scale` ue8m0
@@ -697,7 +697,7 @@ Recorded follow-ups, in impact order:
 
 emmy owns no KV cache. The generative carve runs vLLM's paged `Attention` (and its cache) between the `pre` and
 `post` programs, so the cache dtype is entirely vLLM's: `--kv-cache-dtype fp8_e4m3` is an ordinary passthrough flag
-on both arms of `emmy serve --generate` (nothing in `commands/serve.py` reads it), and it **doubles the KV token
+on both arms of `emmy serve --runner generate` (nothing in `commands/serve.py` reads it), and it **doubles the KV token
 capacity** out of the same byte budget — the emmy arm's `--gpu-memory-utilization 0.97` needs no adjustment, since
 fp8 halves the bytes per token rather than changing what the budget is. Measured on `Qwen/Qwen3-0.6B` at
 `--max-model-len 4096`, 32 GB RTX 5090: 264 048 tokens out of 28.2 GiB (fp16) → 518 224 out of 27.68 GiB (fp8), i.e.
@@ -758,7 +758,7 @@ still pays for `max_tokens`-row buffers** — so the first place to look when re
 `capacity` defaults to the dynamic-dim cap and is deliberately NOT derived from
 `max_num_batched_tokens` — the pack key carries it, so tying it to a scheduler knob recompiles the whole
 program set every time a lane is retuned. **`EMMY_GEN_PREFILL_CAPACITY` pins it instead**, and
-`emmy serve --generate` moves its `--max-num-batched-tokens` default (`capacity + decode_bucket`, the
+`emmy serve --runner generate` moves its `--max-num-batched-tokens` default (`capacity + decode_bucket`, the
 rider headroom) to match. Reach for it when the arena is competing with the KV cache rather than with
 nothing: a model that fills the card with weights pays for every token of capacity it never serves.
 

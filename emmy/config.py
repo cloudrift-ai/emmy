@@ -463,7 +463,7 @@ def gen_prefill_capacity(default: int = -1) -> int:
 
 def gen_chunk_capture(default: int = 1) -> int:
     """``EMMY_GEN_CHUNK_CAPTURE`` — capture WHOLE chunk-prefill and mixed prefill+decode steps
-    as vLLM CUDA graphs (default 1 = ON). ``emmy serve --generate`` then asks for
+    as vLLM CUDA graphs (default 1 = ON). ``emmy serve --runner generate`` then asks for
     ``cudagraph_mode: FULL`` instead of ``FULL_DECODE_ONLY``, extends the capture sizes with
     token-count rungs spanning the prefill widths (the exact chunk width and the rider top
     included), and selects the ``TRITON_ATTN`` attention backend — the one broadly-available

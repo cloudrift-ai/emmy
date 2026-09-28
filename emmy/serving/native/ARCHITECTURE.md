@@ -17,14 +17,20 @@ new compiler or runtime alias format. Unsupported symbolic, indirect, and descri
 Cache buffers use the persistent output role, without joining the public logits/token output list. Custom launches
 identify their writes so Python scratch allocation preserves the same dependencies as native execution.
 
-CUDA source lives in the packaged `kernels.cu` resource, loaded by Python during artifact preparation.
-Small CUDA kernels provide embedding lookup, default full rotary embedding, contiguous cache writes, causal grouped
-query attention, and GPU sampling. Attention keeps dot products, scores, probabilities, and value accumulation in
-FP32, rounding only its output to FP16. This avoids losing near-tied scores at large magnitudes. These kernels favor
-accuracy over speed. Residual sums stay in FP32 through the existing attention-split wrappers; normalization casts
-back to FP16 before each projection. Rotary constants come from the checkpoint's own module in FP32. Rotation also
-uses FP32 intermediates and rounds only the query/key outputs to FP16. The existing standalone exporter bundles all
-binaries and weight bytes. Generation metadata lives in the pack key and has its own version.
+The glue between the projections is compiled too, from three small traced modules in `prepare.py`: the embedding
+gathers the prompt's token at this position while the prompt lasts and the previous step's selection after it, the
+rotary module rotates q and k at this position and hands k and v to the cache pages, and attention runs causal
+grouped-query attention over the whole cache with every position past this one masked. All three read the position
+from device memory, including the cache write, whose paged start is the `position` input rather than a host symbol, so
+a token step is one launch sequence at every position and replays as one graph. Nothing the device runs is
+hand-written: the step ends at the FP32 logits and the greedy token, a compiled reduction over them, and the runtime
+samples on the host only at positive temperature (below), so the same export serves any device the compiler targets.
+Attention keeps dot products, scores, probabilities, and value accumulation in FP32, rounding only its output to FP16.
+This avoids losing near-tied scores at large magnitudes. Residual sums stay in FP32 through the existing
+attention-split wrappers; normalization casts back to FP16 before each projection. Rotary constants come from the
+checkpoint's own module in FP32. Rotation also uses FP32 intermediates and rounds only the query/key outputs to FP16.
+The existing standalone exporter bundles all binaries and weight bytes. Generation metadata lives in the pack key and
+has its own version.
 
 Preparation rejects other model families, quantization, sliding attention, non-default rotary schemes, training mode,
 and non-FP16 or non-CPU parameters. Context capacity must fit both the model and the current 4,096-token limit.
@@ -34,21 +40,28 @@ by itself, established numerical correctness or fast schedules.
 ## Execution and state
 
 The prompt is uploaded once. Prefill processes all but its final token in fixed-width chunks, defaulting to 16 rows.
-Each layer writes valid rows' keys and values at their absolute positions before attention reads each query's causal
-prefix. The final partial chunk masks unused rows before cache writes or attention reads. Its extra projection work
-is still executed. The last layer only writes its cache; its attention and post-attention fragment are unnecessary.
-The final prompt token runs through the one-token decode program, including the output head and sampler, to select
-the first generated token. Later decode steps read the previous GPU-selected token. Prefill chunks do not execute
-the head or sampler and consume no random draws. The host updates one position scalar per submission and reads one
-selected token after the prompt is consumed. Full logits are an explicit diagnostic transfer.
+Each layer writes the chunk's keys and values at their absolute positions through the page tables before attention
+reads each query's causal prefix; a row past the prompt's last token embeds the previous selection, computes alongside
+the others and writes cache rows that decode overwrites when it reaches them, so a chunk is dispatched only where all
+of its rows fit the context and the decode program covers the rest. The last layer only writes its cache; its
+attention and post-attention fragment are unnecessary. The final prompt token runs through the one-token decode
+program, including the output head, which yields the first generated token. Later decode steps embed the previous
+step's token, which the runtime read back from the program or sampled from its logits, and uploaded with the position
+scalar. Prefill chunks execute no head and download nothing.
 
-The cache has one preallocated contiguous K and V array per layer. A new request resets the position and prompt
-length. Attention can only read positions already overwritten by that request, so clearing the entire cache is
-unnecessary. Decode owns the shared inputs, cache, and constants. Prefill borrows identical named allocations through
-the runtime's existing region interface and retains a separate scratch slab; scratch is packed by liveness within
-each program. The borrower drops before the owner. Loading currently allocates and uploads both programs before
-replacing duplicate regions with borrowed addresses, so peak load memory exceeds resident memory. The embedding
-and tied output-head copies within decode remain separate.
+The cache is one paged K and one paged V buffer per layer, shaped `[1, kv_heads, context, head_dim]` and paged along
+the token axis with `page_tokens` tokens per page (`export_model(page_tokens=…)`, `emmy generate --page-tokens`).
+The rotary program writes a chunk of each through the page tables at `position`, the attention program reads all of
+them through the same tables, and the runtime allocates every page at load and binds the tables (see the runtime's
+paged-buffer contract). The default page spans the whole context, so the table has one entry and the addressing is
+that of the contiguous array it replaces; a smaller page changes only the addressing, never the tokens generated. A
+new request resets the position and prompt length. Attention can only read positions already overwritten by that
+request, so clearing the entire cache is unnecessary. Decode owns the shared inputs, cache pages and constants.
+Prefill borrows the same constants through the runtime's region interface and the same cache through its page
+tables, and retains a separate scratch slab; scratch is packed by liveness within each program. The borrower drops
+before the owner. Loading allocates and uploads both programs before replacing duplicate regions and pages with
+borrowed ones, so peak load memory exceeds resident memory. The embedding and tied output-head copies within decode
+remain separate.
 
 Each program has its own graph capture, recorded without executing a warmup. Replaying the graph advances the model
 exactly once,
@@ -66,26 +79,25 @@ returns the advanced position; intermediate chunks return no token or logits.
 
 ## Sampling contract
 
-Generation artifact version 4 preserves FP32 logits and provides private sampling workspaces. The prefill width and
-separate prefill program remain part of the contract.
-Older generation artifacts must be exported again; the underlying execution-plan format is unchanged. Sampling uses
-float64 temperature/top-p inputs and a uint64 seed. Temperature must be finite and
-nonnegative, and top-p must lie in `(0, 1]`. Temperature zero selects the lowest token ID among maximum logits.
-Nonfinite logits fail the request. Top-k is unsupported.
+Generation artifact version 5 ends the decode step at the FP32 logits and the greedy token, and adds the prefill
+width, with a separate prefill program when that width exceeds one. The decode program's inputs are the prompt, its
+length, the position and the previous step's token; its outputs are the logits and the lowest token ID among their
+maxima, which a compiled reduction selects on the device. At temperature zero the runtime downloads that token alone;
+at positive temperature it downloads the logits — one vocabulary-sized FP32 transfer per generated token, none during
+prefill — and samples on the host. The head keeps its scores in FP32, so FP16 rounding cannot create a false maximum
+tie. Older generation artifacts must be exported again; the underlying execution-plan format is unchanged.
+Temperature must be finite and nonnegative, and top-p must lie in `(0, 1]`. Nonfinite logits fail the request. Top-k
+is unsupported.
 
-Greedy selection uses one 128-thread block. Threads scan disjoint vocabulary strides, then reduce their winning
-indices in shared memory with explicit lowest-ID tie-breaking. Every thread participates in invalid-logit detection
-and the reduction, including vocabularies smaller than the block. Preparation supplies 512 bytes of shared memory.
-Intermediate prefill steps leave the selected token untouched. Both greedy and positive-temperature selection read
-FP32 scores. The output head multiplies FP16 normalized activations and FP16 weights with FP32 output, preserving
-score ordering without a wider weight copy.
+Greedy selection is a traced module the compiler lowers with the reductions it has: the peak of the logits, then the
+largest negated token ID among the tokens at the peak, so ties resolve to the lowest ID. A nonfinite logit leaves no
+token at the peak, the result is the vocabulary size, and the runtime rejects it. The output head multiplies FP16
+normalized activations and FP16 weights with FP32 output, preserving score ordering without a wider weight copy.
 
-For positive temperature, threads compute float64 exponential weights in parallel. A 32-pass binary search over
-ordered FP32 keys locates the nucleus cutoff, combining signed zeros. Each pass sums the inclusive upper tail with
-a fixed 128-thread reduction tree using 1 KiB of shared memory. The sampler retains the smallest descending
-probability prefix reaching top-p, breaking ties by ascending token ID, then samples in token-ID order. The fixed
-reduction order avoids seed variation from floating-point atomics. Its private persistent weights cost eight bytes
-per vocabulary entry; no vocabulary-sized buffer crosses to the CPU. Final token selection remains serial.
+For positive temperature, the host computes float64 exponential weights, orders the tokens by descending FP32 logit
+and ascending token ID (signed zeros compare equal), and retains the smallest prefix of that order reaching top-p. It
+then samples that set in token-ID order with the seeded draw. This is a sort of the vocabulary per generated token on
+one core; it is not a sampling performance claim.
 
 A SplitMix64 counter combines the request seed and generated-token index. Prefill does not consume random draws.
 Resetting a request resets the counter, and captured and uncaptured execution select the same tokens for identical
@@ -143,15 +155,17 @@ Performance and production concurrency are separate qualifications.
 
 ## Native HTTP launcher
 
-`emmy serve MODEL --generate --native` prepares the artifact in a fresh temporary directory and executes a prebuilt
-`emmy-server`. Preparation uses FP16 checkpoint weights, the requested revision, and the existing golden and strict
-compiler-evidence controls. `--native-pack DIR` reuses an already prepared serving bundle; its recorded model,
+`emmy serve MODEL --runner generate --native` prepares the artifact in a fresh temporary directory and executes a
+prebuilt `emmy-server`. Preparation uses FP16 checkpoint weights, the requested revision, and the existing golden and
+strict compiler-evidence controls. `--native-pack DIR` reuses an already prepared serving bundle; its recorded model,
 revision, and context must match. Preparation-only evidence flags are rejected when reusing a bundle.
 
-Native options are `--host`, `--port`, `--revision`, `--max-model-len`, and `--native-pack`, plus the existing Emmy
-preparation, dry-run, and benchmark controls. Context defaults to 4,096. `--native` requires `--generate`, rejects
-`--stock`, and rejects unsupported engine arguments. vLLM forwarding stays unchanged without `--native`. Dry-run
-prints preparation settings and the native command without downloading, compiling, or starting a process.
+Native options are `--host`, `--port`, `--revision`, `--max-model-len`, `--page-tokens`, and `--native-pack`, plus the
+existing Emmy preparation, dry-run, and benchmark controls. Context defaults to 4,096; the page size defaults to one
+page spanning it and, like the compiler evidence flags, applies to preparation, not to a reused pack. `--native`
+requires `--runner generate`, rejects `--stock`, and rejects unsupported engine arguments. vLLM forwarding stays
+unchanged without `--native`. Dry-run prints preparation settings and the native command without downloading,
+compiling, or starting a process.
 
 `--bench` uses the existing vLLM benchmark client, with default native concurrency one. Higher explicit concurrency
 measures overload and receives busy responses. The client is an optional dependency; normal native serving does not
