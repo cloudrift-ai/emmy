@@ -608,6 +608,12 @@ class TileOp(Op):
             and any({axis.name for axis in mn} <= owned for owned in (view.left_axes, view.right_axes))
         ):
             return False  # both output axes of one operand are not a matrix-multiply pair
+        if mn is not None and any(axis.name in view.shared_axes and not (axis.extent.is_static and axis.extent.as_static() == 1) for axis in mn):
+            # A coordinate BOTH operands read (a split-K partition: ``x[p·bk + k]`` beside
+            # ``w[n, p·bk + k]``) is a batch of independent products, not a fragment row or column:
+            # tiled, one staged operand slab serves every column of the tile at the tile's first
+            # partition, and every other column contracts against the wrong slice of it.
+            return False
         if not view.shared_axes or (view.left_axes and view.right_axes):
             return True
         roleless, roled = (node.operands[0], node.operands[1]) if not view.left_axes else (node.operands[1], node.operands[0])

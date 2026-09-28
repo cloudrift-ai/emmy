@@ -1798,3 +1798,35 @@ def test_transposed_a_tma_pin_is_refused(monkeypatch) -> None:
 
     with pytest.raises(ValueError, match="does not resolve for this contraction"):
         _run_tile_pass(_imap_graph("transpose_a")[0])
+
+
+@requires_cuda
+def test_a_split_partition_is_never_a_fragment_column(monkeypatch):
+    """A split-K partial of ``sigmoid(x) @ W.T`` at one token reads its partition coordinate in both
+    operands (``x[p·bk + k]``, ``W[n, p·bk + k]``). Tiled as the fragment's columns, the staged W
+    slab served every column at the tile's first partition: 1024 of 1024 outputs were wrong on an
+    RTX 5090 (``REDUCE=g8k``, a synchronous compute fill of the sigmoid). A coordinate both operands
+    read is a batch, never a fragment row or column."""
+    from emmy.commands.trace import graph_from_code
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+
+    code = (
+        "(lambda x, w: torch.nn.functional.linear(torch.sigmoid(x), w))"
+        "(torch.randn(1, 1024, dtype=torch.float16), torch.randn(1024, 1024, dtype=torch.float16))"
+    )
+    graph = graph_from_code(code)[0]
+    for key, value in {"REDUCE": "g8k", "TILE": "mma_m16n8k16_f16_f32/f1x4", "WORK": "w4x1", "STAGE": "d1/smem", "PLACE": "fuse"}.items():
+        monkeypatch.setenv(f"EMMY_{key}", value)
+    rng = np.random.default_rng(0)
+    x = rng.standard_normal((1, 1024)).astype(np.float16)
+    w = (rng.standard_normal((1024, 1024)) / 32).astype(np.float16)
+    backend = CudaBackend()
+    try:
+        compiled = backend.compile(graph)
+    except ValueError as exc:  # the pinned tile may now be refused outright, which is the fix too
+        assert "does not resolve" in str(exc) or "no schedule row" in str(exc), exc
+        return
+    (out_name,) = compiled.outputs
+    result, _ = backend.run(compiled, input_data=dict(zip(compiled.inputs, (x, w), strict=True)))
+    reference = (1 / (1 + np.exp(-x.astype(np.float32)))) @ w.astype(np.float32).T
+    np.testing.assert_allclose(result.outputs[out_name].astype(np.float32), reference, rtol=2e-2, atol=2e-2)
