@@ -299,6 +299,15 @@ def test_run_ab_requires_bench(run_cli):
     assert "--ab requires --bench" in (stdout + stderr)
 
 
+def test_run_ab_sweep_below_the_bench_standard_fails_before_any_work(run_cli):
+    """A sweep exists to leave its rows in the tune DB; below the bench standard it records none, and a
+    record run that copies that DB then falls to the prior without a word. So the run refuses up front,
+    naming the standard, unless ``--no-record-evidence`` says the sweep only measures."""
+    rc, stdout, stderr = run_cli("run", "--code", "torch.zeros(4)", "--bench", "--ab", "BM=8", "--warmup", "3", "--iters", "10")
+    assert rc == 2
+    assert "below the tune bench standard (--warmup >= 5, --iters >= 20)" in (stdout + stderr)
+
+
 def test_run_json_rejects_a_directory_for_one_target(run_cli, tmp_path):
     """One target writes one FILE, and it writes it last.
 

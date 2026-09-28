@@ -85,7 +85,9 @@ def register_run_command(subparsers):
             "measured realizations: one routing row per kernel-set decision it took and one child-identity schedule "
             "receipt per kernel, timed by the isolated re-bench with the greedy comparison row as the reference. With "
             "--pin-route the greedy row is the kernel set the named row describes; the receipts recorded are what price "
-            "that set for a compile nothing pins, and what a strict-evidence compile picks it from."
+            "that set for a compile nothing pins, and what a strict-evidence compile picks it from. Implies "
+            "--strict-evidence: every schedule must come from a measured row or a pin, and a piece the prior would "
+            "decide stops the record with its name."
         ),
     )
     parser.add_argument(
@@ -227,6 +229,25 @@ def handle_run(args):
     if args.record_greedy and not (args.golden and args.bench):
         logger.error("--record-greedy requires --golden PATH and --bench")
         sys.exit(2)
+    if args.ab and args.bench and not getattr(args, "no_record_evidence", False):
+        # A sweep exists to leave its rows in the tune DB for a later record; below the bench standard
+        # it records nothing, and a record run that copies that DB would silently fall to the prior.
+        from emmy.compiler.pipeline.search.bench_record import MIN_RECORD_ITERS, MIN_RECORD_WARMUP, meets_quality_bar  # noqa: PLC0415
+
+        if not meets_quality_bar(args.warmup, args.iters):
+            logger.error(
+                "--ab sweep at --warmup %d / --iters %d is below the tune bench standard (--warmup >= %d, --iters >= %d), "
+                "so none of its rows would reach the tune DB; raise them, or pass --no-record-evidence to measure only",
+                args.warmup,
+                args.iters,
+                MIN_RECORD_WARMUP,
+                MIN_RECORD_ITERS,
+            )
+            sys.exit(2)
+    if args.record_greedy:
+        # A receipt must price a schedule a measurement or a pin chose: a piece the prior would decide
+        # raises EvidenceError naming it, instead of being written into the golden as measured.
+        args.strict_evidence = True
     if args.record or args.record_greedy:
         # A row is evidence only on the card its file names (``golden.records_for_card``): measurements
         # written under another card's header are what no replay on this card ever reads.
