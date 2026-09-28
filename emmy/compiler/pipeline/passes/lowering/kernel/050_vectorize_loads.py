@@ -15,13 +15,17 @@ branches on the vector form.
 For each ``Body`` (every nested Tile / Loop / StridedLoop / Cond body,
 post-order):
 
-1. Walk the stmts. At each position, try widths 8 then 4 then 2.
-2. If ``[body[i], ..., body[i+n-1]]`` are all scalar ``Load``s from the
-   same input buffer, with matching outer indices, and last-dim indices
-   that affinely decompose to ``anchor, anchor+1, ..., anchor+n-1``
-   (same coefficients on free vars), AND the target supports
-   ``vector_type(elem_dtype, n)`` for the source-buffer dtype, replace
-   the run with one widened ``Load``.
+1. Walk the stmts. At each scalar ``Load``, gather the later scalar Loads
+   of the same buffer that can move up to it: nothing between them defines
+   a name their index reads, and nothing between them writes the buffer.
+   An unrolled pointwise body interleaves each element's load with its
+   arithmetic, so a run is rarely adjacent.
+2. Try widths 8 then 4 then 2 over that group: if its first ``n`` Loads
+   have matching outer indices and last-dim indices that affinely
+   decompose to ``anchor, anchor+1, ..., anchor+n-1`` (same coefficients
+   on free vars), AND the target supports ``vector_type(elem_dtype, n)``
+   for the source-buffer dtype, replace them with one widened ``Load`` at
+   the first one's position.
 3. Otherwise advance one stmt.
 
 ## Why this needs the source-buffer dtype
@@ -31,11 +35,13 @@ The decision needs the source-buffer dtype, read off the stamped
 
 ## Observed impact
 
-This is an IR-legibility pass, not a perf lever: ptxas coalesces scalar
-``ld.shared`` runs once alignment is known, so the vectorized and scalar
-source forms compile to identical SASS at every deployable opt level.
-``VECTORIZE_LOADS`` is therefore *not* a search dimension — only ``True`` is
-enumerated. ``EMMY_VECTORIZE_LOADS=0`` is a manual override.
+ptxas coalesces scalar ``ld.shared`` runs once alignment is known, so for
+shared memory the two source forms compile alike. Global f16 loads are
+different: ptxas cannot prove their alignment and keeps them 2 bytes wide,
+so an unrolled pointwise kernel reads a quarter of its bandwidth per
+instruction until this pass widens them. ``VECTORIZE_LOADS`` is still not a
+search dimension — only ``True`` is enumerated. ``EMMY_VECTORIZE_LOADS=0`` is
+a manual override.
 """
 
 from __future__ import annotations
@@ -85,21 +91,38 @@ def _vectorize_body(top: KernelOp, body: Body) -> Body:
             descended.append(s)
 
     out: list[Stmt] = []
-    i = 0
-    while i < len(descended):
-        replaced = False
+    taken: set[int] = set()
+    for i, stmt in enumerate(descended):
+        if i in taken:
+            continue
+        group = _movable_loads(descended, i) if isinstance(stmt, Load) and stmt.is_scalar else [i]
         for run_n in (8, 4, 2):
-            vec = _try_vec_load(descended, i, run_n, top)
+            vec = _try_vec_load([descended[j] for j in group], 0, run_n, top)
             if vec is not None:
                 out.append(vec)
-                i += run_n
-                replaced = True
+                taken.update(group[:run_n])
                 break
-        if not replaced:
-            out.append(descended[i])
-            i += 1
+        else:
+            out.append(stmt)
     vectorized = Body(tuple(out))
     return body if vectorized == body else vectorized
+
+
+def _movable_loads(stmts: list[Stmt], start: int) -> list[int]:
+    """Positions of the Load at ``start`` and of every later scalar Load of the same buffer that
+    can move up to ``start``: no stmt between defines a name its index reads, and none writes
+    the buffer. A stmt with a nested body ends the search — it may write anything."""
+    first = stmts[start]
+    group = [start]
+    defined: set[str] = set(first.defines())
+    for j in range(start + 1, len(stmts)):
+        stmt = stmts[j]
+        if stmt.nested() or getattr(stmt, "output", None) == first.input:
+            break
+        if isinstance(stmt, Load) and stmt.is_scalar and stmt.input == first.input and not set(stmt.deps()) & defined:
+            group.append(j)
+        defined.update(stmt.defines())
+    return group
 
 
 def _try_vec_load(stmts: Iterable[Stmt], start: int, n: int, top: KernelOp) -> Load | None:
