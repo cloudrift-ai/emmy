@@ -37,6 +37,7 @@ def test_common_kernel_corpus_is_small_and_identical(project_root) -> None:
         "NVIDIA H100 80GB": "h100",
         "NVIDIA Tesla V100 SXM2 16GB": "v100",
         "NVIDIA GeForce RTX 5090": "rtx5090",
+        "NVIDIA GeForce RTX 4090": "rtx4090",
     }
     recipe_dir = _experiment(project_root, "kernels")
     recipe = load_recipe(recipe_dir)
