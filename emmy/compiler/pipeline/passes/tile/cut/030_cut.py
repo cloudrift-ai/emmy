@@ -18,7 +18,7 @@ from emmy.compiler.pipeline.fork import SCHEDULE_FORK_STAMPS, DeferredFork, fork
 from emmy.compiler.pipeline.knob import family_of, family_pins
 from emmy.compiler.pipeline.passes.tile._cut import cuttable_seams, full_projection_seams, output_map, realize
 from emmy.compiler.pipeline.passes.tile._split import split_forks
-from emmy.compiler.pipeline.search.pins import composed_cuts_for
+from emmy.compiler.pipeline.search.pins import composed_cuts_for, note_place_key
 
 PATTERN = [Pattern("root", TileOp)]
 FIXPOINT = True
@@ -100,6 +100,7 @@ def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str] | None:
         except MissingSiteError:
             missing = True  # the key addresses a seam of another kernel in the graph
             continue
+        note_place_key(name)
         if id(site.node) not in by_node:
             raise ValueError(f"PLACE pin {name!r} does not address a cuttable Fold edge in this kernel")
         seam = by_node[id(site.node)]
@@ -166,6 +167,7 @@ def _composed_forks(match: Match, root: Node, tile: TileOp, seams, ctx) -> list[
                 site = resolve(tile.op, name, all_sites=all_sites)
             except MissingSiteError:
                 continue
+            note_place_key(name)
             seam = by_node.get(id(site.node)) if site is not None else None
             if seam is not None and not any(picked is seam for picked in chosen):
                 chosen.append(seam)
