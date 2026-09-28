@@ -22,7 +22,7 @@ from emmy.compiler.ir.stmt.blocks import Loop
 from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.leaves import Accum, Load
 from emmy.compiler.ir.stmt.normalize import rename_ssa_sequential
-from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
+from emmy.compiler.pipeline.passes.tile._fromloop import fold_from_loop
 
 
 def _find_load(body, input_buf: str) -> Load:

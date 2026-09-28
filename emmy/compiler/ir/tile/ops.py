@@ -602,7 +602,7 @@ def owns_outputs_it_cannot_bind(op, output_specs: tuple) -> bool:
     kernel around and lowers every reduce but one serially inside the projection.
 
     That combination is what the placement lane's full-projection cut is offered on
-    (``pipeline/passes/lowering/tile/_cut.full_projection_seams``): the ownership half says the
+    (``pipeline/passes/tile/_cut.full_projection_seams``): the ownership half says the
     pieces exist, the root half says the fused kernel cannot reach a tensor-core tier for more than
     one of its contractions. Where the outputs do not partition at all — one output over a whole
     tree, the ordinary fused kernel — there is no piece to hand anything to and the answer is

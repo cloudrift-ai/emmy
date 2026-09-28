@@ -8,6 +8,7 @@ from unittest import mock
 import pytest
 
 from emmy.commands import run as run_mod
+from emmy.compiler.pipeline.search.golden import GoldenFile
 
 
 def _parser():
@@ -20,20 +21,20 @@ def test_run_golden_schema_matches_compile():
     """``run`` spells golden selection the way every replaying command does: ``--golden PATH`` is
     the file, ``--realization NAME`` the row inside it — one pair, one meaning, on ``run`` /
     ``compile`` / ``tune`` / ``serve`` alike."""
-    args = _parser().parse_args(["run", "--golden", "working.yaml", "--realization", "linear.layer0", "--gpu-arch", "sm_90"])
+    args = _parser().parse_args(["run", "--golden", "working.json", "--realization", "linear.layer0", "--gpu-arch", "sm_90"])
 
-    assert args.golden == "working.yaml"
+    assert args.golden == "working.json"
     assert args.realization == "linear.layer0"
     assert args.gpu_arch == "sm_90"
     for removed in ("all_targets", "repeats", "require_kernel_source", "golden_target", "golden_file"):
         assert not hasattr(args, removed)
     with pytest.raises(SystemExit):
-        _parser().parse_args(["run", "--golden-file", "working.yaml"])
+        _parser().parse_args(["run", "--golden-file", "working.json"])
 
 
 def _args(tmp_path, **updates):
     values = {
-        "golden": str(tmp_path / "working.yaml"),
+        "golden": str(tmp_path / "working.json"),
         "realization": None,
         "input": None,
         "code": None,
@@ -58,17 +59,22 @@ def _records(names):
             pin_map={},
             is_routing=False,
             emmy_us=0.0,
+            config_index=0,
         )
         for name in names
     ]
+
+
+#: A golden with no targets: the tests below patch the records a load yields.
+_EMPTY = GoldenFile(compute_cap=(8, 9), programs=[], configs=[])
 
 
 def _patch_records(monkeypatch, names):
     from emmy.compiler.pipeline.search import golden
 
     rows = _records(names)
-    monkeypatch.setattr(golden, "load_golden_file", lambda _path: {})
-    monkeypatch.setattr(golden, "load_golden_records", lambda _document: rows)
+    monkeypatch.setattr(golden.GoldenFile, "load", classmethod(lambda _cls, _path, **_: _EMPTY))
+    monkeypatch.setattr(golden.GoldenFile, "records", lambda _self: rows)
     return rows
 
 
@@ -80,7 +86,7 @@ def test_golden_runs_every_distinct_target_in_process(monkeypatch, tmp_path):
     run_mod._run_golden_targets(_args(tmp_path))
 
     assert [args.realization for args in calls] == ["linear.layer0", "linear.layer1"]
-    assert all(args.golden.endswith("working.yaml") and args._explicit_realization is False for args in calls)
+    assert all(args.golden.endswith("working.json") and args._explicit_realization is False for args in calls)
 
 
 def test_golden_walk_benches_each_target_once_not_its_receipts(monkeypatch, tmp_path):
@@ -119,8 +125,8 @@ def test_golden_walk_without_seeds_benches_the_row_pricing_the_whole_target(monk
         row("post16.k_a.1111.m16.cccc", True, 7.0),
     ]
     rows += [row("pre1.k_b.2222.m1.dddd", False, 30.0), row("pre1.k_b.2222.m1.eeee", False, 20.0)]
-    monkeypatch.setattr(golden, "load_golden_file", lambda _path: {})
-    monkeypatch.setattr(golden, "load_golden_records", lambda _document: rows)
+    monkeypatch.setattr(golden.GoldenFile, "load", classmethod(lambda _cls, _path, **_: _EMPTY))
+    monkeypatch.setattr(golden.GoldenFile, "records", lambda _self: rows)
     calls = []
     monkeypatch.setattr(run_mod, "_handle_run_once", calls.append)
 
@@ -271,9 +277,9 @@ def test_golden_document_is_parsed_once_for_every_target(monkeypatch, tmp_path):
     from emmy.compiler.pipeline.search import golden
 
     loads = []
-    document = {"configs": []}
-    monkeypatch.setattr(golden, "load_golden_file", lambda _path: loads.append(_path) or document)
-    monkeypatch.setattr(golden, "load_golden_records", lambda _document: _records(("a", "b", "c")))
+    document = _EMPTY
+    monkeypatch.setattr(golden.GoldenFile, "load", classmethod(lambda _cls, _path, **_: loads.append(_path) or document))
+    monkeypatch.setattr(golden.GoldenFile, "records", lambda _self: _records(("a", "b", "c")))
     calls = []
     monkeypatch.setattr(run_mod, "_handle_run_once", calls.append)
 
@@ -288,16 +294,16 @@ def test_resolve_golden_arg_prefers_the_document_the_caller_loaded(monkeypatch, 
     from emmy.commands import compile as compile_mod
     from emmy.compiler.pipeline.search import golden
 
-    def _explode(_path, **_kwargs):
+    def _explode(_cls, _path, **_kwargs):
         raise AssertionError("load_golden_file must not be called when a document is supplied")
 
-    monkeypatch.setattr(golden, "load_golden_file", _explode)
-    monkeypatch.setattr(golden, "load_golden_records", lambda _document: [])
+    monkeypatch.setattr(golden.GoldenFile, "load", classmethod(_explode))
+    monkeypatch.setattr(golden.GoldenFile, "records", lambda _self: [])
 
     args = SimpleNamespace(
         realization="missing",
-        golden=str(tmp_path / "absent.yaml"),
-        _golden_document={"configs": []},
+        golden=str(tmp_path / "absent.json"),
+        _golden_document=_EMPTY,
         input=None,
         code=None,
         ir=None,
@@ -322,7 +328,7 @@ def test_record_latency_ignores_a_child_receipt_of_the_same_target():
         bench=object(),
         sample=SimpleNamespace(name="linear.layer0.abcdef123456", knobs={"WORK": "w1x1"}, pins={"FAST_MATH": True}),
     )
-    args = SimpleNamespace(golden="working.yaml", realization="linear.layer0")
+    args = SimpleNamespace(golden="working.json", realization="linear.layer0")
     with mock.patch.object(run_mod, "_bench_total_us", side_effect=AssertionError("a receipt's timing is not the program's")):
         with mock.patch("emmy.compiler.pipeline.search.working_golden.record_latency", lambda *a, **kw: seen.update(kw)):
             run_mod._record_golden_latency(args, {"Emmy": 12.5, "Eager PyTorch": 30.0}, [receipt])
@@ -334,10 +340,10 @@ def test_record_latency_ignores_a_child_receipt_of_the_same_target():
 def test_record_greedy_is_a_golden_bench_flag(run_cli):
     """``--record-greedy`` writes the greedy pick's kernel set back into the benched golden, so
     like ``--record`` it is refused without the file and the bench that measure it."""
-    args = _parser().parse_args(["run", "--golden", "working.yaml", "--realization", "linear.layer0", "--bench", "--record-greedy"])
+    args = _parser().parse_args(["run", "--golden", "working.json", "--realization", "linear.layer0", "--bench", "--record-greedy"])
     assert args.record_greedy is True
 
-    rc, stdout, stderr = run_cli("run", "--golden", "working.yaml", "--realization", "linear.layer0", "--record-greedy")
+    rc, stdout, stderr = run_cli("run", "--golden", "working.json", "--realization", "linear.layer0", "--record-greedy")
 
     assert rc == 2
     assert "--record-greedy requires --golden PATH and --bench" in stdout + stderr
@@ -384,7 +390,7 @@ def test_record_refuses_a_row_benched_without_a_reference(tmp_path):
         sample=sample,
         flags=[f"{run_mod.UNVERIFIED_ROW}: greedy run/bench failed"],
     )
-    args = SimpleNamespace(golden=str(tmp_path / "g.yaml"), realization="pinned.row")
+    args = SimpleNamespace(golden=str(tmp_path / "g.json"), realization="pinned.row")
     with pytest.raises(SystemExit) as exc:
         run_mod._record_golden_latency(args, {"Emmy": 1000.0}, [gb])
     assert exc.value.code == 2

@@ -28,7 +28,7 @@ MAX_IMPLEMENTATION_FILES = 8
 MAX_IMPLEMENTATION_CHANGED_LINES = 500
 
 #: Checked-in reproducers for the realization corpus. They live under ``tests/`` but are evidence,
-#: not code: an onboarding run records a compiler gap it measured by adding one YAML file here.
+#: not code: an onboarding run records a compiler gap it measured by adding one case file here.
 CORPUS_CASE_DIR = "tests/compiler/realization/cases/"
 #: The four stages a corpus case may declare as its expected failure, via its filename suffix. The
 #: filename is semantic, so an ``_xfail``-shaped token naming anything else must be rejected rather
@@ -90,7 +90,7 @@ def _is_tracked_deletion(workspace: Path, path: Path) -> bool:
 
 
 def _is_corpus_case(path: Path) -> bool:
-    return path.as_posix().startswith(CORPUS_CASE_DIR) and path.suffix == ".yaml"
+    return path.as_posix().startswith(CORPUS_CASE_DIR) and path.suffix == ".json"
 
 
 def _validate_corpus_case(path: Path) -> None:
@@ -126,7 +126,7 @@ def _relative_artifact(workspace: Path, raw_path: str) -> Path:
 
 def _invalid_result_artifacts(workspace: Path, artifacts: list[Path]) -> list[Path]:
     def is_recipe_golden(path: Path) -> bool:
-        return len(path.parts) == 4 and path.parts[0] == "recipes" and path.parts[2] == "golden" and path.suffix == ".yaml"
+        return len(path.parts) == 4 and path.parts[0] == "recipes" and path.parts[2] == "golden" and path.suffix == ".json"
 
     return [
         path

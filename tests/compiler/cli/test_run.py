@@ -1282,7 +1282,7 @@ def test_run_ir_loop_stage(run_cli, project_root, tmp_path):
     assert rc == 0, f"stderr: {stderr}"
     log = stdout + stderr
     assert "Loaded loop IR" in log
-    assert "lowering/tile" in log
+    assert "tile/lift" in log
 
 
 @requires_cuda
@@ -1303,7 +1303,7 @@ def test_run_ir_tile_stage(run_cli, project_root, tmp_path):
     log = stdout + stderr
     assert "Loaded tile IR" in log
     assert "lowering/kernel" in log
-    # tile-stage already ran lowering/tile, so it should NOT be in the tail list.
+    # tile-stage already ran the tile passes, so none of them should be in the tail list.
     assert "running tail passes: ['lowering/kernel'" in log
 
 

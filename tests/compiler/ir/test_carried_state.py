@@ -21,8 +21,8 @@ from emmy.compiler.ir.loop.runner import execute_loop_op_cpp
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Load, Loop, Pre, Write
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.ir import loaded_buffers
-from emmy.compiler.loop_wire import _value_from_wire, _value_to_wire
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+from emmy.compiler.wire import decode, encode
 from tests.compiler.helpers import requires_cuda
 
 STEPS, N = 3, 4
@@ -104,7 +104,7 @@ def _graph() -> Graph:
 def test_the_lift_spells_the_state_as_a_buffer_read_one_launch_back() -> None:
     """The loop that carries the state becomes the kernel's serial launch axis and the state a
     buffer the node owns; the step's ``W @ S`` stays a contraction, its B slab the previous state."""
-    lifted = Pipeline.build(["lowering/tile"], select=["lift"]).run(_graph())
+    lifted = Pipeline.build(["tile/lift"], select=["lift"]).run(_graph())
     (node,) = (node for node in lifted.nodes.values() if isinstance(node.op, TileOp))
     tile: TileOp = node.op
 
@@ -181,7 +181,7 @@ def test_the_last_step_is_what_a_read_sees_after_the_loop_closes() -> None:
 def test_a_carried_state_round_trips_the_wire() -> None:
     body = LoopOp(body=_step((c, i, j))).body
 
-    assert _value_from_wire(_value_to_wire(body)) == body
+    assert decode(encode(body)) == body
 
 
 def _define() -> Carry:

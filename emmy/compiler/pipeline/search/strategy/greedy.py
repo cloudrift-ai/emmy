@@ -19,7 +19,7 @@ from emmy.compiler.pipeline.fork import stamp_signature
 from emmy.compiler.pipeline.knob import KERNEL_IDENTITY, family_of
 from emmy.compiler.pipeline.pipeline import Decision, LoweringError, Run
 from emmy.compiler.pipeline.search.db import SearchDB
-from emmy.compiler.pipeline.search.golden_import import evidence_db
+from emmy.compiler.pipeline.search.golden.evidence import evidence_db
 from emmy.compiler.pipeline.search.pins import PLACEMENT_DECISIONS_HINT, composed_routes
 from emmy.compiler.pipeline.search.policy.greedy import _strip_fork_stamps, greedy_decide, logger, tile_identity
 from emmy.compiler.pipeline.search.strategy.base import SearchStrategy
@@ -81,19 +81,25 @@ class GreedyStrategy(SearchStrategy):
         complete = pipeline.lowers_to_cuda
         blocked: dict[str, set[frozenset]] = {}
         # The evidence is the DB: the tune DB's rows, and the golden rows in scope imported among them
-        # (``golden_import.evidence_db``). Only a pipeline that reaches the cut pass consults it: the
+        # (``evidence.evidence_db``). Only a pipeline that reaches the cut pass consults it: the
         # loop-level lowerings a golden record's derivations run (hundreds per file) never do, and
         # must not pay the import. A stored decision that marks several seams of one kernel is the
         # composed decision a pinned compile consumed them as; the cut pass offers that arm beside
         # its single seams so a row can spell it (``spelled_arm``), the way the compile that
         # measured it did.
-        reaches_placement = any(pass_.name == "lowering/tile" for pass_ in pipeline.passes)
+        names = {pass_.name for pass_ in pipeline.passes}
+        reaches_placement = "tile/cut" in names
+        # A kernel-set arm is priced by scheduling its pieces, so a pipeline that ends between
+        # ``tile/cut`` and ``tile/schedule`` cannot price one: its cut forks resolve by pins alone and
+        # otherwise keep the fused tree. That is what lets ``compile --passes dolfnstp`` show the
+        # cuts a kernel offers without paying for a schedule.
+        prices = not reaches_placement or "tile/schedule" in names
         db = evidence_db(self.db, ctx) if reaches_placement else (self.db if self.db is not None else SearchDB())
         with composed_routes(_measured_composed_routes(db) if reaches_placement else []):
             for _attempt in range(_MAX_GREEDY_RETRIES):
                 rejections: list[tuple[str, str, str]] = []
                 run = Run(pipeline=pipeline, ctx=ctx, db=db, backend=backend, dump=dump, rejections=rejections)
-                terminal, trace = run.resolve(graph.copy(), greedy_decide(blocked=blocked, db=db))
+                terminal, trace = run.resolve(graph.copy(), greedy_decide(blocked=blocked, db=db, price_structural=prices))
                 stuck = _stuck(terminal, rejections, lowers_to_cuda=complete)
                 if not stuck or not _retire(blocked, trace, stuck):
                     break
@@ -107,7 +113,7 @@ class GreedyStrategy(SearchStrategy):
             if _stuck(terminal, rejections, lowers_to_cuda=complete):
                 rejections = []
                 run = Run(pipeline=pipeline, ctx=ctx, db=db, backend=backend, dump=dump, rejections=rejections)
-                terminal, trace = run.resolve(graph.copy(), greedy_decide(blocked=blocked, prior=None, db=db))
+                terminal, trace = run.resolve(graph.copy(), greedy_decide(blocked=blocked, prior=None, db=db, price_structural=prices))
         _raise_on_unlowered(terminal, rejections, lowers_to_cuda=complete)
         terminal.hints.set(
             PLACEMENT_DECISIONS_HINT,

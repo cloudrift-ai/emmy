@@ -79,7 +79,7 @@ def test_multisource_indexmap_lifts_unconditional_branch_as_bool():
     """The fallback predicate remains boolean through rendering and Loop IR persistence."""
     import json
 
-    from emmy.compiler.loop_wire import loop_graph_from_wire, loop_graph_to_wire
+    from emmy.compiler.graph import Graph
 
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("left", (2, 2)), node_id="left")
@@ -111,7 +111,7 @@ def test_multisource_indexmap_lifts_unconditional_branch_as_bool():
     assert select.branches[-1].select.render(None) == "1"
     _assert_close(_run(graph, inputs), _run(lifted, inputs))
 
-    restored = loop_graph_from_wire(json.loads(json.dumps(loop_graph_to_wire(lifted))))
+    restored = Graph.from_wire(json.loads(json.dumps(lifted.to_wire())))
     restored_select = next(stmt for stmt in _kernel_nodes(restored)[0].op.body.iter() if isinstance(stmt, Select))
     assert restored_select.branches[-1].select == Literal(True, "bool")
 

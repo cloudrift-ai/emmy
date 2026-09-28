@@ -638,7 +638,7 @@ def test_warp_tier_is_offered_at_a_static_k_the_step_does_not_tile(monkeypatch):
     """The unpinned fork OFFERS mma rows at a static K the K-step does not tile (no GPU —
     enumeration only). The K-step divisibility used to drop every warp candidate on such a shape,
     so no golden could record one."""
-    from emmy.compiler.pipeline.search.golden_eval import enumerate_graph  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.ranking import enumerate_graph  # noqa: PLC0415
 
     for var in ("EMMY_TILE", "EMMY_WORK", "EMMY_STAGE", "EMMY_REDUCE"):
         monkeypatch.delenv(var, raising=False)
@@ -699,7 +699,7 @@ def test_trans_b_offers_staged_rows(monkeypatch):
     The serving ``F.linear`` forks used to enumerate gmem-direct rows ONLY (the ``.lin`` golden
     drift-warning class); the N-major B slab lifts that: d*/cp* and d*/tma* spellings ride the
     fork at sm_90+, cp.async alone below the TMA floor (sm_89)."""
-    from emmy.compiler.pipeline.search.golden_eval import enumerate_graph  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.ranking import enumerate_graph  # noqa: PLC0415
 
     for var in ("EMMY_TILE", "EMMY_WORK", "EMMY_STAGE", "EMMY_REDUCE"):
         monkeypatch.delenv(var, raising=False)
@@ -797,7 +797,7 @@ def test_f16acc_enumeration_policy(monkeypatch):
     forks everywhere they are legal (which sibling deploys is evidence's decision per shape and
     card), and the precise ``F16_MMA_F32_ACC`` pin stays authoritative in both directions."""
     from emmy.compiler.context import Context  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden_eval import enumerate_graph  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.ranking import enumerate_graph  # noqa: PLC0415
     from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC, precision_pin  # noqa: PLC0415
 
     def allowed(**env) -> bool:
@@ -1198,6 +1198,25 @@ def test_staged_splitk_matches_gmem_direct_bit_for_bit(monkeypatch, transport):
     np.testing.assert_allclose(staged.astype(np.float32).reshape(m, n), ref, rtol=2e-2, atol=2e-2)
 
 
+@requires_cuda
+def test_matvec_splitk_matches_the_reference(monkeypatch):
+    """A one-row matmul split across CTAs: each partition reads its own slice of B. Tiling the
+    partition as the row read every partition's B at the first one's slice."""
+    from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
+
+    k, n = 1024, 256
+    rng = np.random.default_rng(5)
+    a = (rng.standard_normal((1, k)) * 0.1).astype(np.float16)
+    b = (rng.standard_normal((k, n)) * 0.1).astype(np.float16)
+    monkeypatch.setenv("EMMY_REDUCE", "g8k")
+    be = CudaBackend()
+    compiled = be.compile(_splitk_mma_graph(1, k, n))
+    assert "o__partial" in compiled.nodes
+    got = np.asarray(be.run(compiled, input_data={"a": a, "b": b})[0].outputs["o"])
+    ref = a.astype(np.float32) @ b.astype(np.float32)
+    np.testing.assert_allclose(got.astype(np.float32).reshape(1, n), ref, rtol=2e-2, atol=2e-2)
+
+
 # =========================================================================== #
 # Compile-time schedule guards — pins that would silently lower to a wrong / un-launchable
 # kernel. Run the TILE pass only (no GPU): the schedule rejects the pin with a clear
@@ -1573,7 +1592,7 @@ def test_raster_fork_offers_both_orders(monkeypatch):
     """The enumeration carries the ``RASTER`` family on every contraction row — the flat ``""``
     and the ``gm8`` sibling — so the search can price them per shape (live-fork capture, no
     GPU). Non-contraction kernels never spell the key."""
-    from emmy.compiler.pipeline.search.golden_eval import enumerate_graph  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.ranking import enumerate_graph  # noqa: PLC0415
 
     g = _mma_matmul_graph("static", 1280, 2048, 1024, "f16", False)
     rows = enumerate_graph(g, Context.from_target((12, 0))).rows
@@ -1585,7 +1604,7 @@ def test_raster_symbolic_grid_stays_flat(monkeypatch):
     """A symbolic-M (masked-tile) grid renders through the dynamic decode path, which does not
     carry the swizzle — the enumeration must decide the flat ``""`` only there (offering ``gm8``
     would stamp a launch order the kernel doesn't realize: the silent-degrade family)."""
-    from emmy.compiler.pipeline.search.golden_eval import enumerate_graph  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.ranking import enumerate_graph  # noqa: PLC0415
 
     g = _mma_matmul_graph("dynamic", 1280, 2048, 1024, "f16", False)
     rows = enumerate_graph(g, Context.from_target((12, 0))).rows

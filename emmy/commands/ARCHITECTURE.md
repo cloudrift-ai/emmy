@@ -182,15 +182,15 @@ and atomic ranking persistence to `compiler/pipeline/search/working_golden.py`. 
 `run` and working-golden tuning live beside that search lifecycle in `compiler/pipeline/search/pins.py`; command
 handlers retain only the workflow's argument validation and user-facing error/reporting.
 
-`emmy trace MODEL -o PATH` lowers through post-fusion Loop IR and writes one self-contained golden YAML inventory.
-The YAML embeds stable frontend Torch IR programs and emits one target row for every post-fusion kernel occurrence;
+`emmy trace MODEL -o PATH` lowers through post-fusion Loop IR and writes one self-contained golden file inventory.
+The file embeds stable frontend Torch IR programs and emits one target row for every post-fusion kernel occurrence;
 structurally identical occurrences are not collapsed and a missing cache key never drops a target. Every target is its
 kernel's standalone Loop IR, stored in `loops` and selected by index, with the frontend provenance origins beside it
 (`target: {loop, origins}`) when it computes every one of them whole — the traced ops a benchmark compares it against.
 Flash score producers absorbed into their consumer are stored as part of that one fused target rather than as a second
 kernel. Trace records neither knobs nor timings,
 refuses replacement, and never writes a traced Graph JSON or provenance sidecar. Quantized traces store their
-checkpoint-declaration digest in the same YAML.
+checkpoint-declaration digest in the same file.
 
 `emmy trace LOCAL_CHECKPOINT --serving-twins --serving-config PATH -o PATH` is the release inventory variant. It
 calls the config/allocation-metadata-only `serving.twins.capture_twin_graphs` path, combines every distinct
@@ -206,8 +206,25 @@ split per target. A static-only release is accepted
 only when the same env proves that no wider or symbolic path is reachable. The resulting working file is consumed
 directly by `tune --golden PATH` and verified by `run --golden PATH [--realization NAME]`.
 
-**One golden flag pair on every command.** `--golden PATH` names a golden YAML (working or canonical) on `run`,
-`compile`, `tune`, `serve` and `eval golden`: its MEASURED rows are the golden evidence that command deploys from,
+`emmy golden check [PATH…]` names the stored targets of a golden that a fresh lowering of its own programs no longer
+writes. It is two existing commands diffed per traced program: `emmy golden kernels PATH --program N` prints the Loop
+IR pool the golden stores, sorted by output set, and `emmy compile --golden PATH --program N --ir loop -o fresh.json`
+writes the same pool lowered fresh from the stored program (a `.json` output path is the wire a golden stores, for
+`--ir torch` the traced program and for `--ir loop` the kernel pool; any other path gets the readable listing). The
+check restricts the diff to the targets the file stores. `emmy golden restamp [PATH…]` rewrites the golden onto that
+lowering; `check` and `restamp` default to every repository golden, none of the three needs a card, and the
+`refresh-golden` skill is the flow around them. What a restamp keeps per row is decided in
+`compiler/pipeline/search/restamp.py`: a measurement survives only when the row's kernel renders the same CUDA source
+from the fresh Loop IR, otherwise the row becomes a proposal. A row naming the target takes the fresh target's
+identity; a row naming a piece of the target's cut or split set keeps its own and survives only if the fresh set
+still mints that piece. A row that no longer decodes, a row whose kernel no fresh kernel writes, and a kernel-set row
+whose members all lost their measurements are dropped and named. The command never deletes a file: one nothing survives
+in is left alone and reported. The lowering behind the check, the restamp and `emmy trace`'s inventory is one function
+(`working_golden.lowered_kernels`), and every command that reads a golden by path loads it through
+`golden.load_golden`, which validates a repository golden strictly and anything else as a working file.
+
+**One golden flag pair on every command.** `--golden PATH` names a golden file (working or canonical) on `run`,
+`compile`, `tune`, `serve`, `generate` and `eval golden`: its MEASURED rows are the golden evidence that command deploys from,
 instead of the repository's per-card goldens, joining the tune DB's rows in the one measured-evidence index the
 greedy pick reads (`search.golden.records_override` in-process; `EMMY_GOLDEN_FILE` for the vLLM child `serve`
 spawns, together with the precision regime the file's rows share — `EMMY_FAST_MATH` and friends — because a row
@@ -257,13 +274,13 @@ event loop, backend-slot queue, DB, and prior, so a file of one-kernel trace ent
 When the file has multiple targets, `--dump-dir` receives one stable indexed subdirectory per target; `--output` is
 rejected because a single CUDA-IR path cannot represent several independent results. The command also resolves and
 rejects any `--golden PATH` inside a canonical repository tree — recipe-local `golden/` or model-agnostic
-`search/goldens/` — including symlink aliases.
+`search/golden/` — including symlink aliases.
 With `--bench`, each target's `62_kernel_bench.json` records whether an eager reference was available and the
 non-fatal accuracy verdict alongside the deployable O3 timings. A null verdict proves correctness only when the
 reference-available field is true; reference-free Loop slices remain timing evidence rather than accuracy evidence.
 
 `emmy compile --golden PATH --realization NAME` and `emmy run --golden PATH [--realization NAME]` are the
-verification counterparts. They resolve targets only in the explicit golden YAML and compile its exact provenance or
+verification counterparts. They resolve targets only in the explicit golden file and compile its exact provenance or
 Loop IR, without canonical-corpus or live-card filtering; `compile` requires the name (it prints one program), `run`
 visits every target name sequentially in the current process unless `--realization` narrows the file to one
 exact or unambiguous substring match. With several targets, `--json DIR` writes one readable JSON record per target;
@@ -292,7 +309,7 @@ nonzero while the pinned schedules receive their normal timed and reference-clea
 request a direct eager correctness proof. Reference-free Loop replay does not allocate a duplicate Torch device copy
 of each boundary input; full-program price probes therefore retain the execution path's device-memory contract.
 Repeated names that resolve to different embedded targets remain ambiguous;
-qualification scopes a temporary working YAML to one target rather than guessing. A direct `run --ir` input remains a
+qualification scopes a temporary working golden file to one target rather than guessing. A direct `run --ir` input remains a
 stage-complete artifact and runs only the later passes. JSON records whole-program end-to-end timing for multi-kernel
 rows, so promotion compares aggregate execution rather than a sum of isolated launch windows.
 `--record` (with `--golden PATH --bench`) attributes that latency to the measured realization by exact name, pins,
@@ -328,9 +345,9 @@ or an `--ab` row) still benches.
 For a fair hybrid-vs-MCTS comparison, both working files start from the same inventory-only trace: do not copy verified
 knob rows into either baseline as proposals. Canonical goldens remain the common implicit deploy context for both runs.
 
-`emmy eval golden --golden GOLDEN_YAML --serving-config PATH` is the release audit. The env must name that exact
+`emmy eval golden --golden GOLDEN_FILE --serving-config PATH` is the release audit. The env must name that exact
 canonical file. The command validates the nested schema and model provenance, requires the live GPU to match both the
-config and YAML, proves that every structural target has every config-derived realization its twin reaches (the width
+config and the golden file, proves that every structural target has every config-derived realization its twin reaches (the width
 rows of a static twin, the dynamic rows of a symbolic one), validates the recorded rows, and re-traces the exact
 static/symbolic precision matrix. A warm shape names its lane (the ``:fm`` suffix), so a served process in a lane
 compiles the static twins of that lane's widths and nothing else; the serving-matrix compile asks the same of each
@@ -449,6 +466,10 @@ emmy
 +-- serve        -- vllm serve with the emmy embedding plugin (optional one-shot bench)
 +-- teardown     -- clean up VMs left by bench --no-teardown
 +-- publish      -- validate, tag, and push the canonical image named by one recipe
++-- dataset
+|   +-- import    -- fill the dataset DB from freezes, golden files and tune DBs, every kernel re-lowered
+|   +-- freeze    -- write a DB instance's admitted rows as a measurement freeze, a golden file per card
+|   +-- check     -- count the rows of a DB instance whose tables disagree with themselves
 +-- recipe
 |   +-- list      -- inspect and filter compact recipe metadata
 |   +-- query     -- filter and order normalized recipe or deployment rows
@@ -565,7 +586,7 @@ misses). Under `--speculative-config` the ladder is derived from the resulting
 round-up to that multiple cannot push a step's padded width past the decode bucket and off the static decode twin
 (`serving/ARCHITECTURE.md` carries the rule and its invariant). The emmy generative arm also defaults
 `--gpu-memory-utilization` to **0.97** (its
-cupy residents are invisible to vLLM's torch-only profiler, so the 0.90 line can fail the min-KV fit at long
+runtime residents are invisible to vLLM's torch-only profiler, so the 0.90 line can fail the min-KV fit at long
 model lens; stock keeps 0.90) and `--max-num-batched-tokens` to **the runner's prefill capacity + the decode
 bucket** — the bucket-sized rider headroom is covered by the chunk+decode twin row split
 (`serving/ARCHITECTURE.md`), so full chunk steps keep carrying their decode riders; an explicit value past that cap
@@ -732,6 +753,18 @@ Capacity-class signals recognized today: CloudRift HTTP 503/429 on rent, CloudRi
 
 GCP project is inferred from `gcloud` config. CloudRift reads `CLOUDRIFT_API_KEY` and `CLOUDRIFT_API_URL` from the environment by default. **H200 on CloudRift** is only available on on-prem clusters — set `CLOUDRIFT_API_URL` to the on-prem endpoint (the public `api.cloudrift.ai` does not offer H200).
 
+### `emmy dataset`
+
+The dataset DB (`EMMY_DATASET_DB`) is the tune DB's tables in a file of their own, read by `emmy eval prior --dataset
+db` and never by a compile. `import [SOURCES…] [--db PATH] [--fresh]` fills it: a source is a measurement freeze
+directory (the checked-in one by default), a golden file, or a tune DB file, which is frozen first. Every kernel is
+re-lowered from its definition through the lowering passes by the current compiler (`golden_import.import_goldens`),
+once per precision regime the file's rows record, and its rows are sourced by the file's digest; a file the instance
+already holds is skipped, and `--fresh` rebuilds from nothing. `freeze --out DIR [--db PATH]` writes an instance's
+admitted rows (`data/freeze.freeze_reason`) as a golden file per card — the artifact that gets checked in. `check
+[--db PATH]` counts the rows of an instance whose tables disagree with themselves (`SearchDB.drift`) and exits
+non-zero when any do.
+
 ### `emmy fit`
 
 Fit an offline-prior weights artifact and cross-validate it, GPU-free. Two orthogonal switches — `--trainer
@@ -860,6 +893,7 @@ no Git operation.
 supervised Rust generation loop. These modes are mutually exclusive. The command layer owns argument parsing and
 tokenizer I/O; model preparation and binary worker transport live in `serving/native`. Native execution accepts
 `--temperature`, `--top-p`, and `--seed`; temperature zero is greedy, and nonzero `--top-k` is rejected.
-`--timeout` controls the native worker operation deadline, including the complete sequential prefill/decode loop.
-HTTP serving remains on the existing vLLM path. Generation artifacts prepared before sampling support must be
-exported again.
+`--prefill-size` selects the exported chunk width (default 16; one selects sequential prefill) and requires preparation.
+`--timeout` controls the native worker operation deadline, including the complete prefill/decode loop.
+Native HTTP serving is opt-in through `serve --generate --native`; vLLM remains the default. Generation artifacts
+from before the chunked prefill contract must be exported again.

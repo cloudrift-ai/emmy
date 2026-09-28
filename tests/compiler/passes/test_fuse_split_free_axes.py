@@ -139,7 +139,7 @@ def _lift(op: LoopOp, shape=(1,)) -> TileOp:
     graph = Graph()
     graph.add_node(op, [], Tensor("out", shape), node_id="out")
     graph.outputs = ["out"]
-    return Pipeline.build(["lowering/tile"], select=["lift"]).run(graph).nodes["out"].op
+    return Pipeline.build(["tile/lift"], select=["lift"]).run(graph).nodes["out"].op
 
 
 def _reduce_name(op: LoopOp) -> str:
@@ -431,7 +431,7 @@ def test_warp_roles_move_only_the_innermost_carrier():
 
 def _bilinear_fold(w_index: tuple, x_index: tuple, product: str = "multiply", swapped: bool = False):
     """The lifted ``Σ_k w ⊗ x`` cell; ``swapped`` spells the loads and the product's arguments the other way round."""
-    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
+    from emmy.compiler.pipeline.passes.tile._fromloop import fold_from_loop
 
     loads = (Load(name="wv", input="w", index=w_index), Load(name="xv", input="x", index=x_index))
     args = ("wv", "xv")

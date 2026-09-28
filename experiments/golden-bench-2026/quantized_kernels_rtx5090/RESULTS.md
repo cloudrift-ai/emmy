@@ -71,6 +71,12 @@ kept row clean under the run's integrity flags (realized-vs-pinned knobs, wrong-
 back through `--record-greedy`; the seq-512 norm kernel keeps its previous row (see below). Each golden was measured
 whole on one box.
 
+The rows this section wrote back were YAML goldens recorded at `1159502e`. Main then converted every golden to
+JSON (#912) and re-lowered the corpus on its new fusion (#914), converting the previous rows, not these. The
+committed files are main's; the re-recorded rows survive in the sweep archive named below and in the pull
+request's history, and re-applying them needs a fresh record on the card against main's lowering. The one
+schedule change worth that (`f4` to `f2` on the two seq-512 norm-weight broadcasts, 1.28 to 1.16 us) is small.
+
 ### Protocol
 
 For every target the compiler's own fork tree was enumerated (`enumerate_graph`) and swept in three passes of

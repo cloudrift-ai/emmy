@@ -1,7 +1,7 @@
 """Generic data-type identity used throughout the compiler.
 
 Holds only generic + numpy information. Backend-specific traits (CUDA C
-spelling, cupy dtype, required headers) live in the respective backend
+spelling, required headers) live in the respective backend
 modules (e.g. ``emmy/compiler/backend/cuda/dtype.py``).
 
 Naming convention: the class is ``DataType``; every argument, variable,
@@ -15,9 +15,11 @@ from functools import cache
 
 import numpy as np
 
+from emmy.compiler.wire import Wire
+
 
 @dataclass(frozen=True)
-class DataType:
+class DataType(Wire):
     """Identity of a tensor element type.
 
     ``name`` is the canonical token written on ``Tensor.dtype`` and used
@@ -31,6 +33,17 @@ class DataType:
       with a hardware-specific layout, e.g. the packed vector ``F16x2``
       (``__half2``), as opposed to a plain scalar element.
     """
+
+    wire_tag = "dtype"
+
+    def to_wire(self) -> str:
+        return self.name
+
+    @classmethod
+    def from_wire(cls, value: object, where: str = "dtype") -> DataType:
+        if not isinstance(value, str):
+            raise ValueError(f"{where} must be a dtype name")
+        return get(value)
 
     name: str
     np: np.dtype

@@ -9,7 +9,7 @@ or the freeze suite silently stops exercising the real filter.
 from __future__ import annotations
 
 from emmy.compiler.pipeline.knob import KERNEL_IDENTITY
-from emmy.compiler.pipeline.search.db import KernelRow, PerfRow, PerfStats
+from emmy.compiler.pipeline.search.db import KernelRow, PerfRow, PerfStats, SearchDB
 
 GPU_5090 = "NVIDIA GeForce RTX 5090"  # registry records fp32/fp16 peaks -> the plausibility gate is active
 
@@ -61,6 +61,7 @@ def kernel_row(identity: str, *, stamps: dict | None = None, name: str | None = 
         loop_ir=wire,
         name=name or f"k_{identity}",
         stamps=dict(F16_MATMUL_STAMPS if stamps is None else stamps),
+        formed=True,
     )
 
 
@@ -96,3 +97,34 @@ def perf_row(
     )
     kw.update(over)
     return PerfRow(**kw)
+
+
+#: A registry card per capability the realization corpus declares, so a case's rows are a card's.
+CARDS = {(12, 0): GPU_5090, (7, 0): "NVIDIA Tesla V100 SXM2 16GB"}
+
+
+def tuned_db(path, cases: tuple[str, ...], *, source: str = "measured", us: float = 1.0) -> SearchDB:
+    """A DB as a tune of the named realization corpus cases leaves it: every entry filed as a measured row
+    (``us`` microseconds where the case authors none) through the golden importer, under the registry
+    card of the case's capability and the case's own regime, ``source`` on every row."""
+    from dataclasses import replace
+
+    from emmy.compiler.context import FAST_MATH_FLAG, Context
+    from emmy.compiler.pipeline.knob import KERNEL_DECISION_FAMILIES, family_of
+    from emmy.compiler.pipeline.search.golden import Measurements
+    from emmy.compiler.pipeline.search.golden.evidence import import_goldens
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+    from tests.compiler.realization import helpers as corpus
+
+    measured = Measurements(emmy_us=us, reference_us=us, reference_backend="corpus")
+    db = SearchDB(path)
+    for case_path in cases:
+        case = corpus.load_case(corpus.CASES_DIR / case_path)
+        records = [replace(record, measurements=measured) if record.measurements is None else record for record in case.records]
+        regime = {str(name): value for name, value in case.record.pin_map.items() if family_of(str(name)) not in KERNEL_DECISION_FAMILIES}
+        with pinned_knobs(regime):
+            # Measured at the deployable opt level whatever lane the suite compiles at.
+            flags = FAST_MATH_FLAG if regime.get("FAST_MATH") else ""
+            ctx = Context.from_target(case.compute_cap, gpu_name=CARDS[tuple(case.compute_cap)], compile_flags=flags)
+            import_goldens(db, ctx, records, source=source)
+    return db

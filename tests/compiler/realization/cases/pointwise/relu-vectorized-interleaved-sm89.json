@@ -1,0 +1,12 @@
+{"compute_cap": [8, 9],
+ "programs": [
+  {"inputs":["x"],"outputs":["relu"],"nodes":[{"id":"x","op":"input","outputs":[["x","f32",[512,4096]]]},{"id":"relu","op":"tensor.elementwise","attrs":{"op":"relu"},"inputs":["x"],"outputs":[["relu","f32",[512,4096]]]}]}
+ ],
+ "configs": [
+  {"program": 0, "target": {"loop": 0, "origins": ["relu"]}, "realizations": [
+   {"name": "k_relu_pointwise", "pins": {"FAST_MATH": false}, "knobs": {"WORK": "", "FAST_EXP": "False", "TILE": "", "INTERLEAVE_LOADS": "True", "RASTER": "", "VECTORIZE_LOADS": "True"}, "identity": "e4342b2a3987b65735daae4bfb678aa48080fd20a8b4bead4d13ecf5b2b4228e"}
+  ]}
+ ],
+ "loops": [
+  {"inputs":["x"],"outputs":["relu"],"nodes":[{"id":"x","op":"input","outputs":[["x","f32",[512,4096]]]},{"id":"relu","op":"loop","attrs":{"body":[{"Loop":{"axis":{"name":"a0","extent":2097152},"body":[{"Load":{"names":["in0"],"input":"x","index":["a0 // 4096","a0 % 4096"]}},{"Assign":{"name":"v0","op":"relu","args":["in0"]}},{"Write":{"output":"relu","index":["a0 // 4096","a0 % 4096"],"values":["v0"]}}]}}],"name":"k_relu_pointwise"},"inputs":["x"],"outputs":[["relu","f32",[512,4096]]]}]}
+ ]}

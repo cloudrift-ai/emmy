@@ -18,10 +18,11 @@ from dataclasses import dataclass
 from emmy.compiler.dim import Dim, to_dim
 from emmy.compiler.dtype import F32, DataType
 from emmy.compiler.dtype import get as _get_dtype
+from emmy.compiler.wire import Wire
 
 
 @dataclass
-class Tensor:
+class Tensor(Wire):
     """Multidimensional array descriptor.
 
     ``shape`` is a tuple of :class:`Dim`. Construction coerces bare
@@ -49,6 +50,19 @@ class Tensor:
     replaced buffer's answer — so no rewrite rule restates it and no
     consumer reconstructs it from op history.
     """
+
+    def to_wire(self) -> list:
+        """``[name, dtype, shape]`` — a buffer's identity; whether it is constant or transient is the graph's."""
+        return [self.name, self.dtype.name, [dim.to_wire() for dim in self.shape]]
+
+    @classmethod
+    def from_wire(cls, value: object, where: str = "tensor") -> Tensor:
+        if not isinstance(value, list) or len(value) != 3 or not isinstance(value[2], list):
+            raise ValueError(f"{where} must be [name, dtype, shape]")
+        name, dtype, shape = value
+        if not isinstance(name, str) or not name or not isinstance(dtype, str) or not dtype:
+            raise ValueError(f"{where} needs a non-empty name and dtype")
+        return cls(name=name, dtype=dtype, shape=tuple(Dim.from_wire(dim, f"{where}.shape") for dim in shape))
 
     name: str
     shape: tuple[Dim, ...]

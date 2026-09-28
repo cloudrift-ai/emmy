@@ -178,7 +178,7 @@ def test_truncated_kernel_pipeline_registers_measured_composed_routes(monkeypatc
 
     monkeypatch.setattr(greedy_strategy, "composed_routes", capture_composed_routes)
     monkeypatch.setattr(greedy_strategy.Run, "resolve", lambda _run, graph, _decide: (graph, []))
-    pipeline = Pipeline(passes=[Pass(name="lowering/tile", rules=[], index=0), Pass(name="lowering/kernel", rules=[], index=1)])
+    pipeline = Pipeline(passes=[Pass(name="tile/cut", rules=[], index=0), Pass(name="lowering/kernel", rules=[], index=1)])
 
     GreedyStrategy(pipeline, db=object()).run(Graph(), ctx=_small_smem_ctx())
 
@@ -223,11 +223,11 @@ def test_unlowered_terminal_is_bench_fail_despite_cached_residual_kernel():
 
     # ``x -> y (TileOp) -> z (CudaOp)`` — the split shape: an un-lowered partial
     # feeding a lowered finalize whose perf row is already cached.
-    from emmy.compiler.loop_wire import kernel_bindings
+    from emmy.compiler.wire import kernel_bindings
     from tests.compiler.helpers import case_target_tile
 
     g = _graph_with_tile()
-    tile = case_target_tile("fused/norm-linear-f16-scalar-reduce.yaml")
+    tile = case_target_tile("fused/norm-linear-f16-scalar-reduce.json")
     cuda = CudaOp(kernel_source="__global__ void k_fin() {}", kernel_name="k_fin", source=tile)
     g.add_node(op=cuda, inputs=["y"], output=Tensor("z", (4,), "f32"), node_id="z")
     g.outputs = ["z"]
@@ -395,7 +395,7 @@ def test_greedy_run_raises_when_the_only_lowering_declines_silently():
 def test_greedy_run_keeps_the_tile_terminal_of_a_truncated_pipeline():
     # ``emmy compile --ir tile`` and the loop backend stop before the final lowering pass,
     # where a surviving TileOp is the requested answer — the check must not fire there.
-    terminal = _silently_declining_pipeline("lowering/tile").run(_graph_with_tile(), ctx=_small_smem_ctx())
+    terminal = _silently_declining_pipeline("tile/schedule").run(_graph_with_tile(), ctx=_small_smem_ctx())
     assert isinstance(terminal.nodes["y"].op, TileOp)
 
 

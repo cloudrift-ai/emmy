@@ -393,7 +393,9 @@ class _Builder:
 
             reads, writes, state = _resources(stmt)
             for mode, names in (("read", reads), ("write", writes), ("state", state)):
-                for name in names:
+                # Sorted, not set order: a resource's vertex number breaks ties between symmetric
+                # siblings, and set order of strings follows the per-process hash seed.
+                for name in sorted(names):
                     if mode != "state":
                         target = self._resource(name)
                     else:

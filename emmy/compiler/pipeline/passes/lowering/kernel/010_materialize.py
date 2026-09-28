@@ -60,7 +60,7 @@ def rewrite(match: Match, root: Node, ctx=None) -> KernelOp | None:
         if resident:
             state = tile.register_program.state.write.output
             if state not in match.graph.outputs and not match.graph.buffer_users(state):
-                from emmy.compiler.pipeline.passes.lowering.tile._cut import _input_fragment  # noqa: PLC0415
+                from emmy.compiler.pipeline.passes.tile._cut import _input_fragment  # noqa: PLC0415
 
                 # Register storage has no global state allocation. Removing that port is a
                 # graph splice; snapshots with external readers remain ordinary outputs.

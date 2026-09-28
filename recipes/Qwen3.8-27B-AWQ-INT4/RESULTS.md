@@ -94,7 +94,7 @@ lane on the RTX 4090.
 
 ## Tesla V100 (sm_70): 4-bit pays in decode and costs in prefill
 
-`golden/v100_sm70.yaml` holds 74 measured rows over 16 targets of decoder layer 0, recorded on one Tesla
+`golden/v100_sm70.json` holds 74 measured rows over 16 targets of decoder layer 0, recorded on one Tesla
 V100-SXM3-32GB. Every row carries a strict correctness proof against its reference; none is timed-only.
 
 This golden is over a program that **carries the coded weights**. Emmy reads this checkpoint's

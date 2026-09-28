@@ -39,7 +39,7 @@ from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
 from emmy.compiler.pipeline.search.prior.base import latency_proxy
 
 if TYPE_CHECKING:
-    # Annotation only: importing ``search.data`` for real would pull it (and, through ``freeze.py``, yaml and
+    # Annotation only: importing ``search.data`` for real would pull it (and, through ``freeze.py``, the golden format and
     # subprocess) onto the deploy path, which loads none of it today.
     from emmy.compiler.pipeline.search.data.group import Group
 

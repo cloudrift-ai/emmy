@@ -30,7 +30,7 @@ from emmy.compiler.ir.tile import Placement, TileOp
 from emmy.compiler.pipeline import TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import iter_leaves
 from emmy.compiler.pipeline.knob import axis_of, complete_kernel_row, family_of, family_value, is_off_value
-from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
+from emmy.compiler.pipeline.passes.tile._fromloop import fold_from_loop
 from emmy.compiler.pipeline.pipeline import Run
 from tests.compiler.terms import contraction, projection
 
@@ -248,7 +248,7 @@ def _rows_of(tile, ctx=None) -> list[dict]:
     still a one-leaf fork, so the engine records its row as a decision)."""
     from importlib import import_module
 
-    classic_forks = import_module("emmy.compiler.pipeline.passes.lowering.tile.040_schedule").classic_forks
+    classic_forks = import_module("emmy.compiler.pipeline.passes.tile.schedule.040_schedule").classic_forks
     out = classic_forks(tile, "k", {}, ctx or Context.from_target((12, 0)))
     return [dict(leaf.knobs) for leaf in iter_leaves(out)]
 

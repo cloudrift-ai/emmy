@@ -20,16 +20,16 @@ from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import iter_leaves
 
-classic_forks = import_module("emmy.compiler.pipeline.passes.lowering.tile.040_schedule").classic_forks
+classic_forks = import_module("emmy.compiler.pipeline.passes.tile.schedule.040_schedule").classic_forks
 
 
 def _unmapped_tile(m: int, n: int, k: int = 64, dtype: str = "f16"):
     """The lifted, unscheduled ``TileOp`` for one ``m x k @ k x n`` matmul, knobs and all.
 
-    Lifting by hand rather than through ``lowering/tile`` lets the assertion below inspect the
+    Lifting by hand rather than through ``tile/lift`` lets the assertion below inspect the
     schedule-space stamp directly instead of inferring a collision from downstream symptoms.
     """
-    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op
+    from emmy.compiler.pipeline.passes.tile._fromloop import lift_loop_op
 
     g = Graph()
     g.add_node(InputOp(), [], Tensor("a", (Dim(m), Dim(k)), dtype=dtype), node_id="a")
@@ -88,7 +88,7 @@ def test_split_dim_store_does_not_share_an_identity() -> None:
     store boundary so a golden measured on one output layout is never handed to the other.
     """
     from emmy.commands.trace import graph_from_code
-    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op
+    from emmy.compiler.pipeline.passes.tile._fromloop import lift_loop_op
 
     matmul = "(torch.randn(128,64,dtype=torch.float16) @ torch.randn(64,128,dtype=torch.float16))"
     ctx = Context.from_target((12, 0))
@@ -126,7 +126,7 @@ def test_an_axis_renamed_twin_preserves_the_node_id_vocabulary() -> None:
     from emmy.compiler.ir.sigma import Sigma
     from emmy.compiler.ir.stmt.passes import rewrite
     from emmy.compiler.ir.tile.ir import TileOp
-    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op
+    from emmy.compiler.pipeline.passes.tile._fromloop import lift_loop_op
 
     norm = "(lambda t: t*torch.rsqrt((t.float()*t.float()).mean(-1,keepdim=True)+1e-6).to(t.dtype))"
     code = f"torch.nn.functional.linear({norm}(torch.randn(128, 256, dtype=torch.float16)), torch.randn(256, 256, dtype=torch.float16))"

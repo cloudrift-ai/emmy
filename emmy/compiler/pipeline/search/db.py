@@ -9,8 +9,11 @@ Tables (the DDL is the reference):
 - ``kernel`` — one row per compilable kernel, keyed by its EXACT identity (``identity_key(structural=False,
   with_io=True)``: the digest of the normalized body's form plus each buffer's dtype and hint-free shape).
   The clustered deploy identity (``identity_key(with_io=True)``, pointwise ops merged — the identity
-  golden receipts store) is beside it, with the kernel's Loop IR wire and its C name. A piece a cut or a
-  split minted is a row like any other, so the same kernel reached from two parents has one definition.
+  golden receipts store) is beside it, with the kernel's Loop IR wire (``wire.kernel_wire``: the body
+  it was formed from, which the lowering passes take back to the kernel — ``formed`` — or, for a piece
+  carved from a twisted tree, its derived body, which only its parent's program reaches) and its C name. A
+  piece a cut or a split minted is a row like any other, so the same kernel reached from two parents has
+  one definition.
 - ``kernel_feature`` — the kernel's ``S_*`` stamps, one per row: what the identity strategy writes onto a
   kernel at the fusion boundary, a function of the fused loop body it was lifted from. The structural
   signature deploy evidence joins and candidate pools group on is the digest of these rows, derived on
@@ -29,8 +32,8 @@ Tables (the DDL is the reference):
   all-or-nothing (:meth:`SearchDB.best_per_op_time`).
 - ``perf`` — one measurement per COMPILABLE kernel variant per context: the kernel, the sizes its symbolic
   dims were benched at (``bindings``, ``{}`` static), its schedule row, the statistics, ``captured``, a
-  ``bench_fail`` row's ``error`` and ``source`` (``measured``, or ``freeze:<digest>`` when imported). No
-  route rows, no whole-slice totals, no kernel-set verdicts.
+  ``bench_fail`` row's ``error`` and ``source`` (``measured``, or the golden file or freeze it was imported from,
+  ``golden:<digest>`` / ``freeze:<digest>``). No route rows, no whole-slice totals, no kernel-set verdicts.
 
 Readers see a FLAT :class:`PerfRow`: the context's columns, and ``knobs`` reassembled as the kernel's
 stamps, its exact identity as the ``I_kernel`` stamp and the schedule row, so the featurizer, the evidence
@@ -53,7 +56,8 @@ import fcntl
 import json
 import logging
 import sqlite3
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -133,13 +137,16 @@ class PerfRow:
 @dataclass(frozen=True)
 class KernelRow:
     """One ``kernel`` row with its stamps: the exact identity, the clustered deploy identity, the Loop IR
-    wire (what the identities digest), the C name, and the ``S_*`` dict."""
+    wire, the C name, the ``S_*`` dict, and whether the wire is the body the kernel was formed from
+    (``formed``: the lowering passes take it back to the kernel, identity and stamps alike) or the derived
+    body of a kernel formed from no loop op, which only its parent's program reaches."""
 
     exact_identity: str
     structural_identity: str
     loop_ir: dict
     name: str
     stamps: dict
+    formed: bool
 
 
 @dataclass(frozen=True)
@@ -159,7 +166,8 @@ _DDL = {
             exact_identity       TEXT PRIMARY KEY,
             structural_identity  TEXT NOT NULL,
             loop_ir              TEXT NOT NULL,
-            kernel_name          TEXT NOT NULL
+            kernel_name          TEXT NOT NULL,
+            formed               INTEGER NOT NULL
         )""",
     "kernel_feature": """
         CREATE TABLE kernel_feature (
@@ -235,7 +243,7 @@ _INDEXES = (
     "CREATE INDEX kernel_structural ON kernel (structural_identity)",
 )
 _COLS = {
-    "kernel": ("exact_identity", "structural_identity", "loop_ir", "kernel_name"),
+    "kernel": ("exact_identity", "structural_identity", "loop_ir", "kernel_name", "formed"),
     "kernel_feature": ("kernel", "name", "value"),
     "context": ("id", "backend", "gpu_name", "arch", "opt", "flags"),
     "schedule": ("id", "digest"),
@@ -263,6 +271,8 @@ _COLS = {
 }
 # Tables an older emmy wrote that nothing reads any more, dropped alongside the rest on a re-create.
 _OBSOLETE_TABLES = ("loop_op", "tile_op", "kernel_op", "cuda_op", "lowering", "kernel_set")
+#: The wire the ``kernel`` table's Loop IR is written in (``PRAGMA user_version``); a file holding another is re-created.
+_WIRE_VERSION = 1
 # Drop order respects the foreign keys; create order is the reverse.
 _DROP_ORDER = ("perf", "routing", "placement_knob", "placement", "schedule_knob", "schedule", "kernel_feature", "context", "kernel")
 
@@ -324,12 +334,22 @@ class SearchDB:
         # One process at a time opens the file. Several `emmy` commands opening one file within
         # milliseconds of each other (the suite's CLI subprocesses) would otherwise each see the tables
         # missing and collide on CREATE TABLE, and a fresh file cannot switch to WAL while another
-        # connection is mid-transaction. The lock beside the file is held for the open only.
-        with open(f"{path}.lock", "w") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        # connection is mid-transaction.
+        with self.exclusive():
             self._conn = sqlite3.connect(str(path), isolation_level=None, check_same_thread=False)
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._create_tables()
+
+    @contextmanager
+    def exclusive(self) -> Iterator[None]:
+        """One process at a time, through the lock beside the file (nothing to hold for an in-memory DB):
+        held for the open, and by ``golden.evidence`` for a golden import."""
+        if self._path is None:
+            yield
+            return
+        with open(f"{self._path}.lock", "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            yield
 
     def _create_tables(self) -> None:
         """The tables, created where missing; a file another emmy wrote is re-created empty."""
@@ -345,6 +365,7 @@ class SearchDB:
                 self._conn.execute(_DDL[table])
             for stmt in _INDEXES:
                 self._conn.execute(stmt)
+            self._conn.execute(f"PRAGMA user_version = {_WIRE_VERSION}")
         self._conn.execute("PRAGMA foreign_keys = ON")
 
     def _columns(self, table: str) -> set[str]:
@@ -354,9 +375,11 @@ class SearchDB:
     def _mismatched(self) -> bool:
         """Whether the file's tables are not exactly this DDL's: a table with other columns (a file another
         emmy wrote), or some of the tables without the rest (a creation that was interrupted, or an emmy one
-        table older) — either would fail on the first read of what is missing."""
+        table older), or a kernel wire another emmy spelled — any of them would fail on the first read."""
         present = {table: self._columns(table) for table in _COLS}
         if any(cols and cols != set(_COLS[table]) for table, cols in present.items()):
+            return True
+        if any(present.values()) and self._conn.execute("PRAGMA user_version").fetchone()[0] != _WIRE_VERSION:
             return True
         return 0 < sum(bool(cols) for cols in present.values()) < len(present)
 
@@ -395,21 +418,6 @@ class SearchDB:
             raise RuntimeError(f"{p}: tables written by another emmy — re-tune it, or `emmy dataset import --fresh` a dataset DB")
         self._conn.execute("PRAGMA foreign_keys = ON")
         return self
-
-    def _transaction(self, rows: Iterable, write) -> int:
-        """``write(row)`` for every row in ONE transaction — an import of thousands of rows on this
-        autocommit connection would otherwise pay one fsync per row. Returns the rows offered."""
-        n = 0
-        self._conn.execute("BEGIN")
-        try:
-            for row in rows:
-                write(row)
-                n += 1
-        except BaseException:
-            self._conn.execute("ROLLBACK")
-            raise
-        self._conn.execute("COMMIT")
-        return n
 
     # ------------------------------------------------------------------
     # The dimension tables: context, schedule, placement
@@ -470,8 +478,8 @@ class SearchDB:
         the one place a re-stamp under a new featurizer lands."""
         fresh = (
             self._conn.execute(
-                "INSERT OR IGNORE INTO kernel (exact_identity, structural_identity, loop_ir, kernel_name) VALUES (?, ?, ?, ?)",
-                (row.exact_identity, row.structural_identity, _wire_json(row.loop_ir), row.name),
+                "INSERT OR IGNORE INTO kernel (exact_identity, structural_identity, loop_ir, kernel_name, formed) VALUES (?, ?, ?, ?, ?)",
+                (row.exact_identity, row.structural_identity, _wire_json(row.loop_ir), row.name, int(row.formed)),
             ).rowcount
             == 1
         )
@@ -482,18 +490,15 @@ class SearchDB:
                 "INSERT INTO kernel_feature (kernel, name, value) VALUES (?, ?, ?)", [(row.exact_identity, k, v) for k, v in stamps.items()]
             )
 
-    def record_kernels(self, rows: Iterable[KernelRow]) -> int:
-        return self._transaction(rows, self.record_kernel)
-
     def kernel_names(self) -> dict[str, str]:
         """Every stored kernel's C name by exact identity — the per-kernel views' grouping key."""
         return dict(self._conn.execute("SELECT exact_identity, kernel_name FROM kernel"))
 
     def iter_kernels(self) -> Iterator[KernelRow]:
-        for exact, structural, loop_ir, name in self._conn.execute(
-            "SELECT exact_identity, structural_identity, loop_ir, kernel_name FROM kernel ORDER BY exact_identity"
+        for exact, structural, loop_ir, name, formed in self._conn.execute(
+            "SELECT exact_identity, structural_identity, loop_ir, kernel_name, formed FROM kernel ORDER BY exact_identity"
         ).fetchall():
-            yield KernelRow(exact, structural, json.loads(loop_ir), name, self._stamps(exact))
+            yield KernelRow(exact, structural, json.loads(loop_ir), name, self._stamps(exact), formed=bool(formed))
 
     # ------------------------------------------------------------------
     # Routing
@@ -511,9 +516,6 @@ class SearchDB:
             "INSERT INTO routing (parent, placement, position, child) VALUES (?, ?, ?, ?)",
             [(row.parent, pid, i, child) for i, child in enumerate(row.children)],
         )
-
-    def record_routings(self, rows: Iterable[RoutingRow]) -> int:
-        return self._transaction(rows, self.record_routing)
 
     def iter_routing(self) -> Iterator[RoutingRow]:
         rows = self._conn.execute("SELECT parent, placement, position, child FROM routing ORDER BY parent, placement, position").fetchall()
@@ -570,7 +572,7 @@ class SearchDB:
         )
 
     def record_perf_row(self, row: PerfRow) -> None:
-        """Upsert one measurement — a live one (:meth:`record_perf`) or an imported one. Keep-best-``ok``
+        """Upsert one measurement — a live one (:meth:`record_perf`) or a golden's. Keep-best-``ok``
         policy: a ``bench_fail`` never overwrites a prior ``ok`` row, and among same-semantics ``ok`` rows
         the lowest median wins. ``captured`` (CUDA-graph-captured, pure GPU time) adds a precedence axis:
         a captured measurement supersedes an uncaptured (wall-semantics) one regardless of median — the
@@ -617,9 +619,6 @@ class SearchDB:
                 row.source,
             ),
         )
-
-    def record_perf_rows(self, rows: Iterable[PerfRow]) -> int:
-        return self._transaction(rows, self.record_perf_row)
 
     # ------------------------------------------------------------------
     # Perf — read
@@ -703,7 +702,7 @@ class SearchDB:
         when it was cut again, so a nested cut prices through and no cut piece needs a row. A decision has no
         measurement of its own; this is its price wherever one is read (the tuner's reward, the deploy pick's
         ballot)."""
-        from emmy.compiler.loop_wire import symbolic_vars  # noqa: PLC0415
+        from emmy.compiler.wire import symbolic_vars  # noqa: PLC0415
 
         pieces: dict[int, list[tuple[str, str]]] = {}
         for pid, child, wire in self._conn.execute(

@@ -22,10 +22,9 @@ from emmy.compiler.ir.stmt import Assign, Load, Write
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.path import resolve
-from emmy.compiler.loop_wire import loop_graph_to_wire
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, TILE_PASSES, Match, Pipeline, Rule
 from emmy.compiler.pipeline.fork import Fork
-from emmy.compiler.pipeline.passes.lowering.tile._cut import (
+from emmy.compiler.pipeline.passes.tile._cut import (
     CutSite,
     _producer_order,
     _workspace_axes,
@@ -34,22 +33,15 @@ from emmy.compiler.pipeline.passes.lowering.tile._cut import (
     realize,
 )
 from emmy.compiler.pipeline.pipeline import RuleSkipped, Run, _is_structural_option
-from emmy.compiler.pipeline.search.golden import (
-    GoldenRecord,
-    _lifted_target,
-    _replay,
-    _target_kernel_nodes,
-    decode_record,
-    kernel_identity,
-    validate_golden_file,
-)
+from emmy.compiler.pipeline.search.golden import GoldenFile, GoldenRecord, Measurements, decode_record
+from emmy.compiler.pipeline.search.golden.decode import _replay
+from emmy.compiler.pipeline.search.golden.record import _lifted_target, _target_kernel_nodes
 from emmy.compiler.pipeline.search.pins import pinned_knobs
-from emmy.compiler.torch_wire import graph_to_wire
 from tests.compiler.helpers import case_target_tile, direct_classic_leaf, loop_record_fields, loop_target, requires_cuda
 from tests.compiler.terms import contraction, projection, reduction, slab
 
 _CTX = Context.from_target((12, 0))
-_CUT = import_module("emmy.compiler.pipeline.passes.lowering.tile.030_cut")
+_CUT = import_module("emmy.compiler.pipeline.passes.tile.cut.030_cut")
 
 
 def _input(graph: Graph, name: str, shape, dtype="f16") -> None:
@@ -65,14 +57,14 @@ def test_cut_and_schedule_passes_share_the_generic_schedule_driver() -> None:
 
 def test_placement_cut_preserves_a_cross_cta_split_receipt() -> None:
     """A split piece can re-enter placement; cutting it must not make REDUCE pending again."""
-    from emmy.compiler.pipeline.passes.lowering.tile._split import split_pending
+    from emmy.compiler.pipeline.passes.tile._split import split_pending
 
     graph = _computed_operand_graph("a")
     tile = graph.nodes["out"].op
     # The partition receipt is the reduce axis's window in the kernel's axis table; the term names it only.
     axes = tuple(replace(axis, window=Window(parent=axis, partition=True)) if axis.name == tile.op.axis else axis for axis in tile.axes)
     graph.nodes["out"].op = replace(tile, axes=axes)
-    pipeline = Pipeline.build(["lowering/tile"], select={"cut"})
+    pipeline = Pipeline.build(["tile/cut"])
     match = pipeline.match(graph, pipeline.passes[0].rules[0])[0]
     seams = cuttable_seams(match.root.op)
 
@@ -162,7 +154,7 @@ def _softmax_graph() -> Graph:
 
 def _offered(graph: Graph, *, frontend: bool = False) -> list[dict]:
     offered: list[dict] = []
-    passes = TILE_PASSES if frontend else ["lowering/tile"]
+    passes = TILE_PASSES if frontend else ["tile/cut"]
     select = None if frontend else {"cut"}
 
     def decide(fork):
@@ -201,7 +193,7 @@ def _case_match(case: str) -> tuple[Match, Graph]:
 
 
 def _nested_attention_cut(pins: dict[str, str]) -> Graph:
-    match, graph = _case_match("attention/rmsnorm-gqa-b-cut.yaml")
+    match, graph = _case_match("attention/rmsnorm-gqa-b-cut.json")
     with pinned_knobs(pins):
         result = _CUT.rewrite(match, graph.nodes[match.root_node_id])
     options = result if isinstance(result, list) else [result]
@@ -211,6 +203,24 @@ def _nested_attention_cut(pins: dict[str, str]) -> Graph:
 
 def _piece_with_seam(fragment: Graph):
     return next(node for node in fragment.nodes.values() if isinstance(node.op, TileOp) and cuttable_seams(node.op))
+
+
+def test_a_pipeline_that_stops_at_the_cut_pass_keeps_the_fused_tree_and_schedules_nothing(monkeypatch) -> None:
+    """``compile --passes dolfnstp``: a kernel-set arm is priced by scheduling its pieces, so a greedy
+    compile that never reaches ``tile/schedule`` must not price one. The offered state cut resolves to
+    the fused tree (pins alone could pick the cut), and no kernel comes out scheduled."""
+    from emmy.compiler.pipeline.search.db import SearchDB
+    from emmy.compiler.pipeline.search.policy import greedy as policy
+
+    def no_price(*_args, **_kwargs):
+        raise AssertionError("a pipeline without tile/schedule must not price an arm by scheduling its pieces")
+
+    monkeypatch.setattr(policy, "_price_kernel", no_price)
+    assert any(value == "cut" for offer in _offered(_softmax_graph(), frontend=True) for value in offer.values())
+    result = Pipeline.build([*LOOP_PASSES, "tile/lift", "tile/cut"]).run(_softmax_graph(), ctx=_CTX, db=SearchDB())
+    kernels = [node.op for node in result.nodes.values() if isinstance(node.op, TileOp)]
+    assert len(kernels) == 1
+    assert kernels[0].schedule is None
 
 
 def test_cut_workspace_retains_static_unit_axes() -> None:
@@ -320,7 +330,7 @@ def test_sdpa_score_cut_is_offered_and_pinned_cut_lowers() -> None:
 
 
 def test_recorded_sdpa_cut_decodes_exactly_and_stale_path_fails_loudly() -> None:
-    wire = graph_to_wire(_sdpa_graph())
+    wire = _sdpa_graph().to_wire()
     fields = {
         "name": "sdpa.route",
         "gpu_name": "",
@@ -418,7 +428,7 @@ def test_composed_scoped_place_pins_cut_together_and_foreign_pins_are_skipped() 
     seam and one consumer, with a producer reading another seam's workspace when its value nests
     inside it — while a pin whose site path exists on no kernel here is another kernel's and is
     skipped, never an error."""
-    match, graph = _case_match("attention/rmsnorm-qk-sdpa-composed-cut.yaml")
+    match, graph = _case_match("attention/rmsnorm-qk-sdpa-composed-cut.json")
     pins = {
         "PLACE@map.1/twist.1/inner.1/map": "cut",  # the normalized-Q cone
         "PLACE@map.1/twist.1/inner.2/map": "cut",  # the normalized-K cone
@@ -442,7 +452,7 @@ def test_composed_scoped_place_pins_cut_together_and_foreign_pins_are_skipped() 
 
 
 def test_bare_and_scoped_place_cuts_compose_in_one_decision() -> None:
-    match, graph = _case_match("attention/rmsnorm-qk-sdpa-composed-cut.yaml")
+    match, graph = _case_match("attention/rmsnorm-qk-sdpa-composed-cut.json")
     pins = {"PLACE": "cut", "PLACE@map.1/twist.1/inner.2/map": "cut"}
 
     with pinned_knobs(pins):
@@ -491,7 +501,7 @@ def _receipt_fields() -> dict:
         "compute_cap": (12, 0),
         "model": None,
         "program_index": 0,
-        "program_wire": graph_to_wire(_sdpa_graph()),
+        "program_wire": _sdpa_graph().to_wire(),
         **loop_record_fields(_sdpa_graph(), ["out"]),
         "bindings": (),
         "pins": (("PLACE@map.1/twist.1/inner", "cut"),),
@@ -517,7 +527,7 @@ def test_child_identity_receipts_decode_per_child_and_join_by_stored_identity() 
 
     receipt = GoldenRecord(knobs=dict(row_a), identity=id_a, **fields)
     assert decode_record(receipt) is None
-    assert kernel_identity(receipt) == id_a
+    assert receipt.kernel_identity == id_a
 
     sibling = GoldenRecord(knobs=dict(row_a), identity=id_b, **fields)
     reason = decode_record(sibling)
@@ -611,10 +621,10 @@ def test_child_identity_receipt_selects_one_kernel_from_multi_kernel_loop_target
     loop = Pipeline.build(LOOP_PASSES).run(graph.copy(), ctx=_CTX)
     fields = {
         **_receipt_fields(),
-        "program_wire": graph_to_wire(graph),
+        "program_wire": graph.to_wire(),
         "origins": (),
         "loop_index": 0,
-        "loop_wire": loop_graph_to_wire(loop),
+        "loop_wire": loop.to_wire(),
     }
     parent = GoldenRecord(knobs={}, **fields)
     with pytest.raises(ValueError, match="target lowers to 2 kernels"):
@@ -633,9 +643,9 @@ def test_import_files_each_row_under_the_kernel_it_decides(monkeypatch) -> None:
     piece inherits nothing from the kernel it replaced."""
     monkeypatch.setenv("EMMY_FAST_MATH", "0")
     from emmy.compiler.pipeline.search.db import SearchDB
-    from emmy.compiler.pipeline.search.golden_import import import_goldens
+    from emmy.compiler.pipeline.search.golden.evidence import import_goldens
 
-    fields = {**_receipt_fields(), "measurements": {"emmy_us": 1.0, "reference_us": 2.0, "reference_backend": "torch"}}
+    fields = {**_receipt_fields(), "measurements": Measurements(emmy_us=1.0, reference_us=2.0, reference_backend="torch")}
     route = {"PLACE@map.1/twist.1/inner": "cut"}
     routing = GoldenRecord(knobs=route, **{**fields, "pins": ()})
     parent = GoldenRecord(knobs={}, **fields)
@@ -675,16 +685,16 @@ def test_multi_output_kernel_record_derives_the_identity_its_live_fork_carries()
         **_receipt_fields(),
         "name": "fused.multi_output",
         "pins": (),
-        "program_wire": graph_to_wire(graph),
+        "program_wire": graph.to_wire(),
         "origins": (),
         "loop_index": 0,
-        "loop_wire": loop_graph_to_wire(loop),
+        "loop_wire": loop.to_wire(),
     }
     record = GoldenRecord(knobs={}, **fields)
     _lowered, nodes = _target_kernel_nodes(record)
     assert len(nodes) == 1 and len(nodes[0].outputs) == 2, "the fused target must be ONE kernel writing two buffers"
 
-    identity = kernel_identity(record)
+    identity = record.kernel_identity
     rows = _replay(record, exhaustive=True).rows
     assert identity in rows, "the derived identity names no kernel the live resolve offers"
     # The join is the subject; spelling one of that kernel's own rows shows the record decodes
@@ -696,7 +706,7 @@ def test_receipt_validation_requires_child_identity_and_place_pins_stay_live(mon
     monkeypatch.setenv("EMMY_FAST_MATH", "0")
     from types import SimpleNamespace
 
-    from emmy.compiler.pipeline.search.golden import regime_live
+    from emmy.compiler.pipeline.search.pins import regime_live
 
     fields = _receipt_fields()
     loops: list[dict] = []
@@ -715,9 +725,9 @@ def test_receipt_validation_requires_child_identity_and_place_pins_stay_live(mon
         ],
     }
     with pytest.raises(ValueError, match="child-identity schedule receipt"):
-        validate_golden_file(document)
+        GoldenFile.from_wire(document).check()
     document["configs"][0]["realizations"][0]["identity"] = "0" * 64
-    validate_golden_file(document)
+    GoldenFile.from_wire(document).check()
     receipt = SimpleNamespace(pin_map={"PLACE@map.1/twist.1/inner": "cut"})
     assert regime_live(receipt), "a receipt's routing pins are its route, never a dead env regime"
 
@@ -733,7 +743,7 @@ def test_pool_group_fuses_node_id_respellings_and_keys_on_pins() -> None:
         respelled.rename_node(nid, f"session2_{nid}")
     twin_fields = {
         **fields,
-        "program_wire": graph_to_wire(respelled),
+        "program_wire": respelled.to_wire(),
         **loop_record_fields(respelled, [f"session2_{o}" for o in fields["origins"]]),
     }
     a = GoldenRecord(knobs={}, **fields)
@@ -784,13 +794,13 @@ def _routing_record(knobs: dict, *, name: str = "sdpa.route") -> GoldenRecord:
         compute_cap=(12, 0),
         model=None,
         program_index=0,
-        program_wire=graph_to_wire(_sdpa_graph()),
+        program_wire=_sdpa_graph().to_wire(),
         **loop_record_fields(_sdpa_graph(), ["out"]),
         bindings=(),
         pins=(),
         knobs=knobs,
         identity=_sdpa_kernel_identity(),
-        measurements={"emmy_us": 1.0, "reference_us": 2.0, "reference_backend": "torch"},
+        measurements=Measurements(emmy_us=1.0, reference_us=2.0, reference_backend="torch"),
         ranking=None,
     )
 
@@ -803,7 +813,7 @@ def _deploy_kernels(records: list) -> list[str]:
     evidence in any nvcc regime: a golden row is scoped by the card and by its own input pins
     (``regime_live``), never by the optimization level the suite compiles at."""
     from emmy.compiler.pipeline.search.golden import records_override
-    from emmy.compiler.pipeline.search.golden_import import evidence_db
+    from emmy.compiler.pipeline.search.golden.evidence import evidence_db
     from emmy.compiler.pipeline.search.policy.greedy import greedy_decide
 
     ctx = Context.from_target((12, 0), gpu_name=_ROUTING_CARD)
@@ -861,7 +871,7 @@ def _cone_seam() -> CutSite:
 def test_alpha_equivalent_operand_cones_cluster_into_one_seam() -> None:
     """Two operand cones spelling the same value are ONE placement decision: the representative
     carries the other as a sibling with its capture correspondence."""
-    from emmy.compiler.pipeline.passes.lowering.tile._cut import _cluster_value_seams
+    from emmy.compiler.pipeline.passes.tile._cut import _cluster_value_seams
 
     same = [_cone_seam(), _cone_seam()]
 
@@ -870,7 +880,7 @@ def test_alpha_equivalent_operand_cones_cluster_into_one_seam() -> None:
 
 
 def test_a_multi_result_cone_does_not_materialize_its_own_dependency() -> None:
-    from emmy.compiler.pipeline.passes.lowering.tile._cut import _cluster_value_seams
+    from emmy.compiler.pipeline.passes.tile._cut import _cluster_value_seams
 
     norm = projection(body=(Load("x", "x", (Var("m"),)), Assign("norm", "rsqrt", ("x",))))
     maximum = reduction("k", (norm, slab("y", "y", "m", "k")), (Assign("amax__v", "multiply", ("norm", "y")),), ("amax",), "maximum")
@@ -884,15 +894,16 @@ def test_a_multi_result_cone_does_not_materialize_its_own_dependency() -> None:
     assert not any(seam.siblings for seam in clustered)
 
 
-def _norm_residual_graph() -> Graph:
+def _norm_residual_graph(m: int = 16) -> Graph:
     """``y = x @ w`` read twice: under the norm's statistic reduce and at the residual add — the
     shape of a fused decoder half, whose o_proj result feeds the post-attention norm and the
-    residual stream. Fusion keeps one definition; the lifted tree holds one cone per scope."""
+    residual stream. Fusion keeps one definition; the lifted tree holds one cone per scope. At
+    ``m == 1`` (decode) every workspace also carries the kernel's unit row axis."""
     from emmy.commands.trace import graph_from_code
 
     code = (
         "(lambda y: y * torch.rsqrt(y.pow(2).mean(-1, keepdim=True) + 1e-6) + y)"
-        "(torch.matmul(torch.randn(16, 64, dtype=torch.float16), torch.randn(64, 32, dtype=torch.float16)))"
+        f"(torch.matmul(torch.randn({m}, 64, dtype=torch.float16), torch.randn(64, 32, dtype=torch.float16)))"
     )
     return graph_from_code(code)[0]
 
@@ -900,31 +911,33 @@ def _norm_residual_graph() -> Graph:
 def _lifted_parent(graph: Graph) -> TileOp:
     """The one fused kernel of ``graph`` as the cut pass first sees it."""
     lowered = Pipeline.build(LOOP_PASSES).run(graph, ctx=_CTX)
-    lifted = Pipeline.build(["lowering/tile"], select={"lift", "twisted"}).run(lowered, ctx=_CTX)
+    lifted = Pipeline.build(["tile/lift"], select={"lift", "twisted"}).run(lowered, ctx=_CTX)
     (tile,) = [node.op for node in lifted.nodes.values() if isinstance(node.op, TileOp)]
     return tile
 
 
-def test_a_value_read_under_a_reduce_and_at_the_free_axis_is_one_seam() -> None:
+@pytest.mark.parametrize("m", [16, 1])
+def test_a_value_read_under_a_reduce_and_at_the_free_axis_is_one_seam(m: int) -> None:
     """The two copies of the contraction bind the hidden coordinate under different names (the
     reduce's own axis, the kernel's free axis) and their slab params may sit in another order, so
     their canonical forms differ; they are one value, and cutting it once must materialize it once
     with every occurrence reading the workspace."""
-    parent = _lifted_parent(_norm_residual_graph())
+    parent = _lifted_parent(_norm_residual_graph(m))
     contractions = [seam for seam in cuttable_seams(parent) if seam.node.as_contraction() is not None]
     assert len(contractions) == 1 and len(contractions[0].siblings) == 1, [seam.spelling for seam in cuttable_seams(parent)]
-    cut = _lower_cut(_norm_residual_graph(), contractions[0].spelling)
+    cut = _lower_cut(_norm_residual_graph(m), contractions[0].spelling)
     cuda = [node for node in cut.nodes.values() if type(node.op).__name__ == "CudaOp"]
     assert len(cuda) == 2
 
 
 @requires_cuda
-def test_a_clustered_value_cut_once_computes_the_right_answer() -> None:
-    graph = _norm_residual_graph()
+@pytest.mark.parametrize("m", [16, 1])
+def test_a_clustered_value_cut_once_computes_the_right_answer(m: int) -> None:
+    graph = _norm_residual_graph(m)
     (seam,) = [seam for seam in cuttable_seams(_lifted_parent(graph.copy())) if seam.node.as_contraction() is not None]
     cut = _lower_cut(graph, seam.spelling)
     rng = np.random.default_rng(0)
-    x = rng.standard_normal((16, 64)).astype(np.float16)
+    x = rng.standard_normal((m, 64)).astype(np.float16)
     w = rng.standard_normal((64, 32)).astype(np.float16)
     inputs = dict(zip(cut.inputs, (x, w), strict=True))
     (out_name,) = cut.outputs
@@ -934,6 +947,54 @@ def test_a_clustered_value_cut_once_computes_the_right_answer() -> None:
     np.testing.assert_allclose(got, expected, rtol=2e-2, atol=2e-1)
 
 
+def _column_seam(column, spelling: str) -> CutSite:
+    """A cone reading its weight at ``column``, an expression of the captured ``n``."""
+    node = projection((), (Load(name="w", input="w", index=(column, Var("k"))),), results=("w",))
+    return CutSite(node=node, spelling=spelling, axes=(Axis("n", 8), Axis("k", 8)), dtypes=(F16,))
+
+
+def test_copies_read_at_shifted_columns_cluster_onto_the_plain_read() -> None:
+    """RoPE's rotate-half reads one projection at its own column and at the two half-shifted ones:
+    one value at three addresses. The plain copy computes it, and each shifted copy reads its
+    workspace at the column expression it spelled."""
+    from emmy.compiler.ir.expr import Literal, TernaryExpr
+    from emmy.compiler.pipeline.passes.tile._cut import _cluster_value_seams
+
+    n, low = Var("n"), Var("n").lt(4)
+    lower = TernaryExpr(cond=low, if_true=Literal(0, "int"), if_false=n + Literal(-4, "int"))
+    upper = Literal(4, "int") + TernaryExpr(cond=low, if_true=n, if_false=Literal(0, "int"))
+    seams = [_column_seam(lower, "PLACE@map.1/inner"), _column_seam(upper, "PLACE@map.2/inner"), _column_seam(n, "PLACE@map.3/inner")]
+
+    (clustered,) = _cluster_value_seams(seams, (Axis("n", 8), Axis("k", 8)))
+
+    assert clustered.spelling == "PLACE@map.3/inner"
+    assert sorted(dict(pairs)["n"].pretty() for _, pairs, _ in clustered.siblings) == sorted((lower.pretty(), upper.pretty()))
+
+
+def test_a_column_read_past_the_plain_copy_is_not_its_value() -> None:
+    """A shifted read reaching past the plain copy's axis reads columns that copy never computes."""
+    from emmy.compiler.ir.expr import Literal
+    from emmy.compiler.pipeline.passes.tile._cut import _cluster_value_seams
+
+    seams = [_column_seam(Var("n") + Literal(4, "int"), "PLACE@map.1/inner"), _column_seam(Var("n"), "PLACE@map.2/inner")]
+
+    assert not any(seam.siblings for seam in _cluster_value_seams(seams, (Axis("n", 8), Axis("k", 8))))
+
+
+def test_a_conversion_to_the_dtype_a_workspace_stores_reads_the_workspace_itself() -> None:
+    """A reader's rounding of a value the workspace already stores rounded is a no-op copy; left in
+    place it keeps the edge a computed cone, which the chunk tier refuses for its streamed value."""
+    from emmy.compiler.dtype import F32
+    from emmy.compiler.pipeline.passes.tile._cut import _without_identity_casts
+
+    rounded = projection((slab("x", "ws", "m"),), (Assign(name="y", op="copy", args=("x",), dtype=F16),), ("y",))
+    root = projection((rounded,), (Assign(name="z", op="exp", args=("y",)),), ("z",))
+
+    kept = _without_identity_casts(root, {"ws": F16}).operands[0]
+    assert kept.as_slab() is not None and kept.exposes == ("y",)
+    assert _without_identity_casts(root, {"ws": F32}) is root
+
+
 def test_a_row_spelled_at_any_occurrence_of_a_clustered_value_names_its_cut() -> None:
     """The arm that cuts a clustered seam spells every occurrence, and a route recorded at one of
     them — a row from before the clustering, a pin at the copy a hand found — selects that arm."""
@@ -941,7 +1002,7 @@ def test_a_row_spelled_at_any_occurrence_of_a_clustered_value_names_its_cut() ->
 
     graph = _norm_residual_graph()
     lowered = Pipeline.build(LOOP_PASSES).run(graph, ctx=_CTX)
-    lifted = Pipeline.build(["lowering/tile"], select={"lift", "twisted"}).run(lowered, ctx=_CTX)
+    lifted = Pipeline.build(["tile/lift"], select={"lift", "twisted"}).run(lowered, ctx=_CTX)
     node = next(node for node in lifted.nodes.values() if isinstance(node.op, TileOp))
     (seam,) = [seam for seam in cuttable_seams(node.op) if seam.node.as_contraction() is not None]
     (alias,) = seam.aliases
@@ -1038,7 +1099,7 @@ def test_a_scalar_operand_is_no_seam() -> None:
 def test_every_seam_is_an_unpinned_arm() -> None:
     """The unpinned fork offers every cuttable seam as its own structural arm, spelled by the same
     key the pin path resolves."""
-    match, graph = _case_match("attention/rmsnorm-qk-sdpa-composed-cut.yaml")
+    match, graph = _case_match("attention/rmsnorm-qk-sdpa-composed-cut.json")
     node = next(node for node in graph.nodes.values() if isinstance(node.op, TileOp))
     options = _CUT.rewrite(match, node)
     arms = [dict(option.knobs) for option in options if "cut" in option.knobs.values()]
@@ -1081,7 +1142,7 @@ def test_disjoint_output_sweeps_offer_an_output_owning_seam() -> None:
     """The NVFP4 encode writes packed codes over the feature axis and one block scale per 16 of
     them. No axis rides both stores, so the fused kernel promotes nothing and its contractions get
     no output-axis pair. Each branch owns one store, and owning it is what gives the piece a grid."""
-    tile = case_target_tile("fused/nvfp4-gate-up-requant-place-cut.yaml")
+    tile = case_target_tile("fused/nvfp4-gate-up-requant-place-cut.json")
     owning = {seam.spelling: seam for seam in cuttable_seams(tile) if seam.owned is not None}
 
     assert set(owning) == {"PLACE@map.1/map", "PLACE@map.2/map"}
@@ -1094,7 +1155,7 @@ def test_output_owning_cut_leaves_single_output_pieces_that_promote() -> None:
     """Realizing it gives two kernels, each writing ONE of the kernel's own outputs — no workspace
     between them — and each binding the sweep its store rides as a grid axis. Rank two is what the
     contraction sites need to name an ``(m, n)`` pair at all."""
-    fragment = _realized("fused/nvfp4-gate-up-requant-place-cut.yaml", "PLACE@map.1/map")
+    fragment = _realized("fused/nvfp4-gate-up-requant-place-cut.json", "PLACE@map.1/map")
     pieces = [node for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
 
     assert len(pieces) == 2
@@ -1243,7 +1304,7 @@ def test_an_output_owning_cut_is_declined_where_no_piece_would_gain_a_grid_axis(
     """The same partition over a purely pointwise quantize: both branches own a store, but neither
     holds a contraction reading it, so promotion has nothing to lift and splitting would buy a
     second launch and no grid. The seams keep their workspace reading."""
-    tile = case_target_tile("fused/nvfp4-quantize-cut-shared-normalizer.yaml")
+    tile = case_target_tile("fused/nvfp4-quantize-cut-shared-normalizer.json")
 
     assert len(tile.output_specs) == 2
     assert all(seam.owned is None for seam in cuttable_seams(tile))
@@ -1252,7 +1313,7 @@ def test_an_output_owning_cut_is_declined_where_no_piece_would_gain_a_grid_axis(
 # ---- the full-projection cut --------------------------------------------------------------------- #
 
 #: The serving W4A4 MLP shape, whose requant projection owns more outputs than the binder can bind.
-_REQUANT = "fused/nvfp4-gate-up-requant-place-cut.yaml"
+_REQUANT = "fused/nvfp4-gate-up-requant-place-cut.json"
 
 
 def _cut_arms(graph: Graph, node) -> list:
@@ -1262,9 +1323,12 @@ def _cut_arms(graph: Graph, node) -> list:
 
 
 def _composed_arm(graph: Graph, node):
-    """The one arm whose knob row marks several seams ``cut``."""
-    composed = [(option, knobs) for option, knobs in _cut_arms(graph, node) if len(knobs) > 1]
-    assert len(composed) == 1, f"expected one composed arm, got {[sorted(knobs) for _, knobs in composed]}"
+    """The one arm that cuts the FULL projection: its knob row marks every owning seam ``cut``. A
+    clustered sibling seam (two alpha-equivalent operand cones, one decision) also spells several
+    seams, and is not this arm."""
+    owning = {seam.spelling for seam in cuttable_seams(node.op) if seam.owned is not None}
+    composed = [(option, knobs) for option, knobs in _cut_arms(graph, node) if len(knobs) > 1 and owning <= set(knobs)]
+    assert len(composed) == 1, f"expected one full-projection arm, got {[sorted(knobs) for _, knobs in composed]}"
     return composed[0]
 
 
@@ -1486,7 +1550,7 @@ def test_a_decision_consumes_the_key_that_spelled_it_on_import(monkeypatch) -> N
     one decision the recording took, not a cut at every piece that offers a seam."""
     monkeypatch.setenv("EMMY_FAST_MATH", "0")
     from emmy.compiler.pipeline.search.db import SearchDB
-    from emmy.compiler.pipeline.search.golden_import import import_goldens
+    from emmy.compiler.pipeline.search.golden.evidence import import_goldens
 
     db = SearchDB()
     counts = import_goldens(
@@ -1523,7 +1587,7 @@ def test_cut_piece_sweeps_the_axis_its_row_statistic_is_invariant_in() -> None:
     once per output cell, which is what a materialized q/k RoPE cone did — one cooperative block
     per element."""
     graph = _row_statistic_graph()
-    pipeline = Pipeline.build(["lowering/tile"], select={"cut"})
+    pipeline = Pipeline.build(["tile/cut"])
     match = pipeline.match(graph, pipeline.passes[0].rules[0])[0]
     seams = cuttable_seams(match.root.op)
 

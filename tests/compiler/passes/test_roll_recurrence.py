@@ -98,13 +98,80 @@ def _chunks(arrays: dict[str, np.ndarray]) -> np.ndarray:
 @pytest.mark.parametrize(("b", "t", "d", "chunk"), [(1, 6, 4, 2), (2, 16, 8, 4)])
 def test_the_rolled_kernel_matches_eager(b: int, t: int, d: int, chunk: int) -> None:
     graph, _, (module, _, _) = graph_from_code(_delta(b, t, d, chunk))
-    graph = Pipeline.build(["lowering/tile"], select=["lift"]).run(Pipeline.build(LOOP_PASSES).run(graph))
+    graph = Pipeline.build(["tile/lift"], select=["lift"]).run(Pipeline.build(LOOP_PASSES).run(graph))
     assert sum(bool(node.op.place.serial) for node in graph.nodes.values() if isinstance(node.op, TileOp)) == 1
 
     arrays = _run(graph)
 
     reference = module(*(torch.from_numpy(arrays[name]) for name in ("q", "k", "v", "g"))).numpy()
     np.testing.assert_allclose(_chunks(arrays), reference, rtol=1e-4, atol=1e-5)
+
+
+_SINKHORN = """
+import torch, torch.nn as nn
+class Sinkhorn(nn.Module):
+    # alternating row and column normalization, from a softmax rather than a zero state
+    def forward(self, scores):
+        x = torch.softmax(scores, dim=-1)
+        for _ in range({iters}):
+            x = x / x.sum(-1, keepdim=True)
+            x = x / x.sum(-2, keepdim=True)
+        return x
+m = Sinkhorn()
+m(torch.randn({n}, {r}, {c}))
+"""
+
+_PREFIX = """
+import torch, torch.nn as nn
+class Prefix(nn.Module):
+    # row k of the output is the sum of the first k + 1 rows of the input: an in-place chain whose
+    # masks and reduction extents grow by one each step
+    def forward(self, x):
+        out = torch.zeros({t}, {d})
+        for k in range({t}):
+            out = out.clone()
+            out[k] = x[:k + 1].sum(0)
+        return out
+m = Prefix()
+m(torch.randn({t}, {d}))
+"""
+
+
+def _lifted_output(code: str, *inputs: str) -> tuple[np.ndarray, np.ndarray]:
+    """The program's output through the rolled kernel, run as Loop IR after the lift, beside eager."""
+    graph, _, (module, _, _) = graph_from_code(code)
+    graph = Pipeline.build(["tile/lift"], select=["lift"]).run(Pipeline.build(LOOP_PASSES).run(graph))
+    assert sum(bool(node.op.place.serial) for node in graph.nodes.values() if isinstance(node.op, TileOp)) == 1
+    arrays = _run(graph)
+    reference = module(*(torch.from_numpy(arrays[name]) for name in inputs)).numpy()
+    (out,) = graph.outputs
+    return arrays[out].reshape(reference.shape), reference
+
+
+def test_a_recurrence_from_a_traced_state_with_alternating_steps_rolls_and_matches_eager() -> None:
+    """Sinkhorn: the state is the softmax rather than zeros, so the seed is a buffer the rolled
+    kernel reads before its first step, and a row step and a column step alternate, so the step
+    the chain repeats is two states long. Unrolled and fused, every step would re-derive every
+    earlier one through two reductions: the binding blowup the splicer's cap was written for."""
+    graph, _, _ = graph_from_code(_SINKHORN.format(iters=4, n=2, r=3, c=3))
+    (rolled,) = _carriers(Pipeline.build(LOOP_PASSES).run(graph))
+    (steps,) = (stmt for stmt in rolled.body if isinstance(stmt, Loop))
+    (carry,) = rolled.body.carries
+    assert steps.axis.extent.as_static() == 4 and isinstance(carry.seed, str), "four two-state steps from the softmax"
+
+    got, reference = _lifted_output(_SINKHORN.format(iters=4, n=2, r=3, c=3), "scores")
+    np.testing.assert_allclose(got, reference, rtol=1e-4, atol=1e-5)
+
+
+def test_a_chain_whose_masks_and_extents_grow_with_the_step_rolls_and_matches_eager() -> None:
+    """The step's mask bounds are literals that advance by one each step, and its reduction covers
+    one more row: the rolled loop runs at the widest extent and skips past each step's own bound."""
+    graph, _, _ = graph_from_code(_PREFIX.format(t=6, d=4))
+    (rolled,) = _carriers(Pipeline.build(LOOP_PASSES).run(graph))
+    assert any(isinstance(stmt, Loop) and stmt.carries for stmt in rolled.body)
+
+    got, reference = _lifted_output(_PREFIX.format(t=6, d=4), "x")
+    np.testing.assert_allclose(got, reference, rtol=1e-4, atol=1e-5)
 
 
 def test_steps_that_are_not_one_body_at_a_stride_do_not_roll() -> None:

@@ -176,10 +176,14 @@ class Loop(Stmt):
             size = 1
             for extent in extents:
                 size *= extent
-            seed = ctx.identity_literal(carry.seed, carry.dtype)
+            # The seed is a constant in every cell or a buffer of the state's shape, copied whole.
+            if isinstance(carry.seed, str):
+                seed = f"{carry.seed}, {carry.seed} + {size}"
+            else:
+                seed = f"{size}, {ctx.identity_literal(carry.seed, carry.dtype)}"
             for slot in (name, f"{name}{NEXT_STEP}"):
                 ctx.shapes[slot] = extents
-                out.append(f"{pad}std::vector<{ctx.type_name(carry.dtype)}> {slot}({size}, {seed});")
+                out.append(f"{pad}std::vector<{ctx.type_name(carry.dtype)}> {slot}({seed});")
             ctx.ssa_dtypes[name] = (carry.dtype or _F32).name
         for s in self.body:
             if isinstance(s, Accum) and s.name not in seen:
@@ -348,7 +352,8 @@ class StridedLoop(Stmt):
         )
 
     def binds_axes(self) -> frozenset[str]:
-        return frozenset({self.axis.name})
+        # An ``end`` override is hoisted into the for-init as ``<var>_end``, which the body may read.
+        return frozenset({self.axis.name, f"{self.axis.name}_end"} if self.end is not None else {self.axis.name})
 
     def exprs(self) -> tuple[Expr, ...]:
         out = (self.start, self.step) if isinstance(self.step, Expr) else (self.start,)

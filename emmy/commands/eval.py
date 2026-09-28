@@ -11,7 +11,7 @@ Five subcommands:
   The summaries are assembled by ``search/prior/report.py`` and rendered here; ``emmy fit``
   writes the same summaries into its ``metrics.json``, so a fit and an eval state the golden
   screen with one implementation rather than two that agree by coincidence.
-- ``eval golden``    — validate one canonical golden YAML against the pinned serving
+- ``eval golden``    — validate one canonical golden file against the pinned serving
   configuration and live GPU, then reproduce its rows and audit the exact serving matrix.
 - ``eval variants``  — per-kernel leaderboard of the tune DB's measured variants
   (fastest first) and the config the prior deploys marked + ranked.
@@ -126,9 +126,9 @@ def register_eval_command(subparsers) -> None:
 
     pg = sub.add_parser(
         "golden",
-        help="Validate one golden YAML against its pinned serving configuration and the live target GPU",
+        help="Validate one golden file against its pinned serving configuration and the live target GPU",
     )
-    pg.add_argument("--golden", required=True, metavar="PATH", help="The exact canonical golden YAML to validate.")
+    pg.add_argument("--golden", required=True, metavar="PATH", help="The exact canonical golden file to validate.")
     pg.add_argument(
         "--serving-config",
         required=True,
@@ -417,13 +417,7 @@ def handle_eval_golden(args) -> None:
     """Validate one file-scoped golden corpus against the pinned serving envelope."""
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden import (
-        # noqa: PLC0415,
-        GoldenFileValidation,
-        load_golden_file,
-        load_golden_records,
-        sole_evidence,
-    )
+    from emmy.compiler.pipeline.search.golden import GoldenFile, sole_evidence
     from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
     from emmy.serving.release import load_serving_config, model_matches  # noqa: PLC0415
     from emmy.serving.twins import capture_twin_graphs  # noqa: PLC0415
@@ -433,16 +427,16 @@ def handle_eval_golden(args) -> None:
         golden_path = Path(args.golden).resolve()
         if golden_path != serving.golden_file:
             raise ValueError(f"serving config names {serving.golden_file}, not {golden_path}")
-        document = load_golden_file(golden_path, validation=GoldenFileValidation.REPOSITORY)
-        records = load_golden_records(document)
+        document = GoldenFile.load(golden_path)
+        records = document.records()
         ctx = Context.probe()
     except (OSError, RuntimeError, ValueError) as exc:
         logger.error("golden evaluation setup failed: %s", exc)
         sys.exit(2)
 
-    cap = tuple(document["compute_cap"])
-    if document.get("gpu_name") != serving.gpu_name:
-        logger.error("golden GPU %r does not match serving config GPU %r", document.get("gpu_name"), serving.gpu_name)
+    cap = tuple(document.compute_cap)
+    if document.gpu_name != serving.gpu_name:
+        logger.error("golden GPU %r does not match serving config GPU %r", document.gpu_name, serving.gpu_name)
         sys.exit(1)
     if ctx.gpu_name != serving.gpu_name or tuple(ctx.compute_capability) != cap:
         logger.error(
@@ -461,14 +455,13 @@ def handle_eval_golden(args) -> None:
     from emmy.serving.twins import twin_width  # noqa: PLC0415
 
     missing = []
-    for config_index, config in enumerate(document["configs"]):
+    for config_index, entry in enumerate(document.configs):
         # A target's rows are the ones its twin reaches: a static twin is compiled at its own
         # width, a symbolic one for any width. The twin is the realization name's first field.
-        twin = config["realizations"][0]["name"].split(".", 1)[0]
+        twin = entry.realizations[0].name.split(".", 1)[0]
         expected = {(row.bindings, row.pins) for row in serving.realizations_for(twin_width(twin))}
         actual = {
-            (tuple(sorted(realization["bindings"].items())), tuple(sorted(realization["pins"].items())))
-            for realization in config["realizations"]
+            (tuple(sorted(realization.bindings.items())), tuple(sorted(realization.pins.items()))) for realization in entry.realizations
         }
         for bindings, pins in sorted(expected - actual, key=lambda item: (item[1], item[0])):
             missing.append((config_index, dict(bindings), pins))

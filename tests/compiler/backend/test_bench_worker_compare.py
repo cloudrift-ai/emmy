@@ -243,12 +243,10 @@ class _HangWorker:
     _CHILD = textwrap.dedent(
         """
         import emmy.compiler.backend.cuda._bench_worker as w
-        import cupy
+        import torch
         def _hang(req):
-            spin = cupy.RawKernel(r'extern "C" __global__ void spin(volatile int* f){ while(f[0]==0){} }', 'spin')
-            flag = cupy.zeros(1, dtype=cupy.int32)   # never set → infinite loop
-            spin((1,), (1,), (flag,))
-            cupy.cuda.runtime.deviceSynchronize()    # blocks forever on the hung kernel
+            torch.cuda._sleep(2**62)   # a spin kernel that outlives any wall budget
+            torch.cuda.synchronize()   # blocks on the hung kernel
             return {}
         w._run_job = _hang
         w.main()

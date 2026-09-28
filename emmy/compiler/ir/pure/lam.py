@@ -15,6 +15,7 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.stmt.base import pretty_body
 from emmy.compiler.ir.stmt.body import Body, _exposed_defines, free_names
 from emmy.compiler.ir.stmt.leaves import Assign, Load
+from emmy.compiler.wire import Wire
 
 
 def _canonical_body_order(body: Body) -> Body:
@@ -59,7 +60,7 @@ def _normalize_body(body: Body) -> Body:
 
 
 @dataclass(frozen=True)
-class Lambda:
+class Lambda(Wire):
     """Explicit binders over the REUSED stmt vocabulary — the ONE binder kind, common to every IR
     level. Not a second expression language: ``body`` is a :class:`Body` of PURE stmts only
     (A-normal form ≙ a let-chain), ``params`` the binders, ``results`` the returned defs

@@ -3,45 +3,21 @@
 A recorded row is evidence a deploy can use only while it still equals an enumerated leaf of its
 own target. Every repository golden — the model-agnostic hardware goldens and each recipe's model
 golden — is asked that ROW BY ROW, on the default lane, so the nodes scatter over the workers
-instead of queueing behind the widest file, and a failure names the row instead of a count. Rows
-that no longer decode are listed in ``golden_xfails.yaml`` and asked strictly, so the list can only
-shrink.
+instead of queueing behind the widest file, and a failure names the row instead of a count. There
+is no list of expected failures: a row that stops decoding, or a file whose stored targets stop being
+the fresh lowering, is red until ``emmy golden restamp`` rewrites the file, which needs no card.
 """
 
-import os
+import difflib
 from collections import Counter
 from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
-import yaml
 
 from emmy.compiler.pipeline.search import golden
-from emmy.compiler.pipeline.search.golden import (
-    _HARDWARE_GOLDENS_DIR,
-    _records_of,
-    _repository_golden_paths,
-    decode_record,
-    flush_identity_store,
-    scope_digest,
-    siblings_of,
-)
-
-#: The rows whose recorded schedule equals no enumerated leaf today, ``{file id: [row label]}`` (see
-#: :func:`_golden_id`).
-#: They are asked as STRICT xfails: closing one turns its node red until the line is deleted, which
-#: is what keeps the hole shrinking. Never add a line to make a red row green — a recorded row that
-#: stops decoding is a regression in the enumeration, and listing it enshrines that as the reference.
-#: Re-record the card's rows instead, or fix the compiler.
-_XFAILS_FILE = Path(__file__).parent / "golden_xfails.yaml"
-
-
-@pytest.fixture(scope="module", autouse=True)
-def _persist_derivations():
-    """Persist what this module derived once per worker rather than once per row: the memo is keyed
-    by compiler fingerprint and record content, so the next run re-derives only what changed."""
-    yield
-    flush_identity_store()
+from emmy.compiler.pipeline.search.golden import decode_record, scope_digest, siblings_of
+from emmy.compiler.pipeline.search.golden.repository import _RECORDS_DIR, _records_of, _repository_golden_paths
 
 
 def _decode(record, records) -> str | None:
@@ -66,25 +42,17 @@ def _labels(records) -> list[str]:
 
 def _golden_id(path: Path) -> str:
     """A golden file's id: its name for a hardware golden, ``<recipe>/<name>`` for a model golden."""
-    return path.name if path.parent == _HARDWARE_GOLDENS_DIR else f"{path.parent.parent.name}/{path.name}"
+    return path.name if path.parent == _RECORDS_DIR else f"{path.parent.parent.name}/{path.name}"
 
 
 def _row_parameters():
-    """One parameter per recorded row of every repository golden, plus one per registry line naming
-    a row the file no longer holds. The stale line carries NO xfail: marked, its own failure would be
-    the expected one and the dead entry would sit there forever."""
-    listed_by_file = yaml.safe_load(_XFAILS_FILE.read_text()) or {}
+    """One parameter per recorded row of every repository golden."""
     parameters = []
     with _repository_golden_paths() as paths:
         for path in sorted(paths, key=_golden_id):
             file_id = _golden_id(path)
-            labels = _labels(_records_of(path))
-            listed = set(listed_by_file.get(file_id, ()))
-            for label in labels:
-                marks = [pytest.mark.xfail(strict=True, reason="row equals no enumerated leaf")] if label in listed else []
-                parameters.append(pytest.param(path, label, id=f"{file_id}/{label}", marks=marks))
-            for stale in sorted(listed - set(labels)):
-                parameters.append(pytest.param(path, stale, id=f"{file_id}/{stale}"))
+            for label in _labels(_records_of(path)):
+                parameters.append(pytest.param(path, label, id=f"{file_id}/{label}"))
     return parameters
 
 
@@ -98,26 +66,24 @@ def test_recorded_row_decodes(path: Path, label: str) -> None:
     needed to re-record a stale row, not to detect one.
     """
     records = _records_of(path)
-    labels = _labels(records)
-    assert label in labels, f"{_XFAILS_FILE.name} lists {label!r}, which {path.name} no longer records"
-    record = records[labels.index(label)]
+    record = records[_labels(records).index(label)]
     assert (reason := _decode(record, records)) is None, reason
 
 
 def test_scope_digest_follows_the_cards_rows_only(tmp_path, monkeypatch) -> None:
     """The digest a serving pack keys on moves with the rows this card's compile reads and with nothing else: another
     card's file, or a file scope that names a different file."""
-    mine = tmp_path / "mine.yaml"
-    other = tmp_path / "other.yaml"
-    mine.write_text("gpu_name: NVIDIA H100 80GB HBM3\nrows: 1\n")
-    other.write_text("gpu_name: NVIDIA GeForce RTX 5090\nrows: 1\n")
-    monkeypatch.setattr(golden, "_repository_golden_paths", lambda: nullcontext([mine, other]))
+    mine = tmp_path / "mine.json"
+    other = tmp_path / "other.json"
+    mine.write_text('{"gpu_name": "NVIDIA H100 80GB HBM3",\n "rows": 1}\n')
+    other.write_text('{"gpu_name": "NVIDIA GeForce RTX 5090",\n "rows": 1}\n')
+    monkeypatch.setattr(golden.repository, "_repository_golden_paths", lambda: nullcontext([mine, other]))
     monkeypatch.delenv("EMMY_GOLDEN_FILE", raising=False)
     card = "NVIDIA H100 80GB"
     base = scope_digest(card)
-    other.write_text("gpu_name: NVIDIA GeForce RTX 5090\nrows: 2\n")
+    other.write_text('{"gpu_name": "NVIDIA GeForce RTX 5090",\n "rows": 2}\n')
     assert scope_digest(card) == base
-    mine.write_text("gpu_name: NVIDIA H100 80GB HBM3\nrows: 2\n")
+    mine.write_text('{"gpu_name": "NVIDIA H100 80GB HBM3",\n "rows": 2}\n')
     changed = scope_digest(card)
     assert changed != base
     monkeypatch.setenv("EMMY_GOLDEN_FILE", str(other))
@@ -141,7 +107,7 @@ def test_decode_ignores_off_anchors_but_not_a_decided_value() -> None:
 
     # The smallest target on the card, named rather than searched for: every assertion below decodes
     # the record again, so the row this stands on decides what the test costs.
-    records = _records_of(_HARDWARE_GOLDENS_DIR / "rtx5090_sm120.yaml")
+    records = _records_of(_RECORDS_DIR / "rtx5090_sm120.json")
     named = [r for r in records if r.name == "matmul.square.512" and any(v == "" for v in r.knobs.values())]
     record = next((r for r in named if _decode(r, records) is None), None)
     assert record is not None, "matmul.square.512 records no decoding row carrying an OFF anchor to compare against"
@@ -168,13 +134,11 @@ def test_a_pool_that_holds_the_recorded_row_is_not_walked_whole(monkeypatch) -> 
 
     from emmy.compiler.pipeline import fork
     from emmy.compiler.pipeline.knob import schedule_match_key
-    from emmy.compiler.pipeline.search import golden
-    from emmy.compiler.pipeline.search.golden import _replay, _unmatched_reason, piece_row, unmatched_reason
-
-    monkeypatch.setattr(golden, "_REPLAY_CACHE", {})
+    from emmy.compiler.pipeline.search.golden import piece_row, unmatched_reason
+    from emmy.compiler.pipeline.search.golden.decode import _replay, _unmatched_reason
 
     # The same smallest target the anchor test stands on: every assertion here replays it.
-    records = _records_of(_HARDWARE_GOLDENS_DIR / "rtx5090_sm120.yaml")
+    records = _records_of(_RECORDS_DIR / "rtx5090_sm120.json")
     record = next(r for r in records if r.name == "matmul.square.512" and _decode(r, records) is None)
     siblings = siblings_of(record, records)
 
@@ -207,7 +171,6 @@ def test_a_pool_that_holds_the_recorded_row_is_not_walked_whole(monkeypatch) -> 
     pairs = set().union(*(summary[1] for summary in miss.offered.values()))
     assert not miss.rows, "a miss retains no candidate rows"
     assert _unmatched_reason(absent, keys, pairs) == unmatched_reason(absent, full)
-    assert not golden._REPLAY_CACHE, "requested-row results cannot serve a different recording and must not accumulate"
 
     respelled = replace(record, knobs={**record.knobs, "WORK@missing": record.knobs["WORK"]})
     reason = _decode(respelled, records)
@@ -223,7 +186,7 @@ def test_a_row_with_only_an_invalid_offered_value_reports_a_semantic_miss() -> N
     """
     from dataclasses import replace
 
-    records = _records_of(_HARDWARE_GOLDENS_DIR / "rtx5090_sm120.yaml")
+    records = _records_of(_RECORDS_DIR / "rtx5090_sm120.json")
     record = next(r for r in records if r.name == "matmul.square.512" and _decode(r, records) is None)
     decided = next(key for key, value in record.knobs.items() if value not in ("", "0"))
     invalid = replace(record, knobs={decided: "not-a-real-value"})
@@ -240,11 +203,27 @@ def test_a_row_whose_every_site_is_re_spelled_still_gets_a_verdict() -> None:
     behind them, then indexed the pair it never filed."""
     from dataclasses import replace
 
-    records = _records_of(_HARDWARE_GOLDENS_DIR / "rtx5090_sm120.yaml")
+    records = _records_of(_RECORDS_DIR / "rtx5090_sm120.json")
     record = next(r for r in records if r.name == "matmul.square.512" and _decode(r, records) is None)
     respelled = replace(record, knobs={f"{key}@missing": value for key, value in record.knobs.items() if value not in ("", "0")})
     reason = _decode(respelled, records)
     assert reason is not None and "re-spelling" in reason and "@missing" in reason, reason
+
+
+def test_a_split_row_the_replay_cannot_take_decodes_red() -> None:
+    """A split row names no seam, so it used to decode whatever the replay did with it. Four atomic
+    split rows (two DeepSeek V4, one each Qwen3.8 AWQ and GPTQ) stayed green after #914 stored their
+    kernels' outputs at f16: the kernels took new identities and refuse the atomic arm, and no deploy
+    could take the rows. A spelling of an arm the kernel does not offer is the same miss."""
+    from dataclasses import replace
+
+    records = _records_of(_RECORDS_DIR / "rtx5090_sm120.json")
+    record = next(r for r in records if r.name == "attention.hd128.gqa.decode.split")
+    assert _decode(record, records) is None
+    (key, value), *_ = record.knobs.items()
+    atomic = replace(record, knobs={key: value.replace("k", "a")})  # a twisted carrier has no atomic arm
+    reason = _decode(atomic, records)
+    assert reason is not None and "taken at no fork" in reason and key in reason, reason
 
 
 def test_a_sibling_sharing_the_target_identity_cannot_silence_the_lead_cut() -> None:
@@ -257,13 +236,14 @@ def test_a_sibling_sharing_the_target_identity_cannot_silence_the_lead_cut() -> 
     from dataclasses import replace
 
     from emmy.compiler.pipeline.knob import schedule_match_key
-    from emmy.compiler.pipeline.search.golden import _replay, piece_row
+    from emmy.compiler.pipeline.search.golden import piece_row
+    from emmy.compiler.pipeline.search.golden.decode import _replay
 
     def decodes(record, siblings) -> bool:  # the replay itself: the decode's verdict is memoized per record
         wanted = schedule_match_key(piece_row(record.knobs))
         return any(_replay(record, siblings=siblings, exhaustive=True, wanted=wanted).rows.values())
 
-    golden = Path(__file__).parents[4] / "recipes" / "DeepSeek-V4-Flash-0731" / "golden" / "v100_sm70.yaml"
+    golden = Path(__file__).parents[4] / "recipes" / "DeepSeek-V4-Flash-0731" / "golden" / "v100_sm70.json"
     records = _records_of(golden)
     lead = next(r for r in records if r.name == "pre16.k_linear_mean_reduce_03c479.8caa25e24052.m16.dc6db94ec8ea.dc6db94ec8ea")
     siblings = siblings_of(lead, records)
@@ -274,58 +254,6 @@ def test_a_sibling_sharing_the_target_identity_cannot_silence_the_lead_cut() -> 
     impostor = replace(other, identity=lead.identity)
     beside = [lead, *(impostor if m is other else m for m in siblings if m is not receipt)]
     assert decodes(receipt, beside), "and beside a receipt stamped with the lead's identity"
-
-
-def test_compiler_fingerprint_ignores_mtime_so_two_checkouts_share_one_memo(tmp_path):
-    """Two byte-identical trees fingerprint alike however their mtimes differ.
-
-    The identity memo is one file per fingerprint, and every checkout of the same revision reads it:
-    an agent worktree beside the main tree, the re-exported host tree a serving container mounts.
-    Keyed by mtime those checkouts disagreed, so each discarded the other's derivations and the
-    next process re-derived every identity from scratch.
-    """
-    from emmy.compiler.pipeline.search.golden import _tree_fingerprint
-
-    first, second = tmp_path / "a", tmp_path / "b"
-    for root in (first, second):
-        (root / "pkg").mkdir(parents=True)
-        (root / "pkg" / "rule.py").write_text("VALUE = 1\n")
-    stamp = (1, 1)
-    os.utime(second / "pkg" / "rule.py", stamp)
-
-    assert _tree_fingerprint(first) == _tree_fingerprint(second)
-
-    # Same length and the SAME mtime as the equal case: only content differs, so a fingerprint that
-    # went back to hashing metadata would fail here instead of passing unnoticed.
-    (second / "pkg" / "rule.py").write_text("VALUE = 2\n")
-    os.utime(second / "pkg" / "rule.py", stamp)
-    assert _tree_fingerprint(first) != _tree_fingerprint(second)
-
-
-def test_a_flush_from_another_compiler_tree_keeps_this_trees_derivations(tmp_path, monkeypatch):
-    """Two compiler revisions sharing one cache directory each keep what they derived.
-
-    The memo was one file holding one fingerprint, so a process from any other tree replaced it
-    whole. On the serving host a one-row replay from an older tree, run between two boots of the
-    same tree, cost the second boot every replay the first had derived: 851 s, then 859 s.
-    """
-    from emmy import config
-    from emmy.compiler.pipeline.search import golden
-
-    monkeypatch.setattr(config, "_CACHE_ROOT", tmp_path)
-
-    def derive(fingerprint: str, key: str) -> dict:
-        monkeypatch.setattr(golden, "_compiler_fingerprint", lambda: fingerprint)
-        monkeypatch.setattr(golden, "_IDENTITY_STORE", None)
-        kept = dict(golden._identity_store()["entries"])
-        golden._identity_store()["entries"][key] = None
-        monkeypatch.setattr(golden, "_IDENTITY_STORE_DIRTY", True)
-        flush_identity_store()
-        return kept
-
-    derive("serving tree", "boot")
-    derive("another tree", "replay")
-    assert "boot" in derive("serving tree", "next boot")
 
 
 def test_a_red_row_says_which_of_the_three_kinds_of_churn_moved_it() -> None:
@@ -361,67 +289,84 @@ def test_the_narrowing_reading_outranks_the_respelling_one() -> None:
     assert "re-spelling" in both and "NARROWING" not in both
 
 
-#: The goldens whose stored targets no longer come out of a fresh lowering of their own programs,
-#: ``[file id]`` (see :func:`_golden_id`). Strict xfails, like the row list above: the line goes
-#: when the file is restamped.
-_LOWERING_XFAILS_FILE = Path(__file__).parent / "golden_lowering_xfails.yaml"
+def _kernel_parameters():
+    """One parameter per stored kernel of every repository golden, named by the first row that targets it."""
+    from emmy.compiler.pipeline.search.golden.repository import _document_of
+
+    parameters = []
+    with _repository_golden_paths() as paths:
+        for path in sorted(paths, key=_golden_id):
+            document, _ = _document_of(path)
+            for index in range(len(document.loops)):
+                name = next((entry.realizations[0].name for entry in document.configs if entry.target.loop == index), f"loop-{index}")
+                parameters.append(pytest.param(path, index, id=f"{_golden_id(path)}/{name}"))
+    return parameters
+
+
+@pytest.mark.parametrize(("path", "index"), _kernel_parameters())
+def test_stored_kernel_is_a_fixed_point_of_normalization(path: Path, index: int) -> None:
+    """A stored kernel must come back byte for byte from a decode: decoding builds a Loop op, whose
+    constructor normalizes the body, so a kernel that decodes to different wire is one the current
+    normalizer spells differently. A load keeps the pools as wires and never decodes, and this is
+    the premise that lets it: until ``emmy golden restamp`` rewrites such a kernel, every consumer
+    reads a body the compiler would not produce, and its rows are evidence for a kernel that does
+    not exist. Cheaper than the fresh-lowering test above, which lowers the whole program, and
+    narrower: it says whether the normalizer moved, not whether the lowering did."""
+    from emmy.compiler.graph import Graph
+    from emmy.compiler.pipeline.search.golden import kernel_pool_text
+    from emmy.compiler.pipeline.search.golden.repository import _document_of
+
+    document, _ = _document_of(path)
+    stored = document.loops[index]
+    rewritten = Graph.from_wire(stored).to_wire()
+    diff = difflib.unified_diff(
+        kernel_pool_text([stored]).splitlines(), kernel_pool_text([rewritten]).splitlines(), "stored", "normalized", lineterm=""
+    )
+    assert rewritten == stored, "\n".join(diff)
 
 
 def _golden_parameters():
-    listed = set(yaml.safe_load(_LOWERING_XFAILS_FILE.read_text()) or ())
     parameters = []
     with _repository_golden_paths() as paths:
         for path in sorted(paths, key=_golden_id):
             file_id = _golden_id(path)
-            marks = [pytest.mark.xfail(strict=True, reason="stored targets are not the fresh lowering")] if file_id in listed else []
-            parameters.append(pytest.param(path, id=file_id, marks=marks))
+            for index in sorted({record.program_index for record in _records_of(path)}):
+                parameters.append(pytest.param(path, index, id=f"{file_id}/program-{index}"))
     return parameters
 
 
-@pytest.mark.parametrize("path", _golden_parameters())
-def test_stored_targets_are_the_fresh_lowering(path: Path) -> None:
+@pytest.mark.parametrize(("path", "program"), _golden_parameters())
+def test_stored_targets_are_the_fresh_lowering(path: Path, program: int) -> None:
     """Every stored target of a repository golden must be a kernel the current compiler lowers the
-    golden's own traced program to — byte for byte.
+    golden's own traced program to — byte for byte: per traced program, ``emmy golden kernels PATH
+    --program N`` against ``emmy compile --golden PATH --program N --ir loop -o fresh.json``, restricted to
+    the targets the file stores (``emmy golden check``; ``emmy golden restamp`` is the fix).
 
     A golden's rows are evidence for the kernels its stored Loop IR names, and a deploy keys them by
     the kernels it lowers FRESH from the model. The decode test above replays the stored target, so
     it stays green when the two drift apart: after #863 the DeepSeek V4 V100 golden decoded row by
     row while serving lowered kernels no row of it described and the strict boot refused. Lowering
-    is the loop passes alone, GPU-free, so this holds on any machine; a file that fails needs a
-    restamp on the card that recorded it, not a card to detect it.
+    is the loop passes alone, GPU-free, so this holds on any machine; one node per program, so a
+    whole-layer trace costs its own minutes and nothing queues behind the widest file.
     """
-    from emmy.compiler import provenance
-    from emmy.compiler.context import Context
-    from emmy.compiler.ir.loop import LoopOp
-    from emmy.compiler.loop_wire import loop_graph_to_wire
-    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
-    from emmy.compiler.pipeline.search.golden import load_golden_file
-    from emmy.compiler.pipeline.search.slice import single_node_graph
-    from emmy.compiler.torch_wire import graph_from_wire
+    from emmy.compiler.pipeline.search.golden import kernel_pool_text
+    from emmy.compiler.pipeline.search.golden.repository import _document_of
+    from emmy.compiler.pipeline.search.restamp import fresh_kernel_digests, fresh_kernels, stale_reasons
 
-    document = load_golden_file(path)
-    ctx = Context.from_target(tuple(document["compute_cap"]), gpu_name=document.get("gpu_name"))
-    fresh: dict[int, dict[frozenset, dict]] = {}
-    for index in sorted({entry["program"] for entry in document["configs"]}):
-        graph = graph_from_wire(document["programs"][index])
-        for node in graph.nodes.values():
-            if node.hints.get("trace.materialize") and node.id not in graph.outputs:
-                graph.outputs.append(node.id)
-        for node in graph.nodes.values():
-            node.hints.remove(provenance.PROV)
-        provenance.seed(graph)
-        fused = Pipeline.build(LOOP_PASSES).run(graph, ctx=ctx)
-        kernel_ids = [nid for nid in fused.topological_order() if isinstance(fused.nodes[nid].op, LoopOp)]
-        kernels = (loop_graph_to_wire(single_node_graph(fused, nid)) for nid in kernel_ids)
-        fresh[index] = {frozenset(wire["outputs"]): wire for wire in kernels}
-    stale = []
-    for entry in document["configs"]:
-        stored = document["loops"][entry["target"]["loop"]]
-        wire = fresh[entry["program"]].get(frozenset(stored["outputs"]))
-        if wire != stored:
-            name = entry["realizations"][0]["name"] if entry.get("realizations") else f"loop {entry['target']['loop']}"
-            stale.append(f"{name}: " + ("no fresh kernel writes its outputs" if wire is None else "the fresh kernel's Loop IR differs"))
-    assert not stale, f"{len(stale)} of {len(document['configs'])} targets are not the fresh lowering:\n  " + "\n  ".join(stale[:12])
+    document, _ = _document_of(path)
+    stale = stale_reasons(document, program, fresh_kernel_digests(document, program))
+    if stale:
+        fresh = fresh_kernels(document, [program])[program]
+        stored = document.kernels(program)
+        matched = [fresh[frozenset(kernel["outputs"])] for kernel in stored if frozenset(kernel["outputs"]) in fresh]
+        diff = difflib.unified_diff(
+            kernel_pool_text(stored).splitlines(),
+            kernel_pool_text(matched).splitlines(),
+            f"emmy golden kernels {path} --program {program}",
+            f"emmy compile --golden {path} --program {program} --ir loop -o fresh.json",
+            lineterm="",
+        )
+        pytest.fail("targets not the fresh lowering:\n  " + "\n  ".join(stale) + "\n" + "\n".join(diff), pytrace=False)
 
 
 def test_a_stored_identity_the_compiler_re_keyed_is_refused() -> None:
@@ -432,7 +377,7 @@ def test_a_stored_identity_the_compiler_re_keyed_is_refused() -> None:
 
     from tests.compiler.realization import helpers as corpus
 
-    case = corpus.load_case(corpus.CASES_DIR / "fused/norm-linear-f16-scalar-reduce.yaml")
+    case = corpus.load_case(corpus.CASES_DIR / "fused/norm-linear-f16-scalar-reduce.json")
     record = case.record
     assert _decode(record, case.records) is None
     stale = replace(record, identity="0" * 64)

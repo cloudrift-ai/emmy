@@ -39,7 +39,7 @@ import numpy as np
 from emmy import config, emmy_runtime
 from emmy.compiler.backend import BenchmarkResult, LaunchTime, RunResult
 from emmy.compiler.backend.cuda import nvcc
-from emmy.compiler.backend.cuda.device import device
+from emmy.compiler.backend.cuda.device import device, torch_module
 from emmy.compiler.backend.plan import BufferSpec as _Buffer
 from emmy.compiler.backend.plan import ExecutionPlan, KernelSpec, apply_weight_loads, plan_from_graph, plan_to_dict
 from emmy.compiler.backend.plan import LaunchSpec as _Launch
@@ -226,16 +226,6 @@ def _resolve_symbolic(plan: ExecutionPlan, input_data: dict) -> dict[str, int]:
 # ---------------------------------------------------------------------------
 # Memory: torch tensors lent to the runtime, pooled across programs
 # ---------------------------------------------------------------------------
-
-
-def _torch():
-    """torch, or ``None`` when it is missing or sees no device — the runtime then allocates."""
-    try:
-        import torch  # noqa: PLC0415
-
-        return torch if torch.cuda.is_available() else None
-    except ImportError:
-        return None
 
 
 def _torch_dtype(np_dtype):
@@ -482,10 +472,11 @@ class CompiledProgram:
         already backed by a large enough tensor is kept (a rebind that grows nothing keeps every
         address); the arena pools everything but constants; a constant bound to a device tensor
         is that tensor."""
-        if _torch() is None:
+        if torch_module() is None:
             return None
         layout = self.program.layout(sym_values)
         regions: dict[str, tuple[int, int]] = {}
+        fresh = False
         for name, nbytes in layout["regions"].items():
             role, _, buffer = name.partition(":")
             src = input_data.get(buffer) if buffer else None
@@ -499,8 +490,13 @@ class CompiledProgram:
                 tensor = self._tensors.get(name)
                 if tensor is None or tensor.numel() < max(1, nbytes):
                     tensor = _new_backing(nbytes)
+            fresh |= tensor is not self._tensors.get(name)
             self._tensors[name] = tensor
             regions[name] = (tensor.data_ptr(), tensor.numel() * tensor.element_size())
+        if fresh:
+            # A new region's zero fill is queued on torch's stream, which the runtime's launches do not
+            # wait on: finish it first, or it can land after a kernel has written the region.
+            torch_module().cuda.current_stream().synchronize()
         return regions
 
     def rebind(self, input_data: dict) -> None:
@@ -537,7 +533,7 @@ class CompiledProgram:
         """:meth:`on_stream` for torch's current stream when torch sees the device, else a
         no-op — the bench and run paths, where peer torch work (the eager reference, the
         interleaved torch benches) must stay ordered with the program's launches."""
-        torch = _torch()
+        torch = torch_module()
         if torch is None:
             yield
             return
@@ -835,7 +831,7 @@ def benchmark_program(
 
     ``run_timeout_s`` bounds the iter loop on **accumulated GPU time**
     (sum of per-launch CUDA-event measurements), not wall-clock — so
-    Python/cupy framing overhead doesn't shrink the budget for tiny
+    Python framing overhead doesn't shrink the budget for tiny
     ops. Catches the gap left by the per-launch ``config.kernel_timeout_ms()``
     watchdog: a variant where every launch fits under the watchdog but
     summed across iters exceeds the budget (e.g. 999 ms × N iters).
@@ -1046,7 +1042,7 @@ class _AsyncBenchWorker:
     respond within ``wall_timeout_s``, the parent SIGKILLs it. The dirty CUDA stream
     (and any kernels still queued behind a hung launch) dies with the process, so the
     *next* bench starts on a clean device — fixing the "autotune hangs on the variant
-    AFTER a bench_fail" pathology. The worker imports cupy lazily on its first
+    AFTER a bench_fail" pathology. The worker loads the runtime lazily on its first
     request, so spawn cost is just Python startup (~0.2 s).
 
     Drives the ``_bench_worker`` protocol (``<8-byte LE length><pickle>``, both

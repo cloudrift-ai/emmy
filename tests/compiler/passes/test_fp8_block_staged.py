@@ -107,7 +107,7 @@ def test_the_seam_reads_the_group_maximum_as_a_per_chunk_statistic(tmp_path):
 
     graph, _, _ = _linear(tmp_path)
     with pinned_knobs({"PLACE": "fuse"}):
-        tiled = Pipeline.build([*LOOP_PASSES, "lowering/tile"]).run(graph, ctx=Context.from_target((12, 0)))
+        tiled = Pipeline.build([*LOOP_PASSES, "tile/lift", "tile/cut", "tile/schedule"]).run(graph, ctx=Context.from_target((12, 0)))
     tile = next(node.op for node in tiled.nodes.values() if isinstance(node.op, TileOp))
     node = next(site.node for site in tile.sites if site.node.as_contraction() is not None)
     _pro, cell, _stats, (chunk_pro, chunk_stats, block) = cone_seam(node.operands[0], node.axis, tile.axes)

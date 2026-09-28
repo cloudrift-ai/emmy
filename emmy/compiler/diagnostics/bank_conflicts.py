@@ -193,7 +193,7 @@ class BankDistribution:
     """Per-lane bank allocation for one warp evaluating one Load index.
 
     Pure layout output — no Stage / Load / Tile identifiers. The lowering
-    rules in ``compiler/pipeline/passes/lowering/tile`` consume the raw
+    rules in ``compiler/pipeline/passes/tile`` consume the raw
     fields directly to score candidate smem layouts.
     """
 

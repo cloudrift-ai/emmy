@@ -167,7 +167,7 @@ def test_every_buffer_the_term_touches_reaches_the_lowered_body() -> None:
 
 def test_iteration_variables_are_not_captures() -> None:
     """The dominant names in any cone are induction variables, bound by the enclosing nest."""
-    from emmy.compiler.pipeline.passes.lowering.tile._cut import _closed_at
+    from emmy.compiler.pipeline.passes.tile._cut import _closed_at
 
     cone = projection(
         (slab("e", "x", "m", "k"), slab("s", "w", "k")),
@@ -181,7 +181,7 @@ def test_iteration_variables_are_not_captures() -> None:
 def test_the_closure_predicate_reads_the_declaration() -> None:
     """``_external_reads`` is :attr:`Fold.free_axes` — asked of the term, not derived by lowering
     it and scanning the result."""
-    from emmy.compiler.pipeline.passes.lowering.tile._cut import _external_reads
+    from emmy.compiler.pipeline.passes.tile._cut import _external_reads
 
     assert _external_reads(_matmul()) == {"m", "n"}  # ``k`` is bound by the fold — not free above it
 
@@ -193,7 +193,7 @@ def test_a_sweep_with_a_projection_beside_a_nested_sweep_lifts() -> None:
     statement of the retained cell, and the boundary records its store under the axis path."""
     from emmy.compiler.ir.loop import LoopOp
     from emmy.compiler.ir.stmt import Write
-    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op
+    from emmy.compiler.pipeline.passes.tile._fromloop import lift_loop_op
 
     add = ElementwiseImpl("add")
     gate_total = Loop(
@@ -247,7 +247,7 @@ def test_a_reduce_under_an_output_sweep_lifts_to_an_operand_and_lowers_back_unde
     rather than a peeled free axis."""
     from emmy.compiler.ir.loop import LoopOp
     from emmy.compiler.ir.stmt import Write
-    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op
+    from emmy.compiler.pipeline.passes.tile._fromloop import lift_loop_op
 
     add = ElementwiseImpl("add")
     total = Loop(

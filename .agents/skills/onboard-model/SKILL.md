@@ -198,7 +198,7 @@ rank. When search finds no acceptable winner, measure a
 correct greedy fallback instead of dropping the target. Strip working `ranking` metadata and commit the resulting
 self-contained, fully verified document beside the model's recipe:
 
-`recipes/<model>/golden/<gpu-slug>_<compute-cap>.yaml`
+`recipes/<model>/golden/<gpu-slug>_<compute-cap>.json`
 
 Keep exactly one file per exact GPU model and compute capability. If the model has no recipe directory yet, create an
 `onboarding`/`untested` recipe shell first, preserving the discovery-managed lifecycle fields when they are known.
@@ -211,7 +211,7 @@ Validate it with repository-golden validation and lower every entry again from t
 Do not put a partially traced model in the recipe's `golden/` directory. Preserve a partial working inventory and its
 diagnostics only in the caller-supplied external output or an ignored task directory; do not commit them or create an
 experiment `RESULTS.md` unless the caller explicitly requests that exact evidence. If no path emits a target, do not
-invent an empty file. Trace incompleteness is the only model-coverage reason to omit the usual golden YAML; tuning
+invent an empty file. Trace incompleteness is the only model-coverage reason to omit the usual golden file; tuning
 failures must fall back to a correct measured configuration, and serving failures do not block a complete golden.
 
 ## 3b. Surface and record compiler realization gaps
@@ -221,7 +221,7 @@ a durable deliverable; a golden that is complete and verified can still be an or
 and say nothing, because the golden gate accepts `reference_backend: emmy-greedy`.
 
 1. After tuning, run one per-target torch comparison at deployable optimization:
-   `emmy run --golden <working.yaml> --bench --bench-backends eager,tcompile,emmy --strict --json <out>`.
+   `emmy run --golden <working.json> --bench --bench-backends eager,tcompile,emmy --strict --json <out>`.
    A bare `--golden PATH` walks every realization and benches each name's verified rows or tune winner; add
    `--realization NAME` to bench one row whatever its measurement state. Parse that record — it carries
    `record_knobs`, `status`, `flags` and `lane` per row. Never parse the terminal table. The clean rows it benches
@@ -234,15 +234,15 @@ and say nothing, because the golden gate accepts `reference_backend: emmy-greedy
    A schedule the compiler *correctly* refuses is not a gap at all.
 4. **Name the desired schedule with cited evidence.** Accept only a sibling card's golden carrying that family for the
    same structural identity, the same family already winning at a neighbouring binding, or an explicit roofline
-   argument. It becomes the case file's `# evidence:` line. Without this the corpus fills with speculation.
+   argument. It becomes the `evidence:` paragraph of the case file's `note`. Without this the corpus fills with
+   speculation.
 5. Minimize to the smallest snippet that reproduces the refusal, then write the case:
 
    ```bash
-   case=tests/compiler/realization/cases/<family>/<name>_xfail_<stage>.yaml
+   case=tests/compiler/realization/cases/<family>/<name>_xfail_<stage>.json
    emmy trace -c "<snippet>" --target sm_<cc> -o "$case"
-   cat >> "$case" <<'EOF'   # the knobs block, copied from run --json's record_knobs
-   EOF
-   make test-corpus-regen   # normalizes, stamps identity, re-prepends the comment block
+   # edit "$case": the realization's "knobs" from run --json's record_knobs, and "note": "evidence: ..."
+   make test-corpus-regen   # normalizes and stamps identity; the note stays
    ```
 
    Read `tests/compiler/realization/ARCHITECTURE.md` first — it owns what earns a case, the knob spelling rules, and
@@ -394,7 +394,7 @@ Also verify:
   golden whose every entry has paired positive O3/reference measurements and reconstructs and lowers on the requested
   compute capability, while a partial trace has no file under the recipe's `golden/` directory;
 - nightly verification is the checked-in golden gate: repository-validate and strictly decode every realization in
-  every `recipes/<model>/golden/*.yaml` file for the model, then run the file-scoped audit and exact pinned replay for
+  every `recipes/<model>/golden/*.json` file for the model, then run the file-scoped audit and exact pinned replay for
   the file matching this job's supplied GPU; nightly orchestration must schedule every recipe/GPU golden pair;
 - every reported tuning winner identifies its O1 ranking lane, and only repeated O3 rows are described as deployable;
 - when a serving recipe exists, at least one successful result for that exact recipe lane exists and the report embeds
@@ -409,7 +409,7 @@ Also verify:
   the archive contains the platform's records, no current-platform record remains at the experiment root, and other
   platform archives and report sections remain unchanged;
 - every new realization-corpus case reproduces the stage its filename names, `pytest tests/compiler/realization` is
-  green, `make test-corpus-regen` is a no-op, and every `_xfail_*` case carries an `# evidence:` line;
+  green, `make test-corpus-regen` is a no-op, and every `_xfail_*` case's note carries an `evidence:` paragraph;
 - no ignored dated run directory, loose benchmark output, or onboarding summary is staged;
 - tracked artifacts contain no credentials, absolute scratch paths, or VM identifiers;
 - deployed workloads are torn down and `docker logout` has run.
@@ -447,14 +447,14 @@ platforms or the ignored dated run directory.
   "artifacts": [
     "recipes/<model>/recipe.yaml",
     "recipes/<model>/RESULTS.md",
-    "recipes/<model>/golden/<gpu-slug>_<compute-cap>.yaml",
-    "tests/compiler/realization/cases/matmul/<name>_xfail_offered.yaml",
+    "recipes/<model>/golden/<gpu-slug>_<compute-cap>.json",
+    "tests/compiler/realization/cases/matmul/<name>_xfail_offered.json",
     "experiments/<model>/serving/recipe.yaml",
     "experiments/<model>/serving/RESULTS.md",
     "experiments/<model>/serving/results_<gpu-short>x<gpu-count>.tar.gz"
   ],
   "compiler_artifacts": [
-    "recipes/<model>/golden/<gpu-slug>_<compute-cap>.yaml"
+    "recipes/<model>/golden/<gpu-slug>_<compute-cap>.json"
   ],
   "experiment_artifacts": [
     "experiments/<model>/serving/recipe.yaml",
@@ -464,12 +464,12 @@ platforms or the ignored dated run directory.
   "report": "recipes/<model>/RESULTS.md",
   "compiler": {
     "coverage": "complete",
-    "golden": "recipes/<model>/golden/<gpu-slug>_<compute-cap>.yaml",
+    "golden": "recipes/<model>/golden/<gpu-slug>_<compute-cap>.json",
     "traced_targets": 42,
     "tuned_targets": 42,
     "blocked_paths": [],
     "realization_gaps": [
-      {"file": "tests/compiler/realization/cases/matmul/<name>_xfail_offered.yaml",
+      {"file": "tests/compiler/realization/cases/matmul/<name>_xfail_offered.json",
        "stage": "offered", "emmy_us": 30.81, "tcompile_us": 24.10}
     ]
   },

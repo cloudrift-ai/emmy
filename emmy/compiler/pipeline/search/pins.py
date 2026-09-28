@@ -4,18 +4,26 @@ from __future__ import annotations
 
 import contextlib
 import os
+from collections.abc import Mapping
+from typing import TYPE_CHECKING
 
 from emmy import config
-from emmy.compiler.ir.schedule import Level, Reduce, Work
+from emmy.compiler.ir.schedule import Level, Reduce, Tile, Work
 from emmy.compiler.ir.schedule.classic import CLASSIC_FAMILIES
+
+if TYPE_CHECKING:
+    from emmy.compiler.pipeline.search.golden import GoldenRecord
+
 from emmy.compiler.pipeline.knob import (
     KERNEL_DECISION_FAMILIES,
+    KnobType,
     axis_of,
     family_of,
     get,
     is_off_value,
     parse_knob_spec,
     pin_key_matches,
+    registry,
     values_equal,
 )
 
@@ -288,3 +296,73 @@ def pinned_knobs(knobs: dict):
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = previous
+
+
+# --- the regime a record was measured under --------------------------------------------------
+
+
+def fast_math_knobs(knobs: Mapping) -> bool:
+    """Whether recorded knobs select a precision-trading realization."""
+    from emmy.compiler.pipeline.search.space import FAST_EXP  # noqa: PLC0415
+
+    for key, value in knobs.items():
+        spelling = str(value)
+        if family_of(str(key)) == "TILE" and spelling:
+            try:
+                plan = Tile.parse(spelling, Work(kind="warp", units=(1, 1)))
+            except ValueError:
+                plan = None
+            if plan is not None and plan.is_warp and plan.atom.operand_dtype("c").nbytes == 2:
+                return True
+        if key == FAST_EXP.name and spelling.casefold() in {"true", "1", "yes", "on"}:
+            return True
+    return False
+
+
+def precision_trading_pins(pins: Mapping) -> bool:
+    """Whether recorded pins enable a precision-trading compiler or NVCC policy."""
+    from emmy.compiler.pipeline.search.space import FAST_MATH, PRECISION_KNOBS  # noqa: PLC0415
+
+    umbrella = bool(pins.get(FAST_MATH.name, False))
+    return umbrella or any(bool(pins.get(knob.name, False)) for knob in PRECISION_KNOBS if knob is not FAST_MATH)
+
+
+def pins_freeze_cut(pins: Mapping) -> bool:
+    """Whether the input pins freeze any placement cut (a ``PLACE…=cut`` pin) — the ONE spelling
+    of the predicate behind both the loader's receipt validation and :attr:`GoldenRecord.is_receipt`."""
+
+    return any(family_of(str(name)) == "PLACE" and str(value) == "cut" for name, value in pins.items())
+
+
+def regime_live(record: GoldenRecord) -> bool:
+    """Whether the record's input-pin regime IS the live one — exact per pin: a BOOL pin compares
+    against its effective precision policy (other BOOLs default off), anything else against the raw env
+    string. Strict BOTH ways: a record measured under FAST_MATH is no evidence for a standard
+    deploy, and a standard record none under a live precision-trading pin — the precision universe
+    (``space.PRECISION_KNOBS``, umbrella semantics per ``space.precision_pin``) is compared even for
+    pins the record omits (omitted = measured OFF). ``PLACE`` pins are the record's route, not a
+    regime."""
+    from emmy.compiler.pipeline.search.space import PRECISION_KNOBS, precision_pin  # noqa: PLC0415
+
+    precision = {knob.name for knob in PRECISION_KNOBS}
+    knobs = registry()
+    pins = record.pin_map
+    for name, value in pins.items():
+        if family_of(str(name)) == "PLACE":
+            continue
+        kn = knobs.get(str(name))
+        raw = kn.raw() if kn is not None else config.knob_raw(str(name))
+        if kn is not None and kn.type is KnobType.BOOL:
+            live = precision_pin(kn) if name in precision else kn.parse(raw) if raw is not None else False
+            if bool(value) != live:
+                return False
+        elif (raw or "") != str(value):
+            return False
+    umbrella = bool(pins.get("FAST_MATH", False))
+    for name in precision:
+        recorded = bool(pins.get(name, umbrella))
+        kn = knobs.get(name)
+        live = bool(precision_pin(kn)) if kn is not None else False
+        if recorded != live:
+            return False
+    return True

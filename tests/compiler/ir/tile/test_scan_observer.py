@@ -22,7 +22,7 @@ from emmy.compiler.ir.pure.twist import SOFTMAX, Twist
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.stmt.passes import rewrite
 from emmy.compiler.ir.tile import OutputSpec, extract_output_specs, observed_result_names
-from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop, lift_loop_op, scan_from_loop
+from emmy.compiler.pipeline.passes.tile._fromloop import fold_from_loop, lift_loop_op, scan_from_loop
 
 
 def _scan_loop(axis_name: str = "k", acc: str = "acc", out: str = "out") -> Loop:

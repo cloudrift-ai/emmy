@@ -55,17 +55,17 @@ write, since every row in it can be measured again, and refused by a reader.
 **The tables are checked, not the code.** `emmy dataset check` verifies that an instance's tables agree with
 themselves — every knob row's digest, every reference, every card, the two knob vocabularies — and counts the rows
 that fail. It does not re-derive what the compiler wrote: the tuning database is a cache, and a row the current code
-disagrees with is re-tuned or re-imported. The freeze is what travels between machines, and one written under another
-featurizer version refuses to load.
+disagrees with is re-tuned or re-imported. The freeze is what travels between machines.
 
 **A frozen snapshot makes a fit reproducible.** The tuning database is a live store — tuning runs keep writing into it
-— so a model fitted straight from it cannot be reproduced later. A freeze is a snapshot written as a directory of YAML
-files, one per card plus the kernel and kernel-set definitions, beside a manifest of content digests. Nothing is
-stored in feature form: the hardware description is rebuilt for the recorded card. Loading is strict — a missing
-file, a foreign manifest or a digest mismatch is an error — and freezing the same database twice produces
-byte-identical digests. A freeze checked into the repository is what `emmy dataset import` loads into the dataset
-database by default, which is what every evaluation reads; none is checked in at the moment, so a tuning database —
-from this machine or a rented card — is named on the command line instead.
+— so a model fitted straight from it cannot be reproduced later. A freeze is a snapshot written as a golden file per
+card: every kernel's definition — the loop body the compiler formed it from — and its measured schedule rows, each
+with the setting it was measured under and its median. Nothing the compiler computed is stored: no identity, no
+features. Importing a freeze re-lowers every kernel from its definition, so the dataset holds the current compiler's
+identities and features whatever compiler wrote the snapshot, and a compiler change is a re-import. Freezing the same
+database twice produces byte-identical files. A freeze checked into the repository is what `emmy dataset import`
+loads into the dataset database by default, which is what every evaluation reads; none is checked in at the moment,
+so a tuning database — from this machine or a rented card — is named on the command line instead.
 
 **Hand-run measurements are recorded too.** A `run --bench` that measured configurations with knob values forced by
 hand records each clean result through the tuner's own writer, so that manually found optima are not lost when the

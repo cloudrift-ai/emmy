@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 
 from emmy.compiler.dim import DEFAULT_SEQ_HINT, Dim, to_dim
 from emmy.compiler.ir.expr import Expr, Interval, Literal, SimplifyCtx
+from emmy.compiler.wire import Wire
 
 # Sentinel upper bound for a symbolic loop axis ``[0, hi]``. Only its ``lo = 0``
 # matters (gives the non-negativity the ``(i*c + …)//c → i`` div fold needs);
@@ -31,7 +32,7 @@ _SYMBOLIC_AXIS_HI = 1 << 30
 
 
 @dataclass(frozen=True)
-class Window:
+class Window(Wire):
     """The slice of a PARENT axis an axis walks — the ONE windowing vocabulary.
 
     ``parent`` is the pre-split axis this one was carved out of: top-level axes (the ones the
@@ -63,7 +64,7 @@ class Window:
 
 
 @dataclass(frozen=True)
-class Axis:
+class Axis(Wire):
     """One named iteration variable.
 
     Referenced from ``Expr`` subtrees by ``Var(name)``. ``extent`` is a

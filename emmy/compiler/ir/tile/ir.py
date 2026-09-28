@@ -4,7 +4,7 @@ One :class:`TileOp` is the article's reduction skeleton — ``project ∘ reduce
 scheduled but not yet bound to hardware threads. It sits between Loop IR (pure iteration) and
 Kernel IR (threads / smem):
 
-    Loop IR ──lowering/tile──▶ Tile IR ──lowering/kernel──▶ Kernel IR
+    Loop IR ──tile/*──▶ Tile IR ──lowering/kernel──▶ Kernel IR
 
 The whole point of the layer is the article's thesis: **the schedule is separate from the
 combine.** The combine is not defined here — it is the :class:`~emmy.compiler.ir.pure.fold.Fold`
@@ -205,7 +205,7 @@ def promoted_sweep(op, output_specs: tuple[OutputSpec, ...], *, free: tuple[Axis
       has an axis, a bare elementwise sweep stays a sweep — the kernel materializer distributes
       exactly that across a worker inventory (``_lane_close``, the close a cooperating reduce's
       projection takes), and binding it here would decide for the schedule that measured the
-      alternative (``cases/reduce/rms-norm-cut-sweep-work.yaml``: 885.9 us walked in one thread,
+      alternative (``cases/reduce/rms-norm-cut-sweep-work.json``: 885.9 us walked in one thread,
       4.2 us split across 512).
 
     The complement is what the reduce clause protects: a reduce that does NOT read the axis is the
@@ -220,7 +220,7 @@ def promoted_sweep(op, output_specs: tuple[OutputSpec, ...], *, free: tuple[Axis
     candidate piece, to decide whether peeling an output off a multi-output kernel would give that
     piece a grid pair the fused kernel cannot have. And the full-projection cut reads its refusal
     from the other side: a reduce this will not bind past is one that cut hands its own kernel
-    (both in ``lowering/tile/_cut.py``).
+    (both in ``tile/_cut.py``).
     """
     if not output_specs:
         return set()

@@ -24,7 +24,7 @@ evidence exists, because measured rows descend directly whatever the pool size.
 
 **Greedy is ranked by evidence and by nothing else.** Measured rows first —
 the reservoir, then the tune DB's rows, the golden rows in scope imported among them
-(``golden_import``), compared on µs alone — then the fitted prior; every measured row is a
+(``golden.evidence``), compared on µs alone — then the fitted prior; every measured row is a
 recording of something that ran. There is no hand-written step: no leaf is
 promoted, demoted, withheld or given a head start here, and no fallback
 default is chosen for being safe. Where nothing measured and no prior speaks
@@ -82,11 +82,11 @@ if TYPE_CHECKING:
 
 @lru_cache(maxsize=1)
 def _tile_pipeline():
-    """The ``lowering/tile``-only pipeline the structural price probes drive —
+    """The tile-passes-only pipeline the structural price probes drive —
     frozen and shareable, so one load serves every nested descent."""
-    from emmy.compiler.pipeline import Pipeline  # noqa: PLC0415
+    from emmy.compiler.pipeline import TILE_LOWERING, Pipeline  # noqa: PLC0415
 
-    return Pipeline.build(["lowering/tile"])
+    return Pipeline.build(TILE_LOWERING)
 
 
 def tile_identity(knobs: dict) -> frozenset:
@@ -283,7 +283,7 @@ def _price_kernel(
     deadline: float | None = None,
 ) -> float | None:
     """One kernel's price: a nested deterministic resolution of its
-    single-node slice through ``lowering/tile`` only (the schedule fork is
+    single-node slice through the ``tile/`` passes only (the schedule fork is
     where the prior prices a complete tile row; the kernel/cuda passes add
     nothing and cost real CPU), summed over the kernels that resolution ends
     with (:func:`_resolved_price`). ``db`` rides into the
@@ -392,7 +392,7 @@ def _priced_pick(
     ordinary ranking cannot featurize, not a rule about which leaf should win.
     Every leaf is priced the same way: the best µs at each kernel's partition
     fork, obtained by a nested deterministic resolution of the kernel's
-    single-node slice (``lowering/tile`` only, no backend, CPU-only —
+    single-node slice (the ``tile/`` passes only, no backend, CPU-only —
     :func:`_price_kernel`); a structural option's price is the Σ over its
     fragment's kernels. The nested pick follows the deploy evidence hierarchy
     (``db`` threads the tune DB down), so each side's price is a *measurement*
@@ -480,7 +480,7 @@ _EMPTY_MEASURED = _Measured({}, {})
 def _db_measured_index_build(db, ctx) -> _Measured:
     """Every measured row this compile may deploy, split into what ranks and what disqualifies: the
     DB's CUDA ``perf`` rows for this compile's regime — the tune's own and the golden rows in scope,
-    imported among them before the compile picks (``golden_import.evidence_db``); ``db`` may be
+    imported among them before the compile picks (``evidence.evidence_db``); ``db`` may be
     ``None`` on a probe that reads no evidence.
 
     Rows are indexed by their ``S_*`` structural signature (stringified values because perf knobs
@@ -662,9 +662,9 @@ def _route_candidates(fp: ForkPoint, index: _Measured, db) -> list[tuple[object,
     (:meth:`SearchDB.priced_arms`). The option is the cut pass's own offer; the pieces it mints
     are brand-new kernels whose own forks consult their own rows. A schedule fork has none."""
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
-    from emmy.compiler.loop_wire import kernel_bindings  # noqa: PLC0415
     from emmy.compiler.pipeline.pipeline import _structural_domain  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import spelled_arm  # noqa: PLC0415
+    from emmy.compiler.wire import kernel_bindings  # noqa: PLC0415
 
     root = fp.root_op
     if not isinstance(root, TileOp) or root.op is None or _schedule_fork(fp):

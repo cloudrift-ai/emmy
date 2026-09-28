@@ -1,7 +1,7 @@
 """Harmonized read-view over the measurement data: a DB instance's ``perf`` rows (filled by tuning and
-by ``emmy dataset import`` of the digest-pinned measurement freeze), the golden configs, and the
-online-prior reservoir — one :class:`Sample` row type, one :class:`Dataset` query surface, the cheap
-:class:`ShapeKey` structural identity, the freeze writer/loader (``freeze.py``, whose ``freeze_reason``
+by ``emmy dataset import`` of a measurement freeze, re-lowered from its kernel definitions), the golden
+configs, and the online-prior reservoir — one :class:`Sample` row type, one :class:`Dataset` query surface,
+the cheap :class:`ShapeKey` structural identity, the freeze writer (``freeze.py``, whose ``freeze_reason``
 is the one admission filter), and ``group.py``'s :class:`Group` — one candidate pool packed as a
 matrix plus one label per row, the candidate pools a ranking question is asked over, with
 :class:`GoldenGroup` the kind whose labels MARK the rows goldens verified and :class:`MeasuredGroup` the
@@ -16,19 +16,16 @@ their labels; deciding what a score MEANS is the layer above (guarded by
 from __future__ import annotations
 
 from emmy.compiler.pipeline.search.data.dataset import Dataset
-from emmy.compiler.pipeline.search.data.freeze import FREEZE_KIND, FREEZE_VER, freeze_reason, load_freeze, write_freeze
+from emmy.compiler.pipeline.search.data.freeze import freeze_reason, write_freeze
 from emmy.compiler.pipeline.search.data.sample import Sample, measured_features
 from emmy.compiler.pipeline.search.data.shape import ShapeKey, is_matmul, op_label
 
 __all__ = [
-    "FREEZE_KIND",
-    "FREEZE_VER",
     "Dataset",
     "Sample",
     "ShapeKey",
     "freeze_reason",
     "is_matmul",
-    "load_freeze",
     "measured_features",
     "op_label",
     "write_freeze",

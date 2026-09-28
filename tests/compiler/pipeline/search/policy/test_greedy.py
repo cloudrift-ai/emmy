@@ -427,7 +427,7 @@ def _cut_fork(db_ctx):
     """A placement fork on a real tile kernel: the fuse arm and one cut, the shape the cut pass offers."""
     from tests.compiler.helpers import case_target_tile
 
-    tile = case_target_tile("fused/norm-linear-f16-scalar-reduce.yaml")
+    tile = case_target_tile("fused/norm-linear-f16-scalar-reduce.json")
     fuse = DeferredFork(materialize=lambda: None, knobs={"PLACE": "fuse"})
     cut = DeferredFork(materialize=lambda: None, knobs={"PLACE@map.1/map": "cut"}, structural=True)
     return SimpleNamespace(options=[fuse, cut], node_id="node", root_op=tile, ctx=db_ctx), tile, fuse, cut
@@ -445,7 +445,8 @@ def test_a_stored_cut_is_priced_from_its_pieces_at_the_fork() -> None:
     point, tile, _fuse, cut = _cut_fork(ctx)
     parent = tile.identity_key(structural=False, with_io=True)
     db = SearchDB()
-    db.record_kernels([kernel_row(parent), kernel_row("c1"), kernel_row("c2")])
+    for row in (kernel_row(parent), kernel_row("c1"), kernel_row("c2")):
+        db.record_kernel(row)
     db.record_routing(RoutingRow(parent=parent, arm={"PLACE@map.1/map": "cut"}, children=("c1", "c2")))
 
     def measured(kernel: str, us: float, work: str = "w1x8") -> None:
@@ -471,7 +472,8 @@ def test_a_stored_composed_cut_is_offered_to_the_cut_pass() -> None:
     from tests.compiler.pipeline.search.helpers import kernel_row
 
     db = SearchDB()
-    db.record_kernels([kernel_row("p", stamps={"S_x": 1.0}), kernel_row("c1"), kernel_row("c2"), kernel_row("c3")])
+    for row in (kernel_row("p", stamps={"S_x": 1.0}), kernel_row("c1"), kernel_row("c2"), kernel_row("c3")):
+        db.record_kernel(row)
     db.record_routing(RoutingRow(parent="p", arm={"PLACE@a": "cut", "PLACE@b": "cut"}, children=("c1", "c2", "c3")))
     db.record_routing(RoutingRow(parent="p", arm={"PLACE@a": "cut"}, children=("c1", "c2")))
 

@@ -117,9 +117,9 @@ markers naming the pass and the rule:
 <<< f:020_merge_loop_ops
 ```
 
-The letter is the pass: `d` decomposition, `o` optimization, `l` lifting, `f` fusion, `s` stamping, `t` tile
-lowering, `k` kernel lowering, `c` CUDA lowering. Because the markers bracket each block, one pass or one rule can be
-sliced out of the output:
+The letter is the pass: `d` decomposition, `o` optimization, `l` lifting, `f` fusion, `n` canonicalization, `s`
+stamping, `t` tile lift, `p` kernel-set cuts, `h` scheduling, `k` kernel lowering, `c` CUDA lowering. Because the
+markers bracket each block, one pass or one rule can be sliced out of the output:
 
 ```bash
 emmy compile Qwen/Qwen3-Embedding-0.6B --layer 0 --target sm_89 -vv | awk '/^>>> f:/,/^<<< f:/'
@@ -130,6 +130,14 @@ runs a prefix of the pipeline, which is the quickest way to see what a stage rec
 
 ```bash
 emmy compile Qwen/Qwen3-Embedding-0.6B --layer 0 --target sm_89 --passes dolf --ir loop
+```
+
+Stopping after the cut pass shows the kernel sets a fused kernel offers without scheduling any of them. Choosing
+between cuts normally means scheduling every piece of every alternative, which is most of a compile's time; a
+pipeline that ends at `p` skips that, takes only the cuts a pin names, and prints the pieces unscheduled:
+
+```bash
+EMMY_PLACE=cut emmy compile Qwen/Qwen3-Embedding-0.6B --layer 0 --target sm_89 --passes dolfnstp --ir tile
 ```
 
 Next: [3. Forks and knobs](./03-forks-and-knobs.md).

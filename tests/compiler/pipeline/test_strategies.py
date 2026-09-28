@@ -151,7 +151,7 @@ def test_a_kernel_given_a_body_of_its_own_is_restamped_with_its_exact_identity()
     from emmy.compiler.pipeline import TILE_PASSES
     from tests.compiler.realization import helpers as corpus
 
-    case = corpus.load_case(corpus.CASES_DIR / "reduce/online-softmax-4x128.yaml")
+    case = corpus.load_case(corpus.CASES_DIR / "reduce/online-softmax-4x128.json")
     lowered = Pipeline.build(LOOP_PASSES).run(case.record.target_program.copy(), ctx=case.context())
     [loop] = [node.op for node in lowered.nodes.values() if isinstance(node.op, LoopOp)]
     assert loop.knobs["I_kernel"] == loop.identity_key(structural=False, with_io=True)

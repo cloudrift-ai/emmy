@@ -15,12 +15,12 @@ Graph (frontend ops)                        ── Layer 1
    │  pipeline/passes/loop/fusion
    ▼
 Graph[LoopOp]  (one LoopOp = one kernel)    ── Layer 2
-   │  pipeline/passes/lowering/tile         (Loop IR → Tile IR)
+   │  pipeline/passes/tile/{lift,cut,schedule}  (Loop IR → Tile IR)
    │  pipeline/passes/lowering/kernel       (Tile IR → Kernel IR)
    │  pipeline/passes/lowering/cuda         (Kernel IR → CUDA source)
    ▼
 Graph[CudaOp]                               ── Layer 3
-   │  backend/cuda                          (cupy.RawKernel via NVRTC)
+   │  backend/cuda                          (nvcc cubins, launched by the Rust runtime)
    ▼
 GPU
 ```
@@ -74,7 +74,7 @@ autotuning cache doesn't bust on cosmetic edits.
 | `ir/`                 | Op-type definitions per dialect         | `ir/ARCHITECTURE.md`         |
 | `trace/`              | PyTorch/HuggingFace → Graph IR          | `trace/ARCHITECTURE.md`      |
 | `pipeline/`           | Rewrite engine, passes, dump hooks      | `pipeline/ARCHITECTURE.md`   |
-| `pipeline/passes/lowering/tile/` | LoopOp → TileOp; **purely algebraic moveset, no specializations** (dispatch on fold algebra) | `pipeline/passes/ARCHITECTURE.md` |
+| `pipeline/passes/tile/` | LoopOp → TileOp; **purely algebraic moveset, no specializations** (dispatch on fold algebra) | `pipeline/passes/ARCHITECTURE.md` |
 | `backend/`            | Execution (numpy / loop / cuda)         | `backend/ARCHITECTURE.md`    |
 | `loader/`             | Bind constants (safetensors / `nn.Module` → `input_data`) | —              |
 | `pipeline/search/`    | Autotune DB + MCTS tree (see below)     | `pipeline/ARCHITECTURE.md`   |
@@ -339,4 +339,4 @@ of fusion merge order — the attention kernel is `k_sdpa_linear_reduce`, its QK
 Layout/plumbing origins (`_WEAK_KINDS`: transpose / reshape / unsqueeze / cat / slice) label a kernel only when no
 strong op is present — RoPE plumbing fused into attention doesn't pollute the name, while a standalone copy kernel
 still reads `k_cat_…` instead of the node-id fallback. Compiler dumps retain provenance-selected frontend slices in
-memory for tune benchmarking; stable persistence of those programs belongs exclusively to golden YAML.
+memory for tune benchmarking; stable persistence of those programs belongs exclusively to golden files.

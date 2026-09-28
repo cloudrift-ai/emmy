@@ -36,10 +36,9 @@ K32 = "mma_m16n8k32_e4m3_f32"
 def _tma_pins() -> tuple[str, ...]:
     """The TMA stage pins, only where the live device has TMA (sm_90+) — below it a TMA pin
     correctly resolves to gmem-direct, which is not the staged form under test."""
-    import cupy
+    import torch
 
-    cap = cupy.cuda.Device().compute_capability  # e.g. "89" / "120"
-    return ("d2/smem-tma",) if int(cap) >= 90 else ()
+    return ("d2/smem-tma",) if torch.cuda.get_device_capability() >= (9, 0) else ()
 
 
 def _node(*, a_dtype: DataType = F16, b_dtype: DataType = F8E4M3, m=512, n=4096, k=4096, b_trans=False):

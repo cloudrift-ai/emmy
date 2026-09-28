@@ -39,17 +39,18 @@ relevant `ARCHITECTURE.md` before answering.
 - `HF_TOKEN` environment variable for HuggingFace model downloads
 - `EMMY_DUMP_DIR` environment variable (optional) — when set, compiler stages dump intermediate debug artifacts
   (graphs, CUDA kernels, execution plans) to this directory. Frontend provenance slices used by `tune --bench` stay
-  in memory; stable Torch IR is persisted only inside golden YAML. Kernels are named after the operations they realize
+  in memory; stable Torch IR is persisted only inside golden files. Kernels are named after the operations they realize
   (`k_rms_norm`, `k_sdpa_reduce`).
 - `EMMY_FREEZE_DIR` environment variable (optional) — overrides the measurement freeze `emmy dataset import` loads
   into the dataset DB by default, the instance `emmy eval prior --dataset db` reads. Defaults to
-  `emmy/compiler/pipeline/search/freezes/`, where a digest-pinned, version-stamped snapshot that is identical on
-  every machine is checked in once a card has been collected — what makes a reported prior number reproducible. None
-  is checked in at the moment (the RTX 5090 is re-collected through the `perf` writer); until then name a tune DB on
-  the `emmy dataset import` command line. The tune DB and the online reservoir are machine-local and mutable; reach
-  them with `--db` when you want one machine's data, not as the default. A freeze's payload YAML is tracked in
-  **git LFS**; its manifest is plain git so provenance stays diffable. Re-freeze with `emmy dataset freeze`; `emmy
-  dataset check` counts the rows of an instance whose tables disagree with themselves.
+  `emmy/compiler/pipeline/search/freezes/`, where a snapshot that is identical on every machine is checked in once a
+  card has been collected — what makes a reported prior number reproducible. A freeze is a golden file per card:
+  each kernel's definition (its Loop IR body) and its measured schedule rows, nothing the compiler computed, so the
+  import re-lowers every kernel and a compiler change is a re-import, never a re-collection. None is checked in at
+  the moment (the RTX 5090 is re-collected through the `perf` writer); until then name a tune DB on the `emmy dataset
+  import` command line. The tune DB and the online reservoir are machine-local and mutable; reach them with `--db`
+  when you want one machine's data, not as the default. The freeze's files are tracked in **git LFS**. Re-freeze with
+  `emmy dataset freeze`; `emmy dataset check` counts the rows of an instance whose tables disagree with themselves.
 - `EMMY_DATASET_DB` environment variable (optional) — overrides the dataset DB path (`~/.cache/emmy/dataset.db`):
   the tune DB's tables in a file of their own, filled by `emmy dataset import` and read by the measurement-data
   readers, never by a compile.
@@ -71,6 +72,21 @@ All `EMMY_*` config env vars are read and written through one module — `emmy/c
 `compiler/pipeline/knob.py`; provider/secret vars stay with `emmy/redact.py`). CLI `--flag` overrides (e.g.
 `--nvcc-flags`) resolve through `config.py` inside the library, not the command layer, so programmatic callers and tests
 get the same precedence. `config.py` is the source of truth for the full var list — do not maintain a copy here.
+
+## Compiler Invariant: Loop Fusion Is Maximal
+
+Loop fusion merges every structurally legal region, to fixpoint, and nothing else. Kernel boundaries come later, from
+cuts (`030_cut`), picked by evidence. No one can know before measuring that a merge is a bad decision, and the maximal
+region is what keeps every kernel variant open to try.
+
+- **Never add a fusion gate.** No size, cost, recompute, schedulability, recognizer or speed bound on a merge; no
+  retained early boundary; no "fusion should not merge X" rule. This holds for code, plans, reviews and proposals to
+  the user.
+- **A slow or unschedulable fused kernel is a cut or lowering problem.** Fix it with a cut that removes the duplicated
+  work, a schedule, or lowering coverage.
+- **A region the splicer cannot build is a compiler bug to raise,** never a smaller region.
+
+The passes `ARCHITECTURE.md` owns the design; `tests/compiler/passes/test_maximal_fusion.py` guards it.
 
 ## Running Tests
 
@@ -100,11 +116,15 @@ one compile regime everywhere in the repo.
 
 The default suite strictly decodes every repository golden row by row — the model-agnostic hardware goldens and each
 recipe's model golden: one test node per recorded row, so the work scatters over the xdist workers and a failure names
-the row. Decoding replays each row at its declared capability, so a stale row is detectable on any machine;
-re-recording it is what needs the card. Rows that no longer decode are listed as strict xfails in
-`tests/compiler/pipeline/search/golden_xfails.yaml`, which only ever shrinks — closing a row turns its node red until
-the line is deleted. Never add a line to make a red row green. The nightly `onboard-model` workflow still owns a model
-golden's exact-GPU replay.
+the row. Decoding replays each row at its declared capability, so a stale row is detectable on any machine. The suite
+also asks every golden whether its stored targets are still what the current compiler lowers the golden's own programs
+to (`emmy golden check`); a file that is not is stale: its rows decode, yet a deploy builds kernels none of them
+describe. Neither check has a list of expected failures. The fix for both is `emmy golden restamp PATH`, GPU-free:
+targets take the fresh Loop IR, rows are re-keyed, a row measured on a kernel that now renders differently keeps its
+schedule and loses its microseconds (a proposal, no evidence until a record run on the card measures it again), a row
+that no longer decodes is dropped. The `refresh-golden` skill owns the whole flow, including the record run and the
+delete-or-re-record decision. Never re-record a row to make a red node green. The nightly `onboard-model` workflow
+still owns a model golden's exact-GPU replay.
 
 When running a large subset (e.g. `tests/compiler/`), pass the same `-n auto --dist=loadgroup` flags `make test` uses to
 parallelize (add `-p no:randomly` for a stable order):
@@ -171,11 +191,12 @@ it before answering any CLI-flag question. Quickstart for the common paths:
 | `emmy bench recipes/* [--filter KEY=PATTERN] [--no-teardown]` | deploy + benchmark + teardown across cloud VMs; `teardown <run_dir>` cleans up afterwards |
 | `emmy vm create gpu --gpu NAME --gpu-count N` | provision a GPU VM by name (also `vm create/delete {gcp,cloudrift}`) |
 | `emmy serve <model> [--generate] [--bench] [vllm flags…]` | serve via vLLM, or opt into native text serving with `--generate --native` |
-| `emmy compile <model_or_ir> [--layer N] [--ir STAGE] [--dynamic …] [--target sm_NN]` | trace + run the compiler; print or save any IR stage |
+| `emmy compile <model_or_ir> [--layer N] [--ir STAGE] [--dynamic …] [--target sm_NN]`, `emmy compile --golden PATH --program N --ir loop -o fresh.json` | trace + run the compiler; print or save any IR stage; lower a golden's stored program and write the stage as the golden's wire |
 | `emmy run <model_or_ir_or_--code> [--bench]` | compile + execute on the CUDA backend, check accuracy, optionally bench vs eager / `torch.compile` |
 | `emmy tune <target> [--bench] [--gpus N]` | two-level autotune; writes the online prior + tune DB |
 | `emmy eval {knobs,prior,golden,variants,failures} [--dataset {golden,db}]` | inspect the priors / tune DB |
-| `emmy dataset {import,freeze,check} …` | fill the dataset DB from measurement freezes and tune DBs; snapshot a DB into a freeze; check a DB's tables agree with themselves |
+| `emmy golden {check,restamp} [PATH…]`, `emmy golden kernels PATH [--program N]` | name the stored targets a fresh lowering of a golden's programs no longer writes; rewrite the golden onto that lowering (every repository golden by default); print the Loop IR pool a golden stores |
+| `emmy dataset {import,freeze,check} …` | fill the dataset DB from measurement freezes, golden files and tune DBs, every kernel re-lowered; snapshot a DB into a freeze; check a DB's tables agree with themselves |
 | `emmy {pull,trace,generate,inspect,compare} …` | model download, IR tracing, the naive generation oracle, IR inspection, dump diffing |
 
 Quick test models / scripts (for local iteration):
@@ -205,8 +226,8 @@ Quick test models / scripts (for local iteration):
   change (`make test` detects the staleness on any machine; this applies the fix)
 - `make test-durations` — re-measure `tests/durations.json`, the checked-in per-test timings the suite balances its
   xdist workers on; commit the result when the balance has drifted
-- `make lint` — run `ruff check` and `ruff format --check`
-- `make format` — auto-format code and fix lint violations
+- `make lint` — run `ruff check`, `ruff format --check`, and check test-duration formatting
+- `make format` — auto-format code, fix lint violations, and sort test durations without re-measuring
 - `make bench` — run benchmarks (`emmy bench recipes/*`)
 - `make bench-kernels` — run per-kernel perf comparison vs PyTorch (`tests/perf/`, requires CUDA)
 - `make wheel` — build the wheel into `dist/` (stages the bundled recipes first; see the Release section of
@@ -321,8 +342,9 @@ Then update the documentation:
 Then run the gates, in this order, after every edit above is in:
 
 22. **Run the full suite**: `make test` — fix any failures. If a realization case comes back stale, `make
-    test-corpus-regen` applies the fix. If golden rows go red, name the change that did it in the PR body — do **not**
-    re-record them to make it green, which enshrines the regression as the new reference.
+    test-corpus-regen` applies the fix; if a golden's stored targets stop being the fresh lowering, `emmy golden
+    restamp` applies that one (the `refresh-golden` skill). If golden rows go red, name the change that did it in the
+    PR body — do **not** re-record them to make it green, which enshrines the regression as the new reference.
 23. **Record the durations of every test this change ADDS that takes over half a second.** `make test` fails at
     session end when a test at or over 5 s is missing from `tests/durations.json`, because CI buckets its xdist
     workers on that file and plans around a hole. Record well BELOW that bar: the gate reads the runner's clock,

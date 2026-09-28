@@ -24,8 +24,8 @@ from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tensor.ir import ReduceOp
 from emmy.compiler.pipeline import TILE_PASSES, Pipeline
-from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams
-from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op
+from emmy.compiler.pipeline.passes.tile._cut import cuttable_seams
+from emmy.compiler.pipeline.passes.tile._fromloop import lift_loop_op
 from tests.compiler.terms import contraction
 
 
@@ -46,7 +46,7 @@ def _tile(body: Body):
     graph = Graph()
     graph.add_node(LoopOp(body=body), [], Tensor("out", (1,)), node_id="out")
     graph.outputs = ["out"]
-    return Pipeline.build(["lowering/tile"], select=["lift"]).run(graph).nodes["out"].op
+    return Pipeline.build(["tile/lift"], select=["lift"]).run(graph).nodes["out"].op
 
 
 def _matmul_body(epilogue=(), k_extent: int = 128) -> Body:
@@ -416,7 +416,7 @@ def test_multi_pass_cell_defines_every_name_before_it_is_read() -> None:
         "torch.randn(1, 1, 8, 4, dtype=torch.float16))"
     )
     graph = Pipeline.build(LOOP_PASSES).run(graph)
-    graph = Pipeline.build(["lowering/tile"], select=["lift"]).run(graph)
+    graph = Pipeline.build(["tile/lift"], select=["lift"]).run(graph)
     tiles = [node.op for node in graph.nodes.values() if isinstance(node.op, TileOp)]
     assert tiles, "SDPA produced no Tile IR"
 
@@ -441,7 +441,7 @@ def _tile_with_shapes(body: Body, out_shape: tuple, inputs: dict) -> object:
         graph.add_node(InputOp(), [], Tensor(name, shape), node_id=name)
     graph.add_node(LoopOp(body=body), list(inputs), Tensor("out", out_shape), node_id="out")
     graph.outputs = ["out"]
-    return Pipeline.build(["lowering/tile"], select=["lift"]).run(graph).nodes["out"].op
+    return Pipeline.build(["tile/lift"], select=["lift"]).run(graph).nodes["out"].op
 
 
 def _decode_body() -> Body:

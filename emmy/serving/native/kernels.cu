@@ -1,34 +1,50 @@
 
 #include <cuda_fp16.h>
 #include <math.h>
+#ifndef PREFILL
+#define PREFILL 0
+#endif
 extern "C" __global__ void native_embed(const long long* prompt, const long long* length,
     const long long* position, const long long* next, const half* weight, float* hidden) {
     int d = blockIdx.x * blockDim.x + threadIdx.x;
-    long long token = *position < *length ? prompt[*position] : *next;
-    if (d < HIDDEN) hidden[d] = __half2float(weight[token * HIDDEN + d]);
+    int row = blockIdx.y;
+    long long pos = *position + row;
+    bool valid = !PREFILL || pos + 1 < *length;
+    long long token = valid ? (pos < *length ? prompt[pos] : *next) : 0;
+    if (d < HIDDEN) hidden[row * HIDDEN + d] = valid ? __half2float(weight[token * HIDDEN + d]) : 0.0f;
 }
 extern "C" __global__ void native_rope_cache(const half* q, const half* k, const half* v,
-    const float* cosine, const float* sine, const long long* position,
+    const float* cosine, const float* sine, const long long* position, const long long* length,
     half* rotated_q, half* cache_k, half* cache_v) {
+    int row = blockIdx.y;
+    long long pos = *position + row;
+    if (PREFILL && pos + 1 >= *length) return;
+    q += row * HEADS * HEAD_DIM; k += row * KV_HEADS * HEAD_DIM; v += row * KV_HEADS * HEAD_DIM;
+    rotated_q += row * HEADS * HEAD_DIM;
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     int d = i % HEAD_DIM;
     int paired = d < HEAD_DIM / 2 ? i + HEAD_DIM / 2 : i - HEAD_DIM / 2;
-    float c = cosine[*position * HEAD_DIM + d], s = sine[*position * HEAD_DIM + d];
+    float c = cosine[pos * HEAD_DIM + d], s = sine[pos * HEAD_DIM + d];
     if (i < HEADS * HEAD_DIM) {
         half r = d < HEAD_DIM / 2 ? __hneg(q[paired]) : q[paired];
         rotated_q[i] = __float2half(__half2float(q[i]) * c + __half2float(r) * s);
     }
     if (i < KV_HEADS * HEAD_DIM) {
         half r = d < HEAD_DIM / 2 ? __hneg(k[paired]) : k[paired];
-        long long offset = *position * KV_HEADS * HEAD_DIM + i;
+        long long offset = pos * KV_HEADS * HEAD_DIM + i;
         cache_k[offset] = __float2half(__half2float(k[i]) * c + __half2float(r) * s);
         cache_v[offset] = v[i];
     }
 }
 extern "C" __global__ void native_attention(const half* q, const half* k, const half* v,
-    const long long* position, half* output) {
+    const long long* position, const long long* length, half* output) {
     extern __shared__ float scores[];
-    int head = blockIdx.x, kv = head / (HEADS / KV_HEADS), count = int(*position) + 1;
+    int row = blockIdx.y, head = blockIdx.x, kv = head / (HEADS / KV_HEADS), count = int(*position) + row + 1;
+    q += row * HEADS * HEAD_DIM; output += row * HEADS * HEAD_DIM;
+    if (PREFILL && count >= *length) {
+        for (int d = threadIdx.x; d < HEAD_DIM; d += blockDim.x) output[head * HEAD_DIM + d] = __float2half(0.0f);
+        return;
+    }
     for (int t = threadIdx.x; t < count; t += blockDim.x) {
         float dot = 0.0f;
         for (int d = 0; d < HEAD_DIM; ++d)
@@ -51,15 +67,31 @@ extern "C" __global__ void native_attention(const half* q, const half* k, const 
     }
 }
 __device__ void native_greedy(const half* logits, long long* next) {
-    {
-        float peak = -INFINITY; long long best = 0;
-        for (int i = 0; i < VOCAB; ++i) {
-            float value = __half2float(logits[i]);
-            if (!isfinite(value)) { *next = -1; return; }
-            if (value > peak) { peak = value; best = i; }
-        }
-        *next = best;
+    // One power-of-two block; all threads participate, including when VOCAB is smaller.
+    extern __shared__ int best[];
+    int lane = threadIdx.x, token = -1;
+    float peak = -INFINITY;
+    bool invalid = false;
+    for (int i = lane; i < VOCAB; i += blockDim.x) {
+        float value = __half2float(logits[i]);
+        invalid |= !isfinite(value);
+        if (value > peak) { peak = value; token = i; }
     }
+    if (__syncthreads_or(invalid)) { if (lane == 0) *next = -1; return; }
+    best[lane] = token;
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride; stride /= 2) {
+        if (lane < stride) {
+            int other = best[lane + stride];
+            float value = other < 0 ? -INFINITY : __half2float(logits[other]);
+            if (value > peak || (value == peak && other >= 0 && other < token)) {
+                peak = value; token = other;
+            }
+            best[lane] = token;
+        }
+        __syncthreads();
+    }
+    if (lane == 0) *next = token;
 }
 
 // Every finite FP16 logit has an exact ordered bin. Signed zeros share a bin.
@@ -84,6 +116,7 @@ extern "C" __global__ void native_sample(const half* logits, const unsigned int*
     const long long* length, long long* next) {
     if (*position + 1 < *length) return;
     if (sampling[0] == 0.0) { native_greedy(logits, next); return; }
+    if (threadIdx.x != 0) return;
     if (histogram[0]) { *next = -1; return; }
     int peak = SAMPLING_BINS - 1;
     while (peak > 0 && !histogram[peak]) --peak;

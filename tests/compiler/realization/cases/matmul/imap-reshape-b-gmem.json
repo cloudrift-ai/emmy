@@ -1,0 +1,13 @@
+{"compute_cap": [12, 0],
+ "note": "A layout op between an activation and its matmul is absorbed into the operand's load index, so the operand is no longer a plain window of its buffer. The gmem-direct mma fragment loader steps rows by one leading dimension, and it reads that dimension off the operand's FLAT address: the index spells the split row as `[m / 2, (m % 2) * 128 + k]`, which sums to `128\u00b7m + k`. Taking the buffer's declared trailing extent instead read a rectangle of the wrong buffer, silently, on plain f16.\n\nThe B-side twin: `w[2\u00b7k + n / 64, n % 64]` sums to `128\u00b7k + n`, read gmem-direct.",
+ "programs": [
+  {"inputs":["x","w"],"outputs":["o"],"nodes":[{"id":"w","op":"input","outputs":[["w","f16",[256,64]]]},{"id":"wr","op":"torch.reshape","attrs":{"shape":[128,128]},"inputs":["w"],"outputs":[["wr","f16",[128,128]]]},{"id":"x","op":"input","outputs":[["x","f16",[64,128]]]},{"id":"o","op":"torch.matmul","inputs":["x","wr"],"outputs":[["o","f16",[64,128]]]}]}
+ ],
+ "configs": [
+  {"program": 0, "target": {"loop": 0, "origins": ["o", "wr"]}, "realizations": [
+   {"name": "k_matmul_9d8a94", "pins": {"FAST_MATH": false}, "knobs": {"WORK": "w2x1", "TILE": "mma_m16n8k16_f16_f32/f4x1", "REDUCE": "", "STAGE": "", "RASTER": ""}, "identity": "8b322636f70f426d67e0599788a6daec58e6f41fffa34f45f0c8173e946a5c56"}
+  ]}
+ ],
+ "loops": [
+  {"inputs":["w","x"],"outputs":["o"],"nodes":[{"id":"w","op":"input","outputs":[["w","f16",[256,64]]]},{"id":"x","op":"input","outputs":[["x","f16",[64,128]]]},{"id":"o","op":"loop","attrs":{"body":[{"Loop":{"axis":{"name":"a0","extent":2},"body":[{"Loop":{"axis":{"name":"a1","extent":64},"body":[{"Loop":{"axis":{"name":"a2","extent":64},"body":[{"Loop":{"axis":{"name":"a3","extent":128},"body":[{"Load":{"names":["in0"],"input":"w","index":["a0 + 2 * a3","a2"]}},{"Load":{"names":["in1"],"input":"x","index":["a1","a3"]}},{"Assign":{"name":"v0","op":"multiply","args":["in0","in1"],"dtype":"f32"}},{"Accum":{"name":"acc0","value":"v0","axes":["a3"]}}]}},{"Write":{"output":"o","index":["a1","64 * a0 + a2"],"values":["acc0"]}}]}}]}}]}}],"name":"k_matmul_ec392d"},"inputs":["w","x"],"outputs":[["o","f16",[64,128]]]}]}
+ ]}

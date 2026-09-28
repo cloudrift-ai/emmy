@@ -115,7 +115,7 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   `config.json` alone (no checkpoint download — a trace never reads a weight value; `layer_types` collapses to one
   local + one `full_attention` layer, the vocab shrinks to a stub) and traces the `pre`/`post` twins through the same
   `build_attention_split_wrapper` / `trace_split` path serving uses. Backs the file-scoped `emmy eval golden
-  --golden GOLDEN_YAML --serving-config PATH` release audit and serving-image gate;
+  --golden GOLDEN_FILE --serving-config PATH` release audit and serving-image gate;
   `scripts/capture_gen_twins.py` is its JSON writer, one graph per file, because `emmy tune` reads a graph per file.
   A CODED TRUNK is spelled by the checkpoint's own spellers, in the order `gen_runner._compile_split`'s stamp runs them:
   the twin's wrapper-relative constant paths (`q_proj.weight`) are re-addressed to the representative layer's

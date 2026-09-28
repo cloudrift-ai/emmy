@@ -3,7 +3,7 @@
 The current lowering pipeline stamps a kernel's ``S_*`` histogram (operations,
 dtypes, loop depths, and extents). ``ShapeKey`` projects that compiler-owned row
 into the compact identity used by datasets and evidence joins. It is intentionally
-not a persistence format: golden YAML stores stable frontend IR plus provenance,
+not a persistence format: a golden file stores stable frontend IR plus provenance,
 then derives both the histogram and this key with the current compiler.
 
 ``from_matmul`` remains a convenience for callers that already have explicit

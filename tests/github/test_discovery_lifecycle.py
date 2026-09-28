@@ -71,7 +71,8 @@ def test_discovery_loads_control_code_and_agents_from_exact_workflow_commit():
     validation_script = steps[validation_index]["run"]
     cleanup_script = next(step["run"] for step in steps if step.get("name") == "Cleanup discovery credentials and output")
 
-    assert install_index < load_index < agent_index < validation_index
+    assert load_index < install_index < agent_index < validation_index
+    assert steps[install_index]["run"] == 'make setup-agent AGENT_SOURCE="$WORKFLOW_SOURCE"'
     assert checkout["with"]["ref"] == "${{ steps.rolling.outputs.branch || github.event.repository.default_branch }}"
     assert 'git archive "$WORKFLOW_SHA"' in load_script
     assert "GIT_LFS_SKIP_SMUDGE" in steps[load_index]["env"]

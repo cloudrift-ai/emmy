@@ -21,6 +21,7 @@ from emmy.compiler.ir.kernel.render import _BLOCK_SIZE, render_kernelop
 from emmy.compiler.ir.stmt import ZeroPrologue
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.lowering.cuda._helpers import atomic_outputs as _atomic_outputs
+from emmy.compiler.pipeline.passes.lowering.cuda._helpers import launch_name
 
 PATTERN = [Pattern("root", KernelOp)]
 
@@ -71,8 +72,8 @@ def rewrite(match: Match, root: Node) -> CudaOp | None:
     (tile,) = tiles
 
     # The kernel function name doubles as the CudaOp's launch name — keep them
-    # identical. Loop naming always stamps a label, but fall back to the node id.
-    name = kernel.name or f"k_{root.id}"
+    # identical. Loop naming always stamps a label, but a split piece is unnamed.
+    name = launch_name(kernel, root.id)
     if name != kernel.name:
         kernel = replace(kernel, name=name)
 

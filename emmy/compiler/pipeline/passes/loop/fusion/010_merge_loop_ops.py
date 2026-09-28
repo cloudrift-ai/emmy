@@ -1,11 +1,10 @@
-"""Greedily fuse maximal downstream ``LoopOp`` regions to a fixed point.
+"""Fuse the Loop subgraph into its regions, one splice each.
 
-Separate consumers become output ports of one kernel. All roots enter the
-same worklist, so shared upstream statements remain one SSA definition.
-
-Fusion has only correctness boundaries. Neither tile lifting, nor scheduling, nor speed narrows
-it. A region does stop at one buffer: a PACKED one it computes (:func:`_packed_readers`). That
-boundary is semantic, not a profitability judgement.
+A region is the set of ``LoopOp`` nodes one kernel computes, and the graph decides every region
+before any is merged (:func:`regions`): the partition is a function of the graph alone, so the
+kernel set is the same whatever order the producers are visited in. Fusion has only correctness
+boundaries. Neither tile lifting, nor scheduling, nor speed narrows it, and a region the splicer
+cannot build is a compiler bug it raises, never a smaller region.
 """
 
 from __future__ import annotations
@@ -14,21 +13,19 @@ from dataclasses import replace
 
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.loop import LoopOp, UnfusableStmt
+from emmy.compiler.ir.loop import LoopOp, observes_running_accumulator
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.loop.fusion._region import build_merged_region, carries_state, live_outputs_of
 
 PATTERN = [Pattern("producer", LoopOp)]
 
 
-def _packed_readers(graph: Graph, region: set[str]) -> set[str]:
-    """The members of ``region`` that read a PACKED buffer the region itself computes, plus
-    everything downstream of them inside it.
+def _packed(graph: Graph, node: Node) -> bool:
+    """Whether ``node`` writes a PACKED buffer — the storage sense: one stored element carries
+    several logical values (``dtype.logical_elems > 1``, two e2m1 codes to the byte), not a
+    concatenated projection.
 
-    Packed here means the storage sense: one stored element carries several logical values
-    (``dtype.logical_elems > 1`` — two e2m1 codes to the byte), not a concatenated projection.
-
-    Why the region stops there, when fusion is otherwise maximal. A packed dtype states a relation
+    Why a region stops there, when fusion is otherwise maximal. A packed dtype states a relation
     between a tensor's stored extent and its logical one: the stored last axis is half the logical
     one (``dtype.py``). Only a tensor carries that relation. The splice deletes the tensor. The
     codes then survive as an ``Assign`` at the packed dtype — a value with no extent. A consumer's
@@ -39,89 +36,75 @@ def _packed_readers(graph: Graph, region: set[str]) -> set[str]:
     The splice also goes ONE WAY, and that is what makes this a refusal rather than a merge
     evidence could cut back: no ``030_cut`` seam offers a packed workspace, so the merged form
     would be the only one left rather than the widest of several. ``passes/ARCHITECTURE.md`` works
-    that half through, beside the seam dtypes it turns on.
-
-    Both halves of the returned set matter. The readers are the nodes whose merge does the
-    splicing: ``splice_graph`` decides a Load is a splice edge on its producer being in the
-    region, never on the buffer also being live. One reader left behind therefore dissolves the
-    buffer, however live it is elsewhere. Their descendants leave with them to keep the region
-    free of holes — drop a downstream-closed subset and every path between two survivors stays
-    inside the remainder, so the merged node cannot come to depend on a node that depends on it.
-
-    Only buffers the region's own ``LoopOp``s write are in question. A packed CONSTANT — every
-    quantized weight — is already stored, and a region reads it as an ordinary external input.
+    that half through, beside the seam dtypes it turns on. A packed CONSTANT — every quantized
+    weight — is already stored, and a region reads it as an ordinary external input.
     """
-    packed = {
-        buf
-        for nid in region
-        for buf in graph.nodes[nid].buffer_names()
-        if (t := graph.buffer(buf)) is not None and t.dtype.logical_elems > 1
+    return any((tensor := graph.buffer(buf)) is not None and tensor.dtype.logical_elems > 1 for buf in node.buffer_names())
+
+
+def regions(graph: Graph) -> dict[str, frozenset[str]]:
+    """Every loop's region, by member — the partition of the Loop subgraph fusion merges.
+
+    Some nodes no region holds: a kernel that carries a state (the splice inlines a store into its
+    readers, and a state is stored once per step, not once), an ordered prefix output
+    (:func:`observes_running_accumulator`) and any op that is not a loop. A region also stops at a
+    packed buffer it computes (:func:`_packed`): the producer stays, its readers begin another.
+
+    Two loops share a region when the same such nodes lie upstream of both — the boundaries — and a
+    chain of loop edges joins them. Equal boundaries are what keep a region convex: a path between
+    two members through a node outside would put that node, or a boundary past it, upstream of one
+    member and not the other, so the merged kernel never depends on a node that depends on it.
+
+    A cut materializes every buffer crossing it, so a loop whose every reader sits in one other region
+    joins it: stored where it is, its value is read once, at whatever shape it happens to have — a
+    reconstructed scale broadcast across its block where the raw per-block scales are what a consumer
+    can index. The packed producer never leaves; its buffer is the cut.
+    """
+    order = graph.topological_order()
+    nodes = graph.nodes
+    fusable = {
+        nid
+        for nid in order
+        if isinstance(nodes[nid].op, LoopOp) and not (carries_state(nodes[nid].op) or observes_running_accumulator(nodes[nid].op))
     }
-    dropped: set[str] = set()
-    pending = [reader for buf in packed for reader in graph.buffer_users(buf) if reader in region]
-    while pending:
-        nid = pending.pop()
-        if nid in dropped:
-            continue
-        dropped.add(nid)
-        pending.extend(user for user in graph.users(nid) if user in region)
-    # Whatever is left feeding ONLY what departed leaves with it. A cut materializes every buffer
-    # crossing it, so a survivor whose entire readership is on the far side buys nothing: its value
-    # is stored once and read once, and it is stored at whatever shape it happens to have — a
-    # broadcast left behind this way writes one value per logical element where its source held one
-    # per block. Releasing it puts the computation back beside its single reader and moves the
-    # boundary onto the source, which is the narrower buffer and the one the reader can index.
-    #
-    # A node writing the PACKED buffer itself never leaves: that buffer is the boundary this
-    # function exists to place, and releasing it would dissolve the extent the whole refusal
-    # protects. A node read from outside the region also stays — its value has to be stored for
-    # those readers whatever happens here.
-    changed = True
-    while changed:
-        changed = False
-        for nid in region - dropped:
-            if packed & set(graph.nodes[nid].buffer_names()):
-                continue
-            users = graph.users(nid)
-            if users and all(user in dropped for user in users):
-                dropped.add(nid)
-                changed = True
-    return dropped
+    stops = {nid for nid in fusable if _packed(graph, nodes[nid])}
+    boundaries: dict[str, frozenset[str]] = {}
+    for nid in order:
+        producers = {graph.producer(name).id for name in nodes[nid].inputs}
+        boundaries[nid] = frozenset().union(
+            *(boundaries[p] | ({p} if p in stops or (p not in fusable and nodes[p].inputs) else frozenset()) for p in producers)
+        )
+    member = {nid: nid for nid in fusable}
 
+    def find(nid: str) -> str:
+        while member[nid] != nid:
+            member[nid] = member[member[nid]]
+            nid = member[nid]
+        return nid
 
-def _downstream(graph: Graph, origin: str, region: set[str]) -> set[str]:
-    """``origin`` and everything after it inside ``region``. Dropping ONLY the doomed node would
-    leave region nodes on both sides of it — the merged op would then feed it and consume it, a
-    cycle. The closure leaves with it; those nodes re-enter fusion through their own matches."""
-    dropped = {origin}
-    pending = [origin]
-    while pending:
-        for user in graph.users(pending.pop()):
-            if user in region and user not in dropped:
-                dropped.add(user)
-                pending.append(user)
-    return dropped
-
-
-def _loop_consumer_region(graph: Graph, producer: Node) -> tuple[set[str], tuple[str, ...]] | None:
-    """Return the maximal downstream ``LoopOp`` region and its live buffers."""
-    region: set[str] = set()
-    pending = [producer.id]
-    while pending:
-        nid = pending.pop()
-        if nid in region:
-            continue
-        region.add(nid)
-        pending.extend(user for user in graph.users(nid) if isinstance(graph.nodes[user].op, LoopOp))
-    region -= _packed_readers(graph, region)
-    # A kernel that carries a state is a region of its own: the splice inlines a store into its
-    # readers, and a state is stored once per step, not once.
-    for nid in [nid for nid in region if carries_state(graph.nodes[nid].op)]:
-        region -= _downstream(graph, nid, region)
-    if len(region) < 2:
-        return None
-    live = live_outputs_of(graph, region)
-    return (region, live) if live else None
+    for nid in fusable:
+        for user in graph.users(nid):
+            if user in fusable and boundaries[user] == boundaries[nid]:
+                member[find(user)] = find(nid)
+    region_of = {nid: find(nid) for nid in fusable}
+    # Readers are downstream, so in reverse topological order every reader's region is final.
+    for nid in reversed(order):
+        if nid in fusable and nid not in stops:
+            readers = {region_of.get(user) for user in graph.users(nid)}
+            if len(readers) == 1 and (target := next(iter(readers))) not in (None, region_of[nid]):
+                region_of[nid] = target
+    # A member released from between two others may leave them unconnected: a region is one chain.
+    member = dict(region_of)
+    for nid in fusable:
+        member[nid] = nid
+    for nid in fusable:
+        for user in graph.users(nid):
+            if user in fusable and region_of[user] == region_of[nid]:
+                member[find(user)] = find(nid)
+    grouped: dict[str, set[str]] = {}
+    for nid in fusable:
+        grouped.setdefault(find(nid), set()).add(nid)
+    return {nid: frozenset(members) for members in grouped.values() for nid in members}
 
 
 def _wrap_multi_output_fragment(
@@ -155,55 +138,18 @@ def _wrap_multi_output_fragment(
     return frag, rename
 
 
-def rewrite(match: Match, producer: Node) -> Graph | None:
+def rewrite(match: Match, producer: Node) -> Graph:
     graph = match.graph
-    if not isinstance(producer.op, LoopOp):
-        raise RuleSkipped("producer is no longer a LoopOp")
-    if carries_state(producer.op):
-        raise RuleSkipped("a kernel that carries a state is a region of its own")
-    found = _loop_consumer_region(graph, producer)
-    if found is None:
-        raise RuleSkipped("producer has no Loop consumer region")
-    region, live_outputs = found
-
-    # The maximal region may contain a recurrence-shaped chain no budget can construct (the
-    # splicer's per-stmt binding cap names the offending loop). Dropping ONLY that node and
-    # retrying keeps every other merge in the region — abandoning the whole region on one doomed
-    # chain is what shattered DeepSeek-V4's post block into 433 kernels where the pre-maximal
-    # fusion produced 92. Each retry costs the cap's refusal (milliseconds); the chain's length
-    # bounds the retries.
-    merged = None
-    while merged is None:
-        try:
-            merged = build_merged_region(graph, region, live_outputs)
-        except UnfusableStmt as doom:
-            if doom.origin == producer.id or doom.origin not in region or len(region) <= 2:
-                raise RuleSkipped(f"region is dominated by an unfusable chain: {doom}") from doom
-            region = region - _downstream(graph, doom.origin, region)
-            if producer.id not in region or len(region) < 2:
-                raise RuleSkipped(f"region shrank away from its producer: {doom}") from doom
-            live_outputs = live_outputs_of(graph, region)
-            if not live_outputs:
-                raise RuleSkipped(f"nothing fusable remains beside the chain: {doom}") from doom
-            continue
-        if merged is None:
-            raise RuleSkipped("N-way Loop splicer rejected the region")
-
-    # Liftability is a correctness boundary: a merge the tile lift cannot spell (an output whose
-    # value is captured from an enclosing scope, an interior write no OutputSpec split
-    # round-trips) would otherwise hard-fail the compile at 010_lift, where nothing can decline
-    # it. The preflight is the exact lift the lowering runs — with the round-trip gate comparing
-    # both sides under construction normalization, a pure reorder no longer fails it, so the
-    # predicate matches what the pipeline truly accepts. Declining leaves the region to smaller
-    # merges; every pre-fusion LoopOp lifts, so a compilable graph always remains.
-    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op  # noqa: PLC0415
-
-    try:
-        lift_loop_op(merged)
-    except ValueError as exc:
-        raise RuleSkipped(f"merged region does not lift: {exc}") from exc
-
+    region = regions(graph).get(producer.id)
+    if region is None or len(region) < 2:
+        raise RuleSkipped("the producer is a region of its own")
+    live_outputs = live_outputs_of(graph, region)
+    if not live_outputs:
+        raise RuleSkipped("nothing reads the region")
+    merged = build_merged_region(graph, region, live_outputs)
+    if merged is None:
+        raise ValueError(f"fusion cannot splice the region of {producer.id!r}: {sorted(region)}")
     fragment, output_map = _wrap_multi_output_fragment(graph, merged, live_outputs)
-    match.consumed = region
+    match.consumed = set(region)
     match.output = live_outputs[0] if len(live_outputs) == 1 else output_map
     return fragment

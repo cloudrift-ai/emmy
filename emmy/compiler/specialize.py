@@ -2,18 +2,27 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from dataclasses import replace
 
-from emmy.compiler.ir.expr import Interval, Literal, SimplifyCtx
-from emmy.compiler.loop_wire import loop_graph_from_wire, loop_graph_to_wire
-from emmy.compiler.torch_wire import expr_from_wire, expr_to_wire, graph_from_wire, graph_to_wire
+from emmy.compiler.dim import Dim
+from emmy.compiler.graph import Graph
+from emmy.compiler.ir.expr import Expr, Interval, Literal, SimplifyCtx, Var
+from emmy.compiler.ir.frontend.ir import ReshapeOp, SliceOp
+from emmy.compiler.wire import rewrite
 
-_EXPR_TAGS = {"var", "literal", "binary", "builtin", "call", "ternary", "cast"}
-_NAMED_SHAPE_OPS = {"torch.reshape", "torch.slice"}
+
+def _rewrite_graph(graph: Graph, fn: Callable[[object], object | None]) -> Graph:
+    """A copy of ``graph`` with ``fn`` applied (:func:`~emmy.compiler.wire.rewrite`) to every op and output buffer."""
+    out = graph.copy()
+    for node in out.nodes.values():
+        node.op = rewrite(node.op, fn)
+        node.outputs = tuple(rewrite(tensor, fn) for tensor in node.outputs)
+    return out
 
 
-def _specialize_expr(value: Mapping, bindings: Mapping[str, int], *, extent: bool = False) -> dict:
-    """Bind the named dimensions inside one wire expression and simplify what that fixes.
+def _bound_expr(expr: Expr, bindings: Mapping[str, int], *, extent: bool) -> Expr:
+    """Bind the named dimensions inside one expression and simplify what that fixes.
 
     ``extent`` says the expression IS a dimension, so every name still free in it is a
     tensor extent and simplification may use the one fact an extent carries: it is at
@@ -22,72 +31,23 @@ def _specialize_expr(value: Mapping, bindings: Mapping[str, int], *, extent: boo
     extents folds a real predicate away (an IndexMap's ``out_coord_1 < 1`` becomes false,
     silently dropping that source), so they simplify with no range at all.
     """
-    expr = expr_from_wire(dict(value))
-    replacements = {name: Literal(size, "int") for name, size in bindings.items()}
-    specialized = expr.substitute(replacements)
+    specialized = expr.substitute({name: Literal(size, "int") for name, size in bindings.items()})
     ranges = {name: Interval(1, 1 << 30) for name in specialized.free_vars()} if extent else {}
-    return expr_to_wire(specialized.simplify(SimplifyCtx(ranges)))
+    return specialized.simplify(SimplifyCtx(ranges))
 
 
-def _specialize_dim(value, bindings: Mapping[str, int]):
-    if isinstance(value, int):
-        return value
-    if not isinstance(value, Mapping):
-        return value
-    if "sym" in value and set(value) <= {"sym", "hint"}:
-        return bindings.get(value["sym"], dict(value))
-    if "expr" in value and set(value) <= {"expr", "hint"}:
-        expr = _specialize_expr(value["expr"], bindings, extent=True)
-        if set(expr) == {"literal"} and expr["literal"].get("dtype") == "int":
-            return int(expr["literal"]["value"])
-        result = {"expr": expr}
-        if "hint" in value:
-            result["hint"] = value["hint"]
-        return result
-    return {key: _specialize_wire(item, bindings) for key, item in value.items()}
+def _bound_dim(dim: Dim, bindings: Mapping[str, int]) -> Dim:
+    if dim.is_static:
+        return dim
+    if isinstance(dim.expr, Var):
+        return Dim(bindings[dim.expr.name]) if dim.expr.name in bindings else dim
+    expr = _bound_expr(dim.expr, bindings, extent=True)
+    return Dim(int(expr.value)) if isinstance(expr, Literal) and expr.dtype == "int" else Dim(expr, hint=dim.hint)
 
 
-def _specialize_named_shape(value, bindings: Mapping[str, int]):
-    if isinstance(value, str):
-        return bindings.get(value, value)
-    if isinstance(value, list):
-        return [_specialize_named_shape(item, bindings) for item in value]
-    if isinstance(value, Mapping) and set(value) == {"__tuple__"}:
-        return {"__tuple__": _specialize_named_shape(value["__tuple__"], bindings)}
-    return value
-
-
-def _specialize_wire(value, bindings: Mapping[str, int]):
-    if isinstance(value, list):
-        return [_specialize_wire(item, bindings) for item in value]
-    if not isinstance(value, Mapping):
-        return value
-
-    keys = set(value)
-    if len(value) == 1 and keys <= _EXPR_TAGS:
-        return _specialize_expr(value, bindings)
-    if keys <= {"sym", "hint"} and "sym" in value:
-        return _specialize_dim(value, bindings)
-    if keys <= {"expr", "hint"} and "expr" in value and "hint" in value:
-        return _specialize_dim(value, bindings)
-    if keys == {"__dim__"}:
-        return {"__dim__": _specialize_dim(value["__dim__"], bindings)}
-    if keys == {"dim"}:
-        return {"dim": _specialize_dim(value["dim"], bindings)}
-    if keys in ({"__expr__"}, {"expr"}):
-        key = next(iter(keys))
-        return {key: _specialize_expr(value[key], bindings)}
-    specialized = {key: _specialize_wire(item, bindings) for key, item in value.items()}
-    attrs = specialized.get("attrs")
-    tag = specialized.get("op")
-    if isinstance(tag, str) and tag in _NAMED_SHAPE_OPS and isinstance(attrs, Mapping) and "shape" in attrs:
-        specialized["attrs"] = dict(attrs)
-        specialized["attrs"]["shape"] = _specialize_named_shape(attrs["shape"], bindings)
-    return specialized
-
-
-def specialize_program(graph, bindings: Mapping[str, int], *, loop: bool = False):
-    """Return a copy of ``graph`` with the named symbolic dimensions bound."""
+def specialize_program(graph: Graph, bindings: Mapping[str, int]) -> Graph:
+    """Return a copy of ``graph`` with the named symbolic dimensions bound: every dim, every expression — an index,
+    a predicate, a context value — and the names a reshape or slice spells its shape with."""
     if not bindings:
         return graph.copy()
     invalid = {
@@ -95,9 +55,41 @@ def specialize_program(graph, bindings: Mapping[str, int], *, loop: bool = False
     }
     if invalid:
         raise ValueError(f"dimension bindings must map non-empty names to positive integers: {invalid!r}")
-    if loop:
-        return loop_graph_from_wire(_specialize_wire(loop_graph_to_wire(graph), bindings))
-    return graph_from_wire(_specialize_wire(graph_to_wire(graph), bindings))
+
+    def bind(value):
+        if isinstance(value, Graph):
+            return _rewrite_graph(value, bind)
+        if isinstance(value, Dim):
+            return _bound_dim(value, bindings)
+        if isinstance(value, Expr):
+            return _bound_expr(value, bindings, extent=False)
+        if isinstance(value, (ReshapeOp, SliceOp)):
+            shape = tuple(bindings.get(dim, dim) if isinstance(dim, str) else rewrite(dim, bind) for dim in value.shape)
+            return replace(value, shape=shape)
+        return None
+
+    return bind(graph)
 
 
-__all__ = ["specialize_program"]
+def rehint_program(graph: Graph, sizes: Mapping[str, int]) -> Graph:
+    """``graph`` with its symbolic dims' hints set to ``sizes`` — the sizes a measurement bound them to — so the
+    program stays symbolic and a bench of it binds those sizes (``wire.symbolic_bindings``). Binding them
+    instead (:func:`specialize_program`) makes the dims static, another kernel. A dim spelled as an expression
+    takes the expression's value at those sizes, and one over a name ``sizes`` lacks is an error; a plain symbolic
+    dim ``sizes`` does not name keeps its hint."""
+
+    def rehint(value):
+        if isinstance(value, Graph):
+            return _rewrite_graph(value, rehint)
+        if not isinstance(value, Dim) or value.is_static:
+            return None
+        if isinstance(value.expr, Var):
+            return Dim(value.expr, hint=sizes.get(value.expr.name, value.hint))
+        if missing := sorted(value.expr.free_vars() - set(sizes)):
+            raise ValueError(f"no size for {', '.join(missing)} in the dim {value.expr.pretty()}")
+        return Dim(value.expr, hint=int(value.expr.eval(dict(sizes))))
+
+    return rehint(graph)
+
+
+__all__ = ["rehint_program", "specialize_program"]

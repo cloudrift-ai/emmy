@@ -1482,7 +1482,7 @@ def render_kernelop(
     # the opaque ``CUtensorMap`` forward decl above suffices.
     desc_names = tuple(dict.fromkeys(s.name for s in kernel_op.body.iter_of_type(TmaDescriptor)))
     # Descriptors are passed by pointer (placed in global memory by the
-    # host) rather than ``__grid_constant__`` value parameters: cupy's
+    # host) rather than ``__grid_constant__`` value parameters: the runtime's
     # arg-packing path doesn't preserve the 64-byte alignment that
     # by-value ``CUtensorMap`` parameters require, so this avoids a
     # CUDA_ERROR_MISALIGNED_ADDRESS at launch.

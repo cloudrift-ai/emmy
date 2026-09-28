@@ -26,6 +26,7 @@
       devShells.${system}.default = pkgs.mkShell {
         packages = [
           pkgs.pkg-config
+          pkgs.openssl
           pkgs.gcc
           pkgs.cmake
           # The interpreter ``make setup`` builds the venv with (``python3.12 -m venv``), so the

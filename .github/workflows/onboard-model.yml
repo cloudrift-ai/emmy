@@ -177,9 +177,6 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install Emmy
-        run: make setup-agent
-
       - name: Load exact workflow source
         env:
           WORKFLOW_SHA: ${{ github.sha }}
@@ -192,6 +189,12 @@ jobs:
           git archive "$WORKFLOW_SHA" | tar -x -C "$WORKFLOW_SOURCE"
           echo "PYTHONPATH=$WORKFLOW_SOURCE" >> "$GITHUB_ENV"
           echo "PYTHONSAFEPATH=1" >> "$GITHUB_ENV"
+
+      # The CLI imports the runtime extension, which ``make setup-agent`` builds with cargo.
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Emmy
+        run: make setup-agent AGENT_SOURCE="$WORKFLOW_SOURCE"
 
       - name: Configure Git LFS
         run: |

@@ -49,7 +49,7 @@ K32 = "mma_m16n8k32_e4m3_f32"
 def _bind(loop, m: str = "m", n: str = "n"):
     """Lift then canonicalize; return ``(a, b, acc, epilogue)`` of the resulting contraction."""
     from emmy.compiler.ir.tile import Placement as TilePlacement
-    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import _stamp_axes, fold_from_loop
+    from emmy.compiler.pipeline.passes.tile._fromloop import _stamp_axes, fold_from_loop
 
     fold = fold_from_loop(_stamp_axes(loop))
     assert fold is not None, "the dequant loop must lift"

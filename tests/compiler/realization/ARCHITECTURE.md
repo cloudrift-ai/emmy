@@ -16,7 +16,7 @@ backend, the pin machinery and the golden loader, and they share one workflow.
 helpers.py            # load, regenerate, and the four oracles
 regen.py              # `make test-corpus-regen` — applies the fix the staleness test detects
 test_realization.py   # one parametrized walker over cases/
-cases/<family>/<name>.yaml
+cases/<family>/<name>.json
 ```
 
 ## What earns a case
@@ -68,7 +68,6 @@ configs:
   target: {loop: 0, origins: [c]}
   realizations:
   - name: k_matmul_5b7645
-    bindings: {}
     pins: {FAST_MATH: true}
     knobs: {WORK: w2x2, TILE: mma_m16n8k16_f16_f16/f4x8/k2, REDUCE: g2k, STAGE: ''}
     identity: 0302cbd2c129ae1851d5f529621a752756f6181d0d4cbaf57eb22f85028d11c2
@@ -111,7 +110,7 @@ Four spelling rules decide what a case actually asserts:
 - **A placement is an entry of its own.** `PLACE@seam: cut` in the `knobs` of an entry whose identity is the kernel
   the cut is offered on; the golden validator refuses a placement key beside a schedule row. Older cases carry the
   route in the first entry's `pins`, which the replay reads the same way.
-- **Binding a symbolic dimension specializes the program.** A case with `bindings: {}` keeps its symbolic axis and runs
+- **Binding a symbolic dimension specializes the program.** A case with no `bindings` keeps its symbolic axis and runs
   at the dimension's own `Dim` hint — the size `emmy run` already resolves a symbolic reproducer to. The corpus has no
   spelling for "compile at the hint, run at some other size", so a sweep of one symbolic kernel across many runtime
   sizes stays in Python.
@@ -121,24 +120,24 @@ Four spelling rules decide what a case actually asserts:
 There is no manifest. Extending the corpus is writing one file:
 
 ```
-<family>/<name>.yaml                  # closed — every applicable stage must pass
-<family>/<name>_xfail_offered.yaml    # open — strict xfail at that stage
-<family>/<name>_xfail_realized.yaml
-<family>/<name>_xfail_built.yaml
-<family>/<name>_xfail_correct.yaml
+<family>/<name>.json                  # closed — every applicable stage must pass
+<family>/<name>_xfail_offered.json    # open — strict xfail at that stage
+<family>/<name>_xfail_realized.json
+<family>/<name>_xfail_built.json
+<family>/<name>_xfail_correct.json
 ```
 
-The open-gap inventory is `ls cases/**/*_xfail_*.yaml`, and the completion gate is "no file matches that glob". Closing
+The open-gap inventory is `ls cases/**/*_xfail_*.json`, and the completion gate is "no file matches that glob". Closing
 a gap is a `git mv`, so the diff shows the closure as a rename. And two concurrent runs on different models can each
 add a case without touching a shared file.
 
 The cost is that the filename is semantic, so an `_xfail`-shaped token naming something other than the four stages is a
 hard error rather than a silently-closed case.
 
-An `_xfail_*` file must carry a leading `# evidence:` comment naming why the schedule *should* be realizable — a
+An `_xfail_*` file's `note` must carry an `evidence:` paragraph naming why the schedule *should* be realizable — a
 sibling card's golden carrying that family for the same structural identity, the same family already winning at a
 neighbouring binding, or an explicit roofline argument. Without it the corpus fills with speculation. The rest of the
-leading comment block is prose about where the gap came from; regeneration preserves it.
+note is prose about where the gap came from; regeneration keeps it.
 
 ## The four stages
 
@@ -156,7 +155,7 @@ evidence), so a fork no entry decides is an `EvidenceError` naming the kernel, n
 online prior is out of the way, the tune DB is not consulted, and the environment carries the case's input pins alone — the regime
 it was measured under (`FAST_MATH` and the precision gates), never its route or its schedule row. The route and the
 row reach the compile as measured rows of the kernels they decide — imported into the compile's DB, as every compile
-imports its golden scope (`golden_import`), and read through the same evidence pick every `compile` / `run` / `serve`
+imports its golden scope (`golden/evidence.py`), and read through the same evidence pick every `compile` / `run` / `serve`
 uses (`greedy._route_candidates`) — or they do not reach it at all. That is the
 deploy contract, asked of every case on every commit: a row the compiler can honour under a pin but does not select
 when it is the evidence — a stale spelling, a route key no offered seam carries, a schedule that equals no leaf of the
@@ -230,7 +229,7 @@ ratcheting.
 decode the program, re-run the inventory writer under `Context.from_target(compute_cap)`, re-derive `identity`,
 re-canonicalize `knobs` — and asserts it equals what is stored. The check is GPU-free at roughly 0.02 s per case, so
 codec and kernel-identity drift is caught on the pull request that causes it, by the commit that causes it. Nothing in
-the tree does that for `recipes/*/golden/*.yaml` today.
+the tree does that for `recipes/*/golden/*.json` today.
 
 `make test-corpus-regen` only *applies* the fix. That split is the shape the repository already uses twice:
 `ruff format --check` detects while `make format` fixes, and the session-end durations gate names its offenders and
@@ -251,8 +250,8 @@ Five rules make it load-bearing:
    them is a review conversation, not a mechanical step.
 4. **Preserve what regeneration cannot produce.** A `latency` block is measured on a card, not derived from the
    program, so a regeneration on a machine without that card carries existing entries through untouched.
-5. **Preserve the leading comment block.** `dump_golden_file` is a plain YAML dump and drops comments, so a naive
-   rewrite would eat the `# evidence:` line on every regeneration.
+5. **Keep the note.** A case's evidence citation is the file's `note` field, not a comment, so a regeneration and
+   every dump carry it.
 
 **A non-target entry's `identity` is authored, and `regenerate` does not re-derive it.** `regenerate` restamps the
 target entry's identity only, so a change that moves a PIECE's identity leaves a further entry addressing a kernel
@@ -265,7 +264,7 @@ one entry per kernel of its set and nothing stands in for a kernel no entry desc
 
 **The authored half rots differently.** Those five rules are about the DERIVED half, and they all assume the case still
 loads. When an IR dataclass loses a field, every case whose stored program serialized it stops parsing —
-`load_golden_file` refuses the whole document on an unknown field, so `test_case_derived_half_is_current` reports a
+`GoldenFile.load` refuses the whole document on an unknown field, so `test_case_derived_half_is_current` reports a
 load error instead of a mismatch, and regeneration cannot help because it has nothing to read. The fix belongs with the
 commit that retires the field: drop the retired key from the stored programs. That is lossless exactly when the field
 sits at its default in every case, which is the ordinary situation for one only a now-deleted construct ever set; a
@@ -275,7 +274,7 @@ means grepping the corpus for its wire name, not only re-running regeneration.
 ## Adding a case
 
 ```bash
-case=tests/compiler/realization/cases/<family>/<name>_xfail_<stage>.yaml
+case=tests/compiler/realization/cases/<family>/<name>_xfail_<stage>.json
 emmy trace -c "<snippet>" --target sm_<cc> -o "$case"
 cat >> "$case" <<'EOF'   # the knobs block, copied from `run --json`'s record_knobs
 EOF

@@ -37,9 +37,10 @@ def effective_flags() -> list[str]:
     Read fresh each call so a per-invocation override / the bench-worker
     subprocess (which inherits the env) both see the same value, and so the
     flags fold into the cache key."""
+    from emmy.compiler.context import FAST_MATH_FLAG  # noqa: PLC0415
     from emmy.compiler.pipeline.search.space import FAST_MATH, precision_pin  # noqa: PLC0415
 
-    return [*(["--use_fast_math"] if precision_pin(FAST_MATH) else []), *config.nvcc_flags().split()]
+    return [*([FAST_MATH_FLAG] if precision_pin(FAST_MATH) else []), *config.nvcc_flags().split()]
 
 
 def cubin_cache_dir() -> Path:

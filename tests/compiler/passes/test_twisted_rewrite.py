@@ -27,8 +27,8 @@ from emmy.compiler.ir.pure.twist import SOFTMAX, WELFORD
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Let, Load, Loop, Write
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
-from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op
-from emmy.compiler.pipeline.passes.lowering.tile._twist import _hoist_invariant, rewrite_twisted
+from emmy.compiler.pipeline.passes.tile._fromloop import lift_loop_op
+from emmy.compiler.pipeline.passes.tile._twist import _hoist_invariant, rewrite_twisted
 from tests.compiler.terms import projection, slab
 
 
@@ -103,7 +103,7 @@ def _twisted_folds(root: Fold) -> list[Fold]:
 def _tile(code: str) -> TileOp:
     graph, _, _ = graph_from_code(code)
     graph = Pipeline.build(LOOP_PASSES).run(graph)
-    graph = Pipeline.build(["lowering/tile"], select=["lift", "twisted"]).run(graph)
+    graph = Pipeline.build(["tile/lift"], select=["lift", "twisted"]).run(graph)
     # By the TREE, not the node id: the carrier is what these tests are about, and a softmax fused
     # into a matmul names its node after neither.
     return next(node.op for node in graph.nodes.values() if isinstance(node.op, TileOp) and _twisted_folds(node.op.op))
@@ -389,7 +389,7 @@ def test_a_refusing_sibling_cluster_says_why(caplog) -> None:
     graph, _, _ = graph_from_code(
         "torch.randn(64,128,dtype=torch.float16).amax(-1, keepdim=True) + torch.randn(64,128,dtype=torch.float16).sum(-1, keepdim=True)"
     )
-    with caplog.at_level(logging.DEBUG, logger="emmy.compiler.pipeline.passes.lowering.tile._twist"):
-        Pipeline.build(LOOP_PASSES + ["lowering/tile"]).run(graph, ctx=Context.from_target((12, 0)))
+    with caplog.at_level(logging.DEBUG, logger="emmy.compiler.pipeline.passes.tile._twist"):
+        Pipeline.build(LOOP_PASSES + ["tile/lift", "tile/cut", "tile/schedule"]).run(graph, ctx=Context.from_target((12, 0)))
     declines = [r.message for r in caplog.records if "declined" in r.message]
     assert declines, "a refusing max/sum sibling pair must name the predicate that refused"

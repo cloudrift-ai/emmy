@@ -2,7 +2,7 @@
 # RTX 5090. Each row traces one pinned layer and strictly executes every distinct post-fusion target against its
 # available reference.
 #
-# A row that names a `golden` replays `golden/<golden>.golden.yaml` instead of tracing: those schedules were measured
+# A row that names a `golden` replays `golden/<golden>.golden.json` instead of tracing: those schedules were measured
 # by hand-pinned `emmy run --ab` rows and committed beside this recipe, and the row only re-measures them at
 # deployable -O3. Rows with `golden: ""` trace and deploy the greedy pick. Both paths end in the same strict
 # `emmy run --golden ... --bench --strict` replay against eager, so the two lanes produce the same correctness evidence.
@@ -42,12 +42,12 @@ command:
     export EMMY_CUBIN_CACHE=$task_dir/cubins
 
     if [ -n "$golden" ]; then
-      cp $repo_dir/experiments/golden-bench-2026/quantized_kernels_rtx5090/golden/$golden.golden.yaml \
-        $task_dir/working.yaml
+      cp $repo_dir/experiments/golden-bench-2026/quantized_kernels_rtx5090/golden/$golden.golden.json \
+        $task_dir/working.json
       echo "replaying committed golden $golden" | tee $task_dir/trace.log
     else
       ./venv/bin/emmy trace "$model_ref" --layer 0 --seq-len "$seq_len" \
-        --model-provenance "$model_ref" --output $task_dir/working.yaml 2>&1 | tee $task_dir/trace.log
+        --model-provenance "$model_ref" --output $task_dir/working.json 2>&1 | tee $task_dir/trace.log
     fi
 
     # Bench each seed realization (one per post-fusion target) on its own. A committed golden carries
@@ -56,14 +56,14 @@ command:
     # only seeds, so the same loop benches every target's greedy pick. Reading each realization by
     # field (unmeasured name) is structural selection, not result interpretation.
     mkdir -p $task_dir/verification
-    ./venv/bin/python -c 'import sys, yaml; d = yaml.safe_load(open(sys.argv[1])); print("\n".join(r["name"] for c in d["configs"] for r in c["realizations"] if not (r.get("measurements") or {}).get("emmy_us")))' \
-      $task_dir/working.yaml > $task_dir/seeds.txt
+    ./venv/bin/python -c 'import json, sys; d = json.load(open(sys.argv[1])); print("\n".join(r["name"] for c in d["configs"] for r in c["realizations"] if not (r.get("measurements") or {}).get("emmy_us")))' \
+      $task_dir/working.json > $task_dir/seeds.txt
     verification_status=0
     while IFS= read -r seed; do
       [ -z "$$seed" ] && continue
       if EMMY_NVCC_FLAGS= EMMY_BENCH_RUN_TIMEOUT_S=60 EMMY_KERNEL_TIMEOUT_MS=120000 \
         CUDA_VISIBLE_DEVICES="$gpu_device_ids" ./venv/bin/emmy run \
-        --golden $task_dir/working.yaml --realization "$$seed" --bench --strict --no-record-evidence \
+        --golden $task_dir/working.json --realization "$$seed" --bench --strict --no-record-evidence \
         --json $task_dir/verification/$$seed --warmup 5 --iters 20 \
         --bench-backends eager,emmy 2>&1 | tee $task_dir/verification/$$seed.log; then
         :

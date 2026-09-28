@@ -40,7 +40,7 @@ def regenerate_all() -> int:
             refused.append(f"{path.name}: the verdict changed with the derived half ({before} -> {after})")
             continue
         stale.append(path.name)
-        helpers.write_case(path, fresh)
+        fresh.dump(path, overwrite=True)
 
     for message in refused:
         print(f"refused: {message}", file=sys.stderr)
@@ -51,10 +51,10 @@ def regenerate_all() -> int:
     return 1 if refused else 0
 
 
-def _records(document: dict) -> tuple:
+def _records(document) -> tuple:
     """The regenerated document's entries as records, the way ``load_case`` reads them."""
-    entry = document["configs"][0]
-    return tuple(helpers.golden_record_from_entry(document, entry, realization) for realization in entry["realizations"])
+    entry = document.configs[0]
+    return tuple(document.record(entry, realization) for realization in entry.realizations)
 
 
 def complete_all() -> int:
@@ -63,11 +63,11 @@ def complete_all() -> int:
     it runs only when asked (``make test-corpus-regen COMPLETE=1``)."""
     for path in helpers.case_files():
         case = helpers.load_case(path)
-        before = list(case.document["configs"][0]["realizations"])
+        before = list(case.document.configs[0].realizations)
         document = helpers.complete(case.document)
-        after = document["configs"][0]["realizations"]
+        after = document.configs[0].realizations
         if after != before:
-            helpers.write_case(path, helpers.regenerate(document))
+            helpers.regenerate(document).dump(path, overwrite=True)
             dropped = sum(1 for realization in before if realization not in after)
             print(f"completed {path.relative_to(helpers.CASES_DIR).as_posix()}: +{len(after) - len(before) + dropped} -{dropped} entries")
     return 0

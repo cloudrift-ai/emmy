@@ -194,32 +194,20 @@ def freeze_path() -> Path:
     """The measurement freeze ``emmy dataset import`` reads by default: ``EMMY_FREEZE_DIR`` → the
     repo's ``search/freezes/`` (empty until a card is re-collected through the ``perf`` writer).
 
-    A freeze is the only measurement store that is a durable, comparable ARTIFACT. It is
-    digest-pinned (``manifest.sha256``), stamped with the featurizer / knob / encoding versions
-    its rows are spelled in, and identical row-for-row on any machine that has it — so two
-    evaluations of two models are a fair comparison, and a number in a report is one someone
-    else can reproduce. The tune DB and the online prior's reservoir are neither: both are
-    machine-local, both are rewritten as tuning continues, and the reservoir is additionally a
-    bounded random SAMPLE that churns, so one model evaluated twice on one machine need not
-    score the same. A report names the sources its dataset holds, so a number computed over a
-    freeze says so.
+    A freeze is the only measurement store that is a durable, comparable ARTIFACT: a golden file
+    per card holding each kernel's definition and its measured rows, identical on any machine that
+    has it and re-lowered by the current compiler on import — so two evaluations of two models are
+    a fair comparison, and a number in a report is one someone else can reproduce. The tune DB and
+    the online prior's reservoir are neither: both are machine-local, both are rewritten as tuning
+    continues, and the reservoir is additionally a bounded random SAMPLE that churns, so one model
+    evaluated twice on one machine need not score the same. A report names the sources its dataset
+    holds, so a number computed over a freeze says so.
 
     Advisory, like :func:`tune_db_path`: callers check it exists."""
     override = os.environ.get(FREEZE_DIR)
     if override:
         return Path(override)
     return Path(__file__).resolve().parent / "compiler" / "pipeline" / "search" / "freezes"
-
-
-def golden_identity_cache_path(fingerprint: str) -> Path:
-    """The derived golden store — ``~/.cache/emmy/golden_identity.<fingerprint>.json``, one file per
-    compiler fingerprint so two compiler revisions sharing this directory never replace each other's
-    derivations. Purely a memo, keyed by per-record content digests, of what the golden import
-    derives from a record: its kernel identity (``kernel_identity``), its strict-decode verdict, and
-    its evidence replay (``golden._replay`` — the rows a record files under which kernels, about two
-    seconds per multi-kernel record to derive); safe to delete at any time, and nothing prunes the
-    file of a compiler that is gone."""
-    return _CACHE_ROOT / f"golden_identity.{fingerprint[:16]}.json"
 
 
 def online_path() -> Path:

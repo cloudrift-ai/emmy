@@ -58,7 +58,7 @@ def test_common_kernel_corpus_is_small_and_identical(project_root) -> None:
     assert "./venv/bin/emmy tune" in run
     assert "./venv/bin/emmy run" in run
     assert "for repeat in 0 1 2 3 4" in run
-    assert "--golden $task_dir/working.yaml --bench --strict" in run
+    assert "--golden $task_dir/working.json --bench --strict" in run
     assert "--bench-backends eager,tcompile" in run
     assert "--bench-backends eager,emmy" in run
     assert "--bench-backends eager,tcompile,emmy" not in run
@@ -127,7 +127,7 @@ def test_quantized_support_check_covers_four_formats_and_replays_block_fp8(proje
     # The decode (seq=1) golden is committed and fully tuned; the prefill (seq=512) golden is a documented
     # partial recorded in the same directory.
     for name in replayed:
-        assert (Path(recipe_dir) / "golden" / f"{name}.golden.yaml").is_file()
+        assert (Path(recipe_dir) / "golden" / f"{name}.golden.json").is_file()
 
     run = recipe.command.run
     assert "./venv/bin/emmy trace" in run
@@ -176,7 +176,7 @@ def test_large_layer_corpus_is_bounded_and_not_labeled_tp8(project_root) -> None
             build_substitution_map(task.variant, list(range(8)), "/repo", "/task"),
         )
         assert "--loop-targets" not in command
-        assert "--golden /task/working.yaml --bench --strict" in command
+        assert "--golden /task/working.json --bench --strict" in command
         assert "--bench-backends eager,tcompile" in command
         assert "--bench-backends eager,emmy" in command
 
@@ -204,7 +204,7 @@ def test_search_ablation_is_executable(project_root) -> None:
         (12, 4),
         (48, 12),
     }
-    assert all("--golden $task_dir/working.yaml --bench --strict" in task.recipe.command.run for task in tasks)
+    assert all("--golden $task_dir/working.json --bench --strict" in task.recipe.command.run for task in tasks)
     assert all(task.recipe.deploy.gpu == "NVIDIA H200 141GB" for task in tasks)
     assert all(task.recipe.deploy.gpu_count == 1 for task in tasks)
 
