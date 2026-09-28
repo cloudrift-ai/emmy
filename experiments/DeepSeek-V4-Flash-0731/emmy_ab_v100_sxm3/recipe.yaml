@@ -1,0 +1,68 @@
+# Emmy against the plain 1Cat fork on 16x V100 SXM3 32GB, at one serving envelope.
+#
+# The two arms differ only in their image. The fork arm is the 1Cat image by digest; the Emmy arm is the baked
+# serving image built FROM that same digest (docker/vllm-emmy-serve, models/deepseek-v4-flash-0731.env), which adds
+# the Emmy plugin, its warmed kernels and execution-plan packs, and the checkpoint. Installing Emmy leaves vLLM, torch
+# and Triton at the fork's versions. The Emmy image is local to the host until it is published; `emmy bench` uses a
+# local image when the pull fails.
+#
+# The envelope is the one the Emmy image was warmed at, and both arms get the same flags and environment. The Emmy
+# image's own serve.sh passes the same values first, so the flags below change nothing there, and a different
+# context length or batched-token limit would miss its packs. Each arm keeps its own execution mode: the fork captures
+# CUDA graphs, Emmy runs eager because the hyper-connection MoE host-syncs every decode step.
+#
+# Two points: one request with a 2,048-token prompt (time to first token and per-token decode), and eight concurrent
+# 1,024-token requests (the maintained serving_v100_sxm3 workload). The arms run fork, Emmy, Emmy, fork, so drift
+# over the run lands on both equally; each arm sees the same prompts in the same round (seed 731, then 831). Every row
+# is its own deployment, repeats rerun the client against it, and prefix caching is off.
+model:
+  huggingface: "deepseek-ai/DeepSeek-V4-Flash-0731"
+  revision: 7872f01b1d1fe23eabc4c98b48bffcef5a386062
+  task: generate
+
+engine:
+  llm:
+    tensor_parallel_size: 8
+    pipeline_parallel_size: 2
+    gpu_memory_utilization: 0.90
+    context_length: 4096
+    max_concurrent_requests: 8
+    vllm:
+      extra_args: >-
+        --dtype half
+        --distributed-executor-backend mp
+        --kv-cache-dtype fp8
+        --block-size 256
+        --max-num-batched-tokens 4112
+        --tokenizer-mode deepseek_v4
+        --no-enable-prefix-caching
+      extra_env:
+        VLLM_SM70_FP8_TURBOMIND: "1"
+        VLLM_SM70_MXFP4_TURBOMIND: "1"
+        VLLM_SM70_MXFP4_TUNE_SMALL_SHAPES: "0"
+        VLLM_SM70_QUANT_BACKEND: "turbomind"
+
+benchmark:
+  temperature: 0.0
+  ignore_eos: true
+  repeats: 3
+
+matrices:
+  - &fork
+    deploy.gpu: "NVIDIA Tesla V100 SXM3 32GB"
+    deploy.gpu_count: 16
+    engine.llm.vllm.image: "cloudriftai/1cat-vllm-deepseek-v4-flash-0731@sha256:276240257b224097876b5b6db8f0d32484dff6a6f168d6b03d6df188e5c65bc1"
+    benchmark.seed: 731
+    zip:
+      benchmark.random_input_len: [2048, 1024]
+      benchmark.random_output_len: [128, 64]
+      benchmark.max_concurrency: [1, 8]
+      benchmark.num_prompts: [4, 8]
+      benchmark.num_warmups: [2, 8]
+  - &emmy
+    <<: *fork
+    engine.llm.vllm.image: "cloudriftai/vllm-emmy-deepseek-v4-flash-0731:1.2.3-a98fd4f8"
+  - <<: *emmy
+    benchmark.seed: 831
+  - <<: *fork
+    benchmark.seed: 831
