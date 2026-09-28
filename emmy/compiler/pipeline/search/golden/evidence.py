@@ -198,9 +198,13 @@ def evidence_db(db: SearchDB | None, ctx: Context) -> SearchDB:
         fresh = SearchDB()
         _import(fresh, ctx, records, source)
         return fresh
-    if source not in db.perf_sources(ctx):
-        db.forget_perf(ctx, "golden:")
-        _import(db, ctx, records, source)
+    # Every worker of a parallel boot imports into one file at its first compile: the check, the forget and the
+    # import are one step, or two workers collide on the rows' unique keys and a third reads a half-written scope
+    # as imported.
+    with db.exclusive():
+        if source not in db.perf_sources(ctx):
+            db.forget_perf(ctx, "golden:")
+            _import(db, ctx, records, source)
     return db
 
 
