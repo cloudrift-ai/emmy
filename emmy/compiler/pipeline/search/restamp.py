@@ -17,8 +17,9 @@ What a restamp keeps is decided per row, never guessed:
   survives only if the fresh set still mints that piece under the set's own rows;
 - a route key no kernel of the fresh lowering resolves makes the file stale too — a node that changed
   only its kind (a reduce read as a contraction) re-spells every route through it while every stored
-  target keeps its Loop IR. Restamp re-spells such a key onto the seam its operand positions reach, and
-  drops the row when they reach none;
+  target keeps its Loop IR. Restamp re-spells such a key onto the seam its operand positions reach —
+  a slab-and-computed pair that swapped its order counting as the same position — and drops the row
+  when they reach none;
 - a row that no longer decodes on the fresh kernel is dropped;
 - a measurement stays only when the kernel it timed is the kernel the fresh Loop IR renders, byte
   for byte, under the row as the compile's only evidence. Otherwise the row keeps its schedule and
@@ -269,15 +270,9 @@ def _respelled_route(document: GoldenFile, entry: Config, row: Realization, repo
     if not stale:
         return row
     tile = _lifted_target(record)
-    placeable = {id(site.node): site for site in family_sites("PLACE", sites(tile.op))}
     renamed: dict[str, str] = {}
     for key in stale:
-        node = tile.op
-        for _label, index in parse_key(key).hops:
-            node = node.operands[index - 1] if index <= len(node.operands) else None
-            if node is None or node.as_slab() is not None:
-                break
-        site = placeable.get(id(node)) if node is not None else None
+        site = seam_at_positions(tile.op, key)
         if site is None:
             report.rows_dropped.append(f"{row.name}: route key {key!r} names no seam of the fresh lowering, and its positions reach none")
             return None
@@ -292,6 +287,23 @@ def _respelled_route(document: GoldenFile, entry: Config, row: Realization, repo
         return None
     report.rows_respelled.append(f"{row.name}: " + ", ".join(f"{old} -> {new}" for old, new in renamed.items()))
     return respelled
+
+
+def seam_at_positions(op, key: str):
+    """The ``PLACE`` site of ``op`` the operand positions of ``key`` reach, whatever kinds its hops name,
+    or ``None``. A slab-and-computed pair that swapped its order (the computed operand became A) is
+    still one seam: a key names a computed operand, never a slab, so a hop that lands on the slab
+    names the other operand."""
+    placeable = {id(site.node): site for site in family_sites("PLACE", sites(op))}
+    node = op
+    for _label, index in parse_key(key).hops:
+        operands = node.operands
+        node = operands[index - 1] if index <= len(operands) else None
+        if node is not None and node.as_slab() is not None and len(operands) == 2:
+            node = next((edge for edge in operands if edge is not node and edge.as_slab() is None), node)
+        if node is None or node.as_slab() is not None:
+            return None
+    return placeable.get(id(node))
 
 
 def _kernel_sources(record: GoldenRecord, records: Sequence[GoldenRecord]) -> tuple[str, ...] | None:

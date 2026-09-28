@@ -85,3 +85,19 @@ def test_a_golden_route_key_that_resolves_nowhere_warns_at_import(tmp_path, capl
     with caplog.at_level(logging.WARNING), pinned_knobs({"FAST_MATH": False}):
         import_goldens(SearchDB(), Context.from_target(tuple(golden.compute_cap)), records, source="test")
     assert f"{_STALE} names no seam of the fresh lowering" in caplog.text
+
+
+def test_a_key_through_a_swapped_operand_pair_reaches_the_same_seam() -> None:
+    """A slab-and-computed pair whose computed operand became A (the SiLU product into a ``[k, n]`` down
+    projection) re-orders the fused tree: a route key recorded before names the seam through the pair's
+    second position, now its first. The key's positions still reach that seam, which restamp re-spells."""
+    from emmy.compiler.ir.tile.path import family_sites, sites
+    from emmy.compiler.pipeline.search.restamp import seam_at_positions
+    from tests.compiler.passes.test_cut_forks import _lifted_parent, _mlp_graph
+
+    parent = _lifted_parent(_mlp_graph())
+    seams = [site for site in family_sites("PLACE", sites(parent.op)) if "/inner.1/" in f"/{site.path}/"]
+    assert seams, "the down projection's computed operand is its first"
+    for site in seams:
+        old = "PLACE@" + site.path.replace("inner.1", "inner.2", 1)
+        assert seam_at_positions(parent.op, old).path == site.path
