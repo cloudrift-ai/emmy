@@ -1144,13 +1144,15 @@ def _placement_knob_dicts(graph) -> list[dict]:
     return list(graph.hints.get(PLACEMENT_DECISIONS_HINT, []))
 
 
-def _ab_samples(specs, dynamic=None):
+def _ab_samples(specs, dynamic=None, route=None):
     """One shapeless pseudo-sample per ``--ab "K1=V1,K2=V2"`` spec: ``.knobs`` holds
     schedule pins, ``.pins`` Boolean input pins, ``.name`` the table label, and ``.shape None`` —
     the marker :func:`_print_kernel_stats` uses to nest the row by the benched
     kernel's own ``S_*`` signature instead of a golden's matmul shape. ``dynamic``
     stamps the run's own ``--dynamic`` specs on each pseudo-sample so the A/B
-    re-trace builds the same symbolic graph as the greedy run."""
+    re-trace builds the same symbolic graph as the greedy run. ``route`` is the kernel-set decisions
+    ``--pin-route`` pins on the greedy compile: each row compiles under them too, so a row differs
+    from the greedy only by its own knobs."""
     from types import SimpleNamespace  # noqa: PLC0415
 
     from emmy.compiler.pipeline.knob import KnobType, family_of, get, parse_knob_spec  # noqa: PLC0415
@@ -1165,7 +1167,7 @@ def _ab_samples(specs, dynamic=None):
             if (descriptor := get(family_of(name))) is not None and descriptor.type is KnobType.BOOL
         }
         knobs = {name: value for name, value in parsed.items() if name not in pins}
-        samples.append(SimpleNamespace(name=f"ab {raw}", pins=pins, knobs=knobs, shape=None, dynamic=dyn))
+        samples.append(SimpleNamespace(name=f"ab {raw}", pins=pins, knobs=knobs, route=dict(route or {}), shape=None, dynamic=dyn))
     return samples
 
 
@@ -2450,7 +2452,9 @@ def _pinned_samples_for_ir(args, embedded):
     """Automatic verified pins plus explicit ``--ab`` pins for an embedded golden target."""
     pinned = list(getattr(args, "golden_configs", None) or [])
     if embedded is not None and (specs := getattr(args, "ab", None)):
-        pinned.extend(_ab_samples(specs, dynamic=getattr(args, "dynamic", None)))
+        from emmy.commands.compile import selected_decisions  # noqa: PLC0415
+
+        pinned.extend(_ab_samples(specs, dynamic=getattr(args, "dynamic", None), route=selected_decisions(args)))
     return pinned
 
 
