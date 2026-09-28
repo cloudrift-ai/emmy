@@ -20,7 +20,13 @@ from emmy.compiler.pipeline.knob import KERNEL_IDENTITY, family_of
 from emmy.compiler.pipeline.pipeline import Decision, LoweringError, Run
 from emmy.compiler.pipeline.search.db import SearchDB
 from emmy.compiler.pipeline.search.golden.evidence import evidence_db
-from emmy.compiler.pipeline.search.pins import PLACEMENT_DECISIONS_HINT, composed_routes
+from emmy.compiler.pipeline.search.pins import (
+    PLACEMENT_DECISIONS_HINT,
+    composed_routes,
+    place_keys_tracked,
+    tracking_place_keys,
+    unmatched_place_pins,
+)
 from emmy.compiler.pipeline.search.policy.greedy import _strip_fork_stamps, greedy_decide, logger, tile_identity
 from emmy.compiler.pipeline.search.strategy.base import SearchStrategy
 
@@ -95,7 +101,9 @@ class GreedyStrategy(SearchStrategy):
         # cuts a kernel offers without paying for a schedule.
         prices = not reaches_placement or "tile/schedule" in names
         db = evidence_db(self.db, ctx) if reaches_placement else (self.db if self.db is not None else SearchDB())
-        with composed_routes(_measured_composed_routes(db) if reaches_placement else []):
+        # A caller already collecting resolved keys (the golden route check) reports them itself.
+        report_pins = reaches_placement and not place_keys_tracked()
+        with composed_routes(_measured_composed_routes(db) if reaches_placement else []), tracking_place_keys() as resolved:
             for _attempt in range(_MAX_GREEDY_RETRIES):
                 rejections: list[tuple[str, str, str]] = []
                 run = Run(pipeline=pipeline, ctx=ctx, db=db, backend=backend, dump=dump, rejections=rejections)
@@ -115,6 +123,9 @@ class GreedyStrategy(SearchStrategy):
                 run = Run(pipeline=pipeline, ctx=ctx, db=db, backend=backend, dump=dump, rejections=rejections)
                 terminal, trace = run.resolve(graph.copy(), greedy_decide(blocked=blocked, prior=None, db=db, price_structural=prices))
         _raise_on_unlowered(terminal, rejections, lowers_to_cuda=complete)
+        if report_pins:
+            for key in unmatched_place_pins(resolved):
+                logger.warning("PLACE pin %s names no seam of any kernel in this compile — it decided nothing", key)
         terminal.hints.set(
             PLACEMENT_DECISIONS_HINT,
             [
