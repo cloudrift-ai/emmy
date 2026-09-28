@@ -610,8 +610,27 @@ def test_fully_overhanging_m_fragment_clamps_its_reads_into_the_tile(monkeypatch
     monkeypatch.setenv("EMMY_STAGE", "")  # gmem-direct: the tier whose loaders clamp per fragment
     src = _render_src(_mma_matmul_graph("static", 1, 128, 64, "f32", False))
     assert "emmy_mma_load_a_gmem_mclamp" in src, "M=1 under this tile must reach the masked-M loader"
-    assert "rows_left - 1;" not in src, "the M clamp must not address below the tile base"
-    assert "row = max(rows_left - 1, 0);" in src
+    assert "if (rows_left > 0) {  // wholly past the bound: read nothing" in src, "an overhanging fragment reads nothing"
+
+
+def test_every_clamped_fragment_loader_reads_nothing_wholly_past_its_bound():
+    """A fragment wholly past its bound has no in-range address: clamping to the fragment base read
+    past the buffer's end. Eight 128-row warps over a 512-row attention (the RTX 5090's hd64 fused
+    kernel under ``WORK=w8x1``) handed warps 4-7 their own Q base at rows 512+; for the last head that
+    is past the allocation, an intermittent CUDA_ERROR_ILLEGAL_ADDRESS. Every clamped loader of every
+    prelude now predicates those reads off and zero-fills the fragment."""
+    import re
+
+    from emmy.compiler.ir.kernel import render
+
+    source = "".join(getattr(render, name) for name in dir(render) if name.endswith("_PRELUDE"))
+    loaders = re.findall(r"void (emmy_\w*(?:clamp\w*|_impl|_gmem4))\(([^)]*)\)\s*\{\n(.*?)\n\}", source, re.S)
+    assert len(loaders) >= 12, [name for name, _, _ in loaders]
+    for name, params, body in loaders:
+        left = next(p.split()[-1] for p in params.split(",") if p.split()[-1] in ("left", "rows_left", "cols_left"))
+        delegates = re.match(r"\s*emmy_\w*_impl<", body)
+        assert delegates or f"{left} > 0" in body, f"{name} reads without checking {left} > 0"
+        assert "return;" not in body, f"{name}: an early return cost the decode split partial 18% on an RTX 5090"
 
 
 @pytest.mark.parametrize(("K", "masked"), [(128, False), (136, True), (132, True)])
@@ -1779,3 +1798,35 @@ def test_transposed_a_tma_pin_is_refused(monkeypatch) -> None:
 
     with pytest.raises(ValueError, match="does not resolve for this contraction"):
         _run_tile_pass(_imap_graph("transpose_a")[0])
+
+
+@requires_cuda
+def test_a_split_partition_is_never_a_fragment_column(monkeypatch):
+    """A split-K partial of ``sigmoid(x) @ W.T`` at one token reads its partition coordinate in both
+    operands (``x[p·bk + k]``, ``W[n, p·bk + k]``). Tiled as the fragment's columns, the staged W
+    slab served every column at the tile's first partition: 1024 of 1024 outputs were wrong on an
+    RTX 5090 (``REDUCE=g8k``, a synchronous compute fill of the sigmoid). A coordinate both operands
+    read is a batch, never a fragment row or column."""
+    from emmy.commands.trace import graph_from_code
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+
+    code = (
+        "(lambda x, w: torch.nn.functional.linear(torch.sigmoid(x), w))"
+        "(torch.randn(1, 1024, dtype=torch.float16), torch.randn(1024, 1024, dtype=torch.float16))"
+    )
+    graph = graph_from_code(code)[0]
+    for key, value in {"REDUCE": "g8k", "TILE": "mma_m16n8k16_f16_f32/f1x4", "WORK": "w4x1", "STAGE": "d1/smem", "PLACE": "fuse"}.items():
+        monkeypatch.setenv(f"EMMY_{key}", value)
+    rng = np.random.default_rng(0)
+    x = rng.standard_normal((1, 1024)).astype(np.float16)
+    w = (rng.standard_normal((1024, 1024)) / 32).astype(np.float16)
+    backend = CudaBackend()
+    try:
+        compiled = backend.compile(graph)
+    except ValueError as exc:  # the pinned tile may now be refused outright, which is the fix too
+        assert "does not resolve" in str(exc) or "no schedule row" in str(exc), exc
+        return
+    (out_name,) = compiled.outputs
+    result, _ = backend.run(compiled, input_data=dict(zip(compiled.inputs, (x, w), strict=True)))
+    reference = (1 / (1 + np.exp(-x.astype(np.float32)))) @ w.astype(np.float32).T
+    np.testing.assert_allclose(result.outputs[out_name].astype(np.float32), reference, rtol=2e-2, atol=2e-2)

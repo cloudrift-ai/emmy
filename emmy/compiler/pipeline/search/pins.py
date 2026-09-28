@@ -14,15 +14,19 @@ from emmy.compiler.ir.schedule.classic import CLASSIC_FAMILIES
 if TYPE_CHECKING:
     from emmy.compiler.pipeline.search.golden import GoldenRecord
 
+from emmy.compiler.ir.schedule.base import pin_refusal
 from emmy.compiler.pipeline.knob import (
     KERNEL_DECISION_FAMILIES,
     KnobType,
     axis_of,
     family_of,
+    family_pins,
     get,
     is_off_value,
+    kernel_scoped,
     parse_knob_spec,
     pin_key_matches,
+    reaches,
     registry,
     values_equal,
 )
@@ -31,7 +35,7 @@ from emmy.compiler.pipeline.knob import (
 #: value never matters — ``spell`` is site-local and drops it — but a count > 1 is load-bearing:
 #: at ``units=(1, 1)`` the parsed ``coop`` collapses to 1 and ``spell`` drops the token entirely,
 #: silently reading ``g2k/coop`` as ``""``.
-_ANY_THREAD_WORK = Work(kind="thread", units=(1, 32))
+_ANY_THREAD_WORK = Work(kind="thread", units=(32, 1))
 
 #: Graph hint carrying the final greedy resolution's placement receipts. Placement is consumed by
 #: a graph splice before CUDA kernels exist, so this is the realized side of a PLACE pin check.
@@ -138,6 +142,7 @@ def unreproducible_pin_flag(
     *,
     placement_knobs: list[dict] | None = None,
     reject_conflicts: bool = False,
+    kernel_names: list[str] | None = None,
 ) -> str | None:
     """Describe pins not realized by any compiled CUDA kernel, or return ``None``.
 
@@ -150,12 +155,18 @@ def unreproducible_pin_flag(
     if not any(kernel_knobs) and not any(placement_knobs or []):
         return None
     misses: list[str] = []
-    for name, want in pinned.items():
-        fam = family_of(name)
+    for label, want in pinned.items():
+        fam = family_of(label)
+        # A kernel pin is its family's bare pin, asked of the kernels it names (``kernel_names``, launch
+        # order beside ``kernel_knobs``); without names, of every kernel, as a bare pin is. A placement
+        # receipt names a seam, never a kernel, so a kernel-scoped PLACE pin keeps its scope and matches none.
+        name = fam if kernel_scoped(label) and fam != "PLACE" else label
         if fam == "PLACE":
             if placement_knobs is None:
                 continue  # callers without a resolution trace cannot gate a splice receipt
             realized_knobs = placement_knobs
+        elif kernel_scoped(label) and kernel_names is not None:
+            realized_knobs = [knobs for knobs, kernel in zip(kernel_knobs, kernel_names, strict=True) if reaches(label, kernel)]
         else:
             realized_knobs = kernel_knobs
         probe = want
@@ -198,7 +209,8 @@ def unreproducible_pin_flag(
             continue
         ran_values = conflicts if reject_conflicts and conflicts else others
         ran = "/".join(ran_values) if ran_values else ("(off)" if saw_off else "(unset)")
-        misses.append(f"{name}={want} realized {ran}")
+        refused = pin_refusal(label if not kernel_scoped(label) else name, want)
+        misses.append(f"{label}={want} realized {ran}" + (f" (refused: {refused})" if refused else ""))
     return f"unreproducible pin: {'; '.join(misses)}" if misses else None
 
 
@@ -206,6 +218,37 @@ def unreproducible_pin_flag(
 #: entries — the signature a kernel's ``S_*`` stamps (``None``: every kernel of the compile, a record
 #: replaying its own target), the keys the ``PLACE@…`` seams one measured row marks ``cut`` together.
 _COMPOSED_ROUTES: list[tuple[frozenset | None, tuple[str, ...]]] = []
+_RESOLVED_PLACE_KEYS: list[set[str]] = []
+
+
+@contextlib.contextmanager
+def tracking_place_keys():
+    """Collect the scoped ``PLACE`` keys — pinned or a golden route's — that the cut pass resolved to a
+    site on some kernel while the block runs (:func:`note_place_key`). A key the whole compile never
+    resolved addressed nothing: a stale spelling, which the cut pass alone cannot tell from a key
+    meant for another kernel of the graph."""
+    seen: set[str] = set()
+    _RESOLVED_PLACE_KEYS.append(seen)
+    try:
+        yield seen
+    finally:
+        del _RESOLVED_PLACE_KEYS[next(i for i, tracked in enumerate(_RESOLVED_PLACE_KEYS) if tracked is seen)]
+
+
+def place_keys_tracked() -> bool:
+    """Whether an enclosing caller is already collecting resolved ``PLACE`` keys — and so owns the report."""
+    return bool(_RESOLVED_PLACE_KEYS)
+
+
+def unmatched_place_pins(resolved: set[str]) -> list[str]:
+    """The live scoped ``PLACE`` pins no kernel of a compile resolved (:func:`tracking_place_keys`)."""
+    return sorted(name for name, _ in family_pins("PLACE") if family_of(name) == "PLACE" and name != "PLACE" and name not in resolved)
+
+
+def note_place_key(key: str) -> None:
+    """Record that ``key`` resolved to a site of the kernel the cut pass is deciding."""
+    for seen in _RESOLVED_PLACE_KEYS:
+        seen.add(key)
 
 
 @contextlib.contextmanager

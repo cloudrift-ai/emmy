@@ -754,7 +754,7 @@ def test_shared_const_broadcast_lowers_as_one_mimo_cuda_kernel():
     (kernel,) = [node for node in result.nodes.values() if isinstance(node.op, CudaOp)]
     assert kernel.buffer_names() == ("c1", "c2")
     assert kernel.op.arg_order[-2:] == ("c1", "c2")
-    assert "float* c1" in kernel.op.kernel_source and "float* c2" in kernel.op.kernel_source
+    assert "float* __restrict__ c1" in kernel.op.kernel_source and "float* __restrict__ c2" in kernel.op.kernel_source
 
 
 def _make_shared_transpose():

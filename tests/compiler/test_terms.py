@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import CastExpr, Var
+from emmy.compiler.ir.expr import BinaryExpr, CastExpr, Literal, Var
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
 from emmy.compiler.pipeline.passes.tile._fromloop import fold_from_loop, scan_from_loop
 from tests.compiler.terms import contraction, projection, slab
@@ -29,6 +29,16 @@ def test_a_contraction_is_the_lifted_matmul_loop() -> None:
     assert built.canonical() == fold_from_loop(loop).canonical()
     view = built.as_contraction()
     assert (view.axis, view.left, view.right, view.product.name, view.plus.name) == ("k", "m", "n", "multiply", "add")
+
+
+def test_several_own_axes_on_both_sides_still_orient_a_pair() -> None:
+    """A chunked row (``64*m1 + m2``) against a packed channel group (``8*n1 + n2``) is an ordinary
+    contraction: each side's own axes stay its role, and the tile picks one of them per side. The
+    Qwen3.8 AWQ down projection has this shape; refusing it left the piece off the tensor cores."""
+    a = Load(name="a", input="x", index=(BinaryExpr("+", BinaryExpr("*", Literal(64, "int"), Var("m1")), Var("m2")), Var("k")))
+    b = Load(name="b", input="w", index=(Var("k"), BinaryExpr("+", BinaryExpr("*", Literal(8, "int"), Var("n1")), Var("n2"))))
+    view = contraction("k", a, (b, "acc")).as_contraction()
+    assert view is not None and (view.left_axes, view.right_axes) == ({"m1", "m2"}, {"n1", "n2"})
 
 
 def test_two_channels_over_one_a_are_one_contraction() -> None:

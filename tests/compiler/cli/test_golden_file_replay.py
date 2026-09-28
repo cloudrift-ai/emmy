@@ -1037,7 +1037,7 @@ def test_run_records_the_greedy_pick_of_an_embedded_golden(monkeypatch, tmp_path
         def resolve(_path):
             return None
 
-    async def fake_isolated(_backend, compiled, *, warmup, iters):
+    async def fake_isolated(_backend, compiled, *, warmup, iters, ref=None, ref_key=None):
         sample = SimpleNamespace(name="greedy (isolated)", knobs={}, shape=None, dynamic=None)
         return run_module._GoldenBench(sample, compiled, launches(compiled, 0.001), [], "ok")
 
@@ -1299,3 +1299,19 @@ def test_pin_route_pins_the_decisions_the_named_rows_agree_on(monkeypatch):
     monkeypatch.setenv("EMMY_KNOBS", "PLACE@inner.1/map=fuse")
     with pytest.raises(SystemExit):
         selected_decisions(SimpleNamespace(golden_configs=[cut], pin_route=True))
+
+
+def test_ab_rows_compile_under_the_pinned_route(monkeypatch):
+    """An ``--ab`` row under ``--pin-route`` compiles the same kernel set as the greedy it is compared
+    with: the route rides every row, and the row's own knobs win where they name the same key. Without
+    the route a bare ``REDUCE`` row compiled the whole fused kernel and failed its split."""
+    from emmy.commands.run import _pinned_samples_for_ir, _sample_replay_knobs
+
+    monkeypatch.delenv("EMMY_KNOBS", raising=False)
+    route = SimpleNamespace(name="r", pins={"FAST_MATH": False}, knobs={"PLACE@inner.1/map": "cut"})
+    args = SimpleNamespace(golden_configs=[route], pin_route=True, ab=["REDUCE=g8k"], dynamic=None)
+    (_, ab) = _pinned_samples_for_ir(args, embedded=object())
+    assert _sample_replay_knobs(ab) == {"PLACE@inner.1/map": "cut", "REDUCE": "g8k"}
+    args.pin_route = False
+    (_, ab) = _pinned_samples_for_ir(args, embedded=object())
+    assert _sample_replay_knobs(ab) == {"REDUCE": "g8k"}

@@ -469,7 +469,7 @@ def test_run_job_trace_args_accuracy_gates_the_bench(monkeypatch) -> None:
 
     benched: list = []
 
-    async def _fake_full_model(module, args_t, kwargs, graph, backend, *, warmup, iters, bench_backends):
+    async def _fake_full_model(module, args_t, kwargs, graph, backend, *, warmup, iters, bench_backends, input_data=None):
         benched.append(graph)
         return {"Emmy": 1.0}, SimpleNamespace(captured=True), True
 
@@ -516,7 +516,7 @@ def test_run_job_trace_args_want_ref_without_eager_accuracy(monkeypatch) -> None
         def run(self, graph, *, input_data=None):
             return SimpleNamespace(outputs={"n0": [2.0]}), None
 
-    async def _fake_full_model(module, args_t, kwargs, graph, backend, *, warmup, iters, bench_backends):
+    async def _fake_full_model(module, args_t, kwargs, graph, backend, *, warmup, iters, bench_backends, input_data=None):
         return {"Emmy": 1.0}, SimpleNamespace(captured=True), True
 
     monkeypatch.setattr(compile_mod, "load_or_trace", lambda ns: (None, None, (object(), (), {})))
@@ -757,3 +757,25 @@ async def test_worker_applies_each_requested_fast_math_policy(monkeypatch):
         await _bench_worker._run_job({"graph": None, "kwargs": {}, "fast_math": enabled})
         assert nvcc.effective_flags() == ["--use_fast_math", "--fmad=false"]
     assert seen == [["--fmad=false"], ["--use_fast_math", "--fmad=false"], ["--fmad=false"]]
+
+
+def test_unsupplied_inputs_fill_with_seeded_normal_values() -> None:
+    """A bench with no inputs times seeded normal values, not a short periodic ramp: a kernel's
+    cost can depend on its values, and the ramp drove a layer's softmax rows into the IEEE
+    division's slow path. Each buffer draws its own stream, deterministically."""
+    import numpy as np
+
+    from emmy.compiler.backend.cuda.program import _host_bytes
+    from emmy.compiler.backend.plan import BufferSpec
+    from emmy.compiler.dim import Dim
+    from emmy.compiler.dtype import F16
+
+    def fill(name: str) -> np.ndarray:
+        buf = BufferSpec(name=name, shape=(Dim(4096),), dtype=F16, role="input")
+        return np.frombuffer(_host_bytes(buf, (4096,), None, {}), dtype=np.float16)
+
+    x = fill("x")
+    assert np.array_equal(x, fill("x")), "the fill is deterministic"
+    assert not np.array_equal(x, fill("w")), "each buffer draws its own stream"
+    assert np.isfinite(x).all() and 0.8 < float(x.astype(np.float32).std()) < 1.2
+    assert not np.array_equal(x[:101], x[101:202]), "no short period"

@@ -341,6 +341,15 @@ class Fold:
                 rows = pair[0].free_axes ^ pair[1].free_axes if slabs else frozenset()
                 k_last.sort(key=lambda e: min(e.free_axes & rows, default=""))
                 a_edge = k_last[0] if len(pair) == 2 and k_last else None
+                # One slab and one computed operand: a slab that reads k in an earlier position than
+                # its last is laid out ``B[k, n]``, so the computed operand is A. A GEMV whose input
+                # is a fused prologue (``silu(gate) * up`` into the down projection) otherwise took
+                # the weight as A, which no fragment loader reads down its k column, and lost every
+                # tensor-core tier. The fold alone decides, so a fused tree and the piece formed from
+                # it orient the term the same way.
+                loaded = [e for e in pair if e.as_slab() is not None]
+                if len(pair) == 2 and len(loaded) == 1 and self.axis not in loaded[0].as_slab().load.index[-1].free_vars():
+                    a_edge = next(e for e in pair if e is not loaded[0])
             if a_edge is not None and self.operands[0] is not a_edge:
                 reordered = (a_edge, *(edge for edge in self.operands if edge is not a_edge))
                 bound = tuple(param for edge in reordered for param, held, _ in self.bindings if held is edge)
@@ -609,8 +618,6 @@ class Fold:
         if self.axis not in a_space & b_space:
             return None
         left_only, right_only = a_space - b_space, b_space - a_space
-        if len(left_only) > 1 and len(right_only) > 1:
-            return None  # several own axes on BOTH sides: an outer product over batches, not an orientable pair
         if not left_only and not right_only:
             return None  # a dot product over shared axes only carries no output role to tile: a planar reduce
         slab = b_edge.as_slab()
