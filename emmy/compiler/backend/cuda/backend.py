@@ -230,7 +230,7 @@ class CudaBackend(Backend):
             with config.nvcc_flags_override(nvcc_flags):
                 result = benchmark_program(
                     compiled,
-                    input_data,
+                    input_data=input_data,
                     warmup=warmup,
                     num_iters=num_iters,
                     on_iter=on_iter,

@@ -167,7 +167,7 @@ async def _run_job(req: dict) -> dict:
                 run_outputs = run_result.outputs
             # Timed on the reference inputs when the row has them, so the pinned row, the
             # greedy row and the torch table all read the same values.
-            result = benchmark_program(req["graph"], run_inputs, **req["kwargs"])
+            result = benchmark_program(req["graph"], input_data=run_inputs, **req["kwargs"])
             return {"result": result, "results": None, "torch_available": False, "captured": result.captured, "run_outputs": run_outputs}
 
         from emmy.compiler.backend.cuda.backend import CudaBackend
