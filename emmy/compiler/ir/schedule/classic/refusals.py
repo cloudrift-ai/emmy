@@ -662,7 +662,7 @@ def _fragment_agreements(
             # whichever side carries ITS key, and the term's canonical orientation decides which
             # that is (a score whose A edge is the key tiles the key as M).
             sides = tuple((side.axis.name, side.units, side.tile, side.reg) for side in (placed.m, placed.n))
-            offer = ("warp", plan.atom.shape, plan.atom.fragment_layout, placed.n.units, placed.n.tile, sides)
+            offer = ("warp", plan.atom.shape, _seam_layout(plan.atom), placed.n.units, placed.n.tile, sides)
         else:
             offer = ("scalar",)
         out.append(_FragmentAgreement("offer", node_id_spelling(site), offer))
@@ -675,13 +675,21 @@ def _fragment_agreements(
             # this atom with the chunk as its N tile, one warp column wide and the same register
             # rows. Stated as a need of its own because the ordinary one accepts an untiled
             # producer, and that row would be stamped on a kernel whose emission ignored it.
-            need = ("chunk", plan.atom.shape, plan.atom.fragment_layout, plan.atom.atom_k * plan.bk, placed.m.reg, node.axis)
+            need = ("chunk", plan.atom.shape, _seam_layout(plan.atom), plan.atom.atom_k * plan.bk, placed.m.reg, node.axis)
         elif plan.is_warp and stage is not None and stage.transport == "smem":
             need = ("step" if facts.need_step else "warp", plan.atom.shape, plan.atom.fragment_layout, stage.bk_elems)
         else:
             need = ("free",)
         out.append(_FragmentAgreement("need", node_id_spelling(facts.need), need))
     return tuple(out)
+
+
+def _seam_layout(atom) -> str:
+    """The register layout a fragment seam hands over. A ``wgmma`` cell's accumulator is, per warp,
+    the ``m16n8k16`` C fragment repeated along N, and its register-A form takes that layout's A
+    fragment, so across a seam it IS that layout: a warp-group expectation reads an ``mma.sync``
+    score's fragments as they stand."""
+    return "m16n8k16" if atom.is_wgmma else atom.fragment_layout
 
 
 def _fragment_registers(atom, role: str) -> int:

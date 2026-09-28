@@ -994,9 +994,10 @@ M8N8K4 = FragLayout(
 
 
 def frag_layout(name: str) -> FragLayout:
-    """The C-fragment layout named by an atom descriptor."""
+    """The C-fragment layout named by an atom descriptor. A ``wgmma`` accumulator is, per warp, the
+    ``m16n8`` C fragment repeated along N (:class:`WgmmaMma`), so it reads through that layout."""
     try:
-        return {"m16n8k16": M16N8, "m8n8k4": M8N8K4}[name]
+        return {"m16n8k16": M16N8, "wgmma": M16N8, "m8n8k4": M8N8K4}[name]
     except KeyError as exc:
         raise ValueError(f"unmodeled C-fragment layout {name!r}") from exc
 
