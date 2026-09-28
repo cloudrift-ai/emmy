@@ -609,8 +609,6 @@ class Fold:
         if self.axis not in a_space & b_space:
             return None
         left_only, right_only = a_space - b_space, b_space - a_space
-        if len(left_only) > 1 and len(right_only) > 1:
-            return None  # several own axes on BOTH sides: an outer product over batches, not an orientable pair
         if not left_only and not right_only:
             return None  # a dot product over shared axes only carries no output role to tile: a planar reduce
         slab = b_edge.as_slab()
