@@ -1,4 +1,15 @@
-# NVFP4 on sm_120: Qwen3.8-27B-NVFP4 and Qwen3-8B, investigation findings (2026-09-28)
+# NVFP4 Qwen bug investigation and serving exploration (2026-09-28)
+
+This investigation documents compiler bugs found while exploring Qwen3-8B and Qwen3.8-27B-NVFP4, together with what
+we could establish about their serving paths. The linked reports describe observable failures and unresolved causes.
+
+IR dumps are evidence for failures such as duplicated contractions, unavailable schedules, codegen crashes and
+incorrectly nested output loops. Those findings can be investigated without a GPU benchmark; some paths fail before
+execution is possible. The investigation therefore includes IR-only checks as well as selected kernel and layer runs.
+
+The RTX 5080 Laptop GPU gives only a rough indication of performance. We retain the hand-picked knobs and timing
+notes as possible starting points for actual tuning after the bugs are addressed. They are secondary to the bug
+findings and do not establish production performance or complete model serving.
 
 ## Bug reports
 
@@ -19,17 +30,16 @@ below have not been independently revalidated.
 | [Attention and encode repeat work](nvfp4-qwen-performance/qwen38-attention-not-flash-and-encode-shape.md) | The examined Qwen attention IR has no `twist=softmax`; four P·V pieces repeat `exp` and division across output columns. Encode assigns 128 threads per byte and repeats each group's maximum eight times. |
 | [DeltaNet compilation and scheduling failures](nvfp4-qwen-performance/qwen38-gdn-layers-fail.md) | In gated DeltaNet (GDN) layers, padding and serving capture raise errors; a one-source `FragmentRepack` crashes CUDA rendering; sibling Tile IR sweeps become nested CUDA loops; input projections lack tensor-core TILEs. |
 
-## Baseline
+## Exploration scope
 
 Two models, compiled and partly benched at `a98fd4f8` on an RTX 5080 Laptop GPU (sm_120, 16 GB):
 
 - `Inferact/Qwen3.8-27B-NVFP4`: IR dumps and single-kernel benches. The model does not fit on the card.
 - `Qwen/Qwen3-8B` against `nvidia/Qwen3-8B-NVFP4`: IR dumps and benches of layer programs.
 
-The original measurements asked how good emmy's code can be with hand-picked knobs. The default (greedy) pick had no
-measured rows for this card and performed poorly or failed in the examined cases. The knobs below come from one
-quick pass of hand pins, not a tuning. No goldens were recorded. The long-term home of the knobs worth keeping is golden
-rows, recorded on a card that is not power-capped.
+Hand pins helped distinguish missing compiler support from poor schedule choices. The default (greedy) pick had no
+measured rows for this card and performed poorly or failed in the examined cases. The explored choices and their
+rough timings are preserved in [the performance reference](#exploratory-tuning-and-performance-reference).
 
 Both NVFP4 checkpoints are W4A4:
 
@@ -41,87 +51,24 @@ Emmy spells this activation *encode* as `to_f4e2m1` ops that write packed `f4e2m
 on the *fp4 cell*, the native instruction `mma_m16n8k64_e2m1_f32`, which multiplies packed codes and applies the block
 scales in hardware. A matmul on the *scalar tier* uses no tensor cores; each thread computes its own output elements.
 
-## Measurement caveats
+## Serving exploration
 
-- **Power cap.** The laptop was power-capped during the runs. One reading showed the GPU at about 20 W with a 9 GHz
-  memory clock instead of 14 GHz; another showed a 14 GHz memory clock with the graphics clock near 400 MHz. Measured
-  bandwidth: 259–641 GB/s for reads, up to 715 GB/s for a copy (reads plus writes), against 896 GB/s on paper. Numbers
-  swing by about 30%.
-- **L2-hot weights.** The device reports a 48 MB L2 cache. A single-matmul program reuses one weight across benchmark
-  iterations, so a weight that fits in L2 stays there, and its time can beat DRAM bandwidth.
-- **Unresolved inline quantized comparison.** `emmy run --strict` was reported to fail across the tested schedules
-  of `-c … --quantize` programs: scalar, W4A16 and fp4, each with errors as large as the outputs. This suggests a
-  shared input or reference problem; it neither identifies the cause nor proves the kernels correct. Checkpoint
-  repros must validate their own reference path. Do not assume their `--strict` comparison is unusable.
-- **What a ✓ means.** Correctness below comes from the `--ab` output check. `emmy run --bench --ab KNOBS` compiles the
-  program once more with `KNOBS` added and flags a wrong answer when that compile's outputs differ from the greedy
-  compile's by more than 5% of the greedy output's largest value. Both compiles use the same `EMMY_KNOBS`. The greedy
-  compile is often already on the fp4 cell. Rows marked "vs scalar" come from runs whose greedy compile was pinned to
-  the scalar tier, so they compare the fp4 cell against scalar code. These are relative comparisons, not independent
-  proofs of correctness. A run that says "wrong-answer reference unusable" has not passed a correctness check.
-- **Global pins reach every kernel.** The experiments did not combine the best knobs of each piece (blocker 5).
-  Whether existing site-scoped pins suffice has not been established.
+These observations describe the extent of the exploration at `a98fd4f8`.
 
-## Qwen3-8B: where things stand
+| Model | What was explored | What this establishes about serving |
+| --- | --- | --- |
+| Qwen3-8B, 16-bit and NVFP4 | Captured and ran selected per-layer serving programs and isolated matmuls. Some comparisons lacked a usable correctness reference. | Parts of the serving compilation path were exercised. These experiments do not demonstrate a complete, validated model serving run. The 16-bit model does not fit the 16 GB card. |
+| Qwen3.8-27B-NVFP4 | Inspected full-attention and DeltaNet layer IR and ran selected kernels individually. | Native emmy serving is blocked by DeltaNet capture and compilation failures. The whole checkpoint also does not fit the test card, so single-kernel results do not demonstrate serving. |
 
-The layer programs below are serving twins: the per-layer programs emmy's serving path compiles.
-`scripts/capture_gen_twins.py --model <model> --out <dir>` writes them. `--decode-bucket` (1 or 32) and
-`--prefill-bucket` (512) set the widths, and `--no-symbolic` skips the any-width twins. There are two twins per layer:
+For Qwen3-8B, the captured layer programs are serving twins, produced by `scripts/capture_gen_twins.py`. There are two
+per layer: `pre` covers input RMSNorm, q/k/v projections and per-head q/k norm; `post` covers o_proj plus residual,
+RMSNorm, gate/up plus SiLU, and down plus residual. Attention runs outside emmy in this serving path and is in neither
+twin. The recorded layer timings therefore leave out attention and the rest of the serving system.
 
-- `pre`: input RMSNorm → q/k/v projections → per-head q/k norm.
-- `post`: o_proj + residual → RMSNorm → gate/up + SiLU → down + residual.
-
-Attention itself runs outside emmy in serving and is in neither twin.
-
-Decode, one token per step, µs per layer. Eager is a PyTorch layer on the same card, from a separate timing script.
-
-| program | 16-bit, pinned | eager | NVFP4, pinned twin | NVFP4, sum of pinned single matmuls |
-| --- | ---: | ---: | ---: | ---: |
-| pre | 109 | 108 | 135 | ≈ 51 |
-| post | 422 | 622 | 1,266 | ≈ 167 |
-
-Estimated time per output token: 36 layers × (pre + post + 20 µs torch attention at context 1024) + 4.9 ms lm_head.
-
-| case | ms per token |
-| --- | ---: |
-| 16-bit, pinned twins | ≈ 24.7; the 16-bit weights do not fit the 16 GB card for serving |
-| NVFP4, pinned twins as they compile today | ≈ 56 |
-| NVFP4, if each layer split like the single-matmul programs | ≈ 13.5 |
-| NVFP4, bandwidth floor (5.15 GB at 896 or 640 GB/s) | 5.8 or 8.0 |
-
-**The fp4 matmuls themselves are good.** At one token, emmy's pinned single matmuls sum to about 218 µs per layer, and
-`torch._scaled_mm`'s fp4 path takes 611 µs for the same seven matmuls. 16-bit matmuls with pins run at or near eager.
-Gate+up at one token takes 265 µs end to end, about 760 GB/s. k/v at 512 tokens and lm_head are slightly slower than
-eager.
-
-**Duplicate projections and inefficient encode schedules contribute substantial avoidable work** (blockers 2 and 3).
-The measurements do not isolate how much of the complete NVFP4-versus-16-bit gap each accounts for.
-
-**Prefill** at 512 tokens with 16-bit pinned twins takes about 105 ms (eager about 174 ms). The NVFP4 `pre512` twin
-alone takes 2.1 ms per layer.
-
-## Qwen3.8-27B-NVFP4: where things stand
-
-The model has 64 layers: three gated DeltaNet (GDN) layers, then one full-attention layer, repeating. Kernels were
-compiled and benched one at a time from trace inventories. `emmy trace <model> --layer L --seq-len S -o <file>` writes
-every kernel of one layer at one width, and `emmy compile|run --golden <file> --realization <kernel>` takes one of them.
-
-- **Fused kernels need the full-projection cut.** Every NVFP4 weight matmul reaches the fp4 cell with cp.async once its
-  fused kernel is split this way. The full-projection cut (`GLOSSARY.md`) is one decision of the cut pass. It moves each
-  contraction and each output-owning branch of a fused kernel into a kernel of its own, called a *piece*, and it is
-  spelled as a set of `PLACE@<site>=cut` keys.
-- **down_proj:** 407 µs at 512 tokens, about 223 TFLOPS. At 16 tokens, 41 µs. Its roughly 47 MB of weights fits the
-  L2, so this 16-token number beats DRAM bandwidth.
-- **Full-attention layer at 16 tokens,** with pins:
-
-  | kernel | µs | weight-read floor, µs |
-  | --- | ---: | ---: |
-  | attention | 531–949 | 86 |
-  | gate/up | 585 | 200 |
-  | o_proj | 626 | 37 |
-
-- **The GDN layers do not work** (blocker 1). They are 48 of the 64 layers, and emmy cannot serve this model with its
-  own kernels.
+Qwen3.8-27B has 48 gated DeltaNet layers and 16 full-attention layers. Individual full-attention projection kernels
+reached the native fp4 instruction after cuts, while the attention computation and DeltaNet paths exposed the bugs
+below. Shipped Qwen3.8 recipes on V100 use external kernels for GDN; that is a different serving path and does not
+validate this NVFP4 checkpoint on sm_120 with emmy's own kernels.
 
 ## Observed problems
 
@@ -133,15 +80,14 @@ every kernel of one layer at one width, and `emmy compile|run --golden <file> --
      no serving program yet".
    - **A CUDA render crash at 512 tokens.** `k_matmul_reduce_81b2ae` hits `assert len(self.srcs) == 2` in
      `FragmentRepack.render` (`emmy/compiler/ir/kernel/ir.py`). Kernel IR shows a one-source repack without `role=b`.
-     Suspected cause: the `_rewrite_kind` overload rebuilds the node without preserving its role. Confirm this with
-     a focused reproducer before choosing the fix.
+     Suspected cause: the `_rewrite_kind` overload rebuilds the node without preserving its role. The causal link
+     remains to be confirmed.
    - **A runaway serial loop.** The input-projection kernel's last piece, the one that stores its outputs,
      nests three sibling output sweeps into one serial loop nest, about 1.3×10¹⁷ iterations on one thread.
    - **The 16-bit input projections stay on the scalar tier.** The unquantized projections and convolution together
      hold about 168 MB per layer. The tensor-core fragment loaders read a contraction's first operand as the matrix
-     whose K runs contiguously. Here that
-     first operand is the K×N weight, and the four taps of the causal convolution come in as four more first-operand
-     inputs.
+     whose K runs contiguously. Here the first operand is the K×N weight, and the four taps of the causal convolution
+     come in as four more first-operand inputs.
    - Also slow: the chunk triangular solve `k_slice_unsqueeze_reduce_b17b4d` takes 16 ms at 64 tokens.
 
    The shipped Qwen3.8-27B recipes (V100) serve GDN outside emmy: Triton kernels for prefill,
@@ -195,11 +141,86 @@ every kernel of one layer at one width, and `emmy compile|run --golden <file> --
    - A cut piece over W4A16 weights gets the weight as its first operand and loses the packed byte-slab stage.
    - A 16-bit matmul whose activation is computed in the kernel gets no TMA for its stored weights.
 8. **lm_head (Qwen3-8B, 16-bit, 1.25 GB)** takes 4.9 ms per token pinned, about as long as eager (about 250 GB/s). That
-   is 9% of the NVFP4 time per token today and 36% of the 13.5 ms estimate.
+   is a performance observation, not an isolated compiler defect. The token-time estimates below are extrapolations.
 
-## Knobs worth keeping
+## Exploratory tuning and performance reference
 
-Timings are the medians of `emmy run … --bench`: `--warmup 20 --iters 200` for Qwen3-8B, `--warmup 5 --iters 20` for
+The material below is retained in case it is useful after the bugs are addressed and actual tuning begins. It records
+one quick pass of hand-picked choices, including unsuccessful paths and missing correctness checks. No measured
+goldens were recorded. Changes to fusion, cuts or scheduling may invalidate the pins or change which choices help.
+
+Laptop power limits, clock variation and cache reuse make these timings rough context. They can suggest which
+experiments were promising; they do not establish a tuned baseline, expected speedup from a fix or serving latency.
+
+### Measurement caveats
+
+- **Power cap.** The laptop was power-capped during the runs. One reading showed the GPU at about 20 W with a 9 GHz
+  memory clock instead of 14 GHz; another showed a 14 GHz memory clock with the graphics clock near 400 MHz. Measured
+  bandwidth: 259–641 GB/s for reads, up to 715 GB/s for a copy (reads plus writes), against 896 GB/s on paper. Numbers
+  swing by about 30%.
+- **L2-hot weights.** The device reports a 48 MB L2 cache. A single-matmul program reuses one weight across benchmark
+  iterations, so a weight that fits in L2 stays there, and its time can beat DRAM bandwidth.
+- **Unresolved inline quantized comparison.** `emmy run --strict` was reported to fail across the tested schedules
+  of `-c … --quantize` programs: scalar, W4A16 and fp4, each with errors as large as the outputs. This suggests a
+  shared input or reference problem; it neither identifies the cause nor proves the kernels correct. Checkpoint
+  repros must validate their own reference path. Do not assume their `--strict` comparison is unusable.
+- **What a ✓ means.** Correctness below comes from the `--ab` output check. `emmy run --bench --ab KNOBS` compiles the
+  program once more with `KNOBS` added and flags a wrong answer when that compile's outputs differ from the greedy
+  compile's by more than 5% of the greedy output's largest value. Both compiles use the same `EMMY_KNOBS`. The greedy
+  compile is often already on the fp4 cell. Rows marked "vs scalar" come from runs whose greedy compile was pinned to
+  the scalar tier, so they compare the fp4 cell against scalar code. These are relative comparisons, not independent
+  proofs of correctness. A run that says "wrong-answer reference unusable" has not passed a correctness check.
+- **Global pins reach every kernel.** The experiments did not combine the best knobs of each piece (blocker 5).
+  Whether existing site-scoped pins suffice has not been established.
+
+### Qwen3-8B: exploratory timings
+
+Decode, one token per step, µs per layer. Eager is a PyTorch layer on the same card, from a separate timing script.
+
+| program | 16-bit, pinned | eager | NVFP4, pinned twin | NVFP4, sum of pinned single matmuls |
+| --- | ---: | ---: | ---: | ---: |
+| pre | 109 | 108 | 135 | ≈ 51 |
+| post | 422 | 622 | 1,266 | ≈ 167 |
+
+Illustrative time-per-token extrapolations, not measured serving latency: 36 layers × (pre + post + 20 µs torch
+attention at context 1024) + 4.9 ms lm_head. The alternative split is hypothetical, and summing isolated matmuls omits
+some surrounding work and may have different cache behavior.
+
+| case | ms per token |
+| --- | ---: |
+| 16-bit, pinned twins | ≈ 24.7; the 16-bit weights do not fit the 16 GB card for serving |
+| NVFP4, pinned twins in this investigation | ≈ 56 |
+| NVFP4, if each layer split like the single-matmul programs | ≈ 13.5 |
+| NVFP4, bandwidth floor (5.15 GB at 896 or 640 GB/s) | 5.8 or 8.0 |
+
+**Some hand-pinned matmuls were promising on this setup.** At one token, emmy's pinned single matmuls sum to about
+218 µs per layer, and `torch._scaled_mm`'s fp4 path takes 611 µs for the same seven matmuls. 16-bit matmuls with pins run at or near eager.
+Gate+up at one token takes 265 µs end to end, about 760 GB/s. k/v at 512 tokens and lm_head are slightly slower than
+eager.
+
+**Duplicate projections and inefficient encode schedules contribute substantial avoidable work** (blockers 2 and 3).
+The measurements do not isolate how much of the complete NVFP4-versus-16-bit gap each accounts for.
+
+**Prefill** at 512 tokens with 16-bit pinned twins takes about 105 ms (eager about 174 ms). The NVFP4 `pre512` twin
+alone takes 2.1 ms per layer.
+
+### Qwen3.8-27B-NVFP4: exploratory timings
+
+Selected kernels of full-attention layer 3, measured individually with hand pins:
+
+- **down_proj:** 407 µs at 512 tokens, about 223 TFLOPS. At 16 tokens, 41 µs. Its roughly 47 MB of weights fits the
+  L2, so this 16-token number beats DRAM bandwidth.
+- **Full-attention layer at 16 tokens,** with pins:
+
+  | kernel | µs | weight-read floor, µs |
+  | --- | ---: | ---: |
+  | attention | 531–949 | 86 |
+  | gate/up | 585 | 200 |
+  | o_proj | 626 | 37 |
+
+### Recorded knobs
+
+These choices are possible starting points for later tuning. Timings are the medians of `emmy run … --bench`: `--warmup 20 --iters 200` for Qwen3-8B, `--warmup 5 --iters 20` for
 Qwen3.8. Unless a row says otherwise, times are end to end.
 
 Tile shorthand:
@@ -210,7 +231,7 @@ Tile shorthand:
 
 For the ✓ column, see the caveats above.
 
-### Qwen3-8B, 16-bit single matmuls
+#### Qwen3-8B, 16-bit single matmuls
 
 Each program is `-c "nn.Linear(K, N, bias=False).half()(torch.randn(M, K, dtype=torch.float16))"`. Gate+up is a
 two-linear SiLU module.
@@ -231,7 +252,7 @@ two-linear SiLU module.
 | down | 512 | same | 866.4 | 870 |
 | lm_head 4096→151936 | 1 | `WORK=w1x2,TILE=H/f1x2/k4,STAGE=d4/smem-tma` | 4,913.6 | 4,734 |
 
-### Qwen3-8B, NVFP4 single matmuls
+#### Qwen3-8B, NVFP4 single matmuls
 
 These are `--quantize nvfp4` programs. `EMMY_KNOBS` held `PLACE@map.1/map=cut,PLACE@map.2/map=cut`, which cuts the
 activation encode into its own kernel. The schedule knobs below went in as `--ab` rows.
@@ -254,7 +275,10 @@ At 512 tokens, `REDUCE=` also fixes the encode kernel (blocker 3). k/v at 512 to
 was not re-measured with the fix. Some gate+up pins at 512 (`f4x4`, `f4x8`, `d4`) fail to compile: "1 node(s) left
 un-lowered — the deterministic compile exhausted its fallbacks and has no kernel for them: - 'mul'".
 
-### Qwen3-8B layer programs (serving twins)
+#### Qwen3-8B layer programs (serving twins)
+
+`scripts/capture_gen_twins.py --model <model> --out <dir>` writes the twins. `--decode-bucket` (1 or 32) and
+`--prefill-bucket` (512) set the widths, and `--no-symbolic` skips the any-width twins.
 
 In these runs the cut knobs went in `EMMY_KNOBS` and the schedule knobs as `--ab` rows.
 
@@ -281,9 +305,10 @@ FPOST  = PLACE@map.1/map=cut,PLACE@map.1/map.2/reduce.1/inner=cut,PLACE@map.1/ma
 
 Site paths are positions in the twin's Fold tree at `a98fd4f8`. They move when fusion changes.
 
-### Qwen3.8-27B-NVFP4 single kernels
+#### Qwen3.8-27B-NVFP4 single kernels
 
-These are kernels of layer 3. Kernel names are at `a98fd4f8`.
+These are kernels of layer 3, compiled and benched individually from trace inventories. Kernel names are at
+`a98fd4f8`. The records do not imply a complete model serving run.
 
 | kernel, tokens | EMMY_KNOBS | µs | ✓ |
 | --- | --- | ---: | --- |
