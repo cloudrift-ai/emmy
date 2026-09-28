@@ -287,7 +287,21 @@ def _absorbing_consumer(match: Match, root: Node) -> tuple[Node | None, str | No
     reader = graph.nodes[readers[0]]
     if not isinstance(reader.op, TileOp) or any(store.sweep for store in reader.op.output_specs):
         return None, "a consumer finalize sums into a kernel the splicer can re-form"
+    # The unsplit kernel writes the same value at the same cells as the finalize, one reduce loop
+    # shallower: if the splicer cannot inline it into the reader, the finalize will not go either.
+    key = (id(tile), id(reader.op))
+    if key not in _SPLICEABLE:
+        try:
+            _SPLICEABLE[key] = (tile, reader.op, _absorbed(match, root, reader, tile, None) is not None)
+        except ValueError:
+            _SPLICEABLE[key] = (tile, reader.op, False)
+    if not _SPLICEABLE[key][2]:
+        return None, "the splicer cannot inline this value into its reader"
     return reader, None
+
+
+#: Whether a kernel's value splices into its reader, by ``(id(kernel), id(reader))``; the ops ride along so the ids stay theirs.
+_SPLICEABLE: dict[tuple[int, int], tuple[TileOp, TileOp, bool]] = {}
 
 
 def _loaded(node: Node) -> set[str]:
@@ -297,16 +311,20 @@ def _loaded(node: Node) -> set[str]:
     return {load.input for load in node.op.op.lower(axes=node.op.axes).loads}
 
 
-def _absorbed(match: Match, root: Node, reader: Node, finalize: TileOp, ws: Tensor) -> TileOp:
+def _absorbed(match: Match, root: Node, reader: Node, finalize: TileOp, ws: Tensor | None) -> TileOp:
     """``reader`` with ``finalize`` spliced into it: its reads of ``root``'s value become the sum over
     the workspace partitions, one loop nest merged by the fusion splicer and formed again."""
     graph = match.graph
     out = root.buffer_names()[0]
     sub = Graph()
-    sub.add_node(op=InputOp(), inputs=[], output=ws, node_id=ws.name)
+    if ws is not None:
+        sub.add_node(op=InputOp(), inputs=[], output=ws, node_id=ws.name)
     fin_body = finalize.op.lower(bound=frozenset(), stores=finalize.output_specs, axes=finalize.axes)
-    fin_reads = [ws.name, *(inp for inp in root.inputs if inp in {load.input for load in Body.coerce(fin_body).loads})]
-    for inp in (*fin_reads[1:], *(i for i in reader.inputs if i != out)):
+    fin_reads = [
+        *((ws.name,) if ws is not None else ()),
+        *(inp for inp in root.inputs if inp in {load.input for load in Body.coerce(fin_body).loads}),
+    ]
+    for inp in (*fin_reads, *(i for i in reader.inputs if i != out)):
         if inp not in sub.nodes:
             sub.add_node(op=InputOp(), inputs=[], output=graph.buffer(inp), node_id=inp)
     sub.add_node(op=LoopOp(body=fin_body), inputs=fin_reads, outputs=root.outputs, node_id=out)
@@ -327,7 +345,7 @@ def _split_fork(match: Match, root: Node, key: str, cta: int, finalize: str) -> 
     spelling = Reduce.of(cta=cta, finalize=finalize).spell()
     # Every arm is realized against the one match, and pricing realizes arms the pick then drops: each
     # starts from the match as the fork found it, so a consumer arm's consumed readers never leak.
-    output, consumed = match.output, set(match.consumed)
+    output, consumed = (match.output, set(match.consumed)) if match is not None else (None, set())
 
     def realize() -> Graph:
         match.output, match.consumed = output, set(consumed)
