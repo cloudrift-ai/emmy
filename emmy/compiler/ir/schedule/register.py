@@ -17,6 +17,7 @@ from emmy.compiler.ir.atom import ATOM_REGISTRY
 from emmy.compiler.ir.expr import BinaryExpr, Literal, TernaryExpr, Var
 from emmy.compiler.ir.schedule.base import Schedule, ScheduleContext, ScheduleProblem, ScheduleRefused, Site
 from emmy.compiler.ir.schedule.choices import Tile, Work
+from emmy.compiler.ir.schedule.classic.schedule import STATE_KEY
 from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Select
 
 if TYPE_CHECKING:
@@ -145,13 +146,13 @@ class RegisterSchedule:
 @dataclass(frozen=True)
 class _RegisterSite(Site):
     problem: RegisterProblem
-    keys = ("WORK", "TILE", "STAGE")
+    keys = ("WORK", "TILE", STATE_KEY)
 
     @cached_property
     def options(self):
         p = self.problem
         program = p.tile.register_program
-        if program is None or set(p.row) - set(self.keys) or p.row.get("STAGE", "d1/reg") != "d1/reg":
+        if program is None or set(p.row) - set(self.keys) or p.row.get(STATE_KEY, "d1/reg") != "d1/reg":
             return ()
         if not p.allow_f16 and "TILE" not in p.row:
             return ()
@@ -214,7 +215,7 @@ class RegisterProblem(ScheduleProblem):
         # this tier does not own (a classic row's REDUCE, its site-scoped keys) describes another
         # tier, so this one offers no leaf for it; only a strict row must be this tier's own.
         if strict and set(row) - set(_RegisterSite.keys):
-            raise ValueError("register schedule accepts only WORK, TILE and STAGE")
+            raise ValueError(f"register schedule accepts only WORK, TILE and {STATE_KEY}")
         return replace(self, row=frozendict(row))
 
 
@@ -259,14 +260,14 @@ class RegisterCodec:
 
     def _encode(self, schedule):
         choice = schedule.kernel
-        return {"WORK": choice.work.spell(), "TILE": choice.tile.spell(), "STAGE": "d1/reg"}
+        return {"WORK": choice.work.spell(), "TILE": choice.tile.spell(), STATE_KEY: "d1/reg"}
 
     def encode(self, schedule):
         return self._encode(self.context.extend(schedule).schedule)
 
     def decode(self, row):
         if set(row) != set(self.keys()):
-            raise ValueError("a register schedule needs exactly WORK, TILE and STAGE")
+            raise ValueError(f"a register schedule needs exactly WORK, TILE and {STATE_KEY}")
         context = self.context.narrowed(row, strict=True)
         choices = tuple(context.extensions())
         if len(choices) != 1:

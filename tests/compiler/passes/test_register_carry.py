@@ -41,7 +41,7 @@ def test_register_schedule_round_trip_and_precision_gate(target):
     for schedule in context.extensions():
         assert codec.decode(codec.encode(schedule)) == schedule
         node.op = materialize_register(tile, schedule, {})
-        assert "STAGE=d1/reg" in node.op.pretty_body()
+        assert "STAGE@state=d1/reg" in node.op.pretty_body()
         restored = Graph.from_dict(graph.to_dict())
         assert restored.nodes[node.id].op.schedule == schedule
         assert restored.nodes[node.id].op.register_program == node.op.register_program
@@ -75,13 +75,13 @@ def test_a_descent_row_naming_other_families_offers_no_register_leaf():
     row = {"WORK": "t16x8", "TILE@map.2/inner": "f26x26", "REDUCE@map.1/inner": ""}
     for narrowing in (row, {"REDUCE@map.1/inner": ""}):
         assert not tuple(context.narrowed(narrowing).extensions())
-    with pytest.raises(ValueError, match="accepts only WORK, TILE and STAGE"):
+    with pytest.raises(ValueError, match="accepts only WORK, TILE and STAGE@state"):
         context.narrowed(row, strict=True)
 
 
 @pytest.mark.parametrize("target", [(7, 0), (12, 0)], ids=["volta", "modern"])
 def test_chunk_loop_is_inside_one_launch(target):
-    with pinned_knobs({"FAST_MATH": True, "STAGE": "d1/reg"}):
+    with pinned_knobs({"FAST_MATH": True, "STAGE@state": "d1/reg"}):
         graph = Pipeline.build(CUDA_PASSES).run(_graph(), ctx=Context.from_target(target))
     (op,) = (n.op for n in graph.nodes.values() if isinstance(n.op, CudaOp))
     assert not op.serial and op.smem_bytes == 0
@@ -145,7 +145,7 @@ def test_register_state_preserves_old_reads_on_cuda(half, warps):
 
     target = Context.probe()
     atom = ("mma_m8n8k4" if target.has_volta_mma else "mma_m16n8k16") + "_f16_" + ("f16" if half else "f32")
-    with pinned_knobs({"STAGE": "d1/reg", "WORK": f"w{warps}x1", "TILE": f"{atom}/f1x1/k4"}):
+    with pinned_knobs({"STAGE@state": "d1/reg", "WORK": f"w{warps}x1", "TILE": f"{atom}/f1x1/k4"}):
         graph = Pipeline.build(CUDA_PASSES).run(_graph())
     (op,) = (n.op for n in graph.nodes.values() if isinstance(n.op, CudaOp))
     assert not op.serial

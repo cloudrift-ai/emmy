@@ -46,7 +46,10 @@ def rewrite(match: Match, root: Node, ctx=None) -> KernelOp | None:
     # structural ``tile/030_cut`` fork's, decided BEFORE scheduling (the walk's catalog
     # offers no ``g`` row, and its pin path strips the consumed ``g`` half). A surviving split
     # request is a bug — the materializer only lowers single-launch kernels.
-    resident = isinstance(tile.materialization, RegisterMaterialization)
+    # A resident state keeps the step loop inside the launch: the register tier, or a classic
+    # schedule whose state ``STAGE`` is on chip.
+    register = isinstance(tile.materialization, RegisterMaterialization)
+    resident = register or (tile.schedule is not None and tile.schedule.kernel.resident)
     rplan = reduce_plan(tile) if tile.op is not None and not resident else None
     assert rplan is None or not rplan.needs_split, "materialize: a GRID split stage reached the kernel pass past 030_cut"
     try:
@@ -58,13 +61,17 @@ def rewrite(match: Match, root: Node, ctx=None) -> KernelOp | None:
         assert not unbound, f"materialize: kernel {tile.name!r} reads names it never binds: {sorted(unbound)}"
         kernel = KernelOp(body=body, name=tile.name, serial=() if resident else tuple(tile.place.serial))
         if resident:
-            state = tile.register_program.state.write.output
+            state = (tile.register_program if register else tile.block_program).state.write.output
             if state not in match.graph.outputs and not match.graph.buffer_users(state):
                 from emmy.compiler.pipeline.passes.tile._cut import _input_fragment  # noqa: PLC0415
 
-                # Register storage has no global state allocation. Removing that port is a
+                # A resident state has no global allocation of its own. Removing that port is a
                 # graph splice; snapshots with external readers remain ordinary outputs.
-                body = body.map(lambda s: None if isinstance(s, RegStore) and s.dst_buffer == state else s)
+                body = body.map(
+                    lambda s: None
+                    if (isinstance(s, RegStore) and s.dst_buffer == state) or (isinstance(s, Write) and s.output == state)
+                    else s
+                )
                 outputs = tuple(t for t in root.outputs if t.name != state)
                 names = {t.name: t.name + "__register" for t in outputs}
                 fragment = _input_fragment(match, root)

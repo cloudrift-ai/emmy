@@ -25,7 +25,7 @@ remains a skip rather than a guessed schedule.
 from __future__ import annotations
 
 from emmy.compiler.graph import Node
-from emmy.compiler.ir.schedule.classic import ClassicProblem, ClassicScheduleCodec, ClassicScheduleContext, materialize_classic
+from emmy.compiler.ir.schedule.classic import STATE_KEY, ClassicProblem, ClassicScheduleCodec, ClassicScheduleContext, materialize_classic
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.ops import carries_partition, merges_partition
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
@@ -68,12 +68,12 @@ def classic_forks(tile: TileOp, name: str, knobs: dict, ctx, *, kernel_set: bool
 
     row = pin_row(split_consumed=tile.split_consumed or carries_partition(tile))
     register = []
-    if tile.register_program is not None and not any(value for key, value in row.items() if key not in ("WORK", "TILE", "STAGE")):
+    if tile.register_program is not None and not any(value for key, value in row.items() if key not in ("WORK", "TILE", STATE_KEY)):
         context = RegisterContext(
             RegisterProblem(
                 tile,
                 ctx,
-                row={key: value for key, value in row.items() if key in ("WORK", "TILE", "STAGE")},
+                row={key: value for key, value in row.items() if key in ("WORK", "TILE", STATE_KEY)},
                 allow_f16=precision_pin(F16_MMA_F32_ACC) is True,
             )
         )
@@ -86,7 +86,7 @@ def classic_forks(tile: TileOp, name: str, knobs: dict, ctx, *, kernel_set: bool
             pool_id=digest(tile.identity_key(with_io=True), ctx.structural_key(), "register", schedule_pin_fingerprint()),
             sample=getattr(ctx, "pool_sample", None),
         )
-    if row.get("STAGE") == "d1/reg" and tile.place.serial:
+    if row.get(STATE_KEY) == "d1/reg" and tile.place.serial:
         return register
 
     # A bare WORK / RASTER / REDUCE pin is published across the kernels a split minted and names the

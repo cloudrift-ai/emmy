@@ -30,6 +30,7 @@ from .refusals import (
     fill_stage_moves,
 )
 from .schedule import (
+    STATE_KEY,
     ClassicSchedule,
     EdgeSchedule,
     KernelSchedule,
@@ -38,6 +39,7 @@ from .schedule import (
     ReductionSchedule,
     _is_edge_site,
     binds_root,
+    carries_state,
     classic_node_key,
     classic_stage_key,
     edge_site_spelling,
@@ -177,6 +179,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         return (
             "WORK",
             "RASTER",
+            *((STATE_KEY,) if carries_state(self.tile_op) else ()),
             *(self.node_key("TILE", site) for site in self.tile_op.family_sites["TILE"]),
             *(self.node_key("REDUCE", site) for site in self.tile_op.family_sites["REDUCE"]),
             *(self.stage_key(next(edge for edge in self.tile_op.stage_edges if edge[0] == site)) for site in stage_consumers),
@@ -623,7 +626,10 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         work = self._work or Work()
         # Same rule as :meth:`_kernel_composes`: serial node choices leave output sweeps free to
         # take one of their own offered worker inventories.
-        if (pick.kernel.work.kind != work.kind or pick.kernel.work.units != work.units) and not (
+        if pick.kernel.resident:
+            if why := self._resident_refusal(pick.kernel):
+                self._refuse(why)
+        elif (pick.kernel.work.kind != work.kind or pick.kernel.work.units != work.units) and not (
             self._output_sweeps_take(pick.kernel.work)
         ):
             self._refuse("kernel WORK does not realize the node choices")
@@ -697,7 +703,22 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         """Whether this serial-node prefix may take this exact output-sweep WORK offer."""
         return work in output_sweep_works(self.tile_op, self._work)
 
+    def _resident_refusal(self, kernel: KernelSchedule) -> str | None:
+        """Why a resident state cannot close this prefix. The CTA holds the block and every thread
+        walks its slice of the cells each step, so the inventory is the cell sweep's and no node may
+        have claimed one of its own: a tiled or cooperating node binds the grid the resident kernel
+        no longer launches over."""
+        if not carries_state(self.tile_op):
+            return "a resident state needs a kernel that carries one"
+        if self._work is not None or any(binds_root(choice) for choice in self.schedule.nodes.values()):
+            return "a resident state needs serial node choices"
+        if kernel.work.kind != "thread" or kernel.work.units[1] != 1 or kernel.work.producer:
+            return "a resident state stripes its cells across a 1-D thread inventory"
+        return None
+
     def _kernel_composes(self, kernel: KernelSchedule) -> bool:
+        if kernel.resident:
+            return self._resident_refusal(kernel) is None
         work = self._work or Work()
         # Serial node choices do not constrain a worker inventory used only to stripe output
         # sweeps; a node-owned inventory still follows the ordinary equality relation.

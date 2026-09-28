@@ -33,15 +33,18 @@ from .refusals import (
     _wgmma_refusal,
 )
 from .schedule import (
+    STATE_KEY,
     ClassicSchedule,
     EdgeSchedule,
     KernelSchedule,
     NodeSchedule,
     ProjectionSchedule,
     ReductionSchedule,
+    carries_state,
     classic_node_key,
     classic_stage_key,
     output_sweep_works,
+    resident_works,
 )
 
 if TYPE_CHECKING:
@@ -293,17 +296,56 @@ class ClassicNodeSite(Site[ClassicSchedule]):
 @dataclass(frozen=True, eq=False)
 class ClassicKernelSite(Site[ClassicSchedule]):
     """The kernel-level factor: the worker inventory and raster, spelled bare (``WORK``,
-    ``RASTER``). Its catalog is what the node sites' choices imply, so it is the last site."""
+    ``RASTER``), and on a kernel that carries a state its residency (``STATE_KEY``). Its catalog is
+    what the node sites' choices imply, so it is the last site."""
 
     problem: ClassicProblem
 
     @property
     def keys(self) -> tuple[str, ...]:
-        return ("WORK", "RASTER")
+        return ("WORK", "RASTER", *((STATE_KEY,) if carries_state(self.problem.tile) else ()))
 
     @cached_property
     def kernels(self) -> tuple[KernelSchedule, ...]:
-        return tuple(KernelSchedule(work, raster) for work in self._works() for raster in self._rasters())
+        # A resident state pairs with the inventories its cell sweep is striped across and never
+        # with a raster: the launch's grid is the batch axes alone, and the cells are the CTA's.
+        out = []
+        for state in self._states():
+            if state.is_direct:
+                out.extend(KernelSchedule(work, raster, state) for work in self._works() for raster in self._rasters())
+            else:
+                out.extend(KernelSchedule(work, Raster(), state) for work in self._resident_works())
+        return tuple(out)
+
+    def _states(self) -> tuple[Stage, ...]:
+        """The state's residency: ``direct`` always, shared memory where the block proof holds."""
+        tile = self.problem.tile
+        if not carries_state(tile):
+            return (Stage.direct(),)
+        program = tile.block_program
+        catalog = (Stage.direct(), *((Stage(depth=depth, transport="smem") for depth in (1, 2)) if program is not None else ()))
+        budget = getattr(self.problem.target, "static_smem_cap", None)
+        allowed = tuple(stage for stage in catalog if stage.is_direct or budget is None or program.bytes * stage.depth <= budget)
+        named = self.problem.row.get(STATE_KEY)
+        if named is None:
+            return allowed
+        try:
+            stage = Stage.parse(named)
+        except ValueError:
+            stage = None
+        if stage is not None and stage in allowed:
+            return (stage,)
+        return () if self.problem.strict(STATE_KEY) else allowed
+
+    def _resident_works(self) -> tuple[Work, ...]:
+        catalog = resident_works()
+        named = self.problem.row.get("WORK")
+        if named is None:
+            return catalog
+        work = self.problem.work
+        if work is not None and work in catalog:
+            return (work,)
+        return () if self.problem.strict("WORK") else catalog
 
     def _inventories(self) -> Iterator[Work]:
         for site in self.problem.node_sites:

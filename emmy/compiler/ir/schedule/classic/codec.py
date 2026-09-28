@@ -11,12 +11,14 @@ from emmy.compiler.ir.schedule.views import NodeId
 
 from .context import ClassicScheduleContext
 from .schedule import (
+    STATE_KEY,
     ClassicSchedule,
     EdgeSchedule,
     KernelSchedule,
     NodeSchedule,
     ProjectionSchedule,
     ReductionSchedule,
+    carries_state,
     classic_node_key,
     classic_stage_key,
     node_id_spelling,
@@ -41,6 +43,7 @@ class ClassicScheduleCodec:
         self._key_order = (
             "WORK",
             "RASTER",
+            *((STATE_KEY,) if carries_state(self.tile_op) else ()),
             *(classic_node_key(self.tile_op, "TILE", site) for site in self.tile_op.family_sites["TILE"]),
             *(classic_node_key(self.tile_op, "REDUCE", site) for site in self.tile_op.family_sites["REDUCE"]),
             *(
@@ -61,6 +64,8 @@ class ClassicScheduleCodec:
             "WORK": schedule.kernel.work.spell(),
             "RASTER": schedule.kernel.raster.spell(),
         }
+        if carries_state(self.tile_op):
+            row[STATE_KEY] = schedule.kernel.state.spell()
         for site in self.tile_op.family_sites["TILE"]:
             row[classic_node_key(self.tile_op, "TILE", site)] = schedule.nodes[site].tile.spell()
         for site in self.tile_op.family_sites["REDUCE"]:
@@ -126,8 +131,9 @@ class ClassicScheduleCodec:
                 else Tile()
             )
             nodes[site] = ProjectionSchedule(tile) if reduce is None else ReductionSchedule(tile, reduce)
+        state = Stage.parse(row[STATE_KEY]) if carries_state(self.tile_op) else Stage.direct()
         return Schedule(
-            KernelSchedule(work, Raster.parse(row["RASTER"])),
+            KernelSchedule(work, Raster.parse(row["RASTER"]), state),
             nodes,
             {
                 edge: EdgeSchedule(Stage.parse(row[classic_stage_key(self.tile_op, edge)]))

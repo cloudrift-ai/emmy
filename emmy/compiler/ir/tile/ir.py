@@ -515,6 +515,13 @@ class TileOp(Op):
         return RegisterProgram.from_tile(self)
 
     @cached_property
+    def block_program(self):
+        """The block a CTA can hold when the carried state lives in shared memory."""
+        from emmy.compiler.ir.schedule.resident import BlockProgram  # noqa: PLC0415
+
+        return BlockProgram.from_tile(self)
+
+    @cached_property
     def grid_sched(self):
         """This kernel read on the grid — the view a legality check offers a CANDIDATE plan to.
 

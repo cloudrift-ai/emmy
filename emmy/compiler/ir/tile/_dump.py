@@ -276,7 +276,7 @@ def _pretty_place(tile) -> list[str]:
     if tile.schedule is not None and tile.schedule.kernel.work.spell():
         out.append(f"work   {tile.schedule.kernel.work.spell()}")
     if tile.schedule is not None and isinstance(tile.schedule.kernel, RegisterSchedule):
-        out.append(f"register  TILE={tile.schedule.kernel.tile.spell()} STAGE=d1/reg")
+        out.append(f"register  TILE={tile.schedule.kernel.tile.spell()} STAGE@state=d1/reg")
     if tile.workers is not None:
         out.append(f"band   {tile.workers.spell()}")
     return out

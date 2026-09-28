@@ -17,6 +17,7 @@ from .context import ClassicScheduleContext
 from .materialize import ClassicMaterialization, materialize_classic
 from .schedule import (
     CLASSIC_FAMILIES,
+    STATE_KEY,
     ClassicSchedule,
     EdgeSchedule,
     KernelSchedule,
@@ -34,6 +35,7 @@ from .sites import ClassicKernelSite, ClassicNodeSite, ClassicProblem
 
 __all__ = [
     "CLASSIC_FAMILIES",
+    "STATE_KEY",
     "ClassicSchedule",
     "ClassicKernelSite",
     "ClassicMaterialization",
