@@ -1315,8 +1315,9 @@ writes — and nothing else is written that way.
   `freeze:<sha256[:12]>` for a freeze directory's files, `golden:<sha256[:12]>` for a golden file
   (`golden.evidence.file_source`) — and `commands/dataset.dataset_db` refuses a default dataset DB that does not hold
   every file of the checked-in freeze, when one is, and every repository golden file, naming the missing file and
-  the command that fixes it. A source is held through its rows, so the import refuses a file none of whose rows
-  becomes a measurement (a stale golden — `emmy golden check` names what) instead of leaving the check unsatisfiable.
+  the command that fixes it. A held file is a fact of its own (the `source` table, written by the import whatever
+  became of the file's rows), so a golden none of whose rows is a measurement — a restamped one keeps its schedules
+  and loses its microseconds — is held and simply contributes no row.
 - **Importing re-lowers.** `emmy dataset import` reads freeze directories, golden files and tune DBs (frozen first,
   so one path serves all) — by default the checked-in freeze and the repository golden files — and hands each file's
   records to the golden importer (`golden.evidence.import_goldens`) once per regime the file holds, entering at the
@@ -1656,12 +1657,13 @@ the one that gates, and the strictly-better **optimistic** rank is reported besi
 The gap between them is the width of the tie plateau at the golden's score, and thus an early warning that the scores
 are saturating.
 
-**A golden pool is one kernel's schedule space, read from the dataset DB.** `ranking.golden_pools` groups the
+**A golden pool is one kernel's schedule space, read from the dataset DB.** `data/group.golden_pools` groups the
 instance's `golden:` rows the freeze admits (`freeze_reason`, the one admission rule) by card, regime, kernel (the
 exact one the rows were measured on — the pool has to be enumerated from a definition, which is why it keys on the
-kernel where the measured pools key on the stamp signature) and sizes; `build_golden_groups` enumerates each pool
-from the kernel's own definition (`kernel.loop_ir` at the rows' sizes, through the tile lowering alone, under the
-regime's pins) and finds each golden row in it by `features.tile_signature`. The base features are the pool's context
+kernel where the measured pools key on the stamp signature) and sizes, beside a count of the rows it dropped, as
+`group_measured` does; `ranking.build_golden_groups` enumerates each pool from the kernel's own definition
+(`KernelRow.program`: the stored body at the rows' sizes, through the tile lowering alone, under the regime's
+pins) and finds each golden row in it by `features.tile_signature`. The base features are the pool's context
 and the kernel's stamps as the DB holds them — nothing is lowered, and a golden's program is never read. Two pools
 that featurize byte-identically fold into one group after packing, so pointwise siblings of one shape still train as
 one pool. `emmy fit` and `eval prior --dataset golden` go through this ONE builder, so the eval and the fit see the

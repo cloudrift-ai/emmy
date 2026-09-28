@@ -77,13 +77,19 @@ def test_the_default_import_holds_the_repository_goldens_too(tmp_path, monkeypat
         dataset_db(None)
 
 
-def test_a_golden_whose_rows_yield_no_measurement_is_refused_by_name(tmp_path):
-    """A source is held through its rows, so a golden file none of whose rows becomes a measurement — a corpus
-    case carries no timings — would never satisfy the readers' freshness check. The import refuses it and names
-    the golden tooling that says what is stale, instead of leaving the dataset unfixable."""
-    case = str(corpus.CASES_DIR / _CASE)
-    with pytest.raises(SystemExit):
-        handle_dataset_import(Namespace(sources=[case], db=str(tmp_path / "dataset.db"), fresh=False))
+def test_a_golden_whose_rows_yield_no_measurement_is_still_held(tmp_path, monkeypatch):
+    """A source is a fact of its own, not a count of rows: a golden file none of whose rows becomes a measurement
+    (a corpus case carries no timings; a restamped golden keeps its schedules and loses its microseconds) is held
+    after the import, so the readers' freshness check is met and the dataset holds no row for it."""
+    case = corpus.CASES_DIR / _CASE
+    monkeypatch.setenv("EMMY_DATASET_DB", str(tmp_path / "dataset.db"))
+    monkeypatch.setenv("EMMY_FREEZE_DIR", str(tmp_path / "no-freeze"))
+    monkeypatch.setattr(golden_repository, "repository_golden_paths", lambda: nullcontext([case]))
+    handle_dataset_import(Namespace(sources=[], db=None, fresh=True))
+    assert dataset_db(None) == tmp_path / "dataset.db"
+    db = SearchDB.open_readonly(tmp_path / "dataset.db")
+    assert db.sources() == {file_source("golden", case)} and db.perf_sources() == {}
+    db.close()
 
 
 def test_a_tune_db_is_frozen_and_re_lowered_on_import(tmp_path):

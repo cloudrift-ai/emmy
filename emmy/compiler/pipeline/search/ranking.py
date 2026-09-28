@@ -1,5 +1,5 @@
-"""Enumerate and rank candidates for the goldens: the candidate pools of a dataset DB's golden rows
-(:func:`golden_pools`, :func:`build_golden_groups`), and one program-backed record's own enumeration
+"""Enumerate and rank candidates for the goldens: the dataset DB's golden pools (``data/group.golden_pools``)
+as training groups (:func:`build_golden_groups`), and one program-backed record's own enumeration
 (:func:`evaluate_record`).
 
 A golden pool is one kernel's schedule space on one card, in one precision regime, at one set of sizes,
@@ -21,10 +21,8 @@ from dataclasses import dataclass, replace
 
 from emmy.compiler.context import Context
 from emmy.compiler.pipeline.search import features
-from emmy.compiler.pipeline.search.data.freeze import REGIME_PINS, freeze_reason, regime_of, schedule_row
-from emmy.compiler.pipeline.search.data.group import DEFAULT_FEATURES, GoldenGroup, feature_view, pack_features
+from emmy.compiler.pipeline.search.data.group import DEFAULT_FEATURES, GoldenGroup, GoldenPool, feature_view, pack_features
 from emmy.compiler.pipeline.search.data.shape import ShapeKey
-from emmy.compiler.pipeline.search.db import KernelRow, PerfRow, SearchDB, knobs_json
 from emmy.compiler.pipeline.search.metrics import dual_rank
 from emmy.compiler.pipeline.search.pool import Candidates, PoolSample
 
@@ -44,72 +42,6 @@ class Ranked:
     rank: int | None
     pool: int
     rank_optimistic: int | None
-
-
-@dataclass(frozen=True)
-class GoldenPool:
-    """One candidate pool the dataset DB records verified rows in: one kernel on one card, in one precision
-    regime (``regime``: a key of :data:`~.data.freeze.REGIME_PINS`), at one set of sizes, and the golden rows
-    measured on it. The pool is enumerated from the kernel's own definition (``kernel.loop_ir``); a kernel
-    formed from no loop op (``kernel.formed`` false: a piece carved from a twisted tree, which only its parent's
-    program reaches) has none, and its pool is skipped by name."""
-
-    gpu: str
-    cap: tuple[int, int]
-    regime: str
-    kernel: KernelRow
-    bindings: dict
-    rows: tuple[PerfRow, ...]
-
-    @property
-    def name(self) -> str:
-        """The pool's label in a report: the kernel's C name and the head of its exact identity — the name a
-        freeze gives its realizations — with the sizes when the kernel is symbolic."""
-        sizes = " ".join(f"{var}={size}" for var, size in sorted(self.bindings.items()))
-        return f"{self.kernel.name}.{self.kernel.exact_identity[:12]}" + (f" {sizes}" if sizes else "")
-
-    @property
-    def pins(self) -> dict:
-        """The input pins the pool's rows were measured under."""
-        return REGIME_PINS[self.regime]
-
-    def schedule_rows(self) -> list[dict[str, str]]:
-        """Each golden row's schedule row — its knobs without the stamps and the identity a read row carries."""
-        return [schedule_row(row) for row in self.rows]
-
-    @property
-    def emmy_us(self) -> float:
-        """The fastest golden time recorded in the pool."""
-        return min(row.stats.median for row in self.rows)
-
-
-def golden_pools(db: SearchDB, *, kernel: str | None = None) -> list[GoldenPool]:
-    """The golden rows of ``db`` as pools: one per card, regime, kernel and sizes that holds at least one row a
-    golden file sourced and the freeze admits (:func:`~.data.freeze.freeze_reason` — the one admission rule every
-    measured-pool reader applies). The kernel is the exact one the rows were measured on: a golden pool has to be
-    enumerated from a definition, which is why it does not key on the stamp signature the measured pools
-    (``group_measured``) share across bodies. ``kernel`` keeps only pools whose kernel's C name contains it. In
-    content order, so a report reads the same on every machine."""
-    kernels = {k.exact_identity: k for k in db.iter_kernels()}
-    buckets: dict[tuple, list[PerfRow]] = defaultdict(list)
-    for row in db.iter_perf_rows(backend="cuda"):
-        if row.source.startswith("golden:") and freeze_reason(row) is None:
-            buckets[(row.gpu, divmod(row.cc, 10), regime_of(row.flags), row.kernel, knobs_json(row.bindings))].append(row)
-    pools = []
-    for (gpu, cap, regime, identity, _bindings), rows in sorted(buckets.items()):
-        if kernel is None or kernel in kernels[identity].name:
-            rows.sort(key=lambda r: knobs_json(r.knobs))
-            pools.append(GoldenPool(gpu, cap, regime, kernels[identity], dict(rows[0].bindings), tuple(rows)))
-    return pools
-
-
-def kernel_program(kernel: KernelRow, bindings: dict):
-    """The program a kernel's pool is enumerated from: its definition, the symbolic dims hinted at the sizes
-    the rows were benched at (a binding would make them static — another kernel)."""
-    from emmy.compiler.graph import Graph  # noqa: PLC0415
-    from emmy.compiler.specialize import rehint_program  # noqa: PLC0415
-
-    return rehint_program(Graph.from_wire(kernel.loop_ir), bindings)
 
 
 def pool_context(pool: GoldenPool) -> Context:
@@ -206,7 +138,7 @@ def enumerate_pool(pool: GoldenPool, ctx: Context) -> Candidates:
     from emmy.compiler.pipeline.search.pins import pinned_knobs, unpinned_decisions  # noqa: PLC0415
 
     with pinned_knobs(pool.pins), unpinned_decisions():
-        return enumerate_graph(kernel_program(pool.kernel, pool.bindings), ctx, passes=TILE_LOWERING)
+        return enumerate_graph(pool.kernel.program(pool.bindings), ctx, passes=TILE_LOWERING)
 
 
 def _shape_group(shape: ShapeKey) -> str:
@@ -235,7 +167,7 @@ class _Packed:
     goldens: list[int]
 
 
-def _pool_identity(pool: GoldenPool, tier: str, shape: str, packed) -> tuple:
+def _pool_identity(gpu: str, tier: str, shape: str, packed) -> tuple:
     """A candidate pool's identity: everything about it except which golden pinned which row.
 
     Two enumerations belong in one group when this matches — the featurized pool is then byte-identical, so
@@ -244,17 +176,17 @@ def _pool_identity(pool: GoldenPool, tier: str, shape: str, packed) -> tuple:
     they decide things the matrix does not: the weight set (``dynamic``), the fold group (``shape``) and the
     report axes. Requiring them to agree can only hold two pools apart, never fuse two that differ."""
     names, matrix, dynamic = packed
-    return (pool.gpu, tier, shape, dynamic, names, hashlib.blake2b(matrix, digest_size=16).digest())
+    return (gpu, tier, shape, dynamic, names, hashlib.blake2b(matrix, digest_size=16).digest())
 
 
 def build_golden_groups(
-    pools: Sequence[GoldenPool], features_spec: str = DEFAULT_FEATURES, *, sample: int = 0, seed: int = 0
+    pools: Sequence[GoldenPool], features_spec: str = DEFAULT_FEATURES, *, sample: int = 0, seed: int = 0, kernel: str | None = None
 ) -> tuple[list[GoldenGroup], list[tuple[str, str, str]]]:
-    """Enumerate each golden pool (:func:`golden_pools`), pin its golden rows, and featurize every candidate,
-    as :class:`GoldenGroup` records (name, tier, card, pinned rows, per-row features filtered through the
-    ``features_spec`` view; ``key`` is ``"<gpu>/<pool name>"``, suffixed ``#2``, ``#3``, … when one name
+    """Enumerate each golden pool (``data/group.golden_pools``), pin its golden rows, and featurize every
+    candidate, as :class:`GoldenGroup` records (name, tier, card, pinned rows, per-row features filtered through
+    the ``features_spec`` view; ``key`` is ``"<gpu>/<pool name>"``, suffixed ``#2``, ``#3``, … when one name
     opens several distinct pools). The second return is the golden rows that did NOT land in a group, as
-    ``(gpu, name, reason)``, so metrics can count every recorded golden.
+    ``(gpu, name, reason)``, so metrics can count every golden row the pools hold.
 
     **A group is a candidate pool, not a golden.** Several golden rows can land on one pool — a shape
     recorded under two names, or recorded twice — and they then share ONE group, each contributing a row to
@@ -272,9 +204,10 @@ def build_golden_groups(
     and every golden signature recorded on the pool's card and regime survives it whatever the draw picks, so
     a golden that misses its pool still means what it always meant: a pin or dtype mismatch.
 
-    A narrowed ``pools`` (``golden_pools(db, kernel=…)``) is a VIEW, for iterating on one kernel without paying
-    for the rest: the keep-set spans only the pools given, so a filtered run's retained rows, groups and positives
-    are its own, and only an unfiltered run compares against a fit."""
+    ``kernel`` keeps only pools whose kernel's C name contains it — a narrowing VIEW, for iterating on one kernel
+    without paying for the rest. Each retained pool's rank is unchanged by it: the keep-set is computed over every
+    pool given, so a pool retains the same rows under the same draw; what changes is the group and positive counts,
+    so only an unfiltered run compares against a fit."""
     keep = feature_view(features_spec)
     groups: list[GoldenGroup] = []
     skipped: list[tuple[str, str, str]] = []
@@ -289,6 +222,8 @@ def build_golden_groups(
     ctxs: dict[tuple, Context] = {}  # ONE Context per card and regime: the facts are identical across its pools
     packed_pools: dict[tuple, _Packed] = {}
     for pool in pools:
+        if kernel is not None and kernel not in pool.kernel.name:
+            continue
         if not pool.kernel.formed:
             skipped.extend((pool.gpu, pool.name, "kernel formed from no loop op") for _ in pool.rows)
             continue
@@ -303,9 +238,11 @@ def build_golden_groups(
         enum_ctx = ctx if sample <= 0 else replace(ctx, pool_sample=PoolSample(sample, seed, keep_set))
         try:
             candidates = enumerate_pool(pool, enum_ctx)
-        except Exception as exc:  # noqa: BLE001 — a definition the enumeration cannot lower is no pool; the rows are counted
-            logger.info("  !! %s: did not lower — %s: %s", pool.name, type(exc).__name__, exc)
-            skipped.extend((pool.gpu, pool.name, f"did not lower: {type(exc).__name__}") for _ in pool.rows)
+        except ValueError as exc:
+            # A definition the lowering does not take back — the reduce piece of a cross-CTA split re-offers the
+            # split and mints the buffer it already holds — or sizes it cannot bind. The rows are counted, loudly.
+            logger.warning("  !! %s: did not lower — %s", pool.name, exc)
+            skipped.extend((pool.gpu, pool.name, "did not lower") for _ in pool.rows)
             continue
         rows = candidates.rows
         if not rows:
@@ -329,6 +266,7 @@ def build_golden_groups(
         matched += len(goldens)
         shape = ShapeKey.from_s_features(pool.kernel.stamps)
         tier = "dyn" if shape.is_dyn else (shape.kind or ("warp" if shape.is_warp else "thread"))
+        fold_group = _shape_group(shape)
         # The feature view (default ``DEFAULT_FEATURES``: ``D_*`` geometry/occupancy plus ``MMA_tier`` — see
         # its rationale in ``search/data/group.py``) filters here, before the pool is packed, so the
         # trained-under view is exactly what the Group stores. ``feature_view`` keeps the routing features
@@ -337,10 +275,10 @@ def build_golden_groups(
         packed = pack_features(feats)
         # Two pools can still pack identically — the same kernel recorded at two sizes it does not depend on.
         # Fold those together, so a pool is one group however many times it was recorded.
-        identity = _pool_identity(pool, tier, _shape_group(shape), packed)
+        identity = _pool_identity(pool.gpu, tier, fold_group, packed)
         found = packed_pools.get(identity)
         if found is None:
-            packed_pools[identity] = _Packed(pool, tier, _shape_group(shape), packed, candidates.total, goldens)
+            packed_pools[identity] = _Packed(pool, tier, fold_group, packed, candidates.total, goldens)
         else:
             found.goldens.extend(goldens)
 

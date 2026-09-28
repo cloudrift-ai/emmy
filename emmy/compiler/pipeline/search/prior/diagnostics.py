@@ -115,8 +115,8 @@ def golden_prior_eval(prior, kernel_filter: str | None = None) -> str:
     return "\n".join(lines)
 
 
-def golden_deploy_perf(prior, pools) -> dict[tuple[str, str], float]:
-    """Per golden pool, keyed ``(name, regime)``, ``pick_us / golden_us`` — the deployable (-O3) latency of
+def golden_deploy_perf(prior, pools) -> dict[tuple[str, str, str], float]:
+    """Per golden pool, keyed ``(gpu, name, regime)``, ``pick_us / golden_us`` — the deployable (-O3) latency of
     the prior's predicted-best **measured** config over the pool's fastest golden row, read from the prior's
     reservoir with **no re-bench**.
 
@@ -150,7 +150,7 @@ def golden_deploy_perf(prior, pools) -> dict[tuple[str, str], float]:
             continue
         index.setdefault(ShapeKey.from_s_features(d), []).extend(o3)
 
-    out: dict[tuple[str, str], float] = {}
+    out: dict[tuple[str, str, str], float] = {}
     for pool in pools:
         leaves = index.get(ShapeKey.from_s_features(pool.kernel.stamps))
         if not leaves:
@@ -161,7 +161,7 @@ def golden_deploy_perf(prior, pools) -> dict[tuple[str, str], float]:
         # pick's regime derives from its knobs like the pool's from its pins.
         if fast_math_knobs(leaves[best_i].knobs) != precision_trading_pins(pool.pins):
             continue
-        out[(pool.name, pool.regime)] = leaves[best_i].latency_us / pool.emmy_us
+        out[(pool.gpu, pool.name, pool.regime)] = leaves[best_i].latency_us / pool.emmy_us
     return out
 
 

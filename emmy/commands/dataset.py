@@ -61,18 +61,23 @@ def register_dataset_command(subparsers) -> None:
 
 
 def handle_dataset_import(args) -> None:
-    from emmy.compiler.pipeline.search.data.freeze import write_freeze  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.db import SearchDB  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden.evidence import file_source, import_file  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden.repository import repository_golden_paths  # noqa: PLC0415
 
     db_path = Path(args.db).expanduser() if args.db else config.dataset_db_path()
-    sources = [Path(s).expanduser() for s in args.sources]
+    # The repository paths live only inside their context (a wheel unpacks its recipes there), so the import runs in it.
+    with repository_golden_paths() as goldens:
+        _import(args, db_path, [Path(s).expanduser() for s in args.sources], goldens)
+    logger.info("dataset DB: %s", db_path)
+
+
+def _import(args, db_path: Path, sources: list[Path], goldens: list[Path]) -> None:
+    from emmy.compiler.pipeline.search.data.freeze import write_freeze  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.db import SearchDB  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden.evidence import file_source, import_file  # noqa: PLC0415
+
     if not sources:
         freeze = config.freeze_path()
-        sources = [freeze] if freeze.is_dir() and any(freeze.glob("*.json")) else []
-        with repository_golden_paths() as goldens:
-            sources.extend(goldens)
+        sources = ([freeze] if freeze.is_dir() and any(freeze.glob("*.json")) else []) + list(goldens)
         if not sources:
             logger.error("nothing to import: no measurement freeze at %s and no repository golden files", freeze)
             sys.exit(2)
@@ -101,18 +106,12 @@ def handle_dataset_import(args) -> None:
                     sys.exit(2)
             for path, source in files:
                 try:
-                    counts = import_file(db, path, source)
+                    import_file(db, path, source)
                 except ValueError as exc:
                     logger.error("%s", exc)
                     sys.exit(2)
-                # A file the instance holds is skipped with no counts. One that was imported and yielded no
-                # measurement is a stale golden, which the freshness check below would keep naming.
-                if counts and not counts["perf rows"]:
-                    logger.error("no row of %s became a measurement under the current compiler — `emmy golden check %s`", path, path)
-                    sys.exit(2)
     finally:
         db.close()
-    logger.info("dataset DB: %s", db_path)
 
 
 def handle_dataset_freeze(args) -> None:
@@ -171,10 +170,26 @@ def dataset_db(db_arg: str | None) -> Path:
     if want:
         db = SearchDB.open_readonly(path)
         try:
-            held = db.perf_sources()
+            held = db.sources()
         finally:
             db.close()
         if missing := sorted(str(file) for source, file in want.items() if source not in held):
             logger.error("dataset DB %s lacks the current %s — run `emmy dataset import --fresh`", path, ", ".join(missing))
             sys.exit(2)
     return path
+
+
+def golden_dataset(db_arg: str | None):
+    """The golden pools of the DB instance a reader reads (:func:`dataset_db`), with the rows dropped by reason
+    (``data/group.golden_pools``) — one read-only open shared by ``emmy fit`` and ``eval prior --dataset golden``.
+    Returns ``(path, pools, dropped)``."""
+    from emmy.compiler.pipeline.search.data.group import golden_pools  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.db import SearchDB  # noqa: PLC0415
+
+    path = dataset_db(db_arg)
+    db = SearchDB.open_readonly(path)
+    try:
+        pools, dropped = golden_pools(db)
+    finally:
+        db.close()
+    return path, pools, dropped

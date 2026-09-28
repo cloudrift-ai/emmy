@@ -197,13 +197,15 @@ def import_file(db: SearchDB, path: Path, source: str) -> Counter:
     """Import one golden-shaped file — a freeze's card file, or a golden file — into ``db``: every kernel
     re-lowered from its definition through the lowering passes alone (a stored kernel body must not meet the
     Loop passes, which would normalize it into another kernel), once per regime the file's rows record, its rows
-    filed under ``source`` (:func:`file_source`). The rows were measured at the deployable opt level under their
-    regime's flags, whatever this machine compiles at. A source the instance already holds is skipped; a git-LFS
-    pointer in the data's place is refused by name. Returns what became of the entries, by kind."""
+    filed under ``source`` (:func:`file_source`), which the instance then holds (``SearchDB.record_source``) whatever
+    became of the rows — a file none of whose rows is a measurement is held too, so the readers' freshness check
+    can be met. The rows were measured at the deployable opt level under their regime's flags, whatever this machine
+    compiles at. A source the instance already holds is skipped; a git-LFS pointer in the data's place is refused by
+    name. Returns what became of the entries, by kind."""
 
     if is_lfs_pointer(path):
         raise ValueError(f"{path} is a git-LFS pointer, not the data: run `git lfs install && git lfs pull` (in CI, check out with lfs)")
-    if source in db.perf_sources():
+    if source in db.sources():
         logger.info("%s is already held (%s)", path.name, source)
         return Counter()
     document = GoldenFile.load(path)
@@ -215,6 +217,7 @@ def import_file(db: SearchDB, path: Path, source: str) -> Counter:
             ctx = Context.from_target(cap, gpu_name=gpu_name, compile_flags=FAST_MATH_FLAG if dict(regime).get("FAST_MATH") else "")
             in_regime = [record for record in records if tuple(sorted(regime_pins(record).items())) == regime]
             counts += import_goldens(db, ctx, in_regime, source=source, passes=LOWERING_PASSES)
+    db.record_source(source)
     logger.info("imported %s as %s: %s", path.name, source, ", ".join(f"{n} {what}" for what, n in sorted(counts.items())) or "nothing")
     return counts
 

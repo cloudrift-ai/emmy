@@ -28,17 +28,16 @@ from dataclasses import replace
 from pathlib import Path
 
 from emmy import config, storage
-from emmy.commands.dataset import dataset_db
+from emmy.commands.dataset import golden_dataset
 from emmy.compiler.pipeline.search import features
 from emmy.compiler.pipeline.search.data.group import DEFAULT_FEATURES
-from emmy.compiler.pipeline.search.db import SearchDB
 from emmy.compiler.pipeline.search.pool import DEFAULT_SAMPLE
 from emmy.compiler.pipeline.search.prior.fit import catboost as fit_catboost
 from emmy.compiler.pipeline.search.prior.fit import cv as fit_cv
 from emmy.compiler.pipeline.search.prior.fit import linear as fit_linear
 from emmy.compiler.pipeline.search.prior.fit.run import run_fit
 from emmy.compiler.pipeline.search.prior.linear_model import LinearModel
-from emmy.compiler.pipeline.search.ranking import build_golden_groups, golden_pools
+from emmy.compiler.pipeline.search.ranking import build_golden_groups
 
 logger = logging.getLogger(__name__)
 
@@ -235,13 +234,8 @@ def handle_fit(args) -> None:
     make_trainers, default_view = TRAINERS[args.trainer]
     view = args.features or default_view
 
-    db_path = dataset_db(args.db)
+    db_path, pools, dropped = golden_dataset(args.db)
     logger.info("Building golden pools from %s (each under its own card's context) ...", db_path)
-    db = SearchDB.open_readonly(db_path)
-    try:
-        pools = golden_pools(db)
-    finally:
-        db.close()
     groups, skipped = build_golden_groups(pools, view, sample=args.pool_sample, seed=args.seed)
     names = sorted({n for c in groups for n in c.feat_names})
     n_dyn = sum(1 for c in groups if c.dynamic)
@@ -267,6 +261,7 @@ def handle_fit(args) -> None:
         # same golden files, and a file's digest in the source name is what says so.
         "source": str(db_path),
         "sources": dict(Counter(row.source for pool in pools for row in pool.rows)),
+        "dropped": dropped,
         "seed": args.seed,
         "feat_ver": features.FEATURIZER_VERSION,
         "features": view,

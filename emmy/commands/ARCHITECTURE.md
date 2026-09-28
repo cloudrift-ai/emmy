@@ -816,8 +816,8 @@ freeze (when there is one) and every repository golden file. Every kernel is re-
 the lowering passes by the current compiler (`golden.evidence.import_goldens`), once per precision regime the file's
 rows record, and its rows are sourced by the file's kind and digest — `freeze:` for a freeze directory's files,
 `golden:` for a golden file; a source the instance already holds is skipped, and `--fresh` rebuilds from nothing.
-The readers (`commands/dataset.dataset_db`) refuse a default instance missing a freeze file or a repository golden,
-naming it. `freeze --out DIR [--db PATH]` writes an instance's
+A held file is recorded in the `source` table whatever became of its rows, and the readers
+(`commands/dataset.dataset_db`) refuse a default instance missing a freeze file or a repository golden, naming it. `freeze --out DIR [--db PATH]` writes an instance's
 admitted rows (`data/freeze.freeze_reason`) as a golden file per card — the artifact that gets checked in. `check
 [--db PATH]` counts the rows of an instance whose tables disagree with themselves (`SearchDB.drift`) and exits
 non-zero when any do.

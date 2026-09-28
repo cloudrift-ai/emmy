@@ -5,8 +5,8 @@ Five subcommands:
 - ``eval knobs``     — print the registered knob schema, then (with a tune DB)
   per-knob **regret** + a knob-interaction matrix (the analysis below).
 - ``eval prior``     — how well the prior RANKS: one report over benched pools
-  (``--dataset db``: Spearman + regret, what a wrong pick costs) or over the golden
-  corpus (``--dataset golden``: the golden-rank screen, plus the greedy pipeline pick vs
+  (``--dataset db``: Spearman + regret, what a wrong pick costs) or over the dataset DB's
+  golden pools (``--dataset golden``: the golden-rank screen, plus the greedy pipeline pick vs
   golden). BOTH prior halves are reported, labelled — they fail for different reasons.
   The summaries are assembled by ``search/prior/report.py`` and rendered here; ``emmy fit``
   writes the same summaries into its ``metrics.json``, so a fit and an eval state the golden
@@ -269,7 +269,7 @@ def _measured_report(args, halves):
     return EvalReport(header, [c for half, prior in halves for c in measured_summaries(half, groups, prior.score_rows)])
 
 
-def _golden_report(args, halves, db_path, pools):
+def _golden_report(args, halves, db_path, pools, dropped):
     """``eval prior --dataset golden`` — the report over the golden pools of a dataset DB (the dataset DB by
     default, any instance with ``--db``): the rows the golden files record, read the way ``emmy fit`` reads
     them (``ranking.build_golden_groups``) over the FULL featurization, not the fit's ``D_*`` view. The
@@ -281,7 +281,7 @@ def _golden_report(args, halves, db_path, pools):
     from emmy.compiler.pipeline.search.ranking import build_golden_groups  # noqa: PLC0415
 
     logger.info("Building golden pools (each under its own card's context) ...")
-    groups, skipped = build_golden_groups(pools, "*", sample=args.pool_sample)
+    groups, skipped = build_golden_groups(pools, "*", sample=args.pool_sample, kernel=args.kernel)
     header = {
         "dataset": "golden",
         "source": str(db_path),
@@ -291,6 +291,7 @@ def _golden_report(args, halves, db_path, pools):
         "groups": len(groups),
         "positives": sum(len(g.golden_ids) for g in groups),
         "skipped": len(skipped),
+        "dropped": dropped,
     }
     return EvalReport(header, [c for half, prior in halves for c in golden_summaries(half, groups, prior.score_rows)])
 
@@ -302,9 +303,7 @@ def handle_eval_prior(args) -> None:
     say what a wrong pick COST, golden pools only say where the known-good row landed. ``--dataset golden``
     additionally runs the deploy-faithful check the ranks are a screen for — the greedy pipeline pick vs the
     golden rows, with the deployable -O3 latency of the prior's pick beside it."""
-    from emmy.commands.dataset import dataset_db  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.db import SearchDB  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.ranking import golden_pools  # noqa: PLC0415
+    from emmy.commands.dataset import golden_dataset  # noqa: PLC0415
 
     resolve_online_arg(args)
     resolve_offline_arg(args)
@@ -312,13 +311,8 @@ def handle_eval_prior(args) -> None:
     halves = _prior_halves()
     golden = args.dataset == "golden"
     if golden:
-        db_path = dataset_db(args.db)
-        db = SearchDB.open_readonly(db_path)
-        try:
-            pools = golden_pools(db, kernel=args.kernel)
-        finally:
-            db.close()
-        report = _golden_report(args, halves, db_path, pools)
+        db_path, pools, dropped = golden_dataset(args.db)
+        report = _golden_report(args, halves, db_path, pools, dropped)
     else:
         report = _measured_report(args, halves)
     _emit_report(report)
@@ -436,10 +430,11 @@ def _emit_golden_deploy_check(args, pools: list) -> None:
     from emmy.compiler.pipeline.search.golden.repository import live_gpu_key  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import pinned_knobs, unpinned_decisions  # noqa: PLC0415
     from emmy.compiler.pipeline.search.prior import OnlinePrior, diagnostics  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.ranking import kernel_program  # noqa: PLC0415
 
-    live = live_gpu_key()
-    pools = [p for p in pools if p.kernel.formed and is_matmul(p.kernel.stamps) and live in (None, (p.gpu, p.cap))]
+    pools = [p for p in pools if p.kernel.formed and is_matmul(p.kernel.stamps) and (not args.kernel or args.kernel in p.kernel.name)]
+    if (live := live_gpu_key()) is not None:
+        # The live card's pools, or every card's when none are recorded for it — as ``goldens_for_live_gpu`` scopes.
+        pools = [p for p in pools if (p.gpu, p.cap) == live] or pools
     if args.features:
         _emit_golden_features(pools)
     prior = OnlinePrior.load()
@@ -452,7 +447,7 @@ def _emit_golden_deploy_check(args, pools: list) -> None:
 
     def picked(pool) -> dict:
         with pinned_knobs(pool.pins), unpinned_decisions():
-            compiled = Pipeline.build(TILE_LOWERING).run(kernel_program(pool.kernel, pool.bindings))  # tile dialect only
+            compiled = Pipeline.build(TILE_LOWERING).run(pool.kernel.program(pool.bindings))  # tile dialect only
         knobs: dict = {}
         for node in compiled.nodes.values():
             k = getattr(node.op, "knobs", None)
@@ -492,7 +487,11 @@ def _emit_golden_deploy_check(args, pools: list) -> None:
             for k in gold:
                 knob_total[k] = knob_total.get(k, 0) + 1
                 knob_match[k] = knob_match.get(k, 0) + _knob_eq(k, gold[k], got)
-            lead = [label, (f"{matched}/{len(gold)}", _ratio_color(matched, len(gold))), _perf_cell(perf, (pool.name, pool.regime))]
+            lead = [
+                label,
+                (f"{matched}/{len(gold)}", _ratio_color(matched, len(gold))),
+                _perf_cell(perf, (pool.gpu, pool.name, pool.regime)),
+            ]
             entries.append(("row", lead, gold, got))
     finally:
         quiet.setLevel(prev)

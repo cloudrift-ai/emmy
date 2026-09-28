@@ -237,7 +237,18 @@ def test_a_file_another_emmy_wrote_is_re_created_whole_by_a_writer_and_refused_b
     db = SearchDB(path)
     assert list(db.iter_perf_rows()) == []
     tables = {r[0] for r in db._conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-    assert tables == {"kernel", "kernel_feature", "context", "schedule", "schedule_knob", "placement", "placement_knob", "routing", "perf"}
+    assert tables == {
+        "source",
+        "kernel",
+        "kernel_feature",
+        "context",
+        "schedule",
+        "schedule_knob",
+        "placement",
+        "placement_knob",
+        "routing",
+        "perf",
+    }
     with pytest.raises(sqlite3.IntegrityError):
         db.record_perf_row(perf_row("ghost", us=1.0))  # no kernel row behind it
     db.record_kernel(kernel_row("k"))

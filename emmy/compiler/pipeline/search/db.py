@@ -56,7 +56,7 @@ import fcntl
 import json
 import logging
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -148,6 +148,14 @@ class KernelRow:
     stamps: dict
     formed: bool
 
+    def program(self, bindings: Mapping[str, int]):
+        """The kernel's definition as a program, its symbolic dims hinted at ``bindings`` — the sizes a measurement
+        of it ran at — so the program stays symbolic; binding them would make the dims static, another kernel."""
+        from emmy.compiler.graph import Graph  # noqa: PLC0415 — the graph package imports this module's neighbours
+        from emmy.compiler.specialize import rehint_program  # noqa: PLC0415
+
+        return rehint_program(Graph.from_wire(self.loop_ir), bindings)
+
 
 @dataclass(frozen=True)
 class RoutingRow:
@@ -161,6 +169,10 @@ class RoutingRow:
 
 # Each table's DDL and the column set a file must have for this module to read it.
 _DDL = {
+    "source": """
+        CREATE TABLE source (
+            name  TEXT PRIMARY KEY
+        )""",
     "kernel": """
         CREATE TABLE kernel (
             exact_identity       TEXT PRIMARY KEY,
@@ -243,6 +255,7 @@ _INDEXES = (
     "CREATE INDEX kernel_structural ON kernel (structural_identity)",
 )
 _COLS = {
+    "source": ("name",),
     "kernel": ("exact_identity", "structural_identity", "loop_ir", "kernel_name", "formed"),
     "kernel_feature": ("kernel", "name", "value"),
     "context": ("id", "backend", "gpu_name", "arch", "opt", "flags"),
@@ -274,7 +287,18 @@ _OBSOLETE_TABLES = ("loop_op", "tile_op", "kernel_op", "cuda_op", "lowering", "k
 #: The wire the ``kernel`` table's Loop IR is written in (``PRAGMA user_version``); a file holding another is re-created.
 _WIRE_VERSION = 1
 # Drop order respects the foreign keys; create order is the reverse.
-_DROP_ORDER = ("perf", "routing", "placement_knob", "placement", "schedule_knob", "schedule", "kernel_feature", "context", "kernel")
+_DROP_ORDER = (
+    "perf",
+    "routing",
+    "placement_knob",
+    "placement",
+    "schedule_knob",
+    "schedule",
+    "kernel_feature",
+    "context",
+    "kernel",
+    "source",
+)
 
 # What one perf read selects, in ``_row_to_perf`` order: the context's columns, then the row's.
 _PERF_SEL = (
@@ -623,6 +647,15 @@ class SearchDB:
     # ------------------------------------------------------------------
     # Perf — read
     # ------------------------------------------------------------------
+
+    def record_source(self, name: str) -> None:
+        """Mark ``name`` as a source this instance holds — a golden-shaped file the import has read, whatever
+        became of its rows — so the readers' freshness check can ask for it by name."""
+        self._conn.execute("INSERT OR IGNORE INTO source (name) VALUES (?)", (name,))
+
+    def sources(self) -> set[str]:
+        """The sources this instance holds (:meth:`record_source`)."""
+        return {name for [name] in self._conn.execute("SELECT name FROM source")}
 
     def perf_sources(self, ctx: Context | None = None) -> dict[str, int]:
         """How many ``perf`` rows each source contributed — what a report over this instance names as its data;

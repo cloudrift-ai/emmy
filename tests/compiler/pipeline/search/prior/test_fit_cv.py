@@ -14,7 +14,7 @@ import pytest
 from emmy.commands.fit import TRAINERS, register_fit_command
 from emmy.compiler.context import FAST_MATH_FLAG
 from emmy.compiler.pipeline.search import features, ranking
-from emmy.compiler.pipeline.search.data.group import DEFAULT_FEATURES, MATMUL_FEATURES, GoldenGroup, feature_view
+from emmy.compiler.pipeline.search.data.group import DEFAULT_FEATURES, MATMUL_FEATURES, GoldenGroup, GoldenPool, feature_view
 from emmy.compiler.pipeline.search.data.shape import ShapeKey
 from emmy.compiler.pipeline.search.db import SearchDB
 from emmy.compiler.pipeline.search.pool import Candidates
@@ -23,7 +23,7 @@ from emmy.compiler.pipeline.search.prior.fit import cv as fit_cv
 from emmy.compiler.pipeline.search.prior.fit.catboost import TREE_FEATURES
 from emmy.compiler.pipeline.search.prior.fit.run import run_fit
 from emmy.compiler.pipeline.search.prior.linear_model import LinearModel, descent_cols
-from emmy.compiler.pipeline.search.ranking import GoldenPool, build_golden_groups
+from emmy.compiler.pipeline.search.ranking import build_golden_groups
 from tests.compiler.pipeline.search.helpers import kernel_row, perf_row
 
 # --- feature view ------------------------------------------------------------------
@@ -187,7 +187,7 @@ def test_a_pool_none_of_whose_goldens_is_found_is_no_group(monkeypatch):
     pools = [_pool("m.512.absent", std, ["zz"]), _pool("m.512.broken", "broken", ["b"]), _pool("m.512", std, ["b"])]
     groups, skipped = _build(pools, monkeypatch)
     assert [(c.key, c.name) for c in groups] == [("gpuA/m.512.k", "m.512.k")]
-    assert skipped == [("gpuA", "m.512.absent.k", "golden not in 2 candidates"), ("gpuA", "m.512.broken.k", "did not lower: ValueError")]
+    assert skipped == [("gpuA", "m.512.absent.k", "golden not in 2 candidates"), ("gpuA", "m.512.broken.k", "did not lower")]
 
 
 # --- synthetic groups ---------------------------------------------------------------

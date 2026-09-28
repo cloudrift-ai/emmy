@@ -8,9 +8,10 @@ pick cost. Nothing generic reads either — the metrics take plain sequences and
 single label column on the base would be a field with no consumer and two mutually exclusive meanings.
 
 Groups are built by plain functions — :func:`group_measured` below for benched rows, and
-``ranking.build_golden_groups`` for the dataset DB's golden pools — and are consumed by the trainers and the
-fold harness through this one shape; there is no iterator/batching layer, the whole dataset is a small in-memory
-list.
+``ranking.build_golden_groups`` over the golden pools :func:`golden_pools` below reads (a golden pool is one
+kernel's schedule space, which the builder still has to enumerate before it is a group) — and are consumed by
+the trainers and the fold harness through this one shape; there is no iterator/batching layer, the whole dataset
+is a small in-memory list.
 
 It lives with the other data types rather than under ``prior/fit/`` because a candidate pool is data, not a
 fitter detail — the fit is only its first consumer. The planned evaluation reports rank over the same pools, and
@@ -48,9 +49,9 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from emmy.compiler.pipeline.search.data.freeze import freeze_reason, regime_of
+from emmy.compiler.pipeline.search.data.freeze import REGIME_PINS, freeze_reason, regime_of, schedule_row
 from emmy.compiler.pipeline.search.data.sample import measured_features
-from emmy.compiler.pipeline.search.db import knobs_json
+from emmy.compiler.pipeline.search.db import KernelRow, PerfRow, SearchDB, knobs_json
 from emmy.compiler.pipeline.search.features import ROUTING_FEATURES, is_dynamic_row, knob_features
 from emmy.compiler.structural import digest
 
@@ -395,3 +396,66 @@ def group_measured(rows) -> tuple[list[MeasuredGroup], dict[str, int]]:
         key = f"{gpu}/{sig}@O{h_opt:g}" + (f" {regime}" if regime else "")
         groups.append(MeasuredGroup.from_measured(key, gpu, sig, h_opt, [r.stats.median for r in grp], feats))
     return groups, dict(dropped)
+
+
+@dataclass(frozen=True)
+class GoldenPool:
+    """One candidate pool the dataset DB records verified rows in: one kernel on one card, in one precision
+    regime (``regime``: a key of :data:`~.freeze.REGIME_PINS`), at one set of sizes, and the golden rows
+    measured on it. The pool is enumerated from the kernel's own definition (``kernel.loop_ir``); a kernel
+    formed from no loop op (``kernel.formed`` false: a piece carved from a twisted tree, which only its parent's
+    program reaches) has none, and its pool is skipped by name."""
+
+    gpu: str
+    cap: tuple[int, int]
+    regime: str
+    kernel: KernelRow
+    bindings: dict
+    rows: tuple[PerfRow, ...]
+
+    @property
+    def name(self) -> str:
+        """The pool's label in a report: the kernel's C name and the head of its exact identity — the name a
+        freeze gives its realizations — with the sizes when the kernel is symbolic."""
+        sizes = " ".join(f"{var}={size}" for var, size in sorted(self.bindings.items()))
+        return f"{self.kernel.name}.{self.kernel.exact_identity[:12]}" + (f" {sizes}" if sizes else "")
+
+    @property
+    def pins(self) -> dict:
+        """The input pins the pool's rows were measured under."""
+        return REGIME_PINS[self.regime]
+
+    def schedule_rows(self) -> list[dict[str, str]]:
+        """Each golden row's schedule row — its knobs without the stamps and the identity a read row carries."""
+        return [schedule_row(row) for row in self.rows]
+
+    @property
+    def emmy_us(self) -> float:
+        """The fastest golden time recorded in the pool."""
+        return min(row.stats.median for row in self.rows)
+
+
+def golden_pools(db: SearchDB) -> tuple[list[GoldenPool], dict[str, int]]:
+    """The golden rows of ``db`` as pools — one per card, regime, kernel and sizes that holds at least one row a
+    golden file sourced (``golden:`` — a repository golden the dataset import filed, or the golden scope a compile
+    imported into a tune DB) and the freeze admits (:func:`~.freeze.freeze_reason`, the one admission rule every
+    measured-pool reader applies) — beside a count of the golden rows dropped, by reason, as
+    :func:`group_measured` returns its own. The kernel is the exact one the rows were measured on: a golden pool
+    has to be enumerated from a definition, which is why it does not key on the stamp signature the measured
+    pools share across bodies. In content order, so a report reads the same on every machine."""
+    kernels = {k.exact_identity: k for k in db.iter_kernels()}
+    dropped: dict[str, int] = defaultdict(int)
+    buckets: dict[tuple, list[PerfRow]] = defaultdict(list)
+    for row in db.iter_perf_rows(backend="cuda"):
+        if not row.source.startswith("golden:"):
+            continue
+        reason = freeze_reason(row)
+        if reason is not None:
+            dropped[reason.split(":")[0]] += 1
+        else:
+            buckets[(row.gpu, divmod(row.cc, 10), regime_of(row.flags), row.kernel, knobs_json(row.bindings))].append(row)
+    pools = []
+    for (gpu, cap, regime, identity, _bindings), rows in sorted(buckets.items()):
+        rows.sort(key=lambda r: knobs_json(r.knobs))
+        pools.append(GoldenPool(gpu, cap, regime, kernels[identity], dict(rows[0].bindings), tuple(rows)))
+    return pools, dict(dropped)

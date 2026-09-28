@@ -6,7 +6,7 @@ through the same vocabulary instead of reimplementing golden filtering or openin
 the DB by hand.
 
 The source (golden vs db) is orthogonal to the analysis, but not every combination
-is meaningful (a DB row has no cuBLAS reference; a golden has no kernel C identity).
+is meaningful (a golden pool has no benched rivals; the per-kernel views read a tune DB).
 :func:`require_source` lets a handler reject a degenerate combination with a
 specific message rather than emit an empty table.
 """
