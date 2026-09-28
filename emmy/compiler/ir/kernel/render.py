@@ -267,28 +267,27 @@ static __device__ __forceinline__ void emmy_mma884_load4(unsigned* r, const T* g
 // The caller proves four-element alignment and a complete K slice.
 template <typename T, bool A>
 static __device__ __forceinline__ void emmy_mma884_load_gmem4(unsigned* r, const T* g, int ldm, int left) {
-    if (left <= 0) { for (int z = 0; z < 2; ++z) r[z] = 0u; return; }  // wholly past the bound: read nothing
     int lane = threadIdx.x & 31;
     int comp = (lane & 15) >> 2;
     int row = ((A ? comp >> 1 : comp & 1) << 3) + (lane & 3) + ((lane >> 4) << 2);
-    row = min(row, left - 1);
-    emmy_mma884_load4(r, g + row * ldm);
+    row = min(row, max(left - 1, 0));
+    r[0] = r[1] = 0u;
+    if (left > 0) emmy_mma884_load4(r, g + row * ldm);  // wholly past the bound: read nothing
 }
 
 template <typename T, typename F = T>
 static __device__ __forceinline__ void emmy_mma884_load_a_impl(
     unsigned* r, const T* g, int ldm, int rows_left, int k_left) {
-    if (rows_left <= 0) { for (int z = 0; z < 2; ++z) r[z] = 0u; return; }  // wholly past the bound: read nothing
     int lane = threadIdx.x & 31;
     int comp = (lane & 15) >> 2;
     int row = ((comp >> 1) << 3) + (lane & 3) + ((lane >> 4) << 2);
-    if (row >= rows_left) row = rows_left - 1;
+    if (row >= rows_left) row = max(rows_left - 1, 0);
     #pragma unroll
     for (int p = 0; p < 2; ++p) {
         int k = p << 1;
         unsigned packed = 0;
-        if (k < k_left) ((F*)&packed)[0] = F(g[row * ldm + k]);
-        if (k + 1 < k_left) ((F*)&packed)[1] = F(g[row * ldm + k + 1]);
+        if (rows_left > 0 && k < k_left) ((F*)&packed)[0] = F(g[row * ldm + k]);
+        if (rows_left > 0 && k + 1 < k_left) ((F*)&packed)[1] = F(g[row * ldm + k + 1]);
         r[p] = packed;
     }
 }
@@ -296,17 +295,16 @@ static __device__ __forceinline__ void emmy_mma884_load_a_impl(
 template <typename T, typename F = T>
 static __device__ __forceinline__ void emmy_mma884_load_b_impl(
     unsigned* r, const T* g, int ldm, int cols_left, int k_left, bool trans) {
-    if (cols_left <= 0) { for (int z = 0; z < 2; ++z) r[z] = 0u; return; }  // wholly past the bound: read nothing
     int lane = threadIdx.x & 31;
     int comp = (lane & 15) >> 2;
     int col = ((comp & 1) << 3) + (lane & 3) + ((lane >> 4) << 2);
-    if (col >= cols_left) col = cols_left - 1;
+    if (col >= cols_left) col = max(cols_left - 1, 0);
     #pragma unroll
     for (int p = 0; p < 2; ++p) {
         int k = p << 1;
         unsigned packed = 0;
-        if (k < k_left) ((F*)&packed)[0] = F(trans ? g[col * ldm + k] : g[k * ldm + col]);
-        if (k + 1 < k_left) ((F*)&packed)[1] = F(trans ? g[col * ldm + k + 1] : g[(k + 1) * ldm + col]);
+        if (cols_left > 0 && k < k_left) ((F*)&packed)[0] = F(trans ? g[col * ldm + k] : g[k * ldm + col]);
+        if (cols_left > 0 && k + 1 < k_left) ((F*)&packed)[1] = F(trans ? g[col * ldm + k + 1] : g[(k + 1) * ldm + col]);
         r[p] = packed;
     }
 }
@@ -695,33 +693,35 @@ static __device__ __forceinline__ void emmy_mma_load_b_gmem(unsigned* r, const T
 // guard (the tile path's ``clamp_last``, same contract).
 template <typename T, typename F = T>
 static __device__ __forceinline__ void emmy_mma_load_a_gmem_mclamp(unsigned* r, const T* g, int ldm, int rows_left) {
-    if (rows_left <= 0) { for (int z = 0; z < 4; ++z) r[z] = 0u; return; }  // wholly past the bound: read nothing
     int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
     #pragma unroll
     for (int i = 0; i < 4; ++i) {
         int row = grp + ((i & 1) ? 8 : 0);
-        if (row >= rows_left) row = rows_left - 1;   // M: clamp to the runtime extent
+        if (row >= rows_left) row = max(rows_left - 1, 0);   // M: clamp to the runtime extent
         int col = (tig << 1) + ((i & 2) ? 8 : 0);
         const T* p = g + row * ldm + col;
-        unsigned packed;
-        ((F*)&packed)[0] = F(p[0]);
-        ((F*)&packed)[1] = F(p[1]);
+        unsigned packed = 0u;
+        if (rows_left > 0) {  // wholly past the bound: read nothing
+            ((F*)&packed)[0] = F(p[0]);
+            ((F*)&packed)[1] = F(p[1]);
+        }
         r[i] = packed;
     }
 }
 
 template <typename T, typename F = T>
 static __device__ __forceinline__ void emmy_mma_load_b_gmem_nclamp(unsigned* r, const T* g, int ldm, int cols_left) {
-    if (cols_left <= 0) { for (int z = 0; z < 2; ++z) r[z] = 0u; return; }  // wholly past the bound: read nothing
     int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
     #pragma unroll
     for (int i = 0; i < 2; ++i) {
         int n = grp;
-        if (n >= cols_left) n = cols_left - 1;       // N: clamp to the runtime extent
+        if (n >= cols_left) n = max(cols_left - 1, 0);       // N: clamp to the runtime extent
         int k = (tig << 1) + (i ? 8 : 0);
-        unsigned packed;
-        ((F*)&packed)[0] = F(g[k * ldm + n]);
-        ((F*)&packed)[1] = F(g[(k + 1) * ldm + n]);
+        unsigned packed = 0u;
+        if (cols_left > 0) {  // wholly past the bound: read nothing
+            ((F*)&packed)[0] = F(g[k * ldm + n]);
+            ((F*)&packed)[1] = F(g[(k + 1) * ldm + n]);
+        }
         r[i] = packed;
     }
 }
@@ -752,16 +752,17 @@ static __device__ __forceinline__ void emmy_mma_load_b_gmem_trans(unsigned* r, c
 // their stores are masked by the RegStore guard.
 template <typename T, typename F = T>
 static __device__ __forceinline__ void emmy_mma_load_b_gmem_trans_nclamp(unsigned* r, const T* g, int ldm, int cols_left) {
-    if (cols_left <= 0) { for (int z = 0; z < 2; ++z) r[z] = 0u; return; }  // wholly past the bound: read nothing
     int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
     #pragma unroll
     for (int i = 0; i < 2; ++i) {
         int n = grp;
-        if (n >= cols_left) n = cols_left - 1;       // N: clamp to the runtime extent
+        if (n >= cols_left) n = max(cols_left - 1, 0);       // N: clamp to the runtime extent
         int k = (tig << 1) + (i ? 8 : 0);
-        unsigned packed;
-        ((F*)&packed)[0] = F(g[n * ldm + k]);
-        ((F*)&packed)[1] = F(g[n * ldm + k + 1]);
+        unsigned packed = 0u;
+        if (cols_left > 0) {  // wholly past the bound: read nothing
+            ((F*)&packed)[0] = F(g[n * ldm + k]);
+            ((F*)&packed)[1] = F(g[n * ldm + k + 1]);
+        }
         r[i] = packed;
     }
 }
@@ -791,17 +792,16 @@ static __device__ __forceinline__ void emmy_mma_load_a_gmem_kzero(unsigned* r, c
 // A: masked-M (clamp rows) AND masked-K (zero-fill cols).
 template <typename T, typename F = T>
 static __device__ __forceinline__ void emmy_mma_load_a_gmem_mclamp_kzero(unsigned* r, const T* g, int ldm, int rows_left, int k_left) {
-    if (rows_left <= 0) { for (int z = 0; z < 4; ++z) r[z] = 0u; return; }  // wholly past the bound: read nothing
     int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
     #pragma unroll
     for (int i = 0; i < 4; ++i) {
         int row = grp + ((i & 1) ? 8 : 0);
-        if (row >= rows_left) row = rows_left - 1;
+        if (row >= rows_left) row = max(rows_left - 1, 0);
         int col = (tig << 1) + ((i & 2) ? 8 : 0);
         const T* p = g + row * ldm + col;
         unsigned packed = 0;
-        if (col < k_left) ((F*)&packed)[0] = F(p[0]);
-        if (col + 1 < k_left) ((F*)&packed)[1] = F(p[1]);
+        if (rows_left > 0 && col < k_left) ((F*)&packed)[0] = F(p[0]);
+        if (rows_left > 0 && col + 1 < k_left) ((F*)&packed)[1] = F(p[1]);
         r[i] = packed;
     }
 }
@@ -824,16 +824,15 @@ static __device__ __forceinline__ void emmy_mma_load_b_gmem_kzero(unsigned* r, c
 // B: masked-N (clamp col) AND masked-K (zero-fill row).
 template <typename T, typename F = T>
 static __device__ __forceinline__ void emmy_mma_load_b_gmem_nclamp_kzero(unsigned* r, const T* g, int ldm, int cols_left, int k_left) {
-    if (cols_left <= 0) { for (int z = 0; z < 2; ++z) r[z] = 0u; return; }  // wholly past the bound: read nothing
     int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
     #pragma unroll
     for (int i = 0; i < 2; ++i) {
         int n = grp;
-        if (n >= cols_left) n = cols_left - 1;
+        if (n >= cols_left) n = max(cols_left - 1, 0);
         int k = (tig << 1) + (i ? 8 : 0);
         unsigned packed = 0;
-        if (k < k_left) ((F*)&packed)[0] = F(g[k * ldm + n]);
-        if (k + 1 < k_left) ((F*)&packed)[1] = F(g[(k + 1) * ldm + n]);
+        if (cols_left > 0 && k < k_left) ((F*)&packed)[0] = F(g[k * ldm + n]);
+        if (cols_left > 0 && k + 1 < k_left) ((F*)&packed)[1] = F(g[(k + 1) * ldm + n]);
         r[i] = packed;
     }
 }
@@ -860,16 +859,15 @@ static __device__ __forceinline__ void emmy_mma_load_b_gmem_trans_kzero(unsigned
 template <typename T, typename F = T>
 static __device__ __forceinline__ void emmy_mma_load_b_gmem_trans_nclamp_kzero(
     unsigned* r, const T* g, int ldm, int cols_left, int k_left) {
-    if (cols_left <= 0) { for (int z = 0; z < 2; ++z) r[z] = 0u; return; }  // wholly past the bound: read nothing
     int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
     #pragma unroll
     for (int i = 0; i < 2; ++i) {
         int n = grp;
-        if (n >= cols_left) n = cols_left - 1;       // N: clamp to the runtime extent
+        if (n >= cols_left) n = max(cols_left - 1, 0);       // N: clamp to the runtime extent
         int k = (tig << 1) + (i ? 8 : 0);
         unsigned packed = 0;
-        if (k < k_left) ((F*)&packed)[0] = F(g[n * ldm + k]);
-        if (k + 1 < k_left) ((F*)&packed)[1] = F(g[n * ldm + k + 1]);
+        if (cols_left > 0 && k < k_left) ((F*)&packed)[0] = F(g[n * ldm + k]);
+        if (cols_left > 0 && k + 1 < k_left) ((F*)&packed)[1] = F(g[n * ldm + k + 1]);
         r[i] = packed;
     }
 }
@@ -993,51 +991,48 @@ static __device__ __forceinline__ void emmy_mma_load_b_gmem_trans_b8(unsigned* r
 // ``_mclamp`` / ``_nclamp`` family above.
 template <typename T>
 static __device__ __forceinline__ void emmy_mma_load_a_gmem_mclamp_b8(unsigned* r, const T* g, int ldm, int rows_left) {
-    if (rows_left <= 0) { for (int z = 0; z < 4; ++z) r[z] = 0u; return; }  // wholly past the bound: read nothing
     const unsigned char* p = reinterpret_cast<const unsigned char*>(g);
     int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
     #pragma unroll
     for (int i = 0; i < 4; ++i) {
         int row = grp + ((i & 1) ? 8 : 0);
-        if (row >= rows_left) row = rows_left - 1;   // M: clamp to the runtime extent
+        if (row >= rows_left) row = max(rows_left - 1, 0);   // M: clamp to the runtime extent
         int col = (tig << 2) + ((i & 2) ? 16 : 0);
-        unsigned packed;
+        unsigned packed = 0u;
         #pragma unroll
-        for (int j = 0; j < 4; ++j) ((unsigned char*)&packed)[j] = p[row * ldm + col + j];
+        for (int j = 0; j < 4; ++j) if (rows_left > 0) ((unsigned char*)&packed)[j] = p[row * ldm + col + j];
         r[i] = packed;
     }
 }
 
 template <typename T>
 static __device__ __forceinline__ void emmy_mma_load_b_gmem_nclamp_b8(unsigned* r, const T* g, int ldm, int cols_left) {
-    if (cols_left <= 0) { for (int z = 0; z < 2; ++z) r[z] = 0u; return; }  // wholly past the bound: read nothing
     const unsigned char* p = reinterpret_cast<const unsigned char*>(g);
     int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
     #pragma unroll
     for (int i = 0; i < 2; ++i) {
         int n = grp;
-        if (n >= cols_left) n = cols_left - 1;       // N: clamp to the runtime extent
+        if (n >= cols_left) n = max(cols_left - 1, 0);       // N: clamp to the runtime extent
         int k = (tig << 2) + (i ? 16 : 0);
-        unsigned packed;
+        unsigned packed = 0u;
         #pragma unroll
-        for (int j = 0; j < 4; ++j) ((unsigned char*)&packed)[j] = p[(k + j) * ldm + n];
+        for (int j = 0; j < 4; ++j) if (cols_left > 0) ((unsigned char*)&packed)[j] = p[(k + j) * ldm + n];
         r[i] = packed;
     }
 }
 
 template <typename T>
 static __device__ __forceinline__ void emmy_mma_load_b_gmem_trans_nclamp_b8(unsigned* r, const T* g, int ldm, int cols_left) {
-    if (cols_left <= 0) { for (int z = 0; z < 2; ++z) r[z] = 0u; return; }  // wholly past the bound: read nothing
     const unsigned char* p = reinterpret_cast<const unsigned char*>(g);
     int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
     #pragma unroll
     for (int i = 0; i < 2; ++i) {
         int n = grp;
-        if (n >= cols_left) n = cols_left - 1;       // N: clamp to the runtime extent
+        if (n >= cols_left) n = max(cols_left - 1, 0);       // N: clamp to the runtime extent
         int k = (tig << 2) + (i ? 16 : 0);
-        unsigned packed;
+        unsigned packed = 0u;
         #pragma unroll
-        for (int j = 0; j < 4; ++j) ((unsigned char*)&packed)[j] = p[n * ldm + k + j];
+        for (int j = 0; j < 4; ++j) if (cols_left > 0) ((unsigned char*)&packed)[j] = p[n * ldm + k + j];
         r[i] = packed;
     }
 }
