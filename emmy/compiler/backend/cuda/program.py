@@ -30,6 +30,7 @@ import os as _os
 import pickle
 import sys as _sys
 import time as _time_module
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -127,7 +128,7 @@ def _numpy_storage(src, dtype) -> np.ndarray:
 
 def _host_bytes(buf: _Buffer, shape: tuple[int, ...], src, constants: dict[str, float]) -> bytes:
     """The bytes one input or constant buffer starts from: the supplied array, the plan's scalar
-    constant, a deterministic pseudo-random ramp for an unsupplied input, zeros otherwise."""
+    constant, seeded normal values for an unsupplied input, zeros otherwise."""
     np_dtype = buf.dtype.np
     is_bf16 = getattr(buf.dtype, "name", buf.dtype) == "bf16"
     n = math.prod(shape)
@@ -145,12 +146,15 @@ def _host_bytes(buf: _Buffer, shape: tuple[int, ...], src, constants: dict[str, 
             return np.full(shape, np.uint16((bits + 0x7FFF + ((bits >> 16) & 1)) >> 16), dtype=np.uint16).tobytes()
         return np.full(shape, v, dtype=np_dtype).tobytes()
     if buf.role == "input":
-        # Pseudo-random fill for un-supplied inputs. The index ramp is built in int64, not
-        # ``np_dtype``: a float16 buffer past 65504 elements would overflow to ``inf`` (then
-        # ``inf % 101`` → ``nan``). Compute in fp32 and cast the final values — always in
-        # ``[-0.5, 0.5]``, so fp16-safe.
-        idx = np.arange(n, dtype=np.int64)
-        vals = 0.01 * ((idx.astype(np.float32) * 7 + 13) % 101 - 50)
+        # Seeded normal values for an un-supplied input, one stream per buffer name — what the
+        # reference path draws (``standard_normal``). A kernel's cost can depend on its values
+        # (an IEEE division's slow path, an exp near overflow): the index ramp this replaced
+        # repeats every 101 elements, and through a whole layer it drove softmax rows into
+        # that slow path, so a timing on it was not the timing on real data. Integer carriers
+        # keep a small ramp: their codes are data, not magnitudes.
+        if not is_bf16 and np.issubdtype(np_dtype, np.integer):
+            return (np.arange(n, dtype=np.int64) % 101).astype(np_dtype).tobytes()
+        vals = np.random.default_rng(zlib.crc32(buf.name.encode())).standard_normal(n, dtype=np.float32)
         vals = encode_bf16(vals) if is_bf16 else vals.astype(np_dtype)
         return vals.tobytes()
     return np.zeros(shape, dtype=np_dtype).tobytes()
@@ -359,6 +363,12 @@ _BATCH_TARGET_MS = 1.0
 # calibration we extend ``warmup`` so total warmup GPU time clears
 # this threshold.
 _WARMUP_TARGET_MS = 10.0
+# Past that floor, warmup keeps going while each iter still runs faster than the one before —
+# the clocks are still ramping — up to this much warmup GPU time. A fixed floor does not cover
+# a datacenter card coming out of idle (a compile, a host-side gap): on an A100 the first kernel
+# measured after one ran ~30% slow (42.6 vs 33.2 us) under the 10 ms floor alone.
+_WARMUP_MAX_MS = 500.0
+_WARMUP_SETTLED = 0.98
 
 
 # ---------------------------------------------------------------------------
@@ -884,6 +894,8 @@ def benchmark_program(
         iters_run = 0
         measured = 0
         cumulative_gpu_ms = 0.0  # measured-iter GPU time, for the "auto" stop target
+        calibrated = False  # batch sizes are set once, at the end of the requested warmup
+        prev_call_ms = None  # the previous iter's per-call time (the ramp check)
         total_gpu_ms = 0.0  # all-iter GPU time (incl. warmup), for the run-stage budget
 
         def _try_capture(sizes: list[int]) -> bool:
@@ -911,18 +923,22 @@ def benchmark_program(
             # discards.
             if run_timeout_s is not None and total_gpu_ms > run_timeout_s * 1000.0:
                 raise RuntimeError(f"benchmark run stage exceeded {run_timeout_s:.1f}s of GPU time — variant marked bench_fail")
-            if iters_run == warmup:
+            # While the last warmup iter still beats the one before it by more than noise, the
+            # clocks are ramping: warm up one iter longer. ``iter_dts`` are per-call times, so
+            # the comparison holds across the batch calibration.
+            call_ms = sum(iter_dts)
+            if iters_run == warmup and prev_call_ms is not None and total_gpu_ms < _WARMUP_MAX_MS:
+                if call_ms < _WARMUP_SETTLED * prev_call_ms:
+                    warmup += 1
+            prev_call_ms = call_ms
+            if iters_run == warmup and not calibrated:
+                calibrated = True
                 batch_sizes = _calibrate_batch_sizes(iter_dts)
                 if capture_graphs:
-                    # Capture (or re-capture) at the calibrated batch sizes.
-                    # The warmup extension below can re-fire this calibration
-                    # branch with new batch sizes — ``capture_launch_graphs``
-                    # no-ops when they're unchanged and re-captures when not,
-                    # so graphs and batches never go out of sync.
+                    # Capture at the calibrated batch sizes, which hold from here on.
                     capture_graphs = _try_capture(batch_sizes)
                 # Extend warmup until total warmup GPU time clears the
-                # clock-ramp floor. Post-batching, each subsequent
-                # warmup iter spends roughly
+                # clock-ramp floor. Post-batching, each warmup iter spends roughly
                 # ``sum(iter_dts[i] * batch_sizes[i])`` of GPU time —
                 # use the just-measured per-launch dts to estimate how
                 # many extra iters are needed.

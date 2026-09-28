@@ -402,7 +402,7 @@ def test_ir_ab_replay_retains_boolean_input_pins(tmp_path, monkeypatch):
             yield
 
     class Backend:
-        async def bench_pinned_async(self, _graph, *, warmup, num_iters):
+        async def bench_pinned_async(self, _graph, *, run_inputs=None, run_inputs_key=None, warmup, num_iters):
             assert (warmup, num_iters) == (1, 2)
             assert precision_pin(FAST_MATH) is False
             return SimpleNamespace(min_ms=0.1, time_ms=0.1), None
@@ -870,7 +870,7 @@ def test_bench_greedy_isolated_ok_and_bench_fail():
     compiled = object()
     benched: list = []
 
-    async def ok_bench(g, *, warmup, num_iters):
+    async def ok_bench(g, *, run_inputs=None, run_inputs_key=None, warmup, num_iters):
         benched.append(g)
         return SimpleNamespace(min_ms=1.0, time_ms=1.0, per_launch=[]), None
 
@@ -879,7 +879,20 @@ def test_bench_greedy_isolated_ok_and_bench_fail():
     assert gb.status == "ok" and gb.bench is not None and gb.flags == []
     assert gb.sample.name == "greedy (isolated)" and gb.sample.shape is None
 
-    async def hung_bench(g, *, warmup, num_iters):
+    # With the run's reference, the greedy row is timed on its inputs under the pinned rows' key.
+    timed_on: list = []
+
+    async def ref_bench(g, *, run_inputs=None, run_inputs_key=None, warmup, num_iters):
+        timed_on.append((run_inputs, run_inputs_key))
+        return SimpleNamespace(min_ms=1.0, time_ms=1.0, per_launch=[]), None
+
+    inputs = {"x": [1.0]}
+    asyncio.run(
+        _bench_greedy_isolated(SimpleNamespace(bench_pinned_async=ref_bench), compiled, warmup=1, iters=1, ref=(inputs, {}), ref_key="k")
+    )
+    assert timed_on == [(inputs, "k")]
+
+    async def hung_bench(g, *, run_inputs=None, run_inputs_key=None, warmup, num_iters):
         raise RuntimeError("bench worker exceeded 100.0s wall budget — SIGKILL'd, stream cleaned")
 
     gb = asyncio.run(_bench_greedy_isolated(SimpleNamespace(bench_pinned_async=hung_bench), compiled, warmup=1, iters=1))

@@ -169,7 +169,7 @@ def test_reference_free_benchmark_respects_iteration_budget():
 
     backend = SimpleNamespace(run=lambda graph, **kwargs: (SimpleNamespace(outputs={}, time_ms=1.0), None), benchmark_async=benchmark)
     asyncio.run(bench_lowered_vs_torch(None, Graph(), backend, seed=0, do_bench=True, warmup=0, iters=1, bench_backends="emmy"))
-    assert calls == [{"warmup": 0, "num_iters": 1, "capture_graphs": True}]
+    assert calls == [{"warmup": 0, "num_iters": 1, "capture_graphs": True, "input_data": {}}]
 
 
 @requires_cuda

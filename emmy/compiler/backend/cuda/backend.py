@@ -193,13 +193,16 @@ class CudaBackend(Backend):
         on_iter=None,
         nvcc_flags: str | None = None,
         capture_graphs: bool = True,
+        input_data: dict | None = None,
     ) -> BenchmarkResult:
         """The single benchmarking entry point for ``CudaBackend`` — async, two paths.
 
         ``nvcc_flags`` re-points this one bench's compile at a different opt level (e.g.
         an -O3 re-bench of a tune winner) without disturbing the ambient flags — the
-        worker applies it per-request; in-process we wrap. ``bench_wall_timeout_s``
-        (plus the absence of ``on_iter``) selects the path:
+        worker applies it per-request; in-process we wrap. ``input_data`` times the program on
+        those inputs (the run's reference inputs) instead of the synthetic fill; it benches
+        in-process. ``bench_wall_timeout_s`` (plus the absence of ``on_iter`` and
+        ``input_data``) selects the path:
 
         - **Set, no ``on_iter`` (autotune sweep)**: bench in a device-pinned,
           SIGKILL-able subprocess worker (:func:`benchmark_program_isolated_async`), so
@@ -211,7 +214,7 @@ class CudaBackend(Backend):
           closures — they share torch state with this process and can't cross the
           subprocess boundary. The blocking bench runs directly on the event loop (it is
           the only work in flight), so ``async`` here is just the uniform call shape."""
-        if self.bench_wall_timeout_s is not None and on_iter is None:
+        if self.bench_wall_timeout_s is not None and on_iter is None and input_data is None:
             result = await benchmark_program_isolated_async(
                 compiled,
                 worker=self._async_worker(),
@@ -227,6 +230,7 @@ class CudaBackend(Backend):
             with config.nvcc_flags_override(nvcc_flags):
                 result = benchmark_program(
                     compiled,
+                    input_data=input_data,
                     warmup=warmup,
                     num_iters=num_iters,
                     on_iter=on_iter,
