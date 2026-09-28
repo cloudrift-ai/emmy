@@ -2,7 +2,26 @@
 
 ## Summary
 
-Two problems that make hand-tuning a large fused kernel difficult and slow.
+A pin fixes a compiler choice. After a cut splits a fused kernel into pieces, global pins can make their schedules
+conflict: a thread-layout pin helps an output writer but removes tensor-core schedules from its matmuls. Existing site-scoped pins may already solve this;
+that has not been tested. Separately, the attention kernel takes minutes to compile without pins, although the
+recorded concurrent runs do not isolate where that time goes.
+
+## Reading the pin interference
+
+Normalized Tile IR schedule summary; instruction and piece names are abbreviated:
+
+```text
+Observed with global WORK=t128:     Desired combination (illustrative):
+residual writer: work t128          residual writer: work t128
+projection: work t128; TILE=f1      projection: TILE=mma_m16n8k64_e2m1_f32/…
+            or no TILE                         with a compatible WORK
+```
+
+The writer and matmul need different schedules. Whether existing site-scoped pins can express this combination is
+unverified; the example does not establish a need for new pin syntax.
+
+## Observed details
 
 1. **A global schedule pin affects pieces it was not intended for.** After the cut pass splits a fused kernel into
    pieces, each piece forks over its own schedule: TILE, STAGE, WORK and REDUCE. A pin without a site (`TILE=…`,
@@ -38,24 +57,14 @@ Two problems that make hand-tuning a large fused kernel difficult and slow.
 The examples establish interference from global pins, not the impossibility of targeting one piece. First inspect the
 schedule sites of the cut pieces and try the existing `KNOB@<site>=value` form. If it works, document and test that
 recipe; new syntax is unnecessary. If sites collide or are rebound so that the requested schedules cannot coexist,
-retain a minimal reproducer of that failure and then design piece targeting. Track this investigation separately from
-compile-time performance.
-
-## Terms
-
-- **Pin:** a fixed choice for a fork, given in `EMMY_KNOBS` as comma-separated `KNOB=value` or `KNOB@<site>=value`.
-  `pin_key_matches` in `emmy/compiler/pipeline/knob.py` (line 348) matches a pin to a fork. A pin without a site
-  matches every site.
-- **Full-projection cut:** one cut-pass decision (`full_projection_seams`,
-  `emmy/compiler/pipeline/passes/tile/_cut.py`) that splits a fused kernel's contractions and output-owning branches
-  into kernels of their own, called *pieces*. It is spelled as a set of `PLACE@<site>=cut` keys.
-- **fp4 cell:** the native fp4 tensor-core instruction `mma_m16n8k64_e2m1_f32`.
-- **Trace inventory, realization:** `emmy trace` writes every kernel of one layer at one width to a file.
-  `--realization <name>` compiles or benches one of them.
+retain a minimal reproducer of that failure before proposing piece-targeting syntax. This targeting question is
+separate from the unexplained compile time.
 
 ## Reproduce
 
-All commands run from the repository root inside `nix develop`, with a fresh tune DB.
+All commands run from the repository root inside `nix develop`, with a fresh tune DB. `emmy trace` writes a layer
+inventory; `--realization <name>` selects one kernel. Pins go in `EMMY_KNOBS` as comma-separated
+`KNOB=value` or `KNOB@<site>=value` choices.
 
 ```sh
 M=Inferact/Qwen3.8-27B-NVFP4@6128240ebaf4eaa7bad2b3d1c72c37d677c5f462   # ~26 GB download on first use

@@ -1,4 +1,4 @@
-# A cut piece over packed 4-bit weights gets the weight as operand A and loses cp.async/TMA staging
+# Cutting packed-weight matmuls reverses their operands and loses staging
 
 ## Summary
 
@@ -16,35 +16,32 @@ Pinning cp.async or TMA fails:
 ValueError: STAGE pin 'd2/smem-async' does not resolve for this contraction
 ```
 
-When a K split (`REDUCE=g4k`) runs together with the cut, the split's kernels come out activation first, and every
-cp.async and TMA option is available. The plain f16 version of the program also orients its pieces activation first.
-So the operand order, not the cut, is what loses the staging.
+When K is split four ways across thread blocks (`REDUCE=g4k`) together with the cut, the split's kernels come out
+activation first, and every cp.async and TMA option is available. The plain f16 version of the program also orients its pieces activation first.
+The staging matcher rejects the weight-first form. Why the K-split path chooses the other orientation remains
+untraced.
 
-## Terms
+## Reading the operand order
 
-- **Tile IR** (`emmy compile --ir tile`) prints each matmul as `Fold[k …] contraction` with its operands in order. The
-  first operand is **A**, the rest are **B**, one per weight.
-- **STAGE** is the knob for how operands reach shared memory. Its value is a depth `dN` (how many K steps of buffers
-  rotate, the *ring*) plus a transport:
-  - `smem` is the smem compute fill: the compute threads write shared memory themselves.
-  - `smem-async` copies bytes with cp.async.
-  - `smem-tma` copies with TMA bulk copies.
-  - `''` means no shared-memory staging at all, the operands are read straight from global memory; only scalar
-    (non-tensor-core) tiles take it here.
-- **Packed-weight staging** is the code's "packed byte-slab stage" (`_packed_warp_stage` in
-  `emmy/compiler/ir/schedule/staging.py`). It copies the raw 4-bit weight bytes into shared memory with cp.async or
-  TMA and decodes the codes in registers. In the inspected TMA form, compute threads separately load and convert the
-  scales into shared memory.
-- **Knob pins** go in `EMMY_KNOBS` as comma-separated `KNOB@site=value`. The site (`map.1/inner`) names one node in
-  the kernel's schedule tree. `REDUCE=` with an empty value forbids a K split; `REDUCE=g4k` splits K four ways across
-  thread blocks. Each projection has one partial-results kernel whose grid includes the split axis, followed by a
-  finishing reduction kernel.
-- **Available options** below means the values that appear in a fork's schedule leaves after the scheduler's own
-  checks. Those are exactly the values a pin can reach. The script in the appendix prints them.
+Tile IR lists operand A first, then B. These sketches use descriptive axis names and abbreviate the weight decode.
+`STAGE` selects how operands reach shared memory: compute fill (`smem`), cp.async (`smem-async`) or TMA (`smem-tma`).
+
+```text
+Observed after the cut:             Expected orientation (illustrative):
+contraction ⟨STAGE=d1/smem⟩         contraction ⟨STAGE=d2/smem-async⟩
+  A: decode(weight[row, k])           A: x[token, k] + 1
+  B: x[token, k] + 1                  B: decode(weight[row, k])
+  output[token, row] = acc            output[token, row] = acc
+```
+
+The output layout is the same. The difference is that the staging matcher recognizes the packed weight only in the
+B position. This is a lost scheduling option, not an incorrect transpose of the returned tensor.
 
 ## Reproduce
 
-From the repository root, inside `nix develop`, with a fresh empty tune DB so no recorded row interferes:
+From the repository root, inside `nix develop`, with a fresh empty tune DB so no recorded row interferes.
+`KNOB@site=value` pins one schedule-tree node; `REDUCE=` disables K splitting. A K split produces partial results
+across thread blocks and then combines them in a finishing kernel.
 
 ```sh
 rm -f /tmp/cut-order.db; export EMMY_TUNE_DB=/tmp/cut-order.db
@@ -110,7 +107,7 @@ this kernel's quarter of K.
 ```
 
 Available STAGE values there: `''`, `d1/smem`, and all 16 copy values: `d1`–`d4` × `smem-async`/`smem-tma` × with and
-without `/p2`, where `/p2` adds a second register buffer.
+without `/p2`, where `/p2` adds a second register buffer. The `d1`–`d4` prefix is the number of buffered K steps.
 
 ## Compare: plain f16
 
@@ -136,7 +133,8 @@ weight first.
 The packed-weight staging's matcher, `match_packed_b_node` in `emmy/compiler/ir/schedule/packing.py` (line 317), reads
 A from the first operand and requires every B operand to be a packed-weight decode. Here the only B operand is `x +
 1`, which is not one, so the matcher returns `None`. The contraction then gets the generic treatment for a computed
-operand: the compute fill only.
+operand: the compute fill only. The intended packed-weight path copies raw weight bytes into shared memory and
+decodes them in registers. In the inspected TMA form, compute threads still load and convert the scales separately.
 
 The K split rebuilds its kernels from the contraction with re-indexed operands
 (`emmy/compiler/pipeline/passes/tile/_split.py`), and they come out activation first. I did not trace why that path
@@ -162,11 +160,9 @@ Done when, for `PROG` at `--target sm_120 --quantize nvfp4-w4a16` with `EMMY_KNO
   - The compute threads write the activation buffer, evaluating `x + 1` from `x`.
 - **Correctness:** on an sm_120 card, the outputs under `EMMY_KNOBS='PLACE@map.1/inner=cut,REDUCE=,STAGE=d2/smem-tma'`
   match the outputs of the fused default schedule on the same inputs, within f16 rounding of a 4096-long sum. For
-  these inline quantized repros, `--strict` was reported to fail at `a98fd4f8` on 2026-09-28 across the tested scalar,
-  W4A16 and fp4 schedules, with errors as large as the outputs. This suggests a shared input or reference problem, but
-  does not establish its cause or prove the kernels correct. Validate the reference before relying on that check; do
-  not extend this observation to checkpoint-based repros. Once that comparison works, `emmy run -c "$PROG" --quantize
-  nvfp4-w4a16 --bench --strict` with that pin must exit 0 as well.
+  these inline quantized repros, the [strict report](strict-fails-for-inline-quantize-programs.md) identifies a
+  reference mismatch. Use the same original weight snapshot and a validated reference for the quantized computation;
+  the current strict failure neither proves a kernel error nor establishes correctness.
 - **No regression:**
   - The fused equal-width two-weight kernel and the K-split kernels keep their current operand order and available
     values.

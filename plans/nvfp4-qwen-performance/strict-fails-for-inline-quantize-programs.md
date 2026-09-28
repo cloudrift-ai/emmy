@@ -1,11 +1,27 @@
-# Inline `--quantize --bench --strict` compares different weight snapshots against unquantized eager
+# Inline quantized benchmarks use mismatched weights and an unquantized strict reference
 
 ## Summary
 
 `emmy run -c "<program>" --quantize nvfp4|nvfp4-w4a16 --bench --strict` fails for every knob setting tried on the
 program below, with an error as large as the outputs. These failures cannot distinguish a kernel error from a bad
 reference comparison. The finding concerns this inline benchmark path; it does not establish that every quantized
-program or checkpoint-based correctness check fails. Two problems stack:
+program or checkpoint-based correctness check fails.
+
+## Reading the reference mismatch
+
+This is a dataflow sketch from source review, not IR output. `Q` includes the selected quantization and its scales.
+
+```text
+Observed, unseeded:                 Expected strict comparison (illustrative):
+Emmy: Q(W_parent, X_worker)         Emmy:  quantized graph(weights, scales, inputs)
+eager: W_worker, X_worker           oracle: same semantics, weights, scales, inputs
+compare at rtol = atol = 1e-3       compare with a justified numerical tolerance
+```
+
+Rerunning the snippet creates different worker weights. Seeding aligns the original snapshots for this reproducer,
+but unquantized eager still computes a different program. Its delta can report quantization error separately.
+
+## Two reference problems
 
 1. **Emmy and eager run different weights.** The bench worker runs the `-c` code a second time, which draws new random
    weights and inputs for its eager module. Emmy's packed weights still come from the checkpoint the parent process
@@ -18,7 +34,8 @@ program or checkpoint-based correctness check fails. Two problems stack:
    That oracle is not wired into the inspected inline benchmark comparison. The non-strict call disables eager
    gating (`accuracy=not (skip_accuracy or quantized)`), but still passes `strict_accuracy=strict_correctness`.
    For this frontend-runnable path, `valid_proof` in `_strict_benchmark_errors` requires an `"eager"` proof at
-   `rtol == atol == 1e-3`. Other paths can accept `"same-input-greedy"`; the restriction is not universal.
+   `rtol == atol == 1e-3`. Strict mode also requires positive captured timings from every requested backend. Other
+   paths can accept `"same-input-greedy"`; the restriction is not universal.
 
 ## Review status
 
@@ -31,23 +48,11 @@ and how broadly other inline programs fail. Agreement across schedules does not 
 original claim that quantization *always* exceeds 1e-3 is too broad: it depends on the data and quantization error.
 The `--ab` behavior and calibration effects discussed below also remain unverified at runtime.
 
-## Terms
-
-- `-c "<program>"`: a Python snippet whose last statement calls an `nn.Module`. `emmy run` traces it.
-- `--quantize nvfp4` makes the traced program W4A4 (4-bit weights and activations); `nvfp4-w4a16` (W4A16) quantizes
-  weights only and keeps 16-bit activations. The command writes a synthesized checkpoint and compiles the quantized
-  program from it.
-- `--strict` (with `--bench`, in this inline path): the run fails unless emmy's outputs match eager's within
-  `rtol = atol = 1e-3`, and unless every requested backend reports a captured timing with a positive latency
-  (`run.py`, lines 168–175 and 2474–2525).
-- The `--bench` comparison runs in a separate worker process (`emmy/compiler/backend/cuda/_bench_worker.py`) that
-  rebuilds the torch module itself.
-- *Greedy compile*: the program as emmy compiles it with no knobs pinned, picking each option itself.
-
 ## Reproduce
 
-From the repository root inside `nix develop`. The fresh tune DB keeps rows recorded by earlier runs out of the greedy
-pick.
+From the repository root inside `nix develop`. `-c` runs a Python snippet whose final statement calls the module.
+`nvfp4` quantizes weights and activations (W4A4); `nvfp4-w4a16` quantizes only weights (W4A16). The fresh tune DB keeps
+earlier measurements out of the greedy pick: the schedule chosen without hand pins.
 
 ```sh
 rm -f /tmp/strict.db; export EMMY_TUNE_DB=/tmp/strict.db
@@ -133,8 +138,9 @@ Two unrelated outputs of that size differ by a mean of about 0.65, which is what
 
 - **Unverified:** the `--ab` wrong-answer check compares each pinned row with the greedy row on the greedy row's
   inputs. It holds the same weights only because the rows reuse the greedy row's bound constants, which assumes node
-  ids repeat across traces. Under W4A4 each unseeded `--ab` row synthesizes its own calibrated `input_scale`; whether the subsequent
-  constant binding preserves that difference or replaces it with the greedy row's scale has not been checked.
+  ids repeat across traces. Under W4A4 each unseeded `--ab` row synthesizes its own calibrated `input_scale`; whether
+  the subsequent constant binding preserves that difference or replaces it with the greedy row's scale has not been
+  checked.
 - **Source-based expectation, not independently reproduced:** under `--strict` in the `-c` path, `run.py` benches
   `--ab` rows without a strict proof, so they fail with "lacks strict eager correctness" (`run.py`, lines 439–449 and
   2523–2524). With `--quantize`, the greedy row's failure skips them first (line 434).

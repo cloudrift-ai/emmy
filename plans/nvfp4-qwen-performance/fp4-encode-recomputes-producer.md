@@ -2,41 +2,41 @@
 
 ## Summary
 
-In a W4A4 NVFP4 model, a matmul whose output feeds another quantized matmul is followed by a 4-bit re-encode of that
-output. The encode reads the matmul's output three times, in two index layouts:
+A cut splits a fused kernel into smaller kernels, called pieces. Here, the full-projection cut intended to expose
+quantized projections to tensor-core schedules instead repeats the same projection for several consumers.
+In `Inferact/Qwen3.8-27B-NVFP4` layer 3 at 16 tokens, Tile IR contains three complete gate/up projections and four
+complete o_proj projections. Each reads the full weight again. Some copies have identical bodies and layouts.
 
-- pairs of neighbouring values, to pack two 4-bit codes per byte (`2*a0`, `2*a0 + 1`),
-- 16-value blocks, for the absolute maximum that sets the codes' scale (`16*a0 + a2`),
-- 16-value blocks again, for the stored 8-bit block scale.
+The consumers need different views of the projection output: pairs of values to pack two 4-bit codes per byte, and
+16-value groups to compute and store quantization scales. Those views should be able to read one computed result.
+The observed q_proj and v_proj also repeat, four and three times respectively.
 
-The full-projection cut splits such a fused kernel so that each matmul can run on the fp4 tensor-core instruction. It
-then materializes the producer matmul once per read, not once in total. Two of the three copies even use the same
-layout and have byte-identical bodies.
+## Observed and expected IR
 
-In `Inferact/Qwen3.8-27B-NVFP4` layer 3 at 16 tokens this gives:
+This is a normalized dataflow sketch of the gate/up Tile IR, not literal compiler syntax. `project` means the full
+contraction over K = 5120; the piece numbers match the excerpt below. The sketch omits SiLU and indexing details.
 
-- gate/up: 3 copies
-- o_proj: 4 copies
-- q_proj: 4 copies
-- v_proj: 3 copies
+```text
+Observed after the full-projection cut
+piece 0: project(gate_weight, up_weight, x) -> workspace_0   # 16-value groups
+piece 2: project(gate_weight, up_weight, x) -> workspace_2   # code pairs
+piece 3: project(gate_weight, up_weight, x) -> workspace_3   # 16-value groups again
 
-Each copy streams the full weight again.
+Expected sharing (illustrative; not emitted today)
+producer: project(gate_weight, up_weight, x) -> shared_output
+consumer: read shared_output as pairs      -> packed codes
+consumer: read shared_output as groups     -> block scales
+```
 
-## Terms
-
-- **Full-projection cut:** one decision of the cut pass (`full_projection_seams`,
-  `emmy/compiler/pipeline/passes/tile/_cut.py`, line 410; "Full-projection cut" in `GLOSSARY.md`). It is offered where
-  a fused kernel owns outputs its projection cannot bind. It cuts every contraction occurrence, every reduce hoisted
-  ahead of an output sweep, and every output-owning branch. In `EMMY_KNOBS` it is spelled as a set of
-  `PLACE@<site>=cut` keys. The resulting kernels are called *pieces*.
-- **fp4 cell:** the native fp4 tensor-core instruction `mma_m16n8k64_e2m1_f32`, called "the block-scaled fp4 cell" in
-  `emmy/compiler/ir/atom.py`. It multiplies packed 4-bit codes and applies the 16-value block scales in hardware.
-- **Seam:** a point in a kernel's Fold tree where the cut pass can place a kernel boundary. The knob site
-  (`map.1/map.2/inner`) spells that point.
+The important difference is one evaluation of each projection, with its result reused across consumers. A legal K
+split may still use partial contractions and a finishing reduction; it must not repeat the full projection for each
+read layout.
 
 ## Reproduce
 
-All commands run from the repository root inside `nix develop`, with a fresh tune DB.
+All commands run from the repository root inside `nix develop`, with a fresh tune DB. The `PLACE@<site>=cut` pins
+select kernel boundaries in the schedule tree. The fp4-cell TILE selects the native instruction
+`mma_m16n8k64_e2m1_f32`, which multiplies packed codes and applies their block scales in hardware.
 
 ```sh
 M=Inferact/Qwen3.8-27B-NVFP4@6128240ebaf4eaa7bad2b3d1c72c37d677c5f462   # ~26 GB download on first use
@@ -91,21 +91,26 @@ The o_proj kernel under its cut streams `p_attn_o_proj_weight_bits` in four cont
 The first two are again identical.
 
 Measured at 16 tokens on an RTX 5080 Laptop GPU, with the fp4-cell pin above: the gate/up kernel's three matmul pieces
-take 139.2, 140.0 and 139.1 µs. That is about 418 µs for work that one pass would do.
+take 139.2, 140.0 and 139.1 µs. That is about 418 µs across the three pieces. This does not establish the latency of a
+shared producer.
 
 ## Suspected causes
 
-Not traced. Two candidates, both in `emmy/compiler/pipeline/passes/tile/_cut.py`:
+The causal links are unverified. The full-projection cut comes from `full_projection_seams`; it cuts contraction
+occurrences, reductions hoisted ahead of output sweeps, and output-owning branches. Two candidates for why it repeats
+work are in `emmy/compiler/pipeline/passes/tile/_cut.py`:
 
-- `_cluster_value_seams` merges seams that materialize the same value only when their captured axes align in count and
+- `_cluster_value_seams` merges seams (potential kernel boundaries) that materialize the same value only when their
+  captured axes align in count and
   extent. The pair layout (`2*a0`, extent N/2) and the block layout (`16*a0 + a2`, extents N/16 and 16) do not align.
-  That explains the pair-versus-block copies.
+  That could explain the pair-versus-block copies; the causal link is unverified.
 - Its docstring (around line 531) excludes output-owning and frontier seams from clustering altogether. That would
   explain copies with identical layouts, such as gate/up pieces 0 and 3.
 
 ## Compare
 
-A 16-bit model has no re-encode, so this does not arise there. Not checked: whether the FP8 or AWQ Qwen3.8-27B recipes
+A 16-bit model has no fp4 re-encode, so it does not have this particular source of repeated reads. Not checked:
+whether the FP8 or AWQ Qwen3.8-27B recipes
 route their requantize steps the same way.
 
 ## Fix criteria

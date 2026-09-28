@@ -1,13 +1,14 @@
-# An f16 matmul whose activation is computed in the kernel cannot copy its stored weights by TMA
+# Fused f16 activations prevent TMA copies of stored weights
 
 ## Summary
 
 Some 16-bit matmuls compute their activation inside the kernel, for example `x + 1` or a norm fused in front of a
 projection. The scheduler gives such a matmul only the smem compute fill, where the compute threads write the
-activation into shared memory. Under `STAGE=d2/smem` the stored weights already arrive through a two-deep cp.async
-ring beside that fill.
+activation into shared memory. `STAGE` selects this transfer method and its buffering depth. Under `STAGE=d2/smem` the
+stored weights already arrive through a two-deep cp.async ring beside that fill.
 
-What is never available: TMA copies of the stored weights, and the `/p2` register double buffer. Pinning them fails:
+For these matmuls, the scheduler offers neither TMA copies of the stored weights nor the `/p2` register double
+buffer between shared memory and the tensor-core instruction. A TMA pin fails:
 
 ```
 ValueError: STAGE pin 'd2/smem-tma' does not resolve for this contraction
@@ -16,27 +17,26 @@ ValueError: STAGE pin 'd2/smem-tma' does not resolve for this contraction
 The same program with packed 4-bit weights (W4A16) gets exactly this combination: the compute threads fill the
 activation while TMA copies the weights. So the pattern exists in emmy, but only on the packed-weight path.
 
-## Terms
+## Reading the missing combination
 
-- **Tile IR** (`emmy compile --ir tile`) prints each matmul as `Fold[k …] contraction` with its operands in order. The
-  first operand is **A**, the activation here; the rest are **B**, one per weight.
-- A **channel** is one weight with its accumulator. A fused gate-and-up pair is one contraction with two channels.
-- **STAGE** is the knob for how operands reach shared memory. Its value is a depth `dN` (how many K steps of buffers
-  rotate, the *ring*) plus a transport:
-  - `smem` is the smem compute fill: the compute threads write shared memory themselves. At depth 2 they also prefetch
-    the stored B buffers by cp.async.
-  - `smem-async` copies every staged operand with cp.async.
-  - `smem-tma` copies with TMA bulk copies.
-  - A suffix `/p2` adds a second register buffer between shared memory and the tensor-core instruction.
-  - `''` means no shared-memory staging; operands are read straight from global memory.
-- **Available options** below means the values that appear in a fork's schedule leaves after the scheduler's own
-  checks. Those are exactly the values a pin can reach. The script in the appendix prints them.
-- **Knob pins** go in `EMMY_KNOBS` as comma-separated `KNOB@site=value`. The site (`map.1/inner.1/map`) names one node
-  in the kernel's schedule tree.
+In Tile IR, operand A is the activation here; B holds the weights. This normalized sketch abbreviates the activation
+subtree as `computed x + 1`, rather than using literal dump syntax:
+
+```text
+Observed:                           Expected with TMA support (illustrative):
+contraction ⟨STAGE=d2/smem⟩          contraction ⟨STAGE=d2/smem-tma⟩
+  A: computed x + 1                   A: computed x + 1   # compute-filled
+  B: load stored weights              B: stored weights  # copied by TMA
+```
+
+TMA copies bytes; it cannot evaluate `x + 1`. The desired combination keeps that computation in the matmul and uses
+TMA only for stored weights. Cutting the activation into a separate kernel already permits TMA, but adds an
+activation write/read through memory.
 
 ## Reproduce
 
-From the repository root, inside `nix develop`, with a fresh empty tune DB:
+From the repository root, inside `nix develop`, with a fresh empty tune DB. Pins go in `EMMY_KNOBS`;
+`KNOB@site=value` targets a node in the schedule tree.
 
 ```sh
 rm -f /tmp/f16-computed-a.db; export EMMY_TUNE_DB=/tmp/f16-computed-a.db
@@ -75,7 +75,8 @@ stored:
     │  ├─ operand[in2]: load linear_wt[a2, a1]   ‹materialized›
 ```
 
-Available STAGE values: `''`, `d1/smem`, `d2/smem`.
+The scheduler permits only no shared-memory staging (`''`) or compute fill at depth one or two (`d1/smem`,
+`d2/smem`). Each weight and its accumulator form one channel; this contraction has two.
 
 A single-weight f16 matmul with a computed activation is limited the same way. Example: two `nn.Linear(4096, 1024)`
 and `nn.Linear(4096, 512)` over `x + 1`, split apart with `EMMY_KNOBS='PLACE@map.1/inner=cut,REDUCE='`. Each piece is

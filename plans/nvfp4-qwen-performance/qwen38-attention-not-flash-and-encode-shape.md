@@ -2,9 +2,37 @@
 
 ## Summary
 
-The full-attention layers of `Inferact/Qwen3.8-27B-NVFP4` are layers 3, 7, 11, …, 16 of the 64. The full-projection
-cut is what puts their projections on the fp4 tensor-core instruction, and after it this attention has two shape
-problems.
+Two forms of repeated work appear in the inspected Qwen3.8 NVFP4 layer: attention recomputes each softmax
+probability for every output column, and activation encoding recomputes each group's maximum for every packed byte.
+A bounded code and IR check found no practical route to fused online-softmax attention for this layer.
+
+The checkpoint has 16 full-attention layers out of 64, at indices 3, 7, 11, and so on. The examples below use layer 3
+at 16 tokens after cuts split the fused kernel into smaller kernels, called pieces, exposing its projections to fp4
+tensor-core schedules.
+
+## Reading the repeated work
+
+These normalized sketches omit batch/head axes and abbreviate the IR. The expected forms illustrate reuse; they are
+not compiler output or prescribed thread layouts.
+
+```text
+Observed P·V:                      Expected fused attention:
+for query, column:                 Fold[key] contraction ⟨twist=softmax⟩
+    sum over key:                      carry max, sum, weighted_output[columns]
+        p = exp(score - max) / sum      reuse probabilities across a column tile
+        output += p * V
+
+Observed encode:                   Expected encode:
+for byte:                          for group of 16 values:
+    max = reduce(group_of(byte))        max = reduce(group)
+    write one byte                     reuse max for eight bytes and the scale
+```
+
+The output-column loop repeats each probability calculation; the byte loop repeats each group's maximum eight times.
+Online softmax carries a running maximum, sum and weighted output while visiting keys in blocks, avoiding a stored
+score matrix. It improves reuse and data movement while retaining dense attention's quadratic query/key work.
+
+## Observed details
 
 1. **No practical flash route found; P·V recomputes softmax probabilities.** None of the three cut sets tried (the
    default, a projection-only cut, and the full-projection cut) keeps scaled dot-product attention as one kernel with
@@ -16,27 +44,17 @@ problems.
      111–149 µs each.
    - Two are printed as `contraction` (`…__place_129c440787`, `…__place_54c95851bf`); with the fp4 TILE pinned, the
      scheduler leaves them without a schedule.
-   - The four-fold copy is likely the same recompute as in the separate report on the full-projection cut. The cut
+   - The four-fold copy is likely the same recompute as in [the producer-duplication
+     report](fp4-encode-recomputes-producer.md); this link between causes is unverified. The cut
      prints two of them as `reduce`, not `contraction`; that may be why the scheduler offers them no tensor-core
      schedule.
-   - The work grows with the square of the sequence length.
+   - This repeats work within attention; it does not change its query/key arithmetic complexity.
 2. **Activation-encode kernels launch one block per packed output byte.** A 4-bit re-encode of a matmul output runs
    `WORK=t128, REDUCE=coop`, with one 128-thread block per byte cooperatively reducing its 16-value group. The group's
    index is `byte_index / 8`, so eight neighboring byte outputs repeat the same maximum reduction.
    - For the gate/up output at 16 tokens that is 139,264 blocks, 151.7 µs, for a job that moves about 0.5 MB.
    - At 512 tokens, o_proj's encode takes 1.6 ms, and gate/up's takes 7.2 ms with the fp4 TILE pinned (0.65 ms under
      the default pick).
-
-## Terms
-
-- **Full-projection cut:** one cut-pass decision (`full_projection_seams`,
-  `emmy/compiler/pipeline/passes/tile/_cut.py`) that splits a fused kernel's contractions and output-owning branches
-  into kernels of their own, called *pieces*. It is spelled as a set of `PLACE@<site>=cut` keys.
-- **Flash attention / online softmax:** the fused form that walks keys in blocks, carries a running max and sum per
-  query, and multiplies probabilities by V on tensor cores without writing the score matrix out. Emmy has this recipe:
-  `emmy/compiler/ir/pure/twist.py` ("Online softmax is (max, Σeˢ, Σeˢv)…"), applied through `Fold.fuse`.
-- **place / grid:** in Tile IR, `place free=(…) grid=(…)` lists a piece's free axes and which of them the launch
-  spreads over. The bench table's `grid` column is the thread-block count.
 
 ## Reproduce
 
@@ -62,9 +80,9 @@ EMMY_KNOBS='PLACE@map.1/map=cut,PLACE@map.1/map.2/inner=cut,PLACE@map.1/map.3/re
 Kernel names are the ones this trace gives at commit `a98fd4f8`. `emmy golden kernels /tmp/l3_s16.golden.json` prints
 each kernel's Loop IR as one JSON line, and its `"name"` fields list the current names.
 
-## Observed
+## IR and launch evidence
 
-1. One of the P·V `reduce` pieces:
+1. One of the P·V `reduce` pieces. `free` lists its free axes; `grid` lists the axes spread over the launch:
 
 ```
 === 13: k_sdpa_linear_mean_reduce_c6c239__place_1108b7f44e ===
@@ -92,12 +110,14 @@ Kernel                                       us      %    grid  block   …  WOR
 k_linear_reduce_2d1c79__place_03cba86402  151.7  25.9%  139264    128   …  t128  …  coop
 ```
 
-   139,264 = 16 tokens × 8,704 packed bytes per row (17,408 values, two per byte).
+   Here `grid` is the thread-block count and `block` is threads per block. 139,264 = 16 tokens × 8,704 packed bytes
+   per row (17,408 values, two per byte).
 
 ## Bounded code and IR check (2026-09-28)
 
 At `a98fd4f8`, flash formation is an automatic algebraic rewrite, not a separate knob to enable. The `020_twisted`
-pass calls `rewrite_twisted`; `Fold.fuse` tries the `SOFTMAX` recipe, including hoisting the key-invariant divisor. It
+pass calls `rewrite_twisted`; `Fold.fuse` tries the `SOFTMAX` recipe from `emmy/compiler/ir/pure/twist.py`, including
+hoisting the key-invariant divisor. It
 requires matching score expressions and compatible reduction axes. A tensor-core TILE pin schedules the resulting
 tree; it does not manufacture a missing online-softmax carrier.
 
@@ -107,6 +127,12 @@ scheduling, still produced no `twist=softmax`. As a control, plain causal GQA wi
 heads, 16 tokens and head dimension 256 produced one softmax carrier with both denominator and weighted-value
 channels. Thus these dimensions and GQA alone do not prevent recognition; the fused checkpoint expression is the
 failing case.
+
+The successful control contains this Tile IR line (the checkpoint dump has no `twist=softmax` line):
+
+```text
+├─ operand[acc1, acc3, acc5__sum]: Fold[a2 in 0..16] contraction  ⟨twist=softmax⟩   ‹computed›
+```
 
 The lift and control can be checked without a GPU or an exhaustive schedule search:
 

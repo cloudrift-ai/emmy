@@ -3,8 +3,30 @@
 ## Summary
 
 48 of the 64 layers of `Inferact/Qwen3.8-27B-NVFP4` are gated DeltaNet (GDN) layers. GDN is a linear-attention token
-mixer that carries a state from one 64-token chunk to the next. With emmy's own kernels on sm_120, these layers fail
-in five separate ways:
+mixer. The traced implementation processes 64-token chunks and carries state between them. With emmy's own kernels on
+sm_120, these layers fail
+at several stages, from tracing and serving capture to CUDA generation and scheduling. These failures block native
+serving before meaningful end-to-end tuning can begin. The report groups five observed failures; it does not assume
+five independent root causes.
+
+## Reading the loop failure
+
+A sweep is an output loop that a thread runs serially unless its worker layout spreads the work.
+Tile IR marks `sweep(a0.a1)`, `sweep(a8.a10)` and `sweep(a8.a11)` as sibling output sweeps. The CUDA nests their axes
+instead. This normalized sketch shows the distinction; it omits other axes and is not literal dump syntax:
+
+```text
+Observed CUDA structure:            Expected independent output sweeps:
+for a0, a1, a8, a6, a10, a11:       for a0, a1:  write output_A
+    ... output stores ...          for a8, a10: write output_B
+                                   for a8, a11: write output_C
+```
+
+Shared prefixes and tiling are allowed. The problem is multiplying unrelated output domains: their loop bounds make
+the observed nest roughly 1.3×10¹⁷ iterations on one thread. This explains the timeout without requiring a GPU run.
+The exact bounds and the separate codegen failure are recorded below.
+
+## Observed failures
 
 1. **No trace below 64 tokens.** Compiling a GDN layer at `--seq-len 16` fails with `NotImplementedError: aten.pad
    supports only explicit zero-width padding, got [0, 0, 0, 48]` (`[0, 0, 0, 63]` at `--seq-len 1`). The Hugging Face
@@ -26,7 +48,8 @@ in five separate ways:
    (`sweep(a0.a1)`, `sweep(a8.a10)`, `sweep(a8.a11)`) into one loop nest, `a0<48 > a1<64 > a8<64 > a6<128 > a10<5120 >
    a11<10240`. That is about 1.3×10¹⁷ iterations on one thread. The core kernel `k_linear_matmul_mean_reduce_5c131b`
    (chunked delta rule, gated norm, `z` gate, activation encode) exceeds the 130 s bench budget. Not examined.
-5. **The 16-bit input projections stay on the scalar tier.** The checkpoint leaves `linear_attn.in_proj_qkv`,
+5. **The 16-bit input projections stay on the scalar tier.** Threads compute outputs without tensor cores. The
+   checkpoint leaves `linear_attn.in_proj_qkv`,
    `in_proj_z`, `in_proj_a`, `in_proj_b` and `conv1d` in bf16, about 168 MB per layer. In Tile IR these weights appear
    as `linear_wt` (`in_proj_qkv`), `linear_1_wt` (`in_proj_z`), `linear_2_wt` and `linear_3_wt`.
    - After the cuts below, the `in_proj_qkv` contraction gets no TILE, only `REDUCE=coop`.
@@ -37,26 +60,14 @@ in five separate ways:
 Also slow: the chunk triangular solve `k_slice_unsqueeze_reduce_b17b4d` takes 16 ms at 64 tokens, with 196,608 thread
 blocks of 128 threads. It is a 62-step recurrence the compiler rolled into one loop.
 
-All five failures remain in scope. Missing padding and serving capture are support gaps that block the intended model
-use just as concretely as the codegen and scheduling failures. This distinction does not reduce their priority or
-remove them from the work tracker; each needs its own implementation and validation.
-
-## Terms
-
-- **Trace inventory:** the file `emmy trace` writes. It holds every kernel of one layer at one width, and
-  `--realization <name>` compiles or benches one of them alone.
-- **Scalar tier / tensor-core tier:** a contraction whose Tile IR line carries a TILE of the form `mma_…` runs on
-  tensor cores. Without one, each thread computes its own output cells.
-- **Operand 0 (A):** in Tile IR, a contraction lists its operands in order. The tensor-core fragment loaders read
-  operand 0 as A, which must run K contiguously. `match_packed_b_node` in `emmy/compiler/ir/schedule/packing.py`
-  describes the same convention.
-- **sweep:** in Tile IR, `sweep(a3)` on an output marks a loop over `a3` that a thread runs serially, unless a worker
-  layout (`WORK`) spreads it.
+Missing padding and serving capture are support gaps that block this model just as concretely as the codegen and
+scheduling failures. They remain part of the finding.
 
 ## Reproduce
 
-All commands run from the repository root inside `nix develop`, with a fresh tune DB. Each compile of a realization
-also applies the inventory's own row for that kernel, printed as "1 automatic pin".
+All commands run from the repository root inside `nix develop`, with a fresh tune DB. `emmy trace` writes a layer
+inventory; `--realization <name>` selects one of its kernels. Each compile also applies the inventory's own row for
+that kernel, printed as "1 automatic pin".
 
 ```sh
 M=Inferact/Qwen3.8-27B-NVFP4@6128240ebaf4eaa7bad2b3d1c72c37d677c5f462   # ~26 GB download on first use
@@ -117,7 +128,7 @@ Gated DeltaNet chunk family", and the AWQ inventory traces a GDN decoder layer w
 
 ## Fix criteria
 
-Each numbered failure is fixed on its own:
+The following observable outcomes correspond to the failures above. Their implementation may share fixes:
 
 1. `emmy compile $M --layer 0 --seq-len 16 --target sm_120 --ir loop` and `--seq-len 1` succeed for both
    `Inferact/Qwen3.8-27B-NVFP4` and `Qwen/Qwen3.8-27B`. Padding has zero-fill semantics, valid input reads stay in

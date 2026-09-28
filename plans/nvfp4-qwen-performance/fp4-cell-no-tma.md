@@ -1,4 +1,4 @@
-# The native fp4 cell never offers TMA staging
+# Native fp4 matmuls cannot use TMA staging
 
 ## Summary
 
@@ -7,32 +7,31 @@ On sm_120, a W4A4 NVFP4 matmul (4-bit weights and 4-bit activations) can run on 
 directly, and it applies each 16-value block's scale inside the instruction.
 
 For this cell, the scheduler offers cp.async staging only: `STAGE=dN/smem-async`, N = 1–4, with and without `/p2`. It
-never offers TMA (`dN/smem-tma`). Pinning TMA fails:
+never offers TMA (`dN/smem-tma`). Here `dN` is the number of buffered K steps; `/p2` adds a second register buffer.
+Pinning TMA fails:
 
 ```
 ValueError: STAGE pin 'd2/smem-tma' does not resolve for this contraction
 ```
 
 The same matmul with 16-bit activations (W4A16) offers TMA at every depth, and so does plain f16. That includes TMA
-copies of packed 4-bit weight bytes. So only the fp4 cell lacks TMA.
+copies of packed 4-bit weight bytes. In these reproducers, the missing path is specific to the fp4 instruction.
+This limits the available schedules; it does not show that TMA would be faster than cp.async.
 
-## Terms
+## Reading the schedule difference
 
-- **TILE** is the knob that picks the tensor-core instruction and the fragment layout per warp. Fp4-cell values look
-  like `mma_m16n8k64_e2m1_f32/f1x2/k4`. The last part, `k4`, means one K step covers 4 instructions of 64 values each,
-  so 256 values.
-- **STAGE** is the knob for how operands reach shared memory. Its value is a depth `dN` (how many K steps of buffers
-  rotate, the *ring*) plus a transport:
-  - `smem-async` copies bytes with cp.async.
-  - `smem-tma` copies with TMA bulk copies, and waits on one mbarrier per ring slot.
-  - A suffix `/p2` adds a second register buffer between shared memory and the instruction.
-  - `''` means no shared-memory staging; operands are read straight from global memory. Only scalar (non-tensor-core)
-    tiles take it here.
-- A **channel** is one weight with its accumulator. A fused gate-and-up pair is one contraction with two channels.
-- **Available options** below means the values that appear in a fork's schedule leaves after the scheduler's own
-  checks. Those are exactly the values a pin can reach. The script in the appendix prints them.
-- `--quantize nvfp4` makes the traced program W4A4: 4-bit weights, and activations quantized to 4 bits by a separate
-  kernel before the matmul. `--quantize nvfp4-w4a16` quantizes the weights only.
+Abbreviated Tile IR for the fp4 contraction; operands and outputs are omitted:
+
+```text
+Observed with the cp.async pin:
+Fold[…] contraction ⟨TILE=mma_m16n8k64_e2m1_f32/f1x2/k4 STAGE=d3/smem-async⟩
+
+Expected with TMA support (illustrative; the pin currently fails):
+Fold[…] contraction ⟨TILE=mma_m16n8k64_e2m1_f32/f1x2/k4 STAGE=d2/smem-tma⟩
+```
+
+`TILE` chooses the matrix instruction and fragment layout; `STAGE` chooses how operands reach shared memory.
+The matrix instruction stays the same. Only the method for copying stored codes and scales into shared memory changes.
 
 ## Reproduce
 
@@ -59,8 +58,8 @@ EMMY_KNOBS='TILE=mma_m16n8k64_e2m1_f32/f1x2/k4,STAGE=d2/smem-tma' \
 # ValueError: STAGE pin 'd2/smem-tma' does not resolve for this contraction
 ```
 
-The two-channel form fails the same way. Here two `nn.Linear(4096, 1024)` read `a = x + 1`, and the program multiplies
-their outputs, so fusion builds one contraction with two weight channels:
+The two-channel form (two weights, each with its own accumulator) fails the same way. Here two `nn.Linear(4096, 1024)`
+read `a = x + 1`, and the program multiplies their outputs, so fusion builds one contraction with two weight channels:
 
 ```sh
 PROG2='
@@ -78,8 +77,9 @@ EMMY_KNOBS='TILE=mma_m16n8k64_e2m1_f32/f1x2/k4,STAGE=d2/smem-tma' \
 # ValueError: STAGE pin 'd2/smem-tma' does not resolve for this contraction
 ```
 
-The fp4 cell's available STAGE values, in both programs: `''`, `d1/smem-async`, `d1/smem-async/p2`, …,
-`d4/smem-async/p2`. There is no `smem-tma` value.
+The STAGE values surviving the scheduler's legality checks, in both programs: `''`, `d1/smem-async`,
+`d1/smem-async/p2`, …, `d4/smem-async/p2`. There is no `smem-tma` value. The empty value (`''`) means no shared-memory staging and applies
+only to scalar tiles.
 
 CUDA of repro 1 (`--ir cuda`) shows the cp.async form. Four shared buffers (activation codes, weight codes, and a
 scale buffer for each) rotate through a three-slot ring:
@@ -98,8 +98,9 @@ for (int _ks = 0; _ks < 4096; _ks += 256) {
 
 ## Compare: W4A16 and f16 offer TMA
 
-Under `--quantize nvfp4-w4a16`, `PROG`'s matmul uses the 16-bit instruction on weights decoded in registers. Its
-available STAGE values include all 16 copy values: `d1`–`d4` × `smem-async`/`smem-tma` × with and without `/p2`. Plain
+With `--quantize nvfp4`, both weights and activations are 4-bit; the activation encode runs separately in these
+reproducers. Under `--quantize nvfp4-w4a16`, only the weights are quantized. `PROG`'s matmul uses the 16-bit
+instruction on weights decoded in registers. Its available STAGE values include all 16 copy values: `d1`–`d4` × `smem-async`/`smem-tma` × with and without `/p2`. Plain
 f16 (no `--quantize`) has the same 16.
 
 With `EMMY_KNOBS='STAGE=d2/smem-tma'`, the W4A16 program compiles to `⟨TILE=mma_m16n8k16_f16_f32/f2x2/k8
@@ -121,7 +122,7 @@ The fp4 cell has its own staging resolver, `_block_scaled_warp_stage` in `emmy/c
 373). It returns `None` for every transport except `smem-async`. Its docstring says why: "cp.async (the
 four-descriptor TMA box copy is not built — a missing-code fact, stated where the code would live)". For the
 multi-channel form, `_stage_candidates` in `emmy/compiler/ir/schedule/classic/refusals.py` (line 454) also keeps only
-`smem-async`. So nothing forbids TMA here; it just isn't written yet.
+`smem-async`. This confirms a missing implementation. It does not establish which TMA layouts or depths will be legal.
 
 ## Fix criteria
 
@@ -144,12 +145,9 @@ Done when all of these hold for both `PROG` and `PROG2`, at `--target sm_120 --q
   - The instruction is still `emmy_mma_m16n8k64_e2m1_f32`, with the scales applied inside it.
 - **Correctness:** on an sm_120 card, for `PROG` and `PROG2` at depths 1, 2 and 3, the TMA schedule's outputs equal
   the `smem-async` schedule's outputs (same TILE, same inputs) to the last bit, since only the copy mechanism differs.
-  For these inline quantized repros, `--strict` was reported to fail at `a98fd4f8` on 2026-09-28 across the tested
-  scalar, W4A16 and fp4 schedules, with errors as large as the outputs. This suggests a shared input or reference
-  problem, but does not establish its cause or prove the kernels correct. Validate the reference before relying on
-  that check; do not extend this observation to checkpoint-based repros. Once that comparison works,
-  `EMMY_KNOBS='TILE=mma_m16n8k64_e2m1_f32/f1x2/k4,STAGE=d2/smem-tma' ./venv/bin/emmy run -c "$PROG" --quantize nvfp4
-  --bench --strict` must exit 0 as well.
+  The [inline strict report](strict-fails-for-inline-quantize-programs.md) explains why the current benchmark
+  comparison cannot establish correctness for these repros: it can use different weight snapshots and compares
+  against unquantized eager. Validate a reference for the same quantized graph before relying on a strict result.
 - **No regression:** the `smem-async` values stay available, and their CUDA is unchanged.
 
 ## Out of scope
