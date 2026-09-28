@@ -26,7 +26,7 @@ optional ``workers: WarpSpec | None`` root field (``None`` = uniform SIMT), a pr
 **The codec values are SITE-LOCAL**: a kernel's worker inventory is spelled exactly once, in the
 ``WORK`` family (:class:`Work`), so a ``TILE`` value carries no unit widths
 (``<atom>/f<FM>x<FN>[/k<bk>]`` warp | ``f<fn>[x<fm>]`` scalar) and a ``REDUCE`` value no coop width
-(``[g<n>[a|k]][/coop[-t]][/r<n>]``). Both therefore ``parse`` **against** a :class:`Work` and are
+(``[g<n>[a|k|c]][/coop[-t]][/r<n>]``). Both therefore ``parse`` **against** a :class:`Work` and are
 hand-written here. The empty ``TILE`` is only the per-cell choice; a parallel unit-register thread
 tile spells ``f1``, so the site value and ``WORK`` decode without cross-family inference. There is
 no second, self-contained reading — the retired embedded-worker grammar
@@ -105,6 +105,14 @@ class FoldMove(enum.Enum):
     SMEM = "smem"  # cross-warp / block-wide smem tree-halve (within-block)
     ATOMIC = "atomic"  # cross-CTA ``atomicAdd`` finalize (030_cut's one-kernel arm)
     KERNEL = "kernel"  # cross-CTA workspace + deferred sibling combine kernel (030_cut)
+    CONSUMER = "consumer"  # cross-CTA workspace summed by the consumer's own read (030_cut)
+
+
+#: The cross-CTA finalize modes and their ``g<n>`` codec letters: ``atomic`` adds each partition into
+#: the output, ``kernel`` combines the f32 workspace in a finalize kernel, ``consumer`` combines it where
+#: the next kernel reads the value, so no finalize launches.
+FINALIZE_LETTERS = {"atomic": "a", "kernel": "k", "consumer": "c"}
+FINALIZE_BY_LETTER = {letter: mode for mode, letter in FINALIZE_LETTERS.items()}
 
 
 @dataclass(frozen=True)
@@ -118,11 +126,11 @@ class ReduceStage:
     ``finalize`` is meaningful only at ``GRID``: how ``030_cut`` realizes the cross-CTA
     combine — ``"atomic"`` (the partial kernel ``atomicAdd``\\ s into the output, one kernel,
     additive carriers only) or ``"kernel"`` (a deferred sibling combine kernel over a
-    workspace, the only legal arm for a twisted carrier). The ``g<n>[a|k]`` codec letter."""
+    workspace, the only legal arm for a twisted carrier). The ``g<n>[a|k|c]`` codec letter."""
 
     level: Level
     width: int = 1
-    finalize: str = "kernel"  # GRID only: "atomic" | "kernel" (the g<n> finalize letter)
+    finalize: str = "kernel"  # GRID only: "atomic" | "kernel" | "consumer" (the g<n> finalize letter)
     # BLOCK only (the ``coop-t`` codec token): swap the cooperative thread mapping for a
     # k-major B operand — warp lanes sweep the OUTPUT axis (contiguous B loads at every k
     # step) and the k partition rides the upper thread bits; the combine becomes the
@@ -139,8 +147,8 @@ class ReduceStage:
             raise TypeError("ReduceStage level must be a Level")
         if type(self.width) is not int or self.width < 1:
             raise ValueError(f"ReduceStage width must be a positive integer, got {self.width!r}")
-        if self.finalize not in ("atomic", "kernel"):
-            raise ValueError(f"ReduceStage finalize must be atomic or kernel, got {self.finalize!r}")
+        if self.finalize not in FINALIZE_LETTERS:
+            raise ValueError(f"ReduceStage finalize must be atomic, kernel or consumer, got {self.finalize!r}")
         if self.level is not Level.GRID and self.finalize != "kernel":
             raise ValueError("only a GRID ReduceStage can select atomic finalization")
         if type(self.transposed) is not bool:
@@ -168,7 +176,7 @@ class ReduceStage:
         if self.level is Level.GROUP:
             return (FoldMove.SMEM,)
         if self.level is Level.GRID:
-            return (FoldMove.ATOMIC,) if self.finalize == "atomic" else (FoldMove.KERNEL,)
+            return {"atomic": (FoldMove.ATOMIC,), "consumer": (FoldMove.CONSUMER,)}.get(self.finalize, (FoldMove.KERNEL,))
         # BLOCK.
         w = self.width
         if w & (w - 1):
@@ -216,8 +224,8 @@ class Reduce:
         ``coop_transposed`` rides the BLOCK stage (the ``coop-t`` k-major lane swap)."""
         if any(type(width) is not int or width < 1 for width in (cta, groups, coop, reg)):
             raise ValueError(f"Reduce widths must be positive integers, got cta={cta!r}, groups={groups!r}, coop={coop!r}, reg={reg!r}")
-        if finalize not in ("atomic", "kernel"):
-            raise ValueError(f"Reduce finalize must be atomic or kernel, got {finalize!r}")
+        if finalize not in FINALIZE_LETTERS:
+            raise ValueError(f"Reduce finalize must be atomic, kernel or consumer, got {finalize!r}")
         if type(coop_transposed) is not bool:
             raise TypeError("Reduce coop_transposed must be a bool")
         if cta == 1 and finalize != "kernel":
@@ -238,7 +246,7 @@ class Reduce:
     def spell(self) -> str:
         """The ``REDUCE`` codec value for this plan — the pipeline coarse→fine, SITE-LOCAL: the
         coop WIDTH lives in the kernel's ``WORK`` inventory, never here, so the value is
-        ``[g<n>[a|k]][/wg<n>][/coop[-t][/v<n>]][/r<n>]``. ``""`` for the scalar serial fold (the per-thread
+        ``[g<n>[a|k|c]][/wg<n>][/coop[-t][/v<n>]][/r<n>]``. ``""`` for the scalar serial fold (the per-thread
         serial remainder is never spelled — it derives as ``ceil(extent / parallel)``). The GRID
         finalize letter IS kept: ``a``/``k`` is the atomic-vs-deferred finalize MODE, a site-local
         fact — ``g4a`` and ``g2k`` are semantically different rows, both live in the golden
@@ -246,7 +254,7 @@ class Reduce:
         width is spelled here, since the ``WORK`` inventory names one group's warps."""
         parts: list[str] = []
         if self.cta > 1:
-            parts.append(f"g{self.cta}{'a' if self.finalize == 'atomic' else 'k'}")
+            parts.append(f"g{self.cta}{FINALIZE_LETTERS[self.finalize]}")
         if self.groups > 1:
             parts.append(f"wg{self.groups}")
         if self.coop > 1:
@@ -271,8 +279,8 @@ class Reduce:
                 groups = _codec_width(t[2:], tok=t, codec="REDUCE")
             elif t.startswith("g"):
                 body = t[1:]
-                if body.endswith(("a", "k")):
-                    finalize = "atomic" if body[-1] == "a" else "kernel"
+                if body.endswith(tuple(FINALIZE_BY_LETTER)):
+                    finalize = FINALIZE_BY_LETTER[body[-1]]
                     body = body[:-1]
                 cta = _codec_width(body, tok=t, codec="REDUCE")
             elif t in ("coop", "coop-t"):
@@ -286,7 +294,7 @@ class Reduce:
                     raise ValueError(f"REDUCE {spec!r}: 'v<n>' follows 'coop-t'")
                 columns = _codec_width(t[1:], tok=t, codec="REDUCE")
             else:
-                raise ValueError(f"REDUCE {spec!r}: unknown token {t!r} (expect g<n>[a|k] / wg<n> / coop[-t][/v<n>] / r<n>)")
+                raise ValueError(f"REDUCE {spec!r}: unknown token {t!r} (expect g<n>[a|k|c] / wg<n> / coop[-t][/v<n>] / r<n>)")
         return _canonical_choice(
             "REDUCE",
             spec,

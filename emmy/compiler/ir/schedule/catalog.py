@@ -310,7 +310,7 @@ COOP_T_COLUMNS: tuple[int, ...] = (1, 2, 4, 8)
 
 def splitk_moves() -> list[Reduce]:
     """Return cross-CTA split choices for both supported finalization modes."""
-    return [Reduce.of(cta=width, finalize=finalize) for width in SPLITK_WIDTHS for finalize in ("kernel", "atomic")]
+    return [Reduce.of(cta=width, finalize=finalize) for width in SPLITK_WIDTHS for finalize in ("kernel", "atomic", "consumer")]
 
 
 def coop_reduce_moves() -> list[Reduce]:

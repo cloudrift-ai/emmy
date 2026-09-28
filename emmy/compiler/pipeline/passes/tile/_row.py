@@ -139,7 +139,13 @@ def reformed(piece: TileOp) -> TileOp:
     not re-formed."""
     if any(store.sweep for store in piece.output_specs):
         return piece
-    body = piece.op.lower(bound=frozenset(), stores=piece.output_specs, axes=piece.axes)
+    return formed_from(piece, piece.op.lower(bound=frozenset(), stores=piece.output_specs, axes=piece.axes))
+
+
+def formed_from(piece: TileOp, body) -> TileOp:
+    """``piece`` re-formed from the loop nest ``body`` — :func:`reformed`'s lift, with the grid the
+    piece was minted with. A body that is not the piece's own lowering is a kernel another nest was
+    spliced into: a split finalize summed where its consumer reads the value."""
     try:
         # Through the LoopOp's normalization: that is where two reduce loops over one axis become
         # one loop with two accumulators, the twin the lift forms one term from.

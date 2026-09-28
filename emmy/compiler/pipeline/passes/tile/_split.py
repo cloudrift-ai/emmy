@@ -36,6 +36,7 @@ from emmy.compiler.ir.address import gmem_axis_step
 from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.loop import LoopOp, splice_graph
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.pure.twist import Twist
@@ -49,7 +50,7 @@ from emmy.compiler.ir.tile.ops import Sched, carries_partition, head, projection
 from emmy.compiler.pipeline import Match
 from emmy.compiler.pipeline.fork import DeferredFork
 from emmy.compiler.pipeline.knob import axis_of, consume_kernel_row, kernel_pin
-from emmy.compiler.pipeline.passes.tile._row import reformed
+from emmy.compiler.pipeline.passes.tile._row import formed_from, reformed
 from emmy.compiler.pipeline.search.space import REDUCE, WORK
 
 logger = logging.getLogger(__name__)
@@ -238,6 +239,8 @@ def split_forks(match: Match, root: Node, *, unsplit_tile: TileOp | None = None)
         _enforce(_projection_refusal(tile, node))
         if plan.finalize == "atomic":
             _enforce(atomic_finalize(node, tail, tile.outputs))
+        if plan.finalize == "consumer":
+            _enforce(_absorbing_consumer(match, root)[1])
         return [_split_fork(match, root, key, plan.cta, plan.finalize)]
     if (why := _projection_refusal(tile, node)) is not None:
         if logger.isEnabledFor(logging.DEBUG):
@@ -245,14 +248,70 @@ def split_forks(match: Match, root: Node, *, unsplit_tile: TileOp | None = None)
         return [unsplit]
     options: list[DeferredFork] = [unsplit]
     atomic_why = atomic_finalize(node, tail, tile.outputs)
+    consumer_why = _absorbing_consumer(match, root)[1]
     for plan in splitk_moves():
-        why = splitk_width(k_axis, plan.cta) or (atomic_why if plan.finalize == "atomic" else None)
+        why = splitk_width(k_axis, plan.cta) or {"atomic": atomic_why, "consumer": consumer_why}.get(plan.finalize)
         if why is not None:
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug("split g%d%s not offered: %s", plan.cta, plan.finalize[0], why)
             continue
         options.append(_split_fork(match, root, key, plan.cta, plan.finalize))
     return options
+
+
+def _absorbing_consumer(match: Match, root: Node) -> tuple[Node | None, str | None]:
+    """The one kernel that can sum ``root``'s split partials where it reads the value — the
+    ``consumer`` finalize — or why there is none. The partials are summed at every read, so the
+    value must have exactly one reader, a kernel, and must not leave the graph."""
+    graph = match.graph
+    tile: TileOp = root.op
+    buffers = root.buffer_names()
+    if len(buffers) != 1 or len(_reducing_roots(tile.op)) > 1:
+        return None, "a consumer finalize sums one value; this kernel writes several"
+    if buffers[0] in graph.outputs:
+        return None, "a consumer finalize needs a reader; this value leaves the graph"
+    # A cut piece lists every buffer of the kernel it came from as an input; a reader is a kernel
+    # whose body loads the value.
+    readers = [nid for nid in graph.buffer_users(buffers[0]) if buffers[0] in _loaded(graph.nodes[nid])]
+    if len(readers) != 1:
+        return None, f"a consumer finalize needs exactly one reader; this value has {len(readers)}"
+    reader = graph.nodes[readers[0]]
+    if not isinstance(reader.op, TileOp) or any(store.sweep for store in reader.op.output_specs):
+        return None, "a consumer finalize sums into a kernel the splicer can re-form"
+    return reader, None
+
+
+def _loaded(node: Node) -> set[str]:
+    """The buffers ``node``'s kernel body loads — every buffer, for an op that is not a kernel."""
+    if not isinstance(node.op, TileOp):
+        return set(node.inputs)
+    return {load.input for load in node.op.op.lower(axes=node.op.axes).loads}
+
+
+def _absorbed(match: Match, root: Node, reader: Node, finalize: TileOp, ws: Tensor) -> TileOp:
+    """``reader`` with ``finalize`` spliced into it: its reads of ``root``'s value become the sum over
+    the workspace partitions, one loop nest merged by the fusion splicer and formed again."""
+    graph = match.graph
+    out = root.buffer_names()[0]
+    sub = Graph()
+    sub.add_node(op=InputOp(), inputs=[], output=ws, node_id=ws.name)
+    fin_body = finalize.op.lower(bound=frozenset(), stores=finalize.output_specs, axes=finalize.axes)
+    fin_reads = [ws.name, *(inp for inp in root.inputs if inp in {load.input for load in Body.coerce(fin_body).loads})]
+    for inp in (*fin_reads[1:], *(i for i in reader.inputs if i != out)):
+        if inp not in sub.nodes:
+            sub.add_node(op=InputOp(), inputs=[], output=graph.buffer(inp), node_id=inp)
+    sub.add_node(op=LoopOp(body=fin_body), inputs=fin_reads, outputs=root.outputs, node_id=out)
+    reader_tile: TileOp = reader.op
+    body = reader_tile.op.lower(bound=frozenset(), stores=reader_tile.output_specs, axes=reader_tile.axes)
+    sub.add_node(op=LoopOp(body=body), inputs=list(reader.inputs), outputs=reader.outputs, node_id=reader.id)
+    sub.outputs = list(reader.buffer_names())
+    spliced = splice_graph(sub)
+    if spliced is None:
+        raise ValueError(f"the splicer cannot sum the split partials of {out!r} into {reader.id!r}")
+    formed = formed_from(reader_tile, spliced[0].body)
+    if formed is reader_tile:
+        raise ValueError(f"the partials of {out!r} spliced into {reader.id!r} do not lift")
+    return replace(formed, knobs=consume_kernel_row(formed.knobs))
 
 
 def _split_fork(match: Match, root: Node, key: str, cta: int, finalize: str) -> DeferredFork:
@@ -614,7 +673,37 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
     # The finalize is stamped AFTER the workspace joins the fragment: it reads that buffer, and a
     # kernel's structural features fold in its operands' dtypes, which only resolve once the
     # buffer is a graph node.
-    frag.add_node(op=partial_tile, inputs=list(root.inputs), output=Tensor(ws_name, ws_shape, F32), node_id=ws_name)
+    ws = Tensor(ws_name, ws_shape, F32)
+    frag.add_node(op=partial_tile, inputs=list(root.inputs), output=ws, node_id=ws_name)
+    if finalize == "consumer":
+        # No finalize kernel: its reader sums the partitions where it reads the value. The merge
+        # axis is a plain loop there, not the consumed-split receipt: the reader is a kernel of its
+        # own, which may still split on its own reduce.
+        reader, why = _absorbing_consumer(match, root)
+        _enforce(why)
+        merge = replace(split, window=None)
+        plain = _state_fold(merge, partial_fold, loads)
+        summed = _piece(
+            _project(_rebind(region, node, plain), body, tuple(free)), free, output_specs=fin_stores, axes=_with_axes(tile.axes, merge)
+        )
+        absorbed = _absorbed(match, root, reader, summed, ws)
+        for inp in reader.inputs:
+            if inp != root.buffer_names()[0] and inp not in frag.nodes:
+                frag.add_node(op=InputOp(), inputs=[], output=match.graph.buffer(inp), node_id=inp)
+        reads = {load.input for load in absorbed.op.lower(axes=absorbed.axes).loads}
+        inputs = [inp for inp in (ws_name, *reader.inputs) if inp in reads]
+        add_output_piece(match, frag, reader, absorbed, inputs)
+        # A cut piece lists every buffer of the kernel it came from, read or not. The value this
+        # split removes goes with them: each such kernel is re-added unchanged, minus that input.
+        value = root.buffer_names()[0]
+        listing = [match.graph.nodes[nid] for nid in match.graph.buffer_users(value) if nid != reader.id]
+        for other in listing:
+            for inp in other.inputs:
+                if inp != value and inp not in frag.nodes:
+                    frag.add_node(op=InputOp(), inputs=[], output=match.graph.buffer(inp), node_id=inp)
+            add_output_piece(match, frag, other, other.op, [inp for inp in other.inputs if inp != value])
+        match.consumed = {root.id, reader.id, *(other.id for other in listing)}
+        return frag
     fin_tile = _piece(
         _project(_rebind(region, node, fin_fold), body, tuple(free)), free, output_specs=fin_stores, axes=_with_axes(tile.axes, fin_axis)
     )
