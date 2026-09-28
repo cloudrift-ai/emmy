@@ -975,10 +975,10 @@ def test_ab_json_labels_each_row_with_its_lane(tmp_path, monkeypatch):
     from emmy.commands import run as run_mod
     from emmy.compiler.pipeline.search.data import Sample
 
-    _FakeNode = namedtuple("_FakeNode", "op")
+    _FakeNode = namedtuple("_FakeNode", "op id")
 
     def _node(knobs):
-        return _FakeNode(SimpleNamespace(kernel_name="k_matmul", smem_bytes=0, knobs=knobs))
+        return _FakeNode(SimpleNamespace(kernel_name="k_matmul", smem_bytes=0, knobs=knobs), "k_matmul")
 
     greedy_graph, fm_graph, std_graph = object(), object(), object()
 
