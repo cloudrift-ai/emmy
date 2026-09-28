@@ -1736,7 +1736,7 @@ def _mlp_down() -> TileOp:
 
 
 def test_a_computed_input_is_a_formed_gemv_pieces_a_operand() -> None:
-    """A piece formed on its own orients a GEMV with a computed input and a ``[k, n]`` weight so the
+    """A GEMV with a computed input and a ``[k, n]`` weight orients, fused or formed, so the
     computed operand is A. With the weight as A no fragment loader reads its k column, and the SiLU
     down projection lost every tensor-core tier (the RTX 5090 s1 layer: 48 -> 65 us with the prologue
     fused; 41 us once it is A)."""
