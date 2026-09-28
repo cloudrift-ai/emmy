@@ -25,7 +25,7 @@ from emmy.timing import (
 logger = logging.getLogger(__name__)
 
 
-async def _baked_hf_cache(run_cmd, image):
+async def baked_hf_cache(run_cmd, image):
     """The image's own HF cache directory, when it ships one — else None.
 
     A prebuilt per-model serving image (``docker/vllm-emmy-serve/``) bakes the model
@@ -134,7 +134,7 @@ async def run_deploy(
     # and cannot do it, since it runs offline by construction. Defer to its cache and
     # rewrite the compose file so the service keeps the baked HF_HOME too (the first
     # write had to happen before the pull, which is what `docker compose pull` reads).
-    baked_hf_home = await _baked_hf_cache(run_cmd, image)
+    baked_hf_home = await baked_hf_cache(run_cmd, image)
     if baked_hf_home:
         logger.info(f"Image ships its model cache at {baked_hf_home} (offline) — skipping download")
         compose_content = generate_compose(

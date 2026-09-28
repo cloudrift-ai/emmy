@@ -48,7 +48,7 @@ def generate_compose(recipe: Recipe, model_dir, hf_token, num_instances=1, gpu_d
     Multi-instance: N vllm services with device IDs + nginx on 8080.
 
     ``baked_hf_home``: the image's own HF cache path, when it ships one (see
-    ``_baked_hf_cache``). Setting HF_HOME on such an image would hide the snapshot it
+    ``baked_hf_cache``). Setting HF_HOME on such an image would hide the snapshot it
     baked in, so the override is dropped and the image's own value stands — UNLESS the
     engine args name a model beyond the baked one (a ``--speculative-config`` drafter):
     the baked cache holds only the one snapshot and the image pins ``HF_HUB_OFFLINE=1``,
