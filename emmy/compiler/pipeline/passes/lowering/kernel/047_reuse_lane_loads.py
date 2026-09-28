@@ -58,15 +58,21 @@ def _walk(body: Body, written: frozenset[str], ctx: SimplifyCtx) -> Body:
             stmt = stmt.with_bodies(tuple(_walk(b, written, inner) for b in nested))
         stmts.append(stmt)
     unrolled: list[Stmt] = []
-    changed = False
+    loops = 0
     for stmt in stmts:
         trips = _trips(stmt, ctx)
         if trips is None:
             unrolled.append(stmt)
             continue
-        changed = True
-        unrolled.extend(_unroll(stmt, trips))
-    if not changed:
+        # Sibling loops over independently spliced cones bind the same names, each in its own C scope.
+        # Flattened into one, a repeat would be a second declaration: give such a loop's trips their own.
+        trip_stmts = _unroll(stmt, trips, "")
+        bound = {name for s in unrolled for name in s.defines()}
+        if any(name in bound for s in trip_stmts if not isinstance(s, (Init, Accum)) for name in s.defines()):
+            trip_stmts = _unroll(stmt, trips, f"_{loops}")
+        unrolled.extend(trip_stmts)
+        loops += 1
+    if not loops:
         return Body(tuple(stmts))
     return Body(tuple(_reuse(unrolled, written, ctx)))
 
@@ -89,7 +95,7 @@ def _trips(stmt: Stmt, ctx: SimplifyCtx) -> int | None:
     return extent // step
 
 
-def _unroll(loop: StridedLoop, trips: int) -> list[Stmt]:
+def _unroll(loop: StridedLoop, trips: int, tag: str) -> list[Stmt]:
     carried = {s.name for s in loop.body if isinstance(s, Accum)}
     out: list[Stmt] = []
     if loop.seed:
@@ -102,7 +108,7 @@ def _unroll(loop: StridedLoop, trips: int) -> list[Stmt]:
     for k in range(trips):
         coord = BinaryExpr("+", loop.start, Literal(k * loop.step.value, "int"))
         sigma = Sigma({loop.axis.name: coord})
-        suffix = f"__u{k}"
+        suffix = f"__u{k}{tag}"
         for s in loop.body:
             out.append(s.rewrite(lambda name, suffix=suffix: f"{name}{suffix}" if name in defined else name, sigma))
     return out
