@@ -2979,7 +2979,7 @@ class _FlashOps(_MmaOps):
             if streams is None:
                 return [(scored_stmts + body, frozenset())]
             if len(streams.transports) == 1:
-                slabs = frozenset(op.slab for op in streams.transports[0].operands)
+                slabs = frozenset(op.slab for op in (streams.key, streams.value) if op is not None)
                 return [(scored_stmts + body, slabs)]
             return [(scored_stmts, frozenset({streams.key.slab})), (body, frozenset({streams.value.slab}))]
 
@@ -3071,8 +3071,11 @@ class _FlashOps(_MmaOps):
         def group(operands: tuple, tag: str = ""):
             common = dict(slab_dtype=cuda_name(elem), elem_bytes=elem.nbytes, cta=cta)
             if self.stage.transport == "smem":
-                # Volta: the same slabs, filled by the blocking vector copy the CTA barrier closes.
-                return SyncTransport(operands=(), copy_operands=operands, copy_sync=True, **common)
+                # Volta: the same slabs, filled by the blocking vector copy the CTA barrier closes; a
+                # two-slot ring splits that copy so the next chunk's loads fly under this one's softmax.
+                n_chunks = _chunk_stream(self.k_axis, bk)[1]
+                staged = self.stage.depth >= 2 and (not isinstance(n_chunks, int) or n_chunks >= 2)
+                return SyncTransport(operands=(), copy_operands=operands, copy_sync=True, staged=staged, **common)
             # A TMA group parity-waits its own barrier, so two groups in one loop take two names.
             if self.stage.transport == "smem-tma":
                 return TmaTransport(operands=operands, mbar=f"_mbar{tag}", **common)

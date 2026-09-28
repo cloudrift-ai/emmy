@@ -432,6 +432,30 @@ def test_sm70_causal_attention_selects_the_mask_per_fragment_element(monkeypatch
     assert "emmy_c_to_a_f16_m8n8k4" in src
 
 
+def test_sm70_attention_rings_its_key_and_value_through_registers(monkeypatch) -> None:
+    """A two-slot ring on the Volta chunk tier is the register-staged split: the next chunk's key
+    and value load into packed registers past the barrier, the softmax and expectation of this
+    chunk run, and the unpack and deposit land them in the free slot. The loads stay behind the
+    barrier — a load moved above it would refill the vectors the unpack has not read yet."""
+    monkeypatch.setenv("EMMY_WORK", "w4x1")
+    monkeypatch.setenv("EMMY_TILE@map.1/twist.1/inner", f"{VOLTA}/f1x2/k2")
+    monkeypatch.setenv("EMMY_TILE@map.1/twist", f"{VOLTA}/f1x8/k8")
+    monkeypatch.setenv("EMMY_STAGE@map.1/twist.1/inner", "d2/smem")
+    monkeypatch.setenv("EMMY_STAGE@map.1/twist", "d2/smem")
+    monkeypatch.setenv("EMMY_REDUCE", "")
+    monkeypatch.setenv("EMMY_RASTER", "")
+    src, knobs = _source(_sdpa_graph(d=128, causal=True), Context(compute_capability=(7, 0)))
+    assert knobs["STAGE@map.1/twist"] == "d2/smem"
+    _, _, body = src.partition("for (int a")
+    drain = body.index("emmy_mma_m8n8k4_f16_f32")
+    unpack = body.index("_a_stage0_0 = _v__a_stage0_0_h[0];")
+    barrier = body.index("__syncthreads();", unpack)
+    issue = body.index("_v__a_stage0_0 = __ldg(")
+    assert drain < unpack < barrier < issue, "the key and value of the chunk after next issue past the barrier"
+    for forbidden in NEWER_INSTRUCTIONS:
+        assert forbidden not in src
+
+
 def test_sm70_computed_a_edge_stages_through_the_smem_compute_fill(monkeypatch) -> None:
     """A COMPUTED ``a`` edge reaches the Volta mma tier: the fill evaluates the norm cone into the
     A slab the Volta shared gather reads, and the materialized B peer rides the BLOCKING vector
