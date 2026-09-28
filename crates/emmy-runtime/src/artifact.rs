@@ -665,6 +665,7 @@ impl Program {
     /// launch's output overlaps its inputs, so an output never aliases its own input.
     fn live_intervals(&self, scratch: &BTreeSet<&str>) -> Result<BTreeMap<String, (usize, usize)>> {
         let mut first_write: BTreeMap<&str, usize> = BTreeMap::new();
+        let mut last_write: BTreeMap<&str, usize> = BTreeMap::new();
         let mut last_read: BTreeMap<&str, usize> = BTreeMap::new();
         for (i, launch) in self.launches.iter().enumerate() {
             let writes: Vec<&str> = if launch.writes.is_empty() {
@@ -683,6 +684,7 @@ impl Program {
             ) {
                 if scratch.contains(w) {
                     first_write.entry(w).or_insert(i);
+                    last_write.insert(w, i);
                 }
             }
             let reads = launch
@@ -702,9 +704,11 @@ impl Program {
             let first = *first_write
                 .get(name)
                 .with_context(|| format!("scratch buffer {name:?} has no producing launch"))?;
-            let last = *last_read.get(name).with_context(|| {
-                format!("scratch buffer {name:?} has no consuming launch (dead scratch)")
-            })?;
+            // A buffer lives through the last launch that touches it. One that no LATER launch
+            // reads lives through its last write: a last-arrival finalize's workspace and counter
+            // are written and read back by one kernel, and the counter's zeroing may ride an
+            // earlier launch.
+            let last = last_read.get(name).copied().unwrap_or(first).max(last_write[name]);
             intervals.insert((*name).to_owned(), (first, last + 1));
         }
         Ok(intervals)

@@ -1128,6 +1128,9 @@ def greedy_decide(
                 won = _priced_pick(fp, leaves, the_prior, memo, db, decisions, deadline)
                 if won is not None:
                     return won[0]
+                # A last-arrival split (``REDUCE=g<n>l``) is taken on measured evidence only: an
+                # unpriced fork ranks every other arm, so it is never a cold default.
+                leaves = [leaf for leaf in leaves if not _last_arrival_arm(leaf)] or leaves
         if len(leaves) <= 1:
             if leaves:
                 return leaves[0]
@@ -1176,3 +1179,14 @@ def greedy_decide(
         return live[best_i][0]
 
     return decide
+
+
+def _last_arrival_arm(leaf) -> bool:
+    """Whether ``leaf`` is a cross-CTA split finalized by its last CTA (``REDUCE=g<n>l``)."""
+    from emmy.compiler.pipeline.fork import leaf_knobs  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
+
+    return any(
+        family_of(str(key)) == "REDUCE" and any(part.startswith("g") and part.endswith("l") for part in str(value).split("/"))
+        for key, value in leaf_knobs(leaf).items()
+    )

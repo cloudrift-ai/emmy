@@ -27,7 +27,7 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.kernel.ir import ELEM_COL, ELEM_ROW, FRAG_COL, FRAG_ROW, RegStore
+from emmy.compiler.ir.kernel.ir import ELEM_COL, ELEM_ROW, FRAG_COL, FRAG_ROW, LastArrival, MmaSyncPtx, RegStore, Tile
 from emmy.compiler.ir.schedule.register import RegisterMaterialization
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body, Load, Write
@@ -54,6 +54,8 @@ def rewrite(match: Match, root: Node, ctx=None) -> KernelOp | None:
         if not resident:
             materialized = _pointwise_strip(tile, materialized)
         body = _drop_repeated_declarations(Body((materialized,)))
+        if tile.arrival is not None:
+            body = _last_arrival(body, tile.arrival)
         unbound = _unbound_names(tile, root, body)
         assert not unbound, f"materialize: kernel {tile.name!r} reads names it never binds: {sorted(unbound)}"
         kernel = KernelOp(body=body, name=tile.name, serial=() if resident else tuple(tile.place.serial))
@@ -204,3 +206,54 @@ def _drop_repeated_declarations(body: Body) -> Body:
         return tuple(kept)
 
     return Body(scope(body))
+
+
+def _last_arrival(body: Body, arrival) -> Body:
+    """The last-arrival finalize (``REDUCE=g<n>l``) spliced between a tensor-core kernel's reduction
+    and its epilogue. Every accumulator fragment an output store reads is stored raw to the
+    workspace at the store's own cells, under partition ``split``; :class:`LastArrival` then lets only
+    the last CTA of each output tile through, and that CTA folds every partition's stored state back
+    into the fragment, in partition order, before the unchanged epilogue projects and stores it.
+
+    Refused, with the reason, where that shape is not there: the fragments must be complete at a
+    top-level position of the tile body that every output store follows, and the partition axis
+    must be the grid's outermost, spanning whole CTAs, so that ``blockIdx.x`` names a CTA's tile."""
+    (tile,) = [stmt for stmt in body if isinstance(stmt, Tile)] or [None]
+    if tile is None:
+        raise ValueError("last-arrival finalize: the kernel has no tile to splice into")
+    stmts = list(tile.body)
+    last_mma = max((i for i, stmt in enumerate(stmts) if any(isinstance(inner, MmaSyncPtx) for inner in Body((stmt,)).iter())), default=None)
+    stores = [(i, stmt) for i, stmt in enumerate(stmts) if isinstance(stmt, RegStore) and stmt.dst_buffer not in (arrival.workspace, arrival.counter)]
+    nested = [stmt for stmt in body.iter() if isinstance(stmt, RegStore) and all(stmt is not top for _, top in stores)]
+    if last_mma is None or not stores or nested or any(i <= last_mma for i, _ in stores):
+        raise ValueError(
+            "last-arrival finalize (REDUCE=g<n>l) needs the tensor-core epilogue: output fragment stores at the top of the "
+            "tile after the reduction — this schedule has none; use REDUCE=g<n>k"
+        )
+    # The partition axis is the outermost grid axis past unit ones (a GEMV's unit row may lead).
+    split = next((axis for axis in tile.axes if axis.extent.as_static() != 1), tile.axes[0])
+    if split.extent.as_static() != arrival.cta or tile.aux_threads or (tile.n_elements // arrival.cta) % tile.cells:
+        raise ValueError(
+            f"last-arrival finalize: the partition axis must be the grid's outermost, {arrival.cta} partitions of whole CTAs; "
+            f"this grid is {[axis.name for axis in tile.axes]} over {tile.cells}-cell CTAs"
+        )
+    saved, gathered = [], []
+    for _, store in stores:
+        for k, frag in enumerate((store.frag, *store.extra_frags)):
+            raw = replace(
+                store,
+                dst_buffer=arrival.workspace,
+                dst_index=(Literal(k, "int"), Var(split.name), *store.dst_index),
+                frag=frag,
+                extra_frags=(),
+                epilogue=None,
+                atomic=False,
+                swizzle="NONE",
+                row_dim=None if store.row_dim is None else store.row_dim + 2,
+                col_dim=None if store.col_dim is None else store.col_dim + 2,
+            )
+            saved.append(raw)
+            gathered.append(replace(raw, gather=arrival.cta, gather_axis=1))
+    at = last_mma + 1
+    spliced = (*stmts[:at], *saved, LastArrival(counter=arrival.counter, cta=arrival.cta), *gathered, *stmts[at:])
+    return Body(tuple(replace(tile, body=Body(spliced)) if stmt is tile else stmt for stmt in body))

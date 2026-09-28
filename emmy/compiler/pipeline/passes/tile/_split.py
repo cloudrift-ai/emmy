@@ -30,7 +30,7 @@ import logging
 from dataclasses import replace
 
 from emmy.compiler.dim import Dim
-from emmy.compiler.dtype import BF16, F16, F32
+from emmy.compiler.dtype import BF16, F16, F32, I32
 from emmy.compiler.graph import Graph, Node, Tensor
 from emmy.compiler.ir.address import gmem_axis_step
 from emmy.compiler.ir.axis import Axis, Window
@@ -45,6 +45,7 @@ from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body, Load, Write
 from emmy.compiler.ir.stmt.passes import projection_distributes
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
+from emmy.compiler.ir.tile.ir import Arrival
 from emmy.compiler.ir.tile.ops import Sched, carries_partition, head, projection_regions, projection_root, projection_tail
 from emmy.compiler.pipeline import Match
 from emmy.compiler.pipeline.fork import DeferredFork
@@ -133,6 +134,23 @@ def atomic_finalize(node: Fold, tail, outputs) -> str | None:
             "over the add; this one does not (a fused bias / activation) — use the deferred "
             "workspace finalize (REDUCE=g<n>k), which projects once after the combine"
         )
+    return None
+
+
+def last_arrival_finalize(node: Fold, outputs, stores: tuple) -> str | None:
+    """Whether the cross-CTA split may take its LAST-ARRIVAL arm (``REDUCE=g<n>l``): every CTA stores
+    its raw accumulator state to a workspace and the last one to finish an output tile combines
+    them and runs the projection. The combine happens in registers of the tensor-core epilogue, so
+    the head must be a contraction whose every state folds by ``add``, and the kernel must store
+    one output buffer (the workspace is laid out over that buffer's cells)."""
+    if node.as_contraction() is None:
+        return "the last-arrival REDUCE combines tensor-core accumulator fragments; this fold is no contraction — use REDUCE=g<n>k"
+    reading = node.as_reduction()
+    if reading is None or reading.twisted or any(op.name != "add" for op in reading.ops or ()):
+        return "the last-arrival REDUCE sums partition states; this carrier does not fold by add — use REDUCE=g<n>k"
+    targets = {store.write.output for store in stores} or set(outputs)
+    if len(targets) != 1:
+        return f"the last-arrival REDUCE lays its workspace over one output buffer; this kernel stores {len(targets)}"
     return None
 
 
@@ -238,6 +256,8 @@ def split_forks(match: Match, root: Node, *, unsplit_tile: TileOp | None = None)
         _enforce(_projection_refusal(tile, node))
         if plan.finalize == "atomic":
             _enforce(atomic_finalize(node, tail, tile.outputs))
+        if plan.finalize == "last":
+            _enforce(last_arrival_finalize(node, tile.outputs, tuple(tile.output_specs)))
         return [_split_fork(match, root, key, plan.cta, plan.finalize)]
     if (why := _projection_refusal(tile, node)) is not None:
         if logger.isEnabledFor(logging.DEBUG):
@@ -245,8 +265,9 @@ def split_forks(match: Match, root: Node, *, unsplit_tile: TileOp | None = None)
         return [unsplit]
     options: list[DeferredFork] = [unsplit]
     atomic_why = atomic_finalize(node, tail, tile.outputs)
+    last_why = last_arrival_finalize(node, tile.outputs, tuple(tile.output_specs))
     for plan in splitk_moves():
-        why = splitk_width(k_axis, plan.cta) or (atomic_why if plan.finalize == "atomic" else None)
+        why = splitk_width(k_axis, plan.cta) or {"atomic": atomic_why, "last": last_why}.get(plan.finalize)
         if why is not None:
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug("split g%d%s not offered: %s", plan.cta, plan.finalize[0], why)
@@ -348,6 +369,14 @@ def _sliced_contraction(node: Fold, k_axis: Axis, w: int) -> tuple[Axis, Axis, F
 
 
 # ---- the piece / fragment builders ------------------------------------------------------------ #
+
+
+def _cells(free) -> int:
+    """How many output cells the free axes span — an upper bound on the output tiles of a grid."""
+    count = 1
+    for axis in free:
+        count *= axis.extent.as_static() if axis.extent.is_static else 1
+    return count
 
 
 def _cell_index(stores: tuple, free) -> tuple:
@@ -564,6 +593,31 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
         result = _one(match, frag, root, piece)
         return _add_projection_pieces(match, result, projection_pieces, free)
 
+    if finalize == "last":
+        # Last-arrival finalize: ONE kernel carrying the projection and stores like the atomic arm,
+        # plus a workspace of raw partition states and a per-tile arrival counter. The kernel
+        # lowering stores each CTA's accumulators to the workspace; the last CTA of a tile folds
+        # every partition's state back into its accumulators, in partition order, before the epilogue.
+        _enforce(last_arrival_finalize(partial_fold, tile.outputs, stores))
+        target = stores[0].write.output if stores else out.name
+        shape = tuple(match.graph.buffer(target).shape) if match.graph.buffer(target) is not None else tuple(out.shape)
+        ws = Tensor(f"{target}__arrival", (Dim(n_comp), Dim(cta), *shape), F32)
+        counter = Tensor(f"{target}__arrivals", (Dim(max(1, _cells(free))),), I32)
+        p_stores = stores or (OutputSpec(write=Write(output=out.name, index=cell, values=states)),)
+        piece = _piece(_project(_rebind(region, node, partial_fold), body, (split, *free)), (split, *free), output_specs=p_stores, axes=axes)
+        # The partition axis is the one grid axis no store indexes. It goes OUTERMOST: a CTA's
+        # partition and tile are then ``blockIdx.x`` over and modulo the CTAs per partition, and the
+        # last two grid axes stay the output's, the rows and columns of the fragment.
+        written = {name for spec in piece.output_specs for expr in spec.write.index for name in expr.free_vars()}
+        (partition,) = [axis for axis in piece.place.free if axis.name not in written and axis.extent == Dim(cta)]
+        piece = replace(
+            piece,
+            place=replace(piece.place, free=(partition, *(axis for axis in piece.place.free if axis is not partition))),
+            arrival=Arrival(workspace=ws.name, counter=counter.name, cta=cta, split=partition.name),
+        )
+        result = add_output_piece(match, frag, root, piece, list(root.inputs), states=(ws, counter))
+        return _add_projection_pieces(match, result, projection_pieces, free)
+
     # Deferred finalize: write every raw component to ``ws[(comp,) ksplit, *cell]``. The workspace
     # shape MUST match the rank of the index the writes/loads use — or ``render_index``'s
     # rank-mismatch fallback silently flattens without strides (colliding partials). ``ws_cell``
@@ -622,4 +676,4 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
     return _add_projection_pieces(match, result, projection_pieces, free)
 
 
-__all__ = ["atomic_finalize", "realize_split", "split_forks", "splitk_width"]
+__all__ = ["atomic_finalize", "last_arrival_finalize", "realize_split", "split_forks", "splitk_width"]

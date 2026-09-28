@@ -362,6 +362,20 @@ def loaded_buffers(term):
 
 
 @dataclass(frozen=True)
+class Arrival:
+    """The last-arrival finalize of a cross-CTA split (``REDUCE=g<n>l``): ``workspace`` holds each
+    partition's raw accumulator state, one f32 plane per state component, laid out
+    ``[component, partition, *output]``; ``counter`` holds one arrival count per output tile, zero
+    between launches (the last CTA resets its own); ``cta`` partitions run along the grid axis
+    ``split``."""
+
+    workspace: str
+    counter: str
+    cta: int
+    split: str
+
+
+@dataclass(frozen=True)
 class TileOp(Op):
     """One scheduled map/reduce kernel (see module docstring).
 
@@ -417,6 +431,10 @@ class TileOp(Op):
     # flag past "declined" is safe because the partition receipt is an explicit pool-key term of
     # the schedule memo — a receipt-bearing twin can never serve a receipt-free one.
     split_consumed: bool = False
+    # A cross-CTA split finalized in this same kernel (``REDUCE=g<n>l``): every CTA stores its raw
+    # accumulator state to a workspace, and the last CTA to finish an output tile combines every
+    # partition's state and runs the projection and stores. ``None`` for every other kernel.
+    arrival: Arrival | None = None
 
     def __post_init__(self) -> None:
         Op.__post_init__(self)

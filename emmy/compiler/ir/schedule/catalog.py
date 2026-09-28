@@ -305,8 +305,9 @@ SPLITK_WIDTHS: tuple[int, ...] = (2, 4, 8, 16, 32, 64)
 
 
 def splitk_moves() -> list[Reduce]:
-    """Return cross-CTA split choices for both supported finalization modes."""
-    return [Reduce.of(cta=width, finalize=finalize) for width in SPLITK_WIDTHS for finalize in ("kernel", "atomic")]
+    """Return cross-CTA split choices for every finalization mode: a sibling kernel, ``atomicAdd``, and
+    the last CTA of a tile (which the greedy takes only on measured evidence)."""
+    return [Reduce.of(cta=width, finalize=finalize) for width in SPLITK_WIDTHS for finalize in ("kernel", "atomic", "last")]
 
 
 def coop_reduce_moves() -> list[Reduce]:

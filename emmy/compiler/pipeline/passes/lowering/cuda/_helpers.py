@@ -8,7 +8,7 @@ walk and the launch name, so they are defined once here.
 from __future__ import annotations
 
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.kernel.ir import RegStore
+from emmy.compiler.ir.kernel.ir import LastArrival, RegStore
 from emmy.compiler.ir.stmt import Write
 
 
@@ -30,4 +30,8 @@ def atomic_outputs(kernel: KernelOp) -> tuple[str, ...]:
             seen.setdefault(s.output, None)
         elif isinstance(s, RegStore) and s.atomic:
             seen.setdefault(s.dst_buffer, None)
+        elif isinstance(s, LastArrival):
+            # A last-arrival counter needs zeros only before the first launch (its last CTA resets
+            # each cell), but the buffer shares slab memory with others, so it takes the same zeroing.
+            seen.setdefault(s.counter, None)
     return tuple(seen)

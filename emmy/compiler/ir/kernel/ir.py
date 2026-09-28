@@ -447,6 +447,46 @@ class Tile(Stmt):
 
 
 @dataclass(frozen=True)
+class LastArrival(Stmt):
+    """The arrival barrier of a last-arrival finalize (``REDUCE=g<n>l``): every CTA has stored its
+    raw accumulators to the workspace; it publishes them (``__threadfence``), counts itself in on
+    its output tile's ``counter`` cell, and every CTA but the tile's last returns. The last resets
+    the cell for the next launch and reads its peers' stores after a second fence. A tile is the
+    ``gridDim.x / cta`` CTAs of one partition that share a block position, so the tile of a CTA is
+    ``blockIdx.x % (gridDim.x / cta)`` — the lowering places the partition axis outermost and
+    aligns its partitions to whole CTAs."""
+
+    counter: str
+    cta: int
+
+    def external_writes(self) -> tuple[str, ...]:
+        return (self.counter,)
+
+    def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
+        new = rename.get(self.counter, self.counter)
+        return self if new == self.counter else replace(self, counter=new)
+
+    def pretty(self, indent: str = "") -> list[str]:
+        return [f"{indent}LastArrival({self.counter}, cta={self.cta})"]
+
+    def render(self, ctx: RenderCtx) -> list[str]:
+        pad = _pad(ctx.indent)
+        return [
+            f"{pad}__threadfence();",
+            f"{pad}__syncthreads();",
+            f"{pad}__shared__ int _la_last;",
+            f"{pad}if (threadIdx.x == 0) {{",
+            f"{pad}    const int _la_tile = blockIdx.x % (gridDim.x / {self.cta});",
+            f"{pad}    _la_last = atomicAdd(&{self.counter}[_la_tile], 1) == {self.cta - 1};",
+            f"{pad}    if (_la_last) {self.counter}[_la_tile] = 0;",
+            f"{pad}}}",
+            f"{pad}__syncthreads();",
+            f"{pad}if (!_la_last) return;",
+            f"{pad}__threadfence();",
+        ]
+
+
+@dataclass(frozen=True)
 class CpAsyncCopy(Stmt):
     """Issue one ``cp.async.{ca,cg}.shared.global`` instruction.
 
@@ -2309,6 +2349,12 @@ class RegStore(Stmt):
     # fragment row offset. ``None`` keeps the legacy inner-extent resolution.
     row_dim: int | None = None
     col_dim: int | None = None
+    # A last-arrival finalize's combine (``REDUCE=g<n>l``): with ``gather`` = the partition count,
+    # this reads instead of stores — every fragment element becomes the sum, in partition order, of
+    # the workspace cells the partitions stored at its address. ``gather_axis`` is the ``dst_index``
+    # position the partition coordinate occupies.
+    gather: int = 0
+    gather_axis: int = 1
 
     def deps(self) -> tuple[str, ...]:
         return (self.frag, *self.extra_frags)
@@ -2317,12 +2363,14 @@ class RegStore(Stmt):
         # The fused epilogue's leaf loads are gmem reads this stmt performs directly (their
         # original Load stmts were stripped by the atom lowering), so they must be declared here for
         # the kernel signature / render shapes to include the buffers.
+        if self.gather:
+            return (self.dst_buffer,)
         if self.epilogue is None:
             return ()
         return tuple(dict.fromkeys(ld.input for ld in self.epilogue.body if isinstance(ld, Load)))
 
     def external_writes(self) -> tuple[str, ...]:
-        return (self.dst_buffer,)
+        return () if self.gather else (self.dst_buffer,)
 
     def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
         new = rename.get(self.dst_buffer, self.dst_buffer)
@@ -2346,6 +2394,8 @@ class RegStore(Stmt):
         if self.n_guard is not None:
             guards += f" n<{self.n_guard[1].pretty()}"
         acc = " (atomic)" if self.atomic else ""
+        if self.gather:
+            return [f"{indent}RegGather {self.frag} <- sum of {self.gather} partitions of {self.dst_buffer}[{idx}]{guards} (ldm={self.ldm or 'auto'})"]
         return [f"{indent}RegStore {self.dst_buffer}[{idx}] <- {self.frag}{epi}{guards}{acc} (ldm={self.ldm or 'auto'})"]
 
     def _swz(self, addr: str) -> str:
@@ -2484,6 +2534,8 @@ class RegStore(Stmt):
     def render(self, ctx: RenderCtx) -> list[str]:
         from emmy.compiler.ir.stmt import render_index  # noqa: PLC0415
 
+        if self.gather:
+            return self._render_gather(ctx)
         flat = render_index(self.dst_buffer, self.dst_index, ctx)
         ldm = self.ldm if self.ldm else _resolve_ldm(self.dst_buffer, ctx, self.row_dim)
         ldn = self.ldn or (_dim_stride(self.dst_buffer, self.col_dim, ctx) if self.col_dim is not None else 1)
@@ -2531,6 +2583,42 @@ class RegStore(Stmt):
         if close:
             body[-1] += close
         return head + body
+
+    def _render_gather(self, ctx: RenderCtx) -> list[str]:
+        """``frag[i] = Σ_s workspace[s][cell(i)]`` over the ``gather`` partitions, in partition order,
+        for every fragment element inside the store guards — the last-arrival combine. The element
+        coordinates are the store's own, so a CTA reads back exactly the cells its peers stored."""
+        from emmy.compiler.ir.stmt import render_index  # noqa: PLC0415
+
+        index = tuple(Var("_la_s") if i == self.gather_axis else e for i, e in enumerate(self.dst_index))
+        flat = render_index(self.dst_buffer, index, ctx)
+        ldm = self.ldm if self.ldm else _resolve_ldm(self.dst_buffer, ctx, self.row_dim)
+        ldn = self.ldn or (_dim_stride(self.dst_buffer, self.col_dim, ctx) if self.col_dim is not None else 1)
+        pad = _pad(ctx.indent)
+        lane = "(threadIdx.x & 31)"
+        coords = self._element_coords()
+        if self.volta_interleaved or self.fragment_layout == "m8n8k4":
+            raise ValueError("the last-arrival combine reads the m16n8k16 fragment layout only")
+        head = [f"{pad}{{ const int _g = {lane} >> 2; const int _t = {lane} & 3;"]
+        preds: list[list[str]] = [[] for _ in coords]
+        for guard, pick in ((self.m_guard, 0), (self.n_guard, 1)):
+            if guard is None:
+                continue
+            base, bound = (e.render(ctx) for e in guard)
+            for i, coord in enumerate(coords):
+                preds[i].append(f"({base}) + {coord[pick]} < ({bound})")
+        lines = [*head, f"{pad}  float _la_v[{len(coords)}] = {{{', '.join('0.0f' for _ in coords)}}};"]
+        # Unrolled: the partitions' loads are independent, and a rolled loop waits out one L2
+        # round trip per partition (12.8 us for a 32-way split of one GEMV, against 2.3 us unsplit).
+        lines.append(f"{pad}  #pragma unroll")
+        lines.append(f"{pad}  for (int _la_s = 0; _la_s < {self.gather}; ++_la_s) {{")
+        for i, (row, col, _row_expr, _col_expr) in enumerate(coords):
+            load = f"_la_v[{i}] += {self.dst_buffer}[{self._addr(flat, row, col, ldm, ldn)}];"
+            lines.append(f"{pad}    if ({' && '.join(preds[i])}) {load}" if preds[i] else f"{pad}    {load}")
+        lines.append(f"{pad}  }}")
+        lines += [f"{pad}  {self.frag}[{i}] = _la_v[{i}];" for i in range(len(coords))]
+        lines.append(f"{pad}}}")
+        return lines
 
     def _render_m8n8k4(self, ctx: RenderCtx, *, flat: str, ldm, ldn, dst_dt: str, pre: list[list[str]], vals: list[str]) -> list[str]:
         """Store an m8n8k4 accumulator under the selected Volta warp-tile arrangement."""
@@ -2856,6 +2944,7 @@ __all__ = [
     "Loop",
     # Kernel-IR statements
     "Tile",
+    "LastArrival",
     "Smem",
     "Sync",
     "TreeHalve",
@@ -2933,6 +3022,11 @@ def _(s: Tile, rename, sigma, axis_fn):
 
 @_rewrite_kind.register
 def _(s: Smem, rename, sigma, axis_fn):
+    return s
+
+
+@_rewrite_kind.register
+def _(s: LastArrival, rename, sigma, axis_fn):
     return s
 
 
