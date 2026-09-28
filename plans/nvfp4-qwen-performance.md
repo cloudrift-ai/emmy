@@ -17,7 +17,7 @@ below have not been independently revalidated.
 | [Global pin interference and slow compilation](nvfp4-qwen-performance/pins-cannot-target-one-piece.md) | A global `WORK=t128` pin removes tensor-core TILEs from neighboring matmul pieces. Unpinned Tile IR compilation takes about 12 minutes in concurrent runs. Site-scoped targeting is untested; the expensive pass is not identified. |
 | [Encode cuts duplicate projections](nvfp4-qwen-performance/fp4-encode-recomputes-producer.md) | Separate Tile IR pieces repeat full-K contractions over the same weights—gate/up three times and o_proj four times. Some copies use identical layouts. |
 | [Attention and encode repeat work](nvfp4-qwen-performance/qwen38-attention-not-flash-and-encode-shape.md) | The examined Qwen attention IR has no `twist=softmax`; four P·V pieces repeat `exp` and division across output columns. Encode assigns 128 threads per byte and repeats each group's maximum eight times. |
-| [GDN compilation and scheduling failures](nvfp4-qwen-performance/qwen38-gdn-layers-fail.md) | Padding and serving capture raise errors; a one-source `FragmentRepack` crashes CUDA rendering; sibling Tile IR sweeps become nested CUDA loops; input projections lack tensor-core TILEs. |
+| [DeltaNet compilation and scheduling failures](nvfp4-qwen-performance/qwen38-gdn-layers-fail.md) | In gated DeltaNet (GDN) layers, padding and serving capture raise errors; a one-source `FragmentRepack` crashes CUDA rendering; sibling Tile IR sweeps become nested CUDA loops; input projections lack tensor-core TILEs. |
 
 ## Baseline
 
