@@ -4,39 +4,27 @@
 
 This table is the shared progress record. The linked directory holds the final reports and reproducible acceptance
 criteria; it does not hold a second status list. Evidence was reviewed at `a98fd4f8` on 2026-09-28 using saved IR and
-error logs. B11–B13 also had their central repros compiled afresh without GPU execution. The flash follow-up checked
+error logs. B01–B03 also had their central repros compiled afresh without GPU execution. The flash follow-up checked
 fresh Tile IR only. Historical GPU timings below have not been independently revalidated.
 
-| ID | Bug or investigation | Status | Owner / branch / PR | Main area and overlap |
-| --- | --- | --- | --- | --- |
-| B01 | [GDN sibling output sweeps become nested serial loops](nvfp4-qwen-performance/qwen38-gdn-layers-fail.md#fix-criteria), failure 4 | Open | Unassigned | Tile placement and CUDA output loops |
-| B02 | [GDN fragment repack crashes CUDA codegen](nvfp4-qwen-performance/qwen38-gdn-layers-fail.md#fix-criteria), failure 3 | Open | Unassigned | Kernel IR rewriting and fragment roles |
-| B03 | [Re-encode duplicates producer projections](nvfp4-qwen-performance/fp4-encode-recomputes-producer.md) | Open | Unassigned | Cut materialization; also attention duplication in B05 |
-| B04 | [Encode repeats group reductions and launches a block per byte](nvfp4-qwen-performance/qwen38-attention-not-flash-and-encode-shape.md#fix-criteria), encode | Open | Unassigned | Reduction reuse and launch layout; coordinate with B03 |
-| B05 | [No practical flash route for Qwen3.8 attention](nvfp4-qwen-performance/qwen38-attention-not-flash-and-encode-shape.md#bounded-code-and-ir-check-2026-09-28) | Open | Unassigned | Softmax rewrite, cut boundaries and paired tensor-core schedules |
-| B06 | [Targeted hand pins across cut pieces](nvfp4-qwen-performance/pins-cannot-target-one-piece.md#review-remark-test-site-scoped-pins-before-adding-syntax) | Investigate | Unassigned | Test existing site scoping before designing piece syntax |
-| B07 | [Slow unpinned attention compilation](nvfp4-qwen-performance/pins-cannot-target-one-piece.md#fix-criteria), compile time | Investigate | Unassigned | Profile search in isolation; keep legal choices available |
-| B08 | [GDN nonzero padding blocks short sequences](nvfp4-qwen-performance/qwen38-gdn-layers-fail.md#fix-criteria), failure 1 | Open | Unassigned | Torch lowering and padding semantics |
-| B09 | [GDN serving capture is unsupported](nvfp4-qwen-performance/qwen38-gdn-layers-fail.md#fix-criteria), failure 2 | Open | Unassigned | Serving programs and state interface |
-| B10 | [GDN input projections miss tensor cores](nvfp4-qwen-performance/qwen38-gdn-layers-fail.md#fix-criteria), failure 5 | Open | Unassigned | Contraction orientation and fragment loading; coordinate with B11 |
-| B11 | [W4A16 cut operand order loses packed staging](nvfp4-qwen-performance/packed-cut-piece-operand-order.md) | Open | Unassigned | Fold orientation and packed-weight recognition |
-| B12 | [Native fp4 staging lacks TMA](nvfp4-qwen-performance/fp4-cell-no-tma.md) | Open | Unassigned | Block-scaled code/scale transport |
-| B13 | [Computed f16 activation prevents weight TMA](nvfp4-qwen-performance/f16-computed-activation-no-tma.md) | Open | Unassigned | Compute fill plus stored-weight transport |
-| B14 | [Establish correctness of inline quantized comparisons](#measurement-caveats) | Investigate | Unassigned | Quantized inputs and reference validation; do not generalize to checkpoints |
-| B15 | [Qwen3-8B q/k projection with per-head norm](#blockers-most-costly-first), blocker 6 | Open | Unassigned | Projection sweeps and tensor-core lowering |
-| B16 | [GDN triangular solve and core-kernel slowness](nvfp4-qwen-performance/qwen38-gdn-layers-fail.md#summary) | Investigate | Unassigned | Recurrence scheduling; diagnose separately from B01 |
-| B17 | [Qwen3-8B lm_head throughput](#blockers-most-costly-first), blocker 8 | Investigate | Unassigned | Measurement and tuning; no compiler defect isolated yet |
+| ID | Bug or investigation | Status | Main area and overlap |
+| --- | --- | --- | --- |
+| B01 | [Native fp4 lacks TMA](nvfp4-qwen-performance/fp4-cell-no-tma.md): the fp4 contraction accepts `d3/smem-async` but rejects `d2/smem-tma`. W4A16 emits TMA copies of packed weight bytes. | Open | Block-scaled code/scale transport |
+| B02 | [Computed f16 activation blocks weight TMA](nvfp4-qwen-performance/f16-computed-activation-no-tma.md): a contraction over `x + 1` offers only no staging, `d1/smem` and `d2/smem`; the TMA pin fails unless the activation is cut out. | Open | Compute fill plus stored-weight transport |
+| B03 | [Packed cut pieces lose staging](nvfp4-qwen-performance/packed-cut-piece-operand-order.md): Tile IR puts the decoded weight before the computed activation. Only no staging and `d1/smem` remain; a `d2/smem-async` pin fails. | Open | Fold orientation and packed-weight recognition; overlaps B07 |
+| B04 | [Global pin interference and slow compilation](nvfp4-qwen-performance/pins-cannot-target-one-piece.md): `WORK=t128` also removes tensor-core TILEs from neighboring matmul pieces. Unpinned Tile IR compilation takes about 12 minutes in concurrent runs. Site-scoped targeting is untested; the expensive pass is not identified. | Investigate | Schedule sites and fork search |
+| B05 | [Encode cuts duplicate projections](nvfp4-qwen-performance/fp4-encode-recomputes-producer.md): separate Tile IR pieces repeat full-K contractions over the same weights—gate/up three times and o_proj four times. Some copies use identical layouts. | Open | Cut materialization; overlaps attention duplication in B06 |
+| B06 | [Attention and encode repeat work](nvfp4-qwen-performance/qwen38-attention-not-flash-and-encode-shape.md): the examined Qwen attention IR has no `twist=softmax`; four P·V pieces repeat `exp` and division across output columns. Encode assigns 128 threads per byte and repeats each group's maximum eight times. | Open | Softmax rewrite, reduction reuse and launch layout; overlaps B05 |
+| B07 | [GDN compilation and scheduling failures](nvfp4-qwen-performance/qwen38-gdn-layers-fail.md): padding and serving capture raise errors; a one-source `FragmentRepack` crashes CUDA rendering; sibling Tile IR sweeps become nested CUDA loops; input projections lack tensor-core TILEs. | Open | Torch lowering, serving, Kernel IR and output loops; operand orientation overlaps B03 |
 
-Use `Open`, `Investigate`, `In progress`, `Blocked`, and `Done`. No implementation owner has been recorded yet.
-Before starting an item, check related PRs, put the owner, branch/draft PR and date in its row, and land that claim
-on main in a small plan update so other developers can see it before the fix is finished. Mark dependencies by ID
-and briefly explain a blocked item. Update this same row as work moves; preserve other developers' claims when
-resolving a conflict. A `Done` row links the merged fix and its validation, rather than just a proposed patch.
+There are seven reports; some contain several independently fixable issues. Use `Open`, `Investigate`, `In progress`,
+`Blocked`, and `Done`. For a combined report, note partial progress in its status cell and use the report's numbered
+fix criteria to identify what remains. Mark the row `Done` only when all its issues have merged fixes and recorded
+validation. Land status updates on main when work starts so other developers can see overlapping work.
 
-The rows separate independently fixable issues even when they share a report. Missing padding and serving support
-remain bugs to address for the intended model use. A speculative root cause is not an implementation requirement.
-Keep this plan and its report directory while work remains; move lasting validation into tests or appropriate docs
-before removing completed planning material. Do not copy the `_process` drafts or local measurement dumps here.
+Missing padding and serving support remain bugs to address for the intended model use. A speculative root cause is
+not an implementation requirement. Keep this plan and its report directory while work remains; move lasting validation
+into tests or appropriate docs before removing completed planning material. Earlier drafts and local dumps are excluded.
 
 ## Baseline
 
@@ -79,7 +67,7 @@ scales in hardware. A matmul on the *scalar tier* uses no tensor cores; each thr
   the scalar tier, so they compare the fp4 cell against scalar code. These are relative comparisons, not independent
   proofs of correctness. A run that says "wrong-answer reference unusable" has not passed a correctness check.
 - **Global pins reach every kernel.** The experiments did not combine the best knobs of each piece (blocker 5).
-  Whether existing site-scoped pins suffice has not been established; B06 investigates that before adding syntax.
+  Whether existing site-scoped pins suffice has not been established; B04 investigates that before adding syntax.
 
 ## Qwen3-8B: where things stand
 
@@ -187,7 +175,7 @@ every kernel of one layer at one width, and `emmy compile|run --golden <file> --
 4. **Attention (Qwen3.8 full-attention layers).**
    - None of the three cut sets tried keeps scaled dot-product attention as one kernel with an online softmax. A
      bounded follow-up found no softmax carrier after lift or the projection-only cut, while plain causal GQA at the
-     same dimensions did form one. No practical flash route was found; see B05 for the code and IR check.
+     same dimensions did form one. No practical flash route was found; see B06 for the code and IR check.
    - P·V is a reduce over keys with one 128-thread block per output element, recomputing `exp(score − max)/sum` per
      head-dim column. Four pieces compute it: 111–149 µs each for the two that run as reduces.
 5. **Global hand pins interfere across pieces.** After a cut, each piece forks over its own schedule. A global pin
@@ -329,20 +317,21 @@ EMMY_KNOBS=… emmy run --golden l3_s16.json --realization <kernel> --bench
 
 ## Suggested work order
 
-The tracker is authoritative for status and ownership; this is a suggested order, not a second checklist.
+The tracker is authoritative for status; this is a suggested order, not a second checklist.
 
-1. Close the concrete codegen failures: nested output sweeps (B01) and the fragment repack crash (B02).
-2. Remove duplicate producer materializations (B03), then redundant encode reductions and excess blocks (B04).
+1. Fix the GDN fragment-repack crash and nested output sweeps (B07), then address padding, serving capture and
+   projection scheduling. The report gives separate fix criteria for each failure.
+2. Remove duplicate producer materializations (B05), then redundant encode reductions and excess blocks (B06).
    Coordinate the changes because both touch the boundary between producers and quantization consumers.
-3. Diagnose flash recognition (B05). In parallel with separate implementation work, owners may investigate existing
-   pin scoping (B06) and profile slow compilation (B07), sharing changes to cut and schedule interfaces.
-4. Complete GDN padding, serving capture and projection scheduling (B08–B10), then investigate remaining recurrence
-   costs (B16). Passing isolated kernel checks does not establish complete model serving support.
-5. Fix the packed-cut orientation and staging gaps (B11–B13), and the q/k projection with per-head norm (B15).
-6. Establish usable correctness references (B14) before recording performance claims for affected programs. Measure
-   lm_head (B17) and the complete layer programs on stable hardware once the blocking implementation work is done.
+3. Diagnose flash recognition (B06). Investigate existing pin scoping and profile slow compilation (B04), sharing
+   changes to cut and schedule interfaces.
+4. Fix packed-cut orientation (B03) and the staging gaps (B01–B02).
 
-For every item, first reproduce its structural failure and add the appropriate focused regression coverage. Compare
-performance before and after under matching conditions, but do not replace an unmeasured claim with an arbitrary
-microsecond threshold. Keep legal fusion and schedule alternatives available. Any correctness check that was skipped
-or had an unusable reference remains outstanding.
+The baseline also records inline quantized comparison failures, q/k projection with per-head norm, GDN recurrence
+costs and lm_head throughput. These remain follow-up observations, not additional bug reports in the overview.
+Establish usable correctness references before recording performance claims for affected programs.
+
+For every fix, first reproduce its structural failure and add the appropriate focused regression coverage. Compare
+performance before and after under matching conditions, rather than imposing arbitrary microsecond thresholds.
+Keep legal fusion and schedule alternatives available. A skipped check or an unusable reference leaves correctness
+validation outstanding.
