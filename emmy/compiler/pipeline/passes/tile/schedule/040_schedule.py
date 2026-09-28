@@ -29,7 +29,7 @@ from emmy.compiler.ir.schedule.classic import ClassicProblem, ClassicScheduleCod
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.ops import carries_partition, merges_partition
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
-from emmy.compiler.pipeline.fork import SCHEDULE_FORK_STAMPS, Fork
+from emmy.compiler.pipeline.fork import SCHEDULE_FORK_STAMPS, Fork, iter_leaves
 
 # NOTE: no ``Knob`` objects (``TILE`` / ``REDUCE`` / ``STAGE``) may be imported here — ``Pass.load``
 # scans rule modules for ``Knob`` attrs and OFF-fills any it finds bare onto every variant of the
@@ -100,6 +100,14 @@ def classic_forks(tile: TileOp, name: str, knobs: dict, ctx, *, kernel_set: bool
     # unmapped. The partial, like every other kernel, keeps every verdict, and the post-compile pin
     # check still asks that SOME kernel realized the pin.
     peer = merges_partition(tile)
+    # A kernel pin names this one kernel, so it is a hand pin to honour exactly, not a row published
+    # across peers to take where it fits; a split's finalize still reads WORK / RASTER / REDUCE as
+    # its partial's.
+    named = frozenset(
+        family
+        for family in ("WORK", "TILE", "REDUCE", "STAGE", "RASTER")
+        if kernel_pin(family, tile.name, node) is not None and not (peer and family in ("WORK", "RASTER", "REDUCE"))
+    )
     problem = ClassicProblem(
         tile,
         ctx,
@@ -108,6 +116,7 @@ def classic_forks(tile: TileOp, name: str, knobs: dict, ctx, *, kernel_set: bool
         allow_fp8=precision_pin(FP8_MMA) is True,
         validate_pins=ctx.validate_pins and not kernel_set,
         tolerate_kernel_pins=peer,
+        _strict_row_keys=named,
     )
     context = ClassicScheduleContext(tile, ctx, problem)
     codec = ClassicScheduleCodec(context)
@@ -154,6 +163,14 @@ def rewrite(match: Match, root: Node, ctx=None) -> Fork | list[Fork]:
     # A cut's pieces carry the seam token in their name or read a workspace named by one.
     kernel_set = "__place_" in tile.name or any("__place_" in buffer for buffer in root.inputs)
     options = classic_forks(tile, tile.name, tile.knobs, ctx, kernel_set=kernel_set, node=root.id)
+    # A pin that names THIS kernel and leaves it no row is refused here, with the pins that did it.
+    # Left to the lazy fork, the empty enumeration was skipped: the kernel ran unscheduled and the
+    # pin looked realized by nothing (a SiLU-prologue down projection under a mma TILE pin).
+    families = ("WORK", "TILE", "REDUCE", "STAGE", "RASTER")
+    scoped = {family: value for family in families if (value := kernel_pin(family, tile.name, root.id)) is not None}
+    if scoped and next(iter_leaves(options), None) is None:
+        pins = ", ".join(f"{family}={value}" for family, value in scoped.items())
+        raise ValueError(f"{tile.name or root.id}: its kernel pins ({pins}) leave no schedule row this kernel offers")
     if not options:
         raise RuleSkipped("no enumerable schedule row for this term — leave it unmapped")
     return options if len(options) > 1 else options[0]

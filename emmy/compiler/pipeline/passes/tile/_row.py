@@ -20,6 +20,7 @@ from dataclasses import replace
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.loop import LoopOp
+from emmy.compiler.ir.pure.fold import PIECE_FORMATION
 from emmy.compiler.ir.stmt import Body, Load, Loop, Stmt, Write
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.path import sites
@@ -142,7 +143,11 @@ def reformed(piece: TileOp) -> TileOp:
     try:
         # Through the LoopOp's normalization: that is where two reduce loops over one axis become
         # one loop with two accumulators, the twin the lift forms one term from.
-        formed = lift_kernel(LoopOp(body=body), name=piece.name)
+        token = PIECE_FORMATION.set(True)
+        try:
+            formed = lift_kernel(LoopOp(body=body), name=piece.name)
+        finally:
+            PIECE_FORMATION.reset(token)
     except ValueError:
         return piece
     # The lift peels every outer plain loop into the grid, a store's sweep included when nothing
