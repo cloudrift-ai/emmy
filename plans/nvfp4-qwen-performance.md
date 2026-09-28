@@ -13,22 +13,34 @@ findings and do not establish production performance or complete model serving.
 
 ## Bug reports
 
-The seven final reports below describe what the investigation found, with reproducers, IR observations and unresolved
+The eight final reports below describe what the investigation found, with reproducers, IR observations and unresolved
 questions. Several reports group related symptoms whose causes may need further investigation.
 
 Evidence was reviewed at `a98fd4f8` on 2026-09-28 using saved IR and error logs. The staging and packed-cut repros were
 also compiled afresh without GPU execution. The flash follow-up checked fresh Tile IR only. Historical GPU timings
-below have not been independently revalidated.
+below have not been independently revalidated. The inline quantization validation report was also checked against
+the parent/worker binding and strict-reference code; its GPU results were not rerun.
+
+The overview is ordered by expected importance for Qwen3.8 NVFP4 serving at parity with vLLM defaults, with likely
+investigation and implementation effort also considered. This is a provisional assessment, not a measured comparison
+with vLLM or an implementation sequence. DeltaNet blocks native serving; duplicate projections and repeated
+attention/encode work directly threaten runtime performance. Their fixes may span lowering and scheduling. Pin
+interference follows because it obstructs combining the explored schedules, but checking existing site-scoped pins
+may resolve part of it cheaply. The inline strict mismatch appears more localized, but its impact on checkpoint
+validation is unestablished. Packed-cut staging may reuse existing transport support; native fp4 TMA needs a new
+staging path and has no demonstrated gain over cp.async here. The computed-f16 TMA gap has a cut workaround and is
+less directly tied to the W4A4 target. Effort and relative importance may change as the causes are established.
 
 | Report | Observed behavior |
 | --- | --- |
-| [Native fp4 lacks TMA](nvfp4-qwen-performance/fp4-cell-no-tma.md) | The fp4 contraction accepts `d3/smem-async` but rejects `d2/smem-tma`. W4A16 emits TMA copies of packed weight bytes. |
-| [Computed f16 activation blocks weight TMA](nvfp4-qwen-performance/f16-computed-activation-no-tma.md) | A contraction over `x + 1` offers only no staging, `d1/smem` and `d2/smem`; the TMA pin fails unless the activation is cut out. |
-| [Packed cut pieces lose staging](nvfp4-qwen-performance/packed-cut-piece-operand-order.md) | Tile IR puts the decoded weight before the computed activation. Only no staging and `d1/smem` remain; a `d2/smem-async` pin fails. |
-| [Global pin interference and slow compilation](nvfp4-qwen-performance/pins-cannot-target-one-piece.md) | A global `WORK=t128` pin removes tensor-core TILEs from neighboring matmul pieces. Unpinned Tile IR compilation takes about 12 minutes in concurrent runs. Site-scoped targeting is untested; the expensive pass is not identified. |
+| [DeltaNet compilation and scheduling failures](nvfp4-qwen-performance/qwen38-gdn-layers-fail.md) | In gated DeltaNet (GDN) layers, padding and serving capture raise errors; a one-source `FragmentRepack` crashes CUDA rendering; sibling Tile IR sweeps become nested CUDA loops; input projections lack tensor-core TILEs. |
 | [Encode cuts duplicate projections](nvfp4-qwen-performance/fp4-encode-recomputes-producer.md) | Separate Tile IR pieces repeat full-K contractions over the same weights—gate/up three times and o_proj four times. Some copies use identical layouts. |
 | [Attention and encode repeat work](nvfp4-qwen-performance/qwen38-attention-not-flash-and-encode-shape.md) | The examined Qwen attention IR has no `twist=softmax`; four P·V pieces repeat `exp` and division across output columns. Encode assigns 128 threads per byte and repeats each group's maximum eight times. |
-| [DeltaNet compilation and scheduling failures](nvfp4-qwen-performance/qwen38-gdn-layers-fail.md) | In gated DeltaNet (GDN) layers, padding and serving capture raise errors; a one-source `FragmentRepack` crashes CUDA rendering; sibling Tile IR sweeps become nested CUDA loops; input projections lack tensor-core TILEs. |
+| [Global pin interference and slow compilation](nvfp4-qwen-performance/pins-cannot-target-one-piece.md) | A global `WORK=t128` pin removes tensor-core TILEs from neighboring matmul pieces. Unpinned Tile IR compilation takes about 12 minutes in concurrent runs. Site-scoped targeting is untested; the expensive pass is not identified. |
+| [Inline quantized strict comparison uses a mismatched reference](nvfp4-qwen-performance/strict-fails-for-inline-quantize-programs.md) | Unseeded inline benchmarks bind Emmy’s packed weights from the parent checkpoint but rebuild eager’s weights in the worker. Strict comparison still uses unquantized eager at 1e-3; reported seeded runs also fail. |
+| [Packed cut pieces lose staging](nvfp4-qwen-performance/packed-cut-piece-operand-order.md) | Tile IR puts the decoded weight before the computed activation. Only no staging and `d1/smem` remain; a `d2/smem-async` pin fails. |
+| [Native fp4 lacks TMA](nvfp4-qwen-performance/fp4-cell-no-tma.md) | The fp4 contraction accepts `d3/smem-async` but rejects `d2/smem-tma`. W4A16 emits TMA copies of packed weight bytes. |
+| [Computed f16 activation blocks weight TMA](nvfp4-qwen-performance/f16-computed-activation-no-tma.md) | A contraction over `x + 1` offers only no staging, `d1/smem` and `d2/smem`; the TMA pin fails unless the activation is cut out. |
 
 ## Exploration scope
 
@@ -160,10 +172,12 @@ experiments were promising; they do not establish a tuned baseline, expected spe
   swing by about 30%.
 - **L2-hot weights.** The device reports a 48 MB L2 cache. A single-matmul program reuses one weight across benchmark
   iterations, so a weight that fits in L2 stays there, and its time can beat DRAM bandwidth.
-- **Unresolved inline quantized comparison.** `emmy run --strict` was reported to fail across the tested schedules
-  of `-c … --quantize` programs: scalar, W4A16 and fp4, each with errors as large as the outputs. This suggests a
-  shared input or reference problem; it neither identifies the cause nor proves the kernels correct. Checkpoint
-  repros must validate their own reference path. Do not assume their `--strict` comparison is unusable.
+- **Inline quantized comparison has a mismatched reference.** The
+  [strict report](nvfp4-qwen-performance/strict-fails-for-inline-quantize-programs.md) traces two problems in
+  `-c … --quantize --bench --strict`: the worker can draw different eager weights from those quantized by the parent,
+  and strict validation compares the quantized graph against unquantized eager at 1e-3. Seeding reportedly reduces
+  the error but does not make these repros pass. The source confirms the reference problems, not that the kernels
+  are correct. Checkpoint-based validation was not examined and must be assessed separately.
 - **What a ✓ means.** Correctness below comes from the `--ab` output check. `emmy run --bench --ab KNOBS` compiles the
   program once more with `KNOBS` added and flags a wrong answer when that compile's outputs differ from the greedy
   compile's by more than 5% of the greedy output's largest value. Both compiles use the same `EMMY_KNOBS`. The greedy
