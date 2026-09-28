@@ -9,12 +9,13 @@ tile flavors of the (now demolished) tile IR.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from functools import cached_property
 
 from emmy.compiler.dtype import F32 as _F32
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Expr, Var
+from emmy.compiler.ir.expr import Expr, Literal, Var
 from emmy.compiler.ir.stmt.base import INDENT, RenderCtx, Stmt, _pad, pretty_body, render_body
 from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.leaves import NEXT_STEP, Accum, Carry
@@ -406,6 +407,10 @@ class StridedLoop(Stmt):
         else:
             out.append(f"{pad}for (int {var} = {start_str}; {var} < {_extent_c(self.axis, ctx)}; {var} += {step_str}) {{")
         inner = ctx.child()
+        if isinstance(self.start, Literal) and isinstance(self.step, Literal | int):
+            step = self.step.value if isinstance(self.step, Literal) else self.step
+            if isinstance(self.start.value, int) and isinstance(step, int) and (stride := math.gcd(self.start.value, step)):
+                inner.aligned[var] = stride
         out.extend(render_body(self.body, inner))
         out.append(f"{pad}}}")
         return out
