@@ -1950,7 +1950,7 @@ def load_quantized_split(
                         values = dequantize_packed_int4(
                             f.get_tensor(k).numpy(),
                             _sibling(qzeros_key).numpy(),
-                            _sibling(scales_key).numpy(),
+                            _sibling(scales_key).float().numpy(),  # numpy has no bfloat16
                             int(qc4.get("group_size", qc4.get("q_group_size", -1))),
                             layout=layout,
                         ).T
