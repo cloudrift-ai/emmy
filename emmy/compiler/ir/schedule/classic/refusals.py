@@ -90,29 +90,8 @@ def _reduction_domain(tile: TileOp, node) -> tuple[Reduce, ...]:
 def _contraction_reductions(tile: TileOp, node, facts: ContractionFacts) -> tuple[Reduce, ...]:
     """The per-cell tier's reductions of a contraction: the plain-reduction catalog, since a
     contraction is a monoid with a ⊗ lift and inherits the same serial-only exclusions with no
-    carve-out of its own; the serial fold alone over a symbolic contraction extent.
-
-    A chunked carrier also offers its key stream split across two groups of the CTA's warps
-    (``wg2``), which only a warp tile realizes (:func:`group_split_refusal`)."""
-    if not facts.k_axis.extent.is_static:
-        return (Reduce(),)
-    return (*_reduction_domain(tile, node), *((Reduce.of(groups=2),) if node.chunked() else ()))
-
-
-def group_split_refusal(tile, reduction: Reduce, key_extent) -> str | None:
-    """Why a tile cannot split its chunked fold across ``reduction.groups`` groups of its warps, or
-    ``None``. Each group is a full copy of the warp tile folding every ``groups``-th chunk of the
-    key stream against the shared query, and the groups merge through shared memory, so the tile
-    must be a warp tile and the stream a whole number of group steps (a ragged or symbolic stream
-    is not split)."""
-    if reduction.groups == 1:
-        return None
-    if not tile.is_warp:
-        return "a warp-group split needs a warp tile"
-    step = reduction.groups * tile.atom.atom_k * tile.bk
-    if not key_extent.is_static or key_extent.as_static() % step:
-        return f"a warp-group split needs a static key stream that is a multiple of {step}"
-    return None
+    carve-out of its own; the serial fold alone over a symbolic contraction extent."""
+    return _reduction_domain(tile, node) if facts.k_axis.extent.is_static else (Reduce(),)
 
 
 def _fragment_projection(tile: TileOp) -> tuple[list, frozenset[str]]:

@@ -86,7 +86,6 @@ class Level(enum.Enum):
     """One hardware level the reduce axis can be partitioned across, coarse→fine."""
 
     GRID = "grid"  # across CTAs (split-K) — realized by 030_cut, never the in-kernel walk
-    GROUP = "group"  # across warp groups within a CTA, each folding its own chunks, merged in smem
     BLOCK = "block"  # cooperative threads within a CTA (warp shuffle / smem tree)
     REG = "reg"  # ILP register-fold accumulators
     SERIAL = "serial"  # the per-thread serial remainder (never spelled — derived)
@@ -165,8 +164,6 @@ class ReduceStage:
           ``width`` required."""
         if self.level in (Level.SERIAL, Level.REG):
             return ()
-        if self.level is Level.GROUP:
-            return (FoldMove.SMEM,)
         if self.level is Level.GRID:
             return (FoldMove.ATOMIC,) if self.finalize == "atomic" else (FoldMove.KERNEL,)
         # BLOCK.
@@ -195,16 +192,15 @@ class Reduce:
         if not isinstance(self.stages, tuple) or any(not isinstance(stage, ReduceStage) for stage in self.stages):
             raise TypeError("Reduce stages must be a tuple of ReduceStage values")
         levels = tuple(stage.level for stage in self.stages)
-        canonical = tuple(level for level in (Level.GRID, Level.GROUP, Level.BLOCK, Level.REG) if level in levels)
+        canonical = tuple(level for level in (Level.GRID, Level.BLOCK, Level.REG) if level in levels)
         if levels != canonical or any(stage.width == 1 for stage in self.stages):
-            raise ValueError("Reduce stages must be unique, active, and ordered GRID -> GROUP -> BLOCK -> REG")
+            raise ValueError("Reduce stages must be unique, active, and ordered GRID -> BLOCK -> REG")
 
     @classmethod
     def of(
         cls,
         *,
         cta: int = 1,
-        groups: int = 1,
         coop: int = 1,
         reg: int = 1,
         finalize: str = "kernel",
@@ -212,10 +208,10 @@ class Reduce:
         columns: int = 1,
     ) -> Reduce:
         """Build a plan from per-level widths (1 = absent). Order is coarse→fine:
-        GRID (cta) → GROUP (groups) → BLOCK (coop) → REG (reg). ``finalize`` rides the GRID stage;
+        GRID (cta) → BLOCK (coop) → REG (reg). ``finalize`` rides the GRID stage;
         ``coop_transposed`` rides the BLOCK stage (the ``coop-t`` k-major lane swap)."""
-        if any(type(width) is not int or width < 1 for width in (cta, groups, coop, reg)):
-            raise ValueError(f"Reduce widths must be positive integers, got cta={cta!r}, groups={groups!r}, coop={coop!r}, reg={reg!r}")
+        if any(type(width) is not int or width < 1 for width in (cta, coop, reg)):
+            raise ValueError(f"Reduce widths must be positive integers, got cta={cta!r}, coop={coop!r}, reg={reg!r}")
         if finalize not in ("atomic", "kernel"):
             raise ValueError(f"Reduce finalize must be atomic or kernel, got {finalize!r}")
         if type(coop_transposed) is not bool:
@@ -227,8 +223,6 @@ class Reduce:
         stages: list[ReduceStage] = []
         if cta > 1:
             stages.append(ReduceStage(Level.GRID, cta, finalize=finalize))
-        if groups > 1:
-            stages.append(ReduceStage(Level.GROUP, groups))
         if coop > 1:
             stages.append(ReduceStage(Level.BLOCK, coop, transposed=coop_transposed, columns=columns))
         if reg > 1:
@@ -238,17 +232,14 @@ class Reduce:
     def spell(self) -> str:
         """The ``REDUCE`` codec value for this plan — the pipeline coarse→fine, SITE-LOCAL: the
         coop WIDTH lives in the kernel's ``WORK`` inventory, never here, so the value is
-        ``[g<n>[a|k]][/wg<n>][/coop[-t][/v<n>]][/r<n>]``. ``""`` for the scalar serial fold (the per-thread
+        ``[g<n>[a|k]][/coop[-t][/v<n>]][/r<n>]``. ``""`` for the scalar serial fold (the per-thread
         serial remainder is never spelled — it derives as ``ceil(extent / parallel)``). The GRID
         finalize letter IS kept: ``a``/``k`` is the atomic-vs-deferred finalize MODE, a site-local
         fact — ``g4a`` and ``g2k`` are semantically different rows, both live in the golden
-        corpus. ``wg<n>`` is a warp tile's fold split across ``n`` warp groups of the CTA — the
-        width is spelled here, since the ``WORK`` inventory names one group's warps."""
+        corpus."""
         parts: list[str] = []
         if self.cta > 1:
             parts.append(f"g{self.cta}{'a' if self.finalize == 'atomic' else 'k'}")
-        if self.groups > 1:
-            parts.append(f"wg{self.groups}")
         if self.coop > 1:
             parts.append("coop-t" if self.coop_transposed else "coop")
         if self.coop_columns > 1:
@@ -265,11 +256,9 @@ class Reduce:
         raises, so a width-carrying spelling (the retired ``b<n>`` embedded-worker grammar) is a
         loud error, not a silent second reading."""
         s = (spec or "").strip()
-        cta, groups, coop, reg, finalize, transposed, columns = 1, 1, 1, 1, "kernel", False, 1
+        cta, coop, reg, finalize, transposed, columns = 1, 1, 1, "kernel", False, 1
         for t in s.split("/") if s else ():
-            if t.startswith("wg"):  # the width rides the token: WORK names one group's warps
-                groups = _codec_width(t[2:], tok=t, codec="REDUCE")
-            elif t.startswith("g"):
+            if t.startswith("g"):
                 body = t[1:]
                 if body.endswith(("a", "k")):
                     finalize = "atomic" if body[-1] == "a" else "kernel"
@@ -286,11 +275,11 @@ class Reduce:
                     raise ValueError(f"REDUCE {spec!r}: 'v<n>' follows 'coop-t'")
                 columns = _codec_width(t[1:], tok=t, codec="REDUCE")
             else:
-                raise ValueError(f"REDUCE {spec!r}: unknown token {t!r} (expect g<n>[a|k] / wg<n> / coop[-t][/v<n>] / r<n>)")
+                raise ValueError(f"REDUCE {spec!r}: unknown token {t!r} (expect g<n>[a|k] / coop[-t][/v<n>] / r<n>)")
         return _canonical_choice(
             "REDUCE",
             spec,
-            cls.of(cta=cta, groups=groups, coop=coop, reg=reg, finalize=finalize, coop_transposed=transposed, columns=columns),
+            cls.of(cta=cta, coop=coop, reg=reg, finalize=finalize, coop_transposed=transposed, columns=columns),
         )
 
     @property
@@ -317,11 +306,6 @@ class Reduce:
     def coop(self) -> int:
         """The BLOCK (cooperative-thread) width, or 1 if no BLOCK stage."""
         return self._width(Level.BLOCK)
-
-    @property
-    def groups(self) -> int:
-        """The GROUP width — warp groups of one CTA splitting a warp tile's fold — or 1."""
-        return self._width(Level.GROUP)
 
     @property
     def cta(self) -> int:
