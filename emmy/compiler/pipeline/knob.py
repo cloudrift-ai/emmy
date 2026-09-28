@@ -461,10 +461,17 @@ def apply_knobs_env(raw: str | None = None) -> dict[str, str]:
 #: share every site key; the token in the piece's kernel name is what tells them apart.
 KERNEL_SCOPE = "place_"
 
+#: The scope prefix of a NODE pin, ``FAMILY@node_<id>``: the kernel pin of the kernel whose graph node is
+#: ``<id>`` — the uncut remainder of a route, which carries no ``__place_`` token — and of its split's
+#: partial (``<id>__partial``) and finalize. A cut piece's own node never matches, so the root's pin stays
+#: off every piece.
+NODE_SCOPE = "node_"
+
 
 def kernel_scoped(key: str) -> bool:
-    """Whether ``key`` is a kernel pin (:data:`KERNEL_SCOPE`) rather than a site-scoped or bare one."""
-    return (axis_of(key) or "").startswith(KERNEL_SCOPE)
+    """Whether ``key`` is a kernel pin (:data:`KERNEL_SCOPE`, :data:`NODE_SCOPE`) rather than a site-scoped
+    or bare one."""
+    return (axis_of(key) or "").startswith((KERNEL_SCOPE, NODE_SCOPE))
 
 
 def kernel_pin(family: str, *names: str) -> str | None:
@@ -485,7 +492,13 @@ def reaches(key: str, kernel: str) -> bool:
     """Whether the kernel pin ``key`` names the kernel (or graph node) called ``kernel``."""
     import re  # noqa: PLC0415
 
-    return re.search(rf"__{re.escape(axis_of(key) or '')}(_|$)", kernel) is not None
+    scope = axis_of(key) or ""
+    if scope.startswith(NODE_SCOPE):
+        # A graph node id, or the kernel name ``k_<id>`` lowering gives it; its split partial too.
+        node = scope[len(NODE_SCOPE) :]
+        name = kernel.lower().removeprefix("k_")
+        return name in (node, f"{node}__partial")
+    return re.search(rf"__{re.escape(scope)}(_|$)", kernel) is not None
 
 
 def family_pins(family: str, *, kernels: bool = False) -> tuple[tuple[str, str], ...]:

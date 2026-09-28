@@ -756,6 +756,24 @@ def test_the_most_specific_kernel_pin_wins(monkeypatch):
     assert pin_row("", "add_7__place_ab12_0__partial", split_consumed=True) == {"REDUCE": "coop-t"}
 
 
+def test_a_node_pin_reaches_the_uncut_root_and_its_split(monkeypatch):
+    """``REDUCE@node_<id>`` pins the kernel whose graph node is ``<id>`` — the uncut remainder of a route,
+    which has no ``__place_`` token — and its split's partial and finalize, never a cut piece; a pin on
+    the partial beats it there."""
+    from importlib import import_module
+
+    pin_row = import_module("emmy.compiler.pipeline.passes.tile.schedule.040_schedule").pin_row
+    monkeypatch.setenv("EMMY_REDUCE@node_add_7", "g16k")
+    monkeypatch.setenv("EMMY_REDUCE@node_add_7__partial", "coop-t/v2")
+    assert knob_mod.kernel_pin("REDUCE", "k_sdpa_x_7e7a8a", "add_7") == "g16k"
+    assert knob_mod.kernel_pin("REDUCE", "", "add_7__partial") == "coop-t/v2"
+    assert knob_mod.kernel_pin("REDUCE", "k_add_7__partial") == "coop-t/v2", "the partial's kernel name"
+    assert knob_mod.kernel_pin("REDUCE", "k_add_7__place_ab12", "add_7__place_ab12_0") is None, "a cut piece"
+    assert knob_mod.kernel_pin("REDUCE", "k_add_70", "add_70") is None
+    assert knob_mod.family_pins("REDUCE") == ()
+    assert pin_row("", "add_7__partial", split_consumed=True) == {"REDUCE": "coop-t/v2"}
+
+
 def test_a_kernel_pin_is_checked_as_its_family():
     """A kernel pin is checked against the kernels it names; given no names, against every kernel, as a bare pin."""
     from emmy.compiler.pipeline.search.pins import unreproducible_pin_flag
