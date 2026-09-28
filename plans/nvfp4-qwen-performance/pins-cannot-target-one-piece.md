@@ -1,10 +1,11 @@
-# Global pins interfere across cut pieces; attention compilation is slow
+# Hand pins cannot select a cut piece’s WORK; attention compilation is slow
 
 ## Summary
 
 A pin fixes a compiler choice. After a cut splits a fused kernel into pieces, global pins can make their schedules
-conflict: a thread-layout pin helps an output writer but removes tensor-core schedules from its matmuls. Existing site-scoped pins may already solve this;
-that has not been tested. Separately, the attention kernel takes minutes to compile without pins, although the
+conflict: a thread-layout pin helps an output writer but removes tensor-core schedules from its matmuls. A CPU-only
+follow-up confirms that existing site-scoped pins do not select the writer’s `WORK`: that choice is kernel-level and
+read only under the bare key. Separately, the attention kernel takes minutes to compile without pins, although the
 recorded concurrent runs do not isolate where that time goes.
 
 ## Observed and desired Tile IR
@@ -51,14 +52,15 @@ Its arithmetic is unchanged and omitted here:
 ```
 
 The global `WORK=t128` attempt instead removes tensor-core schedules from the projection pieces, as described below.
-Whether existing site-scoped pins can produce the composed combination remains unverified.
+The follow-up below establishes why existing site-scoped `WORK` pins do not produce this combination.
 
 ## Observed details
 
 1. **A global schedule pin affects pieces it was not intended for.** After the cut pass splits a fused kernel into
    pieces, each piece forks over its own schedule: TILE, STAGE, WORK and REDUCE. A pin without a site (`TILE=…`,
-   `WORK=…`) applies to every piece. A site-scoped pin (`KNOB@<site>=…`) names a node inside a Fold tree; there is no
-   explicit piece selector. Whether existing site-scoped pins can distinguish the pieces below has not been tested.
+   `WORK=…`) is published to every piece. Node-scoped TILE/REDUCE/STAGE keys address sites inside each piece’s
+   Fold tree; WORK has no node scope, and none of these keys includes a piece selector. Global publication is intended
+   behavior; the missing capability is restricting a hand pin to the desired piece.
    Two examples from `Inferact/Qwen3.8-27B-NVFP4` layer 3 at 16 tokens, both after the full-projection cut:
    - **o_proj + residual + RMSNorm + encode** (`k_linear_mean_reduce_fd2717`). The residual-add piece that writes the
      kernel's output (`…__place_a7de42f3e4`) is offered thread layouts `WORK=t4` to `t512`. With the empty layout it
@@ -74,7 +76,8 @@ Whether existing site-scoped pins can produce the composed combination remains u
 
    Goldens can hold per-piece rows: a child-identity schedule receipt (`GLOSSARY.md`) decorates exactly one kernel of
    a set, and `emmy run --record-greedy` or `--pin-route` records it. The missing result is a demonstrated hand-pin
-   recipe that combines the desired schedules without affecting unrelated pieces.
+   recipe that combines the desired schedules without affecting unrelated pieces. The tested WORK scopes do not
+   provide it; this does not invalidate the existing per-piece golden mechanism.
 2. **The unpinned tile compile of the attention kernel takes about 12 minutes.**
    - `emmy compile --golden … --realization k_sdpa_linear_mean_reduce_c6c239 --ir tile` took 714–717 s at 16 tokens,
      and 742 s at 512. These ran 4 compiles in parallel on the same machine.
@@ -84,13 +87,38 @@ Whether existing site-scoped pins can produce the composed combination remains u
      shared the machine, and no pass profile was collected. `-v` prints only the total ("compile: total 714.29s
      (deterministic resolve)").
 
-## Review remark: test site-scoped pins before adding syntax
+## CPU-only follow-up: the WORK scope is missing
 
-The examples establish interference from global pins, not the impossibility of targeting one piece. First inspect the
-schedule sites of the cut pieces and try the existing `KNOB@<site>=value` form. If it works, document and test that
-recipe; new syntax is unnecessary. If sites collide or are rebound so that the requested schedules cannot coexist,
-retain a minimal reproducer of that failure before proposing piece-targeting syntax. This targeting question is
-separate from the unexplained compile time.
+At `a98fd4f8`, the actual layer-3 o_proj graph was cut with `OPROJ_CUT`, using `--passes tp`. Its residual writer
+`…__place_a7de42f3e4` has no TILE or REDUCE sites. Its kernel WORK catalog includes the empty layout and `t4` through
+`t512`. Inspecting `ClassicProblem.kernel_site` for that piece and the projection `…__place_6abfbbaa03` gives:
+
+| Supplied row | Residual writer's WORK choices | Projection's WORK choices |
+| --- | --- | --- |
+| No WORK pin | Empty or thread layouts | Empty, thread or warp layouts |
+| `WORK=t128` | Only `t128` | Only `t128` |
+| `WORK@n0=t128` | Same as no pin | Same as no pin |
+| `WORK@<piece-name>=t128` | Same as no pin | Same as no pin |
+
+This follows directly from `ClassicKernelSite._works` in `emmy/compiler/ir/schedule/classic/sites.py`: it reads
+`row.get("WORK")`. The schedule codec also emits only bare WORK. The four projection pieces each expose their sole
+contraction under the same bare TILE key; node sites are local to a piece, not identifiers for pieces.
+
+A fresh CLI compile with `OPROJ_CUT,WORK@k_linear_mean_reduce_fd2717__place_a7de42f3e4=t128`, `--passes tph` and
+`--ir tile` completes but leaves the writer unchanged. Actual emitted Tile IR:
+
+```text
+=== 4: k_linear_mean_reduce_fd2717__place_a7de42f3e4 ===
+    place  free=(a0)  grid=(a0)
+    Fold  free
+    …
+    outputs
+    └─ sweep(a3) add_8[0, a0, a3] = v31__ws6abfbbaa03
+```
+
+There is still no `work` line. The neighboring projection retains an fp4 tensor-core TILE, but the requested writer
+layout was not selected. This establishes a hand-targeting gap for WORK without assuming a new syntax is the right
+fix. The attention TILE-targeting example was not separately exhausted, and the compile-time cause remains unverified.
 
 ## Reproduce
 
@@ -110,6 +138,11 @@ EMMY_KNOBS="$OPROJ_CUT" ./venv/bin/emmy run --golden /tmp/l3_s16.golden.json --r
 EMMY_KNOBS="$OPROJ_CUT,WORK=t128" ./venv/bin/emmy compile --golden /tmp/l3_s16.golden.json --realization k_linear_mean_reduce_fd2717 --ir tile
 #   every piece prints `work t128`; the o_proj pieces carry TILE=f1 or none instead of mma_m16n8k64_e2m1_f32/…
 
+# 1a follow-up: a piece name is not a supported WORK scope; the writer remains serial.
+EMMY_KNOBS="$OPROJ_CUT,WORK@k_linear_mean_reduce_fd2717__place_a7de42f3e4=t128" \
+  ./venv/bin/emmy compile --golden /tmp/l3_s16.golden.json --realization k_linear_mean_reduce_fd2717 \
+  --target sm_120 --passes tph --ir tile
+
 # 1b. Related RMSNorm + encode writer with WORK=t128 (not a timing guarantee for o_proj):
 EMMY_KNOBS='PLACE@map.1/map.2/reduce.3/map.1/reduce=cut,PLACE@map.1/map.2/reduce=cut,PLACE@map.2/map.2/reduce=cut,WORK=t128' \
   ./venv/bin/emmy run --golden /tmp/l3_s16.golden.json --realization k_mean_01c219 --bench --no-record-evidence
@@ -123,7 +156,7 @@ each kernel's Loop IR as one JSON line, and its `"name"` fields list the current
 
 ## Fix criteria
 
-1. **Targeted hand pins.** A documented and tested recipe, using existing site pins if sufficient, gives every o_proj
+1. **Targeted hand pins.** A documented and tested way to restrict a pin to a piece gives every o_proj
    piece an fp4-cell TILE and gives the residual-add piece `WORK=t128` in one compile of `k_linear_mean_reduce_fd2717`
    under `OPROJ_CUT`:
    - Tile IR shows `work t128` on the residual-add piece and an `mma_m16n8k64_e2m1_f32/…` TILE on the o_proj pieces.

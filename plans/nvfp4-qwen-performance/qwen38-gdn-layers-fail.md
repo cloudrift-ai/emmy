@@ -143,9 +143,12 @@ kernel's Loop IR as one JSON line; its `"name"` fields list the current names.
 
 - **Failure 1:** `transformers`' `torch_chunk_gated_delta_rule` (`modeling_qwen3_5.py`, lines 270–275) pads to the
   chunk size, and emmy's `aten.pad` lowering accepts only zero-width padding.
-- **Failure 3, suspected:** the name-rewrite of `FragmentRepack` in `emmy/compiler/ir/kernel/ir.py` (around lines
-  3218–3228) rebuilds the node without its `role`. A one-source B repack therefore renders as role A and trips the
-  two-source assert. The Kernel IR shows `FragmentRepack _rf[203] <- ('_rf[61]',)` printed without `role=b`.
+- **Failure 3, rewrite defect confirmed in isolation:** the name-rewrite of `FragmentRepack` in
+  `emmy/compiler/ir/kernel/ir.py` rebuilds the node without its `role`. A CPU-only probe at `a98fd4f8` renders a
+  one-source B repack successfully, then renames it through the existing rewrite and gets the two-source assertion.
+  The saved failing Kernel IR has the same malformed form: `FragmentRepack _rf[203] <- ('_rf[61]',)` without
+  `role=b`. The exact passage of that checkpoint node through the rewrite remains untraced; fixing this defect has
+  not yet been shown to make the whole GDN kernel compile.
 - **Failure 4, suspected:** the trailing-run rule that places output sweeps (`_sweep_start` in
   `emmy/compiler/ir/tile/ir.py`) nests sibling sweeps. `promoted_sweep` does not promote any of them to the grid,
   because no axis is shared by every store.
@@ -153,6 +156,28 @@ kernel's Loop IR as one JSON line; its `"name"` fields list the current names.
   tier because operand 0 is the K×N weight, whose gmem index moves 10,240 elements per contraction column, where the
   fragment loaders need K contiguous. It returns this reason for the contraction: "warp TILE: A fragment loaders read
   16 contraction columns CONTIGUOUSLY, but this operand's gmem index moves 10240 elements per column".
+
+The isolated repack check needs no GPU:
+
+```python
+from emmy.compiler.ir.kernel.ir import FragmentRepack, RenderCtx
+from emmy.compiler.ir.stmt.passes import rewrite
+
+before = FragmentRepack(frag="b", srcs=("c",), role="b")
+after = rewrite(before, lambda name: "renamed_" + name)
+print(before.pretty()[0])
+print(after.pretty()[0])
+before.render(RenderCtx())  # succeeds
+assert after.role == "a"   # the rewrite lost role="b"
+after.render(RenderCtx())   # AssertionError: the A form requires two sources
+```
+
+Actual Kernel IR printed by this probe:
+
+```text
+FragmentRepack b <- ('c',) (f16, m16n8k16, part=0, role=b)
+FragmentRepack renamed_b <- ('renamed_c',) (f16, m16n8k16, part=0)
+```
 
 ## Compare: what shipped recipes do
 

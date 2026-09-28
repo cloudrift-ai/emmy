@@ -25,9 +25,9 @@ The overview is ordered by expected importance for Qwen3.8 NVFP4 serving at pari
 investigation and implementation effort also considered. This is a provisional assessment, not a measured comparison
 with vLLM or an implementation sequence. DeltaNet blocks native serving; duplicate projections and repeated
 attention/encode work directly threaten runtime performance. Their fixes may span lowering and scheduling. Pin
-interference follows because it obstructs combining the explored schedules, but checking existing site-scoped pins
-may resolve part of it cheaply. The inline strict mismatch appears more localized, but its impact on checkpoint
-validation is unestablished. Packed-cut staging may reuse existing transport support; native fp4 TMA needs a new
+interference follows because it obstructs combining the explored schedules; the follow-up confirms that existing
+site scopes do not select a piece’s WORK. The inline strict mismatch appears more localized, but its impact on
+checkpoint validation is unestablished. Packed-cut staging may reuse existing transport support; native fp4 TMA needs a new
 staging path and has no demonstrated gain over cp.async here. The computed-f16 TMA gap has a cut workaround and is
 less directly tied to the W4A4 target. Effort and relative importance may change as the causes are established.
 
@@ -36,11 +36,30 @@ less directly tied to the W4A4 target. Effort and relative importance may change
 | [DeltaNet compilation and scheduling failures](nvfp4-qwen-performance/qwen38-gdn-layers-fail.md) | In gated DeltaNet (GDN) layers, padding and serving capture raise errors; a one-source `FragmentRepack` crashes CUDA rendering; sibling Tile IR sweeps become nested CUDA loops; input projections lack tensor-core TILEs. |
 | [Encode cuts duplicate projections](nvfp4-qwen-performance/fp4-encode-recomputes-producer.md) | Separate Tile IR pieces repeat full-K contractions over the same weights—gate/up three times and o_proj four times. Some copies use identical layouts. |
 | [Attention and encode repeat work](nvfp4-qwen-performance/qwen38-attention-not-flash-and-encode-shape.md) | The normal Qwen cut path misses a softmax rewrite. Q/K cuts plus another rewrite expose partial carriers but emit scalar code with only 16 active consumer threads. The original P·V pieces repeat `exp`/division; encode repeats each group’s maximum eight times. |
-| [Global pin interference and slow compilation](nvfp4-qwen-performance/pins-cannot-target-one-piece.md) | A global `WORK=t128` pin removes tensor-core TILEs from neighboring matmul pieces. Unpinned Tile IR compilation takes about 12 minutes in concurrent runs. Site-scoped targeting is untested; the expensive pass is not identified. |
+| [Global pin interference and slow compilation](nvfp4-qwen-performance/pins-cannot-target-one-piece.md) | A global `WORK=t128` pin removes tensor-core TILEs from neighboring matmul pieces. Unpinned Tile IR compilation takes about 12 minutes in concurrent runs. Scoped WORK keys leave the writer serial; WORK is read only as a bare key. The expensive pass is not identified. |
 | [Inline quantized strict comparison uses a mismatched reference](nvfp4-qwen-performance/strict-fails-for-inline-quantize-programs.md) | Unseeded inline benchmarks bind Emmy’s packed weights from the parent checkpoint but rebuild eager’s weights in the worker. Strict comparison still uses unquantized eager at 1e-3; reported seeded runs also fail. |
 | [Packed cut pieces lose staging](nvfp4-qwen-performance/packed-cut-piece-operand-order.md) | Tile IR puts the decoded weight before the computed activation. Only no staging and `d1/smem` remain; a `d2/smem-async` pin fails. |
 | [Native fp4 lacks TMA](nvfp4-qwen-performance/fp4-cell-no-tma.md) | The fp4 contraction accepts `d3/smem-async` but rejects `d2/smem-tma`. W4A16 emits TMA copies of packed weight bytes. |
 | [Computed f16 activation blocks weight TMA](nvfp4-qwen-performance/f16-computed-activation-no-tma.md) | A contraction over `x + 1` offers only no staging, `d1/smem` and `d2/smem`; the TMA pin fails unless the activation is cut out. |
+
+### Follow-up checks and boundaries
+
+The quick CPU-only follow-up confirms two localized defects: WORK cannot be hand-pinned to the desired cut piece
+through existing site scopes, and renaming a one-source B `FragmentRepack` drops its role and breaks rendering.
+The pin report includes a fresh Qwen Tile IR excerpt; the GDN report includes the isolated repack reproducer. This
+neither identifies the slow compile’s cause nor proves that preserving the repack role fixes all GDN compilation.
+
+The three staging symptoms reach different mechanisms. Native W4A4 explicitly rejects TMA in its block-scaled stage;
+computed-f16 activations enter the compute-fill path without a TMA offer for stored weights; weight-first cut pieces
+fail to match the existing packed-weight staging path. They share staging infrastructure, but no common root cause
+has been established. The inline strict problem instead concerns parent/worker weight binding and reference choice;
+it is independent of schedule-pin scope.
+
+[PR #882](https://github.com/cloudrift-ai/emmy/pull/882) and
+[PR #880](https://github.com/cloudrift-ai/emmy/pull/880) are already in the investigated main revision. Ten focused
+CPU-only regressions pass: multi-channel W4A16 copy staging, packed sibling-reduction merging, and the multi-channel
+W4A4 cp.async offer remain supported. The reports describe gaps beyond those fixes, not their absence. No new GPU
+execution or performance measurement was needed for these checks.
 
 ## Exploration scope
 
@@ -92,8 +111,8 @@ validate this NVFP4 checkpoint on sm_120 with emmy's own kernels.
      no serving program yet".
    - **A CUDA render crash at 512 tokens.** `k_matmul_reduce_81b2ae` hits `assert len(self.srcs) == 2` in
      `FragmentRepack.render` (`emmy/compiler/ir/kernel/ir.py`). Kernel IR shows a one-source repack without `role=b`.
-     Suspected cause: the `_rewrite_kind` overload rebuilds the node without preserving its role. The causal link
-     remains to be confirmed.
+     A CPU-only probe confirms that `_rewrite_kind` drops the B role and creates this assertion failure. The exact
+     checkpoint node’s path through the rewrite and complete-kernel recovery remain unverified.
    - **A runaway serial loop.** The input-projection kernel's last piece, the one that stores its outputs,
      nests three sibling output sweeps into one serial loop nest, about 1.3×10¹⁷ iterations on one thread.
    - **The 16-bit input projections stay on the scalar tier.** The unquantized projections and convolution together
@@ -131,8 +150,8 @@ validate this NVFP4 checkpoint on sm_120 with emmy's own kernels.
    - P·V is a reduce over keys with one 128-thread block per output element, recomputing `exp(score − max)/sum` per
      head-dim column. Four pieces compute it: 111–149 µs each for the two that run as reduces.
 5. **Global hand pins interfere across pieces.** After a cut, each piece forks over its own schedule. A global pin
-   meant for one piece lands on its siblings too. Existing site-scoped pins have not been tested for these cases, so
-   the claim that targeting is impossible remains unproven. Two examples:
+   meant for one piece lands on its siblings too. Existing site scopes do not solve the WORK example: WORK is
+   kernel-level and read only under its bare key. Two examples:
    - The o_proj kernel's residual-add piece is offered `WORK=t4` to `t512`, but it runs 361.5 µs on one thread per row
      under the empty layout. A `WORK=t128` pin would spread it, as it does in the RMSNorm + encode kernel
      (362 → 5.1 µs).
@@ -140,8 +159,9 @@ validate this NVFP4 checkpoint on sm_120 with emmy's own kernels.
    - An fp4 TILE pin leaves the QK score piece on the scalar tier at 242 µs. The greedy pick puts it on a 16-bit tile
      at 37 µs.
 
-   Goldens can hold per-piece rows (child-identity schedule receipts, `GLOSSARY.md`). Whether existing site-scoped
-   hand pins can express the needed combination has not been tested.
+   Goldens can hold per-piece rows (child-identity schedule receipts, `GLOSSARY.md`). A fresh CPU-only compile with
+   WORK scoped to the writer’s piece name leaves its output sweep serial. Attention TILE targeting remains a
+   separate, unexhausted question.
 
    Also: the unpinned tile compile of the Qwen3.8 attention kernel takes about 12 minutes (717 s, with 4 compiles
    sharing the machine). With the cut it takes 71.5 s, and with the cut plus an fp4 TILE pin 13.7 s.
@@ -186,7 +206,7 @@ experiments were promising; they do not establish a tuned baseline, expected spe
   the scalar tier, so they compare the fp4 cell against scalar code. These are relative comparisons, not independent
   proofs of correctness. A run that says "wrong-answer reference unusable" has not passed a correctness check.
 - **Global pins reach every kernel.** The experiments did not combine the best knobs of each piece (blocker 5).
-  Whether existing site-scoped pins suffice has not been established.
+  The CPU follow-up confirms that site-scoped WORK does not select the desired writer layout.
 
 ### Qwen3-8B: exploratory timings
 
