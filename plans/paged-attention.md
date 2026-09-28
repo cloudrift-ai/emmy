@@ -1,9 +1,11 @@
 # Full paged attention
 
-Status: proposed, 2026-09-26. Builds on PR #871, which made paging a property of a buffer: a graph hint names the
-buffer, the axis and the page size, every read and write resolves its page before its offset, the runtime binds the
-page table as an operand and owns pages that span a buffer's declared shape, and the native Qwen3 path serves one
-request at a time over such a cache. This plan takes that to many concurrent requests at a cost close to the unpaged
+Status: proposed 2026-09-26, revised 2026-09-27. Builds on PR #871, which made paging a property of a buffer: a
+graph hint names the buffer, the axis and the page size, every read and write resolves its page before its offset,
+the runtime binds the page table as an operand and owns pages that span a buffer's declared shape, and the native
+Qwen3 path serves one request at a time over such a cache, every kernel it runs compiled from a traced module and
+the token selected on the host. Its prompt is consumed in fixed-width chunks through a second program that borrows
+the decode program's page tables. This plan takes that to many concurrent requests at a cost close to the unpaged
 kernels. It adds no IR and no fusion gate: paging stays on the buffer, kernel boundaries stay with the cut evidence.
 
 ## Objective
@@ -20,8 +22,8 @@ vLLM benchmark client, not claimed.
 | addressing | per-element page lookup in `Load`/`Write`; `start` shifts a chunk write | per-tile lookup when the page divides the KV tile |
 | kernel forms | scalar and warp-tile attention page; `mma` and TMA staging refuse a paged operand | tensor-core attention over pages |
 | runtime | one table per paged buffer; pages spanning the declared shape at load, or a host-bound table | allocator with a free list, per-request page sets, reference counts |
-| native path | one request, one token per step, sequential prefill, page size fixed at export | batch of requests, chunked prefill, admission and scheduling |
-| evidence | V100 rows for the three fragments; the 4080 rows unpaged | paged attention rows per card; a corpus case per form |
+| native path | one request; prefill in fixed-width chunks (16 rows) sharing the decode cache's page tables; the token selected on the host; page size fixed at export | batch of requests, admission and scheduling, a chunk width that follows the prompt |
+| evidence | V100 rows for the one-row fragments; the 4080 rows unpaged; no rows for the 16-row chunk fragments | paged attention rows per card at every width; a corpus case per form |
 
 ## Design
 
@@ -49,8 +51,10 @@ the pages and bumps their counts, a miss allocates. Eviction is least recently u
 **Scheduler.** In `emmy-server`: admission up to the pool's capacity, decode steps over every active request in one
 launch of the batched fragments, new requests joining at step boundaries, and prefill in chunks of a fixed token
 budget through the compiled attention program at `q_len` = chunk, `kv_len` = position, writing each chunk at its
-`start`. Sampling stays per row on the GPU. The fragments compile at the serving widths (M = 1, 8, 16, 32) the export
-declares, and the step picks the smallest width that fits the batch; a wider batch waits.
+`start`. The token is selected on the host today, one vocabulary download per step; a batch downloads one row of
+logits per request, which is fine at eight rows and is the point to move argmax back onto the device as a compiled
+reduction when it is not. The fragments compile at the serving widths (M = 1, 8, 16, 32) the export declares, and
+the step picks the smallest width that fits the batch; a wider batch waits.
 
 ## Milestones
 
@@ -66,8 +70,10 @@ declares, and the step picks the smallest width that fits the batch; a wider bat
 3. **Batched block table.** The second table axis in the hint, the memory protocol and the runtime; fragments at the
    serving widths; the server's decode loop over a batch. Gate: output tokens per second at concurrency 8 against
    concurrency 1 with the vLLM benchmark client, and per-request logits equal to the single-request path.
-4. **Chunked prefill.** Replace the sequential prefill with the `q_len`/`kv_len` attention program over the cache.
-   Gate: time to first token for a 1,024-token prompt on the 4080 from about 7 s to under one second.
+4. **Chunked prefill at width.** The fixed 16-row chunk exists; it needs recorded rows for its fragments on each
+   card (a strict export refuses it today) and a width that follows the prompt through `q_len` rather than a
+   static row count, so a long prompt is not 64 launches of 16. Gate: time to first token for a 1,024-token prompt
+   on the 4080 under one second.
 5. **Prefix reuse.** The hash chain and eviction. Gate: a repeated system prompt skips its prefill, measured as time
    to first token; reference counts hold under concurrent requests.
 6. **Tensor-core forms.** `mma` attention staging rows from pages with `cp.async`; TMA stays refused. Gate: the flash
@@ -92,5 +98,8 @@ Milestones 1 and 2 are independent and can run in parallel; 3 needs both; 4 and 
   the paged-cache experiment is the template.
 - One graph per symbol environment: batch widths and chunk sizes multiply the graphs; lengths must be inputs, not
   symbols, or every request shape captures its own graph.
-- Sequential prefill dominates time to first token until milestone 4 lands; a serving comparison before it measures
-  that, not paging.
+- Sixteen-row prefill dominates time to first token until milestone 4 lands; a serving comparison before it
+  measures that, not paging.
+- The tracer records `permute` as a plain reshape, which is right only where the permute is a memory no-op. Every
+  multi-row module here uses `transpose`; a batched fragment that permutes a batch axis must too, until the tracer
+  is fixed, and a one-row test cannot catch the mistake.

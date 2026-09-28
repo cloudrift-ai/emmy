@@ -170,10 +170,9 @@ class ExecutionPlan:
     kernels: dict[str, KernelSpec]
     weights: dict[str, WeightSpec] = field(default_factory=dict)
     # Buffers that are a table of equal-sized pages rather than one allocation:
-    # ``name -> (axis, page_size, start)``. The runtime reaches them through the page table
-    # bound under ``<name>__pages``; ``start`` names the runtime arg that makes a write's
-    # coordinate absolute. Empty for every ordinary program.
-    paged: dict[str, tuple[int, int, str | None]] = field(default_factory=dict)
+    # ``name -> (axis, page_size)``. The runtime reaches them through the page table bound
+    # under ``<name>__pages``. Empty for every ordinary program.
+    paged: dict[str, tuple[int, int]] = field(default_factory=dict)
     symbolic_bindings: dict[str, tuple[str, int]] = field(default_factory=dict)
     symbolic_hints: dict[str, int] = field(default_factory=dict)
     symbolic_caps: dict[str, int] = field(default_factory=dict)
@@ -292,7 +291,7 @@ def plan_from_graph(graph: Graph) -> ExecutionPlan:
         weights=weights,
         # The paging declaration rides the plan so the runtime knows which buffers have no
         # slab; lowering already renamed their launch args to the table.
-        paged={n: (axis, page, start) for n, axis, page, start in graph.hints.get("cuda.paged_buffers", ())},
+        paged={n: (axis, page) for n, axis, page, _ in graph.hints.get("cuda.paged_buffers", ())},
         symbolic_bindings=graph.symbolic_bindings(),
         symbolic_hints=graph.symbolic_hints(),
         symbolic_caps={},
@@ -473,10 +472,9 @@ def _dim_from_json(v) -> Dim:
 # ---------------------------------------------------------------------------
 
 
-def _paged_to_json(paged: dict[str, tuple[int, int, str | None]]) -> dict:
-    """Serialize the paging declaration: which axis a buffer is cut along, the page size, and the
-    runtime symbol that makes a write's coordinate absolute."""
-    return {n: {"axis": axis, "page": page, **({"start": start} if start else {})} for n, (axis, page, start) in paged.items()}
+def _paged_to_json(paged: dict[str, tuple[int, int]]) -> dict:
+    """Serialize the paging declaration: which axis a buffer is cut along and the page size."""
+    return {n: {"axis": axis, "page": page} for n, (axis, page) in paged.items()}
 
 
 def plan_to_dict(plan: ExecutionPlan) -> dict:
@@ -564,7 +562,7 @@ def plan_from_dict(d: dict) -> ExecutionPlan:
             f"plan format {fmt!r} unsupported (runtime speaks {PLAN_FORMAT_VERSION}, {PLAN_FORMAT_INDIRECT}, and {PLAN_FORMAT_GENERATED})"
         )
     symbols = d.get("symbols", {})
-    paged = {n: (p["axis"], p["page"], p.get("start")) for n, p in d.get("paged", {}).items()}
+    paged = {n: (p["axis"], p["page"]) for n, p in d.get("paged", {}).items()}
     return ExecutionPlan(
         paged=paged,
         backend=d["backend"],

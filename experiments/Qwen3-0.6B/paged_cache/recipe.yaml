@@ -8,7 +8,9 @@
 # The schedules come from `golden/v100_sm70.json`, recorded on this card by `emmy run --golden
 # --record-greedy --strict` under the 4080 experiment's cuts (native_manual_schedules): every fork is
 # decided by a measured row, so the export runs under --strict-evidence with no other evidence in
-# scope and an empty tuning database.
+# scope and an empty tuning database. The golden holds rows for the one-row fragments only, so the
+# prompt is consumed one token per step (--prefill-size 1); the chunked prefill's fragments have no
+# rows on this card yet.
 command:
   stage: [emmy, pyproject.toml, Cargo.toml, Cargo.lock, crates, experiments/Qwen3-0.6B/paged_cache/golden]
   run: |
@@ -26,7 +28,7 @@ command:
     ./venv/bin/emmy generate $hf_model \
       --export-native $task_dir/pack \
       --context-length $context_length \
-      --page-tokens $page_tokens \
+      --page-tokens $page_tokens --prefill-size 1 \
       --golden $$golden --strict-evidence \
       2>&1 | tee $task_dir/export.log
     ./venv/bin/emmy generate $hf_model \
@@ -48,8 +50,8 @@ command:
     # The same pack shape served over HTTP: prepare with the same page size and golden, then one
     # chat request and one streamed completion through the Rust server.
     ./venv/bin/emmy serve $hf_model --runner generate --native --golden $$golden --strict-evidence \
-      --max-model-len $context_length --page-tokens $page_tokens --host 127.0.0.1 --port $port \
-      > $task_dir/serve.log 2>&1 &
+      --max-model-len $context_length --page-tokens $page_tokens --prefill-size 1 \
+      --host 127.0.0.1 --port $port > $task_dir/serve.log 2>&1 &
     server=$$!
     trap 'kill -INT $$server 2>/dev/null || true; wait $$server 2>/dev/null || true' EXIT
     for attempt in $$(seq 1 300); do

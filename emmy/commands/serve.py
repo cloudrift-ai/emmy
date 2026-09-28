@@ -164,15 +164,16 @@ def _spec_query_len(vllm_args: list[str]) -> int:
     return int(cfg.get("num_speculative_tokens", 0) or 0) + 1
 
 
-def _local_config(model: str, vllm_args: list[str]):
-    """The checkpoint's HF config, read LOCALLY (``local_files_only``) so command construction
-    stays hermetic — offline test doubles and uncached models resolve to ``None`` in
-    milliseconds. ``--trust-remote-code`` / ``--revision`` forward so custom-code checkpoints
-    still probe. Every caller treats a ``None`` as "no special case"."""
+def _hf_config(model: str, vllm_args: list[str], *, local: bool = True):
+    """The checkpoint's HF config. Read LOCALLY by default (``local_files_only``) so command
+    construction stays hermetic — offline test doubles and uncached models resolve to ``None``
+    in milliseconds; ``local=False`` fetches it from the hub, what vLLM itself reads at boot to
+    resolve its runner. ``--trust-remote-code`` / ``--revision`` forward so custom-code
+    checkpoints still probe. Every caller treats a ``None`` as "no special case"."""
     try:
         from transformers import AutoConfig  # noqa: PLC0415
 
-        kwargs = {"local_files_only": True}
+        kwargs = {"local_files_only": True} if local else {}
         if _has_flag(vllm_args, "--trust-remote-code"):
             kwargs["trust_remote_code"] = True
         revision = _flag_value(vllm_args, "--revision", "")
@@ -183,30 +184,13 @@ def _local_config(model: str, vllm_args: list[str]):
         return None
 
 
-def _remote_config(model: str, vllm_args: list[str]):
-    """The same config fetched from the hub when the cache holds nothing: what vLLM itself reads
-    at boot to resolve its runner. ``None`` when the checkpoint cannot be reached."""
-    try:
-        from transformers import AutoConfig  # noqa: PLC0415
-
-        kwargs = {}
-        if _has_flag(vllm_args, "--trust-remote-code"):
-            kwargs["trust_remote_code"] = True
-        revision = _flag_value(vllm_args, "--revision", "")
-        if revision:
-            kwargs["revision"] = revision
-        return AutoConfig.from_pretrained(model, **kwargs)
-    except Exception:  # noqa: BLE001 — unreachable checkpoint: vLLM's own last resort applies
-        return None
-
-
 def _is_moe_model(model: str, vllm_args: list[str]) -> bool:
     """True when the checkpoint's config declares token-choice experts. Best-effort LOCAL config
-    probe (:func:`_local_config`). The probe is UX only: the authoritative guard is in
+    probe (:func:`_hf_config`). The probe is UX only: the authoritative guard is in
     ``EmmyGenModel.__init__``, which validates an MoE capture boot against the runner (fixed-slot
     tier present, capture sizes capped at 1) — a probe miss here degrades to that clear boot
     error, never to a capture crash."""
-    cfg = _local_config(model, vllm_args)
+    cfg = _hf_config(model, vllm_args)
     cfg = getattr(cfg, "text_config", cfg)
     return bool(getattr(cfg, "num_experts", None) or getattr(cfg, "num_local_experts", None))
 
@@ -283,7 +267,7 @@ def _gen_graph_args(vllm_args: list[str], *, model: str | None = None) -> list[s
         # the same boot guard.
         if _has_flag(vllm_args, "--enforce-eager") or _has_flag(vllm_args, "--compilation-config"):
             return []  # the caller decided; the boot guard validates capture against the runner
-        cfg = _local_config(model, vllm_args)
+        cfg = _hf_config(model, vllm_args)
         cfg = getattr(cfg, "text_config", cfg)
         if int(getattr(cfg, "hc_mult", 1) or 1) > 1:
             # A hyper-connection MoE (DeepSeek V4) has no fixed-slot tier: its routed combine
@@ -386,7 +370,7 @@ def serving_runner(model: str, vllm_args: list[str]) -> str:
         return "pooling"
     if _sentence_transformers(model, _flag_value(vllm_args, "--revision", "") or None):
         return "pooling"
-    cfg = _local_config(model, vllm_args) or _remote_config(model, vllm_args)
+    cfg = _hf_config(model, vllm_args) or _hf_config(model, vllm_args, local=False)
     for arch in getattr(cfg, "architectures", None) or []:
         if arch.endswith(("ForCausalLM", "ForConditionalGeneration", "LMHeadModel")):
             return "generate"
@@ -411,7 +395,7 @@ def build_serve_cmd(model: str, *, stock: bool, vllm_args: list[str], generate: 
         from emmy.compiler.loader.quant import engine_config_overrides  # noqa: PLC0415
 
         overrides: dict = {"architectures": ["EmmyGenModel"]}
-        overrides.update(engine_config_overrides(_local_config(model, vllm_args)))
+        overrides.update(engine_config_overrides(_hf_config(model, vllm_args)))
         cmd += ["--hf-overrides", json.dumps(overrides)]
         # Force fp16 across the emmy↔vLLM seam: vLLM defaults --dtype auto → bf16 for a
         # bf16 checkpoint, but the emmy trunk emits fp16. Reject an incompatible override.
@@ -564,7 +548,7 @@ def handle_serve(args):
     # twins all read it, and a repo publishing one quantization rung per branch is a DIFFERENT
     # model on each, so the default branch is never a safe stand-in. vLLM takes the two apart, and
     # leaving them joined does not merely lose the pin: every local config probe downstream
-    # (``_local_config``) fails on the unresolvable id and silently returns ``None``, so the
+    # (``_hf_config``) fails on the unresolvable id and silently returns ``None``, so the
     # coded-checkpoint unquantized override and the MoE capture-size cap both no-op.
     model, revision = split_revision(args.model)
     if revision and not _has_flag(vllm_args, "--revision"):

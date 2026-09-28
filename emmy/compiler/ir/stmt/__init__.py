@@ -35,8 +35,6 @@ Loop-IR-specific invariants. Shared body normalization and structural identity s
 
 from emmy.compiler.ir.stmt.base import (
     INDENT,
-    Flat,
-    Memory,
     Paged,
     RenderCtx,
     Stmt,
@@ -81,13 +79,11 @@ __all__ = [
     "Assign",
     "Body",
     "Cond",
-    "Flat",
     "Init",
     "Let",
     "Load",
     "Loop",
     "mask_select_predicate",
-    "Memory",
     "Paged",
     "RenderCtx",
     "ZeroPrologue",

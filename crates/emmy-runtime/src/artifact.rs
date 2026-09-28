@@ -188,16 +188,13 @@ impl Buffer {
 }
 
 /// How one buffer is virtualized: not one allocation but a table of equal-sized pages, cut
-/// along `axis` every `page` elements. `start` names the runtime argument that shifts the
-/// buffer's own coordinate to an absolute one, which is how a step writes only its new rows.
-/// The plan says what shape a page has; whose pages they are is the host's or the runtime's.
-#[derive(Debug, Clone, Deserialize)]
+/// along `axis` every `page` elements. The plan says what shape a page has; whose pages they
+/// are is the host's or the runtime's.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Paging {
     pub axis: usize,
     pub page: u64,
-    #[serde(default)]
-    pub start: Option<String>,
 }
 
 impl Paging {
@@ -211,11 +208,6 @@ impl Paging {
     /// everything after it. A page holds, for each of the `outer` indices, `page` rows.
     pub fn geometry(&self, buffer: &Buffer, env: &Env) -> Result<(usize, usize, usize)> {
         let shape = buffer.resolve_shape(env)?;
-        ensure!(
-            self.axis < shape.len() && self.page > 0,
-            "invalid paging for {}",
-            buffer.name
-        );
         let outer: i64 = shape[..self.axis].iter().product();
         let row =
             shape[self.axis + 1..].iter().product::<i64>() * dtype_bytes(&buffer.dtype)? as i64;
@@ -232,8 +224,7 @@ impl Paging {
         Ok(outer * usize::try_from(self.page)? * row)
     }
 
-    /// How many pages the buffer's declared shape spans. A cache-shaped buffer means that
-    /// literally; a step's chunk-shaped one does not, and its caller sizes the cache itself.
+    /// How many pages the buffer's declared shape spans.
     pub fn page_count(&self, buffer: &Buffer, env: &Env) -> Result<usize> {
         let (_, extent, _) = self.geometry(buffer, env)?;
         Ok(extent.div_ceil(usize::try_from(self.page)?))
@@ -1006,8 +997,8 @@ mod tests {
         assert!(Program::parse(&unknown.to_string()).is_err());
     }
 
-    /// One step of a cache fill: `k` holds the four keys this step produces, and `past` says
-    /// where in the cache — pages the plan never sizes — they land.
+    /// One step of a cache fill: `k` holds the four keys this step produces, written through
+    /// the cache's page table.
     fn paged_example() -> Value {
         json!({
             "format": 1, "backend": "cuda", "inputs": ["x"], "outputs": ["k"],
@@ -1016,12 +1007,12 @@ mod tests {
                 {"name":"k", "shape":[1,2,4,8], "dtype":"f32", "role":"output"}
             ],
             "constants": {}, "runtime_constants": {}, "weights": {},
-            "paged": {"k": {"axis": 2, "page": 8, "start": "past"}},
+            "paged": {"k": {"axis": 2, "page": 8}},
             "kernels": {"fill": {"binary_key":"ab", "arch_specific":false}},
             "symbols": {"bindings":{},"hints":{},"caps":{}},
             "launches": [{"node_id":"k", "kernel":"fill", "args":["x","k__pages"], "writes":["k"],
                 "grid":[[1],[1],[1]],"block":[[32],[1],[1]],"smem":0,
-                "zero_outputs":[],"runtime_args":["past"],"cuda":{"tma":[]}}]
+                "zero_outputs":[],"runtime_args":[],"cuda":{"tma":[]}}]
         })
     }
 
@@ -1031,9 +1022,7 @@ mod tests {
         let layout = program.layout(&Env::new()).unwrap();
         assert!(!layout.regions.contains_key("output:k") && !layout.buffers.contains_key("k"));
         assert_eq!(layout.buffers["x"].bytes, 256);
-        // One page is the buffer's shape with the paged axis cut to the page size — so a step
-        // whose own buffer spans four keys still sizes the cache's eight-key pages correctly,
-        // and its own four keys fit in one of them.
+        // One page is the buffer's shape with the paged axis cut to the page size.
         let paging = &program.paged["k"];
         let k = program.buffer("k").unwrap();
         assert_eq!(paging.geometry(k, &Env::new()).unwrap(), (2, 4, 32));

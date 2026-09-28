@@ -467,9 +467,10 @@ class Paged:
     flat buffer. Both halves fold through the ordinary index simplifier, so a loop tiled to a
     multiple of the page size resolves the page once per tile rather than once per element.
 
-    ``start`` names a runtime ``int`` that makes the buffer's own coordinate absolute before the
-    split, which is the whole of a cache write: the kernel's output holds only the step's new
-    rows and ``start`` decides which pages of the cache they land in.
+    ``start`` names the kernel-local ``int`` (a device scalar the preamble reads) that makes the
+    buffer's own coordinate absolute before the split, which is the whole of a cache write: the
+    kernel's output holds only the step's new rows and ``start`` decides which pages of the cache
+    they land in.
 
     Not vectorizable: a vector access spans consecutive elements, which may cross a page.
     """

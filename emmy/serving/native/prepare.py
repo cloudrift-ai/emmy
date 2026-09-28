@@ -39,10 +39,12 @@ def validate_model(model, context_length):
         raise ValueError("native export requires an FP16 model on CPU")
 
 
-def embed_module(weight):
-    """The token a decode step embeds is the prompt's at this position while the prompt lasts,
+def embed_module(weight, rows):
+    """The tokens a step embeds are the prompt's at its ``rows`` positions while the prompt lasts,
     else the previous step's selection: a gather the device decides, so the host binds one
-    position scalar per step and never sees a prompt token."""
+    position scalar per step and never sees a prompt token. A prefill row past the prompt's last
+    token computes alongside the others and writes cache rows the decode program overwrites when
+    it reaches that position."""
     import torch
 
     class Embed(torch.nn.Module):
@@ -51,28 +53,8 @@ def embed_module(weight):
             self.weight = weight
 
         def forward(self, prompt, prompt_length, position, next_token):
-            token = torch.where(position < prompt_length, prompt[position], next_token)
-            return self.weight[token].float()
-
-    return Embed()
-
-
-def prefill_embed_module(weight, rows):
-    """A prefill chunk embeds ``rows`` prompt tokens from ``position``. A row past the prompt's
-    last token embeds zeros: the chunk still computes it and writes its cache rows, which the
-    decode program overwrites when it reaches that position."""
-    import torch
-
-    class Embed(torch.nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.weight = weight
-
-        def forward(self, prompt, prompt_length, position):
             positions = position + torch.arange(rows)
-            valid = positions + 1 < prompt_length
-            tokens = torch.where(valid, prompt[positions], torch.zeros_like(positions))
-            return torch.where(valid.unsqueeze(1), self.weight[tokens].float(), 0.0)
+            return self.weight[torch.where(positions < prompt_length, prompt[positions], next_token)].float()
 
     return Embed()
 
@@ -134,7 +116,7 @@ class _Step:
         # next step's input; a prefill chunk writes the cache and nothing else.
         self.plan = ExecutionPlan(
             "cuda",
-            ["prompt", "prompt_length", "position"] + ([] if prefill else ["next_token"]),
+            ["prompt", "prompt_length", "position", "next_token"],
             [] if prefill else ["logits"],
             [],
             {},
@@ -144,13 +126,10 @@ class _Step:
         )
         self.bindings = {}
 
-    def buffer(self, name, shape, dtype=F16, role="scratch", data=None, page_tokens=None):
-        """One step-level buffer; ``page_tokens`` declares a cache paged along its token axis (2)."""
+    def buffer(self, name, shape, dtype=F16, role="scratch", data=None):
         self.plan.buffers.append(BufferSpec(name, tuple(Dim(n) for n in shape), dtype, role))
         if data is not None:
             self.bindings[name] = np.ascontiguousarray(data).tobytes()
-        if page_tokens is not None:
-            self.plan.paged[name] = (2, page_tokens, None)
         return name
 
     def compiled(self, prefix, wrapper, examples, inputs, outputs, cache, output_names=(), paged=()):
@@ -158,9 +137,10 @@ class _Step:
         everything else is scoped by ``prefix``. ``output_names`` renames the traced outputs (the
         tracer names them after their last op) so ``paged`` can address them: it names the
         wrapper's buffers that are the step's paged caches, as ``(graph name, axis, page tokens,
-        start)``. Their launches address the step buffer's pages, so their own shape — a chunk of
-        the cache, or all of it — need not equal the step buffer's. Both are spelled in the graph's
-        own names, never the step's, so every layer traces the same graph and compiles once."""
+        start)``, and the step buffer takes that paging. Their launches address the step buffer's
+        pages, so their own shape — a chunk of the cache, or all of it — need not equal the step
+        buffer's. Both are spelled in the graph's own names, never the step's, so every layer
+        traces the same graph and compiles once."""
         from emmy.compiler.backend.cuda.backend import CudaBackend
         from emmy.serving.gen_runner import _bind_plan_constants, trace_split
 
@@ -184,6 +164,7 @@ class _Step:
         names = {b.name: f"{prefix}.{b.name}" for b in plan.buffers}
         names.update(zip(plan.inputs, inputs, strict=True))
         names.update(zip(plan.outputs, outputs, strict=True))
+        self.plan.paged.update({names[n]: paging for n, paging in plan.paged.items()})
         existing = {b.name: b for b in self.plan.buffers}
         for buffer in plan.buffers:
             name = names[buffer.name]
@@ -235,8 +216,8 @@ def _program(model, context_length, rows, page_tokens, cache):
     step.buffer("prompt", (context_length,), I64, "input")
     step.buffer("prompt_length", (1,), I64, "input")
     step.buffer("position", (1,), I64, "input")
+    step.buffer("next_token", (1,), I64, "input")
     if not prefill:
-        step.buffer("next_token", (1,), I64, "input")
         step.buffer("logits", (1, vocab), F16, "output")
 
     # Example inputs are distinct tensors: the tracer folds two arguments that share one into a
@@ -251,20 +232,14 @@ def _program(model, context_length, rows, page_tokens, cache):
         return torch.zeros(1, kv, context_length, d, dtype=torch.float16)
 
     hidden = "hidden0"
-    prompt_example = torch.zeros(context_length, dtype=torch.int64)
-    if prefill:
-        embed = prefill_embed_module(model.model.embed_tokens.weight, rows)
-        step.compiled("embed", embed, (prompt_example, scalar(), scalar()), ["prompt", "prompt_length", "position"], [hidden], cache)
-    else:
-        embed = embed_module(model.model.embed_tokens.weight)
-        step.compiled(
-            "embed",
-            embed,
-            (prompt_example, scalar(), scalar(), scalar()),
-            ["prompt", "prompt_length", "position", "next_token"],
-            [hidden],
-            cache,
-        )
+    step.compiled(
+        "embed",
+        embed_module(model.model.embed_tokens.weight, rows),
+        (torch.zeros(context_length, dtype=torch.int64), scalar(), scalar(), scalar()),
+        ["prompt", "prompt_length", "position", "next_token"],
+        [hidden],
+        cache,
+    )
     with torch.no_grad():
         cosine, sine = model.model.rotary_emb(torch.zeros(1, 1, h, dtype=torch.float32), torch.arange(context_length).reshape(1, -1))
     cosine, sine = cosine[0].contiguous(), sine[0].contiguous()
@@ -277,9 +252,10 @@ def _program(model, context_length, rows, page_tokens, cache):
         # has no consumer, so it takes the persistent role rather than a scratch slot nobody reads.
         last_prefill = prefill and index + 1 == len(model.model.layers)
         rotated = step.buffer(f"layer{index}.rotated", (rows, heads * d), role="output" if last_prefill else "scratch")
-        # The cache: paged along its token axis, written a chunk at a time at ``position``.
-        keys = step.buffer(f"layer{index}.keys", (1, kv, context_length, d), role="output", page_tokens=page_tokens)
-        values = step.buffer(f"layer{index}.values", (1, kv, context_length, d), role="output", page_tokens=page_tokens)
+        # The cache: paged along its token axis by the programs below, written a chunk at a time
+        # at ``position``.
+        keys = step.buffer(f"layer{index}.keys", (1, kv, context_length, d), role="output")
+        values = step.buffer(f"layer{index}.values", (1, kv, context_length, d), role="output")
         step.compiled(
             f"rope{index}",
             rope_module(cosine, sine, heads, kv, d, rows),

@@ -54,22 +54,19 @@ directory. The whole plan grammar is read: an `int` literal, a `"name"` variable
 ## Paged buffers
 
 A KV cache stops being one allocation as soon as it belongs to a request rather than to a program. A plan may therefore
-declare an input or output buffer **paged** (`paged: {name: {axis, page, start}}`): cut along one axis every `page`
-elements, with an optional `start` naming the runtime argument that shifts a write's coordinate into the cache's own.
+declare an input or output buffer **paged** (`paged: {name: {axis, page}}`): cut along one axis every `page` elements.
 The compiler renames that buffer's launch argument to `<name>__pages`, so what the kernel receives is a table of page
 pointers rather than one base, and every read and write resolves its page before its offset inside one. Shapes are
-unchanged — the declaration says how the memory is reached, not what it holds.
-
-A paged buffer has no place in the layout: no region, no placement, nothing to zero per launch. Its table is an
-operand the plan names but never declares, bound like an indirect operand's. A load gives every paged buffer zeroed
-pages of the runtime's own spanning its declared shape — a cache covering the context — and binds their table; the
-buffer then binds and reads back like any other, its flat bytes scattered into and gathered from those pages one
-strided copy per page. A host may instead bind a table of its own (`set_external`), and then owns the pages behind it
-— how the compiler's tests fill a cache chunk by chunk, since a step's buffer spans its chunk while the cache spans a
-request and the plan knows only the page's shape. The `start` a step writes at is either an ordinary runtime argument,
-set through the symbol environment (`set_env`) like any other, or an i64 scalar the kernel reads from device memory,
-which the runtime binds like any input — the form the native token step uses so that it replays as one graph at every
+unchanged — the declaration says how the memory is reached, not what it holds. The position a step writes its rows at
+is an i64 scalar the kernel reads from device memory, bound like any input, so the step replays as one graph at every
 position.
+
+A paged buffer has no place in the layout: no region, no placement, nothing to zero per launch, no host bytes in or
+out. Its table is an operand the plan names but never declares, bound like an indirect operand's. A load gives every
+paged buffer zeroed pages of the runtime's own spanning its declared shape — a cache covering the context — and binds
+their table; `page_table` hands that table to a host that lends the same pages to another executor, which is how the
+prefill program writes the decode program's cache. A host may instead bind a table of its own (`set_external`), and
+then owns the pages behind it — how the compiler's tests fill a cache chunk by chunk and read it back.
 
 Residency is deliberately absent. Whether a page lives in device or host memory would be a property of a page, and
 nothing above it would change; which processor runs a launch is a separate axis again, and belongs on the launch, not

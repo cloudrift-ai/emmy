@@ -18,12 +18,11 @@ const TOKEN_BYTES: usize = size_of::<i64>();
 const MAX_CONTEXT: usize = 4096;
 const PROGRAM: &str = "decode";
 const LOGIT_BYTES: usize = size_of::<u16>();
-/// Every finite FP16 logit has an exact ordered bin; bin zero is reserved for a value that
-/// cannot be sampled.
+/// Every finite FP16 logit has an exact ordered bin.
 const SAMPLING_BINS: usize = 1 << 16;
 
 /// The f32 value of FP16 bits.
-pub fn f16_to_f32(bits: u16) -> f32 {
+fn f16_to_f32(bits: u16) -> f32 {
     let sign = (u32::from(bits) & 0x8000) << 16;
     let exponent = u32::from((bits >> 10) & 0x1f);
     let mantissa = u32::from(bits & 0x3ff);
@@ -40,12 +39,8 @@ pub fn f16_to_f32(bits: u16) -> f32 {
     f32::from_bits(sign | magnitude)
 }
 
-/// The order-preserving bin of one FP16 logit. Signed zeros share a bin; a nonfinite value takes
-/// bin zero.
+/// The order-preserving bin of one finite FP16 logit. Signed zeros share a bin.
 fn logit_bin(bits: u16) -> usize {
-    if !f16_to_f32(bits).is_finite() {
-        return 0;
-    }
     let bits = if bits & 0x7fff == 0 { 0 } else { bits };
     usize::from(if bits & 0x8000 != 0 {
         !bits
@@ -287,7 +282,7 @@ impl Generator {
         let mut shared_tables = Vec::new();
         if let Some(prefill) = &prefill_artifact {
             ensure!(
-                prefill.program.inputs == ["prompt", "prompt_length", "position"]
+                prefill.program.inputs == ["prompt", "prompt_length", "position", "next_token"]
                     && prefill.program.outputs.is_empty(),
                 "invalid prefill interface"
             );
@@ -310,32 +305,21 @@ impl Generator {
                     .program
                     .buffer(&buffer.name)
                     .context("missing shared prefill buffer")?;
-                if artifact.program.paged.contains_key(&buffer.name) {
-                    ensure!(
-                        prefill
-                            .program
-                            .paged
-                            .get(&buffer.name)
-                            .map(|p| (p.axis, p.page))
-                            == artifact
-                                .program
-                                .paged
-                                .get(&buffer.name)
-                                .map(|p| (p.axis, p.page)),
-                        "prefill pages {} differently",
-                        buffer.name
-                    );
-                    shared_tables.push(buffer.name.clone());
-                    continue;
-                }
                 ensure!(
                     buffer.dtype == original.dtype
                         && buffer.role == original.role
-                        && buffer.static_shape() == original.static_shape(),
+                        && buffer.static_shape() == original.static_shape()
+                        && prefill.program.paged.get(&buffer.name)
+                            == artifact.program.paged.get(&buffer.name),
                     "invalid shared prefill buffer {}",
                     buffer.name
                 );
-                shared.push(buffer.name.clone());
+                // A paged buffer lends its page table where a flat one lends its region.
+                if artifact.program.paged.contains_key(&buffer.name) {
+                    shared_tables.push(buffer.name.clone());
+                } else {
+                    shared.push(buffer.name.clone());
+                }
             }
         }
         let executor = Executor::load(device, artifact)?;
@@ -385,7 +369,9 @@ impl Generator {
         self.executor
             .bind("prompt_length", &(prompt.len() as i64).to_le_bytes())?;
         if let Some(prefill) = &mut self.prefill {
-            for name in ["prompt", "prompt_length"] {
+            // A chunk's rows past the prompt embed the selection too; nothing reads their cache
+            // rows before the decode step rewrites them.
+            for name in ["prompt", "prompt_length", "next_token"] {
                 let view = self.executor.buffer(name)?;
                 prefill.bind_device(name, view.ptr, view.bytes)?;
             }

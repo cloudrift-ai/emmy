@@ -897,5 +897,5 @@ tokenizer I/O; model preparation and binary worker transport live in `serving/na
 `--temperature`, `--top-p`, and `--seed`; temperature zero is greedy, and nonzero `--top-k` is rejected.
 `--prefill-size` selects the exported chunk width (default 16; one selects sequential prefill) and requires preparation.
 `--timeout` controls the native worker operation deadline, including the complete prefill/decode loop.
-Native HTTP serving is opt-in through `serve --generate --native`; vLLM remains the default. Generation artifacts
+Native HTTP serving is opt-in through `serve --runner generate --native`; vLLM remains the default. Generation artifacts
 from before the chunked prefill contract must be exported again.

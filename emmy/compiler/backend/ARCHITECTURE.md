@@ -172,18 +172,16 @@ fails the lowering loudly (descriptors bake the base address at encode). A plan 
 `PLAN_FORMAT_INDIRECT` (2) — a runtime that ignored it would pass the wrong arg pack, so old readers reject such
 a plan and fall back to the full compile; plans without the field keep format 1 byte-compatibly.
 
-**Paged buffers** (`ExecutionPlan.paged`, `name -> (axis, page, start)`): a buffer that is a table of equal-sized
-pages rather than one allocation — the shape a KV cache has once it is allocated per request. The kernel takes
+**Paged buffers** (`ExecutionPlan.paged`, `name -> (axis, page)`): a buffer that is a table of equal-sized pages
+rather than one allocation — the shape a KV cache has once it is allocated per request. The kernel takes
 `T* const* <name>__pages` in place of the plain pointer and every read or write resolves its page before its offset
-inside one; `start`, when given, shifts the buffer's own coordinate to an absolute one, so a step producing a chunk
-of new rows lands them anywhere in the cache. It names a runtime `int` argument the caller sets per step, or a graph
-tensor, an i64 scalar the kernel reads in its preamble, which keeps a token step one replayable graph. Like an
-indirect operand it
-enters as a graph hint (`cuda.paged_buffers`, `(name, axis, page, start)` per buffer) read by the final kernel
-lowering, so shapes, schedules, goldens and cubin keys of unpaged programs do not move. The plan carries the
-declaration so the runtime knows the buffer has no slab: it is never allocated, uploaded, zeroed or read back as one;
-its page table is bound by address (`CompiledProgram.alias_buffer`, or pages the runtime allocates itself for a
-standalone pack).
+inside one. Like an indirect operand it enters as a graph hint (`cuda.paged_buffers`, `(name, axis, page, start)`
+per buffer) read by the final kernel lowering, so shapes, schedules, goldens and cubin keys of unpaged programs do
+not move. `start`, when given, names a graph tensor — an i64 scalar the kernel reads in its preamble — that shifts
+the buffer's own coordinate to an absolute one, so a step producing a chunk of new rows lands them anywhere in the
+cache while it stays one replayable graph. The plan carries the declaration so the runtime knows the buffer has no
+slab: it is never allocated, uploaded, zeroed or read back as one; its page table is bound by address
+(`CompiledProgram.alias_buffer`, or pages the runtime allocates itself for a standalone pack).
 
 `pack.py` bundles plans on disk: one directory per model × GPU × serving shape holding `manifest.json` (validity
 key + environment tags + provenance + program index) and `plan/<program>.json`. The validity key is composed by

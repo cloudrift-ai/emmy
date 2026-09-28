@@ -2,8 +2,9 @@
 
 A paged buffer is not one allocation but a device table of equal-sized pages — the shape a KV
 cache has once it is allocated per request instead of contiguously. The ``cuda.paged_buffers``
-hint names the buffer, its paged axis, the page size, and a runtime ``start`` symbol that makes
-the buffer's own coordinate absolute, which is what lets a step write only its new rows.
+hint names the buffer, its paged axis, the page size, and a ``start``: the graph's own i64 scalar
+input that makes the buffer's coordinate absolute, which is what lets a step write only its new
+rows and still replay as one graph at every position.
 
 The hint only reaches a buffer that survives to a kernel boundary — an intermediate the fusion
 policy absorbs is not a buffer at all — so every test here asserts the page table reached the
@@ -37,18 +38,6 @@ def _attention():
     return Attention()
 
 
-def _cache_write():
-    """A producer of the cache's contents — ``tanh`` standing in for the K projection."""
-    import torch
-    import torch.nn as nn
-
-    class CacheWrite(nn.Module):
-        def forward(self, kin):
-            return torch.tanh(kin)
-
-    return CacheWrite()
-
-
 def _inputs():
     import torch
 
@@ -73,7 +62,8 @@ def _compile_read(paged: bool):
 
 
 def _cache_write_at():
-    """The same producer taking its position as an i64 scalar in device memory."""
+    """A producer of the cache's contents — ``tanh`` standing in for the K projection — taking the
+    position it writes at as an i64 scalar in device memory."""
     import torch
     import torch.nn as nn
 
@@ -84,20 +74,16 @@ def _cache_write_at():
     return CacheWriteAt()
 
 
-def _compile_write(*, rows: int = SEQ, start: str | None = None, device_start: bool = False):
-    """Compile the producer of ``rows`` new keys, writing them into a page table at ``start`` — a
-    runtime symbol, or with ``device_start`` the graph's own ``past`` input scalar."""
+def _compile_write(rows: int):
+    """Compile the producer of ``rows`` new keys, writing them into a page table at the graph's own
+    ``past`` input scalar."""
     import torch
 
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.trace.torch import trace_module
 
-    example = torch.zeros(1, KV_HEADS, rows, HEAD_DIM)
-    if device_start:
-        graph = trace_module(_cache_write_at(), (example, torch.zeros(1, dtype=torch.int64)))
-    else:
-        graph = trace_module(_cache_write(), (example,))
-    graph.hints.set("cuda.paged_buffers", ((graph.outputs[0], 2, PAGE, start),))
+    graph = trace_module(_cache_write_at(), (torch.zeros(1, KV_HEADS, rows, HEAD_DIM), torch.zeros(1, dtype=torch.int64)))
+    graph.hints.set("cuda.paged_buffers", ((graph.outputs[0], 2, PAGE, "past"),))
     return CudaBackend().compile(graph)
 
 
@@ -134,36 +120,22 @@ def test_unpaged_build_is_byte_identical_to_before():
     assert "k" in kernel.arg_order and "v" in kernel.arg_order
 
 
-def test_paged_output_writes_at_a_runtime_start():
+def test_paged_output_writes_at_a_device_start():
     """The write side of the same ABI. A paged OUTPUT takes a (non-const element) page table, and
-    a ``start`` symbol becomes an ordinary runtime ``int`` arg that shifts every store into the
-    cache's coordinates — so a kernel producing CHUNK rows can land them anywhere in the cache."""
+    the ``start`` — a graph input the kernel reads off the device in its preamble, so nothing on
+    the host changes between positions and a token step stays one replayable graph — shifts every
+    store into the cache's coordinates: a kernel producing CHUNK rows lands them anywhere in it."""
     pytest.importorskip("torch")
-    compiled = _compile_write(rows=CHUNK, start="past")
+    compiled = _compile_write(CHUNK)
     (kernel,) = _kernels(compiled)
     name = compiled.outputs[0]
 
     signature = _signature(kernel)
     assert f"float* const* {name}__pages" in signature, signature
-    assert "int past" in signature, signature
-    assert "past" in kernel.runtime_args
-    assert f"{name}__pages[" in kernel.kernel_source
-    assert f"{name}__pages" in kernel.arg_order and name not in kernel.arg_order
-
-
-def test_paged_output_start_can_live_on_the_device():
-    """A ``start`` naming a graph input is read off the device in the kernel's preamble instead of
-    arriving as a runtime ``int``: nothing on the host changes between positions, so a token step
-    stays one replayable graph."""
-    pytest.importorskip("torch")
-    compiled = _compile_write(rows=CHUNK, start="past", device_start=True)
-    (kernel,) = _kernels(compiled)
-
-    signature = _signature(kernel)
-    assert "const long long* past" in signature, signature
-    assert "int past" not in signature and not kernel.runtime_args
+    assert "const long long* past" in signature and not kernel.runtime_args, signature
     assert "const int past__at = (int)past[0];" in kernel.kernel_source
     assert "past__at" in kernel.kernel_source.split("__pages[", 1)[1].split("]", 1)[0]
+    assert f"{name}__pages" in kernel.arg_order and name not in kernel.arg_order
 
 
 @requires_cuda
@@ -197,13 +169,12 @@ def test_paged_read_matches_the_contiguous_read():
 
 
 @requires_cuda
-@pytest.mark.parametrize("device_start", [False, True], ids=["symbol", "device"])
-def test_cache_filled_in_chunks_then_attended(device_start):
+def test_cache_filled_in_chunks_then_attended():
     """End to end. The cache starts empty as a table of pages; four steps each compute CHUNK new
-    keys and write them at their absolute position through one ``start`` — a symbol the host sets
-    per step, or a scalar it uploads; then attention reads the whole cache back through the same
-    table. The result must equal the same pipeline run on one contiguous buffer — a wrong page, a
-    wrong offset or a disagreeing layout between the write and the read all break it."""
+    keys and write them at their absolute position, a scalar the host uploads; then attention
+    reads the whole cache back through the same table. The result must equal the same pipeline
+    run on one contiguous buffer — a wrong page, a wrong offset or a disagreeing layout between
+    the write and the read all break it."""
     import torch
 
     from emmy.compiler.backend.cuda.program import CompiledProgram
@@ -211,9 +182,9 @@ def test_cache_filled_in_chunks_then_attended(device_start):
 
     q, kin, v, mask = _inputs()
     with torch.no_grad():
-        reference = _attention()(q, _cache_write()(kin), v, mask).numpy()
+        reference = _attention()(q, torch.tanh(kin), v, mask).numpy()
 
-    writer = _compile_write(rows=CHUNK, start="past", device_start=device_start)
+    writer = _compile_write(CHUNK)
     reader = _compile_read(paged=True)
 
     with gpu_lock():
@@ -224,12 +195,8 @@ def test_cache_filled_in_chunks_then_attended(device_start):
         step = CompiledProgram.build(writer, {writer.inputs[0]: np.ascontiguousarray(kin.numpy()[:, :, :CHUNK, :])})
         step.alias_buffer(f"{writer.outputs[0]}__pages", table)
         for past in range(0, SEQ, CHUNK):
-            chunk = {writer.inputs[0]: np.ascontiguousarray(kin.numpy()[:, :, past : past + CHUNK, :])}
-            if device_start:
-                step.upload_prefix({**chunk, "past": np.array([past], dtype=np.int64)})
-            else:
-                step.upload_prefix(chunk)
-                step.set_sym_values({"past": past})
+            chunk = np.ascontiguousarray(kin.numpy()[:, :, past : past + CHUNK, :])
+            step.upload_prefix({writer.inputs[0]: chunk, "past": np.array([past], dtype=np.int64)})
             step.run_once()
 
         feed = {name: t.numpy() for name, t in zip(("q", "k", "v", "mask"), (q, kin, v, mask), strict=True)}

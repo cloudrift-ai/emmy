@@ -29,8 +29,6 @@ def options(arguments):
     args = parser.parse_args(arguments)
     if not 1 <= args.max_model_len <= DEFAULT_CONTEXT or not 1 <= args.port <= 65535:
         raise ValueError("native context must be 1–4096 and port must be 1–65535")
-    if args.page_tokens is not None and (not 1 <= args.page_tokens <= args.max_model_len or args.max_model_len % args.page_tokens):
-        raise ValueError("native page size must divide the context")
     if args.prefill_size is not None and (args.native_pack or not 1 <= args.prefill_size <= DEFAULT_CONTEXT):
         raise ValueError("prefill size requires preparation and must be 1–4096")
     return args

@@ -40,9 +40,9 @@ by itself, established numerical correctness or fast schedules.
 
 The prompt is uploaded once. Prefill processes all but its final token in fixed-width chunks, defaulting to 16 rows.
 Each layer writes the chunk's keys and values at their absolute positions through the page tables before attention
-reads each query's causal prefix; a row past the prompt's last token embeds zeros, computes alongside the others and
-writes cache rows that decode overwrites when it reaches them, so a chunk is dispatched only where all of its rows fit
-the context and the decode program covers the rest. The last layer only writes its cache; its attention and
+reads each query's causal prefix; a row past the prompt's last token embeds the previous selection, computes alongside
+the others and writes cache rows that decode overwrites when it reaches them, so a chunk is dispatched only where all
+of its rows fit the context and the decode program covers the rest. The last layer only writes its cache; its attention and
 post-attention fragment are unnecessary. The final prompt token runs through the one-token decode program, including
 the output head, and the host selects the first generated token from its logits. Later decode steps embed the
 previous step's token, which the host selected from that step's logits and uploaded with the position scalar. Prefill

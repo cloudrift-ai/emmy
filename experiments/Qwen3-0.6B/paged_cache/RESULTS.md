@@ -10,13 +10,20 @@ and an empty tuning database. At 16-token pages the pack holds 56 paged buffers 
 Nothing the device runs is hand-written: the step ends at the logits, and the runtime selects each token on the host.
 
 ```
-emmy generate Qwen/Qwen3-0.6B --export-native pack --context-length 256 --page-tokens 16 \
+emmy generate Qwen/Qwen3-0.6B --export-native pack --context-length 256 --page-tokens 16 --prefill-size 1 \
   --golden golden/v100_sm70.json --strict-evidence          # 32-36 s
 emmy generate Qwen/Qwen3-0.6B --native-pack pack --prompt "The capital of France is" --max-new-tokens 8
   ->  Paris. The capital of Italy is Rome
 emmy serve Qwen/Qwen3-0.6B --runner generate --native --golden golden/v100_sm70.json --strict-evidence \
-  --max-model-len 256 --page-tokens 16 --port 8000
+  --max-model-len 256 --page-tokens 16 --prefill-size 1 --port 8000
 ```
+
+The prompt is consumed one token per step: the golden records rows for the one-row fragments only, and the chunked
+prefill that main added afterwards compiles the same modules at sixteen rows, which a strict export refuses without
+rows of their own. The merge that brought the chunked prefill in also changed the one-row rotary and attention
+modules (a transpose where a permute traced wrong, a per-row mask), so their recorded rows no longer match the
+fragments a fresh export lowers either: reproducing this on the card is a re-record of the golden through the flow
+below, not a code change. The numbers above are from the pre-merge modules.
 
 Two requests against that server, each one shot, wall time on the client including HTTP. The first two columns are
 the hand-written glue kernels with two head schedules, the third the compiled glue with sampling still on the

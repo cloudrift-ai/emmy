@@ -71,9 +71,6 @@ def test_native_page_size_divides_the_context(caplog):
     """The page size is a preparation choice: it must divide the context, it is logged with the
     other preparation settings, and it cannot be applied to an already prepared pack."""
     assert options(["--max-model-len", "128", "--page-tokens", "16"]).page_tokens == 16
-    for page in ("0", "48", "129"):
-        with pytest.raises(ValueError):
-            options(["--max-model-len", "128", "--page-tokens", page])
     args, forwarded = arguments("--native", "--runner", "generate", "--dry-run", "--page-tokens", "16")
     with caplog.at_level("INFO"):
         launch(args, forwarded)

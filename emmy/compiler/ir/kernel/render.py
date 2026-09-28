@@ -1398,8 +1398,8 @@ def render_kernelop(
     literal_constants: dict[str, float] | None = None,
     runtime_args: tuple[str, ...] = (),
     indirect_inputs: tuple[str, ...] = (),
-    paged_buffers: tuple[tuple[str, int, int], ...] = (),
-    device_starts: tuple[str, ...] = (),
+    paged_buffers: tuple[tuple[str, int, int, str | None], ...] = (),
+    starts: tuple[str, ...] = (),
 ) -> str:
     """Render a complete ``extern "C" __global__`` CUDA function for a ``KernelOp``.
 
@@ -1438,14 +1438,14 @@ def render_kernelop(
     write resolves its page before its offset (see ``render_paged_access``)
     — the KV cache, whose pages are allocated per request and are not one
     contiguous block. Shapes are untouched, so the paged axis stays
-    ``kv_len`` everywhere above the load. ``start`` names a runtime ``int``
-    added to the paged index before the split — the absolute position a
-    cache write lands at — or ``None`` to address from page 0. Empty (the
-    default) renders every buffer flat. A start listed in ``device_starts``
-    is instead an i64 scalar in device memory: the signature takes its
-    pointer (after the outputs, unless the body already loads it) and the
-    preamble reads ``<start>__at`` from it once, so a step replays as one
-    graph whatever position it writes at.
+    ``kv_len`` everywhere above the load. ``start`` names an i64 scalar in
+    device memory, listed in ``starts``: the signature takes its pointer
+    (after the outputs, unless the body already loads it), the preamble
+    reads ``<start>__at`` from it once, and that is added to the paged
+    index before the split — the absolute position a cache write lands
+    at, with the step still one replayable graph whatever the position.
+    ``None`` addresses from page 0. Empty (the default) renders every
+    buffer flat.
 
     Kernel signature is derived from the body: ``kernel_op.inputs``
     (distinct ``Load.input`` names) become input params,
@@ -1487,12 +1487,10 @@ def render_kernelop(
 
     indirect = tuple(n for n in kernel_op.inputs if n in indirect_inputs and n not in literals)
     paged = {
-        n: Paged(n, axis, page, f"{start}__at" if start in device_starts else start)
+        n: Paged(n, axis, page, None if start is None else f"{start}__at")
         for n, axis, page, start in paged_buffers
         if n not in literals and (n in kernel_op.inputs or n in kernel_op.outputs)
     }
-    if set(paged) & set(indirect):
-        raise NotImplementedError(f"buffer(s) {sorted(set(paged) & set(indirect))} are both indirect and paged")
     ctx.memory = dict(paged)
     sig_parts = [
         f"const {cuda_name(_dtype_for(n))}* const* {n}__table, const int* {n}__sel, int {n}__slot"
@@ -1510,7 +1508,7 @@ def render_kernelop(
         return f"{elem}* const* {n}__pages" if n in paged else f"{elem}* {n}"
 
     sig_parts.extend(_out_param(n) for n in kernel_op.outputs)
-    sig_parts.extend(f"const long long* {n}" for n in device_starts if n not in kernel_op.inputs)
+    sig_parts.extend(f"const long long* {n}" for n in starts if n not in kernel_op.inputs)
     # TMA descriptors are passed as ``__grid_constant__`` value parameters.
     # The kernel only takes their address (``&desc``) for inline asm, so
     # the opaque ``CUtensorMap`` forward decl above suffices.
@@ -1554,9 +1552,9 @@ def render_kernelop(
         # Indirect-operand preamble: resolve each marked input's base pointer from its device
         # table before any body statement runs; downstream loads use the plain name unchanged.
         body_text = "".join(f"    const {cuda_name(_dtype_for(n))}* {n} = {n}__table[{n}__sel[{n}__slot]];\n" for n in indirect) + body_text
-    if device_starts:
+    if starts:
         # A paged write's start read off the device: the position a step lands its rows at.
-        body_text = "".join(f"    const int {n}__at = (int){n}[0];\n" for n in device_starts) + body_text
+        body_text = "".join(f"    const int {n}__at = (int){n}[0];\n" for n in starts) + body_text
     prelude = _TMA_PRELUDE if desc_names else ""
     sig_dtypes = [_dtype_for(n) for n in kernel_op.inputs if n not in literals]
     sig_dtypes.extend(_dtype_for(n) for n in kernel_op.outputs)
