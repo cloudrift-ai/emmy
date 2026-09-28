@@ -386,16 +386,40 @@ def test_a_pinned_cooperative_band_rules_out_the_tiled_plans(monkeypatch):
     """A tiled plan folds serially per cell, so it cannot carry a pinned ``coop`` band: a GEMV pinned
     ``REDUCE=coop-t`` offers the band alone, where the tiled tiers used to stay offered and a greedy
     realized the pin's site with a serial fold under the pin's name."""
-    from emmy.commands.trace import graph_from_code
-    from emmy.compiler.ir.tile import TileOp
-    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
-
     ctx = Context.from_target((9, 0))
-    code = "torch.matmul(torch.randn(1, 1024, dtype=torch.float16), torch.randn(1024, 3072, dtype=torch.float16))"
-    lowered = Pipeline.build(LOOP_PASSES).run(graph_from_code(code)[0], ctx=ctx)
-    lifted = Pipeline.build(["tile/lift"], select={"lift", "twisted"}).run(lowered, ctx=ctx)
-    (tile,) = [node.op for node in lifted.nodes.values() if isinstance(node.op, TileOp)]
+    tile = _gemv_tile(ctx)
     monkeypatch.setenv("EMMY_WORK", "t32")
     monkeypatch.setenv("EMMY_REDUCE", "coop-t")
     rows = _rows_of(tile, ctx)
     assert rows and all(row.get("REDUCE") == "coop-t" and not row.get("TILE") for row in rows), rows
+
+
+def _gemv_tile(ctx):
+    """A one-row GEMV lifted to its one tile — the s1 layer's projection piece."""
+    from emmy.commands.trace import graph_from_code
+    from emmy.compiler.ir.tile import TileOp
+    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
+
+    code = "torch.matmul(torch.randn(1, 1024, dtype=torch.float16), torch.randn(1024, 3072, dtype=torch.float16))"
+    lowered = Pipeline.build(LOOP_PASSES).run(graph_from_code(code)[0], ctx=ctx)
+    lifted = Pipeline.build(["tile/lift"], select={"lift", "twisted"}).run(lowered, ctx=ctx)
+    (tile,) = [node.op for node in lifted.nodes.values() if isinstance(node.op, TileOp)]
+    return tile
+
+
+def test_a_kernel_pin_with_no_split_keeps_its_piece_unsplit(monkeypatch):
+    """``REDUCE@place_<token>=coop-t`` names the piece by the token its node id carries (a piece's tile
+    may carry no name of its own): the split fork reads it like a bare pin with no ``g`` half and
+    offers the unsplit tree alone, where it used to miss the pin and offer every split."""
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from emmy.compiler.pipeline.passes.tile._split import split_forks
+
+    for var in ("EMMY_REDUCE", "EMMY_WORK"):
+        monkeypatch.delenv(var, raising=False)
+    root = SimpleNamespace(op=replace(_gemv_tile(Context.from_target((9, 0))), name=""), id="add_7__place_ab12_0")
+    assert len(split_forks(None, root)) > 1, "unpinned, the GEMV offers its splits"
+    monkeypatch.setenv("EMMY_WORK@place_ab12", "t128")
+    monkeypatch.setenv("EMMY_REDUCE@place_ab12", "coop-t")
+    assert len(split_forks(None, root)) == 1
