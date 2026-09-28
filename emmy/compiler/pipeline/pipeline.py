@@ -555,8 +555,10 @@ class Pipeline:
         POLICY, owned by
         :class:`~emmy.compiler.pipeline.search.strategy.greedy.GreedyStrategy` —
         this method is the thin engine entry point."""
+        from emmy.compiler.ir.schedule.base import clear_pin_refusals  # noqa: PLC0415
         from emmy.compiler.pipeline.search.strategy import GreedyStrategy  # noqa: PLC0415
 
+        clear_pin_refusals()  # a refusal names the compile it happened in, not an earlier one
         return GreedyStrategy(self, backend=backend, db=db, dump=dump).run(graph, ctx)
 
     def _new_run(self, graph: Graph, *, search, ctx, backend, db, dump, rejections) -> Run:
