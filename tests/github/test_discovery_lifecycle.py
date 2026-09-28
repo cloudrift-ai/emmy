@@ -25,7 +25,7 @@ GPU = "NVIDIA H200 141GB"
 @pytest.mark.parametrize(
     ("workflow", "message"),
     [
-        ("discover-model.yml", '"Complete the attached lifecycle task exactly."'),
+        ("discover-model.yml", '"Complete the attached lifecycle task exactly. Its file is $AGENT_TASK."'),
         ("onboard-model.yml", '"Complete the attached onboarding task exactly."'),
     ],
 )

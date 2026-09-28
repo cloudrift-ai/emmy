@@ -2,7 +2,8 @@
 
 Use the attached discovery task as the exhaustive recipe inventory. Its `recipe_batches` partition every existing
 recipe exactly once, and `maintained_count` is the required maintained-set size. Do not rebuild the inventory or
-reconstruct an existing model ID.
+reconstruct an existing model ID. When the task is out of view, as after a context compaction, re-read it from the
+path the request names; never rebuild it from the recipe files, which overflow the context.
 
 ## Research and scoring
 
