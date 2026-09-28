@@ -7,19 +7,51 @@ conflict: a thread-layout pin helps an output writer but removes tensor-core sch
 that has not been tested. Separately, the attention kernel takes minutes to compile without pins, although the
 recorded concurrent runs do not isolate where that time goes.
 
-## Reading the pin interference
+## Observed and desired Tile IR
 
-Normalized Tile IR schedule summary; instruction and piece names are abbreviated:
+Observed with `OPROJ_CUT` alone at `a98fd4f8`: the projection has a tensor-core TILE, but the residual writer has no
+`work` line and leaves `a3` as a serial output sweep. These are excerpts from two pieces of the same saved dump:
 
 ```text
-Observed with global WORK=t128:     Desired combination (illustrative):
-residual writer: work t128          residual writer: work t128
-projection: work t128; TILE=f1      projection: TILE=mma_m16n8k64_e2m1_f32/…
-            or no TILE                         with a compatible WORK
+=== 5: k_linear_mean_reduce_fd2717__place_6abfbbaa03 ===
+    place  free=(a0, a1)  grid=(a0, a1)
+    work   w1x4
+    Fold[a2 in 0..6144] contraction   ⟨TILE=mma_m16n8k64_e2m1_f32/f4x2/k8 STAGE=d1/smem-async/p2⟩
+    …
+
+=== 6: k_linear_mean_reduce_fd2717__place_a7de42f3e4 ===
+    place  free=(a0)  grid=(a0)
+    Fold  free
+    ├─ operand[acc2__ws6abfbbaa03]: load add_8__place_6abfbbaa03_0[a0, a3]   ‹materialized›
+    └─ lift: λ(acc2__ws6abfbbaa03, a0, a3) -> (v31__ws6abfbbaa03)
+         f16 v30__ws6abfbbaa03 = copy(acc2__ws6abfbbaa03)
+         in22 = load hidden_states[0, a0, a3]
+         v31__ws6abfbbaa03 = add(in22, v30__ws6abfbbaa03)
+    outputs
+    └─ sweep(a3) add_8[0, a0, a3] = v31__ws6abfbbaa03
 ```
 
-The writer and matmul need different schedules. Whether existing site-scoped pins can express this combination is
-unverified; the example does not establish a need for new pin syntax.
+Desired combination, **composed, not emitted**: retain that projection schedule and give the writer a thread layout.
+Its arithmetic is unchanged and omitted here:
+
+```text
+=== 5: k_linear_mean_reduce_fd2717__place_6abfbbaa03 ===
+    place  free=(a0, a1)  grid=(a0, a1)
+    work   w1x4
+    Fold[a2 in 0..6144] contraction   ⟨TILE=mma_m16n8k64_e2m1_f32/f4x2/k8 STAGE=d1/smem-async/p2⟩
+    …
+
+=== 6: k_linear_mean_reduce_fd2717__place_a7de42f3e4 ===
+    place  free=(a0, a3)  grid=(a0, a3)
+    work   t128
+    Fold  free
+    …
+    outputs
+    └─ add_8[0, a0, a3] = v31__ws6abfbbaa03
+```
+
+The global `WORK=t128` attempt instead removes tensor-core schedules from the projection pieces, as described below.
+Whether existing site-scoped pins can produce the composed combination remains unverified.
 
 ## Observed details
 

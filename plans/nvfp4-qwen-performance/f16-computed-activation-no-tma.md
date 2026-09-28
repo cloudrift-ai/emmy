@@ -17,21 +17,37 @@ ValueError: STAGE pin 'd2/smem-tma' does not resolve for this contraction
 The same program with packed 4-bit weights (W4A16) gets exactly this combination: the compute threads fill the
 activation while TMA copies the weights. So the pattern exists in emmy, but only on the packed-weight path.
 
-## Reading the missing combination
+## Observed and expected Tile IR
 
-In Tile IR, operand A is the activation here; B holds the weights. This normalized sketch abbreviates the activation
-subtree as `computed x + 1`, rather than using literal dump syntax:
+Observed in the reviewed CPU compile at `a98fd4f8`; the excerpt ends before accumulator initialization:
 
 ```text
-Observed:                           Expected with TMA support (illustrative):
-contraction ⟨STAGE=d2/smem⟩          contraction ⟨STAGE=d2/smem-tma⟩
-  A: computed x + 1                   A: computed x + 1   # compute-filled
-  B: load stored weights              B: stored weights  # copied by TMA
+    Fold  free
+    ├─ operand[acc0, acc1]: Fold[a2 in 0..4096] contraction   ⟨TILE=mma_m16n8k16_f16_f32/f2x2/k2 STAGE=d2/smem⟩   ‹computed›
+    │  ├─ operand[v0]: Fold  free   ‹computed›
+    │  │  ├─ operand[in3]: load x[a0, a2]   ‹materialized›
+    │  │  └─ lift: λ(in3) -> (v0)
+    │  │       v0 = add(1, in3)
+    │  ├─ operand[in1]: load linear_1_wt[a2, a1]   ‹materialized›
+    │  ├─ operand[in2]: load linear_wt[a2, a1]   ‹materialized›
 ```
 
-TMA copies bytes; it cannot evaluate `x + 1`. The desired combination keeps that computation in the matmul and uses
-TMA only for stored weights. Cutting the activation into a separate kernel already permits TMA, but adds an
-activation write/read through memory.
+Expected, **composed, not emitted**, with the same computed activation and a TMA stage for stored weights:
+
+```text
+    Fold  free
+    ├─ operand[acc0, acc1]: Fold[a2 in 0..4096] contraction   ⟨TILE=mma_m16n8k16_f16_f32/f2x2/k2 STAGE=d2/smem-tma⟩   ‹computed›
+    │  ├─ operand[v0]: Fold  free   ‹computed›
+    │  │  ├─ operand[in3]: load x[a0, a2]   ‹materialized›
+    │  │  └─ lift: λ(in3) -> (v0)
+    │  │       v0 = add(1, in3)
+    │  ├─ operand[in1]: load linear_1_wt[a2, a1]   ‹materialized›
+    │  ├─ operand[in2]: load linear_wt[a2, a1]   ‹materialized›
+```
+
+The first operand computes `add(1, in3)`; the other two load stored weights. TMA cannot evaluate that addition.
+The expected stage keeps the activation compute-filled and copies the weights with TMA. The existing workaround
+cuts the activation into a separate kernel, adding a write/read through memory.
 
 ## Reproduce
 

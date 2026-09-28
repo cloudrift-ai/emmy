@@ -17,8 +17,8 @@ The eight final reports below describe what the investigation found, with reprod
 questions. Several reports group related symptoms whose causes may need further investigation.
 
 Evidence was reviewed at `a98fd4f8` on 2026-09-28 using saved IR and error logs. The staging and packed-cut repros were
-also compiled afresh without GPU execution. The flash follow-up checked fresh Tile IR only. Historical GPU timings
-below have not been independently revalidated. The inline quantization validation report was also checked against
+also compiled afresh without GPU execution. The flash follow-up checked fresh Tile IR and emitted CUDA without GPU
+execution. Historical GPU timings below have not been independently revalidated. The inline quantization validation report was also checked against
 the parent/worker binding and strict-reference code; its GPU results were not rerun.
 
 The overview is ordered by expected importance for Qwen3.8 NVFP4 serving at parity with vLLM defaults, with likely
@@ -35,7 +35,7 @@ less directly tied to the W4A4 target. Effort and relative importance may change
 | --- | --- |
 | [DeltaNet compilation and scheduling failures](nvfp4-qwen-performance/qwen38-gdn-layers-fail.md) | In gated DeltaNet (GDN) layers, padding and serving capture raise errors; a one-source `FragmentRepack` crashes CUDA rendering; sibling Tile IR sweeps become nested CUDA loops; input projections lack tensor-core TILEs. |
 | [Encode cuts duplicate projections](nvfp4-qwen-performance/fp4-encode-recomputes-producer.md) | Separate Tile IR pieces repeat full-K contractions over the same weights—gate/up three times and o_proj four times. Some copies use identical layouts. |
-| [Attention and encode repeat work](nvfp4-qwen-performance/qwen38-attention-not-flash-and-encode-shape.md) | The examined Qwen attention IR has no `twist=softmax`; four P·V pieces repeat `exp` and division across output columns. Encode assigns 128 threads per byte and repeats each group's maximum eight times. |
+| [Attention and encode repeat work](nvfp4-qwen-performance/qwen38-attention-not-flash-and-encode-shape.md) | The normal Qwen cut path misses a softmax rewrite. Q/K cuts plus another rewrite expose partial carriers but emit scalar code with only 16 active consumer threads. The original P·V pieces repeat `exp`/division; encode repeats each group’s maximum eight times. |
 | [Global pin interference and slow compilation](nvfp4-qwen-performance/pins-cannot-target-one-piece.md) | A global `WORK=t128` pin removes tensor-core TILEs from neighboring matmul pieces. Unpinned Tile IR compilation takes about 12 minutes in concurrent runs. Site-scoped targeting is untested; the expensive pass is not identified. |
 | [Inline quantized strict comparison uses a mismatched reference](nvfp4-qwen-performance/strict-fails-for-inline-quantize-programs.md) | Unseeded inline benchmarks bind Emmy’s packed weights from the parent checkpoint but rebuild eager’s weights in the worker. Strict comparison still uses unquantized eager at 1e-3; reported seeded runs also fail. |
 | [Packed cut pieces lose staging](nvfp4-qwen-performance/packed-cut-piece-operand-order.md) | Tile IR puts the decoded weight before the computed activation. Only no staging and `d1/smem` remain; a `d2/smem-async` pin fails. |
@@ -124,9 +124,10 @@ validate this NVFP4 checkpoint on sm_120 with emmy's own kernels.
      blocks at 16 tokens for a Qwen3.8 gate/up output, and 1–3 million at 512 tokens on Qwen3-8B, costing 0.9–3 ms.
    - Pinning `REDUCE=` (each thread reduces its groups alone) takes it to 11–30 µs.
 4. **Attention (Qwen3.8 full-attention layers).**
-   - None of the three cut sets tried keeps scaled dot-product attention as one kernel with an online softmax. A
-     bounded follow-up found no softmax carrier after lift or the projection-only cut, while plain causal GQA at the
-     same dimensions did form one. No practical flash route was found; the attention report records the check.
+   - The normal cut path skips softmax recognition on a consumer with output sweeps. Q/K cuts plus a repeated
+     recognition pass form partial carriers, but all three emitted kernels lack tensor-core instructions and the
+     attention consumer has only 16 active threads. This is not a practical Qwen NVFP4 route. The report includes the
+     CPU-only repro, actual IR and CUDA excerpts, and a smaller projection-related recognition failure.
    - P·V is a reduce over keys with one 128-thread block per output element, recomputing `exp(score − max)/sum` per
      head-dim column. Four pieces compute it: 111–149 µs each for the two that run as reduces.
 5. **Global hand pins interfere across pieces.** After a cut, each piece forks over its own schedule. A global pin

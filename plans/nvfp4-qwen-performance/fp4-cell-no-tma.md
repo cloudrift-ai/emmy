@@ -18,20 +18,28 @@ The same matmul with 16-bit activations (W4A16) offers TMA at every depth, and s
 copies of packed 4-bit weight bytes. In these reproducers, the missing path is specific to the fp4 instruction.
 This limits the available schedules; it does not show that TMA would be faster than cp.async.
 
-## Reading the schedule difference
+## Observed and expected Tile IR
 
-Abbreviated Tile IR for the fp4 contraction; operands and outputs are omitted:
+Observed with the cp.async pin, from the reviewed CPU compile at `a98fd4f8`:
 
 ```text
-Observed with the cp.async pin:
-Fold[…] contraction ⟨TILE=mma_m16n8k64_e2m1_f32/f1x2/k4 STAGE=d3/smem-async⟩
+=== 1: k_linear_742b47 ===
+    place  free=(a0, a1)  grid=(a0, a1)
+    work   w1x2
+    Fold[a2 in 0..4096] contraction   ⟨TILE=mma_m16n8k64_e2m1_f32/f1x2/k4 STAGE=d3/smem-async⟩
+```
 
-Expected with TMA support (illustrative; the pin currently fails):
-Fold[…] contraction ⟨TILE=mma_m16n8k64_e2m1_f32/f1x2/k4 STAGE=d2/smem-tma⟩
+Expected with the TMA pin, **composed, not emitted**; only the staging choice changes in this excerpt:
+
+```text
+=== 1: k_linear_742b47 ===
+    place  free=(a0, a1)  grid=(a0, a1)
+    work   w1x2
+    Fold[a2 in 0..4096] contraction   ⟨TILE=mma_m16n8k64_e2m1_f32/f1x2/k4 STAGE=d2/smem-tma⟩
 ```
 
 `TILE` chooses the matrix instruction and fragment layout; `STAGE` chooses how operands reach shared memory.
-The matrix instruction stays the same. Only the method for copying stored codes and scales into shared memory changes.
+The fp4 instruction stays the same. The missing implementation copies the stored codes and scales with TMA.
 
 ## Reproduce
 

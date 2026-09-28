@@ -21,21 +21,32 @@ activation first, and every cp.async and TMA option is available. The plain f16 
 The staging matcher rejects the weight-first form. Why the K-split path chooses the other orientation remains
 untraced.
 
-## Reading the operand order
+## Expected Tile IR
 
-Tile IR lists operand A first, then B. These sketches use descriptive axis names and abbreviate the weight decode.
-`STAGE` selects how operands reach shared memory: compute fill (`smem`), cp.async (`smem-async`) or TMA (`smem-tma`).
+The observed Tile IR excerpt under **Reproduce** puts `operand[v4]` (weight decode) before `operand[v5]` (activation).
+The following is **composed expected IR**, with those operand subtrees reversed and copy staging available.
+`…` omits the unchanged weight-decode arithmetic and accumulator operations:
 
 ```text
-Observed after the cut:             Expected orientation (illustrative):
-contraction ⟨STAGE=d1/smem⟩         contraction ⟨STAGE=d2/smem-async⟩
-  A: decode(weight[row, k])           A: x[token, k] + 1
-  B: x[token, k] + 1                  B: decode(weight[row, k])
-  output[token, row] = acc            output[token, row] = acc
+=== 0: k_linear_reduce_e63dae__place_943d6e4dd9 ===
+    place  free=(a1, a0)  grid=(a1, a0)
+    work   w1x2
+    Fold[a2 in 0..4096] contraction   ⟨TILE=mma_m16n8k16_f16_f32/f1x8/k8 STAGE=d2/smem-async⟩
+    ├─ operand[v5]: Fold  free   ‹computed›
+    │  ├─ operand[in5]: load x[a1, a2]   ‹materialized›
+    │  └─ lift: λ(in5) -> (v5)
+    │       v5 = add(1, in5)
+    ├─ operand[v4]: Fold  free   ‹computed›
+    │  ├─ operand[in2]: load p_b_weight_bits[a0, (((a2 / 16) * 8) + ((a2 % 16) / 2))]   ‹materialized›
+    │  ├─ operand[in4]: load p_b_weight_scale_bits[a0, (a2 / 16)]   ‹materialized›
+    │  …
+    …
+    outputs
+    └─ linear[a1, a0] = acc0
 ```
 
-The output layout is the same. The difference is that the staging matcher recognizes the packed weight only in the
-B position. This is a lost scheduling option, not an incorrect transpose of the returned tensor.
+The returned tensor is still token first (`a1`) and weight-row second (`a0`). The change exposes the packed weight in
+the B operand position, where the staging matcher recognizes it; it does not change the mathematical output layout.
 
 ## Reproduce
 

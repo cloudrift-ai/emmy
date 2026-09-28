@@ -9,17 +9,13 @@ program or checkpoint-based correctness check fails.
 
 ## Reading the reference mismatch
 
-This is a dataflow sketch from source review, not IR output. `Q` includes the selected quantization and its scales.
+This failure is in benchmark binding and reference selection, not in the contraction's IR. Emmy binds packed weights
+from the parent's checkpoint, while eager uses the worker module's freshly drawn weights. Both use the worker's inputs.
+A correct strict reference would evaluate the same quantized semantics with the same weights, scales and inputs.
 
-```text
-Observed, unseeded:                 Expected strict comparison (illustrative):
-Emmy: Q(W_parent, X_worker)         Emmy:  quantized graph(weights, scales, inputs)
-eager: W_worker, X_worker           oracle: same semantics, weights, scales, inputs
-compare at rtol = atol = 1e-3       compare with a justified numerical tolerance
-```
-
-Rerunning the snippet creates different worker weights. Seeding aligns the original snapshots for this reproducer,
-but unquantized eager still computes a different program. Its delta can report quantization error separately.
+Seeding aligns the original weight snapshots for this reproducer. It does not make unquantized eager an oracle for
+the quantized graph; that comparison can still report quantization error separately. The source evidence is detailed
+under **Cause of the weight mismatch**.
 
 ## Two reference problems
 

@@ -9,22 +9,57 @@ at several stages, from tracing and serving capture to CUDA generation and sched
 serving before meaningful end-to-end tuning can begin. The report groups five observed failures; it does not assume
 five independent root causes.
 
-## Reading the loop failure
+## Observed IR and expected lowering
 
-A sweep is an output loop that a thread runs serially unless its worker layout spreads the work.
-Tile IR marks `sweep(a0.a1)`, `sweep(a8.a10)` and `sweep(a8.a11)` as sibling output sweeps. The CUDA nests their axes
-instead. This normalized sketch shows the distinction; it omits other axes and is not literal dump syntax:
+The saved four-cut Tile IR at `a98fd4f8` declares sibling output sweeps:
 
 ```text
-Observed CUDA structure:            Expected independent output sweeps:
-for a0, a1, a8, a6, a10, a11:       for a0, a1:  write output_A
-    ... output stores ...          for a8, a10: write output_B
-                                   for a8, a11: write output_C
+    outputs
+    ├─ sweep(a0.a1) reshape_9[0, a0, 0, a1] = v40__wsec2ded4f48
+    ├─ sweep(a0.a1) to_7[0, a0, a1] = v90__wsec2ded4f48
+    ├─ sweep(a0.a1.a6) reshape_5[0, a0, 0, a1, a6] = v134__ws01ef1a7daas0
+    ├─ sweep(a0.a1.a6) reshape_7[0, a0, 0, a1, a6] = v135__ws01ef1a7daas0__wsec2ded4f48
+    ├─ sweep(a8.a10) type_as[0, a8, a10] = v161__ws825fe6030es0
+    └─ sweep(a8.a11) transpose_1[0, a8, a11] = v203__wsbab87715b8
 ```
 
-Shared prefixes and tiling are allowed. The problem is multiplying unrelated output domains: their loop bounds make
-the observed nest roughly 1.3×10¹⁷ iterations on one thread. This explains the timeout without requiring a GPU run.
-The exact bounds and the separate codegen failure are recorded below.
+The saved default CUDA dump shows the same failure: it nests the independent `a10` and `a11` output domains inside
+`a0`, `a1`, `a8` and `a6`. These are actual emitted lines; comments mark omissions, including the closing braces:
+
+```cuda
+        for (int a0 = 0; a0 < 48; a0++) {
+            for (int a1 = 0; a1 < 64; a1++) {
+                // …
+                for (int a8 = 0; a8 < 64; a8++) {
+                    // …
+                    for (int a6 = 0; a6 < 128; a6++) {
+                        // …
+                        for (int a10 = 0; a10 < 5120; a10++) {
+                            // …
+                            type_as[a8 * 5120 + a10] = v161__wsdaf9596f95;
+                            for (int a11 = 0; a11 < 10240; a11++) {
+                                __half v203__wsa98345b786 = type_as__place_a98345b786_0[a8 * 10240 + a11];
+                                transpose_1[a8 * 10240 + a11] = v203__wsa98345b786;
+```
+
+Expected CUDA structure, **composed, not emitted**. The unchanged value calculations and the other output stores are
+omitted; the two shown stores must not be nested inside each other's domains or the unrelated `a0`/`a1` sweeps:
+
+```cuda
+for (int a8 = 0; a8 < 64; a8++) {
+    for (int a10 = 0; a10 < 5120; a10++) {
+        // … unchanged calculation of v161__wsdaf9596f95 …
+        type_as[a8 * 5120 + a10] = v161__wsdaf9596f95;
+    }
+    for (int a11 = 0; a11 < 10240; a11++) {
+        __half v203__wsa98345b786 = type_as__place_a98345b786_0[a8 * 10240 + a11];
+        transpose_1[a8 * 10240 + a11] = v203__wsa98345b786;
+    }
+}
+```
+
+Tile IR already distinguishes the output domains; generated CUDA is the level where the erroneous nesting is visible.
+The independent sweeps may share prefixes or use different tiling. Their extents must not multiply each other's work.
 
 ## Observed failures
 

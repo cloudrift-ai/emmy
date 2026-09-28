@@ -11,26 +11,39 @@ The consumers need different views of the projection output: pairs of values to 
 16-value groups to compute and store quantization scales. Those views should be able to read one computed result.
 The observed q_proj and v_proj also repeat, four and three times respectively.
 
-## Observed and expected IR
+## Expected Tile IR
 
-This is a normalized dataflow sketch of the gate/up Tile IR, not literal compiler syntax. `project` means the full
-contraction over K = 5120; the piece numbers match the excerpt below. The sketch omits SiLU and indexing details.
+The observed excerpts below show three separate full-K contractions over the same gate/up weights. The expected form
+materializes each projection once and lets the consumers index its buffers differently. This is **composed Tile IR**,
+not a successful compile. New buffer names are illustrative; `…` omits unchanged decoding, SiLU and encode operations:
 
 ```text
-Observed after the full-projection cut
-piece 0: project(gate_weight, up_weight, x) -> workspace_0   # 16-value groups
-piece 2: project(gate_weight, up_weight, x) -> workspace_2   # code pairs
-piece 3: project(gate_weight, up_weight, x) -> workspace_3   # 16-value groups again
+=== 0: k_gate_up_expected ===
+    place  free=(a0, a1)  unmapped
+    Fold[a2 in 0..5120] contraction
+    …
+    outputs
+    ├─ gate_proj[0, a0, a1] = acc0
+    └─ up_proj[0, a0, a1] = acc1
 
-Expected sharing (illustrative; not emitted today)
-producer: project(gate_weight, up_weight, x) -> shared_output
-consumer: read shared_output as pairs      -> packed codes
-consumer: read shared_output as groups     -> block scales
+=== 1: k_encode_expected ===
+    place  free=(a0, a1)  unmapped
+    Fold  free
+    ├─ operand[acc0]: Fold[a2 in 0..16] reduce   ‹computed›
+    │  ├─ operand[in5]: load gate_proj[0, a0, ((a1 / 8) * 16) + a2]   ‹materialized›
+    │  ├─ operand[in6]: load up_proj[0, a0, ((a1 / 8) * 16) + a2]   ‹materialized›
+    │  …
+    └─ lift: λ(acc0, a0, a1) -> (v39)
+         in7 = load gate_proj[0, a0, (2 * a1)]
+         in8 = load up_proj[0, a0, (2 * a1)]
+         …
+    outputs
+    └─ mul_13_static_fp4_bits[0, a0, a1] = v39
 ```
 
-The important difference is one evaluation of each projection, with its result reused across consumers. A legal K
-split may still use partial contractions and a finishing reduction; it must not repeat the full projection for each
-read layout.
+The consumer loads projection results instead of contracting over the weights again. This excerpt isolates producer
+sharing: sharing the encode maximum across bytes is the separate finding in the attention/encode report. A legal K
+split may still use partial contractions and a finishing reduction.
 
 ## Reproduce
 
