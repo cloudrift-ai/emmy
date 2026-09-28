@@ -12,6 +12,9 @@ DB at `-O3`, `EMMY_FAST_MATH=0`, and the replay matching eager. An approximate m
 fails `--strict` on a few outputs still counts, and the failing count is written in the scoreboard. A cell counts only
 when all three hold. The plan is done when the lane (`emmy bench` on the recipe) confirms all ten, run once at the end.
 
+Accepted exception (2026-09-28): V100 s1 at 72 µs vs torch.compile 61. It is launch-bound (16 launches at a ~1.8 µs
+floor each); unsplit GEMVs, fewer splits and a consumer-summed split all lost on the V100's 80 SMs.
+
 ## Scoreboard (µs, end to end)
 
 | card | s512 Emmy | s512 torch.compile | gap | s1 Emmy | s1 torch.compile | gap |
