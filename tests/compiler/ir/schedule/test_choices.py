@@ -112,3 +112,14 @@ def test_reduce_rejects_the_retired_coop_width_spelling() -> None:
     for legacy in ("b512", "b256t", "g8k/b128t"):
         with pytest.raises(ValueError, match="unknown token"):
             Reduce.parse(legacy, Work.parse("t512"))
+
+
+def test_reduce_spells_a_warp_group_split_with_its_width() -> None:
+    """``wg<n>``: a warp tile's chunked fold split across ``n`` groups of the CTA's warps. WORK names
+    one group's warps, so the width rides the token, and the split stays apart from a thread band."""
+    r = Reduce.parse("wg2", Work.parse("w4x1"))
+    assert r == Reduce.of(groups=2) and r.spell() == "wg2"
+    assert (r.groups, r.coop, r.cta) == (2, 1, 1)
+    assert Reduce.parse("g2k/wg2", None) == Reduce.of(cta=2, groups=2)
+    with pytest.raises(ValueError, match="positive integer width"):
+        Reduce.parse("wg", Work.parse("w4x1"))
