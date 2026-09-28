@@ -371,11 +371,12 @@ def qwen3_embedding_config():
     return config
 
 
-def qwen3_embedding_model(config=None):
+def qwen3_embedding_model(config=None, auto_class=None):
     """A random-weight fp32 model built from :func:`qwen3_embedding_config` — the shared trunk of the
-    dynamic-shape tests. Seeded, so two calls build the same weights."""
+    dynamic-shape tests. Seeded, so two calls build the same weights. ``auto_class`` picks the head:
+    the bare trunk by default, or a causal LM for the whole-model trace."""
     import torch  # noqa: PLC0415
     from transformers import AutoModel  # noqa: PLC0415
 
     torch.manual_seed(0)
-    return AutoModel.from_config(config if config is not None else qwen3_embedding_config()).float().eval()
+    return (auto_class or AutoModel).from_config(config if config is not None else qwen3_embedding_config()).float().eval()
