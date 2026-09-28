@@ -93,6 +93,20 @@ def test_scope_digest_follows_the_cards_rows_only(tmp_path, monkeypatch) -> None
     assert scope_digest(card) not in (base, changed, scoped)
 
 
+def test_a_scope_says_when_another_card_measured_its_rows(caplog) -> None:
+    """An explicit scope reads a row only on the card that measured it, or everywhere when the row names no
+    card. The rows it drops are named: a working golden seeded from another card's file and recorded here
+    kept every row under that card, and its replay built the fused kernel with nothing said."""
+    from types import SimpleNamespace
+
+    sxm2, sxm3 = "NVIDIA Tesla V100 SXM2 16GB", "NVIDIA Tesla V100 SXM3 32GB"
+    rows = [SimpleNamespace(gpu_name=name, compute_cap=(7, 0)) for name in (sxm2, sxm3, "")]
+    with golden.records_override(rows), caplog.at_level("WARNING"):
+        kept = golden.repository.records_for_card(sxm3, (7, 0))
+    assert kept == rows[1:]
+    assert f"1 row(s) measured on {sxm2} are no evidence on {sxm3}" in caplog.text
+
+
 def test_decode_ignores_off_anchors_but_not_a_decided_value() -> None:
     """A row's OFF anchors are not part of what it is compared by, and its decided values are.
 
