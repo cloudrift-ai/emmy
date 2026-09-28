@@ -427,6 +427,7 @@ def _staged_inner_atom_loop(
     pads=None,
     frag_ns: str = "",
     scales=None,
+    parts: bool = False,
 ) -> list[Stmt]:
     """The inner atom-K drain shared by every staged path: read the A/B ``slabs`` via
     ``LdmatrixLoad(staged=True)`` + ``MmaSyncPtx``. The leaf uses modern ``ldmatrix`` instructions
@@ -597,6 +598,8 @@ def _staged_inner_atom_loop(
             for j in range(n.reg)
         ]
 
+    if parts:  # the pieces themselves, for a K loop that carries the fragments across chunks
+        return n_steps, lambda step, suffix: ldms(Literal(step * atom_k, "int"), suffix), mmas
     if reg_depth < 2 or n_steps < 2:  # single-buffer: the inline fragment-load → mma loop
         body = ldms(Var(ki), "") + mmas("")
         return [
@@ -1736,6 +1739,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
         k_extent=K,
         workers=ops.workers,
         block_threads=tile.launch_threads,
+        carried=ops.carried_drain(operands, mn) if isinstance(transport, CpAsyncTransport) else None,
     )
     # The block-scaled cell's per-tensor scale levels land on the output fragments here — after
     # the K-loop, before the sink.
@@ -2045,6 +2049,29 @@ class _MmaOps(_AtomOps):
             t = self.inputs.get(edge.as_slab().load.input) if self.inputs and edge.as_slab() is not None else None
             out.append(t.dtype if t is not None and t.dtype.nbytes == 1 else dt)
         return tuple(out)
+
+    def carried_drain(self, operands, mn):
+        """The drain as ``slot -> (steps, loads(step, suffix), mmas(suffix))`` for a K loop that
+        double-buffers the fragments across chunk boundaries (``STAGE`` ``/p2`` on a cp.async ring,
+        :func:`pipelined_kloop`), or ``None`` where the drain has more to it than loads and mmas."""
+        if self.tile.atom.is_wgmma or _f16acc(self.tile.atom) or self.stage.reg_depth != 2:
+            return None
+        if any(getattr(op, "scale", None) is not None for op in operands):
+            return None
+        return lambda slot: _staged_inner_atom_loop(
+            slabs=tuple(op.slab for op in operands),
+            offs=tuple(op.slot_row(slot) for op in operands),
+            mn=mn,
+            atom=self.tile.atom,
+            bk_elems=self.stage.bk_elems,
+            ki="_ki",
+            swizzles=tuple(getattr(op, "swizzle", "NONE") for op in operands),
+            trans=tuple(getattr(op, "trans", False) for op in operands),
+            byte_slabs=tuple((getattr(op, "elem_bytes", None) or self.tile.atom.operand_dtype("a").nbytes) == 1 for op in operands),
+            pads=tuple(getattr(op, "pad_cols", 0) for op in operands),
+            frag_ns=self.frag_ns,
+            parts=True,
+        )
 
     def staged_drain(self, operands, slot, cells, offset, mn):
         """The mma slab drain — the fragment-load + ``mma.sync`` leaf reading ring ``slot``
@@ -2437,6 +2464,29 @@ class _ScalarOps(_AtomOps):
         """Each gmem operand's OWN dtype — A and B may differ on the scalar tier (fp32 split
         partials × fp16 weights); the drain's fma converts like the gmem-direct path does."""
         return (self.inputs[self.c.operands[0].as_slab().load.input].dtype, self.inputs[self.c.operands[1].as_slab().load.input].dtype)
+
+    def carried_drain(self, operands, mn):
+        """The drain as ``slot -> (steps, loads(step, suffix), mmas(suffix))`` for a K loop that
+        double-buffers the fragments across chunk boundaries (``STAGE`` ``/p2`` on a cp.async ring,
+        :func:`pipelined_kloop`), or ``None`` where the drain has more to it than loads and mmas."""
+        if self.tile.atom.is_wgmma or _f16acc(self.tile.atom) or self.stage.reg_depth != 2:
+            return None
+        if any(getattr(op, "scale", None) is not None for op in operands):
+            return None
+        return lambda slot: _staged_inner_atom_loop(
+            slabs=tuple(op.slab for op in operands),
+            offs=tuple(op.slot_row(slot) for op in operands),
+            mn=mn,
+            atom=self.tile.atom,
+            bk_elems=self.stage.bk_elems,
+            ki="_ki",
+            swizzles=tuple(getattr(op, "swizzle", "NONE") for op in operands),
+            trans=tuple(getattr(op, "trans", False) for op in operands),
+            byte_slabs=tuple((getattr(op, "elem_bytes", None) or self.tile.atom.operand_dtype("a").nbytes) == 1 for op in operands),
+            pads=tuple(getattr(op, "pad_cols", 0) for op in operands),
+            frag_ns=self.frag_ns,
+            parts=True,
+        )
 
     def staged_drain(self, operands, slot, cells, offset, mn):
         """The scalar slab drain — the plain-``Load`` fma leaf (:func:`_scalar_drain`), reading by
