@@ -49,7 +49,9 @@ axes, each CTA declares the block, seeds it cell by cell, and walks the sequenti
 every thread strides over the cells the step defines, evaluates the step for each from the block and keeps the
 results in a register array; a barrier; then the writes go back into the block and the per-step outputs to
 global memory, the buffers something outside reads also receiving the block's value at the cells the step
-skipped; a second barrier publishes the step.
+skipped; a second barrier publishes the step. A snapshot is written only at the steps its readers load — a
+reader at a literal step, the model's own use of the forward substitution, costs one copy of the block instead
+of one per step; a graph output, or a reader at a non-literal step, keeps every step.
 
 `factorize` builds the ambient `Ctx` and dispatches `tile.op` through `_factorize`, which peels projecting zero-axis
 `Fold`s and binds each leaf via the ONE root-binding pipeline (`_factor._bind`) — its form is read off the node's
