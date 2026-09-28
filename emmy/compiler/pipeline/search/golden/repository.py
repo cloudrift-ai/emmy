@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import tempfile
 from collections.abc import Sequence
 from contextlib import contextmanager
@@ -16,6 +17,8 @@ from emmy.recipe.bundled import default_recipe_root
 
 from .format import GoldenFile
 from .record import GoldenRecord
+
+logger = logging.getLogger("emmy.compiler.pipeline")
 
 #: The maintained golden records, one file per card: model-agnostic rows the offline prior trains on, the tests
 #: decode, and a compile on that card picks from. They ship inside this package.
@@ -119,8 +122,16 @@ def scope_explicit() -> bool:
 
 def _scoped(records: Sequence[GoldenRecord], gpu_name: str, compute_cap: tuple[int, int]) -> list[GoldenRecord]:
     """An explicit scope's records for one card: the capability must agree; a record that names
-    no card (a working golden traced off-GPU) applies to whichever card compiles it."""
-    return [r for r in records if tuple(r.compute_cap) == tuple(compute_cap) and (not r.gpu_name or r.gpu_name == gpu_name)]
+    no card (a working golden traced off-GPU) applies to whichever card compiles it. Rows another
+    card of the same capability measured are no evidence here, and the compile says so: silently
+    dropped, they left a recorded route unread and its replay built the fused kernel."""
+    same_cap = [r for r in records if tuple(r.compute_cap) == tuple(compute_cap)]
+    kept = [r for r in same_cap if not r.gpu_name or r.gpu_name == gpu_name]
+    if gpu_name and (others := sorted({r.gpu_name for r in same_cap if r.gpu_name and r.gpu_name != gpu_name})):
+        logger.warning(
+            "golden scope: %d row(s) measured on %s are no evidence on %s", len(same_cap) - len(kept), ", ".join(others), gpu_name
+        )
+    return kept
 
 
 def records_for_card(gpu_name: str, compute_cap: tuple[int, int]) -> list[GoldenRecord]:

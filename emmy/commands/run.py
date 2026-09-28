@@ -227,6 +227,18 @@ def handle_run(args):
     if args.record_greedy and not (args.golden and args.bench):
         logger.error("--record-greedy requires --golden PATH and --bench")
         sys.exit(2)
+    if args.record or args.record_greedy:
+        # A row is evidence only on the card its file names (``golden.records_for_card``): measurements
+        # written under another card's header are what no replay on this card ever reads.
+        from emmy.compiler.context import Context  # noqa: PLC0415
+        from emmy.compiler.pipeline.search.golden import GoldenFile  # noqa: PLC0415
+        from emmy.compiler.pipeline.search.working_golden import validate_working_gpu  # noqa: PLC0415
+
+        try:
+            validate_working_gpu(GoldenFile.load(args.golden), Context.probe())
+        except ValueError as exc:
+            logger.error("--record / --record-greedy: %s — record into a file seeded for this card", exc)
+            sys.exit(2)
     with config.strict_evidence_override(True if getattr(args, "strict_evidence", False) else None):
         if args.golden and not args.realization:
             _run_golden_targets(args)
