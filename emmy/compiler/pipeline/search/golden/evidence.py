@@ -36,7 +36,15 @@ from emmy.compiler.pipeline.knob import family_of
 from emmy.compiler.pipeline.pipeline import Run, _is_structural_option
 from emmy.compiler.pipeline.search.data.freeze import freeze_source, is_lfs_pointer
 from emmy.compiler.pipeline.search.db import SearchDB, is_placement_knob
-from emmy.compiler.pipeline.search.pins import composed_routes, pinned_knobs, regime_live, spelled_arm, unpinned_decisions
+from emmy.compiler.pipeline.search.pins import (
+    composed_routes,
+    note_place_key,
+    pinned_knobs,
+    regime_live,
+    spelled_arm,
+    tracking_place_keys,
+    unpinned_decisions,
+)
 from emmy.compiler.pipeline.search.policy.terminal_bench import persist_kernel_perf, point_stats
 from emmy.compiler.wire import kernel_tile
 
@@ -138,8 +146,10 @@ def _lower(pipeline, ctx: Context, entries: list[GoldenRecord]):
     asked_by: set[int] = set()
     spelled_by: set[int] = set()
     composed: list[tuple[None, tuple[str, ...]]] = []
+    routed: set[str] = set()
     for row in spelling.values():
         keys = tuple(sorted(key for key, value in row.items() if family_of(key) == "PLACE" and value == "cut"))
+        routed.update(key for key in keys if key != "PLACE")
         if len(keys) > 1 and (None, keys) not in composed:
             composed.append((None, keys))
 
@@ -155,6 +165,7 @@ def _lower(pipeline, ctx: Context, entries: list[GoldenRecord]):
                     # A decision consumes the keys that spelled it (a bare ``PLACE=cut`` its one root-most
                     # cut), so the pieces are read against what the entry has left to say.
                     for key in (*(set(knobs) & set(row)), *(("PLACE",) if row.get("PLACE") == "cut" else ())):
+                        note_place_key(key)
                         row.pop(key, None)
                 return option
         elif asked := piece_row(decider.schedule_row):
@@ -167,8 +178,11 @@ def _lower(pipeline, ctx: Context, entries: list[GoldenRecord]):
                 return hit[0]
         return next(iter_leaves(fp.options))
 
-    with unpinned_decisions(), composed_routes(composed):
+    with unpinned_decisions(), composed_routes(composed), tracking_place_keys() as resolved:
         graph, _trace = Run(pipeline=pipeline, ctx=ctx).resolve(lead.target_program.copy(), decide)
+    for key in sorted(routed - resolved):
+        # The route still decides its other seams; this one addresses nothing the fresh lowering has.
+        logger.warning("golden route of %s: %s names no seam of the fresh lowering — it decided nothing", lead.name, key)
     return graph, asked_by - spelled_by
 
 

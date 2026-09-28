@@ -19,6 +19,7 @@ from emmy.compiler.pipeline.knob import (
     KnobType,
     axis_of,
     family_of,
+    family_pins,
     get,
     is_off_value,
     kernel_scoped,
@@ -214,6 +215,37 @@ def unreproducible_pin_flag(
 #: entries — the signature a kernel's ``S_*`` stamps (``None``: every kernel of the compile, a record
 #: replaying its own target), the keys the ``PLACE@…`` seams one measured row marks ``cut`` together.
 _COMPOSED_ROUTES: list[tuple[frozenset | None, tuple[str, ...]]] = []
+_RESOLVED_PLACE_KEYS: list[set[str]] = []
+
+
+@contextlib.contextmanager
+def tracking_place_keys():
+    """Collect the scoped ``PLACE`` keys — pinned or a golden route's — that the cut pass resolved to a
+    site on some kernel while the block runs (:func:`note_place_key`). A key the whole compile never
+    resolved addressed nothing: a stale spelling, which the cut pass alone cannot tell from a key
+    meant for another kernel of the graph."""
+    seen: set[str] = set()
+    _RESOLVED_PLACE_KEYS.append(seen)
+    try:
+        yield seen
+    finally:
+        del _RESOLVED_PLACE_KEYS[next(i for i, tracked in enumerate(_RESOLVED_PLACE_KEYS) if tracked is seen)]
+
+
+def place_keys_tracked() -> bool:
+    """Whether an enclosing caller is already collecting resolved ``PLACE`` keys — and so owns the report."""
+    return bool(_RESOLVED_PLACE_KEYS)
+
+
+def unmatched_place_pins(resolved: set[str]) -> list[str]:
+    """The live scoped ``PLACE`` pins no kernel of a compile resolved (:func:`tracking_place_keys`)."""
+    return sorted(name for name, _ in family_pins("PLACE") if family_of(name) == "PLACE" and name != "PLACE" and name not in resolved)
+
+
+def note_place_key(key: str) -> None:
+    """Record that ``key`` resolved to a site of the kernel the cut pass is deciding."""
+    for seen in _RESOLVED_PLACE_KEYS:
+        seen.add(key)
 
 
 @contextlib.contextmanager

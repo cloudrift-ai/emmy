@@ -15,6 +15,10 @@ What a restamp keeps is decided per row, never guessed:
 - a row whose stored identity is the target's own takes the fresh target's; a row naming a piece of
   the target's kernel set (a receipt, or a piece row beside its routing row) keeps its identity, and
   survives only if the fresh set still mints that piece under the set's own rows;
+- a route key no kernel of the fresh lowering resolves makes the file stale too — a node that changed
+  only its kind (a reduce read as a contraction) re-spells every route through it while every stored
+  target keeps its Loop IR. Restamp re-spells such a key onto the seam its operand positions reach, and
+  drops the row when they reach none;
 - a row that no longer decodes on the fresh kernel is dropped;
 - a measurement stays only when the kernel it timed is the kernel the fresh Loop IR renders, byte
   for byte, under the row as the compile's only evidence. Otherwise the row keeps its schedule and
@@ -32,7 +36,8 @@ from dataclasses import dataclass, field, replace
 
 from emmy.compiler.context import Context
 from emmy.compiler.ir.cuda.ir import CudaOp
-from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+from emmy.compiler.ir.tile.path import family_sites, parse_key, sites
+from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.knob import KERNEL_DECISION_FAMILIES, family_of
 from emmy.compiler.pipeline.search.golden import (
     Config,
@@ -42,10 +47,12 @@ from emmy.compiler.pipeline.search.golden import (
     Measurements,
     Realization,
     decode_record,
+    records_override,
     siblings_of,
     sole_evidence,
 )
-from emmy.compiler.pipeline.search.pins import pinned_knobs
+from emmy.compiler.pipeline.search.golden.record import _lifted_target
+from emmy.compiler.pipeline.search.pins import pinned_knobs, tracking_place_keys, unpinned_decisions
 from emmy.compiler.pipeline.search.working_golden import lowered_kernels
 from emmy.compiler.structural import digest
 
@@ -89,9 +96,46 @@ def _stale_reason(document: GoldenFile, entry: Config, fresh: Mapping[str, str])
 
 def stale_reasons(document: GoldenFile, program: int, fresh: Mapping[str, str]) -> list[str]:
     """The stored targets of traced ``program`` that ``fresh`` (:func:`fresh_kernel_digests`) does not
-    write, ``name: reason``."""
+    write, and the route keys of its current targets that name no seam of that lowering, ``name: reason``."""
     entries = [entry for entry in document.configs if entry.program == program]
-    return [reason for reason in (_stale_reason(document, entry, fresh) for entry in entries) if reason is not None]
+    reasons = [reason for reason in (_stale_reason(document, entry, fresh) for entry in entries) if reason is not None]
+    for entry in entries:
+        if _stale_reason(document, entry, fresh) is None:
+            reasons += _stale_route_reasons(document, entry)
+    return reasons
+
+
+def _route_keys(record: GoldenRecord) -> frozenset[str]:
+    """The scoped ``PLACE`` keys a record marks cut — the seams its route names."""
+    return frozenset(key for key, value in record.route.items() if family_of(key) == "PLACE" and key != "PLACE" and value == "cut")
+
+
+def unresolved_route_keys(record: GoldenRecord, keys: frozenset[str]) -> list[str]:
+    """The ``keys`` of ``record``'s route that no kernel of its target resolves to a seam: its target
+    lowered through ``tile/cut`` with the keys pinned, as a pinned compile takes them. A key that names
+    nothing is a structural change the Loop IR check cannot see — a seam re-spelled while every
+    stored target kept its body — and a deploy would drop it without a word."""
+    regime = {key: value for key, value in record.pin_map.items() if family_of(str(key)) not in KERNEL_DECISION_FAMILIES}
+    ctx = Context.from_target(record.compute_cap, gpu_name=record.gpu_name or None)
+    pins = {**regime, **dict.fromkeys(keys, "cut")}
+    # No golden evidence: a cut the keys pin is decided by the pin alone, and importing the scope is
+    # the whole cost of the run.
+    with records_override([]), unpinned_decisions(), pinned_knobs(pins), tracking_place_keys() as resolved:
+        Pipeline.build([*LOOP_PASSES, "tile/lift", "tile/cut"]).run(record.target_program.copy(), ctx=ctx, db=None)
+    return sorted(keys - resolved)
+
+
+def _stale_route_reasons(document: GoldenFile, entry: Config) -> list[str]:
+    checked: set[frozenset[str]] = set()
+    reasons = []
+    for realization in entry.realizations:
+        record = document.record(entry, realization)
+        keys = _route_keys(record)
+        if not keys or keys in checked:
+            continue
+        checked.add(keys)
+        reasons += [f"{record.name}: route key {key!r} names no seam of the fresh lowering" for key in unresolved_route_keys(record, keys)]
+    return reasons
 
 
 def stale_targets(document: GoldenFile, program: int | None = None) -> Iterator[str]:
@@ -111,14 +155,16 @@ class RestampReport:
     rows_kept: int = 0
     rows_demoted: list[str] = field(default_factory=list)
     rows_dropped: list[str] = field(default_factory=list)
+    rows_respelled: list[str] = field(default_factory=list)
 
     @property
     def changed(self) -> bool:
-        return bool(self.restamped or self.dropped_targets or self.rows_dropped)
+        return bool(self.restamped or self.dropped_targets or self.rows_dropped or self.rows_respelled)
 
     def lines(self) -> list[str]:
         out = [f"{self.restamped} of {self.targets} targets restamped, {len(self.dropped_targets)} dropped; {self.rows_kept} rows kept"]
         out.extend(f"dropped target {reason}" for reason in self.dropped_targets)
+        out.extend(f"re-spelled the route of {reason}" for reason in self.rows_respelled)
         out.extend(f"demoted to a proposal {name}" for name in self.rows_demoted)
         out.extend(f"dropped row {reason}" for reason in self.rows_dropped)
         return out
@@ -172,6 +218,8 @@ def _rekeyed_rows(document: GoldenFile, entry: Config, wire: dict, report: Resta
     stop decoding dropped, measurements of a kernel that renders differently demoted."""
     scratch = replace(document, loops=[*document.loops, wire])
     fresh_entry = replace(entry, target=replace(entry.target, loop=len(document.loops)))
+    kept = [row for row in (_respelled_route(scratch, fresh_entry, row, report) for row in entry.realizations) if row is not None]
+    entry = replace(entry, realizations=kept)
     old_records = [document.record(entry, row) for row in entry.realizations]
     new_records = [scratch.record(fresh_entry, row) for row in entry.realizations]
 
@@ -207,6 +255,43 @@ def _rekeyed_rows(document: GoldenFile, entry: Config, wire: dict, report: Resta
         rows.remove(row)
         report.rows_dropped.append(f"{row.name}: its kernel set lost its measurements")
     return rows
+
+
+def _respelled_route(document: GoldenFile, entry: Config, row: Realization, report: RestampReport) -> Realization | None:
+    """``row`` with every route key the fresh lowering no longer resolves re-spelled onto the seam the
+    same operand positions reach — a seam whose node changed only its kind (a reduce that became a
+    contraction reads ``inner`` where it read ``reduce``). ``None``, reported as dropped, when a key's
+    positions reach no seam or the re-spelled route still names one nothing resolves: a row whose
+    route decides nothing would replay as another kernel set under its name."""
+    record = document.record(entry, row)
+    keys = _route_keys(record)
+    stale = unresolved_route_keys(record, keys) if keys else []
+    if not stale:
+        return row
+    tile = _lifted_target(record)
+    placeable = {id(site.node): site for site in family_sites("PLACE", sites(tile.op))}
+    renamed: dict[str, str] = {}
+    for key in stale:
+        node = tile.op
+        for _label, index in parse_key(key).hops:
+            node = node.operands[index - 1] if index <= len(node.operands) else None
+            if node is None or node.as_slab() is not None:
+                break
+        site = placeable.get(id(node)) if node is not None else None
+        if site is None:
+            report.rows_dropped.append(f"{row.name}: route key {key!r} names no seam of the fresh lowering, and its positions reach none")
+            return None
+        renamed[key] = f"PLACE@{site.path}"
+    respelled = replace(
+        row,
+        pins={renamed.get(key, key): value for key, value in row.pins.items()},
+        knobs=None if row.knobs is None else {renamed.get(key, key): value for key, value in row.knobs.items()},
+    )
+    if still := unresolved_route_keys(document.record(entry, respelled), frozenset(renamed.get(key, key) for key in keys)):
+        report.rows_dropped.append(f"{row.name}: route key {still[0]!r} names no seam of the fresh lowering, re-spelled or not")
+        return None
+    report.rows_respelled.append(f"{row.name}: " + ", ".join(f"{old} -> {new}" for old, new in renamed.items()))
+    return respelled
 
 
 def _kernel_sources(record: GoldenRecord, records: Sequence[GoldenRecord]) -> tuple[str, ...] | None:
