@@ -10,19 +10,15 @@ from dataclasses import dataclass, field
 
 from emmy.compiler.ir.schedule.base import Schedule
 from emmy.compiler.ir.schedule.catalog import coop_reduce_moves
-from emmy.compiler.ir.schedule.choices import Raster, Reduce, Stage, Tile, Work
+from emmy.compiler.ir.schedule.choices import Raster, Reduce, Stage, StateScope, Tile, Work
 from emmy.compiler.ir.schedule.views import EdgeSite, NodeId
 
 CLASSIC_FAMILIES = ("TILE", "REDUCE", "STAGE")
 
-#: The ``STAGE`` key of a kernel's carried state — where the state lives across the steps of its sequential
-#: axis. Always scoped, never the bare family: a bare ``STAGE`` pin is an operand-transport pin, and it must not
-#: silently move a state on chip. Spelled only on a kernel whose placement has a sequential axis.
-STATE_KEY = "STAGE@state"
-
-#: The transports a carried state may take: global memory (one launch per step, the launch loop the runner
-#: drives), registers (a warp owns its rows) and shared memory (a CTA owns its block).
-STATE_TRANSPORTS = ("direct", "reg", "smem")
+#: The bare kernel-scoped key of a carried state's scope (:class:`StateScope`): who holds the state and walks
+#: its sequential axis. Spelled only on a kernel whose placement has a sequential axis, which is what keeps
+#: every other kernel's row byte-identical.
+STATE_KEY = "STATE"
 
 
 def node_id_spelling(node_id: NodeId) -> str:
@@ -68,22 +64,22 @@ class KernelSchedule:
 
     work: Work
     raster: Raster
-    #: Where the carried state of a sequential axis lives across its steps (``STATE_KEY``). ``direct`` is the
-    #: launch loop over a global buffer; an on-chip transport runs the whole step loop inside one launch, so
-    #: the loop's scope is derived from this choice rather than chosen beside it. Direct on every kernel that
-    #: carries no state, which is what keeps every such kernel's row byte-identical.
-    state: Stage = field(default_factory=Stage.direct)
+    #: The scope that holds the carried state of a sequential axis (``STATE_KEY``): the grid, one launch per
+    #: step over the global buffer, or a CTA holding the block with the whole step loop inside one launch.
+    #: The warp scope is the register tier's, a family of its own spelled under the same key. Grid on every
+    #: kernel that carries no state.
+    state: StateScope = field(default_factory=StateScope)
 
     def __post_init__(self) -> None:
         if not isinstance(self.work, Work) or not isinstance(self.raster, Raster):
             raise TypeError("classic kernel choices must be Work and Raster values")
-        if not isinstance(self.state, Stage) or self.state.transport not in STATE_TRANSPORTS:
-            raise TypeError("classic kernel state must be a direct, reg or smem Stage")
+        if not isinstance(self.state, StateScope) or self.state.scope == "warp":
+            raise TypeError("a classic kernel holds its state at grid or cta scope")
 
     @property
     def resident(self) -> bool:
-        """Whether the carried state lives on chip, the step loop inside the launch."""
-        return not self.state.is_direct
+        """Whether a CTA holds the carried state, the step loop inside the launch."""
+        return not self.state.is_grid
 
 
 @dataclass(frozen=True)

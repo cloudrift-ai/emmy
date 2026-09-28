@@ -6,7 +6,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from emmy.compiler.ir.schedule.base import Schedule
-from emmy.compiler.ir.schedule.choices import Raster, Reduce, Stage, Tile, Work, resolve_site_tile
+from emmy.compiler.ir.schedule.choices import Raster, Reduce, Stage, StateScope, Tile, Work, resolve_site_tile
 from emmy.compiler.ir.schedule.views import NodeId
 
 from .context import ClassicScheduleContext
@@ -131,7 +131,7 @@ class ClassicScheduleCodec:
                 else Tile()
             )
             nodes[site] = ProjectionSchedule(tile) if reduce is None else ReductionSchedule(tile, reduce)
-        state = Stage.parse(row[STATE_KEY]) if carries_state(self.tile_op) else Stage.direct()
+        state = StateScope.parse(row[STATE_KEY]) if carries_state(self.tile_op) else StateScope()
         return Schedule(
             KernelSchedule(work, Raster.parse(row["RASTER"]), state),
             nodes,

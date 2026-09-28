@@ -47,7 +47,7 @@ def pin_row(*, split_consumed: bool) -> dict[str, str]:
     way it reads a golden row. A kernel that consumed a split (``split_consumed``) reads a
     ``REDUCE`` pin without the ``g<n>`` half the split already took."""
     row: dict[str, str] = {}
-    for family in ("WORK", "TILE", "REDUCE", "STAGE", "RASTER"):
+    for family in ("WORK", "TILE", "REDUCE", "STAGE", "RASTER", "STATE"):
         for key, value in family_pins(family):
             if split_consumed and family == "REDUCE":
                 value = "/".join(part for part in value.split("/") if not part.startswith("g"))
@@ -86,7 +86,7 @@ def classic_forks(tile: TileOp, name: str, knobs: dict, ctx, *, kernel_set: bool
             pool_id=digest(tile.identity_key(with_io=True), ctx.structural_key(), "register", schedule_pin_fingerprint()),
             sample=getattr(ctx, "pool_sample", None),
         )
-    if row.get(STATE_KEY) == "d1/reg" and tile.place.serial:
+    if row.get(STATE_KEY) == "warp" and tile.place.serial:
         return register
 
     # A bare WORK / RASTER / REDUCE pin is published across the kernels a split minted and names the

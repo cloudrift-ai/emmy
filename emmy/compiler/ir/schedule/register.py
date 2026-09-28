@@ -152,7 +152,7 @@ class _RegisterSite(Site):
     def options(self):
         p = self.problem
         program = p.tile.register_program
-        if program is None or set(p.row) - set(self.keys) or p.row.get(STATE_KEY, "d1/reg") != "d1/reg":
+        if program is None or set(p.row) - set(self.keys) or p.row.get(STATE_KEY, "warp") != "warp":
             return ()
         if not p.allow_f16 and "TILE" not in p.row:
             return ()
@@ -260,7 +260,7 @@ class RegisterCodec:
 
     def _encode(self, schedule):
         choice = schedule.kernel
-        return {"WORK": choice.work.spell(), "TILE": choice.tile.spell(), STATE_KEY: "d1/reg"}
+        return {"WORK": choice.work.spell(), "TILE": choice.tile.spell(), STATE_KEY: "warp"}
 
     def encode(self, schedule):
         return self._encode(self.context.extend(schedule).schedule)

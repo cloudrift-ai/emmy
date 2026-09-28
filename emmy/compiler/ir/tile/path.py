@@ -35,11 +35,6 @@ PATH_FAMILIES = ("PLACE",)
 #: The node kinds a route may name — each a derived reading of the term.
 KINDS = ("map", "reduce", "inner", "twist", "scan")
 
-#: The one arrival that is not a tree position: a kernel's carried state, which the classic ``STAGE``
-#: family addresses as ``STAGE@state`` (``schedule.classic.STATE_KEY``). It has no route to walk and no
-#: site on the tree; :func:`resolve` never sees it, since only ``PLACE`` keys resolve.
-STATE_ARRIVAL = "state"
-
 
 class MissingSiteError(ValueError):
     """A suffixed knob key that names NO site on this tree. A ``ValueError`` so every existing
@@ -158,8 +153,6 @@ def parse_key(key: str) -> _Key:
         raise ValueError(f"knob key {key!r} is reserved for graph-level placement")
     if not suffix:
         raise ValueError(f"knob key {key!r} has an empty @-suffix")
-    if suffix == STATE_ARRIVAL:
-        return _Key(family=family, hops=(), target=STATE_ARRIVAL)
     *departures, arrival = suffix.split("/")
     if arrival not in KINDS:
         raise ValueError(f"knob key {key!r}: the last segment names the node arrived at by kind, one of {KINDS}, not {arrival!r}")

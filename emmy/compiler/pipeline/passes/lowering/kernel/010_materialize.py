@@ -47,13 +47,16 @@ def rewrite(match: Match, root: Node, ctx=None) -> KernelOp | None:
     # offers no ``g`` row, and its pin path strips the consumed ``g`` half). A surviving split
     # request is a bug — the materializer only lowers single-launch kernels.
     # A resident state keeps the step loop inside the launch: the register tier, or a classic
-    # schedule whose state ``STAGE`` is on chip.
+    # schedule whose state a CTA holds.
     register = isinstance(tile.materialization, RegisterMaterialization)
     resident = register or (tile.schedule is not None and tile.schedule.kernel.resident)
     rplan = reduce_plan(tile) if tile.op is not None and not resident else None
     assert rplan is None or not rplan.needs_split, "materialize: a GRID split stage reached the kernel pass past 030_cut"
+    # The per-step buffers something outside reads: their snapshot of every step must be complete
+    # at the cells the step skips as well.
+    snapshots = frozenset(name for name in root.buffer_names() if name in match.graph.outputs or match.graph.buffer_users(name))
     try:
-        materialized = factorize(tile, root, sm_count=getattr(ctx, "sm_count", 0))
+        materialized = factorize(tile, root, sm_count=getattr(ctx, "sm_count", 0), snapshots=snapshots)
         if not resident:
             materialized = _pointwise_strip(tile, materialized)
         body = _drop_repeated_declarations(Body((materialized,)))

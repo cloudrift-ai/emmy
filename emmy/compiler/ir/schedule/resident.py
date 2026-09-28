@@ -57,7 +57,11 @@ class BlockProgram:
     ``batch`` are the free axes the launch grid binds — every read of the state takes the CTA's own
     coordinate there — and ``cells`` the block's axes, at ``cell_positions`` of the state's index
     (position 0 is time). ``seed`` is the buffer the block is filled from cell by cell before the
-    first step, or the constant. ``bytes`` is one block's size."""
+    first step, or the constant. ``bytes`` is one block's size. ``domain`` is the STEP DOMAIN: the
+    predicate under which a step defines a cell, read off a Carry whose catch-all branch keeps the
+    cell's own previous value — ``None`` when every step defines every cell. A cell outside the
+    domain is left in place, so nothing is evaluated or written for it; that is only sound when every
+    value the kernel stores is the state's, which the proof requires."""
 
     state: OutputSpec
     batch: tuple[Axis, ...]
@@ -65,6 +69,7 @@ class BlockProgram:
     cell_positions: tuple[int, ...]
     seed: str | float
     bytes: int
+    domain: Expr | None = None
 
     @classmethod
     def from_tile(cls, tile: TileOp) -> BlockProgram | None:
@@ -118,7 +123,37 @@ class BlockProgram:
         batch = tuple(axis for axis in tile.place.free if axis.name not in {axis.name for axis in cell_axes})
         tensor = tile.outputs.get(state.write.output)
         width = tensor.dtype.nbytes if tensor is not None else 4
-        return cls(state, batch, cell_axes, tuple(cells), seed, prod(axis.extent.as_static() for axis in cell_axes) * width)
+        size = prod(axis.extent.as_static() for axis in cell_axes) * width
+        return cls(state, batch, cell_axes, tuple(cells), seed, size, _domain(tile, state, lag, time))
+
+
+def _domain(tile: TileOp, state: OutputSpec, lag: Expr, time: str) -> Expr | None:
+    """The predicate under which the step defines a cell: the stored state value is a Select whose
+    catch-all branch is the cell's own previous value, and the domain is the disjunction of the
+    other branches' predicates. Only when every store of the kernel stores that same value — an
+    output written from something else would need evaluating at the cells the step skips."""
+    values = {spec.write.values[0] for spec in tile.output_specs}
+    if len(values) != 1:
+        return None
+    body = tile.op.applied.body
+    stored = next((stmt for stmt in body if isinstance(stmt, Select) and stmt.name == state.write.values[0]), None)
+    if stored is None or len(stored.branches) < 2 or stored.branches[-1].select != Literal(True, "bool"):
+        return None
+    own = (lag, *state.write.index[1:])
+    # The kept value is the lagged read, behind the Select that picks the seed on the first step.
+    name = stored.branches[-1].value
+    defined = {stmt.defines()[0]: stmt for stmt in body if stmt.defines()}
+    seeded = defined.get(name)
+    if isinstance(seeded, Select) and len(seeded.branches) == 2 and seeded.branches[0].select == first_step(time):
+        name = seeded.branches[0].value
+    kept = defined.get(name)
+    if not isinstance(kept, Load) or kept.input != state.write.output or tuple(kept.index) != own:
+        return None
+    predicates = [branch.select for branch in stored.branches[:-1]]
+    domain = predicates[0]
+    for predicate in predicates[1:]:
+        domain = BinaryExpr("||", domain, predicate)
+    return domain
 
 
 def _seed_of(tile: TileOp, reads: frozenset[str] | set[str], time: str) -> str | float | None:

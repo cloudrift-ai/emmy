@@ -1,12 +1,13 @@
-"""Materialize a carried state resident in shared memory: one CTA holds its block across every step.
+"""Materialize a carried state held by one CTA: the block in shared memory across every step.
 
 The launch grid is the block program's batch axes; each CTA declares the block, seeds it, and walks the
-sequential axis inside the launch. Every thread owns a strided slice of the block's cells (the kernel's
-``WORK`` width is the stride) and evaluates the step for each of them from the block, then the step's
-writes go back into the block behind a barrier. At depth one the writes wait for every thread's reads
-(two barriers per step); at depth two the step reads one copy of the block and writes the other, one
-barrier per step. A per-step output — the state's own snapshot when something outside reads it, and any
-other value the step stores — is written to global memory from the same write phase.
+sequential axis inside the launch. Every thread strides over the block's cells (the kernel's ``WORK`` width
+is the stride) and evaluates the step for each cell it owns from the block, keeping the results in a
+register array; after a barrier the writes go back into the block, and a second barrier publishes the
+step. A cell outside the step domain is neither evaluated nor written: the block already holds its
+value. The per-step outputs the graph reads are written from the write phase — the state's own snapshot
+and any other stored value at the cells the step defines, and at the cells it skips the block's value,
+for the buffers something outside reads.
 """
 
 from __future__ import annotations
@@ -14,32 +15,32 @@ from __future__ import annotations
 from math import prod
 
 from emmy.compiler.backend.cuda.dtype import cuda_name
+from emmy.compiler.dtype import F32
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, TernaryExpr, Var
-from emmy.compiler.ir.kernel.ir import Smem, Sync, Tile
+from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, Var
+from emmy.compiler.ir.kernel.ir import RegFragment, Smem, Sync, Tile
 from emmy.compiler.ir.schedule.resident import first_step
-from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body, Cond, Let, Load, Select, Stmt, StridedLoop, Write
 
-from ._atom import copy_cell
-
-#: The block's shared-memory name and the thread's lane coordinate within the CTA.
+#: The block's shared-memory name, the thread's lane within the CTA, and the flat cell ordinal it walks.
 BLOCK = "_state"
 LANE = "_rt"
+CELL = "_ci"
 
 
-def _decode(flat: Expr, extents: tuple[int, ...], axes: tuple[Axis, ...]) -> dict[str, Expr]:
-    """The block's cell coordinates of one flat cell ordinal, row-major over the cell axes."""
-    coords: dict[str, Expr] = {}
+def _decode(extents: tuple[int, ...], axes: tuple[Axis, ...]) -> list[Stmt]:
+    """The block's cell coordinates of the flat cell ordinal, row-major over the cell axes, bound
+    under the axes' own names so the step and the boundary stores read them verbatim."""
+    out: list[Stmt] = []
     stride = prod(extents)
     for axis, extent in zip(axes, extents, strict=True):
         stride //= extent
-        term = flat if stride == 1 else BinaryExpr("/", flat, Literal(stride, "int"))
-        coords[axis.name] = term if axis is axes[0] else BinaryExpr("%", term, Literal(extent, "int"))
-    return coords
+        term: Expr = Var(CELL) if stride == 1 else BinaryExpr("/", Var(CELL), Literal(stride, "int"))
+        out.append(Let(name=axis.name, value=term if axis is axes[0] else BinaryExpr("%", term, Literal(extent, "int"))))
+    return out
 
 
-def _resident_reads(step: Body, program, depth: int, time: str) -> tuple[Body, dict[str, str]]:
+def _resident_reads(step: Body, program, time: str) -> tuple[Body, dict[str, str]]:
     """The step reading its state from the block, and the names it folded away: every lagged load
     of the state becomes a read of the block at its cell coordinates (a batch position is the CTA's
     own block, so it is dropped), and the Select that picks the seed on the first step folds away,
@@ -47,14 +48,13 @@ def _resident_reads(step: Body, program, depth: int, time: str) -> tuple[Body, d
     store of the Select's value stores the read's."""
     state = program.state.write.output
     reads = {stmt.names[0] for stmt in step.iter() if isinstance(stmt, Load) and stmt.input == state}
-    slot = Literal(0, "int") if depth == 1 else BinaryExpr("%", Var(time), Literal(2, "int"))
     start = first_step(time)
     alias: dict[str, str] = {}
     seeds: set[str] = set()
 
     def redirect(stmt: Stmt):
         if isinstance(stmt, Load) and stmt.input == state:
-            return Load(name=stmt.names[0], input=BLOCK, index=(slot, *(stmt.index[position] for position in program.cell_positions)))
+            return Load(name=stmt.names[0], input=BLOCK, index=tuple(stmt.index[position] for position in program.cell_positions))
         if isinstance(stmt, Select) and len(stmt.branches) == 2 and stmt.branches[0].select == start and stmt.branches[0].value in reads:
             alias[stmt.name] = stmt.branches[0].value
             seeds.add(stmt.branches[1].value)
@@ -66,77 +66,68 @@ def _resident_reads(step: Body, program, depth: int, time: str) -> tuple[Body, d
     return Body(tuple(stmt.rename(lambda name: alias.get(name, name)) for stmt in pruned)), alias
 
 
-def factorize_resident(tile) -> Tile:
-    """One launch over the batch axes; each CTA holds the block and walks every step."""
+def factorize_resident(tile, *, snapshots: frozenset[str] = frozenset()) -> Tile:
+    """One launch over the batch axes; each CTA holds the block and walks every step. ``snapshots``
+    names the stored buffers something outside the kernel reads, whose per-step copy must be
+    complete at the cells the step skips too."""
     program = tile.block_program
-    depth = tile.schedule.kernel.state.depth
     threads = tile.schedule.kernel.work.units[0]
     time = tile.place.serial[0]
     state = program.state.write.output
     tensor = tile.outputs.get(state)
     extents = tuple(axis.extent.as_static() for axis in program.cells)
     count = prod(extents)
-    copies = -(-count // threads)
-    exact = copies * threads == count
-    protected = frozenset({time.name, LANE, *(axis.name for axis in tile.axes)})
+    slots = -(-count // threads)
+    cells = Axis(CELL, count)
+    coords = _decode(extents, program.cells)
+    block = tuple(Var(axis.name) for axis in program.cells)
+
+    def stride(body: list[Stmt]) -> StridedLoop:
+        return StridedLoop(axis=cells, start=Var(LANE), step=Literal(threads, "int"), body=Body((*coords, *body)), unroll=False)
 
     # The step, lowered once with every coordinate bound and its boundary stores taken out: the
     # stored values are known by name, and the write phase below places them itself.
     bound = frozenset({time.name, *(axis.name for axis in tile.place.free)})
     step = tile.op.lower(bound, tile.output_specs, tile.axes).map(lambda stmt: None if isinstance(stmt, Write) else stmt)
-    step, alias = _resident_reads(step, program, depth, time.name)
-    stored = {spec.write.values[0]: alias.get(spec.write.values[0], spec.write.values[0]) for spec in tile.output_specs}
+    step, alias = _resident_reads(step, program, time.name)
+    values = tuple(dict.fromkeys(alias.get(spec.write.values[0], spec.write.values[0]) for spec in tile.output_specs))
+    held = {value: f"_next{ordinal}" for ordinal, value in enumerate(values)}
+    stored = {spec.write.output: alias.get(spec.write.values[0], spec.write.values[0]) for spec in tile.output_specs}
+    slot = (BinaryExpr("/", BinaryExpr("-", Var(CELL), Var(LANE)), Literal(threads, "int")),)
 
-    def cell(k: int) -> tuple[Expr, dict[str, Expr], str]:
-        """The k-th cell this thread owns: its raw ordinal, its coordinates (the last ordinal
-        clamped, so a thread past the block's end evaluates a cell it never stores) and the SSA
-        suffix of its copy of the step."""
-        raw = Var(LANE) if k == 0 else BinaryExpr("+", Var(LANE), Literal(k * threads, "int"))
-        flat = raw if exact else TernaryExpr(BinaryExpr("<", raw, Literal(count, "int")), raw, Literal(count - 1, "int"))
-        return raw, _decode(flat, extents, program.cells), f"__k{k}"
-
-    def guarded(raw: Expr, stmts: list[Stmt]) -> list[Stmt]:
-        return stmts if exact else [Cond(cond=BinaryExpr("<", raw, Literal(count, "int")), body=tuple(stmts))]
-
-    def block_index(slot: Expr, coords: dict[str, Expr]) -> tuple[Expr, ...]:
-        return (slot, *(coords[axis.name] for axis in program.cells))
-
-    fill: list[Stmt] = []
-    for k in range(copies):
-        raw, coords, suffix = cell(k)
-        name = f"_seed{suffix}"
-        if isinstance(program.seed, str):
-            index = tuple(expr.substitute(coords) for expr in program.state.write.index[1:])
-            seeded: Stmt = Load(name=name, input=program.seed, index=index)
-        else:
-            seeded = Let(name=name, value=Literal(program.seed))
-        fill.extend(guarded(raw, [seeded, Write(output=BLOCK, index=block_index(Literal(0, "int"), coords), value=name)]))
-
-    write_slot = Literal(0, "int") if depth == 1 else BinaryExpr("%", BinaryExpr("+", Var(time.name), Literal(1, "int")), Literal(2, "int"))
-    evaluate: list[Stmt] = []
-    commit: list[Stmt] = []
-    for k in range(copies):
-        raw, coords, suffix = cell(k)
-        evaluate.extend(copy_cell(step, Sigma(coords), suffix, protected))
-        writes = [Write(output=BLOCK, index=block_index(write_slot, coords), value=f"{stored[program.state.write.values[0]]}{suffix}")]
-        writes.extend(
-            Write(
-                output=spec.write.output,
-                index=tuple(expr.substitute(coords) for expr in spec.write.index),
-                value=f"{stored[spec.write.values[0]]}{suffix}",
-            )
-            for spec in tile.output_specs
-        )
-        commit.extend(guarded(raw, writes))
-    if depth == 1:
-        body = (*evaluate, Sync(), *commit, Sync())
+    if isinstance(program.seed, str):
+        seeded: Stmt = Load(name="_seed", input=program.seed, index=tuple(program.state.write.index[1:]))
     else:
-        # Reads take one copy of the block and writes fill the other, so a thread's writes never
-        # race another's reads within the step; one barrier publishes the step.
-        body = (*evaluate, *commit, Sync())
-    loop = StridedLoop(axis=time, start=Literal(0, "int"), step=Literal(1, "int"), body=Body(body), unroll=False)
-    smem = Smem(name=BLOCK, extents=(depth, *extents), dtype=cuda_name(tensor.dtype) if tensor is not None else "float")
-    return Tile(axes=(*program.batch, Axis(LANE, threads)), body=Body((smem, *fill, Sync(), loop)), block_threads=threads)
+        seeded = Let(name="_seed", value=Literal(program.seed))
+    fill = stride([seeded, Write(output=BLOCK, index=block, value="_seed")])
+
+    evaluate = [*step, *(Write(output=name, index=slot, value=value) for value, name in held.items())]
+    commit: list[Stmt] = [Load(name=f"{name}_v", input=name, index=slot) for name in held.values()]
+    commit.append(Write(output=BLOCK, index=block, value=f"{held[stored[state]]}_v"))
+    commit.extend(
+        Write(output=spec.write.output, index=spec.write.index, value=f"{held[stored[spec.write.output]]}_v") for spec in tile.output_specs
+    )
+    if program.domain is None:
+        phases = (stride(evaluate), Sync(), stride(commit), Sync())
+    else:
+        # A cell outside the domain keeps its value: nothing to evaluate, nothing to write into the
+        # block; the buffers read outside still need that value in this step's snapshot.
+        copies = [
+            Write(output=spec.write.output, index=spec.write.index, value="_kept")
+            for spec in tile.output_specs
+            if spec.write.output in snapshots
+        ]
+        kept = (Load(name="_kept", input=BLOCK, index=block), *copies) if copies else ()
+        phases = (
+            stride([Cond(cond=program.domain, body=tuple(evaluate))]),
+            Sync(),
+            stride([Cond(cond=program.domain, body=tuple(commit), else_body=kept)]),
+            Sync(),
+        )
+    loop = StridedLoop(axis=time, start=Literal(0, "int"), step=Literal(1, "int"), body=Body(phases), unroll=False)
+    smem = Smem(name=BLOCK, extents=extents, dtype=cuda_name(tensor.dtype) if tensor is not None else "float")
+    arrays = tuple(RegFragment(name=name, role="c", shape=(1, 1, 1), dtype=F32, nregs=slots) for name in held.values())
+    return Tile(axes=(*program.batch, Axis(LANE, threads)), body=Body((smem, *arrays, fill, Sync(), loop)), block_threads=threads)
 
 
-__all__ = ["BLOCK", "LANE", "factorize_resident"]
+__all__ = ["BLOCK", "CELL", "LANE", "factorize_resident"]

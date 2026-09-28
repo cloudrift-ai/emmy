@@ -1,9 +1,10 @@
-"""A carried state is an operand of its own step, and its ``STAGE`` says where it lives across the steps.
+"""A carried state's ``STATE`` is the scope that holds it and walks its sequential axis.
 
-``direct`` keeps the state in its global buffer and launches once per step; ``smem`` gives one CTA the
-block — the cells under one batch coordinate — and walks every step inside the launch, the reads of a
-step behind a barrier from its writes. The block proof decides which coordinates are the grid's and
-which the block's, and refuses a state a step reads outside its own block.
+The grid keeps the state in its global buffer and launches once per step; a CTA holds the block — the
+cells under one batch coordinate — in shared memory and walks every step inside the launch, the reads
+of a step behind a barrier from its writes. The block proof decides which coordinates are the grid's
+and which the block's, refuses a state a step reads outside its own block, and reads the step domain
+off a Carry that keeps the cells it does not touch.
 """
 
 from __future__ import annotations
@@ -30,7 +31,7 @@ from tests.compiler.ir.test_carried_state import _graph as _column_graph
 from tests.compiler.ir.test_carried_state import _inputs as _column_inputs
 from tests.compiler.ir.test_carried_state import _reference as _column_reference
 
-STEPS, ROWS, BATCH = 3, 4, 2
+STEPS, ROWS, BATCH = 7, 8, 2
 c, b, i, j, s = Var("c"), Var("b"), Var("i"), Var("j"), Var("s")
 _ZERO, _ONE, _TRUE = Literal(0, "int"), Literal(1, "int"), Literal(True, "bool")
 
@@ -133,6 +134,8 @@ def test_the_block_proof_splits_the_state_into_the_grid_and_the_block() -> None:
     solve = _lifted(_solve_graph()).block_program
     assert [axis.name for axis in solve.batch] == ["a1"] and [axis.name for axis in solve.cells] == ["a2", "a3"]
     assert solve.seed == "A0" and solve.bytes == ROWS * ROWS * 4
+    # The column step defines every cell; the solve step defines one row and keeps the rest.
+    assert column.domain is None and solve.domain is not None
 
 
 def test_the_block_proof_refuses_a_guarded_read_whose_value_survives() -> None:
@@ -153,30 +156,33 @@ def test_the_solve_model_matches_its_reference_on_the_launch_loop() -> None:
 def test_the_classic_walk_offers_the_launch_loop_and_the_resident_block() -> None:
     rows = _rows(_lifted(_column_graph()))
     assert ("", "", "", "") in rows
-    assert {("d1/smem", "t32", "", ""), ("d2/smem", "t32", "", ""), ("d1/smem", "t1024", "", "")} <= rows
-    # A resident block stripes its cells across a thread inventory and takes no raster and no
+    assert {("cta", "t32", "", ""), ("cta", "t1024", "", "")} <= rows
+    # A CTA holding the block stripes its cells across a thread inventory and takes no raster and no
     # cooperating reduce of its own.
     assert all(work.startswith("t") and raster == "" and reduce == "" for state, work, raster, reduce in rows if state)
 
 
-@pytest.mark.parametrize("depth", [1, 2])
-def test_a_resident_state_lowers_to_one_launch_holding_the_block(depth: int) -> None:
-    with pinned_knobs({STATE_KEY: f"d{depth}/smem", "WORK": "t32"}):
-        graph = Pipeline.build(CUDA_PASSES).run(_column_graph(), ctx=Context.from_target((7, 0)))
+@pytest.mark.parametrize("model", ["column", "solve"])
+def test_a_resident_state_lowers_to_one_launch_holding_the_block(model: str) -> None:
+    build = {"column": _column_graph, "solve": _solve_graph}[model]
+    with pinned_knobs({STATE_KEY: "cta", "WORK": "t32"}):
+        graph = Pipeline.build(CUDA_PASSES).run(build(), ctx=Context.from_target((7, 0)))
     (op,) = (node.op for node in graph.nodes.values() if isinstance(node.op, CudaOp))
-    assert not op.serial and op.smem_bytes == 16 * depth and op.block == ((32,), (1,), (1,))
+    assert not op.serial and op.block == ((32,), (1,), (1,))
+    assert op.smem_bytes == {"column": 16, "solve": ROWS * ROWS * 4}[model]
     # The private state has no global port; the snapshot the graph reads stays an output.
-    assert op.arg_order == ("D", "W", "U", "out")
-    # One barrier after the seed fill; per step, one at depth two and two at depth one.
-    assert op.kernel_source.count("__syncthreads()") == 1 + (3 - depth)
+    assert op.arg_order == {"column": ("D", "W", "U", "out"), "solve": ("A0", "out")}[model]
+    # One barrier after the seed fill, then two per step: reads, then writes.
+    assert op.kernel_source.count("__syncthreads()") == 3
+    # The solve step evaluates only the row it defines; the column step has no domain to skip.
+    assert (" else {" in op.kernel_source) == (model == "solve")
 
 
 @requires_cuda
 @pytest.mark.xdist_group("cuda")
 @pytest.mark.parametrize("width", ["t32", "t64"])
-@pytest.mark.parametrize("depth", [1, 2])
 @pytest.mark.parametrize("model", ["column", "solve"])
-def test_a_resident_state_matches_the_reference_on_the_gpu(model: str, depth: int, width: str) -> None:
+def test_a_resident_state_matches_the_reference_on_the_gpu(model: str, width: str) -> None:
     from emmy.compiler.backend.cuda.program import run_program  # noqa: PLC0415
 
     build, inputs, reference = {
@@ -184,7 +190,7 @@ def test_a_resident_state_matches_the_reference_on_the_gpu(model: str, depth: in
         "solve": (_solve_graph, _solve_inputs, _solve_reference),
     }[model]
     arrays = inputs()
-    with pinned_knobs({STATE_KEY: f"d{depth}/smem", "WORK": width}):
+    with pinned_knobs({STATE_KEY: "cta", "WORK": width}):
         graph = Pipeline.build(CUDA_PASSES).run(build())
     (op,) = (node.op for node in graph.nodes.values() if isinstance(node.op, CudaOp))
     assert not op.serial

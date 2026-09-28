@@ -364,7 +364,7 @@ def validate_family_value(name: str, value) -> str:
 
 @lru_cache(maxsize=8192)
 def _validate_family_cached(fam: str, v: str) -> str:
-    from emmy.compiler.ir.schedule import Raster, Reduce, Stage, Tile, Work  # noqa: PLC0415
+    from emmy.compiler.ir.schedule import Raster, Reduce, Stage, StateScope, Tile, Work  # noqa: PLC0415
 
     if fam == "WORK":
         return Work.parse(v).spell()
@@ -377,6 +377,8 @@ def _validate_family_cached(fam: str, v: str) -> str:
         return Stage.parse(v).spell()
     if fam == "RASTER":
         return Raster.parse(v).spell()
+    if fam == "STATE":
+        return StateScope.parse(v).spell()
     return v
 
 
@@ -512,7 +514,7 @@ _KNOB_RANK = {k: i for i, k in enumerate(KNOB_ORDER)}
 
 # The complete classic families emitted at every semantic leaf. Node and edge families are always
 # site-keyed; kernel families are bare.
-SCHEDULE_FAMILIES = ("WORK", "TILE", "REDUCE", "STAGE", "RASTER")
+SCHEDULE_FAMILIES = ("WORK", "TILE", "REDUCE", "STAGE", "RASTER", "STATE")
 KERNEL_DECISION_FAMILIES = ("PLACE", *SCHEDULE_FAMILIES)
 
 
@@ -695,7 +697,7 @@ def complete_kernel_row(knobs: dict) -> dict[str, str]:
             family, separator, site = key.partition("@")
             if family not in SCHEDULE_FAMILIES:
                 continue
-            if family in {"WORK", "RASTER"}:
+            if family in {"WORK", "RASTER", "STATE"}:
                 if separator:
                     raise ValueError(f"classic kernel family {family} must be bare, got {key}")
                 continue

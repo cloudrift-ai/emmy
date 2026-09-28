@@ -678,9 +678,9 @@ class Placement:
     #: SERIAL axes — a recurrence's time: the kernel runs once per coordinate, in order. Outermost
     #: of everything and never on the grid. What makes a lagged read of the kernel's own output
     #: (``S[c − 1]`` while writing ``S[c]``) well-defined: every cell of step ``c − 1`` is stored
-    #: before any cell of step ``c`` runs. How it runs is the state's ``STAGE``
-    #: (``schedule.classic.STATE_KEY``): one launch per coordinate, the coordinate a runtime ``int``,
-    #: while the state lives in its global buffer; a loop inside the launch while it lives on chip.
+    #: before any cell of step ``c`` runs. How it runs is the state's scope (:class:`StateScope`, the
+    #: ``STATE`` choice): one launch per coordinate, the coordinate a runtime ``int``, at grid scope;
+    #: a loop inside the launch when a warp or a CTA holds the state.
     serial: tuple[Axis, ...] = ()
     #: Set by the scheduling transition (:meth:`on_grid`) — the EXPLICIT "the grid has been
     #: decided" bit. A non-empty ``grid`` already says so, but a **free-less** kernel (a decode
@@ -961,6 +961,47 @@ class Raster:
 
 
 _RASTER_RE = re.compile(r"g([mn])(\d+)")
+
+
+#: The scopes that can hold a carried state and walk its sequential axis, outermost first.
+_STATE_SCOPES = ("grid", "warp", "cta")
+
+
+@dataclass(frozen=True)
+class StateScope:
+    """The synchronization scope that holds a carried state and walks its sequential axis — the bare
+    kernel-scoped ``STATE`` choice of a kernel whose placement has one. Every fact that differs between
+    the arms follows from the scope: where the state lives, what a step boundary costs, whether a cell
+    the step skips can be left alone, and who stripes the cells. ``grid`` (spelled empty) is the launch
+    loop — the state in its global buffer, one launch per step, the launch boundary the barrier, a
+    skipped cell copied forward; ``warp`` is the register tier, a warp owning its rows and no barrier;
+    ``cta`` is one CTA holding the block in shared memory, a barrier between a step's reads and its
+    writes, a skipped cell left in place."""
+
+    scope: str = "grid"
+
+    def __post_init__(self) -> None:
+        if self.scope not in _STATE_SCOPES:
+            raise ValueError(f"bad STATE scope {self.scope!r} (expect one of {_STATE_SCOPES})")
+
+    @property
+    def is_grid(self) -> bool:
+        """Whether the state stays in its global buffer and the steps are launches."""
+        return self.scope == "grid"
+
+    def spell(self) -> str:
+        """The canonical ``STATE`` value: empty for the launch loop, else the scope's name."""
+        return "" if self.is_grid else self.scope
+
+    @classmethod
+    def parse(cls, spec: str | None) -> StateScope:
+        """Decode a ``STATE`` value (``""`` / ``None`` is the launch loop). Raises ``ValueError`` on
+        any other spelling — the loud pin contract."""
+        if not spec:
+            return _canonical_choice("STATE", spec, cls())
+        if spec not in _STATE_SCOPES or spec == "grid":
+            raise ValueError(f"STATE: expected warp or cta (or empty for the launch loop), got {spec!r}")
+        return _canonical_choice("STATE", spec, cls(scope=spec))
 
 
 def _ext_expr(axis: Axis) -> Expr:

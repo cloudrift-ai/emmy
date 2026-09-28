@@ -180,6 +180,13 @@ def _stage_features(knobs: dict) -> dict[str, float]:
     }
 
 
+def _state_features(knobs: dict) -> dict[str, float]:
+    """One indicator per on-chip scope of a carried state (the ``STATE`` codec): a warp owning its rows in
+    registers, or a CTA holding the block in shared memory. The launch loop contributes nothing."""
+    scope = str(knobs.get("STATE") or "")
+    return {f"D_state_{scope}": 1.0} if scope in ("warp", "cta") else {}
+
+
 @lru_cache(maxsize=1024)
 def _parsed_stage(spec: str):
     """``Stage.parse`` memoized on the spelling (``None`` on an unparseable one) — same rationale
@@ -265,6 +272,9 @@ def node_slices(knobs: dict) -> tuple[NodeSlice, ...]:
     if not groups and not has_bare:
         return ()
     context = {k: v for k, v in knobs.items() if k.startswith((STRUCT_PREFIX, CTX_PREFIX)) and "@" not in k}
+    # The carried state's scope is kernel-scoped context every node slice shares, like the S_* stamps.
+    if "STATE" in knobs:
+        context["STATE"] = knobs["STATE"]
 
     def bare_slice(work_by_presence: bool) -> NodeSlice:
         sub = dict(context)
@@ -322,6 +332,7 @@ def _schedule_node_features(node_knobs: dict) -> dict[str, float]:
         # siblings — see ``_reduce_features``.
         feats.update(_reduce_features(node_knobs))
     feats.update(_stage_features(node_knobs))  # operand-staging pipeline (STAGE codec); {} when gmem-direct
+    feats.update(_state_features(node_knobs))  # the carried state's scope (STATE codec); {} for the launch loop
     # The B multiplicand's STORED width, on the rows where it differs from the width the mma
     # fragment consumes (``MMA_a_bits``). A packed-pair (NVFP4) weight staged as raw bytes puts 4
     # bits per element through the copy and the slab — a quarter of the traffic at the SAME atom,

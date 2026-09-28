@@ -15,7 +15,7 @@ from emmy.compiler.ir.atom import ATOM_REGISTRY
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule.base import Schedule, ScheduleProblem, Site
 from emmy.compiler.ir.schedule.catalog import map_tile_moves, producer_band_moves, raster_moves
-from emmy.compiler.ir.schedule.choices import PlacedTile, Raster, Reduce, Stage, Tile, Work, derive_inventory, resolve_site_tile
+from emmy.compiler.ir.schedule.choices import PlacedTile, Raster, Reduce, Stage, StateScope, Tile, Work, derive_inventory, resolve_site_tile
 from emmy.compiler.ir.schedule.staging import stage_target
 from emmy.compiler.ir.schedule.views import NodeId
 from emmy.utils import cached_method
@@ -307,34 +307,34 @@ class ClassicKernelSite(Site[ClassicSchedule]):
 
     @cached_property
     def kernels(self) -> tuple[KernelSchedule, ...]:
-        # A resident state pairs with the inventories its cell sweep is striped across and never
+        # A CTA holding the state pairs with the inventories its cells are striped across and never
         # with a raster: the launch's grid is the batch axes alone, and the cells are the CTA's.
         out = []
         for state in self._states():
-            if state.is_direct:
+            if state.is_grid:
                 out.extend(KernelSchedule(work, raster, state) for work in self._works() for raster in self._rasters())
             else:
                 out.extend(KernelSchedule(work, Raster(), state) for work in self._resident_works())
         return tuple(out)
 
-    def _states(self) -> tuple[Stage, ...]:
-        """The state's residency: ``direct`` always, shared memory where the block proof holds."""
+    def _states(self) -> tuple[StateScope, ...]:
+        """The state's scope: the grid always, a CTA where the block proof holds and the block fits."""
         tile = self.problem.tile
         if not carries_state(tile):
-            return (Stage.direct(),)
+            return (StateScope(),)
         program = tile.block_program
-        catalog = (Stage.direct(), *((Stage(depth=depth, transport="smem") for depth in (1, 2)) if program is not None else ()))
-        budget = getattr(self.problem.target, "static_smem_cap", None)
-        allowed = tuple(stage for stage in catalog if stage.is_direct or budget is None or program.bytes * stage.depth <= budget)
+        budget = getattr(self.problem.target, "max_dynamic_smem", None)
+        fits = program is not None and (budget is None or program.bytes <= budget)
+        allowed = (StateScope(), *((StateScope("cta"),) if fits else ()))
         named = self.problem.row.get(STATE_KEY)
         if named is None:
             return allowed
         try:
-            stage = Stage.parse(named)
+            scope = StateScope.parse(named)
         except ValueError:
-            stage = None
-        if stage is not None and stage in allowed:
-            return (stage,)
+            scope = None
+        if scope is not None and scope in allowed:
+            return (scope,)
         return () if self.problem.strict(STATE_KEY) else allowed
 
     def _resident_works(self) -> tuple[Work, ...]:
