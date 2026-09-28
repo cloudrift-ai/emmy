@@ -372,8 +372,8 @@ as worker split x tile fragment x cross-CTA split, capped at 48 pins per pass. P
 iterations; passes 2 and 3 and the write-back at 10 / 100. The write-back ran each lane against a working copy
 holding only that lane's seed and a fresh per-lane tune DB seeded by one bench of the winner. Boxes: vast.ai RTX 5090
 (driver 590.48.01) and RTX 4090 (driver 595.71.05), both CUDA 13.0.88 and PyTorch 2.14.0+cu130 in a fresh venv;
-source revision `1159502e`. The raw pins and A/B records of every pass are in `sweeps_rtx5090x1_2026-09-22.tar.gz`
-and `sweeps_rtx4090x1_2026-09-22.tar.gz`.
+source revision `1159502e`. The raw pins and A/B records of every pass are in `tuning_rtx5090x1_2026-09-22.tar.gz`
+and `tuning_rtx4090x1_2026-09-22.tar.gz`.
 
 ### Measurements, RTX 5090
 

@@ -87,7 +87,7 @@ and 3 around the top three rows measured so far. Pass 1 ranked at 5 warm-ups / 3
 write-back at 10 / 100. The write-back ran each lane against a working copy holding only that lane's seed and a fresh
 per-lane tune DB seeded by one bench of the winner. Box: vast.ai RTX 5090 (driver 590.48.01, CUDA 13.0.88, PyTorch
 2.14.0+cu130 in a fresh venv); source revision `1159502e`. The raw pins and A/B records of every pass are in
-`sweeps_rtx5090x1_2026-09-22.tar.gz`.
+`tuning_rtx5090x1_2026-09-22.tar.gz`.
 
 ### Measurements
 
