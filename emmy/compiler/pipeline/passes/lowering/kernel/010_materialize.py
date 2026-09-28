@@ -68,9 +68,9 @@ def rewrite(match: Match, root: Node, ctx=None) -> KernelOp | None:
                 # A resident state has no global allocation of its own. Removing that port is a
                 # graph splice; snapshots with external readers remain ordinary outputs.
                 body = body.map(
-                    lambda s: None
-                    if (isinstance(s, RegStore) and s.dst_buffer == state) or (isinstance(s, Write) and s.output == state)
-                    else s
+                    lambda s: (
+                        None if (isinstance(s, RegStore) and s.dst_buffer == state) or (isinstance(s, Write) and s.output == state) else s
+                    )
                 )
                 outputs = tuple(t for t in root.outputs if t.name != state)
                 names = {t.name: t.name + "__register" for t in outputs}

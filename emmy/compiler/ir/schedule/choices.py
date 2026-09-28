@@ -675,11 +675,12 @@ class Placement:
 
     free: tuple[Axis, ...] = ()
     grid: tuple[Axis, ...] = ()
-    #: SERIAL axes — a recurrence's time: the kernel is launched once per coordinate, in order,
-    #: each launch receiving the coordinate as a runtime ``int``. Outermost of everything, never
-    #: on the grid, never a loop in the body. What makes a lagged read of the kernel's own output
+    #: SERIAL axes — a recurrence's time: the kernel runs once per coordinate, in order. Outermost
+    #: of everything and never on the grid. What makes a lagged read of the kernel's own output
     #: (``S[c − 1]`` while writing ``S[c]``) well-defined: every cell of step ``c − 1`` is stored
-    #: before any cell of step ``c`` runs.
+    #: before any cell of step ``c`` runs. How it runs is the state's ``STAGE``
+    #: (``schedule.classic.STATE_KEY``): one launch per coordinate, the coordinate a runtime ``int``,
+    #: while the state lives in its global buffer; a loop inside the launch while it lives on chip.
     serial: tuple[Axis, ...] = ()
     #: Set by the scheduling transition (:meth:`on_grid`) — the EXPLICIT "the grid has been
     #: decided" bit. A non-empty ``grid`` already says so, but a **free-less** kernel (a decode
