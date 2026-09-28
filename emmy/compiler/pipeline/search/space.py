@@ -15,7 +15,7 @@ candidate schedules.
 
 Two groups:
 
-- **Schedule codec knobs** (``WORK`` / ``REDUCE`` / ``TILE`` / ``STAGE`` / ``RASTER``) — the tile-lowering schedule
+- **Schedule codec knobs** (``WORK`` / ``REDUCE`` / ``TILE`` / ``STAGE`` / ``RASTER`` / ``STATE``) — the tile-lowering schedule
   fork points serialized by ``ClassicScheduleCodec``. The typed schedule is materialized in
   ``lowering/kernel/010_materialize``; its encoded row rides on ``TileOp.knobs`` so the online
   prior can featurize and tune the decision. ``off=""`` is the explicit direct leaf value.
@@ -141,6 +141,26 @@ RASTER = Knob(
     "block-id decode. Decided by the tile schedule (the row product), applied "
     "at the kernel materializer's grid_tile seal; 2-D-tiled contraction grids only.",
     features=_raster_features,
+    off="",
+)
+
+
+def _state_features(val) -> dict[str, float]:
+    """One indicator per on-chip scope of a carried state: a warp owning its rows in registers, or a CTA
+    holding the block in shared memory. The launch loop (empty) contributes nothing."""
+    scope = str(val or "")
+    return {f"D_state_{scope}": 1.0} if scope in ("warp", "cta") else {}
+
+
+STATE = Knob(
+    "STATE",
+    KnobType.STR,
+    help="The scope that holds a carried state and walks its sequential axis: empty = the grid's launch loop "
+    "over the global state buffer, one launch per step; warp = the register tier, a warp owning its rows; "
+    "cta = one CTA holding the state's block in shared memory, every step inside the launch. Kernel-scoped "
+    "(no @<axis> key), spelled only on a kernel whose placement has a sequential axis. Decided by the tile "
+    "schedule (the row product).",
+    features=_state_features,
     off="",
 )
 

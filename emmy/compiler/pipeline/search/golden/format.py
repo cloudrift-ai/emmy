@@ -284,7 +284,7 @@ class GoldenFile(Wire):
                     }[descriptor.type]
                     if not valid:
                         raise ValueError(f"{row_where}.pins.{name} must be a {descriptor.type.value} value, got {value!r}")
-                    if repository and family_of(name) in {"WORK", "TILE", "REDUCE", "STAGE", "RASTER"}:
+                    if repository and family_of(name) in {"WORK", "TILE", "REDUCE", "STAGE", "RASTER", "STATE"}:
                         try:
                             validate_family_value(name, value)
                         except ValueError as exc:
