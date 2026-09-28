@@ -14,6 +14,7 @@ from emmy.compiler.ir.schedule.classic import CLASSIC_FAMILIES
 if TYPE_CHECKING:
     from emmy.compiler.pipeline.search.golden import GoldenRecord
 
+from emmy.compiler.ir.schedule.base import pin_refusal
 from emmy.compiler.pipeline.knob import (
     KERNEL_DECISION_FAMILIES,
     KnobType,
@@ -207,7 +208,8 @@ def unreproducible_pin_flag(
             continue
         ran_values = conflicts if reject_conflicts and conflicts else others
         ran = "/".join(ran_values) if ran_values else ("(off)" if saw_off else "(unset)")
-        misses.append(f"{label}={want} realized {ran}")
+        refused = pin_refusal(label if not kernel_scoped(label) else name, want)
+        misses.append(f"{label}={want} realized {ran}" + (f" (refused: {refused})" if refused else ""))
     return f"unreproducible pin: {'; '.join(misses)}" if misses else None
 
 
