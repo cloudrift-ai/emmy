@@ -892,6 +892,173 @@ def test_the_packed_drain_addresses_its_own_split_k_slice(tmp_path, stage):
 
 
 # ===================================================================
+# Cut sibling projections — one packed weight per piece
+# ===================================================================
+
+# Two projections of different widths over one computed activation fuse into one kernel whose grid
+# is the token axis alone. The placement cut gives each projection its own kernel, a single-product
+# contraction of ``x + 1`` against one packed weight.
+_CUT_WIDTHS = {"b": 192, "c": 64}
+_CUT_PINS = {"PLACE@map.1/inner": "cut", "REDUCE": ""}
+
+
+def _nvfp4_cut_siblings_graph(tmp_path, *, m, k):
+    """``(x + 1) @ dequant(b)ᵀ`` and ``(x + 1) @ dequant(c)ᵀ`` over a synthetic NVFP4 checkpoint,
+    the two weights of different widths. Returns the graph and each weight's stored tensors."""
+    import torch
+
+    from emmy.compiler.graph import Graph
+    from emmy.compiler.ir.base import ConstantOp, InputOp
+    from emmy.compiler.ir.frontend.ir import LinearOp
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp, IndexMapOp, IndexSource
+    from emmy.compiler.loader.quant import spell_quantized_constants
+    from tests.compiler.loader.test_quant import _FP4_MODELOPT_QC, _fp8_tensor, _write_checkpoint
+
+    rng = np.random.default_rng(5)
+    weights, tensors = {}, {}
+    for name, n in _CUT_WIDTHS.items():
+        packed = rng.integers(0, 256, (n, k // 2)).astype(np.uint8)
+        scale_bits = rng.integers(0x30, 0x40, (n, k // 16)).astype(np.uint8)
+        s2 = np.array(0.5 if name == "b" else 0.25, dtype=np.float32)
+        weights[name] = (packed, scale_bits, s2)
+        tensors |= {
+            f"{name}.weight": torch.from_numpy(packed),
+            f"{name}.weight_scale": _fp8_tensor(scale_bits),
+            f"{name}.weight_scale_2": torch.tensor(float(s2), dtype=torch.float32),
+        }
+    _write_checkpoint(tmp_path, tensors, quant_config={**_FP4_MODELOPT_QC, "ignore": ["lm_head"]})
+    g = Graph()
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (m, k), "f16"), node_id="x")
+    g.add_node(op=ConstantOp(name="one", value=1.0), inputs=[], output=Tensor("one", (1,), "f16"), node_id="one")
+    g.add_node(
+        op=IndexMapOp(out_shape=(m, k), sources=(IndexSource(input_idx=0, coord_map=(_lit(0),)),)),
+        inputs=["one"],
+        output=Tensor("one_bc", (m, k), "f16"),
+        node_id="one_bc",
+    )
+    g.add_node(op=ElementwiseOp("add"), inputs=["x", "one_bc"], output=Tensor("a", (m, k), "f16"), node_id="a")
+    outputs = []
+    for name, n in _CUT_WIDTHS.items():
+        g.add_node(
+            op=ConstantOp(name=name, source_path=f"{name}.weight", source_shape=(n, k), source_dtype="f16"),
+            inputs=[],
+            output=Tensor(name, (n, k), "f16"),
+            node_id=name,
+        )
+        outputs.append(g.add_node(op=LinearOp(), inputs=["a", name], output=Tensor(f"y_{name}", (m, n), "f16"), node_id=f"y_{name}"))
+    g.inputs, g.outputs = ["x"], outputs
+    assert spell_quantized_constants(g, str(tmp_path)) == 2
+    return g, weights
+
+
+def _reads(term: Fold) -> set[str]:
+    """Every buffer ``term`` reads, through its operands and its own lift."""
+    slab = term.as_slab()
+    if slab is not None:
+        return {slab.load.input}
+    own = {stmt.input for stmt in term.lift.body if isinstance(stmt, Load)}
+    return own.union(*(_reads(edge) for edge in term.operands))
+
+
+def test_packed_cut_pieces_orient_the_activation_as_a(tmp_path):
+    """Each cut piece contracts ``x + 1`` as A and the packed weight decode as B, and still writes
+    its output token first. Weight first, the packed-weight reading has no B to recognize, and the
+    piece gets only the compute fill."""
+    from emmy.compiler.context import Context
+    from emmy.compiler.ir.tile import TileOp
+    from emmy.compiler.pipeline import TILE_PASSES, Pipeline
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+    g, _ = _nvfp4_cut_siblings_graph(tmp_path, m=48, k=256)
+    # The compute fill is offered in either orientation, so the pin leaves the orientation free.
+    with pinned_knobs({**_CUT_PINS, "TILE": f"{K16}/f1x2/k2", "WORK": "w1x2", "STAGE": "d1/smem"}):
+        lowered = Pipeline.build(TILE_PASSES).run(g, ctx=Context.from_target((12, 0)))
+    pieces = [node.op for node in lowered.nodes.values() if isinstance(node.op, TileOp)]
+    assert len(pieces) == 2, "the cut must give each projection its own kernel"
+    for tile in pieces:
+        (node,) = [node for node in tile.views if node.as_contraction() is not None]
+        a, b = node.operands
+        assert "x" in _reads(a) and not any(name.endswith("_bits") for name in _reads(a))
+        assert {f"{name}_bits" for name in _CUT_WIDTHS} & _reads(b) and "x" not in _reads(b), _reads(b)
+        view = node.as_contraction()
+        (spec,) = tile.output_specs
+        assert spec.write.index == (Var(view.left), Var(view.right)), "the output stays [token, weight row]"
+
+
+@pytest.mark.parametrize("stage", ["d2/smem-async", "d2/smem-tma"])
+def test_packed_cut_pieces_stage_the_packed_weight_bytes(tmp_path, stage):
+    """Both copy transports reach each cut piece's packed weight: the bytes land in an
+    ``unsigned char`` slab, the TMA pin through a tensor map, and the piece still evaluates
+    ``x + 1`` into its own A slab. No decoded 16-bit weight slab is filled."""
+    from emmy.compiler.context import Context
+    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+    g, _ = _nvfp4_cut_siblings_graph(tmp_path, m=48, k=256)
+    with pinned_knobs({**_CUT_PINS, "TILE": f"{K16}/f1x2/k2", "WORK": "w1x2", "STAGE": stage}):
+        lowered = Pipeline.build(CUDA_PASSES).run(g, ctx=Context.from_target((12, 0)))
+    sources = [s for node in lowered.nodes.values() if (s := getattr(node.op, "kernel_source", None))]
+    assert len(sources) == 2
+    for src in sources:
+        assert "unsigned char _b_smem[" in src and "__half _b_smem[" not in src
+        assert "emmy_mma_load_b_smem_trans_f4s_f16" in src
+        assert "__half _a_smem[" in src and "one[0]" in src, "the piece computes x + 1 itself"
+        if stage.endswith("tma"):
+            assert "const CUtensorMap* __restrict__ _desc_b" in src and "cp_async_bulk_tensor_2d(&_b_smem" in src
+            assert "emmy_cp_async" not in src
+
+
+def _run_cut_siblings(tmp_path, pins, x):
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.loader.binder import bind_constants
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+    tmp_path.mkdir()
+    g, weights = _nvfp4_cut_siblings_graph(tmp_path, m=x.shape[0], k=x.shape[1])
+    backend = CudaBackend()
+    with pinned_knobs(pins):
+        compiled = backend.compile(g)
+    sources = [s for node in compiled.nodes.values() if (s := getattr(node.op, "kernel_source", None))]
+    constants = {}
+    for name, (packed, scale_bits, s2) in weights.items():
+        constants |= {f"{name}.weight": packed, f"{name}.weight_scale": scale_bits, f"{name}.weight_scale_2": s2}
+    result, _ = backend.run(compiled, input_data={**bind_constants(compiled, constants), "x": x})
+    outputs = {name: np.asarray(result.outputs[output]).reshape(x.shape[0], -1).astype(np.float32) for name, output in zip(_CUT_WIDTHS, compiled.outputs, strict=True)}
+    return outputs, weights, sources
+
+
+@requires_cuda
+@pytest.mark.parametrize("stage", ["d2/smem-async", "d2/smem-tma", "d3/smem-tma/p2"])
+@pytest.mark.xdist_group("cuda")
+@requires_sm(9)
+def test_packed_cut_pieces_match_the_decoded_oracle_and_the_fused_kernel(tmp_path, stage):
+    """Numerical parity on the device: each staged cut piece returns ``(x + 1) @ dequantize_nvfp4(w)ᵀ``
+    for its own weight, and agrees with the fused kernel that computes both projections at once.
+
+    The widths differ and the weights carry different per-tensor scales, so a transposed output or
+    two swapped projections cannot pass. The bound is roughly 3x the measured error on a 5080
+    (5e-4), which is the f16 rounding of the stored output; a unit-variance ``x`` keeps the tokens'
+    rows of ``x + 1`` far apart."""
+    from emmy.compiler.loader.quant import dequantize_nvfp4
+
+    rng = np.random.default_rng(13)
+    x = rng.standard_normal((48, 256)).astype(np.float16)
+    staged, weights, sources = _run_cut_siblings(tmp_path / "cut", {**_CUT_PINS, "TILE": f"{K16}/f1x2/k2", "WORK": "w1x2", "STAGE": stage}, x)
+    assert len(sources) == 2 and all("unsigned char _b_smem[" in src for src in sources), "the pins did not reach the byte slab"
+    fused, _, sources = _run_cut_siblings(tmp_path / "fused", {"PLACE@map.1/inner": "fuse", "REDUCE": ""}, x)
+    assert len(sources) == 1
+
+    a = x.astype(np.float32) + 1
+    for name, (packed, scale_bits, s2) in weights.items():
+        ref = a @ dequantize_nvfp4(packed, scale_bits, s2).T
+        denom = max(float(np.abs(ref).max()), 1e-9)
+        assert staged[name].shape == ref.shape
+        assert float(np.abs(staged[name] - ref).max()) / denom < 1.5e-3, name
+        assert float(np.abs(fused[name] - ref).max()) / denom < 1.5e-3, name
+        assert float(np.abs(staged[name] - fused[name]).max()) / denom < 1.5e-3, name
+
+
+# ===================================================================
 # The block-scaled pair — the native fp4 cell's four-slab stage
 # ===================================================================
 

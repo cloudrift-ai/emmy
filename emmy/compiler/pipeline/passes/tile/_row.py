@@ -138,7 +138,13 @@ def reformed(piece: TileOp) -> TileOp:
     not re-formed."""
     if any(store.sweep for store in piece.output_specs):
         return piece
-    body = piece.op.lower(bound=frozenset(), stores=piece.output_specs, axes=piece.axes)
+    # The grid loops are opened here, around the term, rather than by ``lower``: a closed lowering
+    # hoists grid-invariant loads above them, and Loop-IR normalization only orders an outer
+    # free-loop chain that nothing precedes. The grid order would then be ``lower``'s, and so would
+    # a single-product contraction's orientation, which the lift reads off the nest.
+    body = piece.op.lower(bound=frozenset(axis.name for axis in piece.place.free), stores=piece.output_specs, axes=piece.axes)
+    for axis in reversed(piece.place.free):
+        body = Body((Loop(axis=axis, body=body),))
     try:
         # Through the LoopOp's normalization: that is where two reduce loops over one axis become
         # one loop with two accumulators, the twin the lift forms one term from.
