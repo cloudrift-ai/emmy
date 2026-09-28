@@ -1,9 +1,9 @@
 tags:
-  - best-effort
+  - obsolete
 
 model:
   huggingface: "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-AWQ"
-  rationale: "Superseded by Qwen3-Coder-Next line; obsolete prior; negligible current demand."
+  rationale: "Qwen/Qwen3-Coder-Next-FP8 supersedes this recipe: Superseded by Coder-Next line, larger footprint and 23.5GB less context; negligible current demand."
   heat: 5
 engine:
   llm:
