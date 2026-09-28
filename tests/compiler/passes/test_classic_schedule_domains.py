@@ -22,7 +22,7 @@ from emmy.compiler.ir.schedule.classic import (
     ReductionSchedule,
 )
 from emmy.compiler.ir.schedule.classic import refusals as classic
-from emmy.compiler.ir.schedule.classic.schedule import output_sweep_works
+from emmy.compiler.ir.schedule.classic.schedule import output_sweep_works, packed_works
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.ops import carries_partition
@@ -209,7 +209,9 @@ def test_reduction_enumeration_filters_the_independent_product_by_compatibility(
     codec = ClassicScheduleCodec(_context(tile, target))
 
     assert {_signature(codec, leaf.schedule) for leaf in leaves} == {_signature(codec, schedule) for schedule in reference}
-    assert len(reference) == len(expected_reductions)
+    # A warp-wide cooperative fold is offered once more on its packed inventory (several cells per CTA).
+    packed = sum(len(packed_works(Work(kind="thread", units=(plan.coop, 1)))) for plan in coop_reduce_moves() if not plan.coop_transposed)
+    assert len(reference) == len(expected_reductions) + packed
     assert offers.bounds[0] > len(reference)
 
 
