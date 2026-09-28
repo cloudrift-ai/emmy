@@ -961,6 +961,19 @@ def test_a_name_two_stores_ride_at_different_extents_is_not_one_axis() -> None:
     assert promoted_sweep(op, (narrow, wide)) == set(), "and the refusal does not depend on which store is first"
 
 
+def test_a_pointwise_sweep_under_a_unit_row_promotes() -> None:
+    """A decode row is a static unit free axis: it launches one block like no free axis at all, so a
+    pointwise term's shared sweep is the only axis the launch can spread over. Kept a sweep, the
+    Gemma 4 width-1 q-norm piece walked 16 heads in 16 threads and 512 dims serially (20 us for 1)."""
+    from emmy.compiler.ir.tile.ir import promoted_sweep
+
+    op = projection((slab("x", "x", "h", "d"),))
+    store = OutputSpec(write=Write(output="out", index=(Var("h"), Var("d")), value="x"), sweep=(Axis("h", 16), Axis("d", 512)))
+
+    assert promoted_sweep(op, (store,), free=(Axis("_row", 1),)) == {"h", "d"}
+    assert promoted_sweep(op, (store,), free=(Axis("m", 4),)) == set(), "a real free axis still leaves the sweep to the schedule"
+
+
 def test_root_collapses_onto_the_operand_the_stores_read() -> None:
     """The Gated DeltaNet chunk shape: the boundary reads its value off an operand and the root's own
     result is a statistic nothing keeps. Left standing, the root holds an invariant reduce alive, and
