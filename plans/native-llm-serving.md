@@ -38,9 +38,12 @@ or its scope is explicitly revised.
 - **Milestone 4 — manual schedules merged in PR #910; greedy optimization merged in PR #920.** The
   [manual-schedule comparison](../experiments/Qwen3-0.6B/native_manual_schedules/RESULTS.md) and
   [greedy comparison](../experiments/Qwen3-0.6B/native_greedy/RESULTS.md) record the measured improvements.
-  PR #924 adds fixed-width chunked prefill with manually selected schedules and unchanged one-token decode.
+  Merged PR #924 adds fixed-width chunked prefill with manually selected schedules and unchanged one-token decode.
   Its [comparison](../experiments/Qwen3-0.6B/native_prefill/RESULTS.md) records qualification, serving measurements,
-  padding, and memory accounting. Continuous batching and paged KV remain outstanding. The prior is not used;
+  padding, and memory accounting. PR #954 preserves FP32 output logits to close the remaining sequential token
+  mismatch without changing numerical limits. Its [investigation](../experiments/Qwen3-0.6B/native_accuracy/RESULTS.md)
+  qualifies all nineteen sequential and nineteen chunked cases, plus the checkpoint HTTP lifecycle. Continuous
+  batching and paged KV remain outstanding. The prior is not used;
   there is no claim of a performance advantage over stock vLLM.
 
 The [runtime report](../experiments/Qwen3-0.6B/native_runtime/RESULTS.md) shows reduced uncaptured submission cost,

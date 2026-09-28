@@ -29,7 +29,9 @@ Not a `Backend` — a small Graph→torch evaluator that runs a frontend-dialect
 `torch.compile` baseline for `emmy run --ir`. Each frontend / tensor op is mapped to its torch twin
 (`RmsNormOp`→`F.rms_norm`, `LayerNormOp`→`F.layer_norm`, `SdpaOp`→`F.scaled_dot_product_attention`,
 `LinearOp`→`F.linear`, `ElementwiseOp`/`ReduceOp`/additive `ScanOp`→the torch elementwise/reduce/scan, layout
-ops→view/transpose/cat).
+ops→view/transpose/cat). A two-axis transpose swaps those axes, including for rank-two inputs. Matrix multiplication
+promotes its operands to include the declared output dtype, so an FP32 result from FP16 inputs is not rounded to
+FP16 before widening.
 Single-source index maps with unchanged coordinates, broadcasts, permutations, diagonals, or constant-zero coordinates
 use strided views. These preserve noncontiguous input storage and avoid unnecessary gather/clamp expressions that can
 break Inductor fusion across a later slice. Other maps retain the clipped gather and source-selection semantics.

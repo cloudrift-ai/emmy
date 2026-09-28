@@ -156,5 +156,6 @@ controls select greedy decoding. The library validates them before binding or su
 
 The worker adds `load_generation`, `start_generation`, `generation_step`, and `generate`. Prompt and result token
 arrays are little-endian i64 binary files. Step responses contain a selected token or null during prefill; optional
-logits use a binary output file. Loading either a generation model or a benchmark program releases the previous
+logits use a little-endian f32 binary output file under generation artifact version 4. Loading either a generation
+model or a benchmark program releases the previous
 object, and `release` handles both. These additive operations use the existing framed protocol and failure retirement.

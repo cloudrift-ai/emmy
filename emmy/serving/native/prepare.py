@@ -60,7 +60,7 @@ class _Step:
             self.bindings[name] = np.ascontiguousarray(data).tobytes()
         return name
 
-    def launch(self, kernel, args, source, *, writes, blocks=1, rows=1, shared=0, threads=CUDA_THREADS, zero_outputs=()):
+    def launch(self, kernel, args, source, *, writes, blocks=1, rows=1, shared=0, threads=CUDA_THREADS):
         self.plan.kernels[kernel] = KernelSpec(source=source)
         self.plan.launches.append(
             LaunchSpec(
@@ -70,7 +70,7 @@ class _Step:
                 ((blocks,), (rows,), (1,)),
                 ((threads,), (1,), (1,)),
                 shared,
-                tuple(zero_outputs),
+                (),
                 writes=tuple(writes),
             )
         )
