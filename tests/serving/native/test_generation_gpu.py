@@ -529,12 +529,11 @@ def test_gpu_sampling_matches_independent_nucleus_distribution():
     ]
     buffers = [
         *inputs,
-        BufferSpec("histogram", (Dim(512),), F64, "output"),
         BufferSpec("weights", (Dim(257),), F64, "output"),
         BufferSpec("output", (Dim(1),), I64, "output"),
     ]
-    args = ("logits", "histogram", "weights", "params", "seed", "position", "length", "output")
-    launch = LaunchSpec("output", "native_sample", args, ((1,), (1,), (1,)), ((128,), (1,), (1,)), 512, (), writes=("output", "histogram", "weights"))
+    args = ("logits", "weights", "params", "seed", "position", "length", "output")
+    launch = LaunchSpec("output", "native_sample", args, ((1,), (1,), (1,)), ((128,), (1,), (1,)), 512, (), writes=("output", "weights"))
     plan = ExecutionPlan(
         "cuda", [b.name for b in inputs], ["output"], buffers, {}, {}, [launch], {"native_sample": KernelSpec(source=source)}
     )
@@ -599,7 +598,6 @@ def test_gpu_greedy_exact_reduction(vocab):
         BufferSpec(name, (Dim(size),), dtype, "input")
         for name, size, dtype in (
             ("logits", vocab, F32),
-            ("histogram", 1, F64),
             ("weights", 1, F64),
             ("params", 2, F64),
             ("seed", 1, U64),

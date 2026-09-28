@@ -15,9 +15,13 @@ command:
     export EMMY_TUNE_DB=$task_dir/autotune.db
     export EMMY_ONLINE_FILE=$task_dir/online.json
     export EMMY_PACK_DIR=$task_dir/packs
-    lock=$$(./venv/bin/python -c "from emmy.compiler.backend.gpu_lock import _device_scoped; print(_device_scoped('/tmp/emmy-gpu.lock'))")
-    exec 9>"$$lock"
-    flock 9
+    export EMMY_GPU_LOCK=/tmp/emmy-gpu.lock
+    ./venv/bin/python -c '
+    import subprocess
+    from emmy.compiler.backend.gpu_lock import gpu_lock
+    with gpu_lock():
+        subprocess.run(["bash", "-se"], check=True)
+    ' <<'NATIVE_BENCH'
     model=Qwen/Qwen3-0.6B
     ./venv/bin/python -m pip freeze --all > $task_dir/requirements.txt
     if [ "$lane" = baseline ]; then
@@ -63,6 +67,7 @@ command:
           --result-dir $task_dir --result-filename $$label.json > $task_dir/$$label.log 2>&1
       done
     done
+    NATIVE_BENCH
   result_files:
   - '*.json'
   - '*.log'

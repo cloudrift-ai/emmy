@@ -16,7 +16,6 @@ MAX_CONTEXT = 4096
 CUDA_THREADS = 128
 GENERATION_VERSION = 4
 PREFILL_SIZE = 16
-SAMPLING_BINS = 256
 
 
 def validate_model(model, context_length):
@@ -159,7 +158,6 @@ def _program(model, context_length, rows, cache):
     if rows == 1:
         step.buffer("sampling", (2,), F64, "input")
         step.buffer("seed", (1,), U64, "input")
-        step.buffer("sampling_histogram", (2 * SAMPLING_BINS,), F64, "output")
         step.buffer("sampling_weights", (vocab,), F64, "output")
         step.buffer("logits", (1, vocab), F32, "output")
     step.buffer("embedding", (vocab, h), role="constant", data=model.model.embed_tokens.weight.detach().numpy())
@@ -223,9 +221,9 @@ def _program(model, context_length, rows, cache):
     step.compiled("head", head, (example,), [hidden], ["logits"], cache)
     step.launch(
         "native_sample",
-        ["logits", "sampling_histogram", "sampling_weights", "sampling", "seed", "position", "prompt_length", "next_token"],
+        ["logits", "sampling_weights", "sampling", "seed", "position", "prompt_length", "next_token"],
         source,
-        writes=["next_token", "sampling_histogram", "sampling_weights"],
+        writes=["next_token", "sampling_weights"],
         shared=CUDA_THREADS * 4,
     )
     return step

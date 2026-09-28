@@ -99,7 +99,7 @@ __device__ unsigned int logit_key(float value) {
     unsigned int bits = value == 0.0f ? 0u : __float_as_uint(value);
     return bits & 0x80000000u ? ~bits : (bits ^ 0x80000000u);
 }
-extern "C" __global__ void native_sample(const float* logits, double* histogram, double* weights,
+extern "C" __global__ void native_sample(const float* logits, double* weights,
     const double* sampling, const unsigned long long* seed, const long long* position,
     const long long* length, long long* next) {
     if (*position + 1 < *length) return;
@@ -111,6 +111,7 @@ extern "C" __global__ void native_sample(const float* logits, double* histogram,
         weights[i] = exp(((double)logits[i] - maximum) / sampling[0]);
     __syncthreads();
     if (threadIdx.x != 0) return;
+    __shared__ double histogram[512];
     double total = 0.0;
     for (int i = 0; i < VOCAB; ++i) total += weights[i];
     double remaining = sampling[1] * total, mass = 0.0;
