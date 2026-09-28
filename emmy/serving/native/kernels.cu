@@ -99,6 +99,19 @@ __device__ unsigned int logit_key(float value) {
     unsigned int bits = value == 0.0f ? 0u : __float_as_uint(value);
     return bits & 0x80000000u ? ~bits : (bits ^ 0x80000000u);
 }
+__device__ double sampling_sum(double value) {
+    __shared__ double partial[128];
+    int lane = threadIdx.x;
+    partial[lane] = value;
+    __syncthreads();
+    for (int stride = blockDim.x / 2; stride; stride /= 2) {
+        if (lane < stride) partial[lane] += partial[lane + stride];
+        __syncthreads();
+    }
+    double result = partial[0];
+    __syncthreads(); // Every lane reads before the next reduction reuses the workspace.
+    return result;
+}
 extern "C" __global__ void native_sample(const float* logits, double* weights,
     const double* sampling, const unsigned long long* seed, const long long* position,
     const long long* length, long long* next) {
@@ -106,42 +119,36 @@ extern "C" __global__ void native_sample(const float* logits, double* weights,
     native_greedy(logits, next);
     __syncthreads();
     if (*next < 0 || sampling[0] == 0.0) return;
-    double maximum = logits[*next];
-    for (int i = threadIdx.x; i < VOCAB; i += blockDim.x)
+    double maximum = logits[*next], local = 0.0;
+    for (int i = threadIdx.x; i < VOCAB; i += blockDim.x) {
         weights[i] = exp(((double)logits[i] - maximum) / sampling[0]);
-    __syncthreads();
-    if (threadIdx.x != 0) return;
-    __shared__ double histogram[512];
-    double total = 0.0;
-    for (int i = 0; i < VOCAB; ++i) total += weights[i];
-    double remaining = sampling[1] * total, mass = 0.0;
-    unsigned int cutoff = 0, mask = 0, ties = 0;
-    // Refine the cutoff one byte at a time. Each sum has a fixed token order;
-    // no atomic floating-point accumulation can change a seeded selection.
-    for (int shift = 24; shift >= 0; shift -= 8) {
-        for (int bin = 0; bin < 512; ++bin) histogram[bin] = 0.0;
-        for (int i = 0; i < VOCAB; ++i) {
-            unsigned int key = logit_key(logits[i]);
-            if ((key & mask) != cutoff) continue;
-            int bin = (key >> shift) & 255u;
-            histogram[bin] += weights[i];
-            histogram[256 + bin] += 1.0;
-        }
-        int bin = 255;
-        for (; bin > 0; --bin) {
-            if (histogram[bin] >= remaining) break;
-            remaining -= histogram[bin];
-            mass += histogram[bin];
-        }
-        cutoff |= (unsigned int)bin << shift;
-        mask |= 255u << shift;
-        if (shift == 0 && histogram[bin] > 0.0) {
-            unsigned int count = (unsigned int)histogram[256 + bin];
-            double weight = histogram[bin] / count;
-            ties = min(count, (unsigned int)fmax(1.0, ceil(remaining / weight)));
-            mass += ties * weight;
-        }
+        local += weights[i];
     }
+    double target_mass = sampling[1] * sampling_sum(local);
+    unsigned int cutoff = 0;
+    // Largest ordered key whose inclusive upper tail reaches top-p. Fixed block
+    // reductions keep every pass deterministic without floating-point atomics.
+    for (int shift = 31; shift >= 0; --shift) {
+        unsigned int candidate = cutoff | (1u << shift);
+        local = 0.0;
+        for (int i = threadIdx.x; i < VOCAB; i += blockDim.x)
+            if (logit_key(logits[i]) >= candidate) local += weights[i];
+        if (sampling_sum(local) >= target_mass) cutoff = candidate;
+    }
+    local = 0.0;
+    unsigned int count = 0;
+    for (int i = threadIdx.x; i < VOCAB; i += blockDim.x) {
+        unsigned int key = logit_key(logits[i]);
+        if (key > cutoff) local += weights[i];
+        if (key == cutoff) ++count;
+    }
+    double mass = sampling_sum(local);
+    count = (unsigned int)sampling_sum(count);
+    if (threadIdx.x != 0) return;
+    unsigned int bits = cutoff & 0x80000000u ? cutoff ^ 0x80000000u : ~cutoff;
+    double weight = exp(((double)__uint_as_float(bits) - maximum) / sampling[0]);
+    unsigned int ties = weight > 0.0 ? min(count, (unsigned int)fmax(1.0, ceil((target_mass - mass) / weight))) : 0;
+    mass += ties * weight;
     // SplitMix64 counter: request seed and generated-token index, independent of prefill and capture.
     unsigned long long random = *seed + 0x9e3779b97f4a7c15ULL * (unsigned long long)(*position - *length + 2);
     random = (random ^ (random >> 30)) * 0xbf58476d1ce4e5b9ULL;
