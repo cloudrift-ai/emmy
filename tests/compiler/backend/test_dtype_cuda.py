@@ -213,7 +213,7 @@ def test_fp16_fallback_to_float_for_non_native_op():
     sources = "\n".join(n.op.kernel_source for n in compiled.nodes.values() if isinstance(n.op, CudaOp))
     # Signature stays __half; the fallback inserts __half2float on the
     # input and __float2half on the store, with f32 erff in between.
-    assert "__half* y" in sources or "__half* x" in sources, sources
+    assert "__half* __restrict__ y" in sources or "__half* __restrict__ x" in sources, sources
     assert "erff" in sources, f"expected fallback to f32 erff, got:\n{sources}"
     assert "__half2float" in sources, f"expected promote-to-float at use, got:\n{sources}"
     assert "__float2half" in sources, f"expected demote-to-half at store, got:\n{sources}"

@@ -1507,7 +1507,7 @@ def render_kernelop(
         if n in indirect
         else f"const {cuda_name(_dtype_for(n))}* const* {n}__pages"
         if n in paged
-        else f"const {cuda_name(_dtype_for(n))}* {n}"
+        else f"const {cuda_name(_dtype_for(n))}* __restrict__ {n}"
         for n in kernel_op.inputs
         if n not in literals
     ]
@@ -1515,8 +1515,12 @@ def render_kernelop(
     def _out_param(n: str) -> str:
         """A paged output takes its page table; every other output stays a plain pointer."""
         elem = cuda_name(_dtype_for(n))
-        return f"{elem}* const* {n}__pages" if n in paged else f"{elem}* {n}"
+        return f"{elem}* const* {n}__pages" if n in paged else f"{elem}* __restrict__ {n}"
 
+    # Every plain buffer parameter is ``__restrict__``: a launch's output never shares memory with its
+    # inputs (the arena's live intervals end one launch past the last read, and a chained buffer
+    # joins two programs, never one launch's read and write), so the compiler may keep a read-only
+    # operand in registers across the kernel's stores and read it through the non-coherent path.
     sig_parts.extend(_out_param(n) for n in kernel_op.outputs)
     sig_parts.extend(f"const long long* {n}" for n in starts if n not in kernel_op.inputs)
     # TMA descriptors are passed as ``__grid_constant__`` value parameters.
