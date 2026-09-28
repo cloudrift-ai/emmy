@@ -13,10 +13,10 @@ import dataclasses
 import pytest
 
 from emmy.compiler.pipeline.knob import METADATA_PREFIXES
-from emmy.compiler.pipeline.search.data.freeze import REGIME_PINS, freeze_documents, freeze_reason, freeze_source, regime_of, write_freeze
+from emmy.compiler.pipeline.search.data.freeze import REGIME_PINS, freeze_documents, freeze_reason, regime_of, write_freeze
 from emmy.compiler.pipeline.search.db import SearchDB, knobs_json
 from emmy.compiler.pipeline.search.golden import GoldenFile
-from emmy.compiler.pipeline.search.golden.evidence import import_file
+from emmy.compiler.pipeline.search.golden.evidence import file_source, import_file
 from tests.compiler.pipeline.search.helpers import F16_MATMUL_FEATS, impossible_staged_feats, tuned_db
 from tests.compiler.pipeline.search.helpers import perf_row as _row
 
@@ -148,11 +148,11 @@ def test_a_freeze_is_a_golden_file_per_card_that_re_lowers_to_the_rows_it_was_wr
     assert set(digests) == set(documents)
     again = SearchDB()
     for name in sorted(digests):
-        counts = import_file(again, tmp_path / "freeze" / name)
+        counts = import_file(again, tmp_path / "freeze" / name, file_source("freeze", tmp_path / "freeze" / name))
         assert not counts["did not lower"] and not counts["identities no kernel carries"], (name, counts)
     assert _measured(again) == _measured(tuned)
     assert _definitions(again) == definitions
-    assert set(again.perf_sources()) == {freeze_source(tmp_path / "freeze" / name) for name in digests}
+    assert set(again.perf_sources()) == {file_source("freeze", tmp_path / "freeze" / name) for name in digests}
     assert all(source.startswith("freeze:") for source in again.perf_sources())
 
 
@@ -187,7 +187,7 @@ def test_both_precision_lanes_freeze_as_pinned_rows_and_import_apart(tmp_path) -
     write_freeze(path, tmp_path / "freeze")
     db.close()
     again = SearchDB()
-    import_file(again, next((tmp_path / "freeze").glob("*.json")))
+    import_file(again, (frozen := next((tmp_path / "freeze").glob("*.json"))), file_source("freeze", frozen))
     lanes = sorted((r.flags, r.stats.median) for r in again.iter_perf_rows())
     assert lanes == [("", row.stats.median), ("--use_fast_math", row.stats.median)]
 
@@ -218,7 +218,7 @@ def test_a_kernel_benched_at_two_sizes_freezes_as_two_programs(tmp_path) -> None
     write_freeze(path, tmp_path / "freeze")
     db.close()
     again = SearchDB()
-    import_file(again, next((tmp_path / "freeze").glob("*.json")))
+    import_file(again, (frozen := next((tmp_path / "freeze").glob("*.json"))), file_source("freeze", frozen))
     assert sorted(r.bindings["seq_len"] for r in again.iter_perf_rows()) == [128, 512]
     assert {r.kernel for r in again.iter_perf_rows()} == {row.kernel}
 
@@ -262,7 +262,7 @@ def test_an_lfs_pointer_is_named_rather_than_parsed(tmp_path) -> None:
     pointer = tmp_path / "nvidia_geforce_rtx_5090_sm120.json"
     pointer.write_text("version https://git-lfs.github.com/spec/v1\noid sha256:abc\nsize 1\n")
     with pytest.raises(ValueError, match="git-LFS pointer"):
-        import_file(SearchDB(), pointer)
+        import_file(SearchDB(), pointer, file_source("freeze", pointer))
 
 
 @pytest.mark.xdist_group("golden_import_rtx5090")
@@ -288,12 +288,12 @@ def test_the_rtx_5090_hardware_goldens_rows_round_trip_through_a_freeze(tmp_path
     assert dropped == {} and list(documents) == ["nvidia_geforce_rtx_5090_sm120.json"]
     [name] = write_freeze(tuned_path, tmp_path / "freeze")
     again = SearchDB()
-    counts = import_file(again, tmp_path / "freeze" / name)
+    counts = import_file(again, tmp_path / "freeze" / name, file_source("freeze", tmp_path / "freeze" / name))
     assert not counts["did not lower"] and not counts["identities no kernel carries"], counts
     assert _measured(again) == _measured(tuned)
     assert _definitions(again) == _definitions(tuned)
     straight = SearchDB()
-    counts = import_file(straight, path)
+    counts = import_file(straight, path, file_source("freeze", path))
     assert not counts["did not lower"] and not counts["identities no kernel carries"], counts
     # The file records both precision lanes; the tune above ran in one.
     assert {row for row in _measured(straight) if row[-1] == ""} == _measured(tuned)

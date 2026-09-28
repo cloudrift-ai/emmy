@@ -115,30 +115,26 @@ def golden_prior_eval(prior, kernel_filter: str | None = None) -> str:
     return "\n".join(lines)
 
 
-def golden_deploy_perf(prior, kernel_filter: str | None = None) -> dict[str, float]:
-    """Per golden shape, ``pick_us / golden_us`` — the deployable (-O3) latency of the
-    prior's predicted-best **measured** config over the golden's recorded latency, read
-    from the prior's reservoir with **no re-bench**.
+def golden_deploy_perf(prior, pools) -> dict[tuple[str, str], float]:
+    """Per golden pool, keyed ``(name, regime)``, ``pick_us / golden_us`` — the deployable (-O3) latency of
+    the prior's predicted-best **measured** config over the pool's fastest golden row, read from the prior's
+    reservoir with **no re-bench**.
 
     Tuning measures in the deployable regime and feeds every row to the prior, so each tuned
     shape's best config has a deployable row in the reservoir. For each
-    golden shape we take the op group's ``H_opt=3`` rows (the filter still earns its place: a
+    pool we take the op group's ``H_opt=3`` rows (the filter still earns its place: a
     legacy checkpoint can hold rows from the era of a separate ranking lane), pick the one
     ``Prior.pick`` deploys (measured evidence first, model argmin otherwise — the same selection
     greedy ``compile`` / ``run`` make), and divide its measured latency by the golden's
-    recorded ``emmy_us`` (also -O3 → same regime, so the ratio is a real
-    deployable speed comparison; <1.0 = the prior's pick is faster than golden). Shapes
+    recorded time (also -O3 → same regime, so the ratio is a real
+    deployable speed comparison; <1.0 = the prior's pick is faster than golden). Pools
     with no -O3 reservoir row are omitted (the caller renders ``—``). The reservoir is
     used rather than the raw ``perf`` table because only it carries the ``H_*`` regime
     columns needed to isolate the deployable measurements.
 
-    Goldens are scoped to the live card (:func:`goldens_for_live_gpu`) so a multi-GPU
-    goldens dir doesn't make a name's per-card entries collide on the GPU-blind
-    ``ShapeKey`` (e.g. RTX 5090 / RTX PRO 6000 both ``(12, 0)``)."""
-    from emmy.compiler.pipeline.search.golden import goldens_for_live_gpu
-    from emmy.compiler.pipeline.search.pins import fast_math_knobs, precision_trading_pins
-
-    GOLDEN_RECORDS = goldens_for_live_gpu()
+    The caller scopes ``pools`` to the live card, so a multi-GPU dataset doesn't make one shape's per-card
+    pools collide on the GPU-blind ``ShapeKey`` (e.g. RTX 5090 / RTX PRO 6000 both ``(12, 0)``)."""
+    from emmy.compiler.pipeline.search.pins import fast_math_knobs, precision_trading_pins  # noqa: PLC0415
 
     # Deployable (-O3) measured rows per matmul op group, indexed by ShapeKey.
     # An fp32 square and its ``.fp16`` twin share (free_prod, reduce), so the key's
@@ -154,27 +150,18 @@ def golden_deploy_perf(prior, kernel_filter: str | None = None) -> dict[str, flo
             continue
         index.setdefault(ShapeKey.from_s_features(d), []).extend(o3)
 
-    out: dict[str, float] = {}
-    for g in GOLDEN_RECORDS:
-        if not g.is_matmul or not g.emmy_us:
-            continue
-        if kernel_filter and kernel_filter not in g.name:
-            continue
-        leaves = index.get(g.shape_key)
+    out: dict[tuple[str, str], float] = {}
+    for pool in pools:
+        leaves = index.get(ShapeKey.from_s_features(pool.kernel.stamps))
         if not leaves:
             continue
         best_i, _ = prior.pick([s.all_knobs() for s in leaves])
-        # Within-regime comparison (the golden.py convention: a shape's fast-math entry sits
-        # BESIDE its standard one, and each regime is judged against its own): a gate-off pick
-        # must not be measured against an [fm] golden it cannot reach — and vice versa. Skip
-        # cross-regime pairs; the pick's regime derives from its knobs like the golden's.
-        if fast_math_knobs(leaves[best_i].knobs) != precision_trading_pins(g.pin_map):
+        # Within-regime comparison (each regime is judged against its own): a gate-off pick must not be
+        # measured against an [fm] golden it cannot reach — and vice versa. Skip cross-regime pairs; the
+        # pick's regime derives from its knobs like the pool's from its pins.
+        if fast_math_knobs(leaves[best_i].knobs) != precision_trading_pins(pool.pins):
             continue
-        ratio = leaves[best_i].latency_us / g.emmy_us
-        # A shape may record several parity entries under one name — compare against the BEST
-        # (fastest) recorded golden of the pick's regime, not whichever entry iterates last
-        # (max ratio = min emmy_us).
-        out[g.name] = max(out.get(g.name, ratio), ratio)
+        out[(pool.name, pool.regime)] = leaves[best_i].latency_us / pool.emmy_us
     return out
 
 

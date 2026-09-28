@@ -64,8 +64,9 @@ with the setting it was measured under and its median. Nothing the compiler comp
 features. Importing a freeze re-lowers every kernel from its definition, so the dataset holds the current compiler's
 identities and features whatever compiler wrote the snapshot, and a compiler change is a re-import. Freezing the same
 database twice produces byte-identical files. A freeze checked into the repository is what `emmy dataset import`
-loads into the dataset database by default, which is what every evaluation reads; none is checked in at the moment,
-so a tuning database — from this machine or a rented card — is named on the command line instead.
+loads into the dataset database by default, beside the golden configuration files, and that database is what every
+evaluation and the offline fit read; no freeze is checked in at the moment, so the default holds the goldens alone,
+and a tuning database — from this machine or a rented card — is named on the command line to join them.
 
 **Hand-run measurements are recorded too.** A `run --bench` that measured configurations with knob values forced by
 hand records each clean result through the tuner's own writer, so that manually found optima are not lost when the
@@ -146,9 +147,9 @@ Gathered in one place, honestly.
    the release gate compiles the serving matrix under it; a plain deploy without the flag falls through silently.
 7. **There is no per-fork report of which row decided.** Answering "which evidence answered this fork, and did I
    expect that one?" means correlating warnings, the resolution record and the release gate.
-8. **The measured pools are diagnostic-only.** The dataset database is never consulted when deploying. Fitting the
-   offline prior on it is a planned path, not a current one — today `emmy fit` trains on the golden configurations
-   only.
+8. **The measured pools are diagnostic-only.** The dataset database is never consulted when deploying, and the
+   offline prior trains only on the golden rows in it — fitting it on the measured pools too is a planned path, not
+   a current one.
 9. **Nothing evaluates a fork the search never descended into.** Both views score configurations that were built
    and offered as candidates. A search decides one fork at a time, and a fork it never took leaves no row
    anywhere — a good configuration sitting past one is silence that reads as health.

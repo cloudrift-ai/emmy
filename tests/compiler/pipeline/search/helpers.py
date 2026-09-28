@@ -49,7 +49,9 @@ def impossible_staged_feats() -> dict:
     }
 
 
-def kernel_row(identity: str, *, stamps: dict | None = None, name: str | None = None, symbolic: tuple[str, ...] = ()) -> KernelRow:
+def kernel_row(
+    identity: str, *, stamps: dict | None = None, name: str | None = None, symbolic: tuple[str, ...] = (), formed: bool = True
+) -> KernelRow:
     """A ``kernel`` row named ``identity`` with a minimal wire — one loop node whose output carries the
     ``symbolic`` dims — and the f16 matmul stamps unless ``stamps`` says otherwise. Every ``perf`` row
     names a kernel row, so tests seed one of these before recording measurements of it."""
@@ -61,7 +63,7 @@ def kernel_row(identity: str, *, stamps: dict | None = None, name: str | None = 
         loop_ir=wire,
         name=name or f"k_{identity}",
         stamps=dict(F16_MATMUL_STAMPS if stamps is None else stamps),
-        formed=True,
+        formed=formed,
     )
 
 

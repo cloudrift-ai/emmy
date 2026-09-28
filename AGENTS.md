@@ -42,18 +42,20 @@ relevant `ARCHITECTURE.md` before answering.
   in memory; stable Torch IR is persisted only inside golden files. Kernels are named after the operations they realize
   (`k_rms_norm`, `k_sdpa_reduce`).
 - `EMMY_FREEZE_DIR` environment variable (optional) — overrides the measurement freeze `emmy dataset import` loads
-  into the dataset DB by default, the instance `emmy eval prior --dataset db` reads. Defaults to
+  into the dataset DB by default, beside the repository golden files. Defaults to
   `emmy/compiler/pipeline/search/freezes/`, where a snapshot that is identical on every machine is checked in once a
   card has been collected — what makes a reported prior number reproducible. A freeze is a golden file per card:
   each kernel's definition (its Loop IR body) and its measured schedule rows, nothing the compiler computed, so the
   import re-lowers every kernel and a compiler change is a re-import, never a re-collection. None is checked in at
-  the moment (the RTX 5090 is re-collected through the `perf` writer); until then name a tune DB on the `emmy dataset
-  import` command line. The tune DB and the online reservoir are machine-local and mutable; reach them with `--db`
-  when you want one machine's data, not as the default. The freeze's files are tracked in **git LFS**. Re-freeze with
-  `emmy dataset freeze`; `emmy dataset check` counts the rows of an instance whose tables disagree with themselves.
+  the moment (the RTX 5090 is re-collected through the `perf` writer); until then the default import holds the
+  goldens alone, and a tune DB named on the `emmy dataset import` command line joins them. The tune DB and the online
+  reservoir are machine-local and mutable; reach them with `--db` when you want one machine's data, not as the
+  default. The freeze's files are tracked in **git LFS**. Re-freeze with `emmy dataset freeze`; `emmy dataset check`
+  counts the rows of an instance whose tables disagree with themselves.
 - `EMMY_DATASET_DB` environment variable (optional) — overrides the dataset DB path (`~/.cache/emmy/dataset.db`):
   the tune DB's tables in a file of their own, filled by `emmy dataset import` and read by the measurement-data
-  readers, never by a compile.
+  readers (`emmy eval prior`, `emmy fit`), never by a compile. A reader refuses a default instance that lacks a
+  repository golden or a freeze file, naming it; `emmy dataset import --fresh` is the fix.
 - `EMMY_TUNE_DB` environment variable (optional) — overrides the default tuning SQLite cache path
   (`~/.cache/emmy/autotune.db`). `emmy tune` reads from / writes to this path, and a greedy `compile` / `run` /
   `serve` creates it on first use: the golden rows in scope (the live card's repository goldens, or the file

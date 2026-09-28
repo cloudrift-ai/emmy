@@ -809,21 +809,25 @@ GCP project is inferred from `gcloud` config. CloudRift reads `CLOUDRIFT_API_KEY
 
 ### `emmy dataset`
 
-The dataset DB (`EMMY_DATASET_DB`) is the tune DB's tables in a file of their own, read by `emmy eval prior --dataset
-db` and never by a compile. `import [SOURCES…] [--db PATH] [--fresh]` fills it: a source is a measurement freeze
-directory (the checked-in one by default), a golden file, or a tune DB file, which is frozen first. Every kernel is
-re-lowered from its definition through the lowering passes by the current compiler (`golden_import.import_goldens`),
-once per precision regime the file's rows record, and its rows are sourced by the file's digest; a file the instance
-already holds is skipped, and `--fresh` rebuilds from nothing. `freeze --out DIR [--db PATH]` writes an instance's
+The dataset DB (`EMMY_DATASET_DB`) is the tune DB's tables in a file of their own, read by `emmy eval prior` and
+`emmy fit` and never by a compile. `import [SOURCES…] [--db PATH] [--fresh]` fills it: a source is a measurement
+freeze directory, a golden file, or a tune DB file, which is frozen first; with none named it loads the checked-in
+freeze (when there is one) and every repository golden file. Every kernel is re-lowered from its definition through
+the lowering passes by the current compiler (`golden.evidence.import_goldens`), once per precision regime the file's
+rows record, and its rows are sourced by the file's kind and digest — `freeze:` for a freeze directory's files,
+`golden:` for a golden file; a source the instance already holds is skipped, and `--fresh` rebuilds from nothing.
+The readers (`commands/dataset.dataset_db`) refuse a default instance missing a freeze file or a repository golden,
+naming it. `freeze --out DIR [--db PATH]` writes an instance's
 admitted rows (`data/freeze.freeze_reason`) as a golden file per card — the artifact that gets checked in. `check
 [--db PATH]` counts the rows of an instance whose tables disagree with themselves (`SearchDB.drift`) and exits
 non-zero when any do.
 
 ### `emmy fit`
 
-Fit an offline-prior weights artifact and cross-validate it, GPU-free. Two orthogonal switches — `--trainer
-{linear,catboost}` × `--data {golden,freeze:<path>}` — of which both trainers work on `golden`; `freeze:` exits with
-"not yet supported". The two trainers write the same artifact shape, distinguished by its `kind` field, so either can
+Fit an offline-prior weights artifact and cross-validate it, GPU-free, over the golden pools of the dataset DB —
+the default instance, or the one `--db PATH` names — read the way `eval prior --dataset golden` reads them
+(`ranking.build_golden_groups`; the pipeline ARCHITECTURE's Part 8 owns the pool). One switch, `--trainer
+{linear,catboost}`; the two trainers write the same artifact shape, distinguished by its `kind` field, so either can
 be pointed at with `EMMY_OFFLINE_FILE` and A/B'd against the other.
 
 `linear` fits weights by random search + coordinate descent: `--samples N` (default 0: coordinate-descent-from-seed,
@@ -839,23 +843,22 @@ the expected direction when the negatives are unlabeled rather than known-bad). 
 — CatBoost's histogram build is threaded — so two fits are compared by their metrics files rather than by a
 checksum.
 
-**A group is a candidate pool, not a golden.** The golden group builder enumerates each golden's pool and joins a
-golden to an existing group when the featurized pool it enumerates is byte-identical to that group's — so a shape
-recorded under two names, or one name recorded twice, becomes ONE group carrying several verified rows, and its rank
-is the best of them. Membership is decided that way rather than by any metadata key, because most same-name
-duplicates are `FAST_MATH` siblings whose pools are genuinely disjoint (the fast-math enumeration offers an
-f16-accumulate atom the standard one never emits): merging them on the name would pin row indices that do not exist
-in the other pool. The
-realized merge count is therefore an output of the run — the header's `groups` block records the total, positives and
-merged, and every `per_golden` row carries `positives`, so a group count that dropped against an earlier fit says why
-instead of looking like lost data. A golden whose signature matches no row in its pool is unchanged: it is skipped
-and counted per card as `unranked`.
+**A group is a candidate pool, not a golden.** A pool is one kernel on one card, in one precision regime, at one
+set of sizes — every golden row measured on it pins a row of that ONE group, whatever name or file recorded it, and
+the group's rank is the best of them. The fast-math rows of a kernel are another pool: the fast-math enumeration
+offers an f16-accumulate atom the standard one never emits, so pinning row indices across the two would name rows
+that do not exist. Two pools that featurize byte-identically are folded into one group after packing. The realized
+merge count is therefore an output of the run — the header's `groups` block records the total, positives and merged,
+and every `per_golden` row carries `positives`, so a group count that dropped against an earlier fit says why
+instead of looking like lost data. A golden row whose signature matches no candidate of its pool is skipped and
+counted per card as `unranked`; a kernel formed from no loop op (a piece carved from a twisted tree, which only its
+parent's program reaches) is skipped the same way.
 
 **Pools are SAMPLED during enumeration.** `--pool-sample N` (default 2000; `0` enumerates every row) draws
 that many candidates per pool by single-pass reservoir sampling over the schedule walk's leaf stream — each
 candidate dict exists only for the moment it passes the draw — because the corpus is millions of rows and tens
 of gigabytes otherwise, and one golden's pool alone is past the scheduler's materialization budget, so an
-unsampled `--data golden` fit does not finish. The draw is a pure function of the stream and `(N, --seed)` and
+unsampled fit does not finish. The draw is a pure function of the stream and `(N, --seed)` and
 never reads a row, so a refit of the same corpus is byte-identical
 and two goldens over one pool still retain identical rows and still merge into one group. Every recorded
 config survives the draw wherever it sits in its pool, so a golden that misses its pool still means what it
@@ -877,7 +880,7 @@ interaction mirrors), each of which a tree re-derives by splitting on columns th
 `search/data/group.MATMUL_FEATURES` is a third ready spec, holding just the 53 features that can move a matmul
 ranking — the rest are either constant within every pool or affine copies of a kept feature, so excluding them is
 expressiveness-neutral. `--out DIR` defaults to
-`_tune/fits/<timestamp>-<trainer>-<data>/`.
+`_tune/fits/<timestamp>-<trainer>/`.
 
 A run writes `metrics.json` — the per-run record two fits are diffed by: `full_train` (per-golden dual ranks plus
 per-card **summaries**) and the `cv` block (holdout and train summaries, per-card gap, per-fold detail); folds
@@ -891,9 +894,10 @@ about a scored card, and keeping them out preserves the shared summary shape. Al
 full-train artifact in the shipped format (a `catboost` fit also writes the booster as a `weights.cbm` sidecar
 beside it, named after its own JSON so several artifacts can share a directory); `--artifact [PATH]` additionally writes the artifact to PATH (no value: the
 repo-checked `offline_weights.json` — the regenerate-the-shipped-weights flow, formerly the retired
-`scripts/golden_knob_heuristics.py`). `emmy/commands/fit.py` owns the snippet-tracing golden group builder
-(`build_golden_groups` — `pipeline/` must not import the tracer) plus the trainer wiring, the artifact assembly and
-the file writing; the run harness and fold/metrics machinery are library code in
+`scripts/golden_knob_heuristics.py`). The header names the dataset DB and the golden files (by source digest) the
+pools were read from: two fits are comparable only when they were computed over the same rows. `emmy/commands/fit.py`
+owns the trainer wiring, the artifact assembly and the file writing; the pool builder is
+`emmy/compiler/pipeline/search/ranking.py`, and the run harness and fold/metrics machinery are library code in
 `emmy/compiler/pipeline/search/prior/fit/` (`run.py` / `cv.py`), documented there and in the pipeline
 ARCHITECTURE's prior sections.
 

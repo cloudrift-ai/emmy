@@ -25,7 +25,7 @@ not frozen again.
 
 Freezing the same rows twice yields the same bytes: rows sort by content and the golden dump is
 deterministic. A file's identity is its bytes — ``emmy dataset import`` sources its rows as
-``freeze:<sha256[:12]>`` of the file (:func:`freeze_source`), which is what ``commands.dataset.dataset_db``
+``freeze:<sha256[:12]>`` of the file (``golden.evidence.file_source``), which is what ``commands.dataset.dataset_db``
 checks the default dataset DB holds for every file of the checked-in freeze directory
 (``config.freeze_path``, payload in git LFS).
 
@@ -221,7 +221,8 @@ def _path_to(kernel: str, kernels: dict[str, KernelRow], parents: dict[str, list
     return None
 
 
-def _schedule_row(row: PerfRow) -> dict[str, str]:
+def schedule_row(row: PerfRow) -> dict[str, str]:
+    """``row``'s schedule row alone: what the tuner recorded, without the kernel's stamps and identity."""
     return {str(k): str(v) for k, v in row.knobs.items() if not str(k).startswith(METADATA_PREFIXES)}
 
 
@@ -263,7 +264,7 @@ def _document(gpu_name: str, cap: tuple[int, int], rows: list[PerfRow], kernels:
                     "name": f"{kernels[row.kernel].name}.{row.kernel[:12]}.{n}",
                     "bindings": {},
                     "pins": pins,
-                    "knobs": _schedule_row(row),
+                    "knobs": schedule_row(row),
                     "identity": kernels[row.kernel].structural_identity,
                     "measurements": {"emmy_us": row.stats.median},
                     **({"kernel_set": routes} if routes else {}),
@@ -331,11 +332,6 @@ def write_freeze(db_path: Path | str, out_dir: Path | str) -> dict[str, str]:
         shutil.rmtree(out)
     tmp.replace(out)
     return digests
-
-
-def freeze_source(path: Path | str) -> str:
-    """The ``source`` an import files a freeze file's rows under: the file's own bytes, digested."""
-    return f"freeze:{hashlib.sha256(Path(path).read_bytes()).hexdigest()[:12]}"
 
 
 def is_lfs_pointer(path: Path | str) -> bool:

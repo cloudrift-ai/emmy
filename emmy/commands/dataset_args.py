@@ -30,19 +30,19 @@ def add_dataset_args(parser, *, default: str, with_min_variants: bool = False) -
         "--dataset",
         choices=["golden", "db"],
         default=default,
-        help=f"Measurement-data source: 'golden' (recorded golden configs) or 'db' (a DB instance's perf rows). Default: {default}.",
+        help=f"Measurement-data source: 'golden' (the golden files' rows, as pools per kernel) or 'db' (every measured "
+        f"row). Both read a DB instance. Default: {default}.",
     )
     parser.add_argument(
         "--db",
-        help="DB instance to read with --dataset db. `eval prior` defaults to the dataset DB (EMMY_DATASET_DB, else "
+        help="DB instance to read. `eval prior` defaults to the dataset DB (EMMY_DATASET_DB, else "
         "~/.cache/emmy/dataset.db — fill it with `emmy dataset import`); the per-kernel views default to the tune DB "
         "(EMMY_TUNE_DB, else ~/.cache/emmy/autotune.db), whose rows carry the kernel sources they name kernels by.",
     )
     parser.add_argument(
         "--kernel",
-        help="Filter by substring: realization name (the SAME identifier `compile/run --realization` selects a "
-        "single shape with); kernel C identifier for the per-kernel views; op label (e.g. 'matmul', 'reduce', "
-        "'free=512') for `eval prior --dataset db`.",
+        help="Filter by substring: kernel C identifier for the per-kernel views and for `eval prior --dataset golden` "
+        "(the pool's kernel); op label (e.g. 'matmul', 'reduce', 'free=512') for `eval prior --dataset db`.",
     )
     if with_min_variants:
         parser.add_argument(

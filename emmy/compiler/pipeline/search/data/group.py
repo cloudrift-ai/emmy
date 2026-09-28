@@ -7,10 +7,10 @@ the answer, and :class:`MeasuredGroup` holds a benched latency PER ROW, so it al
 pick cost. Nothing generic reads either — the metrics take plain sequences and never see a group — so a
 single label column on the base would be a field with no consumer and two mutually exclusive meanings.
 
-Groups are built by plain functions — :func:`group_measured` below for benched rows, and the golden one in
-``emmy/commands/fit.py``, because case building needs the snippet tracer that ``pipeline/`` must not import —
-and are consumed by the trainers and the fold harness through this one shape; there is no iterator/batching
-layer, the whole dataset is a small in-memory list.
+Groups are built by plain functions — :func:`group_measured` below for benched rows, and
+``ranking.build_golden_groups`` for the dataset DB's golden pools — and are consumed by the trainers and the
+fold harness through this one shape; there is no iterator/batching layer, the whole dataset is a small in-memory
+list.
 
 It lives with the other data types rather than under ``prior/fit/`` because a candidate pool is data, not a
 fitter detail — the fit is only its first consumer. The planned evaluation reports rank over the same pools, and

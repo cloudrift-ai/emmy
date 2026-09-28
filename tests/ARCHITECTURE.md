@@ -295,9 +295,8 @@ their FP16/BF16 decode-and-compute counterparts remain eligible on older cards. 
 TMA-transport `STAGE` pins (`…/tma…`) anywhere: below sm_90 the pin refuses rather than selecting a
 different transport, so `test_attention_coverage.py`'s TMA-staged flash cases carry `requires_sm90` (their `cp`
 siblings run on sm_80+). Golden-scoped CLI tests are the other environment trap: `--realization` without `--golden
-PATH` and
-`eval --dataset golden` resolve against the
-**live card's** recordings, so tests asserting specific golden names (or monkeypatching `GOLDEN_RECORDS` with card-less
-fakes) must pin themselves off-GPU (`torch.cuda.is_available → False` in-process, `CUDA_VISIBLE_DEVICES=""` for
-`run_cli` subprocesses) to take the multi-card-union path — otherwise they pass or fail depending on which shapes the
-local card happens to have recorded.
+PATH`, and the deploy check `eval prior --dataset golden` runs after its report, resolve against the **live card's**
+recordings (the report itself reads a dataset DB and has no such scope), so tests asserting specific golden names (or
+monkeypatching `GOLDEN_RECORDS` with card-less fakes) must pin themselves off-GPU (`torch.cuda.is_available → False`
+in-process, `CUDA_VISIBLE_DEVICES=""` for `run_cli` subprocesses) to take the multi-card-union path — otherwise they
+pass or fail depending on which shapes the local card happens to have recorded.

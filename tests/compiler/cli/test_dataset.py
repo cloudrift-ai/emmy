@@ -6,14 +6,18 @@ from __future__ import annotations
 
 import dataclasses
 from argparse import Namespace
+from contextlib import nullcontext
 
 import pytest
 
 from emmy.commands.dataset import dataset_db, handle_dataset_check, handle_dataset_import
-from emmy.compiler.pipeline.search.data.freeze import freeze_source, write_freeze
+from emmy.compiler.pipeline.search.data.freeze import write_freeze
 from emmy.compiler.pipeline.search.db import RoutingRow, SearchDB, knobs_json
+from emmy.compiler.pipeline.search.golden import repository as golden_repository
+from emmy.compiler.pipeline.search.golden.evidence import file_source
 from emmy.compiler.structural import digest
 from tests.compiler.pipeline.search.helpers import tuned_db
+from tests.compiler.realization import helpers as corpus
 
 _CASE = "fused/norm-linear-f16-scalar-reduce.json"
 
@@ -22,7 +26,7 @@ def _freeze(tmp_path, name: str, us: float):
     """A freeze of one measured kernel at ``us``, written under ``name``."""
     tuned_db(tmp_path / f"{name}.db", (_CASE,), us=us).close()
     write_freeze(tmp_path / f"{name}.db", tmp_path / name)
-    return {freeze_source(path) for path in (tmp_path / name).glob("*.json")}
+    return {file_source("freeze", path) for path in (tmp_path / name).glob("*.json")}
 
 
 def test_the_default_dataset_holds_the_checked_in_freeze_or_is_refused(tmp_path, monkeypatch):
@@ -34,6 +38,7 @@ def test_the_default_dataset_holds_the_checked_in_freeze_or_is_refused(tmp_path,
     _freeze(tmp_path, "older", 400.0)
     monkeypatch.setenv("EMMY_DATASET_DB", str(tmp_path / "dataset.db"))
     monkeypatch.setenv("EMMY_FREEZE_DIR", str(tmp_path / "current"))
+    monkeypatch.setattr(golden_repository, "repository_golden_paths", lambda: nullcontext([]))  # the freeze alone is the default here
 
     with pytest.raises(SystemExit):
         dataset_db(None)  # nothing imported yet
@@ -48,6 +53,37 @@ def test_the_default_dataset_holds_the_checked_in_freeze_or_is_refused(tmp_path,
     assert db.perf_sources() == dict.fromkeys(current, 1)
     assert [row.stats.median for row in db.iter_perf_rows()] == [500.0]
     db.close()
+
+
+def test_the_default_import_holds_the_repository_goldens_too(tmp_path, monkeypatch):
+    """The goldens are measurements too: with no sources named, ``import`` loads the checked-in freeze and every
+    repository golden file, a golden's rows under its own ``golden:`` source — where the golden readers read them
+    — and the readers refuse a default dataset that lacks one of them, by name."""
+    monkeypatch.setenv("EMMY_DATASET_DB", str(tmp_path / "dataset.db"))
+    monkeypatch.setenv("EMMY_FREEZE_DIR", str(tmp_path / "no-freeze-yet"))
+    # A freeze file is golden-shaped; named as a golden it is one, and it carries the measurements a corpus case lacks.
+    _freeze(tmp_path, "goldens", 500.0)
+    _freeze(tmp_path, "later", 400.0)
+    [mine], [later] = (tmp_path / "goldens").glob("*.json"), (tmp_path / "later").glob("*.json")
+    monkeypatch.setattr(golden_repository, "repository_golden_paths", lambda: nullcontext([mine]))
+    handle_dataset_import(Namespace(sources=[], db=None, fresh=True))
+    assert dataset_db(None) == tmp_path / "dataset.db"
+    db = SearchDB.open_readonly(tmp_path / "dataset.db")
+    assert db.perf_sources() == {file_source("golden", mine): 1}
+    db.close()
+
+    monkeypatch.setattr(golden_repository, "repository_golden_paths", lambda: nullcontext([mine, later]))
+    with pytest.raises(SystemExit):
+        dataset_db(None)
+
+
+def test_a_golden_whose_rows_yield_no_measurement_is_refused_by_name(tmp_path):
+    """A source is held through its rows, so a golden file none of whose rows becomes a measurement — a corpus
+    case carries no timings — would never satisfy the readers' freshness check. The import refuses it and names
+    the golden tooling that says what is stale, instead of leaving the dataset unfixable."""
+    case = str(corpus.CASES_DIR / _CASE)
+    with pytest.raises(SystemExit):
+        handle_dataset_import(Namespace(sources=[case], db=str(tmp_path / "dataset.db"), fresh=False))
 
 
 def test_a_tune_db_is_frozen_and_re_lowered_on_import(tmp_path):

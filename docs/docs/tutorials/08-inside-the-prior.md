@@ -66,9 +66,10 @@ artifact does not abort a deployment; what it gets instead is the no-prior behav
 page](./06-deploy-evidence-hierarchy.md), where golden configurations still decide and the rest falls to the rule's first
 option.)
 
-**It is fitted on the golden configurations**, by `emmy fit`. For each recorded golden, the fitter reconstructs the
-set of candidates that golden competed against — by tracing the shape's own small program and enumerating the fork —
-and trains the weights to rank the recorded configuration well inside that set. The loss has two parts:
+**It is fitted on the golden configurations**, by `emmy fit`, read from the dataset database (the previous page's
+store, which `emmy dataset import` fills from the golden files by default). For each kernel a golden row was measured
+on, the fitter enumerates the candidates that kernel offers — from the kernel's own definition, as the database holds
+it — and trains the weights to rank the recorded configuration well inside that set. The loss has two parts:
 
 - an objective pushing each golden's rank up within its own candidate set, with the kinds of case weighted so that no
   one kind dominates the fit;
@@ -170,9 +171,12 @@ buried, while making sure the offline factor's arbitrary magnitude never touches
 ## See it yourself
 
 Evaluate both halves against the golden configurations — where each recorded configuration ranks among the candidates
-it competed against. Both halves are reported side by side, labelled, because they fail for different reasons:
+it competed against. Both read the dataset database, so fill it first; with nothing named, the import loads the golden
+files (and the checked-in freeze, when there is one). Both halves are reported side by side, labelled, because they
+fail for different reasons:
 
 ```bash
+emmy dataset import
 emmy eval prior --dataset golden
 ```
 
