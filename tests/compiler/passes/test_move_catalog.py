@@ -380,3 +380,22 @@ def test_a_cooperative_row_spells_its_own_inventory(monkeypatch):
             parsed = Work.parse(work or None)
             assert parsed is not None and parsed.kind == "thread", f"{label}: {coop} rides WORK={work!r}, not a thread band"
             assert Reduce.parse(coop[0], parsed).coop == parsed.units[0], f"{label}: {coop} disagrees with WORK={work!r}"
+
+
+def test_a_pinned_cooperative_band_rules_out_the_tiled_plans(monkeypatch):
+    """A tiled plan folds serially per cell, so it cannot carry a pinned ``coop`` band: a GEMV pinned
+    ``REDUCE=coop-t`` offers the band alone, where the tiled tiers used to stay offered and a greedy
+    realized the pin's site with a serial fold under the pin's name."""
+    from emmy.commands.trace import graph_from_code
+    from emmy.compiler.ir.tile import TileOp
+    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
+
+    ctx = Context.from_target((9, 0))
+    code = "torch.matmul(torch.randn(1, 1024, dtype=torch.float16), torch.randn(1024, 3072, dtype=torch.float16))"
+    lowered = Pipeline.build(LOOP_PASSES).run(graph_from_code(code)[0], ctx=ctx)
+    lifted = Pipeline.build(["tile/lift"], select={"lift", "twisted"}).run(lowered, ctx=ctx)
+    (tile,) = [node.op for node in lifted.nodes.values() if isinstance(node.op, TileOp)]
+    monkeypatch.setenv("EMMY_WORK", "t32")
+    monkeypatch.setenv("EMMY_REDUCE", "coop-t")
+    rows = _rows_of(tile, ctx)
+    assert rows and all(row.get("REDUCE") == "coop-t" and not row.get("TILE") for row in rows), rows
