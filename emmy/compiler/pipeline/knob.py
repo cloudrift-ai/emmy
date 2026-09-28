@@ -563,7 +563,7 @@ def consume_kernel_row(knobs: dict) -> dict:
     return {k: v for k, v in knobs.items() if family_of(k) not in KERNEL_DECISION_FAMILIES and not k.startswith(METADATA_PREFIXES)}
 
 
-def schedule_pin_fingerprint() -> tuple[tuple[str, str], ...]:
+def schedule_pin_fingerprint(*kernel: str) -> tuple[tuple[str, str], ...]:
     """Every live env pin the schedule enumeration can read, as sorted ``(env var, value)`` pairs spelled as
     the scheduler's catalog arm reads them: the :data:`SCHEDULE_FAMILIES` pins (bare and ``@``-keyed) as
     set, each restricting a domain, and the precision gates by effect — one ``"1"`` entry per gate
@@ -571,6 +571,8 @@ def schedule_pin_fingerprint() -> tuple[tuple[str, str], ...]:
     umbrella), nothing for a gate OFF. Unset precision gates follow the enabled FAST_MATH default.
     The scheduler folds this into its schedule-space stamp, which also seeds a budgeted pool's draw:
     equivalent effective gates share a stamp regardless of how the pins spell them.
+    Given the names ``kernel`` of the one kernel being stamped, a kernel pin that reaches no such name is left
+    out: that kernel never reads it, so it must not re-seed that kernel's draw and move an unpinned pick.
     The environ scan is this module's to make — the ``EMMY_<KNOB>`` namespace is knob.py-owned (the one
     exception to ``config.py``'s env ownership), and the ``@``-keyed pins land there via the ``EMMY_KNOBS`` splat."""
     import os  # noqa: PLC0415 — the one environ read outside ``config``, per the ownership note above
@@ -579,8 +581,17 @@ def schedule_pin_fingerprint() -> tuple[tuple[str, str], ...]:
 
     prefixes = tuple(config.knob_var(name) for name in SCHEDULE_FAMILIES)
     pins = [(var, val) for var, val in os.environ.items() if any(var == p or var.startswith(p + "@") for p in prefixes)]
+    if kernel:
+        pins = [(var, val) for var, val in pins if not _foreign_kernel_pin(var, kernel)]
     pins.extend((gate.env, "1") for gate in (F16_MMA_F32_ACC, FP8_MMA) if precision_pin(gate) is True)
     return tuple(sorted(pins))
+
+
+def _foreign_kernel_pin(var: str, kernel: tuple[str, ...]) -> bool:
+    """Whether the env var ``var`` holds a kernel pin that reaches none of the names ``kernel``."""
+    family, _, element = var[len(config.knob_var("")) :].partition("@")
+    key = f"{family}@{element.lower()}"
+    return kernel_scoped(key) and not any(reaches(key, name) for name in kernel if name)
 
 
 def knob_sort_key(name: str) -> tuple[int, str]:
