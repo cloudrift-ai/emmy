@@ -59,3 +59,11 @@ def test_a_carried_ring_computes_the_right_answer(k: int) -> None:
     (out,) = graph.outputs
     expected = a.astype(np.float32) @ b.astype(np.float32)
     np.testing.assert_allclose(result.outputs[out].astype(np.float32), expected, rtol=2e-2, atol=5e-1)
+
+
+def test_a_scalar_staged_gemv_compiles_on_a_cp_async_ring() -> None:
+    """The scalar drain carries no fragments: a staged GEMV on a cp.async ring keeps its own schedule."""
+    graph = graph_from_code("torch.matmul(torch.randn((1, 1024), dtype=torch.float16), torch.randn((1024, 1024), dtype=torch.float16))")[0]
+    with pinned_knobs({"WORK": "t256", "TILE": "f1", "STAGE": "d3/smem-async"}):
+        lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((8, 0)))
+    assert [node for node in lowered.nodes.values() if isinstance(node.op, CudaOp)]
