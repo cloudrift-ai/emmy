@@ -555,7 +555,8 @@ At a **schedule fork** (one kernel's row):
    deliberately non-deployable `--nvcc-flags` run key elsewhere and are simply never consulted) — the tune's own and
    the **golden rows** in scope, which the compile imports before it picks (`golden.evidence.evidence_db`): the live
    card's repository files, or the file `--golden PATH` names, once per golden digest into the tune DB — created on
-   first use — or into an in-memory instance when the compile has none; a re-recorded file changes the digest, and its
+   first use, and imported under the lock beside the file so the workers of a parallel boot sharing one DB import it
+   once — or into an in-memory instance when the compile has none; a re-recorded file changes the digest, and its
    earlier rows on this card and regime are let go first. Every MEASURED record in the live input regime
    (`pins.regime_live`) lands as the rows of the kernels it decides, keyed by their exact identity: a plain record as
    its one kernel's schedule row, a child-identity receipt as the row of the kernel its identity names (an empty row

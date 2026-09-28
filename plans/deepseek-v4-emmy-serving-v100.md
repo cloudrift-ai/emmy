@@ -8,7 +8,7 @@ serving shell — then A/B against the plain 1Cat container at an equal serving 
 43 layers, `hc_mult` 4, 256 routed experts at top-6 plus one shared, 3 hash-router layers. At TP8 × PP2 the first
 stage owns layers 0–21 and the second 22–42.
 
-## Where it stands (2026-09-27, main at #914)
+## Where it stands (2026-09-27, main at #929)
 
 `main` at `cc2bb92f` (#897) replaced this file. Loop fusion decides its regions from the graph now, the recurrence
 roller rolls the Sinkhorn rounds, and the post block lowers to five kernels per width instead of about thirty-five: a
@@ -97,19 +97,25 @@ checkpoint stays impractical here.
    split decision row to a schedule tests it unsplit), fold the appended decision row (`fold_route.py`), record strict,
    drop the rows the strict election no longer uses, and check each kernel against the old route on the same inputs
    (`pair919.sh`).
-5. **Stage 4 — image and release plumbing.** Bake FROM the immutable 1Cat digest with `cupy-cuda12x` under its own
-   image identity — not the Makefile's default version/tag for a 1Cat 1.2.3 base — labelled with the 1Cat digest and
-   source SHA, Emmy SHA, checkpoint revision and CUDA/NVRTC versions; carry the fork's `VLLM_SM70_*` variables with
-   `--tensor-parallel-size 8 --pipeline-parallel-size 2 --distributed-executor-backend mp`. The pinned config
-   `docker/vllm-emmy-serve/models/deepseek-v4-flash-0731.env` (#768) is the single source for the twin widths; a
-   headroom sweep on the host seals its memory values. Verify with `make serve-config / serve-goldens / serve-warm /
-   serve-image / serve-verify` on the host: the baked image cold-starts offline, every one of the 16 workers reports
-   its pack hit (today's verify accepts one line, which is insufficient), the cubin set is unchanged, no request-time
-   Triton JIT. Build and verify only; registry publication is a separate approval. Envelope to plan the sweep against
-   (gate (c), `--max-model-len 4096 --kv-cache-dtype fp8 --block-size 256 --gpu-memory-utilization 0.90`): 30.8 GiB
-   resident on a first-stage card and 31.75 on a second-stage one of 32, KV cache 76,337 tokens on the first stage and
-   78,722 on the second; KV capacity is not a bytes-per-token constant here, since sliding layers cache a 128-token
-   window and the compressed layers cache compressed entries.
+5. **Stage 4 — image and release plumbing.** The pipeline ran end to end on the host on 2026-09-27 (#928, stacked on
+   #927): `make vllm-emmy-image` builds FROM the 1Cat digest (the config's `SERVE_BASE_IMAGE`, a model-scoped `-base`
+   tag), `make serve-goldens` passes (156 realizations cover the model, every row equals an offered leaf, all 9 twins in
+   scope deploy strict), the warm converges on its first offline pass (88 cubins, one pack per pipeline stage, 264 plan
+   files), `make serve-image` bakes `cloudriftai/vllm-emmy-deepseek-v4-flash-0731:1.2.3-<emmy sha>` with the snapshot in
+   24 sub-10 GB layers and labels for the runtime digest, CUDA 12.9.1, nvcc, the 1Cat source SHA and the checkpoint
+   revision, and verify passes: offline start in about 6 minutes, a pack hit on all 16 workers, no new cubin or Triton
+   cache entry. Found on the way and fixed: the 16 workers' golden imports raced on a fresh tune DB (#927); no wheel had
+   shipped a model golden since #912 (#929, merged); `serve.sh` could not render eager (it drops the capture config when
+   `--enforce-eager` is pinned, as `emmy serve` does); the GPU check compared `nvidia-smi`'s spelling (`Tesla
+   V100-SXM3-32GB`) with the registry's; verify failed on vLLM's JIT-monitor warning, which fires on a first launch
+   loaded from the baked cache (the fork's warmup does not launch its sparse-attention kernels), and now fails on a new
+   Triton cache entry instead. cupy is not needed: nothing imports it since #885. The config ships the M=1 tier off:
+   with it on the M=1 expert twin refuses strict and the release gate fails, and the tier is worth 0.252 → 0.269 s per
+   output token for one request (boot51 vs boot52) and nothing for eight at once. Left: rebuild, warm, bake and verify
+   the release image from the final commit once #927 and #928 are ready (the verified image predates #931 and #932's
+   compiler changes); the headroom sweep did not run, and the config keeps the 0.90 every boot since 09-11 has served at
+   (30.8 GiB resident on a first-stage card, 31.75 of 32 on a second-stage one); registry publication is a separate
+   approval.
 6. **Stage 5 — the A/B, the deliverable.** One `emmy bench` run over both arms at one envelope with their order
    alternated inside each repeat, the way the RTX 5090 gemma-4 experiment balances time and thermal drift, against
    immutable image digests and one checkpoint revision. Profile in a separate run — profiling the fork's multi-stream
@@ -414,7 +420,12 @@ for a row a strict A/B needs that no record wrote, `respell:`); `seed48.sh` and 
 default to `~/emmy-main-6556d75e` (`main` at #914) since #925, `~/emmy-main-0a891de2` being `main` at #921; `boot51.sh`
 boots there and `probe50c.sh N [PROMPT_TOKENS MAX_TOKENS]` runs N probes at once, so decode runs at width N (a repeated
 prompt is a prefix-cache hit, so concurrent long prompts do not measure a cold 4,096-token step). Copy a boot script by
-hand, not with a digit `sed`: `s/48/49/` also rewrote the checkpoint revision hash, and the boot died offline.
+hand, not with a digit `sed`: `s/48/49/` also rewrote the checkpoint revision hash, and the boot died offline. The Stage
+4 release checkout is `~/emmy-stage4` (a GitHub clone of #928's branch, `dist/` holding the sdist built on the Mac with
+`scripts/prepare_dist.py --recipes` and `python -m build --sdist`, since the host has no Rust toolchain; build the base
+with `make -o wheel vllm-emmy-image MODEL=deepseek-ai/DeepSeek-V4-Flash-0731`); its `venv/bin/emmy` is a host-only shim
+running `emmy` in the base image so `make serve-goldens` works, and `~/serve-evidence/stage4-probe.sh IMAGE` boots a
+baked image and diffs its Triton and cubin sets around a request.
 
 **Never touch** `~/.cache/emmy/autotune.db` (the real tune DB), `~/emmy`, `~/emmy-dsv4`, `~/emmy-fix-backup`,
 `~/emmy-durations/_verify/gap3-tune/` (partial rows that regress the election — never merge that DB), or

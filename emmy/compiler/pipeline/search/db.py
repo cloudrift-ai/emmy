@@ -57,6 +57,7 @@ import json
 import logging
 import sqlite3
 from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -333,12 +334,22 @@ class SearchDB:
         # One process at a time opens the file. Several `emmy` commands opening one file within
         # milliseconds of each other (the suite's CLI subprocesses) would otherwise each see the tables
         # missing and collide on CREATE TABLE, and a fresh file cannot switch to WAL while another
-        # connection is mid-transaction. The lock beside the file is held for the open only.
-        with open(f"{path}.lock", "w") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        # connection is mid-transaction.
+        with self.exclusive():
             self._conn = sqlite3.connect(str(path), isolation_level=None, check_same_thread=False)
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._create_tables()
+
+    @contextmanager
+    def exclusive(self) -> Iterator[None]:
+        """One process at a time, through the lock beside the file (nothing to hold for an in-memory DB):
+        held for the open, and by ``golden.evidence`` for a golden import."""
+        if self._path is None:
+            yield
+            return
+        with open(f"{self._path}.lock", "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            yield
 
     def _create_tables(self) -> None:
         """The tables, created where missing; a file another emmy wrote is re-created empty."""

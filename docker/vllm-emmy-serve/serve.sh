@@ -35,7 +35,13 @@
 #                        stays eager.
 #   SERVE_EXTRA_ARGS     further pinned vLLM flags, word-split (e.g. `--kv-cache-dtype
 #                        fp8_e4m3`). They belong in the pinned config because a flag that
-#                        moves which programs the plugin builds is a cache-key input.
+#                        moves which programs the plugin builds is a cache-key input. An
+#                        `--enforce-eager` among them drops the capture config, as a caller's
+#                        does in `emmy serve`: a hyper-connection MoE (DeepSeek V4) host-syncs
+#                        every decode step and serves eager.
+#   SERVE_ENV            further environment the server runs under, word-split NAME=value
+#                        pairs exported before the exec (e.g. a fork's own switches, or
+#                        `EMMY_STRICT_EVIDENCE=1`), so the warm and the baked image run it alike.
 #   SERVE_EMBED_HOST / SERVE_PREFILL_CAPACITY / SERVE_PREFILL_BUCKET / SERVE_M1_TIER
 #                        the memory/shape lane exported as EMMY_GEN_* by warm and baked into
 #                        the image. They are compiler/pack-key inputs even though they do not
@@ -58,6 +64,9 @@
 # frontend on every boot. A caller wanting the other lane still says so, which is what the `:fm`
 # shapes and the recipes' EMMY_FAST_MATH=1 do.
 export EMMY_FAST_MATH="${EMMY_FAST_MATH:-0}"
+for pair in ${SERVE_ENV:-}; do
+    export "$pair"
+done
 if [ -n "${SERVE_V2_MODEL_RUNNER:-}" ]; then
     export VLLM_USE_V2_MODEL_RUNNER="$SERVE_V2_MODEL_RUNNER"
 else
@@ -81,6 +90,10 @@ fi
 
 # shellcheck disable=SC2086 — $REVISION and $SERVE_EXTRA_ARGS are deliberately word-split
 # flag lists, and both expand to nothing at all when unset.
+case " ${SERVE_EXTRA_ARGS:-} " in
+    *" --enforce-eager "*) set -- ${SERVE_EXTRA_ARGS:-} "$@" ;;
+    *) set -- --compilation-config "${COMPILE_CFG}" ${SERVE_EXTRA_ARGS:-} "$@" ;;
+esac
 exec python3 -m vllm.entrypoints.openai.api_server \
     --model "${SERVE_MODEL}" \
     $REVISION \
@@ -91,6 +104,4 @@ exec python3 -m vllm.entrypoints.openai.api_server \
     --gpu-memory-utilization "${SERVE_GPU_MEM_UTIL}" \
     --no-enable-prefix-caching \
     --hf-overrides "${OVERRIDES}" \
-    --compilation-config "${COMPILE_CFG}" \
-    ${SERVE_EXTRA_ARGS:-} \
     "$@"

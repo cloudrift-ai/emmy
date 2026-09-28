@@ -601,6 +601,7 @@
  "tests/compiler/pipeline/search/test_evidence.py::test_a_compile_imports_its_scope_once_and_lets_a_re_recorded_files_rows_go": 1.13,
  "tests/compiler/pipeline/search/test_evidence.py::test_a_measurement_taken_here_is_never_replaced_by_an_import": 1.03,
  "tests/compiler/pipeline/search/test_evidence.py::test_the_rtx_5090_hardware_golden_deploys_from_the_db@golden_evidence_rtx5090": 2.77,
+ "tests/compiler/pipeline/search/test_evidence.py::test_workers_sharing_a_tune_db_import_the_scope_once": 0.99,
  "tests/compiler/pipeline/search/test_golden.py::test_a_pool_that_holds_the_recorded_row_is_not_walked_whole": 1.09,
  "tests/compiler/pipeline/search/test_golden.py::test_a_row_whose_every_site_is_re_spelled_still_gets_a_verdict": 1.49,
  "tests/compiler/pipeline/search/test_golden.py::test_a_row_with_only_an_invalid_offered_value_reports_a_semantic_miss": 1.37,
