@@ -1482,11 +1482,15 @@ def render_kernelop(
     sig_parts = [
         f"const {cuda_name(_dtype_for(n))}* const* {n}__table, const int* {n}__sel, int {n}__slot"
         if n in indirect
-        else f"const {cuda_name(_dtype_for(n))}* {n}"
+        else f"const {cuda_name(_dtype_for(n))}* __restrict__ {n}"
         for n in kernel_op.inputs
         if n not in literals
     ]
-    sig_parts.extend(f"{cuda_name(_dtype_for(n))}* {n}" for n in kernel_op.outputs)
+    # Every buffer parameter is ``__restrict__``: a launch's output never shares memory with its
+    # inputs (the arena's live intervals end one launch past the last read, and a chained buffer
+    # joins two programs, never one launch's read and write), so the compiler may keep a read-only
+    # operand in registers across the kernel's stores and read it through the non-coherent path.
+    sig_parts.extend(f"{cuda_name(_dtype_for(n))}* __restrict__ {n}" for n in kernel_op.outputs)
     # TMA descriptors are passed as ``__grid_constant__`` value parameters.
     # The kernel only takes their address (``&desc``) for inline asm, so
     # the opaque ``CUtensorMap`` forward decl above suffices.
