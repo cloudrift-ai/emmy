@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 from frozendict import frozendict
 
 from emmy.compiler.ir.pure.fold import Fold
-from emmy.compiler.ir.schedule.base import Schedule, ScheduleContext, ScheduleRefused
+from emmy.compiler.ir.schedule.base import Schedule, ScheduleContext, ScheduleRefused, note_pin_refusal
 from emmy.compiler.ir.schedule.choices import PlacedTile, Reduce, Stage, Tile, Work, derive_inventory
 from emmy.compiler.ir.schedule.views import EdgeSite, NodeId
 from emmy.compiler.structural import instance_memo
@@ -524,7 +524,23 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         )
 
     def _support_refusal(self, site: NodeId, support: _LocalSupport) -> str | None:
-        """Return why one locally supported pick cannot extend this prefix."""
+        """Return why one locally supported pick cannot extend this prefix. A pick that spells a
+        pinned value records the reason against that pin (:func:`note_pin_refusal`)."""
+        why = self._support_refusal_reason(site, support)
+        if why is not None and self.problem is not None:
+            families = self.tile_op.family_sites
+            spelled = {classic_node_key(self.tile_op, "TILE", site): support.node.tile.spell()} if site in families["TILE"] else {}
+            if isinstance(support.node, ReductionSchedule) and site in families["REDUCE"]:
+                spelled[classic_node_key(self.tile_op, "REDUCE", site)] = support.node.reduce.spell()
+            for edge in support.edges.values():
+                if (stage_key := self.problem.node_site(site).stage_key) is not None:
+                    spelled[stage_key] = edge.stage.spell()
+            for key, value in spelled.items():
+                if key is not None and self.problem.row.get(key) == value:
+                    note_pin_refusal(key, value, why)
+        return why
+
+    def _support_refusal_reason(self, site: NodeId, support: _LocalSupport) -> str | None:
         if (
             site in self._shared_roots
             and binds_root(support.node)
@@ -588,13 +604,17 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             need, offer = (claim.value, other) if claim.role == "need" else (other, claim.value)
             if need[0] == "chunk":
                 rows, keys = offer[5] if offer[0] == "warp" else ((), ())
-                compatible = (
-                    offer[0] == "warp"
-                    and need[1:3] == offer[1:3]
-                    and keys[0] == need[5]  # the producer's N is the carrier's key: a (row, chunk) tile
-                    and keys[1:3] == (1, need[3])  # one warp column, and that column IS the chunk
-                    and rows[3] == need[4]  # the same register rows the carrier holds
-                )
+                if offer[0] != "warp":
+                    return "the chunk tier's score must be warp-tiled"
+                if need[1:3] != offer[1:3]:
+                    return f"the score's cell {offer[1]} {offer[2]} is not the carrier's {need[1]} {need[2]}"
+                if keys[0] != need[5]:  # the producer's N is the carrier's key: a (row, chunk) tile
+                    return "the score's N tile is not the carrier's key axis"
+                if keys[1:3] != (1, need[3]):  # one warp column, and that column IS the chunk
+                    return f"the score's N tile ({keys[1]} warp columns, {keys[2]} wide) is not the carrier's chunk ({need[3]} wide)"
+                if rows[3] != need[4]:  # the same register rows the carrier holds
+                    return f"the score holds {rows[3]} register rows where the carrier holds {need[4]}"
+                compatible = True
             elif offer[0] == "free":
                 compatible = need[0] != "step"
             else:

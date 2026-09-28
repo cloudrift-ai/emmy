@@ -423,3 +423,32 @@ def test_a_kernel_pin_with_no_split_keeps_its_piece_unsplit(monkeypatch):
     monkeypatch.setenv("EMMY_WORK@place_ab12", "t128")
     monkeypatch.setenv("EMMY_REDUCE@place_ab12", "coop-t")
     assert len(split_forks(None, root)) == 1
+
+
+def test_a_refused_pin_says_which_rule_refused_it(monkeypatch):
+    """A pin the schedule cannot realize names the rule that refused it: the pin check appends the reason
+    the enumeration recorded, where it used to report only what realized instead."""
+    from emmy.commands.trace import graph_from_code
+    from emmy.compiler.ir.schedule.base import clear_pin_refusals, pin_refusal
+    from emmy.compiler.ir.tile import TileOp
+    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
+    from emmy.compiler.pipeline.search.pins import unreproducible_pin_flag
+
+    ctx = Context.from_target((12, 0))
+    code = (
+        "torch.nn.functional.scaled_dot_product_attention(torch.randn(1, 2, 128, 64, dtype=torch.float16), "
+        "torch.randn(1, 2, 128, 64, dtype=torch.float16), torch.randn(1, 2, 128, 64, dtype=torch.float16), is_causal=True)"
+    )
+    lowered = Pipeline.build(LOOP_PASSES).run(graph_from_code(code)[0], ctx=ctx)
+    lifted = Pipeline.build(["tile/lift"], select={"lift", "twisted"}).run(lowered, ctx=ctx)
+    (tile,) = [node.op for node in lifted.nodes.values() if isinstance(node.op, TileOp)]
+    carrier, score = "mma_m16n8k16_f16_f32/f1x8/k4", "mma_m16n8k16_f16_f32/f1x16/k4"
+    monkeypatch.setenv("EMMY_WORK", "w4x1")
+    monkeypatch.setenv("EMMY_TILE@map.1/twist", carrier)
+    monkeypatch.setenv("EMMY_TILE@map.1/twist.1/inner", score)
+    clear_pin_refusals()
+    _rows_of(tile, ctx)
+    why = pin_refusal("TILE@map.1/twist.1/inner", score)
+    assert why is not None and "chunk" in why, why
+    flag = unreproducible_pin_flag({"TILE@map.1/twist.1/inner": score}, [{"TILE": "f1"}])
+    assert flag is not None and f"refused: {why}" in flag
