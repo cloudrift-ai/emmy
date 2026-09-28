@@ -609,12 +609,18 @@ class TileOp(Op):
         ):
             return False  # both output axes of one operand are not a matrix-multiply pair
         if mn is not None and any(
-            axis.name in view.shared_axes and not (axis.extent.is_static and axis.extent.as_static() == 1) for axis in mn
+            axis.name in view.shared_axes
+            and not (axis.extent.is_static and axis.extent.as_static() == 1)
+            and any(_partitions_the_reduction(edge, view.axis, axis.name) for edge in node.operands[:2])
+            for axis in mn
         ):
-            # A coordinate BOTH operands read (a split-K partition: ``x[p·bk + k]`` beside
-            # ``w[n, p·bk + k]``) is a batch of independent products, not a fragment row or column:
-            # tiled, one staged operand slab serves every column of the tile at the tile's first
-            # partition, and every other column contracts against the wrong slice of it.
+            # A split-K partition BOTH operands read (``x[p·bk + k]`` beside ``w[n, p·bk + k]``) is
+            # a batch of independent products, not a fragment row or column: tiled, one staged
+            # operand slab serves every column of the tile at the tile's first partition, and every
+            # other column contracts against the wrong slice of it. Only a coordinate composed with
+            # the reduction index is such a partition: a grouped-query head, which the query reads
+            # as ``h`` and the key as ``h / 2``, is not, and refusing it took the chunk tier off
+            # every sequence-major attention.
             return False
         if not view.shared_axes or (view.left_axes and view.right_axes):
             return True
