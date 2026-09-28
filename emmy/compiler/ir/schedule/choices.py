@@ -129,6 +129,10 @@ class ReduceStage:
     # lane-indexed smem tree across k-slices (no shuffle stage — each lane holds a
     # different output). The interleaved default keeps lanes on the reduce axis.
     transposed: bool = False
+    # BLOCK + transposed only (the ``/v<n>`` codec token): each lane owns ``columns`` adjacent
+    # output columns, so its B reads at one k step are one contiguous run the load vectorizer
+    # widens into a single 4-, 8- or 16-byte load.
+    columns: int = 1
 
     def __post_init__(self) -> None:
         if not isinstance(self.level, Level):
@@ -143,6 +147,8 @@ class ReduceStage:
             raise TypeError("ReduceStage transposed must be a bool")
         if self.level is not Level.BLOCK and self.transposed:
             raise ValueError("only a BLOCK ReduceStage can transpose its cooperative mapping")
+        if type(self.columns) is not int or self.columns < 1 or (self.columns > 1 and not self.transposed):
+            raise ValueError(f"ReduceStage columns must be a positive integer on a transposed band, got {self.columns!r}")
 
     def combine(self, *, warp_size: int, segmented: bool = False) -> tuple[FoldMove, ...]:
         """The derived per-level combine fold(s), fine→coarse within this stage — the ONE
@@ -195,7 +201,15 @@ class Reduce:
 
     @classmethod
     def of(
-        cls, *, cta: int = 1, groups: int = 1, coop: int = 1, reg: int = 1, finalize: str = "kernel", coop_transposed: bool = False
+        cls,
+        *,
+        cta: int = 1,
+        groups: int = 1,
+        coop: int = 1,
+        reg: int = 1,
+        finalize: str = "kernel",
+        coop_transposed: bool = False,
+        columns: int = 1,
     ) -> Reduce:
         """Build a plan from per-level widths (1 = absent). Order is coarse→fine:
         GRID (cta) → GROUP (groups) → BLOCK (coop) → REG (reg). ``finalize`` rides the GRID stage;
@@ -216,7 +230,7 @@ class Reduce:
         if groups > 1:
             stages.append(ReduceStage(Level.GROUP, groups))
         if coop > 1:
-            stages.append(ReduceStage(Level.BLOCK, coop, transposed=coop_transposed))
+            stages.append(ReduceStage(Level.BLOCK, coop, transposed=coop_transposed, columns=columns))
         if reg > 1:
             stages.append(ReduceStage(Level.REG, reg))
         return cls(tuple(stages))
@@ -224,7 +238,7 @@ class Reduce:
     def spell(self) -> str:
         """The ``REDUCE`` codec value for this plan — the pipeline coarse→fine, SITE-LOCAL: the
         coop WIDTH lives in the kernel's ``WORK`` inventory, never here, so the value is
-        ``[g<n>[a|k]][/wg<n>][/coop[-t]][/r<n>]``. ``""`` for the scalar serial fold (the per-thread
+        ``[g<n>[a|k]][/wg<n>][/coop[-t][/v<n>]][/r<n>]``. ``""`` for the scalar serial fold (the per-thread
         serial remainder is never spelled — it derives as ``ceil(extent / parallel)``). The GRID
         finalize letter IS kept: ``a``/``k`` is the atomic-vs-deferred finalize MODE, a site-local
         fact — ``g4a`` and ``g2k`` are semantically different rows, both live in the golden
@@ -237,6 +251,8 @@ class Reduce:
             parts.append(f"wg{self.groups}")
         if self.coop > 1:
             parts.append("coop-t" if self.coop_transposed else "coop")
+        if self.coop_columns > 1:
+            parts.append(f"v{self.coop_columns}")
         if self.reg > 1:
             parts.append(f"r{self.reg}")
         return "/".join(parts)
@@ -249,7 +265,7 @@ class Reduce:
         raises, so a width-carrying spelling (the retired ``b<n>`` embedded-worker grammar) is a
         loud error, not a silent second reading."""
         s = (spec or "").strip()
-        cta, groups, coop, reg, finalize, transposed = 1, 1, 1, 1, "kernel", False
+        cta, groups, coop, reg, finalize, transposed, columns = 1, 1, 1, 1, "kernel", False, 1
         for t in s.split("/") if s else ():
             if t.startswith("wg"):  # the width rides the token: WORK names one group's warps
                 groups = _codec_width(t[2:], tok=t, codec="REDUCE")
@@ -265,12 +281,16 @@ class Reduce:
                 coop, transposed = work.units[0], t.endswith("-t")
             elif t.startswith("r") and t[1:].isdigit():
                 reg = _codec_width(t[1:], tok=t, codec="REDUCE")
+            elif t.startswith("v") and t[1:].isdigit():
+                if not transposed:
+                    raise ValueError(f"REDUCE {spec!r}: 'v<n>' follows 'coop-t'")
+                columns = _codec_width(t[1:], tok=t, codec="REDUCE")
             else:
-                raise ValueError(f"REDUCE {spec!r}: unknown token {t!r} (expect g<n>[a|k] / wg<n> / coop[-t] / r<n>)")
+                raise ValueError(f"REDUCE {spec!r}: unknown token {t!r} (expect g<n>[a|k] / wg<n> / coop[-t][/v<n>] / r<n>)")
         return _canonical_choice(
             "REDUCE",
             spec,
-            cls.of(cta=cta, groups=groups, coop=coop, reg=reg, finalize=finalize, coop_transposed=transposed),
+            cls.of(cta=cta, groups=groups, coop=coop, reg=reg, finalize=finalize, coop_transposed=transposed, columns=columns),
         )
 
     @property
@@ -326,6 +346,11 @@ class Reduce:
     def coop_transposed(self) -> bool:
         """True iff the BLOCK stage carries the ``coop-t`` k-major lane swap."""
         return any(s.transposed for s in self.stages if s.level is Level.BLOCK)
+
+    @property
+    def coop_columns(self) -> int:
+        """The adjacent output columns each lane of a ``coop-t`` band owns, or 1."""
+        return next((s.columns for s in self.stages if s.level is Level.BLOCK), 1)
 
 
 @dataclass(frozen=True)
