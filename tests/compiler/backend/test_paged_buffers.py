@@ -137,7 +137,7 @@ def test_paged_output_writes_at_a_device_start():
 
     signature = _signature(kernel)
     assert f"float* const* {name}__pages" in signature, signature
-    assert "const long long* past" in signature and not kernel.runtime_args, signature
+    assert "const long long* __restrict__ past" in signature and not kernel.runtime_args, signature
     assert "const int past__at = (int)past[0];" in kernel.kernel_source
     assert "past__at" in kernel.kernel_source.split("__pages[", 1)[1].split("]", 1)[0]
     assert f"{name}__pages" in kernel.arg_order and name not in kernel.arg_order
