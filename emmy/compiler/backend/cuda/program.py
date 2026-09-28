@@ -30,6 +30,7 @@ import os as _os
 import pickle
 import sys as _sys
 import time as _time_module
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -127,7 +128,7 @@ def _numpy_storage(src, dtype) -> np.ndarray:
 
 def _host_bytes(buf: _Buffer, shape: tuple[int, ...], src, constants: dict[str, float]) -> bytes:
     """The bytes one input or constant buffer starts from: the supplied array, the plan's scalar
-    constant, a deterministic pseudo-random ramp for an unsupplied input, zeros otherwise."""
+    constant, seeded normal values for an unsupplied input, zeros otherwise."""
     np_dtype = buf.dtype.np
     is_bf16 = getattr(buf.dtype, "name", buf.dtype) == "bf16"
     n = math.prod(shape)
@@ -145,12 +146,15 @@ def _host_bytes(buf: _Buffer, shape: tuple[int, ...], src, constants: dict[str, 
             return np.full(shape, np.uint16((bits + 0x7FFF + ((bits >> 16) & 1)) >> 16), dtype=np.uint16).tobytes()
         return np.full(shape, v, dtype=np_dtype).tobytes()
     if buf.role == "input":
-        # Pseudo-random fill for un-supplied inputs. The index ramp is built in int64, not
-        # ``np_dtype``: a float16 buffer past 65504 elements would overflow to ``inf`` (then
-        # ``inf % 101`` → ``nan``). Compute in fp32 and cast the final values — always in
-        # ``[-0.5, 0.5]``, so fp16-safe.
-        idx = np.arange(n, dtype=np.int64)
-        vals = 0.01 * ((idx.astype(np.float32) * 7 + 13) % 101 - 50)
+        # Seeded normal values for an un-supplied input, one stream per buffer name — what the
+        # reference path draws (``standard_normal``). A kernel's cost can depend on its values
+        # (an IEEE division's slow path, an exp near overflow): the index ramp this replaced
+        # repeats every 101 elements, and through a whole layer it drove softmax rows into
+        # that slow path, so a timing on it was not the timing on real data. Integer carriers
+        # keep a small ramp: their codes are data, not magnitudes.
+        if not is_bf16 and np.issubdtype(np_dtype, np.integer):
+            return (np.arange(n, dtype=np.int64) % 101).astype(np_dtype).tobytes()
+        vals = np.random.default_rng(zlib.crc32(buf.name.encode())).standard_normal(n, dtype=np.float32)
         vals = encode_bf16(vals) if is_bf16 else vals.astype(np_dtype)
         return vals.tobytes()
     return np.zeros(shape, dtype=np_dtype).tobytes()
