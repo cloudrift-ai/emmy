@@ -184,3 +184,24 @@ def test_an_off_precision_gate_stamps_the_same_space() -> None:
     with FAST_MATH.pinned("0"), FP8_MMA.pinned("1"):
         assert schedule_pin_fingerprint() == f16_off
     assert schedule_pin_fingerprint() == default
+
+
+def test_a_kernel_pin_on_another_piece_leaves_the_stamp_alone() -> None:
+    """The stamp seeds a budgeted pool's draw, so a pin the kernel never reads must not move it: a
+    kernel pin naming another cut piece left an unpinned piece's cold pick moving between compiles
+    (a Qwen3.8 GPTQ V100 piece ran 1.5 to 48 ms depending on which other piece a sweep pinned). A
+    kernel pin naming this piece does change the space, so it must still change the stamp."""
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+    ctx = Context.from_target((12, 0))
+    name = "k_probe__place_aaaaaaaaaa"
+    tile = replace(_unmapped_tile(64, 128), name=name)
+
+    def stamp() -> str:
+        return classic_forks(tile, name, tile.knobs, ctx)[0].pool_id
+
+    clean = stamp()
+    with pinned_knobs({"WORK@place_bbbbbbbbbb": "w1x2"}):
+        assert stamp() == clean, "a pin on another piece must not re-seed this piece's draw"
+    with pinned_knobs({"WORK@place_aaaaaaaaaa": "w1x2"}):
+        assert stamp() != clean, "a pin on this piece changes its space, so it must change the stamp"
