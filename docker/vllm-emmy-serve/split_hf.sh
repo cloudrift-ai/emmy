@@ -1,17 +1,19 @@
 #!/bin/bash
-# Split warm/hf into warm/hf_parts/p0..p3 for the bake. Docker Hub rejects very large
+# Split warm/hf into warm/hf_parts/p0..p23 for the bake. Docker Hub rejects very large
 # blobs (the monolithic ~24 GB snapshot layer 503s at upload initiation, forever), so
-# the Dockerfile COPYs four sub-10 GB parts that merge back into /opt/emmy/hf. Split is
-# by hardlink (no extra disk); symlinks (the hub snapshots/ -> blobs/ links) stay
-# symlinks. Everything except the big blobs/ payloads goes to p0; the blob files are
-# balanced across all four parts, largest first.
+# the Dockerfile COPYs 24 sub-10 GB parts that merge back into /opt/emmy/hf — room for a
+# 156 GB checkpoint; a small one leaves most parts empty. Split is by hardlink (no extra
+# disk); symlinks (the hub snapshots/ -> blobs/ links) stay symlinks. Everything except
+# the big blobs/ payloads goes to p0; the blob files are balanced across all parts,
+# largest first.
 set -euo pipefail
 cd "$(dirname "$0")"
 SRC=warm/hf
 DST=warm/hf_parts
 
 rm -rf "$DST"
-mkdir -p "$DST"/p0 "$DST"/p1 "$DST"/p2 "$DST"/p3
+PARTS=24  # the Dockerfile's COPY count
+for i in $(seq 0 $((PARTS - 1))); do mkdir -p "$DST/p$i"; done
 
 # p0 = the full tree minus the large payloads (configs, tokenizer, refs, symlinks).
 # Split by SIZE, not by path: depending on how the snapshot was produced, the weight
@@ -19,18 +21,19 @@ mkdir -p "$DST"/p0 "$DST"/p1 "$DST"/p2 "$DST"/p3
 cp -al "$SRC"/. "$DST"/p0/
 find "$DST"/p0 -type f -size +256M -delete
 
-# balance the large payloads across p0..p3, largest first into the emptiest part.
+# balance the large payloads across the parts, largest first into the emptiest part.
 # The list is captured in a plain assignment (NOT a `< <(...)` process substitution, whose
 # failure `set -e` cannot see): with pipefail, a failing find — e.g. BSD find without
 # -printf on a macOS host — aborts the script here instead of silently yielding an empty
 # loop with every weight shard already deleted from p0 above.
 big=$(find "$SRC" -type f -size +256M -printf "%s %p\n" | sort -rn)
-declare -a used=(0 0 0 0)
+declare -a used=()
+for i in $(seq 0 $((PARTS - 1))); do used[i]=0; done
 if [ -n "$big" ]; then
     while read -r sz f; do
         rel=${f#"$SRC"/}
         best=0
-        for i in 1 2 3; do [ "${used[$i]}" -lt "${used[$best]}" ] && best=$i; done
+        for i in $(seq 1 $((PARTS - 1))); do [ "${used[$i]}" -lt "${used[$best]}" ] && best=$i; done
         mkdir -p "$DST/p$best/$(dirname "$rel")"
         ln "$f" "$DST/p$best/$rel"
         used[$best]=$((used[$best] + sz))
@@ -49,7 +52,8 @@ if [ "$src_n" -ne "$dst_n" ] || [ "$src_bytes" -ne "$dst_bytes" ]; then
     echo "[split] FAIL: parts hold $dst_n files / $dst_bytes bytes, source has $src_n / $src_bytes" >&2
     exit 1
 fi
-for p in p0 p1 p2 p3; do
+for i in $(seq 0 $((PARTS - 1))); do
+    p=p$i
     read -r _ pbytes <<< "$(count "$DST/$p")"
     if [ "$pbytes" -ge 10000000000 ]; then
         echo "[split] FAIL: $p is $pbytes bytes — over Docker Hub's ~10 GB blob cap (re-shard the payload first)" >&2
@@ -57,4 +61,4 @@ for p in p0 p1 p2 p3; do
     fi
 done
 
-echo "[split] $(du -sh "$DST"/p0 "$DST"/p1 "$DST"/p2 "$DST"/p3 | tr '\n' ' ')"
+echo "[split] $(du -sh "$DST"/p* | tr '\n' ' ')"
