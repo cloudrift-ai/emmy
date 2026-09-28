@@ -23,6 +23,7 @@ def _record(model_id, tags, deployments, path=None, heat=None):
         "tags": tags,
         "task": "generate",
         "runnable": "onboarding" not in tags,
+        "emmy_serving": False,
         "deployments": deployments,
         "rationale": f"Qualify {model_id}.",
         "heat": heat,

@@ -135,8 +135,8 @@ def test_model_lifecycle_workflow_posts_discord_summary_from_separate_job(workfl
         assert lifecycle["outputs"]["failure_summary"] == "${{ steps.notice.outputs.failure_summary }}"
         assert notify["env"]["FAILURE_KIND"] == "${{ needs.onboard.outputs.failure_kind }}"
         assert notify["env"]["FAILURE_SUMMARY"] == "${{ needs.onboard.outputs.failure_summary }}"
-        assert "deployment_summary=$(jq -r .deployment_summary" in artifacts["run"]
-        assert "performance_summary=$(jq -r .performance_summary" in artifacts["run"]
+        assert "deployment_summary=$(jq -r '.deployment_summary // empty'" in artifacts["run"]
+        assert "performance_summary=$(jq -r '.performance_summary // empty'" in artifacts["run"]
         notice = next(step for step in lifecycle["steps"] if step.get("id") == "notice")
         assert notice["if"] == "always() && steps.vm.outcome == 'success'"
         assert 'failure.get("regression") is True' in notice["run"]
@@ -387,8 +387,15 @@ def test_onboarding_selects_with_generic_recipe_query():
     assert 'lifecycle == "onboarding"' in script
     assert 'lifecycle == "maintained"' in script
     assert "deployment.availability.cloudrift == true" in script
-    assert "heat desc nulls-last" in script
-    assert "results.last_run_at asc nulls-first" in script
+    tiers = [
+        "--filter 'lifecycle == \"onboarding\"' --filter 'heat >= 70' --filter 'results.last_run_at == null'",
+        "--filter 'emmy_serving == false' --sort 'results.last_run_at asc nulls-first' --sort 'heat desc'",
+        "--filter 'lifecycle == \"onboarding\"' --filter 'results.last_run_at == null' --sort 'heat desc'",
+        "--filter 'lifecycle == \"onboarding\"' --sort 'results.last_run_at asc' --sort 'heat desc'",
+        "--filter 'lifecycle == \"maintained\"' --sort 'results.last_run_at asc nulls-first'",
+    ]
+    positions = [script.index(tier) for tier in tiers]
+    assert positions == sorted(positions)
     assert "deployment.index asc" in script
     assert "--candidate" in script
     assert 'lifecycle != "obsolete"' in script

@@ -260,28 +260,22 @@ jobs:
             )
             selection=$(./venv/bin/emmy "${query[@]}")
           else
-            query+=(
-              --filter 'lifecycle == "onboarding"'
-              --sort 'heat desc nulls-last'
-              --sort 'model_id asc'
-              --sort 'deployment.index asc'
-            )
-            selection=$(./venv/bin/emmy "${query[@]}")
-            if [ "$(jq '.rows | length' <<< "$selection")" -eq 0 ]; then
-              query=(
-                recipe query
-                --root recipes
-                --filter 'provider.cloudrift.team_access == true'
-                --filter 'deployment.availability.cloudrift == true'
-                --filter 'lifecycle == "maintained"'
-                --sort 'results.last_run_at asc nulls-first'
-                --sort 'model_id asc'
-                --sort 'deployment.index asc'
-                --limit 1
-                --json
-              )
-              selection=$(./venv/bin/emmy "${query[@]}")
-            fi
+            # Nightly work in priority order; the first tier with an available deployment wins. A failed
+            # attempt commits its RESULTS.md, so a set last_run_at on a shell marks a failed onboarding.
+            pick() {
+              selection=$(./venv/bin/emmy "${query[@]}" "$@" --sort 'model_id asc' --sort 'deployment.index asc')  || exit 1
+              [ "$(jq '.rows | length' <<< "$selection")" -gt 0 ]
+            }
+            # Hot shells never tried, hot runnable recipes without Emmy serving (least recently run
+            # first), other untried shells, failed shells (oldest attempt first), maintained recipes.
+            pick --filter 'lifecycle == "onboarding"' --filter 'heat >= 70' --filter 'results.last_run_at == null' \
+                --sort 'heat desc' \
+              || pick --filter 'lifecycle in ["maintained", "best-effort"]' --filter 'heat >= 70' \
+                --filter 'emmy_serving == false' --sort 'results.last_run_at asc nulls-first' --sort 'heat desc' \
+              || pick --filter 'lifecycle == "onboarding"' --filter 'results.last_run_at == null' --sort 'heat desc' \
+              || pick --filter 'lifecycle == "onboarding"' --sort 'results.last_run_at asc' --sort 'heat desc' \
+              || pick --filter 'lifecycle == "maintained"' --sort 'results.last_run_at asc nulls-first' \
+              || true
           fi
 
           if [ "$(jq -r '.schema_version' <<< "$selection")" != "1" ]; then
@@ -564,8 +558,11 @@ jobs:
           experiments_root = (workspace / "experiments").resolve()
           summary_path = Path(os.environ["ONBOARD_SUMMARY"])
           summary = json.loads(summary_path.read_text())
+          if summary.get("status") == "failed":
+              # A failed run archives nothing; its report and compiler work are staged as they are.
+              raise SystemExit(0)
           if summary.get("status") != "success":
-              raise SystemExit(f"Onboarding did not succeed: {summary.get('failure')}")
+              raise SystemExit(f"Unexpected onboarding status: {summary.get('status')}")
           experiment_recipe = Path(summary.get("experiment") or "")
           if experiment_recipe.is_absolute() or ".." in experiment_recipe.parts or experiment_recipe.name != "recipe.yaml":
               raise SystemExit(f"Unsafe experiment recipe path: {experiment_recipe}")
@@ -751,9 +748,10 @@ jobs:
             --expected-tag "$EXPECTED_LIFECYCLE" \
             "${heat_args[@]}" \
             --stage
+          echo "status=$(jq -r .status "$ONBOARD_SUMMARY")" >> "$GITHUB_OUTPUT"
           {
-            echo "deployment_summary=$(jq -r .deployment_summary "$ONBOARD_SUMMARY")"
-            echo "performance_summary=$(jq -r .performance_summary "$ONBOARD_SUMMARY")"
+            echo "deployment_summary=$(jq -r '.deployment_summary // empty' "$ONBOARD_SUMMARY")"
+            echo "performance_summary=$(jq -r '.performance_summary // empty' "$ONBOARD_SUMMARY")"
           } >> "$GITHUB_OUTPUT"
           git lfs status
           git diff --cached --check
@@ -783,8 +781,13 @@ jobs:
           ARTIFACT_BRANCH: ${{ steps.branch.outputs.branch }}
           BASE_BRANCH: ${{ github.event.repository.default_branch }}
           BRANCH_EXISTED: ${{ steps.rebase.outputs.expected_head != '' }}
+          RUN_STATUS: ${{ steps.artifacts.outputs.status }}
         run: |
-          git commit -m "recipes: $ONBOARD_MODE $MODEL_ID on $TARGET_GPU x$TARGET_GPU_COUNT"
+          outcome=""
+          if [ "$RUN_STATUS" = "failed" ]; then
+            outcome="failed "
+          fi
+          git commit -m "recipes: ${outcome}$ONBOARD_MODE $MODEL_ID on $TARGET_GPU x$TARGET_GPU_COUNT"
           # Qualification takes hours, so the lifecycle branch may have moved. Replay this run's
           # single commit onto wherever it stands now; a conflict is a real overlap, not a race.
           for attempt in 1 2 3; do
@@ -818,6 +821,7 @@ jobs:
           GH_TOKEN: ${{ steps.app-token-refresh.outputs.token }}
           ARTIFACT_BRANCH: ${{ steps.branch.outputs.branch }}
           PR_NUMBER: ${{ steps.rolling.outputs.number }}
+          RUN_STATUS: ${{ steps.artifacts.outputs.status }}
         run: |
           retry_gh() {
             for attempt in 1 2 3; do
@@ -829,7 +833,7 @@ jobs:
             done
           }
           cat > "$PR_SUMMARY" <<EOF
-          Automated $ONBOARD_MODE completed for \`$MODEL_ID\` on \`$TARGET_GPU x$TARGET_GPU_COUNT\`.
+          Automated $ONBOARD_MODE ${RUN_STATUS/success/completed} for \`$MODEL_ID\` on \`$TARGET_GPU x$TARGET_GPU_COUNT\`.
 
           Workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
           EOF
@@ -856,6 +860,12 @@ jobs:
             -f 'labels[]=model-discovery' \
             -f 'labels[]=model-onboarding' >/dev/null
           echo "number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+
+      - name: Fail a failed onboarding
+        if: steps.artifacts.outputs.status == 'failed'
+        run: |
+          echo "::error::Onboarding failed; its report and compiler work were committed"
+          exit 1
 
       - name: Cleanup local credentials and output
         if: always()

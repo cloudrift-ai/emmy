@@ -472,6 +472,46 @@ def test_validate_summary_rejects_lifecycle_change(tmp_path):
         )
 
 
+def _failure_summary(tmp_path, artifacts):
+    summary_path = tmp_path / "summary.json"
+    summary_path.write_text(
+        json.dumps(
+            {
+                "status": "failed",
+                "mode": "onboarding",
+                "model_id": "org/Model",
+                "target": {"gpu": "NVIDIA H200 141GB", "gpu_count": 1, "ssh": "user@host"},
+                "failure": {"gate": "engine-support", "message": "No engine loads the checkpoint."},
+                "report": "recipes/Model/RESULTS.md",
+                "artifacts": artifacts,
+                "cleanup": {"workloads": "complete", "docker_logout": True},
+            }
+        )
+    )
+    return onboarding_artifacts.validate_summary(
+        summary_path, tmp_path, "org/Model", "NVIDIA H200 141GB", 1, "user@host", "onboarding", "best-effort"
+    )
+
+
+def test_failed_run_keeps_its_report_and_golden(tmp_path):
+    _write_artifacts(tmp_path)
+    golden = tmp_path / "recipes/Model/golden/h200_90.json"
+    golden.parent.mkdir()
+    golden.write_text("{}\n")
+
+    _, artifacts = _failure_summary(tmp_path, ["recipes/Model/golden/h200_90.json"])
+
+    assert artifacts == [Path("recipes/Model/RESULTS.md"), Path("recipes/Model/golden/h200_90.json")]
+
+
+@pytest.mark.parametrize("artifact", ["recipes/Model/recipe.yaml", "experiments/Model/serving/RESULTS.md"])
+def test_failed_run_rejects_serving_artifacts(tmp_path, artifact):
+    _write_artifacts(tmp_path)
+
+    with pytest.raises(ValueError, match="only its report, golden, and compiler work"):
+        _failure_summary(tmp_path, [artifact])
+
+
 def test_stage_artifacts_rejects_unmanifested_agent_changes(tmp_path):
     _init_repo(tmp_path)
     baseline = tmp_path / "README.md"
