@@ -120,12 +120,22 @@ class Load(Stmt):
     matcher-populated ``KernelOp.inputs``/``outputs`` side channels.
     ``None`` keeps the legacy render-time inference path working for
     tests that construct Loads by hand without dtype.
+
+    ``carried`` marks the two halves of a staged copy that crosses the chunk loop's back edge. The
+    names and their packed vector are the ones an earlier Load of the same names DECLARED ahead of
+    the loop. ``"load"`` re-assigns only the packed vector, through the read-only (non-coherent)
+    path — the operand is one the kernel never writes — so the loaded chunk survives into the next
+    iteration as the few registers the vector holds. ``"unpack"`` re-assigns the names from that
+    vector and touches no memory; it sits right before the names' consumer. Measured on the V100:
+    unpacking at the load instead keeps every element live across the mma stream and ptxas then
+    serializes the loads behind it (a 128x128 partial 84 us against 67).
     """
 
     names: tuple[str, ...]
     input: str
     index: tuple[Expr, ...]
     dtype: DataType | None
+    carried: str = ""  # a default, so a Load that does not set it renders (and keys) as before
 
     pure = True  # a pure value binding — legal inside a stored ``Lambda`` body
 
@@ -137,6 +147,7 @@ class Load(Stmt):
         *,
         names: tuple[str, ...] | None = None,
         dtype: DataType | None = None,
+        carried: str = "",
     ) -> None:
         if names is None:
             if name is None:
@@ -154,6 +165,7 @@ class Load(Stmt):
         object.__setattr__(self, "input", input)
         object.__setattr__(self, "index", tuple(index))
         object.__setattr__(self, "dtype", dtype)
+        object.__setattr__(self, "carried", carried)
 
     @property
     def name(self) -> str:
@@ -262,6 +274,12 @@ class Load(Stmt):
         # reinterpret-cast.
         native_n = {"float2": 2, "float4": 4, "__half2": 2}.get(vec_type)
         use_array_index = native_n != n
+        if self.carried == "load":  # re-assign the declared vector only (see the class doc)
+            return [f"{pad}{vname} = __ldg(reinterpret_cast<const {vec_type}*>(&{self.input}[{flat}]));"]
+        if self.carried == "unpack":
+            if use_array_index:
+                return [f"{pad}{nm} = {vname}_h[{k}];" for k, nm in enumerate(self.names)]
+            return [f"{pad}{nm} = {vname}.{c};" for nm, c in zip(self.names, ("x", "y", "z", "w"), strict=False)]
         out_lines = [f"{pad}{vec_type} {vname} = *reinterpret_cast<const {vec_type}*>(&{self.input}[{flat}]);"]
         if use_array_index:
             arr_name = f"{vname}_h"
