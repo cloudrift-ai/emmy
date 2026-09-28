@@ -349,6 +349,23 @@ def test_record_greedy_is_a_golden_bench_flag(run_cli):
     assert "--record-greedy requires --golden PATH and --bench" in stdout + stderr
 
 
+def test_recording_into_another_cards_file_is_refused(caplog):
+    """A recorded row is evidence only on the card its file names, so ``--record-greedy`` into a file
+    seeded for another card is refused before anything is benched, not written where no replay reads it."""
+    args = _parser().parse_args(["run", "--golden", "working.json", "--realization", "linear.layer0", "--bench", "--record-greedy"])
+    seeded = SimpleNamespace(gpu_name="NVIDIA Tesla V100 SXM2 16GB", compute_cap=(7, 0))
+    live = SimpleNamespace(gpu_name="Tesla V100-SXM3-32GB", compute_capability=(7, 0))
+    with (
+        mock.patch.object(GoldenFile, "load", return_value=seeded),
+        mock.patch("emmy.compiler.context.Context.probe", return_value=live),
+        mock.patch.object(run_mod, "_handle_run_once", side_effect=AssertionError("benched a row it cannot record")),
+        pytest.raises(SystemExit) as exc,
+    ):
+        run_mod.handle_run(args)
+    assert exc.value.code == 2
+    assert "working golden targets NVIDIA Tesla V100 SXM2 16GB" in caplog.text
+
+
 def test_pinned_rows_bench_when_the_greedy_returned_no_outputs():
     """A greedy that cannot be timed must not also block the pinned alternative that escapes it.
 
