@@ -1037,7 +1037,7 @@ def test_run_records_the_greedy_pick_of_an_embedded_golden(monkeypatch, tmp_path
         def resolve(_path):
             return None
 
-    async def fake_isolated(_backend, compiled, *, warmup, iters):
+    async def fake_isolated(_backend, compiled, *, warmup, iters, ref=None, ref_key=None):
         sample = SimpleNamespace(name="greedy (isolated)", knobs={}, shape=None, dynamic=None)
         return run_module._GoldenBench(sample, compiled, launches(compiled, 0.001), [], "ok")
 

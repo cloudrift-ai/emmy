@@ -165,7 +165,9 @@ async def _run_job(req: dict) -> dict:
 
                 run_result, _ = CudaBackend(bench_compile_timeout_s=60.0, bench_run_timeout_s=60.0).run(req["graph"], input_data=run_inputs)
                 run_outputs = run_result.outputs
-            result = benchmark_program(req["graph"], **req["kwargs"])
+            # Timed on the reference inputs when the row has them, so the pinned row, the
+            # greedy row and the torch table all read the same values.
+            result = benchmark_program(req["graph"], input_data=run_inputs, **req["kwargs"])
             return {"result": result, "results": None, "torch_available": False, "captured": result.captured, "run_outputs": run_outputs}
 
         from emmy.compiler.backend.cuda.backend import CudaBackend
@@ -223,6 +225,7 @@ async def _run_job(req: dict) -> dict:
             if bundle is None:
                 raise RuntimeError("trace_args produced no runnable module (embedded or debug IR has none)")
             module, args_t, kwargs = bundle
+            input_data = None  # bound by the correctness gate below; the bench then times emmy on them too
             if req.get("accuracy") or req.get("strict_accuracy") or req.get("want_ref"):
                 # The run path's correctness gate, in-child: bind the rebuilt module's real
                 # inputs, run the emmy program on them, compare vs the eager forward. A
@@ -271,6 +274,7 @@ async def _run_job(req: dict) -> dict:
                 warmup=req["warmup"],
                 iters=req["iters"],
                 bench_backends=req["bench_backends"],
+                input_data=input_data,
             )
             avail = True
         else:
