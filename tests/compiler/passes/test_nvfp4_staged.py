@@ -1023,7 +1023,10 @@ def _run_cut_siblings(tmp_path, pins, x):
     for name, (packed, scale_bits, s2) in weights.items():
         constants |= {f"{name}.weight": packed, f"{name}.weight_scale": scale_bits, f"{name}.weight_scale_2": s2}
     result, _ = backend.run(compiled, input_data={**bind_constants(compiled, constants), "x": x})
-    outputs = {name: np.asarray(result.outputs[output]).reshape(x.shape[0], -1).astype(np.float32) for name, output in zip(_CUT_WIDTHS, compiled.outputs, strict=True)}
+    outputs = {
+        name: np.asarray(result.outputs[output]).reshape(x.shape[0], -1).astype(np.float32)
+        for name, output in zip(_CUT_WIDTHS, compiled.outputs, strict=True)
+    }
     return outputs, weights, sources
 
 
@@ -1043,7 +1046,9 @@ def test_packed_cut_pieces_match_the_decoded_oracle_and_the_fused_kernel(tmp_pat
 
     rng = np.random.default_rng(13)
     x = rng.standard_normal((48, 256)).astype(np.float16)
-    staged, weights, sources = _run_cut_siblings(tmp_path / "cut", {**_CUT_PINS, "TILE": f"{K16}/f1x2/k2", "WORK": "w1x2", "STAGE": stage}, x)
+    staged, weights, sources = _run_cut_siblings(
+        tmp_path / "cut", {**_CUT_PINS, "TILE": f"{K16}/f1x2/k2", "WORK": "w1x2", "STAGE": stage}, x
+    )
     assert len(sources) == 2 and all("unsigned char _b_smem[" in src for src in sources), "the pins did not reach the byte slab"
     fused, _, sources = _run_cut_siblings(tmp_path / "fused", {"PLACE@map.1/inner": "fuse", "REDUCE": ""}, x)
     assert len(sources) == 1

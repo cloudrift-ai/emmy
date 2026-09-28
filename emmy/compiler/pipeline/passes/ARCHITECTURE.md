@@ -605,6 +605,13 @@ evidence, not a schedule view or shape matcher, and it widens the catalog rather
 choices stay beside the fragment ones the bound row makes reachable. Decode attention is the standing case — one query
 row per head, whose score would otherwise be re-contracted once per output channel.
 
+A re-formed piece opens its grid loops itself, around its lowered term, so Loop-IR normalization sees the whole
+free-loop chain and orders it by the output layout. A closed lowering would hoist grid-invariant loads above its free
+loops, and normalization orders only a chain that nothing precedes. The piece would then keep the lowering's own loop
+order as its grid order, and the lift orients a single-product contraction of two computed operands by that order: a
+cut W4A16 projection over `x + 1` would put the weight decode in A, where the packed-weight staging, which reads the
+packed weight as B, does not apply.
+
 `_fromloop.fold_from_loop` reads each componentwise monoid directly from the loop's `Accum` statements. It does not
 classify a shape, extract a contraction, pair softmax statistics, hoist a nested reduction, or validate a reconstructed
 loop. Nested reductions are ordinary `Fold` statements in the parent lambda, so source order and SSA scope survive
