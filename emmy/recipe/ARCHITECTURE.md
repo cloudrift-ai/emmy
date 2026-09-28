@@ -50,7 +50,9 @@ the recipe should no longer be used. Low demand or age alone is not enough. Disc
 `best-effort` recipe. Untagged recipes remain runnable for backward compatibility and are classified by the next
 discovery lifecycle run.
 
-Tag values are unique lowercase kebab-case strings. `onboarding` and `untested` must appear together. The runtime
+Tag values are unique lowercase kebab-case strings. `onboarding` and `untested` must appear together. `onboarding-failed` is
+not a lifecycle state: onboarding adds it when an attempt fails and removes it on success, and nightly selection
+holds such a recipe back until nothing else can run. The runtime
 rejects direct use of disabled recipes, while bulk benchmark enumeration and package staging skip them.
 
 `model.rationale` is descriptive lifecycle metadata. It records why the model currently belongs in the inventory and
@@ -91,7 +93,7 @@ The row fields are grouped by ownership:
 | `provider.cloudrift.team_access` | Whether the configured key can act for the configured team UUID |
 
 The expression grammar is deliberately constrained rather than evaluated as Python. Predicates use a documented
-field, one of `==`, `!=`, `>`, `>=`, `<`, `<=`, `in`, `contains`, or `matches`, and a JSON value. Sorts use
+field, one of `==`, `!=`, `>`, `>=`, `<`, `<=`, `in`, `contains`, `not contains`, or `matches`, and a JSON value. Sorts use
 `FIELD asc|desc` with an optional `nulls-first|nulls-last`, or `FIELD order JSON_ARRAY`. Repeated filters are logical
 AND; repeated sort keys are applied in command order. The independent versioned JSON result contains `schema_version`
 and `rows`; an empty result is successful, leaving exact-candidate row-count policy to the caller.

@@ -14,7 +14,7 @@ import yaml
 
 from emmy.hardware import gpu_short_name
 from emmy.recipe.catalog import validate_model_heat
-from emmy.recipe.lifecycle import validate_recipe_tags
+from emmy.recipe.lifecycle import ONBOARDING_FAILED_TAG, validate_recipe_tags
 
 ALLOWED_ARTIFACT_PREFIXES = (
     "docker/vllm-emmy-serve/models/",
@@ -210,27 +210,34 @@ def _validate_implementation_patch(workspace: Path, changed: set[str]) -> None:
 
 
 def _failure_artifacts(summary: dict, workspace: Path, model_id: str) -> list[Path]:
-    """A failed run keeps its failure record in the existing recipe's RESULTS.md, plus compiler work.
+    """A failed run tags its recipe, records the failure in RESULTS.md, and keeps its compiler work.
 
-    The dated report is what moves the recipe behind untried work in the nightly selection, and a
+    The tag sends the recipe to the back of the nightly selection, the dated report says why, and a
     complete golden, corpus case, or bounded compiler fix stays durable even though serving failed.
     """
     report = _relative_file(workspace, summary.get("report") or "", ("recipes/",))
     recipe = report.with_name("recipe.yaml")
     if report.name != "RESULTS.md" or len(report.parts) != 3 or not (workspace / recipe).is_file():
         raise ValueError(f"A failure report must be RESULTS.md beside the model's recipe: {report}")
-    recipe_model = (yaml.safe_load((workspace / recipe).read_text()) or {}).get("model") or {}
-    if recipe_model.get("huggingface") != model_id:
-        raise ValueError(f"Recipe model mismatch: {recipe_model.get('huggingface')} != {model_id}")
+    config = yaml.safe_load((workspace / recipe).read_text()) or {}
+    if (config.get("model") or {}).get("huggingface") != model_id:
+        raise ValueError(f"Recipe model mismatch: {(config.get('model') or {}).get('huggingface')} != {model_id}")
+    committed = subprocess.run(
+        ["git", "show", f"HEAD:{recipe.as_posix()}"], cwd=workspace, capture_output=True, text=True, check=True
+    ).stdout
+    expected = yaml.safe_load(committed) or {}
+    expected["tags"] = list(dict.fromkeys([*(expected.get("tags") or []), ONBOARDING_FAILED_TAG]))
+    config["tags"] = list(config.get("tags") or [])
+    if config != expected:
+        raise ValueError(f"A failed run must add only the {ONBOARDING_FAILED_TAG!r} tag to {recipe}")
     raw_artifacts = summary.get("artifacts") or []
     if not isinstance(raw_artifacts, list):
         raise ValueError("Summary artifacts must be a list")
-    artifacts = list(dict.fromkeys([report, *(_relative_artifact(workspace, raw_path) for raw_path in raw_artifacts)]))
+    artifacts = list(dict.fromkeys([recipe, report, *(_relative_artifact(workspace, raw_path) for raw_path in raw_artifacts)]))
     invalid = [
         path
         for path in artifacts
-        if path.parts[0] in {"experiments", "docker"}
-        or (path.parts[0] == "recipes" and (path.parts[1] != report.parts[1] or path.name == "recipe.yaml"))
+        if path.parts[0] in {"experiments", "docker"} or (path.parts[0] == "recipes" and path.parts[1] != report.parts[1])
     ]
     invalid += _invalid_result_artifacts(workspace, artifacts)
     if invalid:
@@ -284,6 +291,8 @@ def validate_summary(
         raise ValueError(f"Recipe must retain lifecycle tag {expected_tag!r}: {recipe_tags}")
     if mode == "onboarding" and ({"onboarding", "untested"} & set(recipe_tags)):
         raise ValueError(f"Onboarding recipe still has pending lifecycle tags: {recipe_tags}")
+    if ONBOARDING_FAILED_TAG in recipe_tags:
+        raise ValueError(f"A successful run must remove the {ONBOARDING_FAILED_TAG!r} tag: {recipe_tags}")
     report = _relative_file(workspace, summary.get("report") or "", ("recipes/",))
     if report != recipe.with_name("RESULTS.md"):
         raise ValueError(f"Report must be RESULTS.md beside the final recipe: {report}")

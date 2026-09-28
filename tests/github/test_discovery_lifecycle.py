@@ -389,10 +389,10 @@ def test_onboarding_selects_with_generic_recipe_query():
     assert 'lifecycle == "maintained"' in script
     assert "deployment.availability.cloudrift == true" in script
     tiers = [
-        "--filter 'lifecycle == \"onboarding\"' --filter 'heat >= 70' --filter 'results.last_run_at == null'",
-        "--filter 'emmy_serving == false' --sort 'results.last_run_at asc nulls-first' --sort 'heat desc'",
-        "--filter 'lifecycle == \"onboarding\"' --filter 'results.last_run_at == null' --sort 'heat desc'",
-        "--filter 'lifecycle == \"onboarding\"' --sort 'results.last_run_at asc' --sort 'heat desc'",
+        "pick --filter 'lifecycle == \"onboarding\"' --filter 'heat >= 70'",
+        "--filter 'emmy_serving == false' --filter 'tags not contains \"onboarding-failed\"'",
+        "--filter 'lifecycle == \"onboarding\"' --filter 'tags not contains \"onboarding-failed\"'",
+        "--filter 'tags contains \"onboarding-failed\"' --filter 'lifecycle != \"obsolete\"'",
         "--filter 'lifecycle == \"maintained\"' --sort 'results.last_run_at asc nulls-first'",
     ]
     positions = [script.index(tier) for tier in tiers]

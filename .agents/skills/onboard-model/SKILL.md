@@ -71,6 +71,7 @@ belong to the caller.
 
 - `onboarding` starts from the existing `onboarding`/`untested` shell (a direct caller may authorize a new recipe).
   Keep its `model.heat`, and replace the pending tags with `best-effort` only when a valid recipe qualifies.
+- In both modes, a successful run removes an `onboarding-failed` tag, and a failed run adds it (section 6).
 - `verification` starts from the existing active recipe, refreshes its measurements and artifacts, and keeps its
   lifecycle tag and `model.heat`. It never changes the checkpoint, GPU/count, lifecycle, or heat.
 
@@ -272,8 +273,9 @@ the tables that help, drawing from:
 
 **When no engine produces a valid recipe**, add a dated failure entry to that file instead — create it beside the
 shell if absent, and keep earlier entries. Give the platform, the first failed gate, the evidence, what would unblock
-it (for example, the engine release that adds support), and the golden's path when section 2 committed one. The
-nightly workflow orders retries by this file's last commit, so a failure without it is retried every night.
+it (for example, the engine release that adds support), and the golden's path when section 2 committed one. Add the
+`onboarding-failed` tag to the recipe and change nothing else in it: the tag holds the recipe back until the nightly
+queue has nothing else to run.
 
 ## 7. Verify and hand off
 
@@ -362,8 +364,8 @@ line of at most 1000 characters from that exact lane; the workflow notification 
 
 When no valid recipe qualifies, write `status: "failed"`, null `recipe`, `experiment`, `deployment_summary`, and
 `performance_summary`, and empty `experiment_artifacts`. `report` still names `recipes/<model>/RESULTS.md` with the
-failure entry, and `artifacts` lists it with the golden, corpus cases, and bounded fixes the run keeps — never the
-recipe, experiment, or image files. `failure` has `gate`, a concise credential-free `message` (it goes to Discord),
+failure entry, and `artifacts` lists it with the tagged recipe and the golden, corpus cases, and bounded fixes the run
+keeps — never experiment or image files. `failure` has `gate`, a concise credential-free `message` (it goes to Discord),
 and `regression`. `regression: true` means a previously qualified behavior or measured lane no longer meets its prior
 contract and the bounded fix could not restore it; a model that never qualified is a failure, not a regression.
 Diagnostics and partial inventories stay outside the repository. Tear down workloads, never claim partial onboarding

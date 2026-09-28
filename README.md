@@ -270,11 +270,11 @@ emmy recipe list --json
 # Count one lifecycle group in automation.
 emmy recipe query --filter 'tags contains "maintained"' --json
 
-# Select the hottest available onboarding shell never tried. Referencing deployment.* expands each recipe into
+# Select the hottest available onboarding shell that has not failed. Referencing deployment.* expands each recipe into
 # deployment rows; CloudRift availability is resolved only because this query uses it.
 emmy recipe query \
   --filter 'lifecycle == "onboarding"' \
-  --filter 'results.last_run_at == null' \
+  --filter 'tags not contains "onboarding-failed"' \
   --filter 'deployment.availability.cloudrift == true' \
   --sort 'heat desc nulls-last' \
   --sort 'model_id asc' \
