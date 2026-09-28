@@ -1812,10 +1812,12 @@ schedule CHOOSES — rotation and refill discipline derive at materialization fr
 retired `ring` flag compiled byte-identically with and without it), and `smem` / `bk_elems` are resolver outputs,
 never spelled. See `lowering/kernel/ARCHITECTURE.md`.
 
-`d1/reg` selects persistent register storage for a matrix recurrence whose rows are independent across warps.
-The chunk loop runs inside each CTA, with one FP32 carry slot and reused matrix fragments. Its promotion interval
-is the `TILE` K chunk. The prior receives a register-storage indicator rather than shared-memory pipeline features;
-existing fitted artifacts have no coefficient for the new indicator until refitted.
+A kernel that carries a state spells where that state lives as `STAGE@state`, a kernel-scoped key beside `WORK`
+and `RASTER`: empty is the launch loop over the global state buffer, `d1/reg` persistent register storage for a
+matrix recurrence whose rows are independent across warps (the chunk loop inside each CTA, one FP32 carry slot,
+reused matrix fragments, the promotion interval the `TILE` K chunk), `d1/smem` and `d2/smem` the CTA's block held in
+shared memory with the step loop inside the launch. The prior receives a register-storage indicator rather than
+shared-memory pipeline features; existing fitted artifacts have no coefficient for the new indicator until refitted.
 
 **`WSPEC`** (STR codec, RETIRED) — the warp-specialization producer band `p<np>` is INVENTORY: realized rows spell
 it as `WORK`'s `+p<np>` suffix, `SCHEDULE_FAMILIES` no longer lists it, no shipped golden carries the key, and the

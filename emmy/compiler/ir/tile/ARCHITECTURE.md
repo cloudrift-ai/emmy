@@ -46,11 +46,12 @@ keeps the ordered step axis separate from the grid and represents the state with
 A read takes the previous step (`S[c − 1, …]`, or the seed at the first step). A kernel without a serial axis may
 not read its own outputs. The step stays an ordinary `Fold` tree, including contractions over other state cells.
 
-The classic schedule realizes that axis as ordered launches with a global state buffer. The register schedule
-realizes it as a loop inside each CTA when the state rows are independent. Private state buffers disappear during
-materialization; externally read snapshots remain global outputs. Both schedules preserve previous-state reads
-until the step has finished evaluating its outputs. The domain and choices are described in
-[`ir/schedule/ARCHITECTURE.md`](../schedule/ARCHITECTURE.md).
+How that axis runs is the state's `STAGE`, a kernel-site choice of the classic schedule: `direct` realizes it as
+ordered launches with a global state buffer, `reg` as a loop inside each warp when the state rows are independent,
+`smem` as a loop inside each CTA holding the state's block, a barrier between the steps' reads and writes. Private
+state buffers disappear during materialization; externally read snapshots remain global outputs. Every arm
+preserves previous-state reads until the step has finished evaluating its outputs. The domain and choices are
+described in [`ir/schedule/ARCHITECTURE.md`](../schedule/ARCHITECTURE.md).
 
 ## Total lift
 

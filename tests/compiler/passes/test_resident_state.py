@@ -41,7 +41,8 @@ def _solve_step(stored: str = "next") -> Body:
     value. The reads under the row's mask address the batch coordinate through the roll's clamped
     spelling, ``mask ? b : 0``, the value discarded where the mask is false."""
     row = BinaryExpr("+", c, _ONE)
-    mask = BinaryExpr("&&", BinaryExpr("&&", BinaryExpr("<", i, BinaryExpr("+", row, _ONE)), BinaryExpr("<=", row, i)), BinaryExpr("<", j, row))
+    on_row = BinaryExpr("&&", BinaryExpr("<", i, BinaryExpr("+", row, _ONE)), BinaryExpr("<=", row, i))
+    mask = BinaryExpr("&&", on_row, BinaryExpr("<", j, row))
     bb, jj = TernaryExpr(mask, b, _ZERO), TernaryExpr(mask, j, _ZERO)
     mix = Loop(
         axis=Axis("s", ROWS),
@@ -69,7 +70,8 @@ def _solve_step(stored: str = "next") -> Body:
 def _solve_graph(stored: str = "next") -> Graph:
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("A0", (BATCH, ROWS, ROWS), "f32"), node_id="A0")
-    graph.add_node(LoopOp(body=_solve_step(stored), name="k_solve"), ["A0"], Tensor("out", (STEPS, BATCH, ROWS, ROWS), "f32"), node_id="out")
+    out = Tensor("out", (STEPS, BATCH, ROWS, ROWS), "f32")
+    graph.add_node(LoopOp(body=_solve_step(stored), name="k_solve"), ["A0"], out, node_id="out")
     graph.inputs, graph.outputs = ["A0"], ["out"]
     return graph
 
@@ -94,7 +96,8 @@ def _solve_reference(arrays: dict[str, np.ndarray]) -> np.ndarray:
 def _elementwise_graph() -> Graph:
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (8,), "f32"), node_id="x")
-    body = Body((Loop(axis=Axis("i", 8), body=(Load(name="v", input="x", index=(i,)), Assign(name="w", op="exp", args=("v",)), Write(output="y", index=(i,), value="w"))),))
+    cell = (Load(name="v", input="x", index=(i,)), Assign(name="w", op="exp", args=("v",)), Write(output="y", index=(i,), value="w"))
+    body = Body((Loop(axis=Axis("i", 8), body=cell),))
     graph.add_node(LoopOp(body=body, name="k_exp"), ["x"], Tensor("y", (8,), "f32"), node_id="y")
     graph.inputs, graph.outputs = ["x"], ["y"]
     return graph
