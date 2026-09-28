@@ -460,7 +460,8 @@ def apply_knobs_env(raw: str | None = None) -> dict[str, str]:
 
 
 #: The scope prefix of a KERNEL pin, ``FAMILY@place_<token>``: the family's bare pin for the one cut piece
-#: named ``…__place_<token>`` (and the partial and finalize a split of it mints), where a bare pin reaches
+#: named ``…__place_<token>`` (and the ``…__partial`` and finalize a split of it mints under that name, so a
+#: piece's ordinal — ``<token>_1`` — survives its split), where a bare pin reaches
 #: every kernel of the set. A cut child spells its sites relative to itself, so two pieces of one shape
 #: share every site key; the token in the piece's kernel name is what tells them apart.
 KERNEL_SCOPE = "place_"
@@ -479,11 +480,10 @@ def kernel_scoped(key: str) -> bool:
 
 
 def kernel_pin(family: str, *names: str) -> str | None:
-    """The kernel pin of ``family`` that reaches a kernel known by any of ``names``, or ``None``. A
-    split's partial is scheduled as a tile with no name of its own, so its graph node id is asked too.
-    Where several pins reach the kernel the most specific wins: a pin naming a split's partial
-    (``place_<token>_0__partial``) beats the pin naming the piece it was split from (``place_<token>``),
-    which also reaches the partial."""
+    """The kernel pin of ``family`` that reaches a kernel known by any of ``names`` — its kernel name
+    and its graph node id, which a ``node_`` pin names. Where several pins reach the kernel the most
+    specific wins: a pin naming a split's partial (``place_<token>__partial``) beats the pin naming the
+    piece it was split from (``place_<token>``), which also reaches the partial."""
     reached = [
         (len(axis_of(key) or ""), value)
         for key, value in _environ_pins(family)
@@ -502,7 +502,9 @@ def reaches(key: str, kernel: str) -> bool:
         node = scope[len(NODE_SCOPE) :]
         name = kernel.lower().removeprefix("k_")
         return name in (node, f"{node}__partial")
-    return re.search(rf"__{re.escape(scope)}(_|$)", kernel) is not None
+    # A whole name segment: ``place_<token>`` reaches ``…__place_<token>`` and what a split or a nested
+    # cut appends after ``__``, never the sibling piece ``…__place_<token>_1``.
+    return re.search(rf"__{re.escape(scope)}(__|$)", kernel) is not None
 
 
 def family_pins(family: str, *, kernels: bool = False) -> tuple[tuple[str, str], ...]:

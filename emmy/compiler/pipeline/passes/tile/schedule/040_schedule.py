@@ -72,11 +72,11 @@ def classic_forks(
     every piece at once, so each takes the values it can and keeps its catalog where it cannot —
     the reading a row published across peer kernels takes — instead of refusing a value that names
     a sibling piece; the post-compile pin check still asks that SOME kernel realized the pin. ``node``
-    is the kernel's graph node id, which a kernel-scoped pin can name where the tile has no name."""
+    is the kernel's graph node id, which a ``node_`` pin names."""
     from emmy.compiler.ir.schedule.register import RegisterCodec, RegisterContext, RegisterProblem, materialize_register  # noqa: PLC0415
     from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC, FP8_MMA, precision_pin  # noqa: PLC0415
 
-    row = pin_row(tile.name, node, split_consumed=tile.split_consumed or carries_partition(tile), published=published)
+    row = pin_row(name, node, split_consumed=tile.split_consumed or carries_partition(tile), published=published)
     catalog = () if published else ("catalog",)  # a pool without the published pins is another pool
     register = []
     if tile.register_program is not None and not any(value for key, value in row.items() if key not in ("WORK", "TILE", "STAGE")):
