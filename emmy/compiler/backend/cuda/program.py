@@ -364,6 +364,12 @@ _BATCH_TARGET_MS = 1.0
 # calibration we extend ``warmup`` so total warmup GPU time clears
 # this threshold.
 _WARMUP_TARGET_MS = 10.0
+# Past that floor, warmup keeps going while each iter still runs faster than the one before —
+# the clocks are still ramping — up to this much warmup GPU time. A fixed floor does not cover
+# a datacenter card coming out of idle (a compile, a host-side gap): on an A100 the first kernel
+# measured after one ran ~30% slow (42.6 vs 33.2 us) under the 10 ms floor alone.
+_WARMUP_MAX_MS = 500.0
+_WARMUP_SETTLED = 0.98
 
 
 # ---------------------------------------------------------------------------
@@ -890,6 +896,8 @@ def benchmark_program(
         iters_run = 0
         measured = 0
         cumulative_gpu_ms = 0.0  # measured-iter GPU time, for the "auto" stop target
+        calibrated = False  # batch sizes are set once, at the end of the requested warmup
+        prev_call_ms = None  # the previous iter's per-call time (the ramp check)
         total_gpu_ms = 0.0  # all-iter GPU time (incl. warmup), for the run-stage budget
 
         def _try_capture(sizes: list[int]) -> bool:
@@ -917,18 +925,22 @@ def benchmark_program(
             # discards.
             if run_timeout_s is not None and total_gpu_ms > run_timeout_s * 1000.0:
                 raise RuntimeError(f"benchmark run stage exceeded {run_timeout_s:.1f}s of GPU time — variant marked bench_fail")
-            if iters_run == warmup:
+            # While the last warmup iter still beats the one before it by more than noise, the
+            # clocks are ramping: warm up one iter longer. ``iter_dts`` are per-call times, so
+            # the comparison holds across the batch calibration.
+            call_ms = sum(iter_dts)
+            if iters_run == warmup and prev_call_ms is not None and total_gpu_ms < _WARMUP_MAX_MS:
+                if call_ms < _WARMUP_SETTLED * prev_call_ms:
+                    warmup += 1
+            prev_call_ms = call_ms
+            if iters_run == warmup and not calibrated:
+                calibrated = True
                 batch_sizes = _calibrate_batch_sizes(iter_dts)
                 if capture_graphs:
-                    # Capture (or re-capture) at the calibrated batch sizes.
-                    # The warmup extension below can re-fire this calibration
-                    # branch with new batch sizes — ``capture_launch_graphs``
-                    # no-ops when they're unchanged and re-captures when not,
-                    # so graphs and batches never go out of sync.
+                    # Capture at the calibrated batch sizes, which hold from here on.
                     capture_graphs = _try_capture(batch_sizes)
                 # Extend warmup until total warmup GPU time clears the
-                # clock-ramp floor. Post-batching, each subsequent
-                # warmup iter spends roughly
+                # clock-ramp floor. Post-batching, each warmup iter spends roughly
                 # ``sum(iter_dts[i] * batch_sizes[i])`` of GPU time —
                 # use the just-measured per-launch dts to estimate how
                 # many extra iters are needed.
