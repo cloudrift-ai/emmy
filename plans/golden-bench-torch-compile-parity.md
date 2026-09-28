@@ -19,6 +19,10 @@ Called level (2026-09-28): A100 s512 at 182-184 µs vs torch.compile 180-181, in
 in the plain GEMMs (~4 µs each vs cuBLAS): shared-memory bank conflicts in the f2x4 drain's fragment loads, more load
 instructions per mma, and no 96-row (non-power-of-two, masked M edge) tile. Compiler work, not a sweep.
 
+Called level (2026-09-28): H100 s512 at 95.8 µs vs torch.compile 94 in the same run. Emmy's fused small pieces win
+(~13 vs ~20 µs); its sm_90 GEMMs run at ~270-330 TFLOP/s against ~600-870 for nvjet/Triton (~20 µs). Closing that
+needs larger wgmma tiles, TMA staging and a producer warp group on the GEMMs.
+
 ## Scoreboard (µs, end to end)
 
 | card | s512 Emmy | s512 torch.compile | gap | s1 Emmy | s1 torch.compile | gap |
