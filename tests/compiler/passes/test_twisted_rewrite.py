@@ -14,6 +14,7 @@ from dataclasses import replace
 
 import pytest
 
+from emmy import config
 from emmy.commands.trace import graph_from_code
 from emmy.compiler.context import Context
 from emmy.compiler.dim import Dim
@@ -209,10 +210,15 @@ def test_a_score_on_its_own_slab_still_injects_the_streamed_value() -> None:
     )
 
 
-def test_sdpa_score_contraction_reaches_the_mma_tier() -> None:
+def test_sdpa_score_contraction_reaches_the_mma_tier(monkeypatch) -> None:
     """The fused carrier keeps the score contraction as an operand site, which the tensor-core
     tier tiles — and the carrier itself is a site the chunk tier folds, so the value channel
-    reaches the tensor cores in the same kernel."""
+    reaches the tensor cores in the same kernel.
+
+    The carrier's tier is pinned: whether the tensor cores are OFFERED is the compiler's contract,
+    which one the unmeasured greedy picks is the prior's, and it moves with any change to the
+    program (f32 scores moved it to the scalar tile)."""
+    monkeypatch.setenv(config.knob_var("TILE@map.1/twist"), "mma_m16n8k16_f16_f32/f1x2")
     graph, _, _ = graph_from_code(
         "F.scaled_dot_product_attention("
         "torch.randn(1, 1, 32, 16, dtype=torch.float16), "
@@ -221,13 +227,11 @@ def test_sdpa_score_contraction_reaches_the_mma_tier() -> None:
     )
     lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((8, 0)))
     sources = [node.op.kernel_source for node in lowered.nodes.values() if isinstance(node.op, CudaOp)]
-    assert sources
-    assert any("emmy_mma_m16n8k16" in source for source in sources), "the score contraction reaches the tensor-core tier"
-    # The kernel that writes the f16 output converts at the boundary — through the explicit packer,
-    # or through the per-element assign a fragment store converts implicitly. Asked of the
-    # FINALIZE, not of the set: a cross-CTA split's partial keeps the carrier in an f32 workspace
-    # and converts nothing.
-    assert "__float2half" in sources[-1] or "half2_rn" in sources[-1] or "acc" in sources[-1]
+    assert len(sources) == 1, "the pinned carrier is one kernel"
+    assert "emmy_mma_m16n8k16" in sources[0], "the score contraction reaches the tensor-core tier"
+    # The kernel writes the f16 output and converts at the boundary — through the explicit packer,
+    # or through the per-element assign a fragment store converts implicitly.
+    assert "__float2half" in sources[0] or "half2_rn" in sources[0] or "acc" in sources[0]
 
 
 # ===================================================================
