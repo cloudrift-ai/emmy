@@ -455,8 +455,42 @@ def apply_knobs_env(raw: str | None = None) -> dict[str, str]:
     return applied
 
 
-def family_pins(family: str) -> tuple[tuple[str, str], ...]:
-    """Live pins for one knob family, bare first and scoped pins in key order."""
+#: The scope prefix of a KERNEL pin, ``FAMILY@place_<token>``: the family's bare pin for the one cut piece
+#: named ``…__place_<token>`` (and the partial and finalize a split of it mints), where a bare pin reaches
+#: every kernel of the set. A cut child spells its sites relative to itself, so two pieces of one shape
+#: share every site key; the token in the piece's kernel name is what tells them apart.
+KERNEL_SCOPE = "place_"
+
+
+def kernel_scoped(key: str) -> bool:
+    """Whether ``key`` is a kernel pin (:data:`KERNEL_SCOPE`) rather than a site-scoped or bare one."""
+    return (axis_of(key) or "").startswith(KERNEL_SCOPE)
+
+
+def kernel_pin(family: str, *names: str) -> str | None:
+    """The kernel pin of ``family`` that reaches a kernel known by any of ``names``, or ``None``. A
+    split's partial is scheduled as a tile with no name of its own, so its graph node id is asked too."""
+    for key, value in _environ_pins(family):
+        if kernel_scoped(key) and any(reaches(key, name) for name in names):
+            return value
+    return None
+
+
+def reaches(key: str, kernel: str) -> bool:
+    """Whether the kernel pin ``key`` names the kernel (or graph node) called ``kernel``."""
+    import re  # noqa: PLC0415
+
+    return re.search(rf"__{re.escape(axis_of(key) or '')}(_|$)", kernel) is not None
+
+
+def family_pins(family: str, *, kernels: bool = False) -> tuple[tuple[str, str], ...]:
+    """Live pins for one knob family, bare first and scoped pins in key order. Kernel pins
+    (:data:`KERNEL_SCOPE`) name no site, so a site reader skips them and reads its kernel's through
+    :func:`kernel_pin`; ``kernels`` keeps them, for a check over every pin that was set."""
+    return tuple((key, value) for key, value in _environ_pins(family) if kernels or not kernel_scoped(key))
+
+
+def _environ_pins(family: str) -> tuple[tuple[str, str], ...]:
     import os  # noqa: PLC0415 — knob.py owns the ``EMMY_<KNOB>`` environment namespace
 
     family = family.upper()
