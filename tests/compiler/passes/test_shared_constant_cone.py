@@ -127,7 +127,8 @@ def test_sibling_cones_share_one_declaration_of_a_broadcast_constant(_scalar_tie
     bindings = {source: re.findall(r"__half (\w+) = c\[0\];", source) for source in sources.values()}
     assert any(bindings.values())
     assert all(len(names) == 1 for names in bindings.values() if names)
-    uses = [source.count(f" - {names[0]};") for source, names in bindings.items() if names]
+    # A use is any read of the binding past its declaration, whatever spells the subtraction (``-`` or ``__hsub_rn``).
+    uses = [len(re.findall(rf"\b{names[0]}\b", source)) - 1 for source, names in bindings.items() if names]
     assert all(count >= 2 and count % 2 == 0 for count in uses), uses
 
 
