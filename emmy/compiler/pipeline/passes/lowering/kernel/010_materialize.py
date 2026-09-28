@@ -52,11 +52,8 @@ def rewrite(match: Match, root: Node, ctx=None) -> KernelOp | None:
     resident = register or (tile.schedule is not None and tile.schedule.kernel.resident)
     rplan = reduce_plan(tile) if tile.op is not None and not resident else None
     assert rplan is None or not rplan.needs_split, "materialize: a GRID split stage reached the kernel pass past 030_cut"
-    # The per-step buffers something outside reads: their snapshot of every step must be complete
-    # at the cells the step skips as well.
-    snapshots = frozenset(name for name in root.buffer_names() if name in match.graph.outputs or match.graph.buffer_users(name))
     try:
-        materialized = factorize(tile, root, sm_count=getattr(ctx, "sm_count", 0), snapshots=snapshots)
+        materialized = factorize(tile, root, sm_count=getattr(ctx, "sm_count", 0), snapshots=_snapshots(match, root))
         if not resident:
             materialized = _pointwise_strip(tile, materialized)
         body = _drop_repeated_declarations(Body((materialized,)))
@@ -94,6 +91,54 @@ def rewrite(match: Match, root: Node, ctx=None) -> KernelOp | None:
         # realization corpus pins that — and the compile declines it here: the skip is recorded,
         # the node stays a TileOp, and the greedy blocklist retry resolves onto the next row.
         raise RuleSkipped(f"kernel binder refuses this row's projection ownership: {exc}", reject=True) from exc
+
+
+def _snapshots(match: Match, root: Node) -> dict[str, frozenset[int] | None]:
+    """The steps of each per-step buffer of ``root`` that something outside reads — what a resident
+    state's write phase has to keep complete. A graph output, or a reader whose time coordinate is
+    not a literal, needs every step (``None``); readers at literal steps need exactly those; a
+    buffer nobody reads is absent, and its writes are dropped with its port."""
+    out: dict[str, frozenset[int] | None] = {}
+    for name in root.buffer_names():
+        if name in match.graph.outputs:
+            out[name] = None
+            continue
+        steps: set[int] = set()
+        for user in match.graph.buffer_users(name):
+            loads = _loads_of(match.graph.nodes[user].op)
+            if loads is None:
+                steps, complete = set(), False
+                break
+            for load in loads:
+                if load.input != name:
+                    continue
+                step = load.index[0] if load.index else None
+                if not (isinstance(step, Literal) and isinstance(step.value, int)):
+                    steps, complete = set(), False
+                    break
+                steps.add(int(step.value))
+            else:
+                complete = True
+            if not complete:
+                break
+        else:
+            if match.graph.buffer_users(name):
+                out[name] = frozenset(steps)
+            continue
+        out[name] = None
+    return out
+
+
+def _loads_of(op) -> tuple | None:
+    """The loads a reader's stored program spells, or ``None`` for an op with no readable program."""
+    from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
+    from emmy.compiler.ir.tile.ir import loaded_buffers  # noqa: PLC0415
+
+    if isinstance(op, TileOp) and op.op is not None:
+        return tuple(loaded_buffers(op.op))
+    if isinstance(op, (LoopOp, KernelOp)):
+        return tuple(op.body.loads)
+    return None
 
 
 #: Names the RENDERER supplies, so a statement may read them with no binding anywhere in the IR:

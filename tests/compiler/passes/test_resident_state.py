@@ -178,6 +178,42 @@ def test_a_resident_state_lowers_to_one_launch_holding_the_block(model: str) -> 
     assert (" else {" in op.kernel_source) == (model == "solve")
 
 
+def _solve_then_read(step: int) -> Graph:
+    """The solve followed by the model's own use of it: a reader of one step, so the state's snapshot
+    is needed at that step alone."""
+    graph = _solve_graph()
+    graph.outputs = []
+    cell = (
+        Load(name="v", input="out", index=(Literal(step, "int"), b, i, j)),
+        Write(output="final", index=(b, i, j), value="v"),
+    )
+    body = Body((Loop(axis=Axis("b", BATCH), body=(Loop(axis=Axis("i", ROWS), body=(Loop(axis=Axis("j", ROWS), body=cell),)),)),))
+    graph.add_node(LoopOp(body=body, name="k_read"), ["out"], Tensor("final", (BATCH, ROWS, ROWS), "f32"), node_id="final")
+    graph.outputs = ["final"]
+    return graph
+
+
+def test_a_snapshot_is_written_only_at_the_steps_its_readers_load() -> None:
+    with pinned_knobs({STATE_KEY: "cta", "WORK": "t32"}):
+        graph = Pipeline.build(CUDA_PASSES).run(_solve_then_read(STEPS - 1), ctx=Context.from_target((7, 0)))
+    (state,) = (node.op for node in graph.nodes.values() if isinstance(node.op, CudaOp) and "k_solve" in node.op.kernel_name)
+    # Every store of the snapshot, the defined row's and the kept cells', sits under the reader's step.
+    assert state.kernel_source.count(f"== {STEPS - 1})") == 2 and state.kernel_source.count("out[") == 2
+
+
+@requires_cuda
+@pytest.mark.xdist_group("cuda")
+def test_a_snapshot_read_at_one_step_matches_the_reference_on_the_gpu() -> None:
+    from emmy.compiler.backend.cuda.program import run_program  # noqa: PLC0415
+
+    arrays = _solve_inputs()
+    with pinned_knobs({STATE_KEY: "cta", "WORK": "t32"}):
+        graph = Pipeline.build(CUDA_PASSES).run(_solve_then_read(STEPS - 2))
+    result, _ = run_program(graph, arrays)
+    want = _solve_reference(arrays)[STEPS - 2]
+    np.testing.assert_allclose(np.asarray(result.outputs["final"]).reshape(want.shape), want, rtol=1e-5, atol=1e-6)
+
+
 @requires_cuda
 @pytest.mark.xdist_group("cuda")
 @pytest.mark.parametrize("width", ["t32", "t64"])

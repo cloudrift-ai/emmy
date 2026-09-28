@@ -66,10 +66,11 @@ def _resident_reads(step: Body, program, time: str) -> tuple[Body, dict[str, str
     return Body(tuple(stmt.rename(lambda name: alias.get(name, name)) for stmt in pruned)), alias
 
 
-def factorize_resident(tile, *, snapshots: frozenset[str] = frozenset()) -> Tile:
+def factorize_resident(tile, *, snapshots: dict[str, frozenset[int] | None]) -> Tile:
     """One launch over the batch axes; each CTA holds the block and walks every step. ``snapshots``
-    names the stored buffers something outside the kernel reads, whose per-step copy must be
-    complete at the cells the step skips too."""
+    maps each stored buffer something outside the kernel reads to the steps it is read at (``None``
+    for every step): those steps' copies are written, complete at the cells the step skips too, and a
+    buffer nobody reads is not written at all."""
     program = tile.block_program
     threads = tile.schedule.kernel.work.units[0]
     time = tile.place.serial[0]
@@ -101,22 +102,35 @@ def factorize_resident(tile, *, snapshots: frozenset[str] = frozenset()) -> Tile
         seeded = Let(name="_seed", value=Literal(program.seed))
     fill = stride([seeded, Write(output=BLOCK, index=block, value="_seed")])
 
+    def snapshot(value) -> list[Stmt]:
+        """The per-step copies something outside reads, at the steps it reads them: ``value`` names
+        the SSA value a buffer's store takes, or the one name every store takes."""
+        out: list[Stmt] = []
+        for spec in tile.output_specs:
+            steps = snapshots.get(spec.write.output, frozenset())
+            if steps is not None and not steps:
+                continue  # nothing reads this buffer: its port goes, and so do its writes
+            write = Write(output=spec.write.output, index=spec.write.index, value=value(spec) if callable(value) else value)
+            if steps is None:
+                out.append(write)
+                continue
+            clauses = [BinaryExpr("==", Var(time.name), Literal(step, "int")) for step in sorted(steps)]
+            cond = clauses[0]
+            for clause in clauses[1:]:
+                cond = BinaryExpr("||", cond, clause)
+            out.append(Cond(cond=cond, body=(write,)))
+        return out
+
     evaluate = [*step, *(Write(output=name, index=slot, value=value) for value, name in held.items())]
     commit: list[Stmt] = [Load(name=f"{name}_v", input=name, index=slot) for name in held.values()]
     commit.append(Write(output=BLOCK, index=block, value=f"{held[stored[state]]}_v"))
-    commit.extend(
-        Write(output=spec.write.output, index=spec.write.index, value=f"{held[stored[spec.write.output]]}_v") for spec in tile.output_specs
-    )
+    commit.extend(snapshot(lambda spec: f"{held[stored[spec.write.output]]}_v"))
     if program.domain is None:
         phases = (stride(evaluate), Sync(), stride(commit), Sync())
     else:
         # A cell outside the domain keeps its value: nothing to evaluate, nothing to write into the
-        # block; the buffers read outside still need that value in this step's snapshot.
-        copies = [
-            Write(output=spec.write.output, index=spec.write.index, value="_kept")
-            for spec in tile.output_specs
-            if spec.write.output in snapshots
-        ]
+        # block; the buffers read outside still need that value in the snapshots of the steps they read.
+        copies = snapshot("_kept")
         kept = (Load(name="_kept", input=BLOCK, index=block), *copies) if copies else ()
         phases = (
             stride([Cond(cond=program.domain, body=tuple(evaluate))]),

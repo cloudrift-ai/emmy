@@ -330,11 +330,13 @@ def _stmt_eval_scope() -> dict:
     from emmy.compiler.ir.stmt import (
         Accum,
         Assign,
+        Carry,
         Cond,
         Init,
         Let,
         Load,
         Loop,
+        Pre,
         Select,
         SelectBranch,
         StridedLoop,
@@ -363,6 +365,9 @@ def _stmt_eval_scope() -> dict:
         "Loop": Loop,
         "StridedLoop": StridedLoop,
         "Cond": Cond,
+        # A Loop IR carried state: the loop-stage dump of a rolled recurrence spells both.
+        "Carry": Carry,
+        "Pre": Pre,
         # ``repr(Axis)`` spells its ``window`` field in full, so every kernel-stage dump whose
         # axes were shrunk (register tiling, cross-CTA reduce slices) carries ``Window(...)``.
         "Window": Window,

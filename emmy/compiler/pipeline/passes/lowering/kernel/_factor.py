@@ -155,7 +155,7 @@ def _sweep_workers(tile) -> int:
     return work.units[0] if work.kind == "thread" and work.units[1] == 1 else 1
 
 
-def factorize(tile, root, store=None, sm_count: int = 0, snapshots: frozenset[str] = frozenset()) -> Tile:
+def factorize(tile, root, store=None, sm_count: int = 0, snapshots: dict | None = None) -> Tile:
     """The entry to the recursive emitter — build the ambient :class:`Ctx` from the ``TileOp`` and its
     root graph node, then dispatch its ``op`` into a bound ``Tile`` via :func:`_factorize`. ``out_val``
     (the kernel's finalized output SSA name — the root node's produced :class:`Handle`) is resolved
@@ -170,7 +170,7 @@ def factorize(tile, root, store=None, sm_count: int = 0, snapshots: frozenset[st
     if tile.schedule is not None and tile.schedule.kernel.resident:
         from ._resident import factorize_resident  # noqa: PLC0415
 
-        return factorize_resident(tile, snapshots=snapshots)
+        return factorize_resident(tile, snapshots=snapshots or {})
     # Stored trees are already resolved — a computed operand is an inline node on its edge, so the
     # emitter below walks the tree as stored and every reader (``cone_seam``) reads the node
     # boundary straight off ``Fold.a``.
