@@ -66,6 +66,7 @@ from emmy.compiler.ir.tile.ops import UnbindableProjection, chain_form, chain_me
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import (
     clamp_last,
     copy_cell,
+    group_axis_name,
     reduce_codegen,
     store_sink,
     unroll_ok_n,
@@ -532,6 +533,9 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
         # (registers are ptxas's), so the test is the conservative one: fewer CTAs than SMs.
         ctas = launch_ctas(lead, tile.mn)
         one_wave = ctas is not None and 0 < ctx.sm_count and ctas <= ctx.sm_count
+        # A chunked fold split across warp groups (``REDUCE=wg<n>``): each group is a full copy of
+        # the warp tile, one more intra-CTA coordinate above the tile's warps.
+        groups = (ctx.sched.get("REDUCE", op) or Reduce()).groups
         state_decls, reduce_region = reduce_codegen(
             c,
             tile,
@@ -545,6 +549,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
             axes=ctx.sched.tile.axes,
             inner=inner,
             one_wave=one_wave,
+            groups=groups,
         )
         sink = (
             store
@@ -564,6 +569,14 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
         )
         t = unit_tile(register_tile(atomize(tile.atom.shape[:2]), tile.mn), tile.mn)
         mn, bt, lanes = tile.mn, tile.launch_threads, tile.atom.lanes
+        if groups > 1:
+            t = replace(t, axes=(Axis(name=group_axis_name(k_axis), extent=groups), *t.axes))
+            bt *= groups
+            # Group 0 holds the merged carrier (``_FlashOps._merge_groups``) and alone stores it.
+            group_sink, group_var = sink, Var(group_axis_name(k_axis))
+
+            def sink(i, j, offset, mn_):
+                return [Cond(cond=BinaryExpr("==", group_var, Literal(0, "int")), body=tuple(group_sink(i, j, offset, mn_)))]
     else:
         # The reduce partition rides the :class:`Fold` node; ``None`` for a pure pointwise /
         # scalar per-cell zero-axis ``Fold`` (no partition). Every partitioned reduction is a
