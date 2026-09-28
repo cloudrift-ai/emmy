@@ -51,6 +51,8 @@ def test_cached_qwen3_logits_and_generation(tmp_path, monkeypatch):
     executable = shutil.which("emmy-runtime-worker")
     if not executable:
         pytest.skip("build native worker and add it to PATH")
+    # Bit-identical replay requires a fixed reduction order, excluding atomic split reductions.
+    monkeypatch.setenv("EMMY_REDUCE", "")
     model = qwen3_model(2).half()
     model.config._attn_implementation = "eager"
     with gpu_lock():

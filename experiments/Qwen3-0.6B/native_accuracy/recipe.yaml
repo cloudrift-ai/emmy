@@ -15,7 +15,8 @@ command:
     export EMMY_TUNE_DB=$task_dir/autotune.db
     export EMMY_ONLINE_FILE=$task_dir/online.json
     export EMMY_PACK_DIR=$task_dir/packs
-    exec 9>/tmp/emmy-gpu.lock
+    lock=$$(./venv/bin/python -c "from emmy.compiler.backend.gpu_lock import _device_scoped; print(_device_scoped('/tmp/emmy-gpu.lock'))")
+    exec 9>"$$lock"
     flock 9
     model=Qwen/Qwen3-0.6B
     ./venv/bin/python -m pip freeze --all > $task_dir/requirements.txt
