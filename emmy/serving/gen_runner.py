@@ -1389,9 +1389,13 @@ class EmmyGenRunner:
                         for nm in ("w_gate_up", "b_gate_up"):
                             if nm in einputs:
                                 einputs[nm] = deinterleave_gate_up(einputs[nm])
+                # DeepSeek V4's reference runtime scores its experts in float32; in float16 a near-tie
+                # for the last of the top-k flips on rounding alone, and the tokens part ways.
+                router_float32 = getattr(text_config, "model_type", None) == "deepseek_v4"
                 moe_meta.append(
                     {
-                        "gate": copy.deepcopy(gate).to(dtype),
+                        "gate": copy.deepcopy(gate).to(torch.float32 if router_float32 else dtype),
+                        "router_float32": router_float32,
                         # A hash router selects experts by TOKEN ID (a frozen tid2eid table); the
                         # learned gate only weights them. Its call needs the step's token ids.
                         "hash": getattr(gate, "tid2eid", None) is not None,
@@ -2157,6 +2161,8 @@ class EmmyGenRunner:
         """One HF router call. A hash router selects experts by the step's TOKEN IDS (its frozen
         ``tid2eid`` table); the learned gate only weights the selection — so a hash layer without
         the ids cannot route at all, and silently routing on garbage would serve noise."""
+        if moe.get("router_float32"):
+            xn = xn.float()
         if not moe.get("hash"):
             return moe["gate"](xn)
         if token_ids is None:
