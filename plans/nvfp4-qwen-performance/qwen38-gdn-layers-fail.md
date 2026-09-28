@@ -168,8 +168,8 @@ after = rewrite(before, lambda name: "renamed_" + name)
 print(before.pretty()[0])
 print(after.pretty()[0])
 before.render(RenderCtx())  # succeeds
-assert after.role == "a"   # the rewrite lost role="b"
-after.render(RenderCtx())   # AssertionError: the A form requires two sources
+assert after.role == "a"  # the rewrite lost role="b"
+after.render(RenderCtx())  # AssertionError: the A form requires two sources
 ```
 
 Actual Kernel IR printed by this probe:
