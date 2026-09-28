@@ -50,6 +50,8 @@ Read the reason on each stale target:
   the target; each row's measurement survives only if the kernel renders the same CUDA source.
 - `no fresh kernel writes its outputs` — the layer regrouped (fused into a neighbour, split). The target and its rows
   describe no kernel; a restamp drops them, and the fresh kernels are unrecorded inventory.
+- `route key '…' names no seam of the fresh lowering` — the target kept its Loop IR but a seam's spelling moved (a node
+  re-read as another kind). A restamp re-spells the key onto the seam its operand positions reach, or drops the row.
 
 To see what moved, diff the two pools of one program, the stored one and the fresh one:
 
