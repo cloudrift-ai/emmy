@@ -16,6 +16,8 @@ noncommutative one computes a different value."""
 
 from __future__ import annotations
 
+import importlib
+
 from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis
@@ -527,3 +529,50 @@ def test_bilinear_does_not_reorder_a_noncommutative_product():
     )
 
     assert _bind(fold, ("h", "m", "n")) is None
+
+
+# The quotient split: a free coordinate read through ``/ Q`` and ``% Q`` splits into its two factors,
+# unless every reduction that reads those factors also reads the coordinate whole — a packed int4
+# weight reads its channel whole beside the zero-point's ``n / 8`` and the shift's ``n % 8``.
+
+_SPLIT = importlib.import_module("emmy.compiler.pipeline.passes.loop.canonicalize.010_fuse_split_free_axes")
+
+
+def _reduce(*loads: Load, axis: str = "k") -> Loop:
+    accum = Accum(name=f"acc_{axis}", value=loads[0].name, op=ElementwiseImpl("add"), axes=(axis,))
+    return Loop(axis=Axis(axis, Dim(16)), body=Body((*loads, accum)))
+
+
+def _n_nest(*stmts) -> Body:
+    return Body((Loop(axis=Axis("n", Dim(64)), body=Body(stmts)),))
+
+
+def _n(op: str | None = None):
+    return Var("n") if op is None else BinaryExpr(op, Var("n"), Literal(8, "int"))
+
+
+def _split(body: Body) -> bool:
+    return _SPLIT._split_once(body, frozenset({"n", "k", "j"})) is not None
+
+
+def test_a_coordinate_read_only_through_its_factors_splits():
+    zeros, shift = Load(name="z", input="zeros", index=(_n("/"),)), Load(name="s", input="shift", index=(_n("%"),))
+    assert _split(_n_nest(_reduce(zeros, shift)))
+    # A whole read after the reduction (an epilogue gate) owns nothing the contraction reads.
+    assert _split(_n_nest(_reduce(zeros, shift), Load(name="g", input="gate", index=(_n(),))))
+
+
+def test_a_packed_channel_read_whole_by_its_weight_stays_one_axis():
+    weight = Load(name="w", input="weights", index=(_n(),))
+    zeros, shift = Load(name="z", input="zeros", index=(_n("/"),)), Load(name="s", input="shift", index=(_n("%"),))
+    assert not _split(_n_nest(_reduce(weight, zeros, shift)))
+
+
+def test_a_head_pair_splits_when_another_reduction_reads_only_its_factors():
+    """One contraction reads the flattened head coordinate whole beside its head; another reads the
+    head and dim apart. Only the split lets the second bind its operands, so it still happens."""
+    first = _reduce(Load(name="q", input="q", index=(_n(),)), Load(name="h", input="h", index=(_n("/"),)))
+    second = _reduce(
+        Load(name="a", input="a", index=(_n("/"),)), Load(name="b", input="b", index=(_n("%"),)), axis="j"
+    )
+    assert _split(_n_nest(first, second))
