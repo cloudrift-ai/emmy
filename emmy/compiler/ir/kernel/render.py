@@ -1401,6 +1401,9 @@ _BUILTIN_TO_CUDA: dict[str, str] = {
 _BLOCK_SIZE = 256
 
 
+_GRID_DEPENDENCY = '#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900\n    asm volatile("griddepcontrol.wait;" ::: "memory");\n#endif\n'
+
+
 def render_kernelop(
     kernel_op: KernelOp,
     tensors: dict[str, Tensor] | None = None,
@@ -1569,6 +1572,13 @@ def render_kernelop(
     if starts:
         # A paged write's start read off the device: the position a step lands its rows at.
         body_text = "".join(f"    const int {n}__at = (int){n}[0];\n" for n in starts) + body_text
+    # Programmatic dependent launch (sm_90+): wait for the grid ahead before any memory access (the
+    # preambles above already read device memory it may write). A no-op without the launch attribute.
+    # No kernel releases its dependent early (``griddepcontrol.launch_dependents``): a dependent
+    # launched while its predecessor still runs places its blocks on the few SMs free at that moment,
+    # and a 128-block GEMM stacked that way ran 3-4x slower once released (s512 layer 133 -> 192 us).
+    # Released at the predecessor's exit, it still overlaps the launch with the predecessor's drain.
+    body_text = _GRID_DEPENDENCY + body_text
     prelude = _TMA_PRELUDE if desc_names else ""
     sig_dtypes = [_dtype_for(n) for n in kernel_op.inputs if n not in literals]
     sig_dtypes.extend(_dtype_for(n) for n in kernel_op.outputs)
