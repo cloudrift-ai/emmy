@@ -425,9 +425,7 @@ def main() -> int:
         )
         if args.stage:
             archive_name = f"results_{_platform_name(args.gpu, args.gpu_count)}.tar.gz"
-            archive = next(
-                (path for path in artifacts if path.parts[0] == "experiments" and path.name == archive_name), None
-            )
+            archive = next((path for path in artifacts if path.parts[0] == "experiments" and path.name == archive_name), None)
             stage_artifacts(args.workspace.resolve(), artifacts, archive)
         print(json.dumps(summary, sort_keys=True))
         return 0

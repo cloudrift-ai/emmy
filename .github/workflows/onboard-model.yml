@@ -503,10 +503,10 @@ jobs:
             echo "::error::Onboarding agent produced no final text output"
           fi
           if [ ! -s "$ONBOARD_SUMMARY" ]; then
-            echo "::error::Onboarding agent ended without writing its summary"
+            echo "::error::Onboarding agent ended without writing its summary (exit $agent_status)"
             exit 1
           fi
-          exit "$agent_status"
+          # The summary's status decides the run: a failed run still stages its report and golden.
 
       - name: Collect onboarding failure notice
         id: notice

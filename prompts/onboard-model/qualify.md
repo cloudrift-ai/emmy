@@ -1,85 +1,54 @@
 # Non-Interactive Model Qualification
 
-Use the attached onboarding task as the complete run request. Its fields are the only source of the model, hardware,
-credentials path, and deadline; never select, substitute, or infer any of them. The attached exact-workflow-SHA copies
-of the `onboard-model`, `tune-kernels`, and `run-experiment` skills are authoritative — follow them instead of any
-older skill copy in the checkout. Do not ask follow-up questions; a missing or ambiguous task field is an immediate
-failure.
+The attached onboarding task is the complete run request. Its fields are the only source of the model, hardware,
+credentials, and deadline; never select, substitute, or infer any of them, and never ask a question — a missing or
+ambiguous field is an immediate failure. The attached copies of the `onboard-model`, `tune-kernels`, and
+`run-experiment` skills are authoritative over any older copy in the checkout.
 
 ## Task fields
 
 | Field | Use |
 | --- | --- |
-| `mode` | exactly `onboarding` or `verification`; drives the recipe policy below and is echoed in the summary |
+| `mode` | exactly `onboarding` or `verification`; selects the skill's recipe policy and is echoed in the summary |
 | `model_id` | the exact Hugging Face model ID to qualify |
 | `gpu` / `gpu_count` | the exact target platform; never change the GPU name, count, quantization, or checkpoint |
 | `ssh_target`, `ssh_host`, `ssh_user`, `ssh_port` | the supplied server; the only host this run may use |
 | `ssh_key` | pass `--ssh-key <value>` to every Emmy remote command |
 | `deadline` | absolute wall-clock deadline for the whole run |
 | `multimodal_mode` | `auto`, `multimodal`, or `text-only` qualification path |
-| `publish_image` | `true` authorizes publishing a verified prebuilt Emmy image; `false` forbids publication |
-| `summary_path` | absolute path for the atomic machine-readable summary, outside the repository |
+| `publish_image` | `true` authorizes publishing a verified prebuilt Emmy image; `false` forbids it |
+| `summary_path` | absolute path for the atomic summary, outside the repository |
 | `expected_lifecycle` | in `verification` mode, the lifecycle tag the refreshed recipe must keep |
-
-The task's `publish_image` value is the publication authorization for this run. Do not add a conversational approval
-pause, and do not publish when it is `false`.
-
-## Recipe policy per mode
-
-The attached skill states the per-mode recipe policy; this section adds only what the task payload names. In
-`onboarding` mode there is no direct manual request, so use the existing `onboarding`/`untested` recipe shell when
-present. In `verification` mode, the lifecycle tag the refreshed recipe must keep is the task's `expected_lifecycle`.
 
 ## Boundaries
 
-Do not select a model or GPU, rent or delete the VM, commit, push, or open or update a pull request. The caller owns
-those steps. Tear down every deployed workload before returning.
+Do not select a model or GPU, rent or delete the VM, commit, push, or touch a pull request; the caller owns those.
+Tear down every deployed workload before returning. The caller owns the VM's lifetime, not its contents:
+`ssh_user` has passwordless sudo, provisioning the node is your work under the skill's rule, and a host gate fails
+only after Emmy's own provisioning ran and a specific step failed — quote that step's output in the summary.
 
-The caller owns the VM's lifetime, not its contents. Finishing the node's provisioning is your work, under the rule
-the attached skill states: `ssh_user` has passwordless sudo, and a host missing something the run needs is a node to
-provision rather than a gate failure. Report a host gate failure only after Emmy's own provisioning ran and a
-specific step failed, and quote that step's output in the summary.
-
-For a missing image or an unfamiliar launch failure, investigate current official registries, release notes, engine
-documentation, and upstream issues. Test an evidence-backed current repository or tag when the configured image moved
-or disappeared, then pin the exact working tag or digest. You may implement a bounded, model-agnostic compatibility
-fix with focused tests when it is necessary for this exact qualification.
-
-Delegate only bounded, independent read-only research or failure diagnosis to the `onboard-investigator` subagent,
-giving it the complete contents of the attached `investigate.md` and exactly one question. Retain responsibility for
-every edit, command, measurement, and conclusion.
+For a missing image or an unfamiliar launch failure, check current official registries, release notes, engine
+documentation, and upstream issues, then pin the exact working tag or digest. Delegate only bounded read-only research
+or failure diagnosis to the `onboard-investigator` subagent, giving it the complete attached `investigate.md` and
+exactly one question.
 
 ## Repository artifacts
 
-Allowed areas are `recipes/` (including the model's `golden/` subdirectory), `experiments/`,
-`docker/vllm-emmy-serve/models/`, `tests/compiler/realization/cases/` for the realization-corpus cases the skill's
-section 3b records, and a bounded small fix under `emmy/` with its focused tests and nearest `ARCHITECTURE.md`
-updates. A corpus case is evidence rather than code: it does not count against the small-fix budget, and it satisfies
-the focused-test requirement for a compiler fix on its own.
+Allowed areas: `recipes/` (including the model's `golden/`), `experiments/`, `docker/vllm-emmy-serve/models/`,
+`tests/compiler/realization/cases/`, and the skill's bounded fixes under `emmy/` with their focused tests and nearest
+`ARCHITECTURE.md`. A corpus case is evidence, not code: it does not count against the fix budget, and it is the focused
+test for a compiler fix on its own.
 
-Reuse this model's existing serving experiment root when it already represents the protocol; many models keep a
-platform-named root such as `serving_v100_sxm2_16gb`. Create `experiments/<model>/serving/` only when the model has
-no such root, and never add a second root for a platform an existing one already covers. The summary's `experiment`
-field is that root's `recipe.yaml` path, never a directory.
-
-Replace only this platform's `results_<gpu-short>x<gpu-count>.tar.gz` archive and preserve every other platform
-archive and `RESULTS.md` section. The archive must contain the platform's system-only experiment records; do not
-retain those records as top-level files. Update the final recipe's `RESULTS.md` for this platform while preserving
-still-valid measurements for its other platforms. Do not retain the ignored dated run directory or qualification
-summaries in the checkout.
-
-Git LFS is already configured through the caller's local attributes. Verify that the named archive reports
-`filter: lfs`, but do not run `git lfs track` and do not modify or list `.gitattributes` in the summary.
+Reuse the model's existing serving experiment root (many keep a platform-named root such as
+`serving_v100_sxm2_16gb`) and create `experiments/<model>/serving/` only when there is none; never add a second root
+for a platform an existing one already covers. The summary's `experiment` field is that root's `recipe.yaml` path,
+never a directory. Git LFS is configured by the caller: verify the archive reports `filter: lfs`, but do not run
+`git lfs track` or touch `.gitattributes`.
 
 ## Output
 
-Always write the skill's atomic summary to `summary_path`, on success and on failure, with `mode` set to the task's
-mode. List every intended created, modified, or deleted repository file in `artifacts` and no exploratory output —
-including every realization-corpus case, which is staged only when the summary manifests it. Report those cases in
-`compiler.realization_gaps` as `{file, stage, emmy_us, tcompile_us}`.
-Include `experiment_artifacts` with the shared experiment recipe and `RESULTS.md` plus the exact platform archive, and
-one-line `deployment_summary` and `performance_summary` values drawn from the exact selected recipe lane.
-
-The attached skill's own summary section owns the rest of that contract — the field shapes, when a failure counts as
-a regression, printing the path as the final line, and the exit code. Follow it there rather than from a second copy
-here. Keep the failure message concise and credential-free; the caller sends it to a chat notification.
+Always write the skill's summary to `summary_path`, on success and on failure, with `mode` set to the task's mode.
+On failure it still names `recipes/<model>/RESULTS.md` with its dated failure entry, and lists the golden, corpus cases,
+and bounded fixes the run keeps; the caller commits them and orders the next retry by that report. The skill's summary
+section owns every other part of the contract. Keep the failure message concise and credential-free; it goes to a chat
+notification.

@@ -270,21 +270,23 @@ emmy recipe list --json
 # Count one lifecycle group in automation.
 emmy recipe query --filter 'tags contains "maintained"' --json
 
-# Select the hottest available onboarding deployment. Referencing deployment.* expands each recipe into deployment
-# rows; CloudRift availability is resolved only because this query uses it.
+# Select the hottest available onboarding shell never tried. Referencing deployment.* expands each recipe into
+# deployment rows; CloudRift availability is resolved only because this query uses it.
 emmy recipe query \
   --filter 'lifecycle == "onboarding"' \
+  --filter 'results.last_run_at == null' \
   --filter 'deployment.availability.cloudrift == true' \
   --sort 'heat desc nulls-last' \
   --sort 'model_id asc' \
   --limit 1 --json
 
-# When no onboarding deployment is available, select the maintained recipe with the oldest results.
+# Select a hot runnable recipe that has no Emmy serving variant yet.
 emmy recipe query \
-  --filter 'lifecycle == "maintained"' \
-  --filter 'deployment.availability.cloudrift == true' \
-  --sort 'results.last_run_at asc nulls-first' \
-  --limit 1 --json
+  --filter 'lifecycle in ["maintained", "best-effort"]' \
+  --filter 'heat >= 70' \
+  --filter 'emmy_serving == false' \
+  --sort 'heat desc' \
+  --json
 
 # Check one exact external candidate, including a model without a recipe yet.
 emmy recipe query --candidate org/model-name "NVIDIA H200 141GB" 1 \

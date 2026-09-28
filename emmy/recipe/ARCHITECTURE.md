@@ -61,7 +61,7 @@ legacy recipes and sorts as null until the next discovery run.
 
 `recipe_catalog()` is the shared repository scan behind `emmy recipe list` and model-discovery validation. The
 versioned JSON document produced by `recipe_inventory_document()` adds the directory name, lifecycle-aware runnable
-state, and each matrix-expanded deployment's effective context length to the identity, tags, task, rationale, and
+state, whether any variant serves through Emmy, and each matrix-expanded deployment's effective context length to the identity, tags, task, rationale, and
 heat.
 This is the machine interface used by other services: consumers reject unknown `schema_version` values, while Emmy
 may add fields without removing or redefining fields in the current version. Editable installs read the checkout's
@@ -83,6 +83,7 @@ The row fields are grouped by ownership:
 | Fields | Meaning |
 |---|---|
 | `model_id`, `name`, `recipe_path`, `tags`, `lifecycle`, `task`, `runnable`, `rationale`, `heat` | Compact catalog metadata |
+| `emmy_serving` | Some matrix variant serves through the Emmy vLLM plugin (an `Emmy*Model` architecture override) |
 | `operation`, `expected_lifecycle` | Lifecycle-derived onboarding or verification action |
 | `deployment.index`, `deployment.gpu`, `deployment.gpu_count`, `deployment.context_length` | One declared or explicitly requested setup |
 | `deployment.availability.cloudrift` | Exact-count capacity reported by CloudRift |

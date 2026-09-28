@@ -36,9 +36,9 @@ Prefer current community demand, serving value, architecture coverage, and a use
 set. Every unselected complete recipe defaults to best-effort; do not return best-effort IDs because the workflow
 derives them mechanically.
 
-Propose an obsolete recipe only when a named all-around better complete replacement for the same task is available at
-a comparable or lower practical VRAM footprint sized by the attached `model-fit.md`, or when a concrete technical
-limitation means the recipe should no longer be used. Before proposing a replacement, read both recipe files and
+Propose an obsolete recipe only when a named all-around better complete replacement for the same task has a smallest
+deployment that uses no more total GPU memory than the old recipe's smallest, or when a concrete technical limitation
+means the recipe should no longer be used. The workflow demotes any other obsolete proposal to best-effort. Before proposing a replacement, read both recipe files and
 confirm that the old recipe retains no advantage in configured context, concurrency, quantization, hardware support,
 model capability, latency, throughput, operating cost, modality, or licensing. A replacement that is merely comparable
 is not all-around better. Low demand, age, and exclusion from the maintained set are not sufficient. Existing obsolete

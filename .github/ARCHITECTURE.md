@@ -129,10 +129,12 @@ expose the same packages through OpenCode's native skill tool.
 exact workflow SHA. Manual dispatch supplies one exact external candidate; scheduled dispatch queries declared
 deployments. A filtered-out manual candidate is an error, while no scheduled match is a successful no-op.
 The query's filters and sorts read CloudRift VM variant availability without filtering on public-IP supply and consider
-only declared deployments with an available exact CloudRift GPU count. Pending `onboarding`/`untested` recipes are the
-first priority, ordered by descending heat, then model ID and deployment declaration order. If none can run, the
-selector performs a second generic query for a `maintained` recipe whose committed `RESULTS.md` has the oldest
-last-change timestamp; a missing report is oldest. No eligible deployment is a successful no-op.
+only declared deployments with an available exact CloudRift GPU count. It tries five queries in order and takes the
+first match: `onboarding` shells with heat 70 or more and no committed `RESULTS.md`; `maintained` or `best-effort`
+recipes with heat 70 or more and no Emmy serving variant (`emmy_serving`), least recently reported first; other
+shells with no report; shells whose report records a failed attempt, oldest first; and `maintained` recipes, oldest
+report first. Within a query, heat breaks ties, then model ID and deployment declaration order. No eligible deployment
+is a successful no-op.
 
 The workflow requires the repository's `CLOUDRIFT_TEAM_ID` variable to contain the exact Robots team UUID. Before it
 checks capacity, it validates that `CLOUDRIFT_API_KEY` can act for that UUID through a team-scoped account request;
@@ -155,7 +157,10 @@ requires `$HOME/.cache/emmy` to be durable storage with at least 8 GiB free. Com
 venv, cache, and build temporary files there rather than on a small `/tmp` tmpfs. The job has a 24-hour limit and gives
 the agent a 23.5-hour deadline so artifact validation and cleanup retain 30 minutes. The deadline is the agent's only
 budget. It has no step cap: a capped agent can only answer in text once it reaches the cap, so it never writes its
-summary. An agent that ends without a summary fails its step, and the failure notice says so. For the selected
+summary. An agent that ends without a summary fails its step, and the failure notice says so. A failed summary still
+names the recipe's `RESULTS.md` with a dated failure entry, plus any complete golden, corpus case, or bounded compiler
+fix; the workflow validates and commits those, then fails the job. That commit is what moves the shell behind untried
+work on the next night. For the selected
 recipe and GPU, the same nightly qualification validates the recipe-local golden schema, strictly decodes every stored
 row, and replays it on the exact card; pull-request tests do not load checked-in golden files. The shared serving
 experiment retains one LFS archive per exact GPU platform plus one cumulative `RESULTS.md`; each archive includes its

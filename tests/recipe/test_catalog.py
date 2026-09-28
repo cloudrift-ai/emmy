@@ -58,7 +58,7 @@ def test_recipe_inventory_reports_emmy_serving_from_any_variant(tmp_path):
     root = tmp_path / "recipes"
     path = _write_recipe(root, "ready", "org/ready", ["maintained"])
     config = yaml.safe_load(path.read_text())
-    emmy_args = "--hf-overrides '{\"architectures\":[\"EmmyGenModel\"]}'"
+    emmy_args = '--hf-overrides \'{"architectures":["EmmyGenModel"]}\''
     config["matrices"] = [{"zip": {"engine.llm.vllm.extra_args": ["", emmy_args]}}]
     path.write_text(yaml.safe_dump(config))
 

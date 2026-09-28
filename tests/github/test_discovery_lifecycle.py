@@ -166,11 +166,12 @@ def test_onboarding_requires_platform_results_snapshot_and_git_lfs():
     assert "tmpfs|ramfs" in host_setup_script
     assert "8388608" in host_setup_script
     subprocess.run(["bash", "-n"], input=host_setup_script, text=True, check=True)
-    assert "results_<gpu-short>x<gpu-count>.tar.gz" in qualify
-    assert "preserve every other platform" in qualify
-    assert "do not\nretain those records as top-level files" in qualify
+    skill_text = (workspace / ".agents" / "skills" / "onboard-model" / "SKILL.md").read_text()
+    assert "results_<gpu-short>x<gpu-count>.tar.gz" in skill_text
+    assert "A platform run replaces only its own archive" in skill_text
+    assert "never commit those records as\ntop-level files" in skill_text
     assert "`onboard-investigator` subagent" in qualify
-    assert "do not modify or list `.gitattributes`" in qualify
+    assert "touch `.gitattributes`" in qualify
     assert '"$WORKFLOW_SOURCE/.agents/skills/onboard-model/SKILL.md"' in agent_script
     assert '"$WORKFLOW_SOURCE/.agents/skills/tune-kernels/SKILL.md"' in agent_script
     assert '"$WORKFLOW_SOURCE/.agents/skills/run-experiment/SKILL.md"' in agent_script
@@ -552,8 +553,8 @@ def test_onboarding_agent_reads_shared_prompts_from_a_compact_task():
     # must never read as putting the host's contents out of reach.
     assert "The caller owns the VM's lifetime, not its contents" in qualify
     assert "`ssh_user` has passwordless sudo" in qualify
-    assert "never add a second root for a platform an existing one already covers" in qualify
-    assert "`recipe.yaml` path, never a directory" in qualify
+    assert "never add a second root\nfor a platform an existing one already covers" in qualify
+    assert "`recipe.yaml` path,\nnever a directory" in qualify
     assert "Use at most four public-web calls" in investigate
     assert "Apply the investigation prompt" in investigator
 
