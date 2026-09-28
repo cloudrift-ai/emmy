@@ -222,7 +222,14 @@ def split_forks(match: Match, root: Node, *, unsplit_tile: TileOp | None = None)
     assert node is not None and node.axis is not None
     k_axis = tile.axis_of(node.axis)  # the node names its K; the kernel's axis table holds its extent
     key = Sched(tile).key("REDUCE", node) or "REDUCE"
-    unsplit = DeferredFork(lambda: replace(unsplit_tile or tile, split_consumed=True), {key: ""})
+    output, consumed = (match.output, set(match.consumed)) if match is not None else (None, set())
+
+    def keep() -> TileOp:
+        if match is not None:  # a consumer arm priced before this one may have written the match
+            match.output, match.consumed = output, set(consumed)
+        return replace(unsplit_tile or tile, split_consumed=True)
+
+    unsplit = DeferredFork(keep, {key: ""})
     element = axis_of(key)
     # A kernel pin names the piece by its token, which the node id carries where the tile has no
     # name of its own; the schedule pass reads it the same way (``040_schedule.pin_row``).
@@ -263,6 +270,8 @@ def _absorbing_consumer(match: Match, root: Node) -> tuple[Node | None, str | No
     """The one kernel that can sum ``root``'s split partials where it reads the value — the
     ``consumer`` finalize — or why there is none. The partials are summed at every read, so the
     value must have exactly one reader, a kernel, and must not leave the graph."""
+    if match is None:
+        return None, "a consumer finalize needs the graph to find the value's reader"
     graph = match.graph
     tile: TileOp = root.op
     buffers = root.buffer_names()
@@ -316,7 +325,15 @@ def _absorbed(match: Match, root: Node, reader: Node, finalize: TileOp, ws: Tens
 
 def _split_fork(match: Match, root: Node, key: str, cta: int, finalize: str) -> DeferredFork:
     spelling = Reduce.of(cta=cta, finalize=finalize).spell()
-    return DeferredFork(lambda: realize_split(match, root, cta, finalize), {key: spelling}, structural=True)
+    # Every arm is realized against the one match, and pricing realizes arms the pick then drops: each
+    # starts from the match as the fork found it, so a consumer arm's consumed readers never leak.
+    output, consumed = match.output, set(match.consumed)
+
+    def realize() -> Graph:
+        match.output, match.consumed = output, set(consumed)
+        return realize_split(match, root, cta, finalize)
+
+    return DeferredFork(realize, {key: spelling}, structural=True)
 
 
 # ---- slicing the head fold -------------------------------------------------------------------- #
