@@ -2465,28 +2465,9 @@ class _ScalarOps(_AtomOps):
         partials × fp16 weights); the drain's fma converts like the gmem-direct path does."""
         return (self.inputs[self.c.operands[0].as_slab().load.input].dtype, self.inputs[self.c.operands[1].as_slab().load.input].dtype)
 
-    def carried_drain(self, operands, mn):
-        """The drain as ``slot -> (steps, loads(step, suffix), mmas(suffix))`` for a K loop that
-        double-buffers the fragments across chunk boundaries (``STAGE`` ``/p2`` on a cp.async ring,
-        :func:`pipelined_kloop`), or ``None`` where the drain has more to it than loads and mmas."""
-        if self.tile.atom.is_wgmma or _f16acc(self.tile.atom) or self.stage.reg_depth != 2:
-            return None
-        if any(getattr(op, "scale", None) is not None for op in operands):
-            return None
-        return lambda slot: _staged_inner_atom_loop(
-            slabs=tuple(op.slab for op in operands),
-            offs=tuple(op.slot_row(slot) for op in operands),
-            mn=mn,
-            atom=self.tile.atom,
-            bk_elems=self.stage.bk_elems,
-            ki="_ki",
-            swizzles=tuple(getattr(op, "swizzle", "NONE") for op in operands),
-            trans=tuple(getattr(op, "trans", False) for op in operands),
-            byte_slabs=tuple((getattr(op, "elem_bytes", None) or self.tile.atom.operand_dtype("a").nbytes) == 1 for op in operands),
-            pads=tuple(getattr(op, "pad_cols", 0) for op in operands),
-            frag_ns=self.frag_ns,
-            parts=True,
-        )
+    def carried_drain(self, operands, mn):  # noqa: ARG002 — the scalar drain carries no fragments
+        """``None``: a scalar drain has no fragments to carry across chunks."""
+        return None
 
     def staged_drain(self, operands, slot, cells, offset, mn):
         """The scalar slab drain — the plain-``Load`` fma leaf (:func:`_scalar_drain`), reading by
