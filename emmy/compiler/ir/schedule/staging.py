@@ -211,8 +211,10 @@ def _chunk_warp_stage(
     correctly today.
 
     The synchronous ``smem`` transport is the Volta atom's blocking vector copy. It stages the same
-    slabs at one slot, row-padded (:func:`chunk_slab_pad`) because the Volta drain has no swizzled
-    read. A SYMBOLIC key extent does NOT decline —
+    slabs, row-padded (:func:`chunk_slab_pad`) because the Volta drain has no swizzled read, and rings
+    at most ``SPLIT_COPY_DEPTH`` slots through the register-staged split: the next chunk's key and
+    value load into registers under this chunk's softmax (the Qwen3-0.6B s512 GQA attention on a
+    V100, 78 -> 71 us). A SYMBOLIC key extent does NOT decline —
     see the ragged-tail reading below, which is what lets a serving-shaped attention kernel stage
     at all, though it keeps the single-buffer ring. On a STATIC extent depth is the ordinary budget
     clamp: the chunk loop carries the whole softmax between its fill and its drain, so a deeper ring
@@ -264,9 +266,11 @@ def _chunk_warp_stage(
     # run this tier at a symbolic key length); at one slot it is correct. What the runtime chunk
     # count does to the prefetch's clamp is not diagnosed, so the depth is refused here rather than
     # offered and left to fail at the card.
-    # The blocking copy keeps a single slot: its ring is the register-staged split, whose in-flight
-    # chunk would hold both whole slabs in registers across the softmax.
-    depth = 1 if ragged or sync_ok else _clamp_depth(stage.depth, slot_bytes, budget)
+    # The blocking copy rings through the register-staged split (``SPLIT_COPY_DEPTH`` slots): the next
+    # chunk's key and value sit in registers across the softmax instead of in the copy engine.
+    depth = 1 if ragged else _clamp_depth(stage.depth, slot_bytes, budget)
+    if sync_ok:
+        depth = min(depth, SPLIT_COPY_DEPTH)
     choice = replace(stage, depth=depth, reg_depth=min(stage.reg_depth, tile.bk))
     return ResolvedStage(choice, bk_elems=bk_elems)
 
