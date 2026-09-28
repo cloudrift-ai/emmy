@@ -2166,7 +2166,7 @@
  "tests/compiler/pipeline/search/test_golden.py::test_stored_targets_are_the_fresh_lowering[Qwen3.8-27B-EXL3/v100_sm70.json/program-0]": 143.77,
  "tests/compiler/pipeline/search/test_golden.py::test_stored_targets_are_the_fresh_lowering[Qwen3.8-27B-EXL3/v100_sm70.json]": 115.49,
  "tests/compiler/pipeline/search/test_golden.py::test_stored_targets_are_the_fresh_lowering[Qwen3.8-27B-FP8/v100_sm70.json/program-0]": 102.86,
- "tests/compiler/pipeline/search/test_golden.py::test_stored_targets_are_the_fresh_lowering[Qwen3.8-27B-FP8/v100_sm70.json/program-1]": 5.31,
+ "tests/compiler/pipeline/search/test_golden.py::test_stored_targets_are_the_fresh_lowering[Qwen3.8-27B-FP8/v100_sm70.json/program-1]": 37.01,
  "tests/compiler/pipeline/search/test_golden.py::test_stored_targets_are_the_fresh_lowering[Qwen3.8-27B-FP8/v100_sm70.json/program-2]": 51.59,
  "tests/compiler/pipeline/search/test_golden.py::test_stored_targets_are_the_fresh_lowering[Qwen3.8-27B-FP8/v100_sm70.json/program-3]": 10.1,
  "tests/compiler/pipeline/search/test_golden.py::test_stored_targets_are_the_fresh_lowering[Qwen3.8-27B-FP8/v100_sm70.json]": 122.69,
