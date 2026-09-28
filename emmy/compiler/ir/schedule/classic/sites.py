@@ -13,7 +13,7 @@ from frozendict import frozendict
 
 from emmy.compiler.ir.atom import ATOM_REGISTRY
 from emmy.compiler.ir.pure.fold import Fold
-from emmy.compiler.ir.schedule.base import Schedule, ScheduleProblem, Site
+from emmy.compiler.ir.schedule.base import Schedule, ScheduleProblem, Site, note_pin_refusal
 from emmy.compiler.ir.schedule.catalog import map_tile_moves, producer_band_moves, raster_moves
 from emmy.compiler.ir.schedule.choices import PlacedTile, Raster, Reduce, Stage, Tile, Work, derive_inventory, resolve_site_tile
 from emmy.compiler.ir.schedule.staging import stage_target
@@ -22,7 +22,7 @@ from emmy.utils import cached_method
 
 from .refusals import (
     _atom_policy_ok,
-    _contraction_plan_allowed,
+    _contraction_plan_refusal,
     _contraction_plans,
     _contraction_reductions,
     _plan_node_refusal,
@@ -60,6 +60,8 @@ def _select[T](
     bare: str | None,
     validate_pins: bool,
     exact: bool = False,
+    key: str | None = None,
+    why: Callable[[T], str | None] | None = None,
 ) -> tuple[T, ...]:
     """One factor's values under the row.
 
@@ -71,7 +73,29 @@ def _select[T](
     family names one site among several: this factor keeps the pin's value and OFF, and the
     completed schedule is asked which site carried it. An ``exact`` replay supplies the complete
     row, so a value that does not parse and pass its intrinsic checks can return empty without the
-    catalog-spelling fallback needed by partial hand pins."""
+    catalog-spelling fallback needed by partial hand pins.
+
+    A named value the factor does not keep is recorded against ``key`` (:func:`note_pin_refusal`) with
+    ``why``'s reason, so the pin check can say which rule refused it."""
+    out = _select_values(named, catalog, parse=parse, allowed=allowed, spell=spell, bare=bare, validate_pins=validate_pins, exact=exact)
+    if named is not None and key is not None and not any(spell(choice) == named for choice in out):
+        value = parse(named)
+        reason = "it does not parse at this site" if value is None else (why(value) if why is not None else None)
+        note_pin_refusal(key, named, reason or "this site does not offer it")
+    return out
+
+
+def _select_values[T](
+    named: str | None,
+    catalog: Iterator[T] | tuple[T, ...],
+    *,
+    parse: Callable[[str], T | None],
+    allowed: Callable[[T], bool],
+    spell: Callable[[T], str],
+    bare: str | None,
+    validate_pins: bool,
+    exact: bool = False,
+) -> tuple[T, ...]:
     if named is not None:
         value = parse(named)
         if value is not None and allowed(value):
@@ -137,7 +161,7 @@ class ClassicNodeSite(Site[ClassicSchedule]):
         if why := _wgmma_refusal(plan, None if stage is None else Stage.parse(stage)):
             raise ValueError(why)
 
-    def _select_plans(self, named: str | None, catalog, *, allowed, work: Work | None = None) -> tuple[Tile, ...]:
+    def _select_plans(self, named: str | None, catalog, *, allowed, work: Work | None = None, why=None) -> tuple[Tile, ...]:
         if named is not None:
             self._wgmma_pin_refusal(named)
 
@@ -157,6 +181,8 @@ class ClassicNodeSite(Site[ClassicSchedule]):
             bare=self.problem.bare_value("TILE", self.keys),
             validate_pins=self.problem.strict(key),
             exact=self.problem._exact(key),
+            key=key,
+            why=why,
         )
 
     @cached_property
@@ -187,12 +213,19 @@ class ClassicNodeSite(Site[ClassicSchedule]):
             plans = self._select_plans(
                 self._named("TILE"),
                 _contraction_plans(node, facts, self.problem.policy_atoms(self.id)),
-                allowed=lambda plan: _contraction_plan_allowed(node, facts, atoms, plan),
+                allowed=lambda plan: _contraction_plan_refusal(node, facts, atoms, plan) is None,
                 work=self.problem.work,
+                why=lambda plan: _contraction_plan_refusal(node, facts, atoms, plan),
             )
-            # A tiled plan folds serially per cell; an untiled one takes every per-cell reduction.
+            # A tiled plan folds serially per cell; an untiled one takes every per-cell reduction. So a
+            # row whose reductions leave out the serial fold (a pinned ``coop`` band) rules the tiled
+            # plans out too, instead of letting one realize the pin's site with a serial fold.
+            serial = Reduce() in reductions
             choices = (
-                ReductionSchedule(plan, reduction) for plan in plans for reduction in (reductions if not plan.is_tiled else (Reduce(),))
+                ReductionSchedule(plan, reduction)
+                for plan in plans
+                if serial or not plan.is_tiled
+                for reduction in (reductions if not plan.is_tiled else (Reduce(),))
             )
         return tuple(choice for choice in choices if self._placed_ok(choice))
 
@@ -217,6 +250,8 @@ class ClassicNodeSite(Site[ClassicSchedule]):
             bare=self.problem.bare_value("REDUCE", self.keys),
             validate_pins=self.problem.strict(key),
             exact=self.problem._exact(key),
+            key=key,
+            why=lambda reduction: f"this reduction offers {', '.join(r.spell() or 'serial' for r in catalog)}",
         )
 
     def _placed_ok(self, choice: NodeSchedule) -> bool:
@@ -277,6 +312,12 @@ class ClassicNodeSite(Site[ClassicSchedule]):
             bare=self.problem.bare_value("STAGE", self.keys),
             validate_pins=False if self.stage_key is None else self.problem.strict(self.stage_key),
             exact=self.stage_key is not None and self.problem._exact(self.stage_key),
+            key=self.stage_key,
+            why=lambda choice: (
+                "register storage (d1/reg) is offered to a serial kernel's register program only"
+                if choice.stage.transport == "reg"
+                else "no tile this site offers is fed by that transport"
+            ),
         )
 
     @cached_property

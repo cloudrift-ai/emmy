@@ -411,13 +411,21 @@ def _contraction_plans(node, facts: ContractionFacts, atoms: tuple[str, ...]) ->
     yield from _warp_plans(node, facts, atoms)
 
 
-def _contraction_plan_allowed(node, facts: ContractionFacts, atoms: tuple[str, ...], plan: Tile) -> bool:
-    """Whether one parsed contraction plan is a value the catalog would have offered."""
+def _contraction_plan_refusal(node, facts: ContractionFacts, atoms: tuple[str, ...], plan: Tile) -> str | None:
+    """Why one parsed contraction plan is not a value the catalog would have offered, or ``None``."""
     if not plan.is_warp:
-        return plan in _scalar_catalog() if _uniform_extras(node) else plan == Tile()
-    if plan.atom.name not in atoms or not _warp_plan_ok(node, facts, plan):
-        return False
-    return warp_tile_in_catalog(plan) or (plan.regs == (26, 4) and plan.bk == 2)
+        if _uniform_extras(node):
+            return None if plan in _scalar_catalog() else "not a scalar tile of the catalog"
+        return None if plan == Tile() else "this contraction takes no scalar register tile"
+    if plan.atom.name not in atoms:
+        return f"atom {plan.atom.name} is not offered here (offered: {', '.join(atoms) or 'none'})"
+    if (why := _kstep_refusal(facts.k_axis, plan) or _wgmma_refusal(plan)) is not None:
+        return why
+    if not _warp_plan_ok(node, facts, plan):
+        return f"the chunk width {plan.atom.atom_k * plan.bk} is not a multiple of the atom's N ({plan.atom.atom_n})"
+    if not (warp_tile_in_catalog(plan) or (plan.regs == (26, 4) and plan.bk == 2)):
+        return "not a warp tile of the catalog"
+    return None
 
 
 def fill_stage_moves() -> tuple[Stage, ...]:
