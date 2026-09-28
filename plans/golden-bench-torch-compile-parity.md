@@ -15,6 +15,10 @@ when all three hold. The plan is done when the lane (`emmy bench` on the recipe)
 Accepted exception (2026-09-28): V100 s1 at 72 µs vs torch.compile 61. It is launch-bound (16 launches at a ~1.8 µs
 floor each); unsplit GEMVs, fewer splits and a consumer-summed split all lost on the V100's 80 SMs.
 
+Called level (2026-09-28): A100 s512 at 182-184 µs vs torch.compile 180-181, inside run-to-run noise. The rest is
+in the plain GEMMs (~4 µs each vs cuBLAS): shared-memory bank conflicts in the f2x4 drain's fragment loads, more load
+instructions per mma, and no 96-row (non-power-of-two, masked M edge) tile. Compiler work, not a sweep.
+
 ## Scoreboard (µs, end to end)
 
 | card | s512 Emmy | s512 torch.compile | gap | s1 Emmy | s1 torch.compile | gap |
