@@ -609,8 +609,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
             # ``k_co`` between them), so B loads coalesce across lanes. The emitted body's
             # output-var references were σ-substituted to ``blk·32 + n_lane`` inside (clamped,
             # and the store guarded, when 32 does not tile the swept extent).
-            state, fold, close, lanes_axes = _tile_reduce_axis_transposed(op, plan, ctx, tail, out_val)
-            out_ax = next(a for a in reversed(grid) if not (a.extent.is_static and a.extent.as_static() == 1))
+            state, fold, close, lanes_axes, out_ax = _tile_reduce_axis_transposed(op, plan, ctx, tail, out_val)
             blk = Axis(name=f"{out_ax.name}_blk", extent=out_ax.extent.ceil_div(32), window=Window(parent=out_ax))
             lead = tuple(blk if a.name == out_ax.name else a for a in grid)
             t = replace(t, axes=lanes_axes)
@@ -852,7 +851,7 @@ def combine_tail(fold: Fold, *, reg: int, coop: int, lane) -> list[Stmt]:
 
 def _tile_reduce_axis_transposed(
     op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str
-) -> tuple[list[Stmt], list[Stmt], list[Stmt], tuple[Axis, ...]]:
+) -> tuple[list[Stmt], list[Stmt], list[Stmt], tuple[Axis, ...], Axis]:
     """The ``coop-t`` (transposed) cooperative reduce — the k-major-B matvec partition: 32
     ``n_lane`` threads (innermost) sweep the OUTPUT axis so B loads coalesce across lanes at
     every k step, and ``coop/32`` ``k_co`` slices ride the upper thread bits. The emitted body
@@ -870,9 +869,8 @@ def _tile_reduce_axis_transposed(
     assert coop % lanes_n == 0 and k_ways >= 1, f"b{coop}t needs a multiple of {lanes_n}"
     stage = ctx.sched.get("STAGE", op)
     assert not (stage is not None and stage.smem), "transposed coop cannot ride shared-row staging"
-    out_ax = next(a for a in reversed(grid) if not (a.extent.is_static and a.extent.as_static() == 1))
-
     *hoisted, rloop = op.lower(axes=ctx.sched.tile.axes)
+    out_ax = _coalescing_axis(rloop, grid, ctx.inputs)
     view = op.as_reduction()
     axis = rloop.axis
     stride = k_ways * reg
@@ -922,7 +920,25 @@ def _tile_reduce_axis_transposed(
         tail_stmts = [Cond(cond=BinaryExpr("==", Var(k_co.name), Literal(0, "int")), body=tuple(tail_stmts))]
 
     lanes_axes = ((k_co,) if k_co is not None else ()) + (n_lane,)
-    return [], [*(s.substitute(subst) for s in hoisted), strided, *merge], tail_stmts, lanes_axes
+    return [], [*(s.substitute(subst) for s in hoisted), strided, *merge], tail_stmts, lanes_axes, out_ax
+
+
+def _coalescing_axis(rloop, grid: tuple, inputs) -> Axis:
+    """The output axis a ``coop-t`` band lays its 32 lanes on: the non-unit grid axis that the
+    most global loads of the reduce loop step along contiguously (one element per lane), so the
+    lanes read one run. A tile's declared free order need not put that axis last: a q/k twin whose
+    free axes are ``(head_dim, head)`` stores ``head_dim`` contiguously, and laying the lanes on
+    the 16 heads idled half of them and strided every weight read by 128 elements. Ties, and a
+    loop no address walk can read, keep the last non-unit axis."""
+    from emmy.compiler.ir.address import gmem_axis_step  # noqa: PLC0415 — the operand loaders' address read
+
+    candidates = [a for a in grid if not (a.extent.is_static and a.extent.as_static() == 1)]
+    loads = [stmt for stmt in rloop.body.iter() if isinstance(stmt, Load)]
+
+    def contiguous(axis: Axis) -> int:
+        return sum(1 for load in loads if (step := gmem_axis_step(load, axis.name, inputs)) is not None and step[0] == 1)
+
+    return max(reversed(candidates), key=contiguous)
 
 
 def _lane_unroll(axis: Axis, stride: int) -> bool:
