@@ -43,6 +43,7 @@ from .schedule import (
     edge_site_spelling,
     node_id_spelling,
     output_sweep_works,
+    packed_works,
 )
 
 if TYPE_CHECKING:
@@ -564,7 +565,12 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         if work is not None and support.work is not None and support.work != work:
             return "pick requires a different worker inventory"
         resolved_work = support.work or work
-        if allowed_works is not None and resolved_work is not None and (resolved_work.kind, resolved_work.units) not in allowed_works:
+        if (
+            allowed_works is not None
+            and resolved_work is not None
+            and (resolved_work.kind, resolved_work.units) not in allowed_works
+            and not any((packed.kind, packed.units) in allowed_works for packed in packed_works(resolved_work))
+        ):
             return "pick cannot reach a kernel allowed by the schedule restriction"
         if work is None and resolved_work is not None:
             if not all(choice.tile.is_canonical_for(resolved_work) for choice in (*previous_nodes, support.node)):
@@ -624,7 +630,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         # Same rule as :meth:`_kernel_composes`: serial node choices leave output sweeps free to
         # take one of their own offered worker inventories.
         if (pick.kernel.work.kind != work.kind or pick.kernel.work.units != work.units) and not (
-            self._output_sweeps_take(pick.kernel.work)
+            self._output_sweeps_take(pick.kernel.work) or self._packs(pick.kernel.work)
         ):
             self._refuse("kernel WORK does not realize the node choices")
         if not pick.kernel.raster.is_direct and not self._raster_eligible:
@@ -697,11 +703,26 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         """Whether this serial-node prefix may take this exact output-sweep WORK offer."""
         return work in output_sweep_works(self.tile_op, self._work)
 
+    def _packs(self, work: Work) -> bool:
+        """Whether ``work`` stacks several cells of this prefix's cooperative reduce in one CTA
+        (:func:`packed_works`). Every operand reads gmem directly: a staged row is one CTA-wide
+        shared slab per cell, which a packed CTA would share between its cells."""
+        cooperative = any(
+            isinstance(choice, ReductionSchedule) and choice.reduce.coop > 1 and not choice.reduce.coop_transposed
+            for choice in self.schedule.nodes.values()
+        )
+        return cooperative and work in packed_works(self._work) and all(choice.stage.is_direct for choice in self.schedule.edges.values())
+
     def _kernel_composes(self, kernel: KernelSchedule) -> bool:
         work = self._work or Work()
         # Serial node choices do not constrain a worker inventory used only to stripe output
-        # sweeps; a node-owned inventory still follows the ordinary equality relation.
-        agrees = (kernel.work.kind == work.kind and kernel.work.units == work.units) or self._output_sweeps_take(kernel.work)
+        # sweeps; a node-owned inventory still follows the ordinary equality relation, or packs
+        # several of its cells into one CTA.
+        agrees = (
+            (kernel.work.kind == work.kind and kernel.work.units == work.units)
+            or self._output_sweeps_take(kernel.work)
+            or self._packs(kernel.work)
+        )
         return agrees and (not kernel.work.producer or self._producer_eligible) and (kernel.raster.is_direct or self._raster_eligible)
 
     def node_choice(self, site: NodeId) -> NodeSchedule:
