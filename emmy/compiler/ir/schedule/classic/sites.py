@@ -189,9 +189,15 @@ class ClassicNodeSite(Site[ClassicSchedule]):
                 allowed=lambda plan: _contraction_plan_allowed(node, facts, atoms, plan),
                 work=self.problem.work,
             )
-            # A tiled plan folds serially per cell; an untiled one takes every per-cell reduction.
+            # A tiled plan folds serially per cell; an untiled one takes every per-cell reduction. So a
+            # row whose reductions leave out the serial fold (a pinned ``coop`` band) rules the tiled
+            # plans out too, instead of letting one realize the pin's site with a serial fold.
+            serial = Reduce() in reductions
             choices = (
-                ReductionSchedule(plan, reduction) for plan in plans for reduction in (reductions if not plan.is_tiled else (Reduce(),))
+                ReductionSchedule(plan, reduction)
+                for plan in plans
+                if serial or not plan.is_tiled
+                for reduction in (reductions if not plan.is_tiled else (Reduce(),))
             )
         return tuple(choice for choice in choices if self._placed_ok(choice))
 
