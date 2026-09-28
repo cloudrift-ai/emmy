@@ -29,19 +29,21 @@ logger = logging.getLogger(__name__)
 NUM_CONCURRENT = 8
 
 
-def completions_url(base_url):
-    """Full completions endpoint for an OpenAI-compatible API root (lm-eval wants the path included)."""
+def completions_url(base_url, chat=False):
+    """Full completions (or chat completions) endpoint for an OpenAI-compatible API root (lm-eval wants
+    the path included)."""
+    path = "/chat/completions" if chat else "/completions"
     url = base_url.rstrip("/")
-    return url if url.endswith("/completions") else url + "/completions"
+    return url if url.endswith(path) else url + path
 
 
-def build_model_args(base_url, model):
+def build_model_args(base_url, model, chat=False):
     """Constructor args for lm-eval's `local-completions` model (untokenized requests, fixed
     concurrency). The explicit timeout overrides TemplateAPI's 300 s default: the emmy lane's
     slower prefill pushed request tails past it, and the resulting tenacity retry storm died on
     a closed aiohttp session ("Session is closed"), sinking the whole gate (2026-08-01)."""
     return {
-        "base_url": completions_url(base_url),
+        "base_url": completions_url(base_url, chat),
         "model": model,
         "num_concurrent": NUM_CONCURRENT,
         "tokenized_requests": False,
@@ -79,14 +81,22 @@ def main():
     parser.add_argument("--num-fewshot", type=int, default=None, help="Few-shot count (default: task default)")
     parser.add_argument("--out", type=Path, default=None, help="JSON output path (default: stdout)")
     parser.add_argument("--label", default="unlabeled", help="Config label recorded in the output, e.g. emmy-fastmath")
+    parser.add_argument(
+        "--chat",
+        action="store_true",
+        help="Score through /chat/completions with the model's chat template, whose special tokens a raw prompt can "
+        "miss (DeepSeek V4's tokenizer adds no start-of-sequence token to one); few-shot examples become turns",
+    )
     args = parser.parse_args()
 
     import lm_eval  # heavy (pulls datasets/evaluate); deferred so the module imports without it
 
     logger.info("Evaluating %s (%s) on %s [limit=%d] via %s", args.model, args.label, args.task, args.limit, args.base_url)
     results = lm_eval.simple_evaluate(
-        model="local-completions",
-        model_args=build_model_args(args.base_url, args.model),
+        model="local-chat-completions" if args.chat else "local-completions",
+        model_args=build_model_args(args.base_url, args.model, args.chat),
+        apply_chat_template=args.chat,
+        fewshot_as_multiturn=args.chat,
         tasks=[args.task],
         num_fewshot=args.num_fewshot,
         limit=args.limit,
