@@ -3308,7 +3308,12 @@ class _FlashOps(_MmaOps):
 
     def _query_slab(self, mn) -> list[Stmt]:
         """Fill the query's slab once, ahead of the chunk loop: it does not move with the chunk.
-        A cp.async copy the CTA waits on and barriers before the first score reads it."""
+
+        A cp.async copy. When the chunk loop stages its key through cp.async too, the query's group
+        is committed before the loop's first key prime, and cp.async groups complete in commit
+        order: the loop's own wait for that key, and the barrier after it, cover the query as well.
+        So the query's load flies under the first chunk's instead of ahead of it (two memory round
+        trips before the first score become one). Any other transport waits here."""
         m, _ = mn
         if m.mask:
             raise ValueError("the wgmma score stages a whole query tile (an overhanging query tile is not staged)")
@@ -3328,7 +3333,8 @@ class _FlashOps(_MmaOps):
         decl = slab_smem(
             query.slab, query.shape[0], query.shape[1], cuda_name(elem), align=_fill_align(query.shape[1], elem.nbytes, query.swizzle)
         )
-        return [decl, *fill, *cp_async_commit(), *cp_async_wait(0)]
+        loop_waits = self.stage is not None and self.stage.transport == "smem-async"
+        return [decl, *fill, *cp_async_commit(), *([] if loop_waits else cp_async_wait(0))]
 
     def _wgmma_score(self, m, cols: int, key, slot) -> list[Stmt]:
         """The chunk's score on the warp-group cell: both operands through descriptors — the query
