@@ -34,7 +34,7 @@ from emmy.compiler.pipeline.knob import (
 #: value never matters — ``spell`` is site-local and drops it — but a count > 1 is load-bearing:
 #: at ``units=(1, 1)`` the parsed ``coop`` collapses to 1 and ``spell`` drops the token entirely,
 #: silently reading ``g2k/coop`` as ``""``.
-_ANY_THREAD_WORK = Work(kind="thread", units=(1, 32))
+_ANY_THREAD_WORK = Work(kind="thread", units=(32, 1))
 
 #: Graph hint carrying the final greedy resolution's placement receipts. Placement is consumed by
 #: a graph splice before CUDA kernels exist, so this is the realized side of a PLACE pin check.

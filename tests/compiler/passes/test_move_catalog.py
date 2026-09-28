@@ -25,6 +25,7 @@ from emmy.compiler.ir.frontend.ir import MatmulOp
 from emmy.compiler.ir.schedule import Reduce, Tile, Work, derive_workers, resolve_site_tile
 from emmy.compiler.ir.schedule.catalog import MAX_BLOCK_THREADS as _MAX_BLOCK_THREADS
 from emmy.compiler.ir.schedule.catalog import coop_reduce_moves, scalar_tile_moves
+from emmy.compiler.ir.schedule.classic.schedule import packed_works
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
 from emmy.compiler.ir.tile import Placement, TileOp
 from emmy.compiler.pipeline import TILE_PASSES, Pipeline
@@ -205,10 +206,15 @@ def test_bare_reduce_forks_the_coop_catalog():
     # shared-row stage, static K, 32-divisible free grid), so the FULL catalog is offered —
     # bt/g-composites included. Rows that fail the gate (softmax/rms shapes) drop the band;
     # that arm is covered by the schedule tests, not this catalog assertion.
-    def site_of(plan: Reduce) -> tuple[str, str]:
-        return plan.spell(), (f"t{plan.coop}" if plan.coop > 1 else "")
+    # A warp-wide cooperative fold also rides its packed inventory: several cells in one CTA.
+    def sites_of(plan: Reduce) -> set[tuple[str, str]]:
+        works = {Work(kind="thread", units=(plan.coop, 1))} if plan.coop > 1 else {Work()}
+        if plan.coop > 1 and not plan.coop_transposed:
+            works |= packed_works(Work(kind="thread", units=(plan.coop, 1)))
+        return {(plan.spell(), work.spell()) for work in works}
 
-    assert set(offered) == {("", ""), *(site_of(p) for p in coop_reduce_moves())}, f"catalog rows missing: {offered}"
+    expected = {("", "")}.union(*(sites_of(p) for p in coop_reduce_moves()))
+    assert set(offered) == expected, f"catalog rows missing: {offered}"
 
 
 def _computed_b_term() -> TileOp:

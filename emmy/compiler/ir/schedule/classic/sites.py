@@ -42,6 +42,7 @@ from .schedule import (
     classic_node_key,
     classic_stage_key,
     output_sweep_works,
+    packed_works,
 )
 
 if TYPE_CHECKING:
@@ -312,6 +313,16 @@ class ClassicKernelSite(Site[ClassicSchedule]):
                 if work is not None:
                     yield work
 
+    def _packed(self) -> set[Work]:
+        # Several cells of a warp-wide cooperative reduce in one CTA (:func:`packed_works`).
+        return {
+            packed
+            for site in self.problem.node_sites
+            for choice in site.nodes
+            if isinstance(choice, ReductionSchedule) and choice.reduce.coop > 1 and not choice.reduce.coop_transposed
+            for packed in packed_works(Work(kind="thread", units=(choice.reduce.coop, 1)))
+        }
+
     def _sweep_widths(self) -> set[Work]:
         # A kernel whose work IS its output sweep — a bare elementwise map or a placement residual
         # whose reduction sites stay serial — otherwise has one worker per output cell with the
@@ -323,7 +334,7 @@ class ClassicKernelSite(Site[ClassicSchedule]):
 
     def _works(self) -> tuple[Work, ...]:
         def catalog() -> tuple[Work, ...]:
-            domain = {Work(), *self._inventories(), *self._sweep_widths()}
+            domain = {Work(), *self._inventories(), *self._sweep_widths(), *self._packed()}
             return tuple(
                 sorted(
                     {
@@ -339,7 +350,12 @@ class ClassicKernelSite(Site[ClassicSchedule]):
             if work.producer and (work.kind != "warp" or work.producer not in producer_band_moves()):
                 return False
             bare = Work(kind=work.kind, units=work.units)
-            return bare == Work() or bare in self._sweep_widths() or any(inventory == bare for inventory in self._inventories())
+            return (
+                bare == Work()
+                or bare in self._sweep_widths()
+                or bare in self._packed()
+                or any(inventory == bare for inventory in self._inventories())
+            )
 
         named = self.problem.row.get("WORK")
         if named is not None:
