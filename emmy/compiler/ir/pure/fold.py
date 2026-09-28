@@ -29,6 +29,7 @@ and kernel identity — the Loop IR the term lowers to — is the algebra alone.
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from functools import cached_property
 
@@ -147,6 +148,10 @@ class ReductionView:
 #: The name a matcher spells both sides' bound axis as, so an operand that CAPTURES it compares
 #: alpha-invariantly. Reserved: no kernel axis is spelled this way.
 _MATCH_AXIS = "_match_axis"
+
+#: Set while a kernel is formed on its own (a cut piece re-formed by ``tile/_row.reformed``): only
+#: there does a bilinear term with one loaded and one computed operand orient by the slab's layout.
+PIECE_FORMATION: ContextVar[bool] = ContextVar("PIECE_FORMATION", default=False)
 
 
 def _rebind(term: Fold, name: str) -> Fold:
@@ -341,6 +346,21 @@ class Fold:
                 rows = pair[0].free_axes ^ pair[1].free_axes if slabs else frozenset()
                 k_last.sort(key=lambda e: min(e.free_axes & rows, default=""))
                 a_edge = k_last[0] if len(pair) == 2 and k_last else None
+                # One slab and one computed operand, in a kernel formed on its own: a slab that reads k
+                # in an earlier position than its last is laid out ``B[k, n]``, so the computed
+                # operand is A. A GEMV whose input is a fused prologue (``silu(gate) * up`` into the
+                # down projection) otherwise took the weight as A, which no fragment loader reads down
+                # its k column, and lost every tensor-core tier. Only a formed kernel orients this way
+                # (:data:`PIECE_FORMATION`): the fused tree a route is spelled against keeps the order
+                # its former chose, so recorded routes keep their seam spellings.
+                loaded = [e for e in pair if e.as_slab() is not None]
+                if (
+                    PIECE_FORMATION.get()
+                    and len(pair) == 2
+                    and len(loaded) == 1
+                    and self.axis not in loaded[0].as_slab().load.index[-1].free_vars()
+                ):
+                    a_edge = next(e for e in pair if e is not loaded[0])
             if a_edge is not None and self.operands[0] is not a_edge:
                 reordered = (a_edge, *(edge for edge in self.operands if edge is not a_edge))
                 bound = tuple(param for edge in reordered for param, held, _ in self.bindings if held is edge)
