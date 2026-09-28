@@ -1122,6 +1122,51 @@ def test_a_rope_projection_cut_once_computes_the_right_answer() -> None:
     np.testing.assert_allclose(got, rope(q) + rope(k), rtol=2e-2, atol=2e-1)
 
 
+def _gqa_value_graph() -> Graph:
+    """``v = x @ w`` over two heads of eight, each head repeated for two query heads and contracted at the
+    flattened (head, head-dim) channel, as the output projection reads a GQA value."""
+    from emmy.commands.trace import graph_from_code
+
+    code = (
+        "(lambda x, w, y: torch.matmul(torch.matmul(x, w).view(1, 2, 8).repeat_interleave(2, 1).reshape(1, 32), y))"
+        "(torch.randn(1, 64, dtype=torch.float16), torch.randn(64, 16, dtype=torch.float16), torch.randn(32, 16, dtype=torch.float16))"
+    )
+    return graph_from_code(code)[0]
+
+
+def _gqa_value_cut():
+    graph = _gqa_value_graph()
+    (seam,) = [seam for seam in cuttable_seams(_lifted_parent(graph.copy())) if seam.node.as_contraction() is not None]
+    with pinned_knobs({seam.spelling: "cut"}):
+        lowered = Pipeline.build(LOOP_PASSES).run(graph, ctx=_CTX)
+        cut, _ = Run(pipeline=Pipeline.build(["tile/lift", "tile/cut"]), ctx=_CTX).resolve(lowered, lambda fork: fork.options[0])
+    return cut
+
+
+def test_a_gqa_value_read_at_its_flat_channel_is_stored_once_per_kv_head() -> None:
+    """The value's head is read as ``(i // 8) // 2`` beside its head-dim ``i % 8``: the piece stores 16
+    cells, not 32, and reads its weight at the plain column instead of through the repeat. The reader
+    loads it at ``(i // 16) * 8 + i % 8``."""
+    producer, _consumer = (node for node in _gqa_value_cut().nodes.values() if isinstance(node.op, TileOp))
+    assert [d.as_static() for d in producer.outputs[0].shape][-1] == 16
+    body = producer.op.op.lower(frozenset(), producer.op.output_specs, producer.op.axes)
+    (weight,) = [stmt for stmt in body.iter() if isinstance(stmt, Load) and stmt.input == "x1"]
+    assert "/" not in weight.index[-1].pretty() and "%" not in weight.index[-1].pretty()
+
+
+@requires_cuda
+def test_a_gqa_value_stored_once_per_kv_head_computes_the_right_answer() -> None:
+    graph = _gqa_value_graph()
+    (seam,) = [seam for seam in cuttable_seams(_lifted_parent(graph.copy())) if seam.node.as_contraction() is not None]
+    cut = _lower_cut(graph, seam.spelling)
+    rng = np.random.default_rng(0)
+    x, w, y = (rng.standard_normal(shape).astype(np.float16) for shape in ((1, 64), (64, 16), (32, 16)))
+    (out_name,) = cut.outputs
+    got = CudaBackend().run(cut, input_data=dict(zip(cut.inputs, (x, w, y), strict=True)))[0].outputs[out_name].astype(np.float32)
+    v = np.repeat((x.astype(np.float32) @ w.astype(np.float32)).reshape(1, 2, 8), 2, axis=1).reshape(1, 32)
+    np.testing.assert_allclose(got, v @ y.astype(np.float32), rtol=2e-2, atol=5e-1)
+
+
 def test_a_scalar_operand_is_no_seam() -> None:
     """A value uniform over the kernel — an sdpa scale beside its mask fills — offers no cut. The
     piece would be a kernel writing scalars to a workspace so its reader could read them back, and
