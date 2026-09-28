@@ -223,12 +223,14 @@ def split_forks(match: Match, root: Node, *, unsplit_tile: TileOp | None = None)
     key = Sched(tile).key("REDUCE", node) or "REDUCE"
     unsplit = DeferredFork(lambda: replace(unsplit_tile or tile, split_consumed=True), {key: ""})
     element = axis_of(key)
-    pin = kernel_pin("REDUCE", tile.name)
+    # A kernel pin names the piece by its token, which the node id carries where the tile has no
+    # name of its own; the schedule pass reads it the same way (``040_schedule.pin_row``).
+    pin = kernel_pin("REDUCE", tile.name, root.id)
     if pin is None:
         pin = REDUCE.narrow_at(element) if element else REDUCE.raw()
     tail = projection_tail(tile)
     if pin is not None:
-        work = kernel_pin("WORK", tile.name)
+        work = kernel_pin("WORK", tile.name, root.id)
         plan = Reduce.parse(pin, Work.parse(work if work is not None else WORK.raw()))
         if not plan.needs_split:
             return [unsplit]
