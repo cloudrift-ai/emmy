@@ -574,8 +574,8 @@ def test_serve_refuses_an_environment_pin_that_contradicts_the_golden_regime(mon
 
 def test_serving_runner_resolves_like_vllm(tmp_path):
     """The runner is vLLM's flag: explicit wins, a pooling convert pools, a Sentence Transformers
-    checkpoint pools even as a *ForCausalLM, the architecture suffix decides otherwise, and an
-    unknown checkpoint generates, which is vLLM's own last resort."""
+    checkpoint pools even as a *ForCausalLM, the architecture suffix decides otherwise, and a
+    checkpoint that cannot be read generates, which is vLLM's own last resort."""
     import json
 
     from emmy.commands.serve import serving_runner

@@ -183,6 +183,23 @@ def _local_config(model: str, vllm_args: list[str]):
         return None
 
 
+def _remote_config(model: str, vllm_args: list[str]):
+    """The same config fetched from the hub when the cache holds nothing: what vLLM itself reads
+    at boot to resolve its runner. ``None`` when the checkpoint cannot be reached."""
+    try:
+        from transformers import AutoConfig  # noqa: PLC0415
+
+        kwargs = {}
+        if _has_flag(vllm_args, "--trust-remote-code"):
+            kwargs["trust_remote_code"] = True
+        revision = _flag_value(vllm_args, "--revision", "")
+        if revision:
+            kwargs["revision"] = revision
+        return AutoConfig.from_pretrained(model, **kwargs)
+    except Exception:  # noqa: BLE001 — unreachable checkpoint: vLLM's own last resort applies
+        return None
+
+
 def _is_moe_model(model: str, vllm_args: list[str]) -> bool:
     """True when the checkpoint's config declares token-choice experts. Best-effort LOCAL config
     probe (:func:`_local_config`). The probe is UX only: the authoritative guard is in
@@ -337,30 +354,39 @@ def _gen_graph_args(vllm_args: list[str], *, model: str | None = None) -> list[s
     return ["--compilation-config", cfg] + backend_args
 
 
+def _sentence_transformers(model: str, revision: str | None) -> bool:
+    """Whether the checkpoint carries a Sentence Transformers ``modules.json``, which makes vLLM pool
+    it whatever its architecture says: a local directory is looked at, a hub id is read from the
+    cache and fetched when the cache holds nothing about it."""
+    if os.path.isdir(model):
+        return os.path.exists(os.path.join(model, "modules.json"))
+    try:
+        from huggingface_hub import hf_hub_download, try_to_load_from_cache  # noqa: PLC0415
+
+        cached = try_to_load_from_cache(model, "modules.json", revision=revision)
+        if cached is None:
+            hf_hub_download(model, "modules.json", revision=revision)
+            return True
+        return isinstance(cached, str)
+    except Exception:  # noqa: BLE001 — no such file, or no hub: the architecture decides
+        return False
+
+
 def serving_runner(model: str, vllm_args: list[str]) -> str:
     """vLLM's runner for this launch, ``generate`` or ``pooling``, resolved the way vLLM resolves
-    ``--runner auto``: an explicit ``--runner`` wins; a ``--convert`` to a pooling task means
-    pooling; a Sentence Transformers checkpoint (a ``modules.json`` beside the weights) pools even
-    when its architecture is a ``*ForCausalLM``; otherwise the architecture's suffix decides, and
-    an unknown one generates. Only the local cache is consulted, so command construction stays
-    hermetic; a checkpoint that is not cached generates unless ``--runner`` says otherwise."""
+    ``--runner auto`` at boot: an explicit ``--runner`` wins; a ``--convert`` to a pooling task
+    means pooling; a Sentence Transformers checkpoint pools even when its architecture is a
+    ``*ForCausalLM``; otherwise the architecture's suffix decides, and an unknown one generates.
+    The checkpoint is read from the local cache and fetched when it is not there, so a bare
+    ``emmy serve MODEL`` needs no flag; a checkpoint that cannot be reached generates."""
     runner = _flag_value(vllm_args, "--runner", "auto")
     if runner != "auto":
         return runner
     if _flag_value(vllm_args, "--convert", "auto") not in ("auto", "none"):
         return "pooling"
-    try:
-        from huggingface_hub import try_to_load_from_cache  # noqa: PLC0415
-
-        revision = _flag_value(vllm_args, "--revision", "") or None
-        if os.path.isdir(model):
-            if os.path.exists(os.path.join(model, "modules.json")):
-                return "pooling"
-        elif isinstance(try_to_load_from_cache(model, "modules.json", revision=revision), str):
-            return "pooling"
-    except Exception:  # noqa: BLE001 — no hub cache: the architecture decides
-        pass
-    cfg = _local_config(model, vllm_args)
+    if _sentence_transformers(model, _flag_value(vllm_args, "--revision", "") or None):
+        return "pooling"
+    cfg = _local_config(model, vllm_args) or _remote_config(model, vllm_args)
     for arch in getattr(cfg, "architectures", None) or []:
         if arch.endswith(("ForCausalLM", "ForConditionalGeneration", "LMHeadModel")):
             return "generate"

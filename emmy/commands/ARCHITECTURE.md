@@ -560,7 +560,9 @@ See the [native serving contract](../serving/native/ARCHITECTURE.md) for support
 
 
 Serves an embedding model (or a generative chat model via `EmmyGenModel` with `--runner generate`, in
-fp16) through vLLM with the emmy plugin flags baked in (`serving/` plugin; needs the `serving` extra). Unrecognized flags forward to `vllm serve`; tokens after a literal `--` forward verbatim (emmy's
+fp16) through vLLM with the emmy plugin flags baked in (`serving/` plugin; needs the `serving` extra). Without `--runner` the
+runner is resolved the way vLLM resolves `--runner auto`, from the checkpoint's config and a Sentence Transformers
+`modules.json`, cached or fetched, so a bare `emmy serve MODEL` needs no flag. Unrecognized flags forward to `vllm serve`; tokens after a literal `--` forward verbatim (emmy's
 own flags are otherwise extracted wherever they appear — argparse REMAINDER swallows everything after MODEL, so the
 handler re-parses it; see `commands/serve.py::_split_own_flags`). `--max-model-len 4096` (the dynamic-dim cap) is
 applied for both engines unless overridden, so `--stock` is an apples-to-apples baseline. **`--revision` forwards to
