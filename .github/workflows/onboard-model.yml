@@ -270,7 +270,7 @@ jobs:
             # first), then maintained recipes (oldest report first).
             pick --filter 'lifecycle == "onboarding"' --filter 'heat >= 70' \
                 --filter 'tags not contains "onboarding-failed"' --sort 'heat desc' \
-              || pick --filter 'lifecycle in ["maintained", "best-effort"]' --filter 'heat >= 70' \
+              || pick --filter 'lifecycle in ["maintained", "best-effort"]' --filter 'runnable == true' --filter 'heat >= 70' \
                 --filter 'emmy_serving == false' --filter 'tags not contains "onboarding-failed"' --sort 'heat desc' \
               || pick --filter 'lifecycle == "onboarding"' --filter 'tags not contains "onboarding-failed"' \
                 --sort 'heat desc' \

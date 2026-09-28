@@ -283,6 +283,7 @@ emmy recipe query \
 # Select a hot runnable recipe that has no Emmy serving variant yet.
 emmy recipe query \
   --filter 'lifecycle in ["maintained", "best-effort"]' \
+  --filter 'runnable == true' \
   --filter 'heat >= 70' \
   --filter 'emmy_serving == false' \
   --sort 'heat desc' \

@@ -237,7 +237,8 @@ def _failure_artifacts(summary: dict, workspace: Path, model_id: str) -> list[Pa
     invalid = [
         path
         for path in artifacts
-        if path.parts[0] in {"experiments", "docker"} or (path.parts[0] == "recipes" and path.parts[1] != report.parts[1])
+        if path.parts[0] in {"experiments", "docker"}
+        or (path.parts[0] == "recipes" and (path.parts[1] != report.parts[1] or not (workspace / path).is_file()))
     ]
     invalid += _invalid_result_artifacts(workspace, artifacts)
     if invalid:
@@ -272,6 +273,11 @@ def validate_summary(
     if cleanup.get("workloads") != "complete" or cleanup.get("docker_logout") is not True:
         raise ValueError(f"Remote workload or Docker credential cleanup is incomplete: {cleanup}")
     if status == "failed":
+        failure = summary.get("failure")
+        if not isinstance(failure, dict) or not isinstance(failure.get("regression"), bool):
+            raise ValueError(f"A failed summary needs a failure object with a boolean regression: {failure!r}")
+        _summary_text(failure, "gate")
+        _summary_text(failure, "message")
         return summary, _failure_artifacts(summary, workspace, model_id)
     _summary_text(summary, "deployment_summary")
     _summary_text(summary, "performance_summary")

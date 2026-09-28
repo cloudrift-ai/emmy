@@ -489,7 +489,7 @@ def _failure_summary(tmp_path, artifacts):
                 "mode": "onboarding",
                 "model_id": "org/Model",
                 "target": {"gpu": "NVIDIA H200 141GB", "gpu_count": 1, "ssh": "user@host"},
-                "failure": {"gate": "engine-support", "message": "No engine loads the checkpoint."},
+                "failure": {"gate": "engine-support", "message": "No engine loads the checkpoint.", "regression": False},
                 "report": "recipes/Model/RESULTS.md",
                 "artifacts": artifacts,
                 "cleanup": {"workloads": "complete", "docker_logout": True},
@@ -522,6 +522,41 @@ def test_failed_run_changes_only_the_failure_tag(tmp_path, tags):
 
     with pytest.raises(ValueError, match="add only the 'onboarding-failed' tag"):
         _failure_summary(tmp_path, [])
+
+
+def test_failed_run_rejects_a_deleted_golden(tmp_path):
+    golden = tmp_path / "recipes/Model/golden/h200_90.json"
+    golden.parent.mkdir(parents=True)
+    golden.write_text("{}\n")
+    _failed_run(tmp_path)
+    golden.unlink()
+
+    with pytest.raises(ValueError, match="only its report, golden, and compiler work"):
+        _failure_summary(tmp_path, ["recipes/Model/golden/h200_90.json"])
+
+
+def test_failed_run_requires_a_failure_object(tmp_path):
+    _failed_run(tmp_path)
+    summary_path = tmp_path / "summary.json"
+    summary_path.write_text(
+        json.dumps(
+            {
+                "status": "failed",
+                "mode": "onboarding",
+                "model_id": "org/Model",
+                "target": {"gpu": "NVIDIA H200 141GB", "gpu_count": 1, "ssh": "user@host"},
+                "failure": None,
+                "report": "recipes/Model/RESULTS.md",
+                "artifacts": [],
+                "cleanup": {"workloads": "complete", "docker_logout": True},
+            }
+        )
+    )
+
+    with pytest.raises(ValueError, match="failure object"):
+        onboarding_artifacts.validate_summary(
+            summary_path, tmp_path, "org/Model", "NVIDIA H200 141GB", 1, "user@host", "onboarding", "best-effort"
+        )
 
 
 def test_failed_run_rejects_serving_artifacts(tmp_path):
