@@ -110,13 +110,17 @@ class RenderCtx:
     # new C scope inherits the enclosing scope's decls but its own additions do
     # not leak back to the parent or across to siblings).
     scope_decls: set[str] = field(default_factory=set)
+    # The loop counters in scope whose every value is a multiple of a known stride — a static
+    # ``StridedLoop`` start and step — so an index built from one is provably aligned
+    # (``kernel.ir._multiple_of``). Scope-local like ``scope_decls``.
+    aligned: dict[str, int] = field(default_factory=dict)
 
     def child(self) -> RenderCtx:
         """Return a new ctx one indent level deeper. The mutable tables (``shapes``,
         ``ssa_dtypes``, …) stay shared by reference (SSA names are globally unique);
         ``scope_decls`` is COPIED — it tracks per-C-scope local declarations, which an
         inner scope inherits but must not leak back out of."""
-        return replace(self, indent=self.indent + 1, scope_decls=set(self.scope_decls))
+        return replace(self, indent=self.indent + 1, scope_decls=set(self.scope_decls), aligned=dict(self.aligned))
 
     # ---- Convenience wrappers over ``self.target``. These exist so the
     # render methods read ``ctx.type_name(dt)`` instead of pulling the

@@ -54,3 +54,18 @@ def test_a_base_the_reading_cannot_prove_keeps_the_whole_index() -> None:
 
     ring = BinaryExpr("+", BinaryExpr("*", slot, Literal(64, "int")), Literal(16, "int"))
     assert swizzled_slab_index("B128@7", 128, "L", ring, col, ctx, lane_rows=16, lane_col_mod=16) is not None
+
+
+def test_a_stepped_loop_counter_splits_when_its_stride_is_known() -> None:
+    """An unrolled K step (``for (_ki = 0; _ki < 64; _ki += 16)``) is the drain's column: a ``StridedLoop``
+    publishes the counter's stride to its body's render context, and only then does the split apply."""
+    swz = _swz("B128")
+    ki = Var("_ki")
+    assert swizzled_slab_index("B128", 64, "L", Literal(0, "int"), ki, RenderCtx(), lane_rows=16, lane_col_mod=16) is None
+    ctx = RenderCtx(aligned={"_ki": 16})
+    split = swizzled_slab_index("B128", 64, "L", Literal(32, "int"), ki, ctx, lane_rows=16, lane_col_mod=16)
+    assert split is not None
+    for value in range(0, 64, 16):
+        for lane in (row * 64 + col for row in range(16) for col in (0, 8)):
+            assert eval(split, {"L": lane, "_ki": value, swizzle_fn("B128"): swz}) == swz(32 * 64 + value + lane)
+    assert swizzled_slab_index("B128", 64, "L", Literal(0, "int"), ki, RenderCtx(aligned={"_ki": 8}), lane_rows=16, lane_col_mod=16) is None
