@@ -689,6 +689,18 @@ pairable because their per-lane address XOR commutes with the paired lane map;
 cooperative / shared-row templates emit (body-level only — a slab `Smem` decl flags `smem_seen`, so a load-bearing
 prologue `Sync` is correctly retained; `with_bodies` preserves the cooperative tile's `block_threads`).
 
+`045_merge_select_loads` and `047_reuse_lane_loads` keep a cooperative row's reads to one per cell. A concatenation
+lowers to a coordinate `Select` whose branches read the same buffers at different offsets, each clamped in range; when
+the two branches' private chains are one computation up to their load indices (and at most one unary op on top of one
+branch — RoPE's rotate-half negation), `045` emits the chain once with each load at `cond ? index_a : index_b`, the
+branches' own clamps folded against `cond`. `047` then unrolls every lane-strided loop of at most eight trips (a
+cooperative reduce's fold and its full-row projection: a 128-wide row at 32 lanes is four) and drops each load of a
+read-only buffer at an index an earlier load of the same body already read, compared after folding against the lane
+ranges. The projection reads the values the fold loaded, and a partner read resolves to another trip of the same lane.
+Both are structural and carry no knob: they change no schedule and no identity, only the emitted body. Every kernel
+buffer parameter is `__restrict__` (a launch's output never shares memory with its inputs), which lets nvcc keep
+read-only operands in registers across the kernel's stores and read them through the non-coherent path.
+
 `090_guard_reductions` propagates coordinate demand backward through pure scalar expressions and selects. A scalar
 reduction whose result is read only under an enclosing-coordinate predicate becomes a zero-trip loop elsewhere.
 Its identity seed stays outside the loop. Stores, synchronization, warp operations and predicates depending on values
