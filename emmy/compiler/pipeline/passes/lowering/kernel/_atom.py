@@ -99,8 +99,13 @@ from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     SyncOperand,
     SyncTransport,
     TmaTransport,
+    _fill_align,
+    cp_async_commit,
+    cp_async_fill,
+    cp_async_wait,
     pick_swizzle_atom,
     pipelined_kloop,
+    slab_smem,
     software_swizzle,
     staged_kloop,
     stat_rows,
@@ -859,6 +864,9 @@ def _slab_operands(
         if i not in roles:
             continue
         tile, tile_base, sibling = mn[i], base[i], mn[1 - i]
+        # An operand streamed along its sibling's own axis (the chunk tier's query, whose rows ARE the
+        # slab's streamed axis) has no residual sibling reference to bind: that axis is the k map's.
+        sibling = None if sibling.axis.name == k_axis.name else sibling
         # A slab whose tile axis is not its row (B, or the chunk tier's key under ``rows``) stacks its
         # 128-byte swizzle atoms along the rows when a descriptor reads it (:attr:`Operand.atoms`).
         atoms = b_atoms if not is_row else 1
@@ -2855,7 +2863,7 @@ class _FlashOps(_MmaOps):
             "the chunk tier reads the score's prefix leaves once, ahead of the chunk loop"
         )
         pre = [stmt for edge in leaves for stmt in edge.lower(axes=self.axes)]
-        pre += self._query(offset, mn)
+        pre += self._query_slab(mn) if self._score_atom.is_wgmma else self._query(offset, mn)
         # A coordinate mask makes every chunk outside this CTA's rows pure identity work, and the
         # loop skips it: it stops at a causal diagonal (``k_end``) and starts at a band's near edge
         # (``k_first``), which gives a causal stream half its work back and a banded one its band.
@@ -3201,13 +3209,66 @@ class _FlashOps(_MmaOps):
 
         return [*decls, *(stmt for t in range(self._score_steps()) for stmt in at_step(t))]
 
+    def _query_operand(self, mn) -> Operand:
+        """The query's shared-memory slab for a warp-group score, read through a descriptor.
+
+        It is K-major like any wgmma A: the CTA's query rows are its rows, the head dim its columns.
+        A descriptor's K step stays inside one 128-byte swizzle atom, so a head wider than one atom
+        stacks its atoms along the rows (``Operand.atoms``) — the key slab's stacking, with the query
+        row where the key's chunk row is. Built through the one slab factory with the query row as
+        its streamed axis, so the fill's gmem map is the ordinary one."""
+        m, _ = mn
+        elem = self._score_atom.operand_dtype("a")
+        load = next(edge for edge in self.inner[0].operands if m.axis.name in edge.free_axes).as_slab().load
+        span_axis = self._score_k
+        span = span_axis.extent.as_static()
+        atoms = max(1, span * elem.nbytes // 128)
+        side = Side(axis=span_axis, tile=span, units=1, reg=1, block=span_axis.name + "_b", unit=span_axis.name + "_u")
+        (query,) = _slab_operands(
+            index_srcs=(None, load.index),
+            bufs=(None, load.input),
+            mn=(m, side),
+            k_axis=m.axis,
+            bk_elems=m.tile,
+            base=(Literal(0, "int"), Literal(0, "int")),
+            b_atoms=atoms,
+            swizzles=("NONE", self.slab_swizzle(span // atoms, elem.nbytes)),
+            elems=(None, elem),
+            roles=(1,),
+        )
+        return replace(query, tag="q")
+
+    def _query_slab(self, mn) -> list[Stmt]:
+        """Fill the query's slab once, ahead of the chunk loop: it does not move with the chunk.
+        A cp.async copy the CTA waits on and barriers before the first score reads it."""
+        m, _ = mn
+        if m.mask:
+            raise ValueError("the wgmma score stages a whole query tile (an overhanging query tile is not staged)")
+        query = self._query_operand(mn)
+        elem = self._score_atom.operand_dtype("a")
+        cta = _cta(mn, self.tile.atom.lanes, self.tile.launch_threads)
+        fill = cp_async_fill(
+            slab=query.slab,
+            shape=query.shape,
+            src=query.buf,
+            gmem_index=query.index(_tile_base(mn)[0]),
+            cta=cta,
+            elem_bytes=elem.nbytes,
+            name=query.tag,
+            swizzle=query.swizzle,
+        )
+        decl = slab_smem(
+            query.slab, query.shape[0], query.shape[1], cuda_name(elem), align=_fill_align(query.shape[1], elem.nbytes, query.swizzle)
+        )
+        return [decl, *fill, *cp_async_commit(), *cp_async_wait(0)]
+
     def _wgmma_score(self, m, cols: int, key, slot) -> list[Stmt]:
-        """The chunk's score on the warp-group cell: the query's hoisted ``m16n8k16`` A fragments are
-        the register-form A, and one ``wgmma.mma_async`` per score step reads the staged key through
-        a descriptor — the key slab is K-major (the chunk's keys are its rows, the score's
-        contraction its columns), the GEMM drain's transposed-B geometry (:func:`_wgmma_drain`). The
-        score's C fragments are fresh each chunk; a fence opens the steps and a commit and a wait close
-        them before the softmax reads them."""
+        """The chunk's score on the warp-group cell: both operands through descriptors — the query
+        off its slab staged once ahead of the loop (:meth:`_query_slab`), the key off its ring slot;
+        the key slab is K-major (the chunk's keys are its rows, the score's contraction its
+        columns), the GEMM drain's transposed-B geometry (:func:`_wgmma_drain`). The score's C
+        fragments are fresh each chunk; a fence opens the steps and a commit and a wait close them
+        before the softmax reads them."""
         atom = self._score_atom
         cells = atom.cells_per_instruction
         elem_bytes = atom.operand_dtype("b").nbytes
@@ -3217,10 +3278,27 @@ class _FlashOps(_MmaOps):
             raise ValueError("the wgmma score reads a key stored one 128-byte swizzle atom per slab row")
         row_cols = key.shape[1] + key.pad_cols
         chunk = key.shape[0] // key.atoms  # the chunk's keys: one atom's rows
+        query = self._query_operand((m, None))
+        q_rows = query.shape[0] // query.atoms  # the CTA's query rows: one atom's rows
+        # Each warp group reads its own 64 query rows of the tile.
+        grp_row = BinaryExpr("*", BinaryExpr("/", Var(m.unit), Literal(4, "int")), Literal(64, "int"))
         out: list[Stmt] = [self._frag(f"_s0_{j}", "c", atom) for j in range(cols)]
         out.append(WgmmaFence())
         for t in range(self._score_steps()):
             k0 = t * atom.atom_k
+            q_row = BinaryExpr("+", Literal(k0 // row_cols * q_rows, "int"), grp_row)
+            q_index = BinaryExpr("+", BinaryExpr("*", q_row, Literal(row_cols, "int")), Literal(k0 % row_cols, "int"))
+            q_desc = self.frag(f"_dq{t}")
+            out.append(
+                WgmmaDescriptor(
+                    name=q_desc,
+                    smem=query.slab,
+                    smem_index=q_index,
+                    swizzle=query.swizzle,
+                    lbo_bytes=16,
+                    sbo_bytes=8 * row_cols * elem_bytes,
+                )
+            )
             for jg in range(cols // cells):
                 # The step's K lies in atom ``k0 // row_cols``, stacked ``chunk`` rows per atom down.
                 nbase = Literal(k0 // row_cols * chunk + jg * cells * atom.atom_n, "int")
@@ -3236,7 +3314,7 @@ class _FlashOps(_MmaOps):
                 out.append(
                     WgmmaMma(
                         c_frags=tuple(self.frag(f"_s0_{j}") for j in range(jg * cells, (jg + 1) * cells)),
-                        a_frag=self.frag(f"_qa0_{t}"),
+                        a_desc=q_desc,
                         b_desc=desc,
                         shape=atom.ptx_shape,
                         ab_dtype=atom.ab_dtype,
