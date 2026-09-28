@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from functools import singledispatch
 
 from emmy.compiler.ir.axis import Axis, extend_simplify_ctx
@@ -99,11 +100,10 @@ def rewrite(stmt: Stmt, rename: Rename, sigma: Sigma = Sigma.IDENTITY, axis_fn: 
 
 @_rewrite_kind.register
 def _(s: Load, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
-    return Load(
+    return replace(
+        s,
         names=tuple(rename(n) for n in s.names),
-        input=s.input,
         index=tuple(_rename_ssa_vars_in_expr(sigma.apply(e), rename) for e in s.index),
-        dtype=s.dtype,
     )
 
 
@@ -280,7 +280,7 @@ def simplify(stmt: Stmt, ctx: SimplifyCtx) -> Stmt:
 
 @simplify.register
 def _(s: Load, ctx: SimplifyCtx) -> Stmt:
-    return Load(names=s.names, input=s.input, index=tuple(e.simplify(ctx) for e in s.index), dtype=s.dtype)
+    return replace(s, index=tuple(e.simplify(ctx) for e in s.index))
 
 
 @simplify.register
