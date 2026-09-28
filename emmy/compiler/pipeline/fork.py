@@ -239,7 +239,9 @@ class _ScheduleFork(Fork):
             else:
                 continue
             have = str(value)
-            if have and want != have and not want.startswith((have + "/", have + "+")):
+            # A cooperative reduce's ``t<coop>`` grows to the packed ``t<coop>x<cells>`` at the kernel site.
+            grows = (have + "/", have + "+", have + "x") if family == "WORK" and "x" not in have else (have + "/", have + "+")
+            if have and want != have and not want.startswith(grows):
                 return False
         return True
 

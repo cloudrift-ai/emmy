@@ -106,6 +106,13 @@ hand one thread 2, 3, 4 or 8 contiguous inner-axis elements, each offered when i
 is not the scalar-contraction ladder, which stops at 4 because a contraction's strip also carries accumulators; a map
 holds none, and sharing the ladder once dropped the 8-wide strip a recorded QK-norm row deploys.
 
+A cooperative reduce's inventory is `t<coop>`: one CTA of `coop` threads per output cell. Where `coop` is at most a
+warp, the combine is a lane butterfly that stays inside the cell's lanes, so the kernel site also offers the packed
+inventory `t<coop>x<cells>` (`packed_works`), a 128-thread CTA holding several cells; the flat thread decode already
+hands consecutive cells to consecutive lane groups. `REDUCE=coop` reads its width off the inventory's first unit.
+Packing needs every operand read straight from gmem: a staged row is one CTA-wide slab per cell. A node prefix spells
+`t<coop>` and the packed leaf grows it at an `x` boundary, which `Fork.admits` accepts for `WORK`.
+
 Classic domain projection, move catalogs, packed-operand readings, staging resolution, materialization, and
 compatibility all live in `ir/schedule`. The sites are the only source of choices; pipeline search neither defines
 nor filters them. `ir/schedule` may import other IR modules but never the pipeline layer. The pipeline retains only

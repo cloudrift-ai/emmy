@@ -134,6 +134,23 @@ def binds_root(choice: ProjectionSchedule | ReductionSchedule) -> bool:
     return choice.tile.is_tiled or (isinstance(choice, ReductionSchedule) and (choice.reduce.coop > 1 or choice.reduce.reg > 1))
 
 
+#: Threads in a CTA that packs cells of a warp-wide cooperative reduce (``WORK=t<coop>x<cells>``).
+PACKED_CTA_THREADS = 128
+
+
+def packed_works(work: Work | None) -> frozenset[Work]:
+    """The inventory that packs several cells of a cooperative reduce into one CTA.
+
+    A cooperative reduce launches one CTA per output cell, ``coop`` threads each. When ``coop`` is
+    at most a warp, its combine is a lane butterfly that never leaves the cell's lanes, so the
+    launch can stack cells in one CTA (``t<coop>x<cells>``, ``PACKED_CTA_THREADS`` threads): the
+    flat thread decode already hands consecutive cells to consecutive lane groups. At a 128-wide
+    row the one-cell CTA is 32 or 64 threads, and the launch pays per CTA."""
+    if work is None or work.kind != "thread" or work.units[1] != 1 or not 1 < work.units[0] <= 32:
+        return frozenset()
+    return frozenset({Work(kind="thread", units=(work.units[0], PACKED_CTA_THREADS // work.units[0]))})
+
+
 def output_sweep_works(tile_op, claimed_work: Work | None) -> frozenset[Work]:
     """The ``WORK`` values that may stripe every output sweep of a kernel whose nodes stay serial.
 
