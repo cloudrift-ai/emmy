@@ -424,6 +424,34 @@ def test_chunk_tier_folds_the_carrier_on_tensor_cores(keys):
     assert _max_diff(backend, compiled, feed, _sdpa_ref(cuda)) < 1e-2
 
 
+class _SeqMajorQuery(torch.nn.Module):
+    """The query arrives [batch, seq, head, dim], as a projection writes it: its rows stride over
+    every head, not one head dim."""
+
+    def forward(self, q, k, v):
+        return torch.nn.functional.scaled_dot_product_attention(q.transpose(1, 2), k, v)
+
+
+@requires_cuda
+@requires_sm(8)
+def test_chunk_tier_reads_a_query_whose_rows_stride_over_every_head():
+    """The hoisted query fragments take the row stride off the address. Read at the head dim, a
+    fragment's rows came from the wrong queries: the Qwen3-0.6B s512 flash piece disagreed with
+    eager on 487k of 524k outputs."""
+    torch.manual_seed(0)
+    q = torch.randn(1, 64, 2, 64, dtype=torch.float16)
+    k, v = (torch.randn(1, 2, 128, 64, dtype=torch.float16) for _ in range(2))
+    feed = {"q": q.numpy(), "k": k.numpy(), "v": v.numpy()}
+    cuda = {name: torch.from_numpy(array).cuda() for name, array in feed.items()}
+    backend, compiled = _chunk_kernel(_SeqMajorQuery(), (q, k, v))
+
+    def ref():
+        with torch.no_grad():
+            return F.scaled_dot_product_attention(cuda["q"].transpose(1, 2), cuda["k"], cuda["v"]).cpu().flatten().numpy()
+
+    assert _max_diff(backend, compiled, feed, ref) < 1e-2
+
+
 @requires_cuda
 @requires_sm(8)
 def test_chunk_tier_takes_a_symbolic_key_extent():

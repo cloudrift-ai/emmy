@@ -31,11 +31,14 @@ def test_native_dry_run(caplog):
         "--strict-evidence",
         "--port",
         "8123",
+        "--prefill-size",
+        "16",
     )
     with caplog.at_level("INFO"):
         launch(args, forwarded)
     assert "revision=pinned" in caplog.text
     assert "strict=True" in caplog.text
+    assert "prefill_size=16" in caplog.text
     assert "emmy-server" in caplog.text
     assert "--max-model-len 4096" in caplog.text
     assert "--port 8123" in caplog.text
@@ -78,3 +81,9 @@ def test_native_page_size_divides_the_context(caplog):
     args, forwarded = arguments("--native", "--runner", "generate", "--dry-run", "--native-pack", "/tmp/prepared", "--page-tokens", "16")
     with pytest.raises(ValueError):
         launch(args, forwarded)
+
+
+@pytest.mark.parametrize("flags", [["--prefill-size", "0"], ["--prefill-size", "4097"], ["--prefill-size", "16", "--native-pack", "pack"]])
+def test_prefill_size_requires_preparation(flags):
+    with pytest.raises(ValueError, match="prefill size"):
+        options(flags)

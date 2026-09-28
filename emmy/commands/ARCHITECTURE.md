@@ -895,6 +895,7 @@ no Git operation.
 supervised Rust generation loop. These modes are mutually exclusive. The command layer owns argument parsing and
 tokenizer I/O; model preparation and binary worker transport live in `serving/native`. Native execution accepts
 `--temperature`, `--top-p`, and `--seed`; temperature zero is greedy, and nonzero `--top-k` is rejected.
-`--timeout` controls the native worker operation deadline, including the complete sequential prefill/decode loop.
-HTTP serving remains on the existing vLLM path. Generation artifacts prepared before sampling support must be
-exported again.
+`--prefill-size` selects the exported chunk width (default 16; one selects sequential prefill) and requires preparation.
+`--timeout` controls the native worker operation deadline, including the complete prefill/decode loop.
+Native HTTP serving is opt-in through `serve --generate --native`; vLLM remains the default. Generation artifacts
+from before the chunked prefill contract must be exported again.

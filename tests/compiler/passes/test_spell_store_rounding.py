@@ -212,3 +212,19 @@ def test_public_computation_from_private_reduction_stays_full_width() -> None:
     fused = Pipeline.build(["loop/lifting", "loop/fusion"]).run(_private_reduction_graph(public_copy=False))
     kernel = next(node.op for node in fused.nodes.values() if isinstance(node.op, LoopOp))
     assert _conversions(kernel) == []
+
+
+def test_a_reshaped_matmul_result_keeps_its_rounding_into_the_next_matmul() -> None:
+    """``(x @ w).reshape(...) @ v`` in f16: composing the reshape into the second matmul's operand map
+    deletes the public f16 result, so the first matmul's transient reduce becomes its only storage.
+    That buffer's rounding is the source program's, and the fused kernel keeps it."""
+    from emmy.commands.trace import graph_from_code
+    from emmy.compiler.pipeline import LOOP_PASSES
+
+    code = (
+        "torch.matmul(torch.matmul(torch.randn(8, 16, dtype=torch.float16), torch.randn(16, 32, dtype=torch.float16))"
+        ".reshape(16, 16), torch.randn(16, 8, dtype=torch.float16))"
+    )
+    lowered = Pipeline.build(LOOP_PASSES).run(graph_from_code(code)[0], ctx=Context.from_target((12, 0)))
+    (kernel,) = [node.op for node in lowered.nodes.values() if isinstance(node.op, LoopOp)]
+    assert F16 in _conversions(kernel)

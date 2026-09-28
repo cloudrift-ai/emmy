@@ -29,7 +29,7 @@ rather than a sequence of them.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from math import gcd
 
 from emmy.compiler.dtype import F32
@@ -37,7 +37,8 @@ from emmy.compiler.dtype import get as get_dtype
 from emmy.compiler.graph import Graph, Node
 from emmy.compiler.ir.axis import Axis, Dim
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expr import BinaryExpr, Interval, Literal, SimplifyCtx, Var
+from emmy.compiler.ir.elementwise import ElementwiseImpl
+from emmy.compiler.ir.expr import BinaryExpr, Expr, Interval, Literal, SimplifyCtx, Var
 from emmy.compiler.ir.pure.fold import (
     Fold,
 )
@@ -195,7 +196,9 @@ def _fed_store_dtype(tile: TileOp, consumer: Fold):
     return fed.pop() if len(fed) == 1 else None
 
 
-def _workspace_dtypes(node: Fold, tile: TileOp, consumer: Fold | None, table: dict[int, tuple]) -> tuple | None:
+def _workspace_dtypes(
+    node: Fold, tile: TileOp, consumer: Fold | None, table: dict[int, tuple], readers: dict[str, object] | None = None
+) -> tuple | None:
     """The cut workspace's per-component dtypes, or ``None`` when they cannot be determined.
     Reduction carrier precision is a Kernel IR policy — every Fold state is f32 until lowering
     stamps the concrete Accum/Init pair; a zero-axis value has no carrier and is inferred from its
@@ -205,16 +208,35 @@ def _workspace_dtypes(node: Fold, tile: TileOp, consumer: Fold | None, table: di
     carrier its cone computed in (only the ``a`` edge has a converting fill, so an f32 workspace on
     a ``b`` edge could feed no warp atom). That exception is a ZERO-AXIS cone's; a REDUCING operand
     would have been no slab fused either, so it keeps the f32 carrier (:func:`cuttable_seams` names
-    which edges the exception reaches). A seam whose dtypes stay undetermined is not offered: the
+    which edges the exception reaches). A reducing component every reader only converts to one
+    narrower dtype (``readers``, :func:`_narrowed_reads`) stores that dtype: the conversion happens
+    once in the piece instead of in every reader, the value is the same, and a 16-bit workspace is
+    one a warp atom's copy transports can stage. A seam whose dtypes stay undetermined is not offered: the
     offer and the realization must agree, and a raise past the offer would kill the compile."""
     names = node.exposes
     if consumer is not None:
         dtype = _fed_store_dtype(tile, consumer)
         return None if dtype is None else (dtype,) * len(names)
-    dtypes = (F32,) * len(names) if node.axis is not None else table.get(id(node), ())
+    dtypes = tuple((readers or {}).get(name, F32) for name in names) if node.axis is not None else table.get(id(node), ())
     if len(dtypes) != len(names) or any(dtype is None for dtype in dtypes):
         return None
     return dtypes
+
+
+def _narrowed_reads(tile: TileOp) -> dict[str, object]:
+    """Each stored value whose every read is a conversion to one narrower dtype, mapped to that dtype.
+    A reduce's result is an f32 accumulator; the rounding its source program performed reads it back
+    through such a conversion (``loop/lifting/090_spell_store_rounding``)."""
+    casts: dict[str, set] = {}
+    for site in sites(tile.op):
+        for stmt in site.node.lift.body.iter():
+            narrowing = isinstance(stmt, Assign) and stmt.op == ElementwiseImpl("copy") and stmt.dtype is not None and len(stmt.args) == 1
+            for name in Body((stmt,)).ssa_uses:
+                casts.setdefault(name, set()).add(stmt.dtype if narrowing and stmt.dtype.nbytes < 4 else None)
+    for store in tile.output_specs:
+        for name in store.write.values:
+            casts.setdefault(name, set()).add(None)
+    return {name: dtype for name, found in casts.items() if len(found) == 1 and (dtype := next(iter(found))) is not None}
 
 
 def _dtype_table(tile: TileOp) -> dict[int, tuple]:
@@ -294,6 +316,7 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
     dtype_table: dict[int, tuple] = {}
     if isinstance(tile.op, Fold):
         dtype_table = _dtype_table(tile)
+    narrowed = _narrowed_reads(tile)
     taken = _kept_components(tile)
     out: list[CutSite] = []
     seen: set[int] = set()
@@ -336,7 +359,7 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
         if owned is not None:
             dtypes = ()  # the piece writes the kernel's own outputs; there is no workspace to type
         else:
-            dtypes = (frontier.dtype,) if frontier is not None else _workspace_dtypes(node, tile, consumer, dtype_table)
+            dtypes = (frontier.dtype,) if frontier is not None else _workspace_dtypes(node, tile, consumer, dtype_table, narrowed)
             if dtypes is None:
                 continue
         seen.add(id(node))
@@ -435,7 +458,41 @@ def _pruned(body: Body, roots: frozenset[str]) -> Body:
     return Body(tuple(reversed(kept)))
 
 
-def _value_forms(seam: CutSite, axes: tuple) -> tuple:
+def _children(expr) -> tuple:
+    values = (getattr(expr, f.name) for f in fields(expr))
+    return tuple(child for v in values for child in (v if isinstance(v, (tuple, list)) else (v,)) if isinstance(child, Expr))
+
+
+def _coordinate_reads(body: Body, names: tuple[str, ...]) -> dict[str, Expr]:
+    """For each coordinate the cone reads through ONE expression of that coordinate alone, other
+    than the coordinate itself, that expression — the index a rotate-half read computes its column
+    by. A coordinate read two ways, or plainly, reads no expression."""
+
+    found: dict[str, set] = {name: set() for name in names}
+
+    def visit(expr) -> None:
+        own = expr.free_vars()
+        if len(own) == 1 and (name := next(iter(own))) in found:
+            found[name].add(expr)
+            return
+        for child in _children(expr):
+            visit(child)
+
+    for stmt in body.iter():
+        for expr in stmt.exprs():
+            visit(expr)
+    return {name: next(iter(exprs)) for name, exprs in found.items() if len(exprs) == 1 and exprs != {Var(name)}}
+
+
+class _AbstractingSigma(Sigma):
+    """Replaces each coordinate's read expression by the bare coordinate — the cone as a function of
+    the value its index computes. The mapping names the coordinates so a binder still shadows them."""
+
+    def apply(self, expr):
+        return expr.rebuild(lambda term: next((Var(name) for name, read in self._reads.items() if term == read), term))
+
+
+def _value_forms(seam: CutSite, axes: tuple) -> tuple[tuple, dict[str, Expr]]:
     """What each component of a seam's cone computes, spelled so two copies of one value key
     alike: the cone lowered over its captured axes renamed by position, cut to the component,
     under the exact statement identity (SSA names, commutative order and buffer declaration order
@@ -444,17 +501,31 @@ def _value_forms(seam: CutSite, axes: tuple) -> tuple:
     and the residual add at the kernel's own free axis — and its lambda params may sit in another
     order, which :meth:`Fold.canonical` reads positionally; neither is a different value. Per
     component, because a value folded beside another in one twin (the k and v projections over
-    one input) is the same value as the lone contraction that feeds its norm's statistic."""
+    one input) is the same value as the lone contraction that feeds its norm's statistic.
+
+    A coordinate the cone reads only through one expression of it is abstracted to the bare
+    coordinate, and the expression returned in the seam's own names: RoPE's rotate-half reads the q
+    projection at three columns of one head dim, which are one value read at three addresses."""
     from emmy.compiler.ir.stmt.identity import canonicalize_identity  # noqa: PLC0415 — identity imports the tile IR
 
     scoped = tuple(axis.name for axis in seam.axes if axis.name in seam.node.free_axes)
     names = {name: f"_s{position}" for position, name in enumerate(scoped)}
-    body = Body(tuple(stmt.rewrite(lambda name: names.get(name, name)) for stmt in seam.node.lower(bound=frozenset(scoped), axes=axes)))
+    # Substituted, not renamed: a loop inside the cone may bind a captured name again (the o_proj
+    # copy under the post-attention statistic reuses its reduce axis inside the V projection's
+    # norm), and that loop keeps its own variable.
+    captured = Sigma({name: Var(spelled) for name, spelled in names.items()})
+    body = Body(tuple(rewrite_stmt(stmt, lambda name: name, captured) for stmt in seam.node.lower(bound=frozenset(scoped), axes=axes)))
+    reads = _coordinate_reads(body, tuple(names.values()))
+    if reads:
+        sigma = _AbstractingSigma({name: Var(name) for name in reads})
+        object.__setattr__(sigma, "_reads", reads)
+        body = Body(tuple(rewrite_stmt(stmt, lambda name: name, sigma) for stmt in body))
     forms = []
     for exposed in seam.node.exposes:
         identity = canonicalize_identity(_pruned(body, frozenset((exposed,))))
         forms.append((identity.key, identity.arguments))
-    return tuple(forms)
+    own = {spelled: Var(name) for name, spelled in names.items()}
+    return tuple(forms), {name: reads[spelled].substitute(own) for name, spelled in names.items() if spelled in reads}
 
 
 def _cluster_value_seams(seams: list[CutSite], axes: tuple) -> tuple[CutSite, ...]:
@@ -477,13 +548,16 @@ def _cluster_value_seams(seams: list[CutSite], axes: tuple) -> tuple[CutSite, ..
         return tuple(seams)
     captured = {index: tuple(axis.name for axis in seams[index].axes) for index in eligible}
     scoped = {index: tuple(axis for axis in captured[index] if axis in seams[index].node.free_axes) for index in eligible}
-    forms = {index: _value_forms(seams[index], axes) for index in eligible}
+    forms, reads = {}, {}
+    for index in eligible:
+        forms[index], reads[index] = _value_forms(seams[index], axes)
     descendants = {index: {id(site.node) for site in sites(seams[index].node)[1:]} for index in eligible}
     drop: set[int] = set()
     merged: dict[int, CutSite] = {}
     # The representative exposes the most: a twin stands for the lone contractions that equal its
-    # channels, never the other way round.
-    for rep_index in sorted(eligible, key=lambda index: -len(forms[index])):
+    # channels, never the other way round. Among equals it reads its coordinates plainly, so a copy
+    # read through an index expression reads its workspace at that expression.
+    for rep_index in sorted(eligible, key=lambda index: (-len(forms[index]), len(reads[index]))):
         if rep_index in drop:
             continue
         rep = seams[rep_index]
@@ -516,12 +590,37 @@ def _cluster_value_seams(seams: list[CutSite], axes: tuple) -> tuple[CutSite, ..
             )
             if not aligned:
                 continue
-            siblings.append((member.node, tuple(zip(rep_params, member_params, strict=True)), channels))
+            pairs = tuple(
+                (rn, _read_at(rn, mn, rep, member, reads[rep_index], reads[member_index]))
+                for rn, mn in zip(rep_params, member_params, strict=True)
+            )
+            if any(read is None for _, read in pairs):
+                continue
+            siblings.append((member.node, pairs, channels))
             aliases.append(member.spelling)
             drop.add(member_index)
         if siblings:
             merged[rep_index] = replace(rep, siblings=tuple(siblings), aliases=tuple(aliases))
     return tuple(merged.get(index, seam) for index, seam in enumerate(seams) if index not in drop)
+
+
+def _read_at(rn: str, mn: str, rep: CutSite, member: CutSite, rep_reads: dict, member_reads: dict) -> Expr | None:
+    """The address a clustered copy reads the representative's workspace at along ``rn``, or ``None``.
+
+    Both read the coordinate plainly, or through one expression: the copy's own coordinate. The
+    representative reads it plainly and the copy through an expression whose values lie on the
+    representative's axis: that expression. Anything else is not the same value at one address."""
+    if rn in rep_reads:
+        return Var(mn) if member_reads.get(mn) == rep_reads[rn].substitute({rn: Var(mn)}) else None
+    read = member_reads.get(mn)
+    if read is None:
+        return Var(mn)
+    extent = next(axis.extent for axis in rep.axes if axis.name == rn)
+    own = next(axis.extent for axis in member.axes if axis.name == mn)
+    if not (extent.is_static and own.is_static):
+        return None
+    values = {read.eval({mn: value}) for value in range(own.as_static())}
+    return read if min(values) >= 0 and max(values) < extent.as_static() else None
 
 
 def _unchanged(pieces: tuple, members) -> bool:
@@ -607,6 +706,25 @@ def _replace_fold(node: Fold, targets: dict[int, tuple], renamed: dict[str, str]
         head, slots, tail = params[:lead], params[lead : lead + len(bound)], params[lead + len(bound) :]
         lift = replace(lift, params=(*head, *(name for name, keep in zip(slots, bound, strict=True) if keep), *tail))
     return _follow_reads(node, replace(node, operands=operands, lift=lift), renamed)
+
+
+def _without_identity_casts(node: Fold, dtypes: dict[str, object]) -> Fold:
+    """``node`` with each projection that only converts one workspace read to the dtype that workspace
+    already stores replaced by the read itself, under the projection's name. A reader's rounding
+    becomes such a copy once the workspace stores the rounded dtype (:func:`_narrowed_reads`), and
+    left in place it keeps the edge a computed cone: the chunk tier streams V only from a slab."""
+    targets: dict[int, tuple] = {}
+    for site in sites(node)[1:]:
+        proj = site.node
+        if not isinstance(proj, Fold) or proj.axis is not None or len(proj.operands) != 1 or len(proj.lift.body) != 1:
+            continue
+        (stmt,) = proj.lift.body
+        slab = proj.operands[0].as_slab() if isinstance(proj.operands[0], Fold) else None
+        if slab is None or not isinstance(stmt, Assign) or stmt.op != ElementwiseImpl("copy") or stmt.args != proj.lift.params[:1]:
+            continue
+        if dtypes.get(slab.load.input) == stmt.dtype:
+            targets[id(proj)] = (Fold.slab(replace(slab.load, names=(stmt.name,))),)
+    return _replace_fold(node, targets, {}) if targets else node
 
 
 def _kept_components(tile: TileOp) -> dict[int, tuple[str, ...]]:
@@ -709,24 +827,31 @@ def _substitute_and_fold(produced: Fold, name: str, sigma: Sigma, ctx: SimplifyC
 
 
 def _divmod_in_edge(edge: Fold, name: str, factor: int) -> tuple[bool, bool]:
-    """``(the edge reads name / factor, the edge reads name % factor)`` anywhere under it."""
-    div = mod = False
+    """``(the edge reads name / factor, the edge reads name's low part)`` anywhere under it.
+
+    The low part is ``name % factor`` or ``name`` itself: a plain read depends on both halves, as
+    a workspace indexed by the fused name does when a cut materialized one operand at it."""
+    div = low = False
     pending = [edge]
     while pending:
         term = pending.pop()
         pending.extend(term.operands)
         for stmt in term.lift.body.iter():
             for expr in stmt.exprs():
+                uses = covered = 0
                 for part in expr.subterms():
+                    uses += isinstance(part, Var) and part.name == name
                     if (
                         isinstance(part, BinaryExpr)
                         and part.left == Var(name)
                         and isinstance(part.right, Literal)
                         and part.right.value == factor
                     ):
+                        covered += 1
                         div = div or part.op in ("/", "//")
-                        mod = mod or part.op == "%"
-    return div, mod
+                        low = low or part.op == "%"
+                low = low or uses > covered
+    return div, low
 
 
 def _straddles_a_contraction(produced: Fold, name: str, factor: int) -> bool:
@@ -758,8 +883,9 @@ def _straddles_a_contraction(produced: Fold, name: str, factor: int) -> bool:
 
 
 def _fused_pair_factor(produced: Fold, axes: tuple) -> tuple[str, int] | None:
-    """A grid coordinate read ONLY as ``i / c`` beside ``i % c`` is TWO coordinates wearing one
-    name — ``(the axis, c)``, or ``None``.
+    """A grid coordinate read as ``i / c`` beside ``i % c`` or ``i`` itself is TWO coordinates
+    wearing one name — ``(the axis, c)``, or ``None``. The plain read is a workspace a cut stored
+    at the fused index: the other operand of the same contraction still reads ``i / c``.
 
     Attention's (head, head-dim) pair arrives fused: the projection downstream reshapes the
     attention output to one flat width, and a cut inherits that spelling. While the pair stays
@@ -804,7 +930,7 @@ def _fused_pair_factor(produced: Fold, axes: tuple) -> tuple[str, int] | None:
                             elif part.op == "%":
                                 remainders.add(int(part.right.value))
                                 covered += 1
-        if len(divisors) == 1 and divisors == remainders and uses == covered and uses:
+        if len(divisors) == 1 and remainders <= divisors and (remainders or uses > covered):
             (factor,) = divisors
             if 1 < factor < extent and extent % factor == 0 and _straddles_a_contraction(produced, name, factor):
                 return name, factor
@@ -1057,7 +1183,7 @@ def realize(
             # since it reads that workspace at a DIFFERENT address than the representative. It
             # reads the component that is its value: a lone contraction reads one channel of the
             # twin it equals.
-            mapping = {name: Var(other) for name, other in pairs}
+            mapping = dict(pairs)
             mapping.update({axis.name: Literal(0, "int") for axis in axes if _unit(axis) and axis.name not in mapping})
             sibling_index = tuple(expr.substitute(mapping) for expr in index)
             replacements[id(sibling)] = tuple(
@@ -1077,6 +1203,8 @@ def realize(
     # read the workspace like any other consumer. Containment is strict, so order is free.
     everything = {target: loads for *_, replacements in pieces for target, loads in replacements.items()}
     parent_fold = _replace_fold(tile.op, everything, read_names)
+    stored = {buffer: dtype for seam, *_, buffers, _ in pieces for buffer, dtype in zip(buffers, seam.dtypes, strict=False)}
+    parent_fold = _without_identity_casts(parent_fold, stored)
     specs = tuple(
         replace(store, write=replace(store.write, values=tuple(read_names.get(value, value) for value in store.write.values)))
         for store in tile.output_specs
@@ -1087,7 +1215,7 @@ def realize(
         # A piece that reads another seam's workspace re-spells what it derives from it too, and
         # its own stores name those values.
         derived: dict[str, str] = {}
-        produced = _replace_fold(produced, others, derived) if others else produced
+        produced = _without_identity_casts(_replace_fold(produced, others, derived) if others else produced, stored)
         if strides:
             produced = rewrite_stmt(produced, lambda name: name, Sigma({name: Var(name) * stride for name, stride in strides.items()}))
         index = tuple(Var(axis.name) for axis in axes)

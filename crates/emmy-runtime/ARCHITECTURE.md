@@ -154,20 +154,25 @@ build time, so a host without cargo installs pure); `make setup` is that install
 
 ## Cached generation
 
-`generation::Generator` consumes a standalone `decode` program with a versioned generation contract in the pack key.
+`generation::Generator` consumes standalone `decode` and optional `prefill` programs with a versioned generation
+contract in the pack key. Prefill borrows matching inputs, state, and byte-identical constants from decode through
+`set_region`; it owns its scratch and drops before decode. Loading currently creates both programs before lending
+regions, so shared resident storage does not eliminate transient duplicate load allocations.
 It validates the fixed input/output names, shapes, dtypes, vocabulary, context capacity, and EOS IDs before loading the
 executor. The model remains compiler-prepared; the Rust library has no Qwen3 math implementation or Python dependency.
 The native preparation and attention contract lives in
 [`serving/native/ARCHITECTURE.md`](../../emmy/serving/native/ARCHITECTURE.md).
 
-`start` binds the prompt once, keeps the sampling controls and resets request state. `advance` processes exactly one
-token at the current absolute position. Before prompt completion it returns no token; afterward it downloads the
-step's logits, selects the token on the host — greedy, or the exact-FP16-order nucleus draw the native contract
-describes — and uploads it as the next step's input. Nothing the device runs is hand-written. Its explicit
-`ignore_eos` control permits fixed-output serving benchmarks to continue after EOS; ordinary worker generation
-retains EOS stopping. `generate` owns the complete prompt/decode loop and stops at EOS or the requested output count.
-Prompt plus requested output must fit capacity. `logits` is an explicit diagnostic download. All CUDA operations stay
-inside `cuda`, and a failed step cannot continue the current request.
+`start` binds the prompt once, keeps the sampling controls and resets request state. `advance` processes one prefill
+chunk or one decode token at the current absolute position, leaving the final prompt token to decode and taking a
+chunk only where every one of its rows fits the context; the diagnostic `step` always processes one token. Before
+prompt completion either returns no token; afterward it downloads the step's logits, selects the token on the host —
+greedy, or the exact-FP16-order nucleus draw the native contract describes — and uploads it as the next step's input.
+Nothing the device runs is hand-written. Its explicit `ignore_eos` control permits fixed-output serving benchmarks to
+continue after EOS; ordinary worker generation retains EOS stopping. `generate` owns the complete prompt/decode loop
+and stops at EOS or the requested output count. Prompt plus requested output must fit capacity. `logits` is an
+explicit diagnostic download. All CUDA operations stay inside `cuda`, and a failed step cannot continue the current
+request.
 
 The executor's stateful `advance` differs from benchmark `execute`: capture does not run an initialization step or
 warmup, since executing twice would consume the next token twice. Stable allocations allow the same graph to serve

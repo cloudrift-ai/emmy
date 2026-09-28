@@ -47,6 +47,8 @@ enum Command {
     },
     GenerationStep {
         capture: bool,
+        #[serde(default)]
+        prefill: bool,
         logits: Option<PathBuf>,
     },
     Generate {
@@ -165,13 +167,23 @@ fn main() -> Result<()> {
                         .start(&read_tokens(&prompt)?, sampling)?;
                     Ok(json!({"started": true}))
                 }
-                Command::GenerationStep { capture, logits } => {
+                Command::GenerationStep {
+                    capture,
+                    prefill,
+                    logits,
+                } => {
                     let generator = generator.as_mut().context("no loaded generator")?;
-                    let token = generator.advance(capture, false)?;
-                    if let Some(path) = logits {
+                    let token = if prefill {
+                        generator.advance(capture, false)?
+                    } else {
+                        generator.step(capture, false)?
+                    };
+                    if let Some(path) = logits
+                        && (!prefill || token.is_some())
+                    {
                         std::fs::write(path, generator.logits()?)?;
                     }
-                    Ok(json!({"token": token}))
+                    Ok(json!({"token": token, "position": generator.position()}))
                 }
                 Command::Generate {
                     prompt,

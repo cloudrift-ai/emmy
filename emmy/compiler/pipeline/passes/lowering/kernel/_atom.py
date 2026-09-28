@@ -72,7 +72,7 @@ from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.schedule import Side, Stage, Tile
 from emmy.compiler.ir.schedule.classic.refusals import chunk_partial_columns
 from emmy.compiler.ir.schedule.packing import block_scaled_atom, packed_readings
-from emmy.compiler.ir.schedule.staging import chunk_key_stage
+from emmy.compiler.ir.schedule.staging import chunk_key_stage, chunk_slab_pad
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import (
     Accum,
@@ -3032,7 +3032,9 @@ class _FlashOps(_MmaOps):
         elem = self.tile.atom.operand_dtype("b")
         load = self.c.operands[1].as_slab().load
         trans = self.c.as_contraction().b_trans
-        swizzle = self.slab_swizzles(mn, elem.nbytes)[1]
+        # The Volta blocking copy pads its rows instead: its drain reads no swizzled slab.
+        pad = chunk_slab_pad(self.tile, self.stage.choice)
+        swizzle = "NONE" if pad else self.slab_swizzles(mn, elem.nbytes)[1]
         (value,) = _slab_operands(
             index_srcs=(None, load.index),
             bufs=(None, load.input),
@@ -3043,6 +3045,7 @@ class _FlashOps(_MmaOps):
             swizzles=("NONE", swizzle),
             elems=(None, elem),
             b_trans=trans,
+            pads=(0, pad),
             roles=(1,),
         )
         key = None
@@ -3057,17 +3060,23 @@ class _FlashOps(_MmaOps):
                 k_axis=self.k_axis,
                 bk_elems=bk,
                 base=(Literal(0, "int"), _tile_base(mn)[1]),
-                swizzles=(self.slab_swizzle(span, elem.nbytes), "NONE"),
+                swizzles=("NONE" if pad else self.slab_swizzle(span, elem.nbytes), "NONE"),
                 elems=(elem, None),
                 rows=(False, trans),
+                pads=(pad, 0),
                 roles=(0,),
             )
         cta = _cta(mn, self.tile.atom.lanes, self.tile.launch_threads)
 
         def group(operands: tuple, tag: str = ""):
-            common = dict(operands=operands, slab_dtype=cuda_name(elem), elem_bytes=elem.nbytes, cta=cta)
+            common = dict(slab_dtype=cuda_name(elem), elem_bytes=elem.nbytes, cta=cta)
+            if self.stage.transport == "smem":
+                # Volta: the same slabs, filled by the blocking vector copy the CTA barrier closes.
+                return SyncTransport(operands=(), copy_operands=operands, copy_sync=True, **common)
             # A TMA group parity-waits its own barrier, so two groups in one loop take two names.
-            return TmaTransport(mbar=f"_mbar{tag}", **common) if self.stage.transport == "smem-tma" else CpAsyncTransport(**common)
+            if self.stage.transport == "smem-tma":
+                return TmaTransport(operands=operands, mbar=f"_mbar{tag}", **common)
+            return CpAsyncTransport(operands=operands, **common)
 
         # Two groups buy their kill-point refills only at a SINGLE slot: a deeper ring prefetches
         # both operands at the top of the body whatever the grouping, and a second group there
@@ -3190,6 +3199,9 @@ class _FlashOps(_MmaOps):
         m, _ = mn
         atom = self._score_atom
         a_load = next(edge for edge in self.inner[0].operands if m.axis.name in edge.free_axes).as_slab().load
+        # The row stride off the address (:func:`_direct_operand`): a query stored [row, head, dim]
+        # strides its rows by every head's dim, not by the one head dim its last extent holds.
+        _, ldm = _direct_operand(a_load, self.inputs, k_name=self._score_k.name, own=m.axis.name, legacy=(True, 0))
         out: list[Stmt] = []
         for i in range(m.reg):
             for t in range(self._score_steps()):
@@ -3202,6 +3214,7 @@ class _FlashOps(_MmaOps):
                         src_index=tuple(sigma.apply(e) for e in a_load.index),
                         role="a",
                         staged=False,
+                        ldm=ldm,
                         gmem_guard=_guard(m, offset[0].base(i)),
                         fragment_layout=atom.fragment_layout,
                     )
@@ -3219,12 +3232,14 @@ class _FlashOps(_MmaOps):
         col = BinaryExpr("+", base, Literal(j * atom.atom_n, "int"))
         if key is None:
             sigma = Sigma({self.k_axis.name: col, self._score_k.name: k})
+            trans, ldm = _direct_operand(b_load, self.inputs, k_name=self._score_k.name, own=self.k_axis.name, legacy=(trans, 0))
             return LdmatrixLoad(
                 frag=self.frag(f"_kb{j}"),
                 src_buffer=b_load.input,
                 src_index=tuple(sigma.apply(e) for e in b_load.index),
                 role="b",
                 staged=False,
+                ldm=ldm,
                 b_trans=trans,
                 gmem_guard=None if bound is None else (col, bound),
                 fragment_layout=atom.fragment_layout,
@@ -3323,13 +3338,16 @@ class _FlashOps(_MmaOps):
         owns, and a slab written N-major swaps the two and takes the plain ldmatrix."""
         atom = self.tile.atom
         if value is None:
+            legacy = (self.c.as_contraction().b_trans, 0)
+            trans, ldm = _direct_operand(v_load, self.inputs, k_name=self.k_axis.name, own=n.axis.name, legacy=legacy)
             return LdmatrixLoad(
                 frag=self.frag(f"_b{j}_{t}"),
                 src_buffer=v_load.input,
                 src_index=tuple(Sigma({self.k_axis.name: row, n.axis.name: offset[1].base(j)}).apply(e) for e in v_load.index),
                 role="b",
                 staged=False,
-                b_trans=self.c.as_contraction().b_trans,
+                ldm=ldm,
+                b_trans=trans,
                 gmem_guard=_guard(n, offset[1].base(j)),
                 k_zero=None if bound is None else (row, bound),
                 fragment_layout=atom.fragment_layout,

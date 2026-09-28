@@ -1,6 +1,6 @@
 # Native cached generation
 
-Python prepares a standalone dense Qwen3 token-step artifact with FP16 weights, projections, logits, and KV cache.
+Python prepares a standalone dense Qwen3 generation artifact with FP16 weights, projections, logits, and KV cache.
 The Rust runtime submits the exported launches, retains the KV cache, and chooses each next token on the GPU.
 No Python model operation runs after
 preparation. The experimental native HTTP adapter serves one active request; this is not a performance replacement
@@ -10,7 +10,8 @@ for vLLM. The existing serving integration remains the default.
 
 `prepare.export_model` traces the existing attention-split wrappers and final normalization/output head. It uses the
 compiler's plan-template cache to reuse identical layer structure. The compiled plans are joined into one ordinary
-static execution plan: seams refer to the same named allocation, and internal names are scoped by layer. There is no
+static plan for each width: seams refer to the same named allocation, and internal names are scoped by layer. There is
+no
 new compiler or runtime alias format. Unsupported symbolic, indirect, and descriptor arguments are rejected.
 Cache buffers use the persistent output role, without joining the public logits/token output list. Custom launches
 identify their writes so Python scratch allocation preserves the same dependencies as native execution.
@@ -37,42 +38,60 @@ by itself, established numerical correctness or fast schedules.
 
 ## Execution and state
 
-One token step contains every model layer. The prompt is uploaded once. Prefill processes its tokens sequentially,
-writing each token's keys and values once at its absolute position; it never recomputes the growing prefix. Decode
-embeds the previous step's token, which the host selected from that step's logits and uploaded with the position
-scalar. During prefill the host uploads only the position and the logits stay on the device.
+The prompt is uploaded once. Prefill processes all but its final token in fixed-width chunks, defaulting to 16 rows.
+Each layer writes the chunk's keys and values at their absolute positions through the page tables before attention
+reads each query's causal prefix; a row past the prompt's last token embeds zeros, computes alongside the others and
+writes cache rows that decode overwrites when it reaches them, so a chunk is dispatched only where all of its rows fit
+the context and the decode program covers the rest. The last layer only writes its cache; its attention and
+post-attention fragment are unnecessary. The final prompt token runs through the one-token decode program, including
+the output head, and the host selects the first generated token from its logits. Later decode steps embed the
+previous step's token, which the host selected from that step's logits and uploaded with the position scalar. Prefill
+chunks execute no head and download nothing.
 
 The cache is one paged K and one paged V buffer per layer, shaped `[1, kv_heads, context, head_dim]` and paged along
 the token axis with `page_tokens` tokens per page (`export_model(page_tokens=…)`, `emmy generate --page-tokens`).
-The rotary program writes one token of each through the page tables at `position`, the attention program reads all
-of them through the same tables, and the runtime allocates every page at load and binds the tables (see the
-runtime's paged-buffer contract). The default page spans the whole context, so the table has one
-entry and the addressing is that of the contiguous array it replaces; a smaller page changes only the addressing,
-never the tokens generated. A new request resets the position and prompt length. Attention can only read positions
-already overwritten by that request, so clearing the entire cache is unnecessary. Activations and scratch remain
-allocated for the model lifetime; this version does not reuse storage between layers or deduplicate the embedding and
-tied output-head weight copies.
+The rotary program writes a chunk of each through the page tables at `position`, the attention program reads all of
+them through the same tables, and the runtime allocates every page at load and binds the tables (see the runtime's
+paged-buffer contract). The default page spans the whole context, so the table has one entry and the addressing is
+that of the contiguous array it replaces; a smaller page changes only the addressing, never the tokens generated. A
+new request resets the position and prompt length. Attention can only read positions already overwritten by that
+request, so clearing the entire cache is unnecessary. Decode owns the shared inputs, cache pages and constants.
+Prefill borrows the same constants through the runtime's region interface and the same cache through its page
+tables, and retains a separate scratch slab; scratch is packed by liveness within each program. The borrower drops
+before the owner. Loading allocates and uploads both programs before replacing duplicate regions and pages with
+borrowed ones, so peak load memory exceeds resident memory. The embedding and tied output-head copies within decode
+remain separate.
 
-Graph capture records one step without executing a warmup. Replaying the graph advances the model exactly once,
+Each program has its own graph capture, recorded without executing a warmup. Replaying the graph advances the model
+exactly once,
 including when capture is first enabled during decode. All addresses remain stable across positions and requests.
 Each step synchronizes at the CPU observation boundary. EOS or the output budget stops further submissions. A
 request whose prompt plus output budget exceeds capacity is rejected. Greedy decoding is the default; requests may
 select temperature, top-p, and an unsigned 64-bit seed.
 
 The existing supervised native worker supplies hard deadlines and process retirement. Each worker operation has a
-120-second default deadline; `generate --timeout SECONDS` can extend it for long sequential prefills. It never retries
+120-second default deadline; `generate --timeout SECONDS` can extend it for long requests. It never retries
 a failed request. `client.generate_tokens` sends binary token files to that worker; the complete generation loop
 runs in Rust.
-The low-level start/step operations expose logits for parity checks and do not change the ordinary generation path.
+The diagnostic step remains single-token by default. Its `prefill: true` option follows normal chunk dispatch and
+returns the advanced position; intermediate chunks return no token or logits.
 
 ## Sampling contract
 
-Generation artifact version 3 ends the step at the logits: the program's inputs are the prompt, its length, the
-position and the previous step's token, its one output the logits, and the runtime selects each token on the host
-from the logits it downloads after a decode step — one vocabulary-sized FP16 transfer per generated token, none
-during prefill. Older generation artifacts must be exported again; the underlying execution-plan format is
-unchanged. Temperature must be finite and nonnegative, and top-p must lie in `(0, 1]`. Temperature zero selects the
-lowest token ID among maximum logits. Nonfinite logits fail the request. Top-k is unsupported.
+Generation artifact version 4 ends the decode step at the logits and adds the prefill width, with a separate prefill
+program when that width exceeds one. The decode program's inputs are the prompt, its length, the position and the
+previous step's token, its one output the logits, and the runtime selects each token on the host from the logits it
+downloads after a decode step — one vocabulary-sized FP16 transfer per generated token, none during prefill. Older
+generation artifacts must be exported again; the underlying execution-plan format is unchanged. Temperature must be
+finite and nonnegative, and top-p must lie in `(0, 1]`. Temperature zero selects the lowest token ID among maximum
+logits. Nonfinite logits fail the request. Top-k is unsupported.
+
+Greedy selection uses one 128-thread block. Threads scan disjoint vocabulary strides, then reduce their winning
+indices in shared memory with explicit lowest-ID tie-breaking. Every thread participates in invalid-logit detection
+and the reduction, including vocabularies smaller than the block. Preparation supplies 512 bytes of shared memory.
+Intermediate prefill steps leave the selected token untouched. Positive-temperature selection still runs on thread
+zero after the uniform greedy branch; its probability and RNG calculations are unchanged. Re-export an artifact to
+use the parallel sampler. The runtime protocol version is unchanged.
 
 For positive temperature, a 65,536-bin histogram orders FP16 logits exactly, combining signed zeros. The sampler
 retains the smallest descending probability prefix reaching top-p, breaking ties by ascending token ID. It samples
@@ -95,22 +114,31 @@ emmy generate Qwen/Qwen3-0.6B --revision REVISION --native-pack /tmp/qwen-native
   --temperature 0.7 --top-p 0.9 --seed 42
 ```
 
+`generate --export-native` and native serving preparation accept `--prefill-size N`; one selects sequential prefill.
+The width is capped at the context capacity and stored in the artifact; it cannot change when loading an existing pack.
 Use the same checkpoint/tokenizer revision for preparation and text generation. The runtime artifact accepts and returns
 token IDs. Native serving preparation additionally bundles the same
 checkpoint tokenizer and chat template; the HTTP adapter owns text processing.
 
 The hermetic tiny-Qwen3 GPU test checks every logit at `rtol=atol=1e-3`, greedy tokens, request reset, context bounds,
-EOS, zero output budget, graph replay, and first capture during decode. It hides Python and NVCC from the native
+EOS, zero output budget, graph replay, first capture during decode, and full/partial prefill chunks across resets. It
+hides Python and NVCC from the native
 child's PATH after export. The same exported binaries also run through the Python executor; logits must be bit-identical
 at every checked step. Independent NumPy checks cover rotary rounding and causal attention through cache position
 4,096, including a shorter request after the largest one.
 
 Opt-in checkpoint qualification accepts a local `--native-checkpoint` and matching `--native-artifact` with capacity
-at least 256. FP16 eager and FP32 eager references consume the same prefixes and FP16-rounded weights, with TF32
+at least 4,096. Sequential and chunked dispatch are checked separately; chunked dispatch exposes logits only after
+prefill completes and during decode. FP16 eager and FP32 eager references consume the same prefixes and FP16-rounded
+weights, with TF32
 and reduced-precision reductions disabled. Each native logit vector must stay within 2% relative L2 error and 0.02
-total variation from the FP32 distribution. Per-prompt RMS error must be at most twice the FP16 reference RMS, with
-one FP16 epsilon as a floor. Native argmax must match one reference; agreement between the two requires an exact
-match. Pointwise differences remain recorded. These experimental budgets do not establish bitwise model equivalence
+total variation from the FP32 distribution. Sequential execution keeps the whole-prompt RMS limit: twice the FP16
+reference RMS, with one FP16 epsilon as a floor. Chunked execution exposes a shorter output window. Its RMS must
+meet that bound or be no worse than sequential native execution on those same positions and teacher-forced prefixes.
+The paired baseline is recorded separately; this is an additional regression check, not a claim that a tail-only
+RMS is the original whole-prompt metric. Native argmax must match one reference; agreement between the two requires
+an exact match. Pointwise differences remain recorded. These experimental budgets do not establish bitwise model
+equivalence
 or identical future completions when the references disagree.
 
 The [numerical investigation](../../../experiments/Qwen3-0.6B/native_generation/RESULTS.md) records the fixed rotary
@@ -124,16 +152,17 @@ Performance and production concurrency are separate qualifications.
 
 ## Native HTTP launcher
 
-`emmy serve MODEL --runner generate --native` prepares the artifact in a fresh temporary directory and executes a prebuilt
-`emmy-server`. Preparation uses FP16 checkpoint weights, the requested revision, and the existing golden and strict
-compiler-evidence controls. `--native-pack DIR` reuses an already prepared serving bundle; its recorded model,
+`emmy serve MODEL --runner generate --native` prepares the artifact in a fresh temporary directory and executes a
+prebuilt `emmy-server`. Preparation uses FP16 checkpoint weights, the requested revision, and the existing golden and
+strict compiler-evidence controls. `--native-pack DIR` reuses an already prepared serving bundle; its recorded model,
 revision, and context must match. Preparation-only evidence flags are rejected when reusing a bundle.
 
 Native options are `--host`, `--port`, `--revision`, `--max-model-len`, `--page-tokens`, and `--native-pack`, plus the
 existing Emmy preparation, dry-run, and benchmark controls. Context defaults to 4,096; the page size defaults to one
-page spanning it and, like the compiler evidence flags, applies to preparation, not to a reused pack. `--native` requires `--runner generate`, rejects
-`--stock`, and rejects unsupported engine arguments. vLLM forwarding stays unchanged without `--native`. Dry-run
-prints preparation settings and the native command without downloading, compiling, or starting a process.
+page spanning it and, like the compiler evidence flags, applies to preparation, not to a reused pack. `--native`
+requires `--runner generate`, rejects `--stock`, and rejects unsupported engine arguments. vLLM forwarding stays
+unchanged without `--native`. Dry-run prints preparation settings and the native command without downloading,
+compiling, or starting a process.
 
 `--bench` uses the existing vLLM benchmark client, with default native concurrency one. Higher explicit concurrency
 measures overload and receives busy responses. The client is an optional dependency; normal native serving does not

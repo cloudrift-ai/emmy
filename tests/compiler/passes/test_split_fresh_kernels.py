@@ -37,7 +37,7 @@ from emmy.compiler.ir.tile import OutputSpec, Placement
 from emmy.compiler.ir.tile.ir import TileOp
 from emmy.compiler.ir.tile.ops import sched_of
 from emmy.compiler.pipeline import CUDA_PASSES, TILE_PASSES, Pipeline
-from emmy.compiler.pipeline.fork import iter_leaves
+from emmy.compiler.pipeline.fork import iter_leaves, leaf_knobs
 from emmy.compiler.pipeline.knob import STRUCT_PREFIX, decision_view, family_of
 from emmy.compiler.pipeline.pipeline import Run
 from tests.compiler.terms import contraction
@@ -168,6 +168,24 @@ def test_low_precision_output_refuses_direct_atomic_split(monkeypatch, dtype) ->
             _resolve(TILE_PASSES, graph)
 
 
+@pytest.mark.parametrize(("dtype", "atomic"), [(F16, False), (BF16, False), (F32, True)])
+def test_the_split_offer_has_an_atomic_arm_only_into_f32(dtype, atomic) -> None:
+    """The unpinned offer, not only a pin, withholds the direct atomic arm from a 16-bit output: each
+    CTA's partial would round into the output storage, in whatever order the CTAs land. On a V100
+    an f16 GEMV (1 x 4096 x 4096) split g4a missed eager at rtol=atol=1e-3 on 13% of its outputs and
+    g16a on 28%, where g4k and g16k passed. The deferred f32 finalize stays offered."""
+    offered: set[str] = set()
+
+    def decide(fp):
+        for option in fp.options:
+            offered.update(value for key, value in leaf_knobs(option).items() if family_of(key) == "REDUCE" and value.startswith("g"))
+        return next(iter_leaves(fp.options))
+
+    Run(pipeline=Pipeline.build(TILE_PASSES), ctx=_CTX).resolve(_matmul(out_dtype=dtype), decide)
+    assert any(value.endswith("k") for value in offered), offered
+    assert any(value.endswith("a") for value in offered) == atomic, offered
+
+
 def test_finalize_keeps_projection_input_edges(monkeypatch) -> None:
     """A deferred finalize keeps every external buffer its projection reads. The CUDA op's
     argument order cannot name a buffer absent from the graph node's inputs."""
@@ -207,6 +225,17 @@ def test_split_reductions_remain_fold_trees(monkeypatch, graph) -> None:
     pieces = _tile_pieces(graph)
     assert len(pieces) == 2
     assert not any(_contains_raw_loop(piece.op) for piece in pieces)
+
+
+def test_a_matvec_partial_tiles_its_unit_row_not_the_partition(monkeypatch) -> None:
+    """Both operands of a matvec's partial read the partition coordinate, so it is the pair's only
+    shared axis and never a row: B changes with it. The partial keeps the unit row its kernel had,
+    and that row, not the partition, is the tile's M."""
+    monkeypatch.setenv("EMMY_REDUCE", "g2k")
+    (partial,) = [piece for piece in _tile_pieces(_matmul(m=1)) if len(piece.place.free) > 1]
+    (node,) = [node for node in partial.views if node.as_contraction() is not None]
+    m, _ = sched_of(partial)._mn_for(node)
+    assert m.extent == Dim(1) and m.name not in node.as_contraction().shared_axes
 
 
 def test_each_piece_decides_its_own_row(monkeypatch) -> None:

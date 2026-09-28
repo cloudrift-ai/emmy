@@ -3,21 +3,21 @@
 //! device runs is hand-written.
 
 use crate::{
-    artifact::Artifact,
+    artifact::{Artifact, Paging},
     cuda::{Device, Executor},
 };
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 use std::path::Path;
 
-const GENERATION_FORMAT: u32 = 3;
+const GENERATION_FORMAT: u32 = 4;
 const DEFAULT_TEMPERATURE: f64 = 0.0;
 const DEFAULT_TOP_P: f64 = 1.0;
 const DEFAULT_SEED: u64 = 0;
 const TOKEN_BYTES: usize = size_of::<i64>();
-const LOGIT_BYTES: usize = size_of::<u16>();
 const MAX_CONTEXT: usize = 4096;
 const PROGRAM: &str = "decode";
+const LOGIT_BYTES: usize = size_of::<u16>();
 /// Every finite FP16 logit has an exact ordered bin; bin zero is reserved for a value that
 /// cannot be sampled.
 const SAMPLING_BINS: usize = 1 << 16;
@@ -187,6 +187,7 @@ pub struct Config {
     pub version: u32,
     pub context_length: usize,
     pub vocab_size: usize,
+    pub prefill_size: usize,
     pub eos_ids: Vec<i64>,
 }
 
@@ -199,6 +200,10 @@ impl Config {
         ensure!(
             (1..=MAX_CONTEXT).contains(&self.context_length),
             "unsupported context length"
+        );
+        ensure!(
+            (1..=self.context_length).contains(&self.prefill_size),
+            "invalid prefill size"
         );
         ensure!(
             self.vocab_size > 0 && self.vocab_size <= i64::MAX as usize,
@@ -229,6 +234,8 @@ impl Config {
 }
 
 pub struct Generator {
+    // The borrower drops before the decode executor that owns the shared allocations.
+    prefill: Option<Executor>,
     executor: Executor,
     config: Config,
     sampling: Sampling,
@@ -271,10 +278,85 @@ impl Generator {
             artifact.program.outputs == ["logits"],
             "invalid generation outputs"
         );
-        // The KV cache is the paged buffers' pages, which the load sized to the context and
-        // which a request keeps from prompt to EOS.
+        let prefill_artifact = if config.prefill_size > 1 {
+            Some(Artifact::load(root, "prefill")?)
+        } else {
+            None
+        };
+        let mut shared = Vec::new();
+        let mut shared_tables = Vec::new();
+        if let Some(prefill) = &prefill_artifact {
+            ensure!(
+                prefill.program.inputs == ["prompt", "prompt_length", "position"]
+                    && prefill.program.outputs.is_empty(),
+                "invalid prefill interface"
+            );
+            for buffer in &prefill.program.buffers {
+                if buffer.role == "scratch"
+                    || (buffer.role == "output"
+                        && !artifact
+                            .program
+                            .buffer(&buffer.name)
+                            .is_ok_and(|b| b.role == "output"))
+                {
+                    continue;
+                }
+                if buffer.role == "constant"
+                    && artifact.bindings.get(&buffer.name) != prefill.bindings.get(&buffer.name)
+                {
+                    continue;
+                }
+                let original = artifact
+                    .program
+                    .buffer(&buffer.name)
+                    .context("missing shared prefill buffer")?;
+                if artifact.program.paged.contains_key(&buffer.name) {
+                    ensure!(
+                        prefill
+                            .program
+                            .paged
+                            .get(&buffer.name)
+                            .map(|p| (p.axis, p.page))
+                            == artifact
+                                .program
+                                .paged
+                                .get(&buffer.name)
+                                .map(|p| (p.axis, p.page)),
+                        "prefill pages {} differently",
+                        buffer.name
+                    );
+                    shared_tables.push(buffer.name.clone());
+                    continue;
+                }
+                ensure!(
+                    buffer.dtype == original.dtype
+                        && buffer.role == original.role
+                        && buffer.static_shape() == original.static_shape(),
+                    "invalid shared prefill buffer {}",
+                    buffer.name
+                );
+                shared.push(buffer.name.clone());
+            }
+        }
+        let executor = Executor::load(device, artifact)?;
+        let prefill = if let Some(artifact) = prefill_artifact {
+            let mut prefill = Executor::load(device, artifact)?;
+            for name in shared {
+                let view = executor.buffer(&name)?;
+                let region = prefill.layout().buffers[&name].region.clone();
+                prefill.set_region(&region, view.ptr, view.bytes)?;
+            }
+            for name in shared_tables {
+                let (ptr, len) = executor.page_table(&name)?;
+                prefill.set_external(&Paging::table(&name), ptr, len)?;
+            }
+            Some(prefill)
+        } else {
+            None
+        };
         Ok(Self {
-            executor: Executor::load(device, artifact)?,
+            prefill,
+            executor,
             config,
             sampling: Sampling::default(),
             position: 0,
@@ -302,15 +384,47 @@ impl Generator {
         self.executor.bind("prompt", &bytes)?;
         self.executor
             .bind("prompt_length", &(prompt.len() as i64).to_le_bytes())?;
+        if let Some(prefill) = &mut self.prefill {
+            for name in ["prompt", "prompt_length"] {
+                let view = self.executor.buffer(name)?;
+                prefill.bind_device(name, view.ptr, view.bytes)?;
+            }
+        }
         self.position = 0;
         self.prompt_length = prompt.len();
         self.stopped = false;
         Ok(())
     }
 
-    /// Process one prompt or decode token. A prompt token's logits stay on the device; a decode
-    /// step downloads its logits, selects the token here and hands it back for the next step.
+    /// Consume a prefill chunk, or one token on the unchanged decode program. A chunk writes
+    /// every one of its rows to the cache, the ones past the prompt included, so it is taken
+    /// only where the whole chunk fits the context; the decode step covers the rest.
     pub fn advance(&mut self, capture: bool, ignore_eos: bool) -> Result<Option<i64>> {
+        ensure!(!self.stopped, "generation is stopped");
+        if self.position + 1 < self.prompt_length
+            && self.position + self.config.prefill_size <= self.config.context_length
+            && let Some(prefill) = &mut self.prefill
+        {
+            self.stopped = true;
+            prefill.bind("position", &(self.position as i64).to_le_bytes())?;
+            prefill.advance(capture)?;
+            self.position += self
+                .config
+                .prefill_size
+                .min(self.prompt_length - self.position - 1);
+            self.stopped = false;
+            return Ok(None);
+        }
+        self.step(capture, ignore_eos)
+    }
+
+    pub fn position(&self) -> usize {
+        self.position
+    }
+
+    /// Diagnostic single-token execution, including during prefill. A decode step downloads its
+    /// logits, selects the token here and hands it back for the next step.
+    pub fn step(&mut self, capture: bool, ignore_eos: bool) -> Result<Option<i64>> {
         ensure!(
             !self.stopped && self.position < self.config.context_length,
             "generation is stopped or context is full"
@@ -554,6 +668,7 @@ mod tests {
             version: GENERATION_FORMAT,
             context_length: 8,
             vocab_size: 32,
+            prefill_size: 1,
             eos_ids: vec![31],
         };
         config.validate().unwrap();
@@ -561,6 +676,11 @@ mod tests {
         for prompt in [vec![], vec![-1], vec![32], vec![1; 9]] {
             assert!(config.validate_prompt(&prompt).is_err());
         }
+        for size in [0, 9] {
+            config.prefill_size = size;
+            assert!(config.validate().is_err());
+        }
+        config.prefill_size = 1;
         config.context_length = MAX_CONTEXT + 1;
         assert!(config.validate().is_err());
         config.context_length = 8;

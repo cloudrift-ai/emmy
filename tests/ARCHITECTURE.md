@@ -67,7 +67,8 @@ The standalone Rust runtime keeps unit tests beside its modules. `make test-nati
 Python parity and process-recovery tests against it; GPU cases skip when CUDA or the worker binary is unavailable.
 Native HTTP tests also verify checkpoint text parity, seeded streaming, stops, overload, cancellation recovery,
 and shutdown against a prepared artifact. Cargo tests cover transport semantics without GPU dependencies.
-The native generation tests additionally exercise cached tiny-Qwen3 logits, EOS, seeded request reset, and exact-once
+The native generation tests additionally exercise cached tiny-Qwen3 logits, full and partial prefill chunks, EOS,
+seeded request reset, and exact-once
 graph replay, independent rotary rounding, and attention/cache boundaries, including near-tied scores checked against
 float64 attention. Local checkpoint qualification compares FP16
 and FP32 references using the same rounded weights; it is opt-in. The normal suite still exercises export, protocol, and
@@ -220,6 +221,10 @@ assumed to cost 0.05 s. Regenerate it with `make test-durations` — which REPLA
 renamed and deleted tests drop out instead of lingering as ghost slots the bucketer plans around. The refresh runs on
 one xdist loadgroup worker: execution stays serial, while CUDA node IDs keep the canonical ``@cuda`` / ``@cuda-cli``
 suffixes the parallel suite uses for lookup. Point it at the whole suite, never a subset.
+
+Keep the JSON entries alphabetized by full node ID, one entry per line, so unrelated additions do not accumulate at
+the end of the file. `make format` restores this order without changing timings; `make lint` checks it. The duration
+writer uses the same format. Sorting reduces avoidable merge conflicts; edits to the same timing still need resolving.
 
 Two things keep it honest. `make test` passes `--durations=0 --durations-min=1`, so every run (CI included) prints every
 test that takes at least 1 s instead of only a fixed-size tail. And the session-end gate in `conftest.py` fails any run

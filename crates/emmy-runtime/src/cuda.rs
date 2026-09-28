@@ -741,6 +741,20 @@ impl Executor {
         Ok(())
     }
 
+    /// The device address and byte length of a paged buffer's page table, for a host that lends
+    /// the same pages to another executor (a prefill program sharing the decode program's cache).
+    pub fn page_table(&self, name: &str) -> Result<(u64, usize)> {
+        ensure!(
+            self.program.paged.contains_key(name),
+            "buffer {name} is not paged"
+        );
+        let table = self
+            .externals
+            .get(&Paging::table(name))
+            .with_context(|| format!("paged buffer {name} has no page table bound"))?;
+        Ok((table.ptr, table.len))
+    }
+
     fn page_bytes(&self, name: &str) -> Result<usize> {
         let paging = self
             .program

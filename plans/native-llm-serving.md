@@ -35,11 +35,13 @@ or its scope is explicitly revised.
 - **Milestone 3 — implemented in PR #890.** Native text and HTTP serving consume the qualified Rust runtime.
   Checkpoint template/tokenizer parity and real GPU HTTP lifecycle tests pass. The full Python suite has no test
   failures; four missing baseline timing records were added and their tests rechecked.
-- **Milestone 4 — evidence collected; optimizations not implemented.** The local RTX 4080
-  [serving comparison](../experiments/Qwen3-0.6B/native_serving/RESULTS.md) and
-  [GPU profile](../experiments/Qwen3-0.6B/native_profile/RESULTS.md) show no latency advantage for the qualified
-  artifact. A repeated linear kernel accounts for 69.2% of GPU kernel time; sequential prefill dominates long prompts.
-  Choose schedule tuning versus additional serving features before expanding implementation.
+- **Milestone 4 — manual schedules merged in PR #910; greedy optimization merged in PR #920.** The
+  [manual-schedule comparison](../experiments/Qwen3-0.6B/native_manual_schedules/RESULTS.md) and
+  [greedy comparison](../experiments/Qwen3-0.6B/native_greedy/RESULTS.md) record the measured improvements.
+  PR #924 adds fixed-width chunked prefill with manually selected schedules and unchanged one-token decode.
+  Its [comparison](../experiments/Qwen3-0.6B/native_prefill/RESULTS.md) records qualification, serving measurements,
+  padding, and memory accounting. Continuous batching and paged KV remain outstanding. The prior is not used;
+  there is no claim of a performance advantage over stock vLLM.
 
 The [runtime report](../experiments/Qwen3-0.6B/native_runtime/RESULTS.md) shows reduced uncaptured submission cost,
 but little change in captured GPU time for the tested small programs. This is not evidence of a full-model serving

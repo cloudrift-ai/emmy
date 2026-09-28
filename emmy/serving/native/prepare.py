@@ -1,4 +1,4 @@
-"""Export dense FP16 Qwen3 as one static, stateful token-step execution plan."""
+"""Export dense FP16 Qwen3 as static decode and chunked prefill programs."""
 
 from __future__ import annotations
 
@@ -12,7 +12,8 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F16, F32, I64
 
 MAX_CONTEXT = 4096
-GENERATION_VERSION = 3
+GENERATION_VERSION = 4
+PREFILL_SIZE = 16
 MASK_FILL = -1e9
 
 
@@ -39,9 +40,9 @@ def validate_model(model, context_length):
 
 
 def embed_module(weight):
-    """The token a step embeds is the prompt's at this position while the prompt lasts, else the
-    previous step's selection: a gather the device decides, so the host binds one position scalar
-    per step and never sees a prompt token."""
+    """The token a decode step embeds is the prompt's at this position while the prompt lasts,
+    else the previous step's selection: a gather the device decides, so the host binds one
+    position scalar per step and never sees a prompt token."""
     import torch
 
     class Embed(torch.nn.Module):
@@ -56,9 +57,30 @@ def embed_module(weight):
     return Embed()
 
 
-def rope_module(cosine, sine, heads, kv_heads, head_dim):
-    """Rotate q and k at this position in FP32, round once to FP16, and hand k and v to the cache:
-    the two cache outputs are one token wide and land at ``position`` through the page tables."""
+def prefill_embed_module(weight, rows):
+    """A prefill chunk embeds ``rows`` prompt tokens from ``position``. A row past the prompt's
+    last token embeds zeros: the chunk still computes it and writes its cache rows, which the
+    decode program overwrites when it reaches that position."""
+    import torch
+
+    class Embed(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = weight
+
+        def forward(self, prompt, prompt_length, position):
+            positions = position + torch.arange(rows)
+            valid = positions + 1 < prompt_length
+            tokens = torch.where(valid, prompt[positions], torch.zeros_like(positions))
+            return torch.where(valid.unsqueeze(1), self.weight[tokens].float(), 0.0)
+
+    return Embed()
+
+
+def rope_module(cosine, sine, heads, kv_heads, head_dim, rows):
+    """Rotate q and k at their positions in FP32, round once to FP16, and hand k and v to the
+    cache: the two cache outputs are ``rows`` tokens wide and land at ``position`` through the
+    page tables."""
     import torch
 
     class Rope(torch.nn.Module):
@@ -68,41 +90,58 @@ def rope_module(cosine, sine, heads, kv_heads, head_dim):
             self.register_buffer("sine", sine)
 
         def rotate(self, x, n, c, s):
-            x = x.view(1, n, 1, head_dim).float()
+            x = x.view(rows, n, head_dim).float()
             half = head_dim // 2
             paired = torch.cat((-x[..., half:], x[..., :half]), dim=-1)
             return (x * c + paired * s).to(torch.float16)
 
         def forward(self, q, k, v, position):
-            c, s = self.cosine[position], self.sine[position]
-            return self.rotate(q, heads, c, s).view(1, heads * head_dim), self.rotate(k, kv_heads, c, s), v.view(1, kv_heads, 1, head_dim)
+            positions = position + torch.arange(rows)
+            c, s = self.cosine[positions].unsqueeze(1), self.sine[positions].unsqueeze(1)
+            rotated = self.rotate(q, heads, c, s).view(rows, heads * head_dim)
+            keys = self.rotate(k, kv_heads, c, s).transpose(0, 1).unsqueeze(0)
+            values = v.view(rows, kv_heads, head_dim).transpose(0, 1).unsqueeze(0)
+            return rotated, keys, values
 
     return Rope()
 
 
-def attend_module(heads, kv_heads, head_dim, context_length):
-    """Causal grouped-query attention over the whole cache in FP32, rounding only its output: every
-    position past this one is masked on the device, so the launch is the same at every position."""
+def attend_module(heads, kv_heads, head_dim, context_length, rows):
+    """Causal grouped-query attention over the whole cache in FP32, rounding only its output:
+    every position past a row's own is masked on the device, so the launch is the same at every
+    position."""
     import torch
     import torch.nn.functional as F
 
     class Attend(torch.nn.Module):
         def forward(self, q, keys, values, position):
             group = heads // kv_heads
-            q4 = q.view(1, heads, 1, head_dim).float()
+            q4 = q.view(rows, heads, head_dim).transpose(0, 1).unsqueeze(0).float()
             k4 = keys.repeat_interleave(group, dim=1).float()
             v4 = values.repeat_interleave(group, dim=1).float()
-            mask = torch.where(torch.arange(context_length) <= position, 0.0, MASK_FILL).view(1, 1, 1, context_length)
+            positions = position + torch.arange(rows)
+            keep = torch.arange(context_length).unsqueeze(0) <= positions.unsqueeze(1)
+            mask = torch.where(keep, 0.0, MASK_FILL).view(1, 1, rows, context_length)
             out = F.scaled_dot_product_attention(q4, k4, v4, attn_mask=mask)
-            return out.to(torch.float16).view(1, heads * head_dim)
+            return out.to(torch.float16).squeeze(0).transpose(0, 1).reshape(rows, heads * head_dim)
 
     return Attend()
 
 
 class _Step:
-    def __init__(self):
-        # The step ends at the logits; the runtime selects the token on the host and hands it back.
-        self.plan = ExecutionPlan("cuda", ["prompt", "prompt_length", "position", "next_token"], ["logits"], [], {}, {}, [], {})
+    def __init__(self, prefill=False):
+        # A decode step ends at the logits and the runtime hands the token it selects back as the
+        # next step's input; a prefill chunk writes the cache and nothing else.
+        self.plan = ExecutionPlan(
+            "cuda",
+            ["prompt", "prompt_length", "position"] + ([] if prefill else ["next_token"]),
+            [] if prefill else ["logits"],
+            [],
+            {},
+            {},
+            [],
+            {},
+        )
         self.bindings = {}
 
     def buffer(self, name, shape, dtype=F16, role="scratch", data=None, page_tokens=None):
@@ -119,7 +158,7 @@ class _Step:
         everything else is scoped by ``prefix``. ``output_names`` renames the traced outputs (the
         tracer names them after their last op) so ``paged`` can address them: it names the
         wrapper's buffers that are the step's paged caches, as ``(graph name, axis, page tokens,
-        start)``. Their launches address the step buffer's pages, so their own shape — one token of
+        start)``. Their launches address the step buffer's pages, so their own shape — a chunk of
         the cache, or all of it — need not equal the step buffer's. Both are spelled in the graph's
         own names, never the step's, so every layer traces the same graph and compiles once."""
         from emmy.compiler.backend.cuda.backend import CudaBackend
@@ -182,69 +221,68 @@ class _Step:
             )
 
 
-def export_model(model, destination, *, context_length=MAX_CONTEXT, page_tokens=None, eos_ids=(), provenance=None):
-    """Compile and bundle a dense Qwen3 checkpoint; no Python operation is needed after export.
-
-    ``page_tokens`` is how many tokens of the KV cache one page holds. The cache is always a table
-    of pages the runtime owns; the default — one page spanning the whole context — addresses
-    exactly like the single contiguous array it replaces."""
+def _program(model, context_length, rows, page_tokens, cache):
+    """One program: the one-token decode step at ``rows == 1``, else a prefill chunk of ``rows``
+    prompt tokens that writes the cache and computes nothing past the last layer's keys."""
     import torch
 
-    from emmy.compiler.backend.plan_cache import PlanTemplateCache
     from emmy.compiler.trace.huggingface import build_attention_split_wrapper
 
-    validate_model(model, context_length)
-    page_tokens = context_length if page_tokens is None else page_tokens
-    if not 0 < page_tokens <= context_length or context_length % page_tokens:
-        raise ValueError(f"page_tokens={page_tokens} must divide the context capacity {context_length}")
     cfg = model.config
-    if any(not 0 <= token < cfg.vocab_size for token in eos_ids):
-        raise ValueError("EOS token outside vocabulary")
-    cache = PlanTemplateCache()
-    step = _Step()
+    prefill = rows > 1
+    step = _Step(prefill=prefill)
     h, heads, kv, d, vocab = cfg.hidden_size, cfg.num_attention_heads, cfg.num_key_value_heads, cfg.head_dim, cfg.vocab_size
     step.buffer("prompt", (context_length,), I64, "input")
     step.buffer("prompt_length", (1,), I64, "input")
     step.buffer("position", (1,), I64, "input")
-    step.buffer("next_token", (1,), I64, "input")
-    step.buffer("logits", (1, vocab), F16, "output")
+    if not prefill:
+        step.buffer("next_token", (1,), I64, "input")
+        step.buffer("logits", (1, vocab), F16, "output")
 
     # Example inputs are distinct tensors: the tracer folds two arguments that share one into a
     # single aliased input.
     def scalar():
         return torch.zeros(1, dtype=torch.int64)
 
-    hidden = "hidden0"
-    step.compiled(
-        "embed",
-        embed_module(model.model.embed_tokens.weight),
-        (torch.zeros(context_length, dtype=torch.int64), scalar(), scalar(), scalar()),
-        ["prompt", "prompt_length", "position", "next_token"],
-        [hidden],
-        cache,
-    )
-    with torch.no_grad():
-        cosine, sine = model.model.rotary_emb(torch.zeros(1, 1, h, dtype=torch.float32), torch.arange(context_length).reshape(1, -1))
-    cosine, sine = cosine[0].contiguous(), sine[0].contiguous()
-    example = torch.zeros(1, h, dtype=torch.float32)
-
     def head_rows(width):
-        return torch.zeros(1, width * d, dtype=torch.float16)
+        return torch.zeros(rows, width * d, dtype=torch.float16)
 
     def cache_rows():
         return torch.zeros(1, kv, context_length, d, dtype=torch.float16)
 
+    hidden = "hidden0"
+    prompt_example = torch.zeros(context_length, dtype=torch.int64)
+    if prefill:
+        embed = prefill_embed_module(model.model.embed_tokens.weight, rows)
+        step.compiled("embed", embed, (prompt_example, scalar(), scalar()), ["prompt", "prompt_length", "position"], [hidden], cache)
+    else:
+        embed = embed_module(model.model.embed_tokens.weight)
+        step.compiled(
+            "embed",
+            embed,
+            (prompt_example, scalar(), scalar(), scalar()),
+            ["prompt", "prompt_length", "position", "next_token"],
+            [hidden],
+            cache,
+        )
+    with torch.no_grad():
+        cosine, sine = model.model.rotary_emb(torch.zeros(1, 1, h, dtype=torch.float32), torch.arange(context_length).reshape(1, -1))
+    cosine, sine = cosine[0].contiguous(), sine[0].contiguous()
+    example = torch.zeros(rows, h, dtype=torch.float32)
     for index, layer in enumerate(model.model.layers):
         pre, post = build_attention_split_wrapper(layer, float32_residual=True)
-        names = [step.buffer(f"layer{index}.{name}", (1, width * d)) for name, width in (("q", heads), ("k", kv), ("v", kv))]
+        names = [step.buffer(f"layer{index}.{name}", (rows, width * d)) for name, width in (("q", heads), ("k", kv), ("v", kv))]
         step.compiled(f"pre{index}", pre, (example,), [hidden], names, cache)
-        rotated = step.buffer(f"layer{index}.rotated", (1, heads * d))
-        # The cache: paged along its token axis, written one token at a time at ``position``.
+        # The last prefill layer only needs its keys and values in the cache; its rotated query
+        # has no consumer, so it takes the persistent role rather than a scratch slot nobody reads.
+        last_prefill = prefill and index + 1 == len(model.model.layers)
+        rotated = step.buffer(f"layer{index}.rotated", (rows, heads * d), role="output" if last_prefill else "scratch")
+        # The cache: paged along its token axis, written a chunk at a time at ``position``.
         keys = step.buffer(f"layer{index}.keys", (1, kv, context_length, d), role="output", page_tokens=page_tokens)
         values = step.buffer(f"layer{index}.values", (1, kv, context_length, d), role="output", page_tokens=page_tokens)
         step.compiled(
             f"rope{index}",
-            rope_module(cosine, sine, heads, kv, d),
+            rope_module(cosine, sine, heads, kv, d, rows),
             (head_rows(heads), head_rows(kv), head_rows(kv), scalar()),
             [*names, "position"],
             [rotated, keys, values],
@@ -252,19 +290,25 @@ def export_model(model, destination, *, context_length=MAX_CONTEXT, page_tokens=
             output_names=("rotated", "keys", "values"),
             paged=(("keys", 2, page_tokens, "position"), ("values", 2, page_tokens, "position")),
         )
-        attention = step.buffer(f"layer{index}.attention", (1, heads * d))
+        if last_prefill:
+            continue
+        attention = step.buffer(f"layer{index}.attention", (rows, heads * d))
         step.compiled(
             f"attend{index}",
-            attend_module(heads, kv, d, context_length),
+            attend_module(heads, kv, d, context_length, rows),
             (head_rows(heads), cache_rows(), cache_rows(), scalar()),
             [rotated, keys, values, "position"],
             [attention],
             cache,
             paged=(("keys", 2, page_tokens, None), ("values", 2, page_tokens, None)),
         )
-        output = step.buffer(f"hidden{index + 1}", (1, h), F32)
-        step.compiled(f"post{index}", post, (torch.zeros(1, heads * d, dtype=torch.float16), example), [attention, hidden], [output], cache)
+        output = step.buffer(f"hidden{index + 1}", (rows, h), F32)
+        step.compiled(
+            f"post{index}", post, (torch.zeros(rows, heads * d, dtype=torch.float16), example), [attention, hidden], [output], cache
+        )
         hidden = output
+    if prefill:
+        return step
 
     class Head(torch.nn.Sequential):
         def forward(self, hidden):
@@ -272,12 +316,44 @@ def export_model(model, destination, *, context_length=MAX_CONTEXT, page_tokens=
 
     head = Head(model.model.norm, model.lm_head)
     step.compiled("head", head, (example,), [hidden], ["logits"], cache)
+    return step
+
+
+def export_model(model, destination, *, context_length=MAX_CONTEXT, page_tokens=None, eos_ids=(), provenance=None, prefill_size=None):
+    """Bundle one-token decode and fixed-width prefill; preparation owns every model operation.
+
+    ``page_tokens`` is how many tokens of the KV cache one page holds. The cache is always a table
+    of pages the runtime owns; the default — one page spanning the whole context — addresses
+    exactly like the single contiguous array it replaces. ``prefill_size`` is the chunk width the
+    prompt is consumed at; 1 disables chunking."""
+    from emmy.compiler.backend.plan_cache import PlanTemplateCache
+
+    validate_model(model, context_length)
+    page_tokens = context_length if page_tokens is None else page_tokens
+    if not 0 < page_tokens <= context_length or context_length % page_tokens:
+        raise ValueError(f"page_tokens={page_tokens} must divide the context capacity {context_length}")
+    prefill_size = PREFILL_SIZE if prefill_size is None else prefill_size
+    if type(prefill_size) is not int or not 1 <= prefill_size <= MAX_CONTEXT:
+        raise ValueError("prefill size must be within supported context capacity")
+    if any(not 0 <= token < model.config.vocab_size for token in eos_ids):
+        raise ValueError("EOS token outside vocabulary")
+    prefill_size = min(prefill_size, context_length)
+    cache = PlanTemplateCache()
+    programs = {"decode": _program(model, context_length, 1, page_tokens, cache)}
+    if prefill_size > 1:
+        programs["prefill"] = _program(model, context_length, prefill_size, page_tokens, cache)
     return save_executable(
         destination,
-        {"decode": step.plan},
-        bindings={"decode": step.bindings},
+        {name: step.plan for name, step in programs.items()},
+        bindings={name: step.bindings for name, step in programs.items()},
         key={
-            "generation": {"version": GENERATION_VERSION, "context_length": context_length, "vocab_size": vocab, "eos_ids": list(eos_ids)}
+            "generation": {
+                "version": GENERATION_VERSION,
+                "context_length": context_length,
+                "vocab_size": model.config.vocab_size,
+                "eos_ids": list(eos_ids),
+                "prefill_size": prefill_size,
+            }
         },
         provenance=provenance,
     )

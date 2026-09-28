@@ -34,6 +34,7 @@ def register_generate_command(subparsers):
     native = parser.add_mutually_exclusive_group()
     native.add_argument("--export-native", metavar="DIR", help="Prepare a standalone cached Qwen3 artifact and exit")
     native.add_argument("--native-pack", metavar="DIR", help="Generate with a prepared Rust artifact")
+    parser.add_argument("--prefill-size", type=int, default=None, help="Native export chunk width (default: 16; 1 disables chunking)")
     parser.add_argument("--context-length", type=int, default=None, help="Native export context capacity (default: 4096)")
     parser.add_argument(
         "--page-tokens",
@@ -108,8 +109,14 @@ def handle_generate(args):
             raise ValueError("timeout must be finite and positive")
     if args.capture and not args.native_pack:
         raise ValueError("capture requires --native-pack")
-    if (args.golden or args.strict_evidence or args.context_length is not None or args.page_tokens is not None) and not args.export_native:
-        raise ValueError("compiler evidence, context capacity and page size require --export-native")
+    if (
+        args.golden
+        or args.strict_evidence
+        or args.context_length is not None
+        or args.page_tokens is not None
+        or args.prefill_size is not None
+    ) and not args.export_native:
+        raise ValueError("compiler evidence, context capacity, page size and prefill size require --export-native")
     if args.export_native:
         import torch
         from transformers import AutoModelForCausalLM
@@ -128,6 +135,7 @@ def handle_generate(args):
                 context_length=MAX_CONTEXT if args.context_length is None else args.context_length,
                 page_tokens=args.page_tokens,
                 eos_ids=eos,
+                prefill_size=args.prefill_size,
             )
         logger.info("Prepared native artifact at %s", args.export_native)
         return
