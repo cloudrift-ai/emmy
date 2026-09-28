@@ -1,6 +1,7 @@
 # Native cached generation
 
-Python prepares a standalone dense Qwen3 generation artifact with FP16 weights, projections, logits, and KV cache.
+Python prepares a standalone dense Qwen3 generation artifact with FP16 weights, projection inputs, and KV cache.
+The output head retains FP32 logits through sampling so FP16 rounding cannot create a false maximum tie.
 The Rust runtime submits the exported launches, retains the KV cache, and chooses each next token on the GPU.
 No Python model operation runs after
 preparation. The experimental native HTTP adapter serves one active request; this is not a performance replacement
@@ -65,7 +66,8 @@ returns the advanced position; intermediate chunks return no token or logits.
 
 ## Sampling contract
 
-Generation artifact version 3 adds the prefill width and a separate prefill program when that width exceeds one.
+Generation artifact version 4 preserves FP32 logits and provides private sampling workspaces. The prefill width and
+separate prefill program remain part of the contract.
 Older generation artifacts must be exported again; the underlying execution-plan format is unchanged. Sampling uses
 float64 temperature/top-p inputs and a uint64 seed. Temperature must be finite and
 nonnegative, and top-p must lie in `(0, 1]`. Temperature zero selects the lowest token ID among maximum logits.
@@ -74,15 +76,16 @@ Nonfinite logits fail the request. Top-k is unsupported.
 Greedy selection uses one 128-thread block. Threads scan disjoint vocabulary strides, then reduce their winning
 indices in shared memory with explicit lowest-ID tie-breaking. Every thread participates in invalid-logit detection
 and the reduction, including vocabularies smaller than the block. Preparation supplies 512 bytes of shared memory.
-Intermediate prefill steps leave the selected token untouched. Positive-temperature selection still runs on thread
-zero after the uniform greedy branch; its probability and RNG calculations are unchanged. Re-export an artifact to
-use the parallel sampler. The runtime protocol version is unchanged.
+Intermediate prefill steps leave the selected token untouched. Both greedy and positive-temperature selection read
+FP32 scores. The output head multiplies FP16 normalized activations and FP16 weights with FP32 output, preserving
+score ordering without a wider weight copy.
 
-For positive temperature, a 65,536-bin histogram orders FP16 logits exactly, combining signed zeros. The sampler
-retains the smallest descending probability prefix reaching top-p, breaking ties by ascending token ID. It samples
-that distribution in token-ID order using float64 probabilities. The histogram costs 256 KiB per loaded model and is
-cleared whenever the one-token program runs; no vocabulary-sized buffer crosses to the CPU. This simple implementation
-has serial histogram scans and token selection; it is not a sampling performance claim.
+For positive temperature, threads compute float64 exponential weights in parallel. A 32-pass binary search over
+ordered FP32 keys locates the nucleus cutoff, combining signed zeros. Each pass sums the inclusive upper tail with
+a fixed 128-thread reduction tree using 1 KiB of shared memory. The sampler retains the smallest descending
+probability prefix reaching top-p, breaking ties by ascending token ID, then samples in token-ID order. The fixed
+reduction order avoids seed variation from floating-point atomics. Its private persistent weights cost eight bytes
+per vocabulary entry; no vocabulary-sized buffer crosses to the CPU. Final token selection remains serial.
 
 A SplitMix64 counter combines the request seed and generated-token index. Prefill does not consume random draws.
 Resetting a request resets the counter, and captured and uncaptured execution select the same tokens for identical
@@ -109,7 +112,7 @@ checkpoint tokenizer and chat template; the HTTP adapter owns text processing.
 The hermetic tiny-Qwen3 GPU test checks every logit at `rtol=atol=1e-3`, greedy tokens, request reset, context bounds,
 EOS, zero output budget, graph replay, first capture during decode, and full/partial prefill chunks across resets. It
 hides Python and NVCC from the native
-child's PATH after export. The same exported binaries also run through the Python executor; logits must be bit-identical
+child's PATH after export. The same exported binaries also run through the Python API; logits must be bit-identical
 at every checked step. Independent NumPy checks cover rotary rounding and causal attention through cache position
 4,096, including a shorter request after the largest one.
 
@@ -134,6 +137,8 @@ through 256 checkpoint positions. The
 seventeen cases across 10,585 positions, including two 4,096-position prompts, within the unchanged error budgets.
 FP32 attention, rotary intermediates, and residual accumulation close the earlier numerical failures. Independent
 attention qualification also covers the full 4,096-position capacity.
+The [output-precision investigation](../../../experiments/Qwen3-0.6B/native_accuracy/RESULTS.md) records the FP16
+head-output tie and its FP32 repair, with the same checkpoint error limits.
 Performance and production concurrency are separate qualifications.
 
 ## Native HTTP launcher

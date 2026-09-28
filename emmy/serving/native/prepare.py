@@ -9,14 +9,13 @@ import numpy as np
 from emmy.compiler.backend.pack import save_executable
 from emmy.compiler.backend.plan import BufferSpec, ExecutionPlan, KernelSpec, LaunchSpec, plan_from_graph
 from emmy.compiler.dim import Dim
-from emmy.compiler.dtype import F16, F32, F64, I64, U32, U64
+from emmy.compiler.dtype import F16, F32, F64, I64, U64
 from emmy.serving.native.kernels import SOURCE
 
 MAX_CONTEXT = 4096
 CUDA_THREADS = 128
-GENERATION_VERSION = 3
+GENERATION_VERSION = 4
 PREFILL_SIZE = 16
-SAMPLING_BINS = 65536
 
 
 def validate_model(model, context_length):
@@ -61,7 +60,7 @@ class _Step:
             self.bindings[name] = np.ascontiguousarray(data).tobytes()
         return name
 
-    def launch(self, kernel, args, source, *, writes, blocks=1, rows=1, shared=0, threads=CUDA_THREADS, zero_outputs=()):
+    def launch(self, kernel, args, source, *, writes, blocks=1, rows=1, shared=0, threads=CUDA_THREADS):
         self.plan.kernels[kernel] = KernelSpec(source=source)
         self.plan.launches.append(
             LaunchSpec(
@@ -71,7 +70,7 @@ class _Step:
                 ((blocks,), (rows,), (1,)),
                 ((threads,), (1,), (1,)),
                 shared,
-                tuple(zero_outputs),
+                (),
                 writes=tuple(writes),
             )
         )
@@ -159,8 +158,8 @@ def _program(model, context_length, rows, cache):
     if rows == 1:
         step.buffer("sampling", (2,), F64, "input")
         step.buffer("seed", (1,), U64, "input")
-        step.buffer("sampling_histogram", (SAMPLING_BINS,), U32)
-        step.buffer("logits", (1, vocab), F16, "output")
+        step.buffer("sampling_weights", (vocab,), F64, "output")
+        step.buffer("logits", (1, vocab), F32, "output")
     step.buffer("embedding", (vocab, h), role="constant", data=model.model.embed_tokens.weight.detach().numpy())
     with torch.no_grad():
         cosine, sine = model.model.rotary_emb(torch.zeros(1, 1, h, dtype=torch.float32), torch.arange(context_length).reshape(1, -1))
@@ -216,23 +215,15 @@ def _program(model, context_length, rows, cache):
 
     class Head(torch.nn.Sequential):
         def forward(self, hidden):
-            return self[1](self[0](hidden).to(self[1].weight.dtype))
+            return torch.mm(self[0](hidden).to(self[1].weight.dtype), self[1].weight.transpose(0, 1), out_dtype=torch.float32)
 
     head = Head(model.model.norm, model.lm_head)
     step.compiled("head", head, (example,), [hidden], ["logits"], cache)
     step.launch(
-        "native_histogram",
-        ["logits", "sampling", "position", "prompt_length", "sampling_histogram"],
-        source,
-        writes=["sampling_histogram"],
-        blocks=(vocab + CUDA_THREADS - 1) // CUDA_THREADS,
-        zero_outputs=["sampling_histogram"],
-    )
-    step.launch(
         "native_sample",
-        ["logits", "sampling_histogram", "sampling", "seed", "position", "prompt_length", "next_token"],
+        ["logits", "sampling_weights", "sampling", "seed", "position", "prompt_length", "next_token"],
         source,
-        writes=["next_token"],
+        writes=["next_token", "sampling_weights"],
         shared=CUDA_THREADS * 4,
     )
     return step

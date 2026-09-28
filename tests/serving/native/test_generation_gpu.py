@@ -51,6 +51,8 @@ def test_cached_qwen3_logits_and_generation(tmp_path, monkeypatch):
     executable = shutil.which("emmy-runtime-worker")
     if not executable:
         pytest.skip("build native worker and add it to PATH")
+    # Bit-identical replay requires a fixed reduction order, excluding atomic split reductions.
+    monkeypatch.setenv("EMMY_REDUCE", "")
     model = qwen3_model(2).half()
     model.config._attn_implementation = "eager"
     with gpu_lock():
@@ -93,7 +95,7 @@ def test_cached_qwen3_logits_and_generation(tmp_path, monkeypatch):
                         )
                         with torch.no_grad(), _reference_precision(True):
                             expected = model(torch.tensor([prefix], device="cuda")).logits[0, -1].float().cpu().numpy()
-                        actual = np.fromfile(logits_path, np.float16).astype(np.float32)
+                        actual = np.fromfile(logits_path, np.float32)
                         np.testing.assert_array_equal(actual, _python_step(reference_program, position).astype(np.float32))
                         np.testing.assert_allclose(actual, expected, rtol=1e-3, atol=1e-3)
                         if position >= len(prompt) - 1:
@@ -119,7 +121,7 @@ def test_cached_qwen3_logits_and_generation(tmp_path, monkeypatch):
                             prefix = prompt + chunked
                             with torch.no_grad(), _reference_precision(True):
                                 expected = model(torch.tensor([prefix], device="cuda")).logits[0, -1].float().cpu().numpy()
-                            actual = np.fromfile(logits_path, np.float16).astype(np.float32)
+                            actual = np.fromfile(logits_path, np.float32)
                             np.testing.assert_allclose(actual, expected, rtol=1e-3, atol=1e-3)
                             chunked.append(result["token"])
                     assert chunked == selected
@@ -280,7 +282,7 @@ def test_checkpoint_logits_and_completions(request, tmp_path, monkeypatch, name,
                         continue
                     if prefill:
                         precise_outputs.append(fp32)
-                    actual = np.fromfile(logits_path, np.float16).astype(np.float32)
+                    actual = np.fromfile(logits_path, np.float32)
                     if reference_program is not None:
                         np.testing.assert_array_equal(actual, _python_step(reference_program, position).astype(np.float32))
                     assert np.isfinite(actual).all() and np.isfinite(expected).all() and np.isfinite(fp32).all()
@@ -320,7 +322,7 @@ def test_checkpoint_logits_and_completions(request, tmp_path, monkeypatch, name,
                         await worker.run_job({"op": "generation_step", "capture": capture, "logits": str(logits_path)}, wall_timeout_s=30)
                         if position >= len(prompt) - 1:
                             index = position - len(prompt) + 1
-                            baseline = np.fromfile(logits_path, np.float16).astype(np.float32)
+                            baseline = np.fromfile(logits_path, np.float32)
                             measurements[index]["sequential_fp32"] = _logit_errors(baseline, precise_outputs[index])
                     (tmp_path / "measurements.json").write_text(json.dumps(measurements, indent=2))
                 # Experimental acceptance budgets, not a theorem about FP16. A per-prompt
@@ -510,60 +512,43 @@ def test_gpu_sampling_matches_independent_nucleus_distribution():
     from emmy.compiler.backend.cuda.program import CompiledProgram
     from emmy.compiler.backend.plan import BufferSpec, ExecutionPlan, KernelSpec, LaunchSpec
     from emmy.compiler.dim import Dim
-    from emmy.compiler.dtype import F16, F64, I64, U32, U64
+    from emmy.compiler.dtype import F32, F64, I64, U64
     from emmy.serving.native.kernels import SOURCE
 
-    # FP16 logits admit an exact ordering. The reference sorts tokens directly,
-    # independently of the device's histogram representation.
+    # The reference sorts FP32 tokens directly, independently of radix selection.
     source = (
         "#define HIDDEN 32\n#define HEADS 4\n#define KV_HEADS 2\n#define HEAD_DIM 8\n"
         "#define VOCAB 257\n#define SCALE 0.3535533905932738f\n" + SOURCE
     )
     inputs = [
-        BufferSpec("logits", (Dim(257),), F16, "input"),
+        BufferSpec("logits", (Dim(257),), F32, "input"),
         BufferSpec("params", (Dim(2),), F64, "input"),
         BufferSpec("position", (Dim(1),), I64, "input"),
         BufferSpec("length", (Dim(1),), I64, "input"),
         BufferSpec("seed", (Dim(1),), U64, "input"),
     ]
-    one = ((1,), (1,), (1,))
-    histogram_launch = LaunchSpec(
-        "histogram",
-        "native_histogram",
-        ("logits", "params", "position", "length", "histogram"),
-        ((3,), (1,), (1,)),
-        ((128,), (1,), (1,)),
-        0,
-        ("histogram",),
+    buffers = [
+        *inputs,
+        BufferSpec("weights", (Dim(257),), F64, "output"),
+        BufferSpec("output", (Dim(1),), I64, "output"),
+    ]
+    args = ("logits", "weights", "params", "seed", "position", "length", "output")
+    launch = LaunchSpec("output", "native_sample", args, ((1,), (1,), (1,)), ((128,), (1,), (1,)), 512, (), writes=("output", "weights"))
+    plan = ExecutionPlan(
+        "cuda", [b.name for b in inputs], ["output"], buffers, {}, {}, [launch], {"native_sample": KernelSpec(source=source)}
     )
-    sample_args = ("logits", "histogram", "params", "seed", "position", "length", "output")
-    sample_launch = LaunchSpec("output", "native_sample", sample_args, one, ((128,), (1,), (1,)), 128 * 4, ())
-    kernels = {name: KernelSpec(source=source) for name in ("native_histogram", "native_sample")}
-
-    def program(launches, histogram_role):
-        buffers = [*inputs, BufferSpec("histogram", (Dim(65536),), U32, histogram_role), BufferSpec("output", (Dim(1),), I64, "output")]
-        names = [b.name for b in buffers if b.role == "input"]
-        outputs = [b.name for b in buffers if b.role == "output"]
-        plan = ExecutionPlan("cuda", names, outputs, buffers, {}, {}, launches, kernels)
-        feed = {b.name: np.zeros(b.resolve_shape({}), b.dtype.np) for b in buffers if b.role == "input"}
-        return CompiledProgram.build_from_plan(plan, feed)
-
+    feed = {b.name: np.zeros(b.resolve_shape({}), b.dtype.np) for b in inputs}
     with gpu_lock():
-        # One program per stage, so a histogram is built once per case and sampled many times;
-        # a third holds both launches for the captured-replay check.
-        hist = program([histogram_launch], "output")
-        sample = program([sample_launch], "input")
-        both = program([histogram_launch, sample_launch], "scratch")
+        sample = CompiledProgram.build_from_plan(plan, feed)
         rng = np.random.default_rng(928)
-        cases = [rng.normal(size=257).astype(np.float16), np.zeros(257, np.float16)]
-        cases += [np.resize(np.array([-65504, 65504, -0.0, 0.0], np.float16), 257)]
+        cases = [rng.normal(size=257).astype(np.float32), np.zeros(257, np.float32)]
+        cases += [np.resize(np.array([-65504, 65504, -0.0, 0.0], np.float32), 257)]
+        cases.append(np.linspace(20.078, 20.082, 257, dtype=np.float32))  # Distinct scores inside one FP16 bin.
+        cases.append(np.resize(np.array([-np.finfo(np.float32).max, np.finfo(np.float32).max], np.float32), 257))
         for values in cases:
             for temperature, top_p in ((0.0, 1.0), (0.7, 0.8), (2.0, 1.0), (1e-300, 0.01), (1e300, 0.5)):
                 params = np.array([temperature, top_p], np.float64)
-                hist.upload_prefix({"logits": values, "params": params})
-                hist.run_once()
-                histogram = hist.outputs()["histogram"]
-                sample.upload_prefix({"logits": values, "params": params, "histogram": histogram})
+                sample.upload_prefix({"logits": values, "params": params})
                 if temperature == 0:
                     probabilities = np.eye(257)[values.argmax()]
                 else:
@@ -585,17 +570,17 @@ def test_gpu_sampling_matches_independent_nucleus_distribution():
                 # Six binomial standard deviations plus one sample for rounding.
                 bounds = 6 * np.sqrt(probabilities * (1 - probabilities) / len(selected)) + 1 / len(selected)
                 assert np.all(np.abs(frequencies - probabilities) <= bounds), (temperature, top_p, frequencies, probabilities)
-                both.upload_prefix({"logits": values, "params": params, "seed": np.array([77], np.uint64)})
-                both.capture_program_graph()
-                both.replay_program_graph()
-                assert int(both.outputs()["output"][0]) == selected[77]
+                sample.upload_prefix({"logits": values, "params": params, "seed": np.array([77], np.uint64)})
+                sample.capture_program_graph()
+                sample.replay_program_graph()
+                assert int(sample.outputs()["output"][0]) == selected[77]
         for invalid in (np.nan, np.inf, -np.inf):
-            values = np.zeros(257, np.float16)
+            values = np.zeros(257, np.float32)
             values[3] = invalid
             for temperature in (0.0, 1.0):
-                both.upload_prefix({"logits": values, "params": np.array([temperature, 1.0], np.float64)})
-                both.run_once()
-                assert int(both.outputs()["output"][0]) == -1
+                sample.upload_prefix({"logits": values, "params": np.array([temperature, 1.0], np.float64)})
+                sample.run_once()
+                assert int(sample.outputs()["output"][0]) == -1
 
 
 @pytest.mark.parametrize("vocab", [1, 31, 128, 129, 151936])
@@ -603,7 +588,7 @@ def test_gpu_greedy_exact_reduction(vocab):
     from emmy.compiler.backend.cuda.program import CompiledProgram
     from emmy.compiler.backend.plan import BufferSpec, ExecutionPlan, KernelSpec, LaunchSpec
     from emmy.compiler.dim import Dim
-    from emmy.compiler.dtype import F16, F64, I64, U32, U64
+    from emmy.compiler.dtype import F32, F64, I64, U64
     from emmy.serving.native.kernels import SOURCE
 
     source = (
@@ -612,8 +597,8 @@ def test_gpu_greedy_exact_reduction(vocab):
     buffers = [
         BufferSpec(name, (Dim(size),), dtype, "input")
         for name, size, dtype in (
-            ("logits", vocab, F16),
-            ("histogram", 1, U32),
+            ("logits", vocab, F32),
+            ("weights", 1, F64),
             ("params", 2, F64),
             ("seed", 1, U64),
             ("position", 1, I64),
@@ -634,17 +619,18 @@ def test_gpu_greedy_exact_reduction(vocab):
     )
     feed = {b.name: np.zeros(b.resolve_shape({}), b.dtype.np) for b in buffers}
     rng = np.random.default_rng(42)
-    cases = [rng.normal(size=vocab).astype(np.float16), np.full(vocab, -65504, np.float16)]
-    cases.append(np.resize(np.array([-0.0, 0.0], np.float16), vocab))
+    cases = [rng.normal(size=vocab).astype(np.float32), np.full(vocab, -65504, np.float32)]
+    cases.append(np.resize(np.array([-0.0, 0.0], np.float32), vocab))
+    cases.append(np.linspace(20.078, 20.082, vocab, dtype=np.float32))
     for index in sorted({min(i, vocab - 1) for i in (0, 31, 32, 127, 128, 511, 512, vocab - 1)}):
-        values = np.full(vocab, -1, np.float16)
+        values = np.full(vocab, -1, np.float32)
         values[index] = 65504
         cases.append(values.copy())
         values[-1] = 65504  # Cross-thread and cross-iteration ties retain the lower token ID.
         cases.append(values)
     for invalid in (np.nan, np.inf, -np.inf):
         for index in (0, vocab - 1):
-            values = np.zeros(vocab, np.float16)
+            values = np.zeros(vocab, np.float32)
             values[index] = invalid
             cases.append(values)
     with gpu_lock():
@@ -658,6 +644,6 @@ def test_gpu_greedy_exact_reduction(vocab):
             program.replay_program_graph()
             assert int(program.outputs()["output"][0]) == expected
             # Intermediate prefill must not replace the previous selection, even for invalid logits.
-            program.upload_prefix({"logits": np.full(vocab, np.nan, np.float16), "length": np.array([2], np.int64)})
+            program.upload_prefix({"logits": np.full(vocab, np.nan, np.float32), "length": np.array([2], np.int64)})
             program.replay_program_graph()
             assert int(program.outputs()["output"][0]) == expected

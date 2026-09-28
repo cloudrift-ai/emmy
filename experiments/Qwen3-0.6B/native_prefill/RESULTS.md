@@ -5,6 +5,13 @@ sequential prefill on one RTX 4080. All 36 paired benchmark completions match. B
 identical one-token decode plans, standard math, FP16 weights and KV storage, and FP32 residuals and attention
 intermediates. The native server still admits one active request. This is not a comparison with stock vLLM.
 
+## Later output-precision update
+
+The [output-precision investigation](../native_accuracy/RESULTS.md) replaces the FP16 output-head program in the
+shared golden with an FP32-output program. The file now contains 50 rows across five programs, and preparation
+writes generation format 4. The measurements below remain the historical format-3 comparison; reproducing them
+requires the source and golden revisions recorded here. Current preparation uses the updated head and sampler.
+
 ## Update after merging main
 
 Main commit `6556d75e2` (#914) changes cut workspace dtypes and kernel identities. The targets remain fresh, but
@@ -37,7 +44,8 @@ sampler; the last layer also omits attention and its post-attention fragment. De
 CUDA graphs and scratch slabs, with shared weights, request inputs, and KV allocations.
 
 Generation artifact format 3 requires re-exporting older bundles. `--prefill-size 1` selects sequential execution;
-16 is the default. The current [golden](golden/rtx4080_sm89.json) includes the three existing one-token programs and two new
+16 is the default. The historical
+[golden](https://github.com/cloudrift-ai/emmy/blob/a98fd4f851be305a225ffce7bac2ad61b2892c8a/experiments/Qwen3-0.6B/native_prefill/golden/rtx4080_sm89.json) includes the three existing one-token programs and two new
 width-16 programs. Its five targets are fresh, all 52 rows strictly decode, and a fresh tuning database suffices for
 strict-evidence export. All schedules are manually selected from explicit measured candidates. No MCTS or prior-led
 search is used.

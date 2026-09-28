@@ -8,7 +8,7 @@ use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 use std::path::Path;
 
-const GENERATION_FORMAT: u32 = 3;
+const GENERATION_FORMAT: u32 = 4;
 const DEFAULT_TEMPERATURE: f64 = 0.0;
 const DEFAULT_TOP_P: f64 = 1.0;
 const DEFAULT_SEED: u64 = 0;
@@ -126,7 +126,7 @@ impl Generator {
             ("sampling", "f64", "input", vec![2]),
             ("seed", "u64", "input", vec![1]),
             ("next_token", "i64", "output", vec![1]),
-            ("logits", "f16", "output", vec![1, config.vocab_size as i64]),
+            ("logits", "f32", "output", vec![1, config.vocab_size as i64]),
         ] {
             let buffer = artifact
                 .program

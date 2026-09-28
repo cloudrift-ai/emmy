@@ -248,7 +248,8 @@ def _eval(node, ins: list, sym_env: dict[str, int] | None = None, device=None):
     if name == "LinearOp":
         return F.linear(ins[0], ins[1], ins[2] if op.has_bias else None)
     if name == "MatmulOp":
-        out = ins[0] @ ins[1]
+        dtype = torch.promote_types(torch.promote_types(ins[0].dtype, ins[1].dtype), torch_dtype(node.output.dtype))
+        out = ins[0].to(dtype) @ ins[1].to(dtype)
         return out + ins[2] if op.has_bias else out
     if name == "SdpaOp":
         q, k, v = ins[0], ins[1], ins[2]
@@ -290,10 +291,9 @@ def _eval(node, ins: list, sym_env: dict[str, int] | None = None, device=None):
     if name == "SoftmaxOp":
         return torch.softmax(ins[0], dim=op.axis)
     if name == "TransposeOp":
-        ndim = ins[0].dim()
-        if len(op.axes) == ndim:
-            return ins[0].permute(*op.axes)
-        return ins[0].transpose(op.axes[0], op.axes[1])
+        if len(op.axes) == 2:
+            return ins[0].transpose(op.axes[0], op.axes[1])
+        return ins[0].permute(*op.axes)
     if name == "ReshapeOp":
         return ins[0].reshape(_shape_ints(node.output.shape, sym_env))
     if name == "UnsqueezeOp":
