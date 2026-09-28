@@ -742,6 +742,20 @@ def test_a_kernel_pin_reaches_only_the_piece_it_names(monkeypatch):
     assert pin_row("", "add_7__place_ab12_0__partial", split_consumed=True) == {"REDUCE": "coop-t"}, "a partial by its node id"
 
 
+def test_the_most_specific_kernel_pin_wins(monkeypatch):
+    """A pin naming a split's partial beats the pin naming the piece it was split from, which also
+    reaches the partial: a sweep sets the piece's split factor and the partial's tier together."""
+    from importlib import import_module
+
+    pin_row = import_module("emmy.compiler.pipeline.passes.tile.schedule.040_schedule").pin_row
+    monkeypatch.setenv("EMMY_REDUCE@place_ab12", "g8k")
+    monkeypatch.setenv("EMMY_REDUCE@place_ab12_0__partial", "coop-t")
+    assert knob_mod.kernel_pin("REDUCE", "k_x__place_ab12") == "g8k"
+    assert knob_mod.kernel_pin("REDUCE", "k_add_7__place_ab12_0__partial") == "coop-t"
+    assert knob_mod.kernel_pin("REDUCE", "k_add_7__place_ab12_0") == "g8k", "the finalize keeps the piece's pin"
+    assert pin_row("", "add_7__place_ab12_0__partial", split_consumed=True) == {"REDUCE": "coop-t"}
+
+
 def test_a_kernel_pin_is_checked_as_its_family():
     """A kernel pin is checked against the kernels it names; given no names, against every kernel, as a bare pin."""
     from emmy.compiler.pipeline.search.pins import unreproducible_pin_flag
