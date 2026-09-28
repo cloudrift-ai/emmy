@@ -1410,6 +1410,7 @@ def pipelined_kloop(
     k_end: Expr | None = None,
     k_first: Expr | None = None,
     seed: bool = True,
+    carried=None,
 ) -> tuple[list[Stmt], list[Stmt]]:
     """The **one** liveness-scheduled staged K-loop skeleton — every staged form is this scheduler
     run over the loop body's dataflow; none is its own skeleton.
@@ -1559,6 +1560,10 @@ def pipelined_kloop(
         g.n_flight = (w_cnt - f_idx - 1) if g.lag == 0 else (m - 1 - f_idx) + (g.lag - 1) * m + w_cnt
         assert g.n_flight >= 0, "wait-group counting derived a negative in-flight count"
 
+    if carried is not None and (
+        region := _carried_kloop(groups, carried, pre, i_expr, _fill_k0, k0, k_extent, bk_elems, k_end, seed, symbolic, k_first)
+    ):
+        return decls, region
     body: list[Stmt] = []
     for g in groups:  # top fills: the ring prefetch / the single-buffer current-chunk fill
         if g.kind == "ring":
@@ -1604,6 +1609,45 @@ def pipelined_kloop(
     return decls, [*pre, outer]
 
 
+def _carried_kloop(groups, carried, pre, i_expr, fill_k0, k0, k_extent, bk_elems, k_end, seed, symbolic, k_first) -> list[Stmt] | None:
+    """The cp.async ring whose drain carries its fragments across chunks: every chunk's first atom-K
+    step is loaded while the previous chunk's last step is in the tensor cores, and each chunk has
+    one barrier. The last step of chunk ``i`` issues the prefetch of chunk ``i+ring-1`` into the
+    slot chunk ``i-1`` held, waits for chunk ``i+1``, crosses the barrier and loads chunk ``i+1``'s
+    first step into the other fragment set, then issues its own mmas. Chunk ``i-1``'s slot is free
+    to refill there: its last read is a load issued before chunk ``i-1``'s barrier. The
+    ``None`` return keeps the ordinary schedule: two groups, a ring under three (the prefetch would
+    target the slot about to be read), a symbolic or banded stream, an odd step count."""
+    if len(groups) != 1 or symbolic or k_first is not None:
+        return None
+    (g,) = groups
+    if g.kind != "ring" or g.ring < 3 or not isinstance(g.transport, CpAsyncTransport):
+        return None
+    steps, loads, mmas = carried(g.read_slot)
+    if steps < 2 or steps % 2:
+        return None
+    _, next_loads, _ = carried(BinaryExpr("%", BinaryExpr("+", i_expr, _lit(1)), _lit(g.ring)))
+    _, first_loads, _ = carried(_lit(0))
+    in_flight = g.ring - 2  # after this step's commit, every prefetch but the next chunk's may fly
+    head = [*pre, *g.transport.wait(in_flight=in_flight, slot=_lit(0), phase=_lit(0)), *first_loads(0, "_s0")]
+    body: list[Stmt] = []
+    for step in range(steps):
+        this, other = f"_s{step % 2}", f"_s{(step + 1) % 2}"
+        if step < steps - 1:
+            body += loads(step + 1, other)
+        else:
+            slot = BinaryExpr("%", BinaryExpr("+", i_expr, _lit(g.lag)), _lit(g.ring))
+            body += g.transport.fill(k0=fill_k0(g.lag), slot=slot, k0_cur=Var(k0))
+            body += g.transport.commit()
+            body += g.transport.wait(in_flight=in_flight, slot=slot, phase=_lit(0))
+            body += next_loads(0, other)
+        body += mmas(this)
+    outer = StridedLoop(
+        axis=Axis(name=k0, extent=k_extent), start=_lit(0), step=_lit(bk_elems), body=Body(tuple(body)), unroll=False, end=k_end, seed=seed
+    )
+    return [*head, outer]
+
+
 def staged_kloop(
     *,
     transport,
@@ -1618,6 +1662,7 @@ def staged_kloop(
     k_end: Expr | None = None,
     k_first: Expr | None = None,
     seed: bool = True,
+    carried=None,
 ) -> tuple[list[Stmt], list[Stmt]]:
     """The whole-body staged K-loop — ONE operand-group live across the entire ``drain``, run through
     :func:`pipelined_kloop` (the segment list is the single ``(drain(slot), slabs)`` entry, so the
@@ -1684,4 +1729,5 @@ def staged_kloop(
         k_end=k_end,
         k_first=k_first,
         seed=seed,
+        carried=carried,
     )
