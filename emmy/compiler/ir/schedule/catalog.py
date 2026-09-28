@@ -303,6 +303,10 @@ def producer_band_moves() -> tuple[int, ...]:
 
 SPLITK_WIDTHS: tuple[int, ...] = (2, 4, 8, 16, 32, 64)
 
+#: The adjacent output columns a ``coop-t`` lane may own: 1, then the runs whose f16 weights read as one
+#: 4-, 8- or 16-byte vector load.
+COOP_T_COLUMNS: tuple[int, ...] = (1, 2, 4, 8)
+
 
 def splitk_moves() -> list[Reduce]:
     """Return cross-CTA split choices for both supported finalization modes."""
@@ -313,7 +317,7 @@ def coop_reduce_moves() -> list[Reduce]:
     """Return the finite cooperative and register reduction domain."""
     return [
         *(Reduce.of(coop=coop, reg=reg) for coop in (1, 4, 8, 16, 32, 64, 128, 256, 512) for reg in (1, 2, 4) if coop > 1 or reg > 1),
-        *(Reduce.of(coop=width, coop_transposed=True) for width in (32, 64, 128, 256, 512)),
+        *(Reduce.of(coop=width, coop_transposed=True, columns=columns) for width in (32, 64, 128, 256, 512) for columns in COOP_T_COLUMNS),
     ]
 
 

@@ -123,3 +123,19 @@ def test_reduce_spells_a_warp_group_split_with_its_width() -> None:
     assert Reduce.parse("g2k/wg2", None) == Reduce.of(cta=2, groups=2)
     with pytest.raises(ValueError, match="positive integer width"):
         Reduce.parse("wg", Work.parse("w4x1"))
+
+
+def test_a_transposed_band_spells_its_lane_columns() -> None:
+    """``coop-t/v<n>``: each lane of a transposed band owns ``n`` adjacent output columns. The token
+    round-trips, sits between the band and the ILP chains, and means nothing without ``coop-t``."""
+    import pytest
+
+    from emmy.compiler.ir.schedule import Reduce, Work
+
+    work = Work.parse("t512")
+    plan = Reduce.parse("g8k/coop-t/v4", work)
+    assert (plan.cta, plan.coop, plan.coop_transposed, plan.coop_columns) == (8, 512, True, 4)
+    assert plan.spell() == "g8k/coop-t/v4"
+    assert Reduce.parse("coop-t", work).coop_columns == 1
+    with pytest.raises(ValueError, match="follows 'coop-t'"):
+        Reduce.parse("coop/v4", work)
