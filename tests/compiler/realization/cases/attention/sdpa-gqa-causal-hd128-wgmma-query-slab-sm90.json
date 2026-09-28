@@ -3,7 +3,7 @@
   9,
   0
  ],
- "note": "Both of the chunk tier's products on the Hopper warp-group cell at head width 128: the score reads the query from a shared-memory slab and the staged key through descriptors, and the expectation reads the repacked weights the same way against the staged value. A descriptor's K step stays inside one 128-byte swizzle atom, so the key slab stacks its two K atoms along the rows, and the value slab its two N atoms, which is what this case adds over the head-width-64 one.",
+ "note": "The Qwen3-0.6B attention piece's shape on the Hopper warp-group cell: causal, two query heads per key head, head width 128. The score reads the query from a shared-memory slab filled once ahead of the chunk loop. That slab streams along the query rows, which are also its sibling axis, so a fill that bound the sibling to its block base read query row 0 for every row.",
  "programs": [
   {
    "inputs": [
@@ -16,6 +16,23 @@
    ],
    "nodes": [
     {
+     "id": "scaled_dot_product_attention_c3",
+     "op": "constant",
+     "attrs": {
+      "name": "scaled_dot_product_attention_c3",
+      "value": 0.0
+     },
+     "outputs": [
+      [
+       "scaled_dot_product_attention_c3",
+       "f16",
+       [
+        1
+       ]
+      ]
+     ]
+    },
+    {
      "id": "x0",
      "op": "input",
      "outputs": [
@@ -24,7 +41,7 @@
        "f16",
        [
         1,
-        8,
+        16,
         512,
         128
        ]
@@ -66,6 +83,9 @@
     {
      "id": "scaled_dot_product_attention",
      "op": "torch.sdpa",
+     "attrs": {
+      "is_causal": true
+     },
      "inputs": [
       "x0",
       "x1",
@@ -77,7 +97,7 @@
        "f16",
        [
         1,
-        8,
+        16,
         512,
         128
        ]
@@ -98,13 +118,13 @@
    },
    "realizations": [
     {
-     "name": "k_sdpa_c2141f",
+     "name": "k_sdpa_5c4046",
      "pins": {
       "FAST_MATH": false
      },
      "knobs": {
       "WORK": "w4x1",
-      "TILE@map.1/twist": "wgmma_m64n128k16_f16_f32/f1x16/k4",
+      "TILE@map.1/twist": "wgmma_m64n64k16_f16_f32/f1x8/k4",
       "TILE@map.1/twist.1/inner": "wgmma_m64n64k16_f16_f32/f1x8/k4",
       "REDUCE@map.1/twist": "",
       "REDUCE@map.1/twist.1/inner": "",
@@ -112,7 +132,7 @@
       "STAGE@map.1/twist.1/inner": "d2/smem-async",
       "RASTER": ""
      },
-     "identity": "aca35a0df53133c50d3d03471c7ac591761e906e43420fdb2a161d3b038f9ca4"
+     "identity": "310fc37f317bc7b39d9fbaabd47261b22badab5d8a7a1d68e66f419839d8316b"
     }
    ]
   }
@@ -128,6 +148,40 @@
     "scaled_dot_product_attention"
    ],
    "nodes": [
+    {
+     "id": "scaled_dot_product_attention_mask_fill_c",
+     "op": "constant",
+     "attrs": {
+      "name": "scaled_dot_product_attention_mask_fill_c",
+      "value": -1000000000.0
+     },
+     "outputs": [
+      [
+       "scaled_dot_product_attention_mask_fill_c",
+       "f16",
+       [
+        1
+       ]
+      ]
+     ]
+    },
+    {
+     "id": "scaled_dot_product_attention_mask_zero_c",
+     "op": "constant",
+     "attrs": {
+      "name": "scaled_dot_product_attention_mask_zero_c",
+      "value": 0.0
+     },
+     "outputs": [
+      [
+       "scaled_dot_product_attention_mask_zero_c",
+       "f16",
+       [
+        1
+       ]
+      ]
+     ]
+    },
     {
      "id": "scaled_dot_product_attention_scale",
      "op": "constant",
@@ -154,7 +208,7 @@
        "f16",
        [
         1,
-        8,
+        16,
         512,
         128
        ]
@@ -203,6 +257,28 @@
          "names": [
           "in0"
          ],
+         "input": "scaled_dot_product_attention_mask_fill_c",
+         "index": [
+          "0"
+         ]
+        }
+       },
+       {
+        "Load": {
+         "names": [
+          "in1"
+         ],
+         "input": "scaled_dot_product_attention_mask_zero_c",
+         "index": [
+          "0"
+         ]
+        }
+       },
+       {
+        "Load": {
+         "names": [
+          "in2"
+         ],
          "input": "scaled_dot_product_attention_scale",
          "index": [
           "0"
@@ -213,7 +289,7 @@
         "Loop": {
          "axis": {
           "name": "a0",
-          "extent": 8
+          "extent": 16
          },
          "body": [
           {
@@ -240,7 +316,21 @@
                    {
                     "Load": {
                      "names": [
-                      "in1"
+                      "in3"
+                     ],
+                     "input": "x1",
+                     "index": [
+                      "0",
+                      "a0 / 2",
+                      "a2",
+                      "a3"
+                     ]
+                    }
+                   },
+                   {
+                    "Load": {
+                     "names": [
+                      "in4"
                      ],
                      "input": "x0",
                      "index": [
@@ -252,26 +342,12 @@
                     }
                    },
                    {
-                    "Load": {
-                     "names": [
-                      "in2"
-                     ],
-                     "input": "x1",
-                     "index": [
-                      "0",
-                      "a0",
-                      "a2",
-                      "a3"
-                     ]
-                    }
-                   },
-                   {
                     "Assign": {
                      "name": "v0",
                      "op": "multiply",
                      "args": [
-                      "in1",
-                      "in2"
+                      "in3",
+                      "in4"
                      ],
                      "dtype": "f32"
                     }
@@ -294,14 +370,39 @@
                   "op": "multiply",
                   "args": [
                    "acc0",
-                   "in0"
+                   "in2"
+                  ]
+                 }
+                },
+                {
+                 "Select": {
+                  "name": "v2",
+                  "branches": [
+                   {
+                    "value": "in1",
+                    "select": "a2 <= a1"
+                   },
+                   {
+                    "value": "in0",
+                    "select": "a1 < a2"
+                   }
+                  ]
+                 }
+                },
+                {
+                 "Assign": {
+                  "name": "v3",
+                  "op": "add",
+                  "args": [
+                   "v1",
+                   "v2"
                   ]
                  }
                 },
                 {
                  "Accum": {
                   "name": "acc1",
-                  "value": "v1",
+                  "value": "v3",
                   "op": "maximum",
                   "axes": [
                    "a2"
@@ -328,7 +429,21 @@
                    {
                     "Load": {
                      "names": [
-                      "in3"
+                      "in5"
+                     ],
+                     "input": "x1",
+                     "index": [
+                      "0",
+                      "a0 / 2",
+                      "a2",
+                      "a5"
+                     ]
+                    }
+                   },
+                   {
+                    "Load": {
+                     "names": [
+                      "in6"
                      ],
                      "input": "x0",
                      "index": [
@@ -340,26 +455,12 @@
                     }
                    },
                    {
-                    "Load": {
-                     "names": [
-                      "in4"
-                     ],
-                     "input": "x1",
-                     "index": [
-                      "0",
-                      "a0",
-                      "a2",
-                      "a5"
-                     ]
-                    }
-                   },
-                   {
                     "Assign": {
-                     "name": "v2",
+                     "name": "v4",
                      "op": "multiply",
                      "args": [
-                      "in3",
-                      "in4"
+                      "in5",
+                      "in6"
                      ],
                      "dtype": "f32"
                     }
@@ -367,7 +468,7 @@
                    {
                     "Accum": {
                      "name": "acc2",
-                     "value": "v2",
+                     "value": "v4",
                      "axes": [
                       "a5"
                      ]
@@ -378,37 +479,62 @@
                 },
                 {
                  "Assign": {
-                  "name": "v3",
+                  "name": "v5",
                   "op": "multiply",
                   "args": [
                    "acc2",
-                   "in0"
+                   "in2"
+                  ]
+                 }
+                },
+                {
+                 "Select": {
+                  "name": "v6",
+                  "branches": [
+                   {
+                    "value": "in1",
+                    "select": "a2 <= a1"
+                   },
+                   {
+                    "value": "in0",
+                    "select": "a1 < a2"
+                   }
                   ]
                  }
                 },
                 {
                  "Assign": {
-                  "name": "v4",
+                  "name": "v7",
+                  "op": "add",
+                  "args": [
+                   "v5",
+                   "v6"
+                  ]
+                 }
+                },
+                {
+                 "Assign": {
+                  "name": "v8",
                   "op": "subtract",
                   "args": [
-                   "v3",
+                   "v7",
                    "acc1"
                   ]
                  }
                 },
                 {
                  "Assign": {
-                  "name": "v5",
+                  "name": "v9",
                   "op": "exp",
                   "args": [
-                   "v4"
+                   "v8"
                   ]
                  }
                 },
                 {
                  "Accum": {
                   "name": "acc3",
-                  "value": "v5",
+                  "value": "v9",
                   "axes": [
                    "a2"
                   ]
@@ -441,7 +567,21 @@
                       {
                        "Load": {
                         "names": [
-                         "in5"
+                         "in7"
+                        ],
+                        "input": "x1",
+                        "index": [
+                         "0",
+                         "a0 / 2",
+                         "a7",
+                         "a8"
+                        ]
+                       }
+                      },
+                      {
+                       "Load": {
+                        "names": [
+                         "in8"
                         ],
                         "input": "x0",
                         "index": [
@@ -453,26 +593,12 @@
                        }
                       },
                       {
-                       "Load": {
-                        "names": [
-                         "in6"
-                        ],
-                        "input": "x1",
-                        "index": [
-                         "0",
-                         "a0",
-                         "a7",
-                         "a8"
-                        ]
-                       }
-                      },
-                      {
                        "Assign": {
-                        "name": "v6",
+                        "name": "v10",
                         "op": "multiply",
                         "args": [
-                         "in5",
-                         "in6"
+                         "in7",
+                         "in8"
                         ],
                         "dtype": "f32"
                        }
@@ -480,7 +606,7 @@
                       {
                        "Accum": {
                         "name": "acc4",
-                        "value": "v6",
+                        "value": "v10",
                         "axes": [
                          "a8"
                         ]
@@ -491,71 +617,96 @@
                    },
                    {
                     "Assign": {
-                     "name": "v7",
+                     "name": "v11",
                      "op": "multiply",
                      "args": [
                       "acc4",
-                      "in0"
-                     ]
-                    }
-                   },
-                   {
-                    "Assign": {
-                     "name": "v8",
-                     "op": "subtract",
-                     "args": [
-                      "v7",
-                      "acc1"
-                     ]
-                    }
-                   },
-                   {
-                    "Assign": {
-                     "name": "v9",
-                     "op": "exp",
-                     "args": [
-                      "v8"
-                     ]
-                    }
-                   },
-                   {
-                    "Assign": {
-                     "name": "v10",
-                     "op": "divide",
-                     "args": [
-                      "v9",
-                      "acc3"
+                      "in2"
                      ]
                     }
                    },
                    {
                     "Load": {
                      "names": [
-                      "in7"
+                      "in9"
                      ],
                      "input": "x2",
                      "index": [
                       "0",
-                      "a0",
+                      "a0 / 2",
                       "a7",
                       "a6"
                      ]
                     }
                    },
                    {
+                    "Select": {
+                     "name": "v12",
+                     "branches": [
+                      {
+                       "value": "in1",
+                       "select": "a7 <= a1"
+                      },
+                      {
+                       "value": "in0",
+                       "select": "a1 < a7"
+                      }
+                     ]
+                    }
+                   },
+                   {
                     "Assign": {
-                     "name": "v11",
+                     "name": "v13",
+                     "op": "add",
+                     "args": [
+                      "v11",
+                      "v12"
+                     ]
+                    }
+                   },
+                   {
+                    "Assign": {
+                     "name": "v14",
+                     "op": "subtract",
+                     "args": [
+                      "v13",
+                      "acc1"
+                     ]
+                    }
+                   },
+                   {
+                    "Assign": {
+                     "name": "v15",
+                     "op": "exp",
+                     "args": [
+                      "v14"
+                     ]
+                    }
+                   },
+                   {
+                    "Assign": {
+                     "name": "v16",
+                     "op": "divide",
+                     "args": [
+                      "v15",
+                      "acc3"
+                     ]
+                    }
+                   },
+                   {
+                    "Assign": {
+                     "name": "v17",
                      "op": "multiply",
                      "args": [
-                      "in7",
-                      "v10"
+                      "in9",
+                      "v16"
                      ]
                     }
                    },
                    {
                     "Accum": {
                      "name": "acc5",
-                     "value": "v11",
+                     "value": "v17",
                      "axes": [
                       "a7"
                      ]
@@ -588,10 +739,12 @@
         }
        }
       ],
-      "name": "k_sdpa_441e96"
+      "name": "k_sdpa_5c4046"
      },
      "inputs": [
       "scaled_dot_product_attention_scale",
+      "scaled_dot_product_attention_mask_fill_c",
+      "scaled_dot_product_attention_mask_zero_c",
       "x1",
       "x0",
       "x2"
@@ -602,7 +755,7 @@
        "f16",
        [
         1,
-        8,
+        16,
         512,
         128
        ]
