@@ -785,3 +785,12 @@ def test_a_kernel_pin_is_checked_as_its_family():
     names = ["add_7__place_ab12_0__partial", "add_7__place_cd34_0__partial"]
     assert "WORK@place_ab12=t128" in unreproducible_pin_flag({"WORK@place_ab12": "t128"}, rows, kernel_names=names)
     assert unreproducible_pin_flag({"WORK@place_cd34": "t128"}, rows, kernel_names=names) is None
+
+
+def test_a_kernel_scoped_place_pin_is_not_realized_by_a_sibling_seam():
+    """Placement receipts name seams, so ``PLACE@place_<token>`` is never read as a bare PLACE pin."""
+    from emmy.compiler.pipeline.search.pins import unreproducible_pin_flag
+
+    receipts = [{"PLACE@map.1/inner": "cut"}]
+    assert unreproducible_pin_flag({"PLACE@map.1/inner": "cut"}, [{}], placement_knobs=receipts) is None
+    assert unreproducible_pin_flag({"PLACE@place_ab12": "cut"}, [{}], placement_knobs=receipts) is not None

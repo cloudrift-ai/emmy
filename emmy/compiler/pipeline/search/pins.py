@@ -158,8 +158,9 @@ def unreproducible_pin_flag(
     for label, want in pinned.items():
         fam = family_of(label)
         # A kernel pin is its family's bare pin, asked of the kernels it names (``kernel_names``, launch
-        # order beside ``kernel_knobs``); without names, of every kernel, as a bare pin is.
-        name = fam if kernel_scoped(label) else label
+        # order beside ``kernel_knobs``); without names, of every kernel, as a bare pin is. A placement
+        # receipt names a seam, never a kernel, so a kernel-scoped PLACE pin keeps its scope and matches none.
+        name = fam if kernel_scoped(label) and fam != "PLACE" else label
         if fam == "PLACE":
             if placement_knobs is None:
                 continue  # callers without a resolution trace cannot gate a splice receipt
