@@ -21,8 +21,10 @@ from emmy.compiler.pipeline.knob import (
     family_of,
     get,
     is_off_value,
+    kernel_scoped,
     parse_knob_spec,
     pin_key_matches,
+    reaches,
     registry,
     values_equal,
 )
@@ -138,6 +140,7 @@ def unreproducible_pin_flag(
     *,
     placement_knobs: list[dict] | None = None,
     reject_conflicts: bool = False,
+    kernel_names: list[str] | None = None,
 ) -> str | None:
     """Describe pins not realized by any compiled CUDA kernel, or return ``None``.
 
@@ -150,12 +153,17 @@ def unreproducible_pin_flag(
     if not any(kernel_knobs) and not any(placement_knobs or []):
         return None
     misses: list[str] = []
-    for name, want in pinned.items():
-        fam = family_of(name)
+    for label, want in pinned.items():
+        fam = family_of(label)
+        # A kernel pin is its family's bare pin, asked of the kernels it names (``kernel_names``, launch
+        # order beside ``kernel_knobs``); without names, of every kernel, as a bare pin is.
+        name = fam if kernel_scoped(label) else label
         if fam == "PLACE":
             if placement_knobs is None:
                 continue  # callers without a resolution trace cannot gate a splice receipt
             realized_knobs = placement_knobs
+        elif kernel_scoped(label) and kernel_names is not None:
+            realized_knobs = [knobs for knobs, kernel in zip(kernel_knobs, kernel_names, strict=True) if reaches(label, kernel)]
         else:
             realized_knobs = kernel_knobs
         probe = want
@@ -198,7 +206,7 @@ def unreproducible_pin_flag(
             continue
         ran_values = conflicts if reject_conflicts and conflicts else others
         ran = "/".join(ran_values) if ran_values else ("(off)" if saw_off else "(unset)")
-        misses.append(f"{name}={want} realized {ran}")
+        misses.append(f"{label}={want} realized {ran}")
     return f"unreproducible pin: {'; '.join(misses)}" if misses else None
 
 
