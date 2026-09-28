@@ -163,8 +163,9 @@ The native preparation and attention contract lives in
 `start` binds the prompt once, keeps the sampling controls and resets request state. `advance` processes one prefill
 chunk or one decode token at the current absolute position, leaving the final prompt token to decode and taking a
 chunk only where every one of its rows fits the context; the diagnostic `step` always processes one token. Before
-prompt completion either returns no token; afterward it downloads the step's logits, selects the token on the host —
-greedy, or the exact-FP16-order nucleus draw the native contract describes — and uploads it as the next step's input.
+prompt completion either returns no token; afterward it reads back the token the program selected, or at positive
+temperature downloads the step's FP32 logits and draws one on the host as the native contract describes, and uploads
+it as the next step's input.
 Nothing the device runs is hand-written. Its explicit `ignore_eos` control permits fixed-output serving benchmarks to
 continue after EOS; ordinary worker generation retains EOS stopping. `generate` owns the complete prompt/decode loop
 and stops at EOS or the requested output count. Prompt plus requested output must fit capacity. `logits` is an
@@ -180,5 +181,6 @@ controls select greedy decoding. The library validates them before binding or su
 
 The worker adds `load_generation`, `start_generation`, `generation_step`, and `generate`. Prompt and result token
 arrays are little-endian i64 binary files. Step responses contain a selected token or null during prefill; optional
-logits use a binary output file. Loading either a generation model or a benchmark program releases the previous
+logits use a little-endian f32 binary output file under generation artifact version 5. Loading either a generation
+model or a benchmark program releases the previous
 object, and `release` handles both. These additive operations use the existing framed protocol and failure retirement.

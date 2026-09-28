@@ -12,7 +12,7 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F16, F32, I64
 
 MAX_CONTEXT = 4096
-GENERATION_VERSION = 4
+GENERATION_VERSION = 5
 PREFILL_SIZE = 16
 MASK_FILL = -1e9
 
@@ -110,14 +110,29 @@ def attend_module(heads, kv_heads, head_dim, context_length, rows):
     return Attend()
 
 
+def greedy_module(vocab):
+    """The lowest token ID among the maximum logits, from the reductions the compiler has: the peak,
+    then the largest negated ID among the tokens at the peak. A nonfinite logit leaves no token at
+    the peak, and the result is the vocabulary size, which the runtime rejects."""
+    import torch
+
+    class Greedy(torch.nn.Module):
+        def forward(self, logits):
+            peak = logits.amax(dim=1, keepdim=True)
+            ids = torch.arange(vocab).unsqueeze(0)
+            return -torch.where(logits == peak, -ids, -vocab).amax(dim=1)
+
+    return Greedy()
+
+
 class _Step:
     def __init__(self, prefill=False):
-        # A decode step ends at the logits and the runtime hands the token it selects back as the
-        # next step's input; a prefill chunk writes the cache and nothing else.
+        # A decode step ends at the logits and the greedy token; the runtime hands the token it
+        # selects back as the next step's input. A prefill chunk writes the cache and nothing else.
         self.plan = ExecutionPlan(
             "cuda",
             ["prompt", "prompt_length", "position", "next_token"],
-            [] if prefill else ["logits"],
+            [] if prefill else ["logits", "token"],
             [],
             {},
             {},
@@ -218,7 +233,8 @@ def _program(model, context_length, rows, page_tokens, cache):
     step.buffer("position", (1,), I64, "input")
     step.buffer("next_token", (1,), I64, "input")
     if not prefill:
-        step.buffer("logits", (1, vocab), F16, "output")
+        step.buffer("logits", (1, vocab), F32, "output")
+        step.buffer("token", (1,), I64, "output")
 
     # Example inputs are distinct tensors: the tracer folds two arguments that share one into a
     # single aliased input.
@@ -287,11 +303,13 @@ def _program(model, context_length, rows, page_tokens, cache):
         return step
 
     class Head(torch.nn.Sequential):
+        # FP32 scores from FP16 operands: rounding the logits to FP16 could tie distinct scores.
         def forward(self, hidden):
-            return self[1](self[0](hidden).to(self[1].weight.dtype))
+            return torch.mm(self[0](hidden).to(self[1].weight.dtype), self[1].weight.transpose(0, 1), out_dtype=torch.float32)
 
     head = Head(model.model.norm, model.lm_head)
     step.compiled("head", head, (example,), [hidden], ["logits"], cache)
+    step.compiled("greedy", greedy_module(vocab), (torch.zeros(1, vocab, dtype=torch.float32),), ["logits"], ["token"], cache)
     return step
 
 

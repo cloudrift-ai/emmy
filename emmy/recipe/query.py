@@ -19,7 +19,7 @@ from emmy.recipe.lifecycle import BEST_EFFORT_TAG, LIFECYCLE_TAGS, MAINTAINED_TA
 QUERY_SCHEMA_VERSION = 1
 
 _FIELD = r"[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*"
-_PREDICATE = re.compile(rf"^\s*({_FIELD})\s*(==|!=|>=|<=|>|<|in|contains|matches)\s*(.+?)\s*$")
+_PREDICATE = re.compile(rf"^\s*({_FIELD})\s*(==|!=|>=|<=|>|<|in|not contains|contains|matches)\s*(.+?)\s*$")
 _ORDER_SORT = re.compile(rf"^\s*({_FIELD})\s+order\s+(.+?)\s*$")
 _DIRECTION_SORT = re.compile(rf"^\s*({_FIELD})\s+(asc|desc)(?:\s+(nulls-first|nulls-last))?\s*$")
 
@@ -32,6 +32,7 @@ RECIPE_FIELDS = frozenset(
         "lifecycle",
         "task",
         "runnable",
+        "emmy_serving",
         "rationale",
         "heat",
         "operation",
@@ -165,6 +166,7 @@ def _base_row(record: dict | None, model_id: str) -> dict:
         "lifecycle": lifecycle,
         "task": record["task"] if record is not None else None,
         "runnable": record["runnable"] if record is not None else False,
+        "emmy_serving": record["emmy_serving"] if record is not None else False,
         "rationale": record["rationale"] if record is not None else None,
         "heat": record["heat"] if record is not None else None,
         "operation": operation,
@@ -247,11 +249,11 @@ def _matches(row: dict, predicate: Predicate) -> bool:
         return current != expected
     if operator == "in":
         return current in expected
-    if operator == "contains":
+    if operator in ("contains", "not contains"):
         try:
-            return expected in current
+            return (expected in current) == (operator == "contains")
         except TypeError as exc:
-            raise ValueError(f"Field {predicate.field} does not support 'contains'") from exc
+            raise ValueError(f"Field {predicate.field} does not support '{operator}'") from exc
     if operator == "matches":
         if not isinstance(current, str):
             return False

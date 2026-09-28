@@ -53,6 +53,8 @@ def test_cached_qwen3_logits_and_generation(tmp_path, monkeypatch):
     executable = shutil.which("emmy-runtime-worker")
     if not executable:
         pytest.skip("build native worker and add it to PATH")
+    # Bit-identical replay requires a fixed reduction order, excluding atomic split reductions.
+    monkeypatch.setenv("EMMY_REDUCE", "")
     model = qwen3_model(2).half()
     model.config._attn_implementation = "eager"
     with gpu_lock():
@@ -95,7 +97,7 @@ def test_cached_qwen3_logits_and_generation(tmp_path, monkeypatch):
                         )
                         with torch.no_grad(), _reference_precision(True):
                             expected = model(torch.tensor([prefix], device="cuda")).logits[0, -1].float().cpu().numpy()
-                        actual = np.fromfile(logits_path, np.float16).astype(np.float32)
+                        actual = np.fromfile(logits_path, np.float32)
                         np.testing.assert_array_equal(actual, _python_step(reference_program, position, next_token).astype(np.float32))
                         np.testing.assert_allclose(actual, expected, rtol=1e-3, atol=1e-3)
                         if position >= len(prompt) - 1:
@@ -121,7 +123,7 @@ def test_cached_qwen3_logits_and_generation(tmp_path, monkeypatch):
                             prefix = prompt + chunked
                             with torch.no_grad(), _reference_precision(True):
                                 expected = model(torch.tensor([prefix], device="cuda")).logits[0, -1].float().cpu().numpy()
-                            actual = np.fromfile(logits_path, np.float16).astype(np.float32)
+                            actual = np.fromfile(logits_path, np.float32)
                             np.testing.assert_allclose(actual, expected, rtol=1e-3, atol=1e-3)
                             chunked.append(result["token"])
                     assert chunked == selected
@@ -282,7 +284,7 @@ def test_checkpoint_logits_and_completions(request, tmp_path, monkeypatch, name,
                         continue
                     if prefill:
                         precise_outputs.append(fp32)
-                    actual = np.fromfile(logits_path, np.float16).astype(np.float32)
+                    actual = np.fromfile(logits_path, np.float32)
                     if reference_program is not None:
                         np.testing.assert_array_equal(actual, _python_step(reference_program, position, next_token).astype(np.float32))
                     assert np.isfinite(actual).all() and np.isfinite(expected).all() and np.isfinite(fp32).all()
@@ -322,7 +324,7 @@ def test_checkpoint_logits_and_completions(request, tmp_path, monkeypatch, name,
                         await worker.run_job({"op": "generation_step", "capture": capture, "logits": str(logits_path)}, wall_timeout_s=30)
                         if position >= len(prompt) - 1:
                             index = position - len(prompt) + 1
-                            baseline = np.fromfile(logits_path, np.float16).astype(np.float32)
+                            baseline = np.fromfile(logits_path, np.float32)
                             measurements[index]["sequential_fp32"] = _logit_errors(baseline, precise_outputs[index])
                     (tmp_path / "measurements.json").write_text(json.dumps(measurements, indent=2))
                 # Experimental acceptance budgets, not a theorem about FP16. A per-prompt

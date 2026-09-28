@@ -72,6 +72,7 @@
  "tests/compiler/backend/test_torch_ref.py::test_indexmap_broadcast_then_rotary_slice_compiles@cuda": 2.26,
  "tests/compiler/backend/test_torch_ref.py::test_scan_sum_is_runnable_and_matches_torch": 1.01,
  "tests/compiler/backend/test_torch_ref.py::test_source_free_range_is_runnable_on_cpu": 1.38,
+ "tests/compiler/backend/test_torch_ref.py::test_transposed_half_matmul_preserves_float32_output": 0.58,
  "tests/compiler/backend/test_torch_ref.py::test_where_accepts_bool_scalar_broadcast_through_triangular_indexmap": 1.58,
  "tests/compiler/backend/test_torch_ref.py::test_zero_width_pad_is_runnable_identity[f16-torch_dtype0]": 0.19,
  "tests/compiler/backend/test_torch_ref.py::test_zero_width_pad_is_runnable_identity[f32-torch_dtype1]": 1.34,

@@ -1,12 +1,13 @@
 # Full paged attention
 
-Status: proposed 2026-09-26, revised 2026-09-27. Builds on PR #871, which made paging a property of a buffer: a
-graph hint names the buffer, the axis and the page size, every read and write resolves its page before its offset,
-the runtime binds the page table as an operand and owns pages that span a buffer's declared shape, and the native
-Qwen3 path serves one request at a time over such a cache, every kernel it runs compiled from a traced module and
-the token selected on the host. Its prompt is consumed in fixed-width chunks through a second program that borrows
-the decode program's page tables. This plan takes that to many concurrent requests at a cost close to the unpaged
-kernels. It adds no IR and no fusion gate: paging stays on the buffer, kernel boundaries stay with the cut evidence.
+Status: proposed 2026-09-26, revised 2026-09-27. Builds on PR #871, which made paging a property of a buffer: a graph
+hint names the buffer, the axis and the page size, every read and write resolves its page before its offset, the
+runtime binds the page table as an operand and owns pages that span a buffer's declared shape, and the native Qwen3
+path serves one request at a time over such a cache, every kernel it runs compiled from a traced module, the greedy
+token included, and only positive-temperature sampling on the host. Its prompt is consumed in fixed-width chunks
+through a second program that borrows the decode program's page tables. This plan takes that to many concurrent
+requests at a cost close to the unpaged kernels. It adds no IR and no fusion gate: paging stays on the buffer, kernel
+boundaries stay with the cut evidence.
 
 ## Objective
 
@@ -51,10 +52,11 @@ the pages and bumps their counts, a miss allocates. Eviction is least recently u
 **Scheduler.** In `emmy-server`: admission up to the pool's capacity, decode steps over every active request in one
 launch of the batched fragments, new requests joining at step boundaries, and prefill in chunks of a fixed token
 budget through the compiled attention program at `q_len` = chunk, `kv_len` = position, writing each chunk at its
-`start`. The token is selected on the host today, one vocabulary download per step; a batch downloads one row of
-logits per request, which is fine at eight rows and is the point to move argmax back onto the device as a compiled
-reduction when it is not. The fragments compile at the serving widths (M = 1, 8, 16, 32) the export declares, and
-the step picks the smallest width that fits the batch; a wider batch waits.
+`start`. Greedy selection is already a compiled reduction in the decode program, so a greedy batch downloads one
+token per row; positive-temperature sampling downloads one row of FP32 logits per request and draws on the host,
+which is fine at eight rows. Moving it onto the device needs a histogram, a scatter-add the IR declares but nothing
+traces or lowers yet. The fragments compile at the serving widths (M = 1, 8, 16, 32) the export declares, and the
+step picks the smallest width that fits the batch; a wider batch waits.
 
 ## Milestones
 

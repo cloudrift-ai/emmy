@@ -23,6 +23,7 @@ def _record(model_id, tags, deployments, path=None, heat=None):
         "tags": tags,
         "task": "generate",
         "runnable": "onboarding" not in tags,
+        "emmy_serving": False,
         "deployments": deployments,
         "rationale": f"Qualify {model_id}.",
         "heat": heat,
@@ -247,3 +248,19 @@ async def test_query_resolves_team_access_before_cloudrift_availability(monkeypa
 
 def test_query_document_has_independent_versioned_schema():
     assert query_document([]) == {"schema_version": 1, "rows": []}
+
+
+def test_query_not_contains_excludes_tagged_recipes():
+    inventory = [
+        _record("org/failed", ["best-effort", "onboarding-failed"], []),
+        _record("org/healthy", ["best-effort"], []),
+    ]
+
+    rows = query_rows(
+        build_query_rows(inventory),
+        filters=[parse_predicate('tags not contains "onboarding-failed"')],
+        sorts=[],
+        limit=None,
+    )
+
+    assert [row["model_id"] for row in rows] == ["org/healthy"]

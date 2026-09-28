@@ -1,6 +1,6 @@
 //! Single-request cached generation over a compiler-prepared token-step program. The step
-//! computes the logits on the device; the token is selected here, on the host, so nothing the
-//! device runs is hand-written.
+//! computes the logits and the greedy token on the device; sampling at positive temperature
+//! happens here, on the host, so nothing the device runs is hand-written.
 
 use crate::{
     artifact::{Artifact, Paging},
@@ -10,105 +10,48 @@ use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 use std::path::Path;
 
-const GENERATION_FORMAT: u32 = 4;
+const GENERATION_FORMAT: u32 = 5;
 const DEFAULT_TEMPERATURE: f64 = 0.0;
 const DEFAULT_TOP_P: f64 = 1.0;
 const DEFAULT_SEED: u64 = 0;
 const TOKEN_BYTES: usize = size_of::<i64>();
 const MAX_CONTEXT: usize = 4096;
 const PROGRAM: &str = "decode";
-const LOGIT_BYTES: usize = size_of::<u16>();
-/// Every finite FP16 logit has an exact ordered bin.
-const SAMPLING_BINS: usize = 1 << 16;
+const LOGIT_BYTES: usize = size_of::<f32>();
 
-/// The f32 value of FP16 bits.
-fn f16_to_f32(bits: u16) -> f32 {
-    let sign = (u32::from(bits) & 0x8000) << 16;
-    let exponent = u32::from((bits >> 10) & 0x1f);
-    let mantissa = u32::from(bits & 0x3ff);
-    let magnitude = match exponent {
-        0 if mantissa == 0 => 0,
-        0 => {
-            // A subnormal: renormalize the mantissa into the f32 exponent range.
-            let shift = mantissa.leading_zeros() - 21;
-            ((127 - 15 + 1 - shift) << 23) | ((mantissa << shift) & 0x3ff) << 13
-        }
-        0x1f => 0x7f80_0000 | (mantissa << 13),
-        _ => ((exponent + 127 - 15) << 23) | (mantissa << 13),
-    };
-    f32::from_bits(sign | magnitude)
-}
-
-/// The order-preserving bin of one finite FP16 logit. Signed zeros share a bin.
-fn logit_bin(bits: u16) -> usize {
-    let bits = if bits & 0x7fff == 0 { 0 } else { bits };
-    usize::from(if bits & 0x8000 != 0 {
-        !bits
-    } else {
-        bits ^ 0x8000
-    })
-}
-
-fn bin_value(bin: usize) -> f64 {
-    let bin = bin as u16;
-    f64::from(f16_to_f32(if bin & 0x8000 != 0 {
-        bin ^ 0x8000
-    } else {
-        !bin
-    }))
-}
-
-/// The token one decode step selects from its FP16 logits. Temperature zero takes the lowest id
-/// among the maxima. Otherwise the histogram over the exact FP16 order finds the smallest
-/// descending prefix reaching top-p, ties broken by ascending id, and the draw walks the kept
-/// tokens in id order with f64 weights against a SplitMix64 counter of the request seed and the
-/// generated-token `index`, so captured and uncaptured steps select the same token for the same
-/// logits. A nonfinite logit fails the request.
-fn sample(logits: &[u16], sampling: &Sampling, index: u64) -> Result<i64> {
-    let values: Vec<f32> = logits.iter().map(|&bits| f16_to_f32(bits)).collect();
+/// The token one decode step selects from its FP32 logits at positive temperature: the tokens in
+/// descending logit order, ties by ascending id, the smallest prefix of that order reaching top-p,
+/// and a draw over it in id order with f64 weights against a SplitMix64 counter of the request
+/// seed and the generated-token `index`, so captured and uncaptured steps select the same token
+/// for the same logits. Greedy selection is the decode program's own output. A nonfinite logit
+/// fails the request.
+fn sample(logits: &[f32], sampling: &Sampling, index: u64) -> Result<i64> {
     ensure!(
-        values.iter().all(|value| value.is_finite()),
+        logits.iter().all(|value| value.is_finite()),
         "nonfinite logit"
     );
-    if sampling.temperature == 0.0 {
-        let (mut best, mut peak) = (0, f32::NEG_INFINITY);
-        for (token, &value) in values.iter().enumerate() {
-            if value > peak {
-                (best, peak) = (token, value);
-            }
+    let maximum = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let weights: Vec<f64> = logits
+        .iter()
+        .map(|&value| ((f64::from(value) - f64::from(maximum)) / sampling.temperature).exp())
+        .collect();
+    let target_mass = sampling.top_p * weights.iter().sum::<f64>();
+    // Signed zeros compare equal, and every logit is finite, so the order is total.
+    let mut order: Vec<usize> = (0..logits.len()).collect();
+    order.sort_unstable_by(|&a, &b| {
+        logits[b]
+            .partial_cmp(&logits[a])
+            .expect("finite logits")
+            .then(a.cmp(&b))
+    });
+    let mut kept = vec![false; logits.len()];
+    let mut mass = 0.0;
+    for &token in &order {
+        kept[token] = true;
+        mass += weights[token];
+        if mass >= target_mass {
+            break;
         }
-        return Ok(best as i64);
-    }
-    let mut histogram = vec![0u32; SAMPLING_BINS];
-    for &bits in logits {
-        histogram[logit_bin(bits)] += 1;
-    }
-    let temperature = sampling.temperature;
-    let peak = (1..SAMPLING_BINS)
-        .rev()
-        .find(|&bin| histogram[bin] != 0)
-        .context("no logits to sample")?;
-    let maximum = bin_value(peak);
-    let weight_of = |value: f64| ((value - maximum) / temperature).exp();
-    let total: f64 = (1..=peak)
-        .filter(|&bin| histogram[bin] != 0)
-        .map(|bin| f64::from(histogram[bin]) * weight_of(bin_value(bin)))
-        .sum();
-    // Include the smallest descending prefix reaching top-p. Equal logits are ordered by id.
-    let (mut mass, mut cutoff, mut ties) = (0.0, peak, 0u32);
-    while cutoff > 0 {
-        if histogram[cutoff] != 0 {
-            let weight = weight_of(bin_value(cutoff));
-            let group = f64::from(histogram[cutoff]) * weight;
-            if weight > 0.0 && mass + group >= sampling.top_p * total {
-                ties = histogram[cutoff]
-                    .min(((sampling.top_p * total - mass) / weight).ceil().max(1.0) as u32);
-                mass += f64::from(ties) * weight;
-                break;
-            }
-            mass += group;
-        }
-        cutoff -= 1;
     }
     let mut random = sampling
         .seed
@@ -118,23 +61,12 @@ fn sample(logits: &[u16], sampling: &Sampling, index: u64) -> Result<i64> {
     random ^= random >> 31;
     let target = (random >> 11) as f64 * 2f64.powi(-53) * mass;
     let (mut cumulative, mut last) = (0.0, None);
-    for (token, &bits) in logits.iter().enumerate() {
-        let bin = logit_bin(bits);
-        if bin < cutoff {
-            continue;
-        }
-        if bin == cutoff {
-            if ties == 0 {
-                continue;
-            }
-            ties -= 1;
-        }
-        let weight = weight_of(f64::from(values[token]));
-        if weight == 0.0 {
+    for token in 0..logits.len() {
+        if !kept[token] || weights[token] == 0.0 {
             continue;
         }
         last = Some(token as i64);
-        cumulative += weight;
+        cumulative += weights[token];
         if target < cumulative {
             return Ok(token as i64);
         }
@@ -252,7 +184,8 @@ impl Generator {
             ("prompt_length", "i64", "input", vec![1]),
             ("position", "i64", "input", vec![1]),
             ("next_token", "i64", "input", vec![1]),
-            ("logits", "f16", "output", vec![1, config.vocab_size as i64]),
+            ("logits", "f32", "output", vec![1, config.vocab_size as i64]),
+            ("token", "i64", "output", vec![1]),
         ] {
             let buffer = artifact
                 .program
@@ -270,7 +203,7 @@ impl Generator {
             "invalid generation inputs"
         );
         ensure!(
-            artifact.program.outputs == ["logits"],
+            artifact.program.outputs == ["logits", "token"],
             "invalid generation outputs"
         );
         let prefill_artifact = if config.prefill_size > 1 {
@@ -408,8 +341,9 @@ impl Generator {
         self.position
     }
 
-    /// Diagnostic single-token execution, including during prefill. A decode step downloads its
-    /// logits, selects the token here and hands it back for the next step.
+    /// Diagnostic single-token execution, including during prefill. A decode step takes the
+    /// token the program selected, or samples one here from its logits, and hands it back for
+    /// the next step.
     pub fn step(&mut self, capture: bool, ignore_eos: bool) -> Result<Option<i64>> {
         ensure!(
             !self.stopped && self.position < self.config.context_length,
@@ -425,26 +359,43 @@ impl Generator {
             self.stopped = false;
             return Ok(None);
         }
-        let bytes = self.executor.output("logits")?;
-        let logits: Vec<u16> = bytes
-            .as_chunks::<LOGIT_BYTES>()
-            .0
-            .iter()
-            .map(|pair| u16::from_le_bytes(*pair))
-            .collect();
+        let token = if self.sampling.temperature == 0.0 {
+            // The program's own greedy pick; a nonfinite logit leaves it out of range.
+            let bytes = self.executor.output("token")?;
+            i64::from_le_bytes(
+                bytes
+                    .try_into()
+                    .map_err(|_| anyhow::anyhow!("invalid token size"))?,
+            )
+        } else {
+            let bytes = self.executor.output("logits")?;
+            let logits: Vec<f32> = bytes
+                .as_chunks::<LOGIT_BYTES>()
+                .0
+                .iter()
+                .map(|word| f32::from_le_bytes(*word))
+                .collect();
+            ensure!(
+                logits.len() == self.config.vocab_size,
+                "invalid logits size"
+            );
+            // The generated-token index: one for the first token after the prompt.
+            sample(
+                &logits,
+                &self.sampling,
+                (position + 2 - self.prompt_length) as u64,
+            )?
+        };
         ensure!(
-            logits.len() == self.config.vocab_size,
-            "invalid logits size"
+            token >= 0 && (token as usize) < self.config.vocab_size,
+            "invalid selected token"
         );
-        // The generated-token index: one for the first token after the prompt.
-        let index = (position + 2 - self.prompt_length) as u64;
-        let token = sample(&logits, &self.sampling, index)?;
         self.executor.bind("next_token", &token.to_le_bytes())?;
         self.stopped = !ignore_eos && self.config.eos_ids.contains(&token);
         Ok(Some(token))
     }
 
-    /// Diagnostic transfer only; a decode step downloads its logits to select the token anyway.
+    /// Diagnostic transfer only; a decode step at positive temperature downloads them anyway.
     pub fn logits(&self) -> Result<Vec<u8>> {
         self.executor.output("logits")
     }
@@ -476,18 +427,12 @@ impl Generator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cuda::f16_bits;
 
     /// The independent nucleus distribution of `values`: a stable sort by value, the smallest
-    /// prefix reaching top-p, renormalized. Greedy is the lowest id among the maxima.
+    /// prefix reaching top-p, renormalized.
     fn nucleus(values: &[f32], temperature: f64, top_p: f64) -> Vec<f64> {
         let n = values.len();
         let mut probabilities = vec![0.0; n];
-        if temperature == 0.0 {
-            let best = (0..n).fold(0, |b, i| if values[i] > values[b] { i } else { b });
-            probabilities[best] = 1.0;
-            return probabilities;
-        }
         let maximum = values.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
         let weights: Vec<f64> = values
             .iter()
@@ -509,23 +454,8 @@ mod tests {
     }
 
     #[test]
-    fn f16_round_trips() {
-        for value in [0.0f32, -0.0, 1.0, -2.5, 0.333, 65504.0, 6.1e-5] {
-            let back = f16_to_f32(f16_bits(value));
-            assert!(
-                (back - value).abs() <= value.abs() * 1e-3,
-                "{value} -> {back}"
-            );
-        }
-        // The smallest subnormal and the smallest normal, exactly.
-        assert_eq!(f16_to_f32(0x0001), 2f32.powi(-24));
-        assert_eq!(f16_to_f32(0x0400), 2f32.powi(-14));
-        assert!(f16_to_f32(0x7c00).is_infinite() && f16_to_f32(0x7e00).is_nan());
-    }
-
-    #[test]
     fn sampling_matches_an_independent_nucleus_distribution() {
-        // FP16 logits admit an exact ordering; the reference sorts tokens directly.
+        // The reference sorts the tokens directly.
         let n = 257;
         let mut state = 928u64;
         let mut normal = || {
@@ -535,20 +465,18 @@ mod tests {
             let u = (state >> 11) as f64 * 2f64.powi(-53);
             (12.0 * (u - 0.5)) as f32 * 0.5
         };
-        let random: Vec<u16> = (0..n).map(|_| f16_bits(normal())).collect();
-        let zeros = vec![f16_bits(0.0); n];
-        let edges: Vec<u16> = (0..n)
-            .map(|i| f16_bits([-65504.0, 65504.0, -0.0, 0.0][i % 4]))
+        let random: Vec<f32> = (0..n).map(|_| normal()).collect();
+        let zeros = vec![0.0f32; n];
+        let edges: Vec<f32> = (0..n)
+            .map(|i| [-65504.0f32, 65504.0, -0.0, 0.0][i % 4])
             .collect();
-        for logits in [random, zeros, edges] {
-            let values: Vec<f32> = logits.iter().map(|&b| f16_to_f32(b)).collect();
-            for (temperature, top_p) in [
-                (0.0, 1.0),
-                (0.7, 0.8),
-                (2.0, 1.0),
-                (1e-300, 0.01),
-                (1e300, 0.5),
-            ] {
+        // Distinct scores inside one FP16 bin stay apart in FP32.
+        let close: Vec<f32> = (0..n)
+            .map(|i| 20.078 + 0.004 * i as f32 / (n - 1) as f32)
+            .collect();
+        for logits in [random, zeros, edges, close] {
+            let values = logits.clone();
+            for (temperature, top_p) in [(0.7, 0.8), (2.0, 1.0), (1e-300, 0.01), (1e300, 0.5)] {
                 let expected = nucleus(&values, temperature, top_p);
                 let draws = 1024;
                 let mut counts = vec![0usize; n];
@@ -580,7 +508,7 @@ mod tests {
             top_p: 0.9,
             seed: 77,
         };
-        let logits: Vec<u16> = (0..n).map(|i| f16_bits((i % 7) as f32 * 0.25)).collect();
+        let logits: Vec<f32> = (0..n).map(|i| (i % 7) as f32 * 0.25).collect();
         assert_eq!(
             sample(&logits, &sampling, 3).unwrap(),
             sample(&logits, &sampling, 3).unwrap()
@@ -597,22 +525,10 @@ mod tests {
             )
             .unwrap()
         );
-        for invalid in [0x7c00u16, 0xfc00, 0x7e00] {
+        for invalid in [f32::INFINITY, f32::NEG_INFINITY, f32::NAN] {
             let mut bad = logits.clone();
             bad[3] = invalid;
-            for temperature in [0.0, 1.0] {
-                assert!(
-                    sample(
-                        &bad,
-                        &Sampling {
-                            temperature,
-                            ..sampling
-                        },
-                        1
-                    )
-                    .is_err()
-                );
-            }
+            assert!(sample(&bad, &sampling, 1).is_err());
         }
     }
 

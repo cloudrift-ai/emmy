@@ -1,6 +1,7 @@
 # Native cached generation
 
-Python prepares a standalone dense Qwen3 generation artifact with FP16 weights, projections, logits, and KV cache.
+Python prepares a standalone dense Qwen3 generation artifact with FP16 weights, projection inputs, and KV cache.
+The output head retains FP32 logits through sampling so FP16 rounding cannot create a false maximum tie.
 The Rust runtime submits the exported launches, retains the KV cache, and chooses each next token on the GPU.
 No Python model operation runs after
 preparation. The experimental native HTTP adapter serves one active request; this is not a performance replacement
@@ -20,16 +21,16 @@ The glue between the projections is compiled too, from three small traced module
 gathers the prompt's token at this position while the prompt lasts and the previous step's selection after it, the
 rotary module rotates q and k at this position and hands k and v to the cache pages, and attention runs causal
 grouped-query attention over the whole cache with every position past this one masked. All three read the position
-from device memory, including the cache write, whose paged start is the `position` input rather than a host symbol,
-so a token step is one launch sequence at every position and replays as one graph. Nothing the device runs is
-hand-written: the step ends at the logits, and the runtime selects the token on the host (below), so the same
-export serves any device the compiler targets. Attention keeps dot products, scores, probabilities, and value
-accumulation in FP32,
-rounding only its output to FP16. This avoids losing near-tied scores at large magnitudes. Residual sums stay in FP32
-through the existing attention-split wrappers; normalization casts back to FP16 before each projection. Rotary
-constants come from the checkpoint's own module in FP32. Rotation also uses FP32 intermediates and rounds only the
-query/key outputs to FP16. The existing standalone exporter bundles all binaries and weight bytes. Generation metadata
-lives in the pack key and has its own version.
+from device memory, including the cache write, whose paged start is the `position` input rather than a host symbol, so
+a token step is one launch sequence at every position and replays as one graph. Nothing the device runs is
+hand-written: the step ends at the FP32 logits and the greedy token, a compiled reduction over them, and the runtime
+samples on the host only at positive temperature (below), so the same export serves any device the compiler targets.
+Attention keeps dot products, scores, probabilities, and value accumulation in FP32, rounding only its output to FP16.
+This avoids losing near-tied scores at large magnitudes. Residual sums stay in FP32 through the existing
+attention-split wrappers; normalization casts back to FP16 before each projection. Rotary constants come from the
+checkpoint's own module in FP32. Rotation also uses FP32 intermediates and rounds only the query/key outputs to FP16.
+The existing standalone exporter bundles all binaries and weight bytes. Generation metadata lives in the pack key and
+has its own version.
 
 Preparation rejects other model families, quantization, sliding attention, non-default rotary schemes, training mode,
 and non-FP16 or non-CPU parameters. Context capacity must fit both the model and the current 4,096-token limit.
@@ -42,11 +43,11 @@ The prompt is uploaded once. Prefill processes all but its final token in fixed-
 Each layer writes the chunk's keys and values at their absolute positions through the page tables before attention
 reads each query's causal prefix; a row past the prompt's last token embeds the previous selection, computes alongside
 the others and writes cache rows that decode overwrites when it reaches them, so a chunk is dispatched only where all
-of its rows fit the context and the decode program covers the rest. The last layer only writes its cache; its attention and
-post-attention fragment are unnecessary. The final prompt token runs through the one-token decode program, including
-the output head, and the host selects the first generated token from its logits. Later decode steps embed the
-previous step's token, which the host selected from that step's logits and uploaded with the position scalar. Prefill
-chunks execute no head and download nothing.
+of its rows fit the context and the decode program covers the rest. The last layer only writes its cache; its
+attention and post-attention fragment are unnecessary. The final prompt token runs through the one-token decode
+program, including the output head, which yields the first generated token. Later decode steps embed the previous
+step's token, which the runtime read back from the program or sampled from its logits, and uploaded with the position
+scalar. Prefill chunks execute no head and download nothing.
 
 The cache is one paged K and one paged V buffer per layer, shaped `[1, kv_heads, context, head_dim]` and paged along
 the token axis with `page_tokens` tokens per page (`export_model(page_tokens=…)`, `emmy generate --page-tokens`).
@@ -78,25 +79,25 @@ returns the advanced position; intermediate chunks return no token or logits.
 
 ## Sampling contract
 
-Generation artifact version 4 ends the decode step at the logits and adds the prefill width, with a separate prefill
-program when that width exceeds one. The decode program's inputs are the prompt, its length, the position and the
-previous step's token, its one output the logits, and the runtime selects each token on the host from the logits it
-downloads after a decode step — one vocabulary-sized FP16 transfer per generated token, none during prefill. Older
-generation artifacts must be exported again; the underlying execution-plan format is unchanged. Temperature must be
-finite and nonnegative, and top-p must lie in `(0, 1]`. Temperature zero selects the lowest token ID among maximum
-logits. Nonfinite logits fail the request. Top-k is unsupported.
+Generation artifact version 5 ends the decode step at the FP32 logits and the greedy token, and adds the prefill
+width, with a separate prefill program when that width exceeds one. The decode program's inputs are the prompt, its
+length, the position and the previous step's token; its outputs are the logits and the lowest token ID among their
+maxima, which a compiled reduction selects on the device. At temperature zero the runtime downloads that token alone;
+at positive temperature it downloads the logits — one vocabulary-sized FP32 transfer per generated token, none during
+prefill — and samples on the host. The head keeps its scores in FP32, so FP16 rounding cannot create a false maximum
+tie. Older generation artifacts must be exported again; the underlying execution-plan format is unchanged.
+Temperature must be finite and nonnegative, and top-p must lie in `(0, 1]`. Nonfinite logits fail the request. Top-k
+is unsupported.
 
-Greedy selection uses one 128-thread block. Threads scan disjoint vocabulary strides, then reduce their winning
-indices in shared memory with explicit lowest-ID tie-breaking. Every thread participates in invalid-logit detection
-and the reduction, including vocabularies smaller than the block. Preparation supplies 512 bytes of shared memory.
-Intermediate prefill steps leave the selected token untouched. Positive-temperature selection still runs on thread
-zero after the uniform greedy branch; its probability and RNG calculations are unchanged. Re-export an artifact to
-use the parallel sampler. The runtime protocol version is unchanged.
+Greedy selection is a traced module the compiler lowers with the reductions it has: the peak of the logits, then the
+largest negated token ID among the tokens at the peak, so ties resolve to the lowest ID. A nonfinite logit leaves no
+token at the peak, the result is the vocabulary size, and the runtime rejects it. The output head multiplies FP16
+normalized activations and FP16 weights with FP32 output, preserving score ordering without a wider weight copy.
 
-For positive temperature, a 65,536-bin histogram orders FP16 logits exactly, combining signed zeros. The sampler
-retains the smallest descending probability prefix reaching top-p, breaking ties by ascending token ID. It samples
-that distribution in token-ID order using float64 probabilities. This simple implementation has serial histogram
-scans and token selection on the host; it is not a sampling performance claim.
+For positive temperature, the host computes float64 exponential weights, orders the tokens by descending FP32 logit
+and ascending token ID (signed zeros compare equal), and retains the smallest prefix of that order reaching top-p. It
+then samples that set in token-ID order with the seeded draw. This is a sort of the vocabulary per generated token on
+one core; it is not a sampling performance claim.
 
 A SplitMix64 counter combines the request seed and generated-token index. Prefill does not consume random draws.
 Resetting a request resets the counter, and captured and uncaptured execution select the same tokens for identical
@@ -123,7 +124,7 @@ checkpoint tokenizer and chat template; the HTTP adapter owns text processing.
 The hermetic tiny-Qwen3 GPU test checks every logit at `rtol=atol=1e-3`, greedy tokens, request reset, context bounds,
 EOS, zero output budget, graph replay, first capture during decode, and full/partial prefill chunks across resets. It
 hides Python and NVCC from the native
-child's PATH after export. The same exported binaries also run through the Python executor; logits must be bit-identical
+child's PATH after export. The same exported binaries also run through the Python API; logits must be bit-identical
 at every checked step. Independent NumPy checks cover rotary rounding and causal attention through cache position
 4,096, including a shorter request after the largest one.
 
@@ -148,6 +149,8 @@ through 256 checkpoint positions. The
 seventeen cases across 10,585 positions, including two 4,096-position prompts, within the unchanged error budgets.
 FP32 attention, rotary intermediates, and residual accumulation close the earlier numerical failures. Independent
 attention qualification also covers the full 4,096-position capacity.
+The [output-precision investigation](../../../experiments/Qwen3-0.6B/native_accuracy/RESULTS.md) records the FP16
+head-output tie and its FP32 repair, with the same checkpoint error limits.
 Performance and production concurrency are separate qualifications.
 
 ## Native HTTP launcher
