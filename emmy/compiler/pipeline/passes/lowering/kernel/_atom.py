@@ -859,7 +859,9 @@ def _slab_operands(
         if i not in roles:
             continue
         tile, tile_base, sibling = mn[i], base[i], mn[1 - i]
-        atoms = b_atoms if i == 1 and not is_row else 1
+        # A slab whose tile axis is not its row (B, or the chunk tier's key under ``rows``) stacks its
+        # 128-byte swizzle atoms along the rows when a descriptor reads it (:attr:`Operand.atoms`).
+        atoms = b_atoms if not is_row else 1
         block = (tile.tile, bk_elems) if is_row else (bk_elems, tile.tile // atoms)
         elem = elems[i]
         # A >2-D operand (batched / unit-batch view) boxes as rank-N with leading extent-1 dims;
@@ -3045,6 +3047,7 @@ class _FlashOps(_MmaOps):
             swizzles=("NONE", swizzle),
             elems=(None, elem),
             b_trans=trans,
+            b_atoms=self.b_atoms(mn),
             pads=(0, pad),
             roles=(1,),
         )
@@ -3053,6 +3056,9 @@ class _FlashOps(_MmaOps):
             k_load, span = staged_key
             span_axis = self._score_k
             side = Side(axis=span_axis, tile=span, units=1, reg=1, block=span_axis.name + "_b", unit=span_axis.name + "_u")
+            # A warp-group score reads the key through a descriptor, whose K step stays inside one
+            # 128-byte swizzle atom: a wider head stacks its atoms along the slab rows.
+            atoms = max(1, span * elem.nbytes // 128) if self._score_atom.is_wgmma else 1
             (key,) = _slab_operands(
                 index_srcs=(k_load.index, None),
                 bufs=(k_load.input, None),
@@ -3060,7 +3066,8 @@ class _FlashOps(_MmaOps):
                 k_axis=self.k_axis,
                 bk_elems=bk,
                 base=(Literal(0, "int"), _tile_base(mn)[1]),
-                swizzles=("NONE" if pad else self.slab_swizzle(span, elem.nbytes), "NONE"),
+                b_atoms=atoms,
+                swizzles=("NONE" if pad else self.slab_swizzle(span // atoms, elem.nbytes), "NONE"),
                 elems=(elem, None),
                 rows=(False, trans),
                 pads=(pad, 0),
@@ -3093,7 +3100,16 @@ class _FlashOps(_MmaOps):
         (:func:`wide_accumulate`). The chunk's pivot, its denominator and every channel's pattern
         are f32 registers read off these fragments, so the score does not take the reduced cell
         even when the expectation does."""
-        return wide_accumulate(self.tile.atom)
+        return wide_accumulate(self._score_tile_atom)
+
+    @property
+    def _score_tile_atom(self):
+        """The score's own cell. A warp-group expectation (``wgmma``, register-form A) still takes
+        its score from the ``mma.sync`` cell the score's tile names: the P→A handoff is the same
+        ``m16n8k16`` register layout either way, and only the expectation reads a descriptor."""
+        if self.inner is not None and (self.tile.atom.is_wgmma or self.inner[1].atom.is_wgmma):
+            return self.inner[1].atom
+        return self.tile.atom
 
     @property
     def _score_k(self) -> Axis:
@@ -3158,6 +3174,8 @@ class _FlashOps(_MmaOps):
         b_load = next(edge for edge in score.operands if key.name in edge.free_axes).as_slab().load
         trans = score.axis in b_load.index[-1].free_vars()
         staged = None if streams is None else streams.key
+        if atom.is_wgmma:
+            return self._wgmma_score(m, cols, staged, slot)
         decls: list[Stmt] = [self._frag(f"_kb{j}", "b", atom) for j in range(cols)]
         decls += [self._frag(f"_s{i}_{j}", "c", atom) for i in range(m.reg) for j in range(cols)]
 
@@ -3179,6 +3197,51 @@ class _FlashOps(_MmaOps):
             ]
 
         return [*decls, *(stmt for t in range(self._score_steps()) for stmt in at_step(t))]
+
+    def _wgmma_score(self, m, cols: int, key, slot) -> list[Stmt]:
+        """The chunk's score on the warp-group cell: the query's hoisted ``m16n8k16`` A fragments are
+        the register-form A, and one ``wgmma.mma_async`` per score step reads the staged key through
+        a descriptor — the key slab is K-major (the chunk's keys are its rows, the score's
+        contraction its columns), the GEMM drain's transposed-B geometry (:func:`_wgmma_drain`). The
+        score's C fragments are fresh each chunk; a fence opens the steps and a commit and a wait close
+        them before the softmax reads them."""
+        atom = self._score_atom
+        cells = atom.cells_per_instruction
+        elem_bytes = atom.operand_dtype("b").nbytes
+        if key is None or m.reg != 1 or cols % cells:
+            raise ValueError(f"the wgmma score reads a staged key at f1x<C>, C a multiple of {cells}")
+        if key.shape[1] * elem_bytes != 128:
+            raise ValueError("the wgmma score reads a key stored one 128-byte swizzle atom per slab row")
+        row_cols = key.shape[1] + key.pad_cols
+        chunk = key.shape[0] // key.atoms  # the chunk's keys: one atom's rows
+        out: list[Stmt] = [self._frag(f"_s0_{j}", "c", atom) for j in range(cols)]
+        out.append(WgmmaFence())
+        for t in range(self._score_steps()):
+            k0 = t * atom.atom_k
+            for jg in range(cols // cells):
+                # The step's K lies in atom ``k0 // row_cols``, stacked ``chunk`` rows per atom down.
+                nbase = Literal(k0 // row_cols * chunk + jg * cells * atom.atom_n, "int")
+                index = BinaryExpr(
+                    "+", BinaryExpr("*", _slab_row(key, slot, nbase), Literal(row_cols, "int")), Literal(k0 % row_cols, "int")
+                )
+                desc = self.frag(f"_dk{jg}_{t}")
+                out.append(
+                    WgmmaDescriptor(
+                        name=desc, smem=key.slab, smem_index=index, swizzle=key.swizzle, lbo_bytes=16, sbo_bytes=8 * row_cols * elem_bytes
+                    )
+                )
+                out.append(
+                    WgmmaMma(
+                        c_frags=tuple(self.frag(f"_s0_{j}") for j in range(jg * cells, (jg + 1) * cells)),
+                        a_frag=self.frag(f"_qa0_{t}"),
+                        b_desc=desc,
+                        shape=atom.ptx_shape,
+                        ab_dtype=atom.ab_dtype,
+                        scale_d=1,
+                        trans_b=0,
+                    )
+                )
+        return [*out, WgmmaCommit(), WgmmaWait(0)]
 
     def _score_steps(self) -> int:
         """The score's atom-K steps within one chunk. They go STRAIGHT-LINE, which is what lets the
@@ -3268,6 +3331,8 @@ class _FlashOps(_MmaOps):
         m, n = mn
         atom = self.tile.atom
         staged = None if streams is None else streams.value
+        if atom.is_wgmma:
+            return self._wgmma_expectation(mn, weights, steps, staged, slot)
         v_load = self.c.operands[1].as_slab().load
         # The mma's own target. On a REDUCED-accumulate cell that is the packed ``_ph`` fragment,
         # promoted into the f32 carrier once this chunk's mmas are done — the chunk IS the promote
@@ -3328,6 +3393,59 @@ class _FlashOps(_MmaOps):
                     for j in cols
                 ]
         return out
+
+    def _wgmma_expectation(self, mn, weights, steps, value, slot) -> list[Stmt]:
+        """The expectation on the warp-group cell: per chunk step, the weight repacks into the
+        register-form A (the ``m16n8k16`` A fragment, exactly as the ``mma.sync`` form repacks it)
+        and one ``wgmma.mma_async`` per group of ``cells_per_instruction`` accumulator cells reads
+        the streamed value through a descriptor on its slab — the same MN-major, atom-major B the
+        GEMM drain reads (:func:`_wgmma_drain`). The accumulator was just rescaled, so a fence
+        opens the chunk's cells; a commit and a wait close them before anything reads it again or
+        the slot is released. The streamed value is always staged here: the wgmma legality rule
+        refuses a direct stage (``_wgmma_refusal``)."""
+        m, n = mn
+        atom = self.tile.atom
+        cells = atom.cells_per_instruction
+        if value is None or m.reg != 1 or n.reg % cells:
+            raise ValueError(f"the wgmma expectation reads a staged value at f1x<C>, C a multiple of {cells}")
+        trans = getattr(value, "trans", False)
+        elem_bytes = atom.operand_dtype("b").nbytes
+        atom_cols = 128 // elem_bytes
+        if not trans and value.shape[1] != atom_cols:
+            raise ValueError("the wgmma expectation reads an N-contiguous value stored one 128-byte atom per slab row")
+        bk = steps * atom.atom_k
+        out: list[Stmt] = [self._frag(f"_a0_{t}", "a", self._score_tile_atom) for t in range(steps)]
+        for t in range(steps):
+            out += [FragmentRepack(frag=self.frag(f"_a0_{t}"), srcs=(weights[0, 2 * t], weights[0, 2 * t + 1]), ab_dtype=atom.ab_dtype)]
+        out.append(WgmmaFence())
+        for t in range(steps):
+            kstep = Literal(t * atom.atom_k, "int")
+            for jg in range(n.reg // cells):
+                nbase = BinaryExpr("+", BinaryExpr("*", Var(n.unit), Literal(n.reg * 8, "int")), Literal(jg * cells * 8, "int"))
+                if trans:  # K-major (tile_n × chunk): the value's column is the slab row, the key the column
+                    cols = bk + value.pad_cols
+                    index = BinaryExpr("+", BinaryExpr("*", _slab_row(value, slot, nbase), Literal(cols, "int")), kstep)
+                    lbo, sbo = 16, 8 * cols * elem_bytes
+                else:  # MN-major, atom-major: atom ``nbase / atom`` starts ``chunk`` rows down, the key step its row
+                    row = BinaryExpr("+", BinaryExpr("*", BinaryExpr("/", nbase, Literal(atom_cols, "int")), Literal(bk, "int")), kstep)
+                    index = BinaryExpr("*", _slab_row(value, slot, row), Literal(atom_cols, "int"))
+                    lbo, sbo = bk * atom_cols * elem_bytes, 8 * atom_cols * elem_bytes
+                desc = self.frag(f"_dv{jg}_{t}")
+                out.append(
+                    WgmmaDescriptor(name=desc, smem=value.slab, smem_index=index, swizzle=value.swizzle, lbo_bytes=lbo, sbo_bytes=sbo)
+                )
+                out.append(
+                    WgmmaMma(
+                        c_frags=tuple(self.frag(f"_c0_{j}") for j in range(jg * cells, (jg + 1) * cells)),
+                        a_frag=self.frag(f"_a0_{t}"),
+                        b_desc=desc,
+                        shape=atom.ptx_shape,
+                        ab_dtype=atom.ab_dtype,
+                        scale_d=1,
+                        trans_b=0 if trans else 1,
+                    )
+                )
+        return [*out, WgmmaCommit(), WgmmaWait(0)]
 
     def _value_read(self, value, slot, n, offset, j: int, t: int, v_load, row, bound) -> Stmt:
         """One fragment of the streamed value at chunk step ``t``, column ``j`` — from its staged

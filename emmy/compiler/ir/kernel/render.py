@@ -16,6 +16,7 @@ from emmy.compiler.backend.cuda.render_target import CudaRenderTarget
 from emmy.compiler.dtype import F4_VALUES, F32
 from emmy.compiler.ir.kernel.ir import (
     CpAsyncCopy,
+    FragmentRepack,
     KernelOp,
     LdmatrixLoad,
     RegStore,
@@ -1544,7 +1545,11 @@ def render_kernelop(
 
     mma_stmts = tuple(s for s in kernel_op.body.iter() if isinstance(s, MmaSyncPtx))
     uses_m8n8k4 = any(s.shape == (8, 8, 4) for s in mma_stmts)
-    uses_modern_mma = any(s.shape != (8, 8, 4) for s in mma_stmts)
+    # A register-form ``wgmma`` cell reads the ``m16n8k16`` A fragment, loaded and repacked by the same
+    # wrappers, so a kernel whose every cell is warp-group still needs them.
+    uses_modern_mma = any(s.shape != (8, 8, 4) for s in mma_stmts) or any(
+        isinstance(s, (LdmatrixLoad, FragmentRepack)) and s.fragment_layout != "m8n8k4" for s in kernel_op.body.iter()
+    )
     mma_sync_prelude = (_MMA_M8N8K4_PRELUDE if uses_m8n8k4 else "") + (_MMA_SYNC_PRELUDE if uses_modern_mma else "")
     # The fp8 wrappers + byte-gather loaders join only when an fp8 mma is present, so every
     # 16-bit mma kernel's source stays byte-identical (the kernel-source digest gate). The
