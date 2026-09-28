@@ -286,7 +286,8 @@ def iter_leaves(options: Iterable[Op | Graph | Fork]) -> Iterator[Op | Graph | F
             stack.pop()
             continue
         if isinstance(option, Fork) and not option.is_leaf:
-            stack.append(iter(option.expand()))
+            descendants = option.expand() if type(option).leaves is Fork.leaves else option.leaves()
+            stack.append(iter(descendants))
         else:
             yield option
 

@@ -89,6 +89,18 @@ def test_leaf_walk_does_not_use_the_python_call_stack() -> None:
     assert list(Chain(2_000).leaves())[0].is_leaf
 
 
+def test_iter_leaves_preserves_the_branch_complete_row_stream() -> None:
+    """An exhaustive walk reads a branch's rows directly instead of rebuilding its grouping."""
+
+    def reject_grouping(row: dict) -> tuple:
+        raise AssertionError(f"exhaustive traversal regrouped {row}")
+
+    params = [_row(1, 2, 3), _row(2, 3, 4)]
+    tree = build_fork_tree(params=params, levels=[Level(("A",), reject_grouping)], materialize=_stub_materialize)
+
+    assert [leaf.knobs for leaf in iter_leaves([tree])] == params
+
+
 def test_empty_params_raises():
     """No rows ⟹ no fork point — the caller should skip the rule, not
     build a tree. The non-empty invariant keeps the return type a bare
