@@ -1288,7 +1288,11 @@ def _swizzle_prelude(kernel_op: KernelOp) -> str:
     (often long) element index once instead of inlining it twice around the XOR.
     ``__forceinline__``; same SASS as the inlined form."""
     modes = sorted(
-        {s.swizzle for s in kernel_op.body.iter() if isinstance(s, (LdmatrixLoad, CpAsyncCopy, RegStore, SmemTileStore, Write)) and swizzle_xor(s.swizzle)}
+        {
+            s.swizzle
+            for s in kernel_op.body.iter()
+            if isinstance(s, (LdmatrixLoad, CpAsyncCopy, RegStore, SmemTileStore, Write)) and swizzle_xor(s.swizzle)
+        }
     )
     chunks = []
     for mode in modes:
