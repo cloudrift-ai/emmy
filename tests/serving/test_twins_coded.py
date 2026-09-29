@@ -165,11 +165,13 @@ def test_gdn_serving_capture_has_explicit_state_inputs_and_outputs(tmp_path):
     from emmy.serving.twins import capture_twin_graphs
     from tests.compiler.trace.test_huggingface import _QWEN3_5_TINY
 
-    config = Qwen3_5TextConfig(**(_QWEN3_5_TINY | {"num_hidden_layers": 1, "layer_types": ["linear_attention"]}))
+    config = Qwen3_5TextConfig(**_QWEN3_5_TINY)
     config.save_pretrained(tmp_path)
     graphs = capture_twin_graphs(str(tmp_path), decode_bucket=1, prefill_bucket=16, symbolic=False)
-    assert set(graphs) == {"gdn1", "gdn16"}
+    assert set(graphs) == {"gdn1", "gdn16", "pre1-global", "post1-global", "pre16-global", "post16-global"}
     for name, graph in graphs.items():
+        if not name.startswith("gdn"):
+            continue
         rows = int(name.removeprefix("gdn"))
         assert [tuple(graph.buffer(key).shape) for key in graph.inputs] == [
             (1, rows, 64), (1, 4, 16, 16), (1, 128, 4)
@@ -177,6 +179,9 @@ def test_gdn_serving_capture_has_explicit_state_inputs_and_outputs(tmp_path):
         assert [tuple(graph.buffer(key).shape) for key in graph.outputs] == [
             (1, rows, 64), (1, 4, 16, 16), (1, 128, 4)
         ]
+    assert len(graphs["pre1-global"].outputs) == 4
+    post = graphs["post1-global"]
+    assert [tuple(post.buffer(key).shape) for key in post.inputs] == [(1, 64)] * 3
     with pytest.raises(NotImplementedError, match="static sequence widths"):
         capture_twin_graphs(str(tmp_path), decode_bucket=1, prefill_bucket=16)
 

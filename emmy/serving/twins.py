@@ -213,13 +213,18 @@ def capture_twin_graphs(
             # The symbolic program traces at the example width serving uses (8) and ties
             # axis-0 to a ``num_tokens`` Dim; a static twin traces at its bucket, no Dim.
             rows = 8 if m is None else m
+            post_args = [torch.zeros(rows, attn_width, dtype=td), torch.zeros(rows, carrier, dtype=td)]
+            post_names = ["attn_out", "residual"]
+            if getattr(pre_w, "emits_gate", False):
+                post_args.append(torch.zeros(rows, attn_width, dtype=td))
+                post_names.append("gate")
             halves = [
                 ("pre", pre_w, [torch.zeros(rows, carrier, dtype=td)], ["hidden"] if m is None else None),
                 (
                     "post",
                     post_w,
-                    [torch.zeros(rows, attn_width, dtype=td), torch.zeros(rows, carrier, dtype=td)],
-                    ["attn_out", "residual"] if m is None else None,
+                    post_args,
+                    post_names if m is None else None,
                 ),
             ]
             for half, wrapper, example_args, argnames in halves:
@@ -343,6 +348,10 @@ def _attention_query_layout(attn) -> tuple[int, int]:
             raise ValueError(
                 f"serving twin attention {type(attn).__name__} q_proj width {width!r} is not a positive multiple of head_dim={head_dim}"
             )
+        groups = getattr(attn, "num_key_value_groups", None)
+        kv_width = getattr(getattr(attn, "k_proj", None), "out_features", None)
+        if groups and kv_width and width == 2 * groups * kv_width:
+            width //= 2  # the other half is the per-query output gate carried by the pre wrapper
         num_heads = width // head_dim
         declared = getattr(attn, "num_heads", None)
         if declared is not None and declared != num_heads:
