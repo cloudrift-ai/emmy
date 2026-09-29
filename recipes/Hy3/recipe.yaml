@@ -3,8 +3,8 @@ tags:
 - untested
 model:
   huggingface: tencent/Hy3
-  rationale: "Tencent Hy3 has strong OpenRouter volume and growing trend, supporting moderate current onboarding priority."
-  heat: 72
+  rationale: "OpenRouter volume collapsing 52% WoW and Hy4 preview now leads; demand is falling, so priority drops from 72 to moderate. A3B-class retains useful mid-size serving coverage, holding moderate rather than niche."
+  heat: 55
   task: generate
 matrices:
 - deploy.gpu: NVIDIA H200 141GB
