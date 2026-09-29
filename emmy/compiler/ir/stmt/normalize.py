@@ -305,31 +305,6 @@ def eliminate_copy_aliases(stmts: Body) -> Body:
 # ---------------------------------------------------------------------------
 
 
-def unify_sibling_reduce_axes(stmts: Body) -> Body:
-    """At every scope, find sibling reduce ``Loop``s whose reduce axes
-    index overlapping ``(Load.source, dim)`` positions and rename them
-    to a single canonical axis name. Recurses through every block-
-    structured Stmt (Loop / StridedLoop / Tile / Cond) to find nested
-    scopes."""
-    stmts = Body.coerce(stmts)
-
-    def walk(body: Body) -> Body:
-        # Recurse into nested bodies first (post-order) via the canonical
-        # nested() / with_bodies() descent, then group siblings at this
-        # scope. Splitting the recursion from the sibling-grouping keeps
-        # this pass's scope-level logic isolated in ``_unify_siblings``.
-        recursed: list[Stmt] = []
-        for s in body:
-            nested = s.nested()
-            if nested:
-                recursed.append(s.with_bodies(tuple(walk(b) for b in nested)))
-            else:
-                recursed.append(s)
-        return _unify_siblings(Body(recursed))
-
-    return walk(stmts)
-
-
 def _unify_siblings(body: Body) -> Body:
     """Single-scope sibling grouping: rename reduce-axis vars across
     sibling reduce Loops whose Load positions overlap on any
@@ -450,7 +425,7 @@ def _reduce_axis_source_positions(body: Body, reduce_axis_name: str) -> set[tupl
 # Pass 4b: merge sibling reduce Loops with matching axis into one Loop.
 # ---------------------------------------------------------------------------
 #
-# After :func:`unify_sibling_reduce_axes` renames sibling reduce axes
+# After :func:`_unify_siblings` renames sibling reduce axes
 # that index overlapping ``(source, dim)`` positions to one canonical
 # name, adjacent reduce Loops with the same axis name/extent become
 # structurally identical iteration scopes. Merging concatenates their
