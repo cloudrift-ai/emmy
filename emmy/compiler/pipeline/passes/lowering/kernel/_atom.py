@@ -628,7 +628,7 @@ def _staged_inner_atom_loop(
     return stmts
 
 
-def _wgmma_drain(*, operands, slot, mn, atom, bk_elems: int, frag_ns: str, n_folds: int) -> list[Stmt]:
+def _wgmma_drain(*, operands, slot, mn, atom, bk_elems: int, frag_ns: str, n_folds: int, wait: bool = True) -> list[Stmt]:
     """The warp-group drain — the ``wgmma`` leaf reading ring ``slot``. Both operands stay in
     shared memory: each k16 step builds one matrix descriptor per operand and issues one
     ``wgmma.mma_async`` per group of ``cells_per_instruction`` accumulator cells along N, and the
@@ -706,7 +706,7 @@ def _wgmma_drain(*, operands, slot, mn, atom, bk_elems: int, frag_ns: str, n_fol
                         trans_b=0 if trans else 1,
                     )
                 )
-    stmts += [WgmmaCommit(), WgmmaWait(0)]
+    stmts += [WgmmaCommit(), WgmmaWait(0)] if wait else [WgmmaCommit()]
     return stmts
 
 
@@ -1753,6 +1753,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
         workers=ops.workers,
         block_threads=tile.launch_threads,
         carried=ops.carried_drain(operands, mn) if isinstance(transport, CpAsyncTransport) else None,
+        in_flight=ops.in_flight_drain(operands, mn),
     )
     # The block-scaled cell's per-tensor scale levels land on the output fragments here — after
     # the K-loop, before the sink.
@@ -2085,6 +2086,19 @@ class _MmaOps(_AtomOps):
             frag_ns=self.frag_ns,
             parts=True,
         )
+
+    def in_flight_drain(self, operands, mn):
+        """The ``wgmma`` drain that leaves its chunk's group running — ``(issue(slot), settle(n))``,
+        ``settle`` waiting until at most ``n`` groups run (:func:`_in_flight_kloop`) — or ``None``.
+        A ``wgmma`` drain loads no fragments, so its ``STAGE`` ``/p2`` is this register-side
+        pipeline instead: one group in the tensor cores while the next is issued. ``/p1`` waits
+        each chunk out, which keeps one more chunk of the ring in flight."""
+        if not self.tile.atom.is_wgmma or self.stage.reg_depth < 2:
+            return None
+        common = dict(
+            operands=operands, mn=mn, atom=self.tile.atom, bk_elems=self.stage.bk_elems, frag_ns=self.frag_ns, n_folds=len(self.channels)
+        )
+        return (lambda slot: _wgmma_drain(slot=slot, wait=False, **common)), (lambda n: [WgmmaWait(n)])
 
     def staged_drain(self, operands, slot, cells, offset, mn):
         """The mma slab drain — the fragment-load + ``mma.sync`` leaf reading ring ``slot``
@@ -2480,6 +2494,10 @@ class _ScalarOps(_AtomOps):
 
     def carried_drain(self, operands, mn):  # noqa: ARG002 — the scalar drain carries no fragments
         """``None``: a scalar drain has no fragments to carry across chunks."""
+        return None
+
+    def in_flight_drain(self, operands, mn):  # noqa: ARG002 — the scalar drain issues nothing asynchronous
+        """``None``: a scalar drain has no MMA group to leave running."""
         return None
 
     def staged_drain(self, operands, slot, cells, offset, mn):
