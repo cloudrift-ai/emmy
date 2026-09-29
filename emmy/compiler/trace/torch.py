@@ -1695,20 +1695,37 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
         "maximum",
         "minimum",
     }
-    # Some chunked recurrent paths call ``F.pad`` even when the static sequence length
-    # already fills the chunk. Drop that unary no-op like the other pure aliases below, but
-    # reject every non-empty pad here: the generic elementwise spelling has no pad-width,
-    # mode, or fill-value fields and therefore cannot represent changed coordinates.
+    # Constant zero padding is a guarded index map. Clamp inactive source coordinates too:
+    # backends may evaluate both sources before selecting the result.
     if op_name == "pad":
         raw_pad = fx_node.args[1] if len(fx_node.args) > 1 else (fx_node.kwargs or {}).get("pad")
-        if not isinstance(raw_pad, (tuple, list)) or not raw_pad or any(type(width) is not int or width != 0 for width in raw_pad):
-            raise NotImplementedError(f"aten.pad supports only explicit zero-width padding, got {raw_pad!r}")
-        if len(input_ids) != 1:
-            raise ValueError(f"zero-width aten.pad requires one tensor input, got {len(input_ids)}")
+        if not isinstance(raw_pad, (tuple, list)) or len(raw_pad) % 2 or any(type(width) is not int or width < 0 for width in raw_pad):
+            raise NotImplementedError(f"aten.pad requires nonnegative static padding widths, got {raw_pad!r}")
         input_shape = tuple(g.nodes[input_ids[0]].output.shape)
-        if input_shape != tuple(shape):
-            raise ValueError(f"zero-width aten.pad changed shape from {input_shape} to {tuple(shape)}")
-        node_map[name] = input_ids[0]
+        if not any(raw_pad):
+            node_map[name] = input_ids[0]
+            return
+        mode = fx_node.args[2] if len(fx_node.args) > 2 else (fx_node.kwargs or {}).get("mode", "constant")
+        value = fx_node.args[3] if len(fx_node.args) > 3 else (fx_node.kwargs or {}).get("value")
+        if mode != "constant" or value not in (None, 0):
+            raise NotImplementedError("aten.pad supports constant zero fill only")
+        if len(raw_pad) > 2 * len(input_shape):
+            raise ValueError("aten.pad has more padding dimensions than its input")
+        coords = [placeholder(axis) for axis in range(len(input_shape))]
+        valid = Literal(True, "bool")
+        for offset in range(len(raw_pad) // 2):
+            axis = len(input_shape) - offset - 1
+            coords[axis] = coords[axis] - Literal(raw_pad[2 * offset], "int")
+            inside = BinaryExpr("&&", BinaryExpr(">=", coords[axis], Literal(0, "int")), coords[axis].lt(input_shape[axis].expr))
+            valid = BinaryExpr("&&", valid, inside)
+        zero = g.add_node(ConstantOp(name=f"{name}_zero", value=0), [], Tensor(f"{name}_zero", (1,), dtype), node_id=f"{name}_zero")
+        sources = (IndexSource(input_idx=1, coord_map=(Literal(0, "int"),)),)
+        if not any(size == 0 for size in input_shape):
+            safe = tuple(TernaryExpr(valid, coord, Literal(0, "int")) for coord in coords)
+            sources = (IndexSource(input_idx=0, coord_map=safe, select=valid), *sources)
+        node_map[name] = g.add_node(
+            IndexMapOp(out_shape=shape, sources=sources), [input_ids[0], zero], Tensor(name, shape, dtype), node_id=name
+        )
         return
     # --- Clamp ---
     # ``aten.clamp(x, min, max)`` / ``clamp_min`` / ``clamp_max`` decompose to the

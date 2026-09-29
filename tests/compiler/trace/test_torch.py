@@ -1076,6 +1076,48 @@ def test_trace_zero_width_pad_is_an_alias():
     assert len(graph.nodes) == 1
 
 
+@pytest.mark.parametrize("length", [1, 16, 63, 64, 65])
+def test_trace_chunk_padding_matches_torch(run_graph, dtype, length):
+    """Chunk padding preserves every input row and fills only the tail with zero."""
+    import numpy as np
+    import torch
+    from torch import nn
+    from torch.nn import functional as F  # noqa: N812
+
+    from emmy.compiler.trace.torch import trace_module
+
+    class Pad(nn.Module):
+        def forward(self, x):
+            return F.pad(x + 1, (0, 0, 0, (-x.shape[-2]) % 64))
+
+    x = np.arange(length * 3, dtype=np.float32).reshape(1, length, 3).astype(dtype.np)
+    module = Pad()
+    graph = trace_module(module, (torch.from_numpy(x),))
+    actual = run_graph(graph, {graph.inputs[0]: x})[graph.outputs[0]]
+    np.testing.assert_array_equal(actual, module(torch.from_numpy(x)).numpy())
+
+
+@pytest.mark.parametrize("shape,padding", [((2, 3), (2, 1, 1, 2)), ((0, 3), (0, 0, 1, 2))])
+def test_trace_padding_guards_source_coordinates(run_graph, shape, padding):
+    """Left padding and empty inputs must never produce an out-of-bounds read."""
+    import numpy as np
+    import torch
+    from torch import nn
+    from torch.nn import functional as F  # noqa: N812
+
+    from emmy.compiler.trace.torch import trace_module
+
+    class Pad(nn.Module):
+        def forward(self, x):
+            return F.pad(x, padding)
+
+    x = np.arange(np.prod(shape), dtype=np.float32).reshape(shape)
+    module = Pad()
+    graph = trace_module(module, (torch.from_numpy(x),))
+    actual = run_graph(graph, {graph.inputs[0]: x})[graph.outputs[0]]
+    np.testing.assert_array_equal(actual, module(torch.from_numpy(x)).numpy())
+
+
 # ---------------------------------------------------------------------------
 # Edge cases
 # ---------------------------------------------------------------------------
