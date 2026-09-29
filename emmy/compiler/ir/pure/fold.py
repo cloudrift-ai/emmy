@@ -38,7 +38,7 @@ from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.pure.twist import Recipe, Twist
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Load, Loop, OutputSpec, Pre, Stmt, StridedLoop
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Load, Loop, OutputSpec, Pre, Select, Stmt, StridedLoop
 from emmy.compiler.ir.stmt.body import free_names
 
 # ``Body.structural_key()`` dispatches :func:`emmy.compiler.ir.stmt.passes.rewrite` over every
@@ -142,6 +142,21 @@ class ReductionView:
     @property
     def twisted(self) -> bool:
         return self.ops is None
+
+
+@dataclass(frozen=True)
+class AffineView:
+    """A carried state's step read as AFFINE in the state, acting column-wise: every carrier read
+    keeps the cell's own coordinate at every position but ``mixed``, so the step is ``S ← A·S + b``
+    with ``A`` a matrix over the mixed axis alone, applied to every column of the block alike, and
+    two steps compose as affine maps. ``kept`` is the own position a probe packs basis vectors
+    along — the last one — so ``A`` is read off one walk of the step from the identity seed. A step
+    that reads its own cell alone has no mixed position (``None``): ``A`` is diagonal, and one walk
+    from a seed of ones reads it."""
+
+    state: str
+    mixed: int | None
+    kept: int | None
 
 
 #: The name a matcher spells both sides' bound axis as, so an operand that CAPTURES it compares
@@ -912,6 +927,32 @@ class Fold:
         iterates, it does not reduce."""
         return cls(lift=Lambda.closing((), Body((load,)), load.names))
 
+    @cached_method
+    def affine(self) -> AffineView | None:
+        """The :class:`AffineView` of this carried state — its step affine in the state and
+        column-wise — or ``None``: for any other fold, a state read at an index of its own at two
+        positions (a map over the whole block, which has no bounded composition), or a step that
+        is not affine (a square of the state, a maximum over it, a gather it indexes).
+
+        Read structurally off the lift and its operands: a value is FREE of the state, AFFINE in it
+        (a carrier read; a sum, difference or copy of affine values; a product or quotient with
+        exactly one affine factor and a free divisor; a planar ``add`` fold of an affine
+        contribution) or neither. Memoized on the term."""
+        if not self.carries or len(self.base.results) != 1:
+            return None
+        (state,) = self.base.results
+        reads: list[Pre] = []
+        if _affine_classes(self, state, reads, {}).get(state) not in ("affine", "free") or not reads:
+            return None
+        own = tuple(Var(cell) for cell in self.cells)
+        mixed = {position for read in reads for position, expr in enumerate(read.index) if expr != own[position]}
+        if not mixed:
+            return AffineView(state=state, mixed=None, kept=None)
+        if len(mixed) != 1 or len(self.cells) < 2:
+            return None
+        (position,) = mixed
+        return AffineView(state=state, mixed=position, kept=max(p for p in range(len(self.cells)) if p != position))
+
     @classmethod
     def carrier_read(cls, read: Pre, axis: str) -> Fold:
         """A read of a carried state as a term — a lift of one ``Pre`` binding the state it reads,
@@ -1537,6 +1578,67 @@ def _(s: Fold, rename, sigma, axis_fn):
             results=tuple(rename(r) for r in s.observe.results),
         )
     return replace(s, operands=operands, lift=lift, base=base, observe=observe, cells=cells)
+
+
+def _affine_classes(term: Fold, state: str, reads: list[Pre], memo: dict[int, dict[str, str]]) -> dict[str, str]:
+    """How every value ``term`` exposes depends on the carried ``state``: ``"free"``, ``"affine"``
+    or ``"non"`` — read off its lift with its operands classified first. The carrier reads of the
+    state met on the way are collected in ``reads``."""
+    if id(term) in memo:
+        return memo[id(term)]
+    read = term.as_carrier_read()
+    if read is not None:
+        if read.carrier == state:
+            reads.append(read)
+        out = {read.name: "affine" if read.carrier == state else "free"}
+        memo[id(term)] = out
+        return out
+    env: dict[str, str] = {}
+    for param, edge, index in term.bindings:
+        env[param] = _affine_classes(edge, state, reads, memo).get(edge.exposes[index], "free")
+
+    def of(name: str) -> str:
+        return env.get(name, "free")  # a coordinate, a literal name: free of the state
+
+    def combine(op: str, args: tuple[str, ...]) -> str:
+        if all(arg == "free" for arg in args):
+            return "free"
+        if any(arg == "non" for arg in args):
+            return "non"
+        if op in ("add", "subtract", "copy", "negative"):
+            return "affine"
+        if op == "multiply" and sum(arg == "affine" for arg in args) == 1:
+            return "affine"
+        if op == "divide" and args[0] == "affine" and args[1] == "free":
+            return "affine"
+        return "non"
+
+    for stmt in term.lift.body:
+        if isinstance(stmt, Fold):
+            env.update(_affine_classes(stmt, state, reads, memo))
+        elif isinstance(stmt, Assign):
+            env[stmt.name] = combine(stmt.op.name, tuple(of(arg) for arg in stmt.args))
+        elif isinstance(stmt, Load):
+            env[stmt.name] = "non" if any(of(var) != "free" for expr in stmt.index for var in expr.free_vars()) else "free"
+        elif isinstance(stmt, Select):
+            branches = tuple(of(branch.value) for branch in stmt.branches)
+            gated = any(of(var) != "free" for branch in stmt.branches for var in branch.select.free_vars())
+            env[stmt.name] = "non" if gated else combine("add", branches)
+        else:
+            env.update((name, "free" if stmt.pure and not stmt.deps() else combine("non", ("non",))) for name in stmt.defines())
+    if term.base is None:
+        out = {exposed: of(own) for exposed, own in zip(term.exposes, term.lift.results, strict=True)}
+    else:
+        ops = term.base.components()
+        out = {}
+        for index, (exposed, own) in enumerate(zip(term.base.results, term.lift.results, strict=False)):
+            kind = of(own)
+            folded = kind == "free" or (kind == "affine" and (term.carries or (ops is not None and ops[index].name == "add")))
+            out[exposed] = kind if folded else "non"
+        n = len(term.base.results)
+        out.update((exposed, of(own)) for exposed, own in zip(term.exposes[n:], term.lift.results[n:], strict=False))
+    memo[id(term)] = out
+    return out
 
 
 def _channel_product(lift: Lambda, result: str) -> tuple[Lambda, Assign | None]:

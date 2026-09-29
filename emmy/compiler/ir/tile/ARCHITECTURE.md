@@ -56,6 +56,17 @@ exposes, or a pass-through of a value an output sweep beside the cells computes 
 `Fold.lower` opens the carrying loop outside the loops over the cells, with a nest of its own for the step's
 sweeps; the closed program is the Loop IR the roll wrote.
 
+A carried state has one kernel-set decision, the **split across the sequence** (`REDUCE@…/scan=g<n>k`, offered
+by `030_cut` through `_split.realize_carry_split`). It needs the step AFFINE in the state and column-wise
+(`Fold.affine`: every carrier read keeps the cell's own coordinate at every position but one), because then a
+part's steps compose as an affine map `S ← A·S + b`, read off two walks of the part from known seeds — zero gives
+`b`, the identity packed along the kept cells gives `A` beside it — with no symbolic knowledge of the step. Three
+kernels, each lifted from Loop IR like the walk: the probe (both walks of every part, the state stored per step),
+the prefix (the state carried across the parts by their maps, each part's start stored), and the walk itself over
+each part's range from its start, one part per batch cell. Three walks of a part where the sequence took one, for
+`n` times the parallelism; whether that pays is evidence's decision. A step that is not affine (the forward
+substitution) offers nothing and stays one kernel.
+
 The classic schedule realizes the carrying loop as ordered launches with a global state buffer: at its fork it
 lifts the kernel's Loop IR again with the state as a buffer the node owns and the loop as the kernel's **serial
 axis** (`Placement.serial`, `lift_serial`), each launch reading the previous launch's stores one step back. The

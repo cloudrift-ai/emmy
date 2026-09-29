@@ -30,7 +30,7 @@ c, i, j, k = Var("c"), Var("i"), Var("j"), Var("k")
 ZERO = Literal(0, "int")
 
 
-def _step(out_index: tuple, seed: float | str = 0.0, u_index: tuple = (c, i, j)) -> Body:
+def _step(out_index: tuple, seed: float | str = 0.0, u_index: tuple = (c, i, j), steps: int = STEPS) -> Body:
     """``S_c = decay_c * S_{c-1} + W @ S_{c-1} + U_c``, storing the state each step READ, from ``seed``."""
     mix = Loop(
         axis=Axis("k", N),
@@ -52,19 +52,19 @@ def _step(out_index: tuple, seed: float | str = 0.0, u_index: tuple = (c, i, j))
         Write(output="out", index=out_index, value="own"),
     )
     cells = Loop(axis=Axis("i", N), body=(Loop(axis=Axis("j", N), body=cell),))
-    return Body((Loop(axis=Axis("c", STEPS), body=(Load(name="decay", input="D", index=(c,)), cells)),))
+    return Body((Loop(axis=Axis("c", steps), body=(Load(name="decay", input="D", index=(c,)), cells)),))
 
 
 def _loops(body: Body) -> list[Loop]:
     return [stmt for stmt in body.iter() if isinstance(stmt, Loop)]
 
 
-def _inputs(seed: float | str = 0.0, batch: int | None = None) -> dict[str, np.ndarray]:
+def _inputs(seed: float | str = 0.0, batch: int | None = None, steps: int = STEPS) -> dict[str, np.ndarray]:
     rng = np.random.default_rng(0)
     arrays = {
-        "D": rng.standard_normal(STEPS).astype(np.float32),
+        "D": rng.standard_normal(steps).astype(np.float32),
         "W": (rng.standard_normal((N, N)) * 0.3).astype(np.float32),
-        "U": rng.standard_normal((*(() if batch is None else (batch,)), STEPS, N, N)).astype(np.float32),
+        "U": rng.standard_normal((*(() if batch is None else (batch,)), steps, N, N)).astype(np.float32),
     }
     if isinstance(seed, str):
         arrays[seed] = rng.standard_normal((N, N)).astype(np.float32)
@@ -75,8 +75,9 @@ def _reference(arrays: dict[str, np.ndarray], seed: float | str = 0.0) -> np.nda
     if arrays["U"].ndim == 4:  # a batch of recurrences, one per leading row of U
         return np.stack([_reference({**arrays, "U": u}, seed) for u in arrays["U"]])
     state = arrays[seed].copy() if isinstance(seed, str) else np.full((N, N), seed, np.float32)
-    want = np.zeros((STEPS, N, N), np.float32)
-    for step in range(STEPS):
+    steps = arrays["U"].shape[0]
+    want = np.zeros((steps, N, N), np.float32)
+    for step in range(steps):
         want[step] = state
         state = arrays["D"][step] * state + arrays["W"] @ state + arrays["U"][step]
     return want
@@ -98,14 +99,16 @@ def test_a_step_reads_other_cells_of_its_own_state(step_major: bool) -> None:
     np.testing.assert_allclose(got if step_major else np.moveaxis(got, -1, 0), _reference(arrays), rtol=1e-5, atol=1e-6)
 
 
-def _graph(seed: float | str = 0.0) -> Graph:
+def _graph(seed: float | str = 0.0, steps: int = STEPS) -> Graph:
     """The step as a graph; a named ``seed`` is an input tensor of the state's shape the loop starts from."""
     graph = Graph()
-    inputs = [("D", (STEPS,)), ("W", (N, N)), ("U", (STEPS, N, N)), *([(seed, (N, N))] if isinstance(seed, str) else [])]
+    inputs = [("D", (steps,)), ("W", (N, N)), ("U", (steps, N, N)), *([(seed, (N, N))] if isinstance(seed, str) else [])]
     for name, shape in inputs:
         graph.add_node(InputOp(), [], Tensor(name, shape, "f32"), node_id=name)
     names = [name for name, _ in inputs]
-    graph.add_node(LoopOp(body=_step((c, i, j), seed), name="k_step"), names, Tensor("out", (STEPS, N, N), "f32"), node_id="out")
+    graph.add_node(
+        LoopOp(body=_step((c, i, j), seed, steps=steps), name="k_step"), names, Tensor("out", (steps, N, N), "f32"), node_id="out"
+    )
     graph.inputs, graph.outputs = names, ["out"]
     return graph
 

@@ -106,6 +106,9 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   that **carries**: its ⊕ is the action `next` (the state becomes what the step computed — the free monoid of step
   maps stored through its action on the seed, the one form every step has), its `cells` the `Carry` index, its
   `init` the seed, and a **carrier read** — a slab over one `Pre` — is how the step reads the carrier at other cells.
+  A step affine in the state splits **across the sequence** (`REDUCE=g<n>k` on the carrying site): a probe reads
+  each part's affine map off two walks from known seeds, a prefix carries the state across the parts, and the walk
+  runs every part from its start.
 - **Componentwise / twisted combine** — The two shapes a stored fold combine takes: one independent ⊕ per state (a
   planar fold — sum, max — built by `Lambda.componentwise` and read back by `Lambda.components`), or a componentwise
   monoid conjugated by a bijection (a twist) such as the exp/LSE family behind online softmax, stated by a twist
