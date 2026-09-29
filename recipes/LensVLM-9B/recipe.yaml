@@ -3,9 +3,8 @@ tags:
 - untested
 model:
   huggingface: apple/LensVLM-9B
-  rationale: Apple open-weight 262K-context VLM with a paper, selective visual-text expansion novelty and active demo
-    spaces.
-  heat: 55
+  rationale: "New first-party lab VLM release with early momentum; 262 likes in 8 days, 262K-context visual compression novelty."
+  heat: 75
   task: generate
 matrices:
 - deploy.gpu: NVIDIA H200 141GB

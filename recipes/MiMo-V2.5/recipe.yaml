@@ -3,8 +3,8 @@ tags:
 - untested
 model:
   huggingface: XiaomiMiMo/MiMo-V2.5
-  rationale: "OpenRouter volume halved weekly, supplanted by V2.6; cooling significantly."
-  heat: 35
+  rationale: "Volume halved weekly, being supplanted by V2.6; cooling interest."
+  heat: 25
   task: generate
 matrices:
 - deploy.gpu: NVIDIA B200
