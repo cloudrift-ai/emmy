@@ -52,6 +52,9 @@ then uses the `ByNodeId` selector instead of `ByInstanceTypeAndLocation`, and `r
 into the node UUID via `/api/v1/nodes/list` (an operator-only endpoint — customers pass the UUID). A pinned node has
 no placement fallback, so the pin lives on the single-shot provider command, not the candidate orchestrator.
 
+A CloudRift rental opens the ports the caller names (`provision_cloud_vm(ports=…)`): SSH, one host port per engine
+service, and the load balancer's when there is one; the default is `[22, 8000, 8080]`. GCP has no per-VM port list.
+
 Every CloudRift rental carries free-form tags for later filtering on listings. `create_instance` resolves them
 through `emmy.config.rental_tags()` — repeatable `--tag` flags win, else the comma-separated `EMMY_RENTAL_TAGS` env
 var (how an experiment run or CI job labels its whole rental lane), else the default `emmy` tag.
@@ -84,7 +87,9 @@ readiness or SSH polling; once ready, the orchestrator adds connection details a
 explicit lifecycle replaces interception of provider internals and preserves the handle if the process is interrupted
 after allocation.
 
-`emmy vm create gpu --lease PATH --owner ID` enables the observer. `emmy vm delete lease` validates the exact owner,
+`emmy vm create gpu --lease PATH --owner ID` and `emmy deploy cloud --lease PATH --owner ID` enable the observer
+(`add_lease_arguments` / `lease_observer` are the shared flag registration and construction; a dry run rents nothing
+and writes no lease). `emmy vm delete lease` validates the exact owner,
 deletes only the recorded handle, retries and polls provider state, then marks the lease deleted. `emmy vm audit
 lease` independently fails while that handle remains active. A missing lease is an idempotent no-op; an owner mismatch
 is always a hard refusal. CloudRift's `Deactivating` state acknowledges that termination is scheduled, so cleanup and

@@ -65,7 +65,9 @@ def load_plan(path: str | Path) -> Plan:
 
     for device, fractions in sorted(tenants.items()):
         if len(fractions) > 1 and round(sum(fractions), 6) > SHARED_DEVICE_BUDGET:
-            raise ValueError(f"GPU device {device} is shared by models whose fractions add up to {sum(fractions):g}, above {SHARED_DEVICE_BUDGET}")
+            raise ValueError(
+                f"GPU device {device} is shared by models whose fractions add up to {sum(fractions):g}, above {SHARED_DEVICE_BUDGET}"
+            )
     pins = {(service.recipe.deploy.driver_version, service.recipe.deploy.cuda_version) for service in services}
     if len(pins) > 1:
         raise ValueError(f"the recipes disagree on their driver/CUDA version pins: {sorted(pins, key=str)}")

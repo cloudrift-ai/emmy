@@ -209,12 +209,20 @@ emmy deploy local --recipe recipes/gemma-4-12B-it
 
 # Cloud (auto-provisions a VM)
 emmy deploy cloud --recipe recipes/gemma-4-12B-it --gpu "NVIDIA H200 141GB" --gpu-count 8
+
+# Cloud, several models on one VM (a plan file instead of --recipe)
+emmy deploy cloud --plan plan.json --result-json out.json --lease lease.json --owner relay/deployment-42
 ```
 
 `--recipe` also takes a bare recipe name (`--recipe gemma-4-12B-it`). An editable install resolves it from the live
 checkout; a wheel install resolves it from the packaged catalog. Emmy copies the recipe into the current directory
 first because `deploy` writes its compose file next to it and `bench` its timestamped run directory. A path that
 exists always wins, so an edited working copy is never overwritten.
+
+A plan names the VM to rent (`gpu`, `gpu_count`) and an ordered list of `models`, each with a `recipe`, its
+`gpu_memory_utilization` and the `gpu_device_ids` it is pinned to. Model *i* runs as its own container on host port
+`8000 + i`; models sharing a GPU start one after another. `--result-json` writes one endpoint per model on success,
+and `--lease` persists the instance id the moment the VM is rented. The deploy command reference has the details.
 
 ## Publish a serving image
 
@@ -295,10 +303,12 @@ emmy recipe create org/model-name --rationale "Why this model should be onboarde
   --deployment "NVIDIA H200 141GB" 1 --deployment "NVIDIA B200" 1
 ```
 
-`recipe list --json` is a versioned machine interface. It returns an object with `schema_version` and `recipes`;
-each recipe carries its directory `name`, model ID, task, lifecycle-aware `runnable` state, heat score, and
-matrix-expanded deployments with effective context lengths. Consumers must reject unknown schema versions. Fields
-may be added to a schema version, but existing fields are not removed or redefined. Emmy always detects its
+`recipe list --json` is a versioned machine interface (schema version 2). It returns an object with `schema_version`
+and `recipes`; each recipe carries its directory `name`, model ID, task, lifecycle-aware `runnable` state, heat score,
+and matrix-expanded deployments, each with its GPU, GPU count, GPU memory fraction and effective context length. Two
+entries that differ only by fraction are both listed: that is how a recipe declares it may share its GPU. Consumers
+must reject unknown schema versions. Fields may be added to a schema version, but existing fields are not removed or
+redefined. Emmy always detects its
 installation: an editable checkout uses its live top-level `recipes/`, while a regular wheel uses its packaged
 runnable recipe bundle.
 `recipe query --json` returns a separate versioned `rows` interface for generic predicates and stable sort keys. Its

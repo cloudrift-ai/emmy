@@ -84,6 +84,15 @@ def test_recipe_inventory_keeps_entries_that_differ_only_by_memory_fraction(tmp_
     ]
 
 
+def test_bundled_qwen3_30b_a3b_lists_its_shared_gpu_entry(recipes_dir):
+    """The bundled recipe that may share an H200 exposes both of its qualified entries."""
+    record = next(record for record in recipe_inventory(recipes_dir) if record["name"] == "Qwen3-30B-A3B-Instruct-2507")
+    assert record["deployments"] == [
+        {"gpu": GPU, "gpu_count": 1, "gpu_memory_utilization": 0.9, "context_length": 262144},
+        {"gpu": GPU, "gpu_count": 1, "gpu_memory_utilization": 0.55, "context_length": 131072},
+    ]
+
+
 def test_recipe_inventory_rejects_invalid_heat(tmp_path):
     root = tmp_path / "recipes"
     recipe = _write_recipe(root, "ready", "org/ready", ["maintained"])

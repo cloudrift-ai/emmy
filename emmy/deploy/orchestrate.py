@@ -91,7 +91,11 @@ def _request(recipe: Recipe, *, example: bool = False) -> tuple[str, dict]:
             return "/v1/completions", {"model": model, "prompt": "Hello", "max_tokens": 64}
         return "/v1/completions", {"model": model, "prompt": "2 + 2 =", "max_tokens": 16, "temperature": 0}
     content = "Hello" if example else "What is 2+2? Answer with just the number."
-    return "/v1/chat/completions", {"model": model, "messages": [{"role": "user", "content": content}], "max_tokens": 64 if example else 128}
+    return "/v1/chat/completions", {
+        "model": model,
+        "messages": [{"role": "user", "content": content}],
+        "max_tokens": 64 if example else 128,
+    }
 
 
 async def _smoke_test(run_cmd, service: Service, name: str, check_smoke_output: bool) -> bool:
@@ -101,7 +105,9 @@ async def _smoke_test(run_cmd, service: Service, name: str, check_smoke_output: 
     readiness only and retain the response for later review.
     """
     path, body = _request(service.recipe)
-    smoke_cmd = f"curl --fail-with-body -s http://localhost:{service.port}{path} -H 'Content-Type: application/json' -d '{json.dumps(body)}'"
+    smoke_cmd = (
+        f"curl --fail-with-body -s http://localhost:{service.port}{path} -H 'Content-Type: application/json' -d '{json.dumps(body)}'"
+    )
     check = _smoke_response_check(service.recipe, check_smoke_output=check_smoke_output)
     deadline = asyncio.get_event_loop().time() + SMOKE_TIMEOUT
     while asyncio.get_event_loop().time() < deadline:

@@ -97,9 +97,10 @@ async def test_a_model_sharing_a_gpu_starts_only_after_the_earlier_one_is_health
         "curl -sf http://localhost:8001/health",
         "curl -sf http://localhost:8002/health",
     ]
+    question = '{"role": "user", "content": "What is 2+2? Answer with just the number."}'
     assert [command for command in calls if "/v1/" in command] == [
         f"curl --fail-with-body -s http://localhost:{port}/v1/chat/completions -H 'Content-Type: application/json'"
-        f' -d \'{{"model": "{model}", "messages": [{{"role": "user", "content": "What is 2+2? Answer with just the number."}}], "max_tokens": 128}}\''
+        f' -d \'{{"model": "{model}", "messages": [{question}], "max_tokens": 128}}\''
         for port, model in [(8000, "test-org/test-model"), (8001, "org/other"), (8002, "test-org/test-model")]
     ]
 
