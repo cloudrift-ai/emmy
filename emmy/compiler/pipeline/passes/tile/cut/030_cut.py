@@ -208,9 +208,14 @@ def rewrite(match: Match, root: Node, ctx=None):
         raise RuleSkipped("TileOp already scheduled")
     if tile.carries:
         # The runner launches one kernel's steps to completion before the next kernel's first, so
-        # the pieces of a cut or a split could not interleave step by step: piece two's step c would
-        # read what piece one stored at EVERY step. A kernel that carries a state stays one kernel.
-        raise RuleSkipped("a kernel that carries a state is one kernel")
+        # the pieces of a cut could not interleave step by step: piece two's step c would read what
+        # piece one stored at EVERY step. A kernel that carries a state takes no cut; its one
+        # kernel-set decision is the split across the sequence (``_split.realize_carry_split``).
+        choices = split_forks(match, root)
+        if choices is None:
+            raise RuleSkipped("a kernel that carries a state is one kernel")
+        options = [cut.kernel for cut in schedule(_CutContext(tuple(choices)))]
+        return options if len(options) > 1 else options[0]
     choices = None if tile.placement_decided else _placement_forks(match, root, tile, ctx)
     if choices is None:
         choices = split_forks(match, root)
