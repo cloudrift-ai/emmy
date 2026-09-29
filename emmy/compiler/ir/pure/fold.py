@@ -1417,6 +1417,13 @@ class Fold:
                 scope, stmts, loops = nest.bound | set(node), None, []
             if term.axis is None:
                 step = term.step()
+                # A step reading none of its parameters (a multi-output root's constant result) is a
+                # wrapper's: it binds no coordinate, so it sits at the top of its path.
+                if step and stmts is None and not set(term.lift.params) & {name for stmt in step for name in free_names(stmt)}:
+                    node = path_of(frozenset(), path)
+                    sink(node).extend(step)
+                    attach(term, "step", sink(node), node, frozenset(bound) | set(node))
+                    step = ()
                 for edge in placed(term):
                     place(edge, loops, node if step else path, nest)
                 if step:
