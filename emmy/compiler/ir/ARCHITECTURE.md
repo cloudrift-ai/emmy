@@ -635,6 +635,8 @@ canonicalized before validation:
   it, so the block still depends on the enclosing definition it reads. Immutable bodies cache their enclosing SSA
   reads and ordered carried-state names. State names derive from the shared type-filtered lookup, which reuses each
   child's query result. A subtree's full spelling is computed only when sibling statement shapes leave a tie.
+  Sequential renaming gives each lexical binder its own name; a final axis unification restores shared reduction
+  dimensions without merging dependent loops or changing the relation graph's order.
   Affine coordinates sort by lexical binding
   order, so renaming axes or loading a saved body preserves their normal form and exact identity. Identity normalizes
   remaining commutative expressions again after its final rename.

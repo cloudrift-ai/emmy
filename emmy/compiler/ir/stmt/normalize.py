@@ -945,6 +945,9 @@ def _canonical_order(stmts: Body) -> Body:
     stmts = _canonicalize_exprs(stmts)
     ordered, ordering = relation_graph(stmts).label().materialize(spelled=True)
     result = Body.coerce(sort_commutative_args(rename_ssa_sequential(ordered)))
+    # Sequential naming separates lexical binders. Restore shared reduction dimensions without
+    # merging dependent loops or changing the order represented by the relation graph.
+    result = _unify_siblings(result.map(lambda stmt: stmt.with_bodies(tuple(_unify_siblings(child) for child in stmt.nested()))))
     result.__dict__["_ordering"] = ordering
     return result
 
