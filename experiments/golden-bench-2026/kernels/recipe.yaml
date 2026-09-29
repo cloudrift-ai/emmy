@@ -15,12 +15,15 @@ command:
     - pyproject.toml
     - requirements.txt
     - Makefile
+    - Cargo.toml
+    - Cargo.lock
+    - crates
     - experiments/golden-bench-2026/kernels/recipe.yaml
     - experiments/golden-bench-2026/kernels/golden
   strict: true
   run: |
     set -euo pipefail
-    export PATH=/usr/local/cuda/bin:$$PATH
+    export PATH=/usr/local/cuda/bin:$$HOME/.cargo/bin:$$PATH
     cd $repo_dir
     mkdir -p $task_dir/verification
     finalize() {
@@ -41,6 +44,8 @@ command:
     trap finalize EXIT
 
     [ -d venv ] || make setup
+    # A venv staged before the runtime was compiled lacks the extension; build it in place.
+    ./venv/bin/python -c 'import emmy.emmy_runtime' 2>/dev/null || ./venv/bin/pip install -q -e .
     export EMMY_TUNE_DB=$task_dir/autotune.db
     export EMMY_ONLINE_FILE=$task_dir/online.json
     export EMMY_CUBIN_CACHE=$task_dir/cubins

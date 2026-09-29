@@ -78,6 +78,9 @@ def test_common_kernel_corpus_is_small_and_identical(project_root) -> None:
         "pyproject.toml",
         "requirements.txt",
         "Makefile",
+        "Cargo.toml",
+        "Cargo.lock",
+        "crates",
         "experiments/golden-bench-2026/kernels/recipe.yaml",
         "experiments/golden-bench-2026/kernels/golden",
     ]
