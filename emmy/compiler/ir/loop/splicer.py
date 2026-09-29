@@ -65,6 +65,7 @@ import math
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from functools import cached_property
 from graphlib import TopologicalSorter
 
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Interval, Literal, SimplifyCtx, Var, affine_form
@@ -83,6 +84,9 @@ from emmy.compiler.ir.loop.ir import (
     Write,
 )
 from emmy.compiler.ir.sigma import Sigma
+from emmy.compiler.ir.stmt import Body
+from emmy.compiler.ir.stmt.subroutine import Call, Subroutine, definitions, pretty_subroutines, reduction_depths
+from emmy.utils import cached_method
 
 logger = logging.getLogger(__name__)
 
@@ -197,9 +201,7 @@ def splice_loops(
         return None
     try:
         return _Splicer(
-            loops={tag: op.analyze() for tag, op in loops.items()},
-            splice_edges=splice_edges,
-            roots=roots,
+            _Program({tag: op.analyze() for tag, op in loops.items()}, splice_edges), roots=roots,
         ).run()
     except (_NotSupported, ValueError) as exc:
         # _NotSupported = splicer hit an unsupported pattern (σ-solve, scope).
@@ -285,6 +287,20 @@ def splice_graph(graph) -> tuple[LoopOp, list[str]] | None:
     if merged is None:
         return None
     return merged, external_order
+
+
+def expand_calls(body: Body) -> Body:
+    """Reconstruct the full body through the same demand sharing and axis unification as fusion."""
+    targets = definitions(body)
+    if not targets:
+        return body
+    tags = {target: f"sub{index}" for index, target in enumerate(targets)}
+    loops = {tags[target]: LoopMeta.from_body(target.body, target.axes) for target in targets}
+    loops["root"] = LoopMeta.from_body(body)
+    builder = _Splicer(_Program(loops, {}), roots=tuple(("root", w.output) for w, _ in loops["root"].writes), expand=tags)
+    builder._seed()
+    builder.resolve()
+    return Body.coerce(builder.finish())
 
 
 def _output_equivalence_clusters(graph, loop_nodes: dict[str, object]) -> tuple[_OutputEquivalenceCluster, ...]:
@@ -554,84 +570,94 @@ def _loop_extents(op: LoopOp, *, leading: str | None = None) -> dict[str, int] |
 # ---------------------------------------------------------------------------
 
 
-class _Splicer(LoopBuilder):
-    """Multi-loop splicer driven by an explicit splice-edge graph.
+@dataclass(frozen=True)
+class _Program:
+    """The source DAG and its shared reduction definitions for one complete splice."""
 
-    Each registered loop has a tag (opaque string). ``splice_edges``
-    identifies which Loads are inlined from another registered loop;
-    all other Loads are re-indexed into the merged kernel's external
-    input list. ``roots`` names the exact Writes that seed the traversal.
+    loops: dict[str, LoopMeta]
+    splice_edges: dict[tuple[str, str], tuple[str, str]]
 
-    Inherits body building (``insert`` / ``fresh`` / ``finish``) from
-    ``LoopBuilder``; adds the worklist of pending demands and the dedup
-    table that keeps the merged body minimal. Worklist dep-resolution
-    is reverse-topological — producers demanded after consumers — so
-    the builder's prepend-at-leaf behavior yields defined-before-use
-    ordering naturally.
-    """
+    @cached_property
+    def used_names(self) -> set[str]:
+        return set().union(*(_collect_names(meta.body) for meta in self.loops.values()))
 
-    def __init__(
-        self,
-        *,
-        loops: dict[str, LoopMeta],
-        splice_edges: dict[tuple[str, str], tuple[str, str]],
-        roots: tuple[tuple[str, str], ...],
-    ) -> None:
-        used: set[str] = set()
-        for meta in loops.values():
-            used |= _collect_names(meta.op)
-        super().__init__(used_names=used)
-        self.loops = loops
-        self.splice_edges = splice_edges
-        self.roots = roots
-        self._pending: deque[_Demand] = deque()
-        # Dedup: a stmt is uniquely identified by its (origin, name), the
-        # emit scope it lands at in the merged body, and the σ restricted
-        # to its own enclosing — the only bindings that affect its rewrite.
-        # Same key → share a single emission.
-        self._binding: dict[_BindKey, str] = {}
-        dependencies = {tag: {} for tag in loops}
-        for (origin, source), target in splice_edges.items():
+    @cached_property
+    def reduction_depth(self) -> dict[str, dict[str, int]]:
+        dependencies = {tag: {} for tag in self.loops}
+        for (origin, source), target in self.splice_edges.items():
             dependencies[origin][source] = target
-        self._reduction_depth: dict[str, dict[str, int]] = {}
+        depths: dict[str, dict[str, int]] = {}
         order = TopologicalSorter({tag: {origin for origin, _ in edges.values()} for tag, edges in dependencies.items()})
         for tag in order.static_order():
             inputs = {
-                source: max((self._reduction_depth[origin][w.value] for w, _ in loops[origin].writes if w.output == output), default=0)
+                source: max((depths[origin][w.value] for w, _ in self.loops[origin].writes if w.output == output), default=0)
                 for source, (origin, output) in dependencies[tag].items()
             }
-            self._reduction_depth[tag] = loops[tag].op.body.dependency_depths(Accum, inputs=inputs)
-        self._reduce_axes: dict[tuple[Scope, Expr, int], Axis] = {}
-        # Sigma expressions stay live for one splice. Cache by object identity so repeated
-        # dependency placement does not recursively walk the same large coordinate tree, while
-        # avoiding structural hashing (which would perform another recursive tree walk).
-        self._free_vars_by_expr_id: dict[int, tuple[Expr, frozenset[str]]] = {}
-        # Construction bound: how many DISTINCT bindings the merged body may take per source
-        # statement. The dedup table shares each (stmt, emit scope, σ) binding, and a legitimate
-        # splice emits about one binding per input statement — a value read at a few offsets a
-        # few. A recurrence left unrolled breaks that sharing: each stage is re-demanded under
-        # COMPOSITIONS of σs, so bindings multiply per stage instead of deduplicating (DeepSeek-V4's
-        # 20-iteration Sinkhorn chain drove 4.5M distinct bindings from 2,287 input statements and
-        # never finished). Such a merge cannot be constructed at any budget; the first binding past
-        # the bound raises, and the answer is the roller (``loop/fusion/005_roll_recurrence``), never
-        # a smaller region — a termination bound, not a fusion-quality gate: placement still owns
-        # every cut on a merge that CAN be built.
-        self._source_stmts = sum(1 for meta in loops.values() for _ in meta.op.body.iter())
+            depths[tag] = reduction_depths(self.loops[tag].body, inputs)
+        return depths
 
-    #: Bindings per source statement past which construction is a recurrence multiplying, not a merge. A
-    #: whole layer legitimately takes over a hundred: the tracer unrolls per-head work into copies that each
-    #: re-derive the shared input, which is one big kernel, not a blowup; a chain left unrolled doubles per stage.
+    @cached_property
+    def source_stmts(self) -> int:
+        return sum(1 for meta in self.loops.values() for _ in meta.body.iter())
+
+    @cached_method
+    def subroutine(self, origin: str, name: str) -> Subroutine:
+        meta = self.loops[origin]
+        scope = meta.scopes[name]
+        params = tuple(axis for axis in scope.enclosing if axis.name in meta.live_axes[name])
+        builder = _Splicer(self, roots=(), outline=(origin, name))
+        result = builder._ensure_dep(name, origin, Sigma.IDENTITY, scope)
+        builder.resolve()
+        from emmy.compiler.ir.stmt.normalize import prepare_body
+
+        # A temporary output keeps the returned value live while aliases and unit reductions
+        # simplify. It is removed before forming the read-only subroutine.
+        body = prepare_body(Body((*builder.finish(), Write(output="_return", index=(), value=result))))
+        returned = next(stmt for stmt in body if isinstance(stmt, Write))
+        return Subroutine(f"{origin}_{name}", params, Body(stmt for stmt in body if stmt is not returned), returned.value)
+
+
+class _Splicer(LoopBuilder):
+    """Build a maximal region, keeping reduction cones as shared calls until final CSE."""
+
+    def __init__(
+        self, program: _Program, *, roots: tuple[tuple[str, str], ...], outline: tuple[str, str] | None = None,
+        expand: dict[Subroutine, str] | None = None,
+    ) -> None:
+        super().__init__(used_names=program.used_names)
+        self.program = program
+        self.loops = program.loops
+        self.splice_edges = program.splice_edges
+        self.roots = roots
+        self.outline = outline
+        self.expand = expand
+        self.bound = frozenset(axis.name for axis in self.loops[outline[0]].scopes[outline[1]].enclosing) if outline else frozenset()
+        self._pending: deque[_Demand] = deque()
+        self._binding: dict[_BindKey, str] = {}
+        self._reduce_axes: dict[tuple[Scope, Expr, int], Axis] = {}
+        self._free_vars_by_expr_id: dict[int, tuple[Expr, frozenset[str]]] = {}
+
     _BINDING_RATIO = 256
+
+    def insert(self, stmt: Stmt, enclosure: Scope) -> None:
+        # A definition's parameters are bound by its call, not by loops in its body.
+        super().insert(stmt, Scope(tuple(axis for axis in enclosure.enclosing if axis.name not in self.bound)))
+
+    def resolve(self) -> None:
+        while self._pending:
+            self._resolve(self._pending.popleft())
 
     def run(self) -> LoopOp:
         self._seed()
-        while self._pending:
-            self._resolve(self._pending.popleft())
+        self.resolve()
         # Topological reordering of siblings runs inside LoopOp.__post_init__
         # (normalize_body → topo_sort_siblings), so the dedup case where a
         # consumer prepends above its already-emitted producer is fixed up
         # at construction time, not here.
-        return LoopOp(body=self.finish())
+        body = Body.coerce(self.finish())
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("Compact fusion:\n%s", "\n".join(pretty_subroutines(body)))
+        return LoopOp(body=body)
 
     # -- Seed: every selected root Write, with its value queued -------------
 
@@ -689,7 +715,7 @@ class _Splicer(LoopBuilder):
         existing = self._binding.get(key)
         if existing is not None:
             return existing
-        if len(self._binding) >= self._BINDING_RATIO * self._source_stmts:
+        if len(self._binding) >= self._BINDING_RATIO * self.program.source_stmts:
             raise UnfusableStmt(
                 f"the merged body takes over {self._BINDING_RATIO} bindings per source statement, at {name!r} of loop "
                 f"{origin!r} — the region's σ-bindings multiply instead of deduplicating: a recurrence the roller did not roll",
@@ -723,7 +749,21 @@ class _Splicer(LoopBuilder):
             else:
                 self._resolve_external_load(stmt, d)
         elif isinstance(stmt, Accum):
-            self._resolve_accum(stmt, d)
+            if self.expand is not None or (d.origin, d.name) == self.outline:
+                self._resolve_accum(stmt, d)
+            else:
+                target = self.program.subroutine(d.origin, d.name)
+                args = tuple(d.sigma.apply(Var(name)) for name in target.params)
+                self.insert(Call(d.bound_as, target, args), d.demand_scope)
+        elif isinstance(stmt, Call):
+            rename = {
+                arg: Var(self._ensure_dep(arg, d.origin, d.sigma, d.demand_scope))
+                for arg in stmt.deps() if arg in self.loops[d.origin].defs
+            }
+            args = tuple(d.sigma.apply(arg).substitute(rename) for arg in stmt.args)
+            sigma = _canonical(Sigma(dict(zip(stmt.target.params, args, strict=True))), d.demand_scope)
+            value = self._ensure_dep(stmt.target.result, self.expand[stmt.target], sigma, d.demand_scope)
+            self.insert(Assign(name=d.bound_as, op="copy", args=(value,)), d.demand_scope)
         elif isinstance(stmt, (Assign, Select)):
             self._resolve_plain(stmt, d)
         else:
@@ -774,7 +814,7 @@ class _Splicer(LoopBuilder):
             name: Var(self._ensure_dep(name, d.origin, d.sigma, d.demand_scope)) for name in stmt.deps() if name in source_meta.defs
         }
         effective_index = tuple(d.sigma.apply(e).substitute(index_rename) for e in stmt.index)
-        sigma = _solve_sigma(target_write.index, effective_index, {a.name for a in target.op.axes})
+        sigma = _solve_sigma(target_write.index, effective_index, target.body.axis_names)
         if sigma is None:
             raise _NotSupported(f"σ-solve failed pairing target write index {target_write.index} against reader index {effective_index}")
         v_bound = self._ensure_dep(target_write.value, target_tag, _canonical(sigma, d.demand_scope), d.demand_scope)
@@ -783,7 +823,7 @@ class _Splicer(LoopBuilder):
     def _resolve_accum(self, stmt: Accum, d: _Demand) -> None:
         """Queue the value under a shared iteration scope for independent reductions of equal extent."""
         orig_axis = self.loops[d.origin].reduce_axes[stmt.name]
-        key = (d.demand_scope, orig_axis.extent.expr, self._reduction_depth[d.origin][stmt.name])
+        key = (d.demand_scope, orig_axis.extent.expr, self.program.reduction_depth[d.origin][stmt.name])
         reduce_axis = self._reduce_axes.get(key)
         if reduce_axis is None:
             reduce_axis = self._reduce_axes[key] = Axis(name=self.fresh(orig_axis.name), extent=orig_axis.extent)
@@ -887,12 +927,12 @@ def _solve_sigma(
     return Sigma(mapping)
 
 
-def _collect_names(op: LoopOp) -> set[str]:
+def _collect_names(body: Body) -> set[str]:
     """All SSA names plus all axis names used anywhere in ``op``."""
     names: set[str] = set()
-    for s in op:
+    for s in body.iter():
         if isinstance(s, Loop):
             names.add(s.axis.name)
-        elif isinstance(s, (Load, Assign, Select, Accum)):
+        elif isinstance(s, (Load, Assign, Select, Accum, Call)):
             names.add(s.name)
     return names

@@ -1,0 +1,90 @@
+"""Compact fusion calls remain transparent to executable CSE, identity and Tile IR."""
+
+from dataclasses import replace
+
+import numpy as np
+import pytest
+
+from emmy.compiler.graph import Graph, Tensor
+from emmy.compiler.ir.axis import Axis
+from emmy.compiler.ir.expr import Literal, Var
+from emmy.compiler.ir.loop import LoopOp
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
+from emmy.compiler.ir.stmt.normalize import prepare_body
+from emmy.compiler.ir.stmt.subroutine import Call, Subroutine, definitions, pretty_subroutines
+from emmy.compiler.pipeline import Pipeline
+
+
+def _project() -> Subroutine:
+    return Subroutine(
+        "project", (Axis("row", 3), Axis("col", 8)),
+        Body((Loop(Axis("k", 16), Body((
+            Load("xv", "x", (Var("row"), Var("k"))),
+            Load("wv", "weight", (Var("col"), Var("k"))),
+            Assign("product", "multiply", ("xv", "wv")),
+            Accum("sum", "product", "add", axes=("k",)),
+        ))),)), "sum",
+    )
+
+
+def _body(target: Subroutine, offset: int, *, other: Subroutine | None = None) -> Body:
+    # The caller's k shadows the definition's internal k: expansion must be hygienic.
+    return Body((Loop(Axis("k", 3), Body((Loop(Axis("c", 8), Body((
+        Call("left", target, (Var("k"), Var("c"))),
+        Call("right", other or target, (Var("k"), (Var("c") + Literal(offset, "int")) % Literal(8, "int"))),
+        Assign("value", "add", ("left", "right")),
+        Write("out", (Var("k"), Var("c")), "value"),
+    ))),))),))
+
+
+@pytest.mark.parametrize("offset", [0, 4])
+def test_shifted_calls_preserve_values_and_share_common_loads(offset):
+    body = _body(_project(), offset)
+    prepared = prepare_body(body)
+    assert len(tuple(prepared.iter_of_type(Call))) == 2
+    assert len(definitions(prepared)) == 1
+
+    op = LoopOp(body=body)
+    assert not tuple(op.body.iter_of_type(Call))
+    assert len(op.body.accums) == (1 if offset == 0 else 2)
+    assert len([load for load in op.body.loads if load.input == "x"]) == 1
+    x = np.linspace(-1, 1, 48, dtype=np.float32).reshape(3, 16)
+    weight = np.linspace(-0.5, 0.5, 128, dtype=np.float32).reshape(8, 16)
+    inputs = {"x": x, "weight": weight}
+    actual = op.forward(*(inputs[name] for name in op.inputs))
+    projected = x @ weight.T
+    np.testing.assert_allclose(actual, projected + np.roll(projected, -offset, axis=1), rtol=2e-6, atol=2e-6)
+
+
+def test_full_cse_crosses_distinct_definitions_and_tile_lift():
+    target = _project()
+    other = replace(target, name="another_projection")
+    compact = _body(target, 0, other=other)
+    shared = _body(target, 0)
+    assert len(definitions(compact)) == 2
+    assert compact.structural_key() == shared.structural_key()
+    op = LoopOp(body=compact)
+    assert len(op.body.accums) == 1
+    graph = Graph()
+    graph.add_node(op, [], Tensor("out", (3, 8)), node_id="out")
+    graph.outputs = ["out"]
+    tile = Pipeline.build(["tile/lift"], select=["lift"]).run(graph).nodes["out"].op
+    assert len(tile.loop_body.accums) == 1
+
+
+def test_identity_clusters_the_expanded_cse_form():
+    target = _project()
+    # Equivalent outlining must not affect exact or compute-unit-clustered identity.
+    compact = _body(target, 4)
+    expanded = LoopOp(body=compact).body
+    for structural in (False, True):
+        assert compact.identity(structural=structural).key == expanded.identity(structural=structural).key
+
+
+def test_compact_pretty_prints_a_shared_definition_once():
+    rendered = "\n".join(pretty_subroutines(_body(_project(), 4)))
+    assert rendered.count("sub project(row, col):") == 1
+    assert "return sum" in rendered
+    assert "left = project(k, c)" in rendered
+    assert "right = project(k," in rendered
+    assert len(rendered.splitlines()) < 18

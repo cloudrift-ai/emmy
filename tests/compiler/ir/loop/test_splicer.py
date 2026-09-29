@@ -217,9 +217,8 @@ def test_shared_intermediate_deduped():
 
 @pytest.mark.parametrize("dependent", [False, True])
 @pytest.mark.parametrize("offset", [0, 3])
-def test_reductions_share_dependencies_before_body_construction(dependent, offset, monkeypatch):
+def test_reductions_share_dependencies_in_cse_form(dependent, offset):
     """Independent reductions share upstream work; a finalized maximum stays outside its consumer's sum."""
-    from emmy.compiler.ir.loop.builder import LoopBuilder
 
     producer = LoopOp(
         body=(
@@ -264,26 +263,14 @@ def test_reductions_share_dependencies_before_body_construction(dependent, offse
     edges = {("left", "P"): ("producer", "P"), ("right", "P"): ("producer", "P")}
     if dependent:
         edges["right", "left"] = ("left", "left")
-    insert = LoopBuilder.insert
-    emitted_exp = 0
-    reduce_axes = set()
-
-    def record(builder, stmt, scope):
-        nonlocal emitted_exp
-        emitted_exp += isinstance(stmt, Assign) and stmt.op.name == "exp"
-        if isinstance(stmt, Accum):
-            reduce_axes.add(scope.enclosing[-1])
-        insert(builder, stmt, scope)
-
-    monkeypatch.setattr(LoopBuilder, "insert", record)
     merged = splice_loops(
         loops={"producer": producer, "left": left, "right": right},
         splice_edges=edges,
         roots=(("left", "left"), ("right", "right")),
     )
     assert merged is not None
-    assert emitted_exp == (2 if dependent or offset else 1)
-    assert len(reduce_axes) == (2 if dependent else 1)
+    assert _elementwise_fns(merged).count("exp") == (2 if dependent or offset else 1)
+    assert sum(loop.is_reduce for loop in merged.body.iter_of_type(Loop)) == (2 if dependent else 1)
     x = np.linspace(-1, 1, 4 * (16 + offset), dtype=np.float32).reshape(4, 16 + offset)
     results = dict(zip(merged.outputs, merged.forward(x), strict=True))
     values = np.exp(x)

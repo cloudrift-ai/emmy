@@ -48,14 +48,13 @@ def normalize_body(stmts: Body) -> Body:
 
 def _normalize_body(stmts: Body) -> Body:
     """Uncached implementation owned by :class:`Body`'s normalization property."""
-    stmts = topo_sort_siblings(stmts)
-    stmts = drop_size_one_free_axes(stmts)
-    stmts = drop_size_one_reduce_axes(stmts)
-    stmts = canonicalize_free_axis_order(stmts)
-    stmts = eliminate_copy_aliases(stmts)
-    stmts = merge_sibling_reduce_loops(stmts)
-    stmts = hoist_loop_invariants(stmts)
-    stmts = simplify_body(stmts)
+    from emmy.compiler.ir.loop.splicer import expand_calls
+
+    stmts = prepare_body(stmts)
+    expanded = expand_calls(stmts)
+    # Calls are storage sharing only. Full normalization sees every operation, so reduction
+    # fusion, executable identity and Tile IR's common-cone detection use the same CSE form.
+    stmts = prepare_body(expanded) if expanded is not stmts else stmts
     stmts = dedup_loads(stmts)
     # Close the structural cleanup before labeling the relation graph. Coordinate spelling
     # exposes duplicates without paying for canonical sibling order at every round.
@@ -65,6 +64,18 @@ def _normalize_body(stmts: Body) -> Body:
         if reduced == stmts:
             return _canonical_order(reduced)
         stmts = _canonicalize_exprs(reduced)
+
+
+def prepare_body(stmts: Body) -> Body:
+    """Normalize coordinates and aliases while shared subroutine definitions remain compact."""
+    stmts = topo_sort_siblings(stmts)
+    stmts = drop_size_one_free_axes(stmts)
+    stmts = drop_size_one_reduce_axes(stmts)
+    stmts = canonicalize_free_axis_order(stmts)
+    stmts = eliminate_copy_aliases(stmts)
+    stmts = merge_sibling_reduce_loops(stmts)
+    stmts = hoist_loop_invariants(stmts)
+    return Body.coerce(simplify_body(stmts))
 
 
 # ---------------------------------------------------------------------------

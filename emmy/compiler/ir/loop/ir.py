@@ -186,42 +186,7 @@ class LoopOp(BodyOp):
         Convenience for passes (e.g. the fusion splicer) that resolve SSA
         dependencies against a stable snapshot of the body tree.
         """
-        defs: dict[str, Stmt] = {}
-        scopes: dict[str, Scope] = {}
-        reduce_axes: dict[str, Axis] = {}
-        writes: list[tuple[Write, Scope]] = []
-
-        def walk(stmts: Body, scope: Scope) -> None:
-            for s in stmts:
-                if isinstance(s, Loop):
-                    walk(s.body, scope.nest(s.axis))
-                elif isinstance(s, Cond):
-                    walk(s.body, scope)
-                    walk(s.else_body, scope)
-                elif isinstance(s, Accum):
-                    defs[s.name] = s
-                    # Binding scope excludes the reduce axis (the Accum is live
-                    # after its reduce Loop completes).
-                    if scope.enclosing:
-                        reduce_axes[s.name] = scope.enclosing[-1]
-                        scopes[s.name] = Scope(enclosing=scope.enclosing[:-1])
-                    else:
-                        scopes[s.name] = scope
-                elif isinstance(s, (Load, Assign, Select)):
-                    defs[s.name] = s
-                    scopes[s.name] = scope
-                elif isinstance(s, Write):
-                    writes.append((s, scope))
-
-        walk(self.body, Scope())
-        return LoopMeta(
-            op=self,
-            defs=defs,
-            scopes=scopes,
-            reduce_axes=reduce_axes,
-            writes=tuple(writes),
-            live_axes=_compute_live_axes(self.body),
-        )
+        return LoopMeta.from_body(self.body)
 
     def forward(self, *inputs):
         """Evaluate the kernel body via cppyy-JIT'd C++ — mirrors the other ``Op.forward`` methods.
@@ -359,7 +324,7 @@ def _specialize_symbolic_axes(loop: LoopOp, input_arrays: dict) -> LoopOp:
 class LoopMeta:
     """Precomputed lookups over a ``LoopOp`` body.
 
-    - ``op``: the source ``LoopOp`` this meta was built from.
+    - ``body``: the source statement body, including compact subroutine calls during fusion.
     - ``defs``: SSA name → defining ``Stmt`` (``Load`` / ``Assign`` /
       ``Select`` / ``Accum``). A ``Write`` has no SSA name and is not here.
     - ``scopes``: SSA name → binding ``Scope`` (where the value is live
@@ -377,12 +342,57 @@ class LoopMeta:
       since it gets freshened at emission time.
     """
 
-    op: LoopOp
+    body: Body
     defs: dict[str, Stmt]
     scopes: dict[str, Scope]
     reduce_axes: dict[str, Axis]
     writes: tuple[tuple[Write, Scope], ...]
     live_axes: dict[str, frozenset[str]]
+
+    @classmethod
+    def from_body(cls, body: Body, enclosing: tuple[Axis, ...] = ()) -> LoopMeta:
+        """Analyze a loop body or a subroutine with its formal coordinates already bound."""
+        from emmy.compiler.ir.stmt.subroutine import Call
+
+        defs: dict[str, Stmt] = {}
+        scopes: dict[str, Scope] = {}
+        reduce_axes: dict[str, Axis] = {}
+        writes: list[tuple[Write, Scope]] = []
+
+        def walk(stmts: Body, scope: Scope) -> None:
+            for s in stmts:
+                if isinstance(s, Loop):
+                    walk(s.body, scope.nest(s.axis))
+                elif isinstance(s, Cond):
+                    walk(s.body, scope)
+                    walk(s.else_body, scope)
+                elif isinstance(s, Accum):
+                    defs[s.name] = s
+                    # Binding scope excludes the reduce axis (the Accum is live
+                    # after its reduce Loop completes).
+                    if scope.enclosing:
+                        reduce_axes[s.name] = scope.enclosing[-1]
+                        scopes[s.name] = Scope(enclosing=scope.enclosing[:-1])
+                    else:
+                        scopes[s.name] = scope
+                elif isinstance(s, (Load, Assign, Select, Call)):
+                    defs[s.name] = s
+                    scopes[s.name] = scope
+                elif isinstance(s, Write):
+                    writes.append((s, scope))
+
+        walk(body, Scope(enclosing))
+        bound = body
+        for axis in reversed(enclosing):
+            bound = Body((Loop(axis, bound),))
+        return LoopMeta(
+            body=body,
+            defs=defs,
+            scopes=scopes,
+            reduce_axes=reduce_axes,
+            writes=tuple(writes),
+            live_axes=_compute_live_axes(bound),
+        )
 
 
 def _compute_live_axes(body: Body) -> dict[str, frozenset[str]]:
