@@ -249,7 +249,7 @@ Stage deliverables are cumulative. The following sketches are intended results, 
 | ✅ 3. Output domains | One correct placement of computation and stores, with sibling-domain regression tests | Lowered IR has sibling `(a0,a1[,a6])` and `(a8,a10)/(a8,a11)` nests. Store counts are proportional to the sum of the output sizes. The real kernel set completes under the watchdog with correct outputs. |
 | ✅ 4. Padding | Constant zero-fill padding through existing index maps | Tensor IR expresses `y[t,d] = x[t,d] if t < T else 0`; guarded Loop/Kernel loads are in bounds; short GDN traces succeed and returned sequence length remains T. |
 | 🚧 5. Projections | Legal tensor-core routes for qkv and z, with measured cut/schedule alternatives | Tile IR offers activation-A / weight-B contractions with MMA TILE; emitted CUDA contains the expected MMA instructions; reference comparisons pass and measured latency is reported. |
-| Pending: 6. Serving | GDN capture and explicit persistent state, delivered separately if needed | `prefill(x,S0,H0) → (y,S1,H1)` followed by `decode(x1,S1,H1) → (y1,S2,H2)` matches an independent reference; H is convolution history; reset and request isolation pass. Mixed fallback is labelled separately. |
+| 🚧 6. Serving | GDN capture and explicit persistent state, delivered separately if needed | `prefill(x,S0,H0) → (y,S1,H1)` followed by `decode(x1,S1,H1) → (y1,S2,H2)` matches an independent reference; H is convolution history; reset and request isolation pass. Mixed fallback is labelled separately. |
 | Pending: 7. Review | Validated PR(s), measurements, updated docs and tracker | Required finalization checks pass, scope and remaining gaps are explicit, and the tracker changes to ✅ only with the ready-for-review fix PR. |
 
 - CPU tests preserve repack roles for both A/B and modern/Volta layouts; the checkpoint's actual loopification
@@ -372,3 +372,50 @@ including the duration gate. Existing slow tests already have grouped inventory 
 this selection exceeds half a second.
 The longer six-output projection measurement hit the 110-second development budget before reporting results,
 so the earlier smoke measurement remains the only measured evidence for that complete projection.
+
+### September 30: stateful capture and projection measurements
+
+The local workstation is shared with another agent. Its timing results are diagnostic only and must not be used
+for performance comparisons. Correctness tests continue locally. The remote 5090 is checked for other GPU jobs
+before each measurement; our checkout and caches stay under `/root/deltanet-pr973`.
+
+Pinned z-projection measurements on the idle 5090 use a synthetic 64×5120 activation and 5120×6144 weights,
+10 warmups and 100 iterations through `emmy run --bench --strict`. Both schedules pass the strict check:
+
+| Schedule | Emmy | Eager in the same run |
+| --- | ---: | ---: |
+| `mma_m16n8k16_f16_f32/f4x4/k4`, `w2x2`, `d2/smem-async` | 129.9 µs | 29 µs |
+| Same TILE/WORK, `d2/smem-tma` | 67.4 µs | 27 µs |
+
+These are isolated projection measurements, not checkpoint-weight or whole-layer performance. Neither reaches
+eager parity. Profiling the complete six-output projection's timeout locates the cost in greedy cut/schedule
+selection before GPU execution; pinning an individual projection resolves its compile in under one second.
+
+Stateful GDN capture now exposes `(x, state, history) -> (y, next_state, next_history)` through the installed
+Hugging Face forward. It clones history so decode cannot mutate the caller's input; zero states start/reset a
+request. Negative constant padding, used to crop convolution history, now shares the guarded index-map lowering.
+Twelve padding/cropping backend tests pass. Five CPU wrapper checks cover prefill lengths 1/16/65, subsequent
+decode, reset, two-request isolation and both trace shapes. Two traced-IR evaluations also match the eager output
+and both returned state tensors with nonzero input states. Mixed static GDN/full-attention capture passes, including
+the full-attention projection's output gate. Symbolic GDN widths remain explicitly unsupported.
+
+Full-block GPU validation found another output-domain defect. After a computation moves into an operand term,
+an unused load could remain inside the output sweep. The writer then cannot extract output specifications:
+
+```text
+Before (actual residual structure, abbreviated):
+  for a20: write add_10[a0,0,a20] = v477
+  for a37:
+    in224 = load history[a0,a37+4,0]  # no remaining statement reads in224
+    for a39: write add_5[a0,0,a37,a39] = v534
+  for a43: for a45: write copy_[a0,a43,a45] = v539
+
+After lifting:
+  pure computation belongs to closed operand terms
+  output specifications retain only their three independent sweep paths
+```
+
+The lift now retains only effects in each sweep and exposes every scalar those effects read. Its small regression
+fails on the prior implementation; all 17 operand-edge tests pass after the repair. The complete tiny block now
+lowers, but GPU execution exposes a misaligned-address error under the selected schedule. That error is under
+investigation; GPU stateful execution and native serving dispatch are not marked complete.
