@@ -605,12 +605,15 @@ evidence, not a schedule view or shape matcher, and it widens the catalog rather
 choices stay beside the fragment ones the bound row makes reachable. Decode attention is the standing case — one query
 row per head, whose score would otherwise be re-contracted once per output channel.
 
-A re-formed piece opens one loop per grid axis itself and lowers its term inside them, so Loop-IR normalization sees
-the whole chain of nested outer loops over the free axes and orders it by the output layout. A lowering with no axes
-bound would hoist grid-invariant loads above those loops, and normalization orders only a chain that no statement
-precedes. The piece would then keep the lowering's own loop order as its grid order, and the Loop→Tile lift orients a
-single-product contraction of two computed operands by that order: a cut W4A16 projection over `x + 1` would put the
-weight decode in A, where the byte-slab staging, which reads the packed weight as B, does not apply.
+A piece is first formed from its closed nest, where `Fold.lower` picks the loop order and the grid follows it. The
+lift orients a single-product contraction with a computed operand by that order: two slabs orient by layout, while a
+computed operand keeps whichever order the nest spelled. A cut W4A16 projection over `x + 1` would then put the weight
+decode in A, where the byte-slab staging, which reads the packed weight as B, does not apply. So a piece holding such
+a contraction is lowered a second time, inside one loop per grid axis, and lifted again. Nothing precedes that loop
+chain, so Loop-IR normalization orders it by the output layout, token first. The second pass lowers the terms the
+first pass formed, so a gate/up twin merged there stays one term. A lowering with no axes bound would not do: it
+hoists grid-invariant loads above the grid loops, and normalization orders only a chain that no statement precedes.
+Other pieces keep the first pass's form.
 
 `_fromloop.fold_from_loop` reads each componentwise monoid directly from the loop's `Accum` statements. It does not
 classify a shape, extract a contraction, pair softmax statistics, hoist a nested reduction, or validate a reconstructed
