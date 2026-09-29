@@ -276,11 +276,12 @@ def _carry_split_forks(match: Match, root: Node, tile: TileOp, node: Fold) -> li
     """The split fork for a kernel that CARRIES A STATE — the unsplit walk beside one structural
     option per width the step axis divides into — or ``None`` when there is nothing to decide: a
     step that is not affine in its state (:meth:`Fold.affine`), a block the probe cannot pack
-    (fewer kept than mixed cells), a piece of a realized split. Only the deferred finalize exists
-    here (``g<n>k``): the parts' maps compose in a kernel, there is nothing to add atomically."""
+    (fewer kept than mixed cells), a walk under a free loop outside the carrying one, a piece of a
+    realized split. Only the deferred finalize exists here (``g<n>k``): the parts' maps compose in a
+    kernel, there is nothing to add atomically."""
     view = node.affine()
-    if view is None or carries_partition(tile) or tile.split_consumed:
-        return None
+    if view is None or carries_partition(tile) or tile.split_consumed or tile.place.free:
+        return None  # a free loop outside the carrying one: the realizer rebuilds the carrying nest alone
     time = tile.axis_of(node.axis)
     if view.mixed is not None:
         mixed, kept = (tile.axis_of(node.cells[position]).extent for position in (view.mixed, view.kept))
@@ -359,7 +360,7 @@ def realize_carry_split(match: Match, root: Node, cta: int) -> Graph:
     out = root.output
     body = tile.loop_body
     (position,) = (index for index, stmt in enumerate(body) if isinstance(stmt, Loop) and stmt.carries)
-    loop, before = body[position], tuple(body[:position])
+    loop, before, after = body[position], tuple(body[:position]), tuple(body[position + 1 :])
     part, probe = Axis("_part", Dim(cta)), Axis("_probe", Dim(2))
     sliced = replace(loop.axis, extent=Dim(steps), window=Window(parent=loop.axis.source_axis or loop.axis, partition=True))
     sigma = Sigma({loop.axis.name: BinaryExpr("+", BinaryExpr("*", Var(part.name), Literal(steps, "int")), Var(loop.axis.name))})
@@ -390,7 +391,7 @@ def realize_carry_split(match: Match, root: Node, cta: int) -> Graph:
         return stmt
 
     walk = indexed(step, (probe, part), probe_seed).map(probed)
-    probe_body = Body((*before, *_nest(walk, (sliced, probe, part))))
+    probe_body = Body((*before, *_nest(walk, (sliced, probe, part)), *after))
     # The probe's seeds: zero, and the identity between the mixed and the kept cell — ones
     # everywhere for a step reading its own cell alone, whose map is diagonal.
     hit = BinaryExpr(">", Var(probe.name), Literal(0, "int"))
@@ -445,7 +446,7 @@ def realize_carry_split(match: Match, root: Node, cta: int) -> Graph:
         (part, *cell_axes),
     )
     # The walk: the kernel over each part's range, from the state the prefix stored for it.
-    walk_body = Body((*before, *_nest(indexed(step, (part,), starts), (sliced, part))))
+    walk_body = Body((*before, *_nest(indexed(step, (part,), starts), (sliced, part)), *after))
 
     def piece(body: Body, name: str) -> TileOp:
         lifted = lift_kernel(LoopOp(body=body), name=name)

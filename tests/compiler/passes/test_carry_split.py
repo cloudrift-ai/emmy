@@ -23,7 +23,7 @@ from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 from emmy.compiler.pipeline.passes.tile._split import split_forks
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from tests.compiler.helpers import requires_cuda
-from tests.compiler.ir.test_carried_state import _graph, _inputs, _reference, _step, c, i, j
+from tests.compiler.ir.test_carried_state import N, _graph, _inputs, _reference, _step, c, i, j
 
 STEPS = 8
 
@@ -64,6 +64,44 @@ def test_the_walk_is_offered_its_split_and_declines_it_by_default() -> None:
     lifted = Pipeline.build(["tile/lift"], select=["lift"]).run(graph)
     (node,) = (n for n in lifted.nodes.values() if isinstance(n.op, TileOp))
     assert head(node.op.op).affine() is None and split_forks(Match(graph=lifted, root_node_id=node.id, rule=None), node) is None
+
+
+def test_a_coefficient_that_varies_with_the_kept_cell_offers_no_split() -> None:
+    """``S ← S·d[c, j] + W·S + U`` is affine, but a different matrix acts on every column: the
+    probe's packed identity would read column ``k`` of the ``k``-th map and the prefix apply it
+    to every column, so the step is not read as affine and offers nothing."""
+    from emmy.compiler.graph import Graph, Tensor  # noqa: PLC0415
+    from emmy.compiler.ir.base import InputOp  # noqa: PLC0415
+    from emmy.compiler.ir.stmt import Load  # noqa: PLC0415
+    from emmy.compiler.pipeline import Match  # noqa: PLC0415
+
+    per_column = _step((c, i, j), steps=STEPS).map(
+        lambda s: (
+            (Load(name="dj", input="D2", index=(c, j)), Assign(name="kept", op="multiply", args=("own", "dj")))
+            if isinstance(s, Assign) and s.name == "kept"
+            else s
+        )
+    )
+    graph = Graph()
+    for name, shape in (("D", (STEPS,)), ("W", (N, N)), ("U", (STEPS, N, N)), ("D2", (STEPS, N))):
+        graph.add_node(InputOp(), [], Tensor(name, shape, "f32"), node_id=name)
+    graph.add_node(LoopOp(body=per_column, name="k_step"), ["D", "W", "U", "D2"], Tensor("out", (STEPS, N, N), "f32"), node_id="out")
+    graph.inputs, graph.outputs = ["D", "W", "U", "D2"], ["out"]
+    lifted = Pipeline.build(["tile/lift"], select=["lift"]).run(graph)
+    (node,) = (n for n in lifted.nodes.values() if isinstance(n.op, TileOp))
+    assert head(node.op.op).affine() is None and split_forks(Match(graph=lifted, root_node_id=node.id, rule=None), node) is None
+
+
+def test_a_walk_under_an_outer_loop_offers_no_split() -> None:
+    """The realizer rebuilds the carrying nest alone, so a walk under a free loop outside it keeps
+    the sequence, whatever its step count divides into."""
+    from emmy.compiler.pipeline import Match  # noqa: PLC0415
+    from tests.compiler.ir.test_carried_state import _batched_graph  # noqa: PLC0415
+
+    lifted = Pipeline.build(["tile/lift"], select=["lift"]).run(_batched_graph(steps=STEPS))
+    (node,) = (n for n in lifted.nodes.values() if isinstance(n.op, TileOp))
+    assert head(node.op.op).affine() is not None and node.op.place.free
+    assert split_forks(Match(graph=lifted, root_node_id=node.id, rule=None), node) is None
 
 
 @pytest.mark.parametrize("parts", [2, 4])

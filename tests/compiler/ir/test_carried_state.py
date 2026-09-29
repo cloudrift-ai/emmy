@@ -113,16 +113,16 @@ def _graph(seed: float | str = 0.0, steps: int = STEPS) -> Graph:
     return graph
 
 
-def _batched_graph(batch: int = 2) -> Graph:
+def _batched_graph(batch: int = 2, steps: int = STEPS) -> Graph:
     """The step under a FREE loop outside the carrying one — one recurrence per row of the batch,
     ``U`` and ``out`` carrying the batch coordinate first. The roll never makes this shape (its
     batch loops sit inside the step, as cells); the lift takes it all the same."""
     b = Var("b")
     graph = Graph()
-    for name, shape in (("D", (STEPS,)), ("W", (N, N)), ("U", (batch, STEPS, N, N))):
+    for name, shape in (("D", (steps,)), ("W", (N, N)), ("U", (batch, steps, N, N))):
         graph.add_node(InputOp(), [], Tensor(name, shape, "f32"), node_id=name)
-    body = Body((Loop(axis=Axis("b", batch), body=_step((b, c, i, j), u_index=(b, c, i, j))),))
-    graph.add_node(LoopOp(body=body, name="k_step"), ["D", "W", "U"], Tensor("out", (batch, STEPS, N, N), "f32"), node_id="out")
+    body = Body((Loop(axis=Axis("b", batch), body=_step((b, c, i, j), u_index=(b, c, i, j), steps=steps)),))
+    graph.add_node(LoopOp(body=body, name="k_step"), ["D", "W", "U"], Tensor("out", (batch, steps, N, N), "f32"), node_id="out")
     graph.inputs, graph.outputs = ["D", "W", "U"], ["out"]
     return graph
 
