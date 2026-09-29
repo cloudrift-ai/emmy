@@ -789,7 +789,7 @@ class Stage:
     depth: int = 1  # gmem→smem ring depth over the reduce loop (1 = single buffer, no prefetch)
     transport: str = "smem"  # reg | smem | smem-async | smem-tma (the intermediate and its fill mechanism)
     reg_depth: int = 1  # smem→register double-buffer depth (1 = no inner ldmatrix prefetch)
-    # The output tile also goes through shared memory: an mma tile's fragments land over the
+    # The output tile also goes through shared memory: an m16n8k16 tile's fragments land over the
     # operand slabs the finished K-loop no longer reads, and the CTA stores whole 16-byte rows
     # (``lowering/kernel/098_store_through_smem``). A choice, not a default: it wins where the
     # store burst is a large share of the kernel and costs two barriers where it is not.

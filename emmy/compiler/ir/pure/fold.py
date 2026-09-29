@@ -1473,7 +1473,7 @@ class Fold:
             if term.axis is None:
                 step = term.step()
                 # A step reading nothing the tree binds or defines (a multi-output root's constant result)
-                # is a wrapper's: it binds no coordinate, so it sits at the top of its path.
+                # needs no coordinate, so it sits at the top of its path.
                 reads = {name for stmt in step for name in free_names(stmt)} - {name for stmt in step for name in stmt.defines()}
                 if step and stmts is None and not reads & {*term.lift.params, *origin}:
                     node = nest.path_of(frozenset(), path)

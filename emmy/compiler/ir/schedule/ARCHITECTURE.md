@@ -182,7 +182,16 @@ is N-fastest, so contiguous warp ids stack along M), one fragment row per warp (
 64 rows down) with `C` a multiple of N/8 (whole instructions along N), a `k4` chunk (one 128-byte swizzle row per
 descriptor) and a shared-memory stage on every operand (the instruction reads descriptors, never fragments). The
 unpinned catalog drops such rows; a pin raises with the rule's message, and the tile check runs before the stage
-check so that message wins.
+check so that message wins. A `wgmma` also holds its whole accumulator in registers at once, so it cannot spill:
+`_wgmma_register_refusal` refuses a row whose accumulators, plus the registers a lane keeps beside them
+(descriptors, addresses, ring counters), exceed the per-thread register envelope its CTA size leaves — ptxas would
+refuse that kernel.
+
+`stage_moves` offers the `STAGE` product of transport, ring depth and register depth, and on the warp tier the
+`out` token beside each of them — the output tile stored through the operand slabs after the K-loop
+(`lowering/kernel/ARCHITECTURE.md`). A TMA ring never offers `out`, because its last copies complete on an mbarrier
+that store does not wait on. The token is a choice, not a default: measured evidence decides where the two barriers
+it adds pay for the wider stores.
 
 `TileOp.stage_edges` offers a transport at every operand of every contracting site, a chunked carrier's included —
 which tier then puts which operand on a slab is the tier's own business. The chunked site used to be excluded on the
