@@ -92,13 +92,11 @@ def test_chunk_loop_is_inside_one_launch(target):
     assert "#include <cuda_fp16.h>" in op.kernel_source  # The buffers are FP32; the direct loader constructs FP16 operands.
 
 
-@pytest.mark.parametrize("batch_extent", [1, 2])
-def test_register_output_keeps_a_unit_batch_coordinate(batch_extent):
+def _with_output_batch_axis(graph, batch_extent):
     from emmy.compiler.dim import Dim
     from emmy.compiler.ir.expr import Literal
     from emmy.compiler.ir.stmt import Write
 
-    graph = _graph()
     node = graph.nodes["out"]
     tensor = node.outputs[0]
     tensor.shape = (tensor.shape[0], Dim(batch_extent), *tensor.shape[1:])
@@ -108,6 +106,13 @@ def test_register_output_keeps_a_unit_batch_coordinate(batch_extent):
             lambda s: replace(s, index=(s.index[0], Literal(0, "int"), *s.index[1:])) if isinstance(s, Write) else s
         ),
     )
+    return graph
+
+
+@pytest.mark.parametrize("batch_extent", [1, 2])
+def test_register_output_keeps_a_unit_batch_coordinate(batch_extent):
+    graph = _with_output_batch_axis(_graph(), batch_extent)
+    node = graph.nodes["out"]
     (tile,) = (n.op for n in _lift(graph).nodes.values() if isinstance(n.op, TileOp))
     assert (tile.register_program is not None) == (batch_extent == 1)
     if batch_extent == 1:
@@ -208,13 +213,17 @@ def test_register_state_preserves_old_reads_on_cuda(half, warps):
 
 @requires_cuda
 @pytest.mark.xdist_group("cuda")
-def test_register_state_starts_from_the_seed_tensor_on_cuda():
+@pytest.mark.parametrize("unit_batch", [False, True])
+def test_register_state_starts_from_the_seed_tensor_on_cuda(unit_batch):
     """A loop that starts from a tensor rather than zeros: the first step reads the seed at its cell."""
     from emmy.compiler.backend.cuda.program import run_program
 
     atom = ("mma_m8n8k4" if Context.probe().has_volta_mma else "mma_m16n8k16") + "_f16_f32"
+    source = _graph(seed="S0")
+    if unit_batch:
+        source = _with_output_batch_axis(source, 1)
     with pinned_knobs({"STAGE": "d1/reg", "WORK": "w1x1", "TILE": f"{atom}/f1x1/k4"}):
-        graph = Pipeline.build(CUDA_PASSES).run(_graph(seed="S0"))
+        graph = Pipeline.build(CUDA_PASSES).run(source)
     (op,) = (n.op for n in graph.nodes.values() if isinstance(n.op, CudaOp))
     assert not op.serial and "S0" in op.arg_order
     arrays = _inputs(seed="S0")
