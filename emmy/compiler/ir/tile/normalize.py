@@ -151,6 +151,8 @@ def _prune_unread(root: Fold, stored: frozenset[str] = frozenset()) -> Fold:
     while pruned.axis is None and stored and not stored & set(pruned.exposes):
         carriers = [edge for edge in pruned.operands if stored <= set(edge.exposes)]
         if len(carriers) != 1:
+            if not stored & pruned.step().ssa_defs:
+                pruned = replace(pruned, lift=replace(pruned.lift, body=Body(), results=()))
             break
         pruned = carriers[0]
     return pruned

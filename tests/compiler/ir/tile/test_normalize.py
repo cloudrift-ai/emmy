@@ -15,7 +15,7 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Fold, Lambda
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Let, Load, Loop, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.normalize import _share_common_cones
 from emmy.compiler.ir.tile.path import family_sites, sites
@@ -180,6 +180,32 @@ def test_sibling_output_sweeps_stay_sweeps() -> None:
 
     assert tuple(axis.name for axis in tile.place.free) == ("m",)
     assert tuple(tuple(axis.name for axis in store.sweep) for store in tile.output_specs) == (("n",), ("p",))
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_dead_root_value_does_not_multiply_independent_output_sweeps(reverse):
+    p, q, r, s = (Axis(name, size) for name, size in zip(("p", "q", "r", "s"), (3, 5, 7, 2), strict=True))
+    first = slab("xv", "x", "p", "q")
+    second = projection((slab("yv", "y", "p", "r"),), (Assign(name="zv", op="relu", args=("yv",)),), ("zv",))
+    third = slab("wv", "w", "s")
+    root = projection((first, second, third), (Let(name="unused", value=Literal(0)),), ("unused",))
+    specs = (
+        OutputSpec(write=Write(output="xo", index=(Var("p"), Var("q")), value="xv"), sweep=(p, q)),
+        OutputSpec(write=Write(output="yo", index=(Var("p"), Var("r")), value="zv"), sweep=(p, r)),
+        OutputSpec(write=Write(output="wo", index=(Var("s"),), value="wv"), sweep=(s,)),
+    )
+    tile = _tile(root, p, q, r, s, output_specs=specs[::-1] if reverse else specs)
+    domains = {}
+
+    def visit(body, path=()):
+        for stmt in body:
+            if isinstance(stmt, Loop):
+                visit(stmt.body, (*path, stmt.axis.name))
+            elif isinstance(stmt, Write):
+                domains[stmt.output] = set(path)
+
+    visit(tile.loop_body)
+    assert domains == {"xo": {"p", "q"}, "yo": {"p", "r"}, "wo": {"s"}}
 
 
 def _swept_reduce(*, per_cell: bool) -> TileOp:
