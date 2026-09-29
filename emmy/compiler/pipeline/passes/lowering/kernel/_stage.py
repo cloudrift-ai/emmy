@@ -1262,8 +1262,12 @@ _EMPTY_MBAR = "_mbar_empty"
 # TMA-gated, so the ``sm_<nn>a`` compile arch is already in effect). The proven pre-rebuild split:
 # producers drop to the 24-register floor, consumers raise to 240. ``setmaxnreg.inc`` claims from
 # the SM's per-CTA pool, so emit the pair only when the raised total provably fits the 64K-register
-# file — past that envelope the split still runs, just without redistribution.
+# file — past that envelope the split still runs, just without redistribution. ``setmaxnreg`` is a
+# warp-GROUP instruction (``.sync.aligned`` over all four warps), so a band that is not whole warp
+# groups — the one-warp producer of ``+p1`` — runs without it: beside two consumer groups, that
+# kernel hung on the H100.
 _PRODUCER_REGS = 24
+_WARP_GROUP = 128
 _CONSUMER_REGS = 240
 _SM_REGFILE = 65536
 
@@ -1279,6 +1283,7 @@ def _producer_band_kloop(
     aux_threads: int,
     block_threads: int,
     k_end: Expr | None = None,
+    in_flight=None,
 ) -> tuple[list[Stmt], list[Stmt]]:
     """The warp-SPECIALIZED staged K-loop — the same fill → wait → drain phases as the uniform
     skeleton below, split across two warp bands instead of software-pipelined in-warp. The producer
@@ -1315,7 +1320,11 @@ def _producer_band_kloop(
     k0, K = "_ks", k_extent
     i_expr = BinaryExpr("/", Var(k0), _lit(bk_elems))
     kaxis = Axis(name=k0, extent=K)
-    setmaxnreg = _CONSUMER_REGS * block_threads + _PRODUCER_REGS * aux_threads <= _SM_REGFILE
+    setmaxnreg = (
+        aux_threads % _WARP_GROUP == 0
+        and block_threads % _WARP_GROUP == 0
+        and _CONSUMER_REGS * block_threads + _PRODUCER_REGS * aux_threads <= _SM_REGFILE
+    )
 
     # Producer: prefetch chunk ``c = i + ring - 1`` into slot ``c % ring`` (k0 clamped to the last
     # chunk on the overrun tail, exactly as the uniform ring does); from the second lap on
@@ -1345,14 +1354,26 @@ def _producer_band_kloop(
     prod.append(StridedLoop(axis=kaxis, start=_lit(0), step=_lit(bk_elems), body=Body(tuple(prod_body)), unroll=False, end=k_end))
 
     # Compute: wait the data parity, drain the slot, close the band on the named barrier, release.
+    # A drain that leaves its group running (``in_flight``) has waited out the PREVIOUS chunk's
+    # group only, so it releases that chunk's slot, one chunk late (:func:`_in_flight_kloop`).
     read_slot = BinaryExpr("%", i_expr, _lit(ring))
     read_phase = BinaryExpr("%", BinaryExpr("/", i_expr, _lit(ring)), _lit(2))
     cons_body: list[Stmt] = list(transport.wait(in_flight=ring - 1, slot=read_slot, phase=read_phase))
-    cons_body += drain(read_slot)
+    if in_flight is None:
+        cons_body += drain(read_slot)
+    else:
+        cons_body += [*in_flight[0](read_slot), _last_chunk(k0, bk_elems, k_extent, k_end, in_flight[1])]
     cons_body.append(Sync(barrier_id=1, count=block_threads))
-    cons_body.append(
-        Cond(cond=BinaryExpr("==", transport.cta.linear_tid, _lit(0)), body=(MbarrierArrive(mbar=_EMPTY_MBAR, slot=read_slot),))
-    )
+    elected = BinaryExpr("==", transport.cta.linear_tid, _lit(0))
+    if in_flight is None:
+        cons_body.append(Cond(cond=elected, body=(MbarrierArrive(mbar=_EMPTY_MBAR, slot=read_slot),)))
+    else:
+        prev_slot = BinaryExpr("%", BinaryExpr("+", i_expr, _lit(ring - 1)), _lit(ring))
+        cons_body.append(
+            Cond(
+                cond=BinaryExpr("&&", elected, BinaryExpr(">=", i_expr, _lit(1))), body=(MbarrierArrive(mbar=_EMPTY_MBAR, slot=prev_slot),)
+            )
+        )
     cons: list[Stmt] = [SetMaxNReg(_CONSUMER_REGS, "inc")] if setmaxnreg else []
     cons.append(StridedLoop(axis=kaxis, start=_lit(0), step=_lit(bk_elems), body=Body(tuple(cons_body)), unroll=False, end=k_end))
 
@@ -1411,6 +1432,7 @@ def pipelined_kloop(
     k_first: Expr | None = None,
     seed: bool = True,
     carried=None,
+    in_flight=None,
 ) -> tuple[list[Stmt], list[Stmt]]:
     """The **one** liveness-scheduled staged K-loop skeleton — every staged form is this scheduler
     run over the loop body's dataflow; none is its own skeleton.
@@ -1564,6 +1586,10 @@ def pipelined_kloop(
         region := _carried_kloop(groups, carried, pre, i_expr, _fill_k0, k0, k_extent, bk_elems, k_end, seed, symbolic, k_first)
     ):
         return decls, region
+    if in_flight is not None and (
+        region := _in_flight_kloop(groups, in_flight, pre, i_expr, _fill_k0, k0, k_extent, bk_elems, k_end, seed, k_first)
+    ):
+        return decls, region
     body: list[Stmt] = []
     for g in groups:  # top fills: the ring prefetch / the single-buffer current-chunk fill
         if g.kind == "ring":
@@ -1648,6 +1674,53 @@ def _carried_kloop(groups, carried, pre, i_expr, fill_k0, k0, k_extent, bk_elems
     return [*head, outer]
 
 
+def _in_flight_kloop(groups, in_flight, pre, i_expr, fill_k0, k0, k_extent, bk_elems, k_end, seed, k_first) -> list[Stmt] | None:
+    """The ring whose drain leaves its last MMA group running (the ``wgmma`` drain waiting for all
+    but one group): chunk ``i``'s instructions are still in the tensor cores while chunk ``i+1``'s
+    are issued, so the tensor pipe never drains between chunks. The slot chunk ``i`` read is
+    released one chunk late — once chunk ``i+1``'s drain has waited it out and the CTA barrier
+    after it has passed — so the prefetch of chunk ``i+ring-1`` into slot ``(i-1) % ring`` moves
+    from the top of the body to past that barrier, and one fewer fill is in flight at the wait.
+    ``in_flight`` is ``(issue(slot), settle(n))``: the last chunk settles to no group in flight
+    inside the loop (:func:`_last_chunk`). ``None`` keeps the ordinary schedule: several groups, a
+    single-slot ring (its refill would overwrite the slot the running group reads), or a split fill."""
+    if len(groups) != 1:
+        return None
+    (g,) = groups
+    if g.kind != "ring" or g.back_edge or not isinstance(g.transport, (CpAsyncTransport, TmaTransport)):
+        return None
+    issue, settle = in_flight
+    fill_slot = BinaryExpr("%", BinaryExpr("+", i_expr, _lit(g.lag)), _lit(g.ring))
+    body = [
+        *g.transport.wait(in_flight=g.ring - 2, slot=g.read_slot, phase=g.read_phase),
+        *issue(g.read_slot),
+        _last_chunk(k0, bk_elems, k_extent, k_end, settle),
+        Sync(),
+        *g.transport.fill(k0=fill_k0(g.lag), slot=fill_slot, k0_cur=Var(k0)),
+        *g.transport.commit(),
+    ]
+    outer = StridedLoop(
+        axis=Axis(name=k0, extent=k_extent),
+        start=k_first if k_first is not None else _lit(0),
+        step=_lit(bk_elems),
+        body=Body(tuple(body)),
+        unroll=False,
+        end=k_end,
+        seed=seed,
+    )
+    return [*pre, outer]
+
+
+def _last_chunk(k0: str, bk_elems: int, k_extent, k_end: Expr | None, settle) -> Cond:
+    """``settle(1)`` on every chunk but the last, ``settle(0)`` on the last. The last group is
+    waited out INSIDE the loop, not by a wait after it: ptxas (CUDA 12.9) moved the epilogue's
+    accumulator reads above a trailing ``wgmma.wait_group 0`` once it had unrolled the loop, and
+    an H100 GEMM with a ReLU epilogue stored an eighth of its rows wrong."""
+    bound = Var(f"{k0}_end") if k_end is not None else (k_extent.expr if isinstance(k_extent, Dim) else _lit(k_extent))
+    more = BinaryExpr("<", BinaryExpr("+", Var(k0), _lit(bk_elems)), bound)
+    return Cond(cond=more, body=tuple(settle(1)), else_body=tuple(settle(0)))
+
+
 def staged_kloop(
     *,
     transport,
@@ -1663,6 +1736,7 @@ def staged_kloop(
     k_first: Expr | None = None,
     seed: bool = True,
     carried=None,
+    in_flight=None,
 ) -> tuple[list[Stmt], list[Stmt]]:
     """The whole-body staged K-loop — ONE operand-group live across the entire ``drain``, run through
     :func:`pipelined_kloop` (the segment list is the single ``(drain(slot), slabs)`` entry, so the
@@ -1713,6 +1787,7 @@ def staged_kloop(
             aux_threads=32 * workers.producer_warps,
             block_threads=block_threads,
             k_end=k_end,
+            in_flight=in_flight if min(depth, n_chunks) >= 2 else None,  # one slot cannot hold a running group and its refill
         )
     slabs = _staged_slabs(transport)
 
@@ -1730,4 +1805,5 @@ def staged_kloop(
         k_first=k_first,
         seed=seed,
         carried=carried,
+        in_flight=in_flight,
     )

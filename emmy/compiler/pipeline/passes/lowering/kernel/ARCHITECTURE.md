@@ -276,7 +276,10 @@ supplies only the slab drain leaf via `_AtomOps.staged_drain` (the shared inner 
 `_staged_inner_atom_loop` — `ldmatrix` on modern atoms, paired wide loads or a cooperative gather on Volta — or the
 scalar `_scalar_drain`, or the warp-group drain `_wgmma_drain` on a `wgmma` atom: no operand fragments, one
 matrix descriptor per operand and k16 step, one `WgmmaMma` per group of N/8 accumulator cells, the chunk closed
-by a commit and a wait so the ring slot may be released; the four warps of a group emit the same descriptors,
+by a commit and a wait so the ring slot may be released (under `STAGE` `/p2` the wait leaves that group running,
+and the ring's refill moves past the next chunk's barrier, one chunk later: `_in_flight_kloop`, and the release is
+one chunk late on the producer band too; the last chunk waits its group out inside the loop, because ptxas moved the
+epilogue's accumulator reads above a wait placed after an unrolled loop); the four warps of a group emit the same descriptors,
 addressing the slot's 64-row block `64·(warp/4)`, and the hardware hands warp `i` rows `16i..16i+15` of it, which
 is the m16n8 row the epilogue expects at `f1`. The descriptor geometry follows the slab: a K-major slab (A, or a
 transposed B) has one 128-byte swizzle row per tile row, so core groups are `8·bk·2` bytes apart; an N-contiguous
@@ -545,7 +548,8 @@ count 1) and arms + box-copies the prefetch chunk. The **compute** band parity-w
 ONE elected thread releases the slot — `mbarrier_arrive`'s `fence.proxy.async` orders the band's GENERIC slab reads
 before the producer's next ASYNC box copy into the slot (without it the refill overtakes in-flight reads; silent
 corruption under scheduling pressure). `SetMaxNReg` redistributes registers between the bands when the raised total
-fits the 64K regfile. Stores are guarded to the compute band (`grid_tile`), and the launch/`__launch_bounds__`
+fits the 64K regfile and both bands are whole warp groups (it is a warp-group instruction; a `+p1` producer beside two
+consumer groups hung the H100). Stores are guarded to the compute band (`grid_tile`), and the launch/`__launch_bounds__`
 account for the aux band (`Tile.aux_threads`). Accuracy-gated, not bit-identical — the split changes scheduling.
 
 The **scalar** contraction tier stages too, under the same `STAGE` codec, through the **same** `_staged` driver — the
@@ -690,6 +694,11 @@ B). On Volta, adjacent A or B fragments under the derived crosswise/congruous la
 Copy fills and computed operand fills use these same coupled layouts and accumulator mapping.
 The transform halves the staged drain's LSU instructions and is bit-identical; equal modern swizzle modes remain
 pairable because their per-lane address XOR commutes with the paired lane map;
+`097_widen_fragment_stores` stores four N-adjacent fragment cells of a `wgmma` kernel as one 16-byte row per lane
+(`RegStore.run`): each cell's epilogue runs as before, then three `shfl.xor` rounds transpose the quad's packed column
+pairs so lane `t` holds cell `t`'s eight columns — a quarter of the stores, every sector whole (on the H100 the
+four-byte stores cost the Qwen3-0.6B s512 layer about 3.5 µs); unguarded, non-atomic, unswizzled cells only, and a
+destination the render finds not 16-bit keeps the four ordinary stores;
 `110_drop_redundant_syncs` collapses the defensive `Sync`s the
 cooperative / shared-row templates emit (body-level only — a slab `Smem` decl flags `smem_seen`, so a load-bearing
 prologue `Sync` is correctly retained; `with_bodies` preserves the cooperative tile's `block_threads`).
