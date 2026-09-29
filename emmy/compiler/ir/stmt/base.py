@@ -757,8 +757,8 @@ class Stmt(Structural, Wire):
 
     def with_bodies(self, bodies: tuple[Body, ...]) -> Stmt:
         """Write-side counterpart to :meth:`nested`. Return a copy of this
-        stmt with its child bodies replaced by ``bodies`` (positionally matching :meth:`nested`'s
-        order), retaining the original statement when every child body is unchanged.
+        stmt with its child bodies replaced by ``bodies`` (positionally
+        matching :meth:`nested`'s order).
 
         Default: leaves have no children, so ``bodies`` must be empty and
         ``self`` is returned unchanged. Block-structured stmts override

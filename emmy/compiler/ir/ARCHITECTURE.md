@@ -551,9 +551,6 @@ Pure `body → body` passes run from `LoopOp.__post_init__` so every
 constructed `LoopOp` (including intermediate fusion results) is
 canonicalized before validation:
 
-Body transformations retain unchanged bodies and block statements, so their cached analyses survive the next pass.
-Reduction-axis unification and sibling-loop merging use that shared traversal.
-
 - `topo_sort_siblings` — stable Kahn reorder so SSA defs precede their uses
   within each body (fixes splicer-produced use-before-def).
 - `drop_size_one_free_axes` — inline extent-1 free Loops.
@@ -626,8 +623,7 @@ Reduction-axis unification and sibling-loop merging use that shared traversal.
   order, so renaming axes or loading a saved body preserves their normal form and exact identity. Identity normalizes
   remaining commutative expressions again after its final rename.
 - A standard smaller-half worklist computes the equitable partition in
-  `O((vertices + relations) log vertices)` relation visits. A split removes the touched vertices from the existing
-  set instead of copying the untouched remainder. Exact individualization is isolated to partitions that
+  `O((vertices + relations) log vertices)` relation visits. Exact individualization is isolated to partitions that
   refinement cannot distinguish; no exact near-linear worst-case graph-canonization algorithm is known. The search
   keeps its cost near the number of leaves it must see: each node's refinement skips the turns of the cells nothing
   has split (the parent partition is already equitable, and skipping keeps the queue order, so the result is a full

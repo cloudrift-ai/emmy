@@ -13,8 +13,8 @@ ties by spelling, structural identity colors them by type and never reads a spel
 
 from __future__ import annotations
 
-from collections import ChainMap, Counter, deque
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections import Counter, deque
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, fields
 
 from emmy.compiler.ir.axis import Axis
@@ -94,7 +94,7 @@ class _AbstractNames:
 _ABSTRACT_NAMES = _AbstractNames()
 
 #: The vertex each visible spelling is bound to.
-_Binders = Mapping[str, int]
+_Binders = dict[str, int]
 #: One name or resource a statement's shallow form mentions: ``(kind, spelling, role path)``.
 _Occurrence = tuple[str, str, tuple[int | str, ...]]
 
@@ -118,7 +118,8 @@ def _statement_shape(stmt: Stmt) -> tuple[str, tuple[_Occurrence, ...]]:
     occurrences: list[_Occurrence] = []
 
     def strip(value: object, path: tuple[int | str, ...]) -> object:
-        mode = unordered.get(tuple(part for part in path if isinstance(part, int))) if unordered else None
+        integer_path = tuple(part for part in path if isinstance(part, int))
+        mode = unordered.get(integer_path)
         if mode is not None:
             assert isinstance(value, tuple)
             members = value
@@ -332,7 +333,7 @@ class _Builder:
             local = next((vertex for index, _slot, vertex in sites if index != consumer), None)
             return local if local is not None else outer_ssa.get(name)
 
-        local_sources = ChainMap({}, outer_sources)
+        local_sources = dict(outer_sources)
         for stmt in body:
             for name in _source_names(stmt):
                 if name not in local_sources:
@@ -343,7 +344,7 @@ class _Builder:
         statement_vertices: list[int] = []
         categories: list[int] = []
         shapes: list[str] = []
-        bound: list[_Binders] = []
+        bound: list[dict[str, int]] = []
         for statement_index, stmt in enumerate(body):
             shape, occurrences = _statement_shape(stmt)
             children = stmt.nested()
@@ -354,7 +355,7 @@ class _Builder:
             shapes.append(shape)
             self.relation(scope_vertex, stmt_vertex, ("member",))
 
-            axes = ChainMap({}, outer_axes)
+            axes = dict(outer_axes)
             for name in stmt.binds_axes():
                 axis_vertex = self.vertex(("binder", "axis"))
                 axes[name] = axis_vertex
@@ -410,7 +411,7 @@ class _Builder:
                 for name in child.carried_names
                 if name in definitions_by_stmt[index]
             }
-            visible_ssa = ChainMap({}, outer_ssa)
+            visible_ssa = dict(outer_ssa)
             for name in definition_sites:
                 target = definitions_by_stmt[index].get(name)
                 if target is None:
@@ -506,8 +507,6 @@ def _equitable_partition(
             for vertex, multiplicity in counts.items():
                 cell = owner[vertex]
                 assert cell is not None
-                if len(cell.vertices) == 1:
-                    continue
                 _, parts = touched.setdefault(cell.serial, (cell, {}))
                 parts.setdefault(multiplicity, set()).add(vertex)
 
@@ -518,8 +517,7 @@ def _equitable_partition(
 
                 parts = dict(nonzero_parts)
                 if covered < len(cell.vertices):
-                    cell.vertices.difference_update(*nonzero_parts.values())
-                    parts[0] = cell.vertices
+                    parts[0] = cell.vertices - set().union(*nonzero_parts.values())
                 retained = max(parts, key=lambda value: (len(parts[value]), value))
 
                 was_queued = cell.queued
@@ -702,12 +700,13 @@ def _canonical_labeling(
     refined = _equitable_partition(initial, incoming, outgoing)
     if all(len(cell) == 1 for cell in refined):
         order = tuple(cell[0] for cell in refined)
+        labeling = certificate(order), order
     else:
         # Exact graph canonization has no known near-linear worst-case algorithm.  Keep the
         # individualization search off the ordinary path and use it only for unresolved cells.
-        _, order, _ = search(refined, (), refined=True)
+        labeling = search(refined, (), refined=True)
     ranks = [0] * count
-    for rank, vertex in enumerate(order):
+    for rank, vertex in enumerate(labeling[1]):
         ranks[vertex] = rank
 
     parents = list(range(count))

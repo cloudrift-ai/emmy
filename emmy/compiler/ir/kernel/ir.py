@@ -252,8 +252,6 @@ class Tile(Stmt):
 
     def with_bodies(self, bodies: tuple[Body, ...]) -> Stmt:
         (body,) = bodies
-        if body is self.body:
-            return self
         return Tile(
             axes=self.axes,
             body=body,
