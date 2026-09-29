@@ -111,7 +111,7 @@ def classic_forks(
             codec=RegisterCodec(context),
             inherited_knobs=knobs,
             row_prefix={},
-            materialize=lambda schedule, selected: materialize_register(tile, schedule, selected),
+            materialize=lambda schedule, selected, tile=tile: materialize_register(tile, schedule, selected),
             pool_id=digest(
                 tile.identity_key(with_io=True), ctx.structural_key(), "register", schedule_pin_fingerprint(tile.name, node), *catalog
             ),

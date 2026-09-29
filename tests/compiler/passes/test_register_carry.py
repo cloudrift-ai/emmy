@@ -127,6 +127,21 @@ def test_classic_recurrence_does_not_reopen_the_launch_axis():
         assert f"for (int {name} =" not in cuda.kernel_source
 
 
+def test_register_fork_keeps_the_carrier_when_classic_is_also_offered():
+    from importlib import import_module
+
+    from emmy.compiler.pipeline.fork import iter_leaves
+
+    classic_forks = import_module("emmy.compiler.pipeline.passes.tile.schedule.040_schedule").classic_forks
+    (tile,) = (n.op for n in _lift(_graph()).nodes.values() if isinstance(n.op, TileOp))
+    with pinned_knobs({"FAST_MATH": True}):
+        forks = classic_forks(tile, tile.name, {}, Context.from_target((12, 0)))
+        register = next(leaf for leaf in iter_leaves(forks) if leaf.knobs.get("STAGE") == "d1/reg")
+        (scheduled,) = register.expand()
+    assert scheduled.carries and not scheduled.place.serial
+    assert scheduled.register_program == tile.register_program
+
+
 @pytest.mark.parametrize("target", [(7, 0), (12, 0)], ids=["volta", "modern"])
 @pytest.mark.parametrize("stride", [1, 2])
 def test_register_operands_use_direct_loads_when_the_address_allows_it(target, stride):
