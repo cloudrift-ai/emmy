@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 
+from emmy.compiler.ir.address import restore_unit_indices
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr, Literal, TernaryExpr, Var
 from emmy.compiler.ir.loop import LoopOp
@@ -597,7 +598,7 @@ def _carried_from_loop(loop: Loop, axes: tuple, levels: tuple) -> tuple[Fold, tu
     return fold, (*(replace(stmt, values=tuple(observed[value] for value in stmt.values)) for stmt in writes), *sweeps)
 
 
-def states_as_buffers(body: Body, prefix: str) -> tuple[Body, tuple[Axis, ...], dict[str, tuple]]:
+def states_as_buffers(body: Body, prefix: str, inputs=None) -> tuple[Body, tuple[Axis, ...], dict[str, tuple]]:
     """``body`` with every carried state spelled as a STATE BUFFER — ``(body, serial axes,
     buffer shapes)`` — the form a serial launch axis realizes (:attr:`Placement.serial`): the
     classic schedule's realization of a carried state, taken at its fork from the carrying
@@ -621,7 +622,10 @@ def states_as_buffers(body: Body, prefix: str) -> tuple[Body, tuple[Axis, ...], 
         start = seeds[stmt.carrier]
         # The seed is a buffer of the state's shape (the tensor an unrolled loop started from) or a constant.
         if isinstance(start, str):
-            seeded: Stmt = Load(name=seed, input=start, index=(*(Var(axis.name) for axis in outer), *stmt.index))
+            seed_index = (*(Var(axis.name) for axis in outer), *stmt.index)
+            if inputs and start in inputs and inputs[start].shape:
+                seed_index = restore_unit_indices(seed_index, inputs[start].shape)
+            seeded: Stmt = Load(name=seed, input=start, index=seed_index)
         else:
             seeded = Let(name=seed, value=Literal(start))
         return (
@@ -750,7 +754,7 @@ def lift_serial(op: LoopOp, *, name: str, prefix: str) -> tuple[TileOp, dict[str
     """A kernel that carries a state lifted as a serial kernel: its carried states become state
     buffers (:func:`states_as_buffers`, named under ``prefix``) and the loop that carries them the
     kernel's time. Returns the tile and the state buffers' shapes."""
-    body, serial, shapes = states_as_buffers(op.body, prefix)
+    body, serial, shapes = states_as_buffers(op.body, prefix, op.inputs)
     return lift_loop_op(op, name=name, body=body, serial=serial), shapes
 
 

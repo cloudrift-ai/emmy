@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from emmy.compiler.dtype import F32
+from emmy.compiler.ir.address import restore_unit_indices
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, Literal, SimplifyCtx, TernaryExpr, Var
@@ -140,6 +141,7 @@ class _Fragments:
                     seed = self.program.seed
                     if isinstance(seed, str):
                         index = tuple(e.substitute(clipped).simplify(SimplifyCtx.empty()) for e in stmt.index)
+                        index = restore_unit_indices(index, self.tile.inputs[seed].shape)
                         seeded = self.apply("copy", ((seed, index),), (GMEM,), rb, cb)
                     else:
                         seeded = Literal(float(seed))

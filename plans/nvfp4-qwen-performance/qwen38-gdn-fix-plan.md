@@ -437,10 +437,19 @@ fresh requests and reset; it passes under the grouped test runner.
 
 Multi-token validation remains 🚧. A two-token prefill agrees with eager in traced and Loop IR. Its first CUDA
 compile exposed a dropped time-coordinate binding when a carried fold becomes a register-program root. The
-root now closes over that coordinate, preserving operand bindings. CUDA then runs, but returned recurrence
-state has a maximum absolute error of 0.001103, exceeding the current tolerance. Output error is 2.13e-5 and
-convolution history agrees exactly. This state mismatch is under investigation; native serving dispatch is
-also still pending.
+root now closes over that coordinate, preserving operand bindings. The next mismatch exposed lost seed strides:
+
+```text
+Seed tensor shape: [2, 1, 1, 64, 64]
+Carried state after unit-axis removal: [batch, row, column]
+Before (actual CUDA, renamed coordinates): seed[batch + row + column]
+After: seed[batch * 4096 + row * 64 + column]
+```
+
+Classic and register schedules now restore unit coordinates against the bound seed tensor before lowering its
+address. Four focused GPU checks pass, including both schedule families with nonzero seeds containing singleton
+dimensions. The complete two-token block now passes: output maximum error 1.86e-9, recurrence-state error
+7.45e-9, convolution-history error zero. Prefill-to-decode handoff and native serving dispatch remain pending.
 
 The 5090 isolated QKV projection (`64 × 5120` by `5120 × 10240`) now has direct strict-check evidence:
 

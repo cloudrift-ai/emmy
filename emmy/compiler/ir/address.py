@@ -28,6 +28,16 @@ from emmy.compiler.ir.stmt import Load
 BYTE_SLAB_PAD = 16
 
 
+def restore_unit_indices(index: tuple[Expr, ...], shape: tuple) -> tuple[Expr, ...]:
+    """Restore the zero coordinates a carried state dropped when its unit axes disappeared."""
+    if len(index) == len(shape):
+        return index
+    if len(index) != sum(size != 1 for size in shape):
+        raise ValueError(f"Cannot restore unit coordinates: {len(index)} indices for shape {shape}")
+    cells = iter(index)
+    return tuple(Literal(0, "int") if size == 1 else next(cells) for size in shape)
+
+
 def add(*terms) -> Expr:
     """Sum int / Expr terms into one Expr (dropping literal zeros)."""
     out = None

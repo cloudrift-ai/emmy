@@ -263,6 +263,36 @@ def test_register_state_starts_from_the_seed_tensor_on_cuda(unit_batch):
 
 @requires_cuda
 @pytest.mark.xdist_group("cuda")
+@pytest.mark.parametrize("register", [False, True], ids=["classic", "register"])
+def test_seed_tensor_keeps_unit_dimensions_on_cuda(register):
+    from emmy.compiler.backend.cuda.program import run_program
+    from emmy.compiler.dim import Dim
+    from emmy.compiler.ir.expr import Literal
+    from emmy.compiler.ir.stmt import Carry, Pre
+
+    source = _graph(seed="S0")
+    seed = source.nodes["S0"].outputs[0]
+    seed.shape = (Dim(1), seed.shape[0], Dim(1), seed.shape[1])
+    op = source.nodes["out"].op
+    zero = Literal(0, "int")
+    source.nodes["out"].op = replace(
+        op, body=op.body.map(lambda s: replace(s, index=(zero, s.index[0], zero, s.index[1])) if isinstance(s, (Carry, Pre)) else s)
+    )
+    pins = {"FAST_MATH": False}
+    if register:
+        atom = ("mma_m8n8k4" if Context.probe().has_volta_mma else "mma_m16n8k16") + "_f16_f32"
+        pins.update(STAGE="d1/reg", WORK="w1x1", TILE=f"{atom}/f1x1/k4")
+    with pinned_knobs(pins):
+        graph = Pipeline.build(CUDA_PASSES).run(source)
+    arrays = _inputs(seed="S0")
+    want = _reference(arrays, seed="S0")
+    arrays["S0"] = arrays["S0"].reshape(1, *arrays["S0"].shape[:1], 1, -1)
+    result, _ = run_program(graph, arrays)
+    np.testing.assert_allclose(result.outputs["out"], want, rtol=2e-3 if register else 1e-5, atol=2e-3 if register else 1e-6)
+
+
+@requires_cuda
+@pytest.mark.xdist_group("cuda")
 @pytest.mark.parametrize("shape", [(17, 80, 35), (64, 128, 128)], ids=["tails", "gdn128"])
 @pytest.mark.parametrize("half", [False, True], ids=["f32-acc", "f16-acc"])
 def test_gdn_chunk_step_matches_loop_on_cuda(shape, half):
