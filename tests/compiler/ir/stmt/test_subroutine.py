@@ -114,3 +114,9 @@ def test_buffer_renaming_preserves_shared_definitions():
     assert renamed.structural_key() == LoopOp(body=compact).body.rename_buffers(
         {"x": "input", "weight": "matrix", "out": "output"}
     ).structural_key()
+
+
+def test_partial_call_body_is_not_silently_discarded_by_identity():
+    body = _body(_project(), 0).map(lambda stmt: None if isinstance(stmt, Write) else stmt)
+    with pytest.raises(ValueError, match="must have output writes"):
+        body.structural_key()

@@ -290,13 +290,15 @@ def splice_graph(graph) -> tuple[LoopOp, list[str]] | None:
 
 
 def expand_calls(body: Body) -> Body:
-    """Reconstruct the full body through the same demand sharing and axis unification as fusion."""
+    """Expand a complete fusion region through the same demand sharing and axis unification."""
     targets = definitions(body)
     if not targets:
         return body
     tags = {target: f"sub{index}" for index, target in enumerate(targets)}
     loops = {tags[target]: LoopMeta.from_body(target.body, target.axes) for target in targets}
     loops["root"] = LoopMeta.from_body(body)
+    if not loops["root"].writes:
+        raise ValueError("a compact fusion region must have output writes")
     builder = _Splicer(_Program(loops, {}), roots=tuple(("root", w.output) for w, _ in loops["root"].writes), expand=tags)
     builder._seed()
     builder.resolve()
@@ -929,4 +931,3 @@ def _solve_sigma(
             continue
         return None
     return Sigma(mapping)
-
