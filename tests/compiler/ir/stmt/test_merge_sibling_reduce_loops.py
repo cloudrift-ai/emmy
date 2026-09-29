@@ -482,8 +482,18 @@ def test_normalize_closes_reductions_exposed_by_hoisting() -> None:
     assert normalize_body(Body(tuple(normalized))) == normalized
 
 
-def test_normalize_closes_children_exposed_by_parent_merge() -> None:
-    """Merging parent reductions exposes and merges their matching child reductions too."""
+def test_normalize_closes_children_exposed_by_parent_merge(monkeypatch) -> None:
+    """Close newly exposed child reductions before constructing the canonical graph once."""
+    from emmy.compiler.ir.stmt import normalize
+
+    builds = []
+    build = normalize.relation_graph
+
+    def counted(body):
+        builds.append(body)
+        return build(body)
+
+    monkeypatch.setattr(normalize, "relation_graph", counted)
 
     def cone(outer: str, inner: str, tag: str) -> Loop:
         return Loop(
@@ -503,6 +513,7 @@ def test_normalize_closes_children_exposed_by_parent_merge() -> None:
     body = Body((cone("k0", "j0", "a"), cone("k1", "j1", "b"), Write("Y", (), "outer_b")))
     normalized = normalize_body(body)
 
+    assert len(builds) == 1
     assert len(tuple(normalized.iter_of_type(Loop))) == 2
     assert len(tuple(normalized.iter_of_type(Load))) == 1
     assert normalize_body(Body(tuple(normalized))) == normalized
