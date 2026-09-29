@@ -325,5 +325,36 @@ Actual fixed CUDA contains `emmy_c_to_b_f16` for the repack and legal `mma_m16n8
 The projection's emitted kernels include `mma_m16n8k16_f16_f16` with `d2/smem-tma` and `d2/smem-tma/p2`.
 Its independent outputs are distributed into separate kernels; no six-axis Cartesian output loop is required.
 
-Stages 2–4 are marked complete for the compiler contracts above. Stage 5 still needs z-projection and stable
-measurement coverage. Serving and final review are unfinished; the overall bugtracker row remains 🚧.
+Stages 2–4 are marked complete for the compiler contracts above. Stage 5 still needs stable measurement coverage.
+Serving and final review are unfinished; the overall bugtracker row remains 🚧.
+
+### Interleaved z-projection weights
+
+The two existing z-projection cuts exposed a further correctness bug: one producer reads alternating weight
+columns, but shared-memory staging copied contiguous bytes. The logical B operands are `B[k, 2*n]` and
+`B[k, 2*n+1]`. A contiguous copy starting at either address silently supplies neighboring columns to MMA.
+The fix uses the existing per-element operand fill when neither contraction dimension is contiguous.
+
+The following is schematic lowering, not a verbatim dump:
+
+```text
+Tile IR:       even[k,n] = B[k,2*n]; odd[k,n] = B[k,2*n+1]
+Before:        cp.async(shared_even[k,n:n+8], &B[k,2*n], 16 bytes)
+After:         shared_even[k,n] = B[k,2*n]
+               shared_odd[k,n]  = B[k,2*n+1]
+               barrier; ldmatrix; mma.sync
+```
+
+Eight GPU regression cases pass on the local 5080 Laptop: one/two channels, 13/16 columns, and single/double
+buffering. They also check that the generated B operand does not use the incorrect contiguous asynchronous copy.
+Fifteen focused existing transport checks pass; the broader transport run exceeded the development time budget
+and is not counted as a pass.
+
+Both saved-shape z-projection producers now pass against float32 matrix multiplication on synthetic float16
+inputs: A is 64×5120 and B is 5120×6144. The first producer returns the full projection; the second returns its
+even and odd channels. Maximum absolute errors are 0.000993, 0.000992 and 0.000993, respectively, within the
+original `rtol=3e-3, atol=1e-3` bounds. This validates the isolated producers, not the complete core/z consumer
+or end-to-end serving. Stable latency measurements remain pending.
+
+On September 30, #969 merged and GitHub automatically retargeted #973 to main. The fix PR remains draft and
+the overall tracker remains 🚧.
