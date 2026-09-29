@@ -490,6 +490,10 @@ def _stage_candidates(tile: TileOp, target, node, choice: NodeSchedule) -> tuple
         candidates = tuple(stage for stage in candidates if stage.transport not in ("smem-async", "smem-tma"))
     if not _staged_store_fits(choice.tile):
         candidates = tuple(stage for stage in candidates if not stage.out)
+    if not (choice.tile.is_warp and choice.tile.atom.is_wgmma):
+        # An 8-deep ring has paid only on wgmma (the H100 down projection; depth 6 lost to 4 and 8).
+        # Elsewhere it only multiplies the stage space every compile prices.
+        candidates = tuple(stage for stage in candidates if stage.depth < 8)
     return candidates
 
 

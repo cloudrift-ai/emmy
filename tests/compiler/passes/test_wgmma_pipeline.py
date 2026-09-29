@@ -21,7 +21,6 @@ from emmy.compiler.pipeline.search.pins import pinned_knobs
 from tests.compiler.helpers import device_compute_capability, requires_cuda
 
 _N128 = "wgmma_m64n128k16_f16_f32/f1x16/k4"
-_N192 = "wgmma_m64n192k16_f16_f32/f1x24/k4"
 _HOPPER = Context.from_target((9, 0))
 
 requires_hopper = pytest.mark.skipif(device_compute_capability() != (9, 0), reason="wgmma runs on sm_90 only")
@@ -84,8 +83,8 @@ def test_four_cells_store_one_16_byte_row_each_lane() -> None:
         (256, 1024, {"WORK": "w4x1", "TILE": _N128, "STAGE": "d4/smem-async/p2"}, ""),
         (256, 1024, {"WORK": "w4x1", "TILE": _N128, "STAGE": "d8/smem-tma/p2"}, ""),
         (256, 192, {"WORK": "w4x1+p1", "TILE": _N128, "STAGE": "d2/smem-tma/p2"}, ""),
-        (384, 1024, {"WORK": "w8x1", "TILE": _N192, "STAGE": "d4/smem-tma/p2"}, "torch.relu"),
-        (384, 1024, {"WORK": "w4x1+p1", "TILE": _N192, "STAGE": "d4/smem-tma/p2"}, ""),
+        (256, 1024, {"WORK": "w8x1", "TILE": _N128, "STAGE": "d4/smem-tma/p2"}, "torch.relu"),
+        (256, 1024, {"WORK": "w4x1+p1", "TILE": _N128, "STAGE": "d4/smem-tma/p2"}, ""),
     ],
 )
 def test_the_warp_group_gemm_computes_the_right_answer(n: int, k: int, pins: dict, epilogue: str) -> None:

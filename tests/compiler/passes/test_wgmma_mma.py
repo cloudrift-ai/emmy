@@ -51,18 +51,18 @@ def test_family_is_offered_on_hopper_only_and_moves_no_option_0() -> None:
     for dtype, tag in ((F16, "f16"), (BF16, "bf16")):
         offered = atoms_for(dtype, ctx=Context.from_target((9, 0)))
         assert offered[0] == f"mma_m16n8k16_{tag}_f32"
-        assert _family(offered) == tuple(f"wgmma_m64n{n}k16_{tag}_f32" for n in (64, 128, 192, 256))
+        assert _family(offered) == tuple(f"wgmma_m64n{n}k16_{tag}_f32" for n in (64, 128, 256))
         for cap in ((8, 0), (8, 9), (10, 0), (12, 0)):
             assert _family(atoms_for(dtype, ctx=Context.from_target(cap))) == (), cap
     assert atoms_for(F16) == ("mma_m16n8k16_f16_f32",)
 
 
 def test_cell_is_the_m16n8k16_sub_cell_of_its_instruction() -> None:
-    assert len(WGMMA) == 8
+    assert len(WGMMA) == 6
     for name in WGMMA:
         atom = ATOM_REGISTRY[name]
         assert atom.shape == (16, 8, 16) and atom.is_wgmma
-        assert atom.cells_per_instruction == atom.ptx_shape[1] // 8 in (8, 16, 24, 32)
+        assert atom.cells_per_instruction == atom.ptx_shape[1] // 8 in (8, 16, 32)
         assert atom.accumulator_registers_per_lane == 4
         assert atom.c_to_a_repack
         assert wide_accumulate(atom) is atom
@@ -121,11 +121,9 @@ def _problem(monkeypatch, b_trans: bool = False):
 FULL_WGMMA_ROWS = {
     (64, (1, 8), 4),
     (64, (1, 16), 4),
-    (64, (1, 24), 4),
     (64, (1, 32), 4),
     (128, (1, 16), 4),
     (128, (1, 32), 4),
-    (192, (1, 24), 4),
     (256, (1, 32), 4),
 }
 
@@ -150,8 +148,7 @@ def test_domain_offers_only_group_aligned_wgmma_rows_and_stages_them(monkeypatch
     picks = tuple(context.extensions())
     staged = {pick.nodes[site].tile.atom.name for pick in picks if all(not choice.stage.is_direct for choice in pick.edges.values())}
     direct = {pick.nodes[site].tile.atom.name for pick in picks if any(choice.stage.is_direct for choice in pick.edges.values())}
-    # 192 columns do not divide the 1024-wide N, so no n192 row tiles this matmul whole.
-    assert {name for name in WGMMA if name.endswith("_bf16_f32") and "n192" not in name} <= staged
+    assert {name for name in WGMMA if name.endswith("_bf16_f32")} <= staged
     assert not set(WGMMA) & direct and "mma_m16n8k16_bf16_f32" in direct
 
 

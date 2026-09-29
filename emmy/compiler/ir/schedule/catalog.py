@@ -228,7 +228,7 @@ _WARP_TILE_SPACE = Space(
         Dimension("wm", (1, 2, 4, 8, 16)),
         Dimension("wn", (1, 2, 4, 8, 16)),
         Dimension("fm", (1, 2, 3, 4, 8)),
-        Dimension("fn", (1, 2, 4, 8, 16, 24, 32)),
+        Dimension("fn", (1, 2, 4, 8, 16, 32)),
         Dimension("bk", (1, 2, 4, 8)),
     ),
     bounds=(
