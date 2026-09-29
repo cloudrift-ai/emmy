@@ -995,6 +995,62 @@ def test_gdn_chunk_padding_keeps_the_logical_sequence_length(length):
     assert tuple(graph.buffer(graph.outputs[1]).shape) == (1, 2, 8, 8)
 
 
+@pytest.mark.parametrize("length", [1, 16, 65])
+def test_gdn_state_wrapper_continues_resets_and_isolates_requests(length):
+    import torch
+    from transformers.cache_utils import DynamicCache
+    from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
+
+    from emmy.compiler.trace.huggingface import build_gdn_state_wrapper
+
+    block = _qwen3_5_linear_block()
+    mixer = block.linear_attn
+    wrapper = build_gdn_state_wrapper(block)
+    state = torch.zeros(2, mixer.num_v_heads, mixer.head_k_dim, mixer.head_v_dim)
+    history = torch.zeros(2, mixer.conv_dim, mixer.conv_kernel_size)
+    cache = DynamicCache(config=Qwen3_5TextConfig(**_QWEN3_5_TINY))
+    chunks = [torch.randn(2, rows, mixer.hidden_size) * 0.1 for rows in (length, 1, 3)]
+    first = None
+    with torch.no_grad():
+        for x in chunks:
+            old_state, old_history = state.clone(), history.clone()
+            actual, next_state, next_history = wrapper(x, state, history)
+            expected = block(x, position_embeddings=None, past_key_values=cache)
+            torch.testing.assert_close(actual, expected, rtol=1e-4, atol=1e-5)
+            torch.testing.assert_close(next_state, cache.layers[0].recurrent_states[0], rtol=1e-4, atol=1e-5)
+            torch.testing.assert_close(next_history, cache.layers[0].conv_states[0])
+            torch.testing.assert_close(state, old_state, rtol=0, atol=0)
+            torch.testing.assert_close(history, old_history, rtol=0, atol=0)
+            for row in range(2):
+                isolated = wrapper(x[row : row + 1], state[row : row + 1], history[row : row + 1])
+                for single, batched in zip(isolated, (actual, next_state, next_history), strict=True):
+                    torch.testing.assert_close(single, batched[row : row + 1], rtol=1e-4, atol=1e-5)
+            if first is None:
+                first = tuple(t.clone() for t in (actual, next_state, next_history))
+            state, history = next_state, next_history
+        reset = wrapper(chunks[0], torch.zeros_like(state), torch.zeros_like(history))
+        for actual, expected in zip(reset, first, strict=True):
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("length", [1, 16])
+def test_gdn_state_wrapper_traces_both_state_outputs(length):
+    import torch
+
+    from emmy.compiler.trace.huggingface import build_gdn_state_wrapper
+    from emmy.compiler.trace.torch import trace_module
+
+    block = _qwen3_5_linear_block()
+    mixer = block.linear_attn
+    state = torch.zeros(1, mixer.num_v_heads, mixer.head_k_dim, mixer.head_v_dim)
+    history = torch.zeros(1, mixer.conv_dim, mixer.conv_kernel_size)
+    x = torch.randn(1, length, mixer.hidden_size) * 0.1
+    graph = trace_module(build_gdn_state_wrapper(block), (x, state, history))
+    assert len(graph.inputs) == len(graph.outputs) == 3
+    for name, value in zip(graph.outputs, (x, state, history), strict=True):
+        assert tuple(graph.buffer(name).shape) == tuple(value.shape)
+
+
 # --- checkpoint keys vs twin parameter names ---------------------------------------------------
 # A checkpoint may store its tensors under names the config-built twin does not have, and the
 # mismatch is silent — the parameters simply stay on the meta device. Transformers registers the
