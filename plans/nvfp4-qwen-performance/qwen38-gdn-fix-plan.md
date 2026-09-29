@@ -245,9 +245,9 @@ Stage deliverables are cumulative. The following sketches are intended results, 
 | --- | --- | --- |
 | 🚧 1. Baseline | Pinned main + #969 reproduction matrix and small regression inputs | The singleton batch case demonstrably reaches the same recurrence algebra as the checkpoint; each known failure has a bounded reproducer. |
 | 🚧 2. Recurrence | Field-preserving repack rewrite, consistent carrier/output coordinates, register and serial regressions | Kernel IR retains `FragmentRepack … role=b`; the checkpoint offers `STAGE=d1/reg`; classic launch-per-step CUDA does not reopen the time axis inside each launch; focused GPU states and corrected values match the reference. |
-| Pending: 3. Output domains | One correct placement of computation and stores, with sibling-domain regression tests | Lowered IR has sibling `(a0,a1[,a6])` and `(a8,a10)/(a8,a11)` nests. Store counts are proportional to the sum of the output sizes. The real kernel set completes under the watchdog with correct outputs. |
-| Pending: 4. Padding | Constant zero-fill padding through existing index maps | Tensor IR expresses `y[t,d] = x[t,d] if t < T else 0`; guarded Loop/Kernel loads are in bounds; short GDN traces succeed and returned sequence length remains T. |
-| Pending: 5. Projections | Legal tensor-core routes for qkv and z, with measured cut/schedule alternatives | Tile IR offers activation-A / weight-B contractions with MMA TILE; emitted CUDA contains the expected MMA instructions; reference comparisons pass and measured latency is reported. |
+| 🚧 3. Output domains | One correct placement of computation and stores, with sibling-domain regression tests | Lowered IR has sibling `(a0,a1[,a6])` and `(a8,a10)/(a8,a11)` nests. Store counts are proportional to the sum of the output sizes. The real kernel set completes under the watchdog with correct outputs. |
+| 🚧 4. Padding | Constant zero-fill padding through existing index maps | Tensor IR expresses `y[t,d] = x[t,d] if t < T else 0`; guarded Loop/Kernel loads are in bounds; short GDN traces succeed and returned sequence length remains T. |
+| 🚧 5. Projections | Legal tensor-core routes for qkv and z, with measured cut/schedule alternatives | Tile IR offers activation-A / weight-B contractions with MMA TILE; emitted CUDA contains the expected MMA instructions; reference comparisons pass and measured latency is reported. |
 | Pending: 6. Serving | GDN capture and explicit persistent state, delivered separately if needed | `prefill(x,S0,H0) → (y,S1,H1)` followed by `decode(x1,S1,H1) → (y1,S2,H2)` matches an independent reference; H is convolution history; reset and request isolation pass. Mixed fallback is labelled separately. |
 | Pending: 7. Review | Validated PR(s), measurements, updated docs and tracker | Required finalization checks pass, scope and remaining gaps are explicit, and the tracker changes to ✅ only with the ready-for-review fix PR. |
 
@@ -281,3 +281,23 @@ The excerpts above are the review evidence retained in this plan. The full local
 - `pr969-projection.tile.txt`: qkv/convolution contraction and six independent output specifications.
 - `main-projection.cuda.txt`, `pr969-projection.cuda.txt`: fresh runaway output nests.
 - `probe.py`, `trace_lowering.py`: temporary diagnostic scripts; no compiler source changes.
+
+## Implementation evidence (in progress)
+
+- Recurrence: field-preserving repacks, singleton output-coordinate matching, serial-axis binding, and a late-bound
+  register-schedule closure are fixed. The saved 512-token recurrence now emits CUDA with B-fragment conversion.
+  On the isolated RTX 5090 checkout, the 11 focused recurrence GPU tests pass. On the local 5080 Laptop, numerical
+  comparisons pass but the existing f32-accumulator 128-wide no-spill assertion reports 24 local bytes; the unchanged
+  #969 checkout fails identically.
+- Output domains: an unused root scalar kept otherwise independent operands inside the union of their axes.
+  Removing that dead computation preserves live internal stores and lets the operand computations lower as siblings.
+  Both output orders pass the structural regression; all 48 normalization tests pass. The real projection emits
+  CUDA, but its end-to-end CLI run exceeded the 110-second process budget before producing a result. No latency or
+  checkpoint numerical pass is claimed yet.
+- Padding: constant zero fill uses guarded IndexMap sources, including safe inactive input coordinates. All 36
+  focused backend checks pass, covering chunk lengths 1, 16, 63, 64 and 65 plus left padding and empty input.
+  Five actual Transformers chunk-rule traces pass and retain the requested sequence length and final-state shape.
+- Projections: fresh default CUDA contains qkv MMA and TMA kernels using current main's capabilities; numerical
+  validation, z-projection coverage and measured alternatives remain pending.
+- GitHub native stack #974 contains #969 then #973. The extra current-main commits appear in #973 while its base
+  remains #969's older branch; they are not DeltaNet changes.
