@@ -382,6 +382,13 @@ class Body(tuple[Stmt, ...], Wire):
     # -- def-use analysis ------------------------------------------------
 
     @cached_property
+    def carried_names(self) -> tuple[str, ...]:
+        """Accumulator and carried-state names, deduplicated in structural order."""
+        from emmy.compiler.ir.stmt.leaves import Accum, Carry  # noqa: PLC0415
+
+        return tuple(dict.fromkeys(name for stmt in self.iter_of_type(Accum, Carry) for name in stmt.carried_names()))
+
+    @cached_property
     def free_ssa(self) -> frozenset[str]:
         """SSA reads from the enclosing scope, excluding this scope's definitions and exported states."""
         from emmy.compiler.ir.stmt.order import _free_ssa, _ordered_sibling_defs  # noqa: PLC0415

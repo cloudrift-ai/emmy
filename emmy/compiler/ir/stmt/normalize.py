@@ -27,7 +27,7 @@ from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
 from emmy.compiler.ir.stmt.body import Body, free_names
 from emmy.compiler.ir.stmt.leaves import Accum, Assign, Init, Load, SelectBranch, Write
-from emmy.compiler.ir.stmt.order import _ordered_exported_accs, bound_axes, ordering_constraints, relation_graph, topological_sort
+from emmy.compiler.ir.stmt.order import bound_axes, ordering_constraints, relation_graph, topological_sort
 
 __all__ = ["normalize_body"]
 
@@ -886,7 +886,7 @@ class _SequentialScope:
         children = stmt.nested()
         if children:
             for child in children:
-                for name in _ordered_exported_accs(child):
+                for name in child.carried_names:
                     self._allocate(name, "acc")
         else:
             for name in stmt.defines():
@@ -906,7 +906,7 @@ class _SequentialScope:
         shell = stmt.with_bodies(tuple(Body() for _ in children)) if children else stmt
         renamed = shell.rename(names)
         if children:
-            exported = frozenset(name for child in children for name in _ordered_exported_accs(child))
+            exported = frozenset(name for child in children for name in child.carried_names)
             renamed_children: list[Body] = []
             for child in children:
                 scope = _SequentialScope(

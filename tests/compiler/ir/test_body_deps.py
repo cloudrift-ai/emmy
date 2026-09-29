@@ -52,7 +52,7 @@ def test_scope_summary_preserves_reads_above_a_shadowed_name():
     assert body.free_ssa == frozenset({"outer", "source"})
 
 
-def test_recursive_type_queries_share_children_and_preserve_mixed_order():
+def test_recursive_type_queries_share_children_and_preserve_mixed_order(monkeypatch):
     carry = Carry("state", "value", (), 0)
     accum = _acc("sum", "value")
     child = Body((carry, accum))
@@ -62,6 +62,19 @@ def test_recursive_type_queries_share_children_and_preserve_mixed_order():
     assert body.iter_of_type(Accum, Carry) == (carry, accum, carry)
     assert body.iter_of_type(Accum, Carry) is body.iter_of_type(Accum, Carry)
     assert child.iter_of_type(Carry) is child.carries
+    visits = 0
+    original = Carry.carried_names
+
+    def counted(stmt):
+        nonlocal visits
+        visits += 1
+        return original(stmt)
+
+    monkeypatch.setattr(Carry, "carried_names", counted)
+    names = body.carried_names
+    assert names == ("state", "sum")
+    assert body.carried_names is names
+    assert visits == 2
 
 
 # --- closure shape ---------------------------------------------------
