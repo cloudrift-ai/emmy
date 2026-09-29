@@ -613,7 +613,9 @@ a contraction is lowered a second time, inside one loop per grid axis, and lifte
 chain, so Loop-IR normalization orders it by the output layout, token first. The second pass lowers the terms the
 first pass formed, so a gate/up twin merged there stays one term. A lowering with no axes bound would not do: it
 hoists grid-invariant loads above the grid loops, and normalization orders only a chain that no statement precedes.
-Other pieces keep the first pass's form.
+Other pieces keep the first pass's form. A reordered piece takes the new grid order even where its A stays, so a
+recorded schedule of such a piece can name another block order than the one it was measured with and needs a new
+measurement.
 
 `_fromloop.fold_from_loop` reads each componentwise monoid directly from the loop's `Accum` statements. It does not
 classify a shape, extract a contraction, pair softmax statistics, hoist a nested reduction, or validate a reconstructed
