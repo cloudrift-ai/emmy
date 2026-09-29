@@ -9,6 +9,7 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.loop import LoopOp
+from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.stmt.normalize import prepare_body
 from emmy.compiler.ir.stmt.subroutine import Call, Subroutine, definitions, pretty_subroutines
@@ -81,10 +82,25 @@ def test_identity_clusters_the_expanded_cse_form():
         assert compact.identity(structural=structural).key == expanded.identity(structural=structural).key
 
 
+def test_outlining_preserves_inline_identity():
+    target = _project()
+    compact = _body(target, 4)
+
+    def inline(stmt):
+        if not isinstance(stmt, Call):
+            return stmt
+        rename = {name: f"{stmt.name}_{name}" for name in (*target.body.ssa_defs, *target.body.axis_names)}
+        sigma = Sigma(dict(zip(target.params, stmt.args, strict=True)))
+        return (*[s.rename(rename).substitute(sigma) for s in target.body], Assign(stmt.name, "copy", (rename[target.result],)))
+
+    expanded = compact.map(inline)
+    assert compact.structural_key() == expanded.structural_key()
+
+
 def test_compact_pretty_prints_a_shared_definition_once():
     rendered = "\n".join(pretty_subroutines(_body(_project(), 4)))
-    assert rendered.count("sub project(row, col):") == 1
+    assert rendered.count("sub project(x, weight, row, col):") == 1
     assert "return sum" in rendered
-    assert "left = project(k, c)" in rendered
-    assert "right = project(k," in rendered
+    assert "left = project(x, weight, k, c)" in rendered
+    assert "right = project(x, weight, k," in rendered
     assert len(rendered.splitlines()) < 18

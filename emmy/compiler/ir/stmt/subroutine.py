@@ -50,7 +50,7 @@ class Subroutine:
 
     def pretty(self, indent: str = "") -> list[str]:
         return [
-            f"{indent}sub {self.name}({', '.join(self.params)}):",
+            f"{indent}sub {self.name}({', '.join((*self.buffers, *self.params))}):",
             *pretty_body(self.body, indent + "    "),
             f"{indent}    return {self.result}",
         ]
@@ -84,7 +84,8 @@ class Call(Stmt):
         return self.target.buffers
 
     def pretty(self, indent: str = "") -> list[str]:
-        return [f"{indent}{self.name} = {self.target.name}({', '.join(arg.pretty() for arg in self.args)})"]
+        args = (*self.target.buffers, *(arg.pretty() for arg in self.args))
+        return [f"{indent}{self.name} = {self.target.name}({', '.join(args)})"]
 
 
 @_rewrite_kind.register
