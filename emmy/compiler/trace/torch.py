@@ -1699,8 +1699,8 @@ def _handle_call_function(g: Graph, fx_node: Any, node_map: dict[str, NodeRef], 
     # backends may evaluate both sources before selecting the result.
     if op_name == "pad":
         raw_pad = fx_node.args[1] if len(fx_node.args) > 1 else (fx_node.kwargs or {}).get("pad")
-        if not isinstance(raw_pad, (tuple, list)) or len(raw_pad) % 2 or any(type(width) is not int or width < 0 for width in raw_pad):
-            raise NotImplementedError(f"aten.pad requires nonnegative static padding widths, got {raw_pad!r}")
+        if not isinstance(raw_pad, (tuple, list)) or len(raw_pad) % 2 or any(type(width) is not int for width in raw_pad):
+            raise NotImplementedError(f"aten.pad requires static integer padding widths, got {raw_pad!r}")
         input_shape = tuple(g.nodes[input_ids[0]].output.shape)
         if not any(raw_pad):
             node_map[name] = input_ids[0]

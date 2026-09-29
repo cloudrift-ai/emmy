@@ -1097,9 +1097,9 @@ def test_trace_chunk_padding_matches_torch(run_graph, dtype, length):
     np.testing.assert_array_equal(actual, module(torch.from_numpy(x)).numpy())
 
 
-@pytest.mark.parametrize("shape,padding", [((2, 3), (2, 1, 1, 2)), ((0, 3), (0, 0, 1, 2))])
+@pytest.mark.parametrize("shape,padding", [((2, 3), (2, 1, 1, 2)), ((0, 3), (0, 0, 1, 2)), ((2, 7), (-3, 0)), ((3, 7), (-2, 1, 1, -1))])
 def test_trace_padding_guards_source_coordinates(run_graph, shape, padding):
-    """Left padding and empty inputs must never produce an out-of-bounds read."""
+    """Padding, cropping and empty inputs must never produce an out-of-bounds read."""
     import numpy as np
     import torch
     from torch import nn
