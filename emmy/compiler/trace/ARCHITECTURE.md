@@ -208,8 +208,8 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   scale siblings. A packed int4 dense-trunk weight (AWQ, GPTQ, compressed-tensors `pack-quantized`) streams the same
   way, dequantized from its packed codes, zero points and scales under the sibling names its own layout spells
   (`qweight` / `qzeros` / `scales`, or `weight_packed` / `weight_zero_point` / `weight_scale`); a bfloat16 scale
-  is widened to float32 for the decode. A packed NVFP4 EXPERT weight raises `NotImplementedError` — the expert lane has no packed-trio
-  decode. `expert_range=(lo, hi)` narrows the read to one tensor-parallel rank's expert shard, re-indexed
+  is widened to float32 for the decode. A packed NVFP4 EXPERT weight raises `NotImplementedError` — the expert lane
+  has no packed-trio decode. `expert_range=(lo, hi)` narrows the read to one tensor-parallel rank's expert shard, re-indexed
   rank-locally, so a rank never reads bytes it does not own.
   The twin's config must resolve to Transformers' OWN class for the architecture: a hosting process can re-register
   the model type onto its own minimal config class (vLLM's config parser does, process-wide), which drops every field
