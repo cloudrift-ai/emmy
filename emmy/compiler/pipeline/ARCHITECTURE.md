@@ -1807,9 +1807,10 @@ contractions and the LayerNorm statistic reduce now deploy off the prior; adding
 let them be recorded.
 
 **`STAGE`** (STR codec, the tile schedule → `lowering/kernel/010_materialize`) — the operand-staging codec
-`d<depth>/smem|smem-async|smem-tma[/p<reg_depth>]` on the typed `Stage` schedule struct (composes with both fragments
-of the `TILE` knob): `d<depth>` the gmem→smem ring depth, `sync`/`cp.async`/TMA transport, `p<reg_depth>` the
-smem→register double-buffer. `stage=None` (unset / unparseable) = gmem-direct. A `STAGE` value names only what the
+`d<depth>/smem|smem-async|smem-tma[/p<reg_depth>][/out]` on the typed `Stage` schedule struct (composes with both
+fragments of the `TILE` knob): `d<depth>` the gmem→smem ring depth, `sync`/`cp.async`/TMA transport, `p<reg_depth>` the
+smem→register double-buffer, `out` the output tile stored through shared memory too (mma tiles only; see
+`lowering/kernel/ARCHITECTURE.md`). `stage=None` (unset / unparseable) = gmem-direct. A `STAGE` value names only what the
 schedule CHOOSES — rotation and refill discipline derive at materialization from the depth alone (which is why the
 retired `ring` flag compiled byte-identically with and without it), and `smem` / `bk_elems` are resolver outputs,
 never spelled. See `lowering/kernel/ARCHITECTURE.md`.
