@@ -621,12 +621,16 @@ class TmaLoad(Stmt):
     coords: tuple
     mbar: str
     mbar_slot: Expr | None = None
+    # CTAs of the thread-block cluster the box lands in: ``> 1`` writes it, at the same slab offset
+    # and completing on the same mbarrier slot, into every member CTA (``.multicast::cluster``).
+    multicast: int = 1
 
     def pretty(self, indent: str = "") -> list[str]:
         smem_idx = ", ".join(e.pretty() for e in self.smem_index)
         coords = ", ".join(e.pretty() for e in self.coords)
         s = "" if self.mbar_slot is None else f"[{self.mbar_slot.pretty()}]"
-        return [f"{indent}TmaLoad {self.smem}[{smem_idx}] <- {self.desc}({coords}) mbar={self.mbar}{s}"]
+        mc = "" if self.multicast == 1 else f" multicast x{self.multicast}"
+        return [f"{indent}TmaLoad {self.smem}[{smem_idx}] <- {self.desc}({coords}) mbar={self.mbar}{s}{mc}"]
 
     def render(self, ctx: RenderCtx) -> list[str]:
         from emmy.compiler.ir.stmt import render_index
@@ -638,11 +642,38 @@ class TmaLoad(Stmt):
         coord_args = ", ".join(c.render(ctx) for c in reversed(self.coords))
         mbar_addr = "&" + self.mbar if self.mbar_slot is None else f"&{self.mbar}[{self.mbar_slot.render(ctx)}]"
         pad = _pad(ctx.indent)
-        # The ``cp_async_bulk_tensor_<rank>d`` helpers are defined in the
-        # kernel prelude — single-CTA ``.shared::cta`` qualifier; cluster
-        # launches would need a separate helper variant.
+        # The ``cp_async_bulk_tensor_<rank>d`` helpers are defined in the kernel prelude; the
+        # ``_mc`` variants take the cluster's CTA mask.
+        if self.multicast > 1:
+            mask = (1 << self.multicast) - 1
+            return [
+                f"{pad}cp_async_bulk_tensor_{rank}d_mc(&{self.smem}[{smem_flat}], {self.desc}, {coord_args}, {mbar_addr}, {mask});",
+            ]
         return [
             f"{pad}cp_async_bulk_tensor_{rank}d(&{self.smem}[{smem_flat}], {self.desc}, {coord_args}, {mbar_addr});",
+        ]
+
+
+@dataclass(frozen=True)
+class ClusterSync(Stmt):
+    """``barrier.cluster.arrive.release`` + ``wait.acquire`` — every thread of every CTA in the
+    thread-block cluster meets here: the cluster-wide :class:`Sync`. A multicast ring refills a slot
+    in its peers' shared memory, so the barrier that clears a slot for its refill spans the
+    cluster. ``init`` first publishes the CTA's mbarrier initialization to the cluster
+    (``fence.mbarrier_init``), which a peer's multicast completes on."""
+
+    init: bool = False
+
+    def pretty(self, indent: str = "") -> list[str]:
+        return [f"{indent}ClusterSync{' (after mbarrier init)' if self.init else ''}"]
+
+    def render(self, ctx: RenderCtx) -> list[str]:
+        pad = _pad(ctx.indent)
+        fence = [f'{pad}asm volatile("fence.mbarrier_init.release.cluster;\\n" ::: "memory");'] if self.init else []
+        return [
+            *fence,
+            f'{pad}asm volatile("barrier.cluster.arrive.release.aligned;\\n" ::: "memory");',
+            f'{pad}asm volatile("barrier.cluster.wait.acquire.aligned;\\n" ::: "memory");',
         ]
 
 
@@ -700,14 +731,20 @@ class MbarrierArrive(Stmt):
 
     mbar: str
     slot: Expr | None = None
+    # CTAs of the thread-block cluster to arrive at: ``> 1`` arrives on the same mbarrier slot in
+    # every member CTA (the slot is free only when every CTA its multicast refill lands in is done).
+    cluster: int = 1
 
     def pretty(self, indent: str = "") -> list[str]:
         s = "" if self.slot is None else f"[{self.slot.pretty()}]"
-        return [f"{indent}MbarrierArrive({self.mbar}{s})"]
+        mc = "" if self.cluster == 1 else f" x{self.cluster} CTAs"
+        return [f"{indent}MbarrierArrive({self.mbar}{s}){mc}"]
 
     def render(self, ctx: RenderCtx) -> list[str]:
         pad = _pad(ctx.indent)
         addr = "&" + self.mbar if self.slot is None else f"&{self.mbar}[{self.slot.render(ctx)}]"
+        if self.cluster > 1:
+            return [f"{pad}mbarrier_arrive_cluster({addr}, {self.cluster});"]
         return [f"{pad}mbarrier_arrive({addr});"]
 
 
@@ -2966,6 +3003,7 @@ class KernelOp(BodyOp):
 
 
 __all__ = [
+    "ClusterSync",
     # Shared expressions (re-exported)
     "Var",
     "Literal",
@@ -3109,7 +3147,13 @@ def _(s: TmaLoad, rename, sigma, axis_fn):
         coords=tuple(sigma.apply(e) for e in s.coords),
         mbar=s.mbar,
         mbar_slot=sigma.apply(s.mbar_slot) if s.mbar_slot is not None else None,
+        multicast=s.multicast,
     )
+
+
+@_rewrite_kind.register
+def _(s: ClusterSync, rename, sigma, axis_fn):
+    return s
 
 
 @_rewrite_kind.register
@@ -3135,6 +3179,7 @@ def _(s: MbarrierArrive, rename, sigma, axis_fn):
     return MbarrierArrive(
         mbar=s.mbar,
         slot=sigma.apply(s.slot) if s.slot is not None else None,
+        cluster=s.cluster,
     )
 
 

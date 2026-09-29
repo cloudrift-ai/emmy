@@ -16,10 +16,13 @@ from emmy.commands.trace import graph_from_code
 from emmy.compiler.backend.cuda.backend import CudaBackend
 from emmy.compiler.context import Context
 from emmy.compiler.ir.cuda import CudaOp
+from emmy.compiler.ir.schedule import Stage
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+from emmy.compiler.pipeline.pipeline import LoweringError
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from tests.compiler.helpers import device_compute_capability, requires_cuda
 
+_N64 = "wgmma_m64n64k16_f16_f32/f1x8/k4"
 _N128 = "wgmma_m64n128k16_f16_f32/f1x16/k4"
 _N192 = "wgmma_m64n192k16_f16_f32/f1x24/k4"
 _HOPPER = Context.from_target((9, 0))
@@ -86,6 +89,8 @@ def test_four_cells_store_one_16_byte_row_each_lane() -> None:
         (256, 192, {"WORK": "w4x1+p1", "TILE": _N128, "STAGE": "d2/smem-tma/p2"}, ""),
         (384, 1024, {"WORK": "w8x1", "TILE": _N192, "STAGE": "d4/smem-tma/p2"}, "torch.relu"),
         (384, 1024, {"WORK": "w4x1+p1", "TILE": _N192, "STAGE": "d4/smem-tma/p2"}, ""),
+        (256, 1024, {"WORK": "w4x1+p1", "TILE": _N64, "STAGE": "d4/smem-tma/p2/c2"}, "torch.relu"),
+        (256, 1024, {"WORK": "w4x1+p1", "TILE": _N128, "STAGE": "d4/smem-tma/c2"}, ""),
     ],
 )
 def test_the_warp_group_gemm_computes_the_right_answer(n: int, k: int, pins: dict, epilogue: str) -> None:
@@ -99,3 +104,35 @@ def test_the_warp_group_gemm_computes_the_right_answer(n: int, k: int, pins: dic
     if epilogue:
         expected = np.maximum(expected, 0)
     np.testing.assert_allclose(result.outputs[out].astype(np.float32), expected, rtol=2e-2, atol=5e-1)
+
+
+def _linear(n: int, k: int) -> str:
+    return f"F.linear(torch.randn((512, {k}), dtype=torch.float16), torch.randn(({n}, {k}), dtype=torch.float16))"
+
+
+def test_the_cluster_codec_names_a_tma_ring_only() -> None:
+    assert Stage.parse("d4/smem-tma/p2/c2").cluster == 2
+    assert Stage.parse("d4/smem-tma/p2/c2").spell() == "d4/smem-tma/p2/c2"
+    with pytest.raises(ValueError, match="smem-tma"):
+        Stage.parse("d4/smem-async/c2")
+
+
+def test_a_cluster_multicasts_the_shared_b_slab_from_a_producer_band() -> None:
+    src = _source(_linear(2048, 1024), {"WORK": "w4x1+p1", "TILE": _N64, "STAGE": "d4/smem-tma/p2/c2"})
+    assert "__cluster_dims__(2, 1, 1)" in src
+    assert "cp_async_bulk_tensor_2d_mc(&_b_smem" in src and "cp_async_bulk_tensor_2d(&_a_smem" in src, "B multicast, A local"
+    assert "mbarrier_init(&_mbar_empty[0], 2)" in src, "a slot is free once both CTAs released it"
+    assert "mbarrier_arrive_cluster(&_mbar_empty" in src
+    assert src.count("barrier.cluster.wait") == 2, "after the init, and before any CTA leaves"
+
+
+@pytest.mark.parametrize(
+    ("pins", "message"),
+    [
+        ({"WORK": "w4x1", "STAGE": "d4/smem-tma/p2/c2"}, "producer band"),
+        ({"WORK": "w4x1+p1", "STAGE": "d4/smem-tma/p2/c2", "RASTER": "gn8"}, "consecutive M blocks"),
+    ],
+)
+def test_a_cluster_that_cannot_apply_is_refused_loudly(pins: dict, message: str) -> None:
+    with pytest.raises(LoweringError, match=message):
+        _source(_linear(2048, 1024), {"TILE": _N64, **pins})

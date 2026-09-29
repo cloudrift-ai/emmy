@@ -545,6 +545,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
             axes=ctx.sched.tile.axes,
             inner=inner,
             one_wave=one_wave,
+            raster=ctx.raster,
         )
         sink = (
             store

@@ -1735,7 +1735,10 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
             elem_bytes=elem.nbytes,
             cta=cta,
         )
-        transport = TmaTransport(**common) if stage.transport == "smem-tma" else CpAsyncTransport(**common)
+        if stage.transport == "smem-tma":
+            transport = TmaTransport(**common, cluster=stage.cluster, multicast=_multicast_tags(ops, mn, b_ops, n_chunks))
+        else:
+            transport = CpAsyncTransport(**common)
 
     def drain(slot):  # the atom's slab-reading leaf, over ring `slot`
         return ops.staged_drain(operands, slot, cells, offset, mn)
@@ -1755,6 +1758,38 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
     # The block-scaled cell's per-tensor scale levels land on the output fragments here — after
     # the K-loop, before the sink.
     return pre, [*region, *finalize]
+
+
+def _multicast_tags(ops: _AtomOps, mn, b_ops, n_chunks) -> frozenset[str]:
+    """The operand tags a ``STAGE`` ``c<n>`` cluster multicasts — its B slabs — or a loud
+    refusal where the cluster cannot apply. A cluster is ``n`` consecutive CTAs, so the launch
+    order must put them on consecutive M blocks of one N block (``RASTER`` ``gm<g>``, ``n``
+    dividing the group): they then share their B tile. The ring must be a producer band's
+    (``WORK`` ``+p<n>``): its producer waits for every CTA of the cluster to release a slot, where
+    a uniform ring would stall its MMA warps on a cluster barrier every chunk (measured 2x slower
+    on the H100). Every B box must split into eight-row slices, one per rank, so each slice keeps
+    the 128-byte swizzle's period."""
+    cluster = ops.stage.cluster
+    if cluster == 1:
+        return frozenset()
+    from emmy.compiler.pipeline import RuleSkipped  # noqa: PLC0415 — avoid an import cycle
+
+    raster = ops.raster
+    m = mn[0]
+    blocks = m.axis.extent.as_static() // m.tile if m.axis.extent.is_static and not m.mask else 0
+    group = min(raster.group, blocks) if raster is not None and not raster.is_direct and raster.orient == "m" else 0
+    why = None
+    if ops.workers is None:
+        why = "the cluster's ring runs on a producer band (WORK +p<n>)"
+    elif not isinstance(n_chunks, int) or min(ops.stage.depth, n_chunks) < 2:
+        why = "the cluster's ring needs two slots or more"
+    elif not group or group % cluster or blocks % group:
+        why = f"its {cluster} CTAs must be consecutive M blocks of one N block: RASTER gm<g> with {cluster} dividing g and g the M blocks"
+    elif any(op.atoms != 1 or op.box is not None or op.box_extents[0] % (8 * cluster) for op in b_ops):
+        why = f"a B box does not split into {cluster} slices of whole eight-row swizzle periods"
+    if why is not None:
+        raise RuleSkipped(f"STAGE c{cluster}: {why}", reject=True)
+    return frozenset(op.tag for op in b_ops)
 
 
 def _contract_kloop(c, cells, *, read_row, read_col, contract, wrap):
@@ -1981,6 +2016,9 @@ class _AtomOps:
     # The launch fits the card in one wave: the chunk tier keeps its stream whole (see ``_factor``).
     one_wave: bool = False
     outputs: object = None
+    # The kernel's CTA launch order (the parsed ``RASTER``): a cluster's CTAs are consecutive in
+    # it, so it says which operand they share.
+    raster: object = None
 
     def frag(self, name: str) -> str:
         """``name`` in this emission's fragment namespace (:attr:`frag_ns`)."""
@@ -3761,6 +3799,7 @@ def _atom_ops(
     inner: tuple | None = None,
     one_wave: bool = False,
     outputs=None,
+    raster=None,
 ) -> _AtomOps:
     """The **one** atom dispatch — select the codegen strategy off the atom kind. ``c`` is the
     stored algebra, ``tile`` the PLACED schedule slice (``Tile.at``) the geometry derives from."""
@@ -3789,6 +3828,7 @@ def _atom_ops(
         inner,
         one_wave,
         outputs,
+        raster,
     )
 
 
@@ -3806,6 +3846,7 @@ def reduce_codegen(
     axes: tuple = (),
     inner: tuple | None = None,
     one_wave: bool = False,
+    raster=None,
 ):
     """The reusable, **sink-agnostic** ``(state_decls, reduce_region)`` from the atom strategy — the
     accumulator decls + the contraction K-loop (the ONE :meth:`_AtomOps.reduce` driver: the shared
@@ -3814,7 +3855,19 @@ def reduce_codegen(
     only in the drain leaf — ``ldmatrix`` vs plain ``Load``); ``workers`` splits the staged phases
     across producer / compute warp bands (the resolved :class:`WarpSpec`; ``None`` = uniform)."""
     ops = _atom_ops(
-        c, tile, stage, inputs, workers, seam=seam, lead=lead, frag_ns=frag_ns, k_axis=k_axis, axes=axes, inner=inner, one_wave=one_wave
+        c,
+        tile,
+        stage,
+        inputs,
+        workers,
+        seam=seam,
+        lead=lead,
+        frag_ns=frag_ns,
+        k_axis=k_axis,
+        axes=axes,
+        inner=inner,
+        one_wave=one_wave,
+        raster=raster,
     )
     return ops.state, ops.reduce
 

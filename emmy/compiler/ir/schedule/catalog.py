@@ -272,6 +272,7 @@ def warp_tile_in_catalog(plan: Tile) -> bool:
 STAGE_TRANSPORTS = ("smem", "smem-async", "smem-tma")
 STAGE_DEPTHS = (1, 2, 3, 4, 8)
 STAGE_REG_DEPTHS = (1, 2)
+STAGE_CLUSTERS = (1, 2)
 
 
 def stage_moves(*, warp: bool, ctx=None) -> list[Stage]:
@@ -283,12 +284,14 @@ def stage_moves(*, warp: bool, ctx=None) -> list[Stage]:
     ``reg_depth >= 2`` is the fragment ping-pong under the mma drain, so it is warp-tier only."""
     reg_depths = STAGE_REG_DEPTHS if warp else (1,)
     moves = [
-        Stage(depth=depth, transport=transport, reg_depth=reg_depth, out=out)
+        Stage(depth=depth, transport=transport, reg_depth=reg_depth, out=out, cluster=cluster)
         for transport in STAGE_TRANSPORTS
         for depth in STAGE_DEPTHS
         for reg_depth in reg_depths
         # Only an mma tile stores through the slabs, and a TMA ring's tail copies are never waited on.
         for out in ((False, True) if warp and transport != "smem-tma" else (False,))
+        # A cluster multicasts a TMA-staged operand; the schedule rules say which tiles can take one.
+        for cluster in (STAGE_CLUSTERS if warp and transport == "smem-tma" else (1,))
     ]
     return moves if ctx is None else [move for move in moves if move.available_on(ctx)]
 

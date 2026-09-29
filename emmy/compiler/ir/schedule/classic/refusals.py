@@ -557,6 +557,8 @@ def _wgmma_refusal(plan: Tile, stage: Stage | None = None) -> str | None:
     """Why a warp-group cell cannot run under ``plan`` — and under ``stage``, once the operand
     transport is known — or ``None``. The ONE statement of the wgmma legality rules: the catalog
     filter and the compatibility join drop a row through it, the pin path raises its message."""
+    if stage is not None and stage.cluster > 1 and not (plan.is_warp and plan.atom.is_wgmma):
+        return "a cluster multicast feeds a warp-group ring: it needs a wgmma tile"
     if not (plan.is_warp and plan.atom.is_wgmma):
         return None
     atom = plan.atom

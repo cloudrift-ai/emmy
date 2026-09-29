@@ -54,6 +54,7 @@ from emmy.compiler.ir.expr import BinaryExpr, Builtin, Expr, FlatIndex, FuncCall
 from emmy.compiler.ir.kernel.ir import (
     VOLTA_B_CONGRUOUS,
     VOLTA_CROSSWISE,
+    ClusterSync,
     CpAsyncCommit,
     CpAsyncCopy,
     CpAsyncWait,
@@ -1181,6 +1182,12 @@ class TmaTransport:
     elem_bytes: int
     cta: CtaTile
     mbar: str = "_mbar"
+    # The thread-block cluster the ring runs in (``STAGE`` ``c<n>``), and the operand tags the
+    # cluster's CTAs share: each CTA copies its ``1/cluster`` slice of those boxes (its rank's rows)
+    # and multicasts it to every member, so a shared operand leaves L2 once per cluster. Each CTA
+    # still arms its mbarrier for the whole slot: its own slice and its peers' land on it alike.
+    cluster: int = 1
+    multicast: frozenset[str] = frozenset()
 
     @property
     def _tid0(self) -> Expr:
@@ -1197,7 +1204,7 @@ class TmaTransport:
             tma_descriptor(
                 op.desc,
                 op.buf,
-                op.box_extents,
+                self._box(op),
                 op.dtype or self.slab_dtype,
                 swizzle=op.swizzle,
                 elem_bytes=op.elem_bytes or self.elem_bytes,
@@ -1212,6 +1219,11 @@ class TmaTransport:
         ]
         decls.append(Smem(name=self.mbar, extents=(ring,), dtype="unsigned long long"))
         return decls
+
+    def _box(self, op: Operand) -> tuple[int, ...]:
+        """The descriptor box: the operand's, or one rank's slice of its rows when it is multicast."""
+        rows, *rest = op.box_extents
+        return (rows // self.cluster, *rest) if op.tag in self.multicast else op.box_extents
 
     def _box_coords(self, op: Operand, k0: Expr) -> tuple:
         """The operand's TMA box-origin coordinates at K-chunk ``k0`` — split to match a
@@ -1237,6 +1249,24 @@ class TmaTransport:
     def fill(self, *, k0: Expr, slot: Expr, k0_cur: Expr | None = None) -> list[Stmt]:  # noqa: ARG002 — k0_cur is the sync transport's current-chunk handle
         body: list[Stmt] = [MbarrierArriveExpectTx(mbar=self.mbar, bytes_=self._total_bytes, slot=slot)]
         for op in self.operands:
+            if op.tag in self.multicast:
+                # This rank's slice of the rows, at the same place in every member's slot.
+                share = op.box_extents[0] // self.cluster
+                rank = _mul(BinaryExpr("%", Builtin("block_idx.x"), _lit(self.cluster)), _lit(share))
+                coords = self._box_coords(op, k0)
+                base = op.slot_row(slot)
+                body.append(
+                    TmaLoad(
+                        smem=op.slab,
+                        smem_index=(rank if base is None else _add(base, rank), _lit(0)),
+                        desc=op.desc,
+                        coords=(_add(coords[0], rank), *coords[1:]),
+                        mbar=self.mbar,
+                        mbar_slot=slot,
+                        multicast=self.cluster,
+                    )
+                )
+                continue
             # One box per slot, or one per atom of an atom-major slab: block ``a`` lands ``a`` box
             # heights down the slot and reads ``a`` atom widths along the operand's contiguous dim.
             coords, base, rows = self._box_coords(op, k0), op.slot_row(slot), op.box_extents[-2]
@@ -1321,9 +1351,13 @@ def _producer_band_kloop(
     # Prologue (pre-split, CTA-wide): ONE raw-tid-elected thread inits both mbarrier rings — the
     # transport's wrapped ``linear_tid == 0`` election would match one compute AND one aux thread
     # here — then a CTA barrier publishes the init. The transport's own prologue is not used.
+    # In a cluster (``transport.cluster``) every CTA's consumers release each slot in every CTA,
+    # since a multicast refill lands in all of them: the empty barrier counts one arrive per CTA,
+    # and the init is published cluster-wide before any peer can multicast or arrive.
+    cluster = transport.cluster
     inits = tuple(MbarrierInit(mbar=transport.mbar, count=1, slot=_lit(s)) for s in range(ring))
-    inits += tuple(MbarrierInit(mbar=_EMPTY_MBAR, count=1, slot=_lit(s)) for s in range(ring))
-    pre: list[Stmt] = [Cond(cond=BinaryExpr("==", tid, _lit(0)), body=inits), Sync()]
+    inits += tuple(MbarrierInit(mbar=_EMPTY_MBAR, count=cluster, slot=_lit(s)) for s in range(ring))
+    pre: list[Stmt] = [Cond(cond=BinaryExpr("==", tid, _lit(0)), body=inits), ClusterSync(init=True) if cluster > 1 else Sync()]
 
     k0, K = "_ks", k_extent
     i_expr = BinaryExpr("/", Var(k0), _lit(bk_elems))
@@ -1355,7 +1389,10 @@ def _producer_band_kloop(
     (fill_cond,) = transport.fill(k0=k0_pref, slot=pref_slot)
     assert isinstance(fill_cond, Cond), "TmaTransport.fill is the elected-thread Cond"
     empty_wait = Cond(cond=BinaryExpr(">=", i_expr, _lit(1)), body=(MbarrierWait(mbar=_EMPTY_MBAR, phase=empty_phase, slot=pref_slot),))
-    prod_body: list[Stmt] = [Cond(cond=fill_cond.cond, body=(empty_wait, *fill_cond.body))]
+    # A cluster re-fetches nothing past the last chunk: the copy would land in a peer after its
+    # last wait, with nothing left to keep that CTA alive for it.
+    issue = fill_cond.cond if cluster == 1 else BinaryExpr("&&", fill_cond.cond, _chunk_left(k0, (ring - 1) * bk_elems, k_extent, k_end))
+    prod_body: list[Stmt] = [Cond(cond=issue, body=(empty_wait, *fill_cond.body))]
     prod: list[Stmt] = [SetMaxNReg(_PRODUCER_REGS, "dec")] if setmaxnreg else []
     for s in range(ring - 1):  # prime chunks 0..ring-2 into slots 0..ring-2 (release generation 0)
         prod += transport.fill(k0=_lit(s * bk_elems), slot=_lit(s))
@@ -1374,19 +1411,17 @@ def _producer_band_kloop(
     cons_body.append(Sync(barrier_id=1, count=block_threads))
     elected = BinaryExpr("==", transport.cta.linear_tid, _lit(0))
     if in_flight is None:
-        cons_body.append(Cond(cond=elected, body=(MbarrierArrive(mbar=_EMPTY_MBAR, slot=read_slot),)))
+        cons_body.append(Cond(cond=elected, body=(MbarrierArrive(mbar=_EMPTY_MBAR, slot=read_slot, cluster=cluster),)))
     else:
         prev_slot = BinaryExpr("%", BinaryExpr("+", i_expr, _lit(ring - 1)), _lit(ring))
-        cons_body.append(
-            Cond(
-                cond=BinaryExpr("&&", elected, BinaryExpr(">=", i_expr, _lit(1))), body=(MbarrierArrive(mbar=_EMPTY_MBAR, slot=prev_slot),)
-            )
-        )
+        release = MbarrierArrive(mbar=_EMPTY_MBAR, slot=prev_slot, cluster=cluster)
+        cons_body.append(Cond(cond=BinaryExpr("&&", elected, BinaryExpr(">=", i_expr, _lit(1))), body=(release,)))
     cons: list[Stmt] = [SetMaxNReg(_CONSUMER_REGS, "inc")] if setmaxnreg else []
     cons.append(StridedLoop(axis=kaxis, start=_lit(0), step=_lit(bk_elems), body=Body(tuple(cons_body)), unroll=False, end=k_end))
 
     role = Cond(cond=BinaryExpr(">=", tid, _lit(block_threads)), body=tuple(prod), else_body=tuple(cons))
-    return decls, [*pre, role]
+    # No CTA of a cluster leaves while a peer may still arrive on its empty barriers.
+    return decls, [*pre, role, *([ClusterSync()] if cluster > 1 else [])]
 
 
 def _staged_slabs(transport) -> frozenset[str]:
@@ -1719,14 +1754,18 @@ def _in_flight_kloop(groups, in_flight, pre, i_expr, fill_k0, k0, k_extent, bk_e
     return [*pre, outer]
 
 
+def _chunk_left(k0: str, ahead: int, k_extent, k_end: Expr | None) -> Expr:
+    """Whether the chunk ``ahead`` elements past ``k0`` is still in the stream."""
+    bound = Var(f"{k0}_end") if k_end is not None else (k_extent.expr if isinstance(k_extent, Dim) else _lit(k_extent))
+    return BinaryExpr("<", BinaryExpr("+", Var(k0), _lit(ahead)), bound)
+
+
 def _last_chunk(k0: str, bk_elems: int, k_extent, k_end: Expr | None, settle) -> Cond:
     """``settle(1)`` on every chunk but the last, ``settle(0)`` on the last. The last group is
     waited out INSIDE the loop, not by a wait after it: ptxas (CUDA 12.9) moved the epilogue's
     accumulator reads above a trailing ``wgmma.wait_group 0`` once it had unrolled the loop, and
     an H100 GEMM with a ReLU epilogue stored an eighth of its rows wrong."""
-    bound = Var(f"{k0}_end") if k_end is not None else (k_extent.expr if isinstance(k_extent, Dim) else _lit(k_extent))
-    more = BinaryExpr("<", BinaryExpr("+", Var(k0), _lit(bk_elems)), bound)
-    return Cond(cond=more, body=tuple(settle(1)), else_body=tuple(settle(0)))
+    return Cond(cond=_chunk_left(k0, bk_elems, k_extent, k_end), body=tuple(settle(1)), else_body=tuple(settle(0)))
 
 
 def staged_kloop(

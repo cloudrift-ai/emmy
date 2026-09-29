@@ -755,7 +755,7 @@ class Placement:
 _TRANSPORTS = ("direct", "reg", "smem", "smem-async", "smem-tma")
 
 #: The ``STAGE`` grammar, rendered into every parse error so a bad pin names what it could have said.
-_STAGE_EXPECT = "expect d<n> / reg|smem|smem-async|smem-tma / p<n> / out"
+_STAGE_EXPECT = "expect d<n> / reg|smem|smem-async|smem-tma / p<n> / c<n> / out"
 
 
 @dataclass(frozen=True)
@@ -766,7 +766,7 @@ class Stage:
     names stored intermediate values. ``d1/reg`` retains one slot in registers for reuse by
     consumers or loop iterations. It does not imply recurrence: the schedule determines the
     value's lifetime and ownership. The other transports store operands in shared memory.
-    Spelled by the ``STAGE`` codec ``d<depth>/reg|smem|smem-async|smem-tma[/p<reg_depth>][/out]``.
+    Spelled by the ``STAGE`` codec ``d<depth>/reg|smem|smem-async|smem-tma[/p<reg_depth>][/c<cluster>][/out]``.
     Shared-memory eligibility and sizing produce a separate :class:`ResolvedStage`; this choice
     never stores shared-memory names or a derived K chunk.
 
@@ -794,6 +794,10 @@ class Stage:
     # (``lowering/kernel/097_store_through_smem``). A choice, not a default: it wins where the
     # store burst is a large share of the kernel and costs two barriers where it is not.
     out: bool = False
+    # CTAs per thread-block cluster (``c<n>``): the cluster's CTAs load the operand they share once,
+    # each TMA-copying a slice of it into every member's slab (multicast), so that operand leaves
+    # L2 once per cluster instead of once per CTA. TMA only; 1 is the ordinary launch.
+    cluster: int = 1
 
     def __post_init__(self) -> None:
         if self.transport not in _TRANSPORTS:
@@ -808,6 +812,10 @@ class Stage:
             raise ValueError("register storage has one live value and no operand prefetch")
         if self.out and self.transport in ("direct", "reg"):
             raise ValueError("the output tile goes through the operand slabs, so it needs shared-memory staging")
+        if type(self.cluster) is not int or self.cluster < 1:
+            raise ValueError(f"Stage cluster must be a positive integer, got {self.cluster!r}")
+        if self.cluster > 1 and self.transport != "smem-tma":
+            raise ValueError("a cluster shares its operand through TMA multicast, so it needs the smem-tma transport")
 
     @classmethod
     def direct(cls) -> Stage:
@@ -839,7 +847,7 @@ class Stage:
         if not s:
             return _canonical_choice("STAGE", spec, cls.direct())
         seen: set[str] = set()
-        depth, transport, reg_depth, out = 1, "smem", 1, False
+        depth, transport, reg_depth, out, cluster = 1, "smem", 1, False, 1
 
         def once(field: str, tok: str) -> None:
             if field in seen:
@@ -856,12 +864,15 @@ class Stage:
             elif t.startswith("p"):
                 once("p", t)
                 reg_depth = _codec_width(t[1:], tok=t, codec="STAGE")
+            elif t.startswith("c"):
+                once("c", t)
+                cluster = _codec_width(t[1:], tok=t, codec="STAGE")
             elif t == "out":
                 once("out", t)
                 out = True
             else:
                 raise ValueError(f"bad STAGE token {t!r} ({_STAGE_EXPECT})")
-        return _canonical_choice("STAGE", spec, cls(depth=depth, transport=transport, reg_depth=reg_depth, out=out))
+        return _canonical_choice("STAGE", spec, cls(depth=depth, transport=transport, reg_depth=reg_depth, out=out, cluster=cluster))
 
     def spell(self) -> str:
         """The ``STAGE`` codec string for this stage (inverse of :meth:`parse`). Depth and
@@ -872,6 +883,8 @@ class Stage:
         toks = [f"d{self.depth}", self.transport]
         if self.reg_depth > 1:
             toks.append(f"p{self.reg_depth}")
+        if self.cluster > 1:
+            toks.append(f"c{self.cluster}")
         if self.out:
             toks.append("out")
         return "/".join(toks)

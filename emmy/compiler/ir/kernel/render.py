@@ -23,6 +23,7 @@ from emmy.compiler.ir.kernel.ir import (
     Smem,
     SmemTileStore,
     TmaDescriptor,
+    TmaLoad,
     WgmmaMma,
     frag_dtype,
     pack_smem,
@@ -133,6 +134,18 @@ static __device__ __forceinline__ void mbarrier_arrive(unsigned long long* mbar)
                  : "=l"(state) : "r"(addr) : "memory");
 }
 
+static __device__ __forceinline__ void mbarrier_arrive_cluster(unsigned long long* mbar, int ctas) {
+    // Arrive on this slot's mbarrier in every CTA of the cluster: a multicast refill lands in all
+    // of them, so the slot is free once each has released it. Same proxy fence as mbarrier_arrive.
+    unsigned int addr = __cvta_generic_to_shared(mbar);
+    asm volatile("fence.proxy.async.shared::cta;\\n" ::: "memory");
+    for (int r = 0; r < ctas; ++r) {
+        asm volatile("{.reg .b32 ra; mapa.shared::cluster.u32 ra, %0, %1; "
+                     "mbarrier.arrive.shared::cluster.b64 _, [ra];}\\n"
+                     :: "r"(addr), "r"(r) : "memory");
+    }
+}
+
 static __device__ __forceinline__ void mbarrier_wait_parity(unsigned long long* mbar, int phase) {
     // Issue one ``mbarrier.try_wait`` first — its hint timeout makes the
     // warp suspend rather than spin while the TMA tx drains, freeing the
@@ -146,6 +159,25 @@ static __device__ __forceinline__ void mbarrier_wait_parity(unsigned long long* 
     unsigned int addr = __cvta_generic_to_shared(mbar);
     asm volatile("{.reg .pred P; bw: mbarrier.try_wait.parity.shared.b64 P, [%0], %1; @!P bra bw;}\\n"
                  :: "r"(addr), "r"(phase) : "memory");
+}
+
+static __device__ __forceinline__ void cp_async_bulk_tensor_2d_mc(
+    void* smem, const CUtensorMap* desc, int c0, int c1, unsigned long long* mbar, unsigned short mask) {
+    // The box lands at the same shared offset in every CTA of ``mask`` and completes on the same mbarrier.
+    unsigned int saddr = __cvta_generic_to_shared(smem);
+    unsigned int maddr = __cvta_generic_to_shared(mbar);
+    asm volatile("cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes.multicast::cluster "
+                 "[%0], [%1, {%2, %3}], [%4], %5;\\n"
+                 :: "r"(saddr), "l"(desc), "r"(c0), "r"(c1), "r"(maddr), "h"(mask) : "memory");
+}
+
+static __device__ __forceinline__ void cp_async_bulk_tensor_3d_mc(
+    void* smem, const CUtensorMap* desc, int c0, int c1, int c2, unsigned long long* mbar, unsigned short mask) {
+    unsigned int saddr = __cvta_generic_to_shared(smem);
+    unsigned int maddr = __cvta_generic_to_shared(mbar);
+    asm volatile("cp.async.bulk.tensor.3d.shared::cluster.global.mbarrier::complete_tx::bytes.multicast::cluster "
+                 "[%0], [%1, {%2, %3, %4}], [%5], %6;\\n"
+                 :: "r"(saddr), "l"(desc), "r"(c0), "r"(c1), "r"(c2), "r"(maddr), "h"(mask) : "memory");
 }
 
 static __device__ __forceinline__ void cp_async_bulk_tensor_2d(
@@ -1288,7 +1320,11 @@ def _swizzle_prelude(kernel_op: KernelOp) -> str:
     (often long) element index once instead of inlining it twice around the XOR.
     ``__forceinline__``; same SASS as the inlined form."""
     modes = sorted(
-        {s.swizzle for s in kernel_op.body.iter() if isinstance(s, (LdmatrixLoad, CpAsyncCopy, RegStore, SmemTileStore, Write)) and swizzle_xor(s.swizzle)}
+        {
+            s.swizzle
+            for s in kernel_op.body.iter()
+            if isinstance(s, (LdmatrixLoad, CpAsyncCopy, RegStore, SmemTileStore, Write)) and swizzle_xor(s.swizzle)
+        }
     )
     chunks = []
     for mode in modes:
@@ -1550,6 +1586,11 @@ def render_kernelop(
     params_text = ", ".join(sig_parts)
     bounds = _launch_bounds_for(kernel_op)
     launch_bounds = f"\n__launch_bounds__({bounds})"
+    # A multicast box copy writes into the other CTAs of its cluster: the kernel launches in clusters
+    # of that size along x (compile-time dims, so every launch path — graphs included — takes them).
+    cluster = max((s.multicast for s in kernel_op.body.iter() if isinstance(s, TmaLoad)), default=1)
+    if cluster > 1:
+        launch_bounds += f" __cluster_dims__({cluster}, 1, 1)"
 
     body_text = "\n".join(render_body(kernel_op.body, ctx))
     # The cross-thread combine (``WarpShuffle`` / ``TreeHalve``) references the hardware
