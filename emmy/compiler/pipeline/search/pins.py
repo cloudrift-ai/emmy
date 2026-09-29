@@ -142,7 +142,7 @@ def unreproducible_pin_flag(
     *,
     placement_knobs: list[dict] | None = None,
     reject_conflicts: bool = False,
-    kernel_names: list[str] | None = None,
+    kernel_names: list[tuple[str, ...]] | None = None,
 ) -> str | None:
     """Describe pins not realized by any compiled CUDA kernel, or return ``None``.
 
@@ -158,7 +158,9 @@ def unreproducible_pin_flag(
     for label, want in pinned.items():
         fam = family_of(label)
         # A kernel pin is its family's bare pin, asked of the kernels it names (``kernel_names``, launch
-        # order beside ``kernel_knobs``); without names, of every kernel, as a bare pin is. A placement
+        # order beside ``kernel_knobs``: each kernel's name and graph node id, the two names the compile's
+        # ``kernel_pin`` reads -- a cut piece's node id carries its ordinal, its kernel name does not);
+        # without names, of every kernel, as a bare pin is. A placement
         # receipt names a seam, never a kernel, so a kernel-scoped PLACE pin keeps its scope and matches none.
         name = fam if kernel_scoped(label) and fam != "PLACE" else label
         if fam == "PLACE":
@@ -166,7 +168,9 @@ def unreproducible_pin_flag(
                 continue  # callers without a resolution trace cannot gate a splice receipt
             realized_knobs = placement_knobs
         elif kernel_scoped(label) and kernel_names is not None:
-            realized_knobs = [knobs for knobs, kernel in zip(kernel_knobs, kernel_names, strict=True) if reaches(label, kernel)]
+            realized_knobs = [
+                knobs for knobs, names in zip(kernel_knobs, kernel_names, strict=True) if any(reaches(label, name) for name in names)
+            ]
         else:
             realized_knobs = kernel_knobs
         probe = want

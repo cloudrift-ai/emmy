@@ -571,10 +571,35 @@ def _wgmma_refusal(plan: Tile, stage: Stage | None = None) -> str | None:
     return None
 
 
+#: Registers a ``wgmma`` lane keeps live beside its accumulators: descriptors, addresses, the ring
+#: counters. ptxas asked for 154 at an m64n192 (96 accumulator registers) and refused the 128 a
+#: sixteen-warp CTA leaves each lane.
+_WGMMA_LIVE_REGISTERS = 58
+
+
+def _wgmma_register_refusal(node: Fold, plan: Tile) -> str | None:
+    """Why a warp-group row's accumulators cannot fit its CTA's register envelope, or ``None``. A
+    ``wgmma`` holds the whole instruction's accumulator in registers at once, so a row past the
+    envelope does not spill: ptxas refuses the kernel."""
+    if not (plan.is_warp and plan.atom.is_wgmma):
+        return None
+    from emmy.compiler.ir.schedule.catalog import MAX_REGISTERS_PER_CTA, MAX_REGISTERS_PER_THREAD  # noqa: PLC0415
+
+    channels = max(1, len(node.bilinear_channels()))
+    required = channels * plan.reg_m * plan.reg_n * plan.atom.accumulator_registers_per_lane + _WGMMA_LIVE_REGISTERS
+    available = min(MAX_REGISTERS_PER_THREAD, MAX_REGISTERS_PER_CTA // plan.block_threads)
+    if required <= available:
+        return None
+    return (
+        f"wgmma accumulators need about {required} registers/thread, over the {available}-register envelope "
+        f"at {plan.block_threads} threads/CTA"
+    )
+
+
 def _plan_node_refusal(tile_op, node: Fold, plan: Tile, placed: PlacedTile, facts: ContractionFacts) -> str | None:
     from emmy.compiler.ir.schedule import staging  # noqa: PLC0415
 
-    refusal = _kstep_refusal(facts.k_axis, plan) or _wgmma_refusal(plan)
+    refusal = _kstep_refusal(facts.k_axis, plan) or _wgmma_refusal(plan) or _wgmma_register_refusal(node, plan)
     if refusal is not None or not _needs_fill(tile_op, node, plan):
         return refusal
     converting = staging.converting_a(node, plan.atom, tile_op.inputs)

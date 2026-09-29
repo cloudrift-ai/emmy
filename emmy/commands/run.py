@@ -980,7 +980,7 @@ def _wrong_answer_flag(outputs: dict, ref_outputs: dict) -> str | None:
 
 
 def env_pin_refusal(
-    kernel_knobs: list[dict], placement_knobs: list[dict] | None = None, kernel_names: list[str] | None = None
+    kernel_knobs: list[dict], placement_knobs: list[dict] | None = None, kernel_names: list[tuple[str, ...]] | None = None
 ) -> str | None:
     """The live ``EMMY_<KNOB>`` pins a compiled graph did not realize, or ``None``.
 
@@ -1003,7 +1003,9 @@ def env_pin_refusal(
     return unreproducible_pin_flag(pins, kernel_knobs, placement_knobs=placement_knobs, kernel_names=kernel_names) if pins else None
 
 
-def greedy_record_refusal(kernel_knobs: list[dict], accuracy_error: str | None, kernel_names: list[str] | None = None) -> str | None:
+def greedy_record_refusal(
+    kernel_knobs: list[dict], accuracy_error: str | None, kernel_names: list[tuple[str, ...]] | None = None
+) -> str | None:
     """Why ``--record-greedy`` must not write this greedy pick, or ``None``.
 
     A recorded row outranks every later compile, so two picks never become one. A row whose answer
@@ -1171,9 +1173,9 @@ def _cuda_knob_dicts(graph) -> list[dict]:
     return [dict(n.op.knobs or {}) for n in _launch_order_cuda_nodes(graph)]
 
 
-def _cuda_kernel_names(graph) -> list[str]:
-    """The node id of each ``CudaOp`` beside :func:`_cuda_knob_dicts` — what a kernel pin names."""
-    return [n.id for n in _launch_order_cuda_nodes(graph)]
+def _cuda_kernel_names(graph) -> list[tuple[str, str]]:
+    """The kernel name and node id of each ``CudaOp`` beside :func:`_cuda_knob_dicts` — what a kernel pin names."""
+    return [(n.op.kernel_name, n.id) for n in _launch_order_cuda_nodes(graph)]
 
 
 def _placement_knob_dicts(graph) -> list[dict]:
