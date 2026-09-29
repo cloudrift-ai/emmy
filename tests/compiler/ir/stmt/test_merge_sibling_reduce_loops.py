@@ -511,6 +511,9 @@ def test_normalize_closes_children_exposed_by_parent_merge(monkeypatch) -> None:
         )
 
     body = Body((cone("k0", "j0", "a"), cone("k1", "j1", "b"), Write("Y", (), "outer_b")))
+    merged = merge_sibling_reduce_loops(body)
+    assert len(merged.iter_of_type(Loop)) == 2
+    assert len(merged.accums) == 4
     normalized = normalize_body(body)
 
     assert len(builds) == 1
@@ -622,4 +625,5 @@ def test_merge_collapses_the_channel_loops_of_a_blocked_twisted_carrier() -> Non
     assert len(loops) == 2, "the pivot stays apart; the two channels merge"
     assert [s.name for s in loops[0].body if isinstance(s, Accum)] == ["acc1__blk"]
     assert [s.name for s in loops[1].body if isinstance(s, Accum)] == ["acc5__sum__blk", "acc3__blk"]
-    assert len([s for s in loops[1].body if isinstance(s, Loop)]) == 2, "both score passes are inside now"
+    (score_loop,) = [s for s in loops[1].body if isinstance(s, Loop)]
+    assert len(score_loop.body.accums) == 2, "both score states share one inner loop"

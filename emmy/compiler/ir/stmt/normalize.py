@@ -53,7 +53,6 @@ def _normalize_body(stmts: Body) -> Body:
     stmts = drop_size_one_reduce_axes(stmts)
     stmts = canonicalize_free_axis_order(stmts)
     stmts = eliminate_copy_aliases(stmts)
-    stmts = unify_sibling_reduce_axes(stmts)
     stmts = merge_sibling_reduce_loops(stmts)
     stmts = hoist_loop_invariants(stmts)
     stmts = simplify_body(stmts)
@@ -62,10 +61,9 @@ def _normalize_body(stmts: Body) -> Body:
     # exposes duplicates without paying for canonical sibling order at every round.
     stmts = _canonicalize_exprs(stmts)
     while True:
-        unified = unify_sibling_reduce_axes(stmts)
-        reduced = dedup_loads(merge_sibling_reduce_loops(unified))
-        if reduced == unified:
-            return _canonical_order(unified)
+        reduced = dedup_loads(merge_sibling_reduce_loops(stmts))
+        if reduced == stmts:
+            return _canonical_order(reduced)
         stmts = _canonicalize_exprs(reduced)
 
 
@@ -494,19 +492,20 @@ def merge_sibling_reduce_loops(stmts: Body) -> Body:
     statements that originally followed it now resolve to the merged
     Loop above them — still defs-before-uses.
 
-    Recurses through every block-structured Stmt to find nested scopes.
+    Unifies overlapping reduction axes and merges parents before visiting their children, so a
+    parent merge exposes matching child reductions to the same walk.
     """
     stmts = Body.coerce(stmts)
 
     def walk(body: Body) -> Body:
         recursed: list[Stmt] = []
-        for s in body:
+        for s in _merge_sibling_reduce_loops(_unify_siblings(body)):
             nested = s.nested()
             if nested:
                 recursed.append(s.with_bodies(tuple(walk(b) for b in nested)))
             else:
                 recursed.append(s)
-        return _merge_sibling_reduce_loops(Body(recursed))
+        return Body(recursed)
 
     return walk(stmts)
 
