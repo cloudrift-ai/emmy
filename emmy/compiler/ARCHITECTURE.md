@@ -252,6 +252,12 @@ point, so an activation read by one kernel keeps its quantize inline, and the fi
 per slab cell instead of once per output element. Filled codes reach the cell but keep 16-bit traffic on that operand,
 since the fill still reads the unquantized activation to encode from.
 
+The copies run on cp.async or on TMA. A TMA box deposits dense, so its byte rows carry none of the cp.async row pad,
+and the drain's byte gathers then conflict on shared-memory banks. On an RTX 5090 that made 2048-row prefill tiles
+about 25% slower than cp.async, while 16-row decode tiles measured even. Filled codes keep cp.async: one thread arms a
+box copy on an mbarrier, and the compute fill has no place in that handshake, so the TMA stage needs every operand
+stored.
+
 That last move is why the native lowering carries a bounded gap rather than the exact oracle every other lowering
 answers to. The declared program applies `f16(block_scale x tensor_scale)` per element — the single fused rounding
 above — and the instruction applies the raw block scale itself with the tensor level factored out, so the two are not

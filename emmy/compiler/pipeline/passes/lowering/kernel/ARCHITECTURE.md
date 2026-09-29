@@ -406,7 +406,9 @@ computed A has only the synchronous compute fill, as anywhere else; a materializ
 transport the card offers, each depositing the same `1 + N` slabs — so the gate/up GEMM rings on cp.async and reaches
 the TMA box copy, and with it wgmma. Only the gmem-direct MMA leaf stays single-channel, because it folds one B
 straight out of registers. The block-scaled fp4 cell carries N channels the same way, staging `2 + 2N` slabs over the
-one shared A pair, and names each channel's block-scale fragment per channel just as its data fragment is.
+one shared A pair, and names each channel's block-scale fragment per channel just as its data fragment is. Its
+slabs ring on either copy transport. Under TMA each stored buffer is its own descriptor, and a box ends at the
+buffer's K dim: an activation's scales carry a trailing unit dim, which as the box's inner dim would be one byte wide.
 
 **A gmem fragment's leading dimension is read off the operand's ADDRESS.** A loader reaches its operand through one
 leading dimension: one coordinate steps by 1, the other by `ldm`. Which DIM an index spells a coordinate in does not
