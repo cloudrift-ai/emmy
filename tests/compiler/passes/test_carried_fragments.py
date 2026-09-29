@@ -49,6 +49,8 @@ def test_a_two_slot_ring_keeps_the_ordinary_schedule() -> None:
 @requires_cuda
 @pytest.mark.parametrize("k", [192, 1024, 3072])  # three chunks (the whole ring), 16 (it wraps mid-cycle), 48
 def test_a_carried_ring_computes_the_right_answer(k: int) -> None:
+    if not Context.probe().has_cp_async:
+        pytest.skip("a cp.async ring needs sm_80 or newer")
     graph = graph_from_code(_code(k))[0]
     rng = np.random.default_rng(0)
     a = rng.standard_normal((256, k)).astype(np.float16)

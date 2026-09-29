@@ -465,6 +465,7 @@ class CompiledProgram:
         regions = self._provision(sym_values, input_data)
         bindings = _host_bindings(plan, input_data, sym_values)
         self.executor = emmy_runtime.Executor(device(), program, binaries, bindings, sym_values, regions)
+        self._bind_lent_inputs(input_data)
         elapsed = _time_module.monotonic() - t0
         if compile_timeout_s is not None and elapsed > compile_timeout_s:
             raise CompileBudgetExceeded(f"compile stage exceeded {compile_timeout_s:.1f}s budget ({elapsed:.2f}s) — nothing measured")
@@ -527,6 +528,7 @@ class CompiledProgram:
         bindings = _host_bindings(self.plan, input_data, new_sym, only=touched)
         regions = self._provision(new_sym, input_data)
         self.executor.rebind(new_sym, bindings, regions)
+        self._bind_lent_inputs(input_data)
         self.sym_values = new_sym
 
     def set_sym_values(self, values: dict[str, int]) -> None:
@@ -603,6 +605,19 @@ class CompiledProgram:
         bindings = _host_bindings(self.plan, input_data, self.sym_values, only=set(input_data))
         for name, data in bindings.items():
             self.executor.bind(name, data)
+
+    def _bind_lent_inputs(self, input_data: dict) -> None:
+        """Mark every input supplied as a CUDA tensor bound. Its memory IS the buffer's region
+        (:meth:`_provision`), so no bytes travel, but the runtime counts an input bound only once
+        told, and a launch refuses while one is not: the device copy onto itself is skipped and the
+        mark stays (:meth:`upload_prefix_device`)."""
+        lent = {
+            buffer.name: input_data[buffer.name]
+            for buffer in self.plan.buffers
+            if buffer.role == "input" and buffer.name not in self.plan.paged and _is_device_tensor(input_data.get(buffer.name))
+        }
+        if lent:
+            self.upload_prefix_device(lent)
 
     def upload_prefix_device(self, input_data: dict) -> None:
         """Device twin of :meth:`upload_prefix`: copy each supplied CUDA tensor into its buffer's

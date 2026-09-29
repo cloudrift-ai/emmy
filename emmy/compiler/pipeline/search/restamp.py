@@ -239,7 +239,8 @@ def _rekeyed_rows(document: GoldenFile, entry: Config, wire: dict, report: Resta
     if moved:
         report.rows_rekeyed.extend(old.name for old in old_records)
     survivors = [
-        replace(new, identity=new_key) if moved or old.identity == old_key else new for old, new in zip(old_records, new_records, strict=True)
+        replace(new, identity=new_key) if moved or old.identity == old_key else new
+        for old, new in zip(old_records, new_records, strict=True)
     ]
 
     rows = []
