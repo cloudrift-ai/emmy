@@ -32,5 +32,14 @@ engine:
         --tool-call-parser llama3_json
 
 matrices:
-  deploy.gpu: "NVIDIA Tesla V100 SXM3 32GB"
-  deploy.gpu_count: 1
+  - deploy.gpu: "NVIDIA Tesla V100 SXM3 32GB"
+    deploy.gpu_count: 1
+
+  # Reduced-fraction entry so this model can share the 32 GB card with the AWQ-INT4 variant at 0.3.
+  # 0.65 x 32 GiB leaves ~4.5 GiB of KV after the ~15 GiB of FP16 weights and the engine's own
+  # overhead; at 128 KiB per token that holds two 16,384-token requests. Unverified until a record
+  # run on the card.
+  - deploy.gpu: "NVIDIA Tesla V100 SXM3 32GB"
+    deploy.gpu_count: 1
+    engine.llm.gpu_memory_utilization: 0.65
+    engine.llm.context_length: 16384
