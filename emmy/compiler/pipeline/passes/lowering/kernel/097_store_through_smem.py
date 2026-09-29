@@ -9,9 +9,10 @@ finished K-loop no longer reads, and the CTA then writes the tile out in 16-byte
 (:class:`SmemTileStore`).
 
 What is rewritten, judged structurally on the kernel: a 2-D contraction ``Tile`` whose body ends
-in unguarded, non-atomic ``m16n8k16`` :class:`RegStore`\\ s of one 2-byte output with a contiguous
+in non-atomic ``m16n8k16`` :class:`RegStore`\\ s of one 2-byte output with no N edge (a masked M edge keeps
+its row guard on the fragment stores and bounds the row copy) and a contiguous
 row, a tile at least 64 columns wide (the 128-byte swizzle that keeps both the fragment writes and
-the row reads free of bank conflicts), an operand slab big enough to hold it, a cp.async or
+the row reads free of bank conflicts), an operand pool big enough to hold it, a cp.async or
 synchronous fill (a TMA ring's tail copies land on an mbarrier this pass does not wait for), and no
 fused epilogue reading shared memory. Anything else keeps its direct stores.
 
@@ -34,7 +35,7 @@ from emmy.compiler.backend.cuda.dtype import cuda_name
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.expr import BinaryExpr, Literal, SimplifyCtx
 from emmy.compiler.ir.kernel import KernelOp, Tile
-from emmy.compiler.ir.kernel.ir import CpAsyncCopy, CpAsyncWait, MbarrierWait, RegStore, Smem, SmemTileStore, Sync, TmaLoad
+from emmy.compiler.ir.kernel.ir import CpAsyncCopy, CpAsyncWait, MbarrierWait, RegStore, Smem, SmemTileStore, Sync, TmaLoad, pack_smem
 from emmy.compiler.ir.stmt import Body
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 from emmy.compiler.ir.schedule import Stage
@@ -86,7 +87,8 @@ def _through_smem(op: KernelOp, tile: Tile) -> Tile:
         if (
             s.dst_buffer != dst
             or s.atomic
-            or s.m_guard is not None
+            or (s.m_guard is not None) != (stores[0].m_guard is not None)
+            or (s.m_guard is not None and s.m_guard[1] != stores[0].m_guard[1])
             or s.n_guard is not None
             or s.swizzle != "NONE"
             or s.fragment_layout != "m16n8k16"
@@ -133,10 +135,11 @@ def _through_smem(op: KernelOp, tile: Tile) -> Tile:
         return tile
     if cols % 64 or cols & (cols - 1) or ldm % 8 or base[1].eval(probe) % 8:
         return tile
-    need = rows * cols * out.dtype.nbytes
-    over = max((s for s in smem.values() if _nbytes(s) >= need), key=_nbytes, default=None)
-    if over is None:
+    # The tile starts at the pool's first slab and may run on over the others, never past the pool.
+    offsets, pool = pack_smem(smem.values())
+    if not offsets or rows * cols * out.dtype.nbytes > pool:
         return tile
+    over = min(smem.values(), key=lambda s: offsets[s.name])
     swizzle = "B128" if cols == 64 else f"B128@{cols.bit_length() - 1}"
     drain = [CpAsyncWait(group=0)] if any(isinstance(s, CpAsyncCopy) for s in tile.body.iter()) else []
     staged = [
@@ -150,7 +153,17 @@ def _through_smem(op: KernelOp, tile: Tile) -> Tile:
         Smem(name=_TILE, extents=(rows, cols), dtype=cuda_name(out.dtype), over=over.name),
         *staged,
         Sync(),
-        SmemTileStore(src=_TILE, dst=dst, base=base, rows=rows, cols=cols, ldm=ldm, threads=tile.block_threads, swizzle=swizzle),
+        SmemTileStore(
+            src=_TILE,
+            dst=dst,
+            base=base,
+            rows=rows,
+            cols=cols,
+            ldm=ldm,
+            threads=tile.block_threads,
+            swizzle=swizzle,
+            bound=None if stores[0].m_guard is None else stores[0].m_guard[1],
+        ),
     ]
     return replace(tile, body=Body(tuple(body)))
 
@@ -162,9 +175,3 @@ def _static(d) -> int | None:
     return d.as_static() if d.is_static else None
 
 
-def _nbytes(s: Smem) -> int:
-    from math import prod  # noqa: PLC0415
-
-    from emmy.compiler.backend.cuda.dtype import nbytes_of  # noqa: PLC0415
-
-    return prod(int(e) for e in s.extents) * nbytes_of(s.dtype)

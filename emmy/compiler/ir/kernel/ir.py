@@ -94,9 +94,10 @@ class Smem(Stmt):
     extents: tuple[int, ...]
     dtype: str = "float"
     align: int = 0
-    # The buffer whose storage this one reuses, once that buffer is dead — the output tile a GEMM
-    # stores through shared memory after its K-loop lives over the operand slabs. It never grows
-    # past that buffer, so the pool footprint does not change.
+    # The buffer whose storage this one reuses, once it and the buffers packed after it are dead —
+    # the output tile a GEMM stores through shared memory after its K-loop lives over the operand
+    # slabs. It starts at that buffer's offset and may run on over the ones after it; the kernel
+    # then takes the dynamic pool, where they are contiguous.
     over: str | None = None
 
     def local_decls(self) -> tuple[str, ...]:
@@ -2238,7 +2239,9 @@ class SmemTileStore(Stmt):
     The second half of storing a GEMM output through shared memory: the tile's :class:`RegStore`
     fragments wrote ``src`` with 4-byte stores, and this turns them into full rows of 16-byte global
     stores. ``base`` is the tile's ``(row, col)`` in ``dst`` and ``ldm`` its row stride there;
-    ``src`` is row-major, ``cols`` per row, read back through the ``swizzle`` it was written with."""
+    ``src`` is row-major, ``cols`` per row, read back through the ``swizzle`` it was written with.
+    ``bound`` is ``dst``'s row count when the tile overhangs it (a masked M edge): rows at or past
+    it are not stored."""
 
     src: str
     dst: str
@@ -2248,16 +2251,18 @@ class SmemTileStore(Stmt):
     ldm: int
     threads: int
     swizzle: str = "NONE"
+    bound: Expr | None = None
 
     def external_writes(self) -> tuple[str, ...]:
         return (self.dst,)
 
     def exprs(self) -> tuple[Expr, ...]:
-        return tuple(self.base)
+        return (*self.base, *(() if self.bound is None else (self.bound,)))
 
     def pretty(self, indent: str = "") -> list[str]:
         at = ", ".join(e.pretty() for e in self.base)
-        return [f"{indent}SmemTileStore {self.dst}[{at}] <- {self.src}[{self.rows}, {self.cols}] swz={self.swizzle}"]
+        bound = "" if self.bound is None else f" m<{self.bound.pretty()}"
+        return [f"{indent}SmemTileStore {self.dst}[{at}] <- {self.src}[{self.rows}, {self.cols}] swz={self.swizzle}{bound}"]
 
     def render(self, ctx: RenderCtx) -> list[str]:
         from emmy.compiler.backend.cuda.dtype import nbytes_of  # noqa: PLC0415
@@ -2269,11 +2274,12 @@ class SmemTileStore(Stmt):
         if swizzle_xor(self.swizzle):
             src = f"{swizzle_fn(self.swizzle)}({src})"
         pad = _pad(ctx.indent)
+        guard = "" if self.bound is None else f"if ({self.base[0].render(ctx)} + _r < {self.bound.render(ctx)}) "
         return [
             f"{pad}#pragma unroll",
             f"{pad}for (int _i = threadIdx.x; _i < {self.rows * chunks}; _i += {self.threads}) {{",
             f"{pad}    const int _r = _i / {chunks}, _c = (_i % {chunks}) * {vec};",
-            f"{pad}    *reinterpret_cast<uint4*>(&{self.dst}[{render_index(self.dst, self.base, ctx)} + _r * {self.ldm} + _c]) = "
+            f"{pad}    {guard}*reinterpret_cast<uint4*>(&{self.dst}[{render_index(self.dst, self.base, ctx)} + _r * {self.ldm} + _c]) = "
             f"*reinterpret_cast<const uint4*>(&{self.src}[{src}]);",
             f"{pad}}}",
         ]
@@ -2811,6 +2817,7 @@ def pack_smem(smems) -> tuple[dict[str, int], int]:  # noqa: ANN001 — smems: I
         elements = prod(int(e) for e in s.extents) if s.extents else 1
         if s.over:
             offsets[s.name] = offsets[s.over]
+            cursor = max(cursor, offsets[s.name] + elements * nbytes_of(s.dtype))
             continue
         align = max(nbytes_of(s.dtype), int(s.align) if s.align else 0)
         if align:
