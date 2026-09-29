@@ -5,7 +5,7 @@ import logging
 import os
 import sys
 
-from emmy.deploy import DeployParams
+from emmy.deploy import DeployParams, replica_services
 from emmy.deploy import (
     deploy as deploy_entry,
 )
@@ -67,11 +67,13 @@ async def _handle_cloud(args):
         logger.error("Error: VM provisioning failed.")
         sys.exit(1)
 
+    services, load_balancer = replica_services(recipe)
     params = DeployParams(
         server=conn.address,
         ssh_key=ssh_key,
         ssh_port=conn.ssh_port,
-        recipe=recipe,
+        services=services,
+        load_balancer=load_balancer,
         model_dir=args.model_dir,
         hf_token=hf_token,
         dry_run=args.dry_run,
