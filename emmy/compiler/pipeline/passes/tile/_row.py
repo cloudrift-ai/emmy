@@ -118,6 +118,17 @@ def lift_kernel(loop: LoopOp, *, name: str) -> TileOp:
     return tile
 
 
+def _orients_by_nest(tile: TileOp) -> bool:
+    """Whether some single-product contraction of ``tile`` took its A from the loop nest: one with
+    a computed operand, which the lift orients by nest order where two slabs orient by layout."""
+    return any(
+        node.as_contraction() is not None
+        and len(node.bilinear_channels()) == 1
+        and any(edge.as_slab() is None for edge in node.operands[:2])
+        for node in tile.views
+    )
+
+
 def reformed(piece: TileOp) -> TileOp:
     """``piece`` formed as its own kernel: its tree lowered to the closed loop nest and lifted
     again, the way a kernel fusion had ended at a graph edge is formed.
@@ -143,6 +154,23 @@ def reformed(piece: TileOp) -> TileOp:
         # Through the LoopOp's normalization: that is where two reduce loops over one axis become
         # one loop with two accumulators, the twin the lift forms one term from.
         formed = lift_kernel(LoopOp(body=body), name=piece.name)
+        if _orients_by_nest(formed):
+            # The closed nest's grid order is ``lower``'s choice. Formed once, the piece is lowered
+            # again inside its own grid loops: nothing sits ahead of that chain, so normalization
+            # orders it by the output layout, and the lift orients the contraction by that order.
+            # This pass lowers the formed terms, so it keeps the twin the first pass merged.
+            # Normalization can hoist a table read's index out of the reduce loop there, a nest the lift
+            # cannot take whole; such a piece keeps the first form.
+            again = formed.op.lower(bound=frozenset(axis.name for axis in formed.place.free), stores=formed.output_specs, axes=formed.axes)
+            for axis in reversed(formed.place.free):
+                again = Body((Loop(axis=axis, body=again),))
+            try:
+                reoriented = lift_kernel(LoopOp(body=again), name=piece.name)
+                reoriented.op.lower(bound=frozenset(), stores=reoriented.output_specs, axes=reoriented.axes)
+            except ValueError:
+                pass
+            else:
+                body, formed = again, reoriented
     except ValueError:
         return piece
     # The lift peels every outer plain loop into the grid, a store's sweep included when nothing
