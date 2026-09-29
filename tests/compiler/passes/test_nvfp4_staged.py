@@ -1176,15 +1176,44 @@ def test_the_block_scaled_stage_resolves_four_byte_slabs_on_cp_async():
     assert st.bk_elems == tile.bk * 64
 
 
-def test_the_block_scaled_stage_declines_tma_and_a_scale_row_under_the_chunk():
-    """Two refusals, both facts rather than preferences. TMA: the four-descriptor box copy is not
-    written. The narrow tile: a scale row is ``bk_elems / 16`` bytes and the cp.async fill copies
-    16 B chunks, so ``bk_elems`` under 256 leaves a row a chunk cannot fill."""
+def test_the_block_scaled_stage_declines_a_scale_row_under_the_chunk():
+    """A scale row is ``bk_elems / 16`` bytes and both copy transports move 16 B spans, so
+    ``bk_elems`` under 256 leaves a row neither can copy."""
     node, inputs, axes, ka = _pair_node()
-    tile = _tile(K64, "f1x4/k4", "w1x4", axes)
-    assert resolve_warp_stage(node, tile, Stage.parse("d2/smem-tma"), 200 * 1024, inputs, k_axis=ka) is None
     narrow = _tile(K64, "f1x4/k2", "w1x4", axes)
-    assert resolve_warp_stage(node, narrow, Stage.parse("d2/smem-async"), 200 * 1024, inputs, k_axis=ka) is None
+    for spec in ("d2/smem-async", "d2/smem-tma"):
+        assert resolve_warp_stage(node, narrow, Stage.parse(spec), 200 * 1024, inputs, k_axis=ka) is None
+
+
+@pytest.mark.parametrize("make", [_pair_node, _fused_pair_node], ids=["one-channel", "two-channel"])
+def test_fp4_tma_stage_rings_dense_slabs_for_every_channel(make):
+    """TMA boxes the same slabs cp.async copies: the A codes and scales, and a codes and a scales
+    slab per weight channel. A box deposits dense, so a slot is the unpadded rows plus one 8-byte
+    mbarrier, and the ring is as deep as the budget holds whole slots."""
+    node, inputs, axes, ka = make()
+    tile = _tile(K64, "f1x4/k4", "w1x4", axes)
+    bk = tile.bk * 64
+    channels = len(node.bilinear_channels())
+    slot = (tile.m.tile + channels * tile.n.tile) * (bk // 2 + bk // 16) + 8
+    st = resolve_warp_stage(node, tile, Stage.parse("d4/smem-tma"), 2 * slot, inputs, k_axis=ka)
+    assert st is not None and st.transport == "smem-tma" and st.depth == 2 and st.bk_elems == bk
+    assert resolve_warp_stage(node, tile, Stage.parse("d1/smem-tma"), slot - 1, inputs, k_axis=ka) is None
+    # A codes row of 1024 k is a 512-byte box row, past the hardware's 256-element box limit.
+    wide = _tile(K64, "f1x4/k16", "w1x4", axes)
+    assert resolve_warp_stage(node, wide, Stage.parse("d1/smem-tma"), 200 * 1024, inputs, k_axis=ka) is None
+
+
+def test_fp4_tma_leaves_computed_activation_codes_to_cp_async():
+    """A matmul that encodes its own activation has no codes buffer to describe. Its A slab is
+    compute-filled, which cp.async composes with and a TMA box copy does not."""
+    from emmy.compiler.ir.schedule.staging import _block_scaled_warp_stage
+
+    node, inputs, axes, ka = _pair_node()
+    pair = _packed(node, inputs)[1]
+    computed = replace(pair, a=replace(pair.a, bits=None))
+    tile = _tile(K64, "f1x4/k4", "w1x4", axes)
+    assert _block_scaled_warp_stage(node, tile, Stage.parse("d2/smem-tma"), 200 * 1024, computed, inputs, ka) is None
+    assert _block_scaled_warp_stage(node, tile, Stage.parse("d2/smem-async"), 200 * 1024, computed, inputs, ka) is not None
 
 
 # --- the producer band's one illegal partner ---------------------------------------------------

@@ -384,19 +384,29 @@ def _block_scaled_warp_stage(c: Fold, tile: Tile, stage: Stage, budget: int, pai
     matmul computes — its quantize fused in, leaving no buffer to copy from. The weight side is
     always stored, which is what the ``pair.b`` check below requires of every channel.
 
-    The scoped shape: cp.async (the four-descriptor TMA box copy is not built — a missing-code
-    fact, stated where the code would live), a k64 cell over 16-element blocks, both code
-    operands canonically laid out with k innermost, and a static k the tile divides.
+    The scoped shape: a copy transport, a k64 cell over 16-element blocks, both code operands
+    canonically laid out with k innermost, and a static k the tile divides.
 
     Sizing restates the byte-slab rule in the format's units, twice per side. A codes row is
-    ``bk_elems / 2`` bytes and a scales row ``bk_elems / block``; the fill copies 16 B chunks and
+    ``bk_elems / 2`` bytes and a scales row ``bk_elems / block``; each copy moves 16 B chunks and
     a chunk never straddles a row, so both spans — and the gmem rows they stride, ``k / 2`` and
     ``k / block`` — must be 16-divisible. That is what bounds the tile from below: at block 16 a
     scales row needs ``bk_elems`` to be a multiple of 256, so the narrow-k tiles decline here and
-    keep the generic reading.
+    keep the generic reading. The ring holds every slab of every channel: the A pair, and one
+    codes and one scales slab per weight.
+
+    TMA copies the same slabs as boxes, one descriptor per stored buffer. The same 16 B rules are
+    the box's own (inner span and gmem row stride), and every box dim must fit the hardware's 256
+    limit. A box writes its rows unpadded, so they carry no cp.async pad; every slot is then a multiple
+    of 128 B (8-row multiples of 16 B rows), which keeps each slot's destination aligned. Each slot
+    also takes one 8-byte mbarrier. TMA has no way to evaluate an activation's encode, so a matmul
+    that computes its own A codes declines it and keeps cp.async beside its compute fill.
     """
     atom = tile.atom
-    if stage.transport != "smem-async":
+    tma = stage.transport == "smem-tma"
+    if stage.transport != "smem-async" and not tma:
+        return None
+    if tma and pair.a.bits is None:
         return None
     if atom.atom_k != 64 or pair.block != _PACKED_BLOCK or atom.operand_dtype("a") != atom.operand_dtype("b"):
         return None
@@ -425,8 +435,11 @@ def _block_scaled_warp_stage(c: Fold, tile: Tile, stage: Stage, budget: int, pai
             return None
     if k % bk_elems or (bk_elems // 2) % 16 or (bk_elems // block) % 16 or (k // block) % 16:
         return None
-    rows = (tile.m.tile, tile.n.tile)
-    slot_bytes = sum(r * (bk_elems // 2 + BYTE_SLAB_PAD) + r * (bk_elems // block + BYTE_SLAB_PAD) for r in rows)
+    if tma and max(tile.m.tile, tile.n.tile, bk_elems // 2) > _TMA_MAX_BOX:
+        return None
+    pad = 0 if tma else BYTE_SLAB_PAD
+    rows = (tile.m.tile, *(tile.n.tile for _ in pair.b))
+    slot_bytes = sum(r * (bk_elems // 2 + pad) + r * (bk_elems // block + pad) for r in rows) + (8 if tma else 0)
     if slot_bytes > budget:
         return None
     choice = replace(stage, depth=_clamp_depth(stage.depth, slot_bytes, budget), reg_depth=min(stage.reg_depth, tile.bk))
@@ -699,7 +712,7 @@ def resolve_fill_stage(
     c: Fold,
     tile: Tile,
     budget: int,
-    want_depth: int = 1,
+    want: Stage,
     *,
     inputs=None,
     why: list[str] | None = None,
@@ -709,18 +722,24 @@ def resolve_fill_stage(
     producer_k: Axis | None = None,
     axes: tuple = (),
 ) -> ResolvedStage | None:
-    """The ``smem`` compute-fill :class:`Stage` for a computed-operand warp contraction under
-    ``tile`` — MANDATORY for this form (the gmem-direct mma leaf refuses a computed A, and the
-    byte-copy / cp.async / TMA transports move bytes and cannot evaluate a producer cone), so it
-    has no gmem-direct ``""`` sibling and a ``STAGE`` pin can only choose its DEPTH. ``None`` when
-    the slabs exceed ``budget``: one A slab, one B slab per channel, and one fp32 row per bridged
-    statistic (:func:`~emmy.compiler.ir.pure.fold.cone_seam`'s ``stats`` and its per-chunk ``chunk`` stats — the same
-    node boundary the materializer fills through).
+    """The compute-fill :class:`Stage` for a computed-operand warp contraction under ``tile`` —
+    MANDATORY for this form (the gmem-direct mma leaf refuses a computed A, and the byte-copy /
+    cp.async / TMA transports move bytes and cannot evaluate a producer cone), so it has no
+    gmem-direct ``""`` sibling. A ``STAGE`` pin (``want``) chooses the depth and how the stored
+    peers move: ``smem`` copies them with cp.async (the blocking copy where there is none),
+    ``smem-tma`` with TMA box copies, and then also the ``/p2`` register double buffer. The
+    computed slabs are always the fill's. ``None`` when the slabs exceed ``budget``: one A slab,
+    one B slab per channel, and one fp32 row per bridged statistic
+    (:func:`~emmy.compiler.ir.pure.fold.cone_seam`'s ``stats`` and its per-chunk ``chunk`` stats —
+    the same node boundary the materializer fills through).
 
-    ``want_depth >= 2`` is the asymmetric B-only prefetch ring: only the B cp.async slabs ring
+    ``want.depth >= 2`` is the asymmetric B-only prefetch ring: only the copied slabs ring
     (their copies for chunk ``i+d-1`` fly under chunk ``i``'s compute fill and drain), while the
     compute-filled A slab and the stat rows stay single-buffer — ringing a compute fill buys no
     overlap, it runs on the drain's own threads. Both depths are fork siblings, measured per shape.
+
+    TMA asks of the copied slabs what :func:`resolve_warp_stage` asks of every slab it boxes, and
+    needs at least one copied slab: a stage whose every slab is computed has nothing to copy.
 
     ``k_axis`` is the contraction's K with its extent (the enclosing Fold's when the contraction
     is a derived singleton marker), ``producer_k`` the nested producer's; ``axes`` is the kernel's
@@ -733,7 +752,7 @@ def resolve_fill_stage(
         return None
     cones = c.operands[0].as_slab() is None or any(b.as_slab() is None for _, b in c.bilinear_channels())
     computes = cones or converting_a(c, atom, inputs)
-    if want_depth >= 2 and atom.sync_copy_staging and computes:
+    if want.depth >= 2 and atom.sync_copy_staging and computes:
         # With no cp.async the ring's B copies are blocking copies, and on sm_70 the depth-2 ring
         # returned silently wrong answers on nine of sixteen measured warp grids and fragments,
         # every one of them correct at depth 1. That is the ring under a COMPUTE fill, whose
@@ -742,8 +761,7 @@ def resolve_fill_stage(
         # ordinary blocking-copy ring the single-channel tiers already stage (``SPLIT_COPY_DEPTH``).
         _decline(why, "the smem compute fill's B prefetch ring needs cp.async; this atom stages with blocking copies")
         return None
-    if atom.sync_copy_staging:
-        want_depth = min(want_depth, SPLIT_COPY_DEPTH)
+    want_depth = min(want.depth, SPLIT_COPY_DEPTH) if atom.sync_copy_staging else want.depth
     bk_elems = tile.bk * atom.atom_k
     if k_axis.extent.is_static and k_axis.extent.as_static() % bk_elems:
         # the staged driver unrolls WHOLE K chunks — the same rule the copy transports state on their own
@@ -770,7 +788,8 @@ def resolve_fill_stage(
     # A materialized A whose dtype the atom cannot bind rides the CONVERTING synchronous fill —
     # per-cell load + typed slab store — never the byte copy (which cannot convert).
     a_converts = converting_a(c, atom, inputs)
-    if c.operands[0].as_slab() is not None and not a_converts:
+    a_copied = c.operands[0].as_slab() is not None and not a_converts
+    if a_copied:
         async_bytes += a_bytes
     else:
         sync_bytes += a_bytes
@@ -779,6 +798,20 @@ def resolve_fill_stage(
             async_bytes += tile.n.tile * bk_elems * b_nbytes
         else:
             sync_bytes += tile.n.tile * bk_elems * b_nbytes
+    if want.transport == "smem-tma":
+        m, n, b_trans = tile.m, tile.n, c.as_contraction().b_trans
+        if not async_bytes:
+            _decline(why, "every slab of this contraction is computed, so a TMA stage has nothing to copy")
+            return None
+        boxed = [(c.operands[0], m.axis.name)] if a_copied else []
+        boxed += [(edge, n.axis.name) for edge in c.operands[1:] if edge.as_slab() is not None]
+        if not (
+            all(_tma_operand_box(edge.as_slab().load.index, axis, k_axis.name) for edge, axis in boxed)
+            and max(m.tile, n.tile, bk_elems) <= _TMA_MAX_BOX
+            and _warp_tma(k_axis, n.axis, n.tile, bk_elems, a_nbytes, b_nbytes, n.mask, b_trans)
+        ):
+            _decline(why, "a copied slab has no valid TMA box: it needs static, tile-divisible K and N and 16 B-aligned rows")
+            return None
     # A scheduled contraction producer contributes its own streamed and invariant operand slabs.
     # They do not ring: the streamed slab dies inside the block and the invariant slab does not
     # advance. Reserve both from the producer interface supplied by the scheduler.
@@ -793,9 +826,10 @@ def resolve_fill_stage(
     # Only the asynchronous peer slabs ring (the compute-filled slab and stat rows stay
     # single-buffer), so the clamp budgets the ringed slot against what the fixed slabs leave.
     depth = _clamp_depth(want_depth, async_bytes, budget - fixed) if async_bytes else 1
-    computed = [c.operands[0].exposes[-1]] if a_converts or c.operands[0].as_slab() is None else []
+    computed = [] if a_copied else [c.operands[0].exposes[-1]]
     computed.extend(edge.exposes[-1] for edge in c.operands[1:] if edge.as_slab() is None)
-    return ResolvedStage(Stage(depth=depth, transport="smem"), smem=tuple(computed), bk_elems=bk_elems)
+    choice = replace(want, depth=depth, reg_depth=min(want.reg_depth, tile.bk))
+    return ResolvedStage(choice, smem=tuple(computed), bk_elems=bk_elems)
 
 
 __all__ = [

@@ -60,6 +60,7 @@ from emmy.compiler.ir.kernel.ir import (
     MmaSyncPtx,
     RegFragment,
     RegStore,
+    Smem,
     WgmmaCommit,
     WgmmaDescriptor,
     WgmmaFence,
@@ -1420,11 +1421,17 @@ def _block_scaled_operands(
 
             return gmem
 
+        # The TMA box ends at the index's K dim. Any dims past it are unit dims (an activation's
+        # scales carry one, ``[.., K/16, 1]``), and a box whose innermost dim were that unit dim
+        # would have a one-byte inner span, below TMA's 16 B minimum. Leading unit dims keep a box
+        # extent of 1, as the other staged operands' boxes do.
+        rank = max(i for i, e in enumerate(load.index) if k_axis.name in e.free_vars()) + 1
         return Operand(
             tag=tag,
             buf=load.input,
             shape=(side.tile, cols),
-            coords=lambda k0: at(k0, base),
+            box=(1,) * (rank - 2) + (side.tile, cols) if rank > 2 else None,
+            coords=lambda k0: at(k0, base)[:rank],
             index=index,
             trans=trans,
             pad_cols=pad,
@@ -1558,12 +1565,12 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
     cta = _cta(mn, tile.atom.lanes, tile.launch_threads)
     finalize: list[Stmt] = []
     # The BLOCK-SCALED pair, keyed on the ATOM: both operands packed under a 16-bit atom is still
-    # the single-sided shape, whose drain decodes each into 16-bit fragments. cp.async only; the
-    # four-descriptor TMA box copy is not built.
+    # the single-sided shape, whose drain decodes each into 16-bit fragments.
     single, pair = packed_readings((c,), ops.inputs)[id(c)]
-    bs_pair = pair if stage.transport == "smem-async" and block_scaled_atom(tile.atom) else None
-    packed = single if bs_pair is None and stage.transport in ("smem-async", "smem-tma") else None
+    bs_pair = pair if stage.is_async and block_scaled_atom(tile.atom) else None
+    packed = single if bs_pair is None and stage.is_async else None
     if bs_pair is not None:
+        tma = stage.transport == "smem-tma"
         operands, copies, fills = _block_scaled_operands(
             c,
             bs_pair,
@@ -1571,15 +1578,20 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
             mn,
             ops.inputs[bs_pair.b[0].bits.input].dtype,
             ops.inputs[bs_pair.a.scale.input].dtype,
-            pad=BYTE_SLAB_PAD,
+            pad=0 if tma else BYTE_SLAB_PAD,
             k_axis=k_axis,
         )
         common = dict(slab_dtype=cuda_name(elem), elem_bytes=elem.nbytes, cta=cta)
         # Pure copies when both operands' codes are stored; a fill underneath them when this
         # matmul computes its own A codes, which is the same two-group shape the packed
-        # byte-slab stage takes for its scale fill.
+        # byte-slab stage takes for its scale fill. ``staging._block_scaled_warp_stage`` offers
+        # TMA only for pure copies.
         transport = (
-            CpAsyncTransport(operands=copies, **common) if not fills else SyncTransport(operands=fills, copy_operands=copies, **common)
+            TmaTransport(operands=copies, **common)
+            if tma
+            else CpAsyncTransport(operands=copies, **common)
+            if not fills
+            else SyncTransport(operands=fills, copy_operands=copies, **common)
         )
         # The per-tensor scale levels, applied once per output element after the K-loop. The cell
         # multiplies the RAW e4m3 block scales into each block's sum and knows nothing of the
@@ -1618,77 +1630,78 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
                 for cf in (_fold_frag(ops.frag(f"_c{i}_{j}"), f),)
             ),
         ]
-    elif packed is not None:
-        # The packed-pair (NVFP4) weight: the bits copy beside A, the block scales decode into
-        # their own slab, and the drain combines them at the fragment (:func:`_packed_operands`).
-        tma = stage.transport == "smem-tma"
-        operands, sync_ops, async_ops, packed_pro = _packed_operands(
-            c,
-            packed,
-            stage.bk_elems,
-            mn,
-            ops.slab_swizzles(mn, elem.nbytes)[0],
-            ops.inputs[packed.bits.input].dtype,
-            pad=0 if tma else BYTE_SLAB_PAD,
-            cta=cta,
-            seam=ops.cone,
-            inputs=ops.inputs,
-            k_axis=k_axis,
-            axes=ops.axes,
-        )
+    elif packed is not None or stage.transport == "smem" or stage.smem:
+        if packed is not None:
+            # The packed-pair (NVFP4) weight: the bits copy beside A, the block scales decode into
+            # their own slab, and the drain combines them at the fragment (:func:`_packed_operands`).
+            operands, sync_ops, copy_ops, prologue = _packed_operands(
+                c,
+                packed,
+                stage.bk_elems,
+                mn,
+                ops.slab_swizzles(mn, elem.nbytes)[0],
+                ops.inputs[packed.bits.input].dtype,
+                pad=0 if stage.transport == "smem-tma" else BYTE_SLAB_PAD,
+                cta=cta,
+                seam=ops.cone,
+                inputs=ops.inputs,
+                k_axis=k_axis,
+                axes=ops.axes,
+            )
+        else:
+            # The compute fill: every inline edge is evaluated into its canonical slab (converting
+            # on the store when dtypes differ); every materialized counterpart is COPIED underneath
+            # that work — with ``cp.async`` or TMA, or with the blocking vector copy on an atom whose
+            # target has neither. A term with no inline edge at all lands here too: then it is only
+            # the copy.
+            operands, sync_ops, copy_ops, prologue = _sync_operands(
+                c,
+                stage.bk_elems,
+                mn,
+                cta,
+                ops.slab_swizzles(mn, elem.nbytes),
+                ops.channels,
+                ops.cone,
+                ops.inputs,
+                slab_dtype=elem,
+                k_axis=k_axis,
+                axes=ops.axes,
+                b_atoms=ops.b_atoms(mn),
+            )
         common = dict(slab_dtype=cuda_name(elem), elem_bytes=elem.nbytes, cta=cta)
-        if tma:
+        if stage.transport == "smem-tma":
             # TWO operand groups, not one. cp.async can ride inside the ``sync`` producer because
             # both are issued by the same threads under one CTA barrier; a TMA copy is armed on an
             # mbarrier by one elected thread and waited on by parity, which no compute fill can be
             # folded into. The K-loop skeleton already schedules a LIST of groups, so the copies
-            # and the scale fill are simply two of them over one drain segment: the box copies ring
-            # at the stage's depth, the compute fill stays single-buffer as it always is.
-            copies = TmaTransport(operands=async_ops, **common)
-            fill = SyncTransport(operands=sync_ops, prologue_stmts=tuple(packed_pro), **common)
-            slabs = frozenset(op.slab for op in (*async_ops, *sync_ops))
-            return pipelined_kloop(
+            # and the compute fill are simply two of them over one drain segment: the box copies
+            # ring at the stage's depth, the compute fill stays single-buffer as it always is.
+            copies = TmaTransport(operands=copy_ops, **common)
+            fill = SyncTransport(operands=sync_ops, prologue_stmts=tuple(prologue), **common)
+            slabs = frozenset(op.slab for op in (*copy_ops, *sync_ops))
+            decls, region = pipelined_kloop(
                 operands=((copies, stage.depth), (fill, 1)),
                 build_segments=lambda slots: [(ops.staged_drain(operands, slots[0], cells, offset, mn), slabs)],
                 bk_elems=stage.bk_elems,
                 n_chunks=K // stage.bk_elems,
                 k_extent=K,
             )
-        # cp.async: one ``sync`` producer whose copied peers are the two copied slabs — the
-        # same shape the fused norm→linear edge takes.
-        transport = SyncTransport(operands=sync_ops, copy_operands=async_ops, prologue_stmts=tuple(packed_pro), **common)
-    elif stage.transport == "smem":
-        # The synchronous fill: every inline edge is evaluated into its canonical slab (converting
-        # on the store when dtypes differ); every materialized counterpart is COPIED underneath
-        # that work — with ``cp.async``, or with the blocking vector copy on an atom whose target
-        # has none. A term with no inline edge at all lands here too: then it is only the copy.
-        operands, sync_ops, copy_ops, stat_pro = _sync_operands(
-            c,
-            stage.bk_elems,
-            mn,
-            cta,
-            ops.slab_swizzles(mn, elem.nbytes),
-            ops.channels,
-            ops.cone,
-            ops.inputs,
-            slab_dtype=elem,
-            k_axis=k_axis,
-            axes=ops.axes,
-            b_atoms=ops.b_atoms(mn),
-        )
+            # The shared pool packs in declaration order. The ring's few-byte barrier array would
+            # otherwise sit between the copied slabs and the filled ones and push the next swizzled
+            # slab to its 1024 B boundary: a kilobyte that can cost a resident block.
+            barrier = [d for d in decls if isinstance(d, Smem) and d.name == copies.mbar]
+            return [*(d for d in decls if d not in barrier), *barrier], region
         transport = SyncTransport(
             operands=sync_ops,
             copy_operands=copy_ops,
-            slab_dtype=cuda_name(elem),
-            elem_bytes=elem.nbytes,
-            cta=cta,
-            prologue_stmts=tuple(stat_pro),
+            prologue_stmts=tuple(prologue),
             copy_sync=not tile.is_warp or tile.atom.sync_copy_staging,
             # A ring under a blocking copy asks for the register-staged split — that is what makes
             # ``depth`` mean chunks-in-flight here, as it does on the cp.async / TMA transports.
             # A static one-chunk stream has no resident chunk to overlap, so splitting its only
             # copy would issue before the drain and deposit after the drain into uninitialized smem.
             staged=stage.depth >= 2 and (not isinstance(n_chunks, int) or n_chunks >= 2),
+            **common,
         )
     else:
         # A cp.async-staged 1-byte (fp8) slab pads its rows (`BYTE_SLAB_PAD`) so the cooperative

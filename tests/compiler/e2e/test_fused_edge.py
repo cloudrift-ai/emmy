@@ -406,15 +406,16 @@ def test_sdpa_consumer_projection_reaches_mma(monkeypatch):
 
 
 @requires_cuda
-@pytest.mark.parametrize("stage", ["d1/smem", "d2/smem"])
+@pytest.mark.parametrize("stage", ["d1/smem", "d2/smem", pytest.param("d2/smem-tma", marks=requires_sm90)])
 @requires_sm(8)
 def test_fused_cone_splitk_matches_reference(stage, monkeypatch):
     """Redundant-statistic split-K on a computed-A (norm→linear) cone: the contraction K is
     sliced across CTAs (``REDUCE=g4k``) while the k-invariant stat prologue stays FULL-ROW in
     every partition (each recomputes it), and the deferred finalize sums the partials before
     the projection — the output must match the fp32 reference. Parametrized over both sync
-    depths (``d1`` + the asymmetric B-only prefetch ring ``d2``). The decode-M shape class
-    (M=32) is where this split pays: the un-split cone grid starves the SMs."""
+    depths (``d1`` + the asymmetric B-only prefetch ring ``d2``), and the ``d2`` ring with its
+    weight on TMA, whose box origin has to carry the partition's K offset. The decode-M shape
+    class (M=32) is where this split pays: the un-split cone grid starves the SMs."""
     monkeypatch.setenv("EMMY_PLACE", "fuse")
     monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f2x2/k2")
     monkeypatch.setenv("EMMY_WORK", "w1x4")
@@ -443,6 +444,100 @@ def test_fused_cone_splitk_matches_reference(stage, monkeypatch):
     assert any("emmy_mma" in s for s in srcs), "the mma tier must engage on the split partial"
     if stage == "d2/smem":
         assert any("cp.async" in s for s in srcs), "the d2 B-only prefetch ring must issue cp.async on the canonical-B slab"
+    if stage == "d2/smem-tma":
+        assert any("cp_async_bulk_tensor" in s for s in srcs), "the weight must ride the TMA ring beside the fill"
     x, nw, wg = (ins[k].astype(np.float32) for k in ("x", "nw", "wg"))
     rms = x[0] * (1.0 / np.sqrt((x[0] ** 2).mean(axis=-1, keepdims=True) + 1e-6)) * nw
     np.testing.assert_allclose(got.reshape(S, inter).astype(np.float32), rms @ wg, atol=0.5, rtol=0.1)
+
+
+# --- TMA weight copies beside the compute fill -------------------------------------------------
+
+
+_TMA_TILE = ("mma_m16n8k16_f16_f32/f2x2/k2", "w1x1")  # one warp: a 32 x 16 tile, a 32-element K chunk
+_TMA_N = 64
+
+
+def _computed_a_channels_graph(m: int, k: int, channels: int) -> Graph:
+    """``relu(x) @ w0``, or ``(relu(x) @ w0) * (relu(x) @ w1)`` — the computed activation shared by
+    one or two stored weight channels, the shape of a fused gate/up projection."""
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (m, k), F16), node_id="x")
+    g.add_node(ElementwiseOp("relu"), ["x"], Tensor("xn", (m, k), F16), node_id="xn")
+    for c in range(channels):
+        g.add_node(InputOp(), [], Tensor(f"w{c}", (k, _TMA_N), F16), node_id=f"w{c}")
+        g.add_node(MatmulOp(), ["xn", f"w{c}"], Tensor(f"p{c}", (m, _TMA_N), F16), node_id=f"p{c}")
+    out = "p0"
+    if channels == 2:
+        g.add_node(ElementwiseOp("multiply"), ["p0", "p1"], Tensor("o", (m, _TMA_N), F16), node_id="o")
+        out = "o"
+    g.inputs, g.outputs = ["x", *(f"w{c}" for c in range(channels))], [out]
+    return g
+
+
+def _tma_pins(stage: str, tile: tuple[str, str] = _TMA_TILE) -> dict:
+    return {"PLACE": "fuse", "REDUCE": "", "TILE": tile[0], "WORK": tile[1], "STAGE": stage}
+
+
+def test_computed_f16_tma_copies_each_weight_beside_the_activation_fill():
+    """A computed activation keeps its compute fill while every stored weight channel rides a TMA
+    ring: one descriptor per weight, none for the activation, which the compute threads evaluate
+    into its slab. The next chunk's box copies issue at the top of the K loop, before this
+    chunk's fill and tensor-core work, and the drain waits on the slot's barrier first."""
+    from emmy.compiler.context import Context  # noqa: PLC0415
+    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
+
+    with pinned_knobs(_tma_pins("d2/smem-tma")):
+        lowered = Pipeline.build(CUDA_PASSES).run(_computed_a_channels_graph(32, 256, 2), ctx=Context.from_target((12, 0)))
+    (src,) = [s for node in lowered.nodes.values() if (s := getattr(node.op, "kernel_source", None))]
+    kernel = src.split('extern "C" __global__', 1)[1]
+    signature, body = kernel.split("{", 1)[0], kernel.split("for (int _ks", 1)[1]
+    assert signature.count("const CUtensorMap*") == 2 and "_desc_b," in signature and "_desc_b_x1)" in signature
+    assert "emmy_cp_async_cg" not in src, "the weights must not fall back to cp.async"
+    assert "_a_smem[" in body and "x[" in body, "the compute threads fill the activation slab from x"
+    copy, fill = body.index("cp_async_bulk_tensor_2d(&_b_x1_smem"), body.index("_a_smem[")
+    wait, mma = body.index("mbarrier_wait_parity"), body.index("emmy_mma_")
+    assert copy < fill < wait < body.index("emmy_ldmatrix") < mma
+
+
+@requires_cuda
+@requires_sm90
+@pytest.mark.parametrize(
+    ("channels", "m", "k", "fill", "tma", "tile"),
+    [
+        (1, 20, 256, "d2/smem", "d2/smem-tma", _TMA_TILE),
+        (2, 20, 256, "d1/smem", "d1/smem-tma", _TMA_TILE),
+        (2, 20, 256, "d2/smem", "d2/smem-tma", _TMA_TILE),
+        (2, 20, 256, "d2/smem", "d2/smem-tma/p2", _TMA_TILE),
+        (2, 32, 32, "d2/smem", "d2/smem-tma", _TMA_TILE),
+        (2, 160, 512, "d2/smem", "d2/smem-tma", ("mma_m16n8k16_f16_f32/f4x4/k4", "w2x2")),
+    ],
+    ids=["one-weight-d2", "d1", "d2", "d2-p2", "one-chunk", "b128-slabs"],
+)
+def test_computed_f16_tma_matches_the_compute_fill_bitwise(channels, m, k, fill, tma, tile, monkeypatch):
+    """TMA only changes how the stored weights reach shared memory, so it must reproduce the
+    ordinary compute fill bit for bit: the same fill of the computed activation, the same drain.
+    ``m = 20`` leaves a partial 32-row tile, ``k = 256`` wraps the two-slot ring four times so each
+    slot's barrier parity flips, and ``k = 32`` is a stream of one chunk. The last cell's 64-element
+    chunk and 64-column tile put both slabs on the 128-byte swizzle."""
+    from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
+
+    rng = np.random.default_rng(0)
+    ins = {"x": (rng.standard_normal((m, k)) * 0.5).astype(np.float16)}
+    ins |= {f"w{c}": (rng.standard_normal((k, _TMA_N)) * 0.2).astype(np.float16) for c in range(channels)}
+    outs = {}
+    for stage in (fill, tma):
+        with pinned_knobs(_tma_pins(stage, tile)):
+            be = CudaBackend()
+            compiled = be.compile(_computed_a_channels_graph(m, k, channels))
+        srcs = [n.op.kernel_source for n in compiled.nodes.values() if getattr(n.op, "kernel_source", None)]
+        assert len(srcs) == 1, f"{stage}: the activation must stay fused, got {len(srcs)} kernels"
+        assert ("cp_async_bulk_tensor" in srcs[0]) == (stage == tma)
+        outs[stage] = np.asarray(list(be.run(compiled, input_data=ins)[0].outputs.values())[0]).reshape(m, _TMA_N)
+    np.testing.assert_array_equal(outs[tma].view(np.uint16), outs[fill].view(np.uint16))
+    f32 = {name: v.astype(np.float32) for name, v in ins.items()}
+    xn = np.maximum(f32["x"], 0)
+    ref = xn @ f32["w0"] if channels == 1 else (xn @ f32["w0"]) * (xn @ f32["w1"])
+    np.testing.assert_allclose(outs[tma].astype(np.float32), ref, atol=0.1, rtol=2e-2)
