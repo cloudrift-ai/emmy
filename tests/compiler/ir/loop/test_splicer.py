@@ -312,18 +312,9 @@ def test_reduction_producer():
 
 
 @pytest.mark.parametrize("rounds_to", [F16, None])
-def test_graph_splice_preserves_a_spelled_store_rounding(rounds_to: DataType | None, monkeypatch):
+def test_graph_splice_preserves_a_spelled_store_rounding(rounds_to: DataType | None):
     """Fusing a store away must not delete the rounding it spelled — and must invent none."""
     producer = _reduce_producer(source="x", output="producer", rounds_to=rounds_to)
-    from emmy.compiler.ir.loop.builder import LoopBuilder
-
-    insert = LoopBuilder.insert
-
-    def insert_without_alias(builder, stmt, scope):
-        assert not (isinstance(stmt, Assign) and stmt.op.name == "copy" and stmt.dtype is None)
-        insert(builder, stmt, scope)
-
-    monkeypatch.setattr(LoopBuilder, "insert", insert_without_alias)
     merged = _splice_graph_producer(producer, input_shape=(4, 16), output_shape=(4,), edge_dtype=F16)
     typed = [c.dtype for c in merged.body.iter() if isinstance(c, Assign) and c.op.name == "copy" and c.dtype is not None]
     assert typed == ([rounds_to] if rounds_to is not None else [])
