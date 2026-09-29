@@ -103,3 +103,24 @@ def test_hash_routing_needs_the_steps_token_ids():
 
     plain = {"hash": False, "gate": lambda xn: ("l", "s", "i")}
     assert EmmyGenRunner._route(None, plain, xn, None) == ("l", "s", "i")
+
+
+def test_a_float32_router_scores_float32_rows():
+    """DeepSeek V4's reference runtime scores its experts in float32: in float16 a near-tie for the
+    last of the top-k flips on rounding alone. That router is kept in float32 and the step's rows
+    are cast to meet it; every other router takes the rows as they come."""
+    torch = pytest.importorskip("torch")
+
+    from emmy.serving.gen_runner import EmmyGenRunner
+
+    seen = []
+
+    def gate(xn, ids=None):
+        seen.append(xn.dtype)
+        return ("l", "s", "i")
+
+    xn, ids = torch.zeros(2, 4, dtype=torch.float16), torch.zeros(2, dtype=torch.long)
+    assert EmmyGenRunner._route(None, {"hash": False, "router_float32": True, "gate": gate}, xn, None) == ("l", "s", "i")
+    EmmyGenRunner._route(None, {"hash": True, "layer": 0, "router_float32": True, "gate": gate}, xn, ids)
+    EmmyGenRunner._route(None, {"hash": False, "gate": gate}, xn, None)
+    assert seen == [torch.float32, torch.float32, torch.float16]

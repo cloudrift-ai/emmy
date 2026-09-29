@@ -592,7 +592,12 @@ def test_compute_fill_edges_remain_independent_product_factors(monkeypatch) -> N
     context = _plain(tile, target)
     site = context.tile_op.node_sites[0]
 
-    assert all({choice.stage.spell() for choice in site.edges} == {"", "d1/smem", "d2/smem"} for site in offers.node_sites if site.edges)
+    # The computed A keeps the compute fill; on a TMA target its stored B may also ride box copies.
+    fill = {"", "d1/smem", "d2/smem", "d1/smem-tma", "d1/smem-tma/p2", "d2/smem-tma", "d2/smem-tma/p2"}
+    assert all({choice.stage.spell() for choice in site.edges} == fill for site in offers.node_sites if site.edges)
+    # A card without TMA keeps the fill's cp.async ring only.
+    no_tma = _offers(tile, Context.from_target((8, 0)))
+    assert all({choice.stage.spell() for choice in site.edges} == {"", "d1/smem", "d2/smem"} for site in no_tma.node_sites if site.edges)
     reference = tuple(_reference(tile, target))
     leaves = _schedule_leaves(tile, "computed_a", target)
     codec = ClassicScheduleCodec(_context(tile, target))
@@ -600,7 +605,40 @@ def test_compute_fill_edges_remain_independent_product_factors(monkeypatch) -> N
     assert offers.bounds[0] > len(reference)
     warp_schedules = tuple(schedule for schedule in reference if schedule.nodes[site].tile.is_warp)
     assert warp_schedules
-    assert all({edge.stage.transport for edge in schedule.edges.values()} == {"smem"} for schedule in warp_schedules)
+    assert {edge.stage.transport for schedule in warp_schedules for edge in schedule.edges.values()} == {"smem", "smem-tma"}
+    # Beside a compute fill the box copies run as one group of the uniform K loop, so no producer
+    # band is ever composed with them, although the kernel catalog offers bands.
+    assert any(choice.work.producer for choice in offers.kernel_site.kernels)
+    assert not any(schedule.kernel.work.producer for schedule in reference)
+
+
+def test_computed_f16_tma_needs_a_stored_slab_to_copy(monkeypatch) -> None:
+    """With both operands computed, every slab is the compute fill's and a TMA stage has nothing to
+    copy: the catalog names it and the resolver declines it. So does the fill's ring, which has no
+    copied slab to prefetch either, leaving the single-buffer fill."""
+    monkeypatch.setenv("EMMY_FAST_MATH", "0")
+    m, n, k = Axis("m", 64), Axis("n", 64), Axis("k", 64)
+
+    def exp_of(name: str, *index: str):
+        return projection(
+            (), (Load(name=f"{name}_v", input=name, index=tuple(Var(i) for i in index)), Assign(f"{name}_e", "exp", (f"{name}_v",)))
+        )
+
+    tile = TileOp(
+        op=contraction(k, exp_of("scores", "m", "k"), (exp_of("weights", "k", "n"), "acc")),
+        place=Placement(free=(m, n)),
+        axes=(m, n, k),
+        inputs={"scores": Tensor("scores", (64, 64), "f16"), "weights": Tensor("weights", (64, 64), "f16")},
+        outputs={"out": Tensor("out", (64, 64), "f16")},
+    )
+    target = Context.from_target((12, 0))
+    warp = Tile.parse("mma_m16n8k16_f16_f32/f1x1", Work.parse("w1x1"))
+    monkeypatch.setattr(classic, "scalar_tile_moves", lambda: [Tile()])
+    monkeypatch.setattr(classic, "warp_tile_moves", lambda atoms: [warp] if warp.atom.name in atoms else [])
+    reference = tuple(_reference(tile, target))
+    warp_schedules = [schedule for schedule in reference if any(node.tile.is_warp for node in schedule.nodes.values())]
+    assert warp_schedules
+    assert {edge.stage.spell() for schedule in warp_schedules for edge in schedule.edges.values()} == {"d1/smem"}
 
 
 def _two_root_projection(m: Axis, n: Axis, body, results: tuple[str, ...], outputs: dict, specs: tuple) -> TileOp:

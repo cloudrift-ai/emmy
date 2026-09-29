@@ -402,9 +402,10 @@ and clamping only its start still copies past the extent. A **multi-channel prod
 them off the node) fills one B slab per channel, drains N mma chains off the ONE ldmatrix'd A fragment into
 per-channel C fragments (`_fold_frag`), and the projection (SwiGLU) combines the channels per element in the store's
 epilogue `Lambda` (`extra_frags`). Materialized A copies into the same single A slab; computed A evaluates into it. A
-computed A has only the synchronous compute fill, as anywhere else; a materialized one stages through whichever
-transport the card offers, each depositing the same `1 + N` slabs — so the gate/up GEMM rings on cp.async and reaches
-the TMA box copy, and with it wgmma. Only the gmem-direct MMA leaf stays single-channel, because it folds one B
+computed A always takes the synchronous compute fill, as anywhere else, while its stored B slabs copy beside it with
+cp.async (`smem`) or TMA box copies (`smem-tma`, depths 1 and 2, with or without `/p2`); a materialized A stages
+through whichever transport the card offers, each depositing the same `1 + N` slabs — so the gate/up GEMM rings on
+cp.async and reaches the TMA box copy, and with it wgmma. Only the gmem-direct MMA leaf stays single-channel, because it folds one B
 straight out of registers. The block-scaled fp4 cell carries N channels the same way, staging `2 + 2N` slabs over the
 one shared A pair, and names each channel's block-scale fragment per channel just as its data fragment is. Its
 slabs ring on either copy transport. Under TMA each stored buffer is its own descriptor, and a box ends at the
@@ -522,7 +523,9 @@ The two also compose differently with the scale fill. cp.async rides INSIDE the 
 peer, because both are issued by the same threads under one CTA barrier. A TMA copy is armed on an mbarrier by one
 elected thread and waited on by parity, which no compute fill folds into — so the packed TMA form is TWO operand
 groups over one drain segment (`pipelined_kloop` already schedules a list of them): the box copies ring at the
-stage's depth, the compute-filled scale slab stays single-buffer.
+stage's depth, the compute-filled scale slab stays single-buffer. A computed activation beside TMA-copied f16 weights
+is the same two groups, with the activation slab as the compute-filled one. Neither takes a producer band: the band
+splits a single TMA group across warps, and the compute fill has no such split.
 
 Uniform TMA fills cross from generic shared-memory accesses to the asynchronous proxy. Before arming the transaction,
 `mbarrier_arrive_expect_tx` emits `fence.proxy.async.shared::cta`, making barrier initialization visible and ordering

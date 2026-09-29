@@ -445,6 +445,17 @@ def fill_stage_moves() -> tuple[Stage, ...]:
     return (Stage(depth=1), Stage(depth=2))
 
 
+def fill_tma_moves(ctx) -> tuple[Stage, ...]:
+    """The compute fill's stages with its stored peers on TMA instead of cp.async: the fill's own
+    depths, with and without the ``/p2`` register double buffer. The fill still evaluates every
+    computed slab, single-buffer; only the stored slabs ring as box copies.
+
+    Asked twice, like :func:`fill_stage_moves`: the edge catalog offers these, and the local
+    support join admits exactly them."""
+    depths = {stage.depth for stage in fill_stage_moves()}
+    return tuple(stage for stage in stage_moves(warp=True, ctx=ctx) if stage.transport == "smem-tma" and stage.depth in depths)
+
+
 def _stage_candidates(tile: TileOp, target, node, choice: NodeSchedule) -> tuple[Stage, ...]:
     """The transports one node choice can be fed by — the independent edge catalog."""
     direct = Stage.direct()
@@ -464,6 +475,8 @@ def _stage_candidates(tile: TileOp, target, node, choice: NodeSchedule) -> tuple
         candidates: tuple[Stage, ...] = fill_stage_moves()
         if tile.packed_reading(node)[0] is not None:
             candidates = (*candidates, *stage_moves(warp=True, ctx=target))
+        else:
+            candidates = (*candidates, *fill_tma_moves(target))
     elif _multi_fold_direct_refusal(node, choice.tile, direct) is not None:
         # Staged, a multi-channel fold is ordinary — one A slab beside one B per channel, the
         # operand list the compute fill already builds and the copy transports now build too, read
@@ -601,12 +614,15 @@ def _resolve_stage(
         return None  # the chunked carrier's per-cell fallback reads no slab (``_edge_domain``)
     packed = tile_op.packed_reading(node)
     packed_copy = packed[0] is not None and choice.transport in ("smem-async", "smem-tma")
-    if choice.transport == "smem" and _compute_filled(tile_op, node, plan) and not packed_copy:
+    # A packed weight has its own copy stage; any other computed operand keeps the compute fill,
+    # whose stored peers may ride TMA instead of cp.async.
+    fill_tma = choice.transport == "smem-tma" and not packed_copy and _needs_fill(tile_op, node, plan)
+    if (choice.transport == "smem" and _compute_filled(tile_op, node, plan) and not packed_copy) or fill_tma:
         return staging.resolve_fill_stage(
             node,
             placed,
             target.max_dynamic_smem,
-            choice.depth,
+            choice,
             inputs=tile_op.inputs,
             seam=facts.seam,
             k_axis=facts.k_axis,

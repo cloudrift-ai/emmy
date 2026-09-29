@@ -28,6 +28,7 @@ from .refusals import (
     _resolve_stage,
     _wgmma_refusal,
     fill_stage_moves,
+    fill_tma_moves,
 )
 from .schedule import (
     ClassicSchedule,
@@ -396,7 +397,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             resolved_stage = next(iter(resolved)) if len(resolved) == 1 else None
         elif _needs_fill(tile_op, fold, node.tile):
             packed_copy = tile_op.packed_reading(fold)[0] is not None and stage.transport in ("smem-async", "smem-tma")
-            if not packed_copy and stage not in fill_stage_moves():
+            if not packed_copy and stage not in (*fill_stage_moves(), *fill_tma_moves(self.target)):
                 cache[key] = None
                 return None
             resolved_stage = _resolve_stage(tile_op, self.target, fold, node.tile, geometry, stage, facts)
@@ -435,7 +436,9 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             # A producer band splits the staged K-loop's phases across warp bands, which only the
             # contraction tier's skeleton drives; the chunk tier runs every warp through one uniform
             # ring, where an aux band decoding onto warp 0 would re-issue its elected TMA arrive.
-            producer_eligible=not fold.chunked() and not (tile_op.packed_reading(fold)[0] is not None and stage.transport == "smem-tma"),
+            # TMA copies beside a compute fill (a packed weight's scales, a computed activation)
+            # run as two groups of one uniform loop, which has no band split either.
+            producer_eligible=not fold.chunked() and not (stage.transport == "smem-tma" and _needs_fill(tile_op, fold, node.tile)),
         )
         cache[key] = support
         return support

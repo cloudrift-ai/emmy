@@ -1,107 +1,135 @@
-# Full paged attention
+# Native serving optimization and paged attention
 
-Status: proposed 2026-09-26, revised 2026-09-27. Builds on PR #871, which made paging a property of a buffer: a graph
-hint names the buffer, the axis and the page size, every read and write resolves its page before its offset, the
-runtime binds the page table as an operand and owns pages that span a buffer's declared shape, and the native Qwen3
-path serves one request at a time over such a cache, every kernel it runs compiled from a traced module, the greedy
-token included, and only positive-temperature sampling on the host. Its prompt is consumed in fixed-width chunks
-through a second program that borrows the decode program's page tables. This plan takes that to many concurrent
-requests at a cost close to the unpaged kernels. It adds no IR and no fusion gate: paging stays on the buffer, kernel
-boundaries stay with the cut evidence.
+Status: open, revised 2026-09-29 against main `4781e1383`. The native serving foundation is complete in its agreed
+scope: a shared Rust executor, cached dense Qwen3 generation, and a single-request text/HTTP adapter. This plan owns
+its remaining qualification, measurement, and optimization work. Closing the foundation does not claim production
+readiness or a speed advantage over vLLM.
 
-## Objective
+## Current implementation and evidence
 
-Serve concurrent requests through the native Rust server over a paged KV cache: pages allocated per request and freed
-at its end, shared prefixes reused, prefill in chunks through compiled attention, and decode attention within a small
-measured margin of the same kernel over a contiguous cache. Measured against stock vLLM on the same card with the
-vLLM benchmark client, not claimed.
+PR #954 preserves FP32 output logits with FP16 weights and KV storage. Its artifact passed nineteen sequential and
+nineteen chunked checkpoint cases plus HTTP lifecycle checks. PR #871 subsequently replaced the hand-written glue
+with compiled embedding, rotary, attention, and greedy selection, and introduced paged cache addressing. These
+changes require a new full-checkpoint qualification; the earlier accuracy and performance results do not transfer.
 
-## What exists and what is missing
+Greedy decoding downloads one GPU-selected token. Positive-temperature sampling downloads FP32 logits and sorts
+and samples them on the CPU. Both preserve FP32 score ordering. Generation format 5 requires re-exporting artifacts.
+The prompt uses fixed-width prefill chunks, normally sixteen rows, with decode and prefill sharing cache pages.
+Pages span the entire configured context at load. There is no per-request pool, continuous batching, or prefix reuse.
+The native server still admits one active request and rejects contention with a busy response.
 
-| piece | today (#871) | missing |
-| --- | --- | --- |
-| addressing | per-element page lookup in `Load`/`Write`; `start` shifts a chunk write | per-tile lookup when the page divides the KV tile |
-| kernel forms | scalar and warp-tile attention page; `mma` and TMA staging refuse a paged operand | tensor-core attention over pages |
-| runtime | one table per paged buffer; pages spanning the declared shape at load, or a host-bound table | allocator with a free list, per-request page sets, reference counts |
-| native path | one request; prefill in fixed-width chunks (16 rows) sharing the decode cache's page tables; the token selected on the host; page size fixed at export | batch of requests, admission and scheduling, a chunk width that follows the prompt |
-| evidence | V100 rows for the one-row fragments; the 4080 rows unpaged; no rows for the 16-row chunk fragments | paged attention rows per card at every width; a corpus case per form |
+Durable contracts and prior evidence:
 
-## Design
+- [Native preparation and qualification](../emmy/serving/native/ARCHITECTURE.md),
+  [runtime](../crates/emmy-runtime/ARCHITECTURE.md), and [HTTP adapter](../crates/emmy-server/ARCHITECTURE.md).
+- [Output precision](../experiments/Qwen3-0.6B/native_accuracy/RESULTS.md) and
+  [chunked prefill](../experiments/Qwen3-0.6B/native_prefill/RESULTS.md), measured before the compiled paging changes.
+- [Paged-cache investigation](../experiments/Qwen3-0.6B/paged_cache/RESULTS.md): V100 smoke observations from earlier
+  modules, with stale one-row schedules and no measured sixteen-row inventory for the merged modules.
+- [Serving baseline](../experiments/Qwen3-0.6B/native_baseline/RESULTS.md) and
+  [runtime comparison](../experiments/Qwen3-0.6B/native_runtime/RESULTS.md): historical evidence, not current timings.
 
-**Block table.** The plan's paging declaration gains a second axis: the table row. A paged buffer of shape
-`[batch, heads, tokens, d]` paged along `tokens` resolves `pages[b * max_pages + t / page][...]`, so one device table
-holds every request's pages, one row each, and a request is a row of the table plus its length. The `Paged` memory
-implementation grows that one index term; `Load` and `Write` stay unchanged. Lengths and the write position are
-runtime arguments of the symbol environment, as `start` already is; per-request lengths reach the kernel as one
-small input buffer, since a symbol is one value per launch. Graphs stay valid across requests: the table's address is
-baked, its contents are not.
+## Qualification and measurement first
 
-**Per-tile lookup.** When the page size is a multiple of the KV tile and the tile is page-aligned, the `Memory`
-protocol answers a per-tile base instead of a per-element one, and the tile's staging (register, `cp.async`) reads
-rows from that base. This is the perf lever; the scheduler learns one fact, "this tile lies inside one page", and
-offers the same schedules as before. TMA bakes a base address per descriptor, so it does not page: on sm_90 the
-attention over a paged cache stages with `cp.async` rows, and the refusal stays for TMA rather than becoming a fusion
-or schedule gate.
+### 0. Qualify the merged implementation on the local RTX 4080
 
-**Allocator.** In `crates/emmy-runtime`, a `PagePool` per paged buffer: a free list of equal pages, a `Sequence`
-holding a request's page ids and length, and a reference count per page for prefix sharing. The executor's table is a
-region the pool rewrites per step from the active sequences' rows; freeing returns pages to the list. Prefix reuse is
-a hash chain over full pages (token ids of the page and its predecessor's hash), looked up at admission; a hit shares
-the pages and bumps their counts, a miss allocates. Eviction is least recently used over unreferenced pages.
+Record manually selected schedules for every current decode and prefill fragment, including embedding, rotary,
+attention, the FP32 head, and greedy selection. Keep the prior and MCTS out of schedule selection. Use a fresh tuning
+DB, explicit golden scope, strict numerical checks, and strict evidence for the resulting export. Stored targets
+must match fresh lowering, and every recorded row must decode. Missing measurements are work to complete, not a
+reason to fall back to the prior.
 
-**Scheduler.** In `emmy-server`: admission up to the pool's capacity, decode steps over every active request in one
-launch of the batched fragments, new requests joining at step boundaries, and prefill in chunks of a fixed token
-budget through the compiled attention program at `q_len` = chunk, `kv_len` = position, writing each chunk at its
-`start`. Greedy selection is already a compiled reduction in the decode program, so a greedy batch downloads one
-token per row; positive-temperature sampling downloads one row of FP32 logits per request and draws on the host,
-which is fine at eight rows. Moving it onto the device needs a histogram, a scatter-add the IR declares but nothing
-traces or lowers yet. The fragments compile at the serving widths (M = 1, 8, 16, 32) the export declares, and the
-step picks the smallest width that fits the batch; a wider batch waits.
+Run all nineteen sequential and nineteen chunked checkpoint cases, including long prompts, with the existing FP32
+reference, FP16 reference, error limits, and token-agreement rules unchanged. Check request reset, page boundaries,
+full and partial prefill chunks, graph replay, seeded sampling, and the checkpoint HTTP lifecycle. Use the merged
+path's tiny-model and independent sampling checks as well. Gate: a reproducible current artifact and recorded passes;
+fix failures before making new performance claims.
 
-## Milestones
+### 1. Establish the cost of paging and sampling
 
-0. **Price paging alone.** Bench the compiled attention program paged against flat at the same schedule, page sizes
-   16, 64, 256, `q_len` 1 and 256, on the 5090 and the 4080, through `emmy run --golden … --ab`, and put a paged case
-   per form into the realization corpus so `make bench-kernels` tracks it. Gate: numbers in an experiment RESULTS; they
-   set how much of milestone 2 is worth.
-1. **Page lifetime.** The pool, sequences, free and reference counts; the generator frees at EOS. Gate: a thousand
-   requests through the worker with flat device memory, and a test that a shared page outlives the request that
-   allocated it.
-2. **Per-tile lookup.** Gate: decode attention over 64-token pages within 5% of the flat kernel at the same schedule
-   on the 4080, and the corpus case moves.
-3. **Batched block table.** The second table axis in the hint, the memory protocol and the runtime; fragments at the
-   serving widths; the server's decode loop over a batch. Gate: output tokens per second at concurrency 8 against
-   concurrency 1 with the vLLM benchmark client, and per-request logits equal to the single-request path.
-4. **Chunked prefill at width.** The fixed 16-row chunk exists; it needs recorded rows for its fragments on each
-   card (a strict export refuses it today) and a width that follows the prompt through `q_len` rather than a
-   static row count, so a long prompt is not 64 launches of 16. Gate: time to first token for a 1,024-token prompt
-   on the 4080 under one second.
-5. **Prefix reuse.** The hash chain and eviction. Gate: a repeated system prompt skips its prefill, measured as time
-   to first token; reference counts hold under concurrent requests.
-6. **Tensor-core forms.** `mma` attention staging rows from pages with `cp.async`; TMA stays refused. Gate: the flash
-   form over pages within 10% of flat on an H100 at 4,096 keys.
-7. **Serving comparison.** The 4080 experiment's recipe at input 32/256/1024 and concurrency 1/8/32, this path against
-   stock vLLM on the same card, published as an experiment.
+Compare the qualified merged path with the #954 artifact at temperatures 0 and 0.7, using matching runtime binaries,
+the same checkpoint revision, context, prompt/output lengths, graph mode, precision, and warmup. Repeat measurements
+and retain their spread. Whole-serving differences include changed model kernels as well as sampling; isolate
+sampling and transfers before attributing a regression or improvement to CPU placement.
 
-Milestones 1 and 2 are independent and can run in parallel; 3 needs both; 4 and 5 need 3; 6 needs 2.
+Measure paged versus flat compiled attention at identical schedules, page sizes 16, 64, and 256, and query lengths
+1 and 256. Start on the 4080; repeat on the 5090 when available. Record correctness and latency and add appropriate
+paged realization cases so the existing kernel benchmark tracks them. Separate this comparison from whole-model
+serving, which changes more than addressing.
 
-## Decisions for the author
+Profile GPU execution, exposed CPU gaps, sampling, metadata, transfers, and synchronization. Measure useful/padded
+rows and weights, activation, scratch, KV, resident, and peak-load bytes separately. Compare short and long prompts.
+CUDA graph replay already exists; do not count removing Python submission as a new benefit for captured steps.
+Gate: retained raw results and an experiment report identifying which costs justify implementation.
 
-- Page size: fixed per export as now, defaulting to the KV tile (16 or 32 tokens), or chosen per model by the golden.
-- Where the scheduler lives: this plan puts it in the Rust server, since the native path is Python-free after export;
-  the vLLM plugin path keeps vLLM's scheduler and would use only the addressing and the allocator.
-- Batch widths: reuse the serving-twin widths the recipes already declare, or compile per observed batch.
-- TMA on pages: refuse, as planned, or encode one descriptor per page at a cost of one descriptor slot per page.
+## Implementation milestones
 
-## Risks
+2. **Page lifetime.** Add a pool of equal pages and per-request page ownership. Allocate as the sequence grows and
+   reclaim after EOS, output limits, cancellation, or failure once submitted work completes. Gate: one thousand
+   requests with bounded device memory, safe exhaustion, and no reuse while work still references a page.
+3. **Per-tile lookup.** When an aligned KV tile fits inside a page, resolve its base once for register or
+   `cp.async` staging. Target decode attention over 64-token pages within 5% of flat at the same schedule on the
+   4080. Report the measured result even if the target is missed. Do this only if milestone 1 justifies the work.
+4. **Batched decoding.** Add a request axis to the block table and compiled fragments. Each active request has its
+   own table row, length, position, and sampling state. Admit requests at step boundaries within page capacity.
+   Gate: per-request logits satisfy the single-request accuracy contract, seeded replay survives batch changes,
+   and concurrency-eight throughput is measured against concurrency one. Test mixed lengths, fairness, overload,
+   disconnects, cancellation, backpressure, and failure recovery; retain admission until GPU work completes.
+5. **Prefill widths.** Measure larger or symbolic chunk widths against sixteen-row chunks, including partial chunks
+   and useful/padded work. Aim for time to first token below one second for a 1,024-token prompt on the 4080, while
+   preserving decode latency under contention. Fresh schedules for existing sixteen-row chunks belong to milestone
+   0, not this optimization. Width work can proceed before batching when the measurements justify it.
+6. **Prefix reuse.** Add reference counts, a hash chain over complete token pages, and eviction of unreferenced
+   cached pages. Shared pages must survive the allocating request and remain immutable while shared. Gate: repeated
+   prefixes skip their prefill, with measured time to first token and concurrent cancellation/reuse checks.
+7. **Tensor-core attention over pages.** Extend `mma` staging with page-aware `cp.async` rows. TMA stays explicitly
+   unsupported until its descriptor design is separately justified. Target paged attention within 10% of flat on an
+   H100 at 4,096 keys, with strict correctness and recorded schedules on the exact card.
+8. **Serving comparison.** Compare with stock vLLM on the same GPU at input lengths 32/256/1024 and concurrency
+   1/8/32 once batching exists. Hold output work and supported semantics fixed. Publish latency, throughput, memory,
+   errors, fairness, and regressions; no advantage is presumed.
 
-- Volta's tensor-core staging has miscompiled silently; every recorded paged row on sm_70 needs `--strict`.
-- Paged kernels are new identities on every card, so each card needs rows before a strict export; the V100 flow in
-  the paged-cache experiment is the template.
-- One graph per symbol environment: batch widths and chunk sizes multiply the graphs; lengths must be inputs, not
-  symbols, or every request shape captures its own graph.
-- Sixteen-row prefill dominates time to first token until milestone 4 lands; a serving comparison before it
-  measures that, not paging.
-- The tracer records `permute` as a plain reshape, which is right only where the permute is a memory no-op. Every
-  multi-row module here uses `transpose`; a batched fragment that permutes a batch axis must too, until the tracer
-  is fixed, and a one-row test cannot catch the mistake.
+Milestones 0 and 1 come first. Page lifetime precedes batching; per-tile lookup is not a correctness prerequisite
+for batching. Prefix reuse needs page ownership and the batched lifecycle. Tensor-core staging needs the page-aware
+tile design. Implement each measured improvement as a separate, qualified change.
+
+## Design constraints and open decisions
+
+Paging stays a buffer property. A batched cache can resolve a pointer from a table row and token page, then the
+within-page offset. Per-request lengths and write positions are device inputs, not host symbols specialized per
+request. Stable table addresses and updated contents permit graph replay. Reuse the existing memory protocol,
+execution-plan contract, compiler evidence, and Rust executor; do not build a second dispatch path.
+
+Fusion remains maximal. Slow fused attention is a cut or lowering problem. Page alignment constrains legal staging,
+not fusion. Explicitly reject unsupported memory accesses rather than emitting incorrect code.
+
+Choose page sizes, batch widths, prefill budgets, and admission limits from the measurements. Start with existing
+compiled widths where they fit. Do not add speculative abstractions or permanent CPU/GPU sampling alternatives.
+Keep the current FP32 sampling contract. If CPU sampling is a material cost, evaluate compiler-generated GPU
+sampling against the current CPU implementation. A histogram is one possible algorithm, not a prerequisite; the
+#954 sampler used reductions. Do not assume CPU sampling is cheap at eight requests or that GPU placement wins.
+
+The shared Rust dispatch migration landed in #885. Do not reimplement the old standalone-worker tune integration.
+If runtime overhead is material, audit current run/tune/benchmark consumers and measure serialization, cold startup,
+warm loading, allocation, submission, and GPU time separately, with equivalent persistent worker lifetimes. Preserve
+per-kernel diagnostics, deadlines, process retirement, and visible failures. The old report's uncaptured submission
+saving is not a full-model speedup.
+
+Use existing experiment recipes and benchmark commands. Add a reusable missing measurement control to the harness
+when necessary; never write a separate benchmark script. Pin software, hardware, model, artifact, schedules,
+precision, warmup, and timing rules. Retain compressed raw results and system-only records; interpret them in the
+experiment report. Remote hardware and longer runs must remain within the user's authorized scope.
+
+Keep vLLM as the default. Deployment images, additional model families, quantization, multi-GPU serving, and full
+production API parity remain deferred. Revisit the scope if measurements show no useful improvement.
+
+## Known limits to check during implementation
+
+- The tracer's `permute` handling can lose a real transpose; use the qualified transpose path until repaired and
+  test multi-row inputs, since one-row tests can hide the defect.
+- Volta schedules require strict numerical checks; prior miscompilations make smoke text insufficient evidence.
+- Paged tensor-core and TMA staging are currently refused. Do not infer their support from flat-kernel qualification.
+- Loading prefill currently allocates duplicate pages and constants before borrowing decode storage. Account for
+  that transient peak before deciding whether a shared-load change is worthwhile.
+- Performance is schedule- and shape-dependent. Sixteen-row prefill and host sampling are hypotheses to measure,
+  not established dominant costs on the merged implementation.

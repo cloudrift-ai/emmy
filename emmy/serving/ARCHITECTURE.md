@@ -242,7 +242,11 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   belongs to exactly one shard, and summing the ranks' partials — the caller's all-reduce — reproduces the unsharded
   result exactly. A rank that wins no token returns zeros, so the reduction needs no special case. This is what makes
   a 256-expert model fit at all: one DeepSeek V4 pipeline stage's experts are ~9.4 GB sharded eight ways against a 32
-  GB card that also carries attention, arenas and the KV cache. The expert layout (orientation / interleave / bias —
+  GB card that also carries attention, arenas and the KV cache. The router the combine calls is the runner's own copy
+  (`serving_router`), cast to the activation dtype except for the expert-selection bias (`e_score_correction_bias`),
+  which stays float32 as Transformers keeps it: DeepSeek V4's bias reaches ~27, where float16 rounding flipped a top-6
+  pick in 9 of 27 layers for a probed token. DeepSeek V4's router runs wholly in float32, as its reference runtime
+  does. The expert layout (orientation / interleave / bias —
   gpt-oss vs OLMoE, incl. the clamped-SwiGLU spelling and
   the de-interleave-at-load contract) is the trace ARCHITECTURE's `moe_expert_layout` story; the runner just feeds
   named inputs. Program count is 2/layer + one expert program per SHAPE GROUP (see below) — not `E`/layer. MoE
