@@ -408,14 +408,15 @@ def lift_body(body, axes: tuple = (), levels: tuple = (), carriers: dict | None 
             # pure members alone.
             pure = Body(tuple(member for member in cell if not isinstance(member, (Write, Loop))))
             defined = {name for member in pure for name in member.defines()}
+            retained = Body(tuple(member for member in cell if isinstance(member, (Write, Loop))))
             results = tuple(dict.fromkeys(value for write in writes for value in write.values if value in defined))
+            results += tuple(sorted((defined & retained.ssa_uses) - set(results)))
             if results:
                 operands, lift = _close((), (), pure, results, (*axes, stmt.axis), inner_levels)
                 term = Fold(operands=operands, lift=lift)
                 edges.append(term)
                 level.exposed.update((name, term) for name in term.exposes)
-                cell = Body(tuple(member for member in cell if isinstance(member, (Write, Loop))))
-            level.stmts.append(replace(stmt, body=cell))
+            level.stmts.append(replace(stmt, body=retained))
             continue
         nested = stmt.nested()
         if nested:

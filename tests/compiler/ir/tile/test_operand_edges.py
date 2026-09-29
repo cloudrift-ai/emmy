@@ -186,6 +186,30 @@ def test_the_closure_predicate_reads_the_declaration() -> None:
     assert _external_reads(_matmul()) == {"m", "n"}  # ``k`` is bound by the fold — not free above it
 
 
+def test_a_sweep_drops_pure_members_not_read_by_its_stores() -> None:
+    from emmy.compiler.ir.loop import LoopOp
+    from emmy.compiler.ir.stmt import Write
+    from emmy.compiler.ir.tile.ir import loaded_buffers
+    from emmy.compiler.pipeline.passes.tile._fromloop import lift_loop_op
+
+    first = Loop(axis=N_AXIS, body=Body((
+        Load(name="first", input="x", index=(Var("n"),)),
+        Write(output="a", index=(Var("n"),), value="first"),
+    )))
+    second = Loop(axis=M_AXIS, body=Body((
+        Load(name="unused", input="dead", index=(Var("m"),)),
+        Loop(axis=K_AXIS, body=Body((
+            Load(name="value", input="y", index=(Var("m"), Var("k"))),
+            Accum(name="sum", value="value", op="add", axes=("k",)),
+        ))),
+        Write(output="b", index=(Var("m"),), value="sum"),
+    )))
+    tile = lift_loop_op(LoopOp(body=(first, second)))
+    assert {load.input for load in loaded_buffers(tile.op)} == {"x", "y"}
+    assert [(spec.write.output, len(spec.sweep)) for spec in tile.output_specs] == [("a", 1), ("b", 1)]
+    assert tile.output_specs[0].sweep != tile.output_specs[1].sweep
+
+
 def test_a_sweep_with_a_projection_beside_a_nested_sweep_lifts() -> None:
     """DeepSeek-V4 post4096's gate stream in miniature: an output sweep with its own per-cell
     projection and store, beside a nested output sweep whose store is per inner cell. The
