@@ -359,3 +359,16 @@ or end-to-end serving. Stable latency measurements remain pending.
 
 On September 30, the PR state check confirmed that #969 had merged (September 29, 16:07 UTC) and GitHub had
 automatically retargeted #973 to main. The fix PR remains draft and the overall tracker remains 🚧.
+
+### Main update after the parent merged
+
+The branch now includes main `a5b8263c`, including #975's affine carried-state sequence split (`REDUCE=g<n>k`).
+That change adds a probe/prefix/partitioned-walk route; it does not replace the fragment-role, singleton-coordinate,
+output-domain, padding or strided-weight fixes here. Merge conflicts retained those fixes and main's new split.
+The combined recurrence/split/weight-gather selection has 42 passing tests. Its first run exited unsuccessfully
+only because two existing tests exceeded the duration inventory threshold without their worker-group suffix.
+The required `-n 2 --dist=loadgroup --durations=0 --durations-min=0.5` run passes all 42 tests in 17.32 seconds,
+including the duration gate. Existing slow tests already have grouped inventory entries; no newly added test in
+this selection exceeds half a second.
+The longer six-output projection measurement hit the 110-second development budget before reporting results,
+so the earlier smoke measurement remains the only measured evidence for that complete projection.
