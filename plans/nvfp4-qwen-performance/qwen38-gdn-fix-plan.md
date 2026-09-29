@@ -416,6 +416,38 @@ After lifting:
 ```
 
 The lift now retains only effects in each sweep and exposes every scalar those effects read. Its small regression
-fails on the prior implementation; all 17 operand-edge tests pass after the repair. The complete tiny block now
-lowers, but GPU execution exposes a misaligned-address error under the selected schedule. That error is under
-investigation; GPU stateful execution and native serving dispatch are not marked complete.
+fails on the prior implementation; all 17 operand-edge tests pass after the repair.
+
+The misaligned-address failure came from vectorizing adjacent elements while checking only the last index.
+For the three-tap convolution history, an odd row starts at an odd float address:
+
+```text
+Before (CUDA address, abbreviated):
+  float2 pair = *(float2 *)&history[row * 3];  // invalid alignment for odd row
+After:
+  float first = history[row * 3];
+  float second = history[row * 3 + 1];
+```
+
+Both load and store vectorization now prove alignment and adjacency from the complete flattened address.
+Seven CPU checks cover odd/even strides, fixed rows, split coordinates and unknown layouts. The tiny one-token
+block matches traced IR, Loop IR and CUDA with bound transformed weights: output error is zero, both state
+errors are below 8e-9. A GPU regression checks three decode steps, seeded state, two independent batch rows,
+fresh requests and reset; it passes under the grouped test runner.
+
+Multi-token validation remains 🚧. A two-token prefill agrees with eager in traced and Loop IR. Its first CUDA
+compile exposed a dropped time-coordinate binding when a carried fold becomes a register-program root. The
+root now closes over that coordinate, preserving operand bindings. CUDA then runs, but returned recurrence
+state has a maximum absolute error of 0.001103, exceeding the current tolerance. Output error is 2.13e-5 and
+convolution history agrees exactly. This state mismatch is under investigation; native serving dispatch is
+also still pending.
+
+The 5090 isolated QKV projection (`64 × 5120` by `5120 × 10240`) now has direct strict-check evidence:
+
+| Schedule | Emmy | Eager |
+| --- | ---: | ---: |
+| `mma_m16n8k16_f16_f32/f4x4/k4`, `w2x2`, `d2/smem-tma` | 70.2 µs | 72 µs |
+
+The earlier paired run measured async at 209.8 µs, but its TMA comparison lacked the CLI's strict eager
+correctness check; the direct TMA rerun above passed. These remain synthetic isolated projections, not
+checkpoint or whole-layer results. Local 5080 runs are used for correctness because the workstation is shared.

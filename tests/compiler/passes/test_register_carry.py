@@ -66,6 +66,37 @@ def test_register_storage_refuses_cross_warp_state_reads():
     assert tile.register_program is None
 
 
+def test_register_step_keeps_a_time_coordinate_read_by_its_lift():
+    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.stmt import Assign, Body, Load
+
+    (tile,) = (n.op for n in _lift(_graph()).nodes.values() if isinstance(n.op, TileOp))
+    (carrying,) = (site.node for site in tile.sites if site.node.carries)
+    lift = carrying.lift
+    changed = replace(
+        carrying,
+        lift=replace(
+            lift,
+            body=Body(
+                (
+                    Load(name="phase", input="D", index=(Var(carrying.axis),)),
+                    *[
+                        replace(stmt, args=(stmt.args[0], "phase")) if isinstance(stmt, Assign) and stmt.name == lift.results[0] else stmt
+                        for stmt in lift.body
+                    ],
+                )
+            ),
+        ),
+    )
+
+    def substitute(term):
+        return changed if term is carrying else replace(term, operands=tuple(substitute(edge) for edge in term.operands))
+
+    program = replace(tile, op=substitute(tile.op)).register_program
+    assert program is not None
+    assert program.time in program.roots[-1].free_axes
+
+
 def test_a_descent_row_naming_other_families_offers_no_register_leaf():
     """A descent narrows every offered tier with the kernel's whole row: a row naming a family the register tier does
     not own describes another tier, so the register tier offers nothing for it, and a strict row must be its own."""
@@ -102,9 +133,7 @@ def _with_output_batch_axis(graph, batch_extent):
     tensor.shape = (tensor.shape[0], Dim(batch_extent), *tensor.shape[1:])
     node.op = replace(
         node.op,
-        body=node.op.body.map(
-            lambda s: replace(s, index=(s.index[0], Literal(0, "int"), *s.index[1:])) if isinstance(s, Write) else s
-        ),
+        body=node.op.body.map(lambda s: replace(s, index=(s.index[0], Literal(0, "int"), *s.index[1:])) if isinstance(s, Write) else s),
     )
     return graph
 

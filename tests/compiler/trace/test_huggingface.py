@@ -1062,6 +1062,79 @@ def test_gdn_state_wrapper_traces_both_state_outputs(length):
         np.testing.assert_allclose(result.outputs[name], expected.numpy(), rtol=1e-4, atol=1e-5)
 
 
+@pytest.mark.xdist_group("cuda")
+def test_gdn_state_wrapper_cuda_handoff_and_reset():
+    import numpy as np
+    import torch
+    from transformers.cache_utils import DynamicCache
+    from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
+    from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5TextModel
+
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+    from emmy.compiler.trace.huggingface import build_gdn_state_wrapper
+    from emmy.compiler.trace.torch import trace_module_with_constants
+    from tests.compiler.helpers import inject_constants, skip_if_no_cuda
+
+    skip_if_no_cuda()
+    config = Qwen3_5TextConfig(
+        **(
+            _QWEN3_5_TINY
+            | dict(
+                hidden_size=8,
+                intermediate_size=16,
+                num_hidden_layers=1,
+                num_attention_heads=2,
+                num_key_value_heads=1,
+                head_dim=4,
+                linear_key_head_dim=4,
+                linear_value_head_dim=4,
+                linear_num_key_heads=1,
+                linear_num_value_heads=1,
+                linear_conv_kernel_dim=3,
+                layer_types=["linear_attention"],
+            )
+        )
+    )
+    torch.manual_seed(0)
+    block = Qwen3_5TextModel(config).eval().layers[0]
+    wrapper = build_gdn_state_wrapper(block)
+    examples = (torch.zeros(2, 1, 8), torch.zeros(2, 1, 4, 4), torch.zeros(2, 12, 3))
+    graph, targets = trace_module_with_constants(wrapper, examples)
+    tensors = dict(wrapper.named_parameters()) | dict(wrapper.named_buffers())
+    weights = {name: tensors[path].detach().numpy() for name, path in targets.items()}
+    backend = CudaBackend()
+    with pinned_knobs({"FAST_MATH": False, "PLACE": "fuse"}):
+        compiled = backend.compile(graph)
+    weights = inject_constants(weights, compiled)
+    rng = np.random.default_rng(0)
+    chunks = [(rng.standard_normal((2, 1, 8)) * 0.1).astype(np.float32) for _ in range(3)]
+    # Two independent batch rows, a seeded request, and two identical fresh requests after reset.
+    fresh = None
+    for seeded in (True, False, False):
+        state = (rng.standard_normal((2, 1, 4, 4)) * 0.1).astype(np.float32) if seeded else np.zeros((2, 1, 4, 4), np.float32)
+        history = (rng.standard_normal((2, 12, 3)) * 0.1).astype(np.float32) if seeded else np.zeros((2, 12, 3), np.float32)
+        cache = DynamicCache(config=config)
+        cache.update_conv_state(torch.from_numpy(history.copy()), 0)
+        cache.update_recurrent_state(torch.from_numpy(state.copy()), 0)
+        for index, x in enumerate(chunks):
+            inputs = weights | dict(zip(graph.inputs, (x, state, history), strict=True))
+            result, _ = backend.run(compiled, input_data=inputs)
+            values = tuple(result.outputs[name] for name in graph.outputs)
+            with torch.no_grad():
+                y = block(torch.from_numpy(x), position_embeddings=None, past_key_values=cache)
+            expected = (y, cache.layers[0].recurrent_states[0], cache.layers[0].conv_states[0])
+            for actual, reference in zip(values, expected, strict=True):
+                np.testing.assert_allclose(actual, reference.numpy(), rtol=1e-3, atol=1e-4)
+            if not seeded and index == 0:
+                if fresh is None:
+                    fresh = tuple(value.copy() for value in values)
+                else:
+                    for actual, reference in zip(values, fresh, strict=True):
+                        np.testing.assert_array_equal(actual, reference)
+            _, state, history = values
+
+
 # --- checkpoint keys vs twin parameter names ---------------------------------------------------
 # A checkpoint may store its tensors under names the config-built twin does not have, and the
 # mismatch is silent — the parameters simply stay on the meta device. Transformers registers the
