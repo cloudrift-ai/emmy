@@ -583,7 +583,12 @@ class Pre(Stmt):
     step) — no read of a step sees what that step defines; after that loop closes, the last
     step's. ``index`` is any coordinate expression, so a step may read a cell other than the one
     it defines — under a reduce over it, a contraction over the state. See :class:`Carry`.
+
+    A read like a ``Load``, so a term may hold one: a carrier read is a slab over one ``Pre``
+    (``Fold.carrier_read``), the way a gmem read is a slab over one ``Load``.
     """
+
+    pure = True
 
     name: str
     carrier: str

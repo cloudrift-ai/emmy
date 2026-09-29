@@ -325,9 +325,10 @@ defines, so the reads and the definition of one step are order-free. Nothing is 
 nearest enclosing loop whose axis the `Carry` index does not read (`carried_cells`), which is therefore a reduce loop
 the free-axis order never sorts under the cells, and its shape is the loops over its cells. The Loop IR rendering
 keeps two slots of the cell shape and commits the second after each step; how many slots survive and where they are
-stored is a schedule's question, not the statement's. The Tile lift realizes it as a serial launch axis over a state
-buffer (`tile/lift/010_lift`). A register schedule can instead retain the state inside a CTA and realize
-the same axis as a loop, while the classic schedule keeps the ordered launches.
+stored is a schedule's question, not the statement's. The Tile lift keeps the state in the term: a `Fold` whose ⊕ is
+the action `next`, with the `Carry` index as its `cells` and a `Pre` as a carrier-read slab (`ir/tile/ARCHITECTURE.md`).
+The classic schedule realizes the loop as a serial launch axis over a state buffer; the register schedule retains the
+state inside a CTA and realizes the same axis as a loop.
 
 **The algebra is in the term, not a tag.** There is no stored / derived `AlgebraKind` and no op-tree node zoo. The
 stored tile IR has exactly **ONE node kind**, `Fold` — `reduce(⊕) ∘ map(f)` in the λ-foldMap spelling:

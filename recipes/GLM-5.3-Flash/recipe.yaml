@@ -1,9 +1,9 @@
 tags:
-  - best-effort
+  - maintained
 
 model:
   huggingface: "zai-org/GLM-5.3-Flash"
-  rationale: "Onboarded and qualified on 2x AMD Instinct MI350X: vLLM ROCm native FP8, 65536 context, TP2, single-stream decode at 60 tok/s and moderate-batch throughput at 894 out tok/s, 0 failures."
+  rationale: "Top OpenRouter open-weight model with strong growth and verified serving capacity."
   heat: 85
   task: generate
 

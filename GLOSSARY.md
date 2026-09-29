@@ -96,13 +96,19 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   Emmy a scan is a Fold with an **observer**: a pure per-step function over the carried state whose results only
   kernel-boundary output writes consume. An observed fold preserves its stream order, so it schedules as the serial
   fold only.
-- **Serial axis / lagged read** — A recurrence's time as a kernel's launch loop: a `Placement.serial` axis is
-  launched once per coordinate, in order, the coordinate a runtime `int` in the body, and the kernel may read its
+- **Serial axis / lagged read** — The classic schedule's realization of a carried state: a `Placement.serial` axis
+  is launched once per coordinate, in order, the coordinate a runtime `int` in the body, and the kernel reads its
   own output strictly behind the step it writes (`S[c − 1]` while writing `S[c]`). The state lives in the buffer,
-  so the step is any `Fold`; a Loop IR carried state lifts to this (`tile/lift/010_lift`).
-- **Carried state** — A recurrence's state in Loop IR: `Carry` defines the next value of one cell and names the seed,
-  a `Pre` read sees the previous step's value at any cell, and the loop that carries it sits outside the loops
-  over its cells. Not a fold: its steps are ordered and its step is any computation, so it has no op.
+  so the step is any `Fold`; the schedule's fork lifts the carrying kernel's Loop IR into this form (`lift_serial`).
+- **Carried state** — A recurrence's state. In Loop IR, `Carry` defines the next value of one cell and names the
+  seed, a `Pre` read sees the previous step's value at any cell, and the loop that carries it sits outside the loops
+  over its cells; its steps are ordered and its step is any computation, so it has no op. In Tile IR it is a `Fold`
+  that **carries**: its ⊕ is the action `next` (the state becomes what the step computed — the free monoid of step
+  maps stored through its action on the seed, the one form every step has), its `cells` the `Carry` index, its
+  `init` the seed, and a **carrier read** — a slab over one `Pre` — is how the step reads the carrier at other cells.
+  A step affine in the state splits **across the sequence** (`REDUCE=g<n>k` on the carrying site): a probe reads
+  each part's affine map off two walks from known seeds, a prefix carries the state across the parts, and the walk
+  runs every part from its start.
 - **Componentwise / twisted combine** — The two shapes a stored fold combine takes: one independent ⊕ per state (a
   planar fold — sum, max — built by `Lambda.componentwise` and read back by `Lambda.components`), or a componentwise
   monoid conjugated by a bijection (a twist) such as the exp/LSE family behind online softmax, stated by a twist

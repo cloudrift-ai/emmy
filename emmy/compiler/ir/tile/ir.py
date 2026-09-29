@@ -79,6 +79,8 @@ def observed_result_names(op) -> frozenset[str]:
             continue
         if node.observe is not None:
             names.update(node.observe.results)
+        if node.carries:  # a carried state's per-step outputs stream the same way
+            names.update(node.exposes[len(node.base.results) :])
         stack.extend(node.operands)
         stack.extend(s for s in node.lift.body if isinstance(s, Fold))
     return frozenset(names)
@@ -465,16 +467,14 @@ class TileOp(Op):
         )
         self._own_axes()
         self._validate_schedule()
-        self._validate_lagged_reads()
 
-    def _validate_lagged_reads(self) -> None:
-        """A kernel reads its OWN output only one launch back along a serial axis: with no serial
-        axis, no launch has stored what such a read would see."""
-        if self.op is None or self.place.serial:
-            return
-        own = {spec.write.output for spec in self.output_specs}
-        if stale := sorted({load.input for load in loaded_buffers(self.op)} & own):
-            raise ValueError(f"TileOp {self.name!r}: a read of its own output {stale} needs a serial axis")
+    @cached_property
+    def carries(self) -> bool:
+        """Whether this kernel carries a state: a fold of its tree folds the action ``next``
+        (:attr:`Fold.carries`), so its steps run in order inside one loop and the kernel stays one
+        kernel — the classic schedule realizes the loop as one launch per step over a state buffer,
+        the register schedule as a loop inside each CTA."""
+        return any(site.node.carries for site in self.sites)
 
     def _own_axes(self) -> None:
         """The kernel owns its axis table, COMPLETE by construction: the free axes' extents are the

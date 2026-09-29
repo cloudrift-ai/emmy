@@ -190,6 +190,8 @@ def _items(node, ctx: _Ctx) -> list[tuple[str, object]]:
     if node.axis is not None:
         init = ", ".join(x if isinstance(x, str) else format(x, "g") for x in node.init)
         items.append((f"init: ({init})", lambda cont: []))
+    if node.cells:
+        items.append((f"cells: ({', '.join(node.cells)})", lambda cont: []))
     # Always emitted, even for an empty body: the branch carries the SIGNATURE, and a node's
     # binder is storage whether or not it computes anything (an identity projection binds too).
     # APPLIED, not stored: the lift prints with every operand-bound param spelled as the operand

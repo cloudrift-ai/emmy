@@ -62,6 +62,10 @@ _NAME_TO_FN: dict[str, object] = {
     "gelu": lambda x: 0.5 * x * (1.0 + _erf(x / np.sqrt(2.0))),
     "gelu_tanh": lambda x: 0.5 * x * (1.0 + np.tanh(np.sqrt(2.0 / np.pi) * (x + 0.044715 * x**3))),
     "copy": lambda x: x,
+    # The ACTION of a carried state's step: the state becomes what the step computed. A fold whose
+    # ⊕ is this folds the free monoid of step maps under composition, so it has no identity and no
+    # partition arm; every gate that asks ``has_identity`` refuses it by that alone.
+    "next": lambda x, y: y,
     # ``aten.pad`` reaches the generic elementwise spelling only when every pad width is zero.
     # The tracer rejects every non-empty pad before this point, so the stored unary op is an
     # identity (kept distinct from ``copy`` for frontend provenance).
@@ -113,6 +117,7 @@ _ALIASES: dict[str, str] = {
 _ARITY: dict[str, int] = {
     # ``np.where`` is a regular function rather than a ufunc, so it has no ``nin`` metadata.
     "where": 3,
+    "next": 2,
 }
 
 

@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: Qwen/Qwen3.8-2.4T-A95B
-  rationale: "Rides massive Qwen3.8 breakout momentum; flagship MoE status despite lack of fleet deployment."
-  heat: 85
+  rationale: "Sustains flagship MoE interest and strong family momentum, though lacking independent fleet deployment or fresh download evidence this cycle."
+  heat: 70
   task: generate
 matrices:
 - deploy.gpu: NVIDIA B200
