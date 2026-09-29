@@ -22,6 +22,11 @@ full state until the finalize combines and projects it.
 Every piece is a fresh unmapped :class:`TileOp`. A graph splice restarts the lowering pass scan:
 scheduling offers each piece its own row. An axis :class:`Window` records that the partition has
 already been consumed and prevents recursive splitting — the receipt is the IR itself, no flag.
+
+A kernel that CARRIES A STATE has a split of its own, across the sequence (:func:`realize_carry_split`):
+the parts of a step affine in the state compose as affine maps, so a probe reads each part's map
+off two walks from known seeds, a prefix carries the state across the parts, and the walk itself
+runs every part from the state it starts from. Its pieces are Loop IR lifted like the walk.
 """
 
 from __future__ import annotations
@@ -36,20 +41,21 @@ from emmy.compiler.ir.address import gmem_axis_step
 from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.pure.twist import Twist
 from emmy.compiler.ir.schedule import Reduce, Work
 from emmy.compiler.ir.schedule.catalog import splitk_moves
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Body, Load, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Let, Load, Loop, Pre, Select, SelectBranch, Write
 from emmy.compiler.ir.stmt.passes import projection_distributes
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.ops import Sched, carries_partition, head, projection_regions, projection_root, projection_tail
 from emmy.compiler.pipeline import Match
 from emmy.compiler.pipeline.fork import DeferredFork
 from emmy.compiler.pipeline.knob import axis_of, consume_kernel_row, kernel_pin
-from emmy.compiler.pipeline.passes.tile._row import reformed
+from emmy.compiler.pipeline.passes.tile._row import lift_kernel, reformed
 from emmy.compiler.pipeline.search.space import REDUCE, WORK
 
 logger = logging.getLogger(__name__)
@@ -216,9 +222,11 @@ def split_forks(match: Match, root: Node, *, unsplit_tile: TileOp | None = None)
     raises the recorded refusal (``REDUCE`` has no choice of tier, so there is no drop layer);
     a pin with no ``g`` half decides UNSPLIT, exactly as a spelled row with no ``g`` half does."""
     tile: TileOp = root.op
+    node = head(tile.op)
+    if node is not None and node.carries:
+        return _carry_split_forks(match, root, tile, node)
     if not split_pending(tile):
         return None
-    node = head(tile.op)
     assert node is not None and node.axis is not None
     k_axis = tile.axis_of(node.axis)  # the node names its K; the kernel's axis table holds its extent
     key = Sched(tile).key("REDUCE", node) or "REDUCE"
@@ -259,6 +267,222 @@ def split_forks(match: Match, root: Node, *, unsplit_tile: TileOp | None = None)
 def _split_fork(match: Match, root: Node, key: str, cta: int, finalize: str) -> DeferredFork:
     spelling = Reduce.of(cta=cta, finalize=finalize).spell()
     return DeferredFork(lambda: realize_split(match, root, cta, finalize), {key: spelling}, structural=True)
+
+
+# ---- a carried state: the split across the sequence ------------------------------------------- #
+
+
+def _carry_split_forks(match: Match, root: Node, tile: TileOp, node: Fold) -> list[DeferredFork] | None:
+    """The split fork for a kernel that CARRIES A STATE — the unsplit walk beside one structural
+    option per width the step axis divides into — or ``None`` when there is nothing to decide: a
+    step that is not affine in its state (:meth:`Fold.affine`), a block the probe cannot pack
+    (fewer kept than mixed cells), a piece of a realized split. Only the deferred finalize exists
+    here (``g<n>k``): the parts' maps compose in a kernel, there is nothing to add atomically."""
+    view = node.affine()
+    if view is None or carries_partition(tile) or tile.split_consumed:
+        return None
+    time = tile.axis_of(node.axis)
+    if view.mixed is not None:
+        mixed, kept = (tile.axis_of(node.cells[position]).extent for position in (view.mixed, view.kept))
+        if not (mixed.is_static and kept.is_static) or kept.as_static() < mixed.as_static():
+            return None
+    key = Sched(tile).key("REDUCE", node) or "REDUCE"
+    unsplit = DeferredFork(lambda: replace(tile, split_consumed=True), {key: ""})
+    element = axis_of(key)
+    pin = kernel_pin("REDUCE", tile.name, root.id)
+    if pin is None:
+        pin = REDUCE.narrow_at(element) if element else REDUCE.raw()
+
+    def arm(cta: int) -> DeferredFork:
+        return DeferredFork(lambda: realize_carry_split(match, root, cta), {key: Reduce.of(cta=cta).spell()}, structural=True)
+
+    if pin is not None:
+        work = kernel_pin("WORK", tile.name, root.id)
+        plan = Reduce.parse(pin, Work.parse(work if work is not None else WORK.raw()))
+        if not plan.needs_split:
+            return [unsplit]
+        _enforce(splitk_width(time, plan.cta))
+        if plan.finalize != "kernel":
+            raise ValueError("a carried state's split composes its parts in a finalize kernel: spell it REDUCE=g<n>k")
+        return [arm(plan.cta)]
+    options = [unsplit]
+    for plan in splitk_moves():
+        if plan.finalize == "kernel" and splitk_width(time, plan.cta) is None:
+            options.append(arm(plan.cta))
+    return options
+
+
+def state_ports(tile: TileOp, prefix: str) -> tuple[Tensor, ...]:
+    """The buffers the classic realization of ``tile``'s carried states owns, named under
+    ``prefix`` — one per state over ``(time, *free, *cells)``, the index ``states_as_buffers``
+    writes. The lift adds them to the node; register storage drops them again."""
+    outer = tuple(axis.name for axis in tile.place.free)
+    return tuple(
+        Tensor(name=f"{prefix}__{state}", shape=tuple(tile.axis_of(axis).extent for axis in (node.axis, *outer, *node.cells)), dtype=F32)
+        for node in (site.node for site in tile.sites if site.node.carries)
+        for state in node.base.results
+    )
+
+
+def _nest(body: Body, axes: tuple) -> Body:
+    """``body`` under loops over ``axes``, outermost first."""
+    for axis in reversed(axes):
+        body = Body((Loop(axis=axis, body=body),))
+    return body
+
+
+def realize_carry_split(match: Match, root: Node, cta: int) -> Graph:
+    """Split a carried state's walk across the sequence into ``cta`` parts — three kernels, each
+    lifted from Loop IR like the walk itself:
+
+    1. the PROBE walks every part's range twice from known seeds, zero and the identity packed
+       along the kept cells, and stores every step's state: a step affine in the state composes as
+       an affine map, so a part's map is read off the two walks — its offset is the zero walk's last
+       state, its matrix the difference of the two walks' last states;
+    2. the PREFIX carries the state across the parts, applying each part's map to the state the
+       part before it left, and stores the state every part starts from;
+    3. the WALK is the kernel itself over each part's range from that state, one part per batch
+       cell, storing what the kernel stored.
+
+    Three walks of a part's range where the sequence took one, for ``cta`` times the parallelism:
+    the price a card mostly idle on one CTA per head pays gladly, and evidence's to decide."""
+    tile: TileOp = root.op
+    node = head(tile.op)
+    view = node.affine()
+    assert view is not None, "the split offer fires on affine carried states only"
+    (state,) = node.base.results
+    cells = node.cells
+    cell_axes = tuple(tile.axis_of(name) for name in cells)
+    own = tuple(Var(name) for name in cells)
+    time = tile.axis_of(node.axis)
+    steps = time.extent.as_static() // cta
+    out = root.output
+    body = tile.loop_body
+    (position,) = (index for index, stmt in enumerate(body) if isinstance(stmt, Loop) and stmt.carries)
+    loop, before = body[position], tuple(body[:position])
+    part, probe = Axis("_part", Dim(cta)), Axis("_probe", Dim(2))
+    sliced = replace(loop.axis, extent=Dim(steps), window=Window(parent=loop.axis.source_axis or loop.axis, partition=True))
+    sigma = Sigma({loop.axis.name: BinaryExpr("+", BinaryExpr("*", Var(part.name), Literal(steps, "int")), Var(loop.axis.name))})
+    step = Body(tuple(stmt.substitute(sigma) for stmt in loop.body))
+    probe_seed, probe_states, starts = f"{out.name}__probe_seed", f"{out.name}__probe", f"{out.name}__start"
+
+    def indexed(stmts: Body, lead: tuple[Axis, ...], seed: str) -> Body:
+        # The state under the lead coordinates too — a part, a probe — and seeded from ``seed``.
+        prefix = tuple(Var(axis.name) for axis in lead)
+
+        def rewrite(stmt):
+            if isinstance(stmt, Carry):
+                return replace(stmt, index=(*prefix, *stmt.index), seed=seed)
+            if isinstance(stmt, Pre) and stmt.carrier == state:
+                return replace(stmt, index=(*prefix, *stmt.index))
+            return stmt
+
+        return stmts.map(rewrite)
+
+    # The probe: the walk with its stores replaced by one store of the state every step.
+    def probed(stmt):
+        if isinstance(stmt, Write):
+            return None
+        if isinstance(stmt, Loop) and not stmt.is_reduce and not stmt.body.carries and not stmt.body.iter_of_type(Write):
+            return None  # an output sweep with nothing left to store
+        if isinstance(stmt, Carry):
+            return (stmt, Write(output=probe_states, index=(Var(probe.name), Var(part.name), Var(sliced.name), *own), value=stmt.value))
+        return stmt
+
+    walk = indexed(step, (probe, part), probe_seed).map(probed)
+    probe_body = Body((*before, *_nest(walk, (sliced, probe, part))))
+    # The probe's seeds: zero, and the identity between the mixed and the kept cell — ones
+    # everywhere for a step reading its own cell alone, whose map is diagonal.
+    hit = BinaryExpr(">", Var(probe.name), Literal(0, "int"))
+    if view.mixed is not None:
+        hit = BinaryExpr("&&", hit, BinaryExpr("==", own[view.mixed], own[view.kept]))
+    seed_body = Body(
+        (
+            Let(name="_one", value=1.0),
+            Let(name="_zero", value=0.0),
+            Select(name="_seed", branches=(SelectBranch("_one", hit), SelectBranch("_zero", Literal(True, "bool")))),
+            Write(output=probe_seed, index=(Var(probe.name), Var(part.name), *own), value="_seed"),
+        )
+    )
+    seed_kernel = _nest(seed_body, (probe, part, *cell_axes))
+    # The prefix: S ← A_p · S + b_p across the parts, A_p[i, k] the identity walk less the zero walk
+    # at kept cell k, b_p the zero walk; each part's start is the state before its step. A diagonal
+    # map applies cell by cell, with no contraction.
+    last = Literal(steps - 1, "int")
+    carried = f"{state}__across"
+
+    def at(position: int | None, expr) -> tuple:
+        return tuple(expr if index == position else coordinate for index, coordinate in enumerate(own))
+
+    def applied(along) -> tuple:
+        # ``A_p`` at this cell's row and column ``along`` times the state at column ``along``.
+        return (
+            Load(name="_one_walk", input=probe_states, index=(Literal(1, "int"), Var(part.name), last, *at(view.kept, along))),
+            Load(name="_zero_walk", input=probe_states, index=(Literal(0, "int"), Var(part.name), last, *at(view.kept, along))),
+            Assign(name="_a", op="subtract", args=("_one_walk", "_zero_walk")),
+            Pre(name="_s", carrier=carried, index=at(view.mixed, along)),
+            Assign(name="_as", op="multiply", args=("_a", "_s")),
+        )
+
+    if view.mixed is None:
+        mapped = applied(None)
+        product = "_as"
+    else:
+        basis = Axis("_basis", cell_axes[view.mixed].extent)
+        mapped = (Loop(axis=basis, body=Body((*applied(Var(basis.name)), Accum(name="_acc", value="_as")))),)
+        product = "_acc"
+    prefix_body = _nest(
+        Body(
+            (
+                *mapped,
+                Load(name="_b", input=probe_states, index=(Literal(0, "int"), Var(part.name), last, *own)),
+                Pre(name="_from", carrier=carried, index=own),
+                Assign(name="_next", op="add", args=(product, "_b")),
+                Carry(name=carried, value="_next", index=own, seed=node.init[0]),
+                Write(output=starts, index=(Var(part.name), *own), value="_from"),
+            )
+        ),
+        (part, *cell_axes),
+    )
+    # The walk: the kernel over each part's range, from the state the prefix stored for it.
+    walk_body = Body((*before, *_nest(indexed(step, (part,), starts), (sliced, part))))
+
+    def piece(body: Body, name: str) -> TileOp:
+        lifted = lift_kernel(LoopOp(body=body), name=name)
+        return replace(lifted, knobs=consume_kernel_row(lifted.knobs))
+
+    frag = _frag(match, root)
+    extents = tuple(axis.extent for axis in cell_axes)
+    seed_tile = piece(seed_kernel, f"{tile.name}__probe_seed")
+    frag.add_node(op=seed_tile, inputs=[], output=Tensor(probe_seed, (Dim(2), Dim(cta), *extents), F32), node_id=probe_seed)
+    probe_tile = piece(probe_body, f"{tile.name}__probe")
+    frag.add_node(
+        op=probe_tile,
+        inputs=_piece_inputs(root, probe_tile, probe_seed),
+        outputs=(Tensor(probe_states, (Dim(2), Dim(cta), Dim(steps), *extents), F32), *state_ports(probe_tile, probe_states)),
+        node_id=probe_states,
+    )
+    prefix_tile = replace(piece(prefix_body, f"{tile.name}__prefix"), split_consumed=True)
+    seeded = [node.init[0]] if isinstance(node.init[0], str) else []
+    frag.add_node(
+        op=prefix_tile,
+        inputs=[probe_states, *seeded],
+        outputs=(Tensor(starts, (Dim(cta), *extents), F32), *state_ports(prefix_tile, starts)),
+        node_id=starts,
+    )
+    walk_tile = piece(walk_body, tile.name)
+    # The walk owns the outputs the kernel stored, not the state port the lift gave the kernel:
+    # its own port replaces that one, travelling under a temporary until the splice hands it the
+    # name, the way every replaced buffer does.
+    written = output_root(root, {spec.write.output for spec in tile.output_specs})
+    ports = tuple(
+        replace(port, name=f"{port.name}__split") if port.name in root.buffer_names() else port for port in state_ports(walk_tile, root.id)
+    )
+    result = add_output_piece(match, frag, written, walk_tile, _piece_inputs(root, walk_tile, starts), states=ports)
+    replaced = {port.name.removesuffix("__split"): port.name for port in ports if port.name.endswith("__split")}
+    result.outputs.extend(replaced.values())
+    match.output = {**match.output, **replaced}
+    return result
 
 
 # ---- slicing the head fold -------------------------------------------------------------------- #
@@ -635,4 +859,4 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
     return _add_projection_pieces(match, result, projection_pieces, free)
 
 
-__all__ = ["atomic_finalize", "realize_split", "split_forks", "splitk_width"]
+__all__ = ["atomic_finalize", "realize_carry_split", "realize_split", "split_forks", "splitk_width", "state_ports"]
