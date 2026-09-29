@@ -565,12 +565,14 @@ canonicalized before validation:
 - `eliminate_copy_aliases` — drop `y = copy(x)` Assigns. Each nested body owns its alias map, so source spellings
   reused by sibling scopes remain separate binders. Enclosing aliases travel through that same walk, pruned at each
   child scope, instead of renaming its entire subtree before descending again.
-- `unify_sibling_reduce_axes` — rename sibling reduce Loops whose reduce-axis Load positions overlap so they share one
-  canonical axis name (softmax's max + sum sweeps; the two matmul reductions in `silu(x@Wg) * (x@Wu)` that both index
-  `x` at the same K slot). A position is `(source, dim, anchor, coefficient)`, read through `affine_form`: a blocked
-  reduce indexes its stream at `o·B + i` and still walks that dimension, while the anchor keeps `o·B + i` apart from
-  `o·B + 32 + j`, which walk different halves. Union-find groups all transitively-overlapping Loops at one scope.
-- `merge_sibling_reduce_loops` — concatenate sibling reduce Loops that share `axis.name` / `extent` into one Loop body.
+- `merge_sibling_reduce_loops` — unify sibling reduce axes whose Load positions overlap, then merge matching Loops
+  before descending into their children. A parent merge therefore exposes child reductions to the same walk.
+  Overlapping reductions share one canonical axis name (softmax's max + sum sweeps; the two matmul reductions in
+  `silu(x@Wg) * (x@Wu)` that both index `x` at the same K slot). A position is `(source, dim, anchor, coefficient)`,
+  read through `affine_form`: a blocked reduce indexes its stream at `o·B + i` and still walks that dimension, while
+  the anchor keeps `o·B + i` apart from `o·B + 32 + j`, which walk different halves. Union-find groups all
+  transitively-overlapping Loops at one scope.
+  Sibling reduce Loops that share `axis.name` / `extent` concatenate into one Loop body.
   Every gate is phrased over what the second Loop reads from its ENCLOSING scope (`free_names` — what it uses and does
   not bind itself): it must read no name the first body defines (blocking softmax-style sequential reduces where
   sum-exp reads `acc_max`), and no between-stmt def. Names both bodies merely happen to bind are a COLLISION, not a
@@ -592,8 +594,8 @@ canonicalized before validation:
   `(input, index, width, dtype)` read in a scope and rewire every scalar or vector lane. A write invalidates retained
   reads of that buffer, including around a nested scope with a write. Entering a scope also drops cached values whose
   definitions or dependencies are rebound there; an identical index spelling can name a different loop coordinate.
-  The same walk keeps one `Assign` per identical
-  operation over identical arguments and one `Accum` per identical accumulation — a value the loop tree computes
+  The same walk keeps one `Assign` per identical operation over identical arguments, treating commutative operands
+  as unordered after alias substitution, and one `Accum` per identical accumulation. A value the loop tree computes
   twice (a contraction spelled on both sides of a cut seam, a repeated pure expression) folds to one definition, and
   an accumulator alias carries out of the loop that defined it to the scope that reads the sum. This is
   canonicalization for every Loop / Tile body, not a fusion profitability decision; the structural key inherits it,
@@ -609,10 +611,10 @@ canonicalized before validation:
   differ only by argument order land in the same canonical form.
   Runs last so the sort key is the post-rename canonical SSA / buffer
   names.
-- Reduction-axis unification, sibling merging, and duplicate elimination reach a fixed point before canonical
-  ordering. Coordinate expressions and commutative operands normalize between rounds to expose duplicates; every
-  changed round removes a loop or a duplicate computation. The final ordering pass then builds one colored relation
-  graph for the complete body tree and chooses one dependency- and effect-valid statement order. Vertices represent
+- Reduction merging and duplicate elimination reach a fixed point before canonical ordering. Coordinate expressions
+  normalize between rounds to expose duplicates; commutative duplicates resolve during alias substitution. The final
+  ordering pass builds one colored relation graph for the complete body tree and chooses one dependency- and
+  effect-valid statement order. Vertices represent
   scopes, statements, lexical definitions, axes, source axes, and external buffers; colored relations retain operand
   positions, captures, aliases, nesting, resource hazards, and ordered execution protocols. The graph is independent
   of source order and spelling, and it rides the normalized body: structural identity labels the same graph again
