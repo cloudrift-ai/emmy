@@ -122,7 +122,12 @@ def _reuse(stmts: list[Stmt], written: frozenset[str], ctx: SimplifyCtx) -> list
     out: list[Stmt] = []
     for stmt in stmts:
         if rename:
-            stmt = stmt.rewrite(lambda name: rename.get(name, name))
+            # A name the statement defines, itself or anywhere in a nested body (a staging loop unrolled
+            # on its own, with trip names of its own), is a new value: only uses of this body's dropped
+            # loads are renamed. Renaming a nested trip's definition onto an outer one declared the
+            # outer name twice in one C scope.
+            local = {name for s in Body((stmt,)).iter() for name in s.defines()}
+            stmt = stmt.rewrite(lambda name, local=local: name if name in local else rename.get(name, name))
         if isinstance(stmt, Load) and stmt.is_scalar and stmt.input not in written and not stmt.carried:
             stmt = replace(stmt, index=tuple(e.simplify(ctx) for e in stmt.index))
             key = (stmt.input, stmt.dtype, tuple(_canonical(e) for e in stmt.index))
