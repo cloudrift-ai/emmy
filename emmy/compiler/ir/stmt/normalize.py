@@ -58,15 +58,15 @@ def _normalize_body(stmts: Body) -> Body:
     stmts = hoist_loop_invariants(stmts)
     stmts = simplify_body(stmts)
     stmts = dedup_loads(stmts)
-    # Close the structural cleanup before labeling the relation graph. Coordinate and operand
-    # spelling expose duplicates without paying for canonical sibling order at every round.
-    stmts = sort_commutative_args(_canonicalize_exprs(stmts))
+    # Close the structural cleanup before labeling the relation graph. Coordinate spelling
+    # exposes duplicates without paying for canonical sibling order at every round.
+    stmts = _canonicalize_exprs(stmts)
     while True:
         unified = unify_sibling_reduce_axes(stmts)
         reduced = dedup_loads(merge_sibling_reduce_loops(unified))
         if reduced == unified:
             return _canonical_order(unified)
-        stmts = sort_commutative_args(_canonicalize_exprs(reduced))
+        stmts = _canonicalize_exprs(reduced)
 
 
 # ---------------------------------------------------------------------------
@@ -779,8 +779,10 @@ def dedup_loads(stmts: Body) -> Body:
             elif isinstance(s, Assign | Accum):
                 s = rename_free(s, alias)
                 key = (
-                    ("assign", s.op, s.args, s.dtype) if isinstance(s, Assign) else ("accum", s.value, s.op, s.dtype, s.axes, repr(s.base))
-                ) + (s.deps(),)
+                    ("assign", s.op, tuple(sorted(s.args)) if s.op.commutative else s.args, s.dtype)
+                    if isinstance(s, Assign)
+                    else ("accum", s.value, s.op, s.dtype, s.axes, repr(s.base))
+                ) + (frozenset(s.deps()),)
                 if key in local:
                     alias[s.name] = local[key][0]
                     if isinstance(s, Accum):
