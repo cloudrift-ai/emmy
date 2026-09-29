@@ -119,6 +119,7 @@ def capture_twin_graphs(
     from emmy.compiler.trace.huggingface import (
         # noqa: PLC0415,
         build_attention_split_wrapper,
+        build_gdn_state_wrapper,
         build_moe_split_wrapper,
         hyper_connection_seam,
         moe_block_parts,
@@ -179,6 +180,21 @@ def capture_twin_graphs(
     layer_scopes: dict[str, set[int]] = {}
     for layer_idx, block, suffix in layers:
         members = {i for i, signature in enumerate(signatures) if signature == signatures[layer_idx]}
+        mixer = getattr(block, "linear_attn", None)
+        if mixer is not None:
+            if any(rows is None for _name, rows in buckets):
+                raise NotImplementedError("GDN state programs require static sequence widths; capture with symbolic=False")
+            wrapper = build_gdn_state_wrapper(block).to_empty(device="cpu").to(td)
+            for name, rows in buckets:
+                args = [
+                    torch.zeros(1, rows, hidden, dtype=td),
+                    torch.zeros(1, mixer.num_v_heads, mixer.head_k_dim, mixer.head_v_dim, dtype=torch.float32),
+                    torch.zeros(1, mixer.conv_dim, mixer.conv_kernel_size, dtype=td),
+                ]
+                twin_name = f"gdn{name}{suffix}"
+                graphs[twin_name] = trace_split(wrapper, args, None)
+                layer_scopes[twin_name] = members
+            continue
         parts = moe_block_parts(block.mlp)
         if parts is None:
             pre_w, post_w = build_attention_split_wrapper(block)
@@ -286,6 +302,11 @@ def _layer_signatures(trunk, config) -> list[tuple[str, str, int]]:
         attn = at(types, i, "homogeneous")
         attention = getattr(block, "self_attn", None)
         if attention is None:
+            mixer = getattr(block, "linear_attn", None)
+            if mixer is not None:
+                mlp = at(mlp_types, i, "sparse" if moe_block_parts(block.mlp) is not None else "dense")
+                out.append((str(mlp), "linear_attention", int(mixer.num_v_heads)))
+                continue
             raise NotImplementedError(
                 f"serving twins: layer {i} ({type(block).__name__}, {attn}) has no self_attn; "
                 "blocks whose token mixer is not attention (e.g. a gated delta net) have no serving program yet"

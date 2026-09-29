@@ -1035,20 +1035,31 @@ def test_gdn_state_wrapper_continues_resets_and_isolates_requests(length):
 
 @pytest.mark.parametrize("length", [1, 16])
 def test_gdn_state_wrapper_traces_both_state_outputs(length):
+    import numpy as np
     import torch
 
+    from emmy.compiler.backend.numpy import NumpyBackend
     from emmy.compiler.trace.huggingface import build_gdn_state_wrapper
-    from emmy.compiler.trace.torch import trace_module
+    from emmy.compiler.trace.torch import trace_module_with_constants
 
     block = _qwen3_5_linear_block()
     mixer = block.linear_attn
-    state = torch.zeros(1, mixer.num_v_heads, mixer.head_k_dim, mixer.head_v_dim)
-    history = torch.zeros(1, mixer.conv_dim, mixer.conv_kernel_size)
+    state = torch.randn(1, mixer.num_v_heads, mixer.head_k_dim, mixer.head_v_dim) * 0.1
+    history = torch.randn(1, mixer.conv_dim, mixer.conv_kernel_size) * 0.1
     x = torch.randn(1, length, mixer.hidden_size) * 0.1
-    graph = trace_module(build_gdn_state_wrapper(block), (x, state, history))
+    wrapper = build_gdn_state_wrapper(block)
+    graph, targets = trace_module_with_constants(wrapper, (x, state, history))
     assert len(graph.inputs) == len(graph.outputs) == 3
     for name, value in zip(graph.outputs, (x, state, history), strict=True):
         assert tuple(graph.buffer(name).shape) == tuple(value.shape)
+    tensors = dict(wrapper.named_parameters()) | dict(wrapper.named_buffers())
+    inputs = {name: value.numpy() for name, value in zip(graph.inputs, (x, state, history), strict=True)}
+    inputs.update({name: tensors[path].detach().numpy() for name, path in targets.items()})
+    result, _ = NumpyBackend().run(graph, input_data=inputs)
+    with torch.no_grad():
+        reference = wrapper(x, state, history)
+    for name, expected in zip(graph.outputs, reference, strict=True):
+        np.testing.assert_allclose(result.outputs[name], expected.numpy(), rtol=1e-4, atol=1e-5)
 
 
 # --- checkpoint keys vs twin parameter names ---------------------------------------------------
