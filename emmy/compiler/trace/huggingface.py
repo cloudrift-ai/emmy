@@ -2056,7 +2056,11 @@ def load_quantized_split(
                         state[_checkpoint_to_model_key(rename(k))] = torch.from_numpy(vals).to(dtype)
                         continue
                     t = t.float()  # unpaired / skipped fp8: exact value decode, no scale
-                state[_checkpoint_to_model_key(rename(k))] = t.to(dtype) if t.is_floating_point() else t
+                model_key = _checkpoint_to_model_key(rename(k))
+                # A router's expert-selection bias stays float32, as ``from_pretrained`` keeps it (see
+                # ``serving_router``); every other dense tensor takes the twin's dtype.
+                cast_to = torch.float32 if model_key.endswith(".e_score_correction_bias") else dtype
+                state[model_key] = t.to(cast_to) if t.is_floating_point() else t
 
     # POP per layer: the stacked tensors are a full second copy of the expert bytes, so holding the
     # per-expert dict alive across the whole loop peaks at 2× (GLM-4.5-Air: 50 GiB, which no 60 GB
