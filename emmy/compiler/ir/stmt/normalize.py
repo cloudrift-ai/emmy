@@ -27,7 +27,7 @@ from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
 from emmy.compiler.ir.stmt.body import Body, free_names
 from emmy.compiler.ir.stmt.leaves import Accum, Assign, Init, Load, SelectBranch, Write
-from emmy.compiler.ir.stmt.order import bound_axes, ordering_constraints, relation_graph, topological_sort
+from emmy.compiler.ir.stmt.order import _ordered_exported_accs, bound_axes, ordering_constraints, relation_graph, topological_sort
 
 __all__ = ["normalize_body"]
 
@@ -287,10 +287,8 @@ def eliminate_copy_aliases(stmts: Body) -> Body:
     copies as bridges between producer writes and consumer reads; a long
     chain stacks them. Every such Assign is dropped and downstream
     references to ``y`` are rewired to the alias root. Pure IR hygiene."""
-    from emmy.compiler.ir.stmt.passes import rename_free  # noqa: PLC0415
-
-    def walk(body: Body) -> Body:
-        alias: dict[str, str] = {}
+    def walk(body: Body, inherited: dict[str, str]) -> Body:
+        alias = {name: value for name, value in inherited.items() if name not in body.ssa_defs}
 
         def resolve(name: str) -> str:
             seen: set[str] = set()
@@ -304,17 +302,12 @@ def eliminate_copy_aliases(stmts: Body) -> Body:
             if isinstance(stmt, Assign) and stmt.op.name == "copy" and len(stmt.args) == 1 and stmt.dtype is None:
                 alias[stmt.name] = resolve(stmt.args[0])
                 continue
-            if stmt.nested():
-                # Apply aliases from the enclosing scope hygienically, then give each child its
-                # own alias table. A spelling reused by sibling bodies denotes separate binders.
-                stmt = rename_free(stmt, alias)
-                stmt = stmt.with_bodies(tuple(walk(child) for child in stmt.nested()))
-                out.append(stmt)
-            else:
-                out.append(stmt.rewrite(resolve))
+            children = stmt.nested()
+            shell = stmt.with_bodies(tuple(Body() for _ in children)).rewrite(resolve)
+            out.append(shell.with_bodies(tuple(walk(child, alias) for child in children)))
         return Body(out)
 
-    return walk(Body.coerce(stmts))
+    return walk(Body.coerce(stmts), {})
 
 
 # ---------------------------------------------------------------------------
@@ -893,7 +886,7 @@ class _SequentialScope:
         children = stmt.nested()
         if children:
             for child in children:
-                for name in child.exported_accs:
+                for name in _ordered_exported_accs(child):
                     self._allocate(name, "acc")
         else:
             for name in stmt.defines():
@@ -913,7 +906,7 @@ class _SequentialScope:
         shell = stmt.with_bodies(tuple(Body() for _ in children)) if children else stmt
         renamed = shell.rename(names)
         if children:
-            exported = frozenset(name for child in children for name in child.exported_accs)
+            exported = frozenset(name for child in children for name in _ordered_exported_accs(child))
             renamed_children: list[Body] = []
             for child in children:
                 scope = _SequentialScope(

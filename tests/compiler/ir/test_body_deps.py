@@ -41,7 +41,7 @@ def test_scope_summaries_share_nested_analysis(monkeypatch):
     monkeypatch.setattr(Assign, "deps", counted)
     for body in reversed(bodies):
         assert body.free_ssa == frozenset({"source"})
-        assert body.exported_accs == ("sum",)
+        assert tuple(stmt.name for stmt in body.accums) == ("sum",)
     assert visits == 1
 
 

@@ -382,19 +382,6 @@ class Body(tuple[Stmt, ...], Wire):
     # -- def-use analysis ------------------------------------------------
 
     @cached_property
-    def exported_accs(self) -> tuple[str, ...]:
-        """Accumulator and carried-state names exported by this subtree, in structural order."""
-        from emmy.compiler.ir.stmt.leaves import Accum, Carry  # noqa: PLC0415
-
-        names = []
-        for stmt in self:
-            if isinstance(stmt, (Accum, Carry)):
-                names.extend(stmt.carried_names())
-            for child in stmt.nested():
-                names.extend(child.exported_accs)
-        return tuple(dict.fromkeys(names))
-
-    @cached_property
     def free_ssa(self) -> frozenset[str]:
         """SSA reads from the enclosing scope, excluding this scope's definitions and exported states."""
         from emmy.compiler.ir.stmt.order import _free_ssa, _ordered_sibling_defs  # noqa: PLC0415
@@ -736,11 +723,18 @@ class Body(tuple[Stmt, ...], Wire):
         inside nested wrappers")."""
         return tuple(s for s in self if isinstance(s, types))
 
+    @cached_method
     def iter_of_type(self, *types: type) -> tuple[Stmt, ...]:
         """All stmts (recursive — via :meth:`iter`) matching any of the
         given types. The base primitive the named helpers
         (:meth:`loads`, :meth:`writes`, ...) wrap."""
-        return tuple(s for s in self.iter() if isinstance(s, types))
+        found = []
+        for stmt in self:
+            if isinstance(stmt, types):
+                found.append(stmt)
+            for child in stmt.nested():
+                found.extend(child.iter_of_type(*types))
+        return tuple(found)
 
     @cached_property
     def loads(self) -> tuple[Stmt, ...]:
