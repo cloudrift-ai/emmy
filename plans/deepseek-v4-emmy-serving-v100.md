@@ -120,7 +120,12 @@ checkpoint stays impractical here.
    alternated inside each repeat, the way the RTX 5090 gemma-4 experiment balances time and thermal drift, against
    immutable image digests and one checkpoint revision. Profile in a separate run — profiling the fork's multi-stream
    execution perturbs the A/B — with a per-phase split (expert dispatch, attention, stream mixing) so Stage 6's
-   hypothesis is grounded.
+   hypothesis is grounded. Quality gates the A/B (2026-09-29, GSM8K 200, chat template, one envelope): the fork scores
+   0.91 strict / 0.975 flexible; the release image 0.86 / 0.88 because the loader and the runner's router copy rounded
+   the router's float32 selection bias to float16 (fixed by PR #964: 0.71 / 0.96 with it). Emmy still gives every probed
+   prompt 0.05-0.15 nats/token less likelihood than the fork and keeps the few-shot `#### N` answer format less often;
+   routed experts match an fp32 reference, the attention call is identical, and neither of HF's float16
+   hyper-connection choices explains it on the fork. The open suspect is Emmy's compiled `pre`/`post` programs.
 7. **Stage 6 — MXFP4 expert inputs**, only if Stage 5's profile shows expert weight streaming dominates and a
    fused-unpack GEMM can plausibly beat TurboMind's on Volta. `main` spells native MXFP4 expert twins; this checkpoint
    needs its declaration mapped onto that spelling (`quant_method: fp8` with `expert_dtype: fp4`, packed as `w1.weight
@@ -372,9 +377,9 @@ expert route's `--record-greedy` under its one cut pin runs past 600 s of GPU ti
 
 The fork and Emmy numbers are directional, not a balanced A/B: separate invocations, different envelopes (the fork at
 `gpu_memory_utilization` 0.80 with prefix caching off, Emmy at 0.90 with it on), different prompt shapes, the Emmy
-rows one repeat each from direct HTTP requests with no experiment record. No baked Emmy image exists, so the
-single-image two-entrypoint mechanism the A/B needs is not built. Correctness beyond greedy agreement and coherent
-completions was never measured, and no tensor-level comparison has run.
+rows one repeat each from direct HTTP requests with no experiment record. The baked image exists since #928; the
+A/B recipe (PR #960) runs it and the fork image as two arms. Correctness: see Stage 5 — GSM8K and per-layer tensor
+comparisons against the fork have run, and a likelihood gap remains open.
 
 ## Operations handoff
 

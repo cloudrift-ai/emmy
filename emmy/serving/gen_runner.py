@@ -43,11 +43,9 @@ def serving_router(gate, dtype):
     on DeepSeek V4, where float16 rounding (up to 8e-3) flips the last of the top-k picks."""
     import copy
 
-    import torch
-
     router = copy.deepcopy(gate).to(dtype)
-    if getattr(gate, "e_score_correction_bias", None) is not None:
-        router.e_score_correction_bias = gate.e_score_correction_bias.to(torch.float32)
+    if (bias := getattr(gate, "e_score_correction_bias", None)) is not None:
+        router.e_score_correction_bias = bias.float()
     return router
 
 
