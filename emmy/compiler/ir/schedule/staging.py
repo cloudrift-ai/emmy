@@ -384,19 +384,29 @@ def _block_scaled_warp_stage(c: Fold, tile: Tile, stage: Stage, budget: int, pai
     matmul computes — its quantize fused in, leaving no buffer to copy from. The weight side is
     always stored, which is what the ``pair.b`` check below requires of every channel.
 
-    The scoped shape: cp.async (the four-descriptor TMA box copy is not built — a missing-code
-    fact, stated where the code would live), a k64 cell over 16-element blocks, both code
-    operands canonically laid out with k innermost, and a static k the tile divides.
+    The scoped shape: a copy transport, a k64 cell over 16-element blocks, both code operands
+    canonically laid out with k innermost, and a static k the tile divides.
 
     Sizing restates the byte-slab rule in the format's units, twice per side. A codes row is
-    ``bk_elems / 2`` bytes and a scales row ``bk_elems / block``; the fill copies 16 B chunks and
+    ``bk_elems / 2`` bytes and a scales row ``bk_elems / block``; each copy moves 16 B chunks and
     a chunk never straddles a row, so both spans — and the gmem rows they stride, ``k / 2`` and
     ``k / block`` — must be 16-divisible. That is what bounds the tile from below: at block 16 a
     scales row needs ``bk_elems`` to be a multiple of 256, so the narrow-k tiles decline here and
-    keep the generic reading.
+    keep the generic reading. The ring holds every slab of every channel: the A pair, and one
+    codes and one scales slab per weight.
+
+    TMA copies the same slabs as boxes, one descriptor per stored buffer. The same 16 B rules are
+    the box's own (inner span and gmem row stride), and every box dim must fit the hardware's 256
+    limit. A box writes its rows unpadded, so they carry no cp.async pad; every slot is then a multiple
+    of 128 B (8-row multiples of 16 B rows), which keeps each slot's destination aligned. Each slot
+    also takes one 8-byte mbarrier. TMA has no way to evaluate an activation's encode, so a matmul
+    that computes its own A codes declines it and keeps cp.async beside its compute fill.
     """
     atom = tile.atom
-    if stage.transport != "smem-async":
+    tma = stage.transport == "smem-tma"
+    if stage.transport != "smem-async" and not tma:
+        return None
+    if tma and pair.a.bits is None:
         return None
     if atom.atom_k != 64 or pair.block != _PACKED_BLOCK or atom.operand_dtype("a") != atom.operand_dtype("b"):
         return None
@@ -425,8 +435,11 @@ def _block_scaled_warp_stage(c: Fold, tile: Tile, stage: Stage, budget: int, pai
             return None
     if k % bk_elems or (bk_elems // 2) % 16 or (bk_elems // block) % 16 or (k // block) % 16:
         return None
-    rows = (tile.m.tile, tile.n.tile)
-    slot_bytes = sum(r * (bk_elems // 2 + BYTE_SLAB_PAD) + r * (bk_elems // block + BYTE_SLAB_PAD) for r in rows)
+    if tma and max(tile.m.tile, tile.n.tile, bk_elems // 2) > _TMA_MAX_BOX:
+        return None
+    pad = 0 if tma else BYTE_SLAB_PAD
+    rows = (tile.m.tile, *(tile.n.tile for _ in pair.b))
+    slot_bytes = sum(r * (bk_elems // 2 + pad) + r * (bk_elems // block + pad) for r in rows) + (8 if tma else 0)
     if slot_bytes > budget:
         return None
     choice = replace(stage, depth=_clamp_depth(stage.depth, slot_bytes, budget), reg_depth=min(stage.reg_depth, tile.bk))
