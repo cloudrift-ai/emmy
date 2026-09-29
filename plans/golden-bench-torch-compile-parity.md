@@ -10,7 +10,7 @@ kernel-set result good enough for the paper needs the level cells clearly above 
 | # | Work | Cells it moves | Expected | GPUs needed | Status |
 | --- | --- | --- | --- | --- | --- |
 | 0 | #930 close-out: drop the `PIECE_FORMATION` ContextVar (one route re-spell), keep a piece's ordinal through a split, restamp | all | none (hygiene) | local RTX 5090 | done (in #930) |
-| 1 | mma.sync GEMM: conflict-free fragment loads, fewer loads per mma, a 96-row masked M tile | A100 s512, 4090 s512, 5090 s512 | A100 0.98× → ~1.05×; 4090/5090 margin | A100 (primary), RTX 4090, RTX 5090 | code in #967 (staged output store, 96-row tile, masked-M zero-fill, ldmatrix pairing); s512 re-records running |
+| 1 | mma.sync GEMM: conflict-free fragment loads, fewer loads per mma, a 96-row masked M tile | A100 s512, 4090 s512, 5090 s512 | A100 0.98× → ~1.05×; 4090/5090 margin | A100 (primary), RTX 4090, RTX 5090 | done in #967 (96-row tile, masked-M zero-fill, ldmatrix pairing; A100 s512 1.01×, 4090 1.03×, 5090 1.04×) |
 | 2 | sm_90 GEMM: larger wgmma tiles, TMA staging, a producer warp group | H100 s512 | 0.98× → ~1.15–1.2× | H100 | done in #967: golden form 1.04×, HF layer 0.91× (blocker 1) |
 | 3 | Programmatic dependent launch between graph kernels | H100 s1, 5090 s1 (+ s512 tails) | ~0.5–1 µs per launch, 16 launches | H100, RTX 5090 | done in #967: H100 s1 −5 µs, 5090 s1 −2 µs |
 | 4 | FP8 rows of the recipe (the paper figure's Q/K/V-FP8 bars) | FP8 study | measure | RTX 4090, RTX 5090, H100 | skipped (user decision); fp8-block goldens dropped |
@@ -120,8 +120,11 @@ are unrecorded on #930. Trace, sweep, record, and measure on the FP8-capable car
   637 vs 729 µs). Report model form as the headline, golden form beside it.
 - **A100 GEMMs were not bank-conflict bound.** ncu's ~6k conflicts are fill/drain port contention; the main loop is
   tight. The costs were wave count (256 CTAs on 108 SMs), the epilogue's 4-byte global stores (lg_throttle), and a
-  masked-M cp.async fill that clamped 64 rows onto row 511. Fixed by the staged output store (STAGE `out`), the
-  96-row tile (`f3x<N>`) and a zero-fill past the M edge.
+  masked-M cp.async fill that clamped 64 rows onto row 511. Fixed by the 96-row tile (`f3x<N>`) and a zero-fill past
+  the M edge. A store staged through shared memory (STAGE `out`) won on isolated GEMMs but moved the layer by under
+  1 µs on the A100 and 4090 and doubled the priced candidates of every tensor-core kernel (compile-heavy tests up to
+  1.8× slower, CI past its cap); it was dropped (user decision), as were the unused m64n192 wgmma tile, and the 8-deep
+  ring was kept to wgmma tiles.
 - **The 4090 has no real GEMM gap**: every GEMM level with `F.linear` except q (1.06×).
 - **H100**: every plain GEMM now matches or beats `torch.mm`; one wgmma group in flight and 16-byte output stores
   gave 96.2 → 88.1 µs in golden form.
@@ -157,7 +160,7 @@ every card; the lane measures `torch.compile` on the HF layer and stages the Rus
 
 - **A100 GEMMs**: q is at 1.08× of `torch.mm` (best 96x128 row 16.3 vs 15 µs); down at 1.08×, and split-K on it was
   neutral in the layer; the 96x64 tiles win k/v/o/down alone and lose 1-4 µs each in the layer.
-- **4090 q** at 1.04-1.06× of `F.linear`; `w4x2 f2x4/k2 d4` with `/out` reaches 0.95× alone but not in the layer
+- **4090 q** at 1.04-1.06× of `F.linear`; `w4x2 f2x4/k2 d4` with a staged store reached 0.95× alone but not in the layer
   (the layer's q likely carries the input norm).
 - **H100**: a different attention design against cuDNN (the two-warp-group key split and the Q-prologue overlap were
   tried and lost); a full producer warp group (`+p4`, not offered); persistent CTAs if they come into scope. If
@@ -165,9 +168,11 @@ every card; the lane measures `torch.compile` on the HF layer and stages the Rus
   `c2` out of the catalog.
 - **PDL early release**: gating by grid size did not separate good from bad cases; a release that knows the next
   kernel's CTA count and the free SMs might.
-- **Staged output store as a default**: it ties on long-K tiles and moves o/down ±2%; it stays a schedule choice.
-  Shuffle-widened 16-byte stores on mma.sync (no barriers) measured as noise on the A100 layer; if revisited, note
-  they run before the staged store and were never checked against its swizzle.
+- **Wider output stores on mma.sync**: a store staged through shared memory and shuffle-widened 16-byte stores both
+  measured as noise on the A100 layer. Any return must be cheap for the schedule space: a choice that doubles the
+  priced candidates costs every compile.
+- **Catalog cost**: every schedule option multiplies what each compile prices. The 96-row tile still costs about 18%
+  on compile-heavy tests (kept: it buys the A100 q projection 2.9 µs).
 - **Stale rows under the new measurement standard**: #930 made `emmy run` time Emmy on the reference (normal) inputs
   instead of a ramp. Power-bound GEMMs clock lower on them, so Gemma 4 RTX 5090 routes at m1024 and up replay 5-22%
   above their recorded µs with unchanged kernels (post2048 fm 2127 → 2453). Re-record them under the current standard.

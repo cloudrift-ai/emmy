@@ -27,7 +27,7 @@ Model form, from the lane, us. Ratio is `torch.compile` / Emmy (above 1: Emmy fa
 | RTX 5090 | 24.5 | 20 | 33 | 1.65× | 132 | 130 | 135 | 1.04× |
 | RTX 4090 | 26.5 | 26.4 | 28.9 | 1.09× | 158.7 | 157.2 | 162.6 | 1.03× |
 | H100 | 36.7 | 28.8 | 35.1 | 1.22× | 95.8 | 87.3 | 79.0 | 0.90× |
-| A100 40GB | 55–56 | 53 | 56 | 1.06× | 182–184 | 178 | 181 | 1.02× |
+| A100 40GB | 55–56 | 53 | 56 | 1.06× | 182–184 | 179 | 181 | 1.01× |
 | V100 SXM2 | 72 | 72 | 62 | 0.86× | 520 | 513 | 636 | 1.24× |
 
 The #930 column is that PR's scoreboard (golden form at s1). All ten lane cells pass their five `--strict` repeats. In
@@ -39,8 +39,9 @@ H100 runs.
 
 - **mma.sync GEMMs (A100, 4090, 5090) were not bank-conflict bound.** ncu's conflict count on the A100 q projection is
   fill/drain port contention. The costs were the epilogue's 4-byte global stores, which throttle the load/store queue,
-  and wave count. A staged output store (STAGE `out`: the tile goes through the dead operand slabs and leaves as
-  16-byte rows) took an A100 gate/up-sized GEMM from 38.9 to 32.1 us (torch 31). A 96-row M tile (`f3x<N>`) fits one
+  and wave count. A store staged through shared memory took an A100 gate/up-sized GEMM from 38.9 to 32.1 us (torch
+  31), but it moved the whole layer by under 1 us on the A100 and 4090, tied on the 5090, and as a schedule choice
+  doubled the candidates every tensor-core compile prices, so it was dropped. A 96-row M tile (`f3x<N>`) fits one
   wave on the A100's 108 SMs, once a masked-M cp.async fill stopped re-reading row 511 for 64 rows (q 23 → 16.3 us). On
   the 4090 (128 SMs) and 5090 (170 SMs) the 96-row tile loses to wave quantization.
 - **wgmma GEMMs (H100)** keep one MMA group in flight and store 16-byte rows; every plain GEMM now matches or beats
