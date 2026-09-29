@@ -108,9 +108,7 @@ def _through_smem(op: KernelOp, tile: Tile) -> Tile:
     at_zero = [_simplify(lo.substitute(threads)) for lo in local[0]]
     if not all(isinstance(z, Literal) for z in at_zero):
         return tile
-    base = tuple(
-        _simplify(BinaryExpr("-", e.substitute(threads), z)) for e, z in zip(stores[0].dst_index, at_zero, strict=True)
-    )
+    base = tuple(_simplify(BinaryExpr("-", e.substitute(threads), z)) for e, z in zip(stores[0].dst_index, at_zero, strict=True))
     if any(e.free_vars() - set(blocks) for e in base):
         return tile
     # The split must hold for every store at any coordinate: index == base + local.
@@ -174,5 +172,3 @@ def _static(d) -> int | None:
     if isinstance(d, int):
         return d
     return d.as_static() if d.is_static else None
-
-

@@ -94,7 +94,10 @@ def test_the_staged_store_is_bit_identical(monkeypatch, work, tile) -> None:
     from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
 
     rng = np.random.default_rng(0)
-    feed = {"a": (rng.standard_normal((256, 256)) * 0.1).astype(np.float16), "b": (rng.standard_normal((512, 256)) * 0.1).astype(np.float16)}
+    feed = {
+        "a": (rng.standard_normal((256, 256)) * 0.1).astype(np.float16),
+        "b": (rng.standard_normal((512, 256)) * 0.1).astype(np.float16),
+    }
     outs = {}
     for out in (False, True):
         _pin(monkeypatch, work, tile, out=out)
