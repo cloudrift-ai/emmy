@@ -1420,10 +1420,10 @@ def _block_scaled_operands(
 
             return gmem
 
-        # The TMA box covers the index up to its K dim, which is the innermost one the byte copy
-        # walks. Dims past it are unit dims (an activation's scales carry one, ``[.., K/16, 1]``)
-        # that a box of extent 1 there could not copy: its inner span would be one byte. Leading
-        # unit dims keep a box extent of 1, as the other staged operands' boxes do.
+        # The TMA box ends at the index's K dim. Any dims past it are unit dims (an activation's
+        # scales carry one, ``[.., K/16, 1]``), and a box whose innermost dim were that unit dim
+        # would have a one-byte inner span, below TMA's 16 B minimum. Leading unit dims keep a box
+        # extent of 1, as the other staged operands' boxes do.
         rank = max(i for i, e in enumerate(load.index) if k_axis.name in e.free_vars()) + 1
         return Operand(
             tag=tag,
@@ -1583,8 +1583,8 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
         common = dict(slab_dtype=cuda_name(elem), elem_bytes=elem.nbytes, cta=cta)
         # Pure copies when both operands' codes are stored; a fill underneath them when this
         # matmul computes its own A codes, which is the same two-group shape the packed
-        # byte-slab stage takes for its scale fill. The resolver offers TMA only for pure copies.
-        assert not (tma and fills), "the block-scaled TMA stage copies stored codes only"
+        # byte-slab stage takes for its scale fill. ``staging._block_scaled_warp_stage`` offers
+        # TMA only for pure copies.
         transport = (
             TmaTransport(operands=copies, **common)
             if tma

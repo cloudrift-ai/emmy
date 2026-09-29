@@ -1006,7 +1006,7 @@ def test_the_block_scaled_stage_resolves_four_byte_slabs_on_cp_async():
 
 def test_the_block_scaled_stage_declines_a_scale_row_under_the_chunk():
     """A scale row is ``bk_elems / 16`` bytes and both copy transports move 16 B spans, so
-    ``bk_elems`` under 256 leaves a row neither can fill."""
+    ``bk_elems`` under 256 leaves a row neither can copy."""
     node, inputs, axes, ka = _pair_node()
     narrow = _tile(K64, "f1x4/k2", "w1x4", axes)
     for spec in ("d2/smem-async", "d2/smem-tma"):

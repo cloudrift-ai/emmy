@@ -388,7 +388,7 @@ def _block_scaled_warp_stage(c: Fold, tile: Tile, stage: Stage, budget: int, pai
     canonically laid out with k innermost, and a static k the tile divides.
 
     Sizing restates the byte-slab rule in the format's units, twice per side. A codes row is
-    ``bk_elems / 2`` bytes and a scales row ``bk_elems / block``; the fill copies 16 B chunks and
+    ``bk_elems / 2`` bytes and a scales row ``bk_elems / block``; each copy moves 16 B chunks and
     a chunk never straddles a row, so both spans — and the gmem rows they stride, ``k / 2`` and
     ``k / block`` — must be 16-divisible. That is what bounds the tile from below: at block 16 a
     scales row needs ``bk_elems`` to be a multiple of 256, so the narrow-k tiles decline here and
@@ -397,7 +397,7 @@ def _block_scaled_warp_stage(c: Fold, tile: Tile, stage: Stage, budget: int, pai
 
     TMA copies the same slabs as boxes, one descriptor per stored buffer. The same 16 B rules are
     the box's own (inner span and gmem row stride), and every box dim must fit the hardware's 256
-    limit. A box deposits dense, so the rows carry no cp.async pad; every slot is then a multiple
+    limit. A box writes its rows unpadded, so they carry no cp.async pad; every slot is then a multiple
     of 128 B (8-row multiples of 16 B rows), which keeps each slot's destination aligned. Each slot
     also takes one 8-byte mbarrier. TMA has no way to evaluate an activation's encode, so a matmul
     that computes its own A codes declines it and keeps cp.async beside its compute fill.

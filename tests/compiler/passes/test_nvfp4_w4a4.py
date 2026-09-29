@@ -526,9 +526,10 @@ def test_fp4_tma_copies_each_stored_buffer_by_box_ahead_of_the_mma(tmp_path, cha
 def test_fp4_tma_matches_cp_async_bit_for_bit(tmp_path, channels, ring, k):
     """Only the copy mechanism differs between the two transports, so on the same buffers, tile,
     ring depth and register buffering the outputs agree to the bit, launch after launch. Sixteen
-    chunks wrap every ring and flip each slot's barrier parity more than once; a single chunk is
-    all startup and drain. 24 rows leave the second M tile partial, where the box zero-fills the
-    rows cp.async clamps. The declared oracle holds separately, at the cell's own tolerance."""
+    chunks wrap every ring and flip each slot's barrier parity more than once; a single chunk never
+    reaches the ring's steady state. 24 rows leave the second M tile partial, where the box
+    zero-fills the rows cp.async clamps. Separately, the output stays within the cell's declared gap
+    to the numpy reference."""
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.backend.numpy import NumpyBackend
     from emmy.compiler.loader.safetensors import load_constants_from_safetensors

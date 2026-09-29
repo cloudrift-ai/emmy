@@ -342,7 +342,7 @@ while the CTA still widens to hold a band, because the thread budget is set from
 then reach the compute body, where the box copy elects its arming thread on a wrapping linear thread id: thread 0 and
 the band's first thread both match, so one mbarrier takes two arrivals against an arrival count of one and its phase
 parity desynchronizes. That is a hang, not a slow kernel. The native fp4 mma cell needs no rule of its own: its
-TMA stage lowers through the ordinary staged K-loop, which is the one that splits a band.
+TMA stage lowers through `staged_kloop`, which hands a band to the band-splitting K-loop.
 
 **The per-cell contraction tier partitions its K like a plain fold.** A contraction is a monoid with a ⊗ lift, so the
 untiled tile candidate composes with the same `coop_reduce_moves` catalog the plain folds offer — the cooperative

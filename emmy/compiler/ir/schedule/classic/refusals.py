@@ -455,10 +455,10 @@ def _stage_candidates(tile: TileOp, target, node, choice: NodeSchedule) -> tuple
         return (direct,)
     if _multi_channel_cell(tile, node, choice.tile):
         # The cell's copy transports: cp.async or TMA copies every stored slab, one codes and one
-        # scale slab per channel, and cp.async also fills the one computed slab (an activation's
-        # own codes) inside that stage (``staging._block_scaled_warp_stage``). Its operands are
-        # decode CONES, so the generic reading below would send it to the compute fill, which has
-        # no per-channel spelling of the pair; neither has the gmem-direct path.
+        # scale slab per channel, and beside cp.async a compute fill writes the one computed slab
+        # (an activation's own codes) inside that stage (``staging._block_scaled_warp_stage``). Its
+        # operands are decode CONES, so the generic reading below would send it to the compute
+        # fill, which has no per-channel spelling of the pair; neither has the gmem-direct path.
         return tuple(stage for stage in stage_moves(warp=True, ctx=target) if stage.is_async)
     if _needs_fill(tile, node, choice.tile):
         candidates: tuple[Stage, ...] = fill_stage_moves()

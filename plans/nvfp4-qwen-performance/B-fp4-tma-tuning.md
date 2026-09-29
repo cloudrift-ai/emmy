@@ -1,14 +1,18 @@
 # B-fp4-tma: hand-pinned timing of native fp4 TMA staging
 
+The quick performance check of assignment B-fp4-tma ([report](fp4-cell-no-tma.md)): the native fp4 tensor-core atom
+`mma_m16n8k64_e2m1_f32` with its stored codes and block scales copied by cp.async (`smem-async`) or by TMA
+(`smem-tma`).
+
 Device: desktop RTX 5090 (sm_120), CUDA 13.0, deployable `-O3` (no `EMMY_NVCC_FLAGS`). Base `567a42ad`, PR branch
-`fix/B-fp4-tma` at `eb6515a4`. Private tune DB and online prior, created fresh for these runs. Clocks were not locked; the
+`fix/B-fp4-tma` at `eb6515a4`. A fresh tune DB and online prior, not shared with other runs. Clocks were not locked; the
 GPU was otherwise idle.
 
 ## Programs and method
 
 The report's two programs at K = 4096 under `--quantize nvfp4`, each linear 4096 → 4096. `one`: a single linear over
 a separately encoded activation. `two`: two linears reading `a = x + 1`, multiplied, which fuses into one contraction
-with two weight channels. Decode shapes use 16 rows, prefill shapes 2048 rows. Weights are the random snapshot
+with two weights. Decode shapes use 16 rows, prefill shapes 2048 rows. Weights are the random snapshot
 `--quantize` writes per run; timing does not depend on their values.
 
 ```sh
@@ -16,16 +20,18 @@ EMMY_KNOBS="TILE=$TILE,WORK=$WORK,STAGE=$STAGE" \
   emmy run --quantize nvfp4 -c "$PROG" --bench --warmup 50 --iters 500
 ```
 
-Decode pins `TILE=mma_m16n8k64_e2m1_f32/f1x2/k4,WORK=w1x2` (the report's tile). Prefill pins
+`STAGE=dN/<transport>[/p2]`: `dN` is an N-slot shared-memory ring, `/p2` double-buffers the mma fragments in
+registers. Decode pins `TILE=mma_m16n8k64_e2m1_f32/f1x2/k4,WORK=w1x2` (the report's tile). Prefill pins
 `TILE=mma_m16n8k64_e2m1_f32/f4x4/k4,WORK=w2x2` (a 128 x 64 tile). The times below are the matmul kernel's own row of
 the bench table, in µs. A second run of a row is shown after a slash.
 
 Correctness is established separately: the TMA and cp.async kernels agree bit for bit on the same buffers at
-d1, d2/p2, d3, d4/p2 and a one-chunk stream, for one and two channels, and both hold the cell's declared tolerance
-against the numpy oracle (`test_fp4_tma_matches_cp_async_bit_for_bit`).
+d1, d2/p2, d3, d4/p2 and a one-chunk stream, for one and two channels, and both hold the atom's declared tolerance
+against the numpy reference (`test_fp4_tma_matches_cp_async_bit_for_bit`).
 
 The program total is not reported. Under any global pin the activation encode kernel runs on one CTA (about 610 µs
-in `two` at 16 rows), which is the known global pin interference, not a property of either transport.
+in `two` at 16 rows): a global pin also reaches the encode kernel
+([pins report](pins-cannot-target-one-piece.md)). That is not a property of either transport.
 
 ## Existing schedule, base vs PR (cp.async)
 
@@ -40,7 +46,7 @@ The cp.async CUDA of both report programs is byte-identical on the two revisions
 
 ## Available options, cp.async vs TMA (PR)
 
-| Program | Shape | d1 | d2 | d3 | d4 | d2 /p2 |
+| Program | Shape, transport | d1 | d2 | d3 | d4 | d2/p2 |
 | --- | --- | --- | --- | --- | --- | --- |
 | one | 16 rows, cp.async | 7.8 | 7.8 | 6.8 / 7.5 | 7.6 | 7.2 |
 | one | 16 rows, TMA | 9.5 | 7.4 | 7.7 | 7.4 / 7.4 | 7.2 / 7.3 |
@@ -59,8 +65,8 @@ Best tried, cp.async vs TMA: `one` decode 6.8–7.5 vs 7.2–7.4 (even); `two` d
 
 Nsight Compute on the `one` prefill kernel at d2: shared-memory load bank conflicts 1.05 M with cp.async and 45.1 M
 with TMA; shared load wavefronts 9.4 M and 53.5 M. The cp.async fill pads each byte row by 16 B, which spreads the
-drain's byte gathers across banks. A TMA box deposits dense 128-byte rows, so every row of a fragment starts on the
-same bank. A hardware swizzle on the byte slabs, with the matching XOR in the byte-gather drain, would remove this;
-this PR does not implement it.
+per-lane byte loads that read the mma fragments out of shared memory across banks. A TMA box deposits dense
+128-byte rows, so every row of a fragment starts on the same bank. A hardware swizzle on these byte buffers, with the
+matching XOR in those loads, would likely remove this; it is not implemented.
 
 These are isolated hot-cache kernel timings; they do not predict serving throughput.
