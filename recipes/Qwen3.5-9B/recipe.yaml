@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: Qwen/Qwen3.5-9B
-  rationale: "Compact variant, no distinct current momentum."
-  heat: 25
+  rationale: "Compact variant, no distinct momentum, cooling Qwen3.5 line."
+  heat: 12
   task: generate
 matrices:
 - deploy.gpu: NVIDIA GeForce RTX 4090

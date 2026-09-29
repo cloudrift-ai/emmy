@@ -18,8 +18,8 @@ tags:
 
 model:
   huggingface: Qwen/Qwen3.8-27B
-  rationale: "Dominates Hugging Face trending; overwhelming evidence of current breakout demand and downloads."
-  heat: 95
+  rationale: "Solid HF download base from the family, but weak arena position (#95) and declining author share temper the breakout claim."
+  heat: 85
   revision: 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0
   task: generate
 

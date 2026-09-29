@@ -13,12 +13,12 @@
 #
 # There is no Emmy lane: this recipe serves the stock 1Cat-vLLM fork. See RESULTS.md.
 tags:
-  - maintained
+  - best-effort
 
 model:
   huggingface: Qwen/Qwen3.8-27B-FP8
-  rationale: "Dominates trending LM space, strong download momentum, high FP8 serving utility."
-  heat: 92
+  rationale: "Benefits from the 27B line's download utility and FP8 serving value, offset by the same weak arena positioning."
+  heat: 62
   revision: 017b9c7af6b5689d5dd426a76e0bc077eb5ca20a
   task: generate
 
