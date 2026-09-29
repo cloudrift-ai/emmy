@@ -411,11 +411,8 @@ def render_index(buf: str, indices: tuple, ctx: RenderCtx, shape: tuple | None =
     ``0 * stride`` terms in the output.
 
     ``shape`` overrides the buffer's declared shape — a paged read flattens over ONE page,
-    whose paged axis is the page size rather than the buffer's full extent.
-
-    A single index is already a flat address. Otherwise the index spells every dim of the
-    buffer's known shape, ``0`` at a size-one dim; anything else raises, because without
-    strides the coordinates cannot be summed into an address.
+    whose paged axis is the page size rather than the buffer's full extent. A single index is
+    already a flat address; any other index spells every dim of a known shape, ``0`` at a size-one dim.
     """
     if len(indices) == 0:
         return "0"
