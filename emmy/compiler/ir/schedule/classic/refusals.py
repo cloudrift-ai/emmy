@@ -488,6 +488,10 @@ def _stage_candidates(tile: TileOp, target, node, choice: NodeSchedule) -> tuple
     # transport there would name a deposit its materializer cannot emit.
     if len(node.bilinear_channels()) > 1 and not choice.tile.is_warp:
         candidates = tuple(stage for stage in candidates if stage.transport not in ("smem-async", "smem-tma"))
+    # Only an m16n8k16 fragment stores through the slabs; on a wgmma or Volta tile ``out`` would
+    # build the same kernel as its plain twin.
+    if not (choice.tile.is_warp and choice.tile.atom.fragment_layout == "m16n8k16"):
+        candidates = tuple(stage for stage in candidates if not stage.out)
     return candidates
 
 
