@@ -1,11 +1,12 @@
 # DeltaNet investigation and proposed fix plan
 
-Status: 🚧 Implementation approved and in progress. PR #973 is stacked on #969 in native GitHub stack #974.
-The branch combines main `81af0892` with #969 `57667193`. The bugtracker row is marked 🚧 on this branch.
+Status: 🚧 Implementation approved and in progress. PR #973 was stacked on #969 in native GitHub stack #974;
+GitHub automatically retargeted it to main after #969 merged. The original implementation baseline combines
+main `81af0892` with #969 `57667193`. The bugtracker row is marked 🚧 on this branch.
 Change it to ✅ with the fix PR link only when the agreed scope is ready for review; disclose any remaining support gap.
 
 Stage status: 🚧 means in progress; ✅ means its deliverables have passed their checks. Pending stages have not started.
-The investigation below is complete; stage 1 still needs the combined main + #969 baseline before implementation.
+The initial investigation below records the pre-implementation revisions. Later sections record validation results.
 
 ## Revisions and recommendation
 
@@ -356,5 +357,5 @@ even and odd channels. Maximum absolute errors are 0.000993, 0.000992 and 0.0009
 original `rtol=3e-3, atol=1e-3` bounds. This validates the isolated producers, not the complete core/z consumer
 or end-to-end serving. Stable latency measurements remain pending.
 
-On September 30, #969 merged and GitHub automatically retargeted #973 to main. The fix PR remains draft and
-the overall tracker remains 🚧.
+On September 30, the PR state check confirmed that #969 had merged (September 29, 16:07 UTC) and GitHub had
+automatically retargeted #973 to main. The fix PR remains draft and the overall tracker remains 🚧.
