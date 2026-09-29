@@ -196,6 +196,7 @@ def split_pending(tile: TileOp) -> bool:
         and node.axis is not None
         and node.combine is not None
         and node.observe is None
+        and not node.carries
         and not carries_partition(tile)
         and not tile.split_consumed
     )

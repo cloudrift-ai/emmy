@@ -124,7 +124,7 @@ def test_gdn_reuses_the_corrected_values(target):
     from tests.compiler.passes.test_roll_recurrence import _GATED_DELTA_RULE
 
     graph = _lift(Pipeline.build(LOOP_PASSES).run(graph_from_code(_GATED_DELTA_RULE)[0]))
-    (tile,) = (n.op for n in graph.nodes.values() if isinstance(n.op, TileOp) and n.op.place.serial)
+    (tile,) = (n.op for n in graph.nodes.values() if isinstance(n.op, TileOp) and n.op.carries)
     for schedule in _context(tile, target).extensions():
         body = factorize_register(materialize_register(tile, schedule, {})).body
         statements = list(body.iter())
@@ -154,6 +154,22 @@ def test_register_state_preserves_old_reads_on_cuda(half, warps):
     np.testing.assert_allclose(
         np.asarray(result.outputs["out"]).reshape(_reference(arrays).shape), _reference(arrays), rtol=2e-3, atol=2e-3
     )
+
+
+@requires_cuda
+@pytest.mark.xdist_group("cuda")
+def test_register_state_starts_from_the_seed_tensor_on_cuda():
+    """A loop that starts from a tensor rather than zeros: the first step reads the seed at its cell."""
+    from emmy.compiler.backend.cuda.program import run_program
+
+    with pinned_knobs({"STAGE": "d1/reg"}):
+        graph = Pipeline.build(CUDA_PASSES).run(_graph(seed="S0"))
+    (op,) = (n.op for n in graph.nodes.values() if isinstance(n.op, CudaOp))
+    assert not op.serial and "S0" in op.arg_order
+    arrays = _inputs(seed="S0")
+    result, _ = run_program(graph, arrays)
+    want = _reference(arrays, seed="S0")
+    np.testing.assert_allclose(np.asarray(result.outputs["out"]).reshape(want.shape), want, rtol=2e-3, atol=2e-3)
 
 
 @requires_cuda
@@ -188,7 +204,7 @@ m(torch.randn(2,4,{chunk},{keys}), torch.randn(2,4,{chunk},{keys}),
   torch.randn(2,4,{chunk},{values}), torch.rand(2,4))
 """
     lifted = _lift(Pipeline.build(LOOP_PASSES).run(graph_from_code(code)[0]))
-    (node,) = (n for n in lifted.nodes.values() if isinstance(n.op, TileOp) and n.op.place.serial)
+    (node,) = (n for n in lifted.nodes.values() if isinstance(n.op, TileOp) and n.op.carries)
     tile = node.op
     context = _context(tile, Context.probe().compute_capability)
     schedule = next(
@@ -210,7 +226,8 @@ m(torch.randn(2,4,{chunk},{keys}), torch.randn(2,4,{chunk},{keys}),
     lowered = Pipeline.build(["lowering/kernel", "lowering/cuda"]).run(graph)
     lowered.validate()
     (op,) = (n.op for n in lowered.nodes.values() if isinstance(n.op, CudaOp))
-    assert not op.serial and tile.register_program.state.write.output not in op.arg_order
+    (port,) = (t.name for t in node.outputs if t.name not in graph.outputs)  # the state's buffer, dropped with the port
+    assert not op.serial and port not in op.arg_order
     # The carried state's register residency is a property of the deployable build: at the
     # correctness lane's `-Xcicc -O1` the fragment arrays stay in local memory.
     with gpu_lock(), config.nvcc_flags_override(""):

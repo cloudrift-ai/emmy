@@ -30,8 +30,8 @@ c, i, j, k = Var("c"), Var("i"), Var("j"), Var("k")
 ZERO = Literal(0, "int")
 
 
-def _step(out_index: tuple) -> Body:
-    """``S_c = decay_c * S_{c-1} + W @ S_{c-1} + U_c``, storing the state each step READ."""
+def _step(out_index: tuple, seed: float | str = 0.0) -> Body:
+    """``S_c = decay_c * S_{c-1} + W @ S_{c-1} + U_c``, storing the state each step READ, from ``seed``."""
     mix = Loop(
         axis=Axis("k", N),
         body=(
@@ -48,7 +48,7 @@ def _step(out_index: tuple) -> Body:
         Assign(name="kept", op="multiply", args=("own", "decay")),
         Assign(name="moved", op="add", args=("kept", "mixed")),
         Assign(name="next", op="add", args=("moved", "u")),
-        Carry(name="S", value="next", index=(i, j), seed=0.0),
+        Carry(name="S", value="next", index=(i, j), seed=seed),
         Write(output="out", index=out_index, value="own"),
     )
     cells = Loop(axis=Axis("i", N), body=(Loop(axis=Axis("j", N), body=cell),))
@@ -59,17 +59,21 @@ def _loops(body: Body) -> list[Loop]:
     return [stmt for stmt in body.iter() if isinstance(stmt, Loop)]
 
 
-def _inputs() -> dict[str, np.ndarray]:
+def _inputs(seed: float | str = 0.0) -> dict[str, np.ndarray]:
     rng = np.random.default_rng(0)
-    return {
+    arrays = {
         "D": rng.standard_normal(STEPS).astype(np.float32),
         "W": (rng.standard_normal((N, N)) * 0.3).astype(np.float32),
         "U": rng.standard_normal((STEPS, N, N)).astype(np.float32),
     }
+    if isinstance(seed, str):
+        arrays[seed] = rng.standard_normal((N, N)).astype(np.float32)
+    return arrays
 
 
-def _reference(arrays: dict[str, np.ndarray]) -> np.ndarray:
-    state, want = np.zeros((N, N), np.float32), np.zeros((STEPS, N, N), np.float32)
+def _reference(arrays: dict[str, np.ndarray], seed: float | str = 0.0) -> np.ndarray:
+    state = arrays[seed].copy() if isinstance(seed, str) else np.full((N, N), seed, np.float32)
+    want = np.zeros((STEPS, N, N), np.float32)
     for step in range(STEPS):
         want[step] = state
         state = arrays["D"][step] * state + arrays["W"] @ state + arrays["U"][step]
@@ -92,37 +96,43 @@ def test_a_step_reads_other_cells_of_its_own_state(step_major: bool) -> None:
     np.testing.assert_allclose(got if step_major else np.moveaxis(got, -1, 0), _reference(arrays), rtol=1e-5, atol=1e-6)
 
 
-def _graph() -> Graph:
+def _graph(seed: float | str = 0.0) -> Graph:
+    """The step as a graph; a named ``seed`` is an input tensor of the state's shape the loop starts from."""
     graph = Graph()
-    for name, shape in (("D", (STEPS,)), ("W", (N, N)), ("U", (STEPS, N, N))):
+    inputs = [("D", (STEPS,)), ("W", (N, N)), ("U", (STEPS, N, N)), *([(seed, (N, N))] if isinstance(seed, str) else [])]
+    for name, shape in inputs:
         graph.add_node(InputOp(), [], Tensor(name, shape, "f32"), node_id=name)
-    graph.add_node(LoopOp(body=_step((c, i, j)), name="k_step"), ["D", "W", "U"], Tensor("out", (STEPS, N, N), "f32"), node_id="out")
-    graph.inputs, graph.outputs = ["D", "W", "U"], ["out"]
+    names = [name for name, _ in inputs]
+    graph.add_node(LoopOp(body=_step((c, i, j), seed), name="k_step"), names, Tensor("out", (STEPS, N, N), "f32"), node_id="out")
+    graph.inputs, graph.outputs = names, ["out"]
     return graph
 
 
-def test_the_lift_spells_the_state_as_a_buffer_read_one_launch_back() -> None:
-    """The loop that carries the state becomes the kernel's serial launch axis and the state a
-    buffer the node owns; the step's ``W @ S`` stays a contraction, its B slab the previous state."""
+def test_the_lift_carries_the_state_in_the_term() -> None:
+    """The term carries the state: the kernel root folds the action ``next`` over the steps, its
+    cells the two free coordinates the block is indexed by, its seed the loop's; the step's ``W @ S``
+    stays a contraction, its B a read of the carrier one step back. The node gains the state's port
+    for the classic realization, and the closed program spells the carrying loop outside the cells."""
     lifted = Pipeline.build(["tile/lift"], select=["lift"]).run(_graph())
     (node,) = (node for node in lifted.nodes.values() if isinstance(node.op, TileOp))
     tile: TileOp = node.op
 
-    (time,) = tile.place.serial
-    assert time.extent.as_static() == STEPS and len(tile.place.free) == 2
+    assert tile.carries and not tile.place.serial and not tile.place.free
+    (root,) = (site.node for site in tile.sites if site.node.carries)  # under the projection passing its streamed value on
+    assert root.init == (0.0,) and len(root.cells) == 2
+    assert tile.axis_of(root.axis).extent.as_static() == STEPS and all(tile.axis_of(cell).extent.as_static() == N for cell in root.cells)
     (state,) = (tensor for tensor in node.outputs if tensor.name != "out")
     assert tuple(dim.as_static() for dim in state.shape) == (STEPS, N, N) and lifted.outputs == ["out"]
-    reads = [load for load in loaded_buffers(tile.op) if load.input == state.name]
-    assert len(reads) == 2
-    assert all(isinstance(load.index[0], TernaryExpr) and load.index[0].if_true.pretty() == f"({time.name} - 1)" for load in reads)
-    (mix,) = (edge for edge in tile.op.operands if edge.axis is not None)
-    assert mix.as_contraction() is not None and any(load.input == state.name for load in loaded_buffers(mix))
+    assert not [load for load in loaded_buffers(root) if load.input == state.name], "the term reads no buffer of its own"
+    (mix,) = (edge for edge in root.operands if edge.axis is not None)
+    assert mix.as_contraction() is not None and any(edge.as_carrier_read() is not None for edge in mix.operands)
+    (carrying,) = (loop for loop in tile.loop_body if isinstance(loop, Loop))
+    assert list(carrying.carries) == list(root.base.results)
 
     arrays = _inputs()
     closed = LoopOp(body=tile.loop_body)
-    shapes = {tensor.name: tuple(dim.as_static() for dim in tensor.shape) for tensor in node.outputs}
-    got = dict(zip(closed.outputs, execute_loop_op_cpp(closed, arrays, shapes), strict=True))
-    np.testing.assert_allclose(got["out"], _reference(arrays), rtol=1e-5, atol=1e-6)
+    got = np.asarray(execute_loop_op_cpp(closed, arrays, {"out": (STEPS, N, N)}))
+    np.testing.assert_allclose(got, _reference(arrays), rtol=1e-5, atol=1e-6)
 
 
 @requires_cuda

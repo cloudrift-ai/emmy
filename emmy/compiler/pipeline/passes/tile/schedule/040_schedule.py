@@ -62,6 +62,22 @@ def pin_row(*kernel: str, split_consumed: bool, published: bool = True) -> dict[
     return row
 
 
+def serial_form(tile: TileOp, prefix: str) -> TileOp:
+    """A kernel that carries a state as the classic schedule realizes it: its Loop IR lifted again
+    with every carried state a buffer the kernel owns — the port the lift added, named under
+    ``prefix`` — and the carrying loop the kernel's serial launch axis (``lift_serial``): one
+    launch per step, each reading the previous launch's stores. The term the classic tiers then
+    tile is the STEP, a projection over ordinary slabs; the register schedule reads the carrying
+    fold itself."""
+    from dataclasses import replace  # noqa: PLC0415
+
+    from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.tile._fromloop import lift_serial  # noqa: PLC0415
+
+    formed, _ = lift_serial(LoopOp(body=tile.loop_body), name=tile.name, prefix=prefix)
+    return replace(formed, knobs=tile.knobs)
+
+
 def classic_forks(
     tile: TileOp, name: str, knobs: dict, ctx, *, kernel_set: bool = False, node: str = "", published: bool = True
 ) -> list[Fork]:
@@ -99,8 +115,10 @@ def classic_forks(
             ),
             sample=getattr(ctx, "pool_sample", None),
         )
-    if row.get("STAGE") == "d1/reg" and tile.place.serial:
+    if row.get("STAGE") == "d1/reg" and tile.carries:
         return register
+    if tile.carries:
+        tile = serial_form(tile, node)
 
     # A bare WORK / RASTER / REDUCE pin is published across the kernels a split minted and names the
     # partial (a warp ``WORK``, a ``coop`` band), not its finalize, which folds one partial per split
