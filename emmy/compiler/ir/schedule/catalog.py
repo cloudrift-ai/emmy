@@ -228,7 +228,7 @@ _WARP_TILE_SPACE = Space(
         Dimension("wm", (1, 2, 4, 8, 16)),
         Dimension("wn", (1, 2, 4, 8, 16)),
         Dimension("fm", (1, 2, 4, 8)),
-        Dimension("fn", (1, 2, 4, 8, 16, 32)),
+        Dimension("fn", (1, 2, 4, 8, 16, 24, 32)),
         Dimension("bk", (1, 2, 4, 8)),
     ),
     bounds=(
@@ -270,7 +270,7 @@ def warp_tile_in_catalog(plan: Tile) -> bool:
 #: ``depth`` how many chunks that hop keeps in flight, ``reg_depth`` the smem→register
 #: double-buffer beneath it. Independent knobs over one pipeline, so the domain is their PRODUCT.
 STAGE_TRANSPORTS = ("smem", "smem-async", "smem-tma")
-STAGE_DEPTHS = (1, 2, 3, 4)
+STAGE_DEPTHS = (1, 2, 3, 4, 8)
 STAGE_REG_DEPTHS = (1, 2)
 
 

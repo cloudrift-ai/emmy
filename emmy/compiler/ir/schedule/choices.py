@@ -776,6 +776,9 @@ class Stage:
     fragment-load ping-pong over the inner atom-K steps, breaking the WAR hazard on the operand fragments). They are
     orthogonal — ``d3/smem-async/p2`` is a 3-deep gmem ring feeding a 2-deep register ping-pong.
     ``reg_depth = 1`` (the default) is the "optional register" OFF point (no inner prefetch).
+    A ``wgmma`` drain loads no operand fragments; its ``reg_depth`` counts the MMA groups in
+    flight instead: ``p2`` leaves each chunk's group running while the next one is issued, and
+    releases its ring slot one chunk later.
     The slab K-*granularity* (how much K is resident) is ``Tile.bk``, NOT a third depth
     here — granularity and buffer depth are kept distinct.
 

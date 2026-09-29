@@ -241,7 +241,7 @@ ATOM_REGISTRY: dict[str, AtomKind] = {
             target_feature="has_wgmma",
         )
         for ab, dtype in (("f16", F16), ("bf16", BF16))
-        for n in (64, 128, 256)
+        for n in (64, 128, 192, 256)
     },
     "mma_m16n8k32_e4m3_f32": AtomKind(
         "mma_m16n8k32_e4m3_f32",
