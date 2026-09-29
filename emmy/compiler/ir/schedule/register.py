@@ -2,7 +2,7 @@
 
 One warp owns sixteen rows and all columns of each stored value. The row is an independent
 state coordinate; contractions may mix columns but never communicate between row owners.
-The term remains the ordinary Fold tree, including its lagged buffer reads.
+The term remains the ordinary Fold tree, its state a carried one whose reads are carrier reads.
 """
 
 from __future__ import annotations
@@ -14,15 +14,15 @@ from typing import TYPE_CHECKING
 from frozendict import frozendict
 
 from emmy.compiler.ir.atom import ATOM_REGISTRY
-from emmy.compiler.ir.expr import BinaryExpr, Literal, TernaryExpr, Var
+from emmy.compiler.ir.expr import Literal, Var
+from emmy.compiler.ir.pure import Fold
 from emmy.compiler.ir.schedule.base import Schedule, ScheduleContext, ScheduleProblem, ScheduleRefused, Site
 from emmy.compiler.ir.schedule.choices import Tile, Work
-from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Select
+from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Pre, Select
 
 if TYPE_CHECKING:
     from emmy.compiler.context import Context
     from emmy.compiler.ir.axis import Axis
-    from emmy.compiler.ir.pure import Fold
     from emmy.compiler.ir.tile import OutputSpec, TileOp
 
 
@@ -31,9 +31,18 @@ _ATOMS = tuple(atom for atom in ATOM_REGISTRY.values() if atom.c_to_a_repack and
 
 @dataclass(frozen=True, slots=True)
 class RegisterProgram:
-    """The rectangular outputs and one state of a loop, derived before scheduling."""
+    """The rectangular outputs and one state of a loop, derived before scheduling.
 
-    state: OutputSpec
+    Read off the fold that carries the state (:attr:`Fold.carries`): ``time`` is its axis, the
+    state's cells end in the column and the independently owned row (the physical state is
+    transposed), and every per-step output is a matrix under the same batch and time coordinates
+    whose last coordinate is that row. ``roots`` are zero-axis terms over the carrying fold's own
+    operands, one per output and the state's next value last, which the emitter evaluates in
+    fragments; a read of the state is a carrier read, resident in the warp's own rows."""
+
+    time: str
+    state: str
+    seed: float | str
     outputs: tuple[OutputSpec, ...]
     roots: tuple[Fold, ...]
     batch: tuple[Axis, ...]
@@ -42,59 +51,56 @@ class RegisterProgram:
 
     @classmethod
     def from_tile(cls, tile: TileOp) -> RegisterProgram | None:
-        if len(tile.place.serial) != 1 or any(not a.extent.is_static for a in tile.axes):
+        # A free axis outside the carrying loop is neither a cell nor a coordinate the emitter
+        # binds; the roll never makes one, and such a kernel keeps the classic schedule.
+        if not tile.carries or tile.place.free or any(not a.extent.is_static for a in tile.axes):
             return None
-        from emmy.compiler.ir.tile.ir import loaded_buffers  # noqa: PLC0415
-
-        own = {load.input for load in loaded_buffers(tile.op)} & {s.write.output for s in tile.output_specs}
-        states = [s for s in tile.output_specs if s.write.output in own]
-        if len(states) != 1:
+        (carrying,) = (site.node for site in tile.sites if site.node.carries)
+        if len(carrying.base.results) != 1 or len(carrying.cells) < 2:
             return None
-        state = states[0]
-        # Every output is a matrix under the same batch and time coordinates. Its last
-        # coordinate is the independently owned state row (the physical state is transposed).
-        time = tile.place.serial[0].name
+        time, (state,) = carrying.axis, carrying.base.results
         extents = {a.name: a.extent.as_static() for a in tile.axes}
-        outputs = tuple(s for s in tile.output_specs if s.write.output not in own)
+        outputs = tile.output_specs
         if not outputs:
             return None
-        for spec in (state, *outputs):
+        col, row = carrying.cells[-2:]
+        batch_names = carrying.cells[:-2]
+        rows, columns = extents[row], extents[col]
+        if rows < 1 or columns < 1:
+            return None
+        for spec in outputs:
+            # Under the same batch and time coordinates, its last coordinate the state's row — by
+            # extent: a sweep beside the cells spells the row under a name of its own.
             idx = spec.write.index
             if len(idx) < 3 or idx[0] != Var(time) or len(spec.write.values) != 1:
                 return None
-            if not all(isinstance(e, Var) and e.name in extents for e in idx[-2:]):
+            if not all(isinstance(e, Var) and e.name in extents for e in idx[-2:]) or extents[idx[-1].name] != rows:
                 return None
-        rows = extents[state.write.index[-1].name]
-        columns = extents[state.write.index[-2].name]
-        if rows < 1 or columns < 1 or any(extents[s.write.index[-1].name] != rows for s in outputs):
-            return None
-        if tile.op.axis is not None:
-            return None
-        lift = tile.op.applied
+            if idx[1:-2] != tuple(Var(name) for name in batch_names):
+                return None
+        lift = carrying.lift
+        results = (*(spec.write.values[0] for spec in outputs), lift.results[0])
         roots = tuple(
-            replace(tile.op, lift=replace(lift, body=Body(lift.body.backward_cone(s.write.values).members), results=s.write.values))
-            for s in (*outputs, state)
+            Fold(
+                operands=carrying.operands,
+                lift=replace(lift, params=lift.params[1:], body=Body(lift.body.backward_cone((value,)).members), results=(value,)),
+            )
+            for value in results
         )
         for site in tile.sites:
             node = site.node
             if node.twist is not None or node.observe is not None:
                 return None
-            if node.axis is not None:
+            if node.axis is not None and not node.carries:
                 view = node.as_contraction()
                 if view is None or len(node.operands) != 2 or len(node.exposes) != 1 or node.init != (0.0,):
                     return None
                 if (view.product.name, view.plus.name) != ("multiply", "add"):
                     return None
-            if any(not isinstance(s, (Assign, Load, Let, Select)) for s in node.lift.body):
+            if any(not isinstance(s, (Assign, Load, Let, Pre, Select)) for s in node.lift.body):
                 return None
-        cells = {e.name for spec in (state, *outputs) for e in spec.write.index[-2:]}
-        batch_axes = tuple(a for a in tile.place.free if a.name not in cells)
-        batch = {a.name for a in batch_axes}
-        if any(spec.write.index[1:-2] != state.write.index[1:-2] for spec in outputs) or any(
-            e.free_vars() - batch for e in state.write.index[1:-2]
-        ):
-            return None
-        lag = TernaryExpr(BinaryExpr(">", Var(time), Literal(0, "int")), BinaryExpr("-", Var(time), Literal(1, "int")), Literal(0, "int"))
+        batch_axes = tuple(tile.axis_of(name) for name in batch_names)
+        batch = set(batch_names)
 
         def owns(node, row, col, resident=True):
             if row == col:
@@ -118,20 +124,18 @@ class RegisterProgram:
                     return False
                 if isinstance(stmt, Select) and any(b.select.free_vars() - {time, row, col} - batch for b in stmt.branches):
                     return False
-                if isinstance(stmt, Load):
-                    if not stmt.is_scalar or any(e.free_vars() - {time, row, col} - batch for e in stmt.index):
-                        return False
-                    if stmt.input == state.write.output and (
-                        not resident or stmt.index != (lag, *state.write.index[1:-2], Var(col), Var(row)) or extents[col] != columns
-                    ):
-                        return False
+                if isinstance(stmt, Load) and (not stmt.is_scalar or any(e.free_vars() - {time, row, col} - batch for e in stmt.index)):
+                    return False
+                if isinstance(stmt, Pre) and (
+                    not resident or stmt.index != (*(Var(name) for name in batch_names), Var(col), Var(row)) or extents[col] != columns
+                ):
+                    return False
             return True
 
-        if not all(
-            owns(root, spec.write.index[-1].name, spec.write.index[-2].name) for root, spec in zip(roots, (*outputs, state), strict=True)
-        ):
+        cells = (*((spec.write.index[-1].name, spec.write.index[-2].name) for spec in outputs), (row, col))
+        if not all(owns(root, row, col) for root, (row, col) in zip(roots, cells, strict=True)):
             return None
-        return cls(state, outputs, roots, batch_axes, rows, columns)
+        return cls(time, state, carrying.init[0], outputs, roots, batch_axes, rows, columns)
 
 
 @dataclass(frozen=True, slots=True)

@@ -27,7 +27,7 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.kernel.ir import ELEM_COL, ELEM_ROW, FRAG_COL, FRAG_ROW, RegStore
+from emmy.compiler.ir.kernel.ir import ELEM_COL, ELEM_ROW, FRAG_COL, FRAG_ROW
 from emmy.compiler.ir.schedule.register import RegisterMaterialization
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body, Load, Write
@@ -58,14 +58,16 @@ def rewrite(match: Match, root: Node, ctx=None) -> KernelOp | None:
         assert not unbound, f"materialize: kernel {tile.name!r} reads names it never binds: {sorted(unbound)}"
         kernel = KernelOp(body=body, name=tile.name, serial=() if resident else tuple(tile.place.serial))
         if resident:
-            state = tile.register_program.state.write.output
-            if state not in match.graph.outputs and not match.graph.buffer_users(state):
+            # The state's port — the buffer the lift added for the classic realization, which no
+            # store of the term writes. Register storage has no global state allocation, so the
+            # port goes: a graph splice; snapshots with external readers remain ordinary outputs.
+            written = {spec.write.output for spec in tile.output_specs}
+            ports = {t.name for t in root.outputs if t.name not in written and t.name not in match.graph.outputs}
+            ports = {name for name in ports if not match.graph.buffer_users(name)}
+            if ports:
                 from emmy.compiler.pipeline.passes.tile._cut import _input_fragment  # noqa: PLC0415
 
-                # Register storage has no global state allocation. Removing that port is a
-                # graph splice; snapshots with external readers remain ordinary outputs.
-                body = body.map(lambda s: None if isinstance(s, RegStore) and s.dst_buffer == state else s)
-                outputs = tuple(t for t in root.outputs if t.name != state)
+                outputs = tuple(t for t in root.outputs if t.name not in ports)
                 names = {t.name: t.name + "__register" for t in outputs}
                 fragment = _input_fragment(match, root)
                 fragment.add_node(
