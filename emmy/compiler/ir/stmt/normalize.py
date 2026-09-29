@@ -277,6 +277,7 @@ def eliminate_copy_aliases(stmts: Body) -> Body:
     copies as bridges between producer writes and consumer reads; a long
     chain stacks them. Every such Assign is dropped and downstream
     references to ``y`` are rewired to the alias root. Pure IR hygiene."""
+
     def walk(body: Body, inherited: dict[str, str]) -> Body:
         alias = {name: value for name, value in inherited.items() if name not in body.ssa_defs}
 

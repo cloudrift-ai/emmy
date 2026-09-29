@@ -227,9 +227,7 @@ def test_a_store_follows_the_term_defining_its_value_at_that_terms_scope() -> No
 
 def test_a_shared_term_and_its_boundary_store_are_emitted_once() -> None:
     total, swept = _normalized_sum()
-    root = projection(
-        operands=(total, swept), body=(Assign(name="out", op="add", args=("tot", "acc")),), results=("out",)
-    )
+    root = projection(operands=(total, swept), body=(Assign(name="out", op="add", args=("tot", "acc")),), results=("out",))
     store = OutputSpec(write=Write(output="stats", index=(Var("m"),), value="tot", atomic=True))
     body = root.lower(root.free_axes, (store,), axes=SCOPE)
     assert len(body.writes) == 1

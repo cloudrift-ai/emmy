@@ -13,8 +13,8 @@ findings and do not establish production performance or complete model serving.
 
 ## Bug reports
 
-The reports and completed fixes below describe what the investigation found, with reproducers, IR observations and unresolved
-questions. Several reports group related symptoms whose causes may need further investigation.
+The reports and completed fixes below describe the investigation's reproducers, IR observations and unresolved questions.
+Several reports group related symptoms whose causes may need further investigation.
 
 Evidence was reviewed at `a98fd4f8` on 2026-09-28 using saved IR and error logs. The staging and packed-cut repros were
 also compiled afresh without GPU execution. The flash follow-up checked fresh Tile IR and emitted CUDA without GPU

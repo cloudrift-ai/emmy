@@ -721,7 +721,7 @@ selects all its Writes. Every `_NotSupported` carries a reason string, logged at
 `compile -vv` shows which pattern a rejected edge hit.
 
 Before expansion, the splicer uses `Body.dependency_depths` to count reductions along each source definition's longest
-dependency path, passing producer Write depths into consumer inputs. Reductions at equal depth cannot depend on each other.
+dependency path, passing producer Write depths into consumer inputs. Equal-depth reductions cannot depend on each other.
 When they have the same extent and enclosing scope, they share an iteration axis from construction onward, so the
 binding table shares their common producers before emitting them. A reduction that reads another's finalized value
 has greater depth and keeps a separate scope. Different input offsets retain their own coordinate substitutions.

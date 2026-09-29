@@ -321,11 +321,13 @@ class Body(tuple[Stmt, ...], Wire):
         """
         inputs = inputs or {}
         memo = self.fold(
-            lambda stmt, children, _: max(
-                (*(depth for depth in children if depth is not None), *(inputs.get(name, 0) for name in stmt.external_reads())),
-                default=0,
+            lambda stmt, children, _: (
+                max(
+                    (*(depth for depth in children if depth is not None), *(inputs.get(name, 0) for name in stmt.external_reads())),
+                    default=0,
+                )
+                + isinstance(stmt, types)
             )
-            + isinstance(stmt, types)
         )
         return {name: memo[id(stmt)] for name, stmt in self.definitions.items()}
 

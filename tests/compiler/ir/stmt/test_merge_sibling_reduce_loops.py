@@ -316,9 +316,7 @@ def test_unify_groups_loops_indexed_through_one_composite_expression() -> None:
     """A packed stream is read through div and mod of the axis, which is not affine in it. Two
     siblings reading one stream through the same expression of their own axis walk the same
     dimension and unify, the same way bare and affine readers do."""
-    out = _unify_siblings(
-        Body((_packed_stream_reduce("i", _two_codes_per_byte), _packed_stream_reduce("j", _two_codes_per_byte)))
-    )
+    out = _unify_siblings(Body((_packed_stream_reduce("i", _two_codes_per_byte), _packed_stream_reduce("j", _two_codes_per_byte))))
 
     names = {s.axis.name for s in out if isinstance(s, Loop)}
     assert len(names) == 1, "composite siblings over one packed stream index the same dimension"

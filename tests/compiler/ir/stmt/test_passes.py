@@ -32,9 +32,7 @@ def test_free_rename_visits_nested_statements_once(monkeypatch, depth, eliminate
 
     monkeypatch.setattr(passes, "_rewrite_kind", counted)
     if eliminate:
-        result = eliminate_copy_aliases(
-            Body((Assign("outer", "copy", ("renamed",)), Assign("shadow", "copy", ("wrong",)), stmt))
-        )[0]
+        result = eliminate_copy_aliases(Body((Assign("outer", "copy", ("renamed",)), Assign("shadow", "copy", ("wrong",)), stmt)))[0]
     else:
         result = rename_free(stmt, {"outer": "renamed", "shadow": "wrong"})
     members = tuple(Body((result,)).iter())
