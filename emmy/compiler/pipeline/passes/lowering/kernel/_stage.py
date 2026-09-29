@@ -120,6 +120,7 @@ def cp_async_fill(
     name: str,
     row_offset: Expr | None = None,
     swizzle: str = "NONE",
+    valid=None,
 ) -> list[Stmt]:
     """Cooperatively ``cp.async``-copy a ``rows × cols`` (= ``shape``) row-major smem
     ``slab`` from gmem ``src``. ``gmem_index(row_expr, col_expr)`` returns the gmem
@@ -165,6 +166,7 @@ def cp_async_fill(
                     src_index=tuple(gmem_index(_add(lane_row, trip_row), lane_col)),
                     nbytes=v * elem_bytes,
                     swizzle=swizzle,
+                    valid=None if valid is None else valid(_add(lane_row, trip_row), lane_col),
                 )
             )
         return out
@@ -180,6 +182,7 @@ def cp_async_fill(
         src_index=tuple(gmem_index(row, col)),
         nbytes=v * elem_bytes,
         swizzle=swizzle,
+        valid=None if valid is None else valid(row, col),
     )
     loop = StridedLoop(axis=fe, start=cta.linear_tid, step=_lit(cta.n_threads), body=Body((copy,)), unroll=False)
     return [loop]
@@ -673,6 +676,10 @@ class Operand:
     # :class:`SyncOperand`: its values are evaluated off the weight's scale cone, which is compute,
     # not a copy. ``None`` on every other operand.
     scale: tuple[str, int, int] | None = None
+    # ``(row, col) -> Expr``: whether a slab cell lies inside the source, when the tile overhangs a
+    # masked edge. The cp.async fill then zero-fills the chunks past it instead of re-reading the
+    # edge's last row (``CpAsyncCopy.valid``). ``None``: every cell is in bounds.
+    valid: Callable[[Expr, Expr], Expr] | None = None
 
     @property
     def slab(self) -> str:
@@ -1151,6 +1158,7 @@ class CpAsyncTransport:
                 name=op.tag,
                 row_offset=op.slot_row(slot),
                 swizzle=op.swizzle,
+                valid=op.valid,
             )
         return out
 
