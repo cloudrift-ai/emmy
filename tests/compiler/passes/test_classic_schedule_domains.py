@@ -595,6 +595,9 @@ def test_compute_fill_edges_remain_independent_product_factors(monkeypatch) -> N
     # The computed A keeps the compute fill; on a TMA target its stored B may also ride box copies.
     fill = {"", "d1/smem", "d2/smem", "d1/smem-tma", "d1/smem-tma/p2", "d2/smem-tma", "d2/smem-tma/p2"}
     assert all({choice.stage.spell() for choice in site.edges} == fill for site in offers.node_sites if site.edges)
+    # A card without TMA keeps the fill's cp.async ring only.
+    no_tma = _offers(tile, Context.from_target((8, 0)))
+    assert all({choice.stage.spell() for choice in site.edges} == {"", "d1/smem", "d2/smem"} for site in no_tma.node_sites if site.edges)
     reference = tuple(_reference(tile, target))
     leaves = _schedule_leaves(tile, "computed_a", target)
     codec = ClassicScheduleCodec(_context(tile, target))
@@ -617,7 +620,9 @@ def test_computed_f16_tma_needs_a_stored_slab_to_copy(monkeypatch) -> None:
     m, n, k = Axis("m", 64), Axis("n", 64), Axis("k", 64)
 
     def exp_of(name: str, *index: str):
-        return projection((), (Load(name=f"{name}_v", input=name, index=tuple(Var(i) for i in index)), Assign(f"{name}_e", "exp", (f"{name}_v",))))
+        return projection(
+            (), (Load(name=f"{name}_v", input=name, index=tuple(Var(i) for i in index)), Assign(f"{name}_e", "exp", (f"{name}_v",)))
+        )
 
     tile = TileOp(
         op=contraction(k, exp_of("scores", "m", "k"), (exp_of("weights", "k", "n"), "acc")),
