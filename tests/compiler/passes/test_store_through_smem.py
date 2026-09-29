@@ -61,6 +61,8 @@ def test_a_masked_m_edge_bounds_the_row_copy(monkeypatch) -> None:
     src = _source(_graph(256, 256, 128))
     assert "_c_smem" in src
     assert "_r < 256) *reinterpret_cast<uint4*>(&c[" in src
+    # The A rows past the edge are zero-filled, not re-read from the edge's last row.
+    assert "emmy_cp_async_cg_z(&_a_smem[" in src and "emmy_cp_async_cg_z(&_b_smem[" not in src
 
 
 def test_a_stage_without_out_keeps_the_direct_stores(monkeypatch) -> None:

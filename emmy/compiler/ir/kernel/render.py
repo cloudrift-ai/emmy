@@ -193,11 +193,17 @@ static __device__ __forceinline__ void cp_async_bulk_tensor_5d(
 # same helper style the mma / mbarrier preludes use; same SASS. ``cg`` =
 # cache-global / bypass-L1 (16 B, the streaming form); ``ca`` = cache-all (4/8 B).
 # ``commit`` closes a batch of issued copies; ``wait<N>`` blocks until ≤ N of
-# those batches are still in flight.
+# those batches are still in flight. ``_z`` copies only when ``ok`` and writes zeros
+# otherwise, reading nothing: a tile row past a masked edge.
 _CP_ASYNC_PRELUDE = """\
 static __device__ __forceinline__ void emmy_cp_async_cg(void* smem, const void* gmem) {
     unsigned addr = __cvta_generic_to_shared(smem);
     asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\\n" :: "r"(addr), "l"(gmem) : "memory");
+}
+
+static __device__ __forceinline__ void emmy_cp_async_cg_z(void* smem, const void* gmem, bool ok) {
+    unsigned addr = __cvta_generic_to_shared(smem);
+    asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\\n" :: "r"(addr), "l"(gmem), "r"(ok ? 16 : 0) : "memory");
 }
 
 template <int Bytes>
