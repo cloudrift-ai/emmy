@@ -118,6 +118,17 @@ def lift_kernel(loop: LoopOp, *, name: str) -> TileOp:
     return tile
 
 
+def _orients_by_nest(tile: TileOp) -> bool:
+    """Whether some single-product contraction of ``tile`` took its A from the loop nest: one with
+    a computed operand, which the lift orients by nest order where two slabs orient by layout."""
+    return any(
+        node.as_contraction() is not None
+        and len(node.bilinear_channels()) == 1
+        and any(edge.as_slab() is None for edge in node.operands[:2])
+        for node in tile.views
+    )
+
+
 def reformed(piece: TileOp) -> TileOp:
     """``piece`` formed as its own kernel: its tree lowered to the closed loop nest and lifted
     again, the way a kernel fusion had ended at a graph edge is formed.
@@ -138,17 +149,20 @@ def reformed(piece: TileOp) -> TileOp:
     not re-formed."""
     if any(store.sweep for store in piece.output_specs):
         return piece
-    # One loop per grid axis opens here, around the term: a lowering with no axes bound hoists
-    # grid-invariant loads above its loops, and normalization orders only an outer loop chain no
-    # statement precedes. The grid order, and with it a single-product contraction's A, would
-    # otherwise be ``lower``'s choice.
-    body = piece.op.lower(bound=frozenset(axis.name for axis in piece.place.free), stores=piece.output_specs, axes=piece.axes)
-    for axis in reversed(piece.place.free):
-        body = Body((Loop(axis=axis, body=body),))
+    body = piece.op.lower(bound=frozenset(), stores=piece.output_specs, axes=piece.axes)
     try:
         # Through the LoopOp's normalization: that is where two reduce loops over one axis become
         # one loop with two accumulators, the twin the lift forms one term from.
         formed = lift_kernel(LoopOp(body=body), name=piece.name)
+        if _orients_by_nest(formed):
+            # The closed nest's grid order is ``lower``'s choice. Formed once, the piece is lowered
+            # again inside its own grid loops: nothing sits ahead of that chain, so normalization
+            # orders it by the output layout, and the lift orients the contraction by that order.
+            # This pass lowers the formed terms, so it keeps the twin the first pass merged.
+            body = formed.op.lower(bound=frozenset(axis.name for axis in formed.place.free), stores=formed.output_specs, axes=formed.axes)
+            for axis in reversed(formed.place.free):
+                body = Body((Loop(axis=axis, body=body),))
+            formed = lift_kernel(LoopOp(body=body), name=piece.name)
     except ValueError:
         return piece
     # The lift peels every outer plain loop into the grid, a store's sweep included when nothing
