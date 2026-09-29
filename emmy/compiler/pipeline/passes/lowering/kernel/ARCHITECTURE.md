@@ -279,9 +279,10 @@ matrix descriptor per operand and k16 step, one `WgmmaMma` per group of N/8 accu
 by a commit and a wait so the ring slot may be released (under `STAGE` `/p2` the wait leaves that group running,
 and the ring's refill moves past the next chunk's barrier, one chunk later: `_in_flight_kloop`, and the release is
 one chunk late on the producer band too; the last chunk waits its group out inside the loop, because ptxas moved the
-epilogue's accumulator reads above a wait placed after an unrolled loop); the four warps of a group emit the same descriptors,
-addressing the slot's 64-row block `64·(warp/4)`, and the hardware hands warp `i` rows `16i..16i+15` of it, which
-is the m16n8 row the epilogue expects at `f1`. The descriptor geometry follows the slab: a K-major slab (A, or a
+epilogue's accumulator reads above a wait placed after an unrolled loop); the four warps of a group emit the same
+descriptors, addressing the slot's 64-row block `64·(warp/4)`, and the hardware hands warp `i` rows `16i..16i+15` of
+it, which is the m16n8 row the epilogue expects at `f1`.
+The descriptor geometry follows the slab: a K-major slab (A, or a
 transposed B) has one 128-byte swizzle row per tile row, so core groups are `8·bk·2` bytes apart; an N-contiguous
 B is MN-major (`trans_b`) and **atom-major** (`Operand.atoms`, `_MmaOps.b_atoms`): the N tile's 64-element swizzle
 atoms stack along the slab rows, each its own `bk` K rows, so the slab's row is one swizzle row under the plain
@@ -308,16 +309,17 @@ apply the resolved facts verbatim. The `Stage` choice names the intermediate sto
 (gmem→register on a materialized operand, register-to-register on a computed one) — and spells two buffering levels:
 `d<depth>` is the gmem→smem ring — **chunks in flight**, whatever holds them: registers on the blocking copy, the
 commit group on cp.async, the mbarrier-phased box on TMA;
-`p<reg_depth>` is the smem→register double-buffer (the fragment-load ping-pong over the inner atom-K steps). The two
+`p<reg_depth>` is the smem→register double-buffer (the fragment-load ping-pong over the inner atom-K steps; a
+`wgmma` drain loads no fragments, so there it counts the MMA groups in flight, above). The two
 are independent, and so is the transport, so `stage_moves` offers their PRODUCT rather than a hand-picked list —
 `Stage.available_on` drops what the card cannot issue, the resolvers cap what a shape cannot size, and measured
 evidence ranks the rest. Staging is a
 **pure perf transform** — an ineligible kernel (masked N, or a symbolic / non-divisible K on a BYTE-COPIED
 operand, whose chunk runs along K; a transposed B stages N-major on every transport since the serving-layout work)
 silently falls back to gmem-direct, and a staged kernel is
-**bit-identical** to its gmem-direct baseline. A cp.async copy of a slab row past a masked edge (the tile axis on the
-slab row: M, or a transposed B's N) keeps its clamped address but copies zero bytes and zero-fills: clamped reads all
-landed on the edge's last row, and a 96-row A100 tile over 512 rows spent 23 us on a 16 us GEMM contending for it.
+**bit-identical** to its gmem-direct baseline. A cp.async copy of an A-slab row past a masked M edge keeps its
+clamped address but copies zero bytes and zero-fills (`CpAsyncCopy.valid`): clamped reads all landed on the edge's
+last row, and a 96-row A100 tile over 512 rows spent 23 µs on a 16 µs GEMM contending for it.
 A synchronous `smem` ring uses the same slot rotation, and overlaps the
 drain the only way a target without `cp.async` can: the blocking copy SPLITS across it. The fill issues the prefetch
 chunk's global loads into registers, the resident chunk drains, and the deposit stores those registers into the
@@ -698,12 +700,14 @@ Copy fills and computed operand fills use these same coupled layouts and accumul
 The transform halves the staged drain's LSU instructions and is bit-identical; equal modern swizzle modes remain
 pairable because their per-lane address XOR commutes with the paired lane map. A ring drain's row carries its slot term
 and its fragment offset in one `+` chain, so the pair's row distance is read off the literals of the whole chain;
-`098_store_through_smem` stores an mma tile's output through shared memory when its `STAGE` spells `/out`: after the
-K-loop's copies drain and a barrier, the fragments land over the dead operand slabs (a 128-byte-row swizzle keeps both
-sides conflict-free), and a second barrier later the CTA writes 16-byte rows (`SmemTileStore`), bounded by a masked M
-edge. It replaces a burst of 4-byte stores per lane that throttled the load/store queue: an A100 one-wave 256x128 GEMM
-went 39.0 to 32.1 us (cuBLAS 31). It is a schedule choice, not a default, because on long-K tiles with a small store
-share the two barriers cost about as much as they save;
+`098_store_through_smem` stores an `m16n8k16` tile's output through shared memory when its `STAGE` spells `/out` and
+a cp.async or synchronous ring feeds it (a TMA ring's last copies complete on an mbarrier it does not wait on; any
+other tile keeps its direct stores): after the K-loop's copies drain and a barrier, the fragments land over the dead
+operand slabs (`Smem.over`; a tile larger than the first slab runs on over the next ones in the dynamic pool, and a
+128-byte-row swizzle keeps both sides conflict-free), and a second barrier later the CTA writes 16-byte rows
+(`SmemTileStore`), bounded by a masked M edge. It replaces a burst of 4-byte stores per lane that throttled the
+load/store queue: an A100 one-wave 256x128 GEMM went 39.0 to 32.1 µs (cuBLAS 31). It is a schedule choice, not a
+default, because on long-K tiles with a small store share the two barriers cost about as much as they save;
 `097_widen_fragment_stores` stores four N-adjacent fragment cells of a `wgmma` kernel as one 16-byte row per lane
 (`RegStore.run`): each cell's epilogue runs as before, then three `shfl.xor` rounds transpose the quad's packed column
 pairs so lane `t` holds cell `t`'s eight columns — a quarter of the stores, every sector whole (on the H100 the

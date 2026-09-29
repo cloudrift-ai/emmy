@@ -136,7 +136,11 @@ target (`sm_120a`, `sm_90a`). Three unrelated instruction families need that suf
 through the launch's descriptors, and the block-scaled fp4 mma and Hopper's `wgmma`, which a plan can only recognize
 by their wrapper names in
 the rendered source. Plans stored under the older `uses_tma` key still read, since the meaning is the same and
-only the name narrowed. A deterministic source-free bind record is the third binding kind: `plan_from_graph`
+only the name narrowed. A kernel ref also records `dependent_launch`, read the same way off the source: every kernel
+the renderer emits waits on the grid ahead of it (`griddepcontrol.wait`, compiled in on sm_90 and later) before its
+first memory access, and that wait is what lets the runtime launch it as a programmatic dependent launch. A plan
+stored before the renderer emitted the wait carries no flag, and its kernels launch serialized.
+A deterministic source-free bind record is the third binding kind: `plan_from_graph`
 evaluates it once and its bytes ride the plan (`WeightSpec.generated`), so no checkpoint can supply it and
 `build_from_plan` fills that buffer from the plan itself — a caller-supplied array still wins, but an
 unsupplied constant buffer would otherwise allocate as ZEROS and run a silently weightless program.
