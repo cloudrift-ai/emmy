@@ -80,11 +80,12 @@ def test_the_stage_codec_spells_out_last() -> None:
         Stage.parse("d1/reg/out")
 
 
-def test_a_tile_narrower_than_the_swizzle_row_stores_directly(monkeypatch) -> None:
-    """A 32-column tile has no conflict-free 128-byte swizzle row, so it keeps its direct stores."""
+def test_a_tile_narrower_than_the_swizzle_row_refuses_out(monkeypatch) -> None:
+    """A 32-column tile has no conflict-free 128-byte swizzle row: ``out`` is not offered there, so a
+    pin asking for it is refused rather than silently building the direct stores."""
     _pin(monkeypatch, "w2x2", "f2x2/k2")
-    src = _source(_graph(256, 256, 128))
-    assert "_c_smem" not in src
+    with pytest.raises(ValueError, match="STAGE pin 'd2/smem-async/out' does not resolve"):
+        _source(_graph(256, 256, 128))
 
 
 @requires_cuda
@@ -107,3 +108,34 @@ def test_the_staged_store_is_bit_identical(monkeypatch, work, tile) -> None:
         assert ("_c_smem" in src) == out
         outs[out] = np.asarray(be.run(compiled, input_data=feed)[0].outputs["c"])
     np.testing.assert_array_equal(outs[True], outs[False])
+
+
+@pytest.mark.parametrize(
+    ("work", "tile", "fits"),
+    [("w2x2", f"{K16}/f4x4/k2", True), ("w2x2", f"{K16}/f2x2/k2", False), ("w2x2", f"{K16}/f2x3/k2", False)],
+)
+def test_out_is_offered_only_where_the_staged_store_applies(work, tile, fits) -> None:
+    """A 32-column or non-power-of-two tile keeps its direct stores, so ``out`` there would only
+    build the plain kernel again under a second schedule row."""
+    from emmy.compiler.ir.schedule import Tile, Work  # noqa: PLC0415
+    from emmy.compiler.ir.schedule.classic.refusals import _staged_store_fits  # noqa: PLC0415
+
+    assert _staged_store_fits(Tile.parse(tile, Work.parse(work))) is fits
+
+
+def test_a_rewrite_keeps_the_zero_fill_predicate_and_the_staged_store_geometry() -> None:
+    """Coordinate substitution reaches a copy's ``valid`` predicate and a staged store's base and
+    bound, and keeps everything else."""
+    from emmy.compiler.ir.expr import BinaryExpr, Literal, Var  # noqa: PLC0415
+    from emmy.compiler.ir.kernel.ir import CpAsyncCopy, SmemTileStore  # noqa: PLC0415
+    from emmy.compiler.ir.sigma import Sigma  # noqa: PLC0415
+    from emmy.compiler.ir.stmt.passes import rewrite  # noqa: PLC0415
+
+    sigma = Sigma({"r": Literal(5, "int")})
+    copy = CpAsyncCopy(
+        smem="s", smem_index=(Var("r"),), src="a", src_index=(Var("r"),), nbytes=16, valid=BinaryExpr("<", Var("r"), Literal(8, "int"))
+    )
+    assert rewrite(copy, lambda n: n, sigma).valid.pretty() == BinaryExpr("<", Literal(5, "int"), Literal(8, "int")).pretty()
+    store = SmemTileStore(src="t", dst="c", base=(Var("r"), Literal(0, "int")), rows=96, cols=128, ldm=256, threads=128, bound=Var("r"))
+    out = rewrite(store, lambda n: n, sigma)
+    assert out.base[0] == Literal(5, "int") and out.bound == Literal(5, "int") and out.rows == 96 and out.dst == "c"
