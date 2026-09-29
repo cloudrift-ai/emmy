@@ -25,6 +25,7 @@ Tile IR and are materialized away before reaching this layer. A
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from functools import cached_property
 
@@ -993,9 +994,10 @@ M8N8K4 = FragLayout(
 
 
 def frag_layout(name: str) -> FragLayout:
-    """The C-fragment layout named by an atom descriptor."""
+    """The C-fragment layout named by an atom descriptor. A ``wgmma`` accumulator is, per warp, the
+    ``m16n8`` C fragment repeated along N (:class:`WgmmaMma`), so it reads through that layout."""
     try:
-        return {"m16n8k16": M16N8, "m8n8k4": M8N8K4}[name]
+        return {"m16n8k16": M16N8, "wgmma": M16N8, "m8n8k4": M8N8K4}[name]
     except KeyError as exc:
         raise ValueError(f"unmodeled C-fragment layout {name!r}") from exc
 
@@ -1435,18 +1437,26 @@ def swizzle_fn(mode: str) -> str:
     return f"emmy_swizzle_{base.lower()}" + ("" if mode == base else f"_s{swizzle_xor(mode)[0]}")
 
 
-def _multiple_of(expr: Expr, d: int) -> bool:
-    """Whether ``expr`` is provably a multiple of ``d``: a literal that is, a sum or difference of
-    two that are, or a product one of whose literal factors supplies what the other need not."""
+def _multiple_of(expr: Expr, d: int, aligned: Mapping[str, int] | None = None) -> bool:
+    """Whether ``expr`` is provably a multiple of ``d``: a literal that is, a loop counter whose
+    stride is (``aligned``, a render context's), a sum or difference of two that are, or a product
+    one of whose literal factors supplies what the other need not."""
     if d == 1:
         return True
     if isinstance(expr, Literal):
         return isinstance(expr.value, int) and expr.value % d == 0
+    if isinstance(expr, Var):
+        return aligned is not None and expr.name in aligned and aligned[expr.name] % d == 0
     if isinstance(expr, BinaryExpr) and expr.op in ("+", "-"):
-        return _multiple_of(expr.left, d) and _multiple_of(expr.right, d)
+        return _multiple_of(expr.left, d, aligned) and _multiple_of(expr.right, d, aligned)
     if isinstance(expr, BinaryExpr) and expr.op == "*":
         for lit, other in ((expr.left, expr.right), (expr.right, expr.left)):
-            if isinstance(lit, Literal) and isinstance(lit.value, int) and lit.value and _multiple_of(other, d // math.gcd(lit.value, d)):
+            if (
+                isinstance(lit, Literal)
+                and isinstance(lit.value, int)
+                and lit.value
+                and _multiple_of(other, d // math.gcd(lit.value, d), aligned)
+            ):
                 return True
     return False
 
@@ -1472,7 +1482,7 @@ def swizzled_slab_index(
         return None
     shift, mask = xor
     field_mod = 1 << max(0, shift + (mask + 1).bit_length() - ldm.bit_length())
-    if not (_multiple_of(row, max(lane_rows, field_mod)) and _multiple_of(col, lane_col_mod)):
+    if not (_multiple_of(row, max(lane_rows, field_mod), ctx.aligned) and _multiple_of(col, lane_col_mod, ctx.aligned)):
         return None
     fn = swizzle_fn(mode)
     return f"({fn}({lane}) ^ {fn}({col.render(ctx)})) + ({row.render(ctx)}) * {ldm}"

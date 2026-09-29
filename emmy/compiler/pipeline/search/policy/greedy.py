@@ -683,7 +683,29 @@ def _route_candidates(fp: ForkPoint, index: _Measured, db) -> list[tuple[object,
         arm = spelled_arm(fp.options, row)
         if arm is not None:
             out.append((arm[0], us))
+    if db is not None:
+        out.extend((splice, us) for splice in fp.splices if (us := _pieces_price(splice, fp.ctx, db)) is not None)
     return out
+
+
+def _pieces_price(splice: object, ctx: Context, db) -> float | None:
+    """A splice's price as the sum of its pieces' best rows (:meth:`SearchDB.best_per_op_time`), each piece
+    named by the exact identity it carries once spliced, all-or-nothing — the price a routing row gets, for
+    an arm whose pieces were benched with no routing row recorded (a sweep's split)."""
+    from emmy.compiler.wire import kernel_bindings  # noqa: PLC0415
+
+    fragment = _leaf_graph(splice)
+    total = 0.0
+    for node in fragment.nodes.values():
+        if node.op.identity_key(with_io=True, with_knobs=True) is None:
+            continue
+        piece = node.op.with_io(fragment, node)
+        kernel = piece.identity_key(structural=False, with_io=True)
+        us = db.best_per_op_time(ctx, kernel, bindings=kernel_bindings(piece)) if kernel is not None else None
+        if us is None:
+            return None
+        total += us
+    return total
 
 
 def _direct_measured_pick(fp: ForkPoint, blocked, db_index: dict) -> tuple[object, dict, float] | None:

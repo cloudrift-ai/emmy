@@ -48,7 +48,7 @@ from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.ops import Sched, carries_partition, head, projection_regions, projection_root, projection_tail
 from emmy.compiler.pipeline import Match
 from emmy.compiler.pipeline.fork import DeferredFork
-from emmy.compiler.pipeline.knob import axis_of, consume_kernel_row
+from emmy.compiler.pipeline.knob import axis_of, consume_kernel_row, kernel_pin
 from emmy.compiler.pipeline.passes.tile._row import reformed
 from emmy.compiler.pipeline.search.space import REDUCE, WORK
 
@@ -223,10 +223,15 @@ def split_forks(match: Match, root: Node, *, unsplit_tile: TileOp | None = None)
     key = Sched(tile).key("REDUCE", node) or "REDUCE"
     unsplit = DeferredFork(lambda: replace(unsplit_tile or tile, split_consumed=True), {key: ""})
     element = axis_of(key)
-    pin = REDUCE.narrow_at(element) if element else REDUCE.raw()
+    # A kernel pin names the piece by its name, a ``node_`` pin the uncut root by its node id; the
+    # schedule pass reads them the same way (``040_schedule.pin_row``).
+    pin = kernel_pin("REDUCE", tile.name, root.id)
+    if pin is None:
+        pin = REDUCE.narrow_at(element) if element else REDUCE.raw()
     tail = projection_tail(tile)
     if pin is not None:
-        plan = Reduce.parse(pin, Work.parse(WORK.raw()))
+        work = kernel_pin("WORK", tile.name, root.id)
+        plan = Reduce.parse(pin, Work.parse(work if work is not None else WORK.raw()))
         if not plan.needs_split:
             return [unsplit]
         _enforce(splitk_width(k_axis, plan.cta))
@@ -422,10 +427,11 @@ def _with_axes(axes: tuple, *new: Axis) -> tuple:
     return tuple({**{axis.name: axis for axis in axes}, **{axis.name: axis for axis in new}}.values())
 
 
-def _piece(op: Fold, free, *, output_specs: tuple = (), axes: tuple) -> TileOp:
+def _piece(op: Fold, free, *, output_specs: tuple = (), axes: tuple, name: str = "") -> TileOp:
     """One fresh unscheduled Tile kernel over ``op`` and the axis table ``axes``, formed as its own kernel
-    (:func:`~._row.reformed`): its nest lowered and lifted again, the loop op it came from kept as its source."""
-    piece = reformed(TileOp(op=op, place=Placement(free=tuple(free)), output_specs=output_specs, axes=axes))
+    (:func:`~._row.reformed`): its nest lowered and lifted again, the loop op it came from kept as its source.
+    An unnamed piece launches under its graph node's id."""
+    piece = reformed(TileOp(op=op, place=Placement(free=tuple(free)), output_specs=output_specs, axes=axes, name=name))
     # A split CONSUMES the kernel it replaces: the piece drops its schedule row and its structural
     # identity. Built fresh here, so this states the contract rather than doing work — and the rule
     # that mints a kernel is where that has to be said.
@@ -554,7 +560,11 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
         else:
             p_stores = (OutputSpec(write=Write(output=out.name, index=cell, values=states, atomic=True)),)
         piece = _piece(
-            _project(_rebind(region, node, partial_fold), body, (split, *free)), (split, *free), output_specs=p_stores, axes=axes
+            _project(_rebind(region, node, partial_fold), body, (split, *free)),
+            (split, *free),
+            output_specs=p_stores,
+            axes=axes,
+            name=tile.name,
         )
         result = _one(match, frag, root, piece)
         return _add_projection_pieces(match, result, projection_pieces, free)
@@ -589,7 +599,10 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
     # split axis joins as a lead grid axis via the partial tile's OWN placement — the view derives
     # lead axes from the placement, so nothing is restamped on the node.
     ws_stores = tuple(OutputSpec(write=Write(output=ws_name, index=ws_index(i), value=states[i])) for i in range(n_comp))
-    partial_tile = _piece(partial_fold, (split, *free), output_specs=ws_stores, axes=axes)
+    # The partial and the finalize keep the name of the kernel they split, so a kernel pin naming a
+    # piece (``place_<token>_1``) still names both halves of its split; an unnamed kernel (a route's
+    # uncut root) keeps launching under its graph node's id, which a ``node_`` pin names.
+    partial_tile = _piece(partial_fold, (split, *free), output_specs=ws_stores, axes=axes, name=tile.name and f"{tile.name}__partial")
 
     # --- finalize kernel: identity-lift each workspace state tuple through the SAME monoid.
     # The merge axis carries the SAME consumed-split receipt the partial's slice does: the
@@ -611,7 +624,11 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
     # buffer is a graph node.
     frag.add_node(op=partial_tile, inputs=list(root.inputs), output=Tensor(ws_name, ws_shape, F32), node_id=ws_name)
     fin_tile = _piece(
-        _project(_rebind(region, node, fin_fold), body, tuple(free)), free, output_specs=fin_stores, axes=_with_axes(tile.axes, fin_axis)
+        _project(_rebind(region, node, fin_fold), body, tuple(free)),
+        free,
+        output_specs=fin_stores,
+        axes=_with_axes(tile.axes, fin_axis),
+        name=tile.name,
     )
     result = add_output_piece(match, frag, root, fin_tile, _piece_inputs(root, fin_tile, ws_name))
     return _add_projection_pieces(match, result, projection_pieces, free)

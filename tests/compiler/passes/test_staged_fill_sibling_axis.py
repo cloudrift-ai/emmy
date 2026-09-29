@@ -177,3 +177,26 @@ def test_a_ringed_group_still_publishes_the_slab_it_fills_this_iteration() -> No
     scheduled = transport((SimpleNamespace(producer="its own segment"),))
     assert not scheduled.fills_current_slot, "an op with a scheduled producer fills in its own segment"
     assert barriers(scheduled) == []
+
+
+def test_a_slab_streamed_along_its_sibling_axis_keeps_its_rows():
+    """The chunk tier's query slab for a warp-group score: its rows ARE the m axis, which is also
+    the sibling side's axis, so the fill streams along the sibling. Binding that sibling to its
+    block base overwrote the streamed coordinate, and every query row read row 0 of the tile (the
+    Qwen3 attention piece on an H100: 256089 of 262144 outputs wrong)."""
+    q = Axis("m", Dim(512))
+    d = Axis("d", Dim(64))
+    tile = Tile.parse(f"{K16}/f1x4/k8", Work.parse("w1x1"))
+    m_side, d_side = tile.at(q, d).mn
+    (op,) = _slab_operands(
+        index_srcs=(None, (Var("m"), Var("d"))),
+        bufs=(None, "q"),
+        mn=(m_side, d_side),
+        k_axis=q,
+        bk_elems=64,
+        base=(_lit(0), _lit(0)),
+        roles=(1,),
+    )
+    row_index, col_index = op.index(Var("m_b"))(Var("_row"), Var("_col"))
+    assert "_row" in _free((row_index,)), "the query slab's row must select the query row"
+    assert "_col" in _free((col_index,)), "the query slab's column must select the head dim"

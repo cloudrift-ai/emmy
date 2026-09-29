@@ -85,7 +85,9 @@ def register_run_command(subparsers):
             "measured realizations: one routing row per kernel-set decision it took and one child-identity schedule "
             "receipt per kernel, timed by the isolated re-bench with the greedy comparison row as the reference. With "
             "--pin-route the greedy row is the kernel set the named row describes; the receipts recorded are what price "
-            "that set for a compile nothing pins, and what a strict-evidence compile picks it from."
+            "that set for a compile nothing pins, and what a strict-evidence compile picks it from. Implies "
+            "--strict-evidence: every schedule must come from a measured row or a pin, and a piece the prior would "
+            "decide stops the record with its name."
         ),
     )
     parser.add_argument(
@@ -227,6 +229,37 @@ def handle_run(args):
     if args.record_greedy and not (args.golden and args.bench):
         logger.error("--record-greedy requires --golden PATH and --bench")
         sys.exit(2)
+    if args.ab and args.bench and not getattr(args, "no_record_evidence", False):
+        # A sweep exists to leave its rows in the tune DB for a later record; below the bench standard
+        # it records nothing, and a record run that copies that DB would silently fall to the prior.
+        from emmy.compiler.pipeline.search.bench_record import MIN_RECORD_ITERS, MIN_RECORD_WARMUP, meets_quality_bar  # noqa: PLC0415
+
+        if not meets_quality_bar(args.warmup, args.iters):
+            logger.error(
+                "--ab sweep at --warmup %d / --iters %d is below the tune bench standard (--warmup >= %d, --iters >= %d), "
+                "so none of its rows would reach the tune DB; raise them, or pass --no-record-evidence to measure only",
+                args.warmup,
+                args.iters,
+                MIN_RECORD_WARMUP,
+                MIN_RECORD_ITERS,
+            )
+            sys.exit(2)
+    if args.record_greedy:
+        # A receipt must price a schedule a measurement or a pin chose: a piece the prior would decide
+        # raises EvidenceError naming it, instead of being written into the golden as measured.
+        args.strict_evidence = True
+    if args.record or args.record_greedy:
+        # A row is evidence only on the card its file names (``golden.records_for_card``): measurements
+        # written under another card's header are what no replay on this card ever reads.
+        from emmy.compiler.context import Context  # noqa: PLC0415
+        from emmy.compiler.pipeline.search.golden import GoldenFile  # noqa: PLC0415
+        from emmy.compiler.pipeline.search.working_golden import validate_working_gpu  # noqa: PLC0415
+
+        try:
+            validate_working_gpu(GoldenFile.load(args.golden), Context.probe())
+        except ValueError as exc:
+            logger.error("--record / --record-greedy: %s — record into a file seeded for this card", exc)
+            sys.exit(2)
     with config.strict_evidence_override(True if getattr(args, "strict_evidence", False) else None):
         if args.golden and not args.realization:
             _run_golden_targets(args)
@@ -434,7 +467,10 @@ def _handle_run_once(args):
             if pinned and accuracy_error is None:
                 if greedy_fail:
                     logger.error("%s — greedy row marked bench_fail; pinned rows still bench in the worker", greedy_fail)
-                greedy_iso = await _bench_greedy_isolated(backend, compiled, warmup=args.warmup, iters=args.iters)
+                ref_key = uuid.uuid4().hex if ab_ref is not None else None
+                greedy_iso = await _bench_greedy_isolated(
+                    backend, compiled, warmup=args.warmup, iters=args.iters, ref=ab_ref, ref_key=ref_key
+                )
                 golden_benches = await _bench_golden_variants(
                     backend,
                     args.code,
@@ -442,6 +478,7 @@ def _handle_run_once(args):
                     warmup=args.warmup,
                     iters=args.iters,
                     ref=ab_ref,
+                    ref_key=ref_key,
                     quantize=args.quantize,
                     ref_knobs=_cuda_knob_dicts(compiled),
                 )
@@ -942,7 +979,9 @@ def _wrong_answer_flag(outputs: dict, ref_outputs: dict) -> str | None:
     return None
 
 
-def env_pin_refusal(kernel_knobs: list[dict], placement_knobs: list[dict] | None = None) -> str | None:
+def env_pin_refusal(
+    kernel_knobs: list[dict], placement_knobs: list[dict] | None = None, kernel_names: list[str] | None = None
+) -> str | None:
     """The live ``EMMY_<KNOB>`` pins a compiled graph did not realize, or ``None``.
 
     An ``--ab`` row has always been gated this way (:func:`unreproducible_pin_flag`), because benching a
@@ -960,11 +999,11 @@ def env_pin_refusal(kernel_knobs: list[dict], placement_knobs: list[dict] | None
     """
     from emmy.compiler.pipeline.knob import KERNEL_DECISION_FAMILIES, family_pins  # noqa: PLC0415
 
-    pins = {name: value for family in KERNEL_DECISION_FAMILIES for name, value in family_pins(family)}
-    return unreproducible_pin_flag(pins, kernel_knobs, placement_knobs=placement_knobs) if pins else None
+    pins = {name: value for family in KERNEL_DECISION_FAMILIES for name, value in family_pins(family, kernels=True)}
+    return unreproducible_pin_flag(pins, kernel_knobs, placement_knobs=placement_knobs, kernel_names=kernel_names) if pins else None
 
 
-def greedy_record_refusal(kernel_knobs: list[dict], accuracy_error: str | None) -> str | None:
+def greedy_record_refusal(kernel_knobs: list[dict], accuracy_error: str | None, kernel_names: list[str] | None = None) -> str | None:
     """Why ``--record-greedy`` must not write this greedy pick, or ``None``.
 
     A recorded row outranks every later compile, so two picks never become one. A row whose answer
@@ -973,7 +1012,7 @@ def greedy_record_refusal(kernel_knobs: list[dict], accuracy_error: str | None) 
     the planner's own schedule under the pin's name and lane."""
     if accuracy_error is not None:
         return f"it failed the strict accuracy check: {accuracy_error}"
-    return env_pin_refusal(kernel_knobs)
+    return env_pin_refusal(kernel_knobs, kernel_names=kernel_names)
 
 
 REFERENCE_SELF_DISAGREES = (
@@ -1132,18 +1171,25 @@ def _cuda_knob_dicts(graph) -> list[dict]:
     return [dict(n.op.knobs or {}) for n in _launch_order_cuda_nodes(graph)]
 
 
+def _cuda_kernel_names(graph) -> list[str]:
+    """The node id of each ``CudaOp`` beside :func:`_cuda_knob_dicts` — what a kernel pin names."""
+    return [n.id for n in _launch_order_cuda_nodes(graph)]
+
+
 def _placement_knob_dicts(graph) -> list[dict]:
     """Placement receipts from the final greedy resolution of ``graph``."""
     return list(graph.hints.get(PLACEMENT_DECISIONS_HINT, []))
 
 
-def _ab_samples(specs, dynamic=None):
+def _ab_samples(specs, dynamic=None, route=None):
     """One shapeless pseudo-sample per ``--ab "K1=V1,K2=V2"`` spec: ``.knobs`` holds
     schedule pins, ``.pins`` Boolean input pins, ``.name`` the table label, and ``.shape None`` —
     the marker :func:`_print_kernel_stats` uses to nest the row by the benched
     kernel's own ``S_*`` signature instead of a golden's matmul shape. ``dynamic``
     stamps the run's own ``--dynamic`` specs on each pseudo-sample so the A/B
-    re-trace builds the same symbolic graph as the greedy run."""
+    re-trace builds the same symbolic graph as the greedy run. ``route`` is the kernel-set decisions
+    ``--pin-route`` pins on the greedy compile: each row compiles under them too, so a row differs
+    from the greedy only by its own knobs."""
     from types import SimpleNamespace  # noqa: PLC0415
 
     from emmy.compiler.pipeline.knob import KnobType, family_of, get, parse_knob_spec  # noqa: PLC0415
@@ -1158,7 +1204,7 @@ def _ab_samples(specs, dynamic=None):
             if (descriptor := get(family_of(name))) is not None and descriptor.type is KnobType.BOOL
         }
         knobs = {name: value for name, value in parsed.items() if name not in pins}
-        samples.append(SimpleNamespace(name=f"ab {raw}", pins=pins, knobs=knobs, shape=None, dynamic=dyn))
+        samples.append(SimpleNamespace(name=f"ab {raw}", pins=pins, knobs=knobs, route=dict(route or {}), shape=None, dynamic=dyn))
     return samples
 
 
@@ -1192,6 +1238,7 @@ async def _bench_golden_variants(
     quantize=None,
     unverified=None,
     ref_knobs=None,
+    ref_key=None,
 ):
     """Compile + bench each recorded golden config with its knobs pinned — one
     ``_GoldenBench`` per config so :func:`_print_kernel_stats` can show each as a measured
@@ -1236,7 +1283,7 @@ async def _bench_golden_variants(
         raise ValueError("strict pinned correctness requires same-input reference outputs")
     # Session-unique cache key: the (potentially hundreds-of-MB) reference inputs cross
     # the worker pipe once per child, not once per row (see benchmark_pinned_isolated_async).
-    ref_key = uuid.uuid4().hex if ref_inputs is not None else None
+    ref_key = ref_key or (uuid.uuid4().hex if ref_inputs is not None else None)
     # Row index -> its deferred wrong-answer verdict and the knobs it actually realized.
     wrong_answer: dict[int, str | None] = {}
     realized: dict[int, list] = {}
@@ -1276,11 +1323,13 @@ async def _bench_golden_variants(
         # ``EMMY_KNOBS`` and varies schedules per row, so a row whose compile dropped that route
         # would otherwise bench the planner's own kernel set under the row's name.
         with pinned_knobs(replay_knobs):
+            names = _cuda_kernel_names(g_compiled)
             flag = unreproducible_pin_flag(
                 replay_knobs,
                 _cuda_knob_dicts(g_compiled),
                 placement_knobs=_placement_knob_dicts(g_compiled),
-            ) or env_pin_refusal(_cuda_knob_dicts(g_compiled), _placement_knob_dicts(g_compiled))
+                kernel_names=names,
+            ) or env_pin_refusal(_cuda_knob_dicts(g_compiled), _placement_knob_dicts(g_compiled), names)
         if flag:
             flags.append(f"{flag} — row NOT benched")
             logger.error(
@@ -1331,7 +1380,7 @@ async def _bench_golden_variants(
     return out
 
 
-async def _bench_greedy_isolated(backend, compiled, *, warmup, iters):
+async def _bench_greedy_isolated(backend, compiled, *, warmup, iters, ref=None, ref_key=None):
     """Re-bench the greedy deploy's compiled graph emmy-only through the pinned-row worker
     path (``bench_pinned_async``) — the pinned-comparable greedy baseline. The greedy
     comparison row times emmy interleaved with the live torch closures (same warm clocks /
@@ -1341,13 +1390,16 @@ async def _bench_greedy_isolated(backend, compiled, *, warmup, iters):
     pairs, whose finalize re-reads the partials workspace). One number can't be both
     torch-comparable and pinned-comparable, so the greedy config benches twice: this row is
     the one pinned golden / ``--ab`` speedups read against. Reuses the already-compiled
-    greedy graph — one extra worker job, no recompile. Returns a ``_GoldenBench`` (status
-    ``ok`` / ``bench_fail``); a failure never blocks the pinned rows."""
+    greedy graph — one extra worker job, no recompile. ``ref`` (the greedy run's
+    ``(inputs, outputs)``) times it on the inputs the pinned rows are timed on, under the
+    pinned rows' ``ref_key``. Returns a ``_GoldenBench`` (status ``ok`` / ``bench_fail``); a
+    failure never blocks the pinned rows."""
     from types import SimpleNamespace  # noqa: PLC0415
 
     sample = SimpleNamespace(name="greedy (isolated)", knobs={}, shape=None, dynamic=None)
     try:
-        g_bench, _ = await backend.bench_pinned_async(compiled, warmup=warmup, num_iters=iters)
+        inputs = ref[0] if ref is not None else None
+        g_bench, _ = await backend.bench_pinned_async(compiled, run_inputs=inputs, run_inputs_key=ref_key, warmup=warmup, num_iters=iters)
     except Exception as exc:  # noqa: BLE001 — an iso-bench failure must not abort the pinned rows
         st = _failed_bench_status(exc)
         logger.warning("greedy isolated re-bench failed (%s) — row kept as %s; pinned rows still bench", exc, st)
@@ -1707,7 +1759,7 @@ def _write_ab_json(
         "kernels": _kernel_rows(graph, bench),
     }
     # An env pin gates THIS graph, so an unrealized one misrepresents the greedy row itself.
-    env_miss = env_pin_refusal(_cuda_knob_dicts(graph), _placement_knob_dicts(graph))
+    env_miss = env_pin_refusal(_cuda_knob_dicts(graph), _placement_knob_dicts(graph), _cuda_kernel_names(graph))
     if env_miss:
         greedy["flags"] = [f"{env_miss} — the env pin did not realize, so this row is the planner's own pick"]
         logger.error(
@@ -2354,39 +2406,49 @@ async def bench_lowered_vs_torch(
         torch_fns = _build_torch_fns(torch_fn, torch_inputs, {}, warmup, backends=backends)
         if capture_graphs:
             results, bench, captured = await _bench_interleaved_captured(
-                torch_fn, torch_inputs, {}, backend, lowered, warmup, iters, torch_fns=torch_fns
+                torch_fn, torch_inputs, {}, backend, lowered, warmup, iters, torch_fns=torch_fns, input_data=input_data
             )
         else:
             results, bench = await _bench_interleaved(
-                torch_fn, torch_inputs, {}, backend, lowered, warmup, iters, torch_fns=torch_fns, capture_graphs=False
+                torch_fn,
+                torch_inputs,
+                {},
+                backend,
+                lowered,
+                warmup,
+                iters,
+                torch_fns=torch_fns,
+                capture_graphs=False,
+                input_data=input_data,
             )
             captured = False
         base = (results, bench, True, captured, accuracy_error)
         return (*base, correctness, reference) if return_reference else base
     # Emmy-only: a capture failure falls back inside ``benchmark_program``
     # (warned + reported via ``bench.captured``) — nothing to de-mix.
-    bench = await backend.benchmark_async(lowered, warmup=warmup, num_iters=iters, capture_graphs=capture_graphs)
+    bench = await backend.benchmark_async(lowered, warmup=warmup, num_iters=iters, capture_graphs=capture_graphs, input_data=input_data)
     base = ({"Emmy": bench.time_ms * 1000}, bench, False, bench.captured, accuracy_error)
     return (*base, correctness, reference) if return_reference else base
 
 
-async def bench_full_model_real(module, args_t, kwargs, lowered, backend, *, warmup, iters, bench_backends):
+async def bench_full_model_real(module, args_t, kwargs, lowered, backend, *, warmup, iters, bench_backends, input_data=None):
     """End-to-end full-model bench against the **real torch module** — eager /
     ``torch.compile`` / Emmy — using the all-or-nothing CUDA-graph-captured
     interleaved bench (real modules occasionally resist capture; those fall back
     to uncaptured wall timing, flagged in ``captured``). The module + its
     trace-time inputs come from ``load_or_trace``'s bundle; for a symbolic
     graph the torch closures run on hint-tiled inputs (``_hint_sized_inputs``)
-    so both sides bench the hint shape. Skips the accuracy check (emmy's
-    bench uses synthetic activations vs torch's bound inputs, so only latency
-    is comparable here — accuracy lives in the per-kernel path).
+    so both sides bench the hint shape. ``input_data`` (the module's own inputs bound to the
+    emmy program, :func:`_bind_inputs`) times emmy on the values torch reads; a symbolic graph
+    keeps the synthetic fill, since its torch side runs tiled hint-sized copies instead.
     Returns ``(results, bench, captured)``."""
     import torch
 
     cuda_module = module.to("cuda")
     cuda_args = tuple(a.to("cuda") if isinstance(a, torch.Tensor) else a for a in args_t)
     cuda_kwargs = _to_cuda_kwargs(kwargs)
-    cuda_args, cuda_kwargs, _ = _hint_sized_inputs(lowered, cuda_args, cuda_kwargs)
+    cuda_args, cuda_kwargs, sym_env = _hint_sized_inputs(lowered, cuda_args, cuda_kwargs)
+    input_data = None if sym_env else input_data
     backends = _resolve_backends(bench_backends)
     torch_fns = _build_torch_fns(cuda_module, cuda_args, cuda_kwargs, warmup, backends=backends)
     if not torch_fns:
@@ -2401,7 +2463,9 @@ async def bench_full_model_real(module, args_t, kwargs, lowered, backend, *, war
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
         _reset_persisting_l2_cache()
-    return await _bench_interleaved_captured(cuda_module, cuda_args, cuda_kwargs, backend, lowered, warmup, iters, torch_fns=torch_fns)
+    return await _bench_interleaved_captured(
+        cuda_module, cuda_args, cuda_kwargs, backend, lowered, warmup, iters, torch_fns=torch_fns, input_data=input_data
+    )
 
 
 _NO_GREEDY_REF = "pinned embedded-Loop verification requires same-input greedy outputs, but none were returned"
@@ -2441,7 +2505,9 @@ def _pinned_samples_for_ir(args, embedded):
     """Automatic verified pins plus explicit ``--ab`` pins for an embedded golden target."""
     pinned = list(getattr(args, "golden_configs", None) or [])
     if embedded is not None and (specs := getattr(args, "ab", None)):
-        pinned.extend(_ab_samples(specs, dynamic=getattr(args, "dynamic", None)))
+        from emmy.commands.compile import selected_decisions  # noqa: PLC0415
+
+        pinned.extend(_ab_samples(specs, dynamic=getattr(args, "dynamic", None), route=selected_decisions(args)))
     return pinned
 
 
@@ -2645,7 +2711,7 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
                     warmup=args.warmup,
                     iters=args.iters,
                     seed=args.seed,
-                    want_ref=bool(tail and (pinned or record_greedy)),
+                    want_ref=bool(tail and (pinned or record_greedy or args.ab)),
                     strict_accuracy=strict_correctness and not same_input_greedy,
                 )
             except RuntimeError as exc:
@@ -2668,8 +2734,9 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
                 if resp.get("greedy_error"):
                     greedy_fail = f"greedy timing failed after reference execution: {resp['greedy_error']}"
                     _record_greedy_failure(args, backend, graph, resp["greedy_error"])
+            ref_key = uuid.uuid4().hex if ab_ref is not None else None
             if record_greedy and not pinned and tail and greedy_fail is None:
-                greedy_iso = await _bench_greedy_isolated(backend, graph, warmup=args.warmup, iters=args.iters)
+                greedy_iso = await _bench_greedy_isolated(backend, graph, warmup=args.warmup, iters=args.iters, ref=ab_ref, ref_key=ref_key)
             if pinned and tail:
                 reference_error = pinned_reference_refusal(ab_ref=ab_ref, torch_twin=frontend is not None, greedy_fail=greedy_fail)
                 unverified = None
@@ -2694,7 +2761,9 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
                         if to_bench:
                             logger.error("%s — untimed greedy is ineligible; pinned rows still bench", greedy_fail)
                     else:
-                        greedy_iso = await _bench_greedy_isolated(backend, graph, warmup=args.warmup, iters=args.iters)
+                        greedy_iso = await _bench_greedy_isolated(
+                            backend, graph, warmup=args.warmup, iters=args.iters, ref=ab_ref, ref_key=ref_key
+                        )
                     ab_benches = await _bench_golden_variants(
                         backend,
                         embedded,
@@ -2702,6 +2771,7 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
                         warmup=args.warmup,
                         iters=args.iters,
                         ref=ab_ref,
+                        ref_key=ref_key,
                         strict_correctness=strict_correctness and ab_ref is not None,
                         strict_reference="same-input-greedy" if same_input_greedy else "eager",
                         unverified=unverified,
@@ -2710,8 +2780,10 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
             elif not pinned and args.ab and tail:
                 if greedy_fail:
                     logger.error("%s — greedy row marked bench_fail; --ab rows still bench in the worker", greedy_fail)
-                greedy_iso = await _bench_greedy_isolated(backend, graph, warmup=args.warmup, iters=args.iters)
-                ab_benches = await _bench_ab_variants_ir(backend, path, tail, args.ab, warmup=args.warmup, iters=args.iters, db=db)
+                greedy_iso = await _bench_greedy_isolated(backend, graph, warmup=args.warmup, iters=args.iters, ref=ab_ref, ref_key=ref_key)
+                ab_benches = await _bench_ab_variants_ir(
+                    backend, path, tail, args.ab, warmup=args.warmup, iters=args.iters, db=db, ref=ab_ref, ref_key=ref_key
+                )
         finally:
             await backend.aclose_async_worker()
         return (
@@ -2818,7 +2890,9 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
         # The recording ran before the exit that reports a rejected answer. Only the ANSWER and the pin
         # are grounds to refuse — the other strict errors are about the FILE (a working inventory holds
         # no pinned row yet), and refusing on those would leave a recording walk recording nothing at all.
-        record_refusal = greedy_record_refusal(_cuda_knob_dicts(graph), accuracy_error if strict_correctness else None)
+        record_refusal = greedy_record_refusal(
+            _cuda_knob_dicts(graph), accuracy_error if strict_correctness else None, _cuda_kernel_names(graph)
+        )
         if record_refusal is not None:
             logger.error("not recording the greedy pick of %s — %s", args.realization, record_refusal)
         else:
@@ -2842,7 +2916,7 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
         sys.exit(1)  # every row is reported above; any failed row (greedy or --ab) exits non-zero
 
 
-async def _bench_ab_variants_ir(backend, ir_path, tail, specs, *, warmup, iters, db=None):
+async def _bench_ab_variants_ir(backend, ir_path, tail, specs, *, warmup, iters, db=None, ref=None, ref_key=None):
     """The ``--ab`` counterpart of :func:`_bench_golden_variants` for the ``--ir``
     path: each config reloads the IR file fresh (the tail lowering mutates the graph
     in place) and re-lowers it with the knobs pinned, so the pin collapses every
@@ -2879,7 +2953,8 @@ async def _bench_ab_variants_ir(backend, ir_path, tail, specs, *, warmup, iters,
             continue
         try:
             with pinned_knobs(replay_knobs):
-                g_bench, _ = await backend.bench_pinned_async(g, warmup=warmup, num_iters=iters)
+                inputs = ref[0] if ref is not None else None
+                g_bench, _ = await backend.bench_pinned_async(g, run_inputs=inputs, run_inputs_key=ref_key, warmup=warmup, num_iters=iters)
         except Exception as exc:  # noqa: BLE001 — a bad pin must not abort the run's own table
             st = _failed_bench_status(exc)
             logger.warning("[ab] %s: bench of the pinned config failed (%s) — row kept as %s", sample.name, exc, st)
@@ -3448,19 +3523,20 @@ def _capture_torch_fns(torch_fns: dict) -> dict | None:
     return captured
 
 
-async def _bench_interleaved_captured(module, args, kwargs, backend, lowered, warmup, iters, *, torch_fns):
+async def _bench_interleaved_captured(module, args, kwargs, backend, lowered, warmup, iters, *, torch_fns, input_data=None):
     """All-or-nothing CUDA-graph-captured interleaved bench.
 
     Captures every torch closure (``_capture_torch_fns``) and runs the
     interleaved loop with the emmy side captured too. If ANY side fails —
     a torch backend resists capture, or the emmy launch loop fell back
     (``bench.captured`` False) — the whole bench re-runs uncaptured with the
-    original closures, so one table never mixes timing semantics. Returns
+    original closures, so one table never mixes timing semantics. ``input_data`` times the
+    emmy side on the inputs the torch closures read (see :func:`_bench_interleaved`). Returns
     ``(results, bench, captured)``."""
     captured_fns = _capture_torch_fns(torch_fns)
     if captured_fns is not None:
         results, bench = await _bench_interleaved(
-            module, args, kwargs, backend, lowered, warmup, iters, torch_fns=captured_fns, capture_graphs=True
+            module, args, kwargs, backend, lowered, warmup, iters, torch_fns=captured_fns, capture_graphs=True, input_data=input_data
         )
         if bench.captured:
             return results, bench, True
@@ -3469,12 +3545,14 @@ async def _bench_interleaved_captured(module, args, kwargs, backend, lowered, wa
         # benchmark_program already logged the capture failure; re-run only to de-mix the table.
         logger.warning("emmy side fell back to uncaptured timing — re-benching all backends uncaptured")
     results, bench = await _bench_interleaved(
-        module, args, kwargs, backend, lowered, warmup, iters, torch_fns=torch_fns, capture_graphs=False
+        module, args, kwargs, backend, lowered, warmup, iters, torch_fns=torch_fns, capture_graphs=False, input_data=input_data
     )
     return results, bench, False
 
 
-async def _bench_interleaved(module, args, kwargs, backend, compiled_graph, warmup, iters, *, torch_fns, capture_graphs=False):
+async def _bench_interleaved(
+    module, args, kwargs, backend, compiled_graph, warmup, iters, *, torch_fns, capture_graphs=False, input_data=None
+):
     """Time the selected backends by alternating one iter of each per
     loop step. All backends see the same warm GPU state across the
     measurement window — same clocks, same caches, same thermal drift
@@ -3500,6 +3578,10 @@ async def _bench_interleaved(module, args, kwargs, backend, compiled_graph, warm
     closures must be pre-captured by the caller to keep one timing
     semantics per table — use :func:`_bench_interleaved_captured`,
     which owns that all-or-nothing pairing.
+
+    ``input_data`` binds the emmy program to the same values the torch closures read. Without
+    it emmy times a synthetic fill while torch times real inputs, and a kernel whose cost
+    depends on its values (a division's slow path, an exp near overflow) reads differently.
     """
     import torch
 
@@ -3523,7 +3605,9 @@ async def _bench_interleaved(module, args, kwargs, backend, compiled_graph, warm
                 stop.record()
             torch_events[name].append((start, stop, batch_size))
 
-    bench = await backend.benchmark_async(compiled_graph, warmup=warmup, num_iters=iters, on_iter=on_iter, capture_graphs=capture_graphs)
+    bench = await backend.benchmark_async(
+        compiled_graph, warmup=warmup, num_iters=iters, on_iter=on_iter, capture_graphs=capture_graphs, input_data=input_data
+    )
     torch.cuda.synchronize()
 
     results: dict[str, float] = {}

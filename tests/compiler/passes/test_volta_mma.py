@@ -324,11 +324,11 @@ def test_sm70_sync_copy_composes_ring_and_register_pipelines(monkeypatch) -> Non
 def test_sm70_ring_splits_the_blocking_copy_across_the_drain(monkeypatch) -> None:
     """A ring on a target without ``cp.async`` puts its in-flight chunk in REGISTERS.
 
-    The fill issues the next chunk's global loads, the resident chunk's mma drain runs, and only
-    then do the registers land in the slab — so the drain covers the load latency and ONE barrier
-    per chunk publishes the deposit. Back-to-back load/store fills (what a ring emitted before)
-    leave the latency fully exposed and need two barriers, which measured slower than no ring at
-    all on every V100 shape tried."""
+    The resident chunk's mma drain runs, the registers land in the free slot, ONE barrier per chunk
+    publishes them, and only past it do the next chunk's global loads issue — so the loads fly
+    under the whole next drain rather than the part of it ptxas leaves after sinking them. Back-to-
+    back load/store fills (what a ring emitted first) leave the latency fully exposed and need two
+    barriers, which measured slower than no ring at all on every V100 shape tried."""
     monkeypatch.setenv("EMMY_TILE", f"{VOLTA}/f2x2/k8")
     monkeypatch.setenv("EMMY_WORK", "w2x2")  # 128 threads: the slabs stripe evenly, so the split engages
     monkeypatch.setenv("EMMY_STAGE", "d2/smem")
@@ -336,10 +336,14 @@ def test_sm70_ring_splits_the_blocking_copy_across_the_drain(monkeypatch) -> Non
     src, knobs = _source(_graph(m=64, n=64, k=64), Context(compute_capability=(7, 0)))
     assert family_value(knobs, "STAGE") == "d2/smem"
     prologue, _, body = src.partition("for (int _ks")
-    issue = body.index("_v__a_stage0_0")  # the staged gmem load of the PREFETCH chunk
     drain = body.index("emmy_mma_m8n8k4_f16_f32")
+    unpack = body.index("_a_stage0_0 = _v__a_stage0_0_h[0];")  # the carried vector spreads to the staged names
     deposit = body.index("*reinterpret_cast<uint2*>(&_a_smem[_a_smem_store")
-    assert issue < drain < deposit, "the drain must sit between the staged load and its slab store"
+    barrier = body.index("__syncthreads();")
+    issue = body.index("_v__a_stage0_0 = __ldg(")  # the gmem load of the chunk after next, past the barrier
+    assert drain < unpack < deposit < barrier < issue, "the loads issue past the barrier that publishes the deposit"
+    assert "uint4 _v__a_stage0_0 = *reinterpret_cast" in prologue, "the prime declares the carried registers"
+    assert prologue.index("_v__a_stage0_0 = __ldg(") > prologue.rindex("__syncthreads();"), "chunk 1 issues past the prime's barrier"
     assert "int _a_smem_store = emmy_volta_crosswise(" in prologue
     assert "int _b_smem_store = emmy_volta_b_congruous(" in prologue
     assert "auto _a_gmem_stride" in prologue and "auto _a_gmem0" in prologue
@@ -426,6 +430,30 @@ def test_sm70_causal_attention_selects_the_mask_per_fragment_element(monkeypatch
     assert "_w0_0_v3[0] = ((a1__ck + 0 + _vc >= seq_len) ? (-1e+30f) : (_w0_0_v3[0]));" in src
     assert "__frow" not in src and "__fcol" not in src
     assert "emmy_c_to_a_f16_m8n8k4" in src
+
+
+def test_sm70_attention_rings_its_key_and_value_through_registers(monkeypatch) -> None:
+    """A two-slot ring on the Volta chunk tier is the register-staged split: the next chunk's key
+    and value load into packed registers past the barrier, the softmax and expectation of this
+    chunk run, and the unpack and deposit land them in the free slot. The loads stay behind the
+    barrier — a load moved above it would refill the vectors the unpack has not read yet."""
+    monkeypatch.setenv("EMMY_WORK", "w4x1")
+    monkeypatch.setenv("EMMY_TILE@map.1/twist.1/inner", f"{VOLTA}/f1x2/k2")
+    monkeypatch.setenv("EMMY_TILE@map.1/twist", f"{VOLTA}/f1x8/k8")
+    monkeypatch.setenv("EMMY_STAGE@map.1/twist.1/inner", "d2/smem")
+    monkeypatch.setenv("EMMY_STAGE@map.1/twist", "d2/smem")
+    monkeypatch.setenv("EMMY_REDUCE", "")
+    monkeypatch.setenv("EMMY_RASTER", "")
+    src, knobs = _source(_sdpa_graph(d=128, causal=True), Context(compute_capability=(7, 0)))
+    assert knobs["STAGE@map.1/twist"] == "d2/smem"
+    _, _, body = src.partition("for (int a")
+    drain = body.index("emmy_mma_m8n8k4_f16_f32")
+    unpack = body.index("_a_stage0_0 = _v__a_stage0_0_h[0];")
+    barrier = body.index("__syncthreads();", unpack)
+    issue = body.index("_v__a_stage0_0 = __ldg(")
+    assert drain < unpack < barrier < issue, "the key and value of the chunk after next issue past the barrier"
+    for forbidden in NEWER_INSTRUCTIONS:
+        assert forbidden not in src
 
 
 def test_sm70_computed_a_edge_stages_through_the_smem_compute_fill(monkeypatch) -> None:

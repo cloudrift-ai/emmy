@@ -22,7 +22,7 @@ from emmy.compiler.ir.schedule.classic import (
     ReductionSchedule,
 )
 from emmy.compiler.ir.schedule.classic import refusals as classic
-from emmy.compiler.ir.schedule.classic.schedule import output_sweep_works
+from emmy.compiler.ir.schedule.classic.schedule import output_sweep_works, packed_works
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.ops import carries_partition
@@ -209,7 +209,9 @@ def test_reduction_enumeration_filters_the_independent_product_by_compatibility(
     codec = ClassicScheduleCodec(_context(tile, target))
 
     assert {_signature(codec, leaf.schedule) for leaf in leaves} == {_signature(codec, schedule) for schedule in reference}
-    assert len(reference) == len(expected_reductions)
+    # A warp-wide cooperative fold is offered once more on its packed inventory (several cells per CTA).
+    packed = sum(len(packed_works(Work(kind="thread", units=(plan.coop, 1)))) for plan in coop_reduce_moves() if not plan.coop_transposed)
+    assert len(reference) == len(expected_reductions) + packed
     assert offers.bounds[0] > len(reference)
 
 
@@ -486,6 +488,27 @@ def test_union_parameter_ignores_a_global_value_unsupported_by_this_kernel() -> 
     c = _context(tile, target, pins=pins)
 
     assert tuple(enumerate_classic_reference(c))
+
+
+def test_a_cut_piece_keeps_its_catalog_when_published_pins_leave_it_no_row(monkeypatch) -> None:
+    """A pin published to every piece of a cut takes where it fits. ``STAGE=d1/smem`` fits this piece's edge
+    alone yet composes with none of its rows; the piece keeps its catalog instead of running unscheduled,
+    while a kernel pin naming it still holds. A GEMM sweep's pins left two GDN pieces of a Qwen3.8 layer
+    unscheduled this way on every row, and the recorded golden carried them as loops."""
+    k = Axis("k", 64)
+    root = contraction(
+        k, Load(name="a_e", input="a", index=(Var("m"), Var("k"))), (Load(name="b_e", input="b", index=(Var("k"), Var("n"))), "acc")
+    )
+    tile = TileOp(op=root, place=Placement(free=(Axis("m", 64), Axis("n", 64))), axes=(Axis("m", 64), Axis("n", 64), k))
+    target = Context.from_target((7, 0))
+    monkeypatch.setenv("EMMY_STAGE", "d1/smem")
+    assert tuple(iter_leaves(classic_forks(tile, "k__place_ab12", {}, target, kernel_set=True, published=True)))
+    with pytest.raises(ValueError, match="does not resolve"):  # a kernel of its own is held to the pin, loudly
+        tuple(iter_leaves(classic_forks(tile, "k", {}, target)))
+
+    monkeypatch.setenv("EMMY_WORK@place_ab12", "t16x16")
+    leaves = tuple(iter_leaves(classic_forks(tile, "k__place_ab12", {}, target, kernel_set=True, node="out__place_ab12_0")))
+    assert leaves and {leaf.schedule.kernel.work.spell() for leaf in leaves} == {"t16x16"}
 
 
 def test_schedule_restriction_snapshots_parameter_values() -> None:

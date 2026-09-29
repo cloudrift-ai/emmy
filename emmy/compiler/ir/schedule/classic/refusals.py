@@ -411,13 +411,21 @@ def _contraction_plans(node, facts: ContractionFacts, atoms: tuple[str, ...]) ->
     yield from _warp_plans(node, facts, atoms)
 
 
-def _contraction_plan_allowed(node, facts: ContractionFacts, atoms: tuple[str, ...], plan: Tile) -> bool:
-    """Whether one parsed contraction plan is a value the catalog would have offered."""
+def _contraction_plan_refusal(node, facts: ContractionFacts, atoms: tuple[str, ...], plan: Tile) -> str | None:
+    """Why one parsed contraction plan is not a value the catalog would have offered, or ``None``."""
     if not plan.is_warp:
-        return plan in _scalar_catalog() if _uniform_extras(node) else plan == Tile()
-    if plan.atom.name not in atoms or not _warp_plan_ok(node, facts, plan):
-        return False
-    return warp_tile_in_catalog(plan) or (plan.regs == (26, 4) and plan.bk == 2)
+        if _uniform_extras(node):
+            return None if plan in _scalar_catalog() else "not a scalar tile of the catalog"
+        return None if plan == Tile() else "this contraction takes no scalar register tile"
+    if plan.atom.name not in atoms:
+        return f"atom {plan.atom.name} is not offered here (offered: {', '.join(atoms) or 'none'})"
+    if (why := _kstep_refusal(facts.k_axis, plan) or _wgmma_refusal(plan)) is not None:
+        return why
+    if not _warp_plan_ok(node, facts, plan):
+        return f"the chunk width {plan.atom.atom_k * plan.bk} is not a multiple of the atom's N ({plan.atom.atom_n})"
+    if not (warp_tile_in_catalog(plan) or (plan.regs == (26, 4) and plan.bk == 2)):
+        return "not a warp tile of the catalog"
+    return None
 
 
 def fill_stage_moves() -> tuple[Stage, ...]:
@@ -662,7 +670,7 @@ def _fragment_agreements(
             # whichever side carries ITS key, and the term's canonical orientation decides which
             # that is (a score whose A edge is the key tiles the key as M).
             sides = tuple((side.axis.name, side.units, side.tile, side.reg) for side in (placed.m, placed.n))
-            offer = ("warp", plan.atom.shape, plan.atom.fragment_layout, placed.n.units, placed.n.tile, sides)
+            offer = ("warp", plan.atom.shape, _seam_layout(plan.atom), placed.n.units, placed.n.tile, sides)
         else:
             offer = ("scalar",)
         out.append(_FragmentAgreement("offer", node_id_spelling(site), offer))
@@ -675,13 +683,21 @@ def _fragment_agreements(
             # this atom with the chunk as its N tile, one warp column wide and the same register
             # rows. Stated as a need of its own because the ordinary one accepts an untiled
             # producer, and that row would be stamped on a kernel whose emission ignored it.
-            need = ("chunk", plan.atom.shape, plan.atom.fragment_layout, plan.atom.atom_k * plan.bk, placed.m.reg, node.axis)
+            need = ("chunk", plan.atom.shape, _seam_layout(plan.atom), plan.atom.atom_k * plan.bk, placed.m.reg, node.axis)
         elif plan.is_warp and stage is not None and stage.transport == "smem":
             need = ("step" if facts.need_step else "warp", plan.atom.shape, plan.atom.fragment_layout, stage.bk_elems)
         else:
             need = ("free",)
         out.append(_FragmentAgreement("need", node_id_spelling(facts.need), need))
     return tuple(out)
+
+
+def _seam_layout(atom) -> str:
+    """The register layout a fragment seam hands over. A ``wgmma`` cell's accumulator is, per warp,
+    the ``m16n8k16`` C fragment repeated along N, and its register-A form takes that layout's A
+    fragment, so across a seam it IS that layout: a warp-group expectation reads an ``mma.sync``
+    score's fragments as they stand."""
+    return "m16n8k16" if atom.is_wgmma else atom.fragment_layout
 
 
 def _fragment_registers(atom, role: str) -> int:

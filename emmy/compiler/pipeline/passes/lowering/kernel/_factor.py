@@ -113,6 +113,9 @@ class Ctx:
     # split off ``workers`` and a cooperating reduce off its own ``coop``; this is the third case,
     # where nothing else claims the inventory (see the degenerate arm of :func:`_factorize`).
     sweep_workers: int = 1
+    # Cells of a cooperative reduce one CTA holds — the ``WORK`` inventory's second unit
+    # (``t<coop>x<cells>``, offered only where the combine stays inside a warp).
+    packed_cells: int = 1
     # The device's SM count (0 = unknown) — the one-wave test behind the chunk tier's causal early stop.
     sm_count: int = 0
 
@@ -155,6 +158,14 @@ def _sweep_workers(tile) -> int:
     return work.units[0] if work.kind == "thread" and work.units[1] == 1 else 1
 
 
+def _packed_cells(tile) -> int:
+    """The cells of a cooperative reduce one CTA holds: the thread inventory's second unit."""
+    from emmy.compiler.ir.schedule import Work  # noqa: PLC0415
+
+    work = Work.parse((tile.knobs or {}).get("WORK", "") or "")
+    return work.units[1] if work.kind == "thread" else 1
+
+
 def factorize(tile, root, store=None, sm_count: int = 0) -> Tile:
     """The entry to the recursive emitter — build the ambient :class:`Ctx` from the ``TileOp`` and its
     root graph node, then dispatch its ``op`` into a bound ``Tile`` via :func:`_factorize`. ``out_val``
@@ -190,6 +201,7 @@ def factorize(tile, root, store=None, sm_count: int = 0) -> Tile:
         # (m, n) block grid makes it meaningful.
         raster=Raster.parse((tile.knobs or {}).get("RASTER", "")),
         sweep_workers=_sweep_workers(tile),
+        packed_cells=_packed_cells(tile),
         sm_count=sm_count,
     )
     out_val = _wire(op).name if op is not None else ""
@@ -570,7 +582,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
         if any(member is not op for member, _ in parts):
             state, fold, close, lane = _tile_chain_members(op, parts, ctx, tail, out_val)
             t = replace(t, axes=(lane,)) if lane is not None else t
-            bt = lane.extent.as_static() if lane is not None else None
+            bt = lane.extent.as_static() * ctx.packed_cells if lane is not None else None
         elif plan is None or (plan.coop <= 1 and plan.reg <= 1) or (plan.coop_transposed and chain_form(op)):
             # The TERM places its own stores (``Fold.lower``): a sweep store's loop opens around
             # exactly the terms evaluated over that sweep, so sibling sweeps stay siblings, and a
@@ -597,16 +609,15 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
             # ``k_co`` between them), so B loads coalesce across lanes. The emitted body's
             # output-var references were σ-substituted to ``blk·32 + n_lane`` inside (clamped,
             # and the store guarded, when 32 does not tile the swept extent).
-            state, fold, close, lanes_axes = _tile_reduce_axis_transposed(op, plan, ctx, tail, out_val)
-            out_ax = next(a for a in reversed(grid) if not (a.extent.is_static and a.extent.as_static() == 1))
-            blk = Axis(name=f"{out_ax.name}_blk", extent=out_ax.extent.ceil_div(32), window=Window(parent=out_ax))
+            state, fold, close, lanes_axes, out_ax = _tile_reduce_axis_transposed(op, plan, ctx, tail, out_val)
+            blk = Axis(name=f"{out_ax.name}_blk", extent=out_ax.extent.ceil_div(32 * plan.coop_columns), window=Window(parent=out_ax))
             lead = tuple(blk if a.name == out_ax.name else a for a in grid)
             t = replace(t, axes=lanes_axes)
             bt = plan.coop
         else:
             state, fold, close, lane = _tile_reduce_axis(op, plan, ctx, tail, out_val)
             t = replace(t, axes=(lane,)) if lane is not None else t
-            bt = plan.coop if lane is not None else None
+            bt = plan.coop * ctx.packed_cells if lane is not None else None
 
         def state_decls(_cells):
             return state
@@ -840,7 +851,7 @@ def combine_tail(fold: Fold, *, reg: int, coop: int, lane) -> list[Stmt]:
 
 def _tile_reduce_axis_transposed(
     op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str
-) -> tuple[list[Stmt], list[Stmt], list[Stmt], tuple[Axis, ...]]:
+) -> tuple[list[Stmt], list[Stmt], list[Stmt], tuple[Axis, ...], Axis]:
     """The ``coop-t`` (transposed) cooperative reduce — the k-major-B matvec partition: 32
     ``n_lane`` threads (innermost) sweep the OUTPUT axis so B loads coalesce across lanes at
     every k step, and ``coop/32`` ``k_co`` slices ride the upper thread bits. The emitted body
@@ -850,17 +861,23 @@ def _tile_reduce_axis_transposed(
     the segment-indexed smem tree (``emit_combine(inner=…)`` — never a shuffle: adjacent lanes
     hold different outputs); the projection stores guard on ``k_co == 0``, each lane writing its
     own cell. Unsupported here (the enumeration must not offer ``t`` on them): shared-row
-    ``smem`` shared-row staging, distributed full-row projections (a ``Loop`` in the tail)."""
+    ``smem`` shared-row staging, distributed full-row projections (a ``Loop`` in the tail).
+
+    With ``columns > 1`` (``coop-t/v<n>``) each lane owns ``n`` adjacent cells
+    ``blk·32n + n_lane·n + j``: the loop body, its prologue and the projection are copied once
+    per column (SSA suffix ``__v<j>``, column 0 verbatim), so at each k step a lane's reads of B
+    are one contiguous run the load vectorizer merges, and every column's state rides the one
+    combine as extra components."""
     grid = ctx.grid
-    coop, reg = plan.coop, plan.reg
+    coop, reg, columns = plan.coop, plan.reg, plan.coop_columns
+    assert columns == 1 or reg == 1, "a coop-t band splits its lane over columns or over ILP chains, not both"
     lanes_n = 32
     k_ways = coop // lanes_n
     assert coop % lanes_n == 0 and k_ways >= 1, f"b{coop}t needs a multiple of {lanes_n}"
     stage = ctx.sched.get("STAGE", op)
     assert not (stage is not None and stage.smem), "transposed coop cannot ride shared-row staging"
-    out_ax = next(a for a in reversed(grid) if not (a.extent.is_static and a.extent.as_static() == 1))
-
     *hoisted, rloop = op.lower(axes=ctx.sched.tile.axes)
+    out_ax = _coalescing_axis(rloop, grid, ctx.inputs)
     view = op.as_reduction()
     axis = rloop.axis
     stride = k_ways * reg
@@ -874,11 +891,15 @@ def _tile_reduce_axis_transposed(
     # not tile leaves the last block's upper lanes OVERHANGING: they clamp-read the last valid
     # column (a duplicate sweep, in-bounds) and their store is discarded by the guard below — the
     # same masked-overhang contract the tiled contraction's ``clamp_last`` / ``Cond`` pair states.
-    cell = BinaryExpr("+", BinaryExpr("*", Var(blk_name), Literal(lanes_n, "int")), Var(n_lane.name))
+    span = lanes_n * columns
+    base = BinaryExpr("+", BinaryExpr("*", Var(blk_name), Literal(span, "int")), BinaryExpr("*", Var(n_lane.name), Literal(columns, "int")))
+    cells = (
+        [BinaryExpr("+", base, Literal(j, "int")) for j in range(columns)]
+        if columns > 1
+        else [BinaryExpr("+", BinaryExpr("*", Var(blk_name), Literal(lanes_n, "int")), Var(n_lane.name))]
+    )
     out_ext = out_ax.extent_expr()
-    overhang = not (out_ax.extent.is_static and out_ax.extent.as_static() % lanes_n == 0)
-    subst = Sigma({out_ax.name: clamp_last(cell, out_ext) if overhang else cell})  # the sweep's reads
-    store_subst = Sigma({out_ax.name: cell})  # the guarded projection: in range by the guard, so no clamp
+    overhang = not (out_ax.extent.is_static and out_ax.extent.as_static() % span == 0)
 
     nested_axes = {lp.axis.name for lp in rloop.body.iter_of_type(Loop, StridedLoop)}
     defined = {nm for s in rloop.body.iter() for nm in s.defines()}
@@ -895,22 +916,79 @@ def _tile_reduce_axis_transposed(
     copies: list[Stmt] = []
     for r in range(reg):
         copies.extend(_replicate(rloop.body, r, k_ways, axis, masked, protected, stream_identity))
-    strided = StridedLoop(axis=axis, start=start, step=Literal(stride, "int"), body=Body(tuple(copies)), unroll=_lane_unroll(axis, stride))
-    strided = strided.substitute(subst)
+    tail_stmts = with_store(list(tail), ctx.output, grid, out_val)
+
+    # One copy of the prologue, the body and the projection per column. The prologue's names are
+    # renamed with its column, so they come off ``protected``; everything shared (grid, reduce and
+    # lane coordinates) passes through.
+    hoisted_defs = {name for stmt in hoisted for name in stmt.defines()}
+    per_column = protected - hoisted_defs if columns > 1 else protected
+    sweep: list[Stmt] = []
+    body: list[Stmt] = []
+    stores: list[Stmt] = []
+    for j, cell in enumerate(cells):
+        suffix = f"__v{j}" if j else ""
+        read = Sigma({out_ax.name: clamp_last(cell, out_ext) if overhang else cell})  # the sweep's reads
+        sweep += copy_cell(hoisted, read, suffix, per_column)
+        body += copy_cell(copies, read, suffix, per_column)
+        # The guarded projection: in range by the guard, so no clamp.
+        store = copy_cell(tail_stmts, Sigma({out_ax.name: cell}), suffix, per_column)
+        stores += [Cond(cond=BinaryExpr("<", cell, out_ext), body=tuple(store))] if overhang else store
+    strided = StridedLoop(axis=axis, start=start, step=Literal(stride, "int"), body=Body(tuple(body)), unroll=_lane_unroll(axis, stride))
 
     merge: list[Stmt] = [st for r in range(1, reg) for st in merge_stmts(op, tuple(f"{n}__r{r}" for n in view.states))]
     if k_co is not None:
-        merge += emit_combine(op, t=k_co.name, n_threads=k_ways, inner=(n_lane.name, lanes_n))
+        merge += emit_combine(_column_states(op, columns), t=k_co.name, n_threads=k_ways, inner=(n_lane.name, lanes_n))
 
-    tail_stmts = with_store(list(tail), ctx.output, grid, out_val)
-    tail_stmts = [s.substitute(store_subst) for s in tail_stmts]
-    if overhang:
-        tail_stmts = [Cond(cond=BinaryExpr("<", cell, out_ext), body=tuple(tail_stmts))]
     if k_co is not None:
-        tail_stmts = [Cond(cond=BinaryExpr("==", Var(k_co.name), Literal(0, "int")), body=tuple(tail_stmts))]
+        stores = [Cond(cond=BinaryExpr("==", Var(k_co.name), Literal(0, "int")), body=tuple(stores))]
 
     lanes_axes = ((k_co,) if k_co is not None else ()) + (n_lane,)
-    return [], [*(s.substitute(subst) for s in hoisted), strided, *merge], tail_stmts, lanes_axes
+    return [], [*sweep, strided, *merge], stores, lanes_axes, out_ax
+
+
+@dataclass(frozen=True)
+class _Columns:
+    """A fold's combine widened over ``coop-t`` columns: column ``j``'s state components carry the
+    suffix ``__v<j>`` (column 0 verbatim), so one combine reduces every column's state at once."""
+
+    combine: object
+
+
+def _column_states(op: Fold, columns: int):
+    """``op`` itself for one column, else the stand-in :func:`emit_combine` reads for ``columns``."""
+    if columns == 1:
+        return op
+    from emmy.compiler.ir.pure import Lambda  # noqa: PLC0415
+
+    base = op.combine
+    n = len(base.results)
+    lams = [base.rename(lambda name, j=j: f"{name}__v{j}" if j else name) for j in range(columns)]
+    return _Columns(
+        combine=Lambda(
+            params=tuple(p for lam in lams for p in lam.params[:n]) + tuple(p for lam in lams for p in lam.params[n:]),
+            body=Body(tuple(stmt for lam in lams for stmt in lam.body)),
+            results=tuple(r for lam in lams for r in lam.results),
+        )
+    )
+
+
+def _coalescing_axis(rloop, grid: tuple, inputs) -> Axis:
+    """The output axis a ``coop-t`` band lays its 32 lanes on: the non-unit grid axis that the
+    most global loads of the reduce loop step along contiguously (one element per lane), so the
+    lanes read one run. A tile's declared free order need not put that axis last: a q/k twin whose
+    free axes are ``(head_dim, head)`` stores ``head_dim`` contiguously, and laying the lanes on
+    the 16 heads idled half of them and strided every weight read by 128 elements. Ties, and a
+    loop no address walk can read, keep the last non-unit axis."""
+    from emmy.compiler.ir.address import gmem_axis_step  # noqa: PLC0415 — the operand loaders' address read
+
+    candidates = [a for a in grid if not (a.extent.is_static and a.extent.as_static() == 1)]
+    loads = [stmt for stmt in rloop.body.iter() if isinstance(stmt, Load)]
+
+    def contiguous(axis: Axis) -> int:
+        return sum(1 for load in loads if (step := gmem_axis_step(load, axis.name, inputs)) is not None and step[0] == 1)
+
+    return max(reversed(candidates), key=contiguous)
 
 
 def _lane_unroll(axis: Axis, stride: int) -> bool:

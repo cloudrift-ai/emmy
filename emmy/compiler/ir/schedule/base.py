@@ -173,4 +173,31 @@ def schedule[KernelT, NodeT, EdgeT](
             yield child
 
 
+#: Why a pinned value was refused where the schedule reads it, ``{(key, value): why}`` — what the pin check
+#: reports beside a pin that did not realize, so a sweep learns which knob was refused and by which rule
+#: instead of only that the row was the planner's own pick. Filled by the schedule enumeration while it
+#: narrows a site to a pin; cleared at the start of every compile (``Pipeline.run``).
+_PIN_REFUSALS: dict[tuple[str, str], str] = {}
+
+
+def note_pin_refusal(key: str, value: str, why: str) -> None:
+    """Record why ``key=value`` was refused (the first reason recorded for it wins)."""
+    _PIN_REFUSALS.setdefault((key, str(value)), why)
+
+
+def pin_refusal(key: str, value: str) -> str | None:
+    """The recorded reason ``key=value`` was refused, or ``None``. A bare key (``TILE``) reads the reason
+    recorded at any of its family's scoped keys for that value."""
+    if (key, str(value)) in _PIN_REFUSALS:
+        return _PIN_REFUSALS[key, str(value)]
+    if "@" in key:
+        return None
+    return next((why for (k, v), why in _PIN_REFUSALS.items() if k.partition("@")[0] == key and v == str(value)), None)
+
+
+def clear_pin_refusals() -> None:
+    """Forget every recorded pin refusal — the start of a compile."""
+    _PIN_REFUSALS.clear()
+
+
 __all__ = ["Schedule", "ScheduleContext", "ScheduleProblem", "ScheduleRefused", "Site", "schedule"]
