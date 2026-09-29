@@ -791,7 +791,7 @@ class Stage:
     reg_depth: int = 1  # smem→register double-buffer depth (1 = no inner ldmatrix prefetch)
     # The output tile also goes through shared memory: an mma tile's fragments land over the
     # operand slabs the finished K-loop no longer reads, and the CTA stores whole 16-byte rows
-    # (``lowering/kernel/097_store_through_smem``). A choice, not a default: it wins where the
+    # (``lowering/kernel/098_store_through_smem``). A choice, not a default: it wins where the
     # store burst is a large share of the kernel and costs two barriers where it is not.
     out: bool = False
 

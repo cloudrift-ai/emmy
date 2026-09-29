@@ -698,7 +698,7 @@ Copy fills and computed operand fills use these same coupled layouts and accumul
 The transform halves the staged drain's LSU instructions and is bit-identical; equal modern swizzle modes remain
 pairable because their per-lane address XOR commutes with the paired lane map. A ring drain's row carries its slot term
 and its fragment offset in one `+` chain, so the pair's row distance is read off the literals of the whole chain;
-`097_store_through_smem` stores an mma tile's output through shared memory when its `STAGE` spells `/out`: after the
+`098_store_through_smem` stores an mma tile's output through shared memory when its `STAGE` spells `/out`: after the
 K-loop's copies drain and a barrier, the fragments land over the dead operand slabs (a 128-byte-row swizzle keeps both
 sides conflict-free), and a second barrier later the CTA writes 16-byte rows (`SmemTileStore`), bounded by a masked M
 edge. It replaces a burst of 4-byte stores per lane that throttled the load/store queue: an A100 one-wave 256x128 GEMM
