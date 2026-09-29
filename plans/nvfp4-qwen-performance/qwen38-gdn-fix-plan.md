@@ -244,9 +244,9 @@ Stage deliverables are cumulative. The following sketches are intended results, 
 | Stage | Reviewable deliverable | Observable completion condition |
 | --- | --- | --- |
 | 🚧 1. Baseline | Pinned main + #969 reproduction matrix and small regression inputs | The singleton batch case demonstrably reaches the same recurrence algebra as the checkpoint; each known failure has a bounded reproducer. |
-| 🚧 2. Recurrence | Field-preserving repack rewrite, consistent carrier/output coordinates, register and serial regressions | Kernel IR retains `FragmentRepack … role=b`; the checkpoint offers `STAGE=d1/reg`; classic launch-per-step CUDA does not reopen the time axis inside each launch; focused GPU states and corrected values match the reference. |
-| 🚧 3. Output domains | One correct placement of computation and stores, with sibling-domain regression tests | Lowered IR has sibling `(a0,a1[,a6])` and `(a8,a10)/(a8,a11)` nests. Store counts are proportional to the sum of the output sizes. The real kernel set completes under the watchdog with correct outputs. |
-| 🚧 4. Padding | Constant zero-fill padding through existing index maps | Tensor IR expresses `y[t,d] = x[t,d] if t < T else 0`; guarded Loop/Kernel loads are in bounds; short GDN traces succeed and returned sequence length remains T. |
+| ✅ 2. Recurrence | Field-preserving repack rewrite, consistent carrier/output coordinates, register and serial regressions | Kernel IR retains `FragmentRepack … role=b`; the checkpoint offers `STAGE=d1/reg`; classic launch-per-step CUDA does not reopen the time axis inside each launch; focused GPU states and corrected values match the reference. |
+| ✅ 3. Output domains | One correct placement of computation and stores, with sibling-domain regression tests | Lowered IR has sibling `(a0,a1[,a6])` and `(a8,a10)/(a8,a11)` nests. Store counts are proportional to the sum of the output sizes. The real kernel set completes under the watchdog with correct outputs. |
+| ✅ 4. Padding | Constant zero-fill padding through existing index maps | Tensor IR expresses `y[t,d] = x[t,d] if t < T else 0`; guarded Loop/Kernel loads are in bounds; short GDN traces succeed and returned sequence length remains T. |
 | 🚧 5. Projections | Legal tensor-core routes for qkv and z, with measured cut/schedule alternatives | Tile IR offers activation-A / weight-B contractions with MMA TILE; emitted CUDA contains the expected MMA instructions; reference comparisons pass and measured latency is reported. |
 | Pending: 6. Serving | GDN capture and explicit persistent state, delivered separately if needed | `prefill(x,S0,H0) → (y,S1,H1)` followed by `decode(x1,S1,H1) → (y1,S2,H2)` matches an independent reference; H is convolution history; reset and request isolation pass. Mixed fallback is labelled separately. |
 | Pending: 7. Review | Validated PR(s), measurements, updated docs and tracker | Required finalization checks pass, scope and remaining gaps are explicit, and the tracker changes to ✅ only with the ready-for-review fix PR. |
@@ -301,3 +301,29 @@ The excerpts above are the review evidence retained in this plan. The full local
   validation, z-projection coverage and measured alternatives remain pending.
 - GitHub native stack #974 contains #969 then #973. The extra current-main commits appear in #973 while its base
   remains #969's older branch; they are not DeltaNet changes.
+
+### Checkpoint-shape validation after preserving all outputs
+
+Index-map composition was also deleting returned intermediate tensors. Keeping those producers restores all six
+outputs of the saved projection frontend, which now lowers to the original `k_conv1d_linear_mean_reduce_c4b163`
+identity. A new three-backend regression covers this output contract. The Torch reference now supports Conv1d,
+with four CPU reference cases covering groups, bias, stride, padding and dilation.
+
+- The six-output projection passes `emmy run --ir projection-reference.json --bench --strict` on the local 5080
+  Laptop. This is the exact saved frontend with synthetic boundary tensors, not checkpoint-loaded weight numerics.
+  A short 1-warmup/3-iteration run reports 881 µs Emmy vs 421 µs eager; this is smoke evidence, not a stable speed
+  claim. The selected kernel set contains two qkv projection copies and is slower than eager.
+- The original 512-token recurrence target executes on its full 48-head shape against independently written
+  float64 matrix algebra over synthetic boundary tensors. Its offered float32-accumulator register schedule passes
+  `rtol=3e-3, atol=1e-3`; relative norm errors are 0.000572 for states and 0.000524 for corrected values.
+  The default float16-accumulator schedule has state relative norm error 0.000845, but 27/5,505,024 state values
+  exceed that elementwise bound (maximum absolute error 0.001844). This is explicitly not a strict numerical pass
+  for the default precision. The float32 schedule keeps the same recurrence algebra and passes the original bound.
+- Seeded recurrence GPU coverage now includes the singleton external output-batch coordinate.
+
+Actual fixed CUDA contains `emmy_c_to_b_f16` for the repack and legal `mma_m16n8k16_f16_f32` register recurrence.
+The projection's emitted kernels include `mma_m16n8k16_f16_f16` with `d2/smem-tma` and `d2/smem-tma/p2`.
+Its independent outputs are distributed into separate kernels; no six-axis Cartesian output loop is required.
+
+Stages 2–4 are marked complete for the compiler contracts above. Stage 5 still needs z-projection and stable
+measurement coverage. Serving and final review are unfinished; the overall bugtracker row remains 🚧.
