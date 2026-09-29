@@ -492,6 +492,11 @@ class CpAsyncCopy(Stmt):
     # re-swizzled every copy's whole index. ``None`` addresses the whole chunk in ``smem_index``.
     lane_index: tuple | None = None
     lane_rows: int = 0
+    # Whether the chunk lies inside the source, for a tile row past a masked edge: the copy then
+    # writes zeros and reads nothing. The source index stays clamped in bounds. Without it the
+    # clamped rows all read the edge's last row, and on the A100 a 96-row tile over 512 rows spent
+    # 23 us on a 16 us GEMM contending for that one row.
+    valid: Expr | None = None
 
     def external_reads(self) -> tuple[str, ...]:
         return (self.src,)
@@ -527,7 +532,10 @@ class CpAsyncCopy(Stmt):
         # ``emmy_cp_async_{cg,ca}`` (the cp.async prelude) does the ``cvta`` internally, so this is a
         # single call — no ``_smem_addr`` local and no wrapping ``{ }`` block. .cg is 16-byte-only.
         dst, src = f"&{self.smem}[{smem_flat}]", f"&{self.src}[{src_flat}]"
-        call = f"emmy_cp_async_cg({dst}, {src})" if self.nbytes == 16 else f"emmy_cp_async_ca<{self.nbytes}>({dst}, {src})"
+        if self.valid is not None and self.nbytes == 16:
+            call = f"emmy_cp_async_cg_z({dst}, {src}, {self.valid.render(ctx)})"
+        else:
+            call = f"emmy_cp_async_cg({dst}, {src})" if self.nbytes == 16 else f"emmy_cp_async_ca<{self.nbytes}>({dst}, {src})"
         return [f"{pad}{call};"]
 
 

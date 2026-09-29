@@ -895,9 +895,19 @@ def _slab_operands(
                 trans=i == 1 and b_trans,
                 atoms=atoms,
                 pad_cols=pads[i],
+                valid=_inside(tile, tile_base, is_row) if atoms == 1 else None,
             )
         )
     return tuple(ops)
+
+
+def _inside(tile: Side, tile_base: Expr, is_row: bool):
+    """The slab cells inside a masked tile edge — ``(row, col) -> base + <tile coord> < ext`` —
+    or ``None`` for an unmasked tile, or one whose tile axis runs along the slab row (a copy chunk
+    there could straddle the edge)."""
+    if not tile.mask or not is_row:
+        return None
+    return lambda row, col: BinaryExpr("<", BinaryExpr("+", tile_base, row), tile.ext)
 
 
 def _cta(mn: tuple[Side, Side], lanes: int, n_threads: int) -> CtaTile:
