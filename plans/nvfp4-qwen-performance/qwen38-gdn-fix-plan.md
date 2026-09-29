@@ -449,7 +449,9 @@ After: seed[batch * 4096 + row * 64 + column]
 Classic and register schedules now restore unit coordinates against the bound seed tensor before lowering its
 address. Four focused GPU checks pass, including both schedule families with nonzero seeds containing singleton
 dimensions. The complete two-token block now passes: output maximum error 1.86e-9, recurrence-state error
-7.45e-9, convolution-history error zero. Prefill-to-decode handoff and native serving dispatch remain pending.
+7.45e-9, convolution-history error zero. Full-block GPU tests now pass both one-token and two-token prefill
+followed by two decode steps, seeded requests, independent batch rows and reset. Native serving dispatch remains
+pending; explicit-state block execution is not an end-to-end serving claim.
 
 The 5090 isolated QKV projection (`64 × 5120` by `5120 × 10240`) now has direct strict-check evidence:
 

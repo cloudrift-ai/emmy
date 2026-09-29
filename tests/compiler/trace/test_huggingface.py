@@ -1063,7 +1063,8 @@ def test_gdn_state_wrapper_traces_both_state_outputs(length):
 
 
 @pytest.mark.xdist_group("cuda")
-def test_gdn_state_wrapper_cuda_handoff_and_reset():
+@pytest.mark.parametrize("prefill", [1, 2])
+def test_gdn_state_wrapper_cuda_handoff_and_reset(prefill):
     import numpy as np
     import torch
     from transformers.cache_utils import DynamicCache
@@ -1100,15 +1101,17 @@ def test_gdn_state_wrapper_cuda_handoff_and_reset():
     block = Qwen3_5TextModel(config).eval().layers[0]
     wrapper = build_gdn_state_wrapper(block)
     examples = (torch.zeros(2, 1, 8), torch.zeros(2, 1, 4, 4), torch.zeros(2, 12, 3))
-    graph, targets = trace_module_with_constants(wrapper, examples)
     tensors = dict(wrapper.named_parameters()) | dict(wrapper.named_buffers())
-    weights = {name: tensors[path].detach().numpy() for name, path in targets.items()}
     backend = CudaBackend()
-    with pinned_knobs({"FAST_MATH": False, "PLACE": "fuse"}):
-        compiled = backend.compile(graph)
-    weights = inject_constants(weights, compiled)
+    programs = {}
+    for length in sorted({1, prefill}):
+        graph, targets = trace_module_with_constants(wrapper, (torch.zeros(2, length, 8), *examples[1:]))
+        weights = {name: tensors[path].detach().numpy() for name, path in targets.items()}
+        with pinned_knobs({"FAST_MATH": False, "PLACE": "fuse"}):
+            compiled = backend.compile(graph)
+        programs[length] = (graph, compiled, inject_constants(weights, compiled))
     rng = np.random.default_rng(0)
-    chunks = [(rng.standard_normal((2, 1, 8)) * 0.1).astype(np.float32) for _ in range(3)]
+    chunks = [(rng.standard_normal((2, length, 8)) * 0.1).astype(np.float32) for length in (prefill, 1, 1)]
     # Two independent batch rows, a seeded request, and two identical fresh requests after reset.
     fresh = None
     for seeded in (True, False, False):
@@ -1118,6 +1121,7 @@ def test_gdn_state_wrapper_cuda_handoff_and_reset():
         cache.update_conv_state(torch.from_numpy(history.copy()), 0)
         cache.update_recurrent_state(torch.from_numpy(state.copy()), 0)
         for index, x in enumerate(chunks):
+            graph, compiled, weights = programs[x.shape[1]]
             inputs = weights | dict(zip(graph.inputs, (x, state, history), strict=True))
             result, _ = backend.run(compiled, input_data=inputs)
             values = tuple(result.outputs[name] for name in graph.outputs)
