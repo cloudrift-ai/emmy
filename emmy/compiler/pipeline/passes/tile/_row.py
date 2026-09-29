@@ -138,9 +138,10 @@ def reformed(piece: TileOp) -> TileOp:
     not re-formed."""
     if any(store.sweep for store in piece.output_specs):
         return piece
-    # The grid loops open here, around the term: a closed lowering hoists grid-invariant loads above
-    # them, and normalization orders only a free-loop chain nothing precedes. The grid order, and
-    # with it a single-product contraction's A, would otherwise be ``lower``'s choice.
+    # One loop per grid axis opens here, around the term: a lowering with no axes bound hoists
+    # grid-invariant loads above its loops, and normalization orders only an outer loop chain no
+    # statement precedes. The grid order, and with it a single-product contraction's A, would
+    # otherwise be ``lower``'s choice.
     body = piece.op.lower(bound=frozenset(axis.name for axis in piece.place.free), stores=piece.output_specs, axes=piece.axes)
     for axis in reversed(piece.place.free):
         body = Body((Loop(axis=axis, body=body),))
