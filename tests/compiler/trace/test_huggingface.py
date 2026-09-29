@@ -975,6 +975,26 @@ def _qwen3_5_linear_block():
     return model.layers[0]
 
 
+@pytest.mark.parametrize("length", [1, 16, 63, 64, 65])
+def test_gdn_chunk_padding_keeps_the_logical_sequence_length(length):
+    import torch
+
+    from emmy.compiler.trace.torch import trace_module
+
+    pytest.importorskip("transformers.models.qwen3_5")
+    from transformers.models.qwen3_5.modeling_qwen3_5 import torch_chunk_gated_delta_rule
+
+    class Chunk(torch.nn.Module):
+        def forward(self, q, k, v, g, beta, state):
+            return torch_chunk_gated_delta_rule(q, k, v, g, beta, initial_state=state, output_final_state=True)
+
+    vectors = [torch.randn(1, length, 2, 8) * 0.1 for _ in range(3)]
+    args = (*vectors, -torch.rand(1, length, 2), torch.rand(1, length, 2), torch.randn(1, 2, 8, 8) * 0.1)
+    graph = trace_module(Chunk(), args)
+    assert tuple(graph.buffer(graph.outputs[0]).shape) == (1, length, 2, 8)
+    assert tuple(graph.buffer(graph.outputs[1]).shape) == (1, 2, 8, 8)
+
+
 # --- checkpoint keys vs twin parameter names ---------------------------------------------------
 # A checkpoint may store its tensors under names the config-built twin does not have, and the
 # mismatch is silent — the parameters simply stay on the meta device. Transformers registers the
