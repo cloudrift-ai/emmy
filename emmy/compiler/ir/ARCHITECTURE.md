@@ -609,8 +609,10 @@ canonicalized before validation:
   differ only by argument order land in the same canonical form.
   Runs last so the sort key is the post-rename canonical SSA / buffer
   names.
-- The final ordering pass canonicalizes integer coordinate expressions, builds one colored relation graph for the
-  complete body tree, and chooses one dependency- and effect-valid statement order. Vertices represent scopes,
+- Reduction-axis unification, sibling merging, and duplicate elimination reach a fixed point before canonical
+  ordering. Coordinate expressions and commutative operands normalize between rounds to expose duplicates; every
+  changed round removes a loop or a duplicate computation. The final ordering pass then builds one colored relation
+  graph for the complete body tree and chooses one dependency- and effect-valid statement order. Vertices represent scopes,
   statements, lexical definitions, axes, source axes, and external buffers; colored relations retain operand
   positions, captures, aliases, nesting, resource hazards, and ordered execution protocols. The graph is independent
   of source order and spelling, and it rides the normalized body: structural identity labels the same graph again
