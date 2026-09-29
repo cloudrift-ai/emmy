@@ -287,7 +287,7 @@ def stage_moves(*, warp: bool, ctx=None) -> list[Stage]:
         for transport in STAGE_TRANSPORTS
         for depth in STAGE_DEPTHS
         for reg_depth in reg_depths
-        # Only an mma tile stores through the slabs, and a TMA ring's tail copies are never waited on.
+        # A TMA ring's tail copies are never waited on; which tiles take ``out`` is the node's stage filter.
         for out in ((False, True) if warp and transport != "smem-tma" else (False,))
     ]
     return moves if ctx is None else [move for move in moves if move.available_on(ctx)]
