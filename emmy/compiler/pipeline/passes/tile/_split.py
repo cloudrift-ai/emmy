@@ -796,8 +796,8 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
         return _add_projection_pieces(match, result, projection_pieces, free)
 
     # Deferred finalize: write every raw component to ``ws[(comp,) ksplit, *cell]``. The workspace
-    # shape MUST match the rank of the index the writes/loads use — or ``render_index``'s
-    # rank-mismatch fallback silently flattens without strides (colliding partials). ``ws_cell``
+    # shape MUST match the rank of the index the writes/loads use — ``render_index`` refuses
+    # any other. ``ws_cell``
     # is the FREE-axis vars (the partial has no original ``Write`` to copy), so size the workspace
     # by the free extents, not ``out.shape`` (whose extent-1 batch dims the grid never carries). A
     # multi-component carrier packs its per-component states into a leading ``comp`` axis; the
