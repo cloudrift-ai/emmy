@@ -42,7 +42,7 @@ avoidable memory accesses, not a measured speedup. Effort and relative importanc
 | [Inline quantized strict comparison uses a mismatched reference](nvfp4-qwen-performance/strict-fails-for-inline-quantize-programs.md) | Unseeded inline benchmarks bind Emmy’s packed weights from the parent checkpoint but rebuild eager’s weights in the worker. Strict comparison still uses unquantized eager at 1e-3; reported seeded runs also fail. |
 | [Packed cut pieces lose staging](nvfp4-qwen-performance/packed-cut-piece-operand-order.md) | Tile IR puts the decoded weight before the computed activation. Only no staging and `d1/smem` remain; a `d2/smem-async` pin fails. |
 | [Native fp4 lacks TMA](nvfp4-qwen-performance/fp4-cell-no-tma.md) | The fp4 contraction accepts `d3/smem-async` but rejects `d2/smem-tma`. W4A16 emits TMA copies of packed weight bytes. |
-| [Computed f16 activation blocks weight TMA](nvfp4-qwen-performance/f16-computed-activation-no-tma.md) | A contraction over `x + 1` offers only no staging, `d1/smem` and `d2/smem`; the TMA pin fails unless the activation is cut out. |
+| 🚧 [Computed f16 activation blocks weight TMA](nvfp4-qwen-performance/f16-computed-activation-no-tma.md) | A contraction over `x + 1` offers only no staging, `d1/smem` and `d2/smem`; the TMA pin fails unless the activation is cut out. |
 | [NVFP4 decoding unnecessarily uses LUTs](nvfp4-qwen-performance/nvfp4-decode-luts.md) | Scalar decoding reads global-memory byte-to-pair tables; staged W4A16 MMA reads a constant-memory nibble table. Direct E2M1 conversion can remove those accesses. Cache costs are estimated; no speedup has been measured. Lowest priority. |
 
 ### Follow-up checks and boundaries
