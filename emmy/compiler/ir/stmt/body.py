@@ -732,9 +732,9 @@ class Body(tuple[Stmt, ...], Wire):
 
     @cached_method
     def iter_of_type(self, *types: type) -> tuple[Stmt, ...]:
-        """All stmts (recursive — via :meth:`iter`) matching any of the
-        given types. The base primitive the named helpers
-        (:meth:`loads`, :meth:`writes`, ...) wrap."""
+        """Matching statements in preorder, reusing each child's cached query.
+
+        The named helpers (:meth:`loads`, :meth:`writes`, ...) share this lookup."""
         found = []
         for stmt in self:
             if isinstance(stmt, types):

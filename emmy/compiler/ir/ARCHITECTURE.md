@@ -537,7 +537,9 @@ two are safe together only for a whole-subtree renumbering (`rename_ssa_sequenti
 from *dropping* a binding — load dedup, CSE — an inner scope that merely re-uses the dropped name's spelling is a
 different variable, and renaming it both redeclares the survivor inside the scope and rewires the inner arithmetic to
 the outer value. `passes.rename_free(stmt, alias)` is the hygienic form: it prunes the alias of whatever each child
-scope re-binds before descending. `normalize.dedup_loads` applies the same rule while threading its own per-scope
+scope re-binds before descending. It rewrites the wrapper with empty child bodies, then visits each child once;
+rewriting the full subtree first would repeat and discard work at every enclosing level.
+`normalize.dedup_loads` applies the same rule while threading its own per-scope
 environment. σ has the same hazard with axis names, which collide across a tree by design (a cone statistic's axis
 may spell the same as the enclosing contraction's): `fold.subst_free(stmt, sigma)` is σ's hygienic form — it stops at
 a `Loop` / reducing `Fold` binder that re-binds a substituted name, and is what the smem compute fill substitutes
@@ -561,7 +563,8 @@ canonicalized before validation:
   workspace's leading index, so the same rule keeps it outside the axes it partitions without a naming convention.
 
 - `eliminate_copy_aliases` — drop `y = copy(x)` Assigns. Each nested body owns its alias map, so source spellings
-  reused by sibling scopes remain separate binders.
+  reused by sibling scopes remain separate binders. Enclosing aliases travel through that same walk, pruned at each
+  child scope, instead of renaming its entire subtree before descending again.
 - `unify_sibling_reduce_axes` — rename sibling reduce Loops whose reduce-axis Load positions overlap so they share one
   canonical axis name (softmax's max + sum sweeps; the two matmul reductions in `silu(x@Wg) * (x@Wu)` that both index
   `x` at the same K slot). A position is `(source, dim, anchor, coefficient)`, read through `affine_form`: a blocked
@@ -613,7 +616,10 @@ canonicalized before validation:
   of source order and spelling, and it rides the normalized body: structural identity labels the same graph again
   under its own buffer coloring instead of building it a second time. A scope's definitions bind its reads in any
   order and shadow an enclosing binding of the same spelling; a deeper scope's definition binds nothing read above
-  it, so the block still depends on the enclosing definition it reads. Affine coordinates sort by lexical binding
+  it, so the block still depends on the enclosing definition it reads. Immutable bodies cache their enclosing SSA
+  reads and ordered carried-state names. State names derive from the shared type-filtered lookup, which reuses each
+  child's query result. A subtree's full spelling is computed only when sibling statement shapes leave a tie.
+  Affine coordinates sort by lexical binding
   order, so renaming axes or loading a saved body preserves their normal form and exact identity. Identity normalizes
   remaining commutative expressions again after its final rename.
 - A standard smaller-half worklist computes the equitable partition in
