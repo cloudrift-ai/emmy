@@ -70,6 +70,25 @@ def test_recorded_row_decodes(path: Path, label: str) -> None:
     assert (reason := _decode(record, records)) is None, reason
 
 
+def _file_parameters():
+    with _repository_golden_paths() as paths:
+        return [pytest.param(path, id=_golden_id(path)) for path in sorted(paths, key=_golden_id)]
+
+
+@pytest.mark.parametrize("path", _file_parameters())
+def test_every_kernel_set_imports(path: Path) -> None:
+    """Every kernel set of a repository golden must lower when a compile imports it as evidence.
+
+    Decoding asks each row against its target's enumeration; the import also builds each kernel's
+    wire, and a set that fails there is dropped with nothing but a debug line, leaving the deploy to
+    the prior with the file apparently loaded."""
+    from emmy.compiler.pipeline.search.db import SearchDB
+    from emmy.compiler.pipeline.search.golden.evidence import import_file
+
+    counts = import_file(SearchDB(), path)
+    assert not counts["did not lower"], counts
+
+
 def test_scope_digest_follows_the_cards_rows_only(tmp_path, monkeypatch) -> None:
     """The digest a serving pack keys on moves with the rows this card's compile reads and with nothing else: another
     card's file, or a file scope that names a different file."""
