@@ -2921,6 +2921,7 @@
  "tests/serving/test_deepseek_native_loader.py::test_multi_token_prediction_head_is_never_read": 5.5,
  "tests/serving/test_deepseek_native_loader.py::test_native_fp8_trunk_weight_loads_scaled": 1.64,
  "tests/serving/test_deepseek_native_loader.py::test_native_routed_experts_stay_compressed_and_stacked": 5.3,
+ "tests/serving/test_deepseek_native_loader.py::test_native_trunk_names_reach_the_twin": 6.2,
  "tests/serving/test_deepseek_v4_split.py::test_classic_carve_rejects_hyper_connection_block": 5.3,
  "tests/serving/test_deepseek_v4_split.py::test_hyper_connection_split_matches_eager_layer[0]": 1.02,
  "tests/serving/test_deepseek_v4_split.py::test_hyper_connection_split_matches_eager_layer[1]": 2.61,
