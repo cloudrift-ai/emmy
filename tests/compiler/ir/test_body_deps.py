@@ -26,6 +26,32 @@ def _acc(name: str, value: str, op: str = "add") -> Accum:
     return Accum(name=name, value=value, op=op)
 
 
+def test_scope_summaries_share_nested_analysis(monkeypatch):
+    bodies = [Body((_asn("value", "exp", "source"), _acc("sum", "value")))]
+    for level in range(32):
+        bodies.append(Body((Loop(Axis(f"i{level}", 4), bodies[-1]),)))
+    visits = 0
+    original = Assign.deps
+
+    def counted(stmt):
+        nonlocal visits
+        visits += 1
+        return original(stmt)
+
+    monkeypatch.setattr(Assign, "deps", counted)
+    for body in reversed(bodies):
+        assert body.free_ssa == frozenset({"source"})
+        assert body.exported_accs == ("sum",)
+    assert visits == 1
+
+
+def test_scope_summary_preserves_reads_above_a_shadowed_name():
+    inner = Body((_asn("outer", "exp", "source"),))
+    body = Body((_asn("use", "abs", "outer"), Loop(Axis("i", 4), inner)))
+    assert inner.free_ssa == frozenset({"source"})
+    assert body.free_ssa == frozenset({"outer", "source"})
+
+
 # --- closure shape ---------------------------------------------------
 
 

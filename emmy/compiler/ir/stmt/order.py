@@ -20,16 +20,10 @@ from dataclasses import dataclass, fields
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.stmt.leaves import Accum, Assign, Carry, Init
+from emmy.compiler.ir.stmt.leaves import Accum, Assign, Init
 from emmy.compiler.structural import form
 
 __all__ = ["Labeling", "Ordering", "bound_axes", "ordering_constraints", "relation_graph", "topological_sort"]
-
-
-def _ordered_exported_accs(body: Body) -> tuple[str, ...]:
-    """Names ``body`` carries out — accumulators and carried states — deduplicated in structural order."""
-    carriers = (stmt for stmt in Body.coerce(body).iter() if isinstance(stmt, (Accum, Carry)))
-    return tuple(dict.fromkeys(name for stmt in carriers for name in stmt.carried_names()))
 
 
 def _ordered_sibling_defs(stmt: Stmt) -> tuple[str, ...]:
@@ -37,7 +31,7 @@ def _ordered_sibling_defs(stmt: Stmt) -> tuple[str, ...]:
     children = stmt.nested()
     if not children:
         return stmt.defines()
-    return tuple(dict.fromkeys(name for child in children for name in _ordered_exported_accs(child)))
+    return tuple(dict.fromkeys(name for child in children for name in child.exported_accs))
 
 
 def _free_ssa(stmt: Stmt) -> frozenset[str]:
@@ -51,13 +45,8 @@ def _free_ssa(stmt: Stmt) -> frozenset[str]:
         return frozenset(stmt.deps())
     reads = set(stmt.deps())
     for child in children:
-        reads.update(_scope_free_ssa(child))
+        reads.update(child.free_ssa)
     return frozenset(reads)
-
-
-def _scope_free_ssa(body: Body) -> frozenset[str]:
-    defined = {name for stmt in body for name in _ordered_sibling_defs(stmt)}
-    return frozenset().union(*(_free_ssa(stmt) for stmt in body)) - defined
 
 
 def bound_axes(stmt: Stmt) -> tuple[Axis, ...]:
@@ -419,7 +408,7 @@ class _Builder:
             exported = {
                 name: definitions_by_stmt[index][name]
                 for child in children
-                for name in _ordered_exported_accs(child)
+                for name in child.exported_accs
                 if name in definitions_by_stmt[index]
             }
             visible_ssa = dict(outer_ssa)

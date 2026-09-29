@@ -382,6 +382,27 @@ class Body(tuple[Stmt, ...], Wire):
     # -- def-use analysis ------------------------------------------------
 
     @cached_property
+    def exported_accs(self) -> tuple[str, ...]:
+        """Accumulator and carried-state names exported by this subtree, in structural order."""
+        from emmy.compiler.ir.stmt.leaves import Accum, Carry  # noqa: PLC0415
+
+        names = []
+        for stmt in self:
+            if isinstance(stmt, (Accum, Carry)):
+                names.extend(stmt.carried_names())
+            for child in stmt.nested():
+                names.extend(child.exported_accs)
+        return tuple(dict.fromkeys(names))
+
+    @cached_property
+    def free_ssa(self) -> frozenset[str]:
+        """SSA reads from the enclosing scope, excluding this scope's definitions and exported states."""
+        from emmy.compiler.ir.stmt.order import _free_ssa, _ordered_sibling_defs  # noqa: PLC0415
+
+        defined = {name for stmt in self for name in _ordered_sibling_defs(stmt)}
+        return frozenset().union(*(_free_ssa(stmt) for stmt in self)) - defined
+
+    @cached_property
     def definitions(self) -> dict[str, Stmt]:
         """Map every SSA name produced anywhere inside this body
         (recursive) to its defining ``Stmt``.

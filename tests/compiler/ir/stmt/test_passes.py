@@ -1,9 +1,41 @@
-"""Projection legality for cross-CTA atomic reductions."""
+"""Statement rewriting and projection legality."""
 
 import pytest
 
+from emmy.compiler.ir.axis import Axis
+from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.stmt import Body, Cond, Loop
 from emmy.compiler.ir.stmt.leaves import Assign, Write
-from emmy.compiler.ir.stmt.passes import projection_distributes
+from emmy.compiler.ir.stmt.passes import projection_distributes, rename_free
+
+
+@pytest.mark.parametrize("depth", [2, 24])
+def test_free_rename_visits_nested_statements_once(monkeypatch, depth):
+    from emmy.compiler.ir.stmt import passes
+
+    stmt = Cond(
+        cond=Var("outer"),
+        body=(Assign("shadow", "exp", ("outer",)), Write("left", (), "shadow")),
+        else_body=(Write("right", (), "outer"),),
+    )
+    for level in range(depth):
+        stmt = Loop(Axis(f"i{level}", 4), (stmt,))
+    visits = 0
+    original = passes._rewrite_kind
+
+    def counted(*args):
+        nonlocal visits
+        visits += 1
+        return original(*args)
+
+    monkeypatch.setattr(passes, "_rewrite_kind", counted)
+    result = rename_free(stmt, {"outer": "renamed", "shadow": "wrong"})
+    members = tuple(Body((result,)).iter())
+    assert visits <= 2 * len(members)
+    branch = next(member for member in members if isinstance(member, Cond))
+    assert branch.cond == Var("renamed")
+    assert branch.body == Body((Assign("shadow", "exp", ("renamed",)), Write("left", (), "shadow")))
+    assert branch.else_body == Body((Write("right", (), "renamed"),))
 
 
 @pytest.mark.parametrize(
