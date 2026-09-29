@@ -229,7 +229,9 @@ Do not hardcode this model or force the greedy scheduler to choose an unmeasured
    such. Full native GDN completion requires its own stateful prefill/decode programs and reference validation.
    Keep this as a separate reviewable change if its size exceeds the compiler fixes.
 7. **Validate, measure and prepare review.** Use the local 5080 for focused correctness and watchdog completion;
-   the remote 5090 for repeatable deployment measurements and capacity where sufficient. Rent hardware only when
+   the user-provided remote 5090 for repeatable deployment measurements and capacity where sufficient. Keep its
+   checkout, caches and artifacts in a new dedicated directory alongside other agents' work; leave their files and
+   running jobs untouched. Check for existing GPU activity before measuring. Rent hardware only when
    a concrete capacity or architecture gap requires it. V100 validates the distinct Volta fragment path and the
    existing serving recipes; it cannot validate native NVFP4 tensor-core execution. Full model capacity must be
    checked separately from individual-layer tests. Complete the repository's required finalization gates, document
