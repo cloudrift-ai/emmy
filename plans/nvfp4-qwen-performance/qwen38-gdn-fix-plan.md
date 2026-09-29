@@ -435,7 +435,7 @@ block matches traced IR, Loop IR and CUDA with bound transformed weights: output
 errors are below 8e-9. A GPU regression checks three decode steps, seeded state, two independent batch rows,
 fresh requests and reset; it passes under the grouped test runner.
 
-Multi-token validation remains 🚧. A two-token prefill agrees with eager in traced and Loop IR. Its first CUDA
+Multi-token validation exposed two further bugs. A two-token prefill agrees with eager in traced and Loop IR. Its first CUDA
 compile exposed a dropped time-coordinate binding when a carried fold becomes a register-program root. The
 root now closes over that coordinate, preserving operand bindings. The next mismatch exposed lost seed strides:
 
@@ -491,3 +491,20 @@ its test now explicitly pins the scalar serial path with unrolling disabled. The
 All 64 added CPU checks pass under the grouped runner, with slow cases entered into the duration inventory.
 An older convolution test expected nonzero padding to fail; it now compares convolution plus empty/nonempty padding
 against eager on all three backends (six passing cases). No unsupported-mode rejection was removed.
+
+All 22 added CUDA checks also pass under the grouped runner with the matching runtime. The latest source revision
+passes six focused checks on the 5090, including ordinary/NVFP4 stateful capture, one/two-token prefill handoff and
+both seed-address schedules. That ungrouped invocation still exited unsuccessfully because the duration gate
+looked for node IDs without the recorded `@cuda` suffix. The grouped rerun passes all seven checks in 89.82 seconds,
+including the 128-wide FP32-accumulator no-spill assertion that fails on the 5080 baseline.
+
+The local full suite also exposed the host's missing `/bin/bash` path in serving-image shell tests. All 55 tests in
+that file pass with Bash supplied inside a temporary mount namespace; the shared workstation is unchanged.
+Seven staging tests likewise pass when the namespace supplies Git on their fixed `/usr/bin:/bin` PATH.
+The local full run completed with 8,085 passed, 390 skipped, 16 failed and seven setup errors in 1,518.16 seconds:
+two obsolete assertions already repaired, the baseline 5080 spill assertion, thirteen shell-path failures and seven
+Git-path setup errors. The existing FP8 expert check passed after 185.64 seconds of compilation/execution.
+
+The final full suite is now running on the 5090 with eight workers, the current tracked source and a freshly built
+Rust extension. Its first recipe-history check required adding Git history to the previously archive-only checkout;
+that check now passes independently. No other agent's remote files or environments were changed.
