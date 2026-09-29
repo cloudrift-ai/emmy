@@ -374,7 +374,7 @@
  "tests/compiler/loader/test_quant.py::test_trace_model_spells_cones_and_binds_dequantized_twin": 0.06,
  "tests/compiler/loader/test_quant.py::test_trace_model_unquantized_checkpoint_takes_existing_path": 0.07,
  "tests/compiler/passes/test_carry_split.py::test_the_delta_rule_splits_and_matches_eager": 1.93,
- "tests/compiler/passes/test_carry_split.py::test_the_split_parts_match_the_sequential_walk_on_the_gpu@cuda": 0.71,
+ "tests/compiler/passes/test_carry_split.py::test_the_split_parts_match_the_sequential_walk_on_the_gpu@cuda": 5.9,
  "tests/compiler/passes/test_chunk_early_stop.py::test_the_emitted_chunk_loop_carries_the_bounds_only_where_they_can_shorten_the_kernel[band-multi-wave]": 17.0,
  "tests/compiler/passes/test_chunk_early_stop.py::test_the_emitted_chunk_loop_carries_the_bounds_only_where_they_can_shorten_the_kernel[band-one-wave]": 16.56,
  "tests/compiler/passes/test_chunk_early_stop.py::test_the_emitted_chunk_loop_carries_the_bounds_only_where_they_can_shorten_the_kernel[causal-multi-wave]": 17.76,
