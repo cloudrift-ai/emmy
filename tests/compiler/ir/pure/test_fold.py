@@ -20,7 +20,7 @@ from dataclasses import replace
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.pure.twist import SOFTMAX, Twist
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Let, Load, Loop, OutputSpec, Write
@@ -202,6 +202,14 @@ def test_sweeps_no_term_shares_are_sibling_loops_and_a_reader_makes_them_a_chain
     (m_loop,) = forest.lower(frozenset(), axes=scope)
     assert [loop.axis.name for loop in m_loop.body] == ["q", "n"]
     assert all(_chain(loop.body) == ["k"] for loop in m_loop.body)
+
+    # A multi-output root's constant result reads none of its parameters: still a wrapper, placed
+    # ahead of the loops, which stay siblings rather than nesting every sweep inside every other.
+    constant = Body((Load(name="z", input="zero", index=(Literal(0, "int"),), dtype="float32"),))
+    rooted = Fold(operands=(over_q, over_n), lift=Lambda.closing(("sq", "sn"), constant, ("z",)))
+    stores = tuple(OutputSpec(write=Write(output=f"o{v}", index=(Var("m"), Var(v)), value=f"s{v}")) for v in ("q", "n"))
+    ahead, m_loop = rooted.lower(frozenset(), stores, axes=scope)
+    assert isinstance(ahead, Load) and [loop.axis.name for loop in m_loop.body] == ["q", "n"]
 
     total = Body((Assign(name="t", op="add", args=("sq", "sn")),))
     reader = Fold(operands=(over_q, over_n), lift=Lambda.closing(("sq", "sn"), total, ("t",)))
