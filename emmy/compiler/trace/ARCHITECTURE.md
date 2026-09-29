@@ -199,8 +199,9 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
 
 - `load_quantized_split(model_dir, dtype) → (model, expert_store)` is the shard-streamed serving load of a
   quantized MoE checkpoint. The twin builds from config on the meta device (weights never read at trace; the
-  experts' would-be initialization never materializes), while the dense trunk streams per shard as real values and
-  attaches via `load_state_dict(assign=True)`. Expert tensors collect into a per-layer store keyed by the expert
+  experts' would-be initialization never materializes), while the dense trunk streams per shard as real values in the
+  requested dtype (a router's `e_score_correction_bias` stays float32, as `from_pretrained` keeps it) and attaches via
+  `load_state_dict(assign=True)`. Expert tensors collect into a per-layer store keyed by the expert
   program's input names: FP8 weights remain raw bits with f32 scales, and native-MXFP4 gpt-oss weights remain uint8
   blocks with uint8 E8M0 scales; biases stay in the requested value dtype. An NVFP4 dense-trunk weight streams as
   values: the loader dequantizes each packed trio (`<key>` + `<key>_scale` + `<key>_scale_2`) on read and consumes the
