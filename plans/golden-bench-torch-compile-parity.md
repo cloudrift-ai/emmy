@@ -15,7 +15,7 @@ kernel-set result good enough for the paper needs the level cells clearly above 
 | 3 | Programmatic dependent launch between graph kernels | H100 s1, 5090 s1 (+ s512 tails) | ~0.5–1 µs per launch, 16 launches | H100, RTX 5090 | done in #967: H100 s1 −5 µs, 5090 s1 −2 µs |
 | 4 | FP8 rows of the recipe (the paper figure's Q/K/V-FP8 bars) | FP8 study | measure | RTX 4090, RTX 5090, H100 | skipped (user decision); fp8-block goldens dropped |
 | 6 | Re-record goldens the close-out left without rows (below) | Gemma 4 serving, fp8-block corpus | restore evidence | RTX 5090 | done in #967 (Gemma pre1-global 41 → 28.6 µs; fp8-block dropped) |
-| 5 | Final re-record of every golden, unpinned `--strict` replay, lane once per card, RESULTS.md | all | the reported numbers | all five cards + V100 SXM3 (AWQ golden) | after 1–3 |
+| 5 | Final re-record of every golden, unpinned `--strict` replay, lane once per card, RESULTS.md | all | the reported numbers | all five cards + V100 SXM3 (AWQ golden) | done in #967 (lane numbers in RESULTS.md) |
 
 Order: 1 and 2 in parallel (A100 and H100 are separate hosts), then 3, then 5. Item 6 any time on the 5090.
 
@@ -136,45 +136,49 @@ are unrecorded on #930. Trace, sweep, record, and measure on the FP8-capable car
 
 ## Blockers
 
-1. **H100 s512 against the HF layer: 87.2 vs 79.4 µs (0.91×).** Schedules are exhausted (±1 µs) and multicast lost.
-   In-layer gaps: QKV block +5.5 µs (cold weights), gate/up + down +3.3, attention +2.5 vs cuDNN. `torch.compile`'s
-   kernels sum to 73 µs against our 86, and it gives ~11 µs back in launch gaps. The lever left is persistent CTAs
-   that overlap one tile's epilogue with the next tile's loads, which is out of scope for the paper.
-2. **Every s1 golden is stale against a fresh trace.** #871 changed how `is_causal` traces at one token; the stored
-   programs still say causal, so a model-form s1 run finds no evidence (on the V100 the fallback kernel hangs). Golden
-   form is unaffected. Fix: re-trace and re-record s1 on every card at close-out.
-3. **The lane measures golden form.** The recipe's `torch.compile` column must switch to the HF layer before the
-   close-out run.
-4. **Golden-bench goldens are not in `make test`'s decode set** (only recipe and hardware goldens are). Replay and
-   decode them explicitly on each card at close-out.
-5. **AWQ Qwen3.8-27B whole layer on the V100 SXM3 cannot run yet.** The inter-chunk recurrence kernel
+1. **H100 s512 against the HF layer: 87.3 vs 79.0 µs (0.90×, close-out lane).** Schedules are exhausted (±1 µs) and
+   multicast lost. In-layer gaps: QKV block +5.5 µs (cold weights), gate/up + down +3.3, attention +2.5 vs cuDNN.
+   `torch.compile`'s kernels sum to 73 µs against our 86, and it gives ~11 µs back in launch gaps. The lever left is
+   persistent CTAs that overlap one tile's epilogue with the next tile's loads, which is out of scope for the paper.
+2. **AWQ Qwen3.8-27B whole layer on the V100 SXM3 cannot run yet.** The inter-chunk recurrence kernel
    (`k_matmul_reduce_81b2ae`) offers only 48-thread schedules and hits the watchdog; it needs the carried-state
    shared-memory residency of #965, or a cut for a carried-state kernel. The input-projection region needs a long
    kernel-set sweep (root width, cuts, non-spilling projection tiles). The intra-chunk matmul is recorded
    (6,587 → 841 µs).
-6. **Root-sweep fix waits for the final re-record** (user decision): `gb2/v100sxm3-root-sweeps` stops a multi-output
-   root from nesting unrelated copies in one thread (the AWQ input projection hung), but re-lowers 33 Gemma 4 RTX 5090
-   rows and 4 DeepSeek-V4 V100 rows. Merge it right before the re-record and re-record those rows on their cards.
+3. **Golden-bench goldens are not in `make test`'s decode set** (only recipe and hardware goldens are); a compiler
+   change can leave them stale unseen. The close-out replayed and decoded them by hand on each card.
+
+Resolved in #967's close-out: the s1 goldens are re-traced after #871 (`is_causal` at one token) and re-recorded on
+every card; the lane measures `torch.compile` on the HF layer and stages the Rust runtime; the root-sweep fix is merged
+(its first version dropped 36 Gemma and DeepSeek rows through a fold misclassification, fixed and restored).
 
 ## Future improvements
 
-- **A100 GEMMs**: q is at 1.08× of `torch.mm` (best 96x128 row 16.3 vs 15 µs), down at 1.08× (split-K not yet
-  tried); gate/up at cuBLAS geometry reaches 1.035× only with the staged store.
-- **4090 q** at 1.06× of `F.linear`; `w4x2 f2x4/k2 d4` reaches 1.05×.
+- **A100 GEMMs**: q is at 1.08× of `torch.mm` (best 96x128 row 16.3 vs 15 µs); down at 1.08×, and split-K on it was
+  neutral in the layer; the 96x64 tiles win k/v/o/down alone and lose 1-4 µs each in the layer.
+- **4090 q** at 1.04-1.06× of `F.linear`; `w4x2 f2x4/k2 d4` with `/out` reaches 0.95× alone but not in the layer
+  (the layer's q likely carries the input norm).
 - **H100**: a different attention design against cuDNN (the two-warp-group key split and the Q-prologue overlap were
   tried and lost); a full producer warp group (`+p4`, not offered); persistent CTAs if they come into scope. If
   multicast is revisited, first explain its layer hang (64x128 tile + `c2`, possibly cluster launch with PDL) and keep
   `c2` out of the catalog.
 - **PDL early release**: gating by grid size did not separate good from bad cases; a release that knows the next
   kernel's CTA count and the free SMs might.
-- **Staged output store as a default**: o and down move ±2% with it; it stays a schedule choice until a sweep shows
-  it never loses.
+- **Staged output store as a default**: it ties on long-K tiles and moves o/down ±2%; it stays a schedule choice.
+  Shuffle-widened 16-byte stores on mma.sync (no barriers) measured as noise on the A100 layer; if revisited, note
+  they run before the staged store and were never checked against its swizzle.
+- **Stale rows under the new measurement standard**: #930 made `emmy run` time Emmy on the reference (normal) inputs
+  instead of a ramp. Power-bound GEMMs clock lower on them, so Gemma 4 RTX 5090 routes at m1024 and up replay 5-22%
+  above their recorded µs with unchanged kernels (post2048 fm 2127 → 2453). Re-record them under the current standard.
+- **Other slow rows (findings, not re-recorded)**: DeepSeek-V4 V100 pre4096 replays at 3,200 vs a 2,719 µs route row
+  whose pieces already sum to 3,080; AWQ `k_copy_65_base_steps0_reduce` +9% (218.7 vs 200.6 ms) and `k_cumsum_reduce`
+  30.0 vs 25.7 µs with the same source.
 - **Evidence gaps**: Gemma 4 post1 and post1-global have no measured rows; V100 SXM2 GEMM pieces time bimodally
-  (26.9 / 47.6 µs in the bench table, 37.5 / 68.8 medians in the tune DB), which can mis-rank a sweep;
-  `k_cumsum_reduce` on the V100 SXM3 reads 30.0 against a recorded 25.7 with the same source (likely the rewritten
-  timing harness; not re-recorded).
-- **Hygiene before finalization**: two lowering passes numbered 097 (16-byte fragment stores, staged output store);
-  an unsorted import in the staged-store pass.
+  (26.9 / 47.6 µs in the bench table, 37.5 / 68.8 medians in the tune DB), which can mis-rank a sweep.
+- **Tooling**: a `PLACE@place_<token>=fuse` pin is flagged unreproducible by the `--strict` pin check (a fuse leaves no
+  key), so a correct `--record-greedy --strict` exits 1; `--record-greedy` needs every fork pinned (empty `REDUCE` /
+  `RASTER` pins included); an `--ab` run of 18 rows can exceed 40 min, and its rows read slower than the same pin run
+  alone.
 
 ## Hosts
 
