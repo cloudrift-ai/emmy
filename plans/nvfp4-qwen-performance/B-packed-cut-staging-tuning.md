@@ -86,3 +86,41 @@ program under the tried pins does not change. The fix makes the no-split pieces'
 their cost by about a third against the compute fill, but the four-way split is still 2.5–3.2× faster with these
 TILE/WORK choices. Why the no-split pieces run this slowly was not investigated. These are hot-cache timings of one
 isolated program; they say nothing about serving throughput.
+
+The 5090 tables above were measured before the branch merged main's fp4 and computed-f16 TMA changes (#971, #968).
+The same pins render the same kernels after the merge, except that the TMA kernels declare their barrier array at a
+different line.
+
+## V100 golden rows (CloudRift V100 SXM2 16GB, CUDA 12.9, torch 2.13.0+cu126, `-O3`)
+
+The first version of the fix lowered every re-formed piece a second time. That permuted the grid axes of V100 cut
+pieces whose contraction orientation it did not change, and it moved their CUDA: four Qwen3.8 golden rows stopped
+decoding, and several DeepSeek, AWQ and GPTQ rows kept decoding while measuring kernels the compiler no longer emits.
+The final fix keeps the first form of a piece unless the second pass moves some contraction's A, and with it every
+V100 golden row decodes again with its stored kernel. The measurements below come from the intermediate version and
+explain why it was narrowed; they are not rows of the final golden files.
+
+Same card, same pins, three runs, per-kernel isolated time, median (min–max), µs:
+
+| kernel (golden row) | stored | base | intermediate PR |
+| --- | ---: | ---: | ---: |
+| `k_matmul_reduce_50f206` FP8, `t64x16/f2x6` (`…50f206.5f16496e27a8`) | 139.6 | 143.7 (143.5–145.2) | 146.8 (145.7–147.5) |
+| same kernel in the GPTQ golden | 140.0 | 144.7 (142.8–145.2) | 146.3 (145.4–147.5) |
+| `…de59ac__place_b37170b988` GPTQ, `f2x8`/`t32x8` (`…4f7d9a419000`) | 269.8 | 259.1 (231.8–263.4) | 350.2 (349.9–351.2) |
+| `…de59ac__place_509079086b` (`…ce29f503f8fe`) | 891.9 | 1024.0 (1022.0–1025.0) | 1023.0 (1023.0–1026.0) |
+| `…de59ac__place_2d9a0db1be` (`…7557f72462b3`) | 816.1 | 773.1 (772.1–774.1) | 774.1 (772.1–774.1) |
+| `k_linear_matmul_mean_reduce_de59ac` (`…f08b14bf4708`) | 2256.9 | 2138.1 (2137.1–2138.1) | 2140.2 (2139.1–2140.2) |
+
+The `b37170b988` piece lost 35%: the same per-thread tiling ran with the two outer grid axes in the other block
+order. That regression is what the narrowing removes. The card also ran some unchanged kernels far from their stored
+times (an unchanged `50f206` cut piece at 43.6 ms against 34.4 ms stored), so only base against PR on one card is a
+comparison.
+
+A small hand-tuning pass on the `50f206` consumer (FAST_MATH, two runs each, whole cut set under `--pin-route` with the
+consumer's `WORK`/`TILE` varied) found a faster row than the stored one on this card: `t32x16/f2x4` 103–105 µs,
+`t64x16/f2x2` 106–107, `t32x16/f2x2` 109–110, `t16x16/f2x4` 111–113, `t32x16/f1x4` 116–118, `t64x8/f2x4` 117–119,
+`t64x16/f1x4` 117–118, `t32x8/f2x4` 117–119, `t64x16/f2x4` 125–127, stored `t64x16/f2x6` 145–146, `t32x16/f2x6`
+144, `t64x8/f2x6` 144–145, `t32x16/f4x6` 158–160, `t64x16/f1x6` 174, `t32x8/f4x10` 185–187, `t64x16/f2x8` 191–192,
+`t64x16/f4x6` 256. `t128x8/f2x6`, `t64x16/f2x5`, `t128x8/f2x4`, `t64x16/f2x3`, `t32x32/f2x4` and `t16x32/f2x4` are
+not offered. The kernel does not change under the final fix, so this is a tuning opportunity for the golden, not part
+of this PR. V100 has no cp.async or TMA, so the byte-slab staging this PR exposes does not apply there.

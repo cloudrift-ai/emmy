@@ -118,14 +118,23 @@ def lift_kernel(loop: LoopOp, *, name: str) -> TileOp:
     return tile
 
 
-def _orients_by_nest(tile: TileOp) -> bool:
-    """Whether some single-product contraction of ``tile`` took its A from the loop nest: one with
-    a computed operand, which the lift orients by nest order where two slabs orient by layout."""
-    return any(
-        node.as_contraction() is not None
+def _nest_oriented(tile: TileOp) -> tuple[frozenset[str], ...]:
+    """The buffers each single-product contraction with a computed operand reads through its A —
+    the contractions the lift orients by loop-nest order, since two slabs orient by layout."""
+
+    def reads(term) -> frozenset[str]:
+        slab = term.as_slab()
+        if slab is not None:
+            return frozenset({slab.load.input})
+        own = {stmt.input for stmt in term.lift.body if isinstance(stmt, Load)}
+        return frozenset(own.union(*(reads(edge) for edge in term.operands)))
+
+    return tuple(
+        reads(node.operands[0])
+        for node in tile.views
+        if node.as_contraction() is not None
         and len(node.bilinear_channels()) == 1
         and any(edge.as_slab() is None for edge in node.operands[:2])
-        for node in tile.views
     )
 
 
@@ -154,15 +163,19 @@ def reformed(piece: TileOp) -> TileOp:
         # Through the LoopOp's normalization: that is where two reduce loops over one axis become
         # one loop with two accumulators, the twin the lift forms one term from.
         formed = lift_kernel(LoopOp(body=body), name=piece.name)
-        if _orients_by_nest(formed):
-            # The closed nest's grid order is ``lower``'s choice. Formed once, the piece is lowered
-            # again inside its own grid loops: nothing sits ahead of that chain, so normalization
-            # orders it by the output layout, and the lift orients the contraction by that order.
-            # This pass lowers the formed terms, so it keeps the twin the first pass merged.
-            body = formed.op.lower(bound=frozenset(axis.name for axis in formed.place.free), stores=formed.output_specs, axes=formed.axes)
+        oriented = _nest_oriented(formed)
+        if oriented:
+            # The closed nest's loop order is ``lower``'s choice, and such a contraction takes its A
+            # from it. Lowered again inside its own grid loops, the piece's loop chain has nothing
+            # ahead of it, so normalization orders it by the output layout. This pass lowers the
+            # formed terms, so a twin the first pass merged stays one term. Where it moves no A,
+            # the first form stands: the new grid order alone would only reshuffle the blocks.
+            again = formed.op.lower(bound=frozenset(axis.name for axis in formed.place.free), stores=formed.output_specs, axes=formed.axes)
             for axis in reversed(formed.place.free):
-                body = Body((Loop(axis=axis, body=body),))
-            formed = lift_kernel(LoopOp(body=body), name=piece.name)
+                again = Body((Loop(axis=axis, body=again),))
+            reoriented = lift_kernel(LoopOp(body=again), name=piece.name)
+            if _nest_oriented(reoriented) != oriented:
+                body, formed = again, reoriented
     except ValueError:
         return piece
     # The lift peels every outer plain loop into the grid, a store's sweep included when nothing
