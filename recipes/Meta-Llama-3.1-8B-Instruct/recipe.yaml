@@ -7,9 +7,9 @@ model:
   huggingface: "NousResearch/Meta-Llama-3.1-8B-Instruct"
   rationale: "Llama 3.1 is cooling per family reads, despite stable serving volume; attention shifted to Qwen3.8."
   heat: 15
+  # FP16 fits one 32 GB V100 and avoids weight-only quantization. The pinned
+  # public mirror is byte-identical to the official Meta model payload.
   revision: d10aef7999a2b5ba950ab3974312feeedbfe0b77
-    FP16 fits one 32 GB V100 and avoids weight-only quantization. The pinned
-    public mirror is byte-identical to the official Meta model payload.
   task: generate
 
 engine:
