@@ -525,6 +525,8 @@ cannot read each other's finalized result. The splicer supplies graph edges and 
 identical headers. Fold lowering and computed-operand assembly use this same operation. Its input is shared value
 cones, not arbitrary repeated accumulator updates. Effects retain their order and multiplicity and stop reuse across
 them; a read of a finalized reduction keeps the corresponding loops separate.
+Fold lowering also remembers each term placed at each scope before visiting its operands, so a shared term and its
+boundary stores are emitted once instead of relying on statement cleanup to remove duplicate effects.
 
 `backward_cone` resolves reads by NAME over a body it assumes is SSA, so it is only sound where one name has one
 def. `Lambda.cone` is the caller that cannot assume it: a stored combine takes its states in as params and writes

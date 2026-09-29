@@ -79,7 +79,7 @@ def test_recursive_type_queries_share_children_and_preserve_mixed_order(monkeypa
     assert visits == 2
 
 
-# --- closure shape ---------------------------------------------------
+# --- construction analyses ------------------------------------------
 
 
 def test_dependency_depths_follow_ssa_and_external_buffers():
@@ -92,12 +92,16 @@ def test_dependency_depths_follow_ssa_and_external_buffers():
         )
     )
     assert body.dependency_depths(Accum, inputs={"x": 2, "y": 1}) == {
-        "v": 2, "sum": 3, "maximum": 3, "index": 3, "gathered": 3, "total": 4, "other": 0
+        "v": 2,
+        "sum": 3,
+        "maximum": 3,
+        "index": 3,
+        "gathered": 3,
+        "total": 4,
+        "other": 0,
     }
     # Counting loads instead exercises the same traversal without reduction-specific policy.
-    assert body.dependency_depths(Load) == {
-        "v": 1, "sum": 1, "maximum": 1, "index": 1, "gathered": 2, "total": 2, "other": 1
-    }
+    assert body.dependency_depths(Load) == {"v": 1, "sum": 1, "maximum": 1, "index": 1, "gathered": 2, "total": 2, "other": 1}
 
 
 @pytest.mark.parametrize("dependent", [False, True])
@@ -114,6 +118,9 @@ def test_coalesce_preserves_finalized_reduction_dependencies(dependent, strided)
     assert len(body) == (2 if dependent else 1)
     assert len(body.loads) == (2 if dependent else 1)
     assert body.carried_names == ("maximum", "sum")
+
+
+# --- closure shape ---------------------------------------------------
 
 
 def test_load_closure_includes_index_axis_vars():

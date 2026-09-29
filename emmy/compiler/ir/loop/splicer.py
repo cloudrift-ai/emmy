@@ -597,9 +597,7 @@ class _Splicer(LoopBuilder):
         order = TopologicalSorter({tag: {origin for origin, _ in edges.values()} for tag, edges in dependencies.items()})
         for tag in order.static_order():
             inputs = {
-                source: max(
-                    (self._reduction_depth[origin][w.value] for w, _ in loops[origin].writes if w.output == output), default=0
-                )
+                source: max((self._reduction_depth[origin][w.value] for w, _ in loops[origin].writes if w.output == output), default=0)
                 for source, (origin, output) in dependencies[tag].items()
             }
             self._reduction_depth[tag] = loops[tag].op.body.dependency_depths(Accum, inputs=inputs)
