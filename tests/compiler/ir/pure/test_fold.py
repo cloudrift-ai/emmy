@@ -225,6 +225,15 @@ def test_a_store_follows_the_term_defining_its_value_at_that_terms_scope() -> No
     assert mm.lower(mm.free_axes, (store,), axes=SCOPE) == Body((*mm.lower(axes=SCOPE), store.write))
 
 
+def test_a_shared_term_and_its_boundary_store_are_emitted_once() -> None:
+    total, swept = _normalized_sum()
+    root = projection(operands=(total, swept), body=(Assign(name="out", op="add", args=("tot", "acc")),), results=("out",))
+    store = OutputSpec(write=Write(output="stats", index=(Var("m"),), value="tot", atomic=True))
+    body = root.lower(root.free_axes, (store,), axes=SCOPE)
+    assert len(body.writes) == 1
+    assert [stmt.name for stmt in body.accums].count("tot") == 1
+
+
 def test_a_sweep_store_rides_the_loop_the_term_opened() -> None:
     """At kernel scope the term opens its output sweep itself and the store follows the swept sum
     inside it; the row total, evaluated over ``m`` alone, stays ahead."""

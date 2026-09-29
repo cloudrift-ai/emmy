@@ -8,6 +8,9 @@ itself rather than some upstream lowering quirk.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
+import numpy as np
 import pytest
 
 from emmy.compiler.dtype import F16, DataType
@@ -210,6 +213,84 @@ def test_shared_intermediate_deduped():
     assert merged is not None
     # Only one exp in the merged body (producer chain materializes once).
     assert _elementwise_fns(merged).count("exp") == 1
+
+
+@pytest.mark.parametrize("dependent", [False, True])
+@pytest.mark.parametrize("offset", [0, 3])
+def test_reductions_share_dependencies_before_body_construction(dependent, offset, monkeypatch):
+    """Independent reductions share upstream work; a finalized maximum stays outside its consumer's sum."""
+    from emmy.compiler.ir.loop.builder import LoopBuilder
+
+    producer = LoopOp(
+        body=(
+            Loop(
+                axis=A0,
+                body=(
+                    Loop(
+                        axis=Axis("j", 16 + offset),
+                        body=(
+                            Load(name="x", input="X", index=(Var("a0"), Var("j"))),
+                            Assign(name="e", op="exp", args=("x",)),
+                            Write(output="P", index=(Var("a0"), Var("j")), value="e"),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+    left = _reduce_producer(source="P", output="left")
+    left = replace(left, body=left.body.map(lambda s: replace(s, op="maximum") if isinstance(s, Accum) else s))
+    prefix = (Load(name="m", input="left", index=(Var("a0"),)),) if dependent else ()
+    subtract = (Assign(name="shifted", op="subtract", args=("p", "m")),) if dependent else ()
+    right = LoopOp(
+        body=(
+            Loop(
+                axis=A0,
+                body=(
+                    *prefix,
+                    Loop(
+                        axis=K,
+                        body=(
+                            Load(name="p", input="P", index=(Var("a0"), Var("k") + Literal(offset, "int"))),
+                            *subtract,
+                            Accum(name="total", value="shifted" if dependent else "p", op="add"),
+                        ),
+                    ),
+                    Write(output="right", index=(Var("a0"),), value="total"),
+                ),
+            ),
+        ),
+    )
+    edges = {("left", "P"): ("producer", "P"), ("right", "P"): ("producer", "P")}
+    if dependent:
+        edges["right", "left"] = ("left", "left")
+    insert = LoopBuilder.insert
+    emitted_exp = 0
+    reduce_axes = set()
+
+    def record(builder, stmt, scope):
+        nonlocal emitted_exp
+        emitted_exp += isinstance(stmt, Assign) and stmt.op.name == "exp"
+        if isinstance(stmt, Accum):
+            reduce_axes.add(scope.enclosing[-1])
+        insert(builder, stmt, scope)
+
+    monkeypatch.setattr(LoopBuilder, "insert", record)
+    merged = splice_loops(
+        loops={"producer": producer, "left": left, "right": right},
+        splice_edges=edges,
+        roots=(("left", "left"), ("right", "right")),
+    )
+    assert merged is not None
+    assert emitted_exp == (2 if dependent or offset else 1)
+    assert len(reduce_axes) == (2 if dependent else 1)
+    x = np.linspace(-1, 1, 4 * (16 + offset), dtype=np.float32).reshape(4, 16 + offset)
+    results = dict(zip(merged.outputs, merged.forward(x), strict=True))
+    values = np.exp(x)
+    maximum = values[:, :16].max(axis=1)
+    summands = values[:, offset:] - maximum[:, None] if dependent else values[:, offset:]
+    np.testing.assert_allclose(results["left"], maximum, rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(results["right"], summands.sum(axis=1), rtol=1e-6, atol=1e-6)
 
 
 # ---------------------------------------------------------------------------

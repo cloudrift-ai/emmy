@@ -516,6 +516,18 @@ the shared substrate behind the rules that slice cones (the demoted-operand prod
 `tile/cut/030_cut`) — eligibility judgments stay in the rules, per
 `pipeline/passes/ARCHITECTURE.md`.
 
+`Body.dependency_depths` folds the def-use graph with a caller-selected set of statement kinds to count. External
+buffer depths let composition carry the result across producer/consumer boundaries without expanding either body.
+Counting accumulators gives a sufficient independence proof for early reduction sharing: equal-depth reductions
+cannot read each other's finalized result. The splicer supplies graph edges and keeps coordinate substitution local.
+
+`Body.coalesce` assembles repeated shared SSA definitions once and joins adjacent independent reduction loops with
+identical headers. Fold lowering and computed-operand assembly use this same operation. Its input is shared value
+cones, not arbitrary repeated accumulator updates. Effects retain their order and multiplicity and stop reuse across
+them; a read of a finalized reduction keeps the corresponding loops separate.
+Fold lowering also remembers each term placed at each scope before visiting its operands, so a shared term and its
+boundary stores are emitted once instead of relying on statement cleanup to remove duplicate effects.
+
 `backward_cone` resolves reads by NAME over a body it assumes is SSA, so it is only sound where one name has one
 def. `Lambda.cone` is the caller that cannot assume it: a stored combine takes its states in as params and writes
 them back on the way out to spell its results (`Recipe.program`), so a read of the INCOMING state would resolve
@@ -537,7 +549,9 @@ two are safe together only for a whole-subtree renumbering (`rename_ssa_sequenti
 from *dropping* a binding — load dedup, CSE — an inner scope that merely re-uses the dropped name's spelling is a
 different variable, and renaming it both redeclares the survivor inside the scope and rewires the inner arithmetic to
 the outer value. `passes.rename_free(stmt, alias)` is the hygienic form: it prunes the alias of whatever each child
-scope re-binds before descending. `normalize.dedup_loads` applies the same rule while threading its own per-scope
+scope re-binds before descending. It rewrites the wrapper with empty child bodies, then visits each child once;
+rewriting the full subtree first would repeat and discard work at every enclosing level.
+`normalize.dedup_loads` applies the same rule while threading its own per-scope
 environment. σ has the same hazard with axis names, which collide across a tree by design (a cone statistic's axis
 may spell the same as the enclosing contraction's): `fold.subst_free(stmt, sigma)` is σ's hygienic form — it stops at
 a `Loop` / reducing `Fold` binder that re-binds a substituted name, and is what the smem compute fill substitutes
@@ -561,13 +575,16 @@ canonicalized before validation:
   workspace's leading index, so the same rule keeps it outside the axes it partitions without a naming convention.
 
 - `eliminate_copy_aliases` — drop `y = copy(x)` Assigns. Each nested body owns its alias map, so source spellings
-  reused by sibling scopes remain separate binders.
-- `unify_sibling_reduce_axes` — rename sibling reduce Loops whose reduce-axis Load positions overlap so they share one
-  canonical axis name (softmax's max + sum sweeps; the two matmul reductions in `silu(x@Wg) * (x@Wu)` that both index
-  `x` at the same K slot). A position is `(source, dim, anchor, coefficient)`, read through `affine_form`: a blocked
-  reduce indexes its stream at `o·B + i` and still walks that dimension, while the anchor keeps `o·B + i` apart from
-  `o·B + 32 + j`, which walk different halves. Union-find groups all transitively-overlapping Loops at one scope.
-- `merge_sibling_reduce_loops` — concatenate sibling reduce Loops that share `axis.name` / `extent` into one Loop body.
+  reused by sibling scopes remain separate binders. Enclosing aliases travel through that same walk, pruned at each
+  child scope, instead of renaming its entire subtree before descending again.
+- `merge_sibling_reduce_loops` — unify sibling reduce axes whose Load positions overlap, then merge matching Loops
+  before descending into their children. A parent merge therefore exposes child reductions to the same walk.
+  Overlapping reductions share one canonical axis name (softmax's max + sum sweeps; the two matmul reductions in
+  `silu(x@Wg) * (x@Wu)` that both index `x` at the same K slot). A position is `(source, dim, anchor, coefficient)`,
+  read through `affine_form`: a blocked reduce indexes its stream at `o·B + i` and still walks that dimension, while
+  the anchor keeps `o·B + i` apart from `o·B + 32 + j`, which walk different halves. Union-find groups all
+  transitively-overlapping Loops at one scope.
+  Sibling reduce Loops that share `axis.name` / `extent` concatenate into one Loop body.
   Every gate is phrased over what the second Loop reads from its ENCLOSING scope (`free_names` — what it uses and does
   not bind itself): it must read no name the first body defines (blocking softmax-style sequential reduces where
   sum-exp reads `acc_max`), and no between-stmt def. Names both bodies merely happen to bind are a COLLISION, not a
@@ -589,8 +606,8 @@ canonicalized before validation:
   `(input, index, width, dtype)` read in a scope and rewire every scalar or vector lane. A write invalidates retained
   reads of that buffer, including around a nested scope with a write. Entering a scope also drops cached values whose
   definitions or dependencies are rebound there; an identical index spelling can name a different loop coordinate.
-  The same walk keeps one `Assign` per identical
-  operation over identical arguments and one `Accum` per identical accumulation — a value the loop tree computes
+  The same walk keeps one `Assign` per identical operation over identical arguments, treating commutative operands
+  as unordered after alias substitution, and one `Accum` per identical accumulation. A value the loop tree computes
   twice (a contraction spelled on both sides of a cut seam, a repeated pure expression) folds to one definition, and
   an accumulator alias carries out of the loop that defined it to the scope that reads the sum. This is
   canonicalization for every Loop / Tile body, not a fusion profitability decision; the structural key inherits it,
@@ -606,14 +623,21 @@ canonicalized before validation:
   differ only by argument order land in the same canonical form.
   Runs last so the sort key is the post-rename canonical SSA / buffer
   names.
-- The final ordering pass canonicalizes integer coordinate expressions, builds one colored relation graph for the
-  complete body tree, and chooses one dependency- and effect-valid statement order. Vertices represent scopes,
-  statements, lexical definitions, axes, source axes, and external buffers; colored relations retain operand
+- Reduction merging and duplicate elimination reach a fixed point before canonical ordering. Coordinate expressions
+  normalize between rounds to expose duplicates; commutative duplicates resolve during alias substitution. The final
+  ordering pass builds one colored relation graph for the complete body tree and chooses one dependency- and
+  effect-valid statement order. Vertices represent
+  scopes, statements, lexical definitions, axes, source axes, and external buffers; colored relations retain operand
   positions, captures, aliases, nesting, resource hazards, and ordered execution protocols. The graph is independent
   of source order and spelling, and it rides the normalized body: structural identity labels the same graph again
   under its own buffer coloring instead of building it a second time. A scope's definitions bind its reads in any
   order and shadow an enclosing binding of the same spelling; a deeper scope's definition binds nothing read above
-  it, so the block still depends on the enclosing definition it reads. Affine coordinates sort by lexical binding
+  it, so the block still depends on the enclosing definition it reads. Immutable bodies cache their enclosing SSA
+  reads and ordered carried-state names. State names derive from the shared type-filtered lookup, which reuses each
+  child's query result. A subtree's full spelling is computed only when sibling statement shapes leave a tie.
+  Sequential renaming gives each lexical binder its own name; a final axis unification restores shared reduction
+  dimensions without merging dependent loops or changing the relation graph's order.
+  Affine coordinates sort by lexical binding
   order, so renaming axes or loading a saved body preserves their normal form and exact identity. Identity normalizes
   remaining commutative expressions again after its final rename.
 - A standard smaller-half worklist computes the equitable partition in
@@ -695,6 +719,14 @@ therefore seed one worklist; its one binding table shares equal upstream demands
 inlining a shared producer per consumer. The single-sink convenience form still derives the unique terminal loop and
 selects all its Writes. Every `_NotSupported` carries a reason string, logged at DEBUG by `splice_loops` —
 `compile -vv` shows which pattern a rejected edge hit.
+
+Before expansion, the splicer uses `Body.dependency_depths` to count reductions along each source definition's longest
+dependency path, passing producer Write depths into consumer inputs. Equal-depth reductions cannot depend on each other.
+When they have the same extent and enclosing scope, they share an iteration axis from construction onward, so the
+binding table shares their common producers before emitting them. A reduction that reads another's finalized value
+has greater depth and keeps a separate scope. Different input offsets retain their own coordinate substitutions.
+This changes body construction only; every legal fusion region is still built whole, and final normalization closes
+the remaining sharing opportunities.
 
 Before dependency reconstruction, `splice_graph` finds output equivalence clusters: single-owner copy chains ending
 at a terminal graph output, with the same dtype and element count and an exact symbolic proof that the source and

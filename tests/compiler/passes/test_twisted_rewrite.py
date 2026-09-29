@@ -391,7 +391,7 @@ def test_a_refusing_sibling_cluster_says_why(caplog) -> None:
     """A ``maximum`` fold whose same-axis sibling no recipe fuses onto it is the shape this pass
     exists for, refusing — and the demotion is otherwise invisible."""
     graph, _, _ = graph_from_code(
-        "torch.randn(64,128,dtype=torch.float16).amax(-1, keepdim=True) + torch.randn(64,128,dtype=torch.float16).sum(-1, keepdim=True)"
+        "(torch.randn(64,128,dtype=torch.float16) - torch.randn(64,128,dtype=torch.float16).amax(-1, keepdim=True)).sum(-1, keepdim=True)"
     )
     with caplog.at_level(logging.DEBUG, logger="emmy.compiler.pipeline.passes.tile._twist"):
         Pipeline.build(LOOP_PASSES + ["tile/lift", "tile/cut", "tile/schedule"]).run(graph, ctx=Context.from_target((12, 0)))
