@@ -222,26 +222,44 @@ def test_reductions_share_dependencies_before_body_construction(dependent, offse
     from emmy.compiler.ir.loop.builder import LoopBuilder
 
     producer = LoopOp(
-        body=(Loop(axis=A0, body=(Loop(axis=Axis("j", 16 + offset), body=(
-            Load(name="x", input="X", index=(Var("a0"), Var("j"))),
-            Assign(name="e", op="exp", args=("x",)),
-            Write(output="P", index=(Var("a0"), Var("j")), value="e"),
-        )),)),),
+        body=(
+            Loop(
+                axis=A0,
+                body=(
+                    Loop(
+                        axis=Axis("j", 16 + offset),
+                        body=(
+                            Load(name="x", input="X", index=(Var("a0"), Var("j"))),
+                            Assign(name="e", op="exp", args=("x",)),
+                            Write(output="P", index=(Var("a0"), Var("j")), value="e"),
+                        ),
+                    ),
+                ),
+            ),
+        ),
     )
     left = _reduce_producer(source="P", output="left")
     left = replace(left, body=left.body.map(lambda s: replace(s, op="maximum") if isinstance(s, Accum) else s))
     prefix = (Load(name="m", input="left", index=(Var("a0"),)),) if dependent else ()
     subtract = (Assign(name="shifted", op="subtract", args=("p", "m")),) if dependent else ()
     right = LoopOp(
-        body=(Loop(axis=A0, body=(
-            *prefix,
-            Loop(axis=K, body=(
-                Load(name="p", input="P", index=(Var("a0"), Var("k") + Literal(offset, "int"))),
-                *subtract,
-                Accum(name="total", value="shifted" if dependent else "p", op="add"),
-            )),
-            Write(output="right", index=(Var("a0"),), value="total"),
-        )),),
+        body=(
+            Loop(
+                axis=A0,
+                body=(
+                    *prefix,
+                    Loop(
+                        axis=K,
+                        body=(
+                            Load(name="p", input="P", index=(Var("a0"), Var("k") + Literal(offset, "int"))),
+                            *subtract,
+                            Accum(name="total", value="shifted" if dependent else "p", op="add"),
+                        ),
+                    ),
+                    Write(output="right", index=(Var("a0"),), value="total"),
+                ),
+            ),
+        ),
     )
     edges = {("left", "P"): ("producer", "P"), ("right", "P"): ("producer", "P")}
     if dependent:

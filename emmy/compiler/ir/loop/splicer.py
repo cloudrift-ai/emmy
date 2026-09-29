@@ -27,8 +27,8 @@ Resolution dispatches on stmt kind:
   (``loop/lifting/090_spell_store_rounding``), so inlining the value chain
   carries it with no special case here. The target's expression
   chain reconstructs piecemeal.
-- **Accum** — freshen its reduce axis, place
-  ``Loop(fresh_reduce_axis, Accum(...))`` at
+- **Accum** — share an equal-extent axis with independent reductions
+  at the same scope, or allocate a fresh axis, then place ``Loop(axis, Accum(...))`` at
   ``_scope_for_axes(ref_scope, required_c_axes)``, queue the Accum's
   ``value`` under σ extended with the fresh reduce binding.
 - **Plain Assign / Select / Load** (non-splice source) — ``rewrite``
@@ -784,9 +784,7 @@ class _Splicer(LoopBuilder):
         self.insert(Assign(name=d.bound_as, op="copy", args=(v_bound,)), d.demand_scope)
 
     def _resolve_accum(self, stmt: Accum, d: _Demand) -> None:
-        """Emit ``Loop(fresh_reduce_axis, [Accum(bound, value_bound, op)])`` at
-        ``d.demand_scope``. The Accum's value is queued under σ extended with
-        the fresh reduce-axis binding."""
+        """Queue the value under a shared iteration scope for independent reductions of equal extent."""
         orig_axis = self.loops[d.origin].reduce_axes[stmt.name]
         key = (d.demand_scope, orig_axis.extent.expr, self._reduction_depth[d.origin, stmt.name])
         reduce_axis = self._reduce_axes.get(key)

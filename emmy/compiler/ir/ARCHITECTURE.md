@@ -706,6 +706,14 @@ inlining a shared producer per consumer. The single-sink convenience form still 
 selects all its Writes. Every `_NotSupported` carries a reason string, logged at DEBUG by `splice_loops` —
 `compile -vv` shows which pattern a rejected edge hit.
 
+Before expansion, the splicer counts the reductions along the longest dependency path to each source definition,
+following internal Loads through their producer Writes. Reductions at equal depth cannot depend on each other.
+When they have the same extent and enclosing scope, they share an iteration axis from construction onward, so the
+binding table shares their common producers before emitting them. A reduction that reads another's finalized value
+has greater depth and keeps a separate scope. Different input offsets retain their own coordinate substitutions.
+This changes body construction only; every legal fusion region is still built whole, and final normalization closes
+the remaining sharing opportunities.
+
 Before dependency reconstruction, `splice_graph` finds output equivalence clusters: single-owner copy chains ending
 at a terminal graph output, with the same dtype and element count and an exact symbolic proof that the source and
 destination coordinates are related by a reshape and axis permutation. Equal element count alone is insufficient;
