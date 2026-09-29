@@ -44,8 +44,8 @@ def test_recipe_inventory_filters_tags_and_reports_deployments(tmp_path):
             "task": "generate",
             "runnable": True,
             "deployments": [
-                {"gpu": GPU, "gpu_count": 1, "context_length": 8192},
-                {"gpu": "NVIDIA B200", "gpu_count": 2, "context_length": 16384},
+                {"gpu": GPU, "gpu_count": 1, "gpu_memory_utilization": 0.9, "context_length": 8192},
+                {"gpu": "NVIDIA B200", "gpu_count": 2, "gpu_memory_utilization": 0.9, "context_length": 16384},
             ],
             "rationale": "Useful model.",
             "heat": None,
@@ -59,8 +59,29 @@ def test_recipe_inventory_document_is_versioned(tmp_path):
 
     document = recipe_inventory_document(root)
 
-    assert document["schema_version"] == CATALOG_SCHEMA_VERSION == 1
+    assert document["schema_version"] == CATALOG_SCHEMA_VERSION == 2
     assert [recipe["name"] for recipe in document["recipes"]] == ["ready"]
+
+
+def test_recipe_inventory_keeps_entries_that_differ_only_by_memory_fraction(tmp_path):
+    """A recipe that may share its GPU lists one deployment per fraction, each with its own context."""
+    root = tmp_path / "recipes"
+    recipe = _write_recipe(root, "shared", "org/shared", ["maintained"])
+    config = yaml.safe_load(recipe.read_text())
+    config["matrices"] = {
+        "zip": {
+            "deploy.gpu": [GPU, GPU],
+            "deploy.gpu_count": [1, 1],
+            "engine.llm.gpu_memory_utilization": [0.9, 0.3],
+            "engine.llm.context_length": [131072, 32768],
+        }
+    }
+    recipe.write_text(yaml.safe_dump(config, sort_keys=False))
+
+    assert recipe_inventory(root)[0]["deployments"] == [
+        {"gpu": GPU, "gpu_count": 1, "gpu_memory_utilization": 0.9, "context_length": 131072},
+        {"gpu": GPU, "gpu_count": 1, "gpu_memory_utilization": 0.3, "context_length": 32768},
+    ]
 
 
 def test_recipe_inventory_rejects_invalid_heat(tmp_path):

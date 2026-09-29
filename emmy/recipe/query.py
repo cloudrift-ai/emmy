@@ -39,6 +39,7 @@ RECIPE_FIELDS = frozenset(
         "deployment.index",
         "deployment.gpu",
         "deployment.gpu_count",
+        "deployment.gpu_memory_utilization",
         "deployment.context_length",
         "deployment.availability.cloudrift",
         "results.path",
@@ -217,6 +218,7 @@ def build_query_rows(
                     "index": index,
                     "gpu": deployment["gpu"],
                     "gpu_count": deployment["gpu_count"],
+                    "gpu_memory_utilization": deployment.get("gpu_memory_utilization"),
                     "context_length": deployment.get("context_length"),
                     "availability": {"cloudrift": None},
                 }
