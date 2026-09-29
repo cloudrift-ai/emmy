@@ -17,6 +17,7 @@ is reachable from Loop IR and from the digest, not from a materialized
 
 from __future__ import annotations
 
+from collections import ChainMap
 from collections.abc import Callable, Iterator
 from dataclasses import replace
 from itertools import count, product
@@ -902,7 +903,7 @@ class _SequentialScope:
                     self.sources[source.name] = f"p{self.counters['p']}"
                     self.counters["p"] += 1
 
-        names = {**self.ssa, **self.sources, **axes}
+        names = ChainMap(axes, self.sources, self.ssa)
         shell = stmt.with_bodies(tuple(Body() for _ in children)) if children else stmt
         renamed = shell.rename(names)
         if children:
