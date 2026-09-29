@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.stmt import Accum, Assign, Load, Loop, StridedLoop
+from emmy.compiler.ir.stmt import Accum, Assign, Carry, Load, Loop, StridedLoop
 from emmy.compiler.ir.stmt.body import Body
 
 
@@ -50,6 +50,18 @@ def test_scope_summary_preserves_reads_above_a_shadowed_name():
     body = Body((_asn("use", "abs", "outer"), Loop(Axis("i", 4), inner)))
     assert inner.free_ssa == frozenset({"source"})
     assert body.free_ssa == frozenset({"outer", "source"})
+
+
+def test_recursive_type_queries_share_children_and_preserve_mixed_order():
+    carry = Carry("state", "value", (), 0)
+    accum = _acc("sum", "value")
+    child = Body((carry, accum))
+    body = Body((Loop(Axis("i", 4), child), carry))
+    assert child.carries == (carry,)
+    assert child.accums == (accum,)
+    assert body.iter_of_type(Accum, Carry) == (carry, accum, carry)
+    assert body.iter_of_type(Accum, Carry) is body.iter_of_type(Accum, Carry)
+    assert child.iter_of_type(Carry) is child.carries
 
 
 # --- closure shape ---------------------------------------------------

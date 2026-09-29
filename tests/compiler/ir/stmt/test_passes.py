@@ -6,11 +6,13 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.stmt import Body, Cond, Loop
 from emmy.compiler.ir.stmt.leaves import Assign, Write
+from emmy.compiler.ir.stmt.normalize import eliminate_copy_aliases
 from emmy.compiler.ir.stmt.passes import projection_distributes, rename_free
 
 
 @pytest.mark.parametrize("depth", [2, 24])
-def test_free_rename_visits_nested_statements_once(monkeypatch, depth):
+@pytest.mark.parametrize("eliminate", [False, True], ids=["rename", "eliminate"])
+def test_free_rename_visits_nested_statements_once(monkeypatch, depth, eliminate):
     from emmy.compiler.ir.stmt import passes
 
     stmt = Cond(
@@ -29,7 +31,12 @@ def test_free_rename_visits_nested_statements_once(monkeypatch, depth):
         return original(*args)
 
     monkeypatch.setattr(passes, "_rewrite_kind", counted)
-    result = rename_free(stmt, {"outer": "renamed", "shadow": "wrong"})
+    if eliminate:
+        result = eliminate_copy_aliases(
+            Body((Assign("outer", "copy", ("renamed",)), Assign("shadow", "copy", ("wrong",)), stmt))
+        )[0]
+    else:
+        result = rename_free(stmt, {"outer": "renamed", "shadow": "wrong"})
     members = tuple(Body((result,)).iter())
     assert visits <= 2 * len(members)
     branch = next(member for member in members if isinstance(member, Cond))
