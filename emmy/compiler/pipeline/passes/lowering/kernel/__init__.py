@@ -23,8 +23,6 @@ tile-tier rebuild:
 - ``095_interleave_loads`` — sink each Load to just before its first consumer.
 - ``097_widen_fragment_stores`` — store four adjacent ``wgmma`` accumulator cells as one
   16-byte row per lane.
-- ``098_store_through_smem`` — under a ``STAGE`` that spells ``/out``, store an mma tile's output
-  through the dead operand slabs, then to global memory in 16-byte rows.
 - ``110_drop_redundant_syncs`` — collapse no-op Sync stmts at the Tile body level.
 
 The tile-tier kernel passes (mma fragment lowering, register-tile split, smem

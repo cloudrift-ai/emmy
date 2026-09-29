@@ -94,11 +94,6 @@ class Smem(Stmt):
     extents: tuple[int, ...]
     dtype: str = "float"
     align: int = 0
-    # The buffer whose storage this one reuses, once it and the buffers packed after it are dead —
-    # the output tile a GEMM stores through shared memory after its K-loop lives over the operand
-    # slabs. It starts at that buffer's offset and may run on over the ones after it; the kernel
-    # then takes the dynamic pool, where they are contiguous.
-    over: str | None = None
 
     def local_decls(self) -> tuple[str, ...]:
         return (self.name,)
@@ -106,8 +101,7 @@ class Smem(Stmt):
     def pretty(self, indent: str = "") -> list[str]:
         ext = ", ".join(str(e) for e in self.extents) or "-"
         ali = f" align={self.align}" if self.align else ""
-        over = f" over {self.over}" if self.over else ""
-        return [f"{indent}Smem {self.dtype} {self.name}[{ext}]{ali}{over}"]
+        return [f"{indent}Smem {self.dtype} {self.name}[{ext}]{ali}"]
 
     def render(self, ctx: RenderCtx) -> list[str]:
         """``__shared__ <dtype> <name>[<prod(extents)>];`` and register the
@@ -135,8 +129,6 @@ class Smem(Stmt):
         if self.name in ctx.smem_dynamic_offsets:
             offset = ctx.smem_dynamic_offsets[self.name]
             return [f"{_pad(ctx.indent)}{self.dtype}* {self.name} = reinterpret_cast<{self.dtype}*>(_smem_pool + {offset});"]
-        if self.over:
-            return [f"{_pad(ctx.indent)}{self.dtype}* {self.name} = reinterpret_cast<{self.dtype}*>({self.over});"]
         ali = f"__align__({self.align}) " if self.align else ""
         return [f"{_pad(ctx.indent)}__shared__ {ali}{self.dtype} {self.name}[{total}];"]
 
@@ -2240,64 +2232,6 @@ class WgmmaWait(Stmt):
 
 
 @dataclass(frozen=True)
-class SmemTileStore(Stmt):
-    """Copy a CTA's ``rows × cols`` output tile from shared memory to global memory, 16 bytes per
-    thread per step, the CTA's threads taking every ``threads``-th chunk.
-
-    The second half of storing a GEMM output through shared memory: the tile's :class:`RegStore`
-    fragments wrote ``src`` with 4-byte stores, and this turns them into full rows of 16-byte global
-    stores. ``base`` is the tile's ``(row, col)`` in ``dst`` and ``ldm`` its row stride there;
-    ``src`` is row-major, ``cols`` per row, read back through the ``swizzle`` it was written with.
-    ``bound`` is ``dst``'s row count when the tile overhangs it (a masked M edge): rows at or past
-    it are not stored."""
-
-    src: str
-    dst: str
-    base: tuple
-    rows: int
-    cols: int
-    ldm: int
-    threads: int
-    swizzle: str = "NONE"
-    bound: Expr | None = None
-
-    def external_writes(self) -> tuple[str, ...]:
-        return (self.dst,)
-
-    def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
-        new = rename.get(self.dst, self.dst)
-        return self if new == self.dst else replace(self, dst=new)
-
-    def exprs(self) -> tuple[Expr, ...]:
-        return (*self.base, *(() if self.bound is None else (self.bound,)))
-
-    def pretty(self, indent: str = "") -> list[str]:
-        at = ", ".join(e.pretty() for e in self.base)
-        bound = "" if self.bound is None else f" m<{self.bound.pretty()}"
-        return [f"{indent}SmemTileStore {self.dst}[{at}] <- {self.src}[{self.rows}, {self.cols}] swz={self.swizzle}{bound}"]
-
-    def render(self, ctx: RenderCtx) -> list[str]:
-        from emmy.compiler.backend.cuda.dtype import nbytes_of  # noqa: PLC0415
-        from emmy.compiler.ir.stmt import render_index  # noqa: PLC0415
-
-        vec = 16 // nbytes_of(ctx.buffer_dtypes.get(self.dst, "f32"))
-        chunks = self.cols // vec
-        src = f"_r * {self.cols} + _c"
-        if swizzle_xor(self.swizzle):
-            src = f"{swizzle_fn(self.swizzle)}({src})"
-        pad = _pad(ctx.indent)
-        guard = "" if self.bound is None else f"if ({self.base[0].render(ctx)} + _r < {self.bound.render(ctx)}) "
-        return [
-            f"{pad}#pragma unroll",
-            f"{pad}for (int _i = threadIdx.x; _i < {self.rows * chunks}; _i += {self.threads}) {{",
-            f"{pad}    const int _r = _i / {chunks}, _c = (_i % {chunks}) * {vec};",
-            f"{pad}    {guard}*reinterpret_cast<uint4*>(&{self.dst}[{render_index(self.dst, self.base, ctx)} + _r * {self.ldm} + _c]) = "
-            f"*reinterpret_cast<const uint4*>(&{self.src}[{src}]);",
-            f"{pad}}}",
-        ]
-
-
-@dataclass(frozen=True)
 class RegStore(Stmt):
     """Store an mma.sync f32 accumulator array to the output buffer with a
     per-lane epilogue downconvert.
@@ -2883,10 +2817,6 @@ def pack_smem(smems) -> tuple[dict[str, int], int]:  # noqa: ANN001 — smems: I
     cursor = 0
     for s in smems:
         elements = prod(int(e) for e in s.extents) if s.extents else 1
-        if s.over:
-            offsets[s.name] = offsets[s.over]
-            cursor = max(cursor, offsets[s.name] + elements * nbytes_of(s.dtype))
-            continue
         align = max(nbytes_of(s.dtype), int(s.align) if s.align else 0)
         if align:
             cursor = (cursor + align - 1) // align * align
@@ -3097,15 +3027,6 @@ def _(s: CpAsyncCopy, rename, sigma, axis_fn):
         lane_index=None if s.lane_index is None else tuple(sigma.apply(e) for e in s.lane_index),
         lane_rows=s.lane_rows,
         valid=None if s.valid is None else sigma.apply(s.valid),
-    )
-
-
-@_rewrite_kind.register
-def _(s: SmemTileStore, rename, sigma, axis_fn):
-    return replace(
-        s,
-        base=tuple(sigma.apply(e) for e in s.base),
-        bound=None if s.bound is None else sigma.apply(s.bound),
     )
 
 
