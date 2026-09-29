@@ -162,7 +162,8 @@ def test_register_state_starts_from_the_seed_tensor_on_cuda():
     """A loop that starts from a tensor rather than zeros: the first step reads the seed at its cell."""
     from emmy.compiler.backend.cuda.program import run_program
 
-    with pinned_knobs({"STAGE": "d1/reg"}):
+    atom = ("mma_m8n8k4" if Context.probe().has_volta_mma else "mma_m16n8k16") + "_f16_f32"
+    with pinned_knobs({"STAGE": "d1/reg", "WORK": "w1x1", "TILE": f"{atom}/f1x1/k4"}):
         graph = Pipeline.build(CUDA_PASSES).run(_graph(seed="S0"))
     (op,) = (n.op for n in graph.nodes.values() if isinstance(n.op, CudaOp))
     assert not op.serial and "S0" in op.arg_order

@@ -329,7 +329,9 @@ class Fold:
             # read the carrier at other cells through carrier-read operands, each indexing every
             # cell axis; a coupled state has no observer and no twist of its own.
             assert len(lam.results) >= n, "a carried state's lift defines every state's next value first"
-            assert self.twist is None and self.observe is None, "a carried state streams its step's own results; it is neither twisted nor observed"
+            assert self.twist is None and self.observe is None, (
+                "a carried state streams its step's own results; it is neither twisted nor observed"
+            )
             pending, seen = list(self.operands), set()
             while pending:
                 edge = pending.pop()
@@ -1360,6 +1362,7 @@ class Fold:
             (name for name in coordinates if name in read and name not in bound and (name not in internal or name in self.free_axes)),
             key=lambda name: (-readers.get(name, 0), declared.index(name)),
         )
+
         class _Nest:
             """One scope's TREE of free loops: the coordinates it may open (outermost the one the
             most terms are evaluated over), what the scope already binds, and the statements at
@@ -1398,7 +1401,9 @@ class Fold:
                 if not extra:
                     target.append(spec.write)
                     continue
-                assert extra <= set(nest.opened), f"a store reads coordinates {sorted(extra - set(nest.opened))} no term declares and no sweep names"
+                assert extra <= set(nest.opened), (
+                    f"a store reads coordinates {sorted(extra - set(nest.opened))} no term declares and no sweep names"
+                )
                 nest.sink((*node, *(name for name in nest.opened if name in extra))).append(spec.write)
 
         def place(term: Fold, loops: list[tuple[str, frozenset[str], list[Stmt]]], path: tuple[str, ...] | None, nest: _Nest) -> None:

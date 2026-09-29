@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 from frozendict import frozendict
 
 from emmy.compiler.ir.atom import ATOM_REGISTRY
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.pure import Fold
 from emmy.compiler.ir.schedule.base import Schedule, ScheduleContext, ScheduleProblem, ScheduleRefused, Site
 from emmy.compiler.ir.schedule.choices import Tile, Work
@@ -79,7 +79,10 @@ class RegisterProgram:
         lift = carrying.lift
         results = (*(spec.write.values[0] for spec in outputs), lift.results[0])
         roots = tuple(
-            Fold(operands=carrying.operands, lift=replace(lift, params=lift.params[1:], body=Body(lift.body.backward_cone((value,)).members), results=(value,)))
+            Fold(
+                operands=carrying.operands,
+                lift=replace(lift, params=lift.params[1:], body=Body(lift.body.backward_cone((value,)).members), results=(value,)),
+            )
             for value in results
         )
         for site in tile.sites:

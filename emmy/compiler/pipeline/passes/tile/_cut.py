@@ -632,7 +632,14 @@ def _channel_copies(seam: CutSite, axes: tuple) -> dict[int, tuple[int, dict[str
     channel's value at the address its index expression computes (:func:`_read_at`), so the workspace
     stores the plain channel and the copy reads it there."""
     node = seam.node
-    if len(node.exposes) < 2 or node.twist is not None or node.observe is not None or node.carries or seam.frontier is not None or seam.owned is not None:
+    if (
+        len(node.exposes) < 2
+        or node.twist is not None
+        or node.observe is not None
+        or node.carries
+        or seam.frontier is not None
+        or seam.owned is not None
+    ):
         return {}  # a twisted or observed state is one whole: its components depend on each other
     scoped = tuple(axis.name for axis in seam.axes if axis.name in seam.node.free_axes)
     forms = [_value_forms(replace(seam, node=seam.node.exposing((name,))), axes) for name in seam.node.exposes]

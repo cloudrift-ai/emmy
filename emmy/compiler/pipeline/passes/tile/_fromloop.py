@@ -553,7 +553,10 @@ def _carried_from_loop(loop: Loop, axes: tuple, levels: tuple) -> tuple[Fold, tu
 
     flat = Body(flatten(loop.body))
     defined = tuple(stmt for stmt in flat if isinstance(stmt, Carry))
-    if any(carry.cells != defined[0].cells or [isinstance(e, Var) for e in carry.index] != [isinstance(e, Var) for e in defined[0].index] for carry in defined):
+    if any(
+        carry.cells != defined[0].cells or [isinstance(e, Var) for e in carry.index] != [isinstance(e, Var) for e in defined[0].index]
+        for carry in defined
+    ):
         raise ValueError(f"loop {loop.axis.name!r}: every carried state is one value per cell over the same cell axes")
     # A position where normalization dropped a size-one axis is ``0`` in every index over the
     # state; the term's cells are the axes alone, so the reads and the definition drop it too.
@@ -595,7 +598,9 @@ def _carried_from_loop(loop: Loop, axes: tuple, levels: tuple) -> tuple[Fold, tu
 
 def states_as_buffers(body: Body, prefix: str) -> tuple[Body, tuple[Axis, ...], dict[str, tuple]]:
     """``body`` with every carried state spelled as a STATE BUFFER — ``(body, serial axes,
-    buffer shapes)`` — the form a serial launch axis realizes (:attr:`Placement.serial`).
+    buffer shapes)`` — the form a serial launch axis realizes (:attr:`Placement.serial`): the
+    classic schedule's realization of a carried state, taken at its fork from the carrying
+    kernel's own Loop IR (:func:`lift_serial`).
 
     The loop that carries a state becomes the kernel's time: one launch per step, in order. The
     buffer keeps every step, indexed by the step, the free axes outside the loop and the cell. A
