@@ -51,10 +51,10 @@ from dataclasses import replace
 
 from emmy.compiler.backend.cuda.render_target import CudaRenderTarget
 from emmy.compiler.graph import Node
-from emmy.compiler.ir.expr import BinaryExpr, Literal, SimplifyCtx, affine_form
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.stmt import Body, Load, Stmt
 from emmy.compiler.pipeline import Pattern, RuleSkipped
+from emmy.compiler.pipeline.passes.lowering.kernel._vector import vector_run
 from emmy.compiler.pipeline.search.space import VECTORIZE_LOADS
 
 PATTERN = [Pattern("root", KernelOp)]
@@ -164,50 +164,8 @@ def _try_vec_load(stmts: Iterable[Stmt], start: int, n: int, top: KernelOp) -> L
     if _TARGET.vector_type(src_dt, n) is None:
         return None
 
-    # Same rank, same outer indices.
-    rank = len(loads[0].index)
-    if rank == 0 or any(len(s.index) != rank for s in loads[1:]):
+    if not vector_run([load.index for load in loads], src_tensor, n):
         return None
-    outer = loads[0].index[:-1]
-    for s in loads[1:]:
-        if s.index[:-1] != outer:
-            return None
-
-    # Last-dim indices: same free-var coefficients, anchor differs by
-    # exactly k for the k-th load.
-    inner_0 = loads[0].index[-1]
-    free = inner_0.free_vars()
-    for s in loads[1:]:
-        free = free | s.index[-1].free_vars()
-    af0 = affine_form(inner_0, free)
-    if af0 is None:
-        return None
-    anchor_0, coeffs_0 = af0
-    for k, s in enumerate(loads):
-        if k == 0:
-            continue
-        af = affine_form(s.index[-1], free)
-        if af is None:
-            return None
-        anchor_k, coeffs_k = af
-        if coeffs_k != coeffs_0:
-            return None
-        diff = BinaryExpr("-", anchor_k, anchor_0).simplify(SimplifyCtx.empty())
-        if not (isinstance(diff, Literal) and isinstance(diff.value, int) and diff.value == k):
-            return None
-
-    # The reinterpret-cast destination must be aligned to ``n * elem_bytes``.
-    # Prove statically from the affine form: every free-var coefficient on
-    # the last dim must be a multiple of n, and the literal anchor must also
-    # be a multiple of n. n=2 fp16 is NOT a freebie despite __half2's 4-byte
-    # type alignment — an odd-element offset still misses the alignment and
-    # faults with CUDA_ERROR_MISALIGNED_ADDRESS.
-    if n >= 2:
-        if not all(c % n == 0 for c in coeffs_0.values()):
-            return None
-        anchor_simplified = anchor_0.simplify(SimplifyCtx.empty())
-        if not isinstance(anchor_simplified, Literal) or anchor_simplified.value % n != 0:
-            return None
 
     return Load(
         names=tuple(s.name for s in loads),
