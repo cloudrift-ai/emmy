@@ -1452,6 +1452,8 @@ class Fold:
                 )
                 nest.sink((*node, *(name for name in nest.opened if name in extra))).append(spec.write)
 
+        emitted: dict[tuple[int, int], tuple[Fold, list[Stmt]]] = {}
+
         def place(term: Fold, loops: list[tuple[str, frozenset[str], list[Stmt]]], path: tuple[str, ...] | None, nest: _Nest) -> None:
             # ``loops``: the reduce loops enclosing this position, outermost first, as (axis, scope, stmts).
             if any(axis in term.free_axes for axis, _, _ in loops):
@@ -1461,6 +1463,13 @@ class Fold:
             else:
                 node = nest.path_of(term.free_axes, path)
                 scope, stmts, loops = nest.bound | set(node), None, []
+            if term.axis is not None or term.step():
+                target = stmts if stmts is not None else nest.sink(node)
+                key = (id(term), id(target))
+                if key in emitted:
+                    return
+                # Retain both objects: a completed inner scope's list otherwise permits id reuse.
+                emitted[key] = term, target
             if term.axis is None:
                 step = term.step()
                 for edge in placed(term):

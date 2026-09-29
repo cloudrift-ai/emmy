@@ -382,9 +382,8 @@ class Body(tuple[Stmt, ...], Wire):
           ``Stmt.binds_axes()``. ``Cond`` doesn't bind axes. Callbacks
           that don't care about scope can ignore this.
 
-        Returns the per-stmt memo keyed by ``id(stmt)`` — ``Tile`` is a
-        non-frozen dataclass and not hashable, so id-keying is the
-        lowest-friction choice. Callers that want a name-keyed view do
+        Returns the per-stmt memo keyed by ``id(stmt)`` without recursively hashing nested bodies.
+        Callers that want a name-keyed view do
         ``{n: memo[id(s)] for s in body.iter() for n in s.defines()}``.
 
         Recursion order: nested bodies are processed *before* the wrapper

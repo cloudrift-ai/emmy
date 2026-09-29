@@ -516,6 +516,16 @@ the shared substrate behind the rules that slice cones (the demoted-operand prod
 `tile/cut/030_cut`) — eligibility judgments stay in the rules, per
 `pipeline/passes/ARCHITECTURE.md`.
 
+`Body.dependency_depths` folds the def-use graph with a caller-selected set of statement kinds to count. External
+buffer depths let composition carry the result across producer/consumer boundaries without expanding either body.
+Counting accumulators gives a sufficient independence proof for early reduction sharing: equal-depth reductions
+cannot read each other's finalized result. The splicer supplies graph edges and keeps coordinate substitution local.
+
+`Body.coalesce` assembles repeated shared SSA definitions once and joins adjacent independent reduction loops with
+identical headers. Fold lowering and computed-operand assembly use this same operation. Its input is shared value
+cones, not arbitrary repeated accumulator updates. Effects retain their order and multiplicity and stop reuse across
+them; a read of a finalized reduction keeps the corresponding loops separate.
+
 `backward_cone` resolves reads by NAME over a body it assumes is SSA, so it is only sound where one name has one
 def. `Lambda.cone` is the caller that cannot assume it: a stored combine takes its states in as params and writes
 them back on the way out to spell its results (`Recipe.program`), so a read of the INCOMING state would resolve
@@ -706,8 +716,8 @@ inlining a shared producer per consumer. The single-sink convenience form still 
 selects all its Writes. Every `_NotSupported` carries a reason string, logged at DEBUG by `splice_loops` —
 `compile -vv` shows which pattern a rejected edge hit.
 
-Before expansion, the splicer counts the reductions along the longest dependency path to each source definition,
-following internal Loads through their producer Writes. Reductions at equal depth cannot depend on each other.
+Before expansion, the splicer uses `Body.dependency_depths` to count reductions along each source definition's longest
+dependency path, passing producer Write depths into consumer inputs. Reductions at equal depth cannot depend on each other.
 When they have the same extent and enclosing scope, they share an iteration axis from construction onward, so the
 binding table shares their common producers before emitting them. A reduction that reads another's finalized value
 has greater depth and keeps a separate scope. Different input offsets retain their own coordinate substitutions.
