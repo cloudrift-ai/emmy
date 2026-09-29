@@ -51,7 +51,9 @@ class RegisterProgram:
 
     @classmethod
     def from_tile(cls, tile: TileOp) -> RegisterProgram | None:
-        if not tile.carries or any(not a.extent.is_static for a in tile.axes):
+        # A free axis outside the carrying loop is neither a cell nor a coordinate the emitter
+        # binds; the roll never makes one, and such a kernel keeps the classic schedule.
+        if not tile.carries or tile.place.free or any(not a.extent.is_static for a in tile.axes):
             return None
         (carrying,) = (site.node for site in tile.sites if site.node.carries)
         if len(carrying.base.results) != 1 or len(carrying.cells) < 2:

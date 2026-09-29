@@ -22,10 +22,12 @@ def rewrite(match: Match, root: Node, ctx=None):
     if not tile.carries:
         return replace(tile, outputs={root.output.name: root.output})
     # A carried state: the term carries it (``Fold.cells``), and the classic schedule realizes it
-    # as a buffer the kernel owns over the step axis and the cells — so the node gains that port
-    # here, a splice where every other lift is a rebind. Register storage drops it again.
+    # as a buffer the kernel owns over the step axis, the free axes outside the carrying loop and
+    # the cells (the index ``states_as_buffers`` writes) — so the node gains that port here, a
+    # splice where every other lift is a rebind. Register storage drops it again.
+    outer = tuple(axis.name for axis in tile.place.free)
     states = tuple(
-        Tensor(name=f"{root.id}__{state}", shape=tuple(tile.axis_of(axis).extent for axis in (node.axis, *node.cells)), dtype=F32)
+        Tensor(name=f"{root.id}__{state}", shape=tuple(tile.axis_of(axis).extent for axis in (node.axis, *outer, *node.cells)), dtype=F32)
         for node in (site.node for site in tile.sites if site.node.carries)
         for state in node.base.results
     )

@@ -30,7 +30,7 @@ c, i, j, k = Var("c"), Var("i"), Var("j"), Var("k")
 ZERO = Literal(0, "int")
 
 
-def _step(out_index: tuple, seed: float | str = 0.0) -> Body:
+def _step(out_index: tuple, seed: float | str = 0.0, u_index: tuple = (c, i, j)) -> Body:
     """``S_c = decay_c * S_{c-1} + W @ S_{c-1} + U_c``, storing the state each step READ, from ``seed``."""
     mix = Loop(
         axis=Axis("k", N),
@@ -43,7 +43,7 @@ def _step(out_index: tuple, seed: float | str = 0.0) -> Body:
     )
     cell = (
         mix,
-        Load(name="u", input="U", index=(c, i, j)),
+        Load(name="u", input="U", index=u_index),
         Pre(name="own", carrier="S", index=(i, j)),
         Assign(name="kept", op="multiply", args=("own", "decay")),
         Assign(name="moved", op="add", args=("kept", "mixed")),
@@ -59,12 +59,12 @@ def _loops(body: Body) -> list[Loop]:
     return [stmt for stmt in body.iter() if isinstance(stmt, Loop)]
 
 
-def _inputs(seed: float | str = 0.0) -> dict[str, np.ndarray]:
+def _inputs(seed: float | str = 0.0, batch: int | None = None) -> dict[str, np.ndarray]:
     rng = np.random.default_rng(0)
     arrays = {
         "D": rng.standard_normal(STEPS).astype(np.float32),
         "W": (rng.standard_normal((N, N)) * 0.3).astype(np.float32),
-        "U": rng.standard_normal((STEPS, N, N)).astype(np.float32),
+        "U": rng.standard_normal((*(() if batch is None else (batch,)), STEPS, N, N)).astype(np.float32),
     }
     if isinstance(seed, str):
         arrays[seed] = rng.standard_normal((N, N)).astype(np.float32)
@@ -72,6 +72,8 @@ def _inputs(seed: float | str = 0.0) -> dict[str, np.ndarray]:
 
 
 def _reference(arrays: dict[str, np.ndarray], seed: float | str = 0.0) -> np.ndarray:
+    if arrays["U"].ndim == 4:  # a batch of recurrences, one per leading row of U
+        return np.stack([_reference({**arrays, "U": u}, seed) for u in arrays["U"]])
     state = arrays[seed].copy() if isinstance(seed, str) else np.full((N, N), seed, np.float32)
     want = np.zeros((STEPS, N, N), np.float32)
     for step in range(STEPS):
@@ -108,6 +110,48 @@ def _graph(seed: float | str = 0.0) -> Graph:
     return graph
 
 
+def _batched_graph(batch: int = 2) -> Graph:
+    """The step under a FREE loop outside the carrying one — one recurrence per row of the batch,
+    ``U`` and ``out`` carrying the batch coordinate first. The roll never makes this shape (its
+    batch loops sit inside the step, as cells); the lift takes it all the same."""
+    b = Var("b")
+    graph = Graph()
+    for name, shape in (("D", (STEPS,)), ("W", (N, N)), ("U", (batch, STEPS, N, N))):
+        graph.add_node(InputOp(), [], Tensor(name, shape, "f32"), node_id=name)
+    body = Body((Loop(axis=Axis("b", batch), body=_step((b, c, i, j), u_index=(b, c, i, j))),))
+    graph.add_node(LoopOp(body=body, name="k_step"), ["D", "W", "U"], Tensor("out", (batch, STEPS, N, N), "f32"), node_id="out")
+    graph.inputs, graph.outputs = ["D", "W", "U"], ["out"]
+    return graph
+
+
+def test_a_carrying_loop_under_an_outer_loop_keeps_that_coordinate_in_its_port() -> None:
+    """The classic buffer is indexed ``(time, *outer, *cells)``, so the port the lift adds spells
+    the outer coordinate too; the serial form the classic schedule lifts writes that port at that
+    rank, keeps the kernel's bound I/O, and the register program declines the shape."""
+    from importlib import import_module
+
+    serial_form = import_module("emmy.compiler.pipeline.passes.tile.schedule.040_schedule").serial_form
+    lifted = Pipeline.build(["tile/lift"], select=["lift"]).run(_batched_graph())
+    (node,) = (node for node in lifted.nodes.values() if isinstance(node.op, TileOp))
+    tile: TileOp = node.op
+
+    assert tile.carries and [axis.extent.as_static() for axis in tile.place.free] == [2] and tile.register_program is None
+    (state,) = (tensor for tensor in node.outputs if tensor.name != "out")
+    assert tuple(dim.as_static() for dim in state.shape) == (STEPS, 2, N, N)
+    serial = serial_form(tile, node.id)
+    assert serial.inputs == tile.inputs and serial.outputs == tile.outputs
+    (spec,) = (spec for spec in serial.output_specs if spec.write.output == state.name)
+    (carrying,) = (site.node for site in tile.sites if site.node.carries)
+    assert len(spec.write.index) == len(state.shape) and [axis.name for axis in serial.place.serial] == [carrying.axis]
+
+    arrays = _inputs(batch=2)
+    for closed in (LoopOp(body=tile.loop_body), LoopOp(body=serial.loop_body)):
+        shapes = {"out": (2, STEPS, N, N), state.name: (STEPS, 2, N, N)}
+        got = execute_loop_op_cpp(closed, arrays, {name: shape for name, shape in shapes.items() if name in closed.outputs})
+        got = dict(zip(closed.outputs, got if isinstance(got, tuple) else (got,), strict=True))["out"]
+        np.testing.assert_allclose(np.asarray(got), _reference(arrays), rtol=1e-5, atol=1e-6)
+
+
 def test_the_lift_carries_the_state_in_the_term() -> None:
     """The term carries the state: the kernel root folds the action ``next`` over the steps, its
     cells the two free coordinates the block is indexed by, its seed the loop's; the step's ``W @ S``
@@ -137,13 +181,15 @@ def test_the_lift_carries_the_state_in_the_term() -> None:
 
 @requires_cuda
 @pytest.mark.xdist_group("cuda")
-def test_the_lifted_step_runs_one_launch_per_step_on_the_gpu() -> None:
+@pytest.mark.parametrize("batched", [False, True], ids=["root", "under-an-outer-loop"])
+def test_the_lifted_step_runs_one_launch_per_step_on_the_gpu(batched: bool) -> None:
     from emmy.compiler.backend.cuda.program import run_program  # noqa: PLC0415
 
-    arrays = _inputs()
-    result, _ = run_program(Pipeline.build(CUDA_PASSES).run(_graph()), arrays)
+    arrays = _inputs(batch=2 if batched else None)
+    result, _ = run_program(Pipeline.build(CUDA_PASSES).run(_batched_graph() if batched else _graph()), arrays)
 
-    np.testing.assert_allclose(np.asarray(result.outputs["out"]).reshape(STEPS, N, N), _reference(arrays), rtol=1e-5, atol=1e-6)
+    want = _reference(arrays)
+    np.testing.assert_allclose(np.asarray(result.outputs["out"]).reshape(want.shape), want, rtol=1e-5, atol=1e-6)
 
 
 def test_a_loop_over_the_cells_carries_nothing() -> None:
