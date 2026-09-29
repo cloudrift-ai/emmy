@@ -1652,9 +1652,19 @@ def _compute_dynamic_smem_offsets(kernel_op: KernelOp) -> tuple[dict[str, int], 
         return {}, 0
 
     offsets, total = pack_smem(smems)
-    if total <= STATIC_SMEM_CAP:
+    # A buffer laid over another fits a static array only while it stays inside it.
+    by_name = {s.name: s for s in smems}
+    if total <= STATIC_SMEM_CAP and all(s.over is None or _smem_nbytes(s) <= _smem_nbytes(by_name[s.over]) for s in smems):
         return {}, 0
     return offsets, total
+
+
+def _smem_nbytes(s: Smem) -> int:
+    from math import prod  # noqa: PLC0415
+
+    from emmy.compiler.backend.cuda.dtype import nbytes_of  # noqa: PLC0415
+
+    return prod(int(e) for e in s.extents) * nbytes_of(s.dtype)
 
 
 def _launch_bounds_for(kernel_op: KernelOp) -> int:

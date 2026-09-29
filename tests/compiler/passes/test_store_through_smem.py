@@ -54,6 +54,15 @@ def test_a_wide_tile_stores_through_the_operand_slabs(monkeypatch) -> None:
     assert "&c[" not in src.replace("*reinterpret_cast<uint4*>(&c[", "")
 
 
+def test_a_masked_m_edge_bounds_the_row_copy(monkeypatch) -> None:
+    """A 96-row tile over 256 rows overhangs the output: the fragment stores keep their row guard and
+    the row copy stops at the output's last row."""
+    _pin(monkeypatch, "w2x2", "f3x8/k2")
+    src = _source(_graph(256, 256, 128))
+    assert "_c_smem" in src
+    assert "_r < 256) *reinterpret_cast<uint4*>(&c[" in src
+
+
 def test_a_stage_without_out_keeps_the_direct_stores(monkeypatch) -> None:
     _pin(monkeypatch, "w2x2", "f4x4/k2", out=False)
     src = _source(_graph(256, 256, 128))
@@ -78,7 +87,7 @@ def test_a_tile_narrower_than_the_swizzle_row_stores_directly(monkeypatch) -> No
 
 @requires_cuda
 @requires_sm(8)
-@pytest.mark.parametrize(("work", "tile"), [("w2x2", "f4x4/k2"), ("w2x2", "f2x4/k2"), ("w4x2", "f2x8/k2")])
+@pytest.mark.parametrize(("work", "tile"), [("w2x2", "f4x4/k2"), ("w2x2", "f2x4/k2"), ("w4x2", "f2x8/k2"), ("w2x2", "f3x8/k2")])
 def test_the_staged_store_is_bit_identical(monkeypatch, work, tile) -> None:
     from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
 
