@@ -612,8 +612,8 @@ canonicalized before validation:
 - Reduction-axis unification, sibling merging, and duplicate elimination reach a fixed point before canonical
   ordering. Coordinate expressions and commutative operands normalize between rounds to expose duplicates; every
   changed round removes a loop or a duplicate computation. The final ordering pass then builds one colored relation
-  graph for the complete body tree and chooses one dependency- and effect-valid statement order. Vertices represent scopes,
-  statements, lexical definitions, axes, source axes, and external buffers; colored relations retain operand
+  graph for the complete body tree and chooses one dependency- and effect-valid statement order. Vertices represent
+  scopes, statements, lexical definitions, axes, source axes, and external buffers; colored relations retain operand
   positions, captures, aliases, nesting, resource hazards, and ordered execution protocols. The graph is independent
   of source order and spelling, and it rides the normalized body: structural identity labels the same graph again
   under its own buffer coloring instead of building it a second time. A scope's definitions bind its reads in any
