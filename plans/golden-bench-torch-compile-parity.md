@@ -141,10 +141,11 @@ are unrecorded on #930. Trace, sweep, record, and measure on the FP8-capable car
    `torch.compile`'s kernels sum to 73 µs against our 86, and it gives ~11 µs back in launch gaps. The lever left is
    persistent CTAs that overlap one tile's epilogue with the next tile's loads, which is out of scope for the paper.
 2. **AWQ Qwen3.8-27B whole layer on the V100 SXM3 cannot run yet.** The inter-chunk recurrence kernel
-   (`k_matmul_reduce_81b2ae`) offers only 48-thread schedules and hits the watchdog; it needs the carried-state
-   shared-memory residency of #965, or a cut for a carried-state kernel. The input-projection region needs a long
+   (`k_matmul_reduce_81b2ae`) offers only thread widths over the 48 heads and hits the watchdog, still after #969
+   (which changes the state's representation, not its schedules); it needs the carried-state shared-memory residency
+   of #965, or a cut for a carried-state kernel. The input-projection region needs a long
    kernel-set sweep (root width, cuts, non-spilling projection tiles). The intra-chunk matmul is recorded
-   (6,587 → 841 µs).
+   (6,290 → 820 µs after #969).
 3. **Golden-bench goldens are not in `make test`'s decode set** (only recipe and hardware goldens are); a compiler
    change can leave them stale unseen. The close-out replayed and decoded them by hand on each card.
 
