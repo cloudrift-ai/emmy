@@ -1420,11 +1420,17 @@ def _block_scaled_operands(
 
             return gmem
 
+        # The TMA box covers the index up to its K dim, which is the innermost one the byte copy
+        # walks. Dims past it are unit dims (an activation's scales carry one, ``[.., K/16, 1]``)
+        # that a box of extent 1 there could not copy: its inner span would be one byte. Leading
+        # unit dims keep a box extent of 1, as the other staged operands' boxes do.
+        rank = max(i for i, e in enumerate(load.index) if k_axis.name in e.free_vars()) + 1
         return Operand(
             tag=tag,
             buf=load.input,
             shape=(side.tile, cols),
-            coords=lambda k0: at(k0, base),
+            box=(1,) * (rank - 2) + (side.tile, cols) if rank > 2 else None,
+            coords=lambda k0: at(k0, base)[:rank],
             index=index,
             trans=trans,
             pad_cols=pad,
@@ -1558,12 +1564,12 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
     cta = _cta(mn, tile.atom.lanes, tile.launch_threads)
     finalize: list[Stmt] = []
     # The BLOCK-SCALED pair, keyed on the ATOM: both operands packed under a 16-bit atom is still
-    # the single-sided shape, whose drain decodes each into 16-bit fragments. cp.async only; the
-    # four-descriptor TMA box copy is not built.
+    # the single-sided shape, whose drain decodes each into 16-bit fragments.
     single, pair = packed_readings((c,), ops.inputs)[id(c)]
-    bs_pair = pair if stage.transport == "smem-async" and block_scaled_atom(tile.atom) else None
-    packed = single if bs_pair is None and stage.transport in ("smem-async", "smem-tma") else None
+    bs_pair = pair if stage.is_async and block_scaled_atom(tile.atom) else None
+    packed = single if bs_pair is None and stage.is_async else None
     if bs_pair is not None:
+        tma = stage.transport == "smem-tma"
         operands, copies, fills = _block_scaled_operands(
             c,
             bs_pair,
@@ -1571,15 +1577,20 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
             mn,
             ops.inputs[bs_pair.b[0].bits.input].dtype,
             ops.inputs[bs_pair.a.scale.input].dtype,
-            pad=BYTE_SLAB_PAD,
+            pad=0 if tma else BYTE_SLAB_PAD,
             k_axis=k_axis,
         )
         common = dict(slab_dtype=cuda_name(elem), elem_bytes=elem.nbytes, cta=cta)
         # Pure copies when both operands' codes are stored; a fill underneath them when this
         # matmul computes its own A codes, which is the same two-group shape the packed
-        # byte-slab stage takes for its scale fill.
+        # byte-slab stage takes for its scale fill. The resolver offers TMA only for pure copies.
+        assert not (tma and fills), "the block-scaled TMA stage copies stored codes only"
         transport = (
-            CpAsyncTransport(operands=copies, **common) if not fills else SyncTransport(operands=fills, copy_operands=copies, **common)
+            TmaTransport(operands=copies, **common)
+            if tma
+            else CpAsyncTransport(operands=copies, **common)
+            if not fills
+            else SyncTransport(operands=fills, copy_operands=copies, **common)
         )
         # The per-tensor scale levels, applied once per output element after the K-loop. The cell
         # multiplies the RAW e4m3 block scales into each block's sum and knows nothing of the

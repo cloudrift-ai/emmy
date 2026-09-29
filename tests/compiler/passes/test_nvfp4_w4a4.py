@@ -13,6 +13,8 @@ program applies the two levels fused (see the tolerance the device tests below d
 
 from __future__ import annotations
 
+import re
+
 import numpy as np
 import pytest
 
@@ -444,7 +446,7 @@ def test_the_two_channel_pair_is_offered_the_block_scaled_cell_with_its_copy_tra
     plan = next(p for p in sched.warp_tile_moves(atoms) if p.atom.name == "mma_m16n8k64_e2m1_f32" and p.bk == 4)
     assert not sched._needs_fill(tile, con, plan)
     transports = {stage.transport for stage in sched._stage_candidates(tile, ctx, con, ProjectionSchedule(tile=plan))}
-    assert transports == {"smem-async"}, transports
+    assert transports == {"smem-async", "smem-tma"}, transports
 
 
 @requires_cuda
@@ -477,6 +479,83 @@ def test_the_two_channel_block_scaled_cell_runs_and_holds_the_declared_tolerance
     rel = np.abs(c - r) / max(float(np.abs(r).max()), 1e-9)
     assert float(np.median(rel)) < 1e-4, "a systematic shift, not the fused-scale rounding"
     assert float(rel.max()) < 2e-3, "past one fused-scale rounding per side"
+
+
+def _fp4_tma_program(tmp_path, channels, *, m, k):
+    """Stored activation codes under the block-scaled cell: two linears reading one quantized
+    activation, each its own single-channel contraction, or the fused gate/up pair's two channels.
+    Both keep the activation encode in a kernel of its own, so every operand of the cell is a
+    stored buffer."""
+    if channels == 1:
+        return _w4a4_shared_linears(tmp_path, ("q", "kp"), m=m, n=128, k=k, norm=False), 0.5
+    return _w4a4_gate_times_up(tmp_path, m=m, n=128, k=k), 0.02
+
+
+def _fp4_tma_pins(stage: str) -> dict:
+    return {"TILE": "mma_m16n8k64_e2m1_f32/f1x2/k4", "WORK": "w1x2", "STAGE": stage, "PLACE": "fuse"}
+
+
+@pytest.mark.parametrize("channels", [1, 2])
+def test_fp4_tma_copies_each_stored_buffer_by_box_ahead_of_the_mma(tmp_path, channels):
+    """The TMA form of the cell: one descriptor per stored buffer (the activation's codes and scales,
+    and each weight's), no cp.async left for them, and under a two-slot ring the next chunk's box
+    copies issue before this chunk's wait and its native mma."""
+    from emmy.compiler.context import Context
+    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+    g, _ = _fp4_tma_program(tmp_path, channels, m=16, k=1024)
+    with pinned_knobs(_fp4_tma_pins("d2/smem-tma")):
+        lowered = Pipeline.build(CUDA_PASSES).run(g, ctx=Context.from_target((12, 0)))
+    sources = [s for node in lowered.nodes.values() if (s := getattr(node.op, "kernel_source", None))]
+    native = [s for s in sources if "emmy_mma_m16n8k64_e2m1_f32(" in s]
+    assert native, "the pinned block-scaled cell never reached a kernel"
+    for src in native:
+        assert len(set(re.findall(r"CUtensorMap\* __restrict__ (_desc_\w+)", src))) == 2 + 2 * channels
+        assert "emmy_cp_async_cg" not in src
+        assert "unsigned long long _mbar[2]" in src
+        body = src[src.index("for (int _ks") :]
+        assert body.index("cp_async_bulk_tensor") < body.index("mbarrier_wait_parity") < body.index("emmy_mma_m16n8k64_e2m1_f32(")
+
+
+@requires_cuda
+@pytest.mark.xdist_group("cuda")
+@pytest.mark.skipif((device_compute_capability() or (0, 0))[0] != 12, reason="block-scaled FP4 mma requires sm_12x")
+@pytest.mark.parametrize("channels", [1, 2])
+@pytest.mark.parametrize(("ring", "k"), [("d1", 4096), ("d2/p2", 4096), ("d3", 4096), ("d4/p2", 4096), ("d2", 256)])
+def test_fp4_tma_matches_cp_async_bit_for_bit(tmp_path, channels, ring, k):
+    """Only the copy mechanism differs between the two transports, so on the same buffers, tile,
+    ring depth and register buffering the outputs agree to the bit, launch after launch. Sixteen
+    chunks wrap every ring and flip each slot's barrier parity more than once; a single chunk is
+    all startup and drain. 24 rows leave the second M tile partial, where the box zero-fills the
+    rows cp.async clamps. The declared oracle holds separately, at the cell's own tolerance."""
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.loader.safetensors import load_constants_from_safetensors
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+    m = 24
+    g, amplitude = _fp4_tma_program(tmp_path, channels, m=m, k=k)
+    feed = {"x": (np.random.default_rng(5).standard_normal((m, k)) * amplitude).astype(np.float16)}
+    data = load_constants_from_safetensors(g, str(tmp_path))
+    ref, _ = NumpyBackend().run(g, input_data={**data, **feed})
+    depth, *register = ring.split("/")
+    outputs = {}
+    for transport in ("smem-async", "smem-tma"):
+        backend = CudaBackend()
+        with pinned_knobs(_fp4_tma_pins("/".join((depth, transport, *register)))):
+            compiled = backend.compile(g)
+        native = [s for node in compiled.nodes.values() if "emmy_mma_m16n8k64_e2m1_f32(" in (s := getattr(node.op, "kernel_source", "") or "")]
+        assert native and all(("cp_async_bulk_tensor" in s) == (transport == "smem-tma") for s in native)
+        runs = [backend.run(compiled, input_data={**data, **feed})[0] for _ in range(2)]
+        outputs[transport] = [np.asarray(run.outputs[out]) for run in runs for out in g.outputs]
+    async_out, tma_out = outputs["smem-async"], outputs["smem-tma"]
+    assert all(np.array_equal(a, t) for a, t in zip(async_out, tma_out, strict=True)), "TMA and cp.async disagree"
+    assert all(np.array_equal(a, async_out[i % len(g.outputs)]) for i, a in enumerate(tma_out)), "a repeated launch changed"
+    for i, out in enumerate(g.outputs):
+        r = ref.outputs[out].astype(np.float32).reshape(-1)
+        rel = np.abs(tma_out[i].astype(np.float32).reshape(-1) - r) / max(float(np.abs(r).max()), 1e-9)
+        assert float(np.median(rel)) < 1e-4 and float(rel.max()) < 2e-3, out
 
 
 def _seams_of(g):
