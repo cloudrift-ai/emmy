@@ -3096,6 +3096,16 @@ def _(s: CpAsyncCopy, rename, sigma, axis_fn):
         swizzle=s.swizzle,
         lane_index=None if s.lane_index is None else tuple(sigma.apply(e) for e in s.lane_index),
         lane_rows=s.lane_rows,
+        valid=None if s.valid is None else sigma.apply(s.valid),
+    )
+
+
+@_rewrite_kind.register
+def _(s: SmemTileStore, rename, sigma, axis_fn):
+    return replace(
+        s,
+        base=tuple(sigma.apply(e) for e in s.base),
+        bound=None if s.bound is None else sigma.apply(s.bound),
     )
 
 
