@@ -322,23 +322,11 @@ def unify_sibling_reduce_axes(stmts: Body) -> Body:
     to a single canonical axis name. Recurses through every block-
     structured Stmt (Loop / StridedLoop / Tile / Cond) to find nested
     scopes."""
-    stmts = Body.coerce(stmts)
 
-    def walk(body: Body) -> Body:
-        # Recurse into nested bodies first (post-order) via the canonical
-        # nested() / with_bodies() descent, then group siblings at this
-        # scope. Splitting the recursion from the sibling-grouping keeps
-        # this pass's scope-level logic isolated in ``_unify_siblings``.
-        recursed: list[Stmt] = []
-        for s in body:
-            nested = s.nested()
-            if nested:
-                recursed.append(s.with_bodies(tuple(walk(b) for b in nested)))
-            else:
-                recursed.append(s)
-        return _unify_siblings(Body(recursed))
+    def unify(stmt: Stmt) -> Stmt:
+        return stmt.with_bodies(tuple(_unify_siblings(child) for child in stmt.nested()))
 
-    return walk(stmts)
+    return _unify_siblings(Body.coerce(stmts).map(unify))
 
 
 def _unify_siblings(body: Body) -> Body:
@@ -376,7 +364,7 @@ def _unify_siblings(body: Body) -> Body:
                 entries.append((i, s.axis.name, s.axis.extent.expr, frozenset(positions)))
 
     if len(entries) < 2:
-        return Body(stmts)
+        return body
 
     parent = list(range(len(entries)))
 
@@ -408,7 +396,7 @@ def _unify_siblings(body: Body) -> Body:
         renamed = tuple(s.rename({loop.axis.name: canonical}) for s in loop.body)
         stmts[idx] = replace(loop, axis=new_axis, body=renamed)
 
-    return Body(stmts)
+    return body if all(new is old for new, old in zip(stmts, body, strict=True)) else Body(stmts)
 
 
 #: The name every reduce axis is spelled as inside a composite position key, so two siblings'
@@ -505,19 +493,11 @@ def merge_sibling_reduce_loops(stmts: Body) -> Body:
 
     Recurses through every block-structured Stmt to find nested scopes.
     """
-    stmts = Body.coerce(stmts)
 
-    def walk(body: Body) -> Body:
-        recursed: list[Stmt] = []
-        for s in body:
-            nested = s.nested()
-            if nested:
-                recursed.append(s.with_bodies(tuple(walk(b) for b in nested)))
-            else:
-                recursed.append(s)
-        return _merge_sibling_reduce_loops(Body(recursed))
+    def merge(stmt: Stmt) -> Stmt:
+        return stmt.with_bodies(tuple(_merge_sibling_reduce_loops(child) for child in stmt.nested()))
 
-    return walk(stmts)
+    return _merge_sibling_reduce_loops(Body.coerce(stmts).map(merge))
 
 
 def _carried_out(body: Body) -> frozenset[str]:
@@ -605,7 +585,7 @@ def _merge_sibling_reduce_loops(body: Body) -> Body:
             consumed.add(j)
         out.append(merged)
 
-    return Body(out)
+    return Body(out) if consumed else body
 
 
 # ---------------------------------------------------------------------------

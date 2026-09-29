@@ -121,6 +121,8 @@ class Loop(Stmt):
 
     def with_bodies(self, bodies: tuple[Body, ...]) -> Stmt:
         (body,) = bodies
+        if body is self.body:
+            return self
         return Loop(axis=self.axis, body=body, unroll=self.unroll, seed=self.seed)
 
     def binds_axes(self) -> frozenset[str]:
@@ -342,6 +344,8 @@ class StridedLoop(Stmt):
 
     def with_bodies(self, bodies: tuple[Body, ...]) -> Stmt:
         (body,) = bodies
+        if body is self.body:
+            return self
         return StridedLoop(
             axis=self.axis,
             start=self.start,
@@ -454,6 +458,8 @@ class Cond(Stmt):
 
     def with_bodies(self, bodies: tuple[Body, ...]) -> Stmt:
         body, else_body = bodies
+        if body is self.body and else_body is self.else_body:
+            return self
         return Cond(cond=self.cond, body=body, else_body=else_body)
 
     def exprs(self) -> tuple[Expr, ...]:

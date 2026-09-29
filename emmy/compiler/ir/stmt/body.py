@@ -231,8 +231,8 @@ class Body(tuple[Stmt, ...], Wire):
     def map(self, fn: Callable[[Stmt], Stmt | None | Iterable[Stmt]]) -> Body:
         """Recursive 1:N body transformer. Post-order: each block stmt's
         nested body is mapped first, then ``fn`` is applied to the
-        children-rewritten wrapper. Returns a new Body with each stmt
-        replaced by ``fn(stmt)``:
+        children-rewritten wrapper. Retains unchanged bodies and their cached analysis; otherwise
+        returns a new Body with each stmt replaced by ``fn(stmt)``:
 
         - a single ``Stmt`` (kept in place of the input),
         - ``None`` (drop the input), or
@@ -267,7 +267,7 @@ class Body(tuple[Stmt, ...], Wire):
                 out.append(r)
             else:
                 out.extend(r)
-        return Body(out)
+        return self if len(out) == len(self) and all(new is old for new, old in zip(out, self, strict=True)) else Body(out)
 
     def topological_order(
         self,

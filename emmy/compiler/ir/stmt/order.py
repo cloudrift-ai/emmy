@@ -518,7 +518,8 @@ def _equitable_partition(
 
                 parts = dict(nonzero_parts)
                 if covered < len(cell.vertices):
-                    parts[0] = cell.vertices - set().union(*nonzero_parts.values())
+                    cell.vertices.difference_update(*nonzero_parts.values())
+                    parts[0] = cell.vertices
                 retained = max(parts, key=lambda value: (len(parts[value]), value))
 
                 was_queued = cell.queued
