@@ -94,6 +94,10 @@ class Smem(Stmt):
     extents: tuple[int, ...]
     dtype: str = "float"
     align: int = 0
+    # The buffer whose storage this one reuses, once that buffer is dead — the output tile a GEMM
+    # stores through shared memory after its K-loop lives over the operand slabs. It never grows
+    # past that buffer, so the pool footprint does not change.
+    over: str | None = None
 
     def local_decls(self) -> tuple[str, ...]:
         return (self.name,)
@@ -101,7 +105,8 @@ class Smem(Stmt):
     def pretty(self, indent: str = "") -> list[str]:
         ext = ", ".join(str(e) for e in self.extents) or "-"
         ali = f" align={self.align}" if self.align else ""
-        return [f"{indent}Smem {self.dtype} {self.name}[{ext}]{ali}"]
+        over = f" over {self.over}" if self.over else ""
+        return [f"{indent}Smem {self.dtype} {self.name}[{ext}]{ali}{over}"]
 
     def render(self, ctx: RenderCtx) -> list[str]:
         """``__shared__ <dtype> <name>[<prod(extents)>];`` and register the
@@ -129,6 +134,8 @@ class Smem(Stmt):
         if self.name in ctx.smem_dynamic_offsets:
             offset = ctx.smem_dynamic_offsets[self.name]
             return [f"{_pad(ctx.indent)}{self.dtype}* {self.name} = reinterpret_cast<{self.dtype}*>(_smem_pool + {offset});"]
+        if self.over:
+            return [f"{_pad(ctx.indent)}{self.dtype}* {self.name} = reinterpret_cast<{self.dtype}*>({self.over});"]
         ali = f"__align__({self.align}) " if self.align else ""
         return [f"{_pad(ctx.indent)}__shared__ {ali}{self.dtype} {self.name}[{total}];"]
 
@@ -2224,6 +2231,55 @@ class WgmmaWait(Stmt):
 
 
 @dataclass(frozen=True)
+class SmemTileStore(Stmt):
+    """Copy a CTA's ``rows × cols`` output tile from shared memory to global memory, 16 bytes per
+    thread per step, the CTA's threads taking every ``threads``-th chunk.
+
+    The second half of storing a GEMM output through shared memory: the tile's :class:`RegStore`
+    fragments wrote ``src`` with 4-byte stores, and this turns them into full rows of 16-byte global
+    stores. ``base`` is the tile's ``(row, col)`` in ``dst`` and ``ldm`` its row stride there;
+    ``src`` is row-major, ``cols`` per row, read back through the ``swizzle`` it was written with."""
+
+    src: str
+    dst: str
+    base: tuple
+    rows: int
+    cols: int
+    ldm: int
+    threads: int
+    swizzle: str = "NONE"
+
+    def external_writes(self) -> tuple[str, ...]:
+        return (self.dst,)
+
+    def exprs(self) -> tuple[Expr, ...]:
+        return tuple(self.base)
+
+    def pretty(self, indent: str = "") -> list[str]:
+        at = ", ".join(e.pretty() for e in self.base)
+        return [f"{indent}SmemTileStore {self.dst}[{at}] <- {self.src}[{self.rows}, {self.cols}] swz={self.swizzle}"]
+
+    def render(self, ctx: RenderCtx) -> list[str]:
+        from emmy.compiler.backend.cuda.dtype import nbytes_of  # noqa: PLC0415
+        from emmy.compiler.ir.stmt import render_index  # noqa: PLC0415
+
+        vec = 16 // nbytes_of(ctx.buffer_dtypes.get(self.dst, "f32"))
+        chunks = self.cols // vec
+        src = f"_r * {self.cols} + _c"
+        if swizzle_xor(self.swizzle):
+            src = f"{swizzle_fn(self.swizzle)}({src})"
+        pad = _pad(ctx.indent)
+        return [
+            f"{pad}#pragma unroll",
+            f"{pad}for (int _i = threadIdx.x; _i < {self.rows * chunks}; _i += {self.threads}) {{",
+            f"{pad}    const int _r = _i / {chunks}, _c = (_i % {chunks}) * {vec};",
+            f"{pad}    *reinterpret_cast<uint4*>(&{self.dst}[{render_index(self.dst, self.base, ctx)} + _r * {self.ldm} + _c]) = "
+            f"*reinterpret_cast<const uint4*>(&{self.src}[{src}]);",
+            f"{pad}}}",
+        ]
+
+
+@dataclass(frozen=True)
 class RegStore(Stmt):
     """Store an mma.sync f32 accumulator array to the output buffer with a
     per-lane epilogue downconvert.
@@ -2753,6 +2809,9 @@ def pack_smem(smems) -> tuple[dict[str, int], int]:  # noqa: ANN001 — smems: I
     cursor = 0
     for s in smems:
         elements = prod(int(e) for e in s.extents) if s.extents else 1
+        if s.over:
+            offsets[s.name] = offsets[s.over]
+            continue
         align = max(nbytes_of(s.dtype), int(s.align) if s.align else 0)
         if align:
             cursor = (cursor + align - 1) // align * align

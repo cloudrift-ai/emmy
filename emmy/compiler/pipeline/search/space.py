@@ -191,6 +191,14 @@ PAIR_LDMATRIX = Knob(
     off=False,
 )
 
+STORE_THROUGH_SMEM = Knob(
+    "STORE_THROUGH_SMEM",
+    KnobType.BOOL,
+    hints=(True,),  # on by default; not a search dimension — manual override only via the env var
+    help="Store an mma GEMM's output tile through the dead operand slabs, then to global memory in 16-byte rows.",
+    off=False,
+)
+
 #: The unroll budget — the max static loop trip count eligible for ``#pragma unroll``. Pin-only
 #: (``off`` defaults to ``_UNSET`` → never stamped / featurized / enumerated, so it can't perturb the
 #: search or the goldens): ``EMMY_UNROLL=0`` keeps every extent-driven loop **rolled** (compact,
