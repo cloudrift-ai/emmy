@@ -766,11 +766,11 @@ def seed_index(cell: tuple[Expr, ...], shape: tuple) -> tuple[Expr, ...]:
     return tuple(Literal(0, "int") if dim in units else next(rest) for dim in range(len(shape)))
 
 
-def lift_serial(op: LoopOp, *, name: str, prefix: str, inputs: Mapping[str, Tensor]) -> tuple[TileOp, dict[str, tuple]]:
+def lift_serial(op: LoopOp, *, name: str, prefix: str) -> tuple[TileOp, dict[str, tuple]]:
     """A kernel that carries a state lifted as a serial kernel: its carried states become state
     buffers (:func:`states_as_buffers`, named under ``prefix``) and the loop that carries them the
-    kernel's time; ``inputs`` are the kernel's input tensors. Returns the tile and the state buffers' shapes."""
-    body, serial, shapes = states_as_buffers(op.body, prefix, inputs)
+    kernel's time. Returns the tile and the state buffers' shapes."""
+    body, serial, shapes = states_as_buffers(op.body, prefix, op.inputs)
     return lift_loop_op(op, name=name, body=body, serial=serial), shapes
 
 

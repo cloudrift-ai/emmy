@@ -618,9 +618,10 @@ Three definitions the list leans on:
   the candidate must carry every feature the row has with the same value; a newer feature may remain unspecified.
   `I_kernel` hashes the typed, schedule-free Loop body at kernel birth, re-derived when the lift or the twist gives
   the kernel a body of its own — the tile identity the tune DB keys the kernel on, so a kernel's rows and its forks
-  name it alike. Equal feature histograms alone cannot make two kernels share measurements. Legacy rows without this
-  identity remain training data but cannot decide a current kernel's measured pick. The golden import keys a
-  record's rows by the kernels its lowering mints.
+  name it alike. A schedule never re-derives it, even one that realizes the kernel through another term (a carried
+  state's serial form): the kernel is the tile its schedule fork was offered. Equal feature histograms alone cannot
+  make two kernels share measurements. Legacy rows without this identity remain training data but cannot decide a
+  current kernel's measured pick. The golden import keys a record's rows by the kernels its lowering mints.
 - **The reservoir** is the online prior's own training dataset: a bounded uniform sample (Algorithm R, capped at
   `MAX_ROWS` = 100k) of every training row ever streamed in across runs, stored INSIDE the online checkpoint
   (`online.json`, Part 5). Its rows are all `H_opt=3` — `Prior.add_rows` admits no other regime — and they double as

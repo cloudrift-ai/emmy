@@ -69,7 +69,10 @@ substitution) offers nothing and stays one kernel.
 
 The classic schedule realizes the carrying loop as ordered launches with a global state buffer: at its fork it
 lifts the kernel's Loop IR again with the state as a buffer the node owns and the loop as the kernel's **serial
-axis** (`Placement.serial`, `lift_serial`), each launch reading the previous launch's stores one step back. The
+axis** (`Placement.serial`, `lift_serial`), each launch reading the previous launch's stores one step back. That
+form is a realization of the kernel, not another kernel: the kernel keeps the lifted tile's identity, the one its
+fork and its golden rows name. The state's cells are its axes alone, so a size-one dim the Loop IR spelled `0` holds
+no cell; a seed tensor keeps that dim, and both schedules read it with `0` there (`seed_index`). The
 register schedule reads the carrying fold itself and realizes the loop inside each CTA when the state rows are
 independent; the state's port, added at the lift for the classic realization, disappears during materialization,
 and externally read snapshots remain global outputs. Both preserve previous-state reads until the step has

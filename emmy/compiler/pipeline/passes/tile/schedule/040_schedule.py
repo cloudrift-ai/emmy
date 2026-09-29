@@ -74,7 +74,7 @@ def serial_form(tile: TileOp, prefix: str) -> TileOp:
     from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
     from emmy.compiler.pipeline.passes.tile._fromloop import lift_serial  # noqa: PLC0415
 
-    formed, _ = lift_serial(LoopOp(body=tile.loop_body), name=tile.name, prefix=prefix, inputs=tile.inputs)
+    formed, _ = lift_serial(LoopOp(body=tile.loop_body, inputs=tile.inputs), name=tile.name, prefix=prefix)
     # The kernel's own knobs and its BOUND I/O: a standalone loop op seeds placeholder tensors, and
     # the schedule reads operand dtypes, output shapes and the ``with_io`` identity off these maps.
     return replace(formed, knobs=tile.knobs, inputs=tile.inputs, outputs=tile.outputs)
