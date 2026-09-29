@@ -315,7 +315,10 @@ evidence ranks the rest. Staging is a
 **pure perf transform** — an ineligible kernel (masked N, or a symbolic / non-divisible K on a BYTE-COPIED
 operand, whose chunk runs along K; a transposed B stages N-major on every transport since the serving-layout work)
 silently falls back to gmem-direct, and a staged kernel is
-**bit-identical** to its gmem-direct baseline. A synchronous `smem` ring uses the same slot rotation, and overlaps the
+**bit-identical** to its gmem-direct baseline. A cp.async copy of a slab row past a masked edge (the tile axis on the
+slab row: M, or a transposed B's N) keeps its clamped address but copies zero bytes and zero-fills: clamped reads all
+landed on the edge's last row, and a 96-row A100 tile over 512 rows spent 23 us on a 16 us GEMM contending for it.
+A synchronous `smem` ring uses the same slot rotation, and overlaps the
 drain the only way a target without `cp.async` can: the blocking copy SPLITS across it. The fill issues the prefetch
 chunk's global loads into registers, the resident chunk drains, and the deposit stores those registers into the
 prefetch slot — one barrier per chunk, since the slot it writes was freed two chunks back. The split is
@@ -693,7 +696,14 @@ modern atoms, two B `x2` loads become one `x4` (plain for N-adjacent transposed 
 B). On Volta, adjacent A or B fragments under the derived crosswise/congruous layouts become one 128-bit shared load.
 Copy fills and computed operand fills use these same coupled layouts and accumulator mapping.
 The transform halves the staged drain's LSU instructions and is bit-identical; equal modern swizzle modes remain
-pairable because their per-lane address XOR commutes with the paired lane map;
+pairable because their per-lane address XOR commutes with the paired lane map. A ring drain's row carries its slot term
+and its fragment offset in one `+` chain, so the pair's row distance is read off the literals of the whole chain;
+`097_store_through_smem` stores an mma tile's output through shared memory when its `STAGE` spells `/out`: after the
+K-loop's copies drain and a barrier, the fragments land over the dead operand slabs (a 128-byte-row swizzle keeps both
+sides conflict-free), and a second barrier later the CTA writes 16-byte rows (`SmemTileStore`), bounded by a masked M
+edge. It replaces a burst of 4-byte stores per lane that throttled the load/store queue: an A100 one-wave 256x128 GEMM
+went 39.0 to 32.1 us (cuBLAS 31). It is a schedule choice, not a default, because on long-K tiles with a small store
+share the two barriers cost about as much as they save;
 `097_widen_fragment_stores` stores four N-adjacent fragment cells of a `wgmma` kernel as one 16-byte row per lane
 (`RegStore.run`): each cell's epilogue runs as before, then three `shfl.xor` rounds transpose the quad's packed column
 pairs so lane `t` holds cell `t`'s eight columns — a quarter of the stores, every sector whole (on the H100 the
