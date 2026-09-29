@@ -58,23 +58,15 @@ def _normalize_body(stmts: Body) -> Body:
     stmts = hoist_loop_invariants(stmts)
     stmts = simplify_body(stmts)
     stmts = dedup_loads(stmts)
-    # Hoisting, simplification, and a parent merge can expose sibling reductions after the first
-    # merge. Close that dependency here: unifying their axes may enable a merge, which may then
-    # expose duplicate loads and require one new canonical order. Every changed round removes a
-    # loop or a load, so this reaches a fixed point without a fixed iteration bound.
-    stmts = _canonical_order(stmts)
+    # Close the structural cleanup before labeling the relation graph. Coordinate and operand
+    # spelling expose duplicates without paying for canonical sibling order at every round.
+    stmts = sort_commutative_args(_canonicalize_exprs(stmts))
     while True:
-        # Unification renames sibling reduce axes in place: an order-preserving alpha-rename the
-        # relation graph never spelled, so the graph the order came from still describes it.
         unified = unify_sibling_reduce_axes(stmts)
-        if unified == stmts:
-            unified = stmts
-        else:
-            unified.__dict__["_ordering"] = stmts._ordering
         reduced = dedup_loads(merge_sibling_reduce_loops(unified))
         if reduced == unified:
-            return unified
-        stmts = _canonical_order(reduced)
+            return _canonical_order(unified)
+        stmts = sort_commutative_args(_canonicalize_exprs(reduced))
 
 
 # ---------------------------------------------------------------------------
