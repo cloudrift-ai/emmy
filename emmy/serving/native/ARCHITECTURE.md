@@ -2,18 +2,16 @@
 
 Python prepares a standalone dense Qwen3 generation artifact with FP16 weights, projection inputs, and KV cache.
 The output head retains FP32 logits through sampling so FP16 rounding cannot create a false maximum tie.
-The Rust runtime submits the exported launches, retains the KV cache, and chooses each next token on the GPU.
-No Python model operation runs after
-preparation. The experimental native HTTP adapter serves one active request; this is not a performance replacement
-for vLLM. The existing serving integration remains the default.
+The Rust runtime submits the exported launches and retains the KV cache. Compiled GPU reductions select greedy
+tokens; positive-temperature sampling runs on the CPU. No Python model operation runs after preparation. The
+experimental native HTTP adapter serves one active request; this is not a performance replacement for vLLM. The existing serving integration remains the default.
 
 ## Preparation
 
 `prepare.export_model` traces the existing attention-split wrappers and final normalization/output head. It uses the
 compiler's plan-template cache to reuse identical layer structure. The compiled plans are joined into one ordinary
-static plan for each width: seams refer to the same named allocation, and internal names are scoped by layer. There is
-no
-new compiler or runtime alias format. Unsupported symbolic, indirect, and descriptor arguments are rejected.
+static plan for each width: seams refer to the same named allocation, and internal names are scoped by layer.
+There is no new compiler or runtime alias format. Unsupported symbolic, indirect, and descriptor arguments are rejected.
 Cache buffers use the persistent output role, without joining the public logits/token output list. Custom launches
 identify their writes so Python scratch allocation preserves the same dependencies as native execution.
 
@@ -151,7 +149,21 @@ FP32 attention, rotary intermediates, and residual accumulation close the earlie
 attention qualification also covers the full 4,096-position capacity.
 The [output-precision investigation](../../../experiments/Qwen3-0.6B/native_accuracy/RESULTS.md) records the FP16
 head-output tie and its FP32 repair, with the same checkpoint error limits.
-Performance and production concurrency are separate qualifications.
+The output-precision artifact passed nineteen sequential and nineteen chunked checkpoint cases, plus the HTTP
+lifecycle check. Those results precede the compiled embedding, rotary, attention, greedy reduction, and paged cache
+introduced in PR #871; they do not qualify the combined implementation. The
+[paged-cache report](../../../experiments/Qwen3-0.6B/paged_cache/RESULTS.md) records earlier V100 smoke results and
+stale schedule coverage, not a full-checkpoint qualification of the merged path.
+
+The serving foundation is implemented: standalone execution, cached generation, request reset, CUDA graph replay,
+and the [native HTTP adapter](../../../crates/emmy-server/ARCHITECTURE.md). Its scope remains one active dense Qwen3
+request on one GPU. Paging currently allocates the full context at load; per-request allocation and reclamation,
+continuous batching, and prefix reuse are not implemented. The
+[manual-schedule comparison](../../../experiments/Qwen3-0.6B/native_manual_schedules/RESULTS.md),
+[greedy comparison](../../../experiments/Qwen3-0.6B/native_greedy/RESULTS.md), and
+[prefill comparison](../../../experiments/Qwen3-0.6B/native_prefill/RESULTS.md) retain their revision-specific evidence.
+Performance and production concurrency are separate qualifications; these reports establish no general native
+serving advantage over stock vLLM.
 
 ## Native HTTP launcher
 
