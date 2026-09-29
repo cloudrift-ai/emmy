@@ -36,11 +36,10 @@ from emmy.compiler.graph import Node
 from emmy.compiler.ir.expr import BinaryExpr, Literal, SimplifyCtx
 from emmy.compiler.ir.kernel import KernelOp, Tile
 from emmy.compiler.ir.kernel.ir import CpAsyncCopy, CpAsyncWait, MbarrierWait, RegStore, Smem, SmemTileStore, Sync, TmaLoad, pack_smem
+from emmy.compiler.ir.schedule import Stage
 from emmy.compiler.ir.stmt import Body
 from emmy.compiler.pipeline import Pattern, RuleSkipped
-from emmy.compiler.ir.schedule import Stage
 from emmy.compiler.pipeline.knob import family_of
-from emmy.compiler.pipeline.search.space import STAGE
 
 PATTERN = [Pattern("root", KernelOp)]
 
@@ -51,7 +50,9 @@ _ROWS, _COLS = 16, 8  # an m16n8 C fragment
 
 def rewrite(root: Node) -> KernelOp | None:
     op: KernelOp = root.op
-    if not any(family_of(key) == STAGE.name and value and Stage.parse(str(value)).out for key, value in op.knobs.items()):
+    # Read by name: a pass module holding the STAGE ``Knob`` declares it, and the cursor would then stamp an
+    # empty STAGE onto every kernel this pass sees, a thread-tier one included, where no row spells one.
+    if not any(family_of(key) == "STAGE" and value and Stage.parse(str(value)).out for key, value in op.knobs.items()):
         raise RuleSkipped("no STAGE here stores its output through shared memory")
     if any(s.name == _TILE for s in op.smem_buffers.values()):
         raise RuleSkipped("the output tile already goes through shared memory")
