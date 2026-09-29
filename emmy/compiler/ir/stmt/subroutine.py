@@ -10,6 +10,7 @@ from emmy.compiler.ir.expr import Expr
 from emmy.compiler.ir.stmt.base import Stmt, pretty_body
 from emmy.compiler.ir.stmt.body import Body, free_names
 from emmy.compiler.ir.stmt.passes import _rename_ssa_vars_in_expr, _rewrite_kind
+from emmy.utils import cached_method
 
 
 @dataclass(frozen=True, eq=False)
@@ -40,6 +41,10 @@ class Subroutine:
     def buffers(self) -> tuple[str, ...]:
         return tuple(dict.fromkeys(name for stmt in self.body.iter() for name in stmt.external_reads()))
 
+    @cached_method
+    def with_buffers(self, buffers: tuple[str, ...]) -> Subroutine:
+        return replace(self, body=self.body.rename_buffers(dict(zip(self.buffers, buffers, strict=True))))
+
     @property
     def params(self) -> tuple[str, ...]:
         return tuple(axis.name for axis in self.axes)
@@ -58,13 +63,15 @@ class Subroutine:
 
 @dataclass(frozen=True)
 class Call(Stmt):
-    """A scalar call; the definition stays outside generic statement-tree walks."""
+    """A fusion-only scalar call; its definition stays outside generic statement-tree walks.
+
+    Calls expand before a LoopOp is validated or lifted. They are not members of Tile IR lambdas.
+    """
 
     name: str
     target: Subroutine
     args: tuple[Expr, ...]
 
-    pure = True
     deps_deep = True
 
     def __post_init__(self) -> None:
@@ -82,6 +89,10 @@ class Call(Stmt):
 
     def external_reads(self) -> tuple[str, ...]:
         return self.target.buffers
+
+    def rename_buffers(self, rename):  # noqa: ANN001 — see Stmt.rename_buffers
+        buffers = tuple(rename.get(name, name) for name in self.target.buffers)
+        return self if buffers == self.target.buffers else replace(self, target=self.target.with_buffers(buffers))
 
     def pretty(self, indent: str = "") -> list[str]:
         args = (*self.target.buffers, *(arg.pretty() for arg in self.args))

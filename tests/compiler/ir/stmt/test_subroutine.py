@@ -104,3 +104,13 @@ def test_compact_pretty_prints_a_shared_definition_once():
     assert "left = project(x, weight, k, c)" in rendered
     assert "right = project(x, weight, k," in rendered
     assert len(rendered.splitlines()) < 18
+
+
+def test_buffer_renaming_preserves_shared_definitions():
+    compact = _body(_project(), 4)
+    renamed = compact.rename_buffers({"x": "input", "weight": "matrix", "out": "output"})
+    assert len(definitions(renamed)) == 1
+    assert definitions(renamed)[0].buffers == ("input", "matrix")
+    assert renamed.structural_key() == LoopOp(body=compact).body.rename_buffers(
+        {"x": "input", "weight": "matrix", "out": "output"}
+    ).structural_key()

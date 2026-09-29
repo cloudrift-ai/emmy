@@ -566,6 +566,13 @@ Pure `body → body` passes run from `LoopOp.__post_init__` so every
 constructed `LoopOp` (including intermediate fusion results) is
 canonicalized before validation:
 
+Fusion may construct a compact body containing scalar `Call` statements. Each references one read-only `Subroutine`
+with explicit coordinate parameters and captured input buffers. Early ordering, alias elimination, invariant motion
+and coordinate simplification operate on the calls; each shared definition is prepared once. Before full CSE, calls
+expand through the splicer's same demand table and reduction-axis unification. The resulting ordinary statement body
+is the only form used by validation, executable identity, serialization and Tile IR lifting. Operation clustering
+also starts from that CSE form, so it sees operations inside definitions. Subroutine boundaries never limit fusion.
+
 - `topo_sort_siblings` — stable Kahn reorder so SSA defs precede their uses
   within each body (fixes splicer-produced use-before-def).
 - `drop_size_one_free_axes` — inline extent-1 free Loops.
@@ -723,13 +730,22 @@ inlining a shared producer per consumer. The single-sink convenience form still 
 selects all its Writes. Every `_NotSupported` carries a reason string, logged at DEBUG by `splice_loops` —
 `compile -vv` shows which pattern a rejected edge hit.
 
-Before expansion, the splicer uses `Body.dependency_depths` to count reductions along each source definition's longest
-dependency path, passing producer Write depths into consumer inputs. Equal-depth reductions cannot depend on each other.
+The splicer forms one subroutine per demanded source reduction, with nested reductions represented by calls to their
+own shared definitions. Equal calls reuse the same demand before expanding their bodies; different coordinates retain
+distinct calls. `compile -vv` prints this intermediate form as `sub name(buffers, coordinates):` and one-line calls.
+The final Loop IR listing is expanded and fully CSE'd, as are all persisted kernels.
+
+Before expansion, the splicer counts reductions along each source definition's longest dependency path, including
+the depth of called definitions and passing producer Write depths into consumer inputs. Equal-depth reductions cannot
+depend on each other.
 When they have the same extent and enclosing scope, they share an iteration axis from construction onward, so the
 binding table shares their common producers before emitting them. A reduction that reads another's finalized value
 has greater depth and keeps a separate scope. Different input offsets retain their own coordinate substitutions.
 This changes body construction only; every legal fusion region is still built whole, and final normalization closes
-the remaining sharing opportunities.
+the remaining sharing opportunities, including common branches of different subroutines. Formal coordinates enter
+the same liveness analysis as enclosing loop axes: dropping them from a demand key would incorrectly merge calls at
+different rows or columns. Definition and expansion worklists share the source analysis, and expansion uses the same
+scope placement and hygienic substitution as the original splice rather than a separate inliner.
 
 Before dependency reconstruction, `splice_graph` finds output equivalence clusters: single-owner copy chains ending
 at a terminal graph output, with the same dtype and element count and an exact symbolic proof that the source and

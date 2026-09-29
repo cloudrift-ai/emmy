@@ -27,10 +27,10 @@ Resolution dispatches on stmt kind:
   (``loop/lifting/090_spell_store_rounding``), so inlining the value chain
   carries it with no special case here. The target's expression
   chain reconstructs piecemeal.
-- **Accum** — share an equal-extent axis with independent reductions
-  at the same scope, or allocate a fresh axis, then place ``Loop(axis, Accum(...))`` at
-  ``_scope_for_axes(ref_scope, required_c_axes)``, queue the Accum's
-  ``value`` under σ extended with the fresh reduce binding.
+- **Accum** — form one shared subroutine per source reduction and emit a call under the
+  demanded coordinates. Building that definition, or expanding calls before full CSE, shares
+  equal-extent axes between independent reductions at one scope and queues the contribution
+  under σ extended with the reduce binding. Nested reductions remain calls during construction.
 - **Plain Assign / Select / Load** (non-splice source) — ``rewrite``
   the original stmt through ``(rename_ssa, sigma)`` and insert at the
   demand scope.
@@ -41,7 +41,7 @@ to share an existing emission or allocate a fresh one. ``live_axes``
 comes from ``LoopMeta`` and is the set of axes transitively reachable
 through the stmt's Expr subtrees — σ bindings outside that set are
 irrelevant and collapsed. Same key → share; different emit scope or
-different live-σ → emit twice. This handles plain-stmt sharing, Accum
+different live-σ → emit twice. This handles plain-stmt and subroutine-call sharing, Accum
 scope multiplicity (SDPA QK^T at softmax-max vs softmax-output), and
 multi-output splice targets uniformly.
 
@@ -579,7 +579,10 @@ class _Program:
 
     @cached_property
     def used_names(self) -> set[str]:
-        return set().union(*(_collect_names(meta.body) for meta in self.loops.values()))
+        return set().union(*(
+            set(meta.body.ssa_defs | meta.body.axis_names) | {axis.name for scope in meta.scopes.values() for axis in scope.enclosing}
+            for meta in self.loops.values()
+        ))
 
     @cached_property
     def reduction_depth(self) -> dict[str, dict[str, int]]:
@@ -637,6 +640,7 @@ class _Splicer(LoopBuilder):
         self._reduce_axes: dict[tuple[Scope, Expr, int], Axis] = {}
         self._free_vars_by_expr_id: dict[int, tuple[Expr, frozenset[str]]] = {}
 
+    # A recurrence whose substitutions multiply is a construction error, never a smaller region.
     _BINDING_RATIO = 256
 
     def insert(self, stmt: Stmt, enclosure: Scope) -> None:
@@ -926,13 +930,3 @@ def _solve_sigma(
         return None
     return Sigma(mapping)
 
-
-def _collect_names(body: Body) -> set[str]:
-    """All SSA names plus all axis names used anywhere in ``op``."""
-    names: set[str] = set()
-    for s in body.iter():
-        if isinstance(s, Loop):
-            names.add(s.axis.name)
-        elif isinstance(s, (Load, Assign, Select, Accum, Call)):
-            names.add(s.name)
-    return names

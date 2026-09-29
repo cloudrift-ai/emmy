@@ -391,17 +391,9 @@ class LoopMeta:
             scopes=scopes,
             reduce_axes=reduce_axes,
             writes=tuple(writes),
-            live_axes=_compute_live_axes(bound),
+            live_axes=bound.axis_dependencies,
         )
 
-
-def _compute_live_axes(body: Body) -> dict[str, frozenset[str]]:
-    """Axes reachable through Expr subtrees rooted at each SSA name.
-
-    Accums already have their reduce axis subtracted by
-    :attr:`Body.axis_dependencies`.
-    """
-    return body.axis_dependencies
 
 
 # ---------------------------------------------------------------------------
