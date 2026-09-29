@@ -546,7 +546,9 @@ def test_fp4_tma_matches_cp_async_bit_for_bit(tmp_path, channels, ring, k):
         backend = CudaBackend()
         with pinned_knobs(_fp4_tma_pins("/".join((depth, transport, *register)))):
             compiled = backend.compile(g)
-        native = [s for node in compiled.nodes.values() if "emmy_mma_m16n8k64_e2m1_f32(" in (s := getattr(node.op, "kernel_source", "") or "")]
+        native = [
+            s for node in compiled.nodes.values() if "emmy_mma_m16n8k64_e2m1_f32(" in (s := getattr(node.op, "kernel_source", "") or "")
+        ]
         assert native and all(("cp_async_bulk_tensor" in s) == (transport == "smem-tma") for s in native)
         runs = [backend.run(compiled, input_data={**data, **feed})[0] for _ in range(2)]
         outputs[transport] = [np.asarray(run.outputs[out]) for run in runs for out in g.outputs]
