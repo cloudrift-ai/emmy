@@ -2953,6 +2953,8 @@
  "tests/serving/test_twins_coded.py::test_coded_twin_spells_the_deployed_contraction": 0.37,
  "tests/serving/test_twins_coded.py::test_deepseek_expert_twin_records_the_native_mxfp4_program_serving_binds": 0.46,
  "tests/serving/test_twins_coded.py::test_deepseek_serving_twins_capture_the_hyper_connection_seam_weight_free": 0.49,
+ "tests/serving/test_twins_coded.py::test_gdn_serving_capture_has_explicit_state_inputs_and_outputs[False]": 3.78,
+ "tests/serving/test_twins_coded.py::test_gdn_serving_capture_has_explicit_state_inputs_and_outputs[True]": 3.87,
  "tests/serving/test_twins_coded.py::test_laguna_serving_twin_capture_includes_symbolic_coded_expert": 0.22,
  "tests/serving/test_twins_coded.py::test_nvfp4_serving_twins_carry_the_declared_w4a4_program": 0.08,
  "tests/serving/test_twins_coded.py::test_nvfp4_twin_is_the_graph_serving_stamps": 0.1,

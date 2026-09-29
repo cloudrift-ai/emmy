@@ -124,6 +124,7 @@ def capture_twin_graphs(
         hyper_connection_seam,
         moe_block_parts,
         moe_expert_layout,
+        retarget_constants_to_model,
     )
     from emmy.serving.gen_runner import trace_split  # noqa: PLC0415
 
@@ -193,6 +194,7 @@ def capture_twin_graphs(
                 ]
                 twin_name = f"gdn{name}{suffix}"
                 graphs[twin_name] = trace_split(wrapper, args, None)
+                retarget_constants_to_model(graphs[twin_name], wrapper, block)
                 layer_scopes[twin_name] = members
             continue
         parts = moe_block_parts(block.mlp)
