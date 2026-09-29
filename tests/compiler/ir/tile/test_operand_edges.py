@@ -192,18 +192,33 @@ def test_a_sweep_drops_pure_members_not_read_by_its_stores() -> None:
     from emmy.compiler.ir.tile.ir import loaded_buffers
     from emmy.compiler.pipeline.passes.tile._fromloop import lift_loop_op
 
-    first = Loop(axis=N_AXIS, body=Body((
-        Load(name="first", input="x", index=(Var("n"),)),
-        Write(output="a", index=(Var("n"),), value="first"),
-    )))
-    second = Loop(axis=M_AXIS, body=Body((
-        Load(name="unused", input="dead", index=(Var("m"),)),
-        Loop(axis=K_AXIS, body=Body((
-            Load(name="value", input="y", index=(Var("m"), Var("k"))),
-            Accum(name="sum", value="value", op="add", axes=("k",)),
-        ))),
-        Write(output="b", index=(Var("m"),), value="sum"),
-    )))
+    first = Loop(
+        axis=N_AXIS,
+        body=Body(
+            (
+                Load(name="first", input="x", index=(Var("n"),)),
+                Write(output="a", index=(Var("n"),), value="first"),
+            )
+        ),
+    )
+    second = Loop(
+        axis=M_AXIS,
+        body=Body(
+            (
+                Load(name="unused", input="dead", index=(Var("m"),)),
+                Loop(
+                    axis=K_AXIS,
+                    body=Body(
+                        (
+                            Load(name="value", input="y", index=(Var("m"), Var("k"))),
+                            Accum(name="sum", value="value", op="add", axes=("k",)),
+                        )
+                    ),
+                ),
+                Write(output="b", index=(Var("m"),), value="sum"),
+            )
+        ),
+    )
     tile = lift_loop_op(LoopOp(body=(first, second)))
     assert {load.input for load in loaded_buffers(tile.op)} == {"x", "y"}
     assert [(spec.write.output, len(spec.sweep)) for spec in tile.output_specs] == [("a", 1), ("b", 1)]

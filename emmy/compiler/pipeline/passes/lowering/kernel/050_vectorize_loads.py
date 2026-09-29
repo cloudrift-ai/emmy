@@ -20,12 +20,11 @@ post-order):
    a name their index reads, and nothing between them writes the buffer.
    An unrolled pointwise body interleaves each element's load with its
    arithmetic, so a run is rarely adjacent.
-2. Try widths 8 then 4 then 2 over that group: if its first ``n`` Loads
-   have matching outer indices and last-dim indices that affinely
-   decompose to ``anchor, anchor+1, ..., anchor+n-1`` (same coefficients
-   on free vars), AND the target supports ``vector_type(elem_dtype, n)``
-   for the source-buffer dtype, replace them with one widened ``Load`` at
-   the first one's position.
+2. Try widths 8 then 4 then 2 over that group: the complete flat addresses
+   must form ``anchor, anchor+1, ..., anchor+n-1`` with an aligned anchor
+   for every free coordinate. If the target also supports
+   ``vector_type(elem_dtype, n)`` for the source-buffer dtype, replace the
+   loads with one widened ``Load`` at the first one's position.
 3. Otherwise advance one stmt.
 
 ## Why this needs the source-buffer dtype

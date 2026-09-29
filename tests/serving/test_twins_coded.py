@@ -177,12 +177,15 @@ def test_gdn_serving_capture_has_explicit_state_inputs_and_outputs(tmp_path, qua
         config.quantization_config = _NVFP4_CONFIG
         packed, scales, scale2 = quantize_nvfp4(np.random.default_rng(0).standard_normal((128, 64), dtype=np.float32))
         base = "model.layers.0.linear_attn.in_proj_qkv"
-        save_file({
-            f"{base}.weight": torch.from_numpy(packed),
-            f"{base}.weight_scale": torch.from_numpy(np.ascontiguousarray(scales)).view(torch.float8_e4m3fn),
-            f"{base}.weight_scale_2": torch.from_numpy(scale2),
-            f"{base}.input_scale": torch.tensor([0.05]),
-        }, str(tmp_path / "model.safetensors"))
+        save_file(
+            {
+                f"{base}.weight": torch.from_numpy(packed),
+                f"{base}.weight_scale": torch.from_numpy(np.ascontiguousarray(scales)).view(torch.float8_e4m3fn),
+                f"{base}.weight_scale_2": torch.from_numpy(scale2),
+                f"{base}.input_scale": torch.tensor([0.05]),
+            },
+            str(tmp_path / "model.safetensors"),
+        )
     config.save_pretrained(tmp_path)
     graphs = capture_twin_graphs(str(tmp_path), decode_bucket=1, prefill_bucket=16, symbolic=False)
     suffix = "@nvfp4" if quantized else ""
@@ -193,12 +196,8 @@ def test_gdn_serving_capture_has_explicit_state_inputs_and_outputs(tmp_path, qua
         rows = int(name.removeprefix("gdn").split("@")[0])
         if quantized:
             assert set(_packed_weights(graph)) == {"model.layers.0.linear_attn.in_proj_qkv.weight"}
-        assert [tuple(graph.buffer(key).shape) for key in graph.inputs] == [
-            (1, rows, 64), (1, 4, 16, 16), (1, 128, 4)
-        ]
-        assert [tuple(graph.buffer(key).shape) for key in graph.outputs] == [
-            (1, rows, 64), (1, 4, 16, 16), (1, 128, 4)
-        ]
+        assert [tuple(graph.buffer(key).shape) for key in graph.inputs] == [(1, rows, 64), (1, 4, 16, 16), (1, 128, 4)]
+        assert [tuple(graph.buffer(key).shape) for key in graph.outputs] == [(1, rows, 64), (1, 4, 16, 16), (1, 128, 4)]
     assert len(graphs["pre1-global"].outputs) == 4
     post = graphs["post1-global"]
     assert [tuple(post.buffer(key).shape) for key in post.inputs] == [(1, 64)] * 3

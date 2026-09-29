@@ -595,6 +595,11 @@ The Tile IR boundary is one structural operation:
    contraction's shared argument, merge overlapping cones into multi-result edges, and apply the closed-child rules
    over the complete tree.
 
+Output sweeps retain only their effects after their live scalar dependencies move into operand terms. Pure members
+with no remaining reader are discarded, even when no new result needs lifting. A root projection whose outputs all
+come from independent operands likewise keeps no dead body that could force their separate domains into one nest.
+An index-map producer that is itself a graph output remains live after composition into another consumer.
+
 When a contraction in the lifted tree owns no free axis and the placement carries no extent-one axis already, `_row`
 binds a size-one output coordinate back as an extent-one axis and lifts again, keeping the result only if the BOUND
 axis is a contraction's left axis. Where there is nothing to bind into, post-init's `_implicit_unit_row` announces an

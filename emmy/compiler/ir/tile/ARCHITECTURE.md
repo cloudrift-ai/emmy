@@ -54,7 +54,9 @@ contraction over the previous state (`Σ_k W[i,k] · pre S[k,j]`) is an ordinary
 A per-step output is a further result of the lift — a `<value>__obs` copy of what the step defines or an operand
 exposes, or a pass-through of a value an output sweep beside the cells computes — stored inside the loop.
 `Fold.lower` opens the carrying loop outside the loops over the cells, with a nest of its own for the step's
-sweeps; the closed program is the Loop IR the roll wrote.
+sweeps; the closed program is the Loop IR the roll wrote. Unit cell axes disappear from the carrier, while its seed
+keeps its external tensor shape. Serial lowering therefore receives bound input tensors and restores the seed's
+unit coordinates before flattening its address.
 
 A carried state has one kernel-set decision, the **split across the sequence** (`REDUCE@…/scan=g<n>k`, offered
 by `030_cut` through `_split.realize_carry_split`). It needs the step AFFINE in the state and column-wise

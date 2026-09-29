@@ -244,13 +244,13 @@ Stage deliverables are cumulative. The following sketches are intended results, 
 
 | Stage | Reviewable deliverable | Observable completion condition |
 | --- | --- | --- |
-| 🚧 1. Baseline | Pinned main + #969 reproduction matrix and small regression inputs | The singleton batch case demonstrably reaches the same recurrence algebra as the checkpoint; each known failure has a bounded reproducer. |
+| ✅ 1. Baseline | Pinned main + #969 reproduction matrix and small regression inputs | The singleton batch case demonstrably reaches the same recurrence algebra as the checkpoint; each known failure has a bounded reproducer. |
 | ✅ 2. Recurrence | Field-preserving repack rewrite, consistent carrier/output coordinates, register and serial regressions | Kernel IR retains `FragmentRepack … role=b`; the checkpoint offers `STAGE=d1/reg`; classic launch-per-step CUDA does not reopen the time axis inside each launch; focused GPU states and corrected values match the reference. |
 | ✅ 3. Output domains | One correct placement of computation and stores, with sibling-domain regression tests | Lowered IR has sibling `(a0,a1[,a6])` and `(a8,a10)/(a8,a11)` nests. Store counts are proportional to the sum of the output sizes. The real kernel set completes under the watchdog with correct outputs. |
 | ✅ 4. Padding | Constant zero-fill padding through existing index maps | Tensor IR expresses `y[t,d] = x[t,d] if t < T else 0`; guarded Loop/Kernel loads are in bounds; short GDN traces succeed and returned sequence length remains T. |
-| 🚧 5. Projections | Legal tensor-core routes for qkv and z, with measured cut/schedule alternatives | Tile IR offers activation-A / weight-B contractions with MMA TILE; emitted CUDA contains the expected MMA instructions; reference comparisons pass and measured latency is reported. |
+| ✅ 5. Projections | Legal tensor-core routes for qkv and z, with measured cut/schedule alternatives | Tile IR offers activation-A / weight-B contractions with MMA TILE; emitted CUDA contains the expected MMA instructions; reference comparisons pass and measured latency is reported. |
 | 🚧 6. Serving | GDN capture and explicit persistent state, delivered separately if needed | `prefill(x,S0,H0) → (y,S1,H1)` followed by `decode(x1,S1,H1) → (y1,S2,H2)` matches an independent reference; H is convolution history; reset and request isolation pass. Mixed fallback is labelled separately. |
-| Pending: 7. Review | Validated PR(s), measurements, updated docs and tracker | Required finalization checks pass, scope and remaining gaps are explicit, and the tracker changes to ✅ only with the ready-for-review fix PR. |
+| 🚧 7. Review | Validated PR(s), measurements, updated docs and tracker | Required finalization checks pass, scope and remaining gaps are explicit, and the tracker changes to ✅ only with the ready-for-review fix PR. |
 
 - CPU tests preserve repack roles for both A/B and modern/Volta layouts; the checkpoint's actual loopification
   path renders correctly. Enumerate the recurrence's offered register schedules for the checkpoint shape.
@@ -462,3 +462,32 @@ The 5090 isolated QKV projection (`64 × 5120` by `5120 × 10240`) now has direc
 The earlier paired run measured async at 209.8 µs, but its TMA comparison lacked the CLI's strict eager
 correctness check; the direct TMA rerun above passed. These remain synthetic isolated projections, not
 checkpoint or whole-layer results. Local 5080 runs are used for correctness because the workstation is shared.
+
+### Finalization in progress
+
+The 5090 passed five focused checks at `12b88c6b`: full-block one/two-token prefill followed by decode and reset,
+both singleton-seed schedule families, and the time-binding regression (95.24 seconds including collection and
+compilation). Its GPU is free again. Static ordinary and NVFP4 mixed-layer capture also pass; parameter identity
+retargets the GDN wrapper's paths before checkpoint spelling. NVFP4 capture verifies actual packed weight constants.
+
+A fresh main fetch remains at `a5b8263c`, already merged here. Final lint passes. The required full suite is running
+locally with four workers; the shared 5080 is used only for correctness. The tracker remains 🚧 until finalization
+is complete. Native request dispatch and whole-model qualification remain separate integration work.
+
+Fresh model validation uses the report's cached revisions, not the saved frontend inventory alone. The existing CLI
+traces `Inferact/Qwen3.8-27B-NVFP4@6128240ebaf4eaa7bad2b3d1c72c37d677c5f462` at 16 and 64 tokens, spelling four
+quantized weights and four calibrated activation paths and writing eight distinct Loop kernels for each length.
+The unquantized `Qwen/Qwen3.8-27B@1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0` also traces at 64 tokens in FP16;
+the shared selected-layer/inventory APIs trace BF16 at 16 and 64 tokens (16 and 24 Loop kernels respectively).
+A fresh 512-token NVFP4 trace also succeeds and writes 12 distinct Loop kernels.
+These are fresh structural captures, not checkpoint-value GPU correctness or whole-model serving tests.
+
+The first full-suite attempt found a stale installed Rust runtime and Triton's hard-coded `/sbin/ldconfig` path.
+Both reproduced on unchanged main. An isolated runtime built from this branch and the supported
+`TRITON_LIBCUDA_PATH=/run/opengl-driver/lib` override fix all four focused environment checks. The suite restarted
+with those settings. An existing source assertion also depended on the prior choosing a rolled scalar reduction;
+its test now explicitly pins the scalar serial path with unrolling disabled. The focused assertion passes.
+
+All 64 added CPU checks pass under the grouped runner, with slow cases entered into the duration inventory.
+An older convolution test expected nonzero padding to fail; it now compares convolution plus empty/nonempty padding
+against eager on all three backends (six passing cases). No unsupported-mode rejection was removed.

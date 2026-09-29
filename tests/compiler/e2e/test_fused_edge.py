@@ -54,8 +54,12 @@ def test_interleaved_weight_channels_use_gathers_before_mma(stage, channels, col
     for channel in range(channels):
         name = f"b{channel}"
         graph.add_node(
-            IndexMapOp(out_shape=(64, columns), sources=(IndexSource(input_idx=0, coord_map=(placeholder(0), placeholder(1) * 2 + channel)),)),
-            ["b"], Tensor(name, (64, columns), F16), node_id=name,
+            IndexMapOp(
+                out_shape=(64, columns), sources=(IndexSource(input_idx=0, coord_map=(placeholder(0), placeholder(1) * 2 + channel)),)
+            ),
+            ["b"],
+            Tensor(name, (64, columns), F16),
+            node_id=name,
         )
         graph.add_node(MatmulOp(), ["a", name], Tensor(f"out{channel}", (32, columns), F16), node_id=f"out{channel}")
     if channels == 2:
@@ -68,7 +72,7 @@ def test_interleaved_weight_channels_use_gathers_before_mma(stage, channels, col
     assert len(sources) == 1
     assert "emmy_cp_async_cg(&_b" not in sources[0], "a contiguous byte copy cannot gather alternate weight columns"
     rng = np.random.default_rng(0)
-    arrays = {name: (rng.standard_normal(shape) * .1).astype(np.float16) for name, shape in (("a", (32, 64)), ("b", (64, 2 * columns)))}
+    arrays = {name: (rng.standard_normal(shape) * 0.1).astype(np.float16) for name, shape in (("a", (32, 64)), ("b", (64, 2 * columns)))}
     actual = backend.run(compiled, input_data=arrays)[0].outputs
     projections = [arrays["a"].astype(np.float32) @ arrays["b"][:, channel::2].astype(np.float32) for channel in range(channels)]
     expected = projections[0] if channels == 1 else projections[0] * projections[1]

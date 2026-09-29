@@ -223,8 +223,9 @@ def test_independent_output_computations_match_on_cuda():
     skip_if_no_cuda()
     tile = _independent_output_tile()
     graph = Graph()
-    arrays = {name: np.arange(np.prod(shape), dtype=np.float32).reshape(shape) - 4
-              for name, shape in (("x", (3, 5)), ("y", (3, 7)), ("w", (2,)))}
+    arrays = {
+        name: np.arange(np.prod(shape), dtype=np.float32).reshape(shape) - 4 for name, shape in (("x", (3, 5)), ("y", (3, 7)), ("w", (2,)))
+    }
     for name, values in arrays.items():
         graph.add_node(InputOp(), [], Tensor(name, values.shape), node_id=name)
     graph.add_node(tile, list(arrays), outputs=[Tensor(name + "o", values.shape) for name, values in arrays.items()])

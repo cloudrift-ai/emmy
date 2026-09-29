@@ -427,7 +427,9 @@ unit-stride raises rather than emitting an address the loader cannot express; a 
 every earlier dim unknown and keeps the dim-position reading. The staged transports have their own contracts: a TMA box
 is a rectangle in the descriptor's coordinates, so an operand whose trailing dims do not each hold one tile coordinate
 affinely declines it, and a cp.async or blocking fill copies A in chunks along K, so an A whose K is not the gmem inner
-dim declines those.
+dim declines those. A stored B whose K and N coordinates both have non-unit element strides instead uses the
+existing synchronous operand fill to gather each cell. Copy coverage, dtype checks, shared-memory accounting and
+TMA descriptor selection all use that same transport decision; a contiguous copy cannot represent the gather.
 
 **The register tile lifts a computed cone's prologue out of the K-loop.** The gmem-direct spine
 (`_contract_kloop`) takes each operand read as `(hoisted, per-step)`: the cone's row-invariant prologue is a value of
@@ -679,6 +681,11 @@ row · cp.async / TMA 2-D slab) lowers through one module. A contraction operand
 the two apply paths stay distinct on a coop-K contraction.
 
 ## Kernel-IR peepholes
+
+Vector loads and stores share one alignment proof over the complete flattened address. Every variable coefficient
+and the constant base must be divisible by the vector width, and subsequent elements must be consecutive. An aligned
+last coordinate alone is insufficient when an outer row has an odd stride. Unknown multidimensional layouts retain
+scalar operations; split coordinates may still vectorize when simplification reconstructs an aligned flat address.
 
 `030_stamp_types` resolves element dtypes, including the common branch type of a `Select` used by later statements.
 Integer algebra is always restamped from its typed operands, repairing a

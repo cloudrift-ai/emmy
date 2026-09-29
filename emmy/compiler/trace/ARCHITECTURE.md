@@ -49,9 +49,10 @@ diagonal and a typed scalar zero everywhere else. Square and rectangular dimensi
 the exported tensor metadata. Dynamic dimensions, non-strided layouts, pinned memory, and unsupported overloads or
 constructor options fail closed rather than being stored as an elementwise operation without coordinate semantics.
 
-An explicit all-zero `aten.pad` width tuple stays as a unary `ElementwiseOp("pad")` identity so a working golden
-retains the frontend provenance and exact dtype. Any nonzero, symbolic, or otherwise unrepresented padding fails
-closed: the elementwise form has no coordinate, mode, or fill-value fields and cannot describe a changed tensor.
+Constant zero-fill `aten.pad` lowers to a two-source `IndexMapOp`: shifted input coordinates inside the original
+extent and a typed zero outside. Inactive input coordinates are clamped before selection because reference
+backends may evaluate both sources. Negative widths crop through the same map; an empty input uses only the zero
+source. All-zero widths alias the input. Symbolic widths, other modes and nonzero fill values fail explicitly.
 
 The default `aten.cumsum` overload with a static integer axis lowers to an additive `ScanOp`, preserving the input
 shape and dtype. Dynamic axes, dtype overrides, and unsupported overloads or keyword arguments fail closed.
@@ -74,6 +75,11 @@ by both reference backends and the decomposition's scale constant. Gemma-nano (E
 the scaling — so dropping the kwarg re-scaled every logit by `1/sqrt(d)` and redistributed the whole softmax.
 
 ### `huggingface.py` — trace-friendly wrapper
+
+`build_gdn_state_wrapper` exposes a linear-attention block as `(x, state, history) -> (y, next_state, next_history)`.
+The recurrent matrix is FP32 and history uses the projected activation dtype. Zero states start or reset a request;
+batch rows are independent. History is cloned before the installed Hugging Face forward can update it in place,
+so callers retain both inputs. Static prefill and decode programs share this explicit state contract.
 
 HuggingFace `CausalLM` models build their causal attention mask
 dynamically at forward time (`arange` → `cumsum` → `triu` → `eq` …),

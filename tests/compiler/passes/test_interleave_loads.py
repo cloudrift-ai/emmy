@@ -88,7 +88,12 @@ def test_vector_loads_and_stores_require_aligned_row_offsets() -> None:
     from emmy.compiler.ir.expr import Var
     from emmy.compiler.ir.stmt import Write
 
-    for columns, row, aligned in ((3, Var("row"), False), (4, Var("row"), True), (3, Literal(1, "int"), False), (3, Literal(2, "int"), True)):
+    for columns, row, aligned in (
+        (3, Var("row"), False),
+        (4, Var("row"), True),
+        (3, Literal(1, "int"), False),
+        (3, Literal(2, "int"), True),
+    ):
         tensor = Tensor("x", (4, columns), F32)
         loads = Body(tuple(Load(name=f"v{i}", input="x", index=(row, Literal(i, "int")), dtype=F32) for i in range(2)))
         stores = Body(tuple(Write(output="x", index=(row, Literal(i, "int")), value=f"v{i}", value_dtype=F32) for i in range(2)))
