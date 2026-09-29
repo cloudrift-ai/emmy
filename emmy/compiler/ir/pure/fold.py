@@ -1476,9 +1476,9 @@ class Fold:
                 # is a wrapper's: it binds no coordinate, so it sits at the top of its path.
                 reads = {name for stmt in step for name in free_names(stmt)} - {name for stmt in step for name in stmt.defines()}
                 if step and stmts is None and not reads & {*term.lift.params, *origin}:
-                    node = path_of(frozenset(), path)
-                    sink(node).extend(step)
-                    attach(term, "step", sink(node), node, frozenset(bound) | set(node))
+                    node = nest.path_of(frozenset(), path)
+                    nest.sink(node).extend(step)
+                    attach(term, "step", nest.sink(node), node, nest.bound | set(node), nest)
                     step = ()
                 for edge in placed(term):
                     place(edge, loops, node if step else path, nest)
