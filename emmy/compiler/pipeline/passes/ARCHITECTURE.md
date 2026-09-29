@@ -610,6 +610,19 @@ evidence, not a schedule view or shape matcher, and it widens the catalog rather
 choices stay beside the fragment ones the bound row makes reachable. Decode attention is the standing case — one query
 row per head, whose score would otherwise be re-contracted once per output channel.
 
+A piece is first formed from its closed nest, where `Fold.lower` picks the loop order and the grid follows it. The
+lift orients a single-product contraction with a computed operand by that order: two slabs orient by layout, while a
+computed operand keeps whichever order the nest spelled. A cut W4A16 projection over `x + 1` would then put the weight
+decode in A, where the byte-slab staging, which reads the packed weight as B, does not apply. So a piece holding such
+a contraction is lowered a second time, inside one loop per grid axis, and lifted again. Nothing precedes that loop
+chain, so Loop-IR normalization orders it by the output layout, token first. The second pass lowers the terms the
+first pass formed, so a gate/up twin merged there stays one term. A lowering with no axes bound would not do: it
+hoists grid-invariant loads above the grid loops, and normalization orders only a chain that no statement precedes.
+Other pieces keep the first pass's form, and so does a piece whose second nest the lift cannot take whole (a native
+fp4 split-K partial, where normalization hoists a table read's index out of the reduce loop). A reordered piece takes
+the new grid order even where its A stays, so a recorded schedule of such a piece can name another block order than
+the one it was measured with and needs a new measurement.
+
 `_fromloop.fold_from_loop` reads each componentwise monoid directly from the loop's `Accum` statements. It does not
 classify a shape, extract a contraction, pair softmax statistics, hoist a nested reduction, or validate a reconstructed
 loop. Nested reductions are ordinary `Fold` statements in the parent lambda, so source order and SSA scope survive
