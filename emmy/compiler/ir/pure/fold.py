@@ -38,8 +38,7 @@ from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.pure.twist import Recipe, Twist
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Load, Loop, OutputSpec, Pre, Select, Stmt, StridedLoop
-from emmy.compiler.ir.stmt.body import free_names
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Load, Loop, OutputSpec, Pre, Select, Stmt
 
 # ``Body.structural_key()`` dispatches :func:`emmy.compiler.ir.stmt.passes.rewrite` over every
 # stmt for SSA / Expr / axis canonicalization. Register the structural node's handler here — an
@@ -1438,7 +1437,7 @@ class Fold:
                 for name in self.opened[self.opened.index(path[-1]) + 1 :] if path else self.opened:
                     if (*path, name) in self.nest:
                         body.append(Loop(axis=coordinates[name], body=self.assemble((*path, name))))
-                return _scope(body)
+                return Body(body).coalesce()
 
         def attach(term: Fold, kind: str, target: list[Stmt], node: tuple[str, ...], scope: frozenset[str], nest: _Nest) -> None:
             # The stores over what ``term`` defines as ``kind`` — its step's results, its carried
@@ -1510,39 +1509,12 @@ class Fold:
             target = stmts if stmts is not None else nest.sink(node)
             if term.axis not in coordinates:
                 raise ValueError(f"lower: no extent for reduce axis {term.axis!r} — the kernel's axis table names it")
-            target.append(Loop(axis=coordinates[term.axis], body=_scope(inner)))
+            target.append(Loop(axis=coordinates[term.axis], body=Body(inner).coalesce()))
             attach(term, "state", target, node, scope, nest)
 
         root = _Nest(opened, frozenset(bound))
         place(self, [], None, root)
         return root.assemble()
-
-
-def _scope(stmts) -> Body:
-    """One scope's statements — a term reached through several operand positions defining its
-    names once, and sibling terms folding ONE coordinate iterating together.
-
-    The dedup is the shared-term rule. The FUSE is the same rule a level up: two loops over one
-    axis where neither reads what the other defines are two passes over one stream, and their
-    union is one pass, computing what they both read once. A loop that DOES read the loop above it (a
-    statistic's pass, then the pass that normalizes by it) reads a FINISHED accumulator, and
-    iterating together would hand it the in-flight one; that pair stays two loops.
-    """
-    out: list[Stmt] = []
-    for stmt in dict.fromkeys(stmts):
-        prior = out[-1] if out else None
-        if (
-            isinstance(stmt, (Loop, StridedLoop))
-            and isinstance(prior, (Loop, StridedLoop))
-            and prior.is_reduce
-            and stmt.is_reduce
-            and replace(prior, body=stmt.body) == stmt
-            and not (free_names(stmt) & prior.body.ssa_defs)
-        ):
-            stmt = replace(prior, body=_scope((*prior.body, *stmt.body)))
-            out.pop()
-        out.append(stmt)
-    return Body(tuple(out))
 
 
 @_rewrite_kind.register

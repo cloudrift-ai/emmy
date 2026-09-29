@@ -80,23 +80,6 @@ def _exposed_defines(s: Stmt) -> set[str]:
     return out
 
 
-def dedup_recomputes(stmts: Iterable[Stmt]) -> tuple[Stmt, ...]:
-    """``stmts`` with every defining statement equal to an earlier one dropped.
-
-    A cone that reads one traced value through two edges — attention's output normalized by its
-    own row sum — lowers the fold behind it once per edge, and a fill that replicates the cone per
-    cell then declares the fold's states twice in one scope, which nvcc refuses. Two equal
-    statements over the same inputs bind the same names to the same values, so the second binds
-    nothing new. Only a statement that defines something is a candidate: a repeated store is a
-    repeated effect and stays."""
-    kept: list[Stmt] = []
-    for stmt in stmts:
-        if _exposed_defines(stmt) and any(stmt == earlier for earlier in kept):
-            continue
-        kept.append(stmt)
-    return tuple(kept)
-
-
 def free_names(s: Stmt) -> frozenset[str]:
     """Every name ``s`` (whole subtree) reads from its enclosing scope — SSA reads AND index
     coordinates, less what the subtree defines or binds.
@@ -327,6 +310,58 @@ class Body(tuple[Stmt, ...], Wire):
         return relation_graph(self)
 
     # -- generic backward dataflow --------------------------------------
+
+    def dependency_depths(self, *types: type[Stmt], inputs: Mapping[str, int] | None = None) -> dict[str, int]:
+        """Longest def-use path to each SSA name, counting only statements of ``types``.
+
+        The body must be in SSA dependency order, as for :meth:`fold`. ``inputs`` supplies depths
+        for external buffers, so a caller composing bodies can continue a producer's path through
+        its consumer's loads. Missing inputs start at zero. Equal depths of counted statements
+        prove independence; different depths need not prove dependence.
+        """
+        inputs = inputs or {}
+        memo = self.fold(
+            lambda stmt, children, _: max(
+                (*(depth for depth in children if depth is not None), *(inputs.get(name, 0) for name in stmt.external_reads())),
+                default=0,
+            )
+            + isinstance(stmt, types)
+        )
+        return {name: memo[id(stmt)] for name, stmt in self.definitions.items()}
+
+    def coalesce(self) -> Body:
+        """Assemble shared SSA definitions once and merge adjacent independent reduction loops.
+
+        Used when lowering shared value cones: repeated definitions represent the SAME value,
+        not repeated accumulator updates. Equal definitions keep their first occurrence; effects
+        are retained. Loops with identical iteration headers can share a pass unless the later
+        loop reads a finalized result from the earlier one.
+        """
+        from emmy.compiler.ir.stmt.blocks import Loop, StridedLoop  # noqa: PLC0415
+
+        out: list[Stmt] = []
+        seen: set[Stmt] = set()
+        for stmt in self:
+            if stmt.has_side_effects:
+                seen.clear()
+            elif _exposed_defines(stmt):
+                if stmt in seen:
+                    continue
+                seen.add(stmt)
+            prior = out[-1] if out else None
+            if (
+                isinstance(stmt, (Loop, StridedLoop))
+                and isinstance(prior, (Loop, StridedLoop))
+                and prior.is_reduce
+                and stmt.is_reduce
+                and not (prior.has_side_effects or stmt.has_side_effects)
+                and replace(prior, body=stmt.body) == stmt
+                and not (free_names(stmt) & prior.body.ssa_defs)
+            ):
+                stmt = replace(prior, body=(prior.body + stmt.body).coalesce())
+                out.pop()
+            out.append(stmt)
+        return Body(out)
 
     def fold[T](
         self,

@@ -590,20 +590,19 @@ class _Splicer(LoopBuilder):
         # to its own enclosing — the only bindings that affect its rewrite.
         # Same key → share a single emission.
         self._binding: dict[_BindKey, str] = {}
-        dependencies = {}
-        for origin, meta in loops.items():
-            for name, stmt in meta.defs.items():
-                reads = [(origin, dep) for dep in stmt.deps() if dep in meta.defs]
-                if isinstance(stmt, Load) and (edge := splice_edges.get((origin, stmt.input))) is not None:
-                    tag, output = edge
-                    reads.extend((tag, write.value) for write, _ in loops[tag].writes if write.output == output)
-                dependencies[origin, name] = reads
-        # A reduction strictly follows every reduction its value depends on. Equal depths
-        # therefore identify independent reductions whose iteration scopes can be shared.
-        self._reduction_depth: dict[tuple[str, str], int] = {}
-        for key in TopologicalSorter(dependencies).static_order():
-            depth = max((self._reduction_depth[dep] for dep in dependencies[key]), default=0)
-            self._reduction_depth[key] = depth + isinstance(loops[key[0]].defs[key[1]], Accum)
+        dependencies = {tag: {} for tag in loops}
+        for (origin, source), target in splice_edges.items():
+            dependencies[origin][source] = target
+        self._reduction_depth: dict[str, dict[str, int]] = {}
+        order = TopologicalSorter({tag: {origin for origin, _ in edges.values()} for tag, edges in dependencies.items()})
+        for tag in order.static_order():
+            inputs = {
+                source: max(
+                    (self._reduction_depth[origin][w.value] for w, _ in loops[origin].writes if w.output == output), default=0
+                )
+                for source, (origin, output) in dependencies[tag].items()
+            }
+            self._reduction_depth[tag] = loops[tag].op.body.dependency_depths(Accum, inputs=inputs)
         self._reduce_axes: dict[tuple[Scope, Expr, int], Axis] = {}
         # Sigma expressions stay live for one splice. Cache by object identity so repeated
         # dependency placement does not recursively walk the same large coordinate tree, while
@@ -786,7 +785,7 @@ class _Splicer(LoopBuilder):
     def _resolve_accum(self, stmt: Accum, d: _Demand) -> None:
         """Queue the value under a shared iteration scope for independent reductions of equal extent."""
         orig_axis = self.loops[d.origin].reduce_axes[stmt.name]
-        key = (d.demand_scope, orig_axis.extent.expr, self._reduction_depth[d.origin, stmt.name])
+        key = (d.demand_scope, orig_axis.extent.expr, self._reduction_depth[d.origin][stmt.name])
         reduce_axis = self._reduce_axes.get(key)
         if reduce_axis is None:
             reduce_axis = self._reduce_axes[key] = Axis(name=self.fresh(orig_axis.name), extent=orig_axis.extent)

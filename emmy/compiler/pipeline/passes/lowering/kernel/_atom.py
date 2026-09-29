@@ -90,7 +90,7 @@ from emmy.compiler.ir.stmt import (
     Write,
     mask_select_predicate,
 )
-from emmy.compiler.ir.stmt.body import _exposed_defines, dedup_recomputes, free_names
+from emmy.compiler.ir.stmt.body import _exposed_defines, free_names
 from emmy.compiler.ir.stmt.passes import rename_free
 from emmy.compiler.ir.tile.ops import cone_stat, cone_stat_dtypes
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
@@ -1165,7 +1165,7 @@ def _sync_operands(
         slab = edge.as_slab() if isinstance(edge, Fold) else None
         bl = slab.load if slab is not None else edge
         if not isinstance(bl, Load):
-            b_body = dedup_recomputes(bl.lower(axes=axes))
+            b_body = bl.lower(axes=axes)
             exposed = multiplied.get(acc, bl.exposes[-1])
 
             def b_value(k0, row, col, *, body=b_body, exposed=exposed):
