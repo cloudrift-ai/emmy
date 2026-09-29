@@ -99,7 +99,9 @@ move. Their CUDA changes only in block order, but a stored scalar tiling then ru
 `k_matmul_reduce_50f206` consumer piece gets a new identity, so its rows stop decoding. A first attempt lowered every
 piece this way and broke the gate/up twin (two sibling reductions no longer merged); lowering the already formed terms
 keeps the twin. A later attempt that kept the first form unless the A moved was dropped by decision: stored schedules
-are regenerable, and one rule for all such pieces is simpler.
+are regenerable, and one rule for all such pieces is simpler. A piece whose second nest the lift cannot take keeps the
+first form: on a native fp4 split-K partial, normalization hoists a table read's index out of the reduce loop, and the
+re-lifted term then reads that value as a coordinate.
 
 All V100 work used CloudRift VMs, CUDA 12.9, torch 2.13.0+cu126, `EMMY_NVCC_FLAGS=` (nvcc `-O3`), and each row's own
 `FAST_MATH` pin (on for FP8 and GPTQ, off for AWQ, EXL3 and DeepSeek). Times are µs; `(a–b)` is min–max of the runs.
