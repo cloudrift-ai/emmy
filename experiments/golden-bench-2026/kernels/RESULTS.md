@@ -1,5 +1,71 @@
 # Golden-bench kernel corpus
 
+## Five cards — margin over torch.compile on the Hugging Face layer (2026-09-29)
+
+### Question and scope
+
+After #930 every cell was at or near `torch.compile`. This round asks how much margin the compiler can add without
+persistent kernels, and measures it against a stricter baseline: `torch.compile` on the Hugging Face layer itself
+(`emmy run Qwen/Qwen3-0.6B --layer 0 --seq-len N`, "model form"), not on the golden's replayed program ("golden form"),
+which runs `torch.compile` slower (V100 s512: 637 vs 729 us). The corpus is unchanged: layer 0 at s1 and s512.
+
+### Protocol
+
+One lane run per card (`emmy bench` on this recipe) on the close-out compiler of #967. The lane's first step times
+eager, `torch.compile` and Emmy on the Hugging Face layer in one process, with the committed golden as the only
+evidence (fresh tune DB, `-O3`, `EMMY_FAST_MATH=0`, warmup 10, iters 100). Five fresh-process golden-form replays under
+`--strict` against eager follow as the correctness gate. The s1 goldens were re-traced first: #871 changed how
+`is_causal` traces at one token, so the old s1 programs no longer matched a fresh trace. Every golden row was recorded
+from a sweep and confirmed by a whole-layer replay before recording.
+
+### Result summary
+
+Model form, from the lane, us. Ratio is `torch.compile` / Emmy (above 1: Emmy faster).
+
+| card | s1 #930 | s1 Emmy | s1 t.c | s1 ratio | s512 #930 | s512 Emmy | s512 t.c | s512 ratio |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| RTX 5090 | 24.5 | 20 | 33 | 1.65× | 132 | 130 | 135 | 1.04× |
+| RTX 4090 | 26.5 | 26.4 | 28.9 | 1.09× | 158.7 | 157.2 | 162.6 | 1.03× |
+| H100 | 36.7 | 28.8 | 35.1 | 1.22× | 95.8 | 87.3 | 79.0 | 0.90× |
+| A100 40GB | 55–56 | 53 | 56 | 1.06× | 182–184 | 178 | 181 | 1.02× |
+| V100 SXM2 | 72 | 72 | 62 | 0.86× | 520 | 513 | 636 | 1.24× |
+
+The #930 column is that PR's scoreboard (golden form at s1). All ten lane cells pass their five `--strict` repeats. In
+model form s512 misses `--strict` on 2-6 of 524,288 outputs by one f16 step, the accepted approximate match. The s1
+`torch.compile` time is noisy on the desktop-shared RTX 5090 (25-39 us across runs) and moved 30.9 → 35.1 between two
+H100 runs.
+
+### What the pass found
+
+- **mma.sync GEMMs (A100, 4090, 5090) were not bank-conflict bound.** ncu's conflict count on the A100 q projection is
+  fill/drain port contention. The costs were the epilogue's 4-byte global stores, which throttle the load/store queue,
+  and wave count. A staged output store (STAGE `out`: the tile goes through the dead operand slabs and leaves as
+  16-byte rows) took an A100 gate/up-sized GEMM from 38.9 to 32.1 us (torch 31). A 96-row M tile (`f3x<N>`) fits one
+  wave on the A100's 108 SMs, once a masked-M cp.async fill stopped re-reading row 511 for 64 rows (q 23 → 16.3 us). On
+  the 4090 (128 SMs) and 5090 (170 SMs) the 96-row tile loses to wave quantization.
+- **wgmma GEMMs (H100)** keep one MMA group in flight and store 16-byte rows; every plain GEMM now matches or beats
+  `torch.mm`. The s512 cell is still 0.90×: `torch.compile`'s kernels sum to 73 us against Emmy's 86, the gap sits in
+  the QKV block with cold weights, gate/up and attention, and TMA multicast across a CTA pair was slower in the layer
+  (q 7.2 → 10.6 us).
+- **Programmatic dependent launch** on sm_90+ is worth about 5 us at s1 on the H100 and 2 us on the 5090.
+- **Isolated piece time misleads the layer.** On the A100 the isolated winners for k/v/o/down summed 7.5 us faster and
+  made the layer 7 us slower; on the H100 the producer band and m64n192 did the same. Rows here were chosen by
+  whole-layer replay.
+- **s1 routes** keep #930's shape (8 cuts, split GEMVs with coop-t partials); the re-traced routes compile to 14
+  launches. The prior's own s1 picks run 131 us on the A100 against 53 recorded.
+
+### Systems and provenance
+
+RTX 5090 (dev box, shared with the desktop), RTX 4090 (CloudRift `118.163.199.138:60011`), H100 80GB
+(`bench-gb-h100-0924-1252-99aa`), A100 40GB (`bench-keep-a100-0921-1621-6784`), V100 SXM2 16GB (CloudRift
+`185.165.50.75`). Compiler: #967 (`feature/golden-bench-margin`) after its close-out re-records, before its rebase
+onto #969 (which changes recurrences only; every golden-bench target is still the fresh lowering after it).
+
+### Durable files
+
+`results_rtx5090x1.tar.gz`, `results_rtx4090x1.tar.gz`, `results_h100x1.tar.gz`, `results_a100x1.tar.gz`,
+`results_v100x1.tar.gz` (the lane runs), and the ten `golden/qwen3-06b-s{1,512}_<card>.golden.json` files.
+
 ## H100 — the s512 layer's projections on `wgmma` (2026-09-27)
 
 Every GEMM piece of the H100 s512 route above was recorded on `mma.sync`. The `wgmma` tier is offered for all six of
