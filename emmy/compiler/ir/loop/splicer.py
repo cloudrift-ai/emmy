@@ -65,6 +65,7 @@ import math
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from graphlib import TopologicalSorter
 
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Interval, Literal, SimplifyCtx, Var, affine_form
 from emmy.compiler.ir.loop.builder import LoopBuilder
@@ -589,6 +590,21 @@ class _Splicer(LoopBuilder):
         # to its own enclosing — the only bindings that affect its rewrite.
         # Same key → share a single emission.
         self._binding: dict[_BindKey, str] = {}
+        dependencies = {}
+        for origin, meta in loops.items():
+            for name, stmt in meta.defs.items():
+                reads = [(origin, dep) for dep in stmt.deps() if dep in meta.defs]
+                if isinstance(stmt, Load) and (edge := splice_edges.get((origin, stmt.input))) is not None:
+                    tag, output = edge
+                    reads.extend((tag, write.value) for write, _ in loops[tag].writes if write.output == output)
+                dependencies[origin, name] = reads
+        # A reduction strictly follows every reduction its value depends on. Equal depths
+        # therefore identify independent reductions whose iteration scopes can be shared.
+        self._reduction_depth: dict[tuple[str, str], int] = {}
+        for key in TopologicalSorter(dependencies).static_order():
+            depth = max((self._reduction_depth[dep] for dep in dependencies[key]), default=0)
+            self._reduction_depth[key] = depth + isinstance(loops[key[0]].defs[key[1]], Accum)
+        self._reduce_axes: dict[tuple[Scope, Expr, int], Axis] = {}
         # Sigma expressions stay live for one splice. Cache by object identity so repeated
         # dependency placement does not recursively walk the same large coordinate tree, while
         # avoiding structural hashing (which would perform another recursive tree walk).
@@ -772,8 +788,11 @@ class _Splicer(LoopBuilder):
         ``d.demand_scope``. The Accum's value is queued under σ extended with
         the fresh reduce-axis binding."""
         orig_axis = self.loops[d.origin].reduce_axes[stmt.name]
-        fresh_name = self.fresh(orig_axis.name)
-        reduce_axis = Axis(name=fresh_name, extent=orig_axis.extent)
+        key = (d.demand_scope, orig_axis.extent.expr, self._reduction_depth[d.origin, stmt.name])
+        reduce_axis = self._reduce_axes.get(key)
+        if reduce_axis is None:
+            reduce_axis = self._reduce_axes[key] = Axis(name=self.fresh(orig_axis.name), extent=orig_axis.extent)
+        fresh_name = reduce_axis.name
         inner_sigma = d.sigma.extend(orig_axis.name, Var(fresh_name))
         inner_scope = Scope(enclosing=d.demand_scope.enclosing + (reduce_axis,))
         value_bound = self._ensure_dep(stmt.value, d.origin, inner_sigma, inner_scope)
