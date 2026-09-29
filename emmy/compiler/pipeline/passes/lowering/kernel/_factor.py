@@ -589,7 +589,8 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
             # streamed store rides its observed fold's reduce loop — the one placement rule the
             # kernel's identity (``TileOp.loop_body``) already reads.
             axes = ctx.sched.tile.axes
-            placed = op.lower(frozenset(axis.name for axis in ctx.grid), output_specs, axes) if output_specs else op.lower(axes=axes)
+            bound = frozenset(axis.name for axis in (*ctx.grid, *ctx.sched.tile.place.serial))
+            placed = op.lower(bound, output_specs, axes) if output_specs else op.lower(axes=axes)
             body = _one_value_per_name(dict.fromkeys([*placed, *tail]))
             # A kernel whose only work is a FREE output sweep — the elementwise half a placement
             # cut leaves behind a reduction — distributes that sweep across threads exactly as a

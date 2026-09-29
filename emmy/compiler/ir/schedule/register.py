@@ -76,7 +76,11 @@ class RegisterProgram:
                 return None
             if not all(isinstance(e, Var) and e.name in extents for e in idx[-2:]) or extents[idx[-1].name] != rows:
                 return None
-            if idx[1:-2] != tuple(Var(name) for name in batch_names):
+            shape = tile.outputs[spec.write.output].shape
+            batch_index = tuple(
+                e for e, size in zip(idx[1:-2], shape[1:-2], strict=True) if not (e == Literal(0, "int") and size == 1)
+            )
+            if batch_index != tuple(Var(name) for name in batch_names):
                 return None
         lift = carrying.lift
         results = (*(spec.write.values[0] for spec in outputs), lift.results[0])

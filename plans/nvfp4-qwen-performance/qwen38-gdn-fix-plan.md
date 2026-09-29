@@ -1,7 +1,7 @@
 # DeltaNet investigation and proposed fix plan
 
-Status: 🚧 Investigation complete enough to propose implementation. No compiler or serving changes made.
-Implementation awaits the user's review of this plan. The bugtracker row is marked 🚧 on this branch.
+Status: 🚧 Implementation approved and in progress. PR #973 is stacked on #969 in native GitHub stack #974.
+The branch combines main `81af0892` with #969 `57667193`. The bugtracker row is marked 🚧 on this branch.
 Change it to ✅ with the fix PR link only when the agreed scope is ready for review; disclose any remaining support gap.
 
 Stage status: 🚧 means in progress; ✅ means its deliverables have passed their checks. Pending stages have not started.
@@ -244,7 +244,7 @@ Stage deliverables are cumulative. The following sketches are intended results, 
 | Stage | Reviewable deliverable | Observable completion condition |
 | --- | --- | --- |
 | 🚧 1. Baseline | Pinned main + #969 reproduction matrix and small regression inputs | The singleton batch case demonstrably reaches the same recurrence algebra as the checkpoint; each known failure has a bounded reproducer. |
-| Pending: 2. Recurrence | Field-preserving repack rewrite, consistent carrier/output coordinates, register and serial regressions | Kernel IR retains `FragmentRepack … role=b`; the checkpoint offers `STAGE=d1/reg`; classic launch-per-step CUDA does not reopen the time axis inside each launch; focused GPU states and corrected values match the reference. |
+| 🚧 2. Recurrence | Field-preserving repack rewrite, consistent carrier/output coordinates, register and serial regressions | Kernel IR retains `FragmentRepack … role=b`; the checkpoint offers `STAGE=d1/reg`; classic launch-per-step CUDA does not reopen the time axis inside each launch; focused GPU states and corrected values match the reference. |
 | Pending: 3. Output domains | One correct placement of computation and stores, with sibling-domain regression tests | Lowered IR has sibling `(a0,a1[,a6])` and `(a8,a10)/(a8,a11)` nests. Store counts are proportional to the sum of the output sizes. The real kernel set completes under the watchdog with correct outputs. |
 | Pending: 4. Padding | Constant zero-fill padding through existing index maps | Tensor IR expresses `y[t,d] = x[t,d] if t < T else 0`; guarded Loop/Kernel loads are in bounds; short GDN traces succeed and returned sequence length remains T. |
 | Pending: 5. Projections | Legal tensor-core routes for qkv and z, with measured cut/schedule alternatives | Tile IR offers activation-A / weight-B contractions with MMA TILE; emitted CUDA contains the expected MMA instructions; reference comparisons pass and measured latency is reported. |

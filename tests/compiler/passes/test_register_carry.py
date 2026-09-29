@@ -92,6 +92,41 @@ def test_chunk_loop_is_inside_one_launch(target):
     assert "#include <cuda_fp16.h>" in op.kernel_source  # The buffers are FP32; the direct loader constructs FP16 operands.
 
 
+@pytest.mark.parametrize("batch_extent", [1, 2])
+def test_register_output_keeps_a_unit_batch_coordinate(batch_extent):
+    from emmy.compiler.dim import Dim
+    from emmy.compiler.ir.expr import Literal
+    from emmy.compiler.ir.stmt import Write
+
+    graph = _graph()
+    node = graph.nodes["out"]
+    tensor = node.outputs[0]
+    tensor.shape = (tensor.shape[0], Dim(batch_extent), *tensor.shape[1:])
+    node.op = replace(
+        node.op,
+        body=node.op.body.map(
+            lambda s: replace(s, index=(s.index[0], Literal(0, "int"), *s.index[1:])) if isinstance(s, Write) else s
+        ),
+    )
+    (tile,) = (n.op for n in _lift(graph).nodes.values() if isinstance(n.op, TileOp))
+    assert (tile.register_program is not None) == (batch_extent == 1)
+    if batch_extent == 1:
+        schedule = next(iter(_context(tile).extensions()))
+        node.op = materialize_register(tile, schedule, {})
+        lowered = Pipeline.build(["lowering/kernel", "lowering/cuda"]).run(graph, ctx=Context.from_target((12, 0)))
+        (cuda,) = (n.op for n in lowered.nodes.values() if isinstance(n.op, CudaOp))
+        assert "emmy_mma_m16n8k16" in cuda.kernel_source
+
+
+def test_classic_recurrence_does_not_reopen_the_launch_axis():
+    with pinned_knobs({"FAST_MATH": False}):
+        graph = Pipeline.build(CUDA_PASSES).run(_graph(), ctx=Context.from_target((12, 0)))
+    (cuda,) = (n.op for n in graph.nodes.values() if isinstance(n.op, CudaOp))
+    assert cuda.serial
+    for name, _extent in cuda.serial:
+        assert f"for (int {name} =" not in cuda.kernel_source
+
+
 @pytest.mark.parametrize("target", [(7, 0), (12, 0)], ids=["volta", "modern"])
 @pytest.mark.parametrize("stride", [1, 2])
 def test_register_operands_use_direct_loads_when_the_address_allows_it(target, stride):
