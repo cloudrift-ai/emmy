@@ -159,10 +159,18 @@ def reformed(piece: TileOp) -> TileOp:
             # again inside its own grid loops: nothing sits ahead of that chain, so normalization
             # orders it by the output layout, and the lift orients the contraction by that order.
             # This pass lowers the formed terms, so it keeps the twin the first pass merged.
-            body = formed.op.lower(bound=frozenset(axis.name for axis in formed.place.free), stores=formed.output_specs, axes=formed.axes)
+            # Normalization can hoist a table read's index out of the reduce loop there, a nest the lift
+            # cannot take whole; such a piece keeps the first form.
+            again = formed.op.lower(bound=frozenset(axis.name for axis in formed.place.free), stores=formed.output_specs, axes=formed.axes)
             for axis in reversed(formed.place.free):
-                body = Body((Loop(axis=axis, body=body),))
-            formed = lift_kernel(LoopOp(body=body), name=piece.name)
+                again = Body((Loop(axis=axis, body=again),))
+            try:
+                reoriented = lift_kernel(LoopOp(body=again), name=piece.name)
+                reoriented.op.lower(bound=frozenset(), stores=reoriented.output_specs, axes=reoriented.axes)
+            except ValueError:
+                pass
+            else:
+                body, formed = again, reoriented
     except ValueError:
         return piece
     # The lift peels every outer plain loop into the grid, a store's sweep included when nothing
