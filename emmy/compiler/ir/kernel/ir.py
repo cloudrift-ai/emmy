@@ -2264,6 +2264,10 @@ class SmemTileStore(Stmt):
     def external_writes(self) -> tuple[str, ...]:
         return (self.dst,)
 
+    def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
+        new = rename.get(self.dst, self.dst)
+        return self if new == self.dst else replace(self, dst=new)
+
     def exprs(self) -> tuple[Expr, ...]:
         return (*self.base, *(() if self.bound is None else (self.bound,)))
 
