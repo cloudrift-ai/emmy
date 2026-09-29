@@ -67,9 +67,10 @@ def test_common_kernel_corpus_is_small_and_identical(project_root) -> None:
     assert "./venv/bin/emmy run" in run
     assert "for repeat in 0 1 2 3 4" in run
     assert "--golden $task_dir/working.json --bench --strict" in run
-    assert "--bench-backends eager,tcompile" in run
+    assert '"$model_ref" --layer "$layer" --seq-len "$seq_len" --bench' in run
+    assert "EMMY_GOLDEN_FILE=$task_dir/working.json" in run
+    assert "--bench-backends eager,tcompile,emmy" in run
     assert "--bench-backends eager,emmy" in run
-    assert "--bench-backends eager,tcompile,emmy" not in run
     assert "torch-compile.status" in run
     assert "scripts/" not in run
     assert recipe.command.stage == [
@@ -170,7 +171,7 @@ def test_large_layer_corpus_is_bounded_and_not_labeled_tp8(project_root) -> None
         )
         assert "--loop-targets" not in command
         assert "--golden /task/working.json --bench --strict" in command
-        assert "--bench-backends eager,tcompile" in command
+        assert "--bench-backends eager,tcompile,emmy" in command
         assert "--bench-backends eager,emmy" in command
 
 
