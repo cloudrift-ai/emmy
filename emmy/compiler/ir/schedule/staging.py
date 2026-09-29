@@ -780,13 +780,18 @@ def resolve_fill_stage(
         async_bytes += a_bytes
     else:
         sync_bytes += a_bytes
+    for ch in c.operands[1:]:
+        if ch.as_slab() is not None:
+            async_bytes += tile.n.tile * bk_elems * b_nbytes
+        else:
+            sync_bytes += tile.n.tile * bk_elems * b_nbytes
     if want.transport == "smem-tma":
         m, n, b_trans = tile.m, tile.n, c.as_contraction().b_trans
-        boxed = [(c.operands[0], m.axis.name)] if a_copied else []
-        boxed += [(edge, n.axis.name) for edge in c.operands[1:] if edge.as_slab() is not None]
-        if not boxed:
+        if not async_bytes:
             _decline(why, "every slab of this contraction is computed, so a TMA stage has nothing to copy")
             return None
+        boxed = [(c.operands[0], m.axis.name)] if a_copied else []
+        boxed += [(edge, n.axis.name) for edge in c.operands[1:] if edge.as_slab() is not None]
         if not (
             all(_tma_operand_box(edge.as_slab().load.index, axis, k_axis.name) for edge, axis in boxed)
             and max(m.tile, n.tile, bk_elems) <= _TMA_MAX_BOX
@@ -794,11 +799,6 @@ def resolve_fill_stage(
         ):
             _decline(why, "a copied slab has no valid TMA box: it needs static, tile-divisible K and N and 16 B-aligned rows")
             return None
-    for ch in c.operands[1:]:
-        if ch.as_slab() is not None:
-            async_bytes += tile.n.tile * bk_elems * b_nbytes
-        else:
-            sync_bytes += tile.n.tile * bk_elems * b_nbytes
     # A scheduled contraction producer contributes its own streamed and invariant operand slabs.
     # They do not ring: the streamed slab dies inside the block and the invariant slab does not
     # advance. Reserve both from the producer interface supplied by the scheduler.
@@ -813,7 +813,7 @@ def resolve_fill_stage(
     # Only the asynchronous peer slabs ring (the compute-filled slab and stat rows stay
     # single-buffer), so the clamp budgets the ringed slot against what the fixed slabs leave.
     depth = _clamp_depth(want_depth, async_bytes, budget - fixed) if async_bytes else 1
-    computed = [c.operands[0].exposes[-1]] if a_converts or c.operands[0].as_slab() is None else []
+    computed = [] if a_copied else [c.operands[0].exposes[-1]]
     computed.extend(edge.exposes[-1] for edge in c.operands[1:] if edge.as_slab() is None)
     choice = replace(want, depth=depth, reg_depth=min(want.reg_depth, tile.bk))
     return ResolvedStage(choice, smem=tuple(computed), bk_elems=bk_elems)

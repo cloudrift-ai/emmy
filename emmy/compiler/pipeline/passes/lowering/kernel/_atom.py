@@ -60,6 +60,7 @@ from emmy.compiler.ir.kernel.ir import (
     MmaSyncPtx,
     RegFragment,
     RegStore,
+    Smem,
     WgmmaCommit,
     WgmmaDescriptor,
     WgmmaFence,
@@ -1667,13 +1668,18 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
             copies = TmaTransport(operands=copy_ops, **common)
             fill = SyncTransport(operands=sync_ops, prologue_stmts=tuple(prologue), **common)
             slabs = frozenset(op.slab for op in (*copy_ops, *sync_ops))
-            return pipelined_kloop(
+            decls, region = pipelined_kloop(
                 operands=((copies, stage.depth), (fill, 1)),
                 build_segments=lambda slots: [(ops.staged_drain(operands, slots[0], cells, offset, mn), slabs)],
                 bk_elems=stage.bk_elems,
                 n_chunks=K // stage.bk_elems,
                 k_extent=K,
             )
+            # The shared pool packs in declaration order. The ring's few-byte barrier array would
+            # otherwise sit between the copied slabs and the filled ones and push the next swizzled
+            # slab to its 1024 B boundary: a kilobyte that can cost a resident block.
+            barrier = [d for d in decls if isinstance(d, Smem) and d.name == copies.mbar]
+            return [*(d for d in decls if d not in barrier), *barrier], region
         transport = SyncTransport(
             operands=sync_ops,
             copy_operands=copy_ops,

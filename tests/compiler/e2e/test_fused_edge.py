@@ -454,7 +454,7 @@ def test_fused_cone_splitk_matches_reference(stage, monkeypatch):
 # --- TMA weight copies beside the compute fill -------------------------------------------------
 
 
-_TMA_TILE = "mma_m16n8k16_f16_f32/f2x2/k2"  # one warp: a 32 x 16 tile, a 32-element K chunk
+_TMA_TILE = ("mma_m16n8k16_f16_f32/f2x2/k2", "w1x1")  # one warp: a 32 x 16 tile, a 32-element K chunk
 _TMA_N = 64
 
 
@@ -475,8 +475,8 @@ def _computed_a_channels_graph(m: int, k: int, channels: int) -> Graph:
     return g
 
 
-def _tma_pins(stage: str) -> dict:
-    return {"PLACE": "fuse", "REDUCE": "", "TILE": _TMA_TILE, "WORK": "w1x1", "STAGE": stage}
+def _tma_pins(stage: str, tile: tuple[str, str] = _TMA_TILE) -> dict:
+    return {"PLACE": "fuse", "REDUCE": "", "TILE": tile[0], "WORK": tile[1], "STAGE": stage}
 
 
 def test_computed_f16_tma_copies_each_weight_beside_the_activation_fill():
@@ -504,21 +504,23 @@ def test_computed_f16_tma_copies_each_weight_beside_the_activation_fill():
 @requires_cuda
 @requires_sm90
 @pytest.mark.parametrize(
-    ("channels", "m", "k", "fill", "tma"),
+    ("channels", "m", "k", "fill", "tma", "tile"),
     [
-        (1, 20, 256, "d2/smem", "d2/smem-tma"),
-        (2, 20, 256, "d1/smem", "d1/smem-tma"),
-        (2, 20, 256, "d2/smem", "d2/smem-tma"),
-        (2, 20, 256, "d2/smem", "d2/smem-tma/p2"),
-        (2, 32, 32, "d2/smem", "d2/smem-tma"),
+        (1, 20, 256, "d2/smem", "d2/smem-tma", _TMA_TILE),
+        (2, 20, 256, "d1/smem", "d1/smem-tma", _TMA_TILE),
+        (2, 20, 256, "d2/smem", "d2/smem-tma", _TMA_TILE),
+        (2, 20, 256, "d2/smem", "d2/smem-tma/p2", _TMA_TILE),
+        (2, 32, 32, "d2/smem", "d2/smem-tma", _TMA_TILE),
+        (2, 160, 512, "d2/smem", "d2/smem-tma", ("mma_m16n8k16_f16_f32/f4x4/k4", "w2x2")),
     ],
-    ids=["one-weight-d2", "d1", "d2", "d2-p2", "one-chunk"],
+    ids=["one-weight-d2", "d1", "d2", "d2-p2", "one-chunk", "b128-slabs"],
 )
-def test_computed_f16_tma_matches_the_compute_fill_bitwise(channels, m, k, fill, tma, monkeypatch):
+def test_computed_f16_tma_matches_the_compute_fill_bitwise(channels, m, k, fill, tma, tile, monkeypatch):
     """TMA only changes how the stored weights reach shared memory, so it must reproduce the
     ordinary compute fill bit for bit: the same fill of the computed activation, the same drain.
     ``m = 20`` leaves a partial 32-row tile, ``k = 256`` wraps the two-slot ring four times so each
-    slot's barrier parity flips, and ``k = 32`` is a stream of one chunk."""
+    slot's barrier parity flips, and ``k = 32`` is a stream of one chunk. The last cell's 64-element
+    chunk and 64-column tile put both slabs on the 128-byte swizzle."""
     from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
 
@@ -527,7 +529,7 @@ def test_computed_f16_tma_matches_the_compute_fill_bitwise(channels, m, k, fill,
     ins |= {f"w{c}": (rng.standard_normal((k, _TMA_N)) * 0.2).astype(np.float16) for c in range(channels)}
     outs = {}
     for stage in (fill, tma):
-        with pinned_knobs(_tma_pins(stage)):
+        with pinned_knobs(_tma_pins(stage, tile)):
             be = CudaBackend()
             compiled = be.compile(_computed_a_channels_graph(m, k, channels))
         srcs = [n.op.kernel_source for n in compiled.nodes.values() if getattr(n.op, "kernel_source", None)]
