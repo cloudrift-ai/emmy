@@ -699,7 +699,7 @@ def resolve_fill_stage(
     c: Fold,
     tile: Tile,
     budget: int,
-    want_depth: int = 1,
+    want: Stage,
     *,
     inputs=None,
     why: list[str] | None = None,
@@ -709,18 +709,24 @@ def resolve_fill_stage(
     producer_k: Axis | None = None,
     axes: tuple = (),
 ) -> ResolvedStage | None:
-    """The ``smem`` compute-fill :class:`Stage` for a computed-operand warp contraction under
-    ``tile`` — MANDATORY for this form (the gmem-direct mma leaf refuses a computed A, and the
-    byte-copy / cp.async / TMA transports move bytes and cannot evaluate a producer cone), so it
-    has no gmem-direct ``""`` sibling and a ``STAGE`` pin can only choose its DEPTH. ``None`` when
-    the slabs exceed ``budget``: one A slab, one B slab per channel, and one fp32 row per bridged
-    statistic (:func:`~emmy.compiler.ir.pure.fold.cone_seam`'s ``stats`` and its per-chunk ``chunk`` stats — the same
-    node boundary the materializer fills through).
+    """The compute-fill :class:`Stage` for a computed-operand warp contraction under ``tile`` —
+    MANDATORY for this form (the gmem-direct mma leaf refuses a computed A, and the byte-copy /
+    cp.async / TMA transports move bytes and cannot evaluate a producer cone), so it has no
+    gmem-direct ``""`` sibling. A ``STAGE`` pin (``want``) chooses the depth and how the stored
+    peers move: ``smem`` copies them with cp.async (the blocking copy where there is none),
+    ``smem-tma`` with TMA box copies, and then also the ``/p2`` register double buffer. The
+    computed slabs are always the fill's. ``None`` when the slabs exceed ``budget``: one A slab,
+    one B slab per channel, and one fp32 row per bridged statistic
+    (:func:`~emmy.compiler.ir.pure.fold.cone_seam`'s ``stats`` and its per-chunk ``chunk`` stats —
+    the same node boundary the materializer fills through).
 
-    ``want_depth >= 2`` is the asymmetric B-only prefetch ring: only the B cp.async slabs ring
+    ``want.depth >= 2`` is the asymmetric B-only prefetch ring: only the copied slabs ring
     (their copies for chunk ``i+d-1`` fly under chunk ``i``'s compute fill and drain), while the
     compute-filled A slab and the stat rows stay single-buffer — ringing a compute fill buys no
     overlap, it runs on the drain's own threads. Both depths are fork siblings, measured per shape.
+
+    TMA asks of the copied slabs what :func:`resolve_warp_stage` asks of every slab it boxes, and
+    needs at least one copied slab: a stage whose every slab is computed has nothing to copy.
 
     ``k_axis`` is the contraction's K with its extent (the enclosing Fold's when the contraction
     is a derived singleton marker), ``producer_k`` the nested producer's; ``axes`` is the kernel's
@@ -733,7 +739,7 @@ def resolve_fill_stage(
         return None
     cones = c.operands[0].as_slab() is None or any(b.as_slab() is None for _, b in c.bilinear_channels())
     computes = cones or converting_a(c, atom, inputs)
-    if want_depth >= 2 and atom.sync_copy_staging and computes:
+    if want.depth >= 2 and atom.sync_copy_staging and computes:
         # With no cp.async the ring's B copies are blocking copies, and on sm_70 the depth-2 ring
         # returned silently wrong answers on nine of sixteen measured warp grids and fragments,
         # every one of them correct at depth 1. That is the ring under a COMPUTE fill, whose
@@ -742,8 +748,7 @@ def resolve_fill_stage(
         # ordinary blocking-copy ring the single-channel tiers already stage (``SPLIT_COPY_DEPTH``).
         _decline(why, "the smem compute fill's B prefetch ring needs cp.async; this atom stages with blocking copies")
         return None
-    if atom.sync_copy_staging:
-        want_depth = min(want_depth, SPLIT_COPY_DEPTH)
+    want_depth = min(want.depth, SPLIT_COPY_DEPTH) if atom.sync_copy_staging else want.depth
     bk_elems = tile.bk * atom.atom_k
     if k_axis.extent.is_static and k_axis.extent.as_static() % bk_elems:
         # the staged driver unrolls WHOLE K chunks — the same rule the copy transports state on their own
@@ -770,10 +775,25 @@ def resolve_fill_stage(
     # A materialized A whose dtype the atom cannot bind rides the CONVERTING synchronous fill —
     # per-cell load + typed slab store — never the byte copy (which cannot convert).
     a_converts = converting_a(c, atom, inputs)
-    if c.operands[0].as_slab() is not None and not a_converts:
+    a_copied = c.operands[0].as_slab() is not None and not a_converts
+    if a_copied:
         async_bytes += a_bytes
     else:
         sync_bytes += a_bytes
+    if want.transport == "smem-tma":
+        m, n, b_trans = tile.m, tile.n, c.as_contraction().b_trans
+        boxed = [(c.operands[0], m.axis.name)] if a_copied else []
+        boxed += [(edge, n.axis.name) for edge in c.operands[1:] if edge.as_slab() is not None]
+        if not boxed:
+            _decline(why, "every slab of this contraction is computed, so a TMA stage has nothing to copy")
+            return None
+        if not (
+            all(_tma_operand_box(edge.as_slab().load.index, axis, k_axis.name) for edge, axis in boxed)
+            and max(m.tile, n.tile, bk_elems) <= _TMA_MAX_BOX
+            and _warp_tma(k_axis, n.axis, n.tile, bk_elems, a_nbytes, b_nbytes, n.mask, b_trans)
+        ):
+            _decline(why, "a copied slab has no valid TMA box: it needs static, tile-divisible K and N and 16 B-aligned rows")
+            return None
     for ch in c.operands[1:]:
         if ch.as_slab() is not None:
             async_bytes += tile.n.tile * bk_elems * b_nbytes
@@ -795,7 +815,8 @@ def resolve_fill_stage(
     depth = _clamp_depth(want_depth, async_bytes, budget - fixed) if async_bytes else 1
     computed = [c.operands[0].exposes[-1]] if a_converts or c.operands[0].as_slab() is None else []
     computed.extend(edge.exposes[-1] for edge in c.operands[1:] if edge.as_slab() is None)
-    return ResolvedStage(Stage(depth=depth, transport="smem"), smem=tuple(computed), bk_elems=bk_elems)
+    choice = replace(want, depth=depth, reg_depth=min(want.reg_depth, tile.bk))
+    return ResolvedStage(choice, smem=tuple(computed), bk_elems=bk_elems)
 
 
 __all__ = [
