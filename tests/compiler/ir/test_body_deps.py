@@ -8,9 +8,11 @@ gates 013/015 care about.
 
 from __future__ import annotations
 
+import pytest
+
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Var
-from emmy.compiler.ir.stmt import Accum, Assign, Load, Loop, StridedLoop
+from emmy.compiler.ir.expr import Literal, Var
+from emmy.compiler.ir.stmt import Accum, Assign, Carry, Load, Loop, StridedLoop
 from emmy.compiler.ir.stmt.body import Body
 
 
@@ -24,6 +26,98 @@ def _asn(name: str, op: str, *args: str) -> Assign:
 
 def _acc(name: str, value: str, op: str = "add") -> Accum:
     return Accum(name=name, value=value, op=op)
+
+
+def test_scope_summaries_share_nested_analysis(monkeypatch):
+    bodies = [Body((_asn("value", "exp", "source"), _acc("sum", "value")))]
+    for level in range(32):
+        bodies.append(Body((Loop(Axis(f"i{level}", 4), bodies[-1]),)))
+    visits = 0
+    original = Assign.deps
+
+    def counted(stmt):
+        nonlocal visits
+        visits += 1
+        return original(stmt)
+
+    monkeypatch.setattr(Assign, "deps", counted)
+    for body in reversed(bodies):
+        assert body.free_ssa == frozenset({"source"})
+        assert tuple(stmt.name for stmt in body.accums) == ("sum",)
+    assert visits == 1
+
+
+def test_scope_summary_preserves_reads_above_a_shadowed_name():
+    inner = Body((_asn("outer", "exp", "source"),))
+    body = Body((_asn("use", "abs", "outer"), Loop(Axis("i", 4), inner)))
+    assert inner.free_ssa == frozenset({"source"})
+    assert body.free_ssa == frozenset({"outer", "source"})
+
+
+def test_recursive_type_queries_share_children_and_preserve_mixed_order(monkeypatch):
+    carry = Carry("state", "value", (), 0)
+    accum = _acc("sum", "value")
+    child = Body((carry, accum))
+    body = Body((Loop(Axis("i", 4), child), carry))
+    assert child.carries == (carry,)
+    assert child.accums == (accum,)
+    assert body.iter_of_type(Accum, Carry) == (carry, accum, carry)
+    assert body.iter_of_type(Accum, Carry) is body.iter_of_type(Accum, Carry)
+    assert child.iter_of_type(Carry) is child.carries
+    visits = 0
+    original = Carry.carried_names
+
+    def counted(stmt):
+        nonlocal visits
+        visits += 1
+        return original(stmt)
+
+    monkeypatch.setattr(Carry, "carried_names", counted)
+    names = body.carried_names
+    assert names == ("state", "sum")
+    assert body.carried_names is names
+    assert visits == 2
+
+
+# --- construction analyses ------------------------------------------
+
+
+def test_dependency_depths_follow_ssa_and_external_buffers():
+    body = Body(
+        (
+            Loop(Axis("k", 8), (_ld("v", "x", "k"), _acc("sum", "v"), _acc("maximum", "v", "maximum"))),
+            _asn("index", "copy", "sum"),
+            Loop(Axis("j", 8), (_ld("gathered", "y", "index", "j"), _acc("total", "gathered"))),
+            _ld("other", "z", "i"),
+        )
+    )
+    assert body.dependency_depths(Accum, inputs={"x": 2, "y": 1}) == {
+        "v": 2,
+        "sum": 3,
+        "maximum": 3,
+        "index": 3,
+        "gathered": 3,
+        "total": 4,
+        "other": 0,
+    }
+    # Counting loads instead exercises the same traversal without reduction-specific policy.
+    assert body.dependency_depths(Load) == {"v": 1, "sum": 1, "maximum": 1, "index": 1, "gathered": 2, "total": 2, "other": 1}
+
+
+@pytest.mark.parametrize("dependent", [False, True])
+@pytest.mark.parametrize("strided", [False, True])
+def test_coalesce_preserves_finalized_reduction_dependencies(dependent, strided):
+    axis = Axis("k", 8)
+    first = (_ld("v", "x", "k"), _acc("maximum", "v", "maximum"))
+    second = (_ld("v", "x", "k"),)
+    if dependent:
+        second += (_asn("shifted", "subtract", "v", "maximum"),)
+    second += (_acc("sum", "shifted" if dependent else "v"),)
+    loops = tuple(StridedLoop(axis, Literal(0, "int"), 1, body) if strided else Loop(axis, body) for body in (first, second))
+    body = Body(loops).coalesce()
+    assert len(body) == (2 if dependent else 1)
+    assert len(body.loads) == (2 if dependent else 1)
+    assert body.carried_names == ("maximum", "sum")
 
 
 # --- closure shape ---------------------------------------------------

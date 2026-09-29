@@ -254,12 +254,12 @@ def rename_free(stmt: Stmt, alias: Mapping[str, str]) -> Stmt:
     """
     if not alias:
         return stmt
-    renamed = rewrite(stmt, lambda nm: alias.get(nm, nm), Sigma.IDENTITY, _axis_identity)
     bodies = stmt.nested()
+    shell = stmt.with_bodies(tuple(Body() for _ in bodies)) if bodies else stmt
+    renamed = rewrite(shell, lambda nm: alias.get(nm, nm), Sigma.IDENTITY, _axis_identity)
     if not bodies:
         return renamed
-    # ``rewrite`` just descended into the child scopes under the full alias. Redo each one with the
-    # names that scope re-binds pruned out, and put those bodies back.
+    # Rewrite each child once, with only the aliases its scope does not rebind.
     inner = []
     for b in bodies:
         pruned = {k: v for k, v in alias.items() if k not in b.ssa_defs}
