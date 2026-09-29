@@ -147,6 +147,10 @@ Every card ran at P0 with no power cap, thermal or hardware slowdown active; SM 
 - **AWQ and EXL3 (V100 SXM3):** only the rows this change breaks or slows are replaced, measured on one card (GPU
   0323318098458): the `50f206` consumer row in both files, and the AWQ `3d9a86` piece `07d3e3b957`. Every other row
   keeps main's measurement.
+- **After merging main's #969** (recurrence state carried in the term), which restamped all five V100 recipe goldens:
+  main's re-keyed recurrence rows are kept, and in FP8 `emmy golden restamp` re-keyed the re-recorded
+  `k_slice_unsqueeze_reduce_99e5cf` and `k_slice_unsqueeze_reduce_b17b4d` rows onto main's new identities with their
+  measurements kept. Every repository golden then passes `emmy golden check` and its row decode tests.
 - **DeepSeek (V100 SXM3):** unchanged. Every row still decodes. The PR changes the CUDA of the kernels
   `k_linear_matmul_softmax_mean_reduce_bcf52a__place_3409a23aa3`, `k_linear_reduce_45bd47` and `k_linear_reduce_b4cf4a`
   (grid order only), so the rows measuring those keep numbers taken on the old block order.
