@@ -95,9 +95,10 @@ different line.
 
 A re-formed piece whose single-product contraction reads a computed operand is lowered a second time inside its grid
 loops, so its grid follows the output layout. On V100 that reorders the grid of several cut pieces whose A does not
-move. Their CUDA changes only in block order, but a stored scalar tiling then runs in another block order, and the
-`k_matmul_reduce_50f206` consumer piece gets a new identity, so its rows stop decoding. A first attempt lowered every
-piece this way and broke the gate/up twin (two sibling reductions no longer merged); lowering the already formed terms
+move. A stored scalar tiling can then run in another block order; the second normalization can also hoist invariant
+calculations out of repeated work, as in the DeepSeek example below. The `k_matmul_reduce_50f206` consumer piece gets
+a new identity, so its rows stop decoding. A first attempt lowered every piece this way and broke the gate/up twin
+(two sibling reductions no longer merged); lowering the already formed terms
 keeps the twin. A later attempt that kept the first form unless the A moved was dropped by decision: stored schedules
 are regenerable, and one rule for all such pieces is simpler. A piece whose second nest the lift cannot take keeps the
 first form: on a native fp4 split-K partial, normalization hoists a table read's index out of the reduce loop, and the
@@ -153,9 +154,13 @@ Every card ran at P0 with no power cap, thermal or hardware slowdown active; SM 
   main's re-keyed recurrence rows are kept, and in FP8 `emmy golden restamp` re-keyed the re-recorded
   `k_slice_unsqueeze_reduce_99e5cf` and `k_slice_unsqueeze_reduce_b17b4d` rows onto main's new identities with their
   measurements kept. Every repository golden then passes `emmy golden check` and its row decode tests.
-- **DeepSeek (V100 SXM3):** unchanged. Every row still decodes. The PR changes the CUDA of the kernels
+- **DeepSeek (V100 SXM3):** the golden file is unchanged, and every row still decodes. The PR changes the CUDA of
   `k_linear_matmul_softmax_mean_reduce_bcf52a__place_3409a23aa3`, `k_linear_reduce_45bd47` and `k_linear_reduce_b4cf4a`
-  (grid order only), so the rows measuring those keep numbers taken on the old block order.
+  while retaining their inherited measurements. These changes are not limited to grid order: a source comparison
+  of main `a5b8263c` with PR `83834d96` shows that `bcf52a__place_3409a23aa3` computes an invariant sigmoid once and
+  reuses its result across eight unrolled reduction steps. Its emitted CUDA has one `expf` call instead of eight.
+  This is an emitted-source observation, not a claim about the final machine-code instruction count or an isolated
+  measurement of the hoist's benefit. The measured kernel times remain those reported below.
 
 ### Regressed and tuned rows
 
