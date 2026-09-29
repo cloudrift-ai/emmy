@@ -121,7 +121,7 @@ def rewrite(match: Match, producer: Node, consumer: Node) -> Graph | None:
         source.transient = False
 
     match.output = consumer.id
-    match.consumed = {producer.id, consumer.id}
+    match.consumed = {consumer.id} if producer.id in graph.outputs else {producer.id, consumer.id}
     return frag
 
 
