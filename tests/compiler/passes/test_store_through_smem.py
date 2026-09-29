@@ -29,10 +29,10 @@ def _graph(m: int, n: int, k: int) -> Graph:
     return graph
 
 
-def _pin(monkeypatch, work: str, tile: str) -> None:
+def _pin(monkeypatch, work: str, tile: str, *, out: bool = True) -> None:
     monkeypatch.setenv("EMMY_WORK", work)
     monkeypatch.setenv("EMMY_TILE", f"{K16}/{tile}")
-    monkeypatch.setenv("EMMY_STAGE", "d2/smem-async")
+    monkeypatch.setenv("EMMY_STAGE", "d2/smem-async/out" if out else "d2/smem-async")
     monkeypatch.setenv("EMMY_REDUCE", "")
     monkeypatch.setenv("EMMY_RASTER", "")
 
@@ -54,11 +54,19 @@ def test_a_wide_tile_stores_through_the_operand_slabs(monkeypatch) -> None:
     assert "&c[" not in src.replace("*reinterpret_cast<uint4*>(&c[", "")
 
 
-def test_the_env_pin_keeps_the_direct_stores(monkeypatch) -> None:
-    _pin(monkeypatch, "w2x2", "f4x4/k2")
-    monkeypatch.setenv("EMMY_STORE_THROUGH_SMEM", "0")
+def test_a_stage_without_out_keeps_the_direct_stores(monkeypatch) -> None:
+    _pin(monkeypatch, "w2x2", "f4x4/k2", out=False)
     src = _source(_graph(256, 256, 128))
     assert "_c_smem" not in src and "uint4" not in src
+
+
+def test_the_stage_codec_spells_out_last() -> None:
+    from emmy.compiler.ir.schedule import Stage  # noqa: PLC0415
+
+    assert Stage.parse("d4/smem-async/p2/out").spell() == "d4/smem-async/p2/out"
+    assert Stage.parse("d4/smem-async/p2/out").out and not Stage.parse("d4/smem-async/p2").out
+    with pytest.raises(ValueError):
+        Stage.parse("d1/reg/out")
 
 
 def test_a_tile_narrower_than_the_swizzle_row_stores_directly(monkeypatch) -> None:
@@ -76,13 +84,12 @@ def test_the_staged_store_is_bit_identical(monkeypatch, work, tile) -> None:
 
     rng = np.random.default_rng(0)
     feed = {"a": (rng.standard_normal((256, 256)) * 0.1).astype(np.float16), "b": (rng.standard_normal((512, 256)) * 0.1).astype(np.float16)}
-    _pin(monkeypatch, work, tile)
     outs = {}
-    for staged in ("0", "1"):
-        monkeypatch.setenv("EMMY_STORE_THROUGH_SMEM", staged)
+    for out in (False, True):
+        _pin(monkeypatch, work, tile, out=out)
         be = CudaBackend()
         compiled = be.compile(_graph(256, 512, 256))
         src = "\n".join(n.op.kernel_source for n in compiled.nodes.values() if getattr(n.op, "kernel_source", None))
-        assert ("_c_smem" in src) == (staged == "1")
-        outs[staged] = np.asarray(be.run(compiled, input_data=feed)[0].outputs["c"])
-    np.testing.assert_array_equal(outs["1"], outs["0"])
+        assert ("_c_smem" in src) == out
+        outs[out] = np.asarray(be.run(compiled, input_data=feed)[0].outputs["c"])
+    np.testing.assert_array_equal(outs[True], outs[False])

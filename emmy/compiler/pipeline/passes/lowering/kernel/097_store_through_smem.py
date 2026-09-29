@@ -20,7 +20,9 @@ Ordering: every cp.async copy drains and the CTA crosses a barrier before the fi
 a second barrier separates the fragment writes from the row reads.
 
 A perf transform: the stored values, their rounding and their fused epilogue are the ``RegStore``\\ s'
-own, so the output is bit-identical. ``EMMY_STORE_THROUGH_SMEM=0`` keeps the direct stores.
+own, so the output is bit-identical. It is a schedule choice, the ``out`` token of ``STAGE``: it
+wins where the store burst is a large share of the kernel (a one-wave GEMM, a short K) and loses its
+two barriers where it is not, so the sweep decides.
 """
 
 from __future__ import annotations
@@ -35,7 +37,9 @@ from emmy.compiler.ir.kernel import KernelOp, Tile
 from emmy.compiler.ir.kernel.ir import CpAsyncCopy, CpAsyncWait, MbarrierWait, RegStore, Smem, SmemTileStore, Sync, TmaLoad
 from emmy.compiler.ir.stmt import Body
 from emmy.compiler.pipeline import Pattern, RuleSkipped
-from emmy.compiler.pipeline.search.space import STORE_THROUGH_SMEM
+from emmy.compiler.ir.schedule import Stage
+from emmy.compiler.pipeline.knob import family_of
+from emmy.compiler.pipeline.search.space import STAGE
 
 PATTERN = [Pattern("root", KernelOp)]
 
@@ -46,12 +50,14 @@ _ROWS, _COLS = 16, 8  # an m16n8 C fragment
 
 def rewrite(root: Node) -> KernelOp | None:
     op: KernelOp = root.op
-    if STORE_THROUGH_SMEM.name in op.knobs:
-        raise RuleSkipped("STORE_THROUGH_SMEM already decided (idempotence via knob)")
-    if not STORE_THROUGH_SMEM.narrow((True,))[0]:
-        return replace(op, knobs={**op.knobs, STORE_THROUGH_SMEM.name: False})
+    if not any(family_of(key) == STAGE.name and value and Stage.parse(str(value)).out for key, value in op.knobs.items()):
+        raise RuleSkipped("no STAGE here stores its output through shared memory")
+    if any(s.name == _TILE for s in op.smem_buffers.values()):
+        raise RuleSkipped("the output tile already goes through shared memory")
     body = Body(tuple(_through_smem(op, s) if isinstance(s, Tile) else s for s in op.body))
-    return replace(op, body=body, knobs={**op.knobs, STORE_THROUGH_SMEM.name: True})
+    if body == op.body:
+        raise RuleSkipped("no tile here can store its output through shared memory")
+    return replace(op, body=body)
 
 
 def _simplify(e):
