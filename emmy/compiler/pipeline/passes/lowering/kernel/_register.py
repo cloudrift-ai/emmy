@@ -25,7 +25,7 @@ from emmy.compiler.ir.kernel.ir import (
     Tile,
     frag_layout,
 )
-from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Select, StridedLoop
+from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Pre, Select, StridedLoop
 
 from ._atom import _direct_operand
 
@@ -82,9 +82,10 @@ class _Fragments:
         return out
 
     def read_b(self, node, axis, col, k, cb):
-        """Reuse the direct fragment loader for a slab; computed operands keep their C fragments."""
+        """Reuse the direct fragment loader for a slab; computed operands — the carrier read among
+        them — keep their C fragments."""
         slab = node.as_slab()
-        if slab is None or slab.load.input == self.program.state.write.output:
+        if slab is None:
             return None
         try:
             trans, ldm = _direct_operand(slab.load, self.tile.inputs, k_name=axis, own=col, legacy=(False, 0))
@@ -130,12 +131,26 @@ class _Fragments:
             for stmt in node.lift.body:
                 if isinstance(stmt, Let):
                     env[stmt.name] = stmt.value
-                elif isinstance(stmt, Load):
-                    if stmt.input == self.program.state.write.output:
-                        env[stmt.name] = self.states[cb.value // self.width]
-                    else:
+                elif isinstance(stmt, Pre):
+                    # The state one step back: the warp's own fragment of it — before the first
+                    # step, the seed: a constant, or the seed tensor read at the cell. The select
+                    # is emitted for a zero seed too, where the fragments' own initialization already
+                    # holds it: it is the kernel the recorded rows were measured on, and without it
+                    # ptxas spills the odd-shaped f16 chunk step (17 rows, 35 columns) to local memory.
+                    seed = self.program.seed
+                    if isinstance(seed, str):
                         index = tuple(e.substitute(clipped).simplify(SimplifyCtx.empty()) for e in stmt.index)
-                        env[stmt.name] = self.apply("copy", ((stmt.input, index),), (GMEM,), rb, cb)
+                        seeded = self.apply("copy", ((seed, index),), (GMEM,), rb, cb)
+                    else:
+                        seeded = Literal(float(seed))
+                    first = BinaryExpr(">", Var(self.program.time), Literal(0, "int"))
+                    kinds = (COORD, FRAG, UNIFORM if isinstance(seeded, Literal) else FRAG)
+                    env[stmt.name] = self.apply("where", (first, self.states[cb.value // self.width], seeded), kinds, rb, cb)
+                elif isinstance(stmt, Load):
+                    index = tuple(e.substitute(clipped).simplify(SimplifyCtx.empty()) for e in stmt.index)
+                    env[stmt.name] = self.apply("copy", ((stmt.input, index),), (GMEM,), rb, cb)
+                elif isinstance(stmt, Assign) and stmt.op.name == "copy":
+                    env[stmt.name] = env[stmt.args[0]]  # a name for the same fragment, never a second one
                 elif isinstance(stmt, Assign):
                     args = tuple(env[name] for name in stmt.args)
                     kinds = tuple(UNIFORM if isinstance(arg, Literal) else FRAG for arg in args)
@@ -232,19 +247,21 @@ def factorize_register(tile):
     height = choice.tile.atom.atom_m
     row_base = Literal(height, "int") * (Literal(warps, "int") * Var("_rb") + Var("_rw"))
     emit = _Fragments(tile)
-    pending = []
-    for spec, node in zip((*program.outputs, program.state), program.roots, strict=True):
-        col, row = (expr.name for expr in spec.write.index[-2:])
-        columns = emit.extents[col]
-        values = []
-        for j in range((columns + emit.width - 1) // emit.width):
-            cb = Literal(j * emit.width, "int")
-            (value,) = emit.cell(node, row, col, row_base, cb)
-            values.append(emit.fragment(value))
-        pending.append((spec, values))
-    # Outputs may observe both the previous state and results of this step. Emit all reads
-    # before any carried register is overwritten, including readers outside the update cone.
-    for spec, values in pending:
+    (carrying,) = (site.node for site in tile.sites if site.node.carries)
+    col, row = carrying.cells[-2:]
+    cells = (*((spec.write.index[-2].name, spec.write.index[-1].name) for spec in program.outputs), (col, row))
+
+    def fragments(node, row, col):
+        return tuple(
+            emit.fragment(emit.cell(node, row, col, row_base, Literal(j * emit.width, "int"))[0])
+            for j in range((emit.extents[col] + emit.width - 1) // emit.width)
+        )
+
+    # Every output is computed and stored, then the state's next value; the carried registers are
+    # overwritten last, so an output observing the previous state reads it whole. The state itself
+    # has no store: it lives in the fragments across the steps.
+    for spec, (col, row), node in zip(program.outputs, cells, program.roots, strict=False):
+        values = fragments(node, row, col)
         for j, value in enumerate(values):
             index = (*spec.write.index[:-2], Literal(j * emit.width, "int"), row_base)
             emit.body.append(
@@ -260,11 +277,11 @@ def factorize_register(tile):
                     n_guard=(Literal(j * emit.width, "int"), Literal(emit.extents[spec.write.index[-2].name], "int")),
                 )
             )
-    for state, value in zip(emit.states, pending[-1][1], strict=True):
+    for state, value in zip(emit.states, fragments(program.roots[-1], *cells[-1][::-1]), strict=True):
         emit.body.append(
             FragmentApply(out=state, op=ElementwiseImpl("copy"), args=(value,), kinds=(FRAG,), layout=emit.layout, in_place=True)
         )
     declarations = tuple(RegFragment(name=name, role="c", shape=emit.atom.shape, dtype=F32) for name in emit.states)
-    loop = StridedLoop(axis=tile.place.serial[0], start=Literal(0, "int"), step=Literal(1, "int"), body=Body(emit.body), unroll=False)
+    loop = StridedLoop(axis=tile.axis_of(program.time), start=Literal(0, "int"), step=Literal(1, "int"), body=Body(emit.body), unroll=False)
     axes = (*program.batch, Axis("_rb", (program.rows + warps * height - 1) // (warps * height)), Axis("_rw", warps), Axis("_rl", 32))
     return Tile(axes=axes, body=Body((*declarations, loop)), block_threads=warps * 32)

@@ -157,15 +157,17 @@ class RestampReport:
     rows_demoted: list[str] = field(default_factory=list)
     rows_dropped: list[str] = field(default_factory=list)
     rows_respelled: list[str] = field(default_factory=list)
+    rows_rekeyed: list[str] = field(default_factory=list)
 
     @property
     def changed(self) -> bool:
-        return bool(self.restamped or self.dropped_targets or self.rows_dropped or self.rows_respelled)
+        return bool(self.restamped or self.dropped_targets or self.rows_dropped or self.rows_respelled or self.rows_rekeyed)
 
     def lines(self) -> list[str]:
         out = [f"{self.restamped} of {self.targets} targets restamped, {len(self.dropped_targets)} dropped; {self.rows_kept} rows kept"]
         out.extend(f"dropped target {reason}" for reason in self.dropped_targets)
         out.extend(f"re-spelled the route of {reason}" for reason in self.rows_respelled)
+        out.extend(f"re-keyed {name} onto the target's identity under the current compiler" for name in self.rows_rekeyed)
         out.extend(f"demoted to a proposal {name}" for name in self.rows_demoted)
         out.extend(f"dropped row {reason}" for reason in self.rows_dropped)
         return out
@@ -227,11 +229,18 @@ def _rekeyed_rows(document: GoldenFile, entry: Config, wire: dict, report: Resta
     # A row naming the target itself takes the fresh target's identity. Any other stored identity
     # names a piece of the target's kernel set (a receipt, or a piece row beside its routing row):
     # it stays as stored, and the decode below keeps the row only if the fresh set still mints that
-    # piece under the set's own rows.
+    # piece under the set's own rows. One identity shared by every row of the entry, and not the
+    # target's as the compiler computes it today, is the target's own under the compiler that
+    # recorded it — a piece row comes beside its routing row, never alone — so it moves too: that is
+    # the case of a kernel whose Loop IR stayed while what the lift makes of it changed.
     old_key = replace(old_records[0], identity=None).kernel_identity
     new_key = replace(new_records[0], identity=None).kernel_identity
+    moved = len({old.identity for old in old_records}) == 1 and old_records[0].identity != old_key
+    if moved:
+        report.rows_rekeyed.extend(old.name for old in old_records)
     survivors = [
-        replace(new, identity=new_key) if old.identity == old_key else new for old, new in zip(old_records, new_records, strict=True)
+        replace(new, identity=new_key) if moved or old.identity == old_key else new
+        for old, new in zip(old_records, new_records, strict=True)
     ]
 
     rows = []
