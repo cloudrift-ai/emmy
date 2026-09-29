@@ -504,7 +504,43 @@ Seven staging tests likewise pass when the namespace supplies Git on their fixed
 The local full run completed with 8,085 passed, 390 skipped, 16 failed and seven setup errors in 1,518.16 seconds:
 two obsolete assertions already repaired, the baseline 5080 spill assertion, thirteen shell-path failures and seven
 Git-path setup errors. The existing FP8 expert check passed after 185.64 seconds of compilation/execution.
+A separate invocation of that check on unchanged main also exceeded a 110-second diagnostic budget. These
+shared-workstation runs do not establish a before/after compile-time comparison.
 
 The final full suite is now running on the 5090 with eight workers, the current tracked source and a freshly built
 Rust extension. Its first recipe-history check required adding Git history to the previously archive-only checkout;
 that check now passes independently. No other agent's remote files or environments were changed.
+
+### Native serving follow-up boundary
+
+PR #973 supplies the static programs and validates their explicit state contract. Connecting them to native request
+execution is a separate change because the existing native exporter accepts only unquantized dense Qwen3, and the
+generation runner assumes every layer exposes full attention. The remaining deliverables are concrete:
+
+1. Classify each layer when building the runner. GDN owns matrix state and convolution history; full attention owns
+   its KV cache and retains its output gate. Derive each state shape and dtype from the captured program contract.
+2. Allocate two state/history buffer sets per active request and GDN layer. A program reads the old set and writes
+   the new set; swap only after completion. Reset both sets when a request slot is reused. This avoids aliasing an
+   input that another output computation still reads.
+3. Consume exactly the prompt's tokens. The current native attention path may compute a prefill chunk past the
+   prompt end because later decoding overwrites those KV positions. GDN cannot reuse that policy: extra steps
+   change its recurrent state. Use full static chunks followed by single-token steps for the tail initially.
+4. Validate mixed-layer logits, prompt continuation and interleaved request isolation against the installed HF
+   implementation at lengths `1`, `chunk-1`, `chunk`, `chunk+1` and `2*chunk+3`. Cover cancellation and slot reuse.
+   Qualify packed checkpoint loading and memory use before claiming full NVFP4 model serving or its performance.
+
+Expected execution-plan structure, **a draft, not implemented native dispatch**:
+
+```text
+request r, GDN layer l:
+  zero S[r,l,0], S[r,l,1], H[r,l,0], H[r,l,1]       # request admission/reset
+  GDN_chunk(x[0:C], S[r,l,0], H[r,l,0])
+      -> y[0:C], S[r,l,1], H[r,l,1]
+  GDN_decode(x[C:C+1], S[r,l,1], H[r,l,1])
+      -> y[C:C+1], S[r,l,0], H[r,l,0]               # a real tail token
+  # No launch for padded positions beyond the prompt.
+```
+
+The follow-up's review evidence should include the emitted buffer bindings, exact consumed-token counts, reference
+logits, reset/isolation results and checkpoint memory accounting. The block-level checks in this PR establish the
+program seam; they do not substitute for those runner-level checks.
