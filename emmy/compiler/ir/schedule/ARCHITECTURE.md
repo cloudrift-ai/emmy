@@ -187,11 +187,9 @@ check so that message wins. A `wgmma` also holds its whole accumulator in regist
 (descriptors, addresses, ring counters), exceed the per-thread register envelope its CTA size leaves — ptxas would
 refuse that kernel.
 
-`stage_moves` offers the `STAGE` product of transport, ring depth and register depth, and on the warp tier the
-`out` token beside each of them — the output tile stored through the operand slabs after the K-loop
-(`lowering/kernel/ARCHITECTURE.md`). A TMA ring never offers `out`, because its last copies complete on an mbarrier
-that store does not wait on. The token is a choice, not a default: measured evidence decides where the two barriers
-it adds pay for the wider stores.
+`stage_moves` offers the `STAGE` product of transport, ring depth and register depth. A node's stage filter keeps the
+8-deep ring to `wgmma` tiles, the only ones it has paid on; elsewhere it would only multiply the candidates every
+compile prices.
 
 `TileOp.stage_edges` offers a transport at every operand of every contracting site, a chunked carrier's included —
 which tier then puts which operand on a slab is the tier's own business. The chunked site used to be excluded on the

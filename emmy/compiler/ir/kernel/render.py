@@ -21,7 +21,6 @@ from emmy.compiler.ir.kernel.ir import (
     LdmatrixLoad,
     RegStore,
     Smem,
-    SmemTileStore,
     TmaDescriptor,
     WgmmaMma,
     frag_dtype,
@@ -1288,11 +1287,7 @@ def _swizzle_prelude(kernel_op: KernelOp) -> str:
     (often long) element index once instead of inlining it twice around the XOR.
     ``__forceinline__``; same SASS as the inlined form."""
     modes = sorted(
-        {
-            s.swizzle
-            for s in kernel_op.body.iter()
-            if isinstance(s, (LdmatrixLoad, CpAsyncCopy, RegStore, SmemTileStore, Write)) and swizzle_xor(s.swizzle)
-        }
+        {s.swizzle for s in kernel_op.body.iter() if isinstance(s, (LdmatrixLoad, CpAsyncCopy, RegStore, Write)) and swizzle_xor(s.swizzle)}
     )
     chunks = []
     for mode in modes:
@@ -1662,19 +1657,9 @@ def _compute_dynamic_smem_offsets(kernel_op: KernelOp) -> tuple[dict[str, int], 
         return {}, 0
 
     offsets, total = pack_smem(smems)
-    # A buffer laid over another fits a static array only while it stays inside it.
-    by_name = {s.name: s for s in smems}
-    if total <= STATIC_SMEM_CAP and all(s.over is None or _smem_nbytes(s) <= _smem_nbytes(by_name[s.over]) for s in smems):
+    if total <= STATIC_SMEM_CAP:
         return {}, 0
     return offsets, total
-
-
-def _smem_nbytes(s: Smem) -> int:
-    from math import prod  # noqa: PLC0415
-
-    from emmy.compiler.backend.cuda.dtype import nbytes_of  # noqa: PLC0415
-
-    return prod(int(e) for e in s.extents) * nbytes_of(s.dtype)
 
 
 def _launch_bounds_for(kernel_op: KernelOp) -> int:

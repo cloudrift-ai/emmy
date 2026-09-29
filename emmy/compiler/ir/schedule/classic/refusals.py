@@ -488,23 +488,11 @@ def _stage_candidates(tile: TileOp, target, node, choice: NodeSchedule) -> tuple
     # transport there would name a deposit its materializer cannot emit.
     if len(node.bilinear_channels()) > 1 and not choice.tile.is_warp:
         candidates = tuple(stage for stage in candidates if stage.transport not in ("smem-async", "smem-tma"))
-    if not _staged_store_fits(choice.tile):
-        candidates = tuple(stage for stage in candidates if not stage.out)
     if not (choice.tile.is_warp and choice.tile.atom.is_wgmma):
         # An 8-deep ring has paid only on wgmma (the H100 down projection; depth 6 lost to 4 and 8).
         # Elsewhere it only multiplies the stage space every compile prices.
         candidates = tuple(stage for stage in candidates if stage.depth < 8)
     return candidates
-
-
-def _staged_store_fits(plan: Tile) -> bool:
-    """Whether ``out`` can change the kernel under ``plan``: the store through shared memory
-    (``098_store_through_smem``) takes m16n8k16 fragments only, over a CTA tile whose width is a
-    power of two of at least 64 columns (its 128-byte swizzle). Anywhere else the row would build
-    the same kernel as its plain twin."""
-    if not (plan.is_warp and plan.atom.fragment_layout == "m16n8k16"):
-        return False
-    return plan.tile_n % 64 == 0 and plan.tile_n & (plan.tile_n - 1) == 0
 
 
 def _multi_fold_direct_refusal(node: Fold, plan: Tile, stage: Stage) -> str | None:

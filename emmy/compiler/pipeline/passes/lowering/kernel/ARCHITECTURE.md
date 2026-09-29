@@ -700,14 +700,6 @@ Copy fills and computed operand fills use these same coupled layouts and accumul
 The transform halves the staged drain's LSU instructions and is bit-identical; equal modern swizzle modes remain
 pairable because their per-lane address XOR commutes with the paired lane map. A ring drain's row carries its slot term
 and its fragment offset in one `+` chain, so the pair's row distance is read off the literals of the whole chain;
-`098_store_through_smem` stores an `m16n8k16` tile's output through shared memory when its `STAGE` spells `/out` and
-a cp.async or synchronous ring feeds it (a TMA ring's last copies complete on an mbarrier it does not wait on; any
-other tile keeps its direct stores): after the K-loop's copies drain and a barrier, the fragments land over the dead
-operand slabs (`Smem.over`; a tile larger than the first slab runs on over the next ones in the dynamic pool, and a
-128-byte-row swizzle keeps both sides conflict-free), and a second barrier later the CTA writes 16-byte rows
-(`SmemTileStore`), bounded by a masked M edge. It replaces a burst of 4-byte stores per lane that throttled the
-load/store queue: an A100 one-wave 256x128 GEMM went 39.0 to 32.1 µs (cuBLAS 31). It is a schedule choice, not a
-default, because on long-K tiles with a small store share the two barriers cost about as much as they save;
 `097_widen_fragment_stores` stores four N-adjacent fragment cells of a `wgmma` kernel as one 16-byte row per lane
 (`RegStore.run`): each cell's epilogue runs as before, then three `shfl.xor` rounds transpose the quad's packed column
 pairs so lane `t` holds cell `t`'s eight columns — a quarter of the stores, every sector whole (on the H100 the

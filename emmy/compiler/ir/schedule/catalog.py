@@ -283,12 +283,10 @@ def stage_moves(*, warp: bool, ctx=None) -> list[Stage]:
     ``reg_depth >= 2`` is the fragment ping-pong under the mma drain, so it is warp-tier only."""
     reg_depths = STAGE_REG_DEPTHS if warp else (1,)
     moves = [
-        Stage(depth=depth, transport=transport, reg_depth=reg_depth, out=out)
+        Stage(depth=depth, transport=transport, reg_depth=reg_depth)
         for transport in STAGE_TRANSPORTS
         for depth in STAGE_DEPTHS
         for reg_depth in reg_depths
-        # A TMA ring's tail copies are never waited on; which tiles take ``out`` is the node's stage filter.
-        for out in ((False, True) if warp and transport != "smem-tma" else (False,))
     ]
     return moves if ctx is None else [move for move in moves if move.available_on(ctx)]
 
