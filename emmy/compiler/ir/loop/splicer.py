@@ -201,7 +201,8 @@ def splice_loops(
         return None
     try:
         return _Splicer(
-            _Program({tag: op.analyze() for tag, op in loops.items()}, splice_edges), roots=roots,
+            _Program({tag: op.analyze() for tag, op in loops.items()}, splice_edges),
+            roots=roots,
         ).run()
     except (_NotSupported, ValueError) as exc:
         # _NotSupported = splicer hit an unsupported pattern (σ-solve, scope).
@@ -581,10 +582,12 @@ class _Program:
 
     @cached_property
     def used_names(self) -> set[str]:
-        return set().union(*(
-            set(meta.body.ssa_defs | meta.body.axis_names) | {axis.name for scope in meta.scopes.values() for axis in scope.enclosing}
-            for meta in self.loops.values()
-        ))
+        return set().union(
+            *(
+                set(meta.body.ssa_defs | meta.body.axis_names) | {axis.name for scope in meta.scopes.values() for axis in scope.enclosing}
+                for meta in self.loops.values()
+            )
+        )
 
     @cached_property
     def reduction_depth(self) -> dict[str, dict[str, int]]:
@@ -626,7 +629,11 @@ class _Splicer(LoopBuilder):
     """Build a maximal region, keeping reduction cones as shared calls until final CSE."""
 
     def __init__(
-        self, program: _Program, *, roots: tuple[tuple[str, str], ...], outline: tuple[str, str] | None = None,
+        self,
+        program: _Program,
+        *,
+        roots: tuple[tuple[str, str], ...],
+        outline: tuple[str, str] | None = None,
         expand: dict[Subroutine, str] | None = None,
     ) -> None:
         super().__init__(used_names=program.used_names)
@@ -764,7 +771,8 @@ class _Splicer(LoopBuilder):
         elif isinstance(stmt, Call):
             rename = {
                 arg: Var(self._ensure_dep(arg, d.origin, d.sigma, d.demand_scope))
-                for arg in stmt.deps() if arg in self.loops[d.origin].defs
+                for arg in stmt.deps()
+                if arg in self.loops[d.origin].defs
             }
             args = tuple(d.sigma.apply(arg).substitute(rename) for arg in stmt.args)
             sigma = _canonical(Sigma(dict(zip(stmt.target.params, args, strict=True))), d.demand_scope)

@@ -18,24 +18,51 @@ from emmy.compiler.pipeline import Pipeline
 
 def _project() -> Subroutine:
     return Subroutine(
-        "project", (Axis("row", 3), Axis("col", 8)),
-        Body((Loop(Axis("k", 16), Body((
-            Load("xv", "x", (Var("row"), Var("k"))),
-            Load("wv", "weight", (Var("col"), Var("k"))),
-            Assign("product", "multiply", ("xv", "wv")),
-            Accum("sum", "product", "add", axes=("k",)),
-        ))),)), "sum",
+        "project",
+        (Axis("row", 3), Axis("col", 8)),
+        Body(
+            (
+                Loop(
+                    Axis("k", 16),
+                    Body(
+                        (
+                            Load("xv", "x", (Var("row"), Var("k"))),
+                            Load("wv", "weight", (Var("col"), Var("k"))),
+                            Assign("product", "multiply", ("xv", "wv")),
+                            Accum("sum", "product", "add", axes=("k",)),
+                        )
+                    ),
+                ),
+            )
+        ),
+        "sum",
     )
 
 
 def _body(target: Subroutine, offset: int, *, other: Subroutine | None = None) -> Body:
     # The caller's k shadows the definition's internal k: expansion must be hygienic.
-    return Body((Loop(Axis("k", 3), Body((Loop(Axis("c", 8), Body((
-        Call("left", target, (Var("k"), Var("c"))),
-        Call("right", other or target, (Var("k"), (Var("c") + Literal(offset, "int")) % Literal(8, "int"))),
-        Assign("value", "add", ("left", "right")),
-        Write("out", (Var("k"), Var("c")), "value"),
-    ))),))),))
+    return Body(
+        (
+            Loop(
+                Axis("k", 3),
+                Body(
+                    (
+                        Loop(
+                            Axis("c", 8),
+                            Body(
+                                (
+                                    Call("left", target, (Var("k"), Var("c"))),
+                                    Call("right", other or target, (Var("k"), (Var("c") + Literal(offset, "int")) % Literal(8, "int"))),
+                                    Assign("value", "add", ("left", "right")),
+                                    Write("out", (Var("k"), Var("c")), "value"),
+                                )
+                            ),
+                        ),
+                    )
+                ),
+            ),
+        )
+    )
 
 
 @pytest.mark.parametrize("offset", [0, 4])
@@ -111,9 +138,10 @@ def test_buffer_renaming_preserves_shared_definitions():
     renamed = compact.rename_buffers({"x": "input", "weight": "matrix", "out": "output"})
     assert len(definitions(renamed)) == 1
     assert definitions(renamed)[0].buffers == ("input", "matrix")
-    assert renamed.structural_key() == LoopOp(body=compact).body.rename_buffers(
-        {"x": "input", "weight": "matrix", "out": "output"}
-    ).structural_key()
+    assert (
+        renamed.structural_key()
+        == LoopOp(body=compact).body.rename_buffers({"x": "input", "weight": "matrix", "out": "output"}).structural_key()
+    )
 
 
 def test_partial_call_body_is_not_silently_discarded_by_identity():

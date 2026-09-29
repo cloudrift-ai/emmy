@@ -43,6 +43,7 @@ class Subroutine:
 
     @cached_method
     def with_buffers(self, buffers: tuple[str, ...]) -> Subroutine:
+        """Rebind captured buffers once for all calls sharing the same definition."""
         return replace(self, body=self.body.rename_buffers(dict(zip(self.buffers, buffers, strict=True))))
 
     @property
@@ -135,9 +136,12 @@ def reduction_depths(body: Body, inputs: dict[str, int] | None = None) -> dict[s
 
     inputs = inputs or {}
     memo = body.fold(
-        lambda stmt, children, _: max(
-            (*(depth for depth in children if depth is not None), *(inputs.get(name, 0) for name in stmt.external_reads())),
-            default=0,
-        ) + (stmt.target.reduction_depth if isinstance(stmt, Call) else isinstance(stmt, Accum))
+        lambda stmt, children, _: (
+            max(
+                (*(depth for depth in children if depth is not None), *(inputs.get(name, 0) for name in stmt.external_reads())),
+                default=0,
+            )
+            + (stmt.target.reduction_depth if isinstance(stmt, Call) else isinstance(stmt, Accum))
+        )
     )
     return {name: memo[id(stmt)] for name, stmt in body.definitions.items()}

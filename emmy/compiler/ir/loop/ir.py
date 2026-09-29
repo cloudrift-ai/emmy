@@ -326,7 +326,7 @@ class LoopMeta:
 
     - ``body``: the source statement body, including compact subroutine calls during fusion.
     - ``defs``: SSA name → defining ``Stmt`` (``Load`` / ``Assign`` /
-      ``Select`` / ``Accum``). A ``Write`` has no SSA name and is not here.
+      ``Select`` / ``Accum`` / ``Call``). A ``Write`` has no SSA name and is not here.
     - ``scopes``: SSA name → binding ``Scope`` (where the value is live
       after its def). For plain stmts this is the enclosing axis chain;
       for ``Accum`` the reduce axis is excluded — the Accum binds *after*
@@ -393,7 +393,6 @@ class LoopMeta:
             writes=tuple(writes),
             live_axes=bound.axis_dependencies,
         )
-
 
 
 # ---------------------------------------------------------------------------
