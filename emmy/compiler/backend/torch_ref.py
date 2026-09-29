@@ -32,6 +32,7 @@ SUPPORTED = frozenset(
         "CatOp",
         "UnsqueezeOp",
         "LinearOp",
+        "Conv1dOp",
         "MatmulOp",
         "SdpaOp",
         "MeanOp",
@@ -247,6 +248,11 @@ def _eval(node, ins: list, sym_env: dict[str, int] | None = None, device=None):
         raise NotImplementedError(f"torch_ref: scan {fn!r} unmapped")
     if name == "LinearOp":
         return F.linear(ins[0], ins[1], ins[2] if op.has_bias else None)
+    if name == "Conv1dOp":
+        return F.conv1d(
+            ins[0], ins[1], ins[2] if len(ins) > 2 else None,
+            stride=op.stride, padding=op.padding, dilation=op.dilation, groups=op.groups,
+        )
     if name == "MatmulOp":
         dtype = torch.promote_types(torch.promote_types(ins[0].dtype, ins[1].dtype), torch_dtype(node.output.dtype))
         out = ins[0].to(dtype) @ ins[1].to(dtype)
