@@ -656,35 +656,39 @@ class _Splicer(LoopBuilder):
         scope induced by ``ref_scope`` and σ. Queue a new demand the first
         time the key is seen.
         """
-        meta = self.loops[origin]
-        if name not in meta.defs:
-            raise _NotSupported(f"_ensure_dep: {name!r} is not defined in loop {origin!r}")
+        aliases = []
+        while True:
+            meta = self.loops[origin]
+            if name not in meta.defs:
+                raise _NotSupported(f"_ensure_dep: {name!r} is not defined in loop {origin!r}")
 
-        required_axes = tuple(
-            mapped
-            for axis in meta.scopes[name].enclosing
-            for mapped in _remap_axis_names(axis, sigma, ref_scope, free_vars=self._expr_free_vars)
-        )
-        emit_scope = _scope_for_axes(ref_scope, required_axes)
-
-        # σ restricted to axes transitively used in Expr subtrees reachable
-        # from this stmt. Bindings outside this set don't affect any emitted
-        # stmt, so keeping them in the key would cause spurious duplicate
-        # emissions.
-        restricted = sigma.restrict(meta.live_axes[name])
-        key = (origin, name, emit_scope, restricted)
-        existing = self._binding.get(key)
-        if existing is not None:
-            return existing
-        if len(self._binding) >= self._BINDING_RATIO * self._source_stmts:
-            raise UnfusableStmt(
-                f"the merged body takes over {self._BINDING_RATIO} bindings per source statement, at {name!r} of loop "
-                f"{origin!r} — the region's σ-bindings multiply instead of deduplicating: a recurrence the roller did not roll",
-                origin=origin,
+            required_axes = tuple(
+                mapped
+                for axis in meta.scopes[name].enclosing
+                for mapped in _remap_axis_names(axis, sigma, ref_scope, free_vars=self._expr_free_vars)
             )
-        bound = self.fresh(name)
-        self._binding[key] = bound
-        self._pending.append(_Demand(name=name, origin=origin, sigma=sigma, demand_scope=emit_scope, bound_as=bound))
+            emit_scope = _scope_for_axes(ref_scope, required_axes)
+            key = (origin, name, emit_scope, sigma.restrict(meta.live_axes[name]))
+            bound = self._binding.get(key)
+            if bound is not None:
+                break
+            if len(self._binding) + len(aliases) >= self._BINDING_RATIO * self._source_stmts:
+                raise UnfusableStmt(
+                    f"the merged body takes over {self._BINDING_RATIO} bindings per source statement, at {name!r} of loop "
+                    f"{origin!r} — the region's σ-bindings multiply instead of deduplicating: a recurrence the roller did not roll",
+                    origin=origin,
+                )
+            aliases.append(key)
+            stmt = meta.defs[name]
+            if isinstance(stmt, Load) and (edge := self.splice_edges.get((origin, stmt.input))) is not None:
+                name, origin, sigma = self._splice_source(stmt, origin, sigma, emit_scope, *edge)
+                ref_scope = emit_scope
+                continue
+            bound = self.fresh(name)
+            self._pending.append(_Demand(name=name, origin=origin, sigma=sigma, demand_scope=emit_scope, bound_as=bound))
+            break
+        for key in aliases:
+            self._binding[key] = bound
         return bound
 
     def _expr_free_vars(self, expr: Expr) -> frozenset[str]:
@@ -703,12 +707,7 @@ class _Splicer(LoopBuilder):
         stmt = self.loops[d.origin].defs[d.name]
 
         if isinstance(stmt, Load):
-            edge = self.splice_edges.get((d.origin, stmt.input))
-            if edge is not None:
-                target_tag, target_output_buf = edge
-                self._resolve_splice_load(stmt, d, target_tag, target_output_buf)
-            else:
-                self._resolve_external_load(stmt, d)
+            self._resolve_external_load(stmt, d)
         elif isinstance(stmt, Accum):
             self._resolve_accum(stmt, d)
         elif isinstance(stmt, (Assign, Select)):
@@ -737,12 +736,10 @@ class _Splicer(LoopBuilder):
         rename[stmt.name] = d.bound_as
         self.insert(stmt.rewrite(lambda n: rename.get(n, n), d.sigma), d.demand_scope)
 
-    def _resolve_splice_load(self, stmt: Load, d: _Demand, target_tag: str, target_output_buf: str) -> None:
-        """A Load that's a splice edge to another registered loop — emit a
-        copy alias and queue the target loop's ``Write.value`` under the
-        solved σ. The target's expression chain reconstructs piecemeal over
-        subsequent iterations. ``target_output_buf`` selects which ``Write``
-        of the target is the splice source when the target has multiple outputs."""
+    def _splice_source(
+        self, stmt: Load, origin: str, sigma: Sigma, scope: Scope, target_tag: str, target_output_buf: str
+    ) -> tuple[str, str, Sigma]:
+        """Resolve an internal Load directly to its producer value and coordinates."""
         target = self.loops[target_tag]
         found = next(((w, scope) for w, scope in target.writes if w.output == target_output_buf), None)
         if found is None:
@@ -756,16 +753,15 @@ class _Splicer(LoopBuilder):
                 f"splice edge into {target_tag!r} observes running accumulator {target_write.value!r}; ordered loop cannot be spliced",
                 origin=target_tag,
             )
-        source_meta = self.loops[d.origin]
+        source_meta = self.loops[origin]
         index_rename = {
-            name: Var(self._ensure_dep(name, d.origin, d.sigma, d.demand_scope)) for name in stmt.deps() if name in source_meta.defs
+            name: Var(self._ensure_dep(name, origin, sigma, scope)) for name in stmt.deps() if name in source_meta.defs
         }
-        effective_index = tuple(d.sigma.apply(e).substitute(index_rename) for e in stmt.index)
+        effective_index = tuple(sigma.apply(e).substitute(index_rename) for e in stmt.index)
         sigma = _solve_sigma(target_write.index, effective_index, {a.name for a in target.op.axes})
         if sigma is None:
             raise _NotSupported(f"σ-solve failed pairing target write index {target_write.index} against reader index {effective_index}")
-        v_bound = self._ensure_dep(target_write.value, target_tag, _canonical(sigma, d.demand_scope), d.demand_scope)
-        self.insert(Assign(name=d.bound_as, op="copy", args=(v_bound,)), d.demand_scope)
+        return target_write.value, target_tag, _canonical(sigma, scope)
 
     def _resolve_accum(self, stmt: Accum, d: _Demand) -> None:
         """Emit ``Loop(fresh_reduce_axis, [Accum(bound, value_bound, op)])`` at
