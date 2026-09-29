@@ -179,8 +179,9 @@ work ordered with vLLM's, and how a program's raw launches are recorded into vLL
 torch benches stay ordered with the program's launches. Host uploads and descriptor encodes always go through the
 runtime's own stream and complete before they return, so an adopted stream mid-capture never sees a pageable copy or
 a synchronize. Operands a plan names but never declares as buffers — an indirect operand's pointer table and selector
-(the serving MoE fixed-slot dispatch) — are bound by address with `alias_buffer` too; a buffer nobody reads
-(the direct per-expert input those tables replace) is handed back with `release_buffer`.
+(the serving MoE fixed-slot dispatch), a paged buffer's page table (`<name>__pages`) — are bound by address with
+`alias_buffer` too; a buffer nobody reads (the direct per-expert input those tables replace) is handed back with
+`release_buffer`.
 
 `benchmark_program(graph, input_data, warmup, num_iters)` adds a warmup loop + timed loop over the runtime's
 per-launch event windows (`Executor.time_launch`, one pair of events per launch index, reused across iterations) for

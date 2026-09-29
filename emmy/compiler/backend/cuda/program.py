@@ -158,14 +158,15 @@ def _host_bytes(buf: _Buffer, shape: tuple[int, ...], src, constants: dict[str, 
 
 def _host_bindings(plan: ExecutionPlan, input_data: dict, sym_values: dict[str, int], *, only=None) -> dict[str, bytes]:
     """Starting bytes for input and constant buffers (``only`` narrows the set). A buffer bound
-    to a device tensor is skipped: its memory is lent to the runtime instead. Output and scratch
-    buffers start zeroed inside the runtime. Saturating casts here are intended, not bugs: an
+    to a device tensor is skipped: its memory is lent to the runtime instead; so is a paged one,
+    which has no slab to fill and takes its page table instead. Output and scratch buffers start
+    zeroed inside the runtime. Saturating casts here are intended, not bugs: an
     SDPA mask-fill constant (``-1e9``) is meant to become ``-inf`` in fp16 (masked → 0 after
     softmax)."""
     out: dict[str, bytes] = {}
     with np.errstate(over="ignore", invalid="ignore"):
         for buf in plan.buffers:
-            if buf.role not in ("input", "constant") or (only is not None and buf.name not in only):
+            if buf.role not in ("input", "constant") or (only is not None and buf.name not in only) or buf.name in plan.paged:
                 continue
             src = input_data.get(buf.name)
             if _is_device_tensor(src):
@@ -694,7 +695,8 @@ class CompiledProgram:
         """Point one operand at ``tensor``'s memory: a buffer chained onto another program's (a
         producer's output onto a consumer's input, so the consumer's device upload becomes a
         self-copy skip), or an operand the plan never declares as a buffer — an indirect
-        operand's pointer table or selector, which only the caller can supply. A buffer's
+        operand's pointer table or selector, or a paged buffer's page table (``<name>__pages``,
+        the device addresses of its pages), which only the caller can supply. A buffer's
         tensor must be contiguous and at least as large as its region; the runtime drops any
         captured graph, since it baked the old address."""
         if not _is_device_tensor(tensor) or not tensor.is_contiguous():

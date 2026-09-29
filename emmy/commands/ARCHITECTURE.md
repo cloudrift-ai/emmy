@@ -592,13 +592,15 @@ Both `deploy local` and `deploy ssh` auto-detect the target GPU by scanning PCI 
 
 ### `emmy serve`
 
-`--generate --native` selects the experimental Rust text server. Its launcher prepares or reuses a checkpoint-owned
+`--runner generate --native` selects the experimental Rust text server. Its launcher prepares or reuses a checkpoint-owned
 bundle and executes a prebuilt binary. Native arguments are validated separately; vLLM forwarding remains the default.
 See the [native serving contract](../serving/native/ARCHITECTURE.md) for supported options and preparation controls.
 
 
-Serves an embedding model (or a generative chat model via `EmmyGenModel` with `--generate` — `--runner generate` +
-fp16) through vLLM with the emmy plugin flags baked in (`serving/` plugin; needs the `serving` extra). Unrecognized flags forward to `vllm serve`; tokens after a literal `--` forward verbatim (emmy's
+Serves an embedding model (or a generative chat model via `EmmyGenModel` with `--runner generate`, in
+fp16) through vLLM with the emmy plugin flags baked in (`serving/` plugin; needs the `serving` extra). Without `--runner` the
+runner is resolved the way vLLM resolves `--runner auto`, from the checkpoint's config and a Sentence Transformers
+`modules.json`, cached or fetched, so a bare `emmy serve MODEL` needs no flag. Unrecognized flags forward to `vllm serve`; tokens after a literal `--` forward verbatim (emmy's
 own flags are otherwise extracted wherever they appear — argparse REMAINDER swallows everything after MODEL, so the
 handler re-parses it; see `commands/serve.py::_split_own_flags`). `--max-model-len 4096` (the dynamic-dim cap) is
 applied for both engines unless overridden, so `--stock` is an apples-to-apples baseline. **`--revision` forwards to
@@ -650,7 +652,7 @@ the model; raise it when a fresh-serving-shape compile runs longer, e.g. a new p
 combination on a big model, or the kill lands mid-compile and no pack is saved), then
 `vllm bench serve` runs against it (`--max-concurrency` / `--num-prompts` / `--random-input-len` / `--bench-seed`) and
 the server is torn down. The bench backend follows the model: embeddings hit `--backend openai-embeddings --endpoint
-/v1/embeddings`; **`--generate`** hits `--backend openai --endpoint /v1/completions` with `--random-output-len`.
+/v1/embeddings`; **`--runner generate`** hits `--backend openai --endpoint /v1/completions` with `--random-output-len`.
 
 The vLLM child inherits an environment with this interpreter's bin dir prepended to `PATH` (`serve.py::_child_env`):
 invoking `./venv/bin/emmy` by absolute path does not activate the venv, so the generative server's inductor-compile
@@ -933,5 +935,5 @@ tokenizer I/O; model preparation and binary worker transport live in `serving/na
 `--temperature`, `--top-p`, and `--seed`; temperature zero is greedy, and nonzero `--top-k` is rejected.
 `--prefill-size` selects the exported chunk width (default 16; one selects sequential prefill) and requires preparation.
 `--timeout` controls the native worker operation deadline, including the complete prefill/decode loop.
-Native HTTP serving is opt-in through `serve --generate --native`; vLLM remains the default. Generation artifacts
+Native HTTP serving is opt-in through `serve --runner generate --native`; vLLM remains the default. Generation artifacts
 from before the chunked prefill contract must be exported again.

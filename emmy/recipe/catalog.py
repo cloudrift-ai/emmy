@@ -19,6 +19,8 @@ MAX_STUB_DEPLOYMENTS = 3
 CATALOG_SCHEMA_VERSION = 2
 MIN_MODEL_HEAT = 0
 MAX_MODEL_HEAT = 100
+#: The vLLM architecture overrides the Emmy serving plugin registers (``EmmyGenModel``, ``EmmyEmbedModel``).
+EMMY_ARCHITECTURE = re.compile(r"\bEmmy[A-Za-z]*Model\b")
 
 
 def validate_model_heat(value: object, model_id: str, *, required: bool = False) -> int | None:
@@ -109,6 +111,16 @@ def _inventory_deployments(config: dict) -> list[dict[str, object]]:
     return deployments
 
 
+def _names_emmy_architecture(value: object) -> bool:
+    if isinstance(value, str):
+        return EMMY_ARCHITECTURE.search(value) is not None
+    if isinstance(value, dict):
+        return any(_names_emmy_architecture(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_names_emmy_architecture(item) for item in value)
+    return False
+
+
 def recipe_inventory(root: str | Path, tags: tuple[str, ...] = ()) -> list[dict]:
     """Return compact, JSON-ready metadata for recipes carrying every requested tag."""
     records = recipe_catalog(root)
@@ -133,6 +145,8 @@ def recipe_inventory(root: str | Path, tags: tuple[str, ...] = ()) -> list[dict]
                 "task": task,
                 "runnable": recipe_is_runnable(config) and has_inference_engine and task in ("generate", "embed"),
                 "deployments": _inventory_deployments(config),
+                # Some variant serves through the Emmy plugin rather than stock vLLM or SGLang.
+                "emmy_serving": any(_names_emmy_architecture(variant.get("engine")) for variant in _resolved_variants(config)),
                 "rationale": model.get("rationale"),
                 "heat": model.get("heat"),
             }

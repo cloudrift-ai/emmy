@@ -50,7 +50,9 @@ the recipe should no longer be used. Low demand or age alone is not enough. Disc
 `best-effort` recipe. Untagged recipes remain runnable for backward compatibility and are classified by the next
 discovery lifecycle run.
 
-Tag values are unique lowercase kebab-case strings. `onboarding` and `untested` must appear together. The runtime
+Tag values are unique lowercase kebab-case strings. `onboarding` and `untested` must appear together. `onboarding-failed` is
+not a lifecycle state: onboarding adds it when an attempt fails and removes it on success, and nightly selection
+holds such a recipe back until nothing else can run. The runtime
 rejects direct use of disabled recipes, while bulk benchmark enumeration and package staging skip them.
 
 `model.rationale` is descriptive lifecycle metadata. It records why the model currently belongs in the inventory and
@@ -61,10 +63,11 @@ legacy recipes and sorts as null until the next discovery run.
 
 `recipe_catalog()` is the shared repository scan behind `emmy recipe list` and model-discovery validation. The
 versioned JSON document produced by `recipe_inventory_document()` (schema version 2) adds the directory name,
-lifecycle-aware runnable state, and one entry per matrix-expanded deployment — its GPU, GPU count, GPU memory
-fraction (`engine.llm.gpu_memory_utilization`, default 0.9) and effective context length — to the identity, tags,
-task, rationale, and heat. Deployments are unique per (GPU, count, fraction): a recipe that may share its GPU lists
-a reduced-fraction entry beside its whole-GPU one, each with its own qualified context length, and both appear.
+lifecycle-aware runnable state, whether any variant serves through Emmy, and one entry per matrix-expanded
+deployment — its GPU, GPU count, GPU memory fraction (`engine.llm.gpu_memory_utilization`, default 0.9) and
+effective context length — to the identity, tags, task, rationale, and heat. Deployments are unique per (GPU, count,
+fraction): a recipe that may share its GPU lists a reduced-fraction entry beside its whole-GPU one, each with its
+own qualified context length, and both appear.
 This is the machine interface used by other services: consumers reject unknown `schema_version` values, while Emmy
 may add fields without removing or redefining fields in the current version. Editable installs read the checkout's
 live top-level `recipes/` and wheel installs read their packaged runnable recipes. `recipe list` deliberately exposes
@@ -85,6 +88,7 @@ The row fields are grouped by ownership:
 | Fields | Meaning |
 |---|---|
 | `model_id`, `name`, `recipe_path`, `tags`, `lifecycle`, `task`, `runnable`, `rationale`, `heat` | Compact catalog metadata |
+| `emmy_serving` | Some matrix variant serves through the Emmy vLLM plugin (an `Emmy*Model` architecture override) |
 | `operation`, `expected_lifecycle` | Lifecycle-derived onboarding or verification action |
 | `deployment.index`, `deployment.gpu`, `deployment.gpu_count`, `deployment.gpu_memory_utilization`, `deployment.context_length` | One declared or explicitly requested setup |
 | `deployment.availability.cloudrift` | Exact-count capacity reported by CloudRift |
@@ -92,7 +96,7 @@ The row fields are grouped by ownership:
 | `provider.cloudrift.team_access` | Whether the configured key can act for the configured team UUID |
 
 The expression grammar is deliberately constrained rather than evaluated as Python. Predicates use a documented
-field, one of `==`, `!=`, `>`, `>=`, `<`, `<=`, `in`, `contains`, or `matches`, and a JSON value. Sorts use
+field, one of `==`, `!=`, `>`, `>=`, `<`, `<=`, `in`, `contains`, `not contains`, or `matches`, and a JSON value. Sorts use
 `FIELD asc|desc` with an optional `nulls-first|nulls-last`, or `FIELD order JSON_ARRAY`. Repeated filters are logical
 AND; repeated sort keys are applied in command order. The independent versioned JSON result contains `schema_version`
 and `rows`; an empty result is successful, leaving exact-candidate row-count policy to the caller.

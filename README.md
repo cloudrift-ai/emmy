@@ -256,14 +256,15 @@ emmy serve Qwen/Qwen3-Embedding-0.6B --bench --random-input-len 32 --stock
 
 Dense FP16 Qwen3 can be prepared as a standalone artifact and run through the Rust cached-generation loop. This
 single-request path and experimental native HTTP adapter support greedy or seeded temperature/top-p sampling and
-optional CUDA graphs. Residuals and attention/rotary intermediates use FP32. Prefill uses fixed-width chunks;
+optional CUDA graphs. Output logits, residuals, and attention/rotary intermediates use FP32.
+Prefill uses fixed-width chunks;
 vLLM remains the serving default.
 See the [native generation contract](emmy/serving/native/ARCHITECTURE.md)
 for preparation, commands, limitations, and qualification.
 
 ```bash
 make native-dist  # install the archive's matching binaries on PATH
-emmy serve Qwen/Qwen3-0.6B --generate --native --revision REVISION
+emmy serve Qwen/Qwen3-0.6B --runner generate --native --revision REVISION
 ```
 
 Native serving exposes text and chat completions with streaming, stop strings, usage, and one active request.
@@ -278,21 +279,24 @@ emmy recipe list --json
 # Count one lifecycle group in automation.
 emmy recipe query --filter 'tags contains "maintained"' --json
 
-# Select the hottest available onboarding deployment. Referencing deployment.* expands each recipe into deployment
-# rows; CloudRift availability is resolved only because this query uses it.
+# Select the hottest available onboarding shell that has not failed. Referencing deployment.* expands each recipe into
+# deployment rows; CloudRift availability is resolved only because this query uses it.
 emmy recipe query \
   --filter 'lifecycle == "onboarding"' \
+  --filter 'tags not contains "onboarding-failed"' \
   --filter 'deployment.availability.cloudrift == true' \
   --sort 'heat desc nulls-last' \
   --sort 'model_id asc' \
   --limit 1 --json
 
-# When no onboarding deployment is available, select the maintained recipe with the oldest results.
+# Select a hot runnable recipe that has no Emmy serving variant yet.
 emmy recipe query \
-  --filter 'lifecycle == "maintained"' \
-  --filter 'deployment.availability.cloudrift == true' \
-  --sort 'results.last_run_at asc nulls-first' \
-  --limit 1 --json
+  --filter 'lifecycle in ["maintained", "best-effort"]' \
+  --filter 'runnable == true' \
+  --filter 'heat >= 70' \
+  --filter 'emmy_serving == false' \
+  --sort 'heat desc' \
+  --json
 
 # Check one exact external candidate, including a model without a recipe yet.
 emmy recipe query --candidate org/model-name "NVIDIA H200 141GB" 1 \

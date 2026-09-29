@@ -5,7 +5,9 @@
 //! (a torch tensor the serving runner owns). Launches go to the executor's own stream, or to a
 //! stream the host adopted for the duration of a call.
 
-use crate::artifact::{Artifact, Env, Layout, Placement, Program, Tma, dimensions, dtype_bytes};
+use crate::artifact::{
+    Artifact, Env, Layout, Paging, Placement, Program, Tma, dimensions, dtype_bytes,
+};
 use anyhow::{Context, Result, bail, ensure};
 use cudarc::driver::{CudaContext, CudaEvent, CudaGraph, CudaStream, result, sys};
 use serde::Serialize;
@@ -511,8 +513,11 @@ pub struct Executor {
     layout: Layout,
     regions: BTreeMap<String, Region>,
     /// Operands the plan names but never declares as buffers — an indirect operand's pointer
-    /// table and selector — bound by the host by address.
+    /// table and selector, a paged buffer's page table — bound by the host by address, or
+    /// filled here from pages of the runtime's own.
     externals: BTreeMap<String, Region>,
+    /// The pages the runtime allocated for a paged buffer, kept alive for its table.
+    pages: BTreeMap<String, Vec<Region>>,
     bound: BTreeSet<String>,
     descriptors: BTreeMap<EnvKey, BTreeMap<(usize, String), Descriptor>>,
     /// Whole-program graphs by symbol environment, most recently used last.
@@ -587,6 +592,7 @@ impl Executor {
             layout: Layout::default(),
             regions: BTreeMap::new(),
             externals: BTreeMap::new(),
+            pages: BTreeMap::new(),
             bound: BTreeSet::new(),
             descriptors: BTreeMap::new(),
             graphs: Vec::new(),
@@ -595,6 +601,11 @@ impl Executor {
             window: None,
         };
         executor.provision(layout, regions.as_ref())?;
+        // A paged buffer starts with pages of the runtime's own spanning its declared shape —
+        // a KV cache covering the context — until a host binds a table of its own.
+        for name in executor.program.paged.keys().cloned().collect::<Vec<_>>() {
+            executor.alloc_pages(&name)?;
+        }
         executor.own_stream.synchronize()?;
         let allocation_ms = started.elapsed().as_secs_f64() * MILLISECONDS_PER_SECOND;
         let started = Instant::now();
@@ -668,10 +679,24 @@ impl Executor {
     }
 
     fn placement(&self, name: &str) -> Result<&Placement> {
-        self.layout
-            .buffers
-            .get(name)
-            .with_context(|| format!("unknown buffer {name}"))
+        self.layout.buffers.get(name).with_context(|| {
+            if let Some(paged) = self.paged_table(name) {
+                format!("paged buffer {paged} has no page table bound")
+            } else if self.program.paged.contains_key(name) {
+                format!("buffer {name} is paged: it has no single allocation")
+            } else {
+                format!("unknown buffer {name}")
+            }
+        })
+    }
+
+    /// The paged buffer whose page table `name` is.
+    fn paged_table(&self, name: &str) -> Option<&str> {
+        self.program
+            .paged
+            .keys()
+            .map(String::as_str)
+            .find(|paged| Paging::table(paged) == name)
     }
 
     fn address(&self, name: &str) -> Result<u64> {
@@ -687,11 +712,13 @@ impl Executor {
     }
 
     /// Bind an operand the plan never declares as a buffer (an indirect operand's table or
-    /// selector) to memory the host lends.
+    /// selector, a paged buffer's page table) to memory the host lends.
     pub fn set_external(&mut self, name: &str, ptr: u64, len: usize) -> Result<()> {
         self.context.bind_to_thread()?;
+        let paged = self.paged_table(name).map(str::to_owned);
         ensure!(
             self.layout.buffers.contains_key(name)
+                || paged.is_some()
                 || self
                     .program
                     .launches
@@ -699,11 +726,66 @@ impl Executor {
                     .any(|l| l.indirect.iter().any(|i| i.table == name || i.sel == name)),
             "unknown operand {name}"
         );
+        if let Some(paged) = &paged {
+            // Every kernel indexes the table by page: a short one is read past its end.
+            let count =
+                self.program.paged[paged].page_count(self.program.buffer(paged)?, &self.env)?;
+            ensure!(
+                len >= count * size_of::<u64>(),
+                "page table for {paged} holds {} pointers, its {count} pages need one each",
+                len / size_of::<u64>()
+            );
+        }
         self.synchronize()?;
         self.graphs.clear();
         self.launch_graphs = None;
         self.externals
             .insert(name.to_owned(), Region::lent(ptr, len));
+        if let Some(paged) = paged {
+            // The table is what binds a paged buffer: there is no slab to upload into.
+            self.pages.remove(&paged);
+            self.bound.insert(paged);
+        }
+        Ok(())
+    }
+
+    /// The device address and byte length of a paged buffer's page table, for a host that lends
+    /// the same pages to another executor (a prefill program sharing the decode program's cache).
+    pub fn page_table(&self, name: &str) -> Result<(u64, usize)> {
+        ensure!(
+            self.program.paged.contains_key(name),
+            "buffer {name} is not paged"
+        );
+        let table = self
+            .externals
+            .get(&Paging::table(name))
+            .with_context(|| format!("paged buffer {name} has no page table bound"))?;
+        Ok((table.ptr, table.len))
+    }
+
+    /// Give a paged buffer zeroed pages of the runtime's own spanning its declared shape, and
+    /// bind their table in place of the buffer's pointer.
+    fn alloc_pages(&mut self, name: &str) -> Result<()> {
+        self.context.bind_to_thread()?;
+        let (paging, buffer) = (&self.program.paged[name], self.program.buffer(name)?);
+        let count = paging.page_count(buffer, &self.env)?;
+        let bytes = paging.page_bytes(buffer, &self.env)?;
+        self.synchronize()?;
+        self.graphs.clear();
+        self.launch_graphs = None;
+        let stream = self.own_stream.cu_stream();
+        let pages = (0..count)
+            .map(|_| Region::allocate(bytes, stream))
+            .collect::<Result<Vec<_>>>()?;
+        let addresses: Vec<u8> = pages.iter().flat_map(|p| p.ptr.to_le_bytes()).collect();
+        let table = Region::allocate(addresses.len(), stream)?;
+        unsafe {
+            result::memcpy_htod_async(table.ptr, &addresses, stream)?;
+            result::stream::synchronize(stream)?;
+        }
+        self.externals.insert(Paging::table(name), table);
+        self.pages.insert(name.to_owned(), pages);
+        self.bound.insert(name.to_owned());
         Ok(())
     }
 
@@ -770,6 +852,10 @@ impl Executor {
     /// is the buffer skips the copy: a producer's output chained onto the consumer's input.
     pub fn bind_device(&mut self, name: &str, src: u64, nbytes: usize) -> Result<()> {
         self.context.bind_to_thread()?;
+        ensure!(
+            !self.program.paged.contains_key(name),
+            "paged buffer {name} takes host bytes or a page table, not a device copy"
+        );
         let placement = self.placement(name)?;
         ensure!(
             nbytes <= placement.bytes,
@@ -802,11 +888,7 @@ impl Executor {
         self.env = full_env;
         self.provision(layout, regions.as_ref())?;
         for (name, data) in &bindings {
-            let role = &self.program.buffer(name)?.role;
-            ensure!(
-                role == "input" || role == "constant",
-                "only inputs and constants may be bound: {name}"
-            );
+            self.program.check_bindable(name)?;
             self.upload(name, data)?;
         }
         self.apply_runtime_constants()
@@ -818,6 +900,9 @@ impl Executor {
         let mut merged = self.env.clone();
         merged.extend(env);
         for buffer in &self.program.buffers {
+            if self.program.paged.contains_key(&buffer.name) {
+                continue;
+            }
             let placement = self.placement(&buffer.name)?;
             let need = buffer.byte_len(&merged)?;
             ensure!(

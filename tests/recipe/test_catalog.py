@@ -47,10 +47,22 @@ def test_recipe_inventory_filters_tags_and_reports_deployments(tmp_path):
                 {"gpu": GPU, "gpu_count": 1, "gpu_memory_utilization": 0.9, "context_length": 8192},
                 {"gpu": "NVIDIA B200", "gpu_count": 2, "gpu_memory_utilization": 0.9, "context_length": 16384},
             ],
+            "emmy_serving": False,
             "rationale": "Useful model.",
             "heat": None,
         }
     ]
+
+
+def test_recipe_inventory_reports_emmy_serving_from_any_variant(tmp_path):
+    root = tmp_path / "recipes"
+    path = _write_recipe(root, "ready", "org/ready", ["maintained"])
+    config = yaml.safe_load(path.read_text())
+    emmy_args = '--hf-overrides \'{"architectures":["EmmyGenModel"]}\''
+    config["matrices"] = [{"zip": {"engine.llm.vllm.extra_args": ["", emmy_args]}}]
+    path.write_text(yaml.safe_dump(config))
+
+    assert recipe_inventory(root)[0]["emmy_serving"] is True
 
 
 def test_recipe_inventory_document_is_versioned(tmp_path):

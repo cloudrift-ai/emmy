@@ -341,6 +341,8 @@ A fork whose levels form a cartesian product of knob values reuses **`build_fork
 per level plus a `materialize=` callable, and gets back a lazy root `_Branch` whose `expand()` builds children on
 demand, in grouping order. The algorithm — group the parameters by each level's knob keys, collapse a level with one
 key, skip a level with no keys, and defer building a leaf until `expand()` — lives once in `fork.py`.
+Complete leaf walks are iterative and depth-first, so a maximal fused kernel with thousands of schedule levels does
+not consume the Python call stack.
 
 ### Every finished option carries a value for every knob
 
