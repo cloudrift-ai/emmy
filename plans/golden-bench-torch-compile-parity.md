@@ -10,11 +10,11 @@ kernel-set result good enough for the paper needs the level cells clearly above 
 | # | Work | Cells it moves | Expected | GPUs needed | Status |
 | --- | --- | --- | --- | --- | --- |
 | 0 | #930 close-out: drop the `PIECE_FORMATION` ContextVar (one route re-spell), keep a piece's ordinal through a split, restamp | all | none (hygiene) | local RTX 5090 | done (in #930) |
-| 1 | mma.sync GEMM: conflict-free fragment loads, fewer loads per mma, a 96-row masked M tile | A100 s512, 4090 s512, 5090 s512 | A100 0.98× → ~1.05×; 4090/5090 margin | A100 (primary), RTX 4090, RTX 5090 | open |
-| 2 | sm_90 GEMM: larger wgmma tiles, TMA staging, a producer warp group | H100 s512 | 0.98× → ~1.15–1.2× | H100 | open |
-| 3 | Programmatic dependent launch between graph kernels | H100 s1, 5090 s1 (+ s512 tails) | ~0.5–1 µs per launch, 16 launches | H100, RTX 5090 | open |
-| 4 | FP8 rows of the recipe (the paper figure's Q/K/V-FP8 bars) | FP8 study | measure | RTX 4090, RTX 5090, H100 | open, only if the figure keeps them |
-| 6 | Re-record goldens the close-out left without rows (below) | Gemma 4 serving, fp8-block corpus | restore evidence | RTX 5090 | open |
+| 1 | mma.sync GEMM: conflict-free fragment loads, fewer loads per mma, a 96-row masked M tile | A100 s512, 4090 s512, 5090 s512 | A100 0.98× → ~1.05×; 4090/5090 margin | A100 (primary), RTX 4090, RTX 5090 | code in #967 (staged output store, 96-row tile, masked-M zero-fill, ldmatrix pairing); s512 re-records running |
+| 2 | sm_90 GEMM: larger wgmma tiles, TMA staging, a producer warp group | H100 s512 | 0.98× → ~1.15–1.2× | H100 | done in #967: golden form 1.04×, HF layer 0.91× (blocker 1) |
+| 3 | Programmatic dependent launch between graph kernels | H100 s1, 5090 s1 (+ s512 tails) | ~0.5–1 µs per launch, 16 launches | H100, RTX 5090 | done in #967: H100 s1 −5 µs, 5090 s1 −2 µs |
+| 4 | FP8 rows of the recipe (the paper figure's Q/K/V-FP8 bars) | FP8 study | measure | RTX 4090, RTX 5090, H100 | skipped (user decision); fp8-block goldens dropped |
+| 6 | Re-record goldens the close-out left without rows (below) | Gemma 4 serving, fp8-block corpus | restore evidence | RTX 5090 | done in #967 (Gemma pre1-global 41 → 28.6 µs; fp8-block dropped) |
 | 5 | Final re-record of every golden, unpinned `--strict` replay, lane once per card, RESULTS.md | all | the reported numbers | all five cards + V100 SXM3 (AWQ golden) | after 1–3 |
 
 Order: 1 and 2 in parallel (A100 and H100 are separate hosts), then 3, then 5. Item 6 any time on the 5090.
@@ -112,6 +112,69 @@ are unrecorded on #930. Trace, sweep, record, and measure on the FP8-capable car
 3. After 1–3 land, re-record every golden on the final compiler from sweeps (fresh tune DB per run), replay each cell
    unpinned under `--strict`, run the lane (`emmy bench` on the recipe) once per card, write the RESULTS.md section.
 4. #930 finalization per AGENTS.md: full `make test`, lint, docs, PR body.
+
+## Findings of the #967 round (2026-09-28)
+
+- **Reported baseline is the Hugging Face layer** (user decision): `torch.compile` on `emmy run <model> --layer 0`
+  ("model form"), not on the golden's replayed program ("golden form"), which runs `torch.compile` slower (V100 s512
+  637 vs 729 µs). Report model form as the headline, golden form beside it.
+- **A100 GEMMs were not bank-conflict bound.** ncu's ~6k conflicts are fill/drain port contention; the main loop is
+  tight. The costs were wave count (256 CTAs on 108 SMs), the epilogue's 4-byte global stores (lg_throttle), and a
+  masked-M cp.async fill that clamped 64 rows onto row 511. Fixed by the staged output store (STAGE `out`), the
+  96-row tile (`f3x<N>`) and a zero-fill past the M edge.
+- **The 4090 has no real GEMM gap**: every GEMM level with `F.linear` except q (1.06×).
+- **H100**: every plain GEMM now matches or beats `torch.mm`; one wgmma group in flight and 16-byte output stores
+  gave 96.2 → 88.1 µs in golden form.
+- **Programmatic dependent launch**: H100 s1 36.2 → 31.3 µs, 5090 s1 24.5 → 22.5. An early release at kernel start
+  lost at s512 (5090 131 → 192 µs: released blocks pile onto the few free SMs) and is not in.
+- **TMA multicast lost in the layer** (H100 q 7.2 → 10.6 µs, down 11.4 → 18.4); not merged, kept on
+  `gb2/h100-tma-multicast`. Coupling a CTA pair per chunk costs more than the L2 traffic it saves at these sizes.
+- **Isolated piece time misleads the layer**: on the H100 the producer band and m64n192 won alone and lost in the
+  layer (weights arrive cold; gate/up 16 µs alone, ~23 in the graph). Confirm a winner by whole-layer replay.
+- **`--ab` sweep rows read slower than the same pin in its own process** (A100 49.4 vs 39.6 µs). Confirm a sweep
+  winner with a pinned run before recording.
+
+## Blockers
+
+1. **H100 s512 against the HF layer: 87.2 vs 79.4 µs (0.91×).** Schedules are exhausted (±1 µs) and multicast lost.
+   In-layer gaps: QKV block +5.5 µs (cold weights), gate/up + down +3.3, attention +2.5 vs cuDNN. `torch.compile`'s
+   kernels sum to 73 µs against our 86, and it gives ~11 µs back in launch gaps. The lever left is persistent CTAs
+   that overlap one tile's epilogue with the next tile's loads, which is out of scope for the paper.
+2. **Every s1 golden is stale against a fresh trace.** #871 changed how `is_causal` traces at one token; the stored
+   programs still say causal, so a model-form s1 run finds no evidence (on the V100 the fallback kernel hangs). Golden
+   form is unaffected. Fix: re-trace and re-record s1 on every card at close-out.
+3. **The lane measures golden form.** The recipe's `torch.compile` column must switch to the HF layer before the
+   close-out run.
+4. **Golden-bench goldens are not in `make test`'s decode set** (only recipe and hardware goldens are). Replay and
+   decode them explicitly on each card at close-out.
+5. **AWQ Qwen3.8-27B whole layer on the V100 SXM3 cannot run yet.** The inter-chunk recurrence kernel
+   (`k_matmul_reduce_81b2ae`) offers only 48-thread schedules and hits the watchdog; it needs the carried-state
+   shared-memory residency of #965, or a cut for a carried-state kernel. The input-projection region needs a long
+   kernel-set sweep (root width, cuts, non-spilling projection tiles). The intra-chunk matmul is recorded
+   (6,587 → 841 µs).
+6. **Root-sweep fix waits for the final re-record** (user decision): `gb2/v100sxm3-root-sweeps` stops a multi-output
+   root from nesting unrelated copies in one thread (the AWQ input projection hung), but re-lowers 33 Gemma 4 RTX 5090
+   rows and 4 DeepSeek-V4 V100 rows. Merge it right before the re-record and re-record those rows on their cards.
+
+## Future improvements
+
+- **A100 GEMMs**: q is at 1.08× of `torch.mm` (best 96x128 row 16.3 vs 15 µs), down at 1.08× (split-K not yet
+  tried); gate/up at cuBLAS geometry reaches 1.035× only with the staged store.
+- **4090 q** at 1.06× of `F.linear`; `w4x2 f2x4/k2 d4` reaches 1.05×.
+- **H100**: a different attention design against cuDNN (the two-warp-group key split and the Q-prologue overlap were
+  tried and lost); a full producer warp group (`+p4`, not offered); persistent CTAs if they come into scope. If
+  multicast is revisited, first explain its layer hang (64x128 tile + `c2`, possibly cluster launch with PDL) and keep
+  `c2` out of the catalog.
+- **PDL early release**: gating by grid size did not separate good from bad cases; a release that knows the next
+  kernel's CTA count and the free SMs might.
+- **Staged output store as a default**: o and down move ±2% with it; it stays a schedule choice until a sweep shows
+  it never loses.
+- **Evidence gaps**: Gemma 4 post1 and post1-global have no measured rows; V100 SXM2 GEMM pieces time bimodally
+  (26.9 / 47.6 µs in the bench table, 37.5 / 68.8 medians in the tune DB), which can mis-rank a sweep;
+  `k_cumsum_reduce` on the V100 SXM3 reads 30.0 against a recorded 25.7 with the same source (likely the rewritten
+  timing harness; not re-recorded).
+- **Hygiene before finalization**: two lowering passes numbered 097 (16-byte fragment stores, staged output store);
+  an unsorted import in the staged-store pass.
 
 ## Hosts
 
