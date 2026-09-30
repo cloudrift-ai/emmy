@@ -35,4 +35,3 @@ jobs:
           GITHUB_ACTION_CONFIG__AUTO_DESCRIBE: 'false'
           GITHUB_ACTION_CONFIG__AUTO_IMPROVE: 'false'
           GITHUB_ACTION_CONFIG__PR_ACTIONS: '["opened", "reopened", "ready_for_review", "synchronize"]'
-          LITELLM__EXTRA_BODY: '{"chat_template_kwargs": {"enable_thinking": false}}'
