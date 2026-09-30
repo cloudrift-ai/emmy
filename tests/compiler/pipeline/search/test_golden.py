@@ -17,7 +17,7 @@ import pytest
 
 from emmy.compiler.pipeline.search import golden
 from emmy.compiler.pipeline.search.golden import decode_record, scope_digest, siblings_of
-from emmy.compiler.pipeline.search.golden.repository import _RECORDS_DIR, _records_of, _repository_golden_paths
+from emmy.compiler.pipeline.search.golden.repository import _RECORDS_DIR, _records_of, repository_golden_paths
 
 
 def _decode(record, records) -> str | None:
@@ -48,7 +48,7 @@ def _golden_id(path: Path) -> str:
 def _row_parameters():
     """One parameter per recorded row of every repository golden."""
     parameters = []
-    with _repository_golden_paths() as paths:
+    with repository_golden_paths() as paths:
         for path in sorted(paths, key=_golden_id):
             file_id = _golden_id(path)
             for label in _labels(_records_of(path)):
@@ -71,7 +71,7 @@ def test_recorded_row_decodes(path: Path, label: str) -> None:
 
 
 def _file_parameters():
-    with _repository_golden_paths() as paths:
+    with repository_golden_paths() as paths:
         return [pytest.param(path, id=_golden_id(path)) for path in sorted(paths, key=_golden_id)]
 
 
@@ -83,9 +83,9 @@ def test_every_kernel_set_imports(path: Path) -> None:
     wire, and a set that fails there is dropped with nothing but a debug line, leaving the deploy to
     the prior with the file apparently loaded."""
     from emmy.compiler.pipeline.search.db import SearchDB
-    from emmy.compiler.pipeline.search.golden.evidence import import_file
+    from emmy.compiler.pipeline.search.golden.evidence import file_source, import_file
 
-    counts = import_file(SearchDB(), path)
+    counts = import_file(SearchDB(), path, file_source("golden", path))
     assert not counts["did not lower"], counts
 
 
@@ -96,7 +96,7 @@ def test_scope_digest_follows_the_cards_rows_only(tmp_path, monkeypatch) -> None
     other = tmp_path / "other.json"
     mine.write_text('{"gpu_name": "NVIDIA H100 80GB HBM3",\n "rows": 1}\n')
     other.write_text('{"gpu_name": "NVIDIA GeForce RTX 5090",\n "rows": 1}\n')
-    monkeypatch.setattr(golden.repository, "_repository_golden_paths", lambda: nullcontext([mine, other]))
+    monkeypatch.setattr(golden.repository, "repository_golden_paths", lambda: nullcontext([mine, other]))
     monkeypatch.delenv("EMMY_GOLDEN_FILE", raising=False)
     card = "NVIDIA H100 80GB"
     base = scope_digest(card)
@@ -327,7 +327,7 @@ def _kernel_parameters():
     from emmy.compiler.pipeline.search.golden.repository import _document_of
 
     parameters = []
-    with _repository_golden_paths() as paths:
+    with repository_golden_paths() as paths:
         for path in sorted(paths, key=_golden_id):
             document, _ = _document_of(path)
             for index in range(len(document.loops)):
@@ -360,7 +360,7 @@ def test_stored_kernel_is_a_fixed_point_of_normalization(path: Path, index: int)
 
 def _golden_parameters():
     parameters = []
-    with _repository_golden_paths() as paths:
+    with repository_golden_paths() as paths:
         for path in sorted(paths, key=_golden_id):
             file_id = _golden_id(path)
             for index in sorted({record.program_index for record in _records_of(path)}):

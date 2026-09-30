@@ -189,7 +189,6 @@ def test_the_rtx_5090_hardware_golden_deploys_from_the_db(tmp_path) -> None:
     the tables agree with themselves, and a compile of each single-kernel record's target with that DB as
     its only evidence deploys a measured row of its kernel: the recorded variant, or a faster one the same
     file holds. The split winners are off the measured ballot until their pieces are benched."""
-    from emmy import config
     from emmy.compiler.context import Context
     from emmy.compiler.ir.cuda.ir import CudaOp
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
@@ -222,7 +221,7 @@ def test_the_rtx_5090_hardware_golden_deploys_from_the_db(tmp_path) -> None:
         measured: dict[str, list[dict]] = {}
         for row in db.iter_perf(ctx, backend="cuda"):
             measured.setdefault(row.kernel, []).append({k: str(v) for k, v in dict(schedule_row_key(dict(row.knobs))).items()})
-        with records_override([]), config.online_file_override(tmp_path / "absent-online.json"):
+        with records_override([]):
             for record in single:
                 graph = Pipeline.build(CUDA_PASSES).run(record.target_program.copy(), ctx=ctx, db=db)
                 ops = [node.op for node in graph.nodes.values() if isinstance(node.op, CudaOp)]
@@ -238,8 +237,8 @@ def test_a_measurement_taken_here_is_never_replaced_by_an_import(tmp_path) -> No
     """The tune DB is a cache the import fills, and a row this machine measured is the one copy of that
     measurement: a golden row of the same kernel and schedule, captured or faster, leaves it alone, and a
     scope change lets golden rows go, never a local one."""
+    from emmy.compiler.pipeline.search.bench_record import point_stats
     from emmy.compiler.pipeline.search.db import PerfStats
-    from emmy.compiler.pipeline.search.policy.terminal_bench import point_stats
 
     case = corpus.load_case(corpus.CASES_DIR / "fused/norm-linear-f16-scalar-reduce.json")
     [record] = _records(case)

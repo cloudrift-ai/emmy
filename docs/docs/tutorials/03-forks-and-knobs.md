@@ -149,14 +149,8 @@ hierarchy page](./06-deploy-evidence-hierarchy.md) explains.
 
 ## See it yourself
 
-Print every knob the compiler knows about, with its type and the values it considers:
-
-```bash
-emmy eval knobs
-```
-
-No GPU and no measurements are needed for that — it is the schema, not data. Then compile one small matrix
-multiplication and look at the schedule the compiler picked:
+Compile one small matrix multiplication and look at the schedule the compiler picked. No GPU and no measurements are
+needed for that:
 
 ```bash
 emmy compile --code "F.linear(torch.randn(512, 512, dtype=torch.float16), torch.randn(512, 512, dtype=torch.float16))" \

@@ -123,7 +123,6 @@ class Realization(Wire):
     knobs: dict[str, bool | int | str] | None = None
     identity: str | None = None
     measurements: Measurements | None = None
-    ranking: dict | None = None
     kernel_set: tuple[str, ...] = ()
     latency: dict[str, Latency] | None = None
 
@@ -249,8 +248,7 @@ class GoldenFile(Wire):
     def check(self, *, repository: bool = False) -> None:
         """The rules the declarations cannot say: pool references resolve, pins name known knobs, a
         row's knobs agree with its pins, a kernel set names its siblings — and, for a ``repository``
-        golden, that the file names its card, every row spells a schedule, and none carries working
-        ranking metadata."""
+        golden, that the file names its card and every row spells a schedule."""
 
         if repository and not self.gpu_name:
             raise ValueError("repository golden requires gpu_name")
@@ -305,8 +303,6 @@ class GoldenFile(Wire):
                         )
                 if unknown := [name for name in row.kernel_set if name not in names]:
                     raise ValueError(f"{row_where}.kernel_set names no realization of this target: {', '.join(sorted(unknown))}")
-                if repository and row.ranking is not None:
-                    raise ValueError(f"{row_where} working ranking metadata cannot be promoted")
                 measured = row.measurements
                 if repository and measured is not None and (measured.reference_us is None or measured.reference_backend is None):
                     raise ValueError(f"{row_where}.measurements must carry reference_us and reference_backend")
@@ -337,7 +333,6 @@ class GoldenFile(Wire):
             loop_wire=self.loops[entry.target.loop],
             knobs=dict(realization.knobs or {}),
             measurements=realization.measurements,
-            ranking=dict(realization.ranking) if realization.ranking is not None else None,
             identity=realization.identity,
             kernel_set=tuple(realization.kernel_set),
             latency=dict(realization.latency) if realization.latency is not None else None,

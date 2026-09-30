@@ -234,7 +234,6 @@ def test_the_split_fork_offers_atomic_and_deferred_arms(unpinned) -> None:
     siblings of the unsplit tree (``030_cut``), and a fold that admits both finalizes
     still sees the atomic and the deferred arm offered together, beside the unsplit one."""
     from emmy.compiler.pipeline import TILE_PASSES, Pipeline  # noqa: PLC0415
-    from emmy.compiler.pipeline.fork import iter_leaves  # noqa: PLC0415
     from emmy.compiler.pipeline.pipeline import Run  # noqa: PLC0415
 
     offered: set[str] = set()
@@ -242,7 +241,7 @@ def test_the_split_fork_offers_atomic_and_deferred_arms(unpinned) -> None:
     def decide(fp):
         if any(getattr(option, "structural", False) for option in fp.options):
             offered.update(str(v) for option in fp.options for k, v in option.knobs.items() if family_of(k) == "REDUCE")
-        return next(iter_leaves(fp.options))
+        return next(fp.leaves())
 
     Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target(_CC)).resolve(_matmul_graph(64, 64, 64, "f32"), decide)
     assert {"", "g2a", "g2k"} <= offered

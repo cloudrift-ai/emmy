@@ -6,7 +6,6 @@ are explicit at each call site and test modules never import implementation from
 
 from __future__ import annotations
 
-import asyncio
 import dataclasses
 import functools
 from collections.abc import Mapping
@@ -249,66 +248,6 @@ def inject_constants(input_data: dict[str, np.ndarray], graph) -> dict[str, np.n
                 array = array.reshape(node.op.source_shape)
             input_data[node_id] = apply_load_ops(array, node.op.load_ops)
     return input_data
-
-
-def drain_tune(pipeline, graph, *, on=None, **kwargs):
-    """Synchronously collect :meth:`Pipeline.tune_async` terminals for tests."""
-
-    async def _collect():
-        out = []
-        try:
-            async for candidate in pipeline.tune_async(graph, **kwargs):
-                out.append(candidate)
-                if on is not None and on(candidate):
-                    break
-        finally:
-            backend = kwargs.get("backend")
-            if backend is not None and hasattr(backend, "aclose_async_worker"):
-                await backend.aclose_async_worker()
-        return out
-
-    return asyncio.run(_collect())
-
-
-def run_inner_reward(
-    fused_graph,
-    *,
-    ctx,
-    db,
-    backend=None,
-    backends=None,
-    patience,
-    ucb_c=None,
-    explore_eps=0.0,
-    seed=0,
-    progress=None,
-    prior=None,
-):
-    """Synchronously run the two-level strategy's separable terminal scoring for tests."""
-    from emmy.compiler.pipeline import TuningSearch
-    from emmy.compiler.pipeline.search.strategy import TwoLevelStrategy
-
-    if ucb_c is None:
-        ucb_c = TuningSearch.DEFAULT_UCB_C
-    strategy = TwoLevelStrategy(
-        db=db,
-        patience=patience,
-        backend=backend,
-        backends=backends,
-        ucb_c=ucb_c,
-        explore_eps=explore_eps,
-        progress=progress,
-        prior_seed=seed,
-        prior=prior,
-    )
-    return asyncio.run(strategy._evaluate_terminal(fused_graph, ctx))
-
-
-def run_two_level(graph, *, ctx, **kwargs):
-    """Synchronously run :class:`two_level.TwoLevelStrategy` for tests."""
-    from emmy.compiler.pipeline.search.strategy import TwoLevelStrategy
-
-    return asyncio.run(TwoLevelStrategy(**kwargs).run(graph, ctx))
 
 
 def dyn_M(mode: str, M: int):

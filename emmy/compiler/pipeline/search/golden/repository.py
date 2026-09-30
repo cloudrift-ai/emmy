@@ -6,7 +6,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import tempfile
 from collections.abc import Sequence
 from contextlib import contextmanager
 from functools import cache
@@ -42,7 +41,7 @@ def is_repository_golden_path(path: str | Path) -> bool:
 
 
 @contextmanager
-def _repository_golden_paths():
+def repository_golden_paths():
     """Yield model-agnostic hardware goldens plus recipe-local model goldens."""
     with default_recipe_root() as recipe_root:
         paths = list(_RECORDS_DIR.glob("*.json"))
@@ -99,19 +98,13 @@ def records_override(records: list[GoldenRecord] | None):
 @contextmanager
 def sole_evidence(records: list[GoldenRecord]):
     """``records`` as a compile's ONLY evidence, strictly: the golden scope is these rows
-    (:func:`records_override`), the machine-local online prior and its reservoir are out of the
-    way (``EMMY_ONLINE_FILE`` at a nonexistent path) and strict evidence is on, so a fork none of
-    the rows decides is an ``EvidenceError`` naming the kernel instead of a prediction; a
-    ``Pipeline.run`` given no ``db`` consults no tune DB either. The release gate (``eval golden
-    --serving-config``) and the realization corpus ask their question inside this, which is what
-    makes the answer the same on every machine that holds the same rows."""
-    with tempfile.TemporaryDirectory(prefix="emmy-evidence-") as tmp:
-        with (
-            records_override(records),
-            config.online_file_override(Path(tmp) / "absent-online.json"),
-            config.strict_evidence_override(True),
-        ):
-            yield
+    (:func:`records_override`) and strict evidence is on, so a fork none of the rows decides is an
+    ``EvidenceError`` naming the kernel instead of a prediction; a ``Pipeline.run`` given no ``db``
+    consults no tune DB either. The release gate (``eval golden --serving-config``) and the
+    realization corpus ask their question inside this, which is what makes the answer the same on
+    every machine that holds the same rows."""
+    with records_override(records), config.strict_evidence_override(True):
+        yield
 
 
 def scope_explicit() -> bool:
@@ -156,7 +149,7 @@ def records_for_card(gpu_name: str, compute_cap: tuple[int, int]) -> list[Golden
 def _card_golden_paths(gpu_name: str):
     """The repository golden files that can hold ``gpu_name``'s rows: a file whose header names another card is skipped
     unparsed, one whose header names none is kept for the parse to decide."""
-    with _repository_golden_paths() as paths:
+    with repository_golden_paths() as paths:
         yield [path for path in paths if (head := _file_gpu_name(path)) is None or head == gpu_name]
 
 
@@ -209,20 +202,20 @@ def _records_of(path: Path) -> list[GoldenRecord]:
 @cache
 def golden_records() -> tuple[GoldenRecord, ...]:
     """Every row of every repository golden, loaded on first use — the corpus the eval and fit consumers read."""
-    with _repository_golden_paths() as paths:
+    with repository_golden_paths() as paths:
         return tuple(record for path in paths for record in _records_of(path))
 
 
 def goldens_for_live_gpu() -> list[GoldenRecord]:
     """The live card's own rows, or every row when no CUDA card is visible or none are recorded for it."""
-    key = _live_gpu_key()
+    key = live_gpu_key()
     records = list(golden_records())
     if key is None:
         return records
     return [record for record in records if record.gpu_name == key[0] and record.compute_cap == key[1]] or records
 
 
-def _live_gpu_key() -> tuple[str, tuple[int, int]] | None:
+def live_gpu_key() -> tuple[str, tuple[int, int]] | None:
     try:
         import torch  # noqa: PLC0415 — heavy, and only the live-card path needs it
 

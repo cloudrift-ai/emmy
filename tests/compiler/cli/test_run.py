@@ -982,7 +982,7 @@ def test_ab_json_labels_each_row_with_its_lane(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
     from emmy.commands import run as run_mod
-    from emmy.compiler.pipeline.search.data import Sample
+    from emmy.compiler.pipeline.search.dataset import Sample
 
     _FakeNode = namedtuple("_FakeNode", "op id")
 

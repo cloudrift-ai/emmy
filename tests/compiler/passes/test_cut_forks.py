@@ -342,7 +342,6 @@ def test_recorded_sdpa_cut_decodes_exactly_and_stale_path_fails_loudly() -> None
         "bindings": (),
         "pins": (),
         "measurements": None,
-        "ranking": None,
     }
     assert decode_record(GoldenRecord(knobs={"PLACE@map.1/twist.1/inner": "cut"}, **fields)) is None
     reason = decode_record(GoldenRecord(knobs={"PLACE@missing": "cut"}, **fields))
@@ -506,7 +505,6 @@ def _receipt_fields() -> dict:
         "bindings": (),
         "pins": (("PLACE@map.1/twist.1/inner", "cut"),),
         "measurements": None,
-        "ranking": None,
     }
 
 
@@ -732,28 +730,6 @@ def test_receipt_validation_requires_child_identity_and_place_pins_stay_live(mon
     assert regime_live(receipt), "a receipt's routing pins are its route, never a dead env regime"
 
 
-def test_pool_group_fuses_node_id_respellings_and_keys_on_pins() -> None:
-    """``pool_group`` composes the target kernels' identity keys, so two recordings of ONE
-    program whose node ids differ (separate recording sessions) fuse into one enumeration
-    group — the wire digest this replaced split them — while a different pin regime still
-    keys apart."""
-    fields = _receipt_fields()
-    respelled = _sdpa_graph()
-    for nid in [n for n in respelled.nodes if n not in respelled.inputs]:
-        respelled.rename_node(nid, f"session2_{nid}")
-    twin_fields = {
-        **fields,
-        "program_wire": respelled.to_wire(),
-        **loop_record_fields(respelled, [f"session2_{o}" for o in fields["origins"]]),
-    }
-    a = GoldenRecord(knobs={}, **fields)
-    b = GoldenRecord(knobs={}, **twin_fields)
-    assert a.pool_group == b.pool_group, "node-id spelling must not split an enumeration group"
-
-    unpinned = GoldenRecord(knobs={}, **{**fields, "pins": ()})
-    assert unpinned.pool_group != a.pool_group, "the pin regime is a group-key term"
-
-
 # ---------------------------------------------------------------------------
 # The routing lane: a recorded ROUTING row decides a placement fork.
 # ---------------------------------------------------------------------------
@@ -767,7 +743,6 @@ def _sdpa_kernel_identity() -> str:
     is the kernel a routing row names: the route it records is the one decision taken on that
     kernel, before any piece of it exists. Probed off a resolve rather than restated here, so these
     tests pin the routing lane and not a second copy of the identity derivation."""
-    from emmy.compiler.pipeline.fork import flatten_leaves
 
     ctx = Context.from_target((12, 0), gpu_name=_ROUTING_CARD)
     lowered = Pipeline.build(LOOP_PASSES).run(_sdpa_graph(), ctx=ctx)
@@ -776,7 +751,7 @@ def _sdpa_kernel_identity() -> str:
     def decide(fp):
         if not seen and isinstance(fp.root_op, TileOp) and fp.match.rule.name == _CUT.__name__.rsplit(".", 1)[-1]:
             seen.append(fp.root_op.identity_key(with_io=True))
-        return flatten_leaves(fp.options)[0]
+        return next(fp.leaves())
 
     Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(lowered, decide)
     assert seen, "the sdpa program must offer a placement fork"
@@ -801,7 +776,6 @@ def _routing_record(knobs: dict, *, name: str = "sdpa.route") -> GoldenRecord:
         knobs=knobs,
         identity=_sdpa_kernel_identity(),
         measurements=Measurements(emmy_us=1.0, reference_us=2.0, reference_backend="torch"),
-        ranking=None,
     )
 
 

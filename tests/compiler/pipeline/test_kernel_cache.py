@@ -64,13 +64,6 @@ def test_without_a_cache_nothing_changes() -> None:
     assert op.kernel_source
 
 
-def test_tune_search_strips_the_cache() -> None:
-    from emmy.compiler.pipeline.search.policy.mcts import TuningSearch
-
-    ctx = replace(Context.from_target((12, 0)), kernel_cache=KernelCache())
-    assert TuningSearch.prepare_ctx(TuningSearch.__new__(TuningSearch), ctx).kernel_cache is None
-
-
 def test_multi_kernel_origin_poisons_the_key() -> None:
     import types
 

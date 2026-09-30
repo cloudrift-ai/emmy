@@ -157,7 +157,7 @@ def add_golden_arg(parser) -> None:
         "--strict-evidence",
         action="store_true",
         help=(
-            "Fail instead of deploying a prediction: every fork must be decided by a measured row (reservoir, tune DB "
+            "Fail instead of deploying a prediction: every fork must be decided by a measured row (tune DB "
             "or golden). A kernel nothing measured raises EvidenceError naming it."
         ),
     )
@@ -183,8 +183,8 @@ def resolve_golden_arg(args) -> None:
     come along with it) and ``golden_configs`` (the rows ``run`` benches as pinned rows). Which rows
     bench: a realization the operator NAMED is always benched;
     a whole-file walk (``run --golden PATH`` alone, ``_explicit_realization`` false) benches a
-    target's verified rows, or its one valid direct tune winner, and leaves proposals to the
-    tuner. Nothing here installs a pin: a measured record reaches its kernel through the evidence
+    target's verified rows and leaves proposals unbenched. Nothing here installs a pin: a measured
+    record reaches its kernel through the evidence
     pick when the compile reaches that kernel's forks — except the kernel-set decisions a named
     realization records, which the compile pins (:func:`selected_decisions`).
 
@@ -280,20 +280,8 @@ def resolve_golden_arg(args) -> None:
     pinned = matches
     if document is not None:
         states = {row.name: row.kernel_set_state(entry.realizations) for entry in document.configs for row in entry.realizations}
-        verified = [record for record in matches if states.get(record.name) is GoldenEntryState.VERIFIED]
-        winners = [record for record in matches if record.ranking is not None and record.ranking.get("tune_winner") is True]
-        valid_winner = (
-            len(winners) == 1
-            and winners[0].ranking.get("source") == "tune"
-            and winners[0].ranking.get("status") == "ok"
-            and winners[0].ranking.get("measured_knobs") == winners[0].knobs
-            and bool(winners[0].knobs)
-        )
-        if winners and not valid_winner:
-            logger.error("golden %r must contain one valid direct tune winner with matching measured knobs", name)
-            sys.exit(2)
         if not getattr(args, "_explicit_realization", True):
-            pinned = verified or winners
+            pinned = [record for record in matches if states.get(record.name) is GoldenEntryState.VERIFIED]
     # A receipt of a kernel a routing decision minted (its identity is no routing row's) replays under
     # that decision: its piece keys compose with nothing on the unsplit program. The route is the
     # target's routing rows, when they agree; conflicting arms leave the receipt to replay bare.
@@ -357,7 +345,7 @@ def selected_decisions(args) -> dict[str, str]:
 
 def golden_row(record, records=()):
     """A golden record as the duck-typed pinned row ``run`` benches and reports: the
-    :class:`~emmy.compiler.pipeline.search.data.Sample` view (``name`` / ``pins`` / ``knobs`` /
+    :class:`~emmy.compiler.pipeline.search.dataset.Sample` view (``name`` / ``pins`` / ``knobs`` /
     ``shape`` / ``dynamic``) plus the ``record`` itself — the row ``run`` measures under a hand pin and records as
     deploy evidence.
 
@@ -368,7 +356,7 @@ def golden_row(record, records=()):
     whatever the unpinned fork picks under the realization's name."""
     from types import SimpleNamespace  # noqa: PLC0415
 
-    from emmy.compiler.pipeline.search.data import Sample  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.dataset import Sample  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden import kernel_set_pins  # noqa: PLC0415
 
     sample = vars(Sample.from_golden(record))

@@ -17,7 +17,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from emmy.compiler.pipeline.search.data.group import GoldenGroup
+from emmy.compiler.pipeline.search.dataset.group import GoldenGroup
 from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
 from emmy.compiler.pipeline.search.prior import OfflinePrior
 from emmy.compiler.pipeline.search.prior.catboost_model import ABSENT, CatBoostModel
@@ -287,9 +287,7 @@ def test_offline_prior_loads_a_tree_artifact(tmp_path, monkeypatch):
     assert isinstance(prior.model, CatBoostModel)
     fast, slow = {"D_a": 29.0, "D_b": 1.0}, {"D_a": 0.0, "D_b": 1.0}
     assert prior.mean_score_features(fast) < prior.mean_score_features(slow)
-    # ``policy`` prices the sibling set relative to its best — the PUCT surface, over a tree.
     assert max(prior.mean_scores_features([fast, slow])) > 0
-    assert prior.policy([fast, slow])[0] == 1.0
 
 
 def test_linear_only_overrides_are_rejected_against_a_tree_artifact(tmp_path, monkeypatch):

@@ -18,7 +18,7 @@ Two binding scopes share the protocol:
   two-level tuner's minted-kernel watcher), composed into the run's own pipeline instance after
   the discovered set. A pipeline composed with stateful strategies serves one run.
 
-Events fire at the engine's own moments — ``Run.drive`` / ``Run.resolve`` entry,
+Events fire at the engine's own moments — ``Run.resolve`` entry,
 ``Candidate.apply``'s Graph splice (before and after), and ``Cursor.advance``'s pass completion —
 and carry payload objects so signatures never churn. Events are FROZEN records of a moment: a
 handler never mutates the event (nor could a mutation mean anything — nobody reads it after the
@@ -51,7 +51,7 @@ class PipelineStrategy(ABC):  # noqa: B024 — deliberately no abstract methods:
     ``search.policy.Search`` (the frontier policy inside one loop)."""
 
     def on_run_start(self, e: RunStartEvent) -> None:  # noqa: B027 — optional hook, no-op default
-        """A loop (``Run.drive`` / ``Run.resolve``) starts driving a graph."""
+        """A loop (``Run.resolve``) starts driving a graph."""
 
     def on_splice(self, e: SpliceEvent) -> None:  # noqa: B027 — optional hook, no-op default
         """Before a ``Graph`` fragment splices in (op identities stable, pre-id-promotion).
@@ -70,7 +70,7 @@ class PipelineStrategy(ABC):  # noqa: B024 — deliberately no abstract methods:
 
 @dataclass(frozen=True)
 class RunStartEvent:
-    """A loop (``Run.drive`` / ``Run.resolve``) starts driving ``graph``. ``passes`` names the
+    """A loop (``Run.resolve``) starts driving ``graph``. ``passes`` names the
     pipeline's pass list — a strategy keyed to a pass boundary reads it to handle partial
     pipelines that enter after its boundary (e.g. a loop-stage IR resume never runs
     ``loop/stamp``, so identity stamps at entry instead)."""

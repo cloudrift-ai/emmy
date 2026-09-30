@@ -55,6 +55,18 @@ def test_ssh_deploy_command_sequence(run_cli, recipes_dir):
     assert any("docker compose up" in line for line in dry_run_lines)
 
 
+def test_ssh_deploy_with_proxy_configures_the_daemon_and_the_download(run_cli, recipes_dir):
+    rc, stdout, stderr = run_cli(
+        "deploy", "ssh", "--recipe", os.path.join(recipes_dir, "Qwen3-Embedding-8B"), "--ssh", "user@1.2.3.4",
+        "--gpu", "NVIDIA GeForce RTX 5090", "--gpu-count", "1", "--vm-proxy", "http://10.0.0.1:3128", "--dry-run",
+    )  # fmt: skip
+    assert rc == 0, f"stderr: {stderr}\nstdout: {stdout}"
+    assert "Configuring Docker daemon proxy http://10.0.0.1:3128 on user@1.2.3.4" in stdout
+    assert stdout.index("systemctl restart docker") < stdout.index("docker compose pull")
+    download = next(line for line in stdout.splitlines() if "hf download" in line)
+    assert " -e HTTPS_PROXY=http://10.0.0.1:3128 " in download
+
+
 def test_ssh_deploy_completion_smoke_keeps_download_and_prints_completion_example(run_cli, tmp_path):
     config = {
         "model": {"huggingface": "org/base-model", "revision": "0123456789abcdef", "smoke_test": "completion"},
@@ -243,6 +255,7 @@ def test_ssh_help(run_cli):
     # Deprecated flags are still listed but marked as such.
     assert "--server" in stdout
     assert "--ssh-port" in stdout
+    assert "--vm-proxy" in stdout
     assert "DEPRECATED" in stdout
 
 

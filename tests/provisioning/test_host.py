@@ -6,7 +6,10 @@ import click
 import pytest
 
 from emmy.provisioning.host import LocalHost, RemoteHost
-from emmy.provisioning.remote import _ensure_nvidia_versions, _matches
+from emmy.provisioning.proxy import DOCKER_PROXY_DROPIN, NO_PROXY, docker_proxy_dropin
+from emmy.provisioning.remote import _configure_docker_proxy, _ensure_nvidia_versions, _matches, provision_remote
+
+PROXY = "http://10.0.0.1:3128"
 
 
 def test_matches_prefix():
@@ -47,6 +50,94 @@ def test_remote_host_dry_run_logs(caplog):
         rc, _ = asyncio.run(host.run("apt-get update", sudo=True))
     assert rc == 0
     assert any("sudo apt-get update" in r.message for r in caplog.records)
+
+
+def test_remote_host_exports_its_proxy_to_every_command(caplog):
+    host = RemoteHost("user@host", None, 22, dry_run=True, proxy=PROXY)
+    with caplog.at_level("INFO"):
+        asyncio.run(host.run("apt-get update", sudo=True))
+        asyncio.run(host.run("nvidia-smi"))
+    exports = (
+        f"export HTTP_PROXY={PROXY} HTTPS_PROXY={PROXY} NO_PROXY={NO_PROXY} http_proxy={PROXY} https_proxy={PROXY} no_proxy={NO_PROXY};"
+    )
+    assert [r.message for r in caplog.records] == [
+        f"[dry-run] ssh user@host: sudo {exports} apt-get update",
+        f"[dry-run] ssh user@host: {exports} nvidia-smi",
+    ]
+
+
+class _ProxyHost(LocalHost):
+    """A host behind PROXY whose drop-in and proxy check answer as scripted; every other command succeeds."""
+
+    def __init__(self, dropin: str | None = None, curl=(0, "401")):
+        super().__init__()
+        self.proxy = PROXY
+        self.dropin = dropin
+        self.curl = curl
+        self.calls: list[tuple[str, bool]] = []
+
+    async def run(self, cmd, *, sudo=False, capture=False, timeout=600):
+        self.calls.append((cmd, sudo))
+        if cmd.startswith(f"cat {DOCKER_PROXY_DROPIN}"):
+            return (0, self.dropin) if self.dropin is not None else (1, "")
+        if cmd.startswith("curl -sS"):
+            return self.curl
+        return 0, ""
+
+
+def test_configure_docker_proxy_writes_the_dropin_and_restarts_the_daemon(caplog):
+    host = _ProxyHost()
+    with caplog.at_level("INFO"):
+        asyncio.run(_configure_docker_proxy(host, dry_run=False))
+    ((write, sudo),) = [(cmd, sudo) for cmd, sudo in host.calls if "printf" in cmd]
+    assert sudo
+    assert docker_proxy_dropin(PROXY) in write  # the exact content, single-quoted for the shell
+    assert write.endswith(f"> {DOCKER_PROXY_DROPIN} && systemctl daemon-reload && systemctl restart docker")
+    messages = [r.message for r in caplog.records]
+    assert f"Configuring Docker daemon proxy {PROXY} on local" in messages
+    assert f"local: proxy {PROXY} reaches https://registry-1.docker.io/v2/ (HTTP 401)" in messages
+
+
+def test_configure_docker_proxy_leaves_a_matching_dropin_alone(caplog):
+    host = _ProxyHost(dropin=docker_proxy_dropin(PROXY).strip())
+    with caplog.at_level("INFO"):
+        asyncio.run(_configure_docker_proxy(host, dry_run=False))
+    assert not [cmd for cmd, sudo in host.calls if sudo]
+    assert f"Docker daemon proxy {PROXY} already configured on local" in [r.message for r in caplog.records]
+
+
+def test_configure_docker_proxy_rewrites_a_dropin_naming_another_proxy():
+    host = _ProxyHost(dropin=docker_proxy_dropin("http://10.0.0.2:3128").strip())
+    asyncio.run(_configure_docker_proxy(host, dry_run=False))
+    assert [cmd for cmd, sudo in host.calls if sudo and "systemctl restart docker" in cmd]
+
+
+def test_configure_docker_proxy_fails_the_deploy_when_the_proxy_does_not_answer():
+    host = _ProxyHost(curl=(7, "curl: (7) Failed to connect to 10.0.0.1 port 3128: Connection refused"))
+    with pytest.raises(RuntimeError, match=r"local: proxy http://10\.0\.0\.1:3128 does not reach .*Connection refused"):
+        asyncio.run(_configure_docker_proxy(host, dry_run=False))
+
+
+def test_configure_docker_proxy_warns_only_when_the_proxy_is_a_hostname(caplog):
+    named = _ProxyHost()
+    named.proxy = "http://squid.corp:3128"
+    with caplog.at_level("WARNING"):
+        asyncio.run(_configure_docker_proxy(named, dry_run=False))
+        assert any("the host itself must be able to resolve squid.corp" in r.message for r in caplog.records)
+        caplog.clear()
+        asyncio.run(_configure_docker_proxy(_ProxyHost(), dry_run=False))
+    assert not caplog.records
+
+
+def test_provision_remote_configures_the_proxy_once_docker_is_there():
+    host = _ProxyHost()
+    asyncio.run(provision_remote(host, skip_nvidia=True))
+    commands = [cmd for cmd, _ in host.calls]
+    assert commands.index("command -v docker") < commands.index(f"cat {DOCKER_PROXY_DROPIN} 2>/dev/null")
+    plain = _ProxyHost()
+    plain.proxy = None
+    asyncio.run(provision_remote(plain, skip_nvidia=True))
+    assert not [cmd for cmd, _ in plain.calls if "proxy" in cmd]
 
 
 def test_remote_host_build_args_includes_sudo():

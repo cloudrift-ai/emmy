@@ -15,6 +15,7 @@ from emmy.deploy import (
 from emmy.deploy.plan import load_plan
 from emmy.detect import detect_remote_gpus
 from emmy.provisioning.host import RemoteHost
+from emmy.provisioning.proxy import add_proxy_argument
 from emmy.provisioning.remote import provision_remote
 from emmy.provisioning.ssh_target import parse_ssh_target
 from emmy.recipe import resolve_for_hardware, resolve_recipe_dir
@@ -87,9 +88,10 @@ async def _handle_ssh(args):
         model_dir=args.model_dir,
         hf_token=hf_token,
         dry_run=args.dry_run,
+        proxy=args.vm_proxy,
     )
     skip_nvidia = deploy_config.gpu is not None and deploy_config.gpu.startswith("AMD")
-    host = RemoteHost(params.server, params.ssh_key, params.ssh_port, dry_run=params.dry_run)
+    host = RemoteHost(params.server, params.ssh_key, params.ssh_port, dry_run=params.dry_run, proxy=params.proxy)
     timer = PhaseTimer()
     async with timer.ameasure(PHASE_REMOTE_PROVISION):
         await provision_remote(
@@ -131,6 +133,7 @@ def register_ssh_target(subparsers):
         help="SSH target (e.g. user@host or user@host:2222). Default port: 22",
     )
     parser.add_argument("--ssh-key", default="~/.ssh/id_ed25519", help="SSH key path")
+    add_proxy_argument(parser)
     # Deprecated — kept for backwards compatibility. Prefer --ssh USER@HOST[:PORT].
     parser.add_argument("--server", default=None, help="[DEPRECATED] SSH address (user@host); use --ssh instead")
     parser.add_argument("--ssh-port", type=int, default=None, help="[DEPRECATED] SSH port; encode it in --ssh USER@HOST:PORT")

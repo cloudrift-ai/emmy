@@ -3,6 +3,7 @@
 import yaml
 
 from emmy.deploy import Service, generate_compose, generate_nginx_conf, replica_services
+from emmy.provisioning.proxy import NO_PROXY, proxy_env
 from emmy.recipe import Recipe
 
 
@@ -140,6 +141,34 @@ def test_compose_no_gpu_device_ids_uses_count_all(sample_config):
     result = generate_compose([Service(recipe)], "/mnt/models", "token")
     assert "count: all" in result
     assert "device_ids:" not in result
+
+
+def test_compose_proxy_reaches_every_engine_service_but_not_nginx(sample_config_multi):
+    url = "http://10.0.0.1:3128"
+    services, load_balancer = replica_services(Recipe.from_dict(sample_config_multi))
+    result = generate_compose(services, "/mnt/models", "token", load_balancer=load_balancer, proxy=url)
+
+    proxy_block = (
+        f"      - HTTP_PROXY={url}\n"
+        f"      - HTTPS_PROXY={url}\n"
+        f"      - NO_PROXY={NO_PROXY}\n"
+        f"      - http_proxy={url}\n"
+        f"      - https_proxy={url}\n"
+        f"      - no_proxy={NO_PROXY}\n"
+        "    ports:\n"
+    )
+    assert result.count(proxy_block) == len(services) == 2
+    parsed = yaml.safe_load(result)
+    for name in ("vllm_0", "vllm_1"):
+        assert parsed["services"][name]["environment"][-6:] == [f"{k}={v}" for k, v in proxy_env(url).items()]
+    assert "environment" not in parsed["services"]["nginx"]
+
+
+def test_compose_without_proxy_is_unchanged(sample_config):
+    recipe = Recipe.from_dict(sample_config)
+    result = generate_compose([Service(recipe)], "/mnt/models", "token")
+    assert result == generate_compose([Service(recipe)], "/mnt/models", "token", proxy=None)
+    assert "proxy" not in result.lower()
 
 
 # ── generate_nginx_conf ─────────────────────────────────────────────

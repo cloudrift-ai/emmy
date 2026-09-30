@@ -3,7 +3,7 @@
 The ``S_*`` row is an extent-aware histogram used by the learned prior. ``I_kernel`` is the exact
 schedule-free typed identity measured evidence is keyed by: the loop op's at birth, and the tile
 kernel's once the lift has given it a body of its own — the identity the tune DB keys a kernel on
-(``policy.terminal_bench.kernel_key``), so a kernel's rows and its forks name it alike. Both are
+(``search.bench_record.kernel_key``), so a kernel's rows and its forks name it alike. Both are
 materialized into ``op.knobs`` once per kernel, at birth:
 
 - **fusion settled** — the end of the pipeline's last non-lowering pass (``on_pass_end`` at the

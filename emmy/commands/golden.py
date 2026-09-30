@@ -48,11 +48,11 @@ def register_golden_command(subparsers) -> None:
 
 
 def _goldens(paths: list[str]) -> list[Path]:
-    from emmy.compiler.pipeline.search.golden.repository import _repository_golden_paths  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden.repository import repository_golden_paths  # noqa: PLC0415
 
     if paths:
         return [Path(path).expanduser() for path in paths]
-    with _repository_golden_paths() as repository:
+    with repository_golden_paths() as repository:
         return list(repository)
 
 

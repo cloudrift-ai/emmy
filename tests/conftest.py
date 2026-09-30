@@ -102,18 +102,9 @@ def pytest_runtest_setup(item):
 
 
 @pytest.fixture(autouse=True)
-def _isolate_prior_file(tmp_path, monkeypatch):
-    """Point the online-prior checkpoint at a per-test temp path so the
-    greedy compile driver (which loads the global prior) never picks up a
-    dev machine's ``~/.cache/emmy/online.json`` — tests stay deterministic
-    (empty prior → option-0), and a test that tunes writes only its own file."""
-    monkeypatch.setenv("EMMY_ONLINE_FILE", str(tmp_path / "prior.json"))
-
-
-@pytest.fixture(autouse=True)
 def _isolate_offline_file(monkeypatch):
     """Drop any dev-machine ``EMMY_OFFLINE_FILE`` override so tests always score
-    through the repo-checked ``offline_weights.json``. Unlike the prior file, the
+    through the repo-checked ``weights/offline.json``. Unlike the prior file, the
     default here must NOT be a tmp path — a missing offline artifact is a hard
     error by design (no silent fallback), and the shipped one is what tests
     exercise."""

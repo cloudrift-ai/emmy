@@ -11,10 +11,9 @@ which columns this model class wants out of it.
 
 The public scoring methods borrow ``Prior``'s own featurized surface — ``mean_score_features`` and
 ``mean_scores_features`` (``quality`` / ``quality_rows`` / ``score_rows`` are this module's own vocabulary, not
-``Prior``'s). That is deliberate: ``FallbackPrior`` composes priors on exactly those, so a holder can delegate to
-any model through them without a second vocabulary. :mod:`.catboost_model` is the other model class answering the
-same surface. ``explain_features`` is NOT part of it — it is this model's internal per-term breakdown, and
-:meth:`LinearModel.quality` is its only caller.
+``Prior``'s). That is deliberate: a holder delegates to any model through them without a second vocabulary.
+:mod:`.catboost_model` is the other model class answering the same surface. ``explain_features`` is NOT part of
+it — it is this model's internal per-term breakdown, and :meth:`LinearModel.quality` is its only caller.
 :meth:`~LinearModel.quality` / :meth:`~LinearModel.quality_rows` are linear-only — the pre-transform ranking
 quantity a derivative-free descent walks, which a tree model has no additive equivalent of (its matrix entry
 point is ``CatBoostModel.quality_rows``, a booster call rather than a dot product).
@@ -43,7 +42,7 @@ from emmy.compiler.pipeline.search.prior.base import latency_proxy
 if TYPE_CHECKING:
     # Annotation only: importing ``search.data`` for real would pull it (and, through ``freeze.py``, the golden format and
     # subprocess) onto the deploy path, which loads none of it today.
-    from emmy.compiler.pipeline.search.data.group import Group
+    from emmy.compiler.pipeline.search.dataset.group import Group
 
 
 def descent_cols(names) -> tuple[str, ...]:
@@ -70,7 +69,7 @@ FITTED_PARAMS = ("atomic_free_weight", "atomic_free_split_threshold")
 # coordinates are drawn from, so writer, validator and descent cannot drift — add a scalar param once, here.
 #
 # The order matches what the fitter has emitted since the scalar params became fitted coordinates; it is NOT the
-# order in the currently shipped ``offline_weights.json``, which predates that, so the next refit rewrites those
+# order in the currently shipped ``weights/offline.json``, which predates that, so the next refit rewrites those
 # two lines once. Reordering to match the shipped file would instead change what a refit emits.
 PARAM_ORDER = ("scale", *FITTED_PARAMS)
 
@@ -157,8 +156,7 @@ class LinearModel:
         a guard at construction — the one place a hand-edited artifact is also caught.
 
         Worth being precise about the harm, since the module docstring above says such a term "cancels
-        exactly": within one candidate pool it does, and it cancels out of the greedy argmin, out of
-        ``normalize_policy`` and out of ``TiltBlend`` for the same reason. The exception is
+        exactly": within one candidate pool it does, and it cancels out of the greedy argmin. The exception is
         ``policy/greedy._resolved_price``, which SUMS per-kernel scores to compare whole kernel sets — a
         routing weight there scales every symbolic-axis kernel's price and biases the fusion comparison."""
         for name, w_set in (("weights", self.weights), ("weights_dynamic", self.weights_dynamic)):

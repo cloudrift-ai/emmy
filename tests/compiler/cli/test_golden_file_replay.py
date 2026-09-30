@@ -39,15 +39,8 @@ def _working_loop(path, *, state="inventory", pins=None):
     realization.name = "working.relu"
     if pins is not None:
         realization.pins = pins
-    if state in {"proposal", "tuned", "verified"}:
+    if state in {"proposal", "verified"}:
         realization.knobs = {"WORK": "w1x1"}
-    if state == "tuned":
-        realization.ranking = {
-            "source": "tune",
-            "status": "ok",
-            "tune_winner": True,
-            "measured_knobs": {"WORK": "w1x1"},
-        }
     if state == "verified":
         realization.measurements = Measurements(emmy_us=1.0, reference_us=2.0, reference_backend="torch")
     loop = Graph.from_wire(document.loops[entry.target.loop])
@@ -244,10 +237,10 @@ def test_duplicate_name_requires_target_scoped_working_file(tmp_path, caplog):
     assert args._golden_graph.nodes["y"].op.name == "working_second_loop"
 
 
-def test_named_proposal_is_pinned_and_a_file_walk_leaves_it_to_the_tuner(tmp_path):
+def test_named_proposal_is_pinned_and_a_file_walk_leaves_it_unbenched(tmp_path):
     """Naming a realization asks for that row: it benches as a pinned row whatever its measurement
     state (the corpus and perf lanes replay unmeasured cases this way). A bare ``--golden PATH``
-    walk names nothing, so a proposal there stays the tuner's and only verified rows bench."""
+    walk names nothing, so a proposal there stays unbenched and only verified rows bench."""
     from emmy.commands.compile import resolve_golden_arg
     from emmy.commands.run import _pinned_samples_for_ir
 
@@ -533,31 +526,6 @@ def test_working_verified_row_is_automatically_pinned(tmp_path):
     assert args.golden_configs[0].knobs == {"WORK": "w1x1"}
     assert args.golden_configs[0].pins == {"FAST_MATH": True}
     assert _sample_replay_knobs(args.golden_configs[0]) == {"FAST_MATH": True, "WORK": "w1x1"}
-
-
-def test_working_direct_tune_winner_is_automatically_pinned(tmp_path):
-    from emmy.commands.compile import resolve_golden_arg
-
-    path = tmp_path / "working.json"
-    _working_loop(path, state="tuned")
-    args = _args(path)
-
-    resolve_golden_arg(args)
-
-    assert len(args.golden_configs) == 1
-    assert args.golden_configs[0].knobs == {"WORK": "w1x1"}
-
-
-def test_working_invalid_direct_tune_winner_is_rejected(tmp_path):
-    from emmy.commands.compile import resolve_golden_arg
-
-    path = tmp_path / "working.json"
-    document = _working_loop(path, state="tuned")
-    document.configs[0].realizations[0].ranking["measured_knobs"] = {"WORK": "w2x2"}
-    document.dump(path, overwrite=True)
-
-    with pytest.raises(SystemExit, match="2"):
-        resolve_golden_arg(_args(path))
 
 
 def test_run_replays_embedded_loop_golden_through_structural_stamps(tmp_path):
@@ -924,7 +892,7 @@ def test_replay_keys_its_cache_by_the_entry_identity(tmp_path):
 def _decision_watcher():
     """The kernel-set decisions a compile takes, captured as ``run --record-greedy`` captures them:
     the splice watcher, reporting ``(deploy identity of the kernel the fork was offered on, arm)``."""
-    from emmy.compiler.pipeline.search.strategy.two_level import KernelInventory, _identity
+    from emmy.compiler.pipeline.search.inventory import KernelInventory, _identity
 
     taken: list[tuple[str, dict[str, str]]] = []
     watcher = KernelInventory(

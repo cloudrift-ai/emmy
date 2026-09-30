@@ -188,7 +188,7 @@ The artifact worktree stays on the rolling lifecycle branch, while Python contro
 manual dispatch test a workflow PR without leaking that PR's implementation commits into the model-artifact branch.
 The selector runs the exact-SHA catalog logic against the rolling worktree's `recipes/` directory so lifecycle mode
 and priority always reflect the branch that the agent will update.
-The workflow also attaches the exact-SHA README related-project map, the `onboard-model`, `tune-kernels`, and
+The workflow also attaches the exact-SHA README related-project map, the `onboard-model` and
 `run-experiment` skills, and the `prompts/onboard-model/` qualification, benchmarking, and investigation prompts as
 authoritative agent inputs. It loads the OpenCode agent and plugin directory from that same commit; older copies on the
 rolling branch cannot silently override a proposed artifact contract. As in discovery, the workflow renders only a

@@ -107,7 +107,7 @@ def test_schedule_leaves_key_tile_canonically():
     axes: set[str | None] = set()
 
     def decide(fp):
-        leaf = next(iter_leaves(fp.options))
+        leaf = next(fp.leaves())
         for k in getattr(leaf, "knobs", {}):
             if family_of(k) == "TILE":
                 axes.add(axis_of(k))
@@ -149,7 +149,7 @@ def test_tile_pin_forces_the_named_warp_row(monkeypatch):
     rows: list[dict] = []
 
     def decide(fp):
-        leaves = list(iter_leaves(fp.options))
+        leaves = fp.flat()
         if "schedule" in fp.match.rule.name:  # the walk's own fork — not the placement / split offers
             rows.extend(dict(getattr(leaf, "knobs", {}) or {}) for leaf in leaves)
         return leaves[0]
@@ -185,7 +185,7 @@ def test_bare_reduce_forks_the_coop_catalog():
     def decide(fp):
         from emmy.compiler.pipeline.pipeline import _is_structural_option
 
-        leaves = list(iter_leaves(fp.options))
+        leaves = fp.flat()
         if any(_is_structural_option(leaf) for leaf in leaves):
             return next(leaf for leaf in leaves if not _is_structural_option(leaf))
         for leaf in leaves:

@@ -56,7 +56,7 @@ share every line downstream. The projection:
   every boot and silently defeats the cache (a server restart recompiles everything it
   touches) — pinned by `tests/compiler/backend/test_source_determinism.py`, which
   compiles in two subprocesses and asserts identical sources. A cubin loads with no driver PTX→SASS JIT, the
-  compile is ~3× faster than a cold NVRTC compile on the complex tile-search kernels that dominate autotune, and
+  compile is ~3× faster than a cold NVRTC compile on the complex tile-search kernels that dominate a golden bench, and
   it is GPU-free, so the cubin cache can be warmed by a parallel pool (planned). A missing or failing `nvcc` is an
   error; there is no NVRTC fallback. Kernels are emitted with `extern "C" __global__` so nothing name-mangles them
   (the cubin symbol loads by `kernel_name`). The compile budget is checked BETWEEN kernels
@@ -66,7 +66,7 @@ share every line downstream. The projection:
   delegates to `config.nvcc_flags()` — `emmy/config.py` is the single owner
   of `os.environ` for `EMMY_*` vars, incl. `EMMY_NO_NVCC` /
   `EMMY_CUBIN_CACHE`). The CLI sets the flags via `config.set_nvcc_flags`
-  (override logic, no longer in the command layer) — `tune`, `compile` and `run` all default to nvcc's own -O3, the
+  (override logic, no longer in the command layer) — `compile` and `run` both default to nvcc's own -O3, the
   deployable regime, and `--nvcc-flags` overrides. **Tuning measures in the regime it deploys into**, so a tuned
   latency is the deployed one.
 
@@ -79,12 +79,12 @@ share every line downstream. The projection:
   workers receive the effective `FAST_MATH` value with every request and restore their prior value afterward, so a
   previous request's arithmetic mode cannot leak into the next measurement.
 
-  `tune` used to rank at `-Xcicc -O1` to dodge a cicc front-end blowup on big unrolled register-tile kernels. That
+  An older sweep ranked at `-Xcicc -O1` to dodge a cicc front-end blowup on big unrolled register-tile kernels. That
   rationale was measured against the WMMA codegen deleted in #189 four days later; on current codegen (fragment work
   renders as rolled loops with small `#pragma unroll` trip counts) it does not reproduce — over 4,888 nvcc compiles
   spanning the tile inventory, -O3 compiled at a **median 0.96×** of -O1, worst case 1.17×, slowest compile 1.39 s.
   So the lower level bought no compile time while mis-ranking by tile area, and it is no longer a measurement lane.
-  It stays reachable through `--nvcc-flags` for the test suite's compile-speed lane; a sweep pinned to it warns, and
+  It stays reachable through `--nvcc-flags` for the test suite's compile-speed lane; a bench pinned to it warns, and
   its rows key to that regime so no deploy reads them. Note the blowup is a property of unroll size, not of the opt
   level as such: `EMMY_UNROLL` (below) raised far enough could bring it back.
 
@@ -196,7 +196,7 @@ kernel being hung. Before the knob the grace was hard-coupled at 30×, which at 
 needs priced every hang at 900 s; set it alone to bound what a hang costs. The 2 s (not 1 s) default is empirical: the
 gemma-4 post4096-global twin bench_failed 5/5 under a 1 s deadline at the first post-recalibration iteration yet runs
 clean 9/9 with no wait ≥0.2 s at any deadline ≥2 s — a deadline-correlated phantom (mechanism below the driver line
-unresolved; see the constant's note). This is the in-process timing core; both the autotune bench and the deployable
+unresolved; see the constant's note). This is the in-process timing core; both the pinned-row bench and the deployable
 comparison run it **inside the worker** (below), so a hung kernel hangs the child, not the parent.
 
 `benchmark_program` captures each launch position's batch into a CUDA graph **by default**
@@ -213,7 +213,7 @@ batch sizes change. A capture failure (`GraphCaptureError`; the runtime ends the
 reporting, so the stream is clean) is caught in place: the bench warns,
 continues uncaptured, and reports it via `BenchmarkResult.captured` — comparison callers
 (`bench_lowered_vs_torch` / `bench_full_model_real`) pair that flag with their torch-side capture and
-re-run all-or-nothing so one table never mixes semantics. The tune sweep persists the flag per `perf`
+re-run all-or-nothing so one table never mixes semantics. The perf writer persists the flag per `perf`
 row (`SearchDB.record_perf`): captured measurements supersede wall-semantics ones for the same key
 regardless of median, never the reverse — old rows stay usable (replay, prior training) and upgrade
 in place as re-tunes measure them captured. See `tests/compiler/backend/test_graph_capture.py`.
@@ -229,15 +229,15 @@ therefore also captures **one** CUDA graph holding every launch in program order
 backend table compares like-for-like. Reported as `BenchmarkResult.e2e_ms`/`e2e_min_ms`; `run --bench`'s
 comparison table prefers `e2e_min_ms` for the Emmy row and the kernel table prints a
 `whole-program (e2e)` footer beside the per-launch `TOTAL`. Automatic — no flag: a single-launch program's
-solo window already IS the program time (the autotune sweep's usual single-node slice — fields stay `None`,
+solo window already IS the program time (a single-kernel golden's slice — fields stay `None`,
 nothing is measured twice), and multi-launch programs get it whenever capture holds (a program-graph capture
-failure warns and skips, never fatal; uncaptured benches skip it too). The sweep still *ranks* variants on
-the per-op sum (`time_ms`) by design — per-op results key structurally and transfer across graphs, which an
-e2e scalar can't — so for its multi-launch slices (split-K fixups) the e2e fields are measured-but-unread
-(~1 ms/iter); pricing those variants by slice-e2e instead is a possible future tune-semantics change.
+failure warns and skips, never fatal; uncaptured benches skip it too). The evidence pick still *ranks* rows on
+the per-kernel `time_ms` by design — per-kernel results key structurally and transfer across graphs, which an
+e2e scalar can't — so for multi-launch slices (split-K fixups) the e2e fields are measured-but-unread
+(~1 ms/iter); pricing those rows by slice-e2e instead is a possible future change.
 
 **One worker, two jobs.** `_bench_worker.py`'s `_run_job` dispatches on `torch_spec`: `None` is the
-emmy-only bench (`benchmark_program` — the autotune sweep and `run --bench`'s pinned golden / `--ab`
+emmy-only bench (`benchmark_program` — `run --bench`'s pinned golden / `--ab`
 rows; an optional `run_inputs` ndarray dict adds one pre-bench execution on those inputs with the
 outputs shipped back — the pinned-row wrong-answer gate's measurement side); otherwise it's the
 deployable eager / torch.compile / emmy comparison — `("trace_args", {code/input/adapter/layer/seq_len/dynamic})` →
@@ -261,68 +261,62 @@ timing, and exact timing error. The command marks greedy ineligible while still 
 parent retires that child before any pinned job, so a still-running kernel cannot share its context. It never raises
 the watchdog or treats the single run as a candidate. Rebuilding the torch side **in the child** (not pickling a live
 module) is what lets the interleaved comparison — which could not cross a subprocess boundary before — run isolated.
-So `tune --bench` (`commands/tune.py` `_run_bench` /
-`_bench_per_kernel`) and every `run --bench` row go through the worker: a hung kernel
-hangs the child, the parent SIGKILLs it at `wall_timeout_s`, the device is freed, and the sweep / A/B
-**continues** to the next reproducer or row (no device-poisoning wedge, no skip). The worker starts by
+So every `run --bench` row goes through the worker: a hung kernel
+hangs the child, the parent SIGKILLs it at `wall_timeout_s`, the device is freed, and the A/B
+**continues** to the next row (no device-poisoning wedge, no skip). The worker starts by
 dropping `EMMY_DUMP_DIR` from its own env — a child-built `CudaBackend()` defaults its dump from that
 var and `CompilerDump.__post_init__` rmtrees the dir, which would wipe the parent's reproducers. The
 whole bench surface is **async-only** — the parent transport is the single **`_AsyncBenchWorker.run_job`**
 (the old sync `_BenchWorker` and the sync `benchmark_program_isolated` / `benchmark_compare_isolated`
 bridges are gone). `benchmark_compare_isolated_async` awaits a one-shot instance (`_run_job_oneshot`);
-the autotune sweep awaits a persistent per-GPU instance directly via `benchmark_program_isolated_async`;
 `run --bench` awaits its backend's persistent instance via `CudaBackend.benchmark_compare_async` (greedy
 row) / `CudaBackend.bench_pinned_async` (pinned rows) inside one `asyncio.run` session. Synchronous CLI
-entry points (`handle_run`, `_handle_run_ir`, `_run_bench`) bridge with `asyncio.run`. See
+entry points (`handle_run`, `_handle_run_ir`) bridge with `asyncio.run`. See
 `tests/compiler/backend/test_bench_worker_compare.py` (compare-in-worker + SIGKILL recovery + the
-run-path job flags), `test_hung_kernel_watchdog.py` (watchdog raises promptly), and
-`tests/compiler/cli/test_tune_bench_hung_kernel.py` (the `_run_bench` control flow).
+run-path job flags) and `test_hung_kernel_watchdog.py` (watchdog raises promptly).
 
-The three bench budgets (`bench_compile_timeout_s`, `bench_run_timeout_s`, `bench_wall_timeout_s`) are constructor
-policy on the backend, read through live `EMMY_BENCH_COMPILE_TIMEOUT_S` / `EMMY_BENCH_RUN_TIMEOUT_S` /
-`EMMY_BENCH_WALL_TIMEOUT_S` overrides (`emmy/config.py` owns the vars, mirroring `EMMY_KERNEL_TIMEOUT_MS`): one env
-setting reaches every bench path uniformly — the in-child backend inherits the env, and derived wall caps (the
-pinned-row cap, the comparison jobs' workload-scaled cap) recompute from the overridden values. Raising them is how a
-golden row whose recorded latency exceeds the default accumulated-GPU budget gets verified. The two watchdog
-deadlines beside them — `EMMY_KERNEL_TIMEOUT_MS` (steady) and `EMMY_FIRST_ITER_TIMEOUT_MS` (iter 0, default 30× the
-steady one) — are env-only, with no constructor policy, and reach the child the same way.
+The two bench budgets (`bench_compile_timeout_s`, `bench_run_timeout_s`) are constructor policy on the backend, read
+through live `EMMY_BENCH_COMPILE_TIMEOUT_S` / `EMMY_BENCH_RUN_TIMEOUT_S` overrides (`emmy/config.py` owns the vars,
+mirroring `EMMY_KERNEL_TIMEOUT_MS`): one env setting reaches every bench path uniformly — the in-child backend
+inherits the env, and the derived wall caps (the pinned-row cap, the comparison jobs' workload-scaled cap) recompute
+from the overridden values. Raising them is how a golden row whose recorded latency exceeds the default
+accumulated-GPU budget gets verified. The two watchdog deadlines beside them — `EMMY_KERNEL_TIMEOUT_MS` (steady) and
+`EMMY_FIRST_ITER_TIMEOUT_MS` (iter 0, default 30× the steady one) — are env-only, with no constructor policy, and
+reach the child the same way.
 
-The three budgets fail differently, and the differences are load-bearing. A `bench_run_timeout_s` overrun is a fact
+The budgets fail differently, and the differences are load-bearing. A `bench_run_timeout_s` overrun is a fact
 about the **kernel** — it compiled, it ran, it was too slow — and is recorded as a `bench_fail` at the watchdog's
 sentinel latency. A `bench_compile_timeout_s` overrun is a fact about **cicc and the tile's unroll size**: nothing
 about the kernel's speed was measured, so it raises `CompileBudgetExceeded` and callers record *nothing at all*
-(`search/policy/terminal_bench.py`, and `run --bench`'s pinned rows via `_failed_bench_status`). The exception class
+(`run --bench`'s pinned rows via `_failed_bench_status`). The exception class
 cannot cross the worker pipe (the protocol carries `error` as a string), so the child flags the kind as
 `compile_budget: True` and the parent rebuilds it onto `BenchWorkerJobError` — the same shape the retryable
 `cache_miss` kind already uses.
 
-`bench_wall_timeout_s` is the third, and it **must exceed the other two**, because it cannot tell them apart: on
-overrun the parent SIGKILLs the child and raises a plain `RuntimeError`, so a wall that can fire first collapses both
-honest in-child verdicts into one anonymous failure. The compile budget is checked when the compile *returns* and so
-can only fire for a compile that finished; the sweep's old wall sat ~2 s above compile+run, which meant any compile
-slower than that was killed rather than reported — and the wide register-tile family that motivates the budget is
-exactly the family that overruns it. The sweep therefore derives its wall as `compile + run + 60 s`, the same formula
-the pinned path uses; the 60 s of headroom is what lets the per-launch watchdog's first-iter grace fire in-child,
-which is what actually catches hangs. The wall is a backstop for a wedged worker, not a per-variant budget.
+The wall cap on each worker job (`wall_timeout_s`) is the third deadline, derived rather than set, and it **must
+exceed the other two**, because it cannot tell them apart: on overrun the parent SIGKILLs the child and raises a plain
+`RuntimeError`, so a wall that can fire first collapses both honest in-child verdicts into one anonymous failure. The
+compile budget is checked when the compile *returns* and so can only fire for a compile that finished; an earlier
+sweep's wall sat ~2 s above compile+run, which meant any compile slower than that was killed rather than reported —
+and the wide register-tile family that motivates the budget is exactly the family that overruns it. The pinned path
+therefore derives its wall as `compile + run + 60 s`; the 60 s of headroom is what lets the per-launch watchdog's
+first-iter grace fire in-child, which is what actually catches hangs. The wall is a backstop for a wedged worker, not
+a per-variant budget.
 
 The one-shot comparison result includes the worker's non-fatal `accuracy_error` beside timings, reference
-availability, and capture state. `tune --bench` persists that verdict per provenance reproducer instead of treating a
-successful timing response as proof of correctness.
+availability, and capture state. `run --bench` reports that verdict per row instead of treating a successful timing
+response as proof of correctness.
 
 **One async transport — `_AsyncBenchWorker`.** It drives the `_bench_worker.py` subprocess protocol (`<8-byte LE
 length><pickle>`, both directions) over `asyncio` streams. The child completes short writes of both header and payload.
-One event loop keeps N device-pinned workers benching concurrently (`tune --gpus`). Two entry shapes:
+A `CudaBackend` lazily owns one **persistent** worker (reused across rows — pay the ~0.2 s Python spawn once). Two
+entry shapes:
 
-- **Autotune sweep** awaits `benchmark_program_isolated_async(graph, worker=…)`. `CudaBackend(device_id=i)` lazily owns
-  one **persistent** worker (reused across configs — pay the ~0.2 s Python spawn once) and exposes `benchmark_async`,
-  the single benchmarking entry point: the isolated-worker path when `bench_wall_timeout_s` is set and no `on_iter`,
-  else the in-process `benchmark_program` path (the interleave `bench_lowered_vs_torch` / `bench_full_model_real`
-  drive — which itself now runs inside a worker child for every `--bench`). The device pin is a **per-worker spawn-env overlay** —
-  `CUDA_VISIBLE_DEVICES=<id>` (so the child's logical device 0 *is* that GPU, the one ordinal `device.py` ever
-  opens) plus, when a base `EMMY_GPU_LOCK` is set, a per-device `…-<id>` lock path so workers on
-  different GPUs take distinct `FileLock`s instead of serialising. The overlay rides the child only — the parent's
-  `os.environ` is never mutated (all slots share one event-loop thread).
-- **Deployable `--bench`**: `tune --bench` awaits `benchmark_compare_isolated_async`, which uses `_run_job_oneshot`
+- **In-process bench**: `CudaBackend.benchmark_async` runs `benchmark_program` on the event loop itself — the
+  interleave `bench_lowered_vs_torch` / `bench_full_model_real` drive, whose `on_iter` torch closures share this
+  process's torch state and cannot cross the subprocess boundary (the drive as a whole runs inside a worker child for
+  every `--bench`).
+- **Worker bench**: `benchmark_compare_isolated_async` uses `_run_job_oneshot`
   (spawn → run → `aclose`; the worker's streams bind to the loop, so it can't persist across `asyncio.run` calls — a
   per-call spawn, negligible against a minutes-long deployable bench). `run --bench` instead runs its whole session
   (greedy comparison + every pinned row) in ONE `asyncio.run` over the backend's persistent worker
