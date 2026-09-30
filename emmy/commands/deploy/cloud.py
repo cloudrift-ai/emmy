@@ -1,5 +1,6 @@
 """Cloud deploy target CLI handler."""
 
+import argparse
 import asyncio
 import logging
 import os
@@ -11,6 +12,7 @@ from emmy.deploy import (
 )
 from emmy.deploy.plan import load_plan
 from emmy.provisioning.cloud import (
+    DEFAULT_VM_ACTIVE_TIMEOUT,
     provision_cloud_vm,
     read_public_key_files,
 )
@@ -98,6 +100,7 @@ async def _handle_cloud(args):
                 allocation_observer=observer,
                 exact_gpu_count=args.plan is not None,
                 ports=ports,
+                vm_active_timeout=args.vm_active_timeout,
             )
         except (CapacityExhausted, TerminalProvisionError, RuntimeError, ValueError) as exc:
             logger.error(str(exc))
@@ -143,6 +146,13 @@ async def _handle_cloud(args):
         logger.info(line)
 
 
+def _positive_int(text):
+    """argparse type: an integer of at least 1."""
+    if not text.isdigit() or int(text) < 1:
+        raise argparse.ArgumentTypeError(f"expected a positive integer, got {text!r}")
+    return int(text)
+
+
 def register_cloud_target(subparsers):
     """Register the cloud deploy target."""
     parser = subparsers.add_parser("cloud", help="Provision a cloud VM and deploy via SSH")
@@ -178,6 +188,14 @@ def register_cloud_target(subparsers):
         choices=["gcp", "cloudrift"],
         default=None,
         help="Force cloud provider (default: first listed for the GPU in the hardware table)",
+    )
+    parser.add_argument(
+        "--vm-active-timeout",
+        type=_positive_int,
+        default=DEFAULT_VM_ACTIVE_TIMEOUT,
+        metavar="SECONDS",
+        help="Seconds to wait for a rented CloudRift VM to become Active before giving up on that candidate "
+        f"(default: {DEFAULT_VM_ACTIVE_TIMEOUT})",
     )
     add_lease_arguments(parser)
     parser.add_argument("--result-json", metavar="PATH", help="Write the instance id and one endpoint per model here on success")

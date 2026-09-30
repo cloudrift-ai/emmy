@@ -219,6 +219,7 @@ def test_deploy_cloud_help(run_cli):
     assert "--ssh-key" in stdout
     assert "--dry-run" in stdout
     assert "--name" in stdout
+    assert "--vm-active-timeout" in stdout
 
 
 def test_deploy_help_includes_cloud(run_cli):
@@ -316,3 +317,21 @@ def test_deploy_cloud_help_lists_plan_flags(run_cli):
     assert rc == 0
     for flag in ("--plan", "--result-json", "--lease", "--owner"):
         assert flag in stdout
+
+
+# ── --vm-active-timeout ───────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("timeout", "expected_rc"),
+    [("3600", 0), ("0", 2), ("-5", 2), ("soon", 2)],
+    ids=["positive", "zero", "negative", "not-a-number"],
+)
+def test_deploy_cloud_vm_active_timeout_must_be_positive(run_cli, tmp_path, timeout, expected_rc):
+    recipe = _plan_recipe(tmp_path, "one", [0.9])
+    plan = _write_plan(tmp_path, [{"recipe": recipe, "gpu_memory_utilization": 0.9, "gpu_device_ids": [0]}])
+    rc, stdout, stderr = run_cli("deploy", "cloud", "--plan", plan, "--vm-active-timeout", timeout, "--dry-run")
+    assert rc == expected_rc, f"stderr: {stderr}\nstdout: {stdout}"
+    if expected_rc:
+        assert "expected a positive integer" in stderr
+        assert "Creating CloudRift instance" not in stdout

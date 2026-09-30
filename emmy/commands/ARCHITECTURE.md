@@ -556,11 +556,17 @@ sets fallback preference; pass `--provider {gcp,cloudrift}` to restrict the sear
 
 ```bash
 emmy deploy cloud --recipe <path> --gpu "NVIDIA H200 141GB" --gpu-count 8 [--provider gcp] [--name prefix]
-emmy deploy cloud --plan plan.json [--result-json out.json] [--lease lease.json --owner NAME]
+emmy deploy cloud --plan plan.json [--result-json out.json] [--lease lease.json --owner NAME] \
+  [--vm-active-timeout SECONDS]
 ```
 
 Without a fraction, `--gpu`/`--gpu-count` pick the highest `engine.llm.gpu_memory_utilization` among the entries
 for that GPU and count: the whole-GPU qualification, whatever order the recipe lists them in.
+
+`--vm-active-timeout SECONDS` (default 1800) bounds how long a rented CloudRift VM may take to become Active before
+Emmy terminates it and tries the next candidate. A node that has to download the VM image first can need more than
+the default (an on-prem cluster fetching it through a proxy took about an hour). GCP has its own `create_timeout_*`
+provider keys.
 
 `--plan` (exclusive with `--recipe`) deploys several models on one VM. The plan is JSON:
 

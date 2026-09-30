@@ -55,6 +55,11 @@ no placement fallback, so the pin lives on the single-shot provider command, not
 A CloudRift rental opens the ports the caller names (`provision_cloud_vm(ports=…)`): SSH, one host port per engine
 service, and the load balancer's when there is one; the default is `[22, 8000, 8080]`. GCP has no per-VM port list.
 
+A CloudRift rental has `provision_cloud_vm(vm_active_timeout=…)` seconds to become Active (default
+`DEFAULT_VM_ACTIVE_TIMEOUT`, 1800; `deploy cloud --vm-active-timeout` sets it). One that misses the deadline is
+terminated inside `create_instance` and surfaces as `CapacityExhausted`, so the orchestrator advances to the next
+candidate. GCP's wait comes from the `create_timeout_flex_start` / `create_timeout_spot` provider keys instead.
+
 Every CloudRift rental carries free-form tags for later filtering on listings. `create_instance` resolves them
 through `emmy.config.rental_tags()` — repeatable `--tag` flags win, else the comma-separated `EMMY_RENTAL_TAGS` env
 var (how an experiment run or CI job labels its whole rental lane), else the default `emmy` tag.

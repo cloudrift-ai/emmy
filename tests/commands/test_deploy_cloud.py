@@ -68,6 +68,7 @@ async def test_plan_deploy_rents_the_exact_shape_and_writes_the_result(tmp_path,
         billing_exempt=False,
         network=None,
         provider=None,
+        vm_active_timeout=3600,
         lease=tmp_path / "lease.json",
         owner="relay/deployment-42",
         result_json=str(tmp_path / "out.json"),
@@ -78,6 +79,7 @@ async def test_plan_deploy_rents_the_exact_shape_and_writes_the_result(tmp_path,
     kwargs = provision.call_args.kwargs
     assert (kwargs["gpu_name"], kwargs["gpu_count"], kwargs["ports"], kwargs["exact_gpu_count"]) == (GPU, 1, [22, 8000, 8001], True)
     assert kwargs["allocation_observer"] == VmLeaseObserver(tmp_path / "lease.json", "relay/deployment-42", GPU, 1)
+    assert kwargs["vm_active_timeout"] == 3600
     params = cloud.deploy_entry.call_args.args[0]
     assert [(service.gpu_device_ids, service.port) for service in params.services] == [([0], 8000), ([0], 8001)]
     assert params.load_balancer is False
