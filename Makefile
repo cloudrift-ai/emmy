@@ -218,6 +218,7 @@ serve-config: serve-config-guard
 	@echo "serve      = --max-model-len $(SERVE_MAX_MODEL_LEN) --max-num-batched-tokens $(SERVE_MAX_NUM_BATCHED_TOKENS) --gpu-memory-utilization $(SERVE_GPU_MEM_UTIL) (decode bucket $(SERVE_DECODE_BUCKET))"
 	@echo "captures   = $(if $(SERVE_CAPTURE_SIZES_VALUE),$(SERVE_CAPTURE_SIZES_VALUE),the default power-of-two ladder)"
 	@echo "quant arm  = $(if $(SERVE_QUANT),$(SERVE_QUANT),none - vLLM reads the checkpoint as-is)"
+	@echo "scope      = $(if $(SERVE_COMPILE_SCOPE),$(SERVE_COMPILE_SCOPE),full model)"
 	@echo "runner mem = embed-host $(if $(SERVE_EMBED_HOST),$(SERVE_EMBED_HOST),default), prefill capacity $(if $(SERVE_PREFILL_CAPACITY),$(SERVE_PREFILL_CAPACITY),default), prefill bucket $(if $(SERVE_PREFILL_BUCKET),$(SERVE_PREFILL_BUCKET),default), M1 tier $(if $(SERVE_M1_TIER),$(SERVE_M1_TIER),default)"
 	@echo "golden gate= $(if $(filter 1,$(SERVE_STATIC_ONLY)),static-only M=1,standard widths + symbolic)"
 	@echo "extra args = $(SERVE_EXTRA_ARGS_VALUE)"
@@ -272,6 +273,7 @@ serve-image: git-sha-guard serve-config-guard
 		--build-arg DECODE_BUCKET=$(SERVE_DECODE_BUCKET) \
 		--build-arg REVISION=$(SERVE_REVISION) \
 		--build-arg QUANT=$(SERVE_QUANT) \
+		--build-arg COMPILE_SCOPE=$(SERVE_COMPILE_SCOPE) \
 		--build-arg 'CAPTURE_SIZES=$(SERVE_CAPTURE_SIZES_VALUE)' \
 		--build-arg 'EXTRA_ARGS=$(SERVE_EXTRA_ARGS_VALUE)' \
 		--build-arg 'RUNTIME_ENV=$(SERVE_ENV_VALUE)' \

@@ -141,7 +141,7 @@ the same cubins and the standard-lane pack never exists.
   `SERVE_GPU_MEM_UTIL`, `SERVE_DECODE_BUCKET`, `SERVE_GPU`); the rest are per-checkpoint opt-ins whose defaults
   reproduce a dense,
   unquantized, default-branch release exactly — `SERVE_WARM_SHAPES`, `SERVE_REVISION`, `SERVE_QUANT`,
-  `SERVE_CAPTURE_SIZES`, `SERVE_EXTRA_ARGS`, plus the runner memory/shape lane
+  `SERVE_CAPTURE_SIZES`, `SERVE_EXTRA_ARGS`, `SERVE_COMPILE_SCOPE`, plus the runner memory/shape lane
   (`SERVE_EMBED_HOST`, `SERVE_PREFILL_CAPACITY`, `SERVE_PREFILL_BUCKET`, `SERVE_M1_TIER`), the qualified vLLM runner
   opt-in `SERVE_V2_MODEL_RUNNER`, the release-gate scope opt-in `SERVE_STATIC_ONLY`, `SERVE_ENV` (word-split
   `NAME=value` pairs `serve.sh` exports before the exec: a fork's own switches, `EMMY_STRICT_EVIDENCE=1`), and
@@ -155,6 +155,9 @@ the same cubins and the standard-lane pack never exists.
   `SERVE_STATIC_ONLY=1` narrows the realization matrix and is fail-closed: it requires runner capacity, decode bucket,
   and scheduler maximum all equal to one, prefill disabled, the M1 tier enabled, capture sizes exactly `[1]`, and no
   warm-shape override outside that same envelope. Without it the audit derives every warm width plus symbolic.
+  `SERVE_COMPILE_SCOPE=mlp` selects the mixed Qwen3.5 runner for both warm and release. It keeps vLLM's attention and
+  GDN modules, serves BF16 with one active request and eager execution, and compiles only the dense MLPs. The release
+  audit accepts this scope only with M=1 and symbolic widths up to 64; the entrypoint rejects unknown scopes.
 - `serve.sh` — the frozen generative serve invocation (the arg set `emmy serve --generate` builds: `--runner
   generate --dtype float16 --hf-overrides EmmyGenModel`, the `FULL_DECODE_ONLY` whole-step decode-cudagraph
   compilation-config (its fused `rotary_embedding` CustomOp is now redundant), `--no-enable-prefix-caching`, + the
@@ -168,6 +171,8 @@ the same cubins and the standard-lane pack never exists.
   opts a qualified dense model into vLLM's V2 runner; it executes real prefill/decode warmups before enabling vLLM's
   request-time JIT monitor. An `--enforce-eager` in `SERVE_EXTRA_ARGS` drops the capture config, as a caller's does in
   `emmy serve`: a hyper-connection MoE (DeepSeek V4) host-syncs every decode step and serves eager.
+  For `SERVE_COMPILE_SCOPE=mlp`, it selects `EmmyQwen35MlpModel`, BF16, `--max-num-seqs 1`,
+  `--language-model-only`, and `--enforce-eager` without a cudagraph compilation config.
 - `warm.sh` — runs the **plain** `vllm-emmy` image on the target GPU with `./warm` mounted at `/opt/emmy`, waits for
   `/health`, issues one completion (covers prefill + decode kernels), stops. Result: `warm/hf` (the model snapshot —
   the download happens here, once), `warm/cubin` (every compiled kernel), and `warm/pack`

@@ -48,6 +48,8 @@
 #                        add vLLM argv. A warm-shape prefill field overrides the pinned bucket.
 #   SERVE_V2_MODEL_RUNNER
 #                        opt into vLLM's V2 runner after model-specific serving qualification.
+#   SERVE_COMPILE_SCOPE  `mlp` keeps Qwen3.5 attention and GDN in vLLM and replaces only
+#                        its dense MLPs. Empty selects the original whole-model runner.
 
 # Docker must declare the optional build ENV keys so verify can compare the baked image to
 # its source config. Preserve the historical opt-out semantics at runtime: an empty build arg
@@ -90,15 +92,26 @@ fi
 
 # shellcheck disable=SC2086 — $REVISION and $SERVE_EXTRA_ARGS are deliberately word-split
 # flag lists, and both expand to nothing at all when unset.
-case " ${SERVE_EXTRA_ARGS:-} " in
-    *" --enforce-eager "*) set -- ${SERVE_EXTRA_ARGS:-} "$@" ;;
-    *) set -- --compilation-config "${COMPILE_CFG}" ${SERVE_EXTRA_ARGS:-} "$@" ;;
+DTYPE=float16
+case "${SERVE_COMPILE_SCOPE:-}" in
+    "")
+        case " ${SERVE_EXTRA_ARGS:-} " in
+            *" --enforce-eager "*) set -- ${SERVE_EXTRA_ARGS:-} "$@" ;;
+            *) set -- --compilation-config "${COMPILE_CFG}" ${SERVE_EXTRA_ARGS:-} "$@" ;;
+        esac
+        ;;
+    mlp)
+        OVERRIDES='{"architectures": ["EmmyQwen35MlpModel"]}'
+        DTYPE=bfloat16
+        set -- --max-num-seqs 1 --language-model-only --enforce-eager ${SERVE_EXTRA_ARGS:-} "$@"
+        ;;
+    *) echo "unsupported SERVE_COMPILE_SCOPE: ${SERVE_COMPILE_SCOPE}" >&2; exit 1 ;;
 esac
 exec python3 -m vllm.entrypoints.openai.api_server \
     --model "${SERVE_MODEL}" \
     $REVISION \
     --runner generate \
-    --dtype float16 \
+    --dtype "$DTYPE" \
     --max-model-len "${SERVE_MAX_MODEL_LEN}" \
     --max-num-batched-tokens "${SERVE_MAX_NUM_BATCHED_TOKENS}" \
     --gpu-memory-utilization "${SERVE_GPU_MEM_UTIL}" \

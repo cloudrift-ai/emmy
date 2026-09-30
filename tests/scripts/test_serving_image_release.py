@@ -156,6 +156,7 @@ OPTIONAL_KEYS = {
     "SERVE_WARM_SHAPES",
     "SERVE_REVISION",
     "SERVE_QUANT",
+    "SERVE_COMPILE_SCOPE",
     "SERVE_CAPTURE_SIZES",
     "SERVE_EXTRA_ARGS",
     "SERVE_EMBED_HOST",
@@ -362,6 +363,37 @@ def test_serve_sh_renders_the_quantized_moe_invocation(tmp_path):
     assert argv[-2:] == ["--kv-cache-dtype", "fp8_e4m3"], "SERVE_EXTRA_ARGS must word-split into flags"
 
 
+def test_serve_sh_renders_the_mlp_scope_invocation(tmp_path):
+    argv = render_serve_sh(
+        tmp_path,
+        {
+            "SERVE_MODEL": "Qwen/Qwen3.5-27B",
+            "SERVE_COMPILE_SCOPE": "mlp",
+            "SERVE_MAX_MODEL_LEN": "4096",
+            "SERVE_MAX_NUM_BATCHED_TOKENS": "64",
+            "SERVE_GPU_MEM_UTIL": "0.9",
+        },
+    )
+    assert argv[argv.index("--hf-overrides") + 1] == json.dumps({"architectures": ["EmmyQwen35MlpModel"]})
+    assert argv[argv.index("--dtype") + 1] == "bfloat16"
+    assert argv[argv.index("--max-num-seqs") + 1] == "1"
+    assert "--language-model-only" in argv
+    assert "--enforce-eager" in argv
+    assert "--no-enable-prefix-caching" in argv
+    assert "--compilation-config" not in argv
+
+
+def test_serve_sh_rejects_unknown_compile_scope():
+    result = subprocess.run(
+        ["sh", str(SERVE_SCRIPT)],
+        capture_output=True,
+        text=True,
+        env={"SERVE_COMPILE_SCOPE": "attention"},
+    )
+    assert result.returncode != 0
+    assert "unsupported SERVE_COMPILE_SCOPE: attention" in result.stderr
+
+
 def test_serve_sh_renders_the_deepseek_v4_parallel_eager_invocation(tmp_path):
     """DeepSeek V4 on 16 V100s: the vLLM arguments every strict boot of its golden ran (boot51's
     non-default args), rendered from the pinned config. The pinned `--enforce-eager` drops the capture
@@ -504,6 +536,17 @@ def test_server_env_is_warm_bake_verify_parity():
     assert "ARG RUNTIME_ENV=" in dockerfile and 'SERVE_ENV="${RUNTIME_ENV}"' in dockerfile
     assert "--build-arg 'RUNTIME_ENV=$(SERVE_ENV_VALUE)'" in make
     assert 'check_baked SERVE_ENV "${SERVE_ENV:-}"' in verify
+
+
+def test_compile_scope_is_warm_bake_verify_parity():
+    make = (PROJECT_ROOT / "Makefile").read_text()
+    warm = (SERVE_DIR / "warm.sh").read_text()
+    dockerfile = (SERVE_DIR / "Dockerfile").read_text()
+    verify = (SERVE_DIR / "verify.sh").read_text()
+    assert warm.count("-e SERVE_COMPILE_SCOPE") == 2
+    assert "ARG COMPILE_SCOPE=" in dockerfile and 'SERVE_COMPILE_SCOPE="${COMPILE_SCOPE}"' in dockerfile
+    assert "--build-arg COMPILE_SCOPE=$(SERVE_COMPILE_SCOPE)" in make
+    assert 'check_baked SERVE_COMPILE_SCOPE "${SERVE_COMPILE_SCOPE:-}"' in verify
 
 
 def test_release_bakes_and_verifies_the_request_time_triton_cache():
