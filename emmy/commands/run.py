@@ -692,7 +692,7 @@ def _run_golden_targets(args) -> None:
         sys.exit(2)
     # Group by the persisted target, bindings and input regime, just as golden replay does.
     # Dots in a name do not make one target a receipt of another. Prefer the inventory row;
-    # without it, the fastest routing row prices the whole target, unlike a child receipt.
+    # without it, a root routing row carries the parent cuts needed by child receipts.
     targets: dict[int, list] = {}
     for record in records:
         targets.setdefault(id(lead_of(record, records)), []).append(record)
