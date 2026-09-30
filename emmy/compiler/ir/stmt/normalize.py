@@ -286,27 +286,20 @@ def eliminate_copy_aliases(stmts: Body) -> Body:
     chain stacks them. Every such Assign is dropped and downstream
     references to ``y`` are rewired to the alias root. Pure IR hygiene."""
 
-    def walk(body: Body, inherited: dict[str, str]) -> Body:
-        alias = {name: value for name, value in inherited.items() if name not in body.ssa_defs}
+    from emmy.compiler.ir.stmt.passes import rename_free  # noqa: PLC0415
 
-        def resolve(name: str) -> str:
-            seen: set[str] = set()
-            while name in alias and name not in seen:
-                seen.add(name)
-                name = alias[name]
-            return name
-
+    def walk(body: Body) -> Body:
+        alias: dict[str, str] = {}
         out: list[Stmt] = []
         for stmt in body:
+            stmt = rename_free(stmt, alias)
             if isinstance(stmt, Assign) and stmt.op.name == "copy" and len(stmt.args) == 1 and stmt.dtype is None:
-                alias[stmt.name] = resolve(stmt.args[0])
+                alias[stmt.name] = stmt.args[0]
                 continue
-            children = stmt.nested()
-            shell = stmt.with_bodies(tuple(Body() for _ in children)).rewrite(resolve)
-            out.append(shell.with_bodies(tuple(walk(child, alias) for child in children)))
+            out.append(stmt.with_bodies(tuple(walk(child) for child in stmt.nested())))
         return Body(out)
 
-    return walk(Body.coerce(stmts), {})
+    return walk(Body.coerce(stmts))
 
 
 # ---------------------------------------------------------------------------

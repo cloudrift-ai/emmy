@@ -288,8 +288,7 @@ def rename_free(stmt: Stmt, alias: Mapping[str, str]) -> Stmt:
 
 @singledispatch
 def simplify(stmt: Stmt, ctx: SimplifyCtx) -> Stmt:
-    # Default: no Expr fields to simplify (Assign / Accum / Init).
-    return stmt
+    return map_exprs(stmt, lambda expr: expr.simplify(ctx))
 
 
 @simplify.register
