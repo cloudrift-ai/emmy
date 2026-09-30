@@ -892,7 +892,7 @@ def test_replay_keys_its_cache_by_the_entry_identity(tmp_path):
 def _decision_watcher():
     """The kernel-set decisions a compile takes, captured as ``run --record-greedy`` captures them:
     the splice watcher, reporting ``(deploy identity of the kernel the fork was offered on, arm)``."""
-    from emmy.compiler.pipeline.search.strategy.two_level import KernelInventory, _identity
+    from emmy.compiler.pipeline.search.inventory import KernelInventory, _identity
 
     taken: list[tuple[str, dict[str, str]]] = []
     watcher = KernelInventory(

@@ -144,7 +144,7 @@ def test_a_kernel_given_a_body_of_its_own_is_restamped_with_its_exact_identity()
     """The lift and the twist rewrite a kernel's body in place, so its exact identity changes while
     the ``S_*`` row, deliberately the fused body's, does not. The ``I_kernel`` stamp follows the
     body: the tile a compile forks over carries the identity the tune DB keys its rows by
-    (``terminal_bench.kernel_key``), which is what lets those rows decide its forks. An online
+    (``bench_record.kernel_key``), which is what lets those rows decide its forks. An online
     softmax is a twisted kernel, where the two identities differ."""
     from emmy.compiler.ir.tile import TileOp
     from emmy.compiler.pipeline import TILE_PASSES

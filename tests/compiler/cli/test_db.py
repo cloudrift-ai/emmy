@@ -113,9 +113,8 @@ def test_a_tune_db_is_frozen_and_re_lowered_on_import(tmp_path):
 def _instance(path):
     """A DB as the tuner writes it: two real tile kernels with their measurements, one cut on the first that
     minted the second, on a registry card."""
-    from emmy.compiler.pipeline.search.policy.terminal_bench import kernel_row as tile_row
-
     from emmy.compiler.context import Context
+    from emmy.compiler.pipeline.search.bench_record import kernel_row as tile_row
     from emmy.compiler.pipeline.search.db import PerfStats
     from emmy.compiler.wire import kernel_bindings
     from tests.compiler.helpers import case_target_tile

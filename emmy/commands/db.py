@@ -25,7 +25,7 @@ commit away from the repository. No compile ever reads it, so what is imported i
   re-imported, so nothing here decodes what the compiler wrote.
 
 :func:`db_path` is every subcommand's way in: the instance ``--db`` names, refused when missing with the command that
-fills it. :func:`read_samples` is the per-kernel ``eval`` views' way into a tune DB.
+fills it.
 """
 
 from __future__ import annotations

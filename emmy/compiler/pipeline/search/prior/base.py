@@ -47,9 +47,8 @@ def latency_proxy(quality: float, scale: float) -> float:
     through to enumeration order. That is not hypothetical — it is the 2026-07 incident, caused by a ±80 clip
     on the QUALITY, which sat inside the live range and collapsed the whole good region onto one ``exp(-8)``
     value. Moving the bound onto the exponent put it two orders of magnitude outside anything reachable; the
-    warning is what makes a return to that regime visible instead of silent.
-
-    Consumers needing a BOUNDED value (the ``FallbackPrior`` tilt multiplier) clamp on their side."""
+    warning is what makes a return to that regime visible instead of silent. A consumer needing a
+    BOUNDED value clamps on its side."""
     global _clip_warned
     arg = -scale * quality
     if not -PROXY_CLIP <= arg <= PROXY_CLIP:
