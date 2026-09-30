@@ -376,11 +376,12 @@ def _encode_index_map(op) -> tuple | None:
 
 def _encode_load_ops(load_ops: tuple) -> tuple[tuple, ...] | None:
     """Encode a ``ConstantOp.load_ops`` chain into the plan's vocabulary
-    (``("transpose", axes)`` / ``("reshape", shape)`` / ``("slice", spans)``), or ``None`` when a
+    (``("transpose", axes)`` / ``("reshape", shape)`` / ``("slice", spans)`` /
+    ``("reciprocal", ())``), or ``None`` when a
     chain member isn't expressible — the plan still runs (binding came from the live module), it
     just can't rebind that weight from a pack."""
     from emmy.compiler.ir.frontend.ir import ReshapeOp, TransposeOp  # noqa: PLC0415
-    from emmy.compiler.ir.tensor.ir import IndexMapOp  # noqa: PLC0415
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp, IndexMapOp  # noqa: PLC0415
 
     out: list[tuple] = []
     for op in load_ops:
@@ -390,6 +391,8 @@ def _encode_load_ops(load_ops: tuple) -> tuple[tuple, ...] | None:
             out.append(("reshape", tuple(op.shape)))
         elif isinstance(op, IndexMapOp) and (enc := _encode_index_map(op)) is not None:
             out.append(enc)
+        elif isinstance(op, ElementwiseOp) and op.name == "reciprocal":
+            out.append(("reciprocal", ()))
         else:
             logger.warning("plan: load op %r not expressible in the pack vocabulary; weight will not rebind from a pack", op)
             return None
@@ -409,6 +412,8 @@ def apply_weight_loads(source: np.ndarray, load_ops: tuple[tuple, ...]) -> np.nd
         elif kind == "slice":
             spans = [tuple(arg[i : i + 3]) for i in range(0, len(arg), 3)]
             a = a[tuple(slice(start, start + step * extent, step) for start, step, extent in spans)]
+        elif kind == "reciprocal" and not arg:
+            a = np.reciprocal(a)
         else:
             raise ValueError(f"apply_weight_loads: unknown load op kind {kind!r}")
     return np.ascontiguousarray(a)
