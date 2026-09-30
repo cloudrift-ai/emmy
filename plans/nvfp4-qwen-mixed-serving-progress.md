@@ -15,26 +15,36 @@ returns only those output rows. A GPU stale-row probe verified that changing dec
 output unchanged. The lower-level MLP program still supports symbolic prefill when requested, so these interfaces
 remain usable by a larger Emmy region later.
 
-The qualification checkpoint is `Inferact/Qwen3.8-27B-NVFP4@6128240ebaf4eaa7bad2b3d1c72c37d677c5f462` on one RTX 5090. The contract is BF16, text only, TP1/PP1, one active request, 4,096 context tokens, at most 64 scheduled tokens, with prefix caching, speculation and outer CUDA graphs disabled. The earlier proposed FP16 boundary was rejected; no FP16 fallback is part of this lane.
+The qualification checkpoint is
+`Inferact/Qwen3.8-27B-NVFP4@6128240ebaf4eaa7bad2b3d1c72c37d677c5f462` on one RTX 5090. The contract
+is BF16, text only, TP1/PP1, one active request, 4,096 context tokens, at most 64 scheduled tokens, with prefix
+caching, speculation and outer CUDA graphs disabled. The earlier proposed FP16 boundary was rejected; no FP16
+fallback is part of this lane.
 
 ## Evidence and current status
 
 | Gate | Evidence | Status |
 | --- | --- | --- |
 | Stock baseline | Pinned vLLM 0.23 container loaded the exact checkpoint in BF16 with stock ModelOpt NVFP4 and FLA GDN. `/health` returned 200; deterministic text and the paired streaming benchmark succeeded. | Functional and small warm latency baseline passed; peak-load memory pending. |
-| Capture and inventory | Exact checkpoint header inspection found `model.language_model.layers.*`; all 64 MLPs form one structural profile. The shared trace path captures BF16 W4A4 `mlp16@nvfp4` and `mlp64@nvfp4`; the symbolic option remains available in the helper. A pinned exact-checkpoint trace saved 2 graphs and 6 distinct kernels. | Focused CPU tests and trace passed; final release audit pending. |
+| Capture and inventory | Exact checkpoint header inspection found `model.language_model.layers.*`; all 64 MLPs form one structural profile. The shared trace path captures BF16 W4A4 `mlp16@nvfp4` and `mlp64@nvfp4`; the symbolic option remains available in the helper. A pinned exact-checkpoint trace saved 2 graphs of 148 nodes each and 6 distinct kernels. | Focused CPU tests and trace passed; a measured golden release audit is not part of this environment-pinned recipe. |
 | Shared BF16 boundaries | The input carrier, constant binding/cache, device output view, and NumPy graph interpreter had independent BF16 carrier bugs. Shared fixes and focused tests encode numerical BF16 as bits, decode it for arithmetic, and preserve raw bitcasts. | Focused CPU tests passed; broader regression gates pending. |
 | Synthetic GPU MLP | Two tiny layers compiled with plan reuse. Widths 1, 2, 15, 16, 17, 63 and 64 returned finite, distinct BF16 outputs; a nondefault stream passed. | Execution smoke passed. Exact stock quantized MLP comparison currently fails. |
 | Mixed full model | The stock constructor replaced all 64 MLP modules; all seven checkpoint shards loaded, then Emmy bound all 128 programs. Both M=16 with symbolic prefill and M=16 with M=64 native prefill booted and returned `/health` 200. The M=64 boot reported 23.43 GiB model memory and about 31.57 GiB resident GPU memory. | Pinned endpoint boots passed. |
 | Real hybrid preservation | A two-layer actual vLLM 0.23 Qwen3.5 model with GDN and full-attention layers retained non-MLP module and parameter identities and hybrid state interfaces after Emmy replaced its MLPs. | Pinned-container constructor regression passed. |
-| Full-size static MLP | Isolated layer-0 M=1 default compile yielded four launches and 150,410,260 bound weight bytes. Launch 0 took 0.393 ms. Uncaptured launch 1, `k_linear_reduce_93e407`, exceeded a 10,000 ms kernel watchdog. A corrected-quant M=16 program with scoped pins emits four native FP4 MMA kernels and completes. | Unpinned route blocked; isolated pinned native execution passed, endpoint speed pending. |
+| Full-size static MLP | Isolated layer-0 M=1 default compile yielded four launches and 150,410,260 bound weight bytes. Launch 0 took 0.393 ms. Uncaptured launch 1, `k_linear_reduce_93e407`, exceeded a 10,000 ms kernel watchdog. Fresh final-pin CUDA dumps for both M=16 and M=64 contain four native FP4 MMA contraction kernels each. | Unpinned route blocked; native pinned execution and measured endpoint speed passed on selected shapes. |
 | Warm text completions | Stock, scalar mixed and native mixed returned the same 16-token Paris continuation. Native mixed also returned expected Japan then Paris continuations with warm wall times 1.895 and 1.877 s; the initial native request took 152 s while stock vLLM/Triton kernels compiled on first use. | Deterministic text and simple cross-request state smoke passed; first-request latency needs warmed-cache handling. |
 | Single-request latency | Standard `vllm bench serve` with seed-42 random 5-input/16-output requests, one warmup, five measured, concurrency one, and ignore-EOS produced stock/scalar/M=16+symbolic/M=16+M=64 false/M=16+M=64 true mean TTFT 288.16/617.07/390.51/271.86/270.97 ms and TPOT 110.10/444.49/100.27/101.32/101.19 ms. All 25 measured requests succeeded. | Final pinned route reached 9.88 decode tokens/s versus stock 9.08; TTFT was 17.2 ms lower than stock in this small warm run. This is a single request shape, not general throughput. |
-| Teacher-forced prompt | Stock and native mixed returned the same 14 token IDs and expected Tokyo continuation for one fixed 13-token prompt. Selected-token logprob differences across 13 positions had mean absolute 0.0700, RMS 0.0980, maximum 0.2431; earlier scalar maximum was 0.281. | Token smoke passed; numerical logit parity remains open. |
+| Teacher-forced prompt | Stock and the earlier `FAST_MATH=false` native mixed route returned the same 14 token IDs and expected Tokyo continuation for one fixed 13-token prompt. Selected-token logprob differences across 13 positions had mean absolute 0.0700, RMS 0.0980, maximum 0.2431; earlier scalar maximum was 0.281. | Token smoke passed; numerical logit parity remains open. |
 | 4K context | The same 4,005 prompt tokens plus 16 generated tokens completed with identical stock and `FAST_MATH=false` mixed text, 4,021 total tokens, HTTP 200, and no OOM. After a short first-use request, stock took 12.451 s, mixed symbolic scalar prefill took 224.22 s, and mixed native M=64 prefill took 11.547 s wall. The final `FAST_MATH=true` route completed a second 4,005+16 request in 12.348 s with no OOM; its prompt differed, so that is a shape check rather than a paired stock comparison. | Full requested length envelope passed; matched false-pin native long latency passed. |
-| End-to-end correctness | Multiple prompts, teacher-forced logits, hybrid state and cache behavior beyond the tested short requests. | Pending broader comparison. |
+| End-to-end correctness | Selected short and 4K text requests, four additional 64-token prompts, one teacher-forced prompt, and real hybrid topology/state were compared. The four additional prompts each diverged from stock. Cache cancellation and broader quality were not tested. | Functional serving passed on this envelope; exact numerical parity failed and quality acceptance remains open. |
 
-The stalled kernel source has grid 1 and block 256, but only one thread enters the body. It performs full-K scalar gate/up reductions for output codes and again for per-block scales, with no native FP4 MMA. At the actual layer width, nested loops amount to more than one billion serial scalar operations with repeated FP4 decode reads. The generated source and boot logs are retained in the RTX 5090 qualification workspace. This was an **unpinned default schedule**. The user has since clarified that prior tuning is broken and every Emmy compilation and serving run must use explicit knob pins through a golden or `EMMY_KNOBS`. The timeout is evidence about the default route; the pinned route boots and serves but is slow.
+The stalled kernel source has grid 1 and block 256, but only one thread enters the body. It performs full-K scalar
+gate/up reductions for output codes and again for per-block scales, with no native FP4 MMA. At the actual layer width,
+nested loops amount to more than one billion serial scalar operations with repeated FP4 decode reads. The generated
+source and boot logs are retained in the RTX 5090 qualification workspace. This was an **unpinned default schedule**.
+The user has since clarified that prior tuning is broken and every Emmy compilation and serving run must use explicit
+knob pins through a golden or `EMMY_KNOBS`. The timeout is evidence about that default route; the final pinned
+M=16/M=64 route has measured latency near stock on the reported request shapes.
 
 ### Explicit knob experiments on the RTX 5090
 
@@ -115,11 +125,12 @@ code bytes. Raw reconstructed activation relative RMS fell to 0.3967%, gate/up p
 0.462%/0.458%, and full scalar MLP relative RMS to 1.1689%. The corrected M=16 all-native MLP has 1.1937%
 relative RMS. These measured residuals remain under investigation; the zero-tolerance diagnostic still fails.
 
-Under the earlier `FAST_MATH=false` pin, the corrected down-projection input differs from stock in 58/1088 E4M3 bytes and 373/8704 packed FP4 bytes,
-with 4.1487% raw reconstructed relative RMS. This accumulates prior projection and activation rounding and is
-amplified by another FP4 quantization. Stock-byte injection at the first activation producer lowers gate/up
-projection RMS to 0.1025%/0.0984%, which localizes most of the initial projection difference to two FP4 threshold
-flips. Stock uses approximate reciprocal instructions; Emmy currently uses exact FP32 divide at those thresholds.
+Under the earlier `FAST_MATH=false` pin, the corrected down-projection input differs from stock in 58/1088 E4M3
+bytes and 373/8704 packed FP4 bytes, with 4.1487% raw reconstructed relative RMS. This accumulates prior
+projection and activation rounding, then another FP4 quantization amplifies it. Stock-byte injection at the first
+activation producer lowers gate/up projection RMS to 0.1025%/0.0984%. This localizes most of the initial projection
+difference to two FP4 threshold flips. Stock uses approximate reciprocal instructions; the earlier pin used exact
+FP32 divide at those thresholds.
 Further correction should be justified by full-model quality evidence rather than bit identity alone.
 
 That full-model evidence now includes four independent deterministic 64-token prompts. With the earlier
@@ -130,17 +141,29 @@ gate, even though the earlier Paris and 4K requests matched stock text. With `FA
 first diverged at positions 1, 27, 29 and 58: improved isolated FP4 matching did not eliminate full-model
 argmax drift. Do not infer exact stock quality from the matched smoke requests.
 
-An earlier two-layer synthetic build exited 139 once during compilation. Later full redirected and real 27B builds completed, so the cause is unestablished. It remains a cold-build stability risk until repeated boots or a native trace resolve it. The synthetic NumPy graph and GPU outputs are finite after the BF16 fix but differ at some BF16/W4A4 boundaries; that graph interpretation alone is not the independent stock quantized MLP oracle.
+An earlier two-layer synthetic build exited 139 once during compilation. Later full redirected and real 27B builds
+completed, so the cause is unestablished. It remains a cold-build stability risk until repeated boots or a native
+trace resolve it. The synthetic NumPy graph and GPU outputs are finite after the BF16 fix but differ at some
+BF16/W4A4 boundaries; that graph interpretation alone is not the independent stock quantized MLP oracle.
 
 ## Next qualification work
 
-1. Verify per-request state under the chosen M<=64 schedule and run the final release audit and repository gates.
+1. Complete the final repository test gate and review any failures. The environment-pinned recipe has an exact
+   checkpoint trace and runtime check; it has no measured golden file for the separate golden release gate.
 2. Decide whether the 0.47–0.55% same-checkpoint layer-0 MLP relative RMS residual is acceptable for end-to-end
    quality. Four deterministic prompts prove it can affect token choice; no quality acceptance bound was established.
    The stock quantized MLP remains the independent numerical oracle; do not relax tolerance to pass a test.
-3. Measure memory and major latency blockers on the exact RTX 5090 envelope. Run final repository test and lint
-   gates, record commands and versions, and update the draft PR with measured results and remaining limits.
+3. Preserve the final precision pin and source graph identity if later tuning changes the piece schedule. The
+   exact RTX 5090 memory and major latency probes are recorded above; the draft PR carries their limits.
 
 ## Relation to the earlier investigation
 
-[`nvfp4-qwen-performance.md`](nvfp4-qwen-performance.md) is the September 28 investigation, not a completed implementation plan. Its [`fp4-encode-recomputes-producer.md`](nvfp4-qwen-performance/fp4-encode-recomputes-producer.md) report is directly relevant: the actual M=1 gate/up encode kernel repeats full-K work. This PR's isolated 5090 watchdog and generated CUDA give new evidence for the mixed lane; the report's 5080 timings and proposed cut are not assumed to transfer. Emmy's GDN #973 support is not required by this MLP boundary because stock vLLM owns GDN, but that Emmy path remains available. The investigation's LUT, TMA and native GDN ideas remain separate performance work. The later review-only mixed plan proposed FP16, which the user rejected in favor of the checkpoint's BF16; that review branch is not part of this PR.
+[`nvfp4-qwen-performance.md`](nvfp4-qwen-performance.md) is the September 28 investigation, not a completed
+implementation plan. Its
+[`fp4-encode-recomputes-producer.md`](nvfp4-qwen-performance/fp4-encode-recomputes-producer.md) report is directly
+relevant: the actual M=1 gate/up encode kernel repeats full-K work. This PR's isolated 5090 watchdog and generated
+CUDA give new evidence for the mixed lane; the report's 5080 timings and proposed cut are not assumed to transfer.
+Emmy's GDN #973 support is not required by this MLP boundary because stock vLLM owns GDN, but that Emmy path remains
+available. The investigation's LUT, TMA and native GDN ideas remain separate performance work. The later review-only
+mixed plan proposed FP16, which the user rejected in favor of the checkpoint's BF16; that review branch is not part
+of this PR.
