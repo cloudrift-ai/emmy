@@ -1,12 +1,20 @@
 """Remote server provisioning: install Docker, NVIDIA driver/toolkit, etc."""
 
 import asyncio
+import ipaddress
 import logging
+import os
+import shlex
+from urllib.parse import urlsplit
 
 from emmy.provisioning.host import Host
+from emmy.provisioning.proxy import DOCKER_PROXY_DROPIN, docker_proxy_dropin
 from emmy.provisioning.ssh_transport import REMOTE_DEPLOY_DIR
 
 logger = logging.getLogger(__name__)
+
+# What the proxy check fetches: any HTTP status back (401 without credentials) proves the tunnel works.
+REGISTRY_PROBE = "https://registry-1.docker.io/v2/"
 
 
 async def provision_remote(
@@ -21,11 +29,12 @@ async def provision_remote(
     Steps (each checks before installing):
     1. Create the emmy workspace directory
     2. Install Docker if not found
-    3. Install NVIDIA driver / CUDA toolkit if requested versions don't match
+    3. Point the Docker daemon at the host's proxy, when it has one, and check the proxy answers
+    4. Install NVIDIA driver / CUDA toolkit if requested versions don't match
        (reboots and waits for the host to come back if anything was installed)
-    4. Install NVIDIA Container Toolkit if not found
-    5. Add user to docker group
-    6. Start NVIDIA Fabric Manager if the host has NVSwitches
+    5. Install NVIDIA Container Toolkit if not found
+    6. Add user to docker group
+    7. Start NVIDIA Fabric Manager if the host has NVSwitches
     """
     dry_run = bool(getattr(host, "dry_run", False))
 
@@ -41,7 +50,11 @@ async def provision_remote(
             logger.info(f"{host.name}: installing Docker...")
             await host.run("curl -fsSL https://get.docker.com | sh", sudo=True)
 
-    # 3. NVIDIA driver / CUDA (skip for AMD/ROCm)
+    # 3. Docker daemon proxy, before the first pull
+    if host.proxy:
+        await _configure_docker_proxy(host, dry_run)
+
+    # 4. NVIDIA driver / CUDA (skip for AMD/ROCm)
     if not skip_nvidia and (driver_version or cuda_version):
         installed_anything = await _ensure_nvidia_versions(host, driver_version=driver_version, cuda_version=cuda_version)
         if installed_anything:
@@ -52,7 +65,7 @@ async def provision_remote(
             # leaving cuda-drivers in `iU` state with no `nvidia-smi` binary).
             await _verify_nvidia_install(host, driver_version=driver_version, cuda_version=cuda_version)
 
-    # 4. Install NVIDIA Container Toolkit if not found
+    # 5. Install NVIDIA Container Toolkit if not found
     if not skip_nvidia and dry_run:
         logger.info(f"{host.name}: [dry-run] would install nvidia-container-toolkit (if not present)")
     elif not skip_nvidia:
@@ -72,12 +85,47 @@ async def provision_remote(
                 sudo=True,
             )
 
-    # 5. Add user to docker group
+    # 6. Add user to docker group
     await host.run("groups | grep -q docker || sudo usermod -aG docker $(whoami)")
 
-    # 6. Start Fabric Manager on NVSwitch hosts
+    # 7. Start Fabric Manager on NVSwitch hosts
     if not skip_nvidia and not dry_run:
         await _ensure_fabric_manager(host)
+
+
+async def _configure_docker_proxy(host: Host, dry_run: bool) -> None:
+    """Point the Docker daemon at ``host.proxy`` and prove the proxy reaches the image registry.
+
+    The systemd drop-in is written, and the daemon restarted, only when its content differs from
+    what is on the host. The check fails the deploy here, naming the proxy, rather than minutes
+    into ``docker compose pull``.
+    """
+    url = host.proxy
+    hostname = urlsplit(url).hostname
+    try:
+        ipaddress.ip_address(hostname)
+    except ValueError:
+        logger.warning(f"{host.name}: proxy {url} is named by hostname; the host itself must be able to resolve {hostname}")
+    content = docker_proxy_dropin(url)
+    _, current = await host.run(f"cat {DOCKER_PROXY_DROPIN} 2>/dev/null", capture=True)
+    if current == content.strip():
+        logger.info(f"Docker daemon proxy {url} already configured on {host.name}")
+    else:
+        logger.info(f"Configuring Docker daemon proxy {url} on {host.name}")
+        await host.run(
+            f"mkdir -p {os.path.dirname(DOCKER_PROXY_DROPIN)} && printf '%s' {shlex.quote(content)} > {DOCKER_PROXY_DROPIN}"
+            " && systemctl daemon-reload && systemctl restart docker",
+            sudo=True,
+        )
+    rc, out = await host.run(
+        f"curl -sS --connect-timeout 10 -x {shlex.quote(url)} -o /dev/null -w '%{{http_code}}' {REGISTRY_PROBE} 2>&1",
+        capture=True,
+        timeout=60,
+    )
+    if rc != 0:
+        raise RuntimeError(f"{host.name}: proxy {url} does not reach {REGISTRY_PROBE}: {out or f'curl exited {rc}'}")
+    if not dry_run:
+        logger.info(f"{host.name}: proxy {url} reaches {REGISTRY_PROBE} (HTTP {out})")
 
 
 async def _ensure_nvidia_versions(

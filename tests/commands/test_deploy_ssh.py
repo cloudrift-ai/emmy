@@ -54,6 +54,7 @@ def _args(plan, **overrides):
         teardown=False,
         dry_run=False,
         scale_out_strategy="data-parallelism",
+        vm_proxy=None,
     )
     vars(args).update(overrides)
     return args
@@ -65,10 +66,11 @@ async def test_plan_deploys_its_services_to_the_detected_host(tmp_path, monkeypa
     monkeypatch.setattr(ssh, "provision_remote", AsyncMock())
     monkeypatch.setattr(ssh, "deploy_entry", AsyncMock(return_value=True))
 
-    await ssh._handle_ssh(_args(_plan(tmp_path)))
+    await ssh._handle_ssh(_args(_plan(tmp_path), vm_proxy="http://10.0.0.1:3128"))
 
+    assert ssh.provision_remote.call_args.args[0].proxy == "http://10.0.0.1:3128"
     params = ssh.deploy_entry.call_args.args[0]
-    assert (params.server, params.ssh_port) == ("rift@203.0.113.10", 2222)
+    assert (params.server, params.ssh_port, params.proxy) == ("rift@203.0.113.10", 2222, "http://10.0.0.1:3128")
     assert [(service.gpu_device_ids, service.port) for service in params.services] == [([0], 8000), ([0], 8001)]
     assert [service.recipe.engine.llm.gpu_memory_utilization for service in params.services] == [0.62, 0.3]
     assert params.load_balancer is False

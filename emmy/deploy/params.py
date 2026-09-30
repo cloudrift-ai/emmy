@@ -31,3 +31,4 @@ class DeployParams:
     hf_token: str = ""
     dry_run: bool = False
     port_mappings: list[tuple[int, int]] = field(default_factory=list)
+    proxy: str | None = None  # HTTP proxy the host reaches the internet through (--vm-proxy)

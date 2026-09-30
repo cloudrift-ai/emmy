@@ -21,7 +21,8 @@ provisioning/
   gcp.py          # gcloud-compute wrapper
   ssh.py          # generic wait_for_ssh
   host.py         # RemoteHost abstraction over an existing SSH target
-  remote.py       # bare-VM bootstrap (driver/CUDA install)
+  remote.py       # bare-VM bootstrap (driver/CUDA install, Docker daemon proxy)
+  proxy.py        # the HTTP proxy a host reaches the internet through: URL validation, its env, the Docker drop-in
   staging.py      # tar-and-scp helpers used by the deploy layer
   shell.py        # async shell-out helper
   types.py        # VMConnectionInfo dataclass
@@ -169,6 +170,29 @@ non-empty `/proc/driver/nvidia-nvswitch/devices/` and is a no-op everywhere else
 running. Fabric Manager refuses to run against a mismatched driver, so the package is pinned to the running driver's
 exact version, resolved out of `apt-cache madison` rather than guessed — Ubuntu's archive and NVIDIA's CUDA repo
 publish different revision suffixes (`-1`, `-1ubuntu1`, `-0ubuntu0.24.04.1`) for the same driver.
+
+## Hosts behind an HTTP proxy
+
+`deploy ssh --vm-proxy URL` and `deploy cloud --vm-proxy URL` describe a host that reaches the internet only through
+an HTTP proxy: an on-prem VLAN with no default route and, typically, no working DNS — so name the proxy by IP; a
+hostname draws a warning, since only the host itself could resolve it. `proxy.py` owns the pieces. `proxy_url`
+validates the flag (`http://` or `https://`, a host and a port; credentials are allowed and registered with
+`redact.py`, so no log line shows them). `proxy_env` spells the six variables — `HTTP_PROXY`, `HTTPS_PROXY`,
+`NO_PROXY` and their lower-case twins, because Go and Docker read the upper case and curl only the lower.
+`docker_proxy_dropin` renders the systemd drop-in.
+
+`RemoteHost(proxy=…)` prefixes every command with an `export` of those variables. sudo resets the environment, so
+this is what carries the proxy into the provisioning steps that fetch: the Docker install script, the NVIDIA
+container-toolkit keyring and apt repo, the CUDA apt repo with its driver and toolkit packages, and Fabric Manager.
+`provision_remote` then, once Docker is known to be installed and before anything is pulled, writes
+`/etc/systemd/system/docker.service.d/http-proxy.conf` and restarts the daemon — only when the file's content differs,
+so a redeploy onto the same host does not bounce Docker — and runs `curl -x URL https://registry-1.docker.io/v2/` on
+the host. Any HTTP status back (401 without registry credentials) proves the tunnel; a connect failure or timeout
+raises `RuntimeError` naming the proxy, minutes before `docker compose pull` would have failed. The deploy layer
+carries the same URL in `DeployParams.proxy` into the compose environment and the weight-download container.
+
+`NO_PROXY` is fixed at `localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16`: the host itself and the
+private ranges the VLAN and Docker's networks live in.
 
 ## CloudRift API protocol version
 

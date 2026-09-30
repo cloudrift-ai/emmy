@@ -5,6 +5,7 @@ from typing import Any
 import yaml
 
 from emmy.deploy.params import Service
+from emmy.provisioning.proxy import proxy_env
 from emmy.recipe.engines import build_engine_args
 from emmy.recipe.types import Recipe
 
@@ -51,7 +52,7 @@ def replica_services(recipe: Recipe, gpu_device_ids: list[int] | None = None) ->
     return [Service(recipe, list(range(i * per_instance, (i + 1) * per_instance)), 8000 + i) for i in range(count)], True
 
 
-def generate_compose(services: list[Service], model_dir, hf_token, load_balancer=False, baked_images=frozenset()):
+def generate_compose(services: list[Service], model_dir, hf_token, load_balancer=False, baked_images=frozenset(), proxy=None):
     """Build docker-compose.yaml string from the services of one deployment.
 
     One engine service per entry, named ``{engine}_{i}``, pinned to its device ids (``count: all``
@@ -65,8 +66,12 @@ def generate_compose(services: list[Service], model_dir, hf_token, load_balancer
     baked one (a ``--speculative-config`` drafter): the baked cache holds only the one snapshot
     and the image pins ``HF_HUB_OFFLINE=1``, so the extra model can resolve only from the host
     cache, and the override returns.
+
+    ``proxy``: an HTTP proxy URL; every engine service gets it in its environment, in both spellings, so
+    the weight download inside the container goes through it. nginx only talks to the services.
     """
     compose = "services:\n"
+    proxy_lines = "".join(f"\n      - {name}={value}" for name, value in proxy_env(proxy).items()) if proxy else ""
 
     for index, service in enumerate(services):
         recipe = service.recipe
@@ -108,7 +113,7 @@ def generate_compose(services: list[Service], model_dir, hf_token, load_balancer
     volumes:
       - {model_dir}:{model_dir}
     environment:
-      - HUGGING_FACE_HUB_TOKEN={hf_token}{hf_home_line}{extra_env_lines}
+      - HUGGING_FACE_HUB_TOKEN={hf_token}{hf_home_line}{extra_env_lines}{proxy_lines}
     ports:
       - "{service.port}:8000"
     shm_size: '16gb'
