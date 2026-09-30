@@ -35,9 +35,9 @@ def test_recipe_list_json_contains_complete_catalog(run_cli):
 
     assert returncode == 0, stderr
     document = json.loads(stdout)
-    assert document["schema_version"] == 1
+    assert document["schema_version"] == 2
     assert document["recipes"]
-    assert all("deployments" in recipe for recipe in document["recipes"])
+    assert all(0 < deployment["gpu_memory_utilization"] <= 1 for recipe in document["recipes"] for deployment in recipe["deployments"])
 
 
 def test_recipe_list_rejects_catalog_selection_arguments(run_cli):

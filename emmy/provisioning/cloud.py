@@ -132,6 +132,7 @@ async def provision_cloud_vm(
     provisioning_model=None,
     allocation_observer: AllocationObserver | None = None,
     exact_gpu_count: bool = False,
+    ports: list[int] | None = None,
 ):
     """Provision a cloud VM for the given GPU requirements.
 
@@ -154,6 +155,8 @@ async def provision_cloud_vm(
             notified before allocation, immediately after the provider returns
             a deletion handle, and once the VM is ready.
         exact_gpu_count: reject candidates that contain more GPUs than requested.
+        ports: the ports to open on the VM (CloudRift only; default SSH, the engine
+            port and the load balancer's: ``[22, 8000, 8080]``).
 
     Returns:
         VMConnectionInfo on success, None when every candidate is exhausted.
@@ -187,6 +190,7 @@ async def provision_cloud_vm(
                     extra_authorized_keys,
                     provisioning_model,
                     allocation_observer,
+                    ports,
                 )
             except CapacityExhausted as exc:
                 logger.warning(f"{cand.describe()}: capacity exhausted ({exc}); advancing to next candidate.")
@@ -233,6 +237,7 @@ async def _provision_candidate(
     extra_authorized_keys=None,
     provisioning_model=None,
     allocation_observer: AllocationObserver | None = None,
+    ports=None,
 ):
     """Single provisioning attempt for one resolved candidate.
 
@@ -250,6 +255,7 @@ async def _provision_candidate(
             logger,
             extra_authorized_keys,
             allocation_observer,
+            ports,
         )
     if cand.provider == "gcp":
         return await _provision_gcp(
@@ -275,6 +281,7 @@ async def _provision_cloudrift(
     logger,
     extra_authorized_keys=None,
     allocation_observer: AllocationObserver | None = None,
+    ports=None,
 ):
     api_key = os.environ.get("CLOUDRIFT_API_KEY")
     if not api_key and not dry_run:
@@ -298,7 +305,7 @@ async def _provision_cloudrift(
         instance_type=cand.instance_type,
         ssh_key_path=pub_key_path,
         image_url=image_url,
-        ports=[22, 8000, 8080],
+        ports=ports or [22, 8000, 8080],
         timeout=1800,
         dry_run=dry_run,
         fail_statuses={"Inactive"},

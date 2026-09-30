@@ -44,8 +44,8 @@ def test_recipe_inventory_filters_tags_and_reports_deployments(tmp_path):
             "task": "generate",
             "runnable": True,
             "deployments": [
-                {"gpu": GPU, "gpu_count": 1, "context_length": 8192},
-                {"gpu": "NVIDIA B200", "gpu_count": 2, "context_length": 16384},
+                {"gpu": GPU, "gpu_count": 1, "gpu_memory_utilization": 0.9, "context_length": 8192},
+                {"gpu": "NVIDIA B200", "gpu_count": 2, "gpu_memory_utilization": 0.9, "context_length": 16384},
             ],
             "emmy_serving": False,
             "rationale": "Useful model.",
@@ -71,8 +71,48 @@ def test_recipe_inventory_document_is_versioned(tmp_path):
 
     document = recipe_inventory_document(root)
 
-    assert document["schema_version"] == CATALOG_SCHEMA_VERSION == 1
+    assert document["schema_version"] == CATALOG_SCHEMA_VERSION == 2
     assert [recipe["name"] for recipe in document["recipes"]] == ["ready"]
+
+
+def test_recipe_inventory_keeps_entries_that_differ_only_by_memory_fraction(tmp_path):
+    """A recipe that may share its GPU lists one deployment per fraction, each with its own context."""
+    root = tmp_path / "recipes"
+    recipe = _write_recipe(root, "shared", "org/shared", ["maintained"])
+    config = yaml.safe_load(recipe.read_text())
+    config["matrices"] = {
+        "zip": {
+            "deploy.gpu": [GPU, GPU],
+            "deploy.gpu_count": [1, 1],
+            "engine.llm.gpu_memory_utilization": [0.9, 0.3],
+            "engine.llm.context_length": [131072, 32768],
+        }
+    }
+    recipe.write_text(yaml.safe_dump(config, sort_keys=False))
+
+    assert recipe_inventory(root)[0]["deployments"] == [
+        {"gpu": GPU, "gpu_count": 1, "gpu_memory_utilization": 0.9, "context_length": 131072},
+        {"gpu": GPU, "gpu_count": 1, "gpu_memory_utilization": 0.3, "context_length": 32768},
+    ]
+
+
+V100 = "NVIDIA Tesla V100 SXM3 32GB"
+
+
+@pytest.mark.parametrize(
+    ("name", "shared_entry"),
+    [
+        ("Qwen3-30B-A3B-Instruct-2507", {"gpu": GPU, "gpu_count": 1, "gpu_memory_utilization": 0.55, "context_length": 131072}),
+        ("Meta-Llama-3.1-8B-Instruct", {"gpu": V100, "gpu_count": 1, "gpu_memory_utilization": 0.65, "context_length": 16384}),
+        ("Meta-Llama-3.1-8B-Instruct-AWQ-INT4", {"gpu": V100, "gpu_count": 1, "gpu_memory_utilization": 0.3, "context_length": 16384}),
+    ],
+)
+def test_bundled_recipes_list_their_shared_gpu_entry(recipes_dir, name, shared_entry):
+    """A bundled recipe that may share its GPU exposes the reduced-fraction entry after its whole-GPU one."""
+    record = next(record for record in recipe_inventory(recipes_dir) if record["name"] == name)
+    whole = [d for d in record["deployments"] if d["gpu"] == shared_entry["gpu"] and d["gpu_memory_utilization"] > 0.8]
+    assert whole and record["deployments"][-1] == shared_entry
+    assert record["deployments"].index(whole[0]) < record["deployments"].index(shared_entry)
 
 
 def test_recipe_inventory_rejects_invalid_heat(tmp_path):
