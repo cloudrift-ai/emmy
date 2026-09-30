@@ -2,9 +2,10 @@
 
 2026-09-30 update: [PR #973](https://github.com/cloudrift-ai/emmy/pull/973) repairs the compiler failures and adds
 static explicit-state capture. Prefill-to-decode handoff, seeded state and reset pass on both RTX 5080 and RTX 5090;
-full-suite finalization is in progress. Native request dispatch and whole-model serving remain separate integration
-work. The [staged plan](qwen38-gdn-fix-plan.md) records current evidence and limitations. The observations below are
-the original report, with their original revisions and dump provenance.
+the compiler/capture fix is ready for review after full-suite validation and repair of a missing test prerequisite.
+Native request dispatch and whole-model serving remain separate integration work. The [staged plan](qwen38-gdn-fix-plan.md)
+records current evidence and limitations. The observations below are the original report, with their original revisions
+and dump provenance.
 
 ## Summary
 

@@ -1,9 +1,10 @@
 # DeltaNet investigation and proposed fix plan
 
-Status: 🚧 Implementation approved and in progress. PR #973 was stacked on #969 in native GitHub stack #974;
-GitHub automatically retargeted it to main after #969 merged. The original implementation baseline combines
-main `81af0892` with #969 `57667193`. The bugtracker row is marked 🚧 on this branch.
-Change it to ✅ with the fix PR link only when the agreed scope is ready for review; disclose any remaining support gap.
+Status: ✅ Compiler and static state capture fixes are ready for review in [PR #973](https://github.com/cloudrift-ai/emmy/pull/973).
+Originally stacked on #969 in native GitHub stack #974, it automatically retargeted to main when #969 merged.
+The final implementation incorporates main `73a19d81`; the original baseline was main `81af0892` plus #969 `57667193`.
+All seven stages below are complete for the stated scope. Native request dispatch and whole-model qualification
+remain the explicit follow-up; the single-5090 feasibility estimate is recorded at the end.
 
 Stage status: 🚧 means in progress; ✅ means its deliverables have passed their checks. Pending stages have not started.
 The initial investigation below records the pre-implementation revisions. Later sections record validation results.
@@ -250,7 +251,7 @@ Stage deliverables are cumulative. The following sketches are intended results, 
 | ✅ 4. Padding | Constant zero-fill padding through existing index maps | Tensor IR expresses `y[t,d] = x[t,d] if t < T else 0`; guarded Loop/Kernel loads are in bounds; short GDN traces succeed and returned sequence length remains T. |
 | ✅ 5. Projections | Legal tensor-core routes for qkv and z, with measured cut/schedule alternatives | Tile IR offers activation-A / weight-B contractions with MMA TILE; emitted CUDA contains the expected MMA instructions; reference comparisons pass and measured latency is reported. |
 | ✅ 6. Capture and state handoff | Static GDN capture and explicit state contract; native request dispatch remains the separate follow-up below | `prefill(x,S0,H0) → (y,S1,H1)` followed by `decode(x1,S1,H1) → (y1,S2,H2)` matches an independent reference; H is convolution history; reset and request isolation pass. This proves the block contract, not whole-model serving. |
-| 🚧 7. Review | Validated PR(s), measurements, updated docs and tracker | Required finalization checks pass, scope and remaining gaps are explicit, and the tracker changes to ✅ only with the ready-for-review fix PR. |
+| ✅ 7. Review | Validated PR(s), measurements, updated docs and tracker | Required finalization checks pass, scope and remaining gaps are explicit, and the tracker changes to ✅ only with the ready-for-review fix PR. |
 
 - CPU tests preserve repack roles for both A/B and modern/Volta layouts; the checkpoint's actual loopification
   path renders correctly. Enumerate the recurrence's offered register schedules for the checkpoint shape.
@@ -537,12 +538,81 @@ Main then advanced to `73a19d81`. Of its changes, #978 independently repairs sin
 carried-kernel identity; #980 rejects incomplete buffer indices; #976 and #981 change normalization and keep reduction
 subroutines compact. The merge reuses main's `seed_index` implementation and removes this branch's duplicate
 `restore_unit_indices`. Tests combine main's singleton seed case with this branch's singleton output-batch case,
-and retain the larger multi-batch, two-singleton seed regression. The remaining fragment-role, output-domain,
+and retain the two-singleton seed regression and two-batch block checks. The remaining fragment-role, output-domain,
 padding, vector-alignment and capture fixes are still part of this PR. The new runtime contract includes dependent
 launches, so the native extension must be rebuilt before GPU validation on the merged revision.
 
 The merged revision passes 98 focused CPU checks in 10.44 seconds and eight CUDA seed/state checks in 8.71 seconds
 on the replacement 5090 with its rebuilt runtime. The full suite is the remaining validation gate.
+
+### Final validation of the combined branch
+
+At `420bcaa1`, GitHub's full CPU test job passes with **7,618 passed and 1,228 skipped** in 1,923.43 seconds;
+its lint, native build and package dry-run jobs also pass. The replacement 5090 full `make test` run completes with
+**8,442 passed, 397 skipped and seven failed** in 5,351.33 seconds. Every failure is the same fresh-container
+prerequisite: `FileNotFoundError: jq` in the seven workflow-filter tests. Installing `jq` and rerunning that entire
+file gives **seven passed in 3.61 seconds**, without a source change. There are no remaining test failures.
+The full run includes both complete GDN block handoff/reset cases, all recurrence resource checks, packed NVFP4
+regressions, strict golden-row decoding and fresh-lowering checks. No test was skipped or weakened to clear a failure.
+
+The long run is not a throughput measurement. The existing FP8 expert reference case passes after 666.55 seconds;
+stack samples show active CPU schedule search. The EXL3 plan-binding case passes after 225.70 seconds. These timings
+are reported as preparation-cost limitations, without attributing their difference from older workstation runs to
+this PR. The final diff audit reuses main's seed repair, retains no exploratory scripts, and keeps the user's plan.
+Relative to `73a19d81`, core changes are +239/−176 lines; the added capability is padding/cropping, a Conv1d reference
+and explicit-state capture, while vector loads/stores share one address proof. Architecture docs and general guidance
+have been audited. Final lint passes; the tracker and stage table are marked ✅ for review publication.
+
+### Fresh reproduction on current main
+
+A bounded CPU-only comparison imports `73a19d81` from an isolated checkout and runs the same small inputs against
+`420bcaa1`. It confirms that main's intervening repairs do not supersede this PR:
+
+| Input | Current main `73a19d81` | Combined fix `420bcaa1` |
+| --- | --- | --- |
+| Rename one-source B `FragmentRepack` | `role=b` becomes `role=a`; rendering raises `AssertionError` | `role=b` remains B; renders `emmy_c_to_b_f16(new_b, new_c);` |
+| Pad `[1,16,4]` with `[0,0,0,48]` | `NotImplementedError: aten.pad supports only explicit zero-width padding` | Traces output `[1,64,4]` |
+| Three independent output domains | Main now places the stores in sibling domains, but retains `unused = 0` and empty nested `q`/`s` sweeps inside the `r` sweep | Only the live output sweeps remain, as shown below |
+
+The last row is a material advancement since the original report: this small current-main example no longer
+multiplies the output stores themselves. The remaining normalization cleanup removes its dead root and empty
+nested domains. The original checkpoint-sized Cartesian-loop observation remains historical evidence at its
+stated revision; it is not being attributed unchanged to current main.
+
+### Current merged-branch IR excerpts
+
+Generated without GPU execution at `420bcaa1`, after main's #978 seed repair and #981 reduction changes.
+These are actual excerpts from the small regression inputs, not checkpoint-sized dumps or proposed output.
+For a seed of shape `[1,4,1,4]`, classic CUDA now contains:
+
+```cuda
+float v0__seed = S0[a3 * 4 + a2];
+float v2__seed = S0[a1 * 4 + a2];
+```
+
+The old incomplete index flattened as a sum of coordinates. Restoring the unit coordinates before flattening
+retains the row stride of four; register CUDA also multiplies its clipped row coordinate by four.
+The classic kernel receives `int a0` as its time argument and contains no loop over that launch-time coordinate.
+
+The independent-output Tile IR lowers to this Loop IR:
+
+```text
+for p in 0..3
+    for r in 0..7
+        yv = load y[p, r]
+        zv = relu(yv)
+        yo[p, r] = zv
+    for q in 0..5
+        xv = load x[p, q]
+        xo[p, q] = xv
+for s in 0..2
+    wv = load w[s]
+    wo[s] = wv
+```
+
+It writes `3*7 + 3*5 + 2 = 38` output elements, without multiplying sibling domains together. The full generated
+sources are retained locally as `main987-fixed-seed-{False,True}.cu` and `main987-fixed-output-domains.loop.txt`
+in the investigation directory; the committed regression inputs reproduce them.
 
 ### Native serving follow-up boundary
 
@@ -577,3 +647,38 @@ request r, GDN layer l:
 The follow-up's review evidence should include the emitted buffer bindings, exact consumed-token counts, reference
 logits, reset/isolation results and checkpoint memory accounting. The block-level checks in this PR establish the
 program seam; they do not substitute for those runner-level checks.
+
+### Single-5090 serving feasibility (2026-09-30)
+
+A header-only inspection of every indexed safetensors shard at
+`Inferact/Qwen3.8-27B-NVFP4@6128240ebaf4eaa7bad2b3d1c72c37d677c5f462` finds 24.5692 GiB of stored tensors.
+The text path excluding vision (0.8582 GiB) and MTP/speculative-decoding weights (0.7911 GiB) is **22.9200 GiB**.
+This includes separate embedding and output-head matrices, 2.3682 GiB each. The GDN input projections remain
+16-bit and account for 7.5439 GiB; estimating the entire checkpoint at four bits per parameter is misleading.
+
+The replacement 5090 reports 32,607 MiB (31.8428 GiB). A one-request budget, assuming packed weight retention:
+
+| Component | GiB |
+| --- | ---: |
+| Text weights | 22.9200 |
+| FP16 KV cache, 8,192 tokens | 0.5000 |
+| Two GDN matrix-state/history buffer sets | 0.2886 |
+| Remaining for activations, workspaces and runtime overhead | 8.1342 |
+
+The KV calculation is `16 full-attention layers * 2 * 4 KV heads * 256 head_dim * 2 bytes` per token (64 KiB).
+GDN matrix state is `48 layers * 48 value heads * 128 * 128 * 4 bytes`, or 144 MiB per buffer set;
+FP16 convolution history adds 3.75 MiB per set. These are arithmetic storage budgets, **not a measured loaded-model
+footprint or a serving qualification**. Expanded constants, duplicate transformed weight copies, CUDA graphs and
+prefill temporaries can consume the apparent margin. Keeping embeddings on the host is an existing option if needed.
+
+The generation runner already retains an NVFP4 coded trunk and shares uploads across twins, but its layer loop still
+unconditionally reads `block.self_attn`. The standalone native exporter separately accepts only unquantized dense
+Qwen3 with full rotary embedding; this checkpoint is `qwen3_5`, quantized, and uses a 0.25 partial rotary factor.
+Neither becomes a complete serving path merely by merging this PR.
+
+The shortest follow-up is to integrate GDN programs into the existing generation runner before broadening the native
+export format: preserve the packed source path; add per-layer GDN/full-attention dispatch and per-request state;
+retain partial rotary and the full-attention output gate; consume exact prompt tails; and compare prompt/decode logits
+against the installed reference. Start with text only, one request, 4K–8K capacity, short prefill chunks, and no graph
+capture. Measure peak GPU memory during load, prefill and decode before adding concurrency or claiming throughput.
+The memory budget supports attempting this on one 5090; correctness, preparation time and usable latency remain open.
