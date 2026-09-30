@@ -13,7 +13,7 @@ from emmy.provisioning.ssh_transport import REMOTE_DEPLOY_DIR
 
 logger = logging.getLogger(__name__)
 
-# What the proxy check fetches: any HTTP status back (401 without credentials) proves the tunnel works.
+# What the proxy check fetches: any HTTP status back (401 without credentials) proves the proxy forwards to it.
 REGISTRY_PROBE = "https://registry-1.docker.io/v2/"
 
 

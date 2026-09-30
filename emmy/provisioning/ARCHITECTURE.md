@@ -187,7 +187,7 @@ container-toolkit keyring and apt repo, the CUDA apt repo with its driver and to
 `provision_remote` then, once Docker is known to be installed and before anything is pulled, writes
 `/etc/systemd/system/docker.service.d/http-proxy.conf` and restarts the daemon — only when the file's content differs,
 so a redeploy onto the same host does not bounce Docker — and runs `curl -x URL https://registry-1.docker.io/v2/` on
-the host. Any HTTP status back (401 without registry credentials) proves the tunnel; a connect failure or timeout
+the host. Any HTTP status back (401 without registry credentials) proves the proxy forwards to it; a connect failure or
 raises `RuntimeError` naming the proxy, minutes before `docker compose pull` would have failed. The deploy layer
 carries the same URL in `DeployParams.proxy` into the compose environment and the weight-download container.
 
