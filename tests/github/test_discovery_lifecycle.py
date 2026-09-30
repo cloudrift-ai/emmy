@@ -150,7 +150,7 @@ def test_onboarding_requires_platform_results_snapshot_and_git_lfs():
     lfs_script = next(step["run"] for step in steps if step.get("name") == "Configure Git LFS")
     host_setup_script = next(step["run"] for step in steps if step.get("name") == "Prepare target GPU host")
     agent_script = next(step["run"] for step in steps if step.get("name") == "Run onboard-model agent")
-    cleanup_script = next(step["run"] for step in steps if step.get("name") == "Remove archived task-local raw results")
+    cleanup_script = next(step["run"] for step in steps if step.get("name") == "Prepare experiment artifacts")
     validation_script = next(step["run"] for step in steps if step.get("name") == "Validate and stage model artifacts")
     qualify = (workspace / "prompts" / "onboard-model" / "qualify.md").read_text()
 
@@ -217,7 +217,7 @@ def test_onboarding_uses_bounded_read_only_investigator():
 
 def test_onboarding_removes_only_raw_results_preserved_by_platform_archive(tmp_path):
     document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "onboard-model.yml").read_text())
-    step = next(step for step in document["jobs"]["onboard"]["steps"] if step.get("name") == "Remove archived task-local raw results")
+    step = next(step for step in document["jobs"]["onboard"]["steps"] if step.get("name") == "Prepare experiment artifacts")
     cleanup_source = step["run"].split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
 
     experiment_dir = tmp_path / "experiments" / "Model" / "serving"
@@ -270,9 +270,103 @@ def test_onboarding_removes_only_raw_results_preserved_by_platform_archive(tmp_p
     assert not any(path.endswith(".experiment.yaml") for path in updated_summary["experiment_artifacts"])
 
 
+def test_failed_onboarding_keeps_report_and_discards_incomplete_experiment(tmp_path):
+    workspace = Path(__file__).parents[2]
+    document = yaml.safe_load((workspace / ".github" / "workflows" / "onboard-model.yml").read_text())
+    step = next(step for step in document["jobs"]["onboard"]["steps"] if step.get("name") == "Prepare experiment artifacts")
+    cleanup_source = step["run"].split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+
+    recipe = tmp_path / "recipes/Model/recipe.yaml"
+    experiment = tmp_path / "experiments/Model/serving/recipe.yaml"
+    image = tmp_path / "docker/vllm-emmy-serve/models/model.env"
+    for path in (recipe, experiment, image):
+        path.parent.mkdir(parents=True, exist_ok=True)
+    recipe.write_text("tags: [onboarding, untested]\nmodel:\n  huggingface: org/Model\n  heat: 90\n")
+    experiment.write_text("original experiment\n")
+    image.write_text("original image\n")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "recipes", "experiments", "docker"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "seed"],
+        cwd=tmp_path,
+        check=True,
+    )
+
+    recipe.write_text("tags: [onboarding, untested, onboarding-failed]\nmodel:\n  huggingface: org/Model\n  heat: 90\n")
+    report = recipe.with_name("RESULTS.md")
+    report.write_text("# Failure report\n")
+    experiment.write_text("incomplete experiment\n")
+    experiment.with_name("RESULTS.md").write_text("incomplete results\n")
+    image.write_text("incomplete image\n")
+    image.with_name("new.env").write_text("incomplete image\n")
+    summary = tmp_path / "summary.json"
+    summary.write_text(
+        json.dumps(
+            {
+                "status": "failed",
+                "mode": "onboarding",
+                "model_id": "org/Model",
+                "target": {"gpu": "AMD Instinct MI350X", "gpu_count": 4, "ssh": "user@host"},
+                "recipe": "recipes/Model/recipe.yaml",
+                "report": "recipes/Model/RESULTS.md",
+                "experiment": "experiments/Model/serving/recipe.yaml",
+                "experiment_artifacts": ["experiments/Model/serving/RESULTS.md"],
+                "artifacts": ["recipes/Model/recipe.yaml", "recipes/Model/RESULTS.md", "experiments/Model/serving/RESULTS.md"],
+                "deployment_summary": "unqualified",
+                "performance_summary": "incomplete",
+                "cleanup": {"workloads": "complete", "docker_logout": True},
+                "failure": {"gate": "serving", "message": "No supported image", "regression": False},
+            }
+        )
+    )
+
+    subprocess.run(
+        [sys.executable, "-"],
+        cwd=tmp_path,
+        env={**os.environ, "ONBOARD_SUMMARY": str(summary)},
+        input=cleanup_source,
+        text=True,
+        check=True,
+    )
+
+    assert recipe.read_text().startswith("tags: [onboarding, untested, onboarding-failed]")
+    assert report.is_file()
+    assert experiment.read_text() == "original experiment\n"
+    assert image.read_text() == "original image\n"
+    assert not experiment.with_name("RESULTS.md").exists()
+    assert not image.with_name("new.env").exists()
+    cleaned = json.loads(summary.read_text())
+    assert cleaned["artifacts"] == ["recipes/Model/recipe.yaml", "recipes/Model/RESULTS.md"]
+    assert cleaned["experiment"] is None and cleaned["experiment_artifacts"] == []
+    subprocess.run(
+        [
+            sys.executable,
+            str(workspace / ".github/scripts/onboarding_artifacts.py"),
+            "--summary",
+            str(summary),
+            "--model-id",
+            "org/Model",
+            "--gpu",
+            "AMD Instinct MI350X",
+            "--gpu-count",
+            "4",
+            "--ssh-target",
+            "user@host",
+            "--mode",
+            "onboarding",
+            "--expected-tag",
+            "best-effort",
+        ],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
 def test_onboarding_creates_platform_archive_and_preserves_other_platform(tmp_path):
     document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "onboard-model.yml").read_text())
-    step = next(step for step in document["jobs"]["onboard"]["steps"] if step.get("name") == "Remove archived task-local raw results")
+    step = next(step for step in document["jobs"]["onboard"]["steps"] if step.get("name") == "Prepare experiment artifacts")
     cleanup_source = step["run"].split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
 
     experiment_dir = tmp_path / "experiments" / "Model" / "serving"
@@ -388,11 +482,11 @@ def test_onboarding_selects_with_generic_recipe_query():
     assert 'lifecycle == "onboarding"' in script
     assert 'lifecycle == "maintained"' in script
     assert "deployment.availability.cloudrift == true" in script
+    assert "query+=(--filter 'tags not contains \"onboarding-failed\"')" in script
     tiers = [
         "pick --filter 'lifecycle == \"onboarding\"' --filter 'heat >= 70'",
-        "--filter 'emmy_serving == false' --filter 'tags not contains \"onboarding-failed\"'",
-        "--filter 'lifecycle == \"onboarding\"' --filter 'tags not contains \"onboarding-failed\"'",
-        "--filter 'tags contains \"onboarding-failed\"' --filter 'lifecycle != \"obsolete\"'",
+        "--filter 'emmy_serving == false'",
+        "--filter 'lifecycle == \"onboarding\"' --sort 'heat desc'",
         "--filter 'lifecycle == \"maintained\"' --sort 'results.last_run_at asc nulls-first'",
     ]
     positions = [script.index(tier) for tier in tiers]

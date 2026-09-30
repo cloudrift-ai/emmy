@@ -379,6 +379,7 @@
  "tests/compiler/loader/test_exl3.py::test_exl3_twin_carries_decoded_weights": 0.11,
  "tests/compiler/loader/test_exl3.py::test_factored_linear_runs_from_a_plan_on_checkpoint_leaves_alone@cuda": 24.57,
  "tests/compiler/loader/test_exl3.py::test_input_spelling_reaches_cuda_source_without_format_ir": 0.34,
+ "tests/compiler/loader/test_exl3.py::test_real_tensor_bind_time_decode_matches_direct": 6.8,
  "tests/compiler/loader/test_exl3.py::test_storage_expanding_checkpoint_trunk_compiles_plans_and_rebinds": 0.41,
  "tests/compiler/loader/test_quant.py::test_load_quantized_split_decodes_ct_int4_linears": 6.7,
  "tests/compiler/loader/test_quant.py::test_trace_model_spells_cones_and_binds_dequantized_twin": 0.06,

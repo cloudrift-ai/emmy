@@ -135,6 +135,21 @@ def test_golden_walk_without_seeds_benches_the_row_pricing_the_whole_target(monk
     assert [args.realization for args in calls] == ["post16.k_a.1111.m16.cccc", "pre1.k_b.2222.m1.eeee"]
 
 
+def test_golden_walk_selects_the_root_route_before_a_child_split(monkeypatch, tmp_path):
+    rows = _patch_records(monkeypatch, ["layer.root", "layer.split", "layer.piece"])
+    for row in rows:
+        row.target_key = "layer"
+    rows[0].identity, rows[0].is_routing, rows[0].emmy_us = "root", True, 20.0
+    rows[1].identity, rows[1].is_routing, rows[1].emmy_us = "child", True, 2.0
+    rows[2].identity, rows[2].emmy_us = "piece", 1.0
+    calls = []
+    monkeypatch.setattr(run_mod, "_handle_run_once", calls.append)
+
+    run_mod._run_golden_targets(_args(tmp_path))
+
+    assert [args.realization for args in calls] == ["layer.root"]
+
+
 def test_golden_walk_keeps_dotted_names_bindings_and_pin_regimes(monkeypatch, tmp_path):
     rows = _patch_records(monkeypatch, ["k_mean", "k_mean.type_as", "dynamic.m16", "dynamic.m32", "exact", "fast"])
     rows[2].target_key = rows[3].target_key = "dynamic"

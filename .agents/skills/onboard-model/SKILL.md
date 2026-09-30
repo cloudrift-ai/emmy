@@ -274,8 +274,8 @@ the tables that help, drawing from:
 **When no engine produces a valid recipe**, add a dated failure entry to that file instead — create it beside the
 shell if absent, and keep earlier entries. Give the platform, the first failed gate, the evidence, what would unblock
 it (for example, the engine release that adds support), and the golden's path when section 2 committed one. Add the
-`onboarding-failed` tag to the recipe and change nothing else in it: the tag holds the recipe back until the nightly
-queue has nothing else to run.
+`onboarding-failed` tag to the recipe and change nothing else in it: nightly selection skips the recipe until an
+explicit manual retry succeeds.
 
 ## 7. Verify and hand off
 

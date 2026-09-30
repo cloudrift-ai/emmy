@@ -260,22 +260,17 @@ jobs:
             )
             selection=$(./venv/bin/emmy "${query[@]}")
           else
-            # Nightly work in priority order; the first tier with an available deployment wins. A failed run
-            # tags its recipe onboarding-failed, which holds it back until every other tier is empty.
+            # Nightly work never retries a failed recipe; a manual dispatch can retry it after a fix.
+            query+=(--filter 'tags not contains "onboarding-failed"')
             pick() {
               selection=$(./venv/bin/emmy "${query[@]}" "$@" --sort 'model_id asc' --sort 'deployment.index asc') || exit 1
               [ "$(jq '.rows | length' <<< "$selection")" -gt 0 ]
             }
-            # Hot shells, hot runnable recipes without Emmy serving, other shells, failed recipes (oldest attempt
-            # first), then maintained recipes (oldest report first).
-            pick --filter 'lifecycle == "onboarding"' --filter 'heat >= 70' \
-                --filter 'tags not contains "onboarding-failed"' --sort 'heat desc' \
+            # Hot shells, hot runnable recipes without Emmy serving, other shells, then maintained recipes.
+            pick --filter 'lifecycle == "onboarding"' --filter 'heat >= 70' --sort 'heat desc' \
               || pick --filter 'lifecycle in ["maintained", "best-effort"]' --filter 'runnable == true' --filter 'heat >= 70' \
-                --filter 'emmy_serving == false' --filter 'tags not contains "onboarding-failed"' --sort 'heat desc' \
-              || pick --filter 'lifecycle == "onboarding"' --filter 'tags not contains "onboarding-failed"' \
-                --sort 'heat desc' \
-              || pick --filter 'tags contains "onboarding-failed"' --filter 'lifecycle != "obsolete"' \
-                --sort 'results.last_run_at asc nulls-first' --sort 'heat desc' \
+                --filter 'emmy_serving == false' --sort 'heat desc' \
+              || pick --filter 'lifecycle == "onboarding"' --sort 'heat desc' \
               || pick --filter 'lifecycle == "maintained"' --sort 'results.last_run_at asc nulls-first' \
               || true
           fi
@@ -542,7 +537,7 @@ jobs:
               output.write(f"failure_summary={message}\n")
           PY
 
-      - name: Remove archived task-local raw results
+      - name: Prepare experiment artifacts
         if: steps.vm.outcome == 'success'
         run: |
           ./venv/bin/python - <<'PY'
@@ -560,8 +555,29 @@ jobs:
           experiments_root = (workspace / "experiments").resolve()
           summary_path = Path(os.environ["ONBOARD_SUMMARY"])
           summary = json.loads(summary_path.read_text())
+
+          def save_summary():
+              temporary = summary_path.with_name(f".{summary_path.name}.{os.getpid()}.tmp")
+              try:
+                  temporary.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
+                  os.replace(temporary, summary_path)
+              finally:
+                  temporary.unlink(missing_ok=True)
+
           if summary.get("status") == "failed":
-              # A failed run archives nothing; its report and compiler work are staged as they are.
+              # Keep the failure report and compiler work; discard incomplete serving results.
+              for area in ("experiments", "docker/vllm-emmy-serve/models"):
+                  subprocess.run(["git", "restore", "--source=HEAD", "--staged", "--worktree", "--", area], check=True)
+                  subprocess.run(["git", "clean", "-fdx", "--", area], check=True)
+              artifacts = summary.get("artifacts") or []
+              if not isinstance(artifacts, list):
+                  raise SystemExit("Summary artifacts must be a list")
+              summary["artifacts"] = [
+                  path for path in artifacts if not str(path).startswith(("experiments/", "docker/"))
+              ]
+              summary.update(experiment=None, experiment_artifacts=[], recipe=None,
+                             deployment_summary=None, performance_summary=None)
+              save_summary()
               raise SystemExit(0)
           if summary.get("status") != "success":
               raise SystemExit(f"Unexpected onboarding status: {summary.get('status')}")
@@ -681,12 +697,7 @@ jobs:
               additions = durable_snapshot if key == "experiment_artifacts" else [*durable_snapshot, *tracked_record_deletions]
               summary[key] = list(dict.fromkeys([*retained, *(path.as_posix() for path in additions)]))
 
-          temporary_summary = summary_path.with_name(f".{summary_path.name}.{os.getpid()}.tmp")
-          try:
-              temporary_summary.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
-              os.replace(temporary_summary, summary_path)
-          finally:
-              temporary_summary.unlink(missing_ok=True)
+          save_summary()
           PY
 
       - name: Delete workflow-owned CloudRift VMs
