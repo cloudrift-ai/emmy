@@ -6,8 +6,7 @@ into the compact identity used by datasets and evidence joins. It is intentional
 not a persistence format: a golden file stores stable frontend IR plus provenance,
 then derives both the histogram and this key with the current compiler.
 
-``from_matmul`` remains a convenience for callers that already have explicit
-matmul dimensions. Generic golden records start from ``from_s_features`` and replay
+Golden records start from ``from_s_features`` and replay
 their stored schedule prefix through the same offer-aware classifier as deployment,
 which supplies the otherwise-unstamped flash and pre-split computed-A kind signal.
 
@@ -29,7 +28,7 @@ class ShapeKey:
     """Derived extent identity used for grouping compiler measurements.
 
     ``free_prod`` is the product of the **static** output free dims (``M*N``; a
-    symbolic axis is excluded, mirroring the ``992`` stamp — see :meth:`from_matmul`),
+    symbolic axis is excluded, mirroring the ``992`` stamp),
     ``reduce_max`` the reduce extent (``K``), ``is_warp`` whether it lowers on the
     tensor-core warp tier (any non-fp32 matmul), ``is_dyn`` whether an axis is
     symbolic — the split that keeps a dynamic target and its static twin apart,
@@ -99,34 +98,11 @@ class ShapeKey:
             object.__setattr__(self, "free_max", 0)
 
     @classmethod
-    def from_matmul(cls, M: int, N: int, K: int, dtype: str, *, dynamic: bool = False) -> ShapeKey:
-        """The shape of an ``(M, K) @ (K, N)`` matmul. fp32 lowers on the scalar
-        thread tier; fp16 / bf16 on the warp (MMA) tier; an fp8-B spelling
-        (``fp8`` / ``f8e4m3`` / ``f8e5m2``) is warp too and additionally carries
-        ``dtype_class="f8"`` (see the field doc). ``dynamic`` marks the M
-        axis symbolic (the only symbolic-axis golden form today): the key then
-        MIRRORS what the ``IdentityStrategy`` stamps on the op — symbolic
-        axes are **excluded** from the extent products (``free_prod = N``, not the
-        hint-sized ``M*N``) and flagged via ``S_ext_n_symbolic_axis`` — because
-        the stamped histogram is the only identity the op side has (it doesn't
-        know the hint), so a hint-sized golden key would never join it."""
-        f8 = dtype in cls._F8_DTYPES
-        return cls(
-            free_prod=N if dynamic else M * N,
-            reduce_max=K,
-            is_warp=f8 or dtype != "fp32",
-            is_dyn=dynamic,
-            free_max=0 if dynamic else max(M, N),
-            dtype_class="f8" if f8 else "",
-        )
-
-    @classmethod
     def from_s_features(cls, s: dict) -> ShapeKey:
         """The key of a stamped ``S_*`` histogram — an op-group signature from
-        ``Dataset.group_by_op``, a prior-reservoir row's knobs, or a ``CudaOp.knobs``
-        dict carrying the stamped features. The op-side twin of :meth:`from_matmul`:
-        every golden ↔ measured-data join must build BOTH sides through these two
-        constructors, so a new key dimension (e.g. the planned symbolic-axis flag)
+        ``Dataset.group_by_op`` or a ``CudaOp.knobs`` dict carrying the stamped features.
+        Every golden ↔ measured-data join must build BOTH sides through this
+        constructor, so a new key dimension (e.g. the planned symbolic-axis flag)
         lands in one place instead of per join site.
 
         ``is_warp`` derives from the operand-dtype multiset (``S_dtype_f32``): the stamp

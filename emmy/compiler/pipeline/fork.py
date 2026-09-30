@@ -29,32 +29,26 @@ from emmy.compiler.pipeline.knob import EVIDENCE_PREFIXES, METADATA_PREFIXES, ev
 
 
 class Fork(ABC):
-    """Interface for a deferred fork option in the search tree.
+    """Interface for a deferred fork option.
 
     Two flavors share the interface:
 
     - **Branch Fork** (``is_leaf=False``) — produced explicitly by a rule's
       ``rewrite()`` to spawn a hierarchical fork point. ``expand()`` returns
-      the next level of options (more Forks, concrete leaves, or a mix);
-      the search loop drives this via :meth:`LazyCandidate.expand`.
+      the next level of options (more Forks, concrete leaves, or a mix); the
+      decide callback walks them (:func:`iter_leaves`).
     - **Leaf Fork** (``is_leaf=True``) — wraps one concrete ``Op`` /
       ``Graph`` rewrite. ``expand()`` returns ``[option]`` (one element);
-      :meth:`LazyCandidate.resolve` invokes it once at resolve time to
-      retrieve the leaf and apply it.
-
-    Sharing one interface lets ``LazyCandidate.pending`` carry just
-    ``Fork`` (no tagged union) — the search loop branches on
-    ``Fork.is_leaf`` to decide expand-vs-resolve.
+      ``Run.resolve`` invokes it once at resolve time to retrieve the leaf
+      and apply it.
 
     ``knobs`` is the knob-delta this Fork pins (the variant identity the
-    perf DB and the online prior key on, read without expanding). Ranking
-    is SEARCH policy: the engine hands unranked siblings to ``Search.push``
-    and the policy ranks them with the
+    perf DB and the prior key on, read without expanding). Ranking is the
+    decide callback's job: it ranks the leaves with measured evidence and the
     :class:`~emmy.compiler.pipeline.search.prior.Prior` (greedy
-    ``mean_score`` argmin; MCTS PUCT). Forks carry no score of their own —
-    the hand-coded per-fork scorer was removed when the online prior replaced
-    it; siblings are emitted in grouping order and the cold/no-prior fallback
-    is that emission order."""
+    ``mean_score`` argmin). Forks carry no score of their own; siblings are
+    emitted in grouping order and the no-prior fallback is that emission
+    order."""
 
     knobs: dict
     is_leaf: bool = False
@@ -307,7 +301,7 @@ def leaf_for(options: Sequence[Op | Graph | Fork], row: Mapping, *, skip: Callab
 def leaf_knobs(leaf: Op | Graph | Fork) -> dict:
     """A leaf's complete knob row: a leaf ``Fork`` carries it as ``knobs``; a concrete ``Op``
     carries its own; a ``Graph`` splice has no single row (scored structurally, never by knobs) —
-    empty, matching how ``LazyCandidate.from_option`` treats it during the tuning search."""
+    empty."""
     from emmy.compiler.graph import Graph  # noqa: PLC0415
 
     if isinstance(leaf, Fork):

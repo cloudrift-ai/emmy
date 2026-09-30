@@ -173,7 +173,6 @@ def test_onboarding_requires_platform_results_snapshot_and_git_lfs():
     assert "`onboard-investigator` subagent" in qualify
     assert "touch `.gitattributes`" in qualify
     assert '"$WORKFLOW_SOURCE/.agents/skills/onboard-model/SKILL.md"' in agent_script
-    assert '"$WORKFLOW_SOURCE/.agents/skills/tune-kernels/SKILL.md"' in agent_script
     assert '"$WORKFLOW_SOURCE/.agents/skills/run-experiment/SKILL.md"' in agent_script
     assert 'tarfile.open(temporary_archive, "w:gz")' in cleanup_script
     assert "temporary_roots = verify_archive(temporary_archive)" in cleanup_script

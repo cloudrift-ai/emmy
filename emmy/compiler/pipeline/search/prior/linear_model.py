@@ -11,10 +11,9 @@ which columns this model class wants out of it.
 
 The public scoring methods borrow ``Prior``'s own featurized surface — ``mean_score_features`` and
 ``mean_scores_features`` (``quality`` / ``quality_rows`` / ``score_rows`` are this module's own vocabulary, not
-``Prior``'s). That is deliberate: ``FallbackPrior`` composes priors on exactly those, so a holder can delegate to
-any model through them without a second vocabulary. :mod:`.catboost_model` is the other model class answering the
-same surface. ``explain_features`` is NOT part of it — it is this model's internal per-term breakdown, and
-:meth:`LinearModel.quality` is its only caller.
+``Prior``'s). That is deliberate: a holder delegates to any model through them without a second vocabulary.
+:mod:`.catboost_model` is the other model class answering the same surface. ``explain_features`` is NOT part of
+it — it is this model's internal per-term breakdown, and :meth:`LinearModel.quality` is its only caller.
 :meth:`~LinearModel.quality` / :meth:`~LinearModel.quality_rows` are linear-only — the pre-transform ranking
 quantity a derivative-free descent walks, which a tree model has no additive equivalent of (its matrix entry
 point is ``CatBoostModel.quality_rows``, a booster call rather than a dot product).
@@ -157,8 +156,7 @@ class LinearModel:
         a guard at construction — the one place a hand-edited artifact is also caught.
 
         Worth being precise about the harm, since the module docstring above says such a term "cancels
-        exactly": within one candidate pool it does, and it cancels out of the greedy argmin, out of
-        ``normalize_policy`` and out of ``TiltBlend`` for the same reason. The exception is
+        exactly": within one candidate pool it does, and it cancels out of the greedy argmin. The exception is
         ``policy/greedy._resolved_price``, which SUMS per-kernel scores to compare whole kernel sets — a
         routing weight there scales every symbolic-axis kernel's price and biases the fusion comparison."""
         for name, w_set in (("weights", self.weights), ("weights_dynamic", self.weights_dynamic)):

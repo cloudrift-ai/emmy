@@ -28,7 +28,7 @@ helpers (`lane` / `warp`), and nothing else — every other name is bound by a s
 what `free_names` subtracts. What survives is a value some emission referred to under a spelling nothing defines: a
 per-cell rename whose shared coordinates missed an axis, a staged fill whose σ left a tile axis free, a workspace read
 a boundary store was not re-spelled for. Each of those reached nvcc as *identifier "x" is undefined*, a hundred
-errors deep in a generated source and charged to whichever candidate the tuner happened to be benching. Asserting it
+errors deep in a generated source and charged to whichever candidate the bench happened to be running. Asserting it
 here names the kernel and the value instead, in the pass that built them.
 
 For a register materialization, `factorize` emits the same Fold tree as C fragments through `_register`.

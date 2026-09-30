@@ -53,7 +53,7 @@ def test_the_same_kernel_from_two_sites_is_one_tuning_problem():
 
     A kernel minted by a cross-CTA split has its own structural identity, so tuning it is the same
     question as tuning an identical standalone kernel. The deploy path already joins their evidence
-    that way (``Prior.evidence_pick`` indexes on ``S_*``). Keyed on the site that offered them the two
+    that way (the deploy's evidence index is keyed on ``S_*``). Keyed on the site that offered them the two
     land in different pools and get searched twice: on the RTX 5090 measurement freeze 73 structures
     were fragmented like that, the losing pool's best coming in a median 1.46x behind the winning
     pool's."""

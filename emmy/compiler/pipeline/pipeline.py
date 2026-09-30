@@ -4,17 +4,16 @@
 Bundled together because they form a tight chain — ``Pattern`` defines
 what a rule matches, ``Rule`` carries the pattern + rewrite, ``Pass``
 groups rules, ``Pipeline`` is the frozen pass layout + matcher, ``Run``
-owns ONE drive of that layout (ctx / search / db / backend / dump /
-rejections + the engine loop), ``Cursor`` tracks per-candidate resume
-state inside a Run, and ``Match`` carries ``Rule`` (which backref-resolves
-to ``Pass``). ``Run`` exposes two entry points over one shared rule-batch
-body (``Run._step``): ``drive`` (exploration — a ``Search`` policy ranks
-the fork frontier) and ``resolve`` (deterministic resolution — a
-``decide`` callback picks at each ``ForkPoint`` and the fold returns the
-terminal graph plus a ``Decision`` trace).
+owns ONE drive of that layout (ctx / db / backend / dump / rejections +
+the engine loop), ``Cursor`` tracks per-candidate resume state inside a
+Run, and ``Match`` carries ``Rule`` (which backref-resolves to ``Pass``).
+``Run.resolve`` is the one entry point over the rule-batch body
+(``Run._step``): a deterministic resolution — a ``decide`` callback picks
+at each ``ForkPoint`` and the fold returns the terminal graph plus a
+``Decision`` trace.
 
-``Pipeline`` also owns the compile entry points — :meth:`build`,
-:meth:`run`, :meth:`tune` (each constructs a :class:`Run` and drives it).
+``Pipeline`` also owns the compile entry points — :meth:`build` and
+:meth:`run` (which constructs a :class:`Run` and resolves it).
 The per-rule logging, rewrite-kwarg dispatch, and snapshot rendering live
 on :class:`Candidate` (see :mod:`..search.candidate`).
 """
@@ -26,7 +25,6 @@ import inspect
 import logging
 import re
 import sys
-import time
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from functools import cached_property
@@ -35,7 +33,7 @@ from typing import TYPE_CHECKING
 
 from emmy.compiler.graph import Graph, Node
 from emmy.compiler.pipeline.fork import Fork, iter_leaves, leaf_for
-from emmy.compiler.pipeline.knob import Knob, apply_off_defaults, decision_view, family_of, format_tuning_knobs
+from emmy.compiler.pipeline.knob import Knob, apply_off_defaults, decision_view, family_of
 from emmy.compiler.pipeline.strategy import PassEndEvent, RunStartEvent, discovered_strategies
 
 if TYPE_CHECKING:
@@ -44,7 +42,6 @@ if TYPE_CHECKING:
     from emmy.compiler.pipeline.dump import CompilerDump
     from emmy.compiler.pipeline.search.candidate import Candidate
     from emmy.compiler.pipeline.search.db import SearchDB
-    from emmy.compiler.pipeline.search.policy import Search
 
 logger = logging.getLogger("emmy.compiler.pipeline")
 
@@ -61,19 +58,6 @@ def _strip_rule_prefix(name: str) -> str:
     """Drop the numeric ordering prefix from a rule file stem
     (``004_cooperative_reduce`` → ``cooperative_reduce``)."""
     return _RULE_PREFIX_RE.sub("", name)
-
-
-def variant_label(graph: Graph) -> str:
-    """A human label for one tuned variant: the ``|``-joined per-op tuning
-    knobs across the graph (``tile=128 | warps=4``), or ``"option-0"`` when no
-    op carries knobs. Shared by :meth:`Pipeline.tune`'s per-variant log line and
-    the ``tune`` progress bar so both render the same knob string."""
-    knob_strs = [
-        s
-        for nid in graph.topological_order()
-        if (k := getattr(graph.nodes[nid].op, "knobs", None)) and (s := format_tuning_knobs(k)) != "-"
-    ]
-    return " | ".join(knob_strs) if knob_strs else "option-0"
 
 
 @dataclass
@@ -164,11 +148,7 @@ class LoweringError(Exception):
 
     This converts the old silent leak (an un-lowered ``TileOp`` surviving
     every pass until ``CudaBackend`` raises the cryptic ``non-CudaOp``
-    ``TypeError``) into an actionable, early error. The fork-pruning path
-    under ``tune`` is unaffected: there the dropped branch is a
-    legitimate dead end and sibling branches carry other shapes, so
-    nothing is raised (an un-lowered terminal is a ``bench_fail`` instead
-    — see ``search.policy.terminal_bench``)."""
+    ``TypeError``) into an actionable, early error."""
 
 
 @dataclass
@@ -448,7 +428,7 @@ class Pipeline:
     # stateless set (``strategy.discovered_strategies``) plus whatever a caller
     # composed in via :meth:`with_strategies`. Empty for ``from_pattern`` test
     # shims. A pipeline composed with STATEFUL strategies (e.g. the two-level
-    # tuner's minted-kernel watcher) serves ONE run — sharing across runs is
+    # kernel inventory) serves ONE run — sharing across runs is
     # only safe when every strategy is stateless.
     strategies: tuple = ()
 
@@ -497,8 +477,8 @@ class Pipeline:
 
     def with_strategies(self, *extra) -> Pipeline:
         """This pipeline with ``extra`` engine-event strategies composed after the existing
-        set — how a caller installs PER-RUN strategies (e.g. the two-level tuner's minted-kernel
-        watcher). The returned pipeline serves one run when any composed strategy holds state."""
+        set — how a caller installs PER-RUN strategies (e.g. the kernel inventory). The returned
+        pipeline serves one run when any composed strategy holds state."""
         return replace(self, strategies=(*self.strategies, *extra))
 
     def run(
@@ -515,19 +495,16 @@ class Pipeline:
         (:func:`~emmy.compiler.pipeline.search.policy.greedy.greedy_decide`):
         at every fork point, flatten to complete leaves and take the
         ``Prior``'s ``mean_scores`` argmin. Not a search — no frontier,
-        no tree, no benching (it can only *use* a prior trained earlier
-        by ``tune``, never train one); exploration (PUCT) stays in
-        :meth:`tune`. The input ``graph`` is copied once per attempt and
-        resolved in place — no per-fork graph copies.
+        no tree, no benching. The input ``graph`` is copied once per
+        attempt and resolved in place — no per-fork graph copies.
 
         ``ctx`` is built once (probing the live device if not provided)
         and passed to every rule that takes a ``ctx`` parameter.
 
         ``backend`` (typically :class:`CudaBackend`) opts the run into
         real GPU measurement: the terminal graph's per-kernel latency is
-        recorded to ``db`` (via :func:`search.policy.terminal_bench.bench_terminal_async`, once after the
-        resolution settles) and attributed to every ancestor along the
-        ``Op.source`` chain. ``db`` defaults to a fresh in-memory store;
+        recorded to ``db`` once after the resolution settles. ``db``
+        defaults to a fresh in-memory store;
         pass an explicit :class:`SearchDB` to persist measurements
         across runs.
 
@@ -537,8 +514,7 @@ class Pipeline:
 
         * **Validity fallback** — the prior ranks by predicted latency
           and can rank a tile that fails ``validate(ctx)`` (smem /
-          thread budget) first; ``tune`` benches-and-skips it, but
-          greedy benches nothing, so on a left-un-lowered node we
+          thread budget) first; greedy benches nothing, so on a left-un-lowered node we
           blocklist its tile and re-resolve, falling back to the next
           prior-ranked leaf. Bounded retries (each adds ≥1 block or
           stops).
@@ -561,70 +537,6 @@ class Pipeline:
         clear_pin_refusals()  # a refusal names the compile it happened in, not an earlier one
         return GreedyStrategy(self, backend=backend, db=db, dump=dump).run(graph, ctx)
 
-    def _new_run(self, graph: Graph, *, search, ctx, backend, db, dump, rejections) -> Run:
-        """Build the :class:`Run` for :meth:`tune_async`: probe / align ``ctx`` — letting the
-        search policy prepare it (``Search.prepare_ctx``, e.g. the tune search relaxing the
-        strict knob-pin validator) — and wire the run-scoped sinks. Graph seeding is strategy
-        business, fired from the loop entry (``RunStartEvent``)."""
-        from emmy.compiler.context import Context as _Context  # noqa: PLC0415
-        from emmy.compiler.pipeline.search.db import SearchDB as _SearchDB  # noqa: PLC0415
-
-        if ctx is None:
-            ctx = _Context.probe()
-        backend_name = getattr(backend, "name", "cuda")
-        if ctx.backend_name != backend_name:
-            ctx = replace(ctx, backend_name=backend_name)
-        prepare = getattr(search, "prepare_ctx", None)
-        if prepare is not None:
-            ctx = prepare(ctx)
-        return Run(
-            pipeline=self,
-            ctx=ctx,
-            search=search,
-            db=db if db is not None else _SearchDB(),
-            backend=backend,
-            dump=dump,
-            rejections=rejections,
-        )
-
-    async def tune_async(
-        self,
-        graph: Graph,
-        *,
-        search: Search,
-        ctx: Context | None = None,
-        backend=None,
-        db: SearchDB | None = None,
-        dump: CompilerDump | None = None,
-        rejections: list[tuple[str, str, str]] | None = None,
-    ):
-        """Async-generator tune driver: ONE loop, terminal valuation owned by the policy.
-
-        The lowering (``run.drive``) stays a synchronous generator — only the per-terminal
-        ``search.evaluate`` is awaited (benching, DB persistence, the -O3 re-bench and the
-        observe protocol all live on the policy — what a terminal is worth is search policy,
-        not engine mechanics), so N kernels' benches overlap across device-pinned workers on
-        one event loop while the (light) Python lowering runs cooperatively between awaits.
-
-        Per-run engine-event strategies are COMPOSED into the pipeline
-        (:meth:`Pipeline.with_strategies`), never threaded through here."""
-        run = self._new_run(graph, search=search, ctx=ctx, backend=backend, db=db, dump=dump, rejections=rejections)
-        t_start = time.monotonic()
-        n_terminals = 0
-        for token, cand in run.drive(graph):
-            n_terminals += 1
-            if backend is not None:
-                logger.info("[tune] variant #%d  [%s]", n_terminals, variant_label(cand.graph))
-            await search.evaluate(token, cand, backend=backend, db=run.db)
-            yield cand
-        dropped = run._dropped_candidates
-        logger.info(
-            "compile: total %.2fs (%d terminal(s)%s)",
-            time.monotonic() - t_start,
-            n_terminals,
-            f", {dropped} un-lowerable candidate(s) dropped" if dropped else "",
-        )
-
 
 @dataclass
 class ForkPoint:
@@ -632,9 +544,8 @@ class ForkPoint:
     multi-option rewrite: the live :class:`Match`, the raw ``options``
     list exactly as ``Candidate.try_rewrite`` returned it (concrete
     ``Op``/``Graph`` leaves and lazy ``Fork``s — branch Forks included,
-    unexpanded), the pre-decision root op, and the run's ``ctx``. No
-    ``LazyCandidate`` wrapping: ``resolve`` holds one live graph and
-    applies the chosen option in place.
+    unexpanded), the pre-decision root op, and the run's ``ctx``.
+    ``resolve`` holds one live graph and applies the chosen option in place.
 
     ``score`` is the decide callback's one output channel besides its
     return value: a decide that ranks options with a prior stamps the
@@ -694,9 +605,8 @@ class ForkPoint:
         return tuple(o for o in self.options if not _is_structural_option(o))
 
 
-#: A deterministic policy found no complete option below a lazy fork. Search drops such a branch
-#: naturally; resolve uses this explicit result to continue the current rule batch without applying
-#: a rewrite.
+#: A deterministic policy found no complete option below a lazy fork. Resolve uses this explicit
+#: result to continue the current rule batch without applying a rewrite.
 NO_OPTION = object()
 
 
@@ -734,18 +644,14 @@ class Decision:
 @dataclass
 class Run:
     """Mutable per-run state of ONE drive of a pipeline — everything
-    scoped to a single compile / tune invocation lives here, so
+    scoped to a single compile invocation lives here, so
     :class:`Pipeline` stays a frozen, shareable pass layout and nothing
     run-scoped is ever smuggled onto shared objects.
 
     * ``pipeline`` — the frozen pass layout being driven.
     * ``ctx`` — the resolved hardware context, shared by every candidate
       (reached as ``cand.ctx``).
-    * ``search`` — the policy ordering an exploration (:meth:`drive`);
-      ``None`` for a deterministic resolution (:meth:`resolve`), which
-      has no frontier to rank.
-    * ``db`` — the autotune store terminal valuation persists into (the
-      training data for the online prior).
+    * ``db`` — the tune DB the resolution reads its measured evidence from.
     * ``backend`` — optional measurement backend (``None`` = stub bench,
       no persistence).
     * ``dump`` — optional artifact collector: :meth:`Candidate._log_apply`
@@ -753,8 +659,7 @@ class Run:
       routes post-pass graphs through ``dump.on_pass``.
     * ``rejections`` — optional sink for rewrites whose every option
       failed ``validate(ctx)`` (installed by :meth:`Pipeline.run` so
-      greedy compiles can raise :class:`LoweringError`; absent under
-      tune, where a pruned fork is a legitimate dead end).
+      greedy compiles can raise :class:`LoweringError`).
 
     Candidates and cursors hold a back-reference to their Run, so
     engine-adjacent code reads run state off the object at hand
@@ -762,15 +667,10 @@ class Run:
 
     pipeline: Pipeline
     ctx: Context
-    search: Search | None = None
     db: SearchDB | None = None
     backend: object | None = None
     dump: CompilerDump | None = None
     rejections: list[tuple[str, str, str]] | None = None
-    # Count of search candidates dropped by :meth:`drive`'s per-variant
-    # containment (un-lowerable forks that raised during lowering). Tune-only;
-    # stays 0 on the deterministic greedy path.
-    _dropped_candidates: int = 0
 
     def _step(
         self,
@@ -779,7 +679,7 @@ class Run:
         trace: list[Decision] | None = None,
     ) -> tuple[Match, list, bool] | None:
         """Run one rule batch against ``cand`` — the per-candidate engine
-        body shared by :meth:`drive` and :meth:`resolve`. Single-option
+        body of :meth:`resolve`. Single-option
         rewrites apply inline (via ``Candidate.try_rewrite``), empty /
         quiescent batches advance the cursor, and a structural fork whose
         offer site was already decided on this trajectory replays that
@@ -860,10 +760,8 @@ class Run:
     def resolve(self, graph: Graph, decide: Callable[[ForkPoint], object]) -> tuple[Graph, list[Decision]]:
         """Deterministic resolution — fold the pipeline over ``graph``
         IN PLACE, asking ``decide`` at every undecided fork point, and
-        return ``(terminal_graph, trace)``. The counterpart of
-        :meth:`drive` for callers with no frontier to rank (greedy
-        compile, structural pricing probes, assembled-graph lowering):
-        one live graph, no ``LazyCandidate`` sibling snapshots, no
+        return ``(terminal_graph, trace)`` — greedy compile, structural
+        pricing probes, assembled-graph lowering: one live graph, no
         per-fork graph copies — the returned terminal IS the seeded
         ``graph`` object.
 
@@ -891,97 +789,6 @@ class Run:
         while not cand.cursor.is_done:
             self._step(cand, decide=decide, trace=trace)
         return cand.graph, trace
-
-    def drive(self, graph: Graph) -> Iterator[tuple[object | None, Candidate]]:
-        """Seed ``graph`` as the root candidate and drive the search to
-        every terminal. Each iteration: pop a ``(token, candidate)``
-        pair, run one rule's batch of matches against the candidate's
-        graph, push successor(s) under ``parent=token``. Yields
-        ``(token, candidate)`` when a candidate reaches the end of the
-        pipeline (``cursor.is_done``) — the caller passes the token to
-        ``search.observe`` so the measurement lands on the terminal's
-        own lineage (no "most recently popped" hidden state).
-
-        Per-rule batch semantics live in :meth:`_step` (shared with
-        :meth:`resolve`): single-option matches apply inline; the first
-        undecided multi-option match comes back as ``(match, options,
-        structural)`` and spawns one ``LazyCandidate`` per option, in
-        rule-emission order. Selection is the search's job (tuning
-        explores every fork and ranks the unvisited frontier with its
-        online prior). Siblings share ``cand`` as ``inner`` so they
-        don't duplicate the snapshot; ``from_option`` lifts concrete
-        ``Op``/``Graph`` options into leaf Forks so every LazyCandidate's
-        pending carries a uniform Fork shape. Cursor advance for the rule
-        batch is owned by :meth:`Cursor.advance`, fired from
-        ``Candidate.apply`` on ``match.is_last`` (the fork's apply on
-        resolve fires it for deferred forks) or directly in ``_step`` for
-        batches that produced no live matches. The ``structural`` flag
-        rides ``Search.push`` so policies can treat kernel-set decisions
-        specially."""
-        from emmy.compiler.pipeline.search.candidate import Candidate, LazyCandidate  # noqa: PLC0415
-
-        search = self.search
-        assert search is not None, "Run.drive needs a search policy; use Run.resolve for deterministic resolution"
-        event = RunStartEvent(graph=graph, ctx=self.ctx, passes=tuple(p.name for p in self.pipeline.passes))
-        for strat in self.pipeline.strategies:
-            strat.on_run_start(event)
-        # Seed candidate: no parent token — the policy roots it itself.
-        search.push(Candidate(run=self, graph=graph, cursor=Cursor(run=self)).lazy())
-
-        while (popped := search.pop()) is not None:
-            token, lc = popped
-            # Per-variant containment: a search-explored candidate can reach an
-            # un-lowerable shape that a *deterministic* lowering pass raises on
-            # (e.g. a sibling-cell-fused slab fill the single-Write hoisted-compute
-            # materializer can't represent, or an orphan AtomTile at render). The
-            # deployable greedy pick (``Run.resolve``) never reaches these forks, so
-            # under tune they are legitimate dead ends — exactly like a branch whose
-            # every option fails ``validate(ctx)``. Drop the candidate's subtree and
-            # keep driving the rest of the search instead of aborting the whole tune.
-            # A rule raises from its deferred thunk (``expand``/``resolve`` fire a Fork's materializer) as readily as from
-            # ``_step``'s next rule batch, so both sit under the sink.
-            # (``RuleSkipped`` is handled inside ``try_rewrite``; control-flow
-            # exceptions propagate.)
-            try:
-                # Thunk-bearing fork: expand before resolving. Each expansion
-                # spawns the next level of ``LazyCandidate``s (more thunks or
-                # concrete options) sharing the same ``inner`` and ``match`` —
-                # cursor advance is deferred until a leaf actually resolves.
-                if lc.is_expandable():
-                    search.push(*lc.expand(), parent=token)
-                    continue
-                cand = lc.resolve()
-                step = None if cand.cursor.is_done else self._step(cand)
-            except (KeyboardInterrupt, SystemExit, GeneratorExit):
-                raise
-            except Exception as exc:  # noqa: BLE001 — broad by design; this is the tune dead-end sink
-                self._dropped_candidates += 1
-                search.reject(token)
-                logger.warning(
-                    "[tune] dropped un-lowerable candidate (%s: %s) — pruning branch, continuing search",
-                    type(exc).__name__,
-                    exc,
-                )
-                continue
-            if cand.cursor.is_done:
-                yield token, cand
-                continue
-            if step is None:
-                search.push(cand.lazy(), parent=token)
-                continue
-            match, options, structural = step
-            domain = _structural_domain(options) if structural else None
-            forks = [
-                LazyCandidate.from_option(
-                    inner=cand,
-                    cursor=replace(cand.cursor),
-                    match=match,
-                    option=opt,
-                    structural_domain=domain,
-                )
-                for opt in options
-            ]
-            search.push(*forks, parent=token, structural=structural)
 
 
 def _is_structural_option(option: object) -> bool:

@@ -25,10 +25,8 @@ from emmy.compiler.pipeline.pipeline import Run, _remember_structural_decision, 
 
 
 @pytest.fixture(autouse=True)
-def _isolated_prior(monkeypatch, tmp_path):
-    """Untrained prior file so any lazy prior load is deterministic; target
-    reset after each test."""
-    monkeypatch.setenv("EMMY_ONLINE_FILE", str(tmp_path / "prior.json"))
+def _reset_target():
+    """Target reset after each test."""
     yield
     target_mod.set_target(None)
 

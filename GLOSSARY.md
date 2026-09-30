@@ -286,19 +286,14 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Candidate** — One complete set of choices that the compiler could use.
 - **Greedy selection** — Choosing the candidate that currently appears best without exploring alternatives during
   normal compilation.
-- **MCTS (Monte Carlo tree search)** — A search method that treats decisions as a tree and balances trying promising
-  branches with exploring less-tested ones.
 - **Prior** — In Emmy, a ranker that estimates which schedule will be fast before the current candidate is measured.
-  The offline prior is fitted ahead of time (by `emmy fit`, on the golden dataset) and ships with the repo; the
-  online prior learns from collected measurements.
+  The offline prior is fitted ahead of time (by `emmy fit`, on the golden dataset) and ships with the repo; it
+  answers only where no measurement decides.
 - **Trainer** — The object that turns a dataset into a fitted model. It holds the settings of a fit — which features
   to use, how strong the regularizer is, which loss to minimize — and producing a model leaves those settings
   unchanged, so the same trainer can be used many times and answers the same way each time. Emmy has two
   offline-prior trainers, chosen by `emmy fit --trainer`: `LinearTrainer` produces a `LinearModel` (fixed weights
   over the features), and `CatBoostTrainer` produces a `CatBoostModel` (a ranker built from decision trees).
-- **Blend** — How Emmy's two priors are combined into one answer: which of them decides a compile's schedule, and how
-  the two are weighed against each other when the tuner chooses what to try next. Emmy has several, selected by
-  `EMMY_PRIOR_BLEND`, including single-prior ones used to measure one prior on its own.
 - **Candidate pool** — Every way one kernel could be scheduled. The members all compute the same result and differ
   only in speed, so they are the alternatives a tuning choice picks between. Ranking is always asked *within* a
   pool — the model puts one pool's candidates in order, and the question is where a good one landed. Candidates
@@ -330,17 +325,16 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   expression, a dim. Every IR class writes and reads its own wire through one mixin and one walker
   (`emmy/compiler/wire.py`), and a golden file is the wire of the classes that declare it.
 - **Working golden file** — A mutable local JSON inventory used to exchange program targets, unmeasured
-  realizations, proposed knob rows, and tune ranking feedback. It is search state; only its measured rows are
-  evidence, and only when a command names the file with `--golden PATH`.
+  realizations and proposed knob rows, and to hold what `run --bench --record` / `--record-greedy` measured. Only
+  its measured rows are evidence, and only when a command names the file with `--golden PATH`.
 - **Canonical golden file** — A reviewed per-GPU golden file. Model goldens live at
   `recipes/<model>/golden/<gpu-slug>_<compute-cap>.json`; the maintained model-agnostic golden records live under
-  `emmy/compiler/pipeline/search/golden/records/`. Every realization contains verified deployable measurements; `emmy
-  tune`
-  refuses to mutate these files directly. The files for the live card are the golden evidence an ordinary compile
-  reads.
-- **Evidence** — A compatible recorded measurement used to select between candidates: a reservoir row or a tune
-  database row — a measured golden row is imported into the tune database before a compile picks. Both are read by
-  one rule.
+  `emmy/compiler/pipeline/search/golden/records/`. Every realization contains verified deployable measurements; the
+  record writers refuse a canonical path, so a re-record works on a copy. The files for the live card are the golden
+  evidence an ordinary compile reads.
+- **Evidence** — A compatible recorded measurement used to select between candidates: a tune database row — a
+  `run --bench` writes its rows there, and a measured golden row is imported there before a compile picks. All are
+  read by one rule.
 - **Routing row** (*route row*, in older text) — The tune database's record of one kernel-set decision: the kernel
   it was offered on, the arm — a `PLACE` key, or a `REDUCE` value carrying a cross-CTA `g<n>` half — and the pieces
   it minted, one row per piece. A golden row that spells such a decision imports as routing rows. At that kernel's
@@ -352,9 +346,7 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   is the sum of the pieces' fastest measurements there — every piece measured, or the decision is unpriced.
 - **Strict evidence** — A compile mode (`--strict-evidence`, `EMMY_STRICT_EVIDENCE`) in which a fork no measured row
   decides is an error naming the kernel, instead of a prediction the prior makes.
-- **Reservoir** — The bounded sample of past measurements kept inside the online prior's checkpoint file. It is the
-  data that model trains on, and the measurements in it that were taken at deployable settings are also read directly
-  when compiling. - **Dataset DB** — A database with the tuning database's tables in a file of its own — the file
+- **Dataset DB** — A database with the tuning database's tables in a file of its own — the file
   every `emmy db` command names (`_data/dataset.db` in the examples), never the tuning database a compile reads —
   filled by `emmy db import` from measurement freezes, the golden files and tuning databases, and exported by `emmy db
   export` as the dataset the measurement-data readers (`emmy eval prior`, `emmy fit`) read. No compile reads either,
@@ -364,18 +356,16 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   `emmy db export` writes it from the dataset DB; `emmy fit` and `emmy eval prior` read it and nothing else.
 - **Measurement freeze** — A fixed snapshot of collected measurements, written as a golden file per GPU: each
   kernel's definition and its measured schedule rows, with the regime each was measured under and its median, and
-  nothing the compiler computed. The tuning database and the reservoir are local to one machine and are rewritten as
-  tuning continues, so a number computed over either cannot be checked by anyone else. A freeze is identical wherever
+  nothing the compiler computed. The tuning database is local to one machine and is rewritten as benches continue,
+  so a number computed over it cannot be checked by anyone else. A freeze is identical wherever
   it is read, which is what makes two models' scores a fair comparison and a reported score something a reader can
   reproduce, and `emmy db import` re-lowers every kernel from its definition, so a compiler change is a re-import.
   One kept with the repository is named on the import command line like any other source; none is at the moment.
 - **Deploy evidence hierarchy** — The fixed order in which an ordinary compile answers a tuning choice: measured
-  evidence first — the reservoir, then the tune database's rows, the golden rows in scope imported among them, the
-  fastest compatible row winning — then the prior's prediction, and last the rule's own first option. A structural
+  evidence first — the tune database's rows, the golden rows in scope imported among them, the fastest compatible
+  row winning — then the prior's prediction, and last the rule's own first option. A structural
   fork follows the same order over routing rows priced from their pieces, priced alternatives standing in for the
   prior.
-- **Calibration** — A check of whether a learned model ranks measured candidates well enough to influence
-  compilation.
 - **Regret** — What choosing by prediction costs, as a ratio to the best measured option: 1.00 means the choice was
   the fastest one available, 1.40 that it runs forty percent slower than something that was there. Reported over a
   set of candidates that were all actually measured, since the comparison needs the true best.
@@ -384,9 +374,7 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Golden rank** — Where a recorded golden configuration lands in the model's ordering of the candidates it
   competed against. A screen rather than a measure of speed: it says the model found a good configuration late,
   never how much slower the one it preferred actually runs.
-- **Quarantine** — The state in which an online model may continue learning but is not trusted to choose deployed
-  schedules.
-- **CatBoost** — The machine-learning library Emmy uses for its online schedule-ranking model.
+- **CatBoost** — The machine-learning library behind `CatBoostTrainer`, one of the two offline-prior trainers.
 - **SQLite** — A small database stored in one local file. Emmy uses it to persist tuning measurements.
 
 ## Common mathematical terms

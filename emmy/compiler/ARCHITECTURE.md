@@ -77,7 +77,7 @@ autotuning cache doesn't bust on cosmetic edits.
 | `pipeline/passes/tile/` | LoopOp → TileOp; **purely algebraic moveset, no specializations** (dispatch on fold algebra) | `pipeline/passes/ARCHITECTURE.md` |
 | `backend/`            | Execution (numpy / loop / cuda)         | `backend/ARCHITECTURE.md`    |
 | `loader/`             | Bind constants (safetensors / `nn.Module` → `input_data`) | —              |
-| `pipeline/search/`    | Autotune DB + MCTS tree (see below)     | `pipeline/ARCHITECTURE.md`   |
+| `pipeline/search/`    | Tune DB, evidence pick, prior           | `pipeline/ARCHITECTURE.md`   |
 | `structural.py`       | `Structural` protocol + `digest()` fold | —                            |
 | `provenance.py`       | Op provenance — map fused kernels back to original frontend ops | — (see below) |
 | `specialize.py`       | Bind named symbolic dimensions in persisted Torch/Loop programs before lowering | — |
@@ -111,7 +111,7 @@ autotuning cache doesn't bust on cosmetic edits.
   producer call sites need no change. An atomic symbolic `Dim` also carries a `hint` — its *expected*
   size (default `DEFAULT_SEQ_HINT=512`, set automatically so reconstruction can't lose it; an explicit
   `Dim(name, hint=...)` overrides). The hint is pure metadata (excluded from `==`/`hash`/structural keys),
-  read only by the tuner / partition planner to size tiles for a dynamic axis.
+  read only by the schedule enumeration / partition planner to size tiles for a dynamic axis.
   Graph JSON op fields use the same stable dimension wire mapping as Torch IR, so static, symbolic, and composite
   `Dim` values round-trip instead of depending on the scalar-only `Dim.value` compatibility property.
   Program specialization also binds the named string extents admitted by the `ReshapeOp.shape` and `SliceOp.shape`
@@ -122,7 +122,7 @@ autotuning cache doesn't bust on cosmetic edits.
   at any runtime `seq_len` — the grid (`ir/cuda/ir.py` `GridDimSpec` accepts an `Expr` factor, resolved via
   `Expr.eval` at launch) and the guard read the runtime value while the tile shape is tuned for the hint. The backend
   benches a symbolic graph at the hint when no real inputs are supplied (`Graph.symbolic_hints` /
-  `backend/cuda/program.py` `_resolve_symbolic`), so `tune` and `compile` agree on a hint-sized variant. (The masked
+  `backend/cuda/program.py` `_resolve_symbolic`), so a bench and a compile agree on a hint-sized variant. (The masked
   tensor-core / cooperative / split-K tiers for symbolic axes are part of the in-flight tile-IR rebuild — see
   `pipeline/passes/ARCHITECTURE.md` and the tile IR sources for current coverage.)
 - **`ElementwiseOp` inputs must already share the output shape.** The
@@ -190,7 +190,7 @@ constant and the f32 per-tensor scale (`weight_scale_2`) fuse into one f16 scale
 values, one scale per 16 along the last axis. The 256×2 byte-to-value-pair table is a `ConstantOp` whose
 `source_graph` computes it at bind time; `from_f4e2m1` decodes the code halves inside that subgraph. Like every
 other constant it declares its dtype by NAME, which is what lets a spelled graph round-trip through
-`Graph.to_dict()` — the form the serving-twin capture writes and `emmy tune` reads back.
+`Graph.to_dict()` — the form the serving-twin trace writes and a golden replay reads back.
 
 A contraction (the matmul-shaped node) consuming that cone reads two ways, both fork siblings on the tensor-core
 tier. The general one is the computed-B reading every producer cone gets: loop fusion merges the decode into the
@@ -332,7 +332,7 @@ It rides on one chokepoint: `Graph.splice` calls `provenance.propagate` with a `
 fragment node as a fresh piece of the consumed origins; fusion / lifting / optimization folds *aggregate* the consumed
 piece sets onto the merged node (unioning the dissolved producers so a multi-output splice drops nothing). Lowering is
 in-place `Op` rebinds, so prov rides through `LoopOp → TileOp → KernelOp → CudaOp` untouched. Seeded once at
-`Pipeline.tune_async` / `Pipeline.run` entry (idempotent); pure metadata, excluded from structural / cache keys.
+`Pipeline.run` entry (idempotent); pure metadata, excluded from structural / cache keys.
 Boundary sentinels (`InputOp`/`ConstantOp`) never carry prov: `put` refuses to stamp them and `propagate` scrubs splice
 outputs that land on one (the generic hint merge would otherwise copy prov onto e.g. the ConstantOp produced by the sm_90+
 weight-transpose fold, inflating `totals` so every kernel of that origin read partial coverage).

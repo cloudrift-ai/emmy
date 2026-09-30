@@ -2,7 +2,7 @@
 
 The attached onboarding task is the complete run request. Its fields are the only source of the model, hardware,
 credentials, and deadline; never select, substitute, or infer any of them, and never ask a question — a missing or
-ambiguous field is an immediate failure. The attached copies of the `onboard-model`, `tune-kernels`, and
+ambiguous field is an immediate failure. The attached copies of the `onboard-model` and
 `run-experiment` skills are authoritative over any older copy in the checkout.
 
 ## Task fields

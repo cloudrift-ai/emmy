@@ -55,7 +55,7 @@ tested elsewhere. So `serving/helpers.py` spells every shape the lane compiles i
 builds, `WRAPPERS` for the attention-split carves), `serving/regen.py` writes the golden covering exactly those, and the
 `built` / `build_runner` fixtures build inside `helpers.evidence_scope()`. Two properties follow, and both are the
 point: a replay costs a rebind instead of ~1M `schedule()` calls per model, and the compile no longer depends on the
-machine-local tune DB and online prior a cold pick resolves through. Strict evidence keeps the golden honest — a fork no
+machine-local tune DB a cold pick resolves through. Strict evidence keeps the golden honest — a fork no
 row decides raises `EvidenceError` naming the kernel, so a stale or partial golden fails loudly instead of quietly
 restoring the search. Regenerate with `python -m tests.serving.regen` when a shape changes or a new one joins a table.
 These unmeasured scalar schedules are scoped to the live card. Missing or stale schedules still fail strict evidence;

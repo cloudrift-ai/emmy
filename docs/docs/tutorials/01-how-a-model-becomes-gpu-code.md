@@ -100,8 +100,8 @@ So the compiler cannot simply pick. It has to have a way of knowing.
 When a rewrite rule has several correct answers, it returns **all** of them. That return is called a **fork**, and
 deciding forks is what most of Emmy's compiler machinery exists to do. There are two very different situations:
 
-- **`emmy tune` has a GPU and time to spend.** It can build kernels, run them, measure them, and remember what it
-  learned.
+- **`emmy run --bench` has a GPU and time to spend.** It can build kernels, run them, measure them, and record
+  what it measured.
 - **`emmy compile` and `emmy run` measure nothing.** An ordinary compile has to answer every fork immediately, from
   what was recorded earlier — and it may be running on a machine that has never measured anything at all.
 
@@ -112,7 +112,6 @@ The pages that follow work through that, in order:
 | [2. Passes and rewrite rules](./02-passes-and-rewrite-rules.md) | how one rewrite happens, and what the pipeline is made of |
 | [3. Forks and knobs](./03-forks-and-knobs.md) | how a choice is represented before anything is built |
 | [4. Measuring and recalling](./04-measuring-and-recalling.md) | the two ways a fork gets answered, and where knowledge is kept |
-| [5. Inside a tuning run](./05-inside-a-tuning-run.md) | what `emmy tune` actually does |
 | [6. The deploy evidence hierarchy](./06-deploy-evidence-hierarchy.md) | the fixed order an ordinary compile works down |
 | [7. Golden configurations](./07-golden-configurations.md) | the reviewed measurements that ship with the repository |
 | [8. Inside the prior](./08-inside-the-prior.md) | the model that ranks options when nothing was measured |

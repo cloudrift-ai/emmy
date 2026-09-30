@@ -13,9 +13,8 @@ metrics in :mod:`~..metrics`, the fold harness in :mod:`.cv`).
 
 **The objective.** ``QuerySoftMax`` over one group per pool: every pinned row is a positive (label 1.0) and the
 sampled negatives are 0.0. That is the loss shape the golden dataset actually has — *verified* rows only, no
-graded labels — and it is what the deployed ranking is: a softmax over one fork's candidates. The deployed
-:func:`~..base.normalize_policy` is that same softmax numerator, so the fitted objective and the deployed policy
-are the same function of the model's output. ``QuerySoftMax`` takes several positives per group as they are, so
+graded labels — and it is what the deployed ranking is: an argmin over one fork's candidates, the same order
+the softmax ranks by. ``QuerySoftMax`` takes several positives per group as they are, so
 a pool with more than one verified config needs no reshaping — and those siblings are then never drawn as
 negatives against each other, which is what labelling a verified-good config 0.0 used to do.
 

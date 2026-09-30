@@ -23,7 +23,6 @@ from emmy.commands.run import register_run_command
 from emmy.commands.serve import register_serve_command
 from emmy.commands.teardown import register_teardown_command
 from emmy.commands.trace import register_trace_command
-from emmy.commands.tune import register_tune_command
 from emmy.commands.vm import register_vm_command
 from emmy.logging_setup import setup_cli_logging
 
@@ -68,7 +67,6 @@ def main():
     register_pull_command(subparsers)
     register_trace_command(subparsers)
     register_compile_command(subparsers)
-    register_tune_command(subparsers)
     register_run_command(subparsers)
     register_generate_command(subparsers)
     register_inspect_command(subparsers)

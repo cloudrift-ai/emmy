@@ -18,7 +18,6 @@ from emmy.compiler.pipeline.search.golden import GoldenFile
 from emmy.compiler.pipeline.search.golden.repository import _file_gpu_name
 from emmy.compiler.pipeline.search.working_golden import (
     append_trace_inventory,
-    load_working_targets,
     write_trace_inventories,
     write_trace_inventory,
 )
@@ -260,9 +259,9 @@ def test_trace_inventory_replays_depthwise_conv1d_program(tmp_path) -> None:
 
     path = tmp_path / "conv1d.json"
     write_trace_inventory(graph, path, ctx=_TARGET_CTX)
-    document, targets = load_working_targets(path)
+    document = GoldenFile.load(path)
 
-    assert targets
+    assert document.records()
     expected = Conv1dOp(stride=1, padding=3, dilation=1, groups=8)
     assert all(record.origins == ("conv",) and record.program.nodes["conv"].op == expected for record in document.records())
 
@@ -385,9 +384,6 @@ def test_trace_inventory_embeds_loop_ir_when_frontend_provenance_is_missing(monk
     assert record.origins == ()
     assert isinstance(record.target_program.nodes["y"].op, LoopOp)
     assert record.structural_features["S_pw_relu"] == 1.0
-    _document, targets = load_working_targets(path)
-    assert len(targets) == 1
-    assert isinstance(targets[0].program.nodes["y"].op, LoopOp)
 
 
 def test_trace_inventory_stamps_the_card_its_context_is_for(tmp_path) -> None:

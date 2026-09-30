@@ -120,9 +120,9 @@ row.
 
 When the restamp leaves nothing, or drops the targets a deploy needs (a serving golden's twins):
 
-- **Still a maintained recipe** — the `onboard-model` skill re-traces and records the inventory on the card, and the
-  `tune-kernels` skill tunes and promotes the winners. Start from a fresh `emmy trace` inventory; the old file is
-  history, not a seed.
+- **Still a maintained recipe** — the `onboard-model` skill re-traces the inventory on the card, records it
+  (`emmy run --golden PATH --bench --record` / `--record-greedy`) and promotes the winners. Start from a fresh
+  `emmy trace` inventory; the old file is history, not a seed.
 - **A target regrouped into a bigger kernel** (a whole layer fused into one) — the unpinned greedy may hang on it.
   Loop fusion stays maximal, so the fix is a cut route, never a smaller region. Find one without scheduling:
   `emmy compile --golden PATH --realization NAME --ir tile --passes dolfnstp` under `EMMY_KNOBS="PLACE@<seam>=cut,…"`

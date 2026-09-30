@@ -58,7 +58,7 @@ class LaunchTime:
     ``time_ms`` is the median over ``samples`` (the canonical selection
     statistic — robust to single-iter outliers from host framing
     jitter). ``samples`` carries every measured per-iter latency in
-    ms so callers downstream (e.g. ``search.policy.terminal_bench``) can
+    ms so callers downstream (e.g. ``search.bench_record``) can
     compute min/max/mean/variance without re-running the bench."""
 
     idx: int
@@ -125,15 +125,6 @@ class Backend(ABC):
     # through. Distinct from a wall-clock cap so host framing
     # overhead doesn't artificially shrink the budget for tiny ops.
     _bench_run_timeout_s: float = 10.0
-    # Optional hard wall-clock cap on a single ``benchmark()`` call.
-    # When set, the call runs in a subprocess-isolated worker so the
-    # parent can SIGKILL the GPU process if a kernel keeps the device
-    # busy past the in-process per-launch / per-iter budgets (those
-    # budgets poll a completion event, which never trips on
-    # some hangs). Set this for autotune sweeps; leave ``None`` for
-    # interactive ``emmy run`` so on-iter callbacks and the
-    # parent's torch instance can be shared in-process.
-    _bench_wall_timeout_s: float | None = None
 
     @property
     def bench_compile_timeout_s(self) -> float:
@@ -142,10 +133,6 @@ class Backend(ABC):
     @property
     def bench_run_timeout_s(self) -> float:
         return config.bench_run_timeout_s(self._bench_run_timeout_s)
-
-    @property
-    def bench_wall_timeout_s(self) -> float | None:
-        return config.bench_wall_timeout_s(self._bench_wall_timeout_s)
 
     @abstractmethod
     def compile(self, graph: Graph) -> Any:

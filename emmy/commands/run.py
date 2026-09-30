@@ -670,8 +670,8 @@ def _run_golden_targets(args) -> None:
 
     Reached only by a bare ``--golden PATH``; naming one realization with ``--realization NAME``
     goes straight down the single-run path, which already thinks in the (file, name) pair. The
-    walk benches each name's verified rows or tune winner (``_explicit_realization`` false), so a
-    tuner's proposals are not benched as if they were recorded truths.
+    walk benches each name's verified rows (``_explicit_realization`` false), so proposals are not
+    benched as if they were recorded truths.
     """
     from copy import copy  # noqa: PLC0415
 
@@ -2643,7 +2643,7 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
 
         db = SearchDB.for_compile(backend.tune_db)
         logger.info("Using tuning DB: %s", backend.tune_db)
-    from emmy.compiler.pipeline.search.strategy.two_level import KernelInventory  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.inventory import KernelInventory  # noqa: PLC0415
 
     # Every kernel-set decision the greedy compile takes, as the splice watcher reports it: the tile
     # kernel the fork was offered on, the arm, and the graph ids the splice consumed and minted.
