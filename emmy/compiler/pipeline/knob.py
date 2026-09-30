@@ -552,6 +552,28 @@ def parse_knob_spec(raw: str) -> dict[str, str]:
     return out
 
 
+@contextmanager
+def scoped_knob_spec(raw: str):
+    """Apply an explicit knob spec for one sequential compile, restoring prior pins.
+
+    Like :meth:`Knob.pinned`, this is process-global and must not surround
+    concurrent compilations. It lets separate programs share base pins while
+    selecting a legal schedule for only one program's shape.
+    """
+    spec = parse_knob_spec(raw)
+    previous = {key: config.knob_raw(key) for key in spec}
+    try:
+        for key, value in spec.items():
+            config.set_knob(key, value)
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                config.unset_knob(key)
+            else:
+                config.set_knob(key, value)
+
+
 # Splat ``EMMY_KNOBS`` once at import so every later per-knob reader
 # (``config.knob_raw`` / ``config.int_env`` — knob.py is imported transitively
 # by every pipeline pass) sees the individual ``EMMY_<NAME>`` keys.

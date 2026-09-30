@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 import emmy.compiler.pipeline.knob as knob_mod
+from emmy import config
 from emmy.compiler.pipeline.knob import (
     Knob,
     KnobType,
@@ -16,10 +17,24 @@ from emmy.compiler.pipeline.knob import (
     format_tuning_knobs,
     is_off_value,
     pin_key_matches,
+    scoped_knob_spec,
     tuning_knob_items,
     values_equal,
 )
 from emmy.compiler.pipeline.search.features import is_warp, knob_features, mma_atom, tile_signature
+
+
+def test_scoped_knob_spec_restores_base_pins_after_compile_failure(monkeypatch):
+    monkeypatch.setenv(config.knob_var("STAGE@place_abc"), "")
+    monkeypatch.delenv(config.knob_var("TILE@place_abc"), raising=False)
+    assert config.knob_raw("TILE@place_abc") is None
+    with pytest.raises(RuntimeError, match="compile"):
+        with scoped_knob_spec("STAGE@place_abc=d2/smem-async,TILE@place_abc=mma"):
+            assert config.knob_raw("STAGE@place_abc") == "d2/smem-async"
+            assert config.knob_raw("TILE@place_abc") == "mma"
+            raise RuntimeError("compile")
+    assert config.knob_raw("STAGE@place_abc") == ""
+    assert config.knob_raw("TILE@place_abc") is None
 
 
 def test_int_parse():

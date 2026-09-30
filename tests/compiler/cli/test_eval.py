@@ -94,8 +94,8 @@ def test_eval_golden_requires_exact_mlp_checkpoint_provenance(monkeypatch, tmp_p
         golden,
         [
             {
-                "name": "mlp1@nvfp4.m1",
-                "bindings": {"num_tokens": 1},
+                "name": "mlp16@nvfp4.m16",
+                "bindings": {"num_tokens": 16},
                 "pins": {"FAST_MATH": False},
                 "knobs": {},
                 "measurements": {"emmy_us": 1.0, "reference_us": 1.0, "reference_backend": "torch"},
@@ -130,8 +130,8 @@ def test_eval_golden_requires_every_mlp_profile_graph(monkeypatch, tmp_path, cap
         golden,
         [
             {
-                "name": "mlp1@nvfp4.m1",
-                "bindings": {"num_tokens": 1},
+                "name": "mlp16@nvfp4.m16",
+                "bindings": {"num_tokens": 16},
                 "pins": {"FAST_MATH": False},
                 "knobs": {},
                 "measurements": {"emmy_us": 1.0, "reference_us": 1.0, "reference_backend": "torch"},
@@ -147,7 +147,7 @@ def test_eval_golden_requires_every_mlp_profile_graph(monkeypatch, tmp_path, cap
     monkeypatch.setattr(Context, "probe", staticmethod(lambda: ctx))
     monkeypatch.setattr(eval_cmd, "_emit_offer_audit", lambda _records: False)
     monkeypatch.setattr(
-        twins, "capture_serving_graphs", lambda source, serving: {"mlp1@nvfp4": object(), "mlp-sym-profile1@nvfp4": object()}
+        twins, "capture_serving_graphs", lambda source, serving: {"mlp16@nvfp4": object(), "mlp-sym-profile1@nvfp4": object()}
     )
 
     with pytest.raises(SystemExit) as exc:

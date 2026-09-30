@@ -76,19 +76,20 @@ def test_static_only_release_config_rejects_unsafe_warm_overrides(tmp_path, warm
         load_serving_config(path)
 
 
-def test_mlp_release_scope_has_static_one_and_symbolic_realizations(tmp_path):
+def test_mlp_release_scope_has_padded_static_and_symbolic_realizations(tmp_path):
     path = _release_config(
         tmp_path / "mlp.env",
         SERVE_COMPILE_SCOPE="mlp",
         SERVE_STATIC_ONLY="0",
         SERVE_MAX_NUM_BATCHED_TOKENS="64",
+        SERVE_DECODE_BUCKET="16",
         SERVE_PREFILL_CAPACITY="64",
     )
     serving = load_serving_config(path)
     assert serving.compile_scope == "mlp"
-    assert serving.static_widths == (1,)
+    assert serving.static_widths == (16,)
     assert {(row.name, row.bindings) for row in serving.realizations} == {
-        ("m1", (("num_tokens", 1),)),
+        ("m16", (("num_tokens", 16),)),
         ("dynamic", ()),
     }
 
@@ -101,7 +102,7 @@ def test_mlp_release_scope_rejects_wider_envelopes(tmp_path, field, value):
         tmp_path / "mlp.env",
         SERVE_COMPILE_SCOPE="mlp",
         SERVE_STATIC_ONLY="0",
-        **{"SERVE_MAX_NUM_BATCHED_TOKENS": "64", field: value},
+        **{"SERVE_MAX_NUM_BATCHED_TOKENS": "64", "SERVE_DECODE_BUCKET": "16", field: value},
     )
     with pytest.raises(ValueError, match="mlp scope"):
         load_serving_config(path)
@@ -119,10 +120,10 @@ def test_mlp_scope_capture_uses_checkpoint_and_bf16(monkeypatch, tmp_path):
         transformers.AutoConfig, "from_pretrained", lambda model, **kw: seen.update(config=(model, kw)) or SimpleNamespace(text_config=text)
     )
     monkeypatch.setattr(quant, "nvfp4_checkpoint_dir", lambda model, cfg, **kw: seen.update(checkpoint=(model, kw)) or tmp_path)
-    monkeypatch.setattr(mlp, "capture_mlp_graphs", lambda *args, **kw: seen.update(capture=(args, kw)) or {"mlp1@nvfp4": object()})
+    monkeypatch.setattr(mlp, "capture_mlp_graphs", lambda *args, **kw: seen.update(capture=(args, kw)) or {"mlp16@nvfp4": object()})
 
     graphs = capture_serving_graphs("org/model@abc", SimpleNamespace(compile_scope="mlp"))
-    assert set(graphs) == {"mlp1@nvfp4"}
+    assert set(graphs) == {"mlp16@nvfp4"}
     assert seen["config"] == ("org/model", {"revision": "abc"})
     assert seen["checkpoint"] == ("org/model", {"revision": "abc"})
     assert seen["capture"] == ((tmp_path, 128, 256, 2), {"dtype": "bfloat16"})

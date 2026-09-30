@@ -11,6 +11,7 @@ from pathlib import Path
 
 _PROJECTIONS = ("gate_proj", "up_proj", "down_proj")
 _LEAVES = ("weight", "weight_scale", "weight_scale_2", "input_scale")
+MLP_STATIC_ROWS = 16
 
 
 def checkpoint_keys(layer: int, *, prefix: str = "model") -> frozenset[str]:
@@ -109,8 +110,10 @@ def _validate_packed_profiles(groups: dict[tuple, list[int]], hidden: int, inter
             raise ValueError(f"MLP layer {members[0]} does not match the expected packed NVFP4 layout")
 
 
-def capture_mlp_graphs(model_dir: str | Path, hidden: int, intermediate: int, layers: int, *, dtype="bfloat16"):
-    """Capture the static M=1 and symbolic MLPs with runtime's trace and spellers."""
+def capture_mlp_graphs(
+    model_dir: str | Path, hidden: int, intermediate: int, layers: int, *, dtype="bfloat16", static_rows: int = MLP_STATIC_ROWS
+):
+    """Capture the padded static decode and symbolic MLPs with runtime's trace and spellers."""
     import torch
 
     from emmy.compiler.loader.quant import spell_quantized_constants, spell_static_fp4_activations
@@ -125,7 +128,7 @@ def capture_mlp_graphs(model_dir: str | Path, hidden: int, intermediate: int, la
         layer = members[0]
         module = logical_mlp(hidden, intermediate, td)
         keys = parameter_keys(module, layer, prefix=prefix)
-        for label, rows, argnames in (("mlp1", 1, None), ("mlp-sym", 8, ["x"])):
+        for label, rows, argnames in ((f"mlp{static_rows}", static_rows, None), ("mlp-sym", 8, ["x"])):
             graph = trace_split(module, [torch.zeros(rows, hidden, dtype=td)], argnames)
             _retarget_constants(graph, module, keys)
             if not spell_quantized_constants(graph, str(model_dir)):
@@ -140,20 +143,28 @@ def capture_mlp_graphs(model_dir: str | Path, hidden: int, intermediate: int, la
 class MLPPrograms:
     """Per-layer constants with one shared activation arena and compilation cache."""
 
-    def __init__(self, model_dir: str | Path, hidden: int, intermediate: int, layers: int, *, dtype, capacity: int = 64):
+    def __init__(
+        self, model_dir: str | Path, hidden: int, intermediate: int, layers: int, *,
+        dtype, capacity: int = 64, static_rows: int = MLP_STATIC_ROWS,
+    ):
         import numpy as np
         import torch
 
+        from emmy import config
         from emmy.compiler.backend.cuda.program import BufferArena
         from emmy.compiler.backend.plan_cache import PlanTemplateCache
+        from emmy.compiler.pipeline.knob import scoped_knob_spec
         from emmy.serving.gen_runner import _compile_split
 
         if capacity < 2:
             raise ValueError(f"MLP capacity must be at least 2, got {capacity}")
+        if static_rows < 1:
+            raise ValueError(f"MLP static rows must be positive, got {static_rows}")
         if dtype not in (torch.bfloat16, torch.float16):
             raise ValueError(f"MLP dtype must be bfloat16 or float16, got {dtype}")
         self.hidden = hidden
         self.capacity = capacity
+        self.static_rows = static_rows
         self.dtype = dtype
         self.programs = []
         arena = BufferArena()
@@ -176,16 +187,17 @@ class MLPPrograms:
                 ckpt=ckpt,
                 plan_cache=plan_cache,
             )
-            one, _ = _compile_split(
-                module,
-                [torch.zeros(1, hidden, dtype=dtype)],
-                None,
-                np_dtype,
-                dev_consts=constants,
-                arena=arena,
-                ckpt=ckpt,
-                plan_cache=plan_cache,
-            )
+            with scoped_knob_spec(config.mlp_static_knobs()):
+                one, _ = _compile_split(
+                    module,
+                    [torch.zeros(static_rows, hidden, dtype=dtype)],
+                    None,
+                    np_dtype,
+                    dev_consts=constants,
+                    arena=arena,
+                    ckpt=ckpt,
+                    plan_cache=plan_cache,
+                )
             self.programs.append((one, sym))
             del module
 

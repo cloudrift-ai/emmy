@@ -123,7 +123,7 @@ def test_lazy_download_happens_before_resolving_and_exact_keys_are_filtered(adap
     assert loaded == {"model.language_model.layers.0.self_attn.q_proj.weight"}
     assert model.stock_names == list(loaded)
     assert seen["args"] == ("/vllm-cache/snapshot", 2, 4, 1)
-    assert seen["kwargs"] == {"dtype": torch.bfloat16, "capacity": 64}
+    assert seen["kwargs"] == {"dtype": torch.bfloat16, "capacity": 64, "static_rows": 16}
     assert model._emmy_mlp_programs is not None
 
 
