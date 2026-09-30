@@ -7,8 +7,8 @@ configuration (stock vLLM, vLLM+emmy, vLLM+emmy FAST_MATH); the labeled outputs 
 agreement within noise and against the model's published score.
 
 Requires the `eval` extra (`pip install -e '.[eval]'`) and a serving endpoint that answers
-`<base-url>/completions`. Uses lm-eval's Python API (`lm_eval.simple_evaluate`) rather than the CLI:
-it returns the results dict directly — no output-directory discovery and re-parsing of the CLI's
+`<base-url>/completions` (`/chat/completions` with `--chat`). Uses lm-eval's Python API (`lm_eval.simple_evaluate`)
+rather than the CLI: it returns the results dict directly — no output-directory discovery and re-parsing of the CLI's
 timestamped results file — and lets us pin all three harness seeds in one call. lm-eval is imported
 lazily inside main() so this module imports (for tests) without lm-eval installed.
 

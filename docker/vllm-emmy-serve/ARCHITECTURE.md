@@ -182,10 +182,12 @@ the same cubins and the standard-lane pack never exists.
   the config env, `EMMY_PACK_DIR` and `HF_HUB_OFFLINE=1`, entrypoint `serve.sh`. The caches live at **`/opt/emmy`**
   on purpose: compose/recipes bind-mount the host HF cache over `/root/.cache/huggingface`, which would shadow
   anything baked there. The baked `HF_HOME` + `HF_HUB_OFFLINE=1` pair is also the signal `emmy deploy` reads
-  (`orchestrate._baked_hf_cache`): an image that declares itself self-contained keeps its own `HF_HOME` in the
+  (`orchestrate.baked_hf_cache`): an image that declares itself self-contained keeps its own `HF_HOME` in the
   generated compose and skips the download step entirely. Deploy used to override `HF_HOME` unconditionally, which
   hid the baked snapshot while offline mode stayed on — the download then failed outright and no deploy from a
-  prebuilt image was possible.
+  prebuilt image was possible. `emmy bench` runs its client in the same image and, for a recipe that pins a revision,
+  names that snapshot as the client's tokenizer: the baked cache holds no branch ref, so a lookup by repo id finds
+  nothing offline.
 - `verify.sh` — compares the image's baked `SERVE_REVISION` against the config's (a tag built from an older config
   serves different weights and still passes every check below), then cold-starts the **baked** image with no token,
   issues one completion, and diffs the cubin file set before/after: an empty diff proves 100% Emmy cache hit. It
