@@ -797,6 +797,10 @@ def dedup_loads(stmts: Body) -> Body:
         out: list[Stmt] = []
         for original in body:
             rebound = frozenset(name for name in original.defines() if counts[name] > 1)
+            if isinstance(original, (Accum, Init)) and original.name not in reductions:
+                rebound |= frozenset(original.defines())
+            if isinstance(original, Load) and original.carried:
+                rebound |= frozenset(original.defines())
             if rebound:
                 invalidate(frozenset(), rebound)
                 alias = {name: value for name, value in alias.items() if name not in rebound and value not in rebound}

@@ -115,6 +115,21 @@ def test_cse_does_not_alias_distinct_unseeded_accumulators() -> None:
     assert dedup_loads(body) == body
 
 
+def test_cse_partial_state_changes_invalidate_dependent_values() -> None:
+    body = Body((Loop(axis=Axis("k", 8), body=(
+        Assign(name="before", op="exp", args=("sum",)),
+        Accum(name="sum", value="x", axes=("k",)),
+        Assign(name="after", op="exp", args=("sum",)),
+        Write(output="out", index=(Var("k"),), value="after"),
+    )),))
+    assert dedup_loads(body) == body
+
+
+def test_cse_does_not_reuse_a_staged_load_assignment() -> None:
+    body = Body((Load(name="value", input="x", index=ZERO), Load(name="value", input="x", index=ZERO, carried="load")))
+    assert dedup_loads(body) == body
+
+
 def test_normalization_closes_simplification_cse_and_invariant_motion() -> None:
     """An equal gather index exposes a constant predicate, then an invariant shared cone."""
     body = Body((
