@@ -182,11 +182,7 @@ __launch_bounds__(256) void k_rms_norm_reduce(const float* x, const float* p_wei
 ## Fit the offline prior
 
 The offline prior is the cold-start ranker a compile falls back on where nothing was measured. It is fitted on the
-golden files, GPU-free, and ships in the repo as `emmy/compiler/pipeline/search/prior/weights/offline.json`. The data
-passes through a DB the goldens are imported into and the dataset exported from it — a `manifest.json` you can read,
-beside one matrix file per pool — which the fit and the report read. Every path is named on the command line and
-nothing has a default, so a refit never touches the tune DB a compile reads; the examples keep everything under
-`_data/` in the checkout, which git ignores.
+golden files, GPU-free, and ships in the repo as `emmy/compiler/pipeline/search/prior/weights/offline.json`.
 
 ```bash
 # 1. Load the hardware goldens into a DB of their own (--fresh: it then holds exactly these files)
@@ -198,16 +194,9 @@ emmy fit _data/dataset emmy/compiler/pipeline/search/prior/weights/offline.json
 # 4. Where each golden row now ranks among the candidates its kernel offers, under the shipped weights
 emmy eval prior _data/dataset
 ```
- `emmy fit` writes the weights where it is told and a metrics file under `_tune/fits/<timestamp>-linear/`; two fits
-are compared by diffing their metrics files, and the dataset's manifest names the DB, the golden files (by digest),
-the sample and the compiler commit it was exported under. `emmy db export --pool-sample 0` enumerates whole candidate
-pools instead of 2000 rows per pool; `emmy fit --folds 0` skips the cross-validation for a quick fit, and `--trainer
-catboost` fits the tree model instead of the linear one. Any golden-shaped source joins the import the same way: the
-recipe goldens (`recipes/*/golden/*.json`) would add every model's measured rows, a tune DB
-(`~/.cache/emmy/autotune.db`) adds what this machine measured, a freeze directory adds a snapshot from another card.
-The hardware goldens alone are the documented set today; the recipe goldens are the first thing to add when the prior
-needs more shapes. Re-export and refit after any featurizer change: a dataset or an artifact from another feature
-version is refused at load, never guessed at.
+
+Additionally, `emmy fit` writes a metrics file under `_tune/fits/<timestamp>-linear/`; two fits
+are compared by diffing their metrics files.
 
 ## Benchmark
 
