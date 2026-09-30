@@ -84,7 +84,7 @@ def test_restamp_rewrites_the_golden_onto_the_fresh_lowering(golden, caplog):
 
 def test_restamp_demotes_a_measurement_when_source_compile_fails(golden, monkeypatch):
     _make_stale(golden)
-    monkeypatch.setattr("emmy.compiler.pipeline.search.restamp._kernel_sources", lambda *_: None)
+    monkeypatch.setattr("emmy.compiler.pipeline.search.golden.restamp._kernel_sources", lambda *_: None)
     handle_golden_restamp(Namespace(paths=[str(golden)]))
     document = GoldenFile.load(golden)
     row = next(row for entry in document.configs for row in entry.realizations if row.name == "matmul.square.512")

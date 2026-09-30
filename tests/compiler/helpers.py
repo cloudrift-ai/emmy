@@ -273,7 +273,7 @@ def loop_target(graph, origins, loops: list[dict], compute_cap=(12, 0)) -> dict:
     interned into ``loops``, with ``origins`` beside it as provenance — what the recorder writes."""
     from emmy.compiler import provenance  # noqa: PLC0415
     from emmy.compiler.context import Context  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.working_golden import lowered_kernels  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import lowered_kernels  # noqa: PLC0415
     from emmy.compiler.wire import intern  # noqa: PLC0415
 
     lowered = graph.copy()

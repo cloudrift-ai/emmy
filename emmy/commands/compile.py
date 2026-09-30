@@ -230,7 +230,7 @@ def resolve_golden_arg(args) -> None:
     if getattr(args, "dynamic", None):
         logger.error("--dynamic is incompatible with --golden (a dynamic golden's spec is part of its config)")
         sys.exit(2)
-    from emmy.compiler.pipeline.search.golden import GoldenEntryState, GoldenFile, golden_records, goldens_for_live_gpu
+    from emmy.compiler.pipeline.search.golden import GoldenEntryState, GoldenFile, GoldenRecords, golden_records, goldens_for_live_gpu
 
     # Canonical replay scopes to the live card as before. An explicit working file is
     # intentionally literal: no repository union and no live-card filtering, because its
@@ -276,7 +276,7 @@ def resolve_golden_arg(args) -> None:
         sys.exit(2)
     args._golden_graph = matches[0].target_program.copy()
     args._golden_reference = matches[0].reference_program
-    args._golden_records = [record for record in records if record.target_key == matches[0].target_key]
+    args._golden_records = GoldenRecords(record for record in records if record.target_key == matches[0].target_key)
     pinned = matches
     if document is not None:
         states = {row.name: row.kernel_set_state(entry.realizations) for entry in document.configs for row in entry.realizations}
@@ -350,17 +350,17 @@ def golden_row(record, records=()):
     deploy evidence.
 
     A record listing a ``kernel_set`` usually carries no row of its own, so its pin comes from the
-    routing rows it lists (:func:`~emmy.compiler.pipeline.search.golden.kernel_set_pins`, resolved
+    routing rows it lists (:meth:`~emmy.compiler.pipeline.search.golden.GoldenRecords.kernel_set_pins`, resolved
     against ``records``). Those arms ride the row's ``pins`` beside the input regime, and the bench
     publishes both: the compile then reaches the kernel set the recording measured, rather than
     whatever the unpinned fork picks under the realization's name."""
     from types import SimpleNamespace  # noqa: PLC0415
 
     from emmy.compiler.pipeline.search.dataset import Sample  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden import kernel_set_pins  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import GoldenRecords  # noqa: PLC0415
 
     sample = vars(Sample.from_golden(record))
-    arms = kernel_set_pins(record, records)
+    arms = GoldenRecords.of(records).kernel_set_pins(record)
     if arms:
         sample["pins"] = {**sample["pins"], **arms}
     return SimpleNamespace(**sample, record=record)
@@ -584,7 +584,7 @@ def handle_compile(args):
     db = SearchDB.for_compile(tune_db_path)
     logger.info("Using tuning DB: %s", tune_db_path)
 
-    from emmy.compiler.pipeline.search.golden import records_override, shared_regime_pins  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import GoldenRecords, records_override  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
 
     # A selected golden's records are the golden evidence this compile deploys from; their shared
@@ -592,7 +592,7 @@ def handle_compile(args):
     # the named realization records are pinned so the compile takes the kernel set it describes.
     scope = getattr(args, "_golden_records", None) or None
     with (
-        pinned_knobs({**shared_regime_pins([sample.record for sample in args.golden_configs] or scope or []), **selected_decisions(args)}),
+        pinned_knobs({**GoldenRecords([sample.record for sample in args.golden_configs] or scope or []).shared_regime_pins(), **selected_decisions(args)}),
         records_override(scope),
         config.strict_evidence_override(True if args.strict_evidence else None),
     ):
@@ -642,7 +642,7 @@ def wire_stage(graph, stage: str) -> str:
     if stage == "torch":
         return program_text(graph)
     if stage == "loop":
-        from emmy.compiler.pipeline.search.working_golden import kernel_programs  # noqa: PLC0415
+        from emmy.compiler.pipeline.search.golden import kernel_programs  # noqa: PLC0415
 
         return kernel_pool_text(program.to_wire() for _, program in kernel_programs(graph))
     logger.error("a .json output holds the wire a golden stores, which exists for --ir torch and --ir loop only")

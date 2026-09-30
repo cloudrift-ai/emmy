@@ -601,7 +601,7 @@ def test_post_schedule_receipt_does_not_steer_an_unowned_peer(monkeypatch) -> No
         **{key: value for key, value in fields.items() if key != "name"},
     )
 
-    replay = _replay(receipt, siblings=(lead,), lead=lead)
+    replay = _replay(receipt, (lead,), lead=lead)
 
     assert evidence_row_vouches(replay.realized[post_identity], dict(target_row))
     assert evidence_row_vouches(replay.realized[peer_identity], dict(peer_row))
@@ -822,7 +822,7 @@ def test_a_recorded_kernel_set_deploys_the_cut_every_entry_spells(monkeypatch) -
     assert sum(1 for name in routed if "__place_" in name) == 1, f"the parent's entry deploys its one seam: {routed}"
 
     cuts = [replace(parent, name=f"sdpa.piece{i}", knobs={"PLACE": "cut"}, identity=identity) for i, identity in enumerate(pieces)]
-    leaves = sorted(_replay(parent, siblings=tuple(cuts), lead=parent).kernels)
+    leaves = sorted(_replay(parent, cuts, lead=parent).kernels)
     leaf_receipts = [replace(parent, name=f"sdpa.leaf{i}", knobs={}, identity=identity) for i, identity in enumerate(leaves)]
     composed = _deploy_kernels([parent, *cuts, *leaf_receipts])
     assert sum(1 for name in composed if "__place_" in name) >= 2, f"every recorded seam must be cut: {composed}"
