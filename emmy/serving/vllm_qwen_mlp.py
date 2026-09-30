@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import logging
 from itertools import chain
 
@@ -63,6 +64,10 @@ class EmmyQwen35MlpModel(Qwen3_5ForConditionalGeneration):
             old = layer.mlp
             layer.mlp = _CompiledMLP(index, self)
             del old
+        # vLLM linear parameters retain bound weight-loader methods. Those form
+        # cycles back to the displaced MLP modules, whose packed GPU placeholders
+        # must be collected before Emmy allocates its own packed weight buffers.
+        gc.collect()
         torch.cuda.empty_cache()
         self._emmy_model = model.model
         self._emmy_revision = model.revision

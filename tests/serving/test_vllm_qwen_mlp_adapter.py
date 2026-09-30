@@ -3,6 +3,7 @@
 import importlib
 import sys
 import types
+import weakref
 from types import SimpleNamespace
 
 import pytest
@@ -25,6 +26,9 @@ def adapter(monkeypatch):
             self.language_model.model.layers = nn.ModuleList([nn.Module()])
             layer = self.language_model.model.layers[0]
             layer.mlp = nn.Linear(2, 2, device="meta")
+            # Match vLLM's Parameter -> bound weight_loader -> module cycle.
+            layer.mlp.weight._weight_loader = layer.mlp.forward
+            self.old_mlp_ref = weakref.ref(layer.mlp)
             layer.self_attn = nn.Linear(2, 2, device="meta")
 
         def load_weights(self, weights):
@@ -78,6 +82,7 @@ def test_stock_module_ownership_is_preserved(adapter):
     assert layer.self_attn.__class__ is nn.Linear
     assert all("mlp." not in name for name, _ in model.named_parameters())
     assert "owner" not in layer.mlp._modules
+    assert model.old_mlp_ref() is None
     with pytest.raises(RuntimeError, match="have not been bound"):
         layer.mlp(torch.zeros(1, 2, dtype=torch.bfloat16))
 
