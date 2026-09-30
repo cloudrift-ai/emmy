@@ -28,7 +28,7 @@ SMOKE_TIMEOUT = 600
 SMOKE_INTERVAL = 10
 
 
-async def _baked_hf_cache(run_cmd, image):
+async def baked_hf_cache(run_cmd, image):
     """The image's own HF cache directory, when it ships one — else None.
 
     A prebuilt per-model serving image (``docker/vllm-emmy-serve/``) bakes the model
@@ -203,7 +203,7 @@ async def run_deploy(
     # write had to happen before the pull, which is what `docker compose pull` reads).
     baked = set()
     for image in dict.fromkeys(service.recipe.engine.llm.image for service in services):
-        baked_hf_home = await _baked_hf_cache(run_cmd, image)
+        baked_hf_home = await baked_hf_cache(run_cmd, image)
         if baked_hf_home:
             logger.info(f"Image {image} ships its model cache at {baked_hf_home} (offline) — skipping download")
             baked.add(image)

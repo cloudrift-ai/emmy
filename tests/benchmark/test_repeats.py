@@ -68,6 +68,29 @@ def test_each_repeat_draws_fresh_prompts():
     assert seeds(_recipe(1)) == [None]
 
 
+def test_a_baked_offline_image_gets_its_pinned_snapshot_as_the_client_tokenizer():
+    # The client runs in the serving image; a baked image's offline cache has no branch ref to resolve a repo id.
+    def client_calls(recipe, image_env):
+        calls: list[str] = []
+
+        async def fake_run_cmd(command, stream=True, timeout=600):
+            if command.startswith("docker image inspect"):
+                return 0, image_env, ""
+            calls.append(command)
+            return 0, _stanza(100.0, 50.0), ""
+
+        asyncio.run(run_benchmark_workload(fake_run_cmd, recipe))
+        return calls
+
+    pinned = _recipe(2)
+    pinned.model.revision = "abc123"
+    baked = "HF_HOME=/opt/emmy/hf\nHF_HUB_OFFLINE=1\n"
+    snapshot = "--tokenizer /opt/emmy/hf/hub/models--google--gemma-4-12B-it/snapshots/abc123 "
+    assert all(snapshot in call for call in client_calls(pinned, baked))
+    assert not any("--tokenizer" in call for call in client_calls(pinned, "HF_HOME=/root/.cache/huggingface\n"))
+    assert not any("--tokenizer" in call for call in client_calls(_recipe(2), baked))
+
+
 def test_run_benchmark_workload_fails_on_failed_repeat():
     async def fake_run_cmd(command, stream=True, timeout=600):
         return 1, "boom", "err"

@@ -59,7 +59,7 @@ def generate_compose(services: list[Service], model_dir, hf_token, load_balancer
     8080 in front of all of them. Nothing declares ``depends_on``: the orchestrator starts the
     services in the order their GPUs allow and polls each one itself.
 
-    ``baked_images``: the images that ship their own HF cache (see ``_baked_hf_cache``).
+    ``baked_images``: the images that ship their own HF cache (see ``baked_hf_cache``).
     Setting HF_HOME on such an image would hide the snapshot it baked in, so the override is
     dropped and the image's own value stands — UNLESS the engine args name a model beyond the
     baked one (a ``--speculative-config`` drafter): the baked cache holds only the one snapshot
