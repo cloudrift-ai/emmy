@@ -135,7 +135,7 @@ loop under the one name, while a name the replicated TAIL defines that is spelle
 states is renamed apart first (`_unshadowed`): both would take the same cell suffix and land on that cell's
 accumulator, two declarations of one name in one scope, and a tail that recomputes the carrier's own fold has
 exactly that shape (a cone that reads one fold through two edges lowers it twice as EQUAL statements instead, which
-the seam and the computed-B fill collapse to the first — `stmt.body.dedup_recomputes` — before any replication);
+`Body.coalesce` keeps the first while assembling the lowering and the seam, before any replication);
 anything else tiles nothing and folds one thread per
 output cell (the degenerate `op.lower()` + `with_store`) — except a kernel whose ONLY work is a free output sweep,
 which distributes that sweep across its `WORK` threads through the same `_lane_close` a cooperating reduce uses for
@@ -276,9 +276,13 @@ supplies only the slab drain leaf via `_AtomOps.staged_drain` (the shared inner 
 `_staged_inner_atom_loop` — `ldmatrix` on modern atoms, paired wide loads or a cooperative gather on Volta — or the
 scalar `_scalar_drain`, or the warp-group drain `_wgmma_drain` on a `wgmma` atom: no operand fragments, one
 matrix descriptor per operand and k16 step, one `WgmmaMma` per group of N/8 accumulator cells, the chunk closed
-by a commit and a wait so the ring slot may be released; the four warps of a group emit the same descriptors,
-addressing the slot's 64-row block `64·(warp/4)`, and the hardware hands warp `i` rows `16i..16i+15` of it, which
-is the m16n8 row the epilogue expects at `f1`. The descriptor geometry follows the slab: a K-major slab (A, or a
+by a commit and a wait so the ring slot may be released (under `STAGE` `/p2` the wait leaves that group running,
+and the ring's refill moves past the next chunk's barrier, one chunk later: `_in_flight_kloop`, and the release is
+one chunk late on the producer band too; the last chunk waits its group out inside the loop, because ptxas moved the
+epilogue's accumulator reads above a wait placed after an unrolled loop); the four warps of a group emit the same
+descriptors, addressing the slot's 64-row block `64·(warp/4)`, and the hardware hands warp `i` rows `16i..16i+15` of
+it, which is the m16n8 row the epilogue expects at `f1`.
+The descriptor geometry follows the slab: a K-major slab (A, or a
 transposed B) has one 128-byte swizzle row per tile row, so core groups are `8·bk·2` bytes apart; an N-contiguous
 B is MN-major (`trans_b`) and **atom-major** (`Operand.atoms`, `_MmaOps.b_atoms`): the N tile's 64-element swizzle
 atoms stack along the slab rows, each its own `bk` K rows, so the slab's row is one swizzle row under the plain
@@ -305,14 +309,18 @@ apply the resolved facts verbatim. The `Stage` choice names the intermediate sto
 (gmem→register on a materialized operand, register-to-register on a computed one) — and spells two buffering levels:
 `d<depth>` is the gmem→smem ring — **chunks in flight**, whatever holds them: registers on the blocking copy, the
 commit group on cp.async, the mbarrier-phased box on TMA;
-`p<reg_depth>` is the smem→register double-buffer (the fragment-load ping-pong over the inner atom-K steps). The two
+`p<reg_depth>` is the smem→register double-buffer (the fragment-load ping-pong over the inner atom-K steps; a
+`wgmma` drain loads no fragments, so there it counts the MMA groups in flight, above). The two
 are independent, and so is the transport, so `stage_moves` offers their PRODUCT rather than a hand-picked list —
 `Stage.available_on` drops what the card cannot issue, the resolvers cap what a shape cannot size, and measured
 evidence ranks the rest. Staging is a
 **pure perf transform** — an ineligible kernel (masked N, or a symbolic / non-divisible K on a BYTE-COPIED
 operand, whose chunk runs along K; a transposed B stages N-major on every transport since the serving-layout work)
 silently falls back to gmem-direct, and a staged kernel is
-**bit-identical** to its gmem-direct baseline. A synchronous `smem` ring uses the same slot rotation, and overlaps the
+**bit-identical** to its gmem-direct baseline. A cp.async copy of an A-slab row past a masked M edge keeps its
+clamped address but copies zero bytes and zero-fills (`CpAsyncCopy.valid`): clamped reads all landed on the edge's
+last row, and a 96-row A100 tile over 512 rows spent 23 µs on a 16 µs GEMM contending for it.
+A synchronous `smem` ring uses the same slot rotation, and overlaps the
 drain the only way a target without `cp.async` can: the blocking copy SPLITS across it. The fill issues the prefetch
 chunk's global loads into registers, the resident chunk drains, and the deposit stores those registers into the
 prefetch slot — one barrier per chunk, since the slot it writes was freed two chunks back. The split is
@@ -402,11 +410,14 @@ and clamping only its start still copies past the extent. A **multi-channel prod
 them off the node) fills one B slab per channel, drains N mma chains off the ONE ldmatrix'd A fragment into
 per-channel C fragments (`_fold_frag`), and the projection (SwiGLU) combines the channels per element in the store's
 epilogue `Lambda` (`extra_frags`). Materialized A copies into the same single A slab; computed A evaluates into it. A
-computed A has only the synchronous compute fill, as anywhere else; a materialized one stages through whichever
-transport the card offers, each depositing the same `1 + N` slabs — so the gate/up GEMM rings on cp.async and reaches
-the TMA box copy, and with it wgmma. Only the gmem-direct MMA leaf stays single-channel, because it folds one B
+computed A always takes the synchronous compute fill, as anywhere else, while its stored B slabs copy beside it with
+cp.async (`smem`) or TMA box copies (`smem-tma`, depths 1 and 2, with or without `/p2`); a materialized A stages
+through whichever transport the card offers, each depositing the same `1 + N` slabs — so the gate/up GEMM rings on
+cp.async and reaches the TMA box copy, and with it wgmma. Only the gmem-direct MMA leaf stays single-channel, because it folds one B
 straight out of registers. The block-scaled fp4 cell carries N channels the same way, staging `2 + 2N` slabs over the
-one shared A pair, and names each channel's block-scale fragment per channel just as its data fragment is.
+one shared A pair, and names each channel's block-scale fragment per channel just as its data fragment is. Its
+slabs ring on either copy transport. Under TMA each stored buffer is its own descriptor, and a box ends at the
+buffer's K dim: an activation's scales carry a trailing unit dim, which as the box's inner dim would be one byte wide.
 
 **A gmem fragment's leading dimension is read off the operand's ADDRESS.** A loader reaches its operand through one
 leading dimension: one coordinate steps by 1, the other by `ldm`. Which DIM an index spells a coordinate in does not
@@ -520,7 +531,9 @@ The two also compose differently with the scale fill. cp.async rides INSIDE the 
 peer, because both are issued by the same threads under one CTA barrier. A TMA copy is armed on an mbarrier by one
 elected thread and waited on by parity, which no compute fill folds into — so the packed TMA form is TWO operand
 groups over one drain segment (`pipelined_kloop` already schedules a list of them): the box copies ring at the
-stage's depth, the compute-filled scale slab stays single-buffer.
+stage's depth, the compute-filled scale slab stays single-buffer. A computed activation beside TMA-copied f16 weights
+is the same two groups, with the activation slab as the compute-filled one. Neither takes a producer band: the band
+splits a single TMA group across warps, and the compute fill has no such split.
 
 Uniform TMA fills cross from generic shared-memory accesses to the asynchronous proxy. Before arming the transaction,
 `mbarrier_arrive_expect_tx` emits `fence.proxy.async.shared::cta`, making barrier initialization visible and ordering
@@ -540,7 +553,8 @@ count 1) and arms + box-copies the prefetch chunk. The **compute** band parity-w
 ONE elected thread releases the slot — `mbarrier_arrive`'s `fence.proxy.async` orders the band's GENERIC slab reads
 before the producer's next ASYNC box copy into the slot (without it the refill overtakes in-flight reads; silent
 corruption under scheduling pressure). `SetMaxNReg` redistributes registers between the bands when the raised total
-fits the 64K regfile. Stores are guarded to the compute band (`grid_tile`), and the launch/`__launch_bounds__`
+fits the 64K regfile and both bands are whole warp groups (it is a warp-group instruction; a `+p1` producer beside two
+consumer groups hung the H100). Stores are guarded to the compute band (`grid_tile`), and the launch/`__launch_bounds__`
 account for the aux band (`Tile.aux_threads`). Accuracy-gated, not bit-identical — the split changes scheduling.
 
 The **scalar** contraction tier stages too, under the same `STAGE` codec, through the **same** `_staged` driver — the
@@ -684,10 +698,28 @@ modern atoms, two B `x2` loads become one `x4` (plain for N-adjacent transposed 
 B). On Volta, adjacent A or B fragments under the derived crosswise/congruous layouts become one 128-bit shared load.
 Copy fills and computed operand fills use these same coupled layouts and accumulator mapping.
 The transform halves the staged drain's LSU instructions and is bit-identical; equal modern swizzle modes remain
-pairable because their per-lane address XOR commutes with the paired lane map;
+pairable because their per-lane address XOR commutes with the paired lane map. A ring drain's row carries its slot term
+and its fragment offset in one `+` chain, so the pair's row distance is read off the literals of the whole chain;
+`097_widen_fragment_stores` stores four N-adjacent fragment cells of a `wgmma` kernel as one 16-byte row per lane
+(`RegStore.run`): each cell's epilogue runs as before, then three `shfl.xor` rounds transpose the quad's packed column
+pairs so lane `t` holds cell `t`'s eight columns — a quarter of the stores, every sector whole (on the H100 the
+four-byte stores cost the Qwen3-0.6B s512 layer about 3.5 µs); unguarded, non-atomic, unswizzled cells only, and a
+destination the render finds not 16-bit keeps the four ordinary stores;
 `110_drop_redundant_syncs` collapses the defensive `Sync`s the
 cooperative / shared-row templates emit (body-level only — a slab `Smem` decl flags `smem_seen`, so a load-bearing
 prologue `Sync` is correctly retained; `with_bodies` preserves the cooperative tile's `block_threads`).
+
+`045_merge_select_loads` and `047_reuse_lane_loads` keep a cooperative row's reads to one per cell. A concatenation
+lowers to a coordinate `Select` whose branches read the same buffers at different offsets, each clamped in range; when
+the two branches' private chains are one computation up to their load indices (and at most one unary op on top of one
+branch — RoPE's rotate-half negation), `045` emits the chain once with each load at `cond ? index_a : index_b`, the
+branches' own clamps folded against `cond`. `047` then unrolls every lane-strided loop of at most eight trips (a
+cooperative reduce's fold and its full-row projection: a 128-wide row at 32 lanes is four) and drops each load of a
+read-only buffer at an index an earlier load of the same body already read, compared after folding against the lane
+ranges. The projection reads the values the fold loaded, and a partner read resolves to another trip of the same lane.
+Both are structural and carry no knob: they change no schedule and no identity, only the emitted body. Every kernel
+buffer parameter is `__restrict__` (a launch's output never shares memory with its inputs), which lets nvcc keep
+read-only operands in registers across the kernel's stores and read them through the non-coherent path.
 
 `090_guard_reductions` propagates coordinate demand backward through pure scalar expressions and selects. A scalar
 reduction whose result is read only under an enclosing-coordinate predicate becomes a zero-trip loop elsewhere.

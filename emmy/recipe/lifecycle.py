@@ -7,6 +7,9 @@ BEST_EFFORT_TAG = "best-effort"
 OBSOLETE_TAG = "obsolete"
 ONBOARDING_TAG = "onboarding"
 UNTESTED_TAG = "untested"
+#: Not a lifecycle state: the last onboarding or verification attempt failed. It sends the recipe to the back of the
+#: nightly queue until a successful run removes it.
+ONBOARDING_FAILED_TAG = "onboarding-failed"
 
 LIFECYCLE_TAGS = frozenset({MAINTAINED_TAG, BEST_EFFORT_TAG, OBSOLETE_TAG, ONBOARDING_TAG})
 DISABLED_TAGS = frozenset({OBSOLETE_TAG, ONBOARDING_TAG})

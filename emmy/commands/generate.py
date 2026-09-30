@@ -36,6 +36,12 @@ def register_generate_command(subparsers):
     native.add_argument("--native-pack", metavar="DIR", help="Generate with a prepared Rust artifact")
     parser.add_argument("--prefill-size", type=int, default=None, help="Native export chunk width (default: 16; 1 disables chunking)")
     parser.add_argument("--context-length", type=int, default=None, help="Native export context capacity (default: 4096)")
+    parser.add_argument(
+        "--page-tokens",
+        type=int,
+        default=None,
+        help="Tokens of KV cache per page for the native export (default: the whole context, i.e. one page)",
+    )
     parser.add_argument("--capture", action="store_true", help="Replay native token steps as a CUDA graph")
     parser.add_argument("--timeout", type=float, help="Native worker operation deadline in seconds (default: 120)")
     parser.add_argument("--revision", help="Checkpoint and tokenizer revision")
@@ -103,8 +109,14 @@ def handle_generate(args):
             raise ValueError("timeout must be finite and positive")
     if args.capture and not args.native_pack:
         raise ValueError("capture requires --native-pack")
-    if (args.golden or args.strict_evidence or args.context_length is not None or args.prefill_size is not None) and not args.export_native:
-        raise ValueError("compiler evidence, context capacity, and prefill size require --export-native")
+    if (
+        args.golden
+        or args.strict_evidence
+        or args.context_length is not None
+        or args.page_tokens is not None
+        or args.prefill_size is not None
+    ) and not args.export_native:
+        raise ValueError("compiler evidence, context capacity, page size and prefill size require --export-native")
     if args.export_native:
         import torch
         from transformers import AutoModelForCausalLM
@@ -121,6 +133,7 @@ def handle_generate(args):
                 model,
                 args.export_native,
                 context_length=MAX_CONTEXT if args.context_length is None else args.context_length,
+                page_tokens=args.page_tokens,
                 eos_ids=eos,
                 prefill_size=args.prefill_size,
             )

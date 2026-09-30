@@ -651,5 +651,5 @@ def sample_config_multi():
                 },
             }
         },
-        "_num_instances": 2,
+        "deploy": {"gpu": "NVIDIA H100 80GB", "gpu_count": 8},
     }

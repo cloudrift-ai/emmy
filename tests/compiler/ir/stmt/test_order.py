@@ -155,6 +155,21 @@ def test_kahn_tie_break_is_optional() -> None:
     assert body.topological_order(incoming, lambda _index, stmt: stmt.op.name) == Body(reversed(body))
 
 
+def test_materialization_does_not_render_unambiguous_subtrees(monkeypatch) -> None:
+    from emmy.compiler.ir.stmt import order
+
+    body = Body((Load("value", "X", ()), Assign("result", "exp", ("value",)), Write("Y", (), "result")))
+    for level in range(16):
+        body = Body((Loop(Axis(f"i{level}", 4), body),))
+    labeling = order.relation_graph(body).label()
+
+    def unexpected(_value):
+        raise AssertionError("statement shapes already determine the order")
+
+    monkeypatch.setattr(order, "form", unexpected)
+    assert labeling.materialize(spelled=True)[0] == body
+
+
 def test_effect_constraints_keep_only_intervening_resource_hazards() -> None:
     writes = Body(Write(output="X", index=(), value=f"value_{index}") for index in range(100))
     incoming = ordering_constraints(writes, effects=True)

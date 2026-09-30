@@ -74,6 +74,33 @@ def test_normalize_body_dedups_loads_and_rewires_gather_indices() -> None:
 ZERO = (Literal(0, "int"),)
 
 
+def test_dedup_loads_closes_commutative_chains_after_aliasing() -> None:
+    """An alias that reverses sorted operands must not hide the rest of a duplicate chain."""
+    body = Body(
+        (
+            Load(name="z", input="X", index=ZERO),
+            Load(name="a", input="X", index=ZERO),
+            Load(name="m", input="Y", index=ZERO),
+            Assign(name="z1", op="multiply", args=("m", "z")),
+            Assign(name="a1", op="multiply", args=("a", "m")),
+            Assign(name="z2", op="add", args=("m", "z1")),
+            Assign(name="a2", op="add", args=("a1", "m")),
+            Assign(name="left", op="subtract", args=("m", "z1")),
+            Assign(name="right", op="subtract", args=("a1", "m")),
+            Write(output="O", index=ZERO, value="a2"),
+            Write(output="L", index=ZERO, value="left"),
+            Write(output="R", index=ZERO, value="right"),
+        )
+    )
+
+    out = dedup_loads(body)
+
+    assert [stmt.name for stmt in out if isinstance(stmt, Assign)] == ["z1", "z2", "left", "right"]
+    assert out[-4] == Assign(name="right", op="subtract", args=("z1", "m"))
+    assert out[-3] == Write(output="O", index=ZERO, value="z2")
+    assert dedup_loads(out) == out
+
+
 def test_dedup_loads_does_not_capture_a_rebinding_inner_scope() -> None:
     """A nested scope re-binding a deduped name binds a DIFFERENT variable — the outer alias must
     stop there, or the loop is handed a redeclaration of the survivor and the wrong arithmetic."""

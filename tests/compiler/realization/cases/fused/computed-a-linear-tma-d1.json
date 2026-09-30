@@ -1,0 +1,13 @@
+{"compute_cap": [12, 0],
+ "note": "A fused x + 1 activation in front of one stored weight, at depth one: the weight's single TMA slot is filled and waited on in the same step as the compute threads fill the activation. The compute fill used to offer no TMA stage.",
+ "programs": [
+  {"inputs":["x"],"outputs":["linear"],"nodes":[{"id":"add_c1","op":"constant","attrs":{"name":"add_c1","value":1.0},"outputs":[["add_c1","f16",[1]]]},{"id":"add_c1_bc","op":"tensor.index_map","attrs":{"out_shape":[16,256],"sources":[{"input_idx":0,"coord_map":["0"]}]},"inputs":["add_c1"],"outputs":[["add_c1_bc","f16",[16,256]]]},{"id":"p_b_weight","op":"constant","attrs":{"name":"p_b_weight","source_path":"b.weight","source_shape":[96,256],"source_dtype":"float16"},"outputs":[["p_b_weight","f16",[96,256]]]},{"id":"x","op":"input","outputs":[["x","f16",[16,256]]]},{"id":"add","op":"tensor.elementwise","attrs":{"op":"add"},"inputs":["x","add_c1_bc"],"outputs":[["add","f16",[16,256]]]},{"id":"linear","op":"torch.linear","inputs":["add","p_b_weight"],"outputs":[["linear","f16",[16,96]]]}]}
+ ],
+ "configs": [
+  {"program": 0, "target": {"loop": 0, "origins": ["add", "add_c1_bc", "linear"]}, "realizations": [
+   {"name": "k_linear_ceab81", "pins": {"FAST_MATH": false, "PLACE": "fuse"}, "knobs": {"WORK": "w1x2", "TILE": "mma_m16n8k16_f16_f32/f2x2/k2", "REDUCE": "", "STAGE": "d1/smem-tma", "RASTER": ""}, "identity": "5811069f1916f243ce8b99b3a062f02e2834b1472cfe202f2c4f636c052cb098"}
+  ]}
+ ],
+ "loops": [
+  {"inputs":["x"],"outputs":["linear"],"nodes":[{"id":"add_c1","op":"constant","attrs":{"name":"add_c1","value":1.0},"outputs":[["add_c1","f16",[1]]]},{"id":"linear_wt","op":"constant","attrs":{"name":"p_b_weight","load_ops":[{"torch.transpose":{"axes":[-2,-1]}}],"source_path":"b.weight","source_shape":[96,256],"source_dtype":"float16"},"outputs":[["linear_wt","f16",[256,96]]]},{"id":"x","op":"input","outputs":[["x","f16",[16,256]]]},{"id":"linear","op":"loop","attrs":{"body":[{"Load":{"names":["in0"],"input":"add_c1","index":["0"]}},{"Loop":{"axis":{"name":"a0","extent":16},"body":[{"Loop":{"axis":{"name":"a1","extent":96},"body":[{"Loop":{"axis":{"name":"a2","extent":256},"body":[{"Load":{"names":["in1"],"input":"linear_wt","index":["a2","a1"]}},{"Load":{"names":["in2"],"input":"x","index":["a0","a2"]}},{"Assign":{"name":"v0","op":"add","args":["in0","in2"]}},{"Assign":{"name":"v1","op":"multiply","args":["in1","v0"],"dtype":"f32"}},{"Accum":{"name":"acc0","value":"v1","axes":["a2"]}}]}},{"Write":{"output":"linear","index":["a0","a1"],"values":["acc0"]}}]}}]}}],"name":"k_linear_ceab81"},"inputs":["add_c1","x","linear_wt"],"outputs":[["linear","f16",[16,96]]]}]}
+ ]}

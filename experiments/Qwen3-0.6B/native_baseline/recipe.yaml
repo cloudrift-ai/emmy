@@ -26,7 +26,7 @@ command:
     sha256sum $$EMMY_GOLDEN_FILE > $task_dir/golden.txt
     stock=
     if [ "$lane" = stock ]; then stock=--stock; fi
-    ./venv/bin/emmy serve $$model --generate $$stock --revision $$revision \
+    ./venv/bin/emmy serve $$model --runner generate $$stock --revision $$revision \
       --host 127.0.0.1 --port 8127 --dtype float16 --max-model-len 4096 \
       --gpu-memory-utilization 0.6 --max-num-seqs 4 --max-num-batched-tokens 256 \
       --no-enable-prefix-caching --attention-backend TRITON_ATTN \

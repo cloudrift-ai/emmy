@@ -8,8 +8,8 @@ tags:
 
 model:
   huggingface: "deepseek-ai/DeepSeek-V4-Flash-0731"
-  rationale: "OR rank 5 open-weight, 9.77T tokens/wk +16%; solid current DeepSeek flash demand."
-  heat: 72
+  rationale: "Steady OpenRouter volume, but attention concentrated in newer V4.1 variant; moderate current interest."
+  heat: 60
   revision: 7872f01b1d1fe23eabc4c98b48bffcef5a386062
   task: generate
 

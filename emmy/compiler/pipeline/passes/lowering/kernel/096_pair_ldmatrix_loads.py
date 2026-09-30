@@ -93,17 +93,17 @@ def _walk(body: Body) -> tuple[Body, bool]:
     return Body(tuple(paired)), True
 
 
-def _split(e: Expr) -> tuple[Expr | None, int | None]:
-    """``e`` as ``base + constant`` (``base`` None for a bare literal), or ``(e, None)`` when no
-    constant tail is recognizable — callers compare bases by frozen-dataclass equality."""
-    if isinstance(e, Literal):
-        return None, int(e.value)
+def _split(e: Expr) -> tuple[tuple[str, ...], int]:
+    """``e`` as the terms of its ``+`` chain and the sum of their integer literals. The literal can
+    sit anywhere in the chain: a ring drain's row is ``slot * rows + (warp_row + 8)``, which a
+    top-level ``base + constant`` split never sees. Terms compare by their rendered form, order
+    free."""
     if isinstance(e, BinaryExpr) and e.op == "+":
-        if isinstance(e.right, Literal):
-            return e.left, int(e.right.value)
-        if isinstance(e.left, Literal):
-            return e.right, int(e.left.value)
-    return e, 0
+        (lt, lc), (rt, rc) = _split(e.left), _split(e.right)
+        return tuple(sorted(lt + rt)), lc + rc
+    if isinstance(e, Literal) and isinstance(e.value, int):
+        return (), e.value
+    return (repr(e),), 0
 
 
 def _delta(a: Expr, b: Expr) -> int | None:
@@ -117,9 +117,7 @@ def _delta(a: Expr, b: Expr) -> int | None:
         if isinstance(diff, Literal) and isinstance(diff.value, int):
             return diff.value
     (ab, ac), (bb, bc) = _split(a), _split(b)
-    if ab == bb and ac is not None and bc is not None:
-        return bc - ac
-    return None
+    return bc - ac if ab == bb else None
 
 
 def _candidate(s: Stmt) -> bool:

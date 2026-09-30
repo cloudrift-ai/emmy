@@ -1,7 +1,7 @@
 """Loop IR → Tile IR, as three passes.
 
 ``tile/lift`` peels the outer parallel axes and mechanically converts every remaining reduction loop
-to a ``Fold``; a carried state lifts onto a serial launch axis over a state buffer. Its ``020_twisted``
+to a ``Fold``; a carried state lifts to a fold that carries it (``Fold.cells``). Its ``020_twisted``
 fuses every reduce that reads a reduce into the twisted carrier a recipe recognizes
 (``ir/pure/twist.py``). ``tile/cut`` runs to a fixpoint: it first offers the maximal fused tree beside
 every closed stored Fold-edge cut, then the unsplit tree beside every cross-CTA reduce split the head

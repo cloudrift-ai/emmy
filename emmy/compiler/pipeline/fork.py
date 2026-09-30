@@ -98,10 +98,7 @@ class Fork(ABC):
 
     def leaves(self) -> Iterator[Op | Graph | Fork]:
         """Stream complete descendants without retaining the expanded tree."""
-        if self.is_leaf:
-            yield self
-        else:
-            yield from iter_leaves(self.expand())
+        yield from iter_leaves((self,))
 
     def admits(self, row: Mapping) -> bool:
         """Whether a knob ``row`` — complete, or partial with the undecided knobs absent — can lie
@@ -239,7 +236,9 @@ class _ScheduleFork(Fork):
             else:
                 continue
             have = str(value)
-            if have and want != have and not want.startswith((have + "/", have + "+")):
+            # A cooperative reduce's ``t<coop>`` grows to the packed ``t<coop>x<cells>`` at the kernel site.
+            grows = (have + "/", have + "+", have + "x") if family == "WORK" and "x" not in have else (have + "/", have + "+")
+            if have and want != have and not want.startswith(grows):
                 return False
         return True
 
@@ -280,10 +279,17 @@ def exact_schedule_leaf(
 
 
 def iter_leaves(options: Iterable[Op | Graph | Fork]) -> Iterator[Op | Graph | Fork]:
-    """Yield complete leaves depth-first without retaining the expanded tree."""
-    for option in options:
-        if isinstance(option, Fork):
-            yield from option.leaves()
+    """Yield complete leaves depth-first without retaining the expanded tree or Python stack."""
+    stack = [iter(options)]
+    while stack:
+        try:
+            option = next(stack[-1])
+        except StopIteration:
+            stack.pop()
+            continue
+        if isinstance(option, Fork) and not option.is_leaf:
+            descendants = option.expand() if type(option).leaves is Fork.leaves else option.leaves()
+            stack.append(iter(descendants))
         else:
             yield option
 

@@ -53,7 +53,7 @@ def kind(node) -> str:
     it carries, a bilinear planar fold is an ``inner``."""
     if node.axis is None:
         return "map"
-    if node.observe is not None:
+    if node.observe is not None or node.carries:
         return "scan"
     view = node.as_reduction()
     if view is not None and view.twisted:

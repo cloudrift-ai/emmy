@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from functools import singledispatch
 
 from emmy.compiler.ir.axis import Axis, extend_simplify_ctx
@@ -99,11 +100,10 @@ def rewrite(stmt: Stmt, rename: Rename, sigma: Sigma = Sigma.IDENTITY, axis_fn: 
 
 @_rewrite_kind.register
 def _(s: Load, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
-    return Load(
+    return replace(
+        s,
         names=tuple(rename(n) for n in s.names),
-        input=s.input,
         index=tuple(_rename_ssa_vars_in_expr(sigma.apply(e), rename) for e in s.index),
-        dtype=s.dtype,
     )
 
 
@@ -254,12 +254,12 @@ def rename_free(stmt: Stmt, alias: Mapping[str, str]) -> Stmt:
     """
     if not alias:
         return stmt
-    renamed = rewrite(stmt, lambda nm: alias.get(nm, nm), Sigma.IDENTITY, _axis_identity)
     bodies = stmt.nested()
+    shell = stmt.with_bodies(tuple(Body() for _ in bodies)) if bodies else stmt
+    renamed = rewrite(shell, lambda nm: alias.get(nm, nm), Sigma.IDENTITY, _axis_identity)
     if not bodies:
         return renamed
-    # ``rewrite`` just descended into the child scopes under the full alias. Redo each one with the
-    # names that scope re-binds pruned out, and put those bodies back.
+    # Rewrite each child once, with only the aliases its scope does not rebind.
     inner = []
     for b in bodies:
         pruned = {k: v for k, v in alias.items() if k not in b.ssa_defs}
@@ -280,7 +280,7 @@ def simplify(stmt: Stmt, ctx: SimplifyCtx) -> Stmt:
 
 @simplify.register
 def _(s: Load, ctx: SimplifyCtx) -> Stmt:
-    return Load(names=s.names, input=s.input, index=tuple(e.simplify(ctx) for e in s.index), dtype=s.dtype)
+    return replace(s, index=tuple(e.simplify(ctx) for e in s.index))
 
 
 @simplify.register

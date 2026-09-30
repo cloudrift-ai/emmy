@@ -23,9 +23,10 @@ error.
 | --- | --- |
 | `axis` | reduction axis; `None` for the root pointwise projection |
 | `lift` | pure per-element `Lambda`; nested reductions occupy their original structural position here |
-| `init` / `combine` | componentwise monoid read mechanically from the loop's `Accum` statements |
+| `init` / `combine` | componentwise monoid read mechanically from the loop's `Accum` statements; for a carried state the seed (a constant or a buffer name) and the action `next` |
 | `operands` | explicit materialized or computed inputs used by later transforms |
 | `observe` | optional per-step observer — the scan spelling: a pure `λ(k, state…)` evaluated after each combine |
+| `cells` | a carried state's cell axes in the order every carrier read indexes them — the Loop IR `Carry` index |
 
 `Fold.defines()` exposes the fold results to its containing lambda. This is what lets later statements in an SDPA
 cell read the maximum, denominator, or nested QK result without extracting or relocating any subtree.
@@ -41,15 +42,41 @@ only kernel-boundary `OutputSpec` writes consume, and the streamed store reconst
 the observer stmts (`observed_result_names` + the `observed=` reconstitution arm). An observed fold makes the stream
 order-visible, so the schedule offers exactly the serial reduce plan and the cross-CTA split fork declines it.
 
-A recurrence is spelled with the kernel's **serial axes** (`Placement.serial`) and a **lagged read**. The lift
-keeps the ordered step axis separate from the grid and represents the state with a buffer the kernel owns.
-A read takes the previous step (`S[c − 1, …]`, or the seed at the first step). A kernel without a serial axis may
-not read its own outputs. The step stays an ordinary `Fold` tree, including contractions over other state cells.
+A recurrence is a fold that **carries a state** (`Fold.carries`): its ⊕ is the action `next` — the state becomes
+what the step computed — on every component, and its `cells` are the state's coordinates in the order the Loop IR
+`Carry` indexes them, batch and cell alike. A recurrence folds the free monoid of step maps under composition, a
+real monoid, but the composed map has a bounded form only for a closed family (an affine step composes as a
+matmul), so the term stores that ⊕'s action on the seed, the one form every step has; `next` has no identity, so
+every partition arm refuses the fold by the gate it already applies and it lowers as the serial walk. The step
+reads the carrier at other cells through **carrier reads**: a slab over one `Pre` (`Fold.carrier_read`, recognized
+by `as_carrier_read()` beside `as_slab()`) binding the state, the carrying axis and the cell coordinates, so a
+contraction over the previous state (`Σ_k W[i,k] · pre S[k,j]`) is an ordinary nested fold whose B is the carrier.
+A per-step output is a further result of the lift — a `<value>__obs` copy of what the step defines or an operand
+exposes, or a pass-through of a value an output sweep beside the cells computes — stored inside the loop.
+`Fold.lower` opens the carrying loop outside the loops over the cells, with a nest of its own for the step's
+sweeps; the closed program is the Loop IR the roll wrote.
 
-The classic schedule realizes that axis as ordered launches with a global state buffer. The register schedule
-realizes it as a loop inside each CTA when the state rows are independent. Private state buffers disappear during
-materialization; externally read snapshots remain global outputs. Both schedules preserve previous-state reads
-until the step has finished evaluating its outputs. The domain and choices are described in
+A carried state has one kernel-set decision, the **split across the sequence** (`REDUCE@…/scan=g<n>k`, offered
+by `030_cut` through `_split.realize_carry_split`). It needs the step AFFINE in the state and column-wise
+(`Fold.affine`: every carrier read keeps the cell's own coordinate at every position but one), because then a
+part's steps compose as an affine map `S ← A·S + b`, read off two walks of the part from known seeds — zero gives
+`b`, the identity packed along the kept cells gives `A` beside it — with no symbolic knowledge of the step. Three
+kernels, each lifted from Loop IR like the walk: the probe (both walks of every part, the state stored per step),
+the prefix (the state carried across the parts by their maps, each part's start stored), and the walk itself over
+each part's range from its start, one part per batch cell. Three walks of a part where the sequence took one, for
+`n` times the parallelism; whether that pays is evidence's decision. A step that is not affine (the forward
+substitution) offers nothing and stays one kernel.
+
+The classic schedule realizes the carrying loop as ordered launches with a global state buffer: at its fork it
+lifts the kernel's Loop IR again with the state as a buffer the node owns and the loop as the kernel's **serial
+axis** (`Placement.serial`, `lift_serial`), each launch reading the previous launch's stores one step back. That
+form is a realization of the kernel, not another kernel: the kernel keeps the lifted tile's identity, the one its
+fork and its golden rows name. The state's cells are its axes alone, so a size-one dim the Loop IR spelled `0` holds
+no cell; a seed tensor keeps that dim, and both schedules read it with `0` there (`seed_index`). The
+register schedule reads the carrying fold itself and realizes the loop inside each CTA when the state rows are
+independent; the state's port, added at the lift for the classic realization, disappears during materialization,
+and externally read snapshots remain global outputs. Both preserve previous-state reads until the step has
+finished evaluating its outputs. The domain and choices are described in
 [`ir/schedule/ARCHITECTURE.md`](../schedule/ARCHITECTURE.md).
 
 ## Total lift
@@ -61,7 +88,10 @@ until the step has finished evaluating its outputs. The domain and choices are d
 3. build the `lift`, `init`, and `combine` directly from those accumulators;
 4. a per-step `Write` over the carried state (the `025_lift_scan` shape) peels into an observer — the fold gains
    `observe` with fresh `<state>__obs` results, and the store, rewritten to read the observed name, rides the stream
-   position after the node, where output-spec extraction claims it as an ordinary boundary write.
+   position after the node, where output-spec extraction claims it as an ordinary boundary write;
+5. a loop that carries a state (`Loop.carries`) lifts to a fold folding the action `next`: the chain of loops
+   down to the `Carry` gives `cells`, each `Carry` a state whose lift result is its value and whose seed is the
+   fold's `init`, each `Pre` a carrier-read slab, and a free loop beside the chain stays an output sweep of the step.
 
 There is no SDPA matching, byte-identity recognition gate, softmax pairing, fused view, or raw-loop fallback at this
 boundary. Unsupported non-canonical Loop IR fails loudly. Kernel placement is a later fork over this complete tree.
@@ -131,13 +161,14 @@ operand reading the axis is the first — the coordinate is that contraction's o
 work per cell whatever the placement says, and a statistic evaluated ahead of the sweep beside them is cheap against
 it. Every reduce in the term reading the axis is the second: each cell folds its own, so binding the axis replicates
 none of them. A term with NO reduce satisfies that second ground vacuously, and then it promotes only where the
-placement has no free axis at all — a kernel with no free axis launches one block whatever it does, so its shared
-sweep is the only axis the launch could spread over. Where the placement already has an axis, a bare elementwise sweep
-stays a sweep: the kernel materializer distributes exactly that across a worker inventory, and binding it here would
-decide for the schedule that measured the alternative (`cases/reduce/rms-norm-cut-sweep-work.json`, 885.9 us walked in
-one thread against 4.2 us split across 512). The complement is what the reduce clause protects: a reduce that does NOT
-read the axis is the row's statistic, evaluated once for the whole sweep, and binding the sweep would recompute it per
-output element, which is why softmax's maximum and rms-norm's sum of squares keep their loops.
+placement launches one block — no free axis, or only static extent-one ones (a decode row) — and whatever it does, its
+shared sweep is then the only axis the launch could spread over. Where the placement already has an axis, a bare
+elementwise sweep stays a sweep: the kernel materializer distributes exactly that across a worker inventory, and
+binding it here would decide for the schedule that measured the alternative
+(`cases/reduce/rms-norm-cut-sweep-work.json`, 885.9 us walked in one thread against 4.2 us split across 512). The
+complement is what the reduce clause protects: a reduce that does NOT read the axis is the row's statistic, evaluated
+once for the whole sweep, and binding the sweep would recompute it per output element, which is why softmax's maximum
+and rms-norm's sum of squares keep their loops.
 
 A sibling output nest's axis is never promoted, however many contractions read it: the other nests do not ride it, so
 promoting it would evaluate them once per cell — DeepSeek-V4 post4096's residual root holds four sibling nests, and

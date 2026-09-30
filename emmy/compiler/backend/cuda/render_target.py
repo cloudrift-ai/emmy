@@ -74,7 +74,14 @@ _INTRINSIC_F32: dict[str, str] = {
     "erf": "erff",
 }
 
+# The rounding binary ops spell ``_rn``: cuda_fp16.h's ``+`` / ``*`` are ``__hadd`` / ``__hmul``, which
+# nvcc may contract into one ``fma`` across statements, rounding a multiply-add once where the source
+# program rounded each op. RoPE's ``q*cos + rotate_half(q)*sin`` came out one f16 step off eager in
+# a sixth of its outputs that way. ``_rn`` rounds every op, as torch's per-op kernels do.
 _INTRINSIC_F16: dict[str, str] = {
+    "add": "__hadd_rn",
+    "subtract": "__hsub_rn",
+    "multiply": "__hmul_rn",
     "exp": "hexp",
     "exp_fast": "hexp",
     "log": "hlog",
@@ -90,6 +97,9 @@ _INTRINSIC_F16: dict[str, str] = {
 # ``h2`` / ``__h*2`` form. Used when an Init / Accum / Assign carries
 # dtype = F16x2 (paired by the ``070_pack_fp16_pairs`` pass).
 _INTRINSIC_F16x2: dict[str, str] = {
+    "add": "__hadd2_rn",
+    "subtract": "__hsub2_rn",
+    "multiply": "__hmul2_rn",
     "exp": "h2exp",
     "log": "h2log",
     "sqrt": "h2sqrt",

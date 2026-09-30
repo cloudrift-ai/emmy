@@ -13,7 +13,7 @@ from collections.abc import Sequence
 
 import pytest
 
-from emmy.compiler.pipeline.fork import DeferredFork, Fork, Level, build_fork_tree
+from emmy.compiler.pipeline.fork import DeferredFork, Fork, Level, build_fork_tree, iter_leaves
 
 
 def _row(a: int, b: int, c: int) -> dict:
@@ -70,6 +70,35 @@ def test_deferred_structural_leaf_materializes_only_when_selected() -> None:
     assert made == []
     assert leaf.expand() == ["graph"]
     assert made == ["built"]
+
+
+def test_leaf_walk_does_not_use_the_python_call_stack() -> None:
+    """Maximal fused layers can have more schedule sites than Python's recursion limit."""
+
+    class Chain(Fork):
+        knobs = {}
+
+        def __init__(self, depth: int):
+            self.depth = depth
+
+        def expand(self):
+            return [Chain(self.depth - 1)] if self.depth else [DeferredFork(lambda: "op")]
+
+    (leaf,) = iter_leaves([Chain(2_000)])
+    assert leaf.is_leaf
+    assert list(Chain(2_000).leaves())[0].is_leaf
+
+
+def test_iter_leaves_preserves_the_branch_complete_row_stream() -> None:
+    """An exhaustive walk reads a branch's rows directly instead of rebuilding its grouping."""
+
+    def reject_grouping(row: dict) -> tuple:
+        raise AssertionError(f"exhaustive traversal regrouped {row}")
+
+    params = [_row(1, 2, 3), _row(2, 3, 4)]
+    tree = build_fork_tree(params=params, levels=[Level(("A",), reject_grouping)], materialize=_stub_materialize)
+
+    assert [leaf.knobs for leaf in iter_leaves([tree])] == params
 
 
 def test_empty_params_raises():

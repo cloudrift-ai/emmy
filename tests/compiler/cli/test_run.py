@@ -299,6 +299,15 @@ def test_run_ab_requires_bench(run_cli):
     assert "--ab requires --bench" in (stdout + stderr)
 
 
+def test_run_ab_sweep_below_the_bench_standard_fails_before_any_work(run_cli):
+    """A sweep exists to leave its rows in the tune DB; below the bench standard it records none, and a
+    record run that copies that DB then falls to the prior without a word. So the run refuses up front,
+    naming the standard, unless ``--no-record-evidence`` says the sweep only measures."""
+    rc, stdout, stderr = run_cli("run", "--code", "torch.zeros(4)", "--bench", "--ab", "BM=8", "--warmup", "3", "--iters", "10")
+    assert rc == 2
+    assert "below the tune bench standard (--warmup >= 5, --iters >= 20)" in (stdout + stderr)
+
+
 def test_run_json_rejects_a_directory_for_one_target(run_cli, tmp_path):
     """One target writes one FILE, and it writes it last.
 
@@ -402,7 +411,7 @@ def test_ir_ab_replay_retains_boolean_input_pins(tmp_path, monkeypatch):
             yield
 
     class Backend:
-        async def bench_pinned_async(self, _graph, *, warmup, num_iters):
+        async def bench_pinned_async(self, _graph, *, run_inputs=None, run_inputs_key=None, warmup, num_iters):
             assert (warmup, num_iters) == (1, 2)
             assert precision_pin(FAST_MATH) is False
             return SimpleNamespace(min_ms=0.1, time_ms=0.1), None
@@ -870,7 +879,7 @@ def test_bench_greedy_isolated_ok_and_bench_fail():
     compiled = object()
     benched: list = []
 
-    async def ok_bench(g, *, warmup, num_iters):
+    async def ok_bench(g, *, run_inputs=None, run_inputs_key=None, warmup, num_iters):
         benched.append(g)
         return SimpleNamespace(min_ms=1.0, time_ms=1.0, per_launch=[]), None
 
@@ -879,7 +888,20 @@ def test_bench_greedy_isolated_ok_and_bench_fail():
     assert gb.status == "ok" and gb.bench is not None and gb.flags == []
     assert gb.sample.name == "greedy (isolated)" and gb.sample.shape is None
 
-    async def hung_bench(g, *, warmup, num_iters):
+    # With the run's reference, the greedy row is timed on its inputs under the pinned rows' key.
+    timed_on: list = []
+
+    async def ref_bench(g, *, run_inputs=None, run_inputs_key=None, warmup, num_iters):
+        timed_on.append((run_inputs, run_inputs_key))
+        return SimpleNamespace(min_ms=1.0, time_ms=1.0, per_launch=[]), None
+
+    inputs = {"x": [1.0]}
+    asyncio.run(
+        _bench_greedy_isolated(SimpleNamespace(bench_pinned_async=ref_bench), compiled, warmup=1, iters=1, ref=(inputs, {}), ref_key="k")
+    )
+    assert timed_on == [(inputs, "k")]
+
+    async def hung_bench(g, *, run_inputs=None, run_inputs_key=None, warmup, num_iters):
         raise RuntimeError("bench worker exceeded 100.0s wall budget — SIGKILL'd, stream cleaned")
 
     gb = asyncio.run(_bench_greedy_isolated(SimpleNamespace(bench_pinned_async=hung_bench), compiled, warmup=1, iters=1))
@@ -962,10 +984,10 @@ def test_ab_json_labels_each_row_with_its_lane(tmp_path, monkeypatch):
     from emmy.commands import run as run_mod
     from emmy.compiler.pipeline.search.data import Sample
 
-    _FakeNode = namedtuple("_FakeNode", "op")
+    _FakeNode = namedtuple("_FakeNode", "op id")
 
     def _node(knobs):
-        return _FakeNode(SimpleNamespace(kernel_name="k_matmul", smem_bytes=0, knobs=knobs))
+        return _FakeNode(SimpleNamespace(kernel_name="k_matmul", smem_bytes=0, knobs=knobs), "k_matmul")
 
     greedy_graph, fm_graph, std_graph = object(), object(), object()
 

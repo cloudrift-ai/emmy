@@ -119,7 +119,11 @@ class Knob:
     def __post_init__(self) -> None:
         # Construction IS registration: a module-level ``Knob`` declaration lands in the registry
         # the moment it executes, wherever it lives. First-seen wins, matching the old module-scan
-        # collapse rule (duplicate declarations should agree on type / hints anyway).
+        # collapse rule (duplicate declarations should agree on type / hints anyway). The canonical
+        # declarations in ``search/space.py`` load first, so a throwaway knob built before anything
+        # asked the registry (a test's stand-in) can never claim a canonical name.
+        from emmy.compiler.pipeline.search import space  # noqa: F401, PLC0415 — deferred: space imports knob
+
         _REGISTRY.setdefault(self.name, self)
 
     @property
@@ -455,8 +459,62 @@ def apply_knobs_env(raw: str | None = None) -> dict[str, str]:
     return applied
 
 
-def family_pins(family: str) -> tuple[tuple[str, str], ...]:
-    """Live pins for one knob family, bare first and scoped pins in key order."""
+#: The scope prefix of a KERNEL pin, ``FAMILY@place_<token>``: the family's bare pin for the one cut piece
+#: named ``…__place_<token>`` (and the ``…__partial`` and finalize a split of it mints under that name, so a
+#: piece's ordinal — ``<token>_1`` — survives its split), where a bare pin reaches
+#: every kernel of the set. A cut child spells its sites relative to itself, so two pieces of one shape
+#: share every site key; the token in the piece's kernel name is what tells them apart.
+KERNEL_SCOPE = "place_"
+
+#: The scope prefix of a NODE pin, ``FAMILY@node_<id>``: the kernel pin of the kernel whose graph node is
+#: ``<id>`` — the uncut remainder of a route, which carries no ``__place_`` token — and of its split's
+#: partial (``<id>__partial``) and finalize. A cut piece's own node never matches, so the root's pin stays
+#: off every piece.
+NODE_SCOPE = "node_"
+
+
+def kernel_scoped(key: str) -> bool:
+    """Whether ``key`` is a kernel pin (:data:`KERNEL_SCOPE`, :data:`NODE_SCOPE`) rather than a site-scoped
+    or bare one."""
+    return (axis_of(key) or "").startswith((KERNEL_SCOPE, NODE_SCOPE))
+
+
+def kernel_pin(family: str, *names: str) -> str | None:
+    """The kernel pin of ``family`` that reaches a kernel known by any of ``names`` — its kernel name
+    and its graph node id, which a ``node_`` pin names. Where several pins reach the kernel the most
+    specific wins: a pin naming a split's partial (``place_<token>__partial``) beats the pin naming the
+    piece it was split from (``place_<token>``), which also reaches the partial."""
+    reached = [
+        (len(axis_of(key) or ""), value)
+        for key, value in _environ_pins(family)
+        if kernel_scoped(key) and any(reaches(key, name) for name in names)
+    ]
+    return max(reached, key=lambda pair: pair[0])[1] if reached else None
+
+
+def reaches(key: str, kernel: str) -> bool:
+    """Whether the kernel pin ``key`` names the kernel (or graph node) called ``kernel``."""
+    import re  # noqa: PLC0415
+
+    scope = axis_of(key) or ""
+    if scope.startswith(NODE_SCOPE):
+        # A graph node id, or the kernel name ``k_<id>`` lowering gives it; its split partial too.
+        node = scope[len(NODE_SCOPE) :]
+        name = kernel.lower().removeprefix("k_")
+        return name in (node, f"{node}__partial")
+    # A whole name segment: ``place_<token>`` reaches ``…__place_<token>`` and what a split or a nested
+    # cut appends after ``__``, never the sibling piece ``…__place_<token>_1``.
+    return re.search(rf"__{re.escape(scope)}(__|$)", kernel) is not None
+
+
+def family_pins(family: str, *, kernels: bool = False) -> tuple[tuple[str, str], ...]:
+    """Live pins for one knob family, bare first and scoped pins in key order. Kernel pins
+    (:data:`KERNEL_SCOPE`) name no site, so a site reader skips them and reads its kernel's through
+    :func:`kernel_pin`; ``kernels`` keeps them, for a check over every pin that was set."""
+    return tuple((key, value) for key, value in _environ_pins(family) if kernels or not kernel_scoped(key))
+
+
+def _environ_pins(family: str) -> tuple[tuple[str, str], ...]:
     import os  # noqa: PLC0415 — knob.py owns the ``EMMY_<KNOB>`` environment namespace
 
     family = family.upper()
@@ -529,7 +587,7 @@ def consume_kernel_row(knobs: dict) -> dict:
     return {k: v for k, v in knobs.items() if family_of(k) not in KERNEL_DECISION_FAMILIES and not k.startswith(METADATA_PREFIXES)}
 
 
-def schedule_pin_fingerprint() -> tuple[tuple[str, str], ...]:
+def schedule_pin_fingerprint(*kernel: str) -> tuple[tuple[str, str], ...]:
     """Every live env pin the schedule enumeration can read, as sorted ``(env var, value)`` pairs spelled as
     the scheduler's catalog arm reads them: the :data:`SCHEDULE_FAMILIES` pins (bare and ``@``-keyed) as
     set, each restricting a domain, and the precision gates by effect — one ``"1"`` entry per gate
@@ -537,6 +595,8 @@ def schedule_pin_fingerprint() -> tuple[tuple[str, str], ...]:
     umbrella), nothing for a gate OFF. Unset precision gates follow the enabled FAST_MATH default.
     The scheduler folds this into its schedule-space stamp, which also seeds a budgeted pool's draw:
     equivalent effective gates share a stamp regardless of how the pins spell them.
+    Given the names ``kernel`` of the one kernel being stamped, a kernel pin that reaches no such name is left
+    out: that kernel never reads it, so it must not re-seed that kernel's draw and move an unpinned pick.
     The environ scan is this module's to make — the ``EMMY_<KNOB>`` namespace is knob.py-owned (the one
     exception to ``config.py``'s env ownership), and the ``@``-keyed pins land there via the ``EMMY_KNOBS`` splat."""
     import os  # noqa: PLC0415 — the one environ read outside ``config``, per the ownership note above
@@ -545,8 +605,17 @@ def schedule_pin_fingerprint() -> tuple[tuple[str, str], ...]:
 
     prefixes = tuple(config.knob_var(name) for name in SCHEDULE_FAMILIES)
     pins = [(var, val) for var, val in os.environ.items() if any(var == p or var.startswith(p + "@") for p in prefixes)]
+    if kernel:
+        pins = [(var, val) for var, val in pins if not _foreign_kernel_pin(var, kernel)]
     pins.extend((gate.env, "1") for gate in (F16_MMA_F32_ACC, FP8_MMA) if precision_pin(gate) is True)
     return tuple(sorted(pins))
+
+
+def _foreign_kernel_pin(var: str, kernel: tuple[str, ...]) -> bool:
+    """Whether the env var ``var`` holds a kernel pin that reaches none of the names ``kernel``."""
+    family, _, element = var[len(config.knob_var("")) :].partition("@")
+    key = f"{family}@{element.lower()}"
+    return kernel_scoped(key) and not any(reaches(key, name) for name in kernel if name)
 
 
 def knob_sort_key(name: str) -> tuple[int, str]:

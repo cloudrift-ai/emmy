@@ -964,10 +964,30 @@ def test_load_quantized_split_preserves_nonzero_laguna_router_bias(tmp_path):
         expected = reference(hidden)
         actual = loaded(hidden)
 
-    torch.testing.assert_close(loaded.e_score_correction_bias, correction.to(torch.float16), rtol=0, atol=0)
+    torch.testing.assert_close(loaded.e_score_correction_bias, correction, rtol=0, atol=0)
     torch.testing.assert_close(actual[0], expected[0], rtol=0, atol=0)
     torch.testing.assert_close(actual[1], expected[1], rtol=0, atol=0)
     torch.testing.assert_close(actual[2], expected[2], rtol=0, atol=0)
+
+
+def test_the_serving_router_keeps_its_selection_bias_float32():
+    """Transformers keeps a router's correction bias float32 whatever the model dtype. A float16 copy
+    rounds 9.003 and 9.001 both to 9.0 — enough to change which experts make the top-k."""
+    torch = pytest.importorskip("torch")
+    transformers = pytest.importorskip("transformers")
+    from transformers.models.glm4_moe.modeling_glm4_moe import Glm4MoeTopkRouter
+
+    from emmy.serving.gen_runner import serving_router
+
+    gate = Glm4MoeTopkRouter(_tiny_glm4_moe_config(transformers)).eval()
+    gate.e_score_correction_bias.copy_(torch.tensor([9.0, 9.003, 9.001, 0.0]))  # zero weight: the bias alone picks
+    router = serving_router(gate, torch.float16)
+
+    assert router.weight.dtype == torch.float16
+    torch.testing.assert_close(router.e_score_correction_bias, gate.e_score_correction_bias, rtol=0, atol=0)
+    with torch.no_grad():
+        _logits, _weights, indices = router(torch.randn(3, gate.hidden_dim, dtype=torch.float16))
+    assert all(sorted(row) == [1, 2] for row in indices.tolist())
 
 
 def test_load_quantized_split_rejects_missing_laguna_router_bias(tmp_path):

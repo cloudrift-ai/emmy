@@ -40,6 +40,7 @@ def test_scalar_stage_catalog_offers_sync_staging_on_volta() -> None:
         "d2/smem",
         "d3/smem",
         "d4/smem",
+        "d8/smem",
     ]
 
 
@@ -49,7 +50,10 @@ def test_warp_stage_catalog_is_the_product_of_its_parametrizations() -> None:
     measured evidence do that."""
     hopper = stage_moves(warp=True, ctx=Context.from_target((9, 0)))
     assert {(stage.transport, stage.depth, stage.reg_depth) for stage in hopper} == {
-        (transport, depth, reg_depth) for transport in ("smem", "smem-async", "smem-tma") for depth in (1, 2, 3, 4) for reg_depth in (1, 2)
+        (transport, depth, reg_depth)
+        for transport in ("smem", "smem-async", "smem-tma")
+        for depth in (1, 2, 3, 4, 8)
+        for reg_depth in (1, 2)
     }
     # sm_70 issues neither cp.async nor TMA; the register ping-pong still pairs with what is left.
     volta = stage_moves(warp=True, ctx=Context.from_target((7, 0)))
@@ -112,3 +116,19 @@ def test_reduce_rejects_the_retired_coop_width_spelling() -> None:
     for legacy in ("b512", "b256t", "g8k/b128t"):
         with pytest.raises(ValueError, match="unknown token"):
             Reduce.parse(legacy, Work.parse("t512"))
+
+
+def test_a_transposed_band_spells_its_lane_columns() -> None:
+    """``coop-t/v<n>``: each lane of a transposed band owns ``n`` adjacent output columns. The token
+    round-trips, sits between the band and the ILP chains, and means nothing without ``coop-t``."""
+    import pytest
+
+    from emmy.compiler.ir.schedule import Reduce, Work
+
+    work = Work.parse("t512")
+    plan = Reduce.parse("g8k/coop-t/v4", work)
+    assert (plan.cta, plan.coop, plan.coop_transposed, plan.coop_columns) == (8, 512, True, 4)
+    assert plan.spell() == "g8k/coop-t/v4"
+    assert Reduce.parse("coop-t", work).coop_columns == 1
+    with pytest.raises(ValueError, match="follows 'coop-t'"):
+        Reduce.parse("coop/v4", work)

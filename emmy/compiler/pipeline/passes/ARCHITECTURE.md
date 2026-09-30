@@ -74,9 +74,10 @@ post-decomposition Python source file for known format names.
 
 ## The tile scheduler: one stored tree
 
-`010_lift` reads a Loop IR carried state as a serial kernel (`states_as_buffers`): the loop that carries the
-state becomes `Placement.serial`, the state a buffer the node owns and keeps every step of, a `Pre` read a load
-one launch back (the seed at the first), and the `Carry` a store of its value at this step. The step's own algebra is
+`010_lift` reads a Loop IR carried state as a fold that carries it, and the classic schedule's fork realizes that
+fold as a serial kernel (`states_as_buffers`): the loop that carries the state becomes `Placement.serial`, the state
+a buffer the node owns and keeps every step of, a `Pre` read a load one launch back (the seed at the first), and the
+`Carry` a store of its value at this step. The step's own algebra is
 untouched, so a contraction over the previous state lifts as a contraction whose B slab is that buffer. A serial
 kernel stays ONE kernel — `030_cut` offers it no cut and no split — because the runner launches one kernel's steps
 to completion before the next kernel's first, so pieces could not interleave step by step. The register schedule
@@ -208,7 +209,9 @@ rewrite consumes only the stored Fold algebra (a contraction slices through σ-r
 row-invariant statistic staying full-row in every partition; any other fold slices through the generic
 `Fold.rewrite`), and each piece re-enters the scan as a fresh kernel that decides its own row. A piece is the region
 term rebound over the partial or the finalize fold: the projection keeps its epilogue and its other operands whole,
-and only the fold it is about is swapped, the finalize's reading its states from the workspace. The split is CONSUMED
+and only the fold it is about is swapped, the finalize's reading its states from the workspace. The two keep the name
+of the kernel they split (`<piece>__partial` and `<piece>`), so a kernel pin that names a cut piece, its ordinal
+included, names both halves; a route's unnamed uncut root keeps its graph node id, which `node_` pins name. The split is CONSUMED
 by the kernel that realizes it — the sliced axis's partition `Window` is the receipt, kernel-scoped — so the pieces
 skip the fork, and the walk's pin path strips a `REDUCE` pin's `g<n>[a|k]` half on a kernel that carries the
 receipt (`g2k/coop` on a piece is `coop`); a realized split's independent projection SIBLING has no sliced axis, so
@@ -339,8 +342,8 @@ K-loop rather than the band-splitting one, so it takes no warp inventory and the
 while the CTA still widens to hold a band, because the thread budget is set from the inventory alone. The extra warps
 then reach the compute body, where the box copy elects its arming thread on a wrapping linear thread id: thread 0 and
 the band's first thread both match, so one mbarrier takes two arrivals against an arrival count of one and its phase
-parity desynchronizes. That is a hang, not a slow kernel. The native fp4 mma cell needs no rule of its own — its
-stage resolver takes cp.async only, so it never reaches a TMA stage for the question to be asked about.
+parity desynchronizes. That is a hang, not a slow kernel. The native fp4 mma cell needs no rule of its own: its
+TMA stage lowers through `staged_kloop`, which hands a band to the band-splitting K-loop.
 
 **The per-cell contraction tier partitions its K like a plain fold.** A contraction is a monoid with a ⊗ lift, so the
 untiled tile candidate composes with the same `coop_reduce_moves` catalog the plain folds offer — the cooperative
@@ -603,6 +606,19 @@ evidence, not a schedule view or shape matcher, and it widens the catalog rather
 choices stay beside the fragment ones the bound row makes reachable. Decode attention is the standing case — one query
 row per head, whose score would otherwise be re-contracted once per output channel.
 
+A piece is first formed from its closed nest, where `Fold.lower` picks the loop order and the grid follows it. The
+lift orients a single-product contraction with a computed operand by that order: two slabs orient by layout, while a
+computed operand keeps whichever order the nest spelled. A cut W4A16 projection over `x + 1` would then put the weight
+decode in A, where the byte-slab staging, which reads the packed weight as B, does not apply. So a piece holding such
+a contraction is lowered a second time, inside one loop per grid axis, and lifted again. Nothing precedes that loop
+chain, so Loop-IR normalization orders it by the output layout, token first. The second pass lowers the terms the
+first pass formed, so a gate/up twin merged there stays one term. A lowering with no axes bound would not do: it
+hoists grid-invariant loads above the grid loops, and normalization orders only a chain that no statement precedes.
+Other pieces keep the first pass's form, and so does a piece whose second nest the lift cannot take whole (a native
+fp4 split-K partial, where normalization hoists a table read's index out of the reduce loop). A reordered piece takes
+the new grid order even where its A stays, so a recorded schedule of such a piece can name another block order than
+the one it was measured with and needs a new measurement.
+
 `_fromloop.fold_from_loop` reads each componentwise monoid directly from the loop's `Accum` statements. It does not
 classify a shape, extract a contraction, pair softmax statistics, hoist a nested reduction, or validate a reconstructed
 loop. Nested reductions are ordinary `Fold` statements in the parent lambda, so source order and SSA scope survive
@@ -658,7 +674,10 @@ that canonical input:
 
 - **`030_cut`** offers the maximal fused Fold tree and every stored child-Fold seam, each as its own arm (see the
   placement discussion above). A cut writes one workspace per state component and replaces all occurrences of the
-  same canonically shared Fold object with workspace loads.
+  same canonically shared Fold object with workspace loads. A component that is another component read at other
+  coordinates (RoPE's rotate-half channels beside the plain projection) stores nothing: it reads the other one's
+  workspace at the address it computes, so each weight is read once. A channel that reads a coordinate only as
+  `i // d` where another reads it plainly (GQA's k beside q) is computed by its own piece, once per group of `d`.
   Closure and replaceability are semantic gates; operation family, expected speed, row order, and search-space size
   are not. Closure reads the complete lowered statement stream through `Body`'s scope-aware dependence analysis:
   an axis bound by one loop does not scope its siblings, and dead-but-still-emitted statements retain their free axes

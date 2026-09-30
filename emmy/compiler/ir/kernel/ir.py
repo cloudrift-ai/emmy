@@ -25,6 +25,7 @@ Tile IR and are materialized away before reaching this layer. A
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from functools import cached_property
 
@@ -483,6 +484,11 @@ class CpAsyncCopy(Stmt):
     # re-swizzled every copy's whole index. ``None`` addresses the whole chunk in ``smem_index``.
     lane_index: tuple | None = None
     lane_rows: int = 0
+    # Whether the chunk lies inside the source, for a tile row past a masked edge: the copy then
+    # writes zeros and reads nothing. The source index stays clamped in bounds. Without it the
+    # clamped rows all read the edge's last row, and on the A100 a 96-row tile over 512 rows spent
+    # 23 us on a 16 us GEMM contending for that one row.
+    valid: Expr | None = None
 
     def external_reads(self) -> tuple[str, ...]:
         return (self.src,)
@@ -518,7 +524,10 @@ class CpAsyncCopy(Stmt):
         # ``emmy_cp_async_{cg,ca}`` (the cp.async prelude) does the ``cvta`` internally, so this is a
         # single call — no ``_smem_addr`` local and no wrapping ``{ }`` block. .cg is 16-byte-only.
         dst, src = f"&{self.smem}[{smem_flat}]", f"&{self.src}[{src_flat}]"
-        call = f"emmy_cp_async_cg({dst}, {src})" if self.nbytes == 16 else f"emmy_cp_async_ca<{self.nbytes}>({dst}, {src})"
+        if self.valid is not None and self.nbytes == 16:
+            call = f"emmy_cp_async_cg_z({dst}, {src}, {self.valid.render(ctx)})"
+        else:
+            call = f"emmy_cp_async_cg({dst}, {src})" if self.nbytes == 16 else f"emmy_cp_async_ca<{self.nbytes}>({dst}, {src})"
         return [f"{pad}{call};"]
 
 
@@ -993,9 +1002,10 @@ M8N8K4 = FragLayout(
 
 
 def frag_layout(name: str) -> FragLayout:
-    """The C-fragment layout named by an atom descriptor."""
+    """The C-fragment layout named by an atom descriptor. A ``wgmma`` accumulator is, per warp, the
+    ``m16n8`` C fragment repeated along N (:class:`WgmmaMma`), so it reads through that layout."""
     try:
-        return {"m16n8k16": M16N8, "m8n8k4": M8N8K4}[name]
+        return {"m16n8k16": M16N8, "wgmma": M16N8, "m8n8k4": M8N8K4}[name]
     except KeyError as exc:
         raise ValueError(f"unmodeled C-fragment layout {name!r}") from exc
 
@@ -1435,18 +1445,26 @@ def swizzle_fn(mode: str) -> str:
     return f"emmy_swizzle_{base.lower()}" + ("" if mode == base else f"_s{swizzle_xor(mode)[0]}")
 
 
-def _multiple_of(expr: Expr, d: int) -> bool:
-    """Whether ``expr`` is provably a multiple of ``d``: a literal that is, a sum or difference of
-    two that are, or a product one of whose literal factors supplies what the other need not."""
+def _multiple_of(expr: Expr, d: int, aligned: Mapping[str, int] | None = None) -> bool:
+    """Whether ``expr`` is provably a multiple of ``d``: a literal that is, a loop counter whose
+    stride is (``aligned``, a render context's), a sum or difference of two that are, or a product
+    one of whose literal factors supplies what the other need not."""
     if d == 1:
         return True
     if isinstance(expr, Literal):
         return isinstance(expr.value, int) and expr.value % d == 0
+    if isinstance(expr, Var):
+        return aligned is not None and expr.name in aligned and aligned[expr.name] % d == 0
     if isinstance(expr, BinaryExpr) and expr.op in ("+", "-"):
-        return _multiple_of(expr.left, d) and _multiple_of(expr.right, d)
+        return _multiple_of(expr.left, d, aligned) and _multiple_of(expr.right, d, aligned)
     if isinstance(expr, BinaryExpr) and expr.op == "*":
         for lit, other in ((expr.left, expr.right), (expr.right, expr.left)):
-            if isinstance(lit, Literal) and isinstance(lit.value, int) and lit.value and _multiple_of(other, d // math.gcd(lit.value, d)):
+            if (
+                isinstance(lit, Literal)
+                and isinstance(lit.value, int)
+                and lit.value
+                and _multiple_of(other, d // math.gcd(lit.value, d), aligned)
+            ):
                 return True
     return False
 
@@ -1472,7 +1490,7 @@ def swizzled_slab_index(
         return None
     shift, mask = xor
     field_mod = 1 << max(0, shift + (mask + 1).bit_length() - ldm.bit_length())
-    if not (_multiple_of(row, max(lane_rows, field_mod)) and _multiple_of(col, lane_col_mod)):
+    if not (_multiple_of(row, max(lane_rows, field_mod), ctx.aligned) and _multiple_of(col, lane_col_mod, ctx.aligned)):
         return None
     fn = swizzle_fn(mode)
     return f"({fn}({lane}) ^ {fn}({col.render(ctx)})) + ({row.render(ctx)}) * {ldm}"
@@ -2299,29 +2317,35 @@ class RegStore(Stmt):
     # fragment row offset. ``None`` keeps the legacy inner-extent resolution.
     row_dim: int | None = None
     col_dim: int | None = None
+    # The next three cells along N (8 columns apart each), stored WITH this one (the
+    # ``097_widen_fragment_stores`` peephole): the quad's four lanes trade their column pairs so
+    # each lane writes one cell's eight columns of a row as a single 16-byte store — a quarter of
+    # the stores, and every one of them a full sector. Each member keeps its own fragment and
+    # epilogue; only the store is shared.
+    run: tuple[RegStore, ...] = ()
 
     def deps(self) -> tuple[str, ...]:
-        return (self.frag, *self.extra_frags)
+        return (self.frag, *self.extra_frags, *(d for cell in self.run for d in cell.deps()))
 
     def external_reads(self) -> tuple[str, ...]:
         # The fused epilogue's leaf loads are gmem reads this stmt performs directly (their
         # original Load stmts were stripped by the atom lowering), so they must be declared here for
         # the kernel signature / render shapes to include the buffers.
-        if self.epilogue is None:
-            return ()
-        return tuple(dict.fromkeys(ld.input for ld in self.epilogue.body if isinstance(ld, Load)))
+        own = () if self.epilogue is None else tuple(ld.input for ld in self.epilogue.body if isinstance(ld, Load))
+        return tuple(dict.fromkeys((*own, *(b for cell in self.run for b in cell.external_reads()))))
 
     def external_writes(self) -> tuple[str, ...]:
         return (self.dst_buffer,)
 
     def rename_buffers(self, rename):  # noqa: ANN001 — see ``Stmt.rename_buffers``
         new = rename.get(self.dst_buffer, self.dst_buffer)
-        return self if new == self.dst_buffer else replace(self, dst_buffer=new)
+        run = tuple(cell.rename_buffers(rename) for cell in self.run)
+        return self if new == self.dst_buffer and run == self.run else replace(self, dst_buffer=new, run=run)
 
     def exprs(self) -> tuple[Expr, ...]:
         epi = () if self.epilogue is None else tuple(e for st in self.epilogue.body for e in st.exprs())
         guards = tuple(e for g in (self.m_guard, self.n_guard) if g is not None for e in g)
-        return (*self.dst_index, *epi, *guards)
+        return (*self.dst_index, *epi, *guards, *(e for cell in self.run for e in cell.exprs()))
 
     def pretty(self, indent: str = "") -> list[str]:
         idx = ", ".join(e.pretty() for e in self.dst_index)
@@ -2336,7 +2360,8 @@ class RegStore(Stmt):
         if self.n_guard is not None:
             guards += f" n<{self.n_guard[1].pretty()}"
         acc = " (atomic)" if self.atomic else ""
-        return [f"{indent}RegStore {self.dst_buffer}[{idx}] <- {self.frag}{epi}{guards}{acc} (ldm={self.ldm or 'auto'})"]
+        run = "" if not self.run else f" +{','.join(cell.frag for cell in self.run)} (16-byte rows)"
+        return [f"{indent}RegStore {self.dst_buffer}[{idx}] <- {self.frag}{run}{epi}{guards}{acc} (ldm={self.ldm or 'auto'})"]
 
     def _swz(self, addr: str) -> str:
         """The store address, XOR-permuted through the slab's swizzle helper when this store
@@ -2491,6 +2516,10 @@ class RegStore(Stmt):
         # base ``flat`` is tile-aligned and ``2t`` is even, so the pair is
         # 4-/8-byte aligned. The ``{ }`` block scopes _g/_t (and the per-element
         # epilogue temps) per RegStore.
+        if self.run and (wide := self._render_run(ctx, flat=flat, ldm=ldm, dst_dt=dst_dt)) is not None:
+            return wide
+        if self.run:  # a destination the 16-byte row cannot serve stores each cell on its own
+            return [ln for cell in (replace(self, run=()), *self.run) for ln in cell.render(ctx)]
         if self.m_guard is not None or self.n_guard is not None:
             return self._render_guarded(ctx, flat=flat, ldm=ldm, ldn=ldn, dst_dt=dst_dt, pre=pre, vals=vals)
         lane_stmt = f"const int _g = {lane} >> 2; const int _t = {lane} & 3;"
@@ -2521,6 +2550,51 @@ class RegStore(Stmt):
         if close:
             body[-1] += close
         return head + body
+
+    def _render_run(self, ctx: RenderCtx, *, flat: str, ldm, dst_dt: str) -> list[str] | None:
+        """The four cells of :attr:`run` as one 16-byte store per lane and row, or ``None`` for a
+        destination that is not 16-bit or whose row stride breaks the 16-byte alignment.
+
+        Lane ``t`` of a quad holds columns ``2t, 2t+1`` of each cell. Three ``shfl.xor`` rounds
+        transpose the quad's 4×4 grid of packed pairs: in round ``s`` a lane sends the pair of
+        cell ``t^s`` and receives, from lane ``t^s``, that lane's pair of cell ``t``. Lane ``t``
+        then holds all eight columns of cell ``t`` and writes them at ``8t`` past the first
+        cell. The quad runs whole, as the fragment stores it replaces already assume."""
+        vec2 = {"f16": "__half2", "bf16": "__nv_bfloat162"}.get(dst_dt)
+        if vec2 is None or not isinstance(ldm, int) or ldm % 8:
+            return None
+        packer = {"f16": "__floats2half2_rn", "bf16": "__floats2bfloat162_rn"}[dst_dt]
+        pad = _pad(ctx.indent)
+        cells = (self, *self.run)
+        names = [[f"_wp{r}_{k}" for k in range(len(cells))] for r in (0, 1)]
+        lines = [
+            f"{pad}{{ const int _g = (threadIdx.x & 31) >> 2; const int _t = (threadIdx.x & 31) & 3;",
+            f"{pad}  unsigned {', '.join(n for row in names for n in row)};",
+        ]
+        for k, cell in enumerate(cells):
+            pre, vals = cell._element_values(ctx)
+            lines.append(f"{pad}  {{")
+            lines += [f"{pad}    {ln}" for group in pre for ln in group]
+            for r in (0, 1):
+                pair = f"{packer}({vals[2 * r]}, {vals[2 * r + 1]})"
+                lines.append(f"{pad}    {{ {vec2} _h = {pair}; {names[r][k]} = *reinterpret_cast<unsigned*>(&_h); }}")
+            lines.append(f"{pad}  }}")
+
+        def pick(*by_lane: str) -> str:
+            return f"(_t == 0 ? {by_lane[0]} : _t == 1 ? {by_lane[1]} : _t == 2 ? {by_lane[2]} : {by_lane[3]})"
+
+        for r, row in ((0, "_g"), (1, "(_g + 8)")):
+            p0, p1, p2, p3 = names[r]
+            q1, q2, q3 = (f"_wq{r}_{s}" for s in (1, 2, 3))
+            lines += [
+                f"{pad}  const unsigned {q1} = __shfl_xor_sync(0xffffffffu, {pick(p1, p0, p3, p2)}, 1);",
+                f"{pad}  const unsigned {q2} = __shfl_xor_sync(0xffffffffu, {pick(p2, p3, p0, p1)}, 2);",
+                f"{pad}  const unsigned {q3} = __shfl_xor_sync(0xffffffffu, {pick(p3, p2, p1, p0)}, 3);",
+                f"{pad}  *reinterpret_cast<uint4*>(&{self.dst_buffer}[{flat} + {row} * {ldm} + _t * 8]) = make_uint4("
+                f"{pick(p0, q1, q2, q3)}, {pick(q1, p1, q3, q2)}, {pick(q2, q3, p2, q1)}, {pick(q3, q2, q1, p3)});",
+            ]
+        lines.append(f"{pad}}}")
+        return lines
 
     def _render_m8n8k4(self, ctx: RenderCtx, *, flat: str, ldm, ldn, dst_dt: str, pre: list[list[str]], vals: list[str]) -> list[str]:
         """Store an m8n8k4 accumulator under the selected Volta warp-tile arrangement."""
@@ -2952,6 +3026,7 @@ def _(s: CpAsyncCopy, rename, sigma, axis_fn):
         swizzle=s.swizzle,
         lane_index=None if s.lane_index is None else tuple(sigma.apply(e) for e in s.lane_index),
         lane_rows=s.lane_rows,
+        valid=None if s.valid is None else sigma.apply(s.valid),
     )
 
 
@@ -3180,6 +3255,7 @@ def _(s: RegStore, rename, sigma, axis_fn):
         epilogue=epilogue,
         m_guard=_sub_guard(s.m_guard),
         n_guard=_sub_guard(s.n_guard),
+        run=tuple(_rewrite_kind(cell, rename, sigma, axis_fn) for cell in s.run),
     )
 
 

@@ -341,6 +341,8 @@ A fork whose levels form a cartesian product of knob values reuses **`build_fork
 per level plus a `materialize=` callable, and gets back a lazy root `_Branch` whose `expand()` builds children on
 demand, in grouping order. The algorithm — group the parameters by each level's knob keys, collapse a level with one
 key, skip a level with no keys, and defer building a leaf until `expand()` — lives once in `fork.py`.
+Complete leaf walks are iterative and depth-first, so a maximal fused kernel with thousands of schedule levels does
+not consume the Python call stack.
 
 ### Every finished option carries a value for every knob
 
@@ -573,7 +575,9 @@ first — over one more kind of evidence. A kernel-set decision is a `routing` r
 or a golden's cut or split imported as one — and its price on this card is the sum of its pieces' fastest rows, each
 piece at its own projection of the fork's bindings, all-or-nothing (`SearchDB.priced_arms` — the same read the
 tuner's reward uses, so the two agree); a decision no piece's row prices is off the measured ballot, which is what a
-golden's cross-CTA split timed as a whole is until its pieces are benched. `greedy._route_candidates` turns EVERY
+golden's cross-CTA split timed as a whole is until its pieces are benched. An offered split or cut that no routing row
+names is priced the same way, from its own pieces' rows, so a sweep that benched a split's partial and finalize (and
+wrote no routing row) still puts that split on the ballot. `greedy._route_candidates` turns EVERY
 measured row of the kernel's signature, and every priced decision on the exact kernel, into a candidate, each one of
 the pass's OWN offered arms: the arm the row spells (`pins.spelled_arm` — a schedule row the fused / unsplit arm,
 since the kernel it decorates ran that way; a routing arm the composed arm that cuts exactly the several offered
@@ -614,9 +618,10 @@ Three definitions the list leans on:
   the candidate must carry every feature the row has with the same value; a newer feature may remain unspecified.
   `I_kernel` hashes the typed, schedule-free Loop body at kernel birth, re-derived when the lift or the twist gives
   the kernel a body of its own — the tile identity the tune DB keys the kernel on, so a kernel's rows and its forks
-  name it alike. Equal feature histograms alone cannot make two kernels share measurements. Legacy rows without this
-  identity remain training data but cannot decide a current kernel's measured pick. The golden import keys a
-  record's rows by the kernels its lowering mints.
+  name it alike. A schedule never re-derives it, even one that realizes the kernel through another term (a carried
+  state's serial form): the kernel is the tile its schedule fork was offered. Equal feature histograms alone cannot
+  make two kernels share measurements. Legacy rows without this identity remain training data but cannot decide a
+  current kernel's measured pick. The golden import keys a record's rows by the kernels its lowering mints.
 - **The reservoir** is the online prior's own training dataset: a bounded uniform sample (Algorithm R, capped at
   `MAX_ROWS` = 100k) of every training row ever streamed in across runs, stored INSIDE the online checkpoint
   (`online.json`, Part 5). Its rows are all `H_opt=3` — `Prior.add_rows` admits no other regime — and they double as
@@ -1803,10 +1808,11 @@ contractions and the LayerNorm statistic reduce now deploy off the prior; adding
 let them be recorded.
 
 **`STAGE`** (STR codec, the tile schedule → `lowering/kernel/010_materialize`) — the operand-staging codec
-`d<depth>/smem|smem-async|smem-tma[/p<reg_depth>]` on the typed `Stage` schedule struct (composes with both fragments
-of the `TILE` knob): `d<depth>` the gmem→smem ring depth, `sync`/`cp.async`/TMA transport, `p<reg_depth>` the
-smem→register double-buffer. `stage=None` (unset / unparseable) = gmem-direct. A `STAGE` value names only what the
-schedule CHOOSES — rotation and refill discipline derive at materialization from the depth alone (which is why the
+`d<depth>/smem|smem-async|smem-tma[/p<reg_depth>]` on the typed `Stage` schedule struct (composes with both
+fragments of the `TILE` knob): `d<depth>` the gmem→smem ring depth, `sync`/`cp.async`/TMA transport, `p<reg_depth>` the
+smem→register double-buffer (on a `wgmma` drain, which loads no fragments, the MMA groups left in flight).
+`stage=None` (unset / unparseable) = gmem-direct. A `STAGE` value names only what
+the schedule CHOOSES — rotation and refill discipline derive at materialization from the depth alone (which is why the
 retired `ring` flag compiled byte-identically with and without it), and `smem` / `bk_elems` are resolver outputs,
 never spelled. See `lowering/kernel/ARCHITECTURE.md`.
 

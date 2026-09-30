@@ -139,7 +139,7 @@ def _stamp_load(s: Load, ctx: _StampCtx) -> Load:
         for n in s.names:
             ctx.ssa_dtypes[n] = dt
         if s.dtype is None:
-            return Load(names=s.names, input=s.input, index=s.index, dtype=dt)
+            return replace(s, dtype=dt)
     return s
 
 

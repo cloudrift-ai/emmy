@@ -8,6 +8,8 @@ buffer, `k_sdpa_linear_reduce` wrote it through 32-bit addressing, and the fault
 later CUDA test sharing that xdist worker.
 """
 
+import pytest
+
 from emmy.compiler.dim import DYNAMIC_DIM_MAX, Dim
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.stmt.base import RenderCtx, render_index
@@ -46,3 +48,11 @@ def test_symbolic_dim_is_bounded_by_the_exported_cap_not_its_hint():
     assert "long long" not in _render((Dim("seq_len"), Dim(1024)))
     # The hint (512) is far below the cap; the cap is what decides.
     assert Dim("seq_len").hint < DYNAMIC_DIM_MAX
+
+
+def test_an_index_that_does_not_spell_every_dim_is_refused():
+    """Without strides, coordinates cannot be summed into an address: a seed of shape ``[1, n, 4, 4]``
+    read with three coordinates once rendered ``a1 + a4 + a3`` for ``a1 * 16 + a4 * 4 + a3``."""
+    for shapes in ({"buf": (Dim(1), Dim(4), Dim(4))}, {}):
+        with pytest.raises(ValueError, match="an index spells every dim"):
+            render_index("buf", (Var("a1"), Var("a2")), RenderCtx(shapes=shapes))

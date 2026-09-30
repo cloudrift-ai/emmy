@@ -1061,6 +1061,112 @@ def test_a_twin_cut_once_serves_its_lone_channel_reader() -> None:
     np.testing.assert_allclose(got, expected, rtol=2e-2, atol=2e-1)
 
 
+def _rope_graph() -> Graph:
+    """RoPE over ``q = x @ wq`` (four heads of eight) and ``k = x @ wk`` (two heads, each read by two):
+    ``t * cos + rotate_half(t) * sin`` for each. Lifting folds both projections and their half-shifted
+    copies into one six-channel twin."""
+    from emmy.commands.trace import graph_from_code
+
+    code = (
+        "(lambda x, wq, wk, c, s: (lambda q, k: q * c + torch.cat((-q[..., 4:], q[..., :4]), -1) * s"
+        " + k * c + torch.cat((-k[..., 4:], k[..., :4]), -1) * s)"
+        "(torch.matmul(x, wq).view(1, 4, 8), torch.matmul(x, wk).view(1, 2, 8).repeat_interleave(2, 1)))"
+        "(torch.randn(1, 64, dtype=torch.float16), torch.randn(64, 32, dtype=torch.float16), torch.randn(64, 16, dtype=torch.float16),"
+        " torch.randn(1, 1, 8, dtype=torch.float16), torch.randn(1, 1, 8, dtype=torch.float16))"
+    )
+    return graph_from_code(code)[0]
+
+
+def _rope_seam() -> CutSite:
+    (seam,) = [seam for seam in cuttable_seams(_lifted_parent(_rope_graph())) if seam.node.as_contraction() is not None]
+    return seam
+
+
+def test_a_twin_channel_read_at_shifted_columns_reads_the_plain_channels_workspace() -> None:
+    """RoPE's rotate-half copies are channels of the projection twin, each reading its weight again, and
+    the repeated k head reads its weight once per q head. Cut at the projection, each weight is read
+    once: the q piece stores four heads, the k piece two, and the reader loads each workspace at the
+    three columns a copy reads."""
+    seam = _rope_seam()
+    assert len(seam.node.exposes) == 6
+    with pinned_knobs({seam.spelling: "cut"}):
+        lowered = Pipeline.build(LOOP_PASSES).run(_rope_graph(), ctx=_CTX)
+        cut, _ = Run(pipeline=Pipeline.build(["tile/lift", "tile/cut"]), ctx=_CTX).resolve(lowered, lambda fork: fork.options[0])
+
+    def loads(node) -> list[tuple[str, str]]:
+        body = node.op.op.lower(frozenset(), node.op.output_specs, node.op.axes)
+        return [(stmt.input, stmt.index[-1].pretty()) for stmt in body.iter() if isinstance(stmt, Load)]
+
+    *producers, consumer = (node for node in cut.nodes.values() if isinstance(node.op, TileOp))
+    assert sorted(tuple(d.as_static() for d in node.outputs[0].shape) for node in producers) == [(2, 8), (4, 8)], "k keeps its two heads"
+    assert sorted(name for node in producers for name, _ in loads(node) if name in ("x1", "x2")) == ["x1", "x2"], "each weight is read once"
+    for node in producers:
+        assert len({column for name, column in loads(consumer) if name == node.id}) == 3, "the reader loads a workspace at three columns"
+
+
+@requires_cuda
+def test_a_rope_projection_cut_once_computes_the_right_answer() -> None:
+    cut = _lower_cut(_rope_graph(), _rope_seam().spelling)
+    rng = np.random.default_rng(0)
+    x, wq, wk = (rng.standard_normal(shape).astype(np.float16) for shape in ((1, 64), (64, 32), (64, 16)))
+    c, s = (rng.standard_normal((1, 1, 8)).astype(np.float16) for _ in range(2))
+    inputs = dict(zip(cut.inputs, (x, wq, wk, c, s), strict=True))
+    (out_name,) = cut.outputs
+    got = CudaBackend().run(cut, input_data=inputs)[0].outputs[out_name].astype(np.float32)
+
+    def rope(t):
+        return t * c.astype(np.float32) + np.concatenate((-t[..., 4:], t[..., :4]), -1) * s.astype(np.float32)
+
+    q = (x.astype(np.float32) @ wq.astype(np.float32)).reshape(1, 4, 8)
+    k = np.repeat((x.astype(np.float32) @ wk.astype(np.float32)).reshape(1, 2, 8), 2, axis=1)
+    np.testing.assert_allclose(got, rope(q) + rope(k), rtol=2e-2, atol=2e-1)
+
+
+def _gqa_value_graph() -> Graph:
+    """``v = x @ w`` over two heads of eight, each head repeated for two query heads and contracted at the
+    flattened (head, head-dim) channel, as the output projection reads a GQA value."""
+    from emmy.commands.trace import graph_from_code
+
+    code = (
+        "(lambda x, w, y: torch.matmul(torch.matmul(x, w).view(1, 2, 8).repeat_interleave(2, 1).reshape(1, 32), y))"
+        "(torch.randn(1, 64, dtype=torch.float16), torch.randn(64, 16, dtype=torch.float16), torch.randn(32, 16, dtype=torch.float16))"
+    )
+    return graph_from_code(code)[0]
+
+
+def _gqa_value_cut():
+    graph = _gqa_value_graph()
+    (seam,) = [seam for seam in cuttable_seams(_lifted_parent(graph.copy())) if seam.node.as_contraction() is not None]
+    with pinned_knobs({seam.spelling: "cut"}):
+        lowered = Pipeline.build(LOOP_PASSES).run(graph, ctx=_CTX)
+        cut, _ = Run(pipeline=Pipeline.build(["tile/lift", "tile/cut"]), ctx=_CTX).resolve(lowered, lambda fork: fork.options[0])
+    return cut
+
+
+def test_a_gqa_value_read_at_its_flat_channel_is_stored_once_per_kv_head() -> None:
+    """The value's head is read as ``(i // 8) // 2`` beside its head-dim ``i % 8``: the piece stores 16
+    cells, not 32, and reads its weight at the plain column instead of through the repeat. The reader
+    loads it at ``(i // 16) * 8 + i % 8``."""
+    producer, _consumer = (node for node in _gqa_value_cut().nodes.values() if isinstance(node.op, TileOp))
+    assert [d.as_static() for d in producer.outputs[0].shape][-1] == 16
+    body = producer.op.op.lower(frozenset(), producer.op.output_specs, producer.op.axes)
+    (weight,) = [stmt for stmt in body.iter() if isinstance(stmt, Load) and stmt.input == "x1"]
+    assert "/" not in weight.index[-1].pretty() and "%" not in weight.index[-1].pretty()
+
+
+@requires_cuda
+def test_a_gqa_value_stored_once_per_kv_head_computes_the_right_answer() -> None:
+    graph = _gqa_value_graph()
+    (seam,) = [seam for seam in cuttable_seams(_lifted_parent(graph.copy())) if seam.node.as_contraction() is not None]
+    cut = _lower_cut(graph, seam.spelling)
+    rng = np.random.default_rng(0)
+    x, w, y = (rng.standard_normal(shape).astype(np.float16) for shape in ((1, 64), (64, 16), (32, 16)))
+    (out_name,) = cut.outputs
+    got = CudaBackend().run(cut, input_data=dict(zip(cut.inputs, (x, w, y), strict=True)))[0].outputs[out_name].astype(np.float32)
+    v = np.repeat((x.astype(np.float32) @ w.astype(np.float32)).reshape(1, 2, 8), 2, axis=1).reshape(1, 32)
+    np.testing.assert_allclose(got, v @ y.astype(np.float32), rtol=2e-2, atol=5e-1)
+
+
 def test_a_scalar_operand_is_no_seam() -> None:
     """A value uniform over the kernel — an sdpa scale beside its mask fills — offers no cut. The
     piece would be a kernel writing scalars to a workspace so its reader could read them back, and
@@ -1596,3 +1702,74 @@ def test_cut_piece_sweeps_the_axis_its_row_statistic_is_invariant_in() -> None:
     producer = next(node.op for name, node in fragment.nodes.items() if isinstance(node.op, TileOp) and "__place_" in name)
     assert [axis.name for axis in producer.place.free] == ["m"]
     assert [axis.name for store in producer.output_specs for axis in store.sweep] == ["n"]
+
+
+def _mlp_graph() -> Graph:
+    """``exp(down(silu(x @ wg) * (x @ wu)))`` at one token: cut at the gate/up twin and at the down
+    projection, the down piece's A operand is the computed SiLU product and its weight is laid out
+    ``[k, n]``."""
+    from emmy.commands.trace import graph_from_code
+
+    code = (
+        "(lambda x, wg, wu, wd: torch.matmul(torch.nn.functional.silu(torch.matmul(x, wg)) * torch.matmul(x, wu), wd).exp())"
+        "(torch.randn(1, 64, dtype=torch.float16), torch.randn(64, 256, dtype=torch.float16),"
+        " torch.randn(64, 256, dtype=torch.float16), torch.randn(256, 128, dtype=torch.float16))"
+    )
+    return graph_from_code(code)[0]
+
+
+def _mlp_cuts() -> dict[str, str]:
+    """Both contraction seams cut: the gate/up twin and the down projection."""
+    return {seam.spelling: "cut" for seam in cuttable_seams(_lifted_parent(_mlp_graph())) if seam.node.as_contraction() is not None}
+
+
+def _mlp_down() -> TileOp:
+    with pinned_knobs(_mlp_cuts()):
+        lowered = Pipeline.build(LOOP_PASSES).run(_mlp_graph(), ctx=_CTX)
+        cut, _ = Run(pipeline=Pipeline.build(["tile/lift", "tile/cut"]), ctx=_CTX).resolve(lowered, lambda fork: fork.options[0])
+    (down,) = [
+        node.op
+        for node in cut.nodes.values()
+        if isinstance(node.op, TileOp) and "__place_" in node.op.name and any(t.shape[0] == 256 for t in node.op.inputs.values())
+    ]
+    return down
+
+
+def test_a_computed_input_is_a_formed_gemv_pieces_a_operand() -> None:
+    """A GEMV with a computed input and a ``[k, n]`` weight orients, fused or formed, so the
+    computed operand is A. With the weight as A no fragment loader reads its k column, and the SiLU
+    down projection lost every tensor-core tier (the RTX 5090 s1 layer: 48 -> 65 us with the prologue
+    fused; 41 us once it is A)."""
+    from emmy.compiler.ir.schedule.classic.refusals import _warp_atoms
+    from emmy.compiler.ir.tile.path import sites
+
+    down = _mlp_down()
+    (site,) = [site for site in sites(down.op) if site.node.as_contraction() is not None]
+    assert site.node.operands[0].as_slab() is None, "the SiLU product is A"
+    assert _warp_atoms(down, _CTX, site.node), "the tensor-core tier is offered"
+
+
+def test_a_split_keeps_the_name_of_the_piece_it_splits() -> None:
+    """A split piece's partial and finalize launch under the piece's own name, so a kernel pin naming
+    the piece (its ordinal included) names both halves; they used to take the name of the workspace
+    buffer, whose ordinal counts components, not pieces."""
+    import re
+
+    down = _mlp_down()
+    token = re.search(r"__place_(\w+)$", down.name).group(1)
+    from emmy.compiler.pipeline.fork import iter_leaves
+
+    with pinned_knobs({**_mlp_cuts(), f"REDUCE@place_{token}": "g4k"}):
+        lowered, _ = Run(Pipeline.build(CUDA_PASSES), _CTX).resolve(_mlp_graph(), lambda fork: next(iter_leaves(fork.options)))
+    names = {node.op.kernel_name for node in lowered.nodes.values() if type(node.op).__name__ == "CudaOp"}
+    assert {down.name, f"{down.name}__partial"} <= names, names
+
+
+def test_a_kernel_pin_that_leaves_no_row_is_refused_by_name() -> None:
+    """A kernel-scoped pin the named piece cannot take fails the compile with the pins that did it,
+    instead of leaving the piece unscheduled and the pin realized by nothing."""
+    import re
+
+    token = re.search(r"__place_([0-9a-f]+)", _mlp_down().name).group(1)
+    with pytest.raises(ValueError, match="leave no schedule row"):
+        _lower(_mlp_graph(), {**_mlp_cuts(), f"TILE@place_{token}": "mma_m16n8k16_f16_f32/f64x64"})

@@ -5,7 +5,7 @@ import logging
 import os
 import sys
 
-from emmy.deploy import DEFAULT_STRATEGY, STRATEGIES, run_deploy, run_teardown
+from emmy.deploy import DEFAULT_STRATEGY, STRATEGIES, replica_services, run_deploy, run_teardown
 from emmy.deploy.local import make_run_cmd, make_write_file
 from emmy.detect import detect_local_gpus
 from emmy.provisioning.host import LocalHost
@@ -66,14 +66,16 @@ async def _handle_local(args):
         )
 
     timer = PhaseTimer()
+    services, load_balancer = replica_services(recipe)
     success = await run_deploy(
         run_cmd=run_cmd,
         write_file=write_file,
-        recipe=recipe,
+        services=services,
         model_dir=model_dir,
         hf_token=hf_token,
         host="localhost",
         dry_run=dry_run,
+        load_balancer=load_balancer,
         timer=timer,
     )
 

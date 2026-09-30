@@ -721,3 +721,81 @@ def test_evidence_row_vouches_reads_a_bare_row_key_like_a_bare_pin() -> None:
     assert not evidence_row_vouches({"WORK": "t32", "REDUCE@map.1/twist": "", "REDUCE@map.1/twist.1/inner": ""}, row), "no site carries it"
     assert evidence_row_vouches({"WORK": "t32", "REDUCE": "coop", "TILE": "f1"}, row), "an exact key compares exactly; TILE is free"
     assert not evidence_row_vouches({"WORK": "t32", "REDUCE": "r4"}, row)
+
+
+def test_a_kernel_pin_reaches_only_the_piece_it_names(monkeypatch):
+    """``REDUCE@place_<token>`` is the REDUCE pin of the one cut piece named ``…__place_<token>`` and of
+    the partial and finalize its split mints; a piece of another token, or a token that only starts the
+    same way, keeps the bare pin. Site readers never see it as a site key."""
+    from importlib import import_module
+
+    pin_row = import_module("emmy.compiler.pipeline.passes.tile.schedule.040_schedule").pin_row
+    monkeypatch.setenv("EMMY_REDUCE", "coop")
+    monkeypatch.setenv("EMMY_REDUCE@place_ab12", "g16k/coop-t")
+    assert knob_mod.kernel_pin("REDUCE", "k_x__place_ab12") == "g16k/coop-t"
+    assert knob_mod.kernel_pin("REDUCE", "k_x__place_ab12__partial") == "g16k/coop-t"
+    assert knob_mod.kernel_pin("REDUCE", "k_x__place_ab12_1") is None, "a sibling piece of the same seam"
+    assert knob_mod.kernel_pin("REDUCE", "k_x__place_ab12_1__partial") is None
+    assert knob_mod.kernel_pin("REDUCE", "k_x__place_ab123") is None
+    assert knob_mod.kernel_pin("REDUCE", "k_x__place_cd34") is None
+    assert knob_mod.family_pins("REDUCE") == (("REDUCE", "coop"),)
+    assert pin_row("k_x__place_ab12", split_consumed=True) == {"REDUCE": "coop-t"}
+    assert pin_row("k_x__place_cd34", split_consumed=False) == {"REDUCE": "coop"}
+    assert pin_row("k_x__place_ab12__partial", "add_7__place_ab12_0__partial", split_consumed=True) == {"REDUCE": "coop-t"}
+
+
+def test_the_most_specific_kernel_pin_wins(monkeypatch):
+    """A pin naming a split's partial beats the pin naming the piece it was split from, which also
+    reaches the partial: a sweep sets the piece's split factor and the partial's tier together."""
+    from importlib import import_module
+
+    pin_row = import_module("emmy.compiler.pipeline.passes.tile.schedule.040_schedule").pin_row
+    monkeypatch.setenv("EMMY_REDUCE@place_ab12", "g8k")
+    monkeypatch.setenv("EMMY_REDUCE@place_ab12__partial", "coop-t")
+    assert knob_mod.kernel_pin("REDUCE", "k_x__place_ab12") == "g8k"
+    assert knob_mod.kernel_pin("REDUCE", "k_x__place_ab12__partial") == "coop-t"
+    assert knob_mod.kernel_pin("REDUCE", "k_x__place_ab12", "add_7__place_ab12_0") == "g8k", "the finalize keeps the piece's pin"
+    assert pin_row("k_x__place_ab12__partial", split_consumed=True) == {"REDUCE": "coop-t"}
+
+
+def test_a_node_pin_reaches_the_uncut_root_and_its_split(monkeypatch):
+    """``REDUCE@node_<id>`` pins the kernel whose graph node is ``<id>`` — the uncut remainder of a route,
+    which has no ``__place_`` token — and its split's partial and finalize, never a cut piece; a pin on
+    the partial beats it there."""
+    from importlib import import_module
+
+    pin_row = import_module("emmy.compiler.pipeline.passes.tile.schedule.040_schedule").pin_row
+    monkeypatch.setenv("EMMY_REDUCE@node_add_7", "g16k")
+    monkeypatch.setenv("EMMY_REDUCE@node_add_7__partial", "coop-t/v2")
+    assert knob_mod.kernel_pin("REDUCE", "k_sdpa_x_7e7a8a", "add_7") == "g16k"
+    assert knob_mod.kernel_pin("REDUCE", "", "add_7__partial") == "coop-t/v2"
+    assert knob_mod.kernel_pin("REDUCE", "k_add_7__partial") == "coop-t/v2", "the partial's kernel name"
+    assert knob_mod.kernel_pin("REDUCE", "k_add_7__place_ab12", "add_7__place_ab12_0") is None, "a cut piece"
+    assert knob_mod.kernel_pin("REDUCE", "k_add_70", "add_70") is None
+    assert knob_mod.family_pins("REDUCE") == ()
+    assert pin_row("", "add_7__partial", split_consumed=True) == {"REDUCE": "coop-t/v2"}
+
+
+def test_a_kernel_pin_is_checked_as_its_family():
+    """A kernel pin is checked against the kernels it names; given no names, against every kernel, as a bare pin."""
+    from emmy.compiler.pipeline.search.pins import unreproducible_pin_flag
+
+    rows = [{"WORK": "w1x16", "REDUCE": ""}, {"WORK": "t128", "REDUCE": "coop-t"}]
+    assert unreproducible_pin_flag({"WORK@place_ab12": "t128"}, rows) is None
+    assert unreproducible_pin_flag({"WORK@place_ab12": "w4x1"}, rows) is not None
+    # Named, it is asked of the kernels it reaches alone: the piece that ran w1x16 did not realize t128.
+    names = [("k_x__place_ab12__partial",), ("k_x__place_cd34__partial",)]
+    assert "WORK@place_ab12=t128" in unreproducible_pin_flag({"WORK@place_ab12": "t128"}, rows, kernel_names=names)
+    assert unreproducible_pin_flag({"WORK@place_cd34": "t128"}, rows, kernel_names=names) is None
+    # A cut piece's node id carries its ordinal and its kernel name does not; the pin reaches the kernel by either.
+    pieces = [("k_x__place_ab12", "add_7__place_ab12_0"), ("k_x__place_cd34", "add_7__place_cd34_0")]
+    assert unreproducible_pin_flag({"WORK@place_cd34": "t128"}, rows, kernel_names=pieces) is None
+
+
+def test_a_kernel_scoped_place_pin_is_not_realized_by_a_sibling_seam():
+    """Placement receipts name seams, so ``PLACE@place_<token>`` is never read as a bare PLACE pin."""
+    from emmy.compiler.pipeline.search.pins import unreproducible_pin_flag
+
+    receipts = [{"PLACE@map.1/inner": "cut"}]
+    assert unreproducible_pin_flag({"PLACE@map.1/inner": "cut"}, [{}], placement_knobs=receipts) is None
+    assert unreproducible_pin_flag({"PLACE@place_ab12": "cut"}, [{}], placement_knobs=receipts) is not None

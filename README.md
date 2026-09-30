@@ -209,12 +209,20 @@ emmy deploy local --recipe recipes/gemma-4-12B-it
 
 # Cloud (auto-provisions a VM)
 emmy deploy cloud --recipe recipes/gemma-4-12B-it --gpu "NVIDIA H200 141GB" --gpu-count 8
+
+# Cloud, several models on one VM (a plan file instead of --recipe)
+emmy deploy cloud --plan plan.json --result-json out.json --lease lease.json --owner relay/deployment-42
 ```
 
 `--recipe` also takes a bare recipe name (`--recipe gemma-4-12B-it`). An editable install resolves it from the live
 checkout; a wheel install resolves it from the packaged catalog. Emmy copies the recipe into the current directory
 first because `deploy` writes its compose file next to it and `bench` its timestamped run directory. A path that
 exists always wins, so an edited working copy is never overwritten.
+
+A plan names the VM to rent (`gpu`, `gpu_count`) and an ordered list of `models`, each with a `recipe`, its
+`gpu_memory_utilization` and the `gpu_device_ids` it is pinned to. Model *i* runs as its own container on host port
+`8000 + i`; models sharing a GPU start one after another. `--result-json` writes one endpoint per model on success,
+and `--lease` persists the instance id the moment the VM is rented. The deploy command reference has the details.
 
 ## Publish a serving image
 
@@ -248,14 +256,15 @@ emmy serve Qwen/Qwen3-Embedding-0.6B --bench --random-input-len 32 --stock
 
 Dense FP16 Qwen3 can be prepared as a standalone artifact and run through the Rust cached-generation loop. This
 single-request path and experimental native HTTP adapter support greedy or seeded temperature/top-p sampling and
-optional CUDA graphs. Residuals and attention/rotary intermediates use FP32. Prefill uses fixed-width chunks;
+optional CUDA graphs. Output logits, residuals, and attention/rotary intermediates use FP32.
+Prefill uses fixed-width chunks;
 vLLM remains the serving default.
 See the [native generation contract](emmy/serving/native/ARCHITECTURE.md)
 for preparation, commands, limitations, and qualification.
 
 ```bash
 make native-dist  # install the archive's matching binaries on PATH
-emmy serve Qwen/Qwen3-0.6B --generate --native --revision REVISION
+emmy serve Qwen/Qwen3-0.6B --runner generate --native --revision REVISION
 ```
 
 Native serving exposes text and chat completions with streaming, stop strings, usage, and one active request.
@@ -270,21 +279,24 @@ emmy recipe list --json
 # Count one lifecycle group in automation.
 emmy recipe query --filter 'tags contains "maintained"' --json
 
-# Select the hottest available onboarding deployment. Referencing deployment.* expands each recipe into deployment
-# rows; CloudRift availability is resolved only because this query uses it.
+# Select the hottest available onboarding shell that has not failed. Referencing deployment.* expands each recipe into
+# deployment rows; CloudRift availability is resolved only because this query uses it.
 emmy recipe query \
   --filter 'lifecycle == "onboarding"' \
+  --filter 'tags not contains "onboarding-failed"' \
   --filter 'deployment.availability.cloudrift == true' \
   --sort 'heat desc nulls-last' \
   --sort 'model_id asc' \
   --limit 1 --json
 
-# When no onboarding deployment is available, select the maintained recipe with the oldest results.
+# Select a hot runnable recipe that has no Emmy serving variant yet.
 emmy recipe query \
-  --filter 'lifecycle == "maintained"' \
-  --filter 'deployment.availability.cloudrift == true' \
-  --sort 'results.last_run_at asc nulls-first' \
-  --limit 1 --json
+  --filter 'lifecycle in ["maintained", "best-effort"]' \
+  --filter 'runnable == true' \
+  --filter 'heat >= 70' \
+  --filter 'emmy_serving == false' \
+  --sort 'heat desc' \
+  --json
 
 # Check one exact external candidate, including a model without a recipe yet.
 emmy recipe query --candidate org/model-name "NVIDIA H200 141GB" 1 \
@@ -295,10 +307,12 @@ emmy recipe create org/model-name --rationale "Why this model should be onboarde
   --deployment "NVIDIA H200 141GB" 1 --deployment "NVIDIA B200" 1
 ```
 
-`recipe list --json` is a versioned machine interface. It returns an object with `schema_version` and `recipes`;
-each recipe carries its directory `name`, model ID, task, lifecycle-aware `runnable` state, heat score, and
-matrix-expanded deployments with effective context lengths. Consumers must reject unknown schema versions. Fields
-may be added to a schema version, but existing fields are not removed or redefined. Emmy always detects its
+`recipe list --json` is a versioned machine interface (schema version 2). It returns an object with `schema_version`
+and `recipes`; each recipe carries its directory `name`, model ID, task, lifecycle-aware `runnable` state, heat score,
+and matrix-expanded deployments, each with its GPU, GPU count, GPU memory fraction and effective context length. Two
+entries that differ only by fraction are both listed: that is how a recipe declares it may share its GPU. Consumers
+must reject unknown schema versions. Fields may be added to a schema version, but existing fields are not removed or
+redefined. Emmy always detects its
 installation: an editable checkout uses its live top-level `recipes/`, while a regular wheel uses its packaged
 runnable recipe bundle.
 `recipe query --json` returns a separate versioned `rows` interface for generic predicates and stable sort keys. Its

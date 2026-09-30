@@ -3,7 +3,7 @@
 import logging
 from pathlib import Path
 
-from emmy.deploy.compose import calculate_num_instances
+from emmy.deploy.compose import replica_services
 from emmy.deploy.orchestrate import baked_hf_cache
 from emmy.recipe.types import Recipe, VllmConfig
 from emmy.redact import redact_secrets
@@ -17,8 +17,8 @@ def _bench_args(recipe: Recipe, repeat: int = 0, tokenizer: str | None = None) -
     ``seed + i`` (unset counts as 0): a replayed prompt set would hit the server's prefix cache."""
     bench = recipe.benchmark
     seed = None if bench.seed is None and not repeat else (bench.seed or 0) + repeat
-    num_instances = calculate_num_instances(recipe)
-    port = 8080 if num_instances > 1 else 8000
+    _, load_balancer = replica_services(recipe)
+    port = 8080 if load_balancer else 8000
     args = [
         f"--model {recipe.model_name}",
         "--trust-remote-code",

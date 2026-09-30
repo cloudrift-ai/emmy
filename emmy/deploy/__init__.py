@@ -1,9 +1,10 @@
 """Deploy library: compose generation, deploy orchestration, scale-out strategies."""
 
 from emmy.deploy.compose import (
-    calculate_num_instances,
     generate_compose,
     generate_nginx_conf,
+    replica_services,
+    service_name,
 )
 from emmy.deploy.orchestrate import (
     deploy,
@@ -11,7 +12,7 @@ from emmy.deploy.orchestrate import (
     run_teardown,
     teardown,
 )
-from emmy.deploy.params import DeployParams
+from emmy.deploy.params import DeployParams, Service
 from emmy.deploy.scale_out import (
     DEFAULT_STRATEGY,
     STRATEGIES,
@@ -27,11 +28,13 @@ __all__ = [
     "ReplicaParallelismScaleOutStrategy",
     "STRATEGIES",
     "ScaleOutStrategy",
-    "calculate_num_instances",
+    "Service",
     "deploy",
     "generate_compose",
     "generate_nginx_conf",
+    "replica_services",
     "run_deploy",
     "run_teardown",
+    "service_name",
     "teardown",
 ]

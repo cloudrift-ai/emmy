@@ -14,9 +14,15 @@ tile-tier rebuild:
 
 - ``030_stamp_types`` — stamp Load/Assign/Write dtypes (so the next two read
   them off the IR; overflow-prone fp16 squares promote to f32).
+- ``045_merge_select_loads`` — compute a coordinate select's two isomorphic branches once, each
+  load reading at the selected index (RoPE's rotate-half partner).
+- ``047_reuse_lane_loads`` — unroll short lane-strided loops and load each read-only cell once, so a
+  cooperative row stays in registers from its reduce to its projection.
 - ``050_vectorize_loads`` / ``080_vectorize_stores`` — fold consecutive scalar
   Loads / Writes into one wide vector access.
 - ``095_interleave_loads`` — sink each Load to just before its first consumer.
+- ``097_widen_fragment_stores`` — store four adjacent ``wgmma`` accumulator cells as one
+  16-byte row per lane.
 - ``110_drop_redundant_syncs`` — collapse no-op Sync stmts at the Tile body level.
 
 The tile-tier kernel passes (mma fragment lowering, register-tile split, smem

@@ -5,20 +5,25 @@
 # schedules were tuned by the tune-kernels skill and committed beside this recipe, and the row only re-measures them
 # at deployable -O3. Rows with `golden: ""` keep the original trace + in-recipe search. Both paths end in the same
 # fresh-process `emmy run --golden ... --bench --strict` repeats against eager and Emmy, so the two lanes produce
-# the same terminal correctness evidence. A separate torch.compile replay is diagnostic because a reference backend
-# can be unavailable for a valid target; its absence must not fail an otherwise-correct Emmy replay.
+# the same terminal correctness evidence. A separate torch.compile run is diagnostic because a reference backend
+# can be unavailable for a valid target; its absence must not fail an otherwise-correct Emmy replay. It times the
+# Hugging Face layer itself (`emmy run MODEL --layer N`), with the working golden as evidence, so eager,
+# torch.compile and Emmy run on the module a user would compile rather than on the golden's traced program.
 command:
   stage:
     - emmy
     - pyproject.toml
     - requirements.txt
     - Makefile
+    - Cargo.toml
+    - Cargo.lock
+    - crates
     - experiments/golden-bench-2026/kernels/recipe.yaml
     - experiments/golden-bench-2026/kernels/golden
   strict: true
   run: |
     set -euo pipefail
-    export PATH=/usr/local/cuda/bin:$$PATH
+    export PATH=/usr/local/cuda/bin:$$HOME/.cargo/bin:$$PATH
     cd $repo_dir
     mkdir -p $task_dir/verification
     finalize() {
@@ -39,6 +44,8 @@ command:
     trap finalize EXIT
 
     [ -d venv ] || make setup
+    # A venv staged before the runtime was compiled lacks the extension; build it in place.
+    ./venv/bin/python -c 'import emmy.emmy_runtime' 2>/dev/null || ./venv/bin/pip install -q -e .
     export EMMY_TUNE_DB=$task_dir/autotune.db
     export EMMY_ONLINE_FILE=$task_dir/online.json
     export EMMY_CUBIN_CACHE=$task_dir/cubins
@@ -74,10 +81,10 @@ command:
     fi
 
     mkdir -p $task_dir/torch-compile
-    if EMMY_NVCC_FLAGS= CUDA_VISIBLE_DEVICES="$$first_device" ./venv/bin/emmy run \
-      --golden $task_dir/working.json --bench \
-      --json $task_dir/torch-compile --warmup 10 --iters 100 \
-      --bench-backends eager,tcompile 2>&1 | tee $task_dir/torch-compile.log; then
+    if EMMY_NVCC_FLAGS= EMMY_GOLDEN_FILE=$task_dir/working.json CUDA_VISIBLE_DEVICES="$$first_device" ./venv/bin/emmy run \
+      "$model_ref" --layer "$layer" --seq-len "$seq_len" --bench \
+      --json $task_dir/torch-compile/model.json --warmup 10 --iters 100 \
+      --bench-backends eager,tcompile,emmy 2>&1 | tee $task_dir/torch-compile.log; then
       torch_compile_status=0
     else
       torch_compile_status=$$?
@@ -120,8 +127,6 @@ matrices:
       zip:
         deploy.gpu:
           - "NVIDIA Tesla V100 SXM3 32GB"
-          - "NVIDIA GeForce RTX 4090"
-          - "NVIDIA GeForce RTX 5090"
           - "NVIDIA H200 141GB"
           - "NVIDIA B200"
         deploy.gpu_count: 1
@@ -157,6 +162,51 @@ matrices:
       zip:
         seq_len: [1, 512]
         golden: [qwen3-06b-s1_h100, qwen3-06b-s512_h100]
+
+  # The same common corpus on the V100 SXM2 16GB, replaying the committed goldens instead of searching.
+  - cross:
+      study: common
+      model_ref: Qwen/Qwen3-0.6B@c1899de289a04d12100db370d81485cdf75e47ca
+      layer: 0
+      budget: 0
+      patience: 0
+      seed: 0
+      fp8_mma: 0
+      deploy.gpu: "NVIDIA Tesla V100 SXM2 16GB"
+      deploy.gpu_count: 1
+      zip:
+        seq_len: [1, 512]
+        golden: [qwen3-06b-s1_v100, qwen3-06b-s512_v100]
+
+  # The same common corpus on the RTX 5090, replaying the committed goldens instead of searching.
+  - cross:
+      study: common
+      model_ref: Qwen/Qwen3-0.6B@c1899de289a04d12100db370d81485cdf75e47ca
+      layer: 0
+      budget: 0
+      patience: 0
+      seed: 0
+      fp8_mma: 0
+      deploy.gpu: "NVIDIA GeForce RTX 5090"
+      deploy.gpu_count: 1
+      zip:
+        seq_len: [1, 512]
+        golden: [qwen3-06b-s1_rtx5090, qwen3-06b-s512_rtx5090]
+
+  # The same common corpus on the RTX 4090, replaying the committed goldens instead of searching.
+  - cross:
+      study: common
+      model_ref: Qwen/Qwen3-0.6B@c1899de289a04d12100db370d81485cdf75e47ca
+      layer: 0
+      budget: 0
+      patience: 0
+      seed: 0
+      fp8_mma: 0
+      deploy.gpu: "NVIDIA GeForce RTX 4090"
+      deploy.gpu_count: 1
+      zip:
+        seq_len: [1, 512]
+        golden: [qwen3-06b-s1_rtx4090, qwen3-06b-s512_rtx4090]
 
   # Dynamic-FP8 checkpoint layers on FP8-capable GPUs. A future golden filter will define the W8A8-only corpus.
   - cross:

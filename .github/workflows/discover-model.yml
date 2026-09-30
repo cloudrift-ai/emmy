@@ -144,7 +144,7 @@ jobs:
           }
           set +e
           : > "$AGENT_EVENTS"
-          run_agent "Complete the attached lifecycle task exactly." \
+          run_agent "Complete the attached lifecycle task exactly. Its file is $AGENT_TASK." \
             --file "$WORKFLOW_SOURCE/.agents/skills/discover-models/SKILL.md" \
             --file "$WORKFLOW_SOURCE/prompts/model-fit.md" \
             --file "$WORKFLOW_SOURCE/prompts/discover-models/lifecycle.md" \

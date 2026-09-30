@@ -3,8 +3,8 @@ tags:
 - untested
 model:
   huggingface: XiaomiMiMo/MiMo-V2.6-Flash-RL
-  rationale: 'New MiMo V2.6 RL wave: 309B/15B omnimodal MoE, FP8, MIT, agent benchmarks near frontier, active on OpenRouter.'
-  heat: 78
+  rationale: "#7 weekly, >999% WoW, arena #23, 28k downloads; strong current breakout attention."
+  heat: 90
   task: generate
 matrices:
 - deploy.gpu: AMD Instinct MI350X

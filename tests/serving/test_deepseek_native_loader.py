@@ -98,7 +98,7 @@ def _native_checkpoint(tmp_path, torch, hidden: int = 64, inter: int = 32, exper
     tensors["layers.0.hc_ffn_scale"] = torch.randn(3)
     tensors["layers.0.ffn_norm.weight"] = torch.randn(hidden, dtype=torch.bfloat16)
     tensors["layers.0.ffn.gate.weight"] = torch.randn(experts, hidden, dtype=torch.bfloat16)
-    tensors["layers.0.ffn.gate.bias"] = torch.randn(experts, dtype=torch.float32)
+    tensors["layers.0.ffn.gate.bias"] = references["gate_bias"] = 9 + torch.rand(experts, dtype=torch.float32)
     # The speculative-decoding head ships in the same checkpoint and belongs to no twin.
     tensors["mtp.0.attn_norm.weight"] = torch.randn(hidden, dtype=torch.bfloat16)
     for e in range(experts):
@@ -160,6 +160,21 @@ def test_native_trunk_names_reach_the_twin(tmp_path):
         "model.layers.0.mlp.gate.e_score_correction_bias",
     ):
         assert key in state and not state[key].is_meta, f"{key} did not load from the native checkpoint"
+
+
+def test_a_float16_twin_keeps_the_routing_bias_float32(tmp_path):
+    """The published bias is float32 and reaches ~27; float16 rounds it by up to 8e-3. Served that way,
+    one probed token picked a different top-6 expert than the 1Cat fork in 9 of its first 27 routed layers."""
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("transformers")
+
+    from emmy.compiler.trace.huggingface import load_quantized_split
+
+    _config, references = _native_checkpoint(tmp_path, torch)
+    model, _store = load_quantized_split(tmp_path, torch.float16)
+
+    loaded = model.state_dict()["model.layers.0.mlp.gate.e_score_correction_bias"]
+    torch.testing.assert_close(loaded, references["gate_bias"], rtol=0, atol=0)
 
 
 def test_expert_range_narrows_the_load_to_one_shard(tmp_path):

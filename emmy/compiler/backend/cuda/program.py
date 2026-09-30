@@ -30,6 +30,7 @@ import os as _os
 import pickle
 import sys as _sys
 import time as _time_module
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -127,7 +128,7 @@ def _numpy_storage(src, dtype) -> np.ndarray:
 
 def _host_bytes(buf: _Buffer, shape: tuple[int, ...], src, constants: dict[str, float]) -> bytes:
     """The bytes one input or constant buffer starts from: the supplied array, the plan's scalar
-    constant, a deterministic pseudo-random ramp for an unsupplied input, zeros otherwise."""
+    constant, seeded normal values for an unsupplied input, zeros otherwise."""
     np_dtype = buf.dtype.np
     is_bf16 = getattr(buf.dtype, "name", buf.dtype) == "bf16"
     n = math.prod(shape)
@@ -145,12 +146,15 @@ def _host_bytes(buf: _Buffer, shape: tuple[int, ...], src, constants: dict[str, 
             return np.full(shape, np.uint16((bits + 0x7FFF + ((bits >> 16) & 1)) >> 16), dtype=np.uint16).tobytes()
         return np.full(shape, v, dtype=np_dtype).tobytes()
     if buf.role == "input":
-        # Pseudo-random fill for un-supplied inputs. The index ramp is built in int64, not
-        # ``np_dtype``: a float16 buffer past 65504 elements would overflow to ``inf`` (then
-        # ``inf % 101`` → ``nan``). Compute in fp32 and cast the final values — always in
-        # ``[-0.5, 0.5]``, so fp16-safe.
-        idx = np.arange(n, dtype=np.int64)
-        vals = 0.01 * ((idx.astype(np.float32) * 7 + 13) % 101 - 50)
+        # Seeded normal values for an un-supplied input, one stream per buffer name — what the
+        # reference path draws (``standard_normal``). A kernel's cost can depend on its values
+        # (an IEEE division's slow path, an exp near overflow): the index ramp this replaced
+        # repeats every 101 elements, and through a whole layer it drove softmax rows into
+        # that slow path, so a timing on it was not the timing on real data. Integer carriers
+        # keep a small ramp: their codes are data, not magnitudes.
+        if not is_bf16 and np.issubdtype(np_dtype, np.integer):
+            return (np.arange(n, dtype=np.int64) % 101).astype(np_dtype).tobytes()
+        vals = np.random.default_rng(zlib.crc32(buf.name.encode())).standard_normal(n, dtype=np.float32)
         vals = encode_bf16(vals) if is_bf16 else vals.astype(np_dtype)
         return vals.tobytes()
     return np.zeros(shape, dtype=np_dtype).tobytes()
@@ -158,14 +162,15 @@ def _host_bytes(buf: _Buffer, shape: tuple[int, ...], src, constants: dict[str, 
 
 def _host_bindings(plan: ExecutionPlan, input_data: dict, sym_values: dict[str, int], *, only=None) -> dict[str, bytes]:
     """Starting bytes for input and constant buffers (``only`` narrows the set). A buffer bound
-    to a device tensor is skipped: its memory is lent to the runtime instead. Output and scratch
-    buffers start zeroed inside the runtime. Saturating casts here are intended, not bugs: an
+    to a device tensor is skipped: its memory is lent to the runtime instead; so is a paged one,
+    which has no slab to fill and takes its page table instead. Output and scratch buffers start
+    zeroed inside the runtime. Saturating casts here are intended, not bugs: an
     SDPA mask-fill constant (``-1e9``) is meant to become ``-inf`` in fp16 (masked → 0 after
     softmax)."""
     out: dict[str, bytes] = {}
     with np.errstate(over="ignore", invalid="ignore"):
         for buf in plan.buffers:
-            if buf.role not in ("input", "constant") or (only is not None and buf.name not in only):
+            if buf.role not in ("input", "constant") or (only is not None and buf.name not in only) or buf.name in plan.paged:
                 continue
             src = input_data.get(buf.name)
             if _is_device_tensor(src):
@@ -359,6 +364,12 @@ _BATCH_TARGET_MS = 1.0
 # calibration we extend ``warmup`` so total warmup GPU time clears
 # this threshold.
 _WARMUP_TARGET_MS = 10.0
+# Past that floor, warmup keeps going while each iter still runs faster than the one before —
+# the clocks are still ramping — up to this much warmup GPU time. A fixed floor does not cover
+# a datacenter card coming out of idle (a compile, a host-side gap): on an A100 the first kernel
+# measured after one ran ~30% slow (42.6 vs 33.2 us) under the 10 ms floor alone.
+_WARMUP_MAX_MS = 500.0
+_WARMUP_SETTLED = 0.98
 
 
 # ---------------------------------------------------------------------------
@@ -454,6 +465,7 @@ class CompiledProgram:
         regions = self._provision(sym_values, input_data)
         bindings = _host_bindings(plan, input_data, sym_values)
         self.executor = emmy_runtime.Executor(device(), program, binaries, bindings, sym_values, regions)
+        self._bind_lent_inputs(input_data)
         elapsed = _time_module.monotonic() - t0
         if compile_timeout_s is not None and elapsed > compile_timeout_s:
             raise CompileBudgetExceeded(f"compile stage exceeded {compile_timeout_s:.1f}s budget ({elapsed:.2f}s) — nothing measured")
@@ -516,6 +528,7 @@ class CompiledProgram:
         bindings = _host_bindings(self.plan, input_data, new_sym, only=touched)
         regions = self._provision(new_sym, input_data)
         self.executor.rebind(new_sym, bindings, regions)
+        self._bind_lent_inputs(input_data)
         self.sym_values = new_sym
 
     def set_sym_values(self, values: dict[str, int]) -> None:
@@ -592,6 +605,19 @@ class CompiledProgram:
         bindings = _host_bindings(self.plan, input_data, self.sym_values, only=set(input_data))
         for name, data in bindings.items():
             self.executor.bind(name, data)
+
+    def _bind_lent_inputs(self, input_data: dict) -> None:
+        """Mark every input supplied as a CUDA tensor bound. Its memory IS the buffer's region
+        (:meth:`_provision`), so no bytes travel, but the runtime counts an input bound only once
+        told, and a launch refuses while one is not: the device copy onto itself is skipped and the
+        mark stays (:meth:`upload_prefix_device`)."""
+        lent = {
+            buffer.name: input_data[buffer.name]
+            for buffer in self.plan.buffers
+            if buffer.role == "input" and buffer.name not in self.plan.paged and _is_device_tensor(input_data.get(buffer.name))
+        }
+        if lent:
+            self.upload_prefix_device(lent)
 
     def upload_prefix_device(self, input_data: dict) -> None:
         """Device twin of :meth:`upload_prefix`: copy each supplied CUDA tensor into its buffer's
@@ -694,7 +720,8 @@ class CompiledProgram:
         """Point one operand at ``tensor``'s memory: a buffer chained onto another program's (a
         producer's output onto a consumer's input, so the consumer's device upload becomes a
         self-copy skip), or an operand the plan never declares as a buffer — an indirect
-        operand's pointer table or selector, which only the caller can supply. A buffer's
+        operand's pointer table or selector, or a paged buffer's page table (``<name>__pages``,
+        the device addresses of its pages), which only the caller can supply. A buffer's
         tensor must be contiguous and at least as large as its region; the runtime drops any
         captured graph, since it baked the old address."""
         if not _is_device_tensor(tensor) or not tensor.is_contiguous():
@@ -884,6 +911,8 @@ def benchmark_program(
         iters_run = 0
         measured = 0
         cumulative_gpu_ms = 0.0  # measured-iter GPU time, for the "auto" stop target
+        calibrated = False  # batch sizes are set once, at the end of the requested warmup
+        prev_call_ms = None  # the previous iter's per-call time (the ramp check)
         total_gpu_ms = 0.0  # all-iter GPU time (incl. warmup), for the run-stage budget
 
         def _try_capture(sizes: list[int]) -> bool:
@@ -911,18 +940,22 @@ def benchmark_program(
             # discards.
             if run_timeout_s is not None and total_gpu_ms > run_timeout_s * 1000.0:
                 raise RuntimeError(f"benchmark run stage exceeded {run_timeout_s:.1f}s of GPU time — variant marked bench_fail")
-            if iters_run == warmup:
+            # While the last warmup iter still beats the one before it by more than noise, the
+            # clocks are ramping: warm up one iter longer. ``iter_dts`` are per-call times, so
+            # the comparison holds across the batch calibration.
+            call_ms = sum(iter_dts)
+            if iters_run == warmup and prev_call_ms is not None and total_gpu_ms < _WARMUP_MAX_MS:
+                if call_ms < _WARMUP_SETTLED * prev_call_ms:
+                    warmup += 1
+            prev_call_ms = call_ms
+            if iters_run == warmup and not calibrated:
+                calibrated = True
                 batch_sizes = _calibrate_batch_sizes(iter_dts)
                 if capture_graphs:
-                    # Capture (or re-capture) at the calibrated batch sizes.
-                    # The warmup extension below can re-fire this calibration
-                    # branch with new batch sizes — ``capture_launch_graphs``
-                    # no-ops when they're unchanged and re-captures when not,
-                    # so graphs and batches never go out of sync.
+                    # Capture at the calibrated batch sizes, which hold from here on.
                     capture_graphs = _try_capture(batch_sizes)
                 # Extend warmup until total warmup GPU time clears the
-                # clock-ramp floor. Post-batching, each subsequent
-                # warmup iter spends roughly
+                # clock-ramp floor. Post-batching, each warmup iter spends roughly
                 # ``sum(iter_dts[i] * batch_sizes[i])`` of GPU time —
                 # use the just-measured per-launch dts to estimate how
                 # many extra iters are needed.
