@@ -42,7 +42,7 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
 - `runner.py` — `EmmyForwardRunner`. At engine start: load the `AutoModel` **trunk** (hidden states out — no
   lm_head), `build_full_model_wrapper(dynamic=True)`, trace with the canonical 4-spec dynamic seq_len
   (`seq_len@input_ids:1`, `@attention_mask:2`, `@attention_mask:3`, `@position_ids:1`), compile through `CudaBackend`
-  (greedy fork picks from the global prior — benefits from any prior `emmy tune`), bind weights as graph
+  (greedy fork picks from the measured evidence, then the prior), bind weights as graph
   constants (`named_parameters` + `named_buffers`, `remove_duplicate=False`, in the traced dtype), and build ONE
   `CompiledProgram` over a buffer set sized at **`max_seq_len`** (`--max-model-len`). Per
   sequence (`forward_hidden_states`) it takes a **1-D int torch CUDA tensor** and returns an `(S, hidden)` **torch CUDA
@@ -79,7 +79,7 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   audit nothing. A floor under `MIN_FLOOR_US` is still skipped as timer noise, which at low bit rates an expert
   launch can be — a 2.25 bpw GLM expert streams ~4 MB — so read the expert tiers' silence as "below the noise
   floor", not "clean".
-  Logs a loud WARNING naming any program >10x over it, with the `emmy tune` pointer. Conservative by construction
+  Logs a loud WARNING naming any program >10x over it. Conservative by construction
   (each floor is a true lower bound for its regime, both calibrations undershoot peak, quantized weights only
   underestimate the compute floor, and FAST_MATH kernels can only sit *under* the f32-acc-calibrated compute floor),
   advisory only (never raises, never blocks boot). A measurement failure is swallowed to debug, but an unusable
@@ -115,8 +115,7 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   `config.json` alone (no checkpoint download — a trace never reads a weight value; `layer_types` collapses to one
   local + one `full_attention` layer, the vocab shrinks to a stub) and traces the `pre`/`post` twins through the same
   `build_attention_split_wrapper` / `trace_split` path serving uses. Backs the file-scoped `emmy eval golden
-  --golden GOLDEN_FILE --serving-config PATH` release audit and serving-image gate;
-  `scripts/capture_gen_twins.py` is its JSON writer, one graph per file, because `emmy tune` reads a graph per file.
+  --golden GOLDEN_FILE --serving-config PATH` release audit and serving-image gate.
   Static linear-attention profiles additionally capture `gdn<width>` programs with explicit matrix state and
   convolution history inputs and outputs. Each uses the installed block forward and can hand its returned state
   from prefill into decode. Parameter identity retargets wrapper paths to the underlying block before checkpoint
@@ -422,13 +421,14 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   way, a known small numeric drift.
   **Tuning what serving actually runs.** The deploy pick reads one measured-evidence index — the golden rows in
   scope (the card's repository files, or the file `emmy serve --golden PATH` names, which reaches the vLLM child as
-  `EMMY_GOLDEN_FILE`) beside box-local `perf` / reservoir rows, fastest first, the prior only where nothing was
+  `EMMY_GOLDEN_FILE`) beside the box-local `perf` rows, fastest first, the prior only where nothing was
   measured; `--strict-evidence` (`EMMY_STRICT_EVIDENCE`) fails the boot on a fork nothing measured decides — and only
   evidence recorded against the *serving graph* carries serving. An isolated snippet does not:
   fusion inside a real block produces a different graph (`F.rms_norm(x) @ w` binds a cone the in-model op does not).
   So the evidence path is the **twins**. `emmy trace CHECKPOINT --serving-twins --serving-config PATH` captures
   every distinct structural target once as symbolic Loop IR and attaches the exact config-derived realization
-  matrix. `emmy tune --golden PATH` specializes and tunes each binding and precision regime. Capture a **global**
+  matrix. `emmy run --golden PATH --bench --record` (or `--record-greedy`) measures and records each binding and
+  precision regime. Capture a **global**
   (`full_attention`) layer alongside the sliding one for any model whose layers are not homogeneous — gemma-4's
   global layers carry a larger `head_dim`, so their projections are different shapes with different optimal configs.
   Re-capture whenever a tracer/recognizer change alters the graphs. The release audit re-traces the exact widths

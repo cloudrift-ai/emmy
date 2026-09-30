@@ -50,10 +50,8 @@ A hackable PyTorch → Graph IR → CUDA compiler. Trace any `nn.Module`, fuse i
 emmy compile -c "nn.RMSNorm(2048)(torch.randn(1,32,2048))"
 # Benchmark kernel on a local GPU
 emmy run --bench --profile -c "torch.nn.Softmax(dim=-1)(torch.randn(1, 28, 2048, 2048))"
-# Trace a dynamic model layer into an unmeasured working golden for remote tuning
+# Trace a dynamic model layer into an unmeasured working golden
 emmy trace Qwen/Qwen3-0.6B --layer 0 --dynamic seq_len@x:1 -o _tune/qwen3/working.json
-# Measure proposed rows, then spend the remaining per-kernel budget on MCTS
-emmy tune --golden _tune/qwen3/working.json --devices 0,1 --max-candidates 64
 # Bench every realization and record the measurements as deploy evidence (add --realization NAME to select one)
 emmy run --golden _tune/qwen3/working.json --bench --strict --json _tune/qwen3/results
 # Record the kernel set the greedy pick took for one realization as measured rows a strict compile picks again

@@ -321,7 +321,7 @@ shared with CausalLM traces.
 
 ## Entry points
 
-- CLI model/IR/code loading: `commands.compile.load_or_trace` is shared by `trace`, `compile`, `run`, and `tune`, so
+- CLI model/IR/code loading: `commands.compile.load_or_trace` is shared by `trace`, `compile` and `run`, so
   adapters, dynamic shapes, quantized checkpoint reconstruction, and the guarded remote-code fallback cannot drift.
 - Working-golden inventory generation is downstream compiler/search behavior, not frontend capture behavior:
   `compiler.pipeline.search.working_golden.write_trace_inventory` lowers the captured graph through fusion, enumerates

@@ -13,10 +13,10 @@ evidence hierarchy**, and each step in it is called a **tier**.
 
 ## The order
 
-1. **Measured evidence.** Every measured row whose structural signature is this kernel's, from two stores: the
-   reservoir (measurements taken at the deployable setting) and the tuning database's rows for this compile's
-   regime — which hold the golden rows in scope too, the golden configurations recorded for this GPU that ship with
-   the repository, or the file `--golden PATH` names instead, imported into the database before the compile picks.
+1. **Measured evidence.** Every measured row whose structural signature is this kernel's: the tuning database's
+   rows for this compile's regime — which hold the golden rows in scope too, the golden configurations recorded for
+   this GPU that ship with the repository, or the file `--golden PATH` names instead, imported into the database
+   before the compile picks.
    The option that agrees with the fastest such row decides. A golden is a preference among measured rows, never a
    forced pin: a recorded row that is slower than a local measurement loses, and a row nothing measured yet (a proposal) is not evidence until `run --golden PATH
    --bench` has measured it.
@@ -28,12 +28,12 @@ evidence hierarchy**, and each step in it is called a **tier**.
 
 The shape of that list is the whole design in miniature. Any measurement of this exact kernel beats a prediction; a
 prediction beats an arbitrary choice. Nothing further down ever overrules something further up, and there is one
-mechanism, not one per store: a golden row and a tune's row are the same kind of thing to the pick.
+mechanism, not one per store: a golden row and a bench's row are the same kind of thing to the pick.
 
 ## How one fork is actually decided
 
-Take the example kernel — the fused RMSNorm and query/key/value linear layer — on a machine with a tuned checkpoint.
-The tile-lowering rule matches it and returns its options.
+Take the example kernel — the fused RMSNorm and query/key/value linear layer — on a machine whose tuning database
+holds rows. The tile-lowering rule matches it and returns its options.
 
 1. The engine hands the fork to the greedy chooser.
 2. **The fork is flattened to complete leaves.** As [the forks page](./03-forks-and-knobs.md) explained, the tree is
@@ -42,8 +42,8 @@ The tile-lowering rule matches it and returns its options.
    only — still no kernel is built.
 3. **Each leaf becomes one row**: the hardware and regime this compile is running under, the summary of the kernel's
    body and extents that the stamping pass wrote onto it, and the leaf's complete knob values.
-4. **Measured evidence.** The fastest reservoir, database or golden row of this same kernel, and the leaf that
-   agrees with it — measured rows first, whichever store they came from.
+4. **Measured evidence.** The fastest database or golden row of this same kernel, and the leaf that agrees with
+   it — measured rows first, whichever store they came from.
 5. **The prior.** Otherwise, all the leaves are scored by the prior in one batch and the lowest prediction wins.
 6. **Only now is the winning leaf built for real**, and the compile moves to the next fork.
 
@@ -56,8 +56,8 @@ option has already decided has the same value in that row.** Knobs the option ha
 pass will decide them.
 
 That is what lets one fully decided measurement settle a fork whose options are only partly decided. Suppose the
-reservoir holds a measurement of this kernel with `WORK = w2x2`, `TILE = f2x8`, `STAGE = depth 2`, and the fork on the
-table is choosing only the worker arrangement:
+tuning database holds a measurement of this kernel with `WORK = w2x2`, `TILE = f2x8`, `STAGE = depth 2`, and the
+fork on the table is choosing only the worker arrangement:
 
 ```
 option A:  WORK = w2x2     ← agrees: the one knob it decides matches the measured row
@@ -71,10 +71,10 @@ so the agreement test is stricter, and the same row keeps steering the compile t
 
 ## Which evidence applies under which settings
 
-- **Reservoir and golden rows apply only to a compile at the deployable setting.** Their numbers are true of that
-  setting and no other.
+- **Golden rows apply only to a compile at the deployable setting.** Their numbers are true of that setting and no
+  other.
 - **The measurements table applies under the setting it was measured in**: the index is keyed by the compile's
-  regime, so a sweep at another optimization level is never read by an ordinary deploy.
+  regime, so a bench at another optimization level is never read by an ordinary deploy.
 - A compile whose settings name no optimization level — which is the default for `emmy compile` and `emmy run` —
   counts as deployable. So an ordinary deployment always gets the full hierarchy.
 
@@ -91,10 +91,9 @@ shuffled option orders and require the same answer, plus a check that two separa
 
 ## When there is no prior
 
-The prior can be missing: a corrupted checkpoint, or weights that fail to load. The reservoir travels inside the
-prior's checkpoint, so its rows are gone with it, and with no prior every fork it would have ranked falls to the
-rule's first option. The database and golden rows are read on the path where a prior exists, so a broken checkpoint
-costs a deploy its measured evidence too; `--strict-evidence` makes that loud instead of silent. Pinned knobs still
+The prior can be missing: weights that fail to load. With no prior every fork it would have ranked falls to the
+rule's first option. The database and golden rows are read on the path where a prior exists, so a broken weights
+file costs a deploy its measured evidence too; `--strict-evidence` makes that loud instead of silent. Pinned knobs still
 apply: a pinned family never reaches a fork at all.
 
 ## Changing which kernels exist
@@ -104,8 +103,8 @@ compile, and both are deliberately harder to trigger.
 
 **A placement cut.** Before the schedule is chosen, a separate decision splits — or does not split — the recognized
 work into kernels. An explicit placement pin decides it outright; unpinned, the cut is offered as an ordinary
-structural fork (the fused form first, one fragment per legal seam), so a tuning run can discover a profitable
-split and a chosen cut records as a row whose keys spell the route. Such a row is measured evidence for the kernel
+structural fork (the fused form first, one fragment per legal seam), so a record run can take a profitable
+split, and a chosen cut records as a row whose keys spell the route. Such a row is measured evidence for the kernel
 it was recorded on: at the placement fork it is the measured price of that cut, it outranks any arm the prior would
 have to price, and taking it means taking the pass's own cut arm. Each resulting piece is a brand-new kernel,
 recognized afresh, that works down the same hierarchy for its own schedule from rows of its own.
@@ -141,7 +140,7 @@ the fork altogether.
 ## When the chosen option does not fit
 
 The prior ranks by predicted latency, so it can rank first a tile that fails validation — one that needs more shared
-memory or more threads than the card has. A tuning run would build it, watch it fail, and move on. An ordinary compile
+memory or more threads than the card has. A bench would build it, watch it fail, and move on. An ordinary compile
 builds nothing, so it has to notice differently.
 
 It notices at the end: a node that never became a kernel. The compile then adds the offending tile to a block list

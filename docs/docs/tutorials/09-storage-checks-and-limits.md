@@ -55,9 +55,9 @@ write, since every row in it can be measured again, and refused by a reader.
 **The tables are checked, not the code.** `emmy db check` verifies that an instance's tables agree with
 themselves — every knob row's digest, every reference, every card, the two knob vocabularies — and counts the rows
 that fail. It does not re-derive what the compiler wrote: the tuning database is a cache, and a row the current code
-disagrees with is re-tuned or re-imported. The freeze is what travels between machines.
+disagrees with is re-benched or re-imported. The freeze is what travels between machines.
 
-**A frozen snapshot makes a fit reproducible.** The tuning database is a live store — tuning runs keep writing into it
+**A frozen snapshot makes a fit reproducible.** The tuning database is a live store — benches keep writing into it
 — so a model fitted straight from it cannot be reproduced later. A freeze is a snapshot written as a golden file per
 card: every kernel's definition — the loop body the compiler formed it from — and its measured schedule rows, each
 with the setting it was measured under and its median. Nothing the compiler computed is stored: no identity, no
@@ -69,24 +69,22 @@ database is what every evaluation and the offline fit read; nothing is loaded in
 checked in at the moment.
 
 **Hand-run measurements are recorded too.** A `run --bench` that measured configurations with knob values forced by
-hand records each clean result through the tuner's own writer, so that manually found optima are not lost when the
+hand records each clean result through the same writer as the compiler's own pick, so that manually found optima
+are not lost when the
 session ends. Rows that were flagged by any of the integrity checks are never recorded at all.
 
 ## The version stamp, and what raising it costs
 
 Every stored training artifact carries the version of the feature encoding it was written under. Raising that version
-is the correct response to any incompatible change in how knobs are named or features are encoded — old artifacts age
-out instead of poisoning the model with rows whose names no longer mean anything.
+is the correct response to any incompatible change in how knobs are named or features are encoded — old artifacts
+are refused instead of poisoning the model with rows whose names no longer mean anything.
 
 It is worth being explicit about how far the consequence reaches, because it is not obvious:
 
-- **The prior's checkpoint from another version is discarded whole** — the model *and* the stored rows.
-- Those stored rows are the reservoir. Discarding them therefore also deletes the reservoir's share of the
-  [measured evidence](./06-deploy-evidence-hierarchy.md), and disables the structural cost estimate, which needs a
-  trusted online model.
-- The machine's deployments silently drop to the golden and database rows, then the offline prior — **with no
-  warning at compile time** unless `--strict-evidence` is on. It behaves like a machine that has never been tuned,
-  until it is tuned again.
+- **The prior's weights from another version are refused**, and so is a dataset exported under another version:
+  refit and re-export, never silently continue.
+- A compile whose weights fail to load has no prior, and every fork the prior would have ranked falls to the rule's
+  first option — **with no warning at compile time** unless `--strict-evidence` is on.
 - The measurements table survives, because it is keyed by content rather than by feature names.
 
 A related rule protects the same evidence from a much smaller change. Matching a candidate to measured rows deliberately
@@ -96,7 +94,7 @@ every existing database at once. That happened, which is why the rule is what it
 
 ## Finding out where the prior is wrong
 
-`emmy eval` exists for the question "the prior chose badly — where?". Two views matter.
+`emmy eval prior` exists for the question "the prior chose badly — where?". Two views matter.
 
 **Where a golden ranks, with ties counted against it.** For each recorded golden configuration, the view reports how
 many candidates the prior scored better. A tie counts as a loss, because when scores are equal the compile takes
@@ -116,10 +114,6 @@ than the fastest configuration in the set. A ratio of 1.00 means the model's pic
 the view that tracks deployed speed, and it is why the ranking view above is only a screen — a rank says where a good
 configuration landed in the ordering, never what missing it costs.
 
-Both views are rendered **once per half of the prior, each labeled**. The composite would answer with whichever half
-is currently active, and the two halves' results point at different fixes — the shipped weights versus the local
-training data — so an unlabeled number would destroy the diagnostic.
-
 Every figure carries the count of comparison sets behind it. The sets have different minimum sizes — a correlation
 needs more members than a ratio does — and the ones too small for a given figure are excluded rather than averaged
 in, so the count is what tells you how much of the data a number actually covers.
@@ -128,31 +122,30 @@ in, so the count is what tells you how much of the data a number actually covers
 
 Gathered in one place, honestly.
 
-1. **The calibration check is lenient on a small tuning run.** A model can be fitted on as few as 50 rows, and if all
-   its operation groups are too small to compute a correlation, calibration cannot be measured — and an unmeasurable
-   calibration passes. Such a model owns deployments and structural decisions on very little data.
-2. **Ranking-setting measurements are known to invert against the deployable setting.** The evidence index is
-   keyed by the compile's regime, so a sweep at the ranking setting is never read by a deploy — but such a machine
+1. **Ranking-setting measurements are known to invert against the deployable setting.** The evidence index is
+   keyed by the compile's regime, so a bench at the ranking setting is never read by a deploy — but such a machine
    deploys on the prior for those kernels, and the prior can be wrong about the ordering it is used for.
-3. **Raising the feature version silently removes the reservoir's evidence.** As described above: no warning at
-   compile time, and the only symptom is that deployments get worse.
-4. **A fresh machine deploys mostly on prediction.** Only golden configurations travel with a clone. Where no golden
+2. **Raising the feature version silently changes what a machine deploys.** As described above: a refused weights
+   file leaves the compile with no prior, no warning at compile time, and the only symptom is that deployments get
+   worse.
+3. **A fresh machine deploys mostly on prediction.** Only golden configurations travel with a clone. Where no golden
    covers a shape, a rented box is choosing from a model that has never seen that card's measurements.
-5. **A cold compile changes which kernels exist only on evidence.** Structural choices need a trusted online model
-   to be costed, so on the offline prior the current kernel set is kept — even where splitting would be much faster.
-   The 1.8-times-faster split on [the goldens page](./07-golden-configurations.md) is only deployable because
-   somebody recorded it, and its recorded decision, priced from the pieces' measured rows, is what deploys it.
-6. **A recording that no longer realizes is simply not evidence**, and the kernel falls to the prior, which can be
+4. **A cold compile changes which kernels exist on a prediction it cannot check.** Structural choices are costed as
+   sums of per-kernel prices; where nothing measured prices a piece, the prior does, and its absolute error does not
+   cancel across kernel families. The 1.8-times-faster split on [the goldens page](./07-golden-configurations.md)
+   deploys with confidence only because somebody recorded it: its recorded decision, priced from the pieces'
+   measured rows, outranks any priced sum.
+5. **A recording that no longer realizes is simply not evidence**, and the kernel falls to the prior, which can be
    far slower than the number the recording advertises. `--strict-evidence` makes that fall-through an error, and
    the release gate compiles the serving matrix under it; a plain deploy without the flag falls through silently.
-7. **There is no per-fork report of which row decided.** Answering "which evidence answered this fork, and did I
+6. **There is no per-fork report of which row decided.** Answering "which evidence answered this fork, and did I
    expect that one?" means correlating warnings, the resolution record and the release gate.
-8. **The measured pools are diagnostic-only.** The dataset database is never consulted when deploying, and the
+7. **The measured pools are diagnostic-only.** The dataset database is never consulted when deploying, and the
    offline prior trains only on the golden rows in it — fitting it on the measured pools too is a planned path, not
    a current one.
-9. **Nothing evaluates a fork the search never descended into.** Both views score configurations that were built
-   and offered as candidates. A search decides one fork at a time, and a fork it never took leaves no row
-   anywhere — a good configuration sitting past one is silence that reads as health.
+8. **Nothing evaluates a fork no bench ever took.** Both views score configurations that were built and offered
+   as candidates. A measured row exists only for a configuration somebody pinned or the compiler picked, and a fork
+   nothing took leaves no row anywhere — a good configuration sitting past one is silence that reads as health.
 
 ## See it yourself
 
@@ -164,12 +157,11 @@ emmy db export --db _data/tune.db _data/tune
 emmy eval prior _data/tune --pools measured
 ```
 
-And the two halves can be compared against candidate artifacts without touching the installed ones, which is how two
-fits are judged against each other, with `--json` writing the report in the same shape a fit records:
+And a candidate weights file can be scored without touching the installed one, which is how two fits are judged
+against each other, with `--json` writing the report in the same shape a fit records:
 
 ```bash
-emmy eval prior --offline-file /tmp/candidate-weights.json --json /tmp/candidate.json
-emmy eval prior --online-file /tmp/candidate-checkpoint.json --json /tmp/incumbent.json
+emmy eval prior _data/tune --offline-file /tmp/candidate-weights.json --json /tmp/candidate.json
 ```
 
 ## Where to go next

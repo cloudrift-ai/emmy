@@ -15,8 +15,8 @@ structurally, not a distinct kind.
 Every semantically legal alternative is exposed as a fork option, an enumerated row, or a knob value, and the
 choice among them is made in exactly two places, neither of which is a pass:
 
-- a **deployed model** answers every choice from measured evidence — one index holding the box-local reservoir
-  and tune-DB rows a local `emmy tune` or `run --bench` produced and the golden rows in scope, every one a
+- a **deployed model** answers every choice from measured evidence — one index holding the box-local tune-DB
+  rows a local `run --bench` produced and the golden rows in scope, every one a
   recording of something that ran;
 - everything else answers through the deploy evidence hierarchy, whose last learned step is the fitted prior — on
   a fresh machine, the offline model. Unmeasured-deploy quality is the prior's responsibility, and the way to
@@ -40,13 +40,13 @@ Concretely:
 - **A bad unmeasured pick is an accepted outcome.** With no golden, no measurement and no useful prior, a compile
   takes whatever the walk emitted first; that kernel may be far off the best one the space contains. It is not a
   regression and not a reason to reintroduce a rule. The path back to a good kernel is a measurement: a benched
-  golden row or a `tune` is evidence the hierarchy deploys, and a hand pin (`--ab`, `EMMY_KNOBS`) is how a row is
-  measured in the first place.
+  golden row or a `run --bench` row is evidence the hierarchy deploys, and a hand pin (`--ab`, `EMMY_KNOBS`) is how a
+  row is measured in the first place.
 - A pass refusal states a semantic reason (correctness, SSA/region ownership, a resource impossibility) or a
   boundedness reason. Schedule spaces are recursive and lazy, so a large legal Cartesian product is not itself a
   refusal reason. "Measured slower",
-  "occupancy", "register pressure", and "profitability" are never refusal reasons; they are the tuner's and the
-  prior's vocabulary, and a fix for a slow configuration is new evidence — a re-tune and a refreshed golden file —
+  "occupancy", "register pressure", and "profitability" are never refusal reasons; they are the evidence's and the
+  prior's vocabulary, and a fix for a slow configuration is new evidence — a record run and a refreshed golden file —
   never a new compile-time condition.
 - A rewrite motivated by performance is a fork with the un-rewritten form as a sibling, so evidence can decide.
   Hiding a sibling is forbidden, and so is arranging the siblings so one of them wins by default.
@@ -737,7 +737,7 @@ A selected cross-CTA split is recorded structurally by an axis `Window`. The sch
 axis that is already a slice, including partition axes nested inside the complete Fold tree. The one-kernel atomic arm
 also splices a graph so it restarts the ordinary pass scan with the consumed schedule removed.
 
-Both forms keep their uncut or unsplit sibling addressable. The tuner chooses among them; neither greedy policy nor
+Both forms keep their uncut or unsplit sibling addressable. Evidence chooses among them; neither greedy policy nor
 schedule enumeration may hide a legal kernel set.
 
 The atom spec is subtyped by kind (`ir/atom.py`: `AtomKind` is the fixed mma cell selected by name; `ScalarAtom`

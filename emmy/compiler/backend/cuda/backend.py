@@ -23,16 +23,6 @@ from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 
 logger = logging.getLogger(__name__)
 
-# Hard wall-clock cap for ``benchmark()`` calls. Wraps the whole bench
-# in a daemon worker thread; if it doesn't return within this budget we
-# abandon and raise ``RuntimeError``. Needed because NVRTC compilation
-# inside the first kernel launch can take 30+ s on heavily-replicated
-# kernels (e.g. autotune variants with FM*FN=256 cells), which would
-# otherwise stall the whole sweep on one bad variant. Exposed via the
-# inherited ``Backend.bench_wall_timeout_s`` attribute for callers
-# (autotune cache reads it to set fail-row latencies).
-
-
 if TYPE_CHECKING:
     from emmy.compiler.context import Context
     from emmy.compiler.graph import Graph

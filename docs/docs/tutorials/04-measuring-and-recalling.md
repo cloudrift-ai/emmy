@@ -1,8 +1,8 @@
 ---
 sidebar_position: 4
 title: "4. Measuring and Recalling"
-description: The two ways a fork is answered — measure it now, or recall what was measured before — and the four places knowledge is kept.
-keywords: [Emmy, autotuning, greedy selection, evidence, reservoir, tuning database, regime]
+description: The two ways a fork is answered — measure it now, or recall what was measured before — and the three places knowledge is kept.
+keywords: [Emmy, autotuning, greedy selection, evidence, tuning database, regime]
 ---
 
 # 4. Measuring and Recalling
@@ -12,9 +12,9 @@ happens, and they could hardly be more different.
 
 ## Two situations
 
-**`emmy tune` has a GPU and time to spend.** It can take a fork, build a kernel for one of its options, run that
-kernel, time it, and keep the number. It explores, it compares, and it writes down everything it learns. A tuning run
-takes minutes to hours.
+**`emmy run --bench` has a GPU and time to spend.** It can build a kernel for a pinned option, run it, time it, and
+keep the number. It compares the compiler's own pick with the rows it was asked to measure, and it writes down every
+clean measurement. A bench takes minutes.
 
 **`emmy compile` and `emmy run` measure nothing.** An ordinary compile has to produce a program now. It cannot build
 four kernels to find out which is faster; it picks one, in a fraction of a second, and moves on to the next fork.
@@ -24,30 +24,27 @@ what every deployment does.
 The interesting problem is the second one. An ordinary compile can only *use* knowledge; it can never create any. So
 everything depends on what was recorded earlier, and on where.
 
-## The four stores
+## The three stores
 
-Four stores hold everything a compile can know. Telling them apart is the single most useful thing to learn early,
+Three stores hold everything a compile can know. Telling them apart is the single most useful thing to learn early,
 because they have different writers, different readers and different lifetimes.
 
 | Store | Where it lives | Written by | Read by |
 | --- | --- | --- | --- |
 | **Golden configurations** | model files under `recipes/<model>/golden/`, one per exact GPU; model-agnostic files under compiler search | promoted from measured comparisons | an ordinary compile, first of all; also, through the dataset database, the training data for the offline prior |
-| **Reservoir** | inside the online prior's checkpoint, `~/.cache/emmy/online.json` | `emmy tune`, every training row | the online prior's own training; and an ordinary compile, for the rows measured at deployable settings |
-| **Measurements table** | the tuning database, `~/.cache/emmy/autotune.db` | `emmy tune`, one row per benchmarked kernel; also `emmy run --bench` for hand-forced measurements | an ordinary compile, after the two above; and as a cache, so a configuration already measured is never re-run |
+| **Measurements table** | the tuning database, `~/.cache/emmy/autotune.db` | `emmy run --bench`, one row per benchmarked kernel — the compiler's own pick and every hand-forced row; also the golden configurations in scope, imported before a compile picks | an ordinary compile, together with the golden rows; and as a cache, so a configuration already measured is never re-run |
 | **Dataset database** | a file of its own that every `emmy db` command names (`_data/dataset.db` in the examples), the same tables | `emmy db import`, from measurement freezes, the golden configuration files and tuning databases | `emmy db export`, which writes the dataset (`_data/dataset`, a manifest beside one matrix file per pool) the `emmy eval` views and the offline fit read — **never** consulted when compiling |
 
 The last row surprises people. The dataset database holds the same kind of rows as the tuning database — every
 benchmarked configuration, failures included — but it is filled from a pinned snapshot rather than from this
-machine's tuning, and it is deliberately not consulted when deciding what to deploy. It exists to answer questions
-about the search itself, which is what the [last page](./09-storage-checks-and-limits.md) is about.
+machine's benches, and it is deliberately not consulted when deciding what to deploy. It exists to answer questions
+about the prior and the measurements themselves, which is what the [last page](./09-storage-checks-and-limits.md) is
+about.
 
 ```
 WRITERS                                     STORES                                READERS
 
-emmy tune ─┬─ each benchmark ─────────────▶ measurements table ────────────────▶ ordinary compile
-           └─ each training row ──────────▶ reservoir  ────────────────────────▶ ordinary compile, online prior
-
-emmy run --bench, hand-forced rows ───────▶ measurements table
+emmy run --bench, the pick and hand-forced rows ──▶ measurements table ──────────▶ ordinary compile
 
 emmy db import, snapshots/goldens/tune DBs ──▶ dataset database ──▶ emmy db export ──▶ dataset ──▶ emmy eval
                                                                                                └── emmy fit ──▶ offline prior weights ──▶ ordinary compile
@@ -57,8 +54,8 @@ recorded by hand from those rows ─────────▶ golden configura
 
 ## Only one of them travels
 
-Of the four, **only the golden configurations are in the repository**. The reservoir and the tuning database are
-caches under `~/.cache/emmy` on whichever machine ran the tuning.
+Of the three, **only the golden configurations are in the repository**. The tuning database is a cache under
+`~/.cache/emmy` on whichever machine ran the bench.
 
 That has a consequence worth pausing on. A freshly rented GPU box has: the golden configuration files, and the
 weights of the offline prior that also ship with the repository. It has no measurements of its own, and nothing local
@@ -74,11 +71,11 @@ true of the settings it was taken under. Those settings are called the **regime*
 most is the optimization level the CUDA compiler ran at.
 
 `-O3` is the **deployable** setting. It is what `emmy compile` and `emmy run` use, so it is what a served model
-actually runs — and it is what a tuning sweep measures at too. **Emmy tunes in the regime it deploys into**, so a
-tuned latency is the latency you get.
+actually runs — and it is what `emmy run --bench` measures at too. **Emmy measures in the regime it deploys
+into**, so a recorded latency is the latency you get.
 
-That sounds too obvious to state, so it is worth saying why it needs stating. A sweep benches thousands of
-configurations, and a cheaper compiler setting (`-Xcicc -O1`) was once used to make that affordable, on the
+That sounds too obvious to state, so it is worth saying why it needs stating. An earlier search benched thousands
+of configurations, and a cheaper compiler setting (`-Xcicc -O1`) was once used to make that affordable, on the
 assumption that it would still *rank* correctly even if the absolute numbers were off. It did not. The cheap
 setting's error was not random noise but a systematic bias along tile size: it made big register tiles look slow,
 which is exactly the family it was most important to get right. Ranking in a regime you do not deploy in means the
@@ -87,17 +84,17 @@ winner of the search need not be the winner in production.
 The general lesson outlives the specific setting: **a measurement is only evidence about the conditions it was taken
 under.** Emmy therefore keeps the regime on every stored measurement and gates on it, so a number taken under some
 other setting is never silently read as if it applied here. If you deliberately pin a different optimization level
-with `--nvcc-flags`, the sweep still runs and still records — but under that regime's own identity, where no ordinary
+with `--nvcc-flags`, the bench still runs and still records — but under that regime's own identity, where no ordinary
 compile will read it. You will get a warning saying so.
 
 ## Where this is going
 
-The next page follows a tuning run and shows what it produces. The page after that is the one that answers the
-question the series opened with — given all of this, in what order does an ordinary compile consult it?
+The next page is the one that answers the question the series opened with — given all of this, in what order does
+an ordinary compile consult it?
 
 ## See it yourself
 
-Look at what a tuned machine actually has:
+Look at what a machine that has benched actually has:
 
 ```bash
 ls -la ~/.cache/emmy/
@@ -111,13 +108,12 @@ find recipes -path '*/golden/*.json' -print
 
 The central `emmy/compiler/pipeline/search/golden/` directory contains only model-agnostic hardware goldens.
 
-If a tuning database exists, the measured configurations for each kernel can be listed as a table, best first, with
-the one an ordinary compile would choose marked:
+Measure one shape; each clean kernel row lands in the tuning database (this one needs a GPU):
 
 ```bash
-emmy eval variants
+emmy run --bench -c "torch.nn.Softmax(dim=-1)(torch.randn(1, 28, 2048, 2048))"
 ```
 
-That command reads the database only — it runs no kernels and needs no GPU.
+Run it a second time and the compile picks from the row it just recorded.
 
-Next: [5. Inside a tuning run](./05-inside-a-tuning-run.md).
+Next: [6. The deploy evidence hierarchy](./06-deploy-evidence-hierarchy.md).
