@@ -2965,6 +2965,7 @@
  "tests/serving/test_twins_coded.py::test_laguna_serving_twin_capture_includes_symbolic_coded_expert": 0.22,
  "tests/serving/test_twins_coded.py::test_nvfp4_serving_twins_carry_the_declared_w4a4_program": 0.08,
  "tests/serving/test_twins_coded.py::test_nvfp4_twin_is_the_graph_serving_stamps": 0.1,
+ "tests/serving/test_vllm_qwen_mlp_hybrid.py::test_real_qwen35_hybrid_modules_survive_mlp_replacement": 26.1,
  "tests/test_emmy.py::test_no_gpu_optout_names_only_real_subcommands": 0.28,
  "tests/test_emmy.py::test_version_flag_reports_the_installed_distribution": 0.29,
  "tests/test_logging_setup.py::test_attaches_handler_when_unconfigured": 0.05,

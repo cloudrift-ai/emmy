@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import importlib.metadata
 import json
+import sys
 import tempfile
 from pathlib import Path
 
@@ -122,7 +123,7 @@ def stock_mlp(directory: Path, prefix: str, layer: int, hidden: int, intermediat
     return module.eval(), tensors
 
 
-def emmy_mlp(directory: Path, prefix: str, layer: int, hidden: int, intermediate: int):
+def emmy_mlp(directory: Path, prefix: str, layer: int, hidden: int, intermediate: int, *, static_only: bool = False, static_rows: int = 1):
     """Compile only the selected layer with the same path as MLPPrograms."""
     import numpy as np
     import torch
@@ -135,20 +136,22 @@ def emmy_mlp(directory: Path, prefix: str, layer: int, hidden: int, intermediate
     module = logical_mlp(hidden, intermediate, torch.bfloat16)
     ckpt = (str(directory), parameter_keys(module, layer, prefix=prefix))
     arena, cache, constants = BufferArena(), PlanTemplateCache(), {}
-    symbolic, _ = _compile_split(
-        module,
-        [torch.zeros(8, hidden, dtype=torch.bfloat16)],
-        ["x"],
-        np.dtype("float32"),
-        dev_consts=constants,
-        arena=arena,
-        capacity=64,
-        ckpt=ckpt,
-        plan_cache=cache,
-    )
+    symbolic = None
+    if not static_only:
+        symbolic, _ = _compile_split(
+            module,
+            [torch.zeros(8, hidden, dtype=torch.bfloat16)],
+            ["x"],
+            np.dtype("float32"),
+            dev_consts=constants,
+            arena=arena,
+            capacity=64,
+            ckpt=ckpt,
+            plan_cache=cache,
+        )
     one, _ = _compile_split(
         module,
-        [torch.zeros(1, hidden, dtype=torch.bfloat16)],
+        [torch.zeros(static_rows, hidden, dtype=torch.bfloat16)],
         None,
         np.dtype("float32"),
         dev_consts=constants,
@@ -163,6 +166,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--checkpoint", type=Path, required=True, help="local snapshot of the pinned ModelOpt NVFP4 checkpoint")
     parser.add_argument("--layer", type=int, default=3)
+    parser.add_argument("--static-only", action="store_true", help="diagnose decode M=1 without compiling the symbolic prefill graph")
+    parser.add_argument("--static-rows", type=int, default=1, help="static Emmy program rows; probe padded decode with 16")
+    parser.add_argument("--compile-only", action="store_true", help="inspect Emmy's selected kernels without constructing stock vLLM")
+    parser.add_argument("--quant-probe", action="store_true", help="compare stock and Emmy activation FP4 bytes for M=1")
     parser.add_argument("--atol", type=float, default=0.05, help="provisional diagnostic threshold, not a qualified error bound")
     parser.add_argument("--rtol", type=float, default=0.05, help="provisional diagnostic threshold, not a qualified error bound")
     parser.add_argument("--emmy-knobs", default=config.knobs_aggregate(), help="explicit Emmy compile pins, including FAST_MATH=0")
@@ -174,10 +181,17 @@ def main() -> None:
     pins = dict(item.split("=", 1) for item in entries)
     if pins.get("FAST_MATH", "").lower() not in {"0", "false"} or len(pins) < 2:
         parser.error("--emmy-knobs must include FAST_MATH=0/false and at least one explicit schedule/placement pin")
+    if not 1 <= args.static_rows <= 64 or (args.static_rows != 1 and not args.static_only):
+        parser.error("--static-rows requires --static-only and a row count between 1 and 64")
     import torch
     from transformers import AutoConfig
     from vllm.config import VllmConfig, set_current_vllm_config
-    from vllm.distributed import ensure_model_parallel_initialized, init_distributed_environment
+    from vllm.distributed import (
+        destroy_distributed_environment,
+        destroy_model_parallel,
+        ensure_model_parallel_initialized,
+        init_distributed_environment,
+    )
 
     from emmy.compiler.pipeline.search.pins import pinned_knobs
     from emmy.serving.mlp import text_prefix
@@ -200,54 +214,122 @@ def main() -> None:
         raise ValueError("expected a Qwen3.5 dense text layer in range")
     prefix = text_prefix(directory)
     hidden, intermediate = text.hidden_size, text.intermediate_size
+    if args.compile_only:
+        with pinned_knobs(pins):
+            one, _, _arena = emmy_mlp(
+                directory, prefix, args.layer, hidden, intermediate, static_only=args.static_only, static_rows=args.static_rows
+            )
+        print(json.dumps({"static_rows": args.static_rows, "kernels": len(one.program.plan.kernels), "emmy_knobs": pins}, indent=2))
+        return
     torch.cuda.set_device(0)
+
+    def cleanup_distributed():
+        destroy_model_parallel()
+        destroy_distributed_environment()
+
     with tempfile.TemporaryDirectory() as temporary, set_current_vllm_config(VllmConfig()):
-        init_distributed_environment(world_size=1, rank=0, local_rank=0, distributed_init_method=f"file://{temporary}/init", backend="nccl")
-        ensure_model_parallel_initialized(1, 1)
-        stock, tensors = stock_mlp(directory, prefix, args.layer, hidden, intermediate)
-    with pinned_knobs(pins):
-        one, symbolic, _arena = emmy_mlp(directory, prefix, args.layer, hidden, intermediate)
-    torch.cuda.synchronize()
-    report = {
-        "checkpoint": str(directory),
-        "expected_revision": REVISION,
-        "snapshot_revision_verified": snapshot_verified,
-        "layer": args.layer,
-        "vllm": version,
-        "stock_kernel": type(stock.gate_up_proj.quant_method.kernel).__name__,
-        "stock_linear_dtype": str(stock.gate_up_proj.params_dtype),
-        "emmy_knobs": pins,
-        "atol": args.atol,
-        "rtol": args.rtol,
-        "rows": {},
-    }
-    generator = torch.Generator(device="cpu").manual_seed(20260930)
-    failures = []
-    with torch.inference_mode():
-        for rows in (1, 2, 64):
-            x = torch.randn((rows, hidden), generator=generator).to(device="cuda", dtype=torch.bfloat16)
-            expected = stock(x)
-            actual = one.run_device([x])[0] if rows == 1 else symbolic.run_device_sym([x])[0]
+        init_distributed_environment(world_size=1, rank=0, local_rank=0, distributed_init_method=f"file://{temporary}/init", backend="gloo")
+        ensure_model_parallel_initialized(1, 1, backend="gloo")
+        try:
+            stock, tensors = stock_mlp(directory, prefix, args.layer, hidden, intermediate)
+            with pinned_knobs(pins):
+                print("Emmy compile start", file=sys.stderr, flush=True)
+                one, symbolic, _arena = emmy_mlp(
+                    directory, prefix, args.layer, hidden, intermediate, static_only=args.static_only, static_rows=args.static_rows
+                )
+                print("Emmy compile done", file=sys.stderr, flush=True)
             torch.cuda.synchronize()
-            report["rows"][rows] = error_metrics(actual, expected, atol=args.atol, rtol=args.rtol)
-            if not torch.isfinite(expected).all() or not torch.isfinite(actual).all():
-                failures.append(f"rows={rows}: nonfinite MLP output")
-            elif not torch.count_nonzero(expected) or not torch.count_nonzero(actual):
-                failures.append(f"rows={rows}: zero MLP output")
-            else:
-                try:
-                    torch.testing.assert_close(actual, expected, atol=args.atol, rtol=args.rtol)
-                except AssertionError as exc:
-                    failures.append(f"rows={rows}: {exc}")
-    gate = f"{prefix}.layers.{args.layer}.mlp.gate_proj.input_scale"
-    up = f"{prefix}.layers.{args.layer}.mlp.up_proj.input_scale"
-    report["gate_up_input_scales_equal"] = bool(torch.equal(tensors[gate], tensors[up]))
-    gate = f"{prefix}.layers.{args.layer}.mlp.gate_proj.weight_scale_2"
-    up = f"{prefix}.layers.{args.layer}.mlp.up_proj.weight_scale_2"
-    report["gate_up_weight_scales_equal"] = bool(torch.equal(tensors[gate], tensors[up]))
-    print(json.dumps(report, indent=2))
-    if failures:
-        raise AssertionError("\n".join(failures))
+            report = {
+                "checkpoint": str(directory),
+                "expected_revision": REVISION,
+                "snapshot_revision_verified": snapshot_verified,
+                "layer": args.layer,
+                "vllm": version,
+                "stock_kernel": type(stock.gate_up_proj.quant_method.kernel).__name__,
+                "stock_linear_dtype": str(stock.gate_up_proj.params_dtype),
+                "emmy_knobs": pins,
+                "emmy_static_rows": args.static_rows,
+                "atol": args.atol,
+                "rtol": args.rtol,
+                "rows": {},
+            }
+            generator = torch.Generator(device="cpu").manual_seed(20260930)
+            failures = []
+            with torch.inference_mode():
+                for rows in (1,) if args.static_only else (1, 2, 64):
+                    x = torch.randn((rows, hidden), generator=generator).to(device="cuda", dtype=torch.bfloat16)
+                    print(f"rows={rows}: stock forward start", file=sys.stderr, flush=True)
+                    expected = stock(x)
+                    print(f"rows={rows}: Emmy forward start", file=sys.stderr, flush=True)
+                    intermediate = {}
+                    if rows == 1 and args.quant_probe:
+                        from emmy.compiler.backend.gpu_lock import gpu_lock
+
+                        target = {"x_static_fp4_bits", "x_static_fp4_scale_bits"}
+
+                        def after_launch(_index, launch, names=target, snapshots=intermediate):
+                            for name in names.intersection(launch.writes):
+                                snapshots[name] = one.program.buffer_view(name).clone()
+
+                        with gpu_lock(), one.program.on_stream(torch.cuda.current_stream()):
+                            one.program.upload_prefix_device({"x": x})
+                            one.program.iter_once(per_launch_hook=after_launch)
+                            actual = one.program.output_prefix_device()[one.output_names[0]][:rows].clone()
+                        if set(intermediate) != target:
+                            raise AssertionError(f"activation buffers were not materialized by a launch: {set(intermediate)}, {target}")
+                    else:
+                        actual = one.run_device([x])[0] if rows == 1 else symbolic.run_device_sym([x])[0]
+                    torch.cuda.synchronize()
+                    if rows == 1 and args.quant_probe:
+                        from vllm._custom_ops import scaled_fp4_quant
+
+                        stock_codes, stock_scales = scaled_fp4_quant(
+                            x,
+                            stock.gate_up_proj.input_global_scale_inv,
+                            is_sf_swizzled_layout=False,
+                            backend="flashinfer-cutlass",
+                            padded_n=hidden,
+                        )
+                        probe = {}
+                        for suffix, stock_tensor in (("bits", stock_codes), ("scale_bits", stock_scales)):
+                            emmy_tensor = intermediate[f"x_static_fp4_{suffix}"].contiguous().view(torch.uint8).flatten()
+                            stock_tensor = stock_tensor.contiguous().view(torch.uint8).flatten()
+                            if emmy_tensor.numel() != stock_tensor.numel():
+                                raise AssertionError(
+                                    f"{suffix}: byte counts differ, Emmy {emmy_tensor.numel()}, stock {stock_tensor.numel()}"
+                                )
+                            mismatches = emmy_tensor != stock_tensor
+                            probe[suffix] = {
+                                "bytes": stock_tensor.numel(),
+                                "different": torch.count_nonzero(mismatches).item(),
+                                "first_differences": [
+                                    (int(index), int(emmy_tensor[index]), int(stock_tensor[index]))
+                                    for index in torch.nonzero(mismatches).flatten()[:8].tolist()
+                                ],
+                            }
+                        report["activation_quantization"] = probe
+                    print(f"rows={rows}: comparisons start", file=sys.stderr, flush=True)
+                    report["rows"][rows] = error_metrics(actual, expected, atol=args.atol, rtol=args.rtol)
+                    if not torch.isfinite(expected).all() or not torch.isfinite(actual).all():
+                        failures.append(f"rows={rows}: nonfinite MLP output")
+                    elif not torch.count_nonzero(expected) or not torch.count_nonzero(actual):
+                        failures.append(f"rows={rows}: zero MLP output")
+                    else:
+                        try:
+                            torch.testing.assert_close(actual, expected, atol=args.atol, rtol=args.rtol)
+                        except AssertionError as exc:
+                            failures.append(f"rows={rows}: {exc}")
+            gate = f"{prefix}.layers.{args.layer}.mlp.gate_proj.input_scale"
+            up = f"{prefix}.layers.{args.layer}.mlp.up_proj.input_scale"
+            report["gate_up_input_scales_equal"] = bool(torch.equal(tensors[gate], tensors[up]))
+            gate = f"{prefix}.layers.{args.layer}.mlp.gate_proj.weight_scale_2"
+            up = f"{prefix}.layers.{args.layer}.mlp.up_proj.weight_scale_2"
+            report["gate_up_weight_scales_equal"] = bool(torch.equal(tensors[gate], tensors[up]))
+            print(json.dumps(report, indent=2))
+            if failures:
+                raise AssertionError("\n".join(failures))
+        finally:
+            cleanup_distributed()
 
 
 if __name__ == "__main__":

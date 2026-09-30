@@ -259,7 +259,7 @@ emmy serve Qwen/Qwen3-Embedding-0.6B --bench --random-input-len 32 --stock
 
 For the pinned 27B ModelOpt NVFP4 checkpoint on one RTX 5090, `--compile-scope mlp` keeps vLLM 0.23's Qwen3.5
 hybrid model, attention, GDN state, scheduling, and non-MLP quantized loader. Emmy compiles the 64 dense text MLPs
-in BF16. This lane is still being qualified; see the [progress and measured limits](plans/nvfp4-qwen-mixed-serving-progress.md).
+in BF16. This lane is still being qualified; the draft implementation PR records its measured limits.
 
 ```bash
 export EMMY_KNOBS='FAST_MATH=false,PLACE@map.1/map=cut,PLACE@map.1/map.2/inner=cut,PLACE@map.1/map.3/reduce.1/inner=cut,PLACE@map.2/map=cut,PLACE@map.2/map.2/reduce.1/inner=cut,WORK=w1x4,TILE=,STAGE=,REDUCE=,RASTER='
