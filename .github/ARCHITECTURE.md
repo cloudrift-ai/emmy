@@ -52,8 +52,8 @@ These checks require no GPU. Native GPU parity and failure recovery run through 
 reviews ready PRs from both repository branches and forks, including bot-authored PRs. The action reads the diff through
 the GitHub API without checking out PR code, and its token can read contents and write PR comments but cannot push.
 Only `/review` runs; PR descriptions and code suggestions are left to the author. New commits replace an in-progress
-review for the same PR. The model, endpoint, and credential are shared with the nightly agent workflows, and Qwen's
-chat-template thinking mode is disabled for review output. PR Agent can use up to 128,000 tokens of model context.
+review for the same PR. The model, endpoint, and credential are shared with the nightly agent workflows. PR Agent can
+use up to 128,000 tokens of model context.
 
 ## Package publication
 
