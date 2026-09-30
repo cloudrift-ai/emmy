@@ -285,7 +285,7 @@ def _two_pass_tile_pipeline(n_over_budget: int, *, decline: bool = False) -> Pip
     With ``decline`` those same leaves are declined by an ordinary ``RuleSkipped``
     instead — the row is refused with nothing recorded, the second way a node ends up
     stranded."""
-    from emmy.compiler.pipeline.fork import OptionFork
+    from emmy.compiler.pipeline.fork import DeferredFork
 
     def _tile_leaf(bn: int) -> TileOp:
         return TileOp(name="k_test", knobs={"BN": bn})
@@ -293,8 +293,8 @@ def _two_pass_tile_pipeline(n_over_budget: int, *, decline: bool = False) -> Pip
     def emit_tiles(root):
         if "BN" in root.op.knobs:  # already tiled (our own output) → don't re-fork
             raise RuleSkipped("already tiled")
-        leaves = [OptionFork(option=_tile_leaf(8), knobs={"BN": 8})]
-        leaves += [OptionFork(option=_tile_leaf(16 + 8 * i), knobs={"BN": 16 + 8 * i}) for i in range(n_over_budget)]
+        leaves = [DeferredFork(lambda: _tile_leaf(8), {"BN": 8})]
+        leaves += [DeferredFork(lambda bn=bn: _tile_leaf(bn), {"BN": bn}) for bn in (16 + 8 * i for i in range(n_over_budget))]
         return leaves
 
     def materialize(root):
@@ -627,7 +627,7 @@ def _composed_route_pipeline(refused: dict[str, set[int]], *, rows: tuple[int, .
     every node still un-lowered, exactly as ``LOOPIFY`` does on the production terminal."""
     from dataclasses import replace
 
-    from emmy.compiler.pipeline.fork import OptionFork
+    from emmy.compiler.pipeline.fork import DeferredFork
     from emmy.compiler.pipeline.pipeline import RuleSkipped
 
     def cut(root):
@@ -639,13 +639,13 @@ def _composed_route_pipeline(refused: dict[str, set[int]], *, rows: tuple[int, .
             fragment, seam = _composed_fragment("y_ws", "2"), "PLACE@seam.1"
         else:
             raise RuleSkipped("not a kernel-set fork")
-        fused = [OptionFork(option=TileOp(name=root.op.name, knobs={"BN": bn}), knobs={"BN": bn}) for bn in rows]
-        return [*fused, OptionFork(option=fragment, knobs={seam: "cut"})]
+        fused = [DeferredFork(lambda bn=bn: TileOp(name=root.op.name, knobs={"BN": bn}), {"BN": bn}) for bn in rows]
+        return [*fused, DeferredFork(lambda: fragment, {seam: "cut"}, structural=isinstance(fragment, Graph))]
 
     def schedule(root):
         if "BN" in root.op.knobs:
             raise RuleSkipped("already scheduled")
-        return [OptionFork(option=replace(root.op, knobs={"BN": bn}), knobs={"BN": bn}) for bn in rows]
+        return [DeferredFork(lambda bn=bn: replace(root.op, knobs={"BN": bn}), {"BN": bn}) for bn in rows]
 
     def materialize(root):
         bn = root.op.knobs["BN"]

@@ -7,7 +7,7 @@ import pytest
 from emmy.compiler.context import Context
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.pipeline.fork import OptionFork
+from emmy.compiler.pipeline.fork import DeferredFork
 from emmy.compiler.pipeline.pipeline import Pass, Pattern, Pipeline, Rule, RuleSkipped
 from emmy.compiler.pipeline.search.policy.mcts import TuningSearch
 from emmy.compiler.pipeline.search.policy.terminal_bench import point_stats
@@ -21,7 +21,7 @@ def test_patience_bounds_consecutive_lowering_failures() -> None:
     def offer(root):
         if root.op.knobs:
             raise RuleSkipped("already selected")
-        return [OptionFork(option=TileOp(name="test", knobs={"WORK": f"t{n}"}), knobs={"WORK": f"t{n}"}) for n in range(1, 9)]
+        return [DeferredFork(lambda n=n: TileOp(name="test", knobs={"WORK": f"t{n}"}), {"WORK": f"t{n}"}) for n in range(1, 9)]
 
     def lower(root):
         attempted.append(root.op.knobs["WORK"])

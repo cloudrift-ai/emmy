@@ -1,11 +1,11 @@
 """Focused tests for program-backed golden enumeration."""
 
 from dataclasses import dataclass, field
-from types import SimpleNamespace
 
 from emmy.compiler.context import Context
 from emmy.compiler.graph import Graph
 from emmy.compiler.pipeline.fork import DeferredFork, Fork
+from emmy.compiler.pipeline.pipeline import ForkPoint
 from emmy.compiler.pipeline.search.ranking import enumerate_graph
 
 
@@ -23,7 +23,7 @@ def test_enumeration_skips_an_empty_pinned_branch(monkeypatch) -> None:
     live = DeferredFork(materialize=lambda: None, knobs=row)
 
     def resolve(_self, graph, decide):
-        assert decide(SimpleNamespace(options=[_EmptyBranch(), live])) is live
+        assert decide(ForkPoint(match=None, options=[_EmptyBranch(), live], root_op=None, ctx=None)) is live
         return graph, []
 
     monkeypatch.setattr("emmy.compiler.pipeline.pipeline.Run.resolve", resolve)

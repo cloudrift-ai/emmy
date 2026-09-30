@@ -1,66 +1,27 @@
-"""Unit tests for ``pipeline/fork.py``'s hierarchical Fork-tree builder.
-
-Covers the generic builder contract using synthetic knob rows so the suite
-stays decoupled from any specific Tile-IR pass (`partition_loops` is the
-canonical caller; its integration tests live in
-``tests/compiler/passes/test_partition_planner_forks.py``). The deferred structural leaf is covered
-directly because graph-building must remain lazy.
-"""
+"""``pipeline/fork.py``: the deferred leaf, the iterative leaf walk, the fork point's typed partition and walk, and
+the schedule branch's descent rule (``admits``) — on synthetic forks, no pass and no tracing."""
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from dataclasses import dataclass
+from types import SimpleNamespace
 
-import pytest
-
-from emmy.compiler.pipeline.fork import DeferredFork, Fork, Level, build_fork_tree, iter_leaves
-
-
-def _row(a: int, b: int, c: int) -> dict:
-    """Synthetic variant knob row — two branch-level knobs (A, B) plus a
-    knob no level covers (C), mirroring the planner's FK."""
-    return {"A": a, "B": b, "C": c}
+from emmy.compiler.pipeline.fork import DeferredFork, Fork, _ScheduleFork, iter_leaves
 
 
-def _stub_materialize(row: dict) -> str:
-    """Stand-in for a real Op materializer; returns a string so leaves'
-    ``expand()`` results are trivially comparable."""
-    return f"op({row['A']},{row['B']},{row['C']})"
+@dataclass(frozen=True)
+class _Branch(Fork):
+    """A synthetic branch: the knobs it pins and the options below it."""
+
+    knobs: dict
+    children: tuple
+
+    def expand(self):
+        return list(self.children)
 
 
-def _walk_leaves(node: Fork) -> list[Fork]:
-    """Collect every leaf Fork in tree order (grouping order first)."""
-    out: list[Fork] = []
-    stack: list[Fork] = [node]
-    while stack:
-        cur = stack.pop(0)
-        if cur.is_leaf:
-            out.append(cur)
-        else:
-            stack[:0] = list(cur.expand())
-    return out
-
-
-def _walk_branches(node: Fork) -> list[Fork]:
-    """Collect every non-leaf branch Fork in the tree."""
-    out: list[Fork] = []
-    stack: list[Fork] = [node]
-    while stack:
-        cur = stack.pop()
-        if cur.is_leaf:
-            continue
-        out.append(cur)
-        stack.extend(cur.expand())
-    return out
-
-
-# Conventional levels reused across tests: `A` is the outer branch key,
-# `B` the inner one. `C` is deliberately covered by NO level — leaves
-# still carry it because a leaf's knobs are its complete row.
-_LEVELS = [
-    Level(("A",), lambda r: (r["A"],)),
-    Level(("B",), lambda r: (r["B"],)),
-]
+def _leaf(tag: str, made: list) -> DeferredFork:
+    return DeferredFork(lambda: made.append(tag) or tag, {"TAG": tag})
 
 
 def test_deferred_structural_leaf_materializes_only_when_selected() -> None:
@@ -86,217 +47,47 @@ def test_leaf_walk_does_not_use_the_python_call_stack() -> None:
 
     (leaf,) = iter_leaves([Chain(2_000)])
     assert leaf.is_leaf
-    assert list(Chain(2_000).leaves())[0].is_leaf
 
 
-def test_iter_leaves_preserves_the_branch_complete_row_stream() -> None:
-    """An exhaustive walk reads a branch's rows directly instead of rebuilding its grouping."""
-
-    def reject_grouping(row: dict) -> tuple:
-        raise AssertionError(f"exhaustive traversal regrouped {row}")
-
-    params = [_row(1, 2, 3), _row(2, 3, 4)]
-    tree = build_fork_tree(params=params, levels=[Level(("A",), reject_grouping)], materialize=_stub_materialize)
-
-    assert [leaf.knobs for leaf in iter_leaves([tree])] == params
-
-
-def test_empty_params_raises():
-    """No rows ⟹ no fork point — the caller should skip the rule, not
-    build a tree. The non-empty invariant keeps the return type a bare
-    ``Fork`` (the engine never sees an empty option list)."""
-    with pytest.raises(ValueError, match="params must be non-empty"):
-        build_fork_tree(params=[], levels=_LEVELS, materialize=_stub_materialize)
+def test_iter_leaves_streams_leaves_depth_first_in_emission_order() -> None:
+    """Each option's leaves precede the next's, a branch expanding in place — the order a score tie falls back to
+    (option-0 first) — and the walk materializes nothing."""
+    made: list[str] = []
+    tree = [
+        _Branch({"A": 1}, (_leaf("a1", made), _Branch({"A": 1, "B": 2}, (_leaf("a1b2", made),)))),
+        _leaf("top", made),
+        _Branch({"A": 2}, ()),
+    ]
+    assert [option.knobs["TAG"] for option in iter_leaves(tree)] == ["a1", "a1b2", "top"]
+    assert made == []
 
 
-def test_empty_levels_raises():
-    with pytest.raises(ValueError, match="at least one Level"):
-        build_fork_tree(params=[_row(1, 2, 3)], levels=[], materialize=_stub_materialize)
-
-
-def test_single_param_single_leaf():
-    """One row → the root expands straight to one leaf Fork (every level
-    collapses), the leaf carrying the COMPLETE row as knobs."""
-    tree = build_fork_tree(params=[_row(1, 2, 3)], levels=_LEVELS, materialize=_stub_materialize)
-    assert isinstance(tree, Fork)
-    assert not tree.is_leaf and tree.knobs == {}  # lazy root: nothing pinned, nothing built
-    (leaf,) = tree.expand()
-    assert leaf.is_leaf
-    assert leaf.knobs == {"A": 1, "B": 2, "C": 3}
-    assert leaf.expand() == ["op(1,2,3)"]
-
-
-def test_two_params_identical_branch_key_collapses_branch():
-    """Two rows sharing every grouping key → both branch levels collapse;
-    result is a flat list of leaf Forks at the top level."""
-    params = [_row(1, 2, 3), _row(1, 2, 5)]
-    tree = build_fork_tree(params=params, levels=_LEVELS, materialize=_stub_materialize)
-    # A and B both have one distinct key → collapse. The rows still
-    # differ (in C), so the root expands to two sibling leaves.
-    top = tree.expand()
-    assert all(f.is_leaf for f in top)
-    assert [f.knobs["C"] for f in top] == [3, 5]
-
-
-def test_two_params_distinct_branch_key_emits_branches():
-    """Two rows with distinct outer keys → two branch Forks, each with
-    one leaf child."""
-    params = [_row(1, 2, 3), _row(2, 2, 3)]
-    tree = build_fork_tree(params=params, levels=_LEVELS, materialize=_stub_materialize)
-    top = tree.expand()
-    assert len(top) == 2
-    for branch in top:
-        assert not branch.is_leaf
-        assert set(branch.knobs.keys()) == {"A"}
-        children = branch.expand()
-        assert len(children) == 1
-        assert children[0].is_leaf
-
-
-def test_siblings_unranked_in_grouping_order():
-    """The builder does NOT sort siblings — ranking is search policy (the
-    online prior). Siblings come out in grouping (= first-occurrence) order
-    regardless of any heuristic."""
-    params = [_row(1, 0, 0), _row(3, 0, 0), _row(2, 0, 0)]
-    tree = build_fork_tree(params=params, levels=_LEVELS, materialize=_stub_materialize)
-    assert [f.knobs["A"] for f in tree.expand()] == [1, 3, 2]
-
-
-def test_leaf_knobs_are_the_complete_row():
-    """Every leaf carries its FULL knob row — including knobs no level
-    covers (C) — so the engine's DB replay (``_best_fork``) can match
-    leaves by knobs alone, and distinct siblings always differ in a
-    recorded knob."""
-    params = [_row(a, b, c) for a in (1, 2) for b in (1, 2) for c in (1, 2)]
-    leaves = _walk_leaves(build_fork_tree(params=params, levels=_LEVELS, materialize=_stub_materialize))
-    assert sorted(tuple(sorted(leaf.knobs.items())) for leaf in leaves) == sorted(tuple(sorted(p.items())) for p in params)
-
-
-def test_branch_knobs_partition_and_leaf_row_agrees():
-    """BRANCH knobs along any root→leaf path have no duplicates (each
-    level pins its slice exactly once); the leaf's complete row agrees
-    with every value pinned on the way down."""
-    params = [_row(a, b, c) for a in (1, 2) for b in (1, 2) for c in (1, 2)]
-    tree = build_fork_tree(params=params, levels=_LEVELS, materialize=_stub_materialize)
-
-    path = [tree]
-    node = tree
-    while not node.is_leaf:
-        node = node.expand()[0]
-        path.append(node)
-    leaf, branches = path[-1], path[:-1]
-    seen: dict[str, int] = {}
-    for f in branches:
-        for k, v in f.knobs.items():
-            seen[k] = seen.get(k, 0) + 1
-            assert leaf.knobs[k] == v, f"leaf row disagrees with pinned branch knob {k}"
-    duplicates = {k: n for k, n in seen.items() if n > 1}
-    assert not duplicates, f"knob duplicated along branch path: {duplicates}"
-    assert set(seen) <= {"A", "B"}
-
-
-def test_collapsed_constant_level_omits_branch():
-    """A level whose key is constant across all rows produces no Fork
-    wrapper for that level."""
-    # All rows share A=1, vary B and C → A level collapses, B emits
-    # branches, leaves carry the full rows.
-    params = [_row(1, 1, 1), _row(1, 2, 1)]
-    tree = build_fork_tree(params=params, levels=_LEVELS, materialize=_stub_materialize)
-    for branch in _walk_branches(tree):
-        assert "A" not in branch.knobs
-
-
-def test_materialize_is_lazy():
-    """``materialize`` fires 0 times at build, exactly once per leaf
-    ``expand()`` resolution."""
-    calls: list[dict] = []
-
-    def counting_materialize(row: dict) -> str:
-        calls.append(row)
-        return _stub_materialize(row)
-
-    params = [_row(1, 2, 3), _row(1, 2, 5)]
-    tree = build_fork_tree(params=params, levels=_LEVELS, materialize=counting_materialize)
-    assert calls == [], "materialize fired during build"
-
-    leaves = _walk_leaves(tree)
-    leaves[0].expand()
-    assert len(calls) == 1
-    leaves[1].expand()
-    assert len(calls) == 2
-
-
-def test_addressable_space_is_not_materialized_at_construction():
-    """The root retains the addressable space and reads rows only when a branch expands."""
-
-    class Rows(Sequence):
-        def __init__(self):
-            self.reads: list[int] = []
-
-        def __len__(self):
-            return 3
-
-        def __getitem__(self, index):
-            if isinstance(index, slice):
-                raise AssertionError("the fork copied the schedule space")
-            self.reads.append(index)
-            return _row(index, 0, 0)
-
-        def __iter__(self):
-            raise AssertionError("the fork eagerly iterated the schedule space")
-
-    rows = Rows()
-    tree = build_fork_tree(params=rows, levels=_LEVELS, materialize=_stub_materialize)
-    assert rows.reads == []
-
-    branches = tree.expand()
-    assert rows.reads == [0, 1, 2]
-    assert [branch.knobs["A"] for branch in branches] == [0, 1, 2]
-
-
-def test_leaf_expand_returns_own_param_materialization():
-    """Each leaf's ``expand()`` materializes that leaf's OWN row — the
-    leaf holds its row as data (``knobs``), no shared-closure traps."""
-    params = [_row(1, 1, 1), _row(1, 1, 2), _row(1, 1, 3)]
-    tree = build_fork_tree(params=params, levels=_LEVELS, materialize=_stub_materialize)
-    leaves = _walk_leaves(tree)
-    results = sorted(leaf.expand()[0] for leaf in leaves)
-    assert results == ["op(1,1,1)", "op(1,1,2)", "op(1,1,3)"]
-
-
-def test_fork_point_partitions_offers_and_carries_pool_identity():
-    """The engine's typed offer partition: ``splices`` / ``variants`` classify top-level options
-    once, and schedule-tree Forks expose the enumeration's minted ``pool_id`` (``None`` for forks
-    outside a schedule enumeration — the base-class default the tree builder inherits)."""
+def test_fork_point_partitions_offers_and_walks_them() -> None:
+    """The engine's typed offer partition — ``splices`` / ``variants`` classify top-level options once — and the
+    walk the fork point owns: ``leaves()`` streams every complete leaf in emission order, ``find(row)`` descends
+    to the one leaf a row names. A fork outside a schedule enumeration carries no pool identity."""
     from emmy.compiler.graph import Graph
     from emmy.compiler.pipeline.pipeline import ForkPoint
 
-    tree = build_fork_tree(params=[_row(1, 1, 1), _row(1, 2, 1)], levels=_LEVELS, materialize=_stub_materialize)
+    made: list[str] = []
+    tree = _Branch({}, (_leaf("a1", made), _Branch({"A": 2}, (_leaf("a2", made),))))
     splice = Graph()
     fp = ForkPoint(match=None, options=[splice, tree], root_op=None, ctx=None)
     assert fp.splices == (splice,)
     assert fp.structural  # derived from the partition, not a second classification
     assert fp.variants == (tree,)
-    assert tree.pool_id is None  # build_fork_tree mints no pool identity — only the scheduler does
+    assert tree.pool_id is None
+    leaves = fp.flat()
+    assert leaves[0] is splice and [leaf.knobs["TAG"] for leaf in leaves[1:]] == ["a1", "a2"]
+    variants = ForkPoint(match=None, options=[tree], root_op=None, ctx=None)
+    found = variants.find({"TAG": "a2"})
+    assert found is not None and found[1] == {"TAG": "a2"} and variants.find({"TAG": "none"}) is None
+    assert made == []
 
 
-def test_admits_reads_a_level_projection_and_a_schedule_prefix() -> None:
-    """``Fork.admits`` is the one descent rule for a row that names a leaf. A level tree's branch
-    admits a row when the level projects the row onto the branch's key, a row lacking the level's
-    knob being undecided there; a schedule branch spells each decided knob as a prefix of what its
-    leaves will spell, so the row's value must extend it at a segment boundary."""
-    from types import SimpleNamespace
-
-    from emmy.compiler.pipeline.fork import Level, _ScheduleFork, build_fork_tree
-
-    rows = [{"TILE": "f2x4/k2", "WORK": "w2x2"}, {"TILE": "f2x4/k8", "WORK": "w2x2"}, {"TILE": "f1x1/k4", "WORK": "w1x1"}]
-    root = build_fork_tree(params=rows, levels=(Level(("TILE",), lambda row: (row["TILE"].split("/")[0],)),), materialize=lambda row: row)
-    by_key = {branch.knobs["TILE"]: branch for branch in root.expand()}
-
-    assert by_key["f2x4"].admits({"TILE": "f2x4/k8", "WORK": "w2x2"})
-    assert not by_key["f1x1"].admits({"TILE": "f2x4/k8", "WORK": "w2x2"})
-    assert by_key["f1x1"].admits({"WORK": "w2x2"}), "a row that leaves the level's knob undecided is admitted"
-
+def test_admits_reads_a_schedule_prefix() -> None:
+    """``Fork.admits`` is the one descent rule for a row that names a leaf: a schedule branch spells each decided
+    knob as a prefix of what its leaves will spell, so the row's value must extend it at a segment boundary."""
     branch = _ScheduleFork(
         tree=SimpleNamespace(branch_knobs={"S_warp_eligible": 1.0, "STAGE": ""}), context=None, row={"TILE": "mma/f2x2", "WORK": "w2x2"}
     )
@@ -321,10 +112,6 @@ def test_admits_prunes_a_site_this_branch_already_decided_OFF() -> None:
     minutes without compiling a single kernel. An OFF the branch merely INHERITED is still
     undecided and still admits, and so does a site the row names only by its bare family key.
     """
-    from types import SimpleNamespace
-
-    from emmy.compiler.pipeline.fork import _ScheduleFork
-
     decided = _ScheduleFork(tree=SimpleNamespace(branch_knobs={}), context=None, row={"STAGE@map.1/inner": ""})
     assert not decided.admits({"STAGE@map.1/inner": "d1/smem"})
     assert decided.admits({"STAGE@map.1/inner": ""})
