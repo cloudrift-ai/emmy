@@ -2,10 +2,10 @@
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
-from emmy.compiler.ir.stmt.blocks import Loop
+from emmy.compiler.ir.stmt.blocks import Cond, Loop
 from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.leaves import Accum, Assign, Let, Load, Select, SelectBranch, Write
-from emmy.compiler.ir.stmt.normalize import dedup_loads, normalize_body
+from emmy.compiler.ir.stmt.normalize import dedup_loads, hoist_common_branches, normalize_body
 
 
 def test_dedup_loads_preserves_loads_under_a_rebound_coordinate() -> None:
@@ -133,6 +133,54 @@ def test_normalization_closes_simplification_cse_and_invariant_motion() -> None:
     normalized = normalize_body(body)
     assert any(isinstance(s, Assign) and s.op.name == "exp" for s in normalized)
     assert normalize_body(Body(tuple(normalized))) == normalized
+
+
+def test_cse_factors_common_branch_cones_without_speculation() -> None:
+    def branch(prefix, extra):
+        return Body((
+            Load(name=f"{prefix}i", input="indices", index=ZERO),
+            Load(name=f"{prefix}x", input="x", index=(Var(f"{prefix}i"),)),
+            Assign(name=f"{prefix}v", op="exp", args=(f"{prefix}x",)),
+            Load(name=f"{prefix}only", input=extra, index=ZERO),
+            Assign(name=f"{prefix}out", op="add", args=(f"{prefix}v", f"{prefix}only")),
+            Write(output="out", index=ZERO, value=f"{prefix}out"),
+        ))
+    body = Body((Cond(cond=Var("predicate"), body=branch("a", "left"), else_body=branch("b", "right")),))
+    out = normalize_body(body)
+    assert [type(stmt) for stmt in out] == [Load, Load, Assign, Cond]
+    assert out[2].op.name == "exp"
+    for inner in out[-1].nested():
+        assert [type(stmt) for stmt in inner] == [Load, Assign, Write]
+        assert out[2].name in inner[1].args
+    assert normalize_body(Body(tuple(out))) == out
+
+
+def test_common_branch_load_cannot_cross_a_write_on_either_path() -> None:
+    read = Load(name="value", input="x", index=ZERO)
+    write = Write(output="x", index=ZERO, value="replacement")
+    result = Write(output="out", index=ZERO, value="value")
+    for left, right in (((write, read, result), (read, result)), ((read, result), (write, read, result))):
+        body = Body((Cond(cond=Var("predicate"), body=left, else_body=right),))
+        assert hoist_common_branches(body) == body
+
+
+def test_normalized_quotient_addresses_fuse_and_share_the_whole_reduction() -> None:
+    def reduction(axis, name, nested):
+        index = BinaryExpr("/", Var(axis), Literal(128 if nested else 256, "int"))
+        if nested:
+            index = BinaryExpr("/", index, Literal(2, "int"))
+        return Loop(axis=Axis(axis, 1024), body=(
+            Load(name=f"{name}x", input="x", index=(index,)),
+            Assign(name=f"{name}v", op="exp", args=(f"{name}x",)),
+            Accum(name=name, value=f"{name}v", axes=(axis,)),
+        ))
+    body = Body((reduction("i", "left", True), reduction("j", "right", False),
+                 Write(output="out", index=ZERO, value="right"), Write(output="other", index=ZERO, value="left")))
+    out = normalize_body(body)
+    assert len(out.loads) == len(out.accums) == 1
+    assert len([s for s in out.iter() if isinstance(s, Loop)]) == 1
+    assert out[-1].value == out[-2].value
+    assert normalize_body(Body(tuple(out))) == out
 
 
 def test_dedup_loads_closes_commutative_chains_after_aliasing() -> None:

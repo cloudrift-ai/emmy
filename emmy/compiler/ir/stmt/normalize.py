@@ -57,7 +57,7 @@ def _normalize_body(stmts: Body) -> Body:
     # fusion, executable identity and Tile IR's common-cone detection use the same CSE form.
     stmts = expanded
     while True:
-        reduced = dedup_loads(_canonicalize_exprs(prepare_body(stmts)))
+        reduced = dedup_loads(hoist_common_branches(_canonicalize_exprs(prepare_body(stmts))))
         if reduced == stmts:
             return _canonical_order(reduced)
         stmts = reduced
@@ -704,6 +704,64 @@ def _value_key(stmt: Stmt) -> Stmt | None:
         stmt = replace(stmt, base=None)
     names = {name: f"${index}" for index, name in enumerate(stmt.defines())}
     return stmt.rename(names)
+
+
+def hoist_common_branches(stmts: Body) -> Body:
+    """Place pure computations performed by both branches in their common enclosing scope.
+
+    A computation moves only when all its ordering predecessors move with it on BOTH paths.
+    This factors complete common cones without speculating a load from just one path or moving
+    a read across a write. Alias substitution exposes the next common operation bottom-up.
+    """
+    from emmy.compiler.ir.stmt.passes import rename_free  # noqa: PLC0415
+
+    used = set(stmts.ssa_defs | stmts.ssa_uses | stmts.axis_names)
+    fresh = (f"shared{n}" for n in count())
+
+    def factor(stmt: Stmt) -> Stmt | Body:
+        if not isinstance(stmt, Cond) or not stmt.body or not stmt.else_body:
+            return stmt
+        branches = stmt.nested()
+        predecessors = [ordering_constraints(branch, effects=True) for branch in branches]
+        mutable = [
+            {name for name, occurrences in Counter(name for member in branch for name in member.defines()).items() if occurrences > 1}
+            for branch in branches
+        ]
+        taken: list[set[int]] = [set(), set()]
+        aliases: list[dict[str, str]] = [{}, {}]
+        shared = []
+        while True:
+            ready = []
+            for side, branch in enumerate(branches):
+                candidates = {}
+                for index, member in enumerate(branch):
+                    if index in taken[side] or predecessors[side][index] - taken[side] or not member.pure:
+                        continue
+                    if mutable[side].intersection(member.defines()):
+                        continue
+                    renamed = rename_free(member, aliases[side])
+                    if (key := _value_key(renamed)) is not None:
+                        candidates.setdefault(key, (index, renamed))
+                ready.append(candidates)
+            common = next((key for key in ready[0] if key in ready[1]), None)
+            if common is None:
+                break
+            names = tuple(next(name for name in fresh if name not in used) for _ in common.defines())
+            used.update(names)
+            shared.append(common.rename(dict(zip(common.defines(), names, strict=True))))
+            for side in (0, 1):
+                index, member = ready[side][common]
+                taken[side].add(index)
+                aliases[side].update(zip(member.defines(), names, strict=True))
+        if not shared:
+            return stmt
+        children = tuple(
+            Body(rename_free(member, aliases[side]) for index, member in enumerate(branch) if index not in taken[side])
+            for side, branch in enumerate(branches)
+        )
+        return Body((*shared, stmt.with_bodies(children)))
+
+    return stmts.map(factor)
 
 
 def dedup_loads(stmts: Body) -> Body:
