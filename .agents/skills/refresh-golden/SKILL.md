@@ -112,9 +112,9 @@ lane, each spelled explicitly: `EMMY_FAST_MATH=1` for the fast-math row and `EMM
 Fast math is the default, so a standard row recorded with the variable unset measures the fast-math kernel under the
 standard row's name. Then promote: move the receipt's `measurements`, `knobs` and
 `identity` onto the proposal row in the canonical file, or keep the receipt and drop the proposal, and write through
-`dump_golden_file(..., validation=REPOSITORY)` so the diff is only the rows. Prove it: `emmy golden check PATH` stays
-clean, the row's test node decodes, and a `--strict-evidence` compile of the target with `--golden PATH` picks the
-row.
+`GoldenFile.dump(PATH, repository=True, overwrite=True)` so the diff is only the rows. Prove it:
+`emmy golden check PATH` stays clean, the row's test node decodes, and a `--strict-evidence` compile of the target
+with `--golden PATH` picks the row.
 
 ### 4. Re-record or delete
 
