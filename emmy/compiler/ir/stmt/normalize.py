@@ -27,8 +27,9 @@ from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
 from emmy.compiler.ir.stmt.body import Body, free_names
-from emmy.compiler.ir.stmt.leaves import Accum, Assign, Init, Load, SelectBranch, Write
+from emmy.compiler.ir.stmt.leaves import Accum, Assign, Init, Load, Write
 from emmy.compiler.ir.stmt.order import bound_axes, ordering_constraints, relation_graph, topological_sort
+from emmy.compiler.ir.stmt.subroutine import Call, definitions
 
 __all__ = ["normalize_body"]
 
@@ -51,11 +52,10 @@ def _normalize_body(stmts: Body) -> Body:
     """Uncached implementation owned by :class:`Body`'s normalization property."""
     from emmy.compiler.ir.loop.splicer import expand_calls
 
-    stmts = prepare_body(stmts)
-    expanded = expand_calls(stmts)
     # Calls are storage sharing only. Full normalization sees every operation, so reduction
     # fusion, executable identity and Tile IR's common-cone detection use the same CSE form.
-    stmts = expanded
+    if definitions(stmts):
+        stmts = expand_calls(dedup_loads(_canonicalize_exprs(prepare_body(stmts))))
     while True:
         reduced = dedup_loads(hoist_common_branches(_canonicalize_exprs(prepare_body(stmts))))
         if reduced == stmts:
@@ -696,7 +696,7 @@ def simplify_body(body: Body) -> Body:
 
 def _value_key(stmt: Stmt) -> Stmt | None:
     """A value's structural operation with anonymous results, retaining every semantic field."""
-    if stmt.nested() or not (stmt.pure or isinstance(stmt, Accum)) or isinstance(stmt, Load) and stmt.carried:
+    if stmt.nested() or not (stmt.pure or isinstance(stmt, (Accum, Call))) or isinstance(stmt, Load) and stmt.carried:
         return None
     if isinstance(stmt, Assign) and stmt.op.commutative:
         stmt = replace(stmt, args=tuple(sorted(stmt.args)))
@@ -1015,8 +1015,7 @@ def _canonical_order(stmts: Body) -> Body:
 
 def _canonicalize_exprs(stmts: Body, axes: tuple[str, ...] = ()) -> Body:
     """Canonicalize integer expressions using lexical binding order, never axis spelling."""
-    from dataclasses import fields  # noqa: PLC0415
-
+    from emmy.compiler.ir.stmt.passes import map_exprs  # noqa: PLC0415
     from emmy.compiler.structural import form  # noqa: PLC0415
 
     commutative = frozenset({"+", "*", "==", "!=", "&&", "||", "&", "|", "^"})
@@ -1062,18 +1061,8 @@ def _canonicalize_exprs(stmts: Body, axes: tuple[str, ...] = ()) -> Body:
             return CastExpr(expr.dtype, expression(expr.expr))
         return expr
 
-    def value(item):
-        if isinstance(item, Expr):
-            return expression(item)
-        if isinstance(item, tuple):
-            return tuple(value(member) for member in item)
-        if isinstance(item, SelectBranch):
-            return SelectBranch(value=item.value, select=expression(item.select))
-        return item
-
     def statement(stmt: Stmt) -> Stmt:
-        changes = {field.name: value(getattr(stmt, field.name)) for field in fields(stmt)}
-        rewritten = replace(stmt, **changes)
+        rewritten = map_exprs(stmt, expression)
         bound = (*axes, *(axis.name for axis in bound_axes(stmt)))
         return rewritten.with_bodies(tuple(_canonicalize_exprs(child, bound) for child in rewritten.nested()))
 
