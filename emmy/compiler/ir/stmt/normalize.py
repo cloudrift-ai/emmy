@@ -771,13 +771,17 @@ def dedup_loads(stmts: Body) -> Body:
     """
     from emmy.compiler.ir.stmt.passes import rename_free  # noqa: PLC0415
 
-    def walk(body: Body, env: dict[Stmt, tuple[str, ...]], carried: dict[str, str], seeded: bool = False) -> Body:
+    def walk(
+        body: Body, env: dict[Stmt, tuple[str, ...]], carried: dict[str, str],
+        seeded: bool = False, initialized: frozenset[str] = frozenset(),
+    ) -> Body:
         local = dict(env)
         alias: dict[str, str] = {}
+        state = set(initialized)
         counts = Counter(name for stmt in body for name in stmt.defines())
         reductions = {
             stmt.name for stmt in body if isinstance(stmt, Accum) and seeded
-            and counts[stmt.name] == 1 and stmt.name not in body.ssa_uses
+            and counts[stmt.name] == 1 and stmt.name not in body.ssa_uses and stmt.name not in state
         }
 
         def invalidate(buffers: frozenset[str], names: frozenset[str] = frozenset()) -> None:
@@ -809,7 +813,8 @@ def dedup_loads(stmts: Body) -> Body:
                         and not shadowed.intersection((*values, *free_names(key)))
                         and not isinstance(key, Accum)
                     }
-                    children.append(walk(child, available, alias, isinstance(stmt, Loop) and stmt.seed))
+                    children.append(walk(child, available, alias, isinstance(stmt, Loop) and stmt.seed, frozenset(state)))
+                    state.update(child.carried_names)
                 out.append(stmt.with_bodies(tuple(children)))
                 invalidate(clobbered)
                 continue
@@ -825,6 +830,8 @@ def dedup_loads(stmts: Body) -> Body:
                     continue
                 local[key] = stmt.defines()
             out.append(stmt)
+            if isinstance(stmt, (Init, Accum)):
+                state.add(stmt.name)
             invalidate(frozenset(stmt.external_writes()))
         return Body(out)
 

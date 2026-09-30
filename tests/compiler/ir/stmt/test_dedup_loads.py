@@ -4,7 +4,7 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.stmt.blocks import Cond, Loop
 from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.stmt.leaves import Accum, Assign, Let, Load, Select, SelectBranch, Write
+from emmy.compiler.ir.stmt.leaves import Accum, Assign, Init, Let, Load, Select, SelectBranch, Write
 from emmy.compiler.ir.stmt.normalize import dedup_loads, hoist_common_branches, normalize_body
 
 
@@ -127,6 +127,12 @@ def test_cse_partial_state_changes_invalidate_dependent_values() -> None:
 
 def test_cse_does_not_reuse_a_staged_load_assignment() -> None:
     body = Body((Load(name="value", input="x", index=ZERO), Load(name="value", input="x", index=ZERO, carried="load")))
+    assert dedup_loads(body) == body
+
+
+def test_cse_does_not_merge_reductions_with_distinct_explicit_seeds() -> None:
+    body = Body((Init("left", 0.0, dtype="f32"), Init("right", 1.0, dtype="f32"),
+                 Loop(axis=Axis("k", 8), body=(Accum("left", "x"), Accum("right", "x")))))
     assert dedup_loads(body) == body
 
 
