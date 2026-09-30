@@ -455,22 +455,22 @@
    {"name": "gemma4_12b.kv_norm_global.dynM", "pins": {"FAST_MATH": false}, "knobs": {"WORK": "t128", "TILE": "", "REDUCE": "coop", "STAGE": "", "RASTER": ""}, "identity": "9b35ea7430ebeefe1f22113f3bc386a7749b71ded63980f3a8745fd221fda8bd"}
   ]},
   {"program": 82, "target": {"loop": 82, "origins": ["relu"]}, "realizations": [
-   {"name": "gemma4_12b.pw.n4096.m32", "bindings": {"num_tokens": 32}, "pins": {"FAST_MATH": false}, "knobs": {"WORK": "", "TILE": "f4", "REDUCE": "", "STAGE": "", "RASTER": ""}, "identity": "96432be3a50d7a6f61fff18854ac1a7975b78d0a18ade1cb528fd6a7625da0c7"}
+   {"name": "gemma4_12b.pw.n4096.m32", "bindings": {"num_tokens": 32}, "pins": {"FAST_MATH": false}, "knobs": {"WORK": "", "TILE": "f4", "REDUCE": "", "STAGE": "", "RASTER": ""}, "identity": "96432be3a50d7a6f61fff18854ac1a7975b78d0a18ade1cb528fd6a7625da0c7", "measurements": {"emmy_us": 1.0302822338417172, "reference_us": 1.0407868539914489, "reference_backend": "same-input-greedy"}}
   ]},
   {"program": 83, "target": {"loop": 83, "origins": ["relu"]}, "realizations": [
-   {"name": "gemma4_12b.pw.n4096.m256", "bindings": {"num_tokens": 256}, "pins": {"FAST_MATH": false}, "knobs": {"WORK": "", "TILE": "f4", "REDUCE": "", "STAGE": "", "RASTER": ""}, "identity": "fe336c38564a9a81e16b9d38c6e3607acc1df25ff5ea26b624d0ba3d35f56a10"}
+   {"name": "gemma4_12b.pw.n4096.m256", "bindings": {"num_tokens": 256}, "pins": {"FAST_MATH": false}, "knobs": {"WORK": "", "TILE": "f4", "REDUCE": "", "STAGE": "", "RASTER": ""}, "identity": "fe336c38564a9a81e16b9d38c6e3607acc1df25ff5ea26b624d0ba3d35f56a10", "measurements": {"emmy_us": 2.0206933841109276, "reference_us": 1.9801142625510693, "reference_backend": "same-input-greedy"}}
   ]},
   {"program": 84, "target": {"loop": 84, "origins": ["relu"]}, "realizations": [
-   {"name": "gemma4_12b.pw.n8192.m32", "bindings": {"num_tokens": 32}, "pins": {"FAST_MATH": false}, "knobs": {"WORK": "", "TILE": "f4", "REDUCE": "", "STAGE": "", "RASTER": ""}, "identity": "0a228c3388e93d2bdc11ce9ced58e9cc1a59c3b092ad68e9594fb430d9f35eca"}
+   {"name": "gemma4_12b.pw.n8192.m32", "bindings": {"num_tokens": 32}, "pins": {"FAST_MATH": false}, "knobs": {"WORK": "", "TILE": "f4", "REDUCE": "", "STAGE": "", "RASTER": ""}, "identity": "0a228c3388e93d2bdc11ce9ced58e9cc1a59c3b092ad68e9594fb430d9f35eca", "measurements": {"emmy_us": 1.1918527306988835, "reference_us": 1.2034560786560178, "reference_backend": "same-input-greedy"}}
   ]},
   {"program": 85, "target": {"loop": 85, "origins": ["relu"]}, "realizations": [
-   {"name": "gemma4_12b.pw.n8192.m256", "bindings": {"num_tokens": 256}, "pins": {"FAST_MATH": false}, "knobs": {"WORK": "", "TILE": "f4", "REDUCE": "", "STAGE": "", "RASTER": ""}, "identity": "59a9f24b4f72aeecebdc6757acec6802b3bafe94bc3f6fe050e3324fe66c9832"}
+   {"name": "gemma4_12b.pw.n8192.m256", "bindings": {"num_tokens": 256}, "pins": {"FAST_MATH": false}, "knobs": {"WORK": "", "TILE": "f4", "REDUCE": "", "STAGE": "", "RASTER": ""}, "identity": "59a9f24b4f72aeecebdc6757acec6802b3bafe94bc3f6fe050e3324fe66c9832", "measurements": {"emmy_us": 2.9389713890850544, "reference_us": 2.9349292162805796, "reference_backend": "same-input-greedy"}}
   ]},
   {"program": 86, "target": {"loop": 86, "origins": ["relu"]}, "realizations": [
-   {"name": "gemma4_12b.pw.n2048.m32", "bindings": {"num_tokens": 32}, "pins": {"FAST_MATH": false}, "knobs": {"WORK": "", "TILE": "f4", "REDUCE": "", "STAGE": "", "RASTER": ""}, "identity": "44d666a65abe937234d6470ffc681dd774042407e9b73051ef7cba0c1e184479"}
+   {"name": "gemma4_12b.pw.n2048.m32", "bindings": {"num_tokens": 32}, "pins": {"FAST_MATH": false}, "knobs": {"WORK": "", "TILE": "f4", "REDUCE": "", "STAGE": "", "RASTER": ""}, "identity": "44d666a65abe937234d6470ffc681dd774042407e9b73051ef7cba0c1e184479", "measurements": {"emmy_us": 0.9289143490605056, "reference_us": 0.9487058850936592, "reference_backend": "same-input-greedy"}}
   ]},
   {"program": 87, "target": {"loop": 87, "origins": ["relu"]}, "realizations": [
-   {"name": "gemma4_12b.pw.n2048.m256", "bindings": {"num_tokens": 256}, "pins": {"FAST_MATH": false}, "knobs": {"WORK": "", "TILE": "f4", "REDUCE": "", "STAGE": "", "RASTER": ""}, "identity": "e8fe61a9444e854915c1a27cceb6b828c7b20fa87c1db7364bc0c73166bcc093"}
+   {"name": "gemma4_12b.pw.n2048.m256", "bindings": {"num_tokens": 256}, "pins": {"FAST_MATH": false}, "knobs": {"WORK": "", "TILE": "f4", "REDUCE": "", "STAGE": "", "RASTER": ""}, "identity": "e8fe61a9444e854915c1a27cceb6b828c7b20fa87c1db7364bc0c73166bcc093", "measurements": {"emmy_us": 1.4321678318083286, "reference_us": 1.4548570616170764, "reference_backend": "same-input-greedy"}}
   ]},
   {"program": 88, "target": {"loop": 88, "origins": ["relu"]}, "realizations": [
    {"name": "gemma4_12b.pw.n2048.dynM", "pins": {"FAST_MATH": false}, "knobs": {"WORK": "", "TILE": "", "REDUCE": "", "STAGE": "", "RASTER": ""}, "identity": "b5ec2f3e7a5dc8265fd7bb43754375ceb161ee7074fa71c70fba95368a4af825", "measurements": {"emmy_us": 3.0, "reference_us": 4.6, "reference_backend": "torch-eager"}}
@@ -485,10 +485,10 @@
    {"name": "gemma4_12b.cut_cone_stat.m32", "bindings": {"num_tokens": 32}, "pins": {"FAST_MATH": false}, "knobs": {"WORK": "t128", "REDUCE": "coop"}, "identity": "cb8ae4e5f8b18208330402ce6f48f8d6e93a3d5160f83c3e0007f59d51c1b61e", "measurements": {"emmy_us": 1.7, "reference_us": 8.7, "reference_backend": "torch-eager"}}
   ]},
   {"program": 92, "target": {"loop": 92, "origins": ["relu"]}, "realizations": [
-   {"name": "gemma4_12b.cut_cone_scale.m32", "bindings": {"num_tokens": 32}, "pins": {"FAST_MATH": false}, "knobs": {"WORK": "", "TILE": "f4"}, "identity": "ffd3f00ba0c266a655336c6c3f7e500ede503b83120c65aeec3e3cc9fce685f1"}
+   {"name": "gemma4_12b.cut_cone_scale.m32", "bindings": {"num_tokens": 32}, "pins": {"FAST_MATH": false}, "knobs": {"WORK": "", "TILE": "f4"}, "identity": "ffd3f00ba0c266a655336c6c3f7e500ede503b83120c65aeec3e3cc9fce685f1", "measurements": {"emmy_us": 1.096369232982397, "reference_us": 1.109714270569384, "reference_backend": "same-input-greedy"}}
   ]},
   {"program": 93, "target": {"loop": 93, "origins": ["relu"]}, "realizations": [
-   {"name": "gemma4_12b.cut_combine.m32", "bindings": {"num_tokens": 32}, "pins": {"FAST_MATH": false}, "knobs": {"WORK": "", "TILE": "f4"}, "identity": "dcc61aeda8c113dbce6d0d2074f3fcbb5c6a31cc5cc88cdccb6e8b1f5a646409"}
+   {"name": "gemma4_12b.cut_combine.m32", "bindings": {"num_tokens": 32}, "pins": {"FAST_MATH": false}, "knobs": {"WORK": "", "TILE": "f4"}, "identity": "dcc61aeda8c113dbce6d0d2074f3fcbb5c6a31cc5cc88cdccb6e8b1f5a646409", "measurements": {"emmy_us": 1.8113135593011975, "reference_us": 1.8045901088044047, "reference_backend": "same-input-greedy"}}
   ]},
   {"program": 94, "target": {"loop": 94, "origins": ["matmul"]}, "realizations": [
    {"name": "gemma4_12b.mlp_ch.m256", "bindings": {"num_tokens": 256}, "pins": {"FAST_MATH": false}, "knobs": {"WORK": "w2x2", "TILE": "mma_m16n8k16_f16_f32/f4x8", "REDUCE": "", "STAGE": "d2/smem-async", "RASTER": ""}, "identity": "d731305a5ee809e998f3a3b92605e47f1e336187581e221626c5409638f791f2", "measurements": {"emmy_us": 219.7, "reference_us": 237.8, "reference_backend": "cublas"}},
@@ -505,13 +505,13 @@
    {"name": "gemma4_12b.reduce.k3840.dynM", "pins": {"FAST_MATH": false}, "knobs": {"WORK": "t256", "TILE": "", "REDUCE": "coop", "STAGE": "", "RASTER": ""}, "identity": "a1d5161439c8b3ae746d5186c4bcaed386d84ee2ba31f1b463f4fb3f447028cd", "measurements": {"emmy_us": 2.9, "reference_us": 6.4, "reference_backend": "torch-eager"}}
   ]},
   {"program": 98, "target": {"loop": 98, "origins": ["relu"]}, "realizations": [
-   {"name": "gemma4_12b.pw.n15360.m256.fp32", "bindings": {"num_tokens": 256}, "pins": {"FAST_MATH": false}, "knobs": {"WORK": "", "TILE": "f4", "REDUCE": "", "STAGE": "", "RASTER": ""}, "identity": "a987308918bc51bbdae27cd403604911984e8312c661b45190b847327507d2fb"}
+   {"name": "gemma4_12b.pw.n15360.m256.fp32", "bindings": {"num_tokens": 256}, "pins": {"FAST_MATH": false}, "knobs": {"WORK": "", "TILE": "f4", "REDUCE": "", "STAGE": "", "RASTER": ""}, "identity": "a987308918bc51bbdae27cd403604911984e8312c661b45190b847327507d2fb", "measurements": {"emmy_us": 8.411428891122341, "reference_us": 8.440686389803886, "reference_backend": "same-input-greedy"}}
   ]},
   {"program": 99, "target": {"loop": 99, "origins": ["relu"]}, "realizations": [
    {"name": "gemma4_12b.pw.n15360.dynM.fp32", "pins": {"FAST_MATH": false}, "knobs": {"WORK": "", "TILE": "", "REDUCE": "", "STAGE": "", "RASTER": ""}, "identity": "195667106c4e767d76fc24fa69538243c051cd1f6ef8170d4fbd5c586bc160a3", "measurements": {"emmy_us": 15.5, "reference_us": 16.5, "reference_backend": "torch-eager"}}
   ]},
   {"program": 100, "target": {"loop": 100, "origins": ["relu"]}, "realizations": [
-   {"name": "gemma4_12b.pw.n3840.m256.fp32", "bindings": {"num_tokens": 256}, "pins": {"FAST_MATH": false}, "knobs": {"WORK": "", "TILE": "f4", "REDUCE": "", "STAGE": "", "RASTER": ""}, "identity": "516a3bd8a8e8b624780f41f46e446096bf2cdc8cad81df103042ec2c29dc92b5"}
+   {"name": "gemma4_12b.pw.n3840.m256.fp32", "bindings": {"num_tokens": 256}, "pins": {"FAST_MATH": false}, "knobs": {"WORK": "", "TILE": "f4", "REDUCE": "", "STAGE": "", "RASTER": ""}, "identity": "516a3bd8a8e8b624780f41f46e446096bf2cdc8cad81df103042ec2c29dc92b5", "measurements": {"emmy_us": 2.9028989374637604, "reference_us": 2.90481629781425, "reference_backend": "same-input-greedy"}}
   ]},
   {"program": 101, "target": {"loop": 101, "origins": ["relu"]}, "realizations": [
    {"name": "gemma4_12b.pw.n3840.dynM.fp32", "pins": {"FAST_MATH": false}, "knobs": {"WORK": "", "TILE": "", "REDUCE": "", "STAGE": "", "RASTER": ""}, "identity": "55e14bc2258c133b32f8a82e01b08d76182d97eddfc3363cd8d39e9240add2b7", "measurements": {"emmy_us": 4.7, "reference_us": 5.4, "reference_backend": "torch-eager"}}
@@ -527,10 +527,10 @@
    {"name": "gemma4_12b.mlp_down.lin.dynM", "pins": {"FAST_MATH": false}, "knobs": {"WORK": "w1x8", "TILE": "mma_m16n8k16_f16_f32/f2x2/k4", "REDUCE": "g4k", "RASTER": "", "STAGE": "d2/smem-async"}, "identity": "ba68d01df6e0e3e2c412d06dee2788fd2d81a2ff9744d25477f07a80d1bfff4c", "measurements": {"emmy_us": 517.3, "reference_us": 368.4, "reference_backend": "cublas"}}
   ]},
   {"program": 105, "target": {"loop": 105, "origins": ["relu"]}, "realizations": [
-   {"name": "gemma4_12b.pw.n8704.m32", "bindings": {"num_tokens": 32}, "pins": {"FAST_MATH": false}, "knobs": {"WORK": "", "TILE": "f4", "REDUCE": "", "STAGE": "", "RASTER": ""}, "identity": "671ff05d692f2b5cbc10b689987dec76f7072d67ffb41a61290356eeb4c469b8"}
+   {"name": "gemma4_12b.pw.n8704.m32", "bindings": {"num_tokens": 32}, "pins": {"FAST_MATH": false}, "knobs": {"WORK": "", "TILE": "f4", "REDUCE": "", "STAGE": "", "RASTER": ""}, "identity": "671ff05d692f2b5cbc10b689987dec76f7072d67ffb41a61290356eeb4c469b8", "measurements": {"emmy_us": 1.2250306317582726, "reference_us": 1.228800043463707, "reference_backend": "same-input-greedy"}}
   ]},
   {"program": 106, "target": {"loop": 106, "origins": ["relu"]}, "realizations": [
-   {"name": "gemma4_12b.pw.n8704.m256", "bindings": {"num_tokens": 256}, "pins": {"FAST_MATH": false}, "knobs": {"WORK": "", "TILE": "f4", "REDUCE": "", "STAGE": "", "RASTER": ""}, "identity": "cd65edaf3a850de184ef656b4c7c37d3c37548077964a8461399406a74c16522"}
+   {"name": "gemma4_12b.pw.n8704.m256", "bindings": {"num_tokens": 256}, "pins": {"FAST_MATH": false}, "knobs": {"WORK": "", "TILE": "f4", "REDUCE": "", "STAGE": "", "RASTER": ""}, "identity": "cd65edaf3a850de184ef656b4c7c37d3c37548077964a8461399406a74c16522", "measurements": {"emmy_us": 3.0571429524570704, "reference_us": 3.053210908547044, "reference_backend": "same-input-greedy"}}
   ]},
   {"program": 107, "target": {"loop": 107, "origins": ["relu"]}, "realizations": [
    {"name": "gemma4_12b.pw.n8704.dynM", "pins": {"FAST_MATH": false}, "knobs": {"WORK": "", "TILE": "f4", "REDUCE": "", "STAGE": "", "RASTER": ""}, "identity": "89e32a428bfab60db39e7029bfe5f0f90b7513060dcd1b15368cc210bcd73b50", "measurements": {"emmy_us": 4.9, "reference_us": 5.4, "reference_backend": "torch-eager"}}
