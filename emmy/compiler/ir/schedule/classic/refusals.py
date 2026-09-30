@@ -251,7 +251,7 @@ def _chunk_refusal(tile: TileOp, node) -> str | None:
         if (
             mask_select_predicate(stmt) is None
             or len(consumers) != 1
-            or not set(stmt.deps()) <= uniform
+            or not {branch.value for branch in stmt.branches} <= uniform
             or any(not branch.select.free_vars() <= coord_axes for branch in stmt.branches)
         ):
             return "the score's coordinate Select does not form a cell-uniform additive mask"

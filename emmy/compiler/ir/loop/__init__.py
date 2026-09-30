@@ -1,28 +1,18 @@
-"""Loop IR — post-fusion kernel representation plus its analysis/normalization.
+"""Loop IR — post-fusion kernel representation and validation.
 
-Submodules:
-- :mod:`.ir` — ``LoopOp`` (one kernel) plus ``LoopMeta`` / ``Scope``
-  helpers. The body statement vocabulary (``Loop``, ``Load``, ``Write``,
-  ``Assign``, ``Accum``, ``Select``, ``SelectBranch``, ``Cond``,
-  ``StridedLoop``, ``Stmt``, ``iter_body``, ``map_body``) lives in
-  ``ir/stmt.py`` and is re-exported here. Construction runs structural
-  normalization (``normalize_body`` in ``ir/stmt.py``) then validation via
-  ``__post_init__``.
-- :mod:`.splicer` — the DAG splicer used by ``loop/fusion``.
-
-The public surface below re-exports the common types so callers use
-``from emmy.compiler.ir.loop import LoopOp, ...``.
+``LoopOp`` normalizes its body before validation. The statement vocabulary, body analysis and
+reconstruction live in ``ir/stmt``; the Loop IR splicer supplies graph regions to that shared engine.
+Common types are re-exported here for Loop IR callers.
 """
 
-from emmy.compiler.ir.loop.builder import LoopBuilder
 from emmy.compiler.ir.loop.ir import (
     Accum,
     Assign,
     Axis,
+    BodyAnalysis,
     Cond,
     Load,
     Loop,
-    LoopMeta,
     LoopOp,
     Scope,
     Select,
@@ -32,6 +22,7 @@ from emmy.compiler.ir.loop.ir import (
 )
 from emmy.compiler.ir.loop.splicer import UnfusableStmt, observes_running_accumulator, splice_graph, splice_loops
 from emmy.compiler.ir.sigma import Sigma
+from emmy.compiler.ir.stmt.builder import BodyBuilder
 
 __all__ = [
     "Accum",
@@ -40,8 +31,8 @@ __all__ = [
     "Cond",
     "Load",
     "Loop",
-    "LoopBuilder",
-    "LoopMeta",
+    "BodyBuilder",
+    "BodyAnalysis",
     "LoopOp",
     "Scope",
     "Select",

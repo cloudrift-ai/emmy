@@ -56,6 +56,40 @@ def test_sort_commutative_args_idempotent() -> None:
     assert tuple(once) == tuple(twice)
 
 
+def test_affine_index_equivalence_and_cse_have_one_exact_identity() -> None:
+    keys = set()
+    for row, column in (("i", "j"), ("z", "q")):
+        i, j = Var(row), Var(column)
+        forms = (i + 2 * j + 3, 3 + j + (i + j), 3 * (i + j + 1) - (2 * i + j))
+        for first, second in product(forms, repeat=2):
+            body = Body(
+                (
+                    Loop(
+                        axis=Axis(row, 4),
+                        body=(
+                            Loop(
+                                axis=Axis(column, 4),
+                                body=(
+                                    Load(name="a", input="x", index=(first,)),
+                                    Load(name="b", input="x", index=(second,)),
+                                    Assign(name="left", op="exp", args=("a",)),
+                                    Assign(name="right", op="exp", args=("b",)),
+                                    Assign(name="sum", op="add", args=("right", "left")),
+                                    Write(output="out", index=(i, j), value="sum"),
+                                ),
+                            ),
+                        ),
+                    ),
+                )
+            )
+            normalized = normalize_body(body)
+            assert len(normalized.loads) == 1
+            assert len([s for s in normalized.iter() if isinstance(s, Assign)]) == 2
+            assert normalize_body(Body(tuple(normalized))) == normalized
+            keys.add(body.structural_key(structural=False))
+    assert len(keys) == 1
+
+
 # ---------------------------------------------------------------------------
 # Body.structural_key()
 # ---------------------------------------------------------------------------

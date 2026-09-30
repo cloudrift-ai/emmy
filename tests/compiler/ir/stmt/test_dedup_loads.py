@@ -1,11 +1,11 @@
 """Tests for Load deduplication during body normalization."""
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Literal, Var
-from emmy.compiler.ir.stmt.blocks import Loop
+from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.stmt.blocks import Cond, Loop
 from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.stmt.leaves import Assign, Load, Write
-from emmy.compiler.ir.stmt.normalize import dedup_loads, normalize_body
+from emmy.compiler.ir.stmt.leaves import Accum, Assign, Init, Let, Load, Select, SelectBranch, Write
+from emmy.compiler.ir.stmt.normalize import dedup_loads, hoist_common_branches, normalize_body
 
 
 def test_dedup_loads_preserves_loads_under_a_rebound_coordinate() -> None:
@@ -74,6 +74,235 @@ def test_normalize_body_dedups_loads_and_rewires_gather_indices() -> None:
 ZERO = (Literal(0, "int"),)
 
 
+def test_normalize_hoisted_shadowed_loads_keep_their_values() -> None:
+    """Motion preserves lexical bindings before CSE merges equal loads."""
+    from emmy.compiler.ir.loop import LoopOp
+
+    for inner_input in ("x", "y"):
+        op = LoopOp(
+            body=Body(
+                (
+                    Load("value", "x", ZERO),
+                    Loop(
+                        Axis("i", 4),
+                        body=(Load("value", inner_input, ZERO), Write("inner", (Var("i"),), "value")),
+                    ),
+                    Write("outer", ZERO, "value"),
+                )
+            )
+        )
+        loads = {stmt.name: stmt.input for stmt in op.body if isinstance(stmt, Load)}
+        writes = {stmt.output: stmt.value for stmt in op.body.iter() if isinstance(stmt, Write)}
+        assert loads[writes["outer"]] == "x"
+        assert loads[writes["inner"]] == inner_input
+        assert len(loads) == (1 if inner_input == "x" else 2)
+        assert normalize_body(op.body) == op.body
+
+
+def test_cse_does_not_use_expression_printing(monkeypatch) -> None:
+    monkeypatch.setattr(BinaryExpr, "pretty", lambda self: "index")
+    indices = [BinaryExpr("+", Var("i"), Literal(n, "int")) for n in (1, 2)]
+    body = Body(Load(name=f"x{n}", input="x", index=(index,)) for n, index in enumerate(indices))
+    assert dedup_loads(body) == body
+
+
+def test_cse_shares_selections_and_their_downstream_cones() -> None:
+    body = Body(
+        (
+            Let(name="zero", value=Literal(0, "int")),
+            Let(name="other_zero", value=Literal(0, "int")),
+            Select(name="left", branches=(SelectBranch("x", Var("p")), SelectBranch("zero", Literal(1, "int")))),
+            Select(name="right", branches=(SelectBranch("x", Var("p")), SelectBranch("other_zero", Literal(1, "int")))),
+            Assign(name="a", op="exp", args=("left",)),
+            Assign(name="b", op="exp", args=("right",)),
+            Write(output="out", index=ZERO, value="b"),
+        )
+    )
+    out = dedup_loads(body)
+    assert [type(s) for s in out] == [Let, Select, Assign, Write]
+    assert out[-1].value == "a"
+
+
+def test_cse_selection_predicates_observe_rebound_coordinates() -> None:
+    def selection(name):
+        return Select(name=name, branches=(SelectBranch("x", Var("k")), SelectBranch("y", Literal(1, "int"))))
+
+    body = Body((selection("a"), Loop(axis=Axis("k", 4), body=(selection("b"), Write(output="out", index=(Var("k"),), value="b")))))
+    assert dedup_loads(body) == body
+
+
+def test_cse_does_not_drop_repeated_accumulator_updates() -> None:
+    update = Accum(name="sum", value="x", axes=("k",))
+    body = Body((Loop(axis=Axis("k", 8), body=(update, update)),))
+    assert dedup_loads(body) == body
+
+
+def test_cse_does_not_alias_distinct_unseeded_accumulators() -> None:
+    body = Body(
+        (
+            Loop(
+                axis=Axis("k", 8),
+                seed=False,
+                body=(
+                    Accum(name="left", value="x", axes=("k",)),
+                    Accum(name="right", value="x", axes=("k",)),
+                ),
+            ),
+        )
+    )
+    assert dedup_loads(body) == body
+
+
+def test_cse_partial_state_changes_invalidate_dependent_values() -> None:
+    body = Body(
+        (
+            Loop(
+                axis=Axis("k", 8),
+                body=(
+                    Assign(name="before", op="exp", args=("sum",)),
+                    Accum(name="sum", value="x", axes=("k",)),
+                    Assign(name="after", op="exp", args=("sum",)),
+                    Write(output="out", index=(Var("k"),), value="after"),
+                ),
+            ),
+        )
+    )
+    assert dedup_loads(body) == body
+
+
+def test_cse_nested_state_changes_invalidate_enclosing_values() -> None:
+    body = Body(
+        (
+            Assign("before", "exp", ("sum",)),
+            Loop(Axis("k", 4), (Accum("sum", "x", axes=("k",)),), seed=False),
+            Assign("after", "exp", ("sum",)),
+            Write("out", ZERO, "after"),
+        )
+    )
+    assert dedup_loads(body) == body
+
+
+def test_cse_does_not_reuse_a_staged_load_assignment() -> None:
+    body = Body((Load(name="value", input="x", index=ZERO), Load(name="value", input="x", index=ZERO, carried="load")))
+    assert dedup_loads(body) == body
+
+
+def test_cse_removes_repeated_copies_of_one_binding() -> None:
+    from emmy.compiler.ir.loop import LoopOp
+
+    load = Load("value", "x", ZERO)
+    body = Body((load, Write("first", ZERO, "value"), load, Write("second", ZERO, "value")))
+    assert dedup_loads(body) == Body((load, *body[1:2], body[-1]))
+    assert len([stmt for stmt in LoopOp(body=body).body if isinstance(stmt, Load)]) == 1
+
+
+def test_cse_never_aliases_a_value_to_an_overwritten_representative() -> None:
+    body = Body((Load("value", "x", ZERO), Load("copy", "x", ZERO), Load("value", "y", ZERO), Write("out", ZERO, "copy")))
+    assert dedup_loads(body) == body
+    update = Assign("value", "exp", ("value",))
+    assert dedup_loads(Body((update, update))) == Body((update, update))
+
+
+def test_cse_does_not_merge_reductions_with_distinct_explicit_seeds() -> None:
+    body = Body(
+        (
+            Init("left", 0.0, dtype="f32"),
+            Init("right", 1.0, dtype="f32"),
+            Loop(axis=Axis("k", 8), body=(Accum("left", "x"), Accum("right", "x"))),
+        )
+    )
+    assert dedup_loads(body) == body
+
+
+def test_normalization_closes_simplification_cse_and_invariant_motion() -> None:
+    """An equal gather index exposes a constant predicate, then an invariant shared cone."""
+    body = Body(
+        (
+            Load(name="x", input="x", index=ZERO),
+            Loop(
+                axis=Axis("i", 4),
+                body=(
+                    Load(name="a", input="indices", index=(Var("i"),)),
+                    Load(name="b", input="indices", index=(Var("i"),)),
+                    Select(
+                        name="s",
+                        branches=(
+                            SelectBranch("x", BinaryExpr("<", BinaryExpr("-", Var("a"), Var("b")), Literal(1, "int"))),
+                            SelectBranch("a", Literal(1, "int")),
+                        ),
+                    ),
+                    Assign(name="v", op="exp", args=("s",)),
+                    Write(output="out", index=(Var("i"),), value="v"),
+                ),
+            ),
+        )
+    )
+    normalized = normalize_body(body)
+    assert any(isinstance(s, Assign) and s.op.name == "exp" for s in normalized)
+    assert normalize_body(Body(tuple(normalized))) == normalized
+
+
+def test_cse_factors_common_branch_cones_without_speculation() -> None:
+    def branch(prefix, extra):
+        return Body(
+            (
+                Load(name=f"{prefix}i", input="indices", index=ZERO),
+                Load(name=f"{prefix}x", input="x", index=(Var(f"{prefix}i"),)),
+                Assign(name=f"{prefix}v", op="exp", args=(f"{prefix}x",)),
+                Load(name=f"{prefix}only", input=extra, index=ZERO),
+                Assign(name=f"{prefix}out", op="add", args=(f"{prefix}v", f"{prefix}only")),
+                Write(output="out", index=ZERO, value=f"{prefix}out"),
+            )
+        )
+
+    body = Body((Cond(cond=Var("predicate"), body=branch("a", "left"), else_body=branch("b", "right")),))
+    out = normalize_body(body)
+    assert [type(stmt) for stmt in out] == [Load, Load, Assign, Cond]
+    assert out[2].op.name == "exp"
+    for inner in out[-1].nested():
+        assert [type(stmt) for stmt in inner] == [Load, Assign, Write]
+        assert out[2].name in inner[1].args
+    assert normalize_body(Body(tuple(out))) == out
+
+
+def test_common_branch_load_cannot_cross_a_write_on_either_path() -> None:
+    read = Load(name="value", input="x", index=ZERO)
+    write = Write(output="x", index=ZERO, value="replacement")
+    result = Write(output="out", index=ZERO, value="value")
+    for left, right in (((write, read, result), (read, result)), ((read, result), (write, read, result))):
+        body = Body((Cond(cond=Var("predicate"), body=left, else_body=right),))
+        assert hoist_common_branches(body) == body
+
+
+def test_normalized_quotient_addresses_fuse_and_share_the_whole_reduction() -> None:
+    def reduction(axis, name, nested):
+        index = BinaryExpr("/", Var(axis), Literal(128 if nested else 256, "int"))
+        if nested:
+            index = BinaryExpr("/", index, Literal(2, "int"))
+        return Loop(
+            axis=Axis(axis, 1024),
+            body=(
+                Load(name=f"{name}x", input="x", index=(index,)),
+                Assign(name=f"{name}v", op="exp", args=(f"{name}x",)),
+                Accum(name=name, value=f"{name}v", axes=(axis,)),
+            ),
+        )
+
+    body = Body(
+        (
+            reduction("i", "left", True),
+            reduction("j", "right", False),
+            Write(output="out", index=ZERO, value="right"),
+            Write(output="other", index=ZERO, value="left"),
+        )
+    )
+    out = normalize_body(body)
+    assert len(out.loads) == len(out.accums) == 1
+    assert len([s for s in out.iter() if isinstance(s, Loop)]) == 1
+    assert out[-1].value == out[-2].value
+    assert normalize_body(Body(tuple(out))) == out
+
+
 def test_dedup_loads_closes_commutative_chains_after_aliasing() -> None:
     """An alias that reverses sorted operands must not hide the rest of a duplicate chain."""
     body = Body(
@@ -139,6 +368,69 @@ def test_dedup_loads_still_rewires_an_inner_use_of_the_dropped_name() -> None:
 
     assert [s.name for s in out if isinstance(s, Load)] == ["in0"]
     assert out[-1].body == Body((Assign(name="v", op="add", args=("in0", "in0")),))
+
+
+def test_cse_alias_cannot_be_captured_by_its_destination_name() -> None:
+    body = Body(
+        (
+            Load(name="a", input="x", index=ZERO),
+            Load(name="b", input="x", index=ZERO),
+            Cond(
+                cond=Var("p"),
+                body=(
+                    Load(name="a", input="y", index=ZERO),
+                    Assign(name="v", op="subtract", args=("a", "b")),
+                    Write(output="out", index=ZERO, value="v"),
+                ),
+            ),
+        )
+    )
+    out = dedup_loads(body)
+    assert len(out) == 2
+    inner = out[1].body
+    assert inner[0].name != out[0].name
+    assert inner[1].args == (inner[0].name, out[0].name)
+
+
+def test_cse_reuses_dominating_values_in_both_branches() -> None:
+    outer = Load(name="a", input="x", index=ZERO)
+    body = Body(
+        (
+            outer,
+            Cond(
+                cond=Var("p"),
+                body=(
+                    Load(name="b", input="x", index=ZERO),
+                    Write(output="left", index=ZERO, value="b"),
+                ),
+                else_body=(Load(name="c", input="x", index=ZERO), Write(output="right", index=ZERO, value="c")),
+            ),
+        )
+    )
+    out = dedup_loads(body)
+    assert len(out.loads) == 1
+    assert all(child[0].value == "a" for child in out[1].nested())
+
+
+def test_cse_reuses_a_dominating_read_until_the_write_on_that_branch() -> None:
+    body = Body(
+        (
+            Load("old", "x", ZERO),
+            Cond(
+                cond=Var("p"),
+                body=(
+                    Load("before", "x", ZERO),
+                    Write("out", ZERO, "before"),
+                    Write("x", ZERO, "replacement"),
+                    Load("after", "x", ZERO),
+                    Write("new", ZERO, "after"),
+                ),
+            ),
+        )
+    )
+    out = dedup_loads(body)
+    assert out[1].body[0] == Write("out", ZERO, "old")
+    assert [load.name for load in out.loads] == ["old", "after"]
 
 
 def test_dedup_loads_rewires_every_vector_lane() -> None:

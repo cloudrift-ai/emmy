@@ -155,7 +155,7 @@ def test_split_n_pair_fuses():
     wv = next(s for s in op.body.iter() if isinstance(s, Load) and s.input == "w")
     assert wv.index == (Var(n), Var(_reduce_name(op))), "the composite operand index must collapse to the bare fused axis"
     wr = next(s for s in op.body.iter() if isinstance(s, Write))
-    assert wr.index[2] == BinaryExpr("//", Var(n), Literal(D, "int"))
+    assert wr.index[2] == BinaryExpr("/", Var(n), Literal(D, "int"))
     assert wr.index[3] == BinaryExpr("%", Var(n), Literal(D, "int"))
 
 
@@ -323,7 +323,7 @@ def test_split_pair_fuses_across_an_intervening_free_loop():
     s_name = chain[0].axis.name
     assert wr.index == (
         Literal(0, "int"),
-        BinaryExpr("//", Var(n), Literal(D, "int")),
+        BinaryExpr("/", Var(n), Literal(D, "int")),
         Var(s_name),
         BinaryExpr("%", Var(n), Literal(D, "int")),
     )

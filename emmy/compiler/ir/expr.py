@@ -408,9 +408,22 @@ class BinaryExpr(Expr):
             if _is_zero(left):
                 return _make_int_literal(0)
             if isinstance(right, Literal) and right.dtype == "int" and isinstance(right.value, int) and right.value > 1:
+                if (
+                    isinstance(left, BinaryExpr)
+                    and left.op in ("/", "//")
+                    and isinstance(left.right, Literal)
+                    and left.right.dtype == "int"
+                    and left.right.value > 0
+                    and (bounds := left.left.range(ctx)) is not None
+                    and bounds.lo >= 0
+                ):
+                    # Positive constant quotient chains have one denominator in index normal form.
+                    return BinaryExpr("/", left.left, Literal(left.right.value * right.value, "int")).simplify(ctx)
                 decomp = _div_mod_decompose(left, right.value, ctx)
                 if decomp is not None:
                     return decomp[0]
+                if op == "//" and (bounds := left.range(ctx)) is not None and bounds.lo >= 0:
+                    return BinaryExpr("/", left, right)
             cancelled = _cancel_common_factors(op, left, right, ctx)
             if cancelled is not None:
                 return cancelled
