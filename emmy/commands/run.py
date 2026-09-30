@@ -686,8 +686,7 @@ def _run_golden_targets(args) -> None:
     except (OSError, ValueError) as exc:
         logger.error("cannot load --golden %s: %s", args.golden, exc)
         sys.exit(2)
-    names = list(dict.fromkeys(record.name for record in records))
-    if not names:
+    if not records:
         logger.error("--golden contains no realizations: %s", args.golden)
         sys.exit(2)
     # Group by the persisted target, bindings and input regime, just as golden replay does.
