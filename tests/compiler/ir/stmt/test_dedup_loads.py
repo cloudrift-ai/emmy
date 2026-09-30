@@ -145,6 +145,18 @@ def test_cse_partial_state_changes_invalidate_dependent_values() -> None:
     assert dedup_loads(body) == body
 
 
+def test_cse_nested_state_changes_invalidate_enclosing_values() -> None:
+    body = Body(
+        (
+            Assign("before", "exp", ("sum",)),
+            Loop(Axis("k", 4), (Accum("sum", "x", axes=("k",)),), seed=False),
+            Assign("after", "exp", ("sum",)),
+            Write("out", ZERO, "after"),
+        )
+    )
+    assert dedup_loads(body) == body
+
+
 def test_cse_does_not_reuse_a_staged_load_assignment() -> None:
     body = Body((Load(name="value", input="x", index=ZERO), Load(name="value", input="x", index=ZERO, carried="load")))
     assert dedup_loads(body) == body

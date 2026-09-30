@@ -7,7 +7,7 @@ import pytest
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Literal, Var
-from emmy.compiler.ir.stmt import Assign, Body, Cond, Load, Loop, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Load, Loop, Write
 from emmy.compiler.ir.stmt.body import free_names
 from emmy.compiler.ir.stmt.normalize import _normalize_body, normalize_body
 from tests.compiler.realization.helpers import CASES_DIR, case_files
@@ -22,7 +22,7 @@ def _assert_scoped_cse(body, available=()):
     available = list(available)
     for stmt in body:
         # A redefinition changes the value of an operand or of the earlier representative.
-        rebound = set(stmt.defines())
+        rebound = set(stmt.defines()) | {name for child in stmt.nested() for name in child.carried_names}
         available = [prior for prior in available if not rebound.intersection((*prior.defines(), *free_names(prior)))]
         if stmt.nested():
             writes = {name for child in stmt.nested() for member in child.iter() for name in member.external_writes()}
@@ -75,3 +75,9 @@ def test_audit_respects_writes_and_shadowing():
     duplicate = Load("second", "x", (Var("i"),))
     _assert_scoped_cse(Body((first, Write("x", (Var("i"),), "first"), duplicate)))
     _assert_scoped_cse(Body((first, Loop(Axis("i", 4), (duplicate,)))))
+
+
+def test_audit_respects_carried_state_updates():
+    _assert_scoped_cse(
+        Body((Assign("before", "exp", ("sum",)), Loop(Axis("k", 4), (Accum("sum", "x"),), seed=False), Assign("after", "exp", ("sum",))))
+    )

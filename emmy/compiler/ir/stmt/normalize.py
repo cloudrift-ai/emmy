@@ -798,6 +798,8 @@ def dedup_loads(stmts: Body) -> Body:
         out: list[Stmt] = []
         for original in body:
             rebound = frozenset(name for name in original.defines() if counts[name] > 1)
+            # Carried state escapes a child scope; its update also invalidates enclosing values.
+            rebound |= frozenset(name for child in original.nested() for name in child.carried_names)
             if isinstance(original, (Accum, Init)) and original.name not in reductions:
                 rebound |= frozenset(original.defines())
             if isinstance(original, Load) and original.carried:
