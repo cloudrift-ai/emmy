@@ -65,6 +65,40 @@ def load_mlp_leaves(module, mapping, tensors) -> None:
             param.weight_loader(param, tensors[key], shard)
 
 
+def error_metrics(actual, expected, *, atol: float, rtol: float) -> dict:
+    """Measure magnitude and BF16 output-rounding distance, including near-zero outliers."""
+    import torch
+
+    reference = expected.float()
+    delta = (actual.float() - reference).abs()
+    n = delta.numel()
+    flat = delta.flatten()
+    quantiles = torch.quantile(flat, torch.tensor([0.5, 0.9, 0.99, 0.999], device=flat.device))
+
+    def ordered_bits(value):
+        bits = value.contiguous().view(torch.int16).to(torch.int32) & 0xFFFF
+        return torch.where((bits & 0x8000) != 0, 0xFFFF - bits, bits + 0x8000)
+
+    ulps = (ordered_bits(actual) - ordered_bits(expected)).abs()
+    bound = atol + rtol * reference.abs()
+    return {
+        "max_abs": delta.max().item(),
+        "mean_abs": delta.mean().item(),
+        "rms_abs": torch.sqrt(torch.mean(delta.square())).item(),
+        "rms_relative": torch.sqrt(torch.sum(delta.square()) / torch.sum(reference.square())).item(),
+        "abs_percentiles": dict(zip(("p50", "p90", "p99", "p99_9"), quantiles.tolist(), strict=True)),
+        "max_ulp": ulps.max().item(),
+        "p99_ulp": torch.quantile(ulps.float(), 0.99).item(),
+        "ulp_counts": {str(distance): torch.count_nonzero(ulps == distance).item() for distance in range(4)}
+        | {"4_or_more": torch.count_nonzero(ulps >= 4).item()},
+        "outside_tolerance": torch.count_nonzero(delta > bound).item(),
+        "outside_fraction": (torch.count_nonzero(delta > bound) / n).item(),
+        "reference_max_abs": reference.abs().max().item(),
+        "nonzero_reference": torch.count_nonzero(expected).item(),
+        "nonzero_emmy": torch.count_nonzero(actual).item(),
+    }
+
+
 def stock_mlp(directory: Path, prefix: str, layer: int, hidden: int, intermediate: int):
     """Construct stock Qwen3NextMLP, then use its own shard loaders and quant method."""
     import torch
@@ -195,14 +229,7 @@ def main() -> None:
             expected = stock(x)
             actual = one.run_device([x])[0] if rows == 1 else symbolic.run_device_sym([x])[0]
             torch.cuda.synchronize()
-            delta = (actual.float() - expected.float()).abs()
-            report["rows"][rows] = {
-                "max_abs": delta.max().item(),
-                "mean_abs": delta.mean().item(),
-                "reference_max_abs": expected.float().abs().max().item(),
-                "nonzero_reference": torch.count_nonzero(expected).item(),
-                "nonzero_emmy": torch.count_nonzero(actual).item(),
-            }
+            report["rows"][rows] = error_metrics(actual, expected, atol=args.atol, rtol=args.rtol)
             if not torch.isfinite(expected).all() or not torch.isfinite(actual).all():
                 failures.append(f"rows={rows}: nonfinite MLP output")
             elif not torch.count_nonzero(expected) or not torch.count_nonzero(actual):
