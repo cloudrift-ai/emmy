@@ -81,6 +81,47 @@ def test_compile_split_feeds_bf16_input_as_bits(monkeypatch, input_dtype):
     np.testing.assert_array_equal(feeds[0]["weight"], [0x3F80, 0xC000, 0x4049])
 
 
+def test_bind_plan_constants_separates_bf16_and_f32_storage_in_wrapper_cache(monkeypatch):
+    from types import SimpleNamespace
+
+    import torch
+
+    from emmy.compiler.backend.plan import WeightSpec
+    from emmy.compiler.dtype import BF16, F32
+    from emmy.serving.gen_runner import _bind_plan_constants
+
+    source = torch.tensor([1.0, -2.0, 3.140625], dtype=torch.bfloat16).float().numpy()
+    plan = SimpleNamespace(
+        weights={
+            "bf16_weight": WeightSpec(source_path="weight"),
+            "f32_weight": WeightSpec(source_path="weight"),
+        },
+        buffers=[
+            SimpleNamespace(name="bf16_weight", dtype=BF16),
+            SimpleNamespace(name="f32_weight", dtype=F32),
+        ],
+    )
+    uploads = []
+
+    def fake_cuda(tensor):
+        uploads.append(tensor)
+        return tensor
+
+    monkeypatch.setattr(torch.Tensor, "cuda", fake_cuda)
+    cache = {}
+    first = _bind_plan_constants(plan, {"weight": source}, cache)
+    second = _bind_plan_constants(plan, {"weight": source}, cache)
+
+    assert len(uploads) == len(cache) == 2
+    assert second["bf16_weight"] is first["bf16_weight"]
+    assert second["f32_weight"] is first["f32_weight"]
+    assert first["bf16_weight"] is not first["f32_weight"]
+    assert first["bf16_weight"].numpy().dtype == np.uint16
+    np.testing.assert_array_equal(first["bf16_weight"].numpy(), [0x3F80, 0xC000, 0x4049])
+    assert first["f32_weight"].numpy().dtype == np.float32
+    np.testing.assert_array_equal(first["f32_weight"].numpy(), source)
+
+
 def test_compile_split_reuses_plan_but_builds_fresh_programs_and_weights(monkeypatch):
     import torch
 
