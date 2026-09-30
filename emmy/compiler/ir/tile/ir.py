@@ -202,8 +202,8 @@ def promoted_sweep(op, output_specs: tuple[OutputSpec, ...], *, free: tuple[Axis
     - every reduce the term holds reads the axis, so each cell folds its own and binding the axis
       replicates none of them — the NVFP4 encode's packed codes over a maximum taken across each
       sixteen of them. A term with NO reduce satisfies that vacuously, and then it promotes only
-      when ``free`` is empty: a kernel with no free axis launches ONE block whatever it does, so
-      its shared sweep is the only axis the launch could spread over. Where the placement already
+      when ``free`` launches ONE block — no free axis, or only static unit ones (a decode row) —
+      so its shared sweep is the only axis the launch could spread over. Where the placement already
       has an axis, a bare elementwise sweep stays a sweep — the kernel materializer distributes
       exactly that across a worker inventory (``_lane_close``, the close a cooperating reduce's
       projection takes), and binding it here would decide for the schedule that measured the
@@ -241,12 +241,13 @@ def promoted_sweep(op, output_specs: tuple[OutputSpec, ...], *, free: tuple[Axis
     nodes = tuple(site.node for site in sites(op))
     contractions = tuple(node for node in nodes if node.as_contraction() is not None)
     reduces = tuple(node for node in nodes if isinstance(node, Fold) and node.axis is not None)
+    one_block = all(axis.extent.is_static and axis.extent.as_static() == 1 for axis in free)
     return {
         name
         for name in shared
         if (rides[0][name].is_static and rides[0][name].as_static() == 1)
         or any(any(name in edge.free_axes for edge in con.operands) for con in contractions)
-        or (all(name in reduce.free_axes for reduce in reduces) and (reduces or not free))
+        or (all(name in reduce.free_axes for reduce in reduces) and (reduces or one_block))
     }
 
 

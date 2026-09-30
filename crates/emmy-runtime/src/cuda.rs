@@ -527,6 +527,8 @@ pub struct Executor {
     /// Per-launch timing events, created once and reused across iterations.
     events: Vec<(CudaEvent, CudaEvent)>,
     window: Option<(CudaEvent, CudaEvent)>,
+    /// The device takes programmatic dependent launches (sm_90+).
+    dependent_launch: bool,
 }
 
 // A captured graph is a raw driver handle the driver does not synchronize, so cudarc leaves it
@@ -599,6 +601,7 @@ impl Executor {
             launch_graphs: None,
             events: Vec::new(),
             window: None,
+            dependent_launch: device.context.compute_capability()?.0 >= 9,
         };
         executor.provision(layout, regions.as_ref())?;
         // A paged buffer starts with pages of the runtime's own spanning its declared shape —
@@ -1011,7 +1014,17 @@ impl Executor {
         Ok(descriptor)
     }
 
-    fn launch(&mut self, index: usize, env: &Env, key: &EnvKey, serial_from: usize) -> Result<()> {
+    /// Launch `index` at `env`. `dependent` lets a kernel that waits on the grid ahead of it start
+    /// while that grid drains: whole-program submission only, so a batch of one kernel timed on its
+    /// own measures that kernel and not its overlap with itself.
+    fn launch(
+        &mut self,
+        index: usize,
+        env: &Env,
+        key: &EnvKey,
+        serial_from: usize,
+        dependent: bool,
+    ) -> Result<()> {
         let program = self.program.clone();
         let launch = &program.launches[index];
         if serial_from < launch.serial.len() {
@@ -1021,7 +1034,7 @@ impl Executor {
             for step in 0..*extent {
                 let mut stepped = env.clone();
                 stepped.insert(name.clone(), step);
-                self.launch(index, &stepped, key, serial_from + 1)?;
+                self.launch(index, &stepped, key, serial_from + 1, dependent)?;
             }
             return Ok(());
         }
@@ -1080,17 +1093,45 @@ impl Executor {
             launch.kernel
         );
         let function = &self.functions[&launch.kernel];
+        let smem = launch.smem.saturating_sub(function.static_smem);
+        // A memset ahead of the kernel is not a grid it can wait on, so that launch stays serialized.
+        let dependent = dependent
+            && self.dependent_launch
+            && launch.zero_outputs.is_empty()
+            && program
+                .kernels
+                .get(&launch.kernel)
+                .is_some_and(|k| k.dependent_launch);
         // The compiler defines the ABI and access bounds. Every pointer resolved above stays
         // alive and exclusively owned through completion.
         unsafe {
-            result::launch_kernel(
-                function.function,
-                grid,
-                block,
-                launch.smem.saturating_sub(function.static_smem),
-                stream,
-                &mut raw,
-            )?;
+            if dependent {
+                let mut attribute: sys::CUlaunchAttribute = std::mem::zeroed();
+                attribute.id =
+                    sys::CUlaunchAttributeID::CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION;
+                attribute.value.programmaticStreamSerializationAllowed = 1;
+                let config = sys::CUlaunchConfig {
+                    gridDimX: grid.0,
+                    gridDimY: grid.1,
+                    gridDimZ: grid.2,
+                    blockDimX: block.0,
+                    blockDimY: block.1,
+                    blockDimZ: block.2,
+                    sharedMemBytes: smem,
+                    hStream: stream,
+                    attrs: &mut attribute,
+                    numAttrs: 1,
+                };
+                sys::cuLaunchKernelEx(
+                    &config,
+                    function.function,
+                    raw.as_mut_ptr(),
+                    std::ptr::null_mut(),
+                )
+                .result()?;
+            } else {
+                result::launch_kernel(function.function, grid, block, smem, stream, &mut raw)?;
+            }
         }
         Ok(())
     }
@@ -1103,7 +1144,7 @@ impl Executor {
         let key = self.ensure_descriptors()?;
         let env = self.env.clone();
         for index in 0..self.program.launches.len() {
-            self.launch(index, &env, &key, 0)?;
+            self.launch(index, &env, &key, 0, true)?;
         }
         Ok(())
     }
@@ -1155,7 +1196,7 @@ impl Executor {
             None => {
                 let env = self.env.clone();
                 for _ in 0..batch {
-                    self.launch(index, &env, &key, 0)?;
+                    self.launch(index, &env, &key, 0, false)?;
                 }
             }
         }
@@ -1209,7 +1250,7 @@ impl Executor {
             ensure!(batch > 0, "batch must be positive");
             graphs.push(self.capture(|executor| {
                 for _ in 0..batch {
-                    executor.launch(index, &env, &key, 0)?;
+                    executor.launch(index, &env, &key, 0, false)?;
                 }
                 Ok(())
             })?);

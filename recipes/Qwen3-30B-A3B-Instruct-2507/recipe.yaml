@@ -31,5 +31,14 @@ engine:
         --tool-call-parser hermes
 
 matrices:
-  deploy.gpu: "NVIDIA H200 141GB"
-  deploy.gpu_count: 1
+  - deploy.gpu: "NVIDIA H200 141GB"
+    deploy.gpu_count: 1
+
+  # Reduced-fraction entry so this model can share an H200 with a ~35 GB FP8 model at 0.35.
+  # 0.55 x 141 GB leaves ~16 GB after the ~61 GB of BF16 weights; at ~96 KB of KV per token
+  # (48 layers x 4 KV heads x 128) that holds one 131,072-token request at the same
+  # single-request concurrency. Unverified until a record run on an H200.
+  - deploy.gpu: "NVIDIA H200 141GB"
+    deploy.gpu_count: 1
+    engine.llm.gpu_memory_utilization: 0.55
+    engine.llm.context_length: 131072

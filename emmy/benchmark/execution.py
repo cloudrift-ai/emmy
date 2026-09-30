@@ -10,7 +10,7 @@ from emmy.benchmark.bench_logging import _get_group_logger, active_run_dir, add_
 from emmy.benchmark.command_workload import run_command_workload
 from emmy.benchmark.experiment_record import ExperimentRecord, Infrastructure, Provenance
 from emmy.benchmark.workload import capture_server_log, run_benchmark_workload
-from emmy.deploy import DeployParams
+from emmy.deploy import DeployParams, replica_services
 from emmy.deploy import deploy as deploy_entry
 from emmy.deploy import teardown as teardown_entry
 from emmy.planner import BenchmarkTask, ExecutionGroup
@@ -241,15 +241,16 @@ async def run_execution_group(
                 completed.add(id(task))
                 continue
 
+            services, load_balancer = replica_services(recipe, gpu_device_ids)
             params = DeployParams(
                 server=conn.address,
                 ssh_key=ssh_key,
                 ssh_port=conn.ssh_port,
-                recipe=recipe,
+                services=services,
+                load_balancer=load_balancer,
                 model_dir=model_dir,
                 hf_token=hf_token,
                 dry_run=dry_run,
-                gpu_device_ids=gpu_device_ids,
                 port_mappings=conn.port_mappings,
             )
             task_logger.info("Deploying model...")
