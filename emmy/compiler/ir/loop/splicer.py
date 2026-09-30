@@ -28,9 +28,9 @@ Resolution dispatches on stmt kind:
   carries it with no special case here. The target's expression
   chain reconstructs piecemeal.
 - **Accum** — form one shared subroutine per source reduction and emit a call under the
-  demanded coordinates. Building that definition, or expanding calls before full CSE, shares
-  equal-extent axes between independent reductions at one scope and queues the contribution
-  under σ extended with the reduce binding. Nested reductions remain calls during construction.
+  demanded coordinates. Building that definition queues the contribution under σ extended with
+  a fresh reduce binding. Nested reductions remain calls during construction. Generic statement
+  normalization inlines the calls and merges independent reductions before full CSE.
 - **Plain Assign / Select / Load** (non-splice source) — ``rewrite``
   the original stmt through ``(rename_ssa, sigma)`` and insert at the
   demand scope.
@@ -66,7 +66,6 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from functools import cached_property
-from graphlib import TopologicalSorter
 
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Interval, Literal, SimplifyCtx, Var, affine_form
 from emmy.compiler.ir.loop.builder import LoopBuilder
@@ -85,7 +84,7 @@ from emmy.compiler.ir.loop.ir import (
 )
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body
-from emmy.compiler.ir.stmt.subroutine import Call, Subroutine, definitions, pretty_subroutines, reduction_depths
+from emmy.compiler.ir.stmt.subroutine import Call, Subroutine, pretty_subroutines
 from emmy.utils import cached_method
 
 logger = logging.getLogger(__name__)
@@ -288,22 +287,6 @@ def splice_graph(graph) -> tuple[LoopOp, list[str]] | None:
     if merged is None:
         return None
     return merged, external_order
-
-
-def expand_calls(body: Body) -> Body:
-    """Expand a complete fusion region through the same demand sharing and axis unification."""
-    targets = definitions(body)
-    if not targets:
-        return body
-    tags = {target: f"sub{index}" for index, target in enumerate(targets)}
-    loops = {tags[target]: LoopMeta.from_body(target.body, target.axes) for target in targets}
-    loops["root"] = LoopMeta.from_body(body)
-    if not loops["root"].writes:
-        raise ValueError("a compact fusion region must have output writes")
-    builder = _Splicer(_Program(loops, {}), roots=tuple(("root", w.output) for w, _ in loops["root"].writes), expand=tags)
-    builder._seed()
-    builder.resolve()
-    return Body.coerce(builder.finish())
 
 
 def _output_equivalence_clusters(graph, loop_nodes: dict[str, object]) -> tuple[_OutputEquivalenceCluster, ...]:
@@ -582,27 +565,7 @@ class _Program:
 
     @cached_property
     def used_names(self) -> set[str]:
-        return set().union(
-            *(
-                set(meta.body.ssa_defs | meta.body.axis_names) | {axis.name for scope in meta.scopes.values() for axis in scope.enclosing}
-                for meta in self.loops.values()
-            )
-        )
-
-    @cached_property
-    def reduction_depth(self) -> dict[str, dict[str, int]]:
-        dependencies = {tag: {} for tag in self.loops}
-        for (origin, source), target in self.splice_edges.items():
-            dependencies[origin][source] = target
-        depths: dict[str, dict[str, int]] = {}
-        order = TopologicalSorter({tag: {origin for origin, _ in edges.values()} for tag, edges in dependencies.items()})
-        for tag in order.static_order():
-            inputs = {
-                source: max((depths[origin][w.value] for w, _ in self.loops[origin].writes if w.output == output), default=0)
-                for source, (origin, output) in dependencies[tag].items()
-            }
-            depths[tag] = reduction_depths(self.loops[tag].body, inputs)
-        return depths
+        return set().union(*(meta.body.ssa_defs | meta.body.axis_names for meta in self.loops.values()))
 
     @cached_property
     def source_stmts(self) -> int:
@@ -626,7 +589,12 @@ class _Program:
 
 
 class _Splicer(LoopBuilder):
-    """Build a maximal region, keeping reduction cones as shared calls until final CSE."""
+    """Build a maximal region, keeping reduction cones as shared calls until final CSE.
+
+    Worklist dep-resolution is reverse-topological — producers demanded after consumers — so
+    the builder's prepend-at-leaf behavior yields defined-before-use ordering. Reusing an already
+    emitted producer can invert siblings; normalization restores their topological order.
+    """
 
     def __init__(
         self,
@@ -634,7 +602,6 @@ class _Splicer(LoopBuilder):
         *,
         roots: tuple[tuple[str, str], ...],
         outline: tuple[str, str] | None = None,
-        expand: dict[Subroutine, str] | None = None,
     ) -> None:
         super().__init__(used_names=program.used_names)
         self.program = program
@@ -642,14 +609,24 @@ class _Splicer(LoopBuilder):
         self.splice_edges = program.splice_edges
         self.roots = roots
         self.outline = outline
-        self.expand = expand
         self.bound = frozenset(axis.name for axis in self.loops[outline[0]].scopes[outline[1]].enclosing) if outline else frozenset()
         self._pending: deque[_Demand] = deque()
         self._binding: dict[_BindKey, str] = {}
-        self._reduce_axes: dict[tuple[Scope, Expr, int], Axis] = {}
         self._free_vars_by_expr_id: dict[int, tuple[Expr, frozenset[str]]] = {}
 
-    # A recurrence whose substitutions multiply is a construction error, never a smaller region.
+    # Construction bound: how many DISTINCT bindings the merged body may take per source
+    # statement. The dedup table shares each (stmt, emit scope, σ) binding, and a legitimate
+    # splice emits about one binding per input statement — a value read at a few offsets a
+    # few. A recurrence left unrolled breaks that sharing: each stage is re-demanded under
+    # COMPOSITIONS of σs, so bindings multiply per stage instead of deduplicating (DeepSeek-V4's
+    # 20-iteration Sinkhorn chain drove 4.5M distinct bindings from 2,287 input statements and
+    # never finished). Such a merge cannot be constructed at any budget; the first binding past
+    # the bound raises, and the answer is the roller (``loop/fusion/005_roll_recurrence``), never
+    # a smaller region — a termination bound, not a fusion-quality gate: placement still owns
+    # every cut on a merge that CAN be built.
+    # Whole layers legitimately take over a hundred bindings per source statement: the tracer
+    # unrolls per-head work into copies that each re-derive the shared input. Hence 256, rather
+    # than a bound that would reject those layers; a chain left unrolled doubles per stage.
     _BINDING_RATIO = 256
 
     def insert(self, stmt: Stmt, enclosure: Scope) -> None:
@@ -762,22 +739,12 @@ class _Splicer(LoopBuilder):
             else:
                 self._resolve_plain(stmt, d)
         elif isinstance(stmt, Accum):
-            if self.expand is not None or (d.origin, d.name) == self.outline:
+            if (d.origin, d.name) == self.outline:
                 self._resolve_accum(stmt, d)
             else:
                 target = self.program.subroutine(d.origin, d.name)
                 args = tuple(d.sigma.apply(Var(name)) for name in target.params)
                 self.insert(Call(d.bound_as, target, args), d.demand_scope)
-        elif isinstance(stmt, Call):
-            rename = {
-                arg: Var(self._ensure_dep(arg, d.origin, d.sigma, d.demand_scope))
-                for arg in stmt.deps()
-                if arg in self.loops[d.origin].defs
-            }
-            args = tuple(d.sigma.apply(arg).substitute(rename) for arg in stmt.args)
-            sigma = _canonical(Sigma(dict(zip(stmt.target.params, args, strict=True))), d.demand_scope)
-            value = self._ensure_dep(stmt.target.result, self.expand[stmt.target], sigma, d.demand_scope)
-            self.insert(Assign(name=d.bound_as, op="copy", args=(value,)), d.demand_scope)
         elif isinstance(stmt, (Assign, Select)):
             self._resolve_plain(stmt, d)
         else:
@@ -821,12 +788,9 @@ class _Splicer(LoopBuilder):
         self.insert(Assign(name=d.bound_as, op="copy", args=(v_bound,)), d.demand_scope)
 
     def _resolve_accum(self, stmt: Accum, d: _Demand) -> None:
-        """Queue the value under a shared iteration scope for independent reductions of equal extent."""
+        """Queue the outlined reduction's value under its fresh iteration axis."""
         orig_axis = self.loops[d.origin].reduce_axes[stmt.name]
-        key = (d.demand_scope, orig_axis.extent.expr, self.program.reduction_depth[d.origin][stmt.name])
-        reduce_axis = self._reduce_axes.get(key)
-        if reduce_axis is None:
-            reduce_axis = self._reduce_axes[key] = Axis(name=self.fresh(orig_axis.name), extent=orig_axis.extent)
+        reduce_axis = Axis(name=self.fresh(orig_axis.name), extent=orig_axis.extent)
         fresh_name = reduce_axis.name
         inner_sigma = d.sigma.extend(orig_axis.name, Var(fresh_name))
         inner_scope = Scope(enclosing=d.demand_scope.enclosing + (reduce_axis,))

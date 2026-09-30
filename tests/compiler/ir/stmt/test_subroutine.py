@@ -11,7 +11,7 @@ from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
-from emmy.compiler.ir.stmt.normalize import dedup_loads, prepare_body
+from emmy.compiler.ir.stmt.normalize import dedup_loads, normalize_body, prepare_body
 from emmy.compiler.ir.stmt.subroutine import Call, Subroutine, definitions, pretty_subroutines
 from emmy.compiler.pipeline import Pipeline
 
@@ -145,7 +145,18 @@ def test_buffer_renaming_preserves_shared_definitions():
     )
 
 
-def test_partial_call_body_is_not_silently_discarded_by_identity():
+def test_partial_call_body_normalizes_without_output_writes():
     body = _body(_project(), 0).map(lambda stmt: None if isinstance(stmt, Write) else stmt)
-    with pytest.raises(ValueError, match="must have output writes"):
-        body.structural_key()
+    normalized = normalize_body(body)
+    assert not tuple(normalized.iter_of_type(Call))
+    assert len(normalized.accums) == 1
+    assert len(normalized.loads) == 2
+    assert body.structural_key() == normalized.structural_key()
+
+
+def test_nested_calls_freshen_locals_without_capturing_arguments():
+    inner = _project()
+    outer = Subroutine("wrapper", inner.axes, Body((Call("result", inner, tuple(Var(p) for p in inner.params)),)), "result")
+    # A name resembling an inliner's generated local must remain a caller coordinate.
+    compact = _body(outer, 4).map(lambda stmt: stmt.rename({"k": "k__call0"}))
+    assert compact.structural_key() == _body(inner, 4).structural_key()

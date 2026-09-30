@@ -572,9 +572,11 @@ canonicalized before validation:
 Fusion may construct a compact body containing scalar `Call` statements. Each references one read-only `Subroutine`
 with explicit coordinate parameters and captured input buffers. Early ordering, alias elimination, invariant motion
 and coordinate simplification operate on the calls; each shared definition is prepared once. Identical calls to the
-same definition share by argument structure without searching their bodies. Before full CSE, calls
-expand through the splicer's same demand table and reduction-axis unification. The resulting ordinary statement body
-is the only form used by validation, executable identity, serialization and Tile IR lifting. Operation clustering
+same definition share by argument structure without searching their bodies. Before full CSE, the statement layer
+inlines calls by freshening local bindings, substituting coordinate arguments and copying each result. Ordinary
+reduction merging and invariant motion expose sharing across definitions. Normalization also accepts bodies without
+output writes. The expanded body is the only form used by validation, executable identity, serialization and Tile IR
+lifting. Operation clustering
 also starts from that CSE form, so it sees operations inside definitions. Subroutine boundaries never limit fusion.
 
 - `topo_sort_siblings` — stable Kahn reorder so SSA defs precede their uses
@@ -758,17 +760,11 @@ own shared definitions. Equal calls reuse the same demand before expanding their
 distinct calls. `compile -vv` prints this intermediate form as `sub name(buffers, coordinates):` and one-line calls.
 The final Loop IR listing is expanded and fully CSE'd, as are all persisted kernels.
 
-Before expansion, the splicer counts reductions along each source definition's longest dependency path, including
-the depth of called definitions and passing producer Write depths into consumer inputs. Equal-depth reductions cannot
-depend on each other.
-When they have the same extent and enclosing scope, they share an iteration axis from construction onward, so the
-binding table shares their common producers before emitting them. A reduction that reads another's finalized value
-has greater depth and keeps a separate scope. Different input offsets retain their own coordinate substitutions.
-This changes body construction only; every legal fusion region is still built whole, and final normalization closes
-the remaining sharing opportunities, including common branches of different subroutines. Formal coordinates enter
-the same liveness analysis as enclosing loop axes: dropping them from a demand key would incorrectly merge calls at
-different rows or columns. Definition and expansion worklists share the source analysis, and expansion uses the same
-scope placement and hygienic substitution as the original splice rather than a separate inliner.
+Subroutine expansion belongs to the generic statement layer and does not run the splicer again. Each call gets fresh
+local SSA and axis names before its formal coordinates are substituted, preventing capture by the caller or nested
+calls. The normalizer merges independent reductions and shares their common producers after expansion. A reduction
+that reads another's finalized value remains a separate sweep. Different input offsets retain their own coordinate
+substitutions. Every legal fusion region is still built whole; subroutine boundaries do not affect final CSE.
 
 Before dependency reconstruction, `splice_graph` finds output equivalence clusters: single-owner copy chains ending
 at a terminal graph output, with the same dtype and element count and an exact symbolic proof that the source and

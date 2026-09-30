@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from functools import cached_property
+from itertools import count
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Expr
+from emmy.compiler.ir.sigma import Sigma
+from emmy.compiler.ir.stmt.leaves import Assign
 from emmy.compiler.ir.stmt.base import Stmt, pretty_body
 from emmy.compiler.ir.stmt.body import Body, free_names
 from emmy.compiler.ir.stmt.passes import _rename_ssa_vars_in_expr, _rewrite_kind
@@ -49,10 +52,6 @@ class Subroutine:
     @property
     def params(self) -> tuple[str, ...]:
         return tuple(axis.name for axis in self.axes)
-
-    @cached_property
-    def reduction_depth(self) -> int:
-        return reduction_depths(self.body)[self.result]
 
     def pretty(self, indent: str = "") -> list[str]:
         return [
@@ -130,18 +129,24 @@ def pretty_subroutines(body: Body, indent: str = "") -> list[str]:
     return [line for target in definitions(body) for line in (*target.pretty(indent), "")] + pretty_body(body, indent)
 
 
-def reduction_depths(body: Body, inputs: dict[str, int] | None = None) -> dict[str, int]:
-    """Reduction depth including the reductions held in shared definitions."""
-    from emmy.compiler.ir.stmt.leaves import Accum
+def expand_calls(body: Body) -> Body:
+    """Inline calls by freshening local bindings, substituting arguments and copying the result."""
+    used = set(body.ssa_defs | body.axis_names | body.ssa_uses)
+    used.update(name for stmt in body for name in free_names(stmt))
+    for target in definitions(body):
+        used.update((*target.body.ssa_defs, *target.body.axis_names, *target.params))
+    suffixes = count()
 
-    inputs = inputs or {}
-    memo = body.fold(
-        lambda stmt, children, _: (
-            max(
-                (*(depth for depth in children if depth is not None), *(inputs.get(name, 0) for name in stmt.external_reads())),
-                default=0,
-            )
-            + (stmt.target.reduction_depth if isinstance(stmt, Call) else isinstance(stmt, Accum))
-        )
-    )
-    return {name: memo[id(stmt)] for name, stmt in body.definitions.items()}
+    def inline(stmt: Stmt) -> Stmt | Body:
+        if not isinstance(stmt, Call):
+            return stmt
+        rename = {}
+        for name in sorted(stmt.target.body.ssa_defs | stmt.target.body.axis_names):
+            fresh = next(candidate for n in suffixes if (candidate := f"{name}__call{n}") not in used)
+            rename[name] = fresh
+            used.add(fresh)
+        sigma = Sigma(dict(zip(stmt.target.params, stmt.args, strict=True)))
+        expanded = Body(s.rename(rename).substitute(sigma) for s in stmt.target.body).map(inline)
+        return Body((*expanded, Assign(stmt.name, "copy", (rename[stmt.target.result],))))
+
+    return body.map(inline)
