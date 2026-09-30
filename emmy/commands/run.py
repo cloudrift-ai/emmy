@@ -328,7 +328,7 @@ def _handle_run_once(args):
 
         if ir_path is not None:
             args.ir = ir_path
-        with pinned_knobs(shared_regime_pins(getattr(args, "_golden_records", None) or [])):
+        with pinned_knobs(shared_regime_pins([s.record for s in args.golden_configs] or getattr(args, "_golden_records", None) or [])):
             _handle_run_ir(args, CudaBackend, CompilerDump)
         return
 
