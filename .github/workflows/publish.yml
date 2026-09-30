@@ -76,7 +76,7 @@ jobs:
           CATALOG="$RUNNER_TEMP/emmy-recipes.json"
           python -m venv "$SMOKE_ENV"
           "$SMOKE_ENV/bin/pip" install --disable-pip-version-check "$WHEEL"
-          "$SMOKE_ENV/bin/python" -c 'import emmy.emmy_runtime'  # loads without a GPU; the driver is opened lazily
+          "$SMOKE_ENV/bin/python" -P -c 'import emmy.emmy_runtime'  # -P: the checkout's emmy/ must not shadow the wheel
           test "$("$SMOKE_ENV/bin/emmy" --version)" = "emmy $VERSION"
           "$SMOKE_ENV/bin/emmy" recipe list --json > "$CATALOG"
           "$SMOKE_ENV/bin/python" -c \
