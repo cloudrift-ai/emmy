@@ -38,20 +38,19 @@ from dataclasses import dataclass, field, replace
 from emmy.compiler.context import Context
 from emmy.compiler.ir.cuda.ir import CudaOp
 from emmy.compiler.ir.tile.path import family_sites, parse_key, sites
-from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
+from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.knob import KERNEL_DECISION_FAMILIES, family_of
 from emmy.compiler.pipeline.search.golden import (
     Config,
     GoldenEntryState,
     GoldenFile,
     GoldenRecord,
-    Measurements,
     Realization,
     decode_record,
     records_override,
     siblings_of,
-    sole_evidence,
 )
+from emmy.compiler.pipeline.search.golden.decode import _replay
 from emmy.compiler.pipeline.search.golden.record import _lifted_target
 from emmy.compiler.pipeline.search.pins import pinned_knobs, tracking_place_keys, unpinned_decisions
 from emmy.compiler.pipeline.search.working_golden import lowered_kernels
@@ -235,11 +234,10 @@ def _rekeyed_rows(document: GoldenFile, entry: Config, wire: dict, report: Resta
     # the case of a kernel whose Loop IR stayed while what the lift makes of it changed.
     old_key = replace(old_records[0], identity=None).kernel_identity
     new_key = replace(new_records[0], identity=None).kernel_identity
-    moved = len({old.identity for old in old_records}) == 1 and old_records[0].identity != old_key
-    if moved:
-        report.rows_rekeyed.extend(old.name for old in old_records)
+    target_identity = old_records[0].identity if old_records[0].is_routing or len({old.identity for old in old_records}) == 1 else old_key
+    report.rows_rekeyed.extend(old.name for old in old_records if old.identity == target_identity and target_identity != old_key)
     survivors = [
-        replace(new, identity=new_key) if moved or old.identity == old_key else new
+        replace(new, identity=new_key) if old.identity in (old_key, target_identity) else new
         for old, new in zip(old_records, new_records, strict=True)
     ]
 
@@ -251,7 +249,11 @@ def _rekeyed_rows(document: GoldenFile, entry: Config, wire: dict, report: Resta
             continue
         row = replace(realization, identity=new.identity if new.identity is not None else realization.identity)
         if row.measurements is not None or row.latency is not None:
-            if wire != document.loops[entry.target.loop] and _kernel_sources(old, old_records) != _kernel_sources(new, survivors):
+            if wire != document.loops[entry.target.loop] and (
+                (old_sources := _kernel_sources(old, old_records)) is None
+                or (new_sources := _kernel_sources(new, survivors)) is None
+                or old_sources != new_sources
+            ):
                 row = replace(row, measurements=None, latency=None)
                 report.rows_demoted.append(old.name)
             else:
@@ -316,19 +318,15 @@ def seam_at_positions(op, key: str):
 
 
 def _kernel_sources(record: GoldenRecord, records: Sequence[GoldenRecord]) -> tuple[str, ...] | None:
-    """The CUDA sources the record's target renders with the record as the compile's only evidence —
-    beside the rows of its set that decide other kernels (its route, the other pieces), never an
-    alternate schedule of its own kernel. ``None`` when the compile refuses, which a caller reads
-    as "not the same kernel"."""
+    """The CUDA sources the record's route and schedule render with its sibling rows. The strict
+    golden replay selects those rows before lowering, so source comparison does not search an
+    unrelated schedule pool. ``None`` when replay or lowering refuses."""
 
     siblings = [other for other in siblings_of(record, records) if other.is_routing or other.identity != record.identity]
-    stand_in = Measurements(emmy_us=1.0, reference_us=1.0, reference_backend="restamp")
-    evidence = [entry if entry.measurements is not None else replace(entry, measurements=stand_in) for entry in (record, *siblings)]
-    regime = {key: value for key, value in record.pin_map.items() if family_of(str(key)) not in KERNEL_DECISION_FAMILIES}
     ctx = Context.from_target(record.compute_cap, gpu_name=record.gpu_name or None)
     try:
-        with sole_evidence(evidence), pinned_knobs(regime):
-            graph = Pipeline.build(CUDA_PASSES).run(record.target_program.copy(), ctx=ctx, db=None)
+        replay = _replay(record, siblings=siblings)
+        graph = Pipeline.build(CUDA_PASSES[len(TILE_PASSES) :]).run(replay.graph.copy(), ctx=ctx, db=None)
     except Exception:  # noqa: BLE001 — a compile the row cannot steer is not the kernel it measured
         return None
     return tuple(sorted(node.op.kernel_source for node in graph.nodes.values() if isinstance(node.op, CudaOp)))

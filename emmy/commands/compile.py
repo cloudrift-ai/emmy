@@ -309,7 +309,7 @@ def resolve_golden_arg(args) -> None:
 
     def row(match):
         sample = golden_row(match, records)
-        if route and match.identity is not None and (match.is_routing or match.identity not in minted):
+        if route and match.identity is not None and match.identity not in minted:
             sample.route = {key: value for key, value in route.items() if key not in match.knobs}
         return sample
 
@@ -604,7 +604,7 @@ def handle_compile(args):
     # the named realization records are pinned so the compile takes the kernel set it describes.
     scope = getattr(args, "_golden_records", None) or None
     with (
-        pinned_knobs({**shared_regime_pins(scope or []), **selected_decisions(args)}),
+        pinned_knobs({**shared_regime_pins([sample.record for sample in args.golden_configs] or scope or []), **selected_decisions(args)}),
         records_override(scope),
         config.strict_evidence_override(True if args.strict_evidence else None),
     ):

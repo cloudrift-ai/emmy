@@ -5,6 +5,13 @@ is 5.8–7.1× lower, decode time per token is 3.5–4.3× lower, and output thr
 qualified artifact. All seventeen numerical qualification cases pass. Strict evidence prevents prior fallback;
 selection uses explicit schedules and their measured timings.
 
+## CSE status (2026-09-30)
+
+The current compiler changes two of the golden's three stored Loop IR targets and re-spells cut routes. A restamp of
+a copy drops 20 of 32 rows because their recorded child identities no longer resolve. The exact RTX 4080 was not
+available to re-record them, so the checked-in golden retains its historical measurements. Strict-evidence export
+with the current compiler awaits a re-record on that card. The measurements below describe the recorded revision.
+
 ## Scope and reproduction
 
 The checkpoint is `Qwen/Qwen3-0.6B` at revision `c1899de289a04d12100db370d81485cdf75e47ca`. Compilation uses

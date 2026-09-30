@@ -5,6 +5,13 @@ sequential prefill on one RTX 4080. All 36 paired benchmark completions match. B
 identical one-token decode plans, standard math, FP16 weights and KV storage, and FP32 residuals and attention
 intermediates. The native server still admits one active request. This is not a comparison with stock vLLM.
 
+## CSE status (2026-09-30)
+
+The current compiler changes four of the golden's five stored Loop IR targets and re-spells cut routes. A restamp of
+a copy drops 11 of 50 rows because their recorded child identities no longer resolve. The exact RTX 4080 was not
+available to re-record them, so the checked-in golden retains its historical measurements. Strict-evidence export
+with the current compiler awaits a re-record on that card. The measurements below describe the recorded revision.
+
 ## Later output-precision update
 
 The [output-precision investigation](../native_accuracy/RESULTS.md) replaces the FP16 output-head program in the

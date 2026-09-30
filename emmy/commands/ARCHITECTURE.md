@@ -292,9 +292,9 @@ the whole-file walk benches a name's verified rows or its one valid direct tune 
 tuner. Every pinned row (a golden row and an `--ab` hand row alike) is MEASURED under a hand pin published to the
 environment for that one compile, then recorded (see `--record` and the bench-to-DB recording below); deploying it
 is the evidence pick's business, never the pin's. The selected target's records are also the compile's golden
-evidence for the greedy row, and their shared input regime is published so the rows read as live measurements; a
-schedule row or a route in them deploys only where it is the fastest measured row for its kernel. Embedded Loop IR
-stores stable algebra rather than derived structural stamps. Registered
+evidence for the greedy row. The selected realization's input regime is published so its rows read as live
+measurements. A schedule or routing row deploys only where it is the fastest measured row for its kernel.
+Embedded Loop IR stores stable algebra rather than derived structural stamps. Registered
 Boolean values in an explicit `--ab` row remain input pins, so false values are not dropped with kernel pass markers
 and the JSON record identifies the inputs that were compiled. A scoped schedule-key OFF beside a non-OFF bare family
 pin also remains explicit as the exact-site exception to that bare pin. A failed row with
