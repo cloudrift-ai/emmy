@@ -132,6 +132,9 @@ class ReduceStage:
     # output columns, so its B reads at one k step are one contiguous run the load vectorizer
     # widens into a single 4-, 8- or 16-byte load.
     columns: int = 1
+    # BLOCK + transposed only (``/n8``): output lanes in each warp; the remaining lanes
+    # partition K. The established ``coop-t`` spelling keeps its 32 output lanes.
+    output_lanes: int = 32
 
     def __post_init__(self) -> None:
         if not isinstance(self.level, Level):
@@ -148,6 +151,10 @@ class ReduceStage:
             raise ValueError("only a BLOCK ReduceStage can transpose its cooperative mapping")
         if type(self.columns) is not int or self.columns < 1 or (self.columns > 1 and not self.transposed):
             raise ValueError(f"ReduceStage columns must be a positive integer on a transposed band, got {self.columns!r}")
+        if self.output_lanes not in (8, 32) or (self.output_lanes != 32 and not self.transposed):
+            raise ValueError("ReduceStage output lanes must be 8 or 32 on a transposed band")
+        if self.transposed and self.width % self.output_lanes:
+            raise ValueError("ReduceStage width must be divisible by its output lanes")
 
     def combine(self, *, warp_size: int, segmented: bool = False) -> tuple[FoldMove, ...]:
         """The derived per-level combine fold(s), fine→coarse within this stage — the ONE
@@ -206,6 +213,7 @@ class Reduce:
         finalize: str = "kernel",
         coop_transposed: bool = False,
         columns: int = 1,
+        output_lanes: int = 32,
     ) -> Reduce:
         """Build a plan from per-level widths (1 = absent). Order is coarse→fine:
         GRID (cta) → BLOCK (coop) → REG (reg). ``finalize`` rides the GRID stage;
@@ -220,11 +228,13 @@ class Reduce:
             raise ValueError("Reduce finalization is meaningful only when cta > 1")
         if coop == 1 and coop_transposed:
             raise ValueError("Reduce cooperative transposition is meaningful only when coop > 1")
+        if coop == 1 and output_lanes != 32:
+            raise ValueError("Reduce output lanes are meaningful only when coop > 1")
         stages: list[ReduceStage] = []
         if cta > 1:
             stages.append(ReduceStage(Level.GRID, cta, finalize=finalize))
         if coop > 1:
-            stages.append(ReduceStage(Level.BLOCK, coop, transposed=coop_transposed, columns=columns))
+            stages.append(ReduceStage(Level.BLOCK, coop, transposed=coop_transposed, columns=columns, output_lanes=output_lanes))
         if reg > 1:
             stages.append(ReduceStage(Level.REG, reg))
         return cls(tuple(stages))
@@ -232,7 +242,7 @@ class Reduce:
     def spell(self) -> str:
         """The ``REDUCE`` codec value for this plan — the pipeline coarse→fine, SITE-LOCAL: the
         coop WIDTH lives in the kernel's ``WORK`` inventory, never here, so the value is
-        ``[g<n>[a|k]][/coop[-t][/v<n>]][/r<n>]``. ``""`` for the scalar serial fold (the per-thread
+        ``[g<n>[a|k]][/coop[-t][/n8][/v<n>]][/r<n>]``. ``""`` for the scalar serial fold (the per-thread
         serial remainder is never spelled — it derives as ``ceil(extent / parallel)``). The GRID
         finalize letter IS kept: ``a``/``k`` is the atomic-vs-deferred finalize MODE, a site-local
         fact — ``g4a`` and ``g2k`` are semantically different rows, both live in the golden
@@ -242,6 +252,8 @@ class Reduce:
             parts.append(f"g{self.cta}{'a' if self.finalize == 'atomic' else 'k'}")
         if self.coop > 1:
             parts.append("coop-t" if self.coop_transposed else "coop")
+        if self.coop_output_lanes != 32:
+            parts.append(f"n{self.coop_output_lanes}")
         if self.coop_columns > 1:
             parts.append(f"v{self.coop_columns}")
         if self.reg > 1:
@@ -256,7 +268,7 @@ class Reduce:
         raises, so a width-carrying spelling (the retired ``b<n>`` embedded-worker grammar) is a
         loud error, not a silent second reading."""
         s = (spec or "").strip()
-        cta, coop, reg, finalize, transposed, columns = 1, 1, 1, "kernel", False, 1
+        cta, coop, reg, finalize, transposed, columns, output_lanes = 1, 1, 1, "kernel", False, 1, 32
         for t in s.split("/") if s else ():
             if t.startswith("g"):
                 body = t[1:]
@@ -270,16 +282,20 @@ class Reduce:
                 coop, transposed = work.units[0], t.endswith("-t")
             elif t.startswith("r") and t[1:].isdigit():
                 reg = _codec_width(t[1:], tok=t, codec="REDUCE")
+            elif t.startswith("n") and t[1:].isdigit():
+                if not transposed:
+                    raise ValueError(f"REDUCE {spec!r}: 'n<n>' follows 'coop-t'")
+                output_lanes = _codec_width(t[1:], tok=t, codec="REDUCE")
             elif t.startswith("v") and t[1:].isdigit():
                 if not transposed:
                     raise ValueError(f"REDUCE {spec!r}: 'v<n>' follows 'coop-t'")
                 columns = _codec_width(t[1:], tok=t, codec="REDUCE")
             else:
-                raise ValueError(f"REDUCE {spec!r}: unknown token {t!r} (expect g<n>[a|k] / coop[-t][/v<n>] / r<n>)")
+                raise ValueError(f"REDUCE {spec!r}: unknown token {t!r} (expect g<n>[a|k] / coop[-t][/n8][/v<n>] / r<n>)")
         return _canonical_choice(
             "REDUCE",
             spec,
-            cls.of(cta=cta, coop=coop, reg=reg, finalize=finalize, coop_transposed=transposed, columns=columns),
+            cls.of(cta=cta, coop=coop, reg=reg, finalize=finalize, coop_transposed=transposed, columns=columns, output_lanes=output_lanes),
         )
 
     @property
@@ -335,6 +351,11 @@ class Reduce:
     def coop_columns(self) -> int:
         """The adjacent output columns each lane of a ``coop-t`` band owns, or 1."""
         return next((s.columns for s in self.stages if s.level is Level.BLOCK), 1)
+
+    @property
+    def coop_output_lanes(self) -> int:
+        """The output lanes of a transposed BLOCK band, or the established 32."""
+        return next((s.output_lanes for s in self.stages if s.level is Level.BLOCK), 32)
 
 
 @dataclass(frozen=True)
