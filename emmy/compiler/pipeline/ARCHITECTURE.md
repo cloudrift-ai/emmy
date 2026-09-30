@@ -1390,14 +1390,14 @@ name, positive named dimension `bindings`, and explicit registered input `pins`,
 `measurements`, and working-only `ranking`. `pins` defines the enumeration regime; `knobs` records the configuration
 selected and measured inside that regime. Empty bindings retain the symbolic program; non-empty bindings specialize it
 before lowering. A working realization may be inventory-only, a proposal, or verified. Repository promotion requires
-an explicit knob mapping (possibly empty for a forkless anchor) and paired positive finite Emmy/reference timings on
-every realization. Missing, one-sided, zero, NaN, infinite measurements, and ranking metadata are rejected before they
-become trusted deploy evidence. The format is declared once, as the `GoldenFile` classes in `golden/format.py`
-(`Config`, `Target`, `Realization`, `Measurements`, `Latency`): one type-directed walker reads the parsed JSON into
-them and writes them back (every class's `from_wire` / `to_wire`), refusing an unknown or missing key by its path, the
-leaf rules (a positive number, a hex digest) live in the constructors, and `GoldenFile.check` holds only the rules
-that cross objects — pool references resolve, pins name known knobs, a kernel set names its siblings, and what a
-repository file may hold. `GoldenFile.load` reads a file, checked as a repository golden when it lives in the
+an explicit knob mapping (possibly empty for a forkless anchor). An unmeasured row remains a proposal; a measured row
+requires paired positive finite Emmy/reference timings. One-sided, zero, NaN, infinite measurements, and ranking
+metadata are rejected before they become trusted deploy evidence. The format is declared once, as the `GoldenFile`
+classes in `golden/format.py` (`Config`, `Target`, `Realization`, `Measurements`, `Latency`): one type-directed walker
+reads the parsed JSON into them and writes them back (every class's `from_wire` / `to_wire`), refusing an unknown or
+missing key by its path. Leaf rules (a positive number, a hex digest) live in the constructors.
+`GoldenFile.check` holds only cross-object rules: pool references, known knobs, sibling sets, and repository file
+requirements. `GoldenFile.load` reads a file, checked as a repository golden when it lives in the
 repository and as a working file otherwise; `GoldenFile.dump` writes one the same way and refuses replacement unless
 its caller opts in explicitly. The program and Loop IR pools stay wires: decoding a kernel builds a Loop op, whose
 construction normalizes the body, and that runs once, where a record's kernel graph is read, never at load — a
@@ -1475,6 +1475,11 @@ reason the replay memo is keyed by the entry's identity beside its row and pins:
 same row on different kernels. Recorded this way, a strict-evidence compile of the file picks the same kernel set
 again from the file's rows alone (no tune DB, no prior): that 10-kernel twin, whose unseeded pick spends minutes
 pricing, resolves from its 19 recorded rows in seconds.
+
+`golden check` compares each stored target with a fresh lowering of its embedded program. `golden restamp` re-keys
+routing rows and child receipts when that target changes. It retains a measured time only when strict replay of the
+row's route and schedule renders the same CUDA sources before and after the change. A failed replay or changed source
+demotes the row to a proposal, so the next exact-card record run can measure it again.
 
 The preferred reference is the runnable Torch slice (`torch-eager`) or the applicable library kernel (`cublas`). A
 stored kernel's slice is its stored origins cut from the embedded program (`GoldenRecord.reference_program`), taken
