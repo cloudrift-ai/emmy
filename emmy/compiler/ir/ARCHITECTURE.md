@@ -628,7 +628,8 @@ inside definitions. Subroutine boundaries never limit fusion.
   dependencies too. Assignments treat commutative operands as unordered after alias substitution; floating-point
   reassociation is not an equivalence. One-update reductions with the same implicit seed and no reads of partial
   state also share. Repeated updates, explicitly initialized or unseeded accumulators, and staged load assignments
-  retain their state transitions; changing a state invalidates dependent available values. A value the loop tree computes
+  retain their state transitions; changing a state invalidates dependent available values in enclosing scopes too.
+  A value the loop tree computes
   twice (a contraction spelled on both sides of a cut seam, a repeated pure expression) folds to one definition, and
   an accumulator alias carries out of the loop that defined it to the scope that reads the sum. This is
   canonicalization for every Loop / Tile body, not a fusion profitability decision; the structural key inherits it,
@@ -638,12 +639,13 @@ inside definitions. Subroutine boundaries never limit fusion.
   shares complete common cones while preserving writes and ordered protocols; it never speculates a load present
   on only one path. Loop invariants and fused reduction bodies provide availability across loop scopes. These rules
   do not claim general partial redundancy elimination.
-- `rename_ssa_sequential` — cosmetic: `Load` names become `in0, in1, …`, accumulator state becomes `acc0, …`, and
+- `rename_ssa_sequential` — `Load` names become `in0, in1, …`, accumulator state becomes `acc0, …`, and
   every other definition becomes `v0, v1, …`, in lexical definition order. Names stay globally unique while each
   nested body tracks its own binders, so sibling scopes may reuse the same source spelling without collapsing. Axis
   renames reach conditions, reduction metadata, and `Window` parent/base/bound metadata as well as indices; a
   reduction's axis tuple is canonicalized as a set. SSA values travel only through the rename channel, never `sigma`,
-  so indirect indices cannot be renamed twice.
+  so indirect indices cannot be renamed twice. Normalization separates lexical bindings before motion can put them
+  in one scope, then assigns canonical names again after ordering the result.
 - `sort_commutative_args` — sort `Assign.args` for commutative ops
   (`add` / `multiply` / `maximum` / `minimum`) so two bodies that
   differ only by argument order land in the same canonical form.
