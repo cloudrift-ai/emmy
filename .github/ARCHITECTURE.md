@@ -142,10 +142,10 @@ exact workflow SHA. Manual dispatch supplies one exact external candidate; sched
 deployments. A filtered-out manual candidate is an error, while no scheduled match is a successful no-op.
 The query's filters and sorts read CloudRift VM variant availability without filtering on public-IP supply and consider
 only declared deployments with an available exact CloudRift GPU count. Nightly work excludes every recipe tagged
-`onboarding-failed`; an explicit manual dispatch can retry one after a fix. It tries four queries in order and takes the
-first match: `onboarding` shells with heat 70 or more; `maintained` or `best-effort` recipes with heat 70 or more and
-no Emmy serving variant (`emmy_serving`); other shells; and `maintained` recipes, oldest report first. Ties fall to heat, then
-model ID and deployment declaration order. No eligible deployment is a successful no-op.
+`onboarding-failed`; an explicit manual dispatch can retry one after a fix. It tries four queries in order and takes
+the first match: `onboarding` shells with heat 70 or more; `maintained` or `best-effort` recipes with heat 70 or more
+and no Emmy serving variant (`emmy_serving`); other shells; and `maintained` recipes, oldest report first. Ties fall
+to heat, then model ID and deployment declaration order. No eligible deployment is a successful no-op.
 
 The workflow requires the repository's `CLOUDRIFT_TEAM_ID` variable to contain the exact Robots team UUID. Before it
 checks capacity, it validates that `CLOUDRIFT_API_KEY` can act for that UUID through a team-scoped account request;
