@@ -541,6 +541,9 @@ and retain the larger multi-batch, two-singleton seed regression. The remaining 
 padding, vector-alignment and capture fixes are still part of this PR. The new runtime contract includes dependent
 launches, so the native extension must be rebuilt before GPU validation on the merged revision.
 
+The merged revision passes 98 focused CPU checks in 10.44 seconds and eight CUDA seed/state checks in 8.71 seconds
+on the replacement 5090 with its rebuilt runtime. The full suite is the remaining validation gate.
+
 ### Native serving follow-up boundary
 
 PR #973 supplies the static programs and validates their explicit state contract. Connecting them to native request
