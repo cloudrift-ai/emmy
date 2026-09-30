@@ -277,7 +277,7 @@ def test_overwide_reduction_is_in_the_domain_before_c_restricts_it(monkeypatch) 
     tile = _row_sum(Axis("k", 8), Axis("n", 8))
     target = Context.from_target((12, 0))
     overwide = Reduce.of(coop=128)
-    monkeypatch.setattr(classic, "coop_reduce_moves", lambda: [overwide])
+    monkeypatch.setattr(classic, "coop_reduce_moves", lambda **_: [overwide])
     offers = _offers(tile, target)
     c = _context(
         tile,
@@ -707,7 +707,7 @@ def _cooperative_root_sets(tile: TileOp, target, monkeypatch) -> set[tuple[int, 
     cooperative = Reduce.of(coop=4)
     monkeypatch.setattr(classic, "scalar_tile_moves", lambda: [Tile()])
     monkeypatch.setattr(classic, "warp_tile_moves", lambda atoms: [])
-    monkeypatch.setattr(classic, "coop_reduce_moves", lambda: [cooperative])
+    monkeypatch.setattr(classic, "coop_reduce_moves", lambda **_: [cooperative])
     roots = tuple(tile.node_id(edge) for edge in tile.op.operands)
     leaves = _schedule_leaves(tile, "gate_up", target)
     assert leaves
