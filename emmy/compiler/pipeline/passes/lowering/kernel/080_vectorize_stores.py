@@ -18,11 +18,8 @@ post-order):
    decompose to ``anchor, anchor+1, ..., anchor+n-1`` (same coefficients on
    free vars), AND the target supports ``vector_type(elem_dtype, n)`` for the
    destination-buffer dtype, replace the run with one widened ``Write``.
-   A run the per-dim reading declines re-reads by its row-major FLAT address
-   when a div/mod residue is present — the re-fused split store spells one
-   axis as a ``f/Q, f%Q`` dim pair, whose motion is only affine flat
-   (``_flat_inners``); the gate keeps every classic spelling on the per-dim
-   path byte-for-byte.
+   Contiguity and alignment are proved on the complete flat address, including
+   outer row strides and recomposed div/mod coordinates.
 3. Otherwise advance one stmt.
 
 The destination-buffer dtype comes from the op's ``outputs`` / ``inputs``
@@ -39,10 +36,10 @@ from dataclasses import replace
 
 from emmy.compiler.backend.cuda.render_target import CudaRenderTarget
 from emmy.compiler.graph import Node
-from emmy.compiler.ir.expr import BinaryExpr, Literal, SimplifyCtx, affine_form
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.stmt import Body, Stmt, Write
 from emmy.compiler.pipeline import Pattern, RuleSkipped
+from emmy.compiler.pipeline.passes.lowering.kernel._vector import vector_run
 from emmy.compiler.pipeline.search.space import VECTORIZE_STORES
 
 PATTERN = [Pattern("root", KernelOp)]
@@ -102,77 +99,6 @@ def _vectorize_body(top: KernelOp, body: Body) -> Body:
     return body if vectorized == body else vectorized
 
 
-def _per_dim_inners(writes: list[Write]) -> list | None:
-    """The classic run reading: all outer index tuples equal, the last dims carry the motion.
-    ``None`` when the outers differ — the flat fallback may still read the run."""
-    outer = writes[0].index[:-1]
-    if any(s.index[:-1] != outer for s in writes[1:]):
-        return None
-    return [s.index[-1] for s in writes]
-
-
-def _has_divmod(e) -> bool:
-    return (isinstance(e, BinaryExpr) and e.op in ("/", "//", "%")) or any(
-        _has_divmod(c) for c in ((e.left, e.right) if isinstance(e, BinaryExpr) else ())
-    )
-
-
-def _flat_inners(writes: list[Write], top: KernelOp) -> list | None:
-    """The split-store reading: a re-fused axis reaches the store as a ``f/Q, f%Q`` dim pair, so
-    per-dim comparison sees non-affine motion — but the row-major FLAT address is affine (the
-    div/mod recomposition fold collapses the pair), and contiguity/alignment are flat-address
-    facts anyway. Gated on a div/mod residue actually being present, so every classic spelling
-    keeps its per-dim reading byte-for-byte."""
-    if not any(_has_divmod(e) for s in writes for e in s.index):
-        return None
-    t = top.outputs.get(writes[0].output) or top.inputs.get(writes[0].output)
-    if t is None or len(t.shape) != len(writes[0].index) or not all(getattr(d, "is_static", False) for d in t.shape):
-        return None
-    strides, acc = [], 1
-    for d in reversed(list(t.shape)):
-        strides.append(acc)
-        acc *= d.as_static()
-    strides.reverse()
-    out = []
-    for s in writes:
-        flat = Literal(0, "int")
-        for e, st in zip(s.index, strides, strict=True):
-            flat = BinaryExpr("+", flat, BinaryExpr("*", e, Literal(st, "int")))
-        out.append(flat.simplify(SimplifyCtx.empty()))
-    return out
-
-
-def _consecutive(inners: list, n: int) -> bool:
-    """The consecutive-cell proof over one motion reading: same free-var coefficients, anchor
-    differs by exactly ``k`` for the ``k``-th write (mirrors ``050_vectorize_loads``), plus the
-    alignment proof — the reinterpret-cast destination must be aligned to ``n * elem_bytes``,
-    so every free-var coefficient and the literal anchor must be multiples of ``n``."""
-    free = frozenset(v for e in inners for v in e.free_vars())
-    af0 = affine_form(inners[0], free)
-    if af0 is None:
-        return False
-    anchor_0, coeffs_0 = af0
-    for k, e in enumerate(inners):
-        if k == 0:
-            continue
-        af = affine_form(e, free)
-        if af is None:
-            return False
-        anchor_k, coeffs_k = af
-        if coeffs_k != coeffs_0:
-            return False
-        diff = BinaryExpr("-", anchor_k, anchor_0).simplify(SimplifyCtx.empty())
-        if not (isinstance(diff, Literal) and isinstance(diff.value, int) and diff.value == k):
-            return False
-    if n >= 2:
-        if not all(c % n == 0 for c in coeffs_0.values()):
-            return False
-        anchor_simplified = anchor_0.simplify(SimplifyCtx.empty())
-        if not isinstance(anchor_simplified, Literal) or anchor_simplified.value % n != 0:
-            return False
-    return True
-
-
 def _try_vec_store(stmts: Iterable[Stmt], start: int, n: int, top: KernelOp) -> Write | None:
     """If ``stmts[start:start+n]`` matches the consecutive-Write pattern
     and the target supports ``vector_type(elem_dtype, n)`` for the
@@ -200,11 +126,8 @@ def _try_vec_store(stmts: Iterable[Stmt], start: int, n: int, top: KernelOp) -> 
     if _TARGET.vector_type(dst_dt, n) is None:
         return None
 
-    # Same rank; the run's motion read per-dim first, by flat address second (the split store).
-    rank = len(writes[0].index)
-    if rank == 0 or any(len(s.index) != rank for s in writes[1:]):
-        return None
-    if not any(_consecutive(inners, n) for inners in (_per_dim_inners(writes), _flat_inners(writes, top)) if inners is not None):
+    tensor = top.outputs.get(output_name) or top.inputs.get(output_name)
+    if not vector_run([write.index for write in writes], tensor, n):
         return None
 
     return Write(

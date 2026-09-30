@@ -35,6 +35,25 @@ def _rng():
     return np.random.default_rng(0)
 
 
+@pytest.mark.parametrize("groups", [1, 4])
+@pytest.mark.parametrize("bias", [False, True])
+def test_conv1d_reference_preserves_groups_and_spatial_parameters(groups, bias):
+    from emmy.compiler.ir.frontend.ir import Conv1dOp
+
+    graph = Graph()
+    shapes = {"x": (2, 4, 17), "w": (8, 4 // groups, 3)}
+    if bias:
+        shapes["b"] = (8,)
+    for name, shape in shapes.items():
+        graph.add_node(InputOp(), [], Tensor(name, shape), node_id=name)
+    op = Conv1dOp(stride=2, padding=2, dilation=2, groups=groups)
+    graph.add_node(op, list(shapes), Tensor("out", (2, 8, 9)), node_id="out")
+    graph.inputs, graph.outputs = list(shapes), ["out"]
+    assert torch_ref.is_runnable(graph)
+    rng = _rng()
+    _assert_matches_numpy(graph, {name: rng.standard_normal(shape).astype(np.float32) for name, shape in shapes.items()})
+
+
 def test_rms_norm():
     g = Graph()
     g.add_node(InputOp(), [], Tensor("x", (1, 4, 8)), node_id="x")

@@ -158,6 +158,53 @@ def test_laguna_selects_dense_full_sparse_sliding_and_sparse_full_profiles():
     ]
 
 
+@pytest.mark.parametrize("quantized", [False, True])
+def test_gdn_serving_capture_has_explicit_state_inputs_and_outputs(tmp_path, quantized):
+    torch = pytest.importorskip("torch")
+    from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
+
+    from emmy.serving.twins import capture_twin_graphs
+    from tests.compiler.trace.test_huggingface import _QWEN3_5_TINY
+
+    config = Qwen3_5TextConfig(**_QWEN3_5_TINY)
+    if quantized:
+        import numpy as np
+        from safetensors.torch import save_file
+
+        from emmy.compiler.loader.quant import quantize_nvfp4
+        from emmy.compiler.loader.synthesize import _NVFP4_CONFIG
+
+        config.quantization_config = _NVFP4_CONFIG
+        packed, scales, scale2 = quantize_nvfp4(np.random.default_rng(0).standard_normal((128, 64), dtype=np.float32))
+        base = "model.layers.0.linear_attn.in_proj_qkv"
+        save_file(
+            {
+                f"{base}.weight": torch.from_numpy(packed),
+                f"{base}.weight_scale": torch.from_numpy(np.ascontiguousarray(scales)).view(torch.float8_e4m3fn),
+                f"{base}.weight_scale_2": torch.from_numpy(scale2),
+                f"{base}.input_scale": torch.tensor([0.05]),
+            },
+            str(tmp_path / "model.safetensors"),
+        )
+    config.save_pretrained(tmp_path)
+    graphs = capture_twin_graphs(str(tmp_path), decode_bucket=1, prefill_bucket=16, symbolic=False)
+    suffix = "@nvfp4" if quantized else ""
+    assert set(graphs) == {f"gdn1{suffix}", f"gdn16{suffix}", "pre1-global", "post1-global", "pre16-global", "post16-global"}
+    for name, graph in graphs.items():
+        if not name.startswith("gdn"):
+            continue
+        rows = int(name.removeprefix("gdn").split("@")[0])
+        if quantized:
+            assert set(_packed_weights(graph)) == {"model.layers.0.linear_attn.in_proj_qkv.weight"}
+        assert [tuple(graph.buffer(key).shape) for key in graph.inputs] == [(1, rows, 64), (1, 4, 16, 16), (1, 128, 4)]
+        assert [tuple(graph.buffer(key).shape) for key in graph.outputs] == [(1, rows, 64), (1, 4, 16, 16), (1, 128, 4)]
+    assert len(graphs["pre1-global"].outputs) == 4
+    post = graphs["post1-global"]
+    assert [tuple(post.buffer(key).shape) for key in post.inputs] == [(1, 64)] * 3
+    with pytest.raises(NotImplementedError, match="static sequence widths"):
+        capture_twin_graphs(str(tmp_path), decode_bucket=1, prefill_bucket=16)
+
+
 def test_attention_query_layout_accepts_validated_deepseek_low_rank_signature():
     from types import SimpleNamespace
 

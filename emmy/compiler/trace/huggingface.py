@@ -271,6 +271,47 @@ def build_layer_wrapper(block, rotary_emb, hidden_size: int, dtype, *, layer_typ
     return LayerWrapper()
 
 
+def build_gdn_state_wrapper(block) -> nn.Module:
+    """Expose a GDN block as ``(x, state, history) -> (y, state, history)`` without input mutation.
+
+    State is the FP32 recurrent matrix; history holds the last convolution-kernel-width projected
+    inputs. Zero tensors start a request. Batch rows own independent state and history. The block's
+    installed forward supplies both the prefill and single-token decode math.
+    """
+    import torch.nn as nn
+
+    mixer = getattr(block, "linear_attn", None)
+    if mixer is None:
+        raise ValueError("a GDN state wrapper requires a linear_attn block")
+
+    class State:
+        def __init__(self, state, history):
+            self.recurrent_states = [state]
+            self.conv_states = [history.clone()]
+            self.layers = {mixer.layer_idx: self}
+
+        def has_previous_state(self, layer_idx):
+            return True
+
+        def update_conv_state(self, value, layer_idx):
+            self.conv_states[0] = value
+
+        def update_recurrent_state(self, value, layer_idx):
+            self.recurrent_states[0] = value
+
+    class StatefulGDN(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.block = block
+
+        def forward(self, x, state, history):
+            cache = State(state, history)
+            y = self.block(x, position_embeddings=None, past_key_values=cache)
+            return y, cache.recurrent_states[0], cache.conv_states[0]
+
+    return StatefulGDN()
+
+
 def find_text_decoder(model):
     """Return the deepest module owning the text decoder layers and rotary embedding."""
     import torch.nn as nn  # noqa: PLC0415

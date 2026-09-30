@@ -15,7 +15,7 @@ from frozendict import frozendict
 
 from emmy.compiler.ir.atom import ATOM_REGISTRY
 from emmy.compiler.ir.expr import Literal, Var
-from emmy.compiler.ir.pure import Fold
+from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.schedule.base import Schedule, ScheduleContext, ScheduleProblem, ScheduleRefused, Site
 from emmy.compiler.ir.schedule.choices import Tile, Work
 from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Pre, Select
@@ -76,14 +76,16 @@ class RegisterProgram:
                 return None
             if not all(isinstance(e, Var) and e.name in extents for e in idx[-2:]) or extents[idx[-1].name] != rows:
                 return None
-            if idx[1:-2] != tuple(Var(name) for name in batch_names):
+            shape = tile.outputs[spec.write.output].shape
+            batch_index = tuple(e for e, size in zip(idx[1:-2], shape[1:-2], strict=True) if not (e == Literal(0, "int") and size == 1))
+            if batch_index != tuple(Var(name) for name in batch_names):
                 return None
         lift = carrying.lift
         results = (*(spec.write.values[0] for spec in outputs), lift.results[0])
         roots = tuple(
             Fold(
                 operands=carrying.operands,
-                lift=replace(lift, params=lift.params[1:], body=Body(lift.body.backward_cone((value,)).members), results=(value,)),
+                lift=Lambda.closing(lift.params[1:], Body(lift.body.backward_cone((value,)).members), (value,)),
             )
             for value in results
         )

@@ -557,7 +557,11 @@ def _needs_fill(tile_op, node: Fold, plan: Tile) -> bool:
     # producer cone. A multi-channel node whose weights are all materialized is not that — it
     # stages one A slab beside one B per channel, which is the same operand list the fill builds
     # and the same order the drain reads (the gate/up pair on sm_80 and sm_90).
-    return plan.is_warp and (_computed_edge(node) or staging.converting_a(node, plan.atom, tile_op.inputs))
+    return plan.is_warp and (
+        _computed_edge(node)
+        or staging.converting_a(node, plan.atom, tile_op.inputs)
+        or any(not staging.copied_b(node, edge, tile_op.inputs) for edge in node.operands[1:])
+    )
 
 
 def _kstep_refusal(k_axis, plan: Tile) -> str | None:
@@ -620,7 +624,9 @@ def _plan_node_refusal(tile_op, node: Fold, plan: Tile, placed: PlacedTile, fact
     if refusal is not None or not _needs_fill(tile_op, node, plan):
         return refusal
     converting = staging.converting_a(node, plan.atom, tile_op.inputs)
-    return staging.computed_operand_cover(node, placed, converting=converting, k_axis=facts.k_axis) or staging.computed_operand_copy_dtype(
+    return staging.computed_operand_cover(
+        node, placed, converting=converting, k_axis=facts.k_axis, inputs=tile_op.inputs
+    ) or staging.computed_operand_copy_dtype(
         node,
         placed,
         tile_op.inputs,

@@ -15,7 +15,7 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Fold, Lambda
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Let, Load, Loop, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.normalize import _share_common_cones
 from emmy.compiler.ir.tile.path import family_sites, sites
@@ -180,6 +180,61 @@ def test_sibling_output_sweeps_stay_sweeps() -> None:
 
     assert tuple(axis.name for axis in tile.place.free) == ("m",)
     assert tuple(tuple(axis.name for axis in store.sweep) for store in tile.output_specs) == (("n",), ("p",))
+
+
+def _independent_output_tile(reverse=False):
+    p, q, r, s = (Axis(name, size) for name, size in zip(("p", "q", "r", "s"), (3, 5, 7, 2), strict=True))
+    first = slab("xv", "x", "p", "q")
+    second = projection((slab("yv", "y", "p", "r"),), (Assign(name="zv", op="relu", args=("yv",)),), ("zv",))
+    third = slab("wv", "w", "s")
+    root = projection((first, second, third), (Let(name="unused", value=Literal(0)),), ("unused",))
+    specs = (
+        OutputSpec(write=Write(output="xo", index=(Var("p"), Var("q")), value="xv"), sweep=(p, q)),
+        OutputSpec(write=Write(output="yo", index=(Var("p"), Var("r")), value="zv"), sweep=(p, r)),
+        OutputSpec(write=Write(output="wo", index=(Var("s"),), value="wv"), sweep=(s,)),
+    )
+    return _tile(root, p, q, r, s, output_specs=specs[::-1] if reverse else specs)
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_dead_root_value_does_not_multiply_independent_output_sweeps(reverse):
+    tile = _independent_output_tile(reverse)
+    domains = {}
+
+    def visit(body, path=()):
+        for stmt in body:
+            if isinstance(stmt, Loop):
+                visit(stmt.body, (*path, stmt.axis.name))
+            elif isinstance(stmt, Write):
+                domains[stmt.output] = set(path)
+
+    visit(tile.loop_body)
+    assert domains == {"xo": {"p", "q"}, "yo": {"p", "r"}, "wo": {"s"}}
+
+
+@pytest.mark.xdist_group("cuda")
+def test_independent_output_computations_match_on_cuda():
+    import numpy as np
+
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.ir.base import InputOp
+    from tests.compiler.helpers import skip_if_no_cuda
+
+    skip_if_no_cuda()
+    tile = _independent_output_tile()
+    graph = Graph()
+    arrays = {
+        name: np.arange(np.prod(shape), dtype=np.float32).reshape(shape) - 4 for name, shape in (("x", (3, 5)), ("y", (3, 7)), ("w", (2,)))
+    }
+    for name, values in arrays.items():
+        graph.add_node(InputOp(), [], Tensor(name, values.shape), node_id=name)
+    graph.add_node(tile, list(arrays), outputs=[Tensor(name + "o", values.shape) for name, values in arrays.items()])
+    graph.inputs = list(arrays)
+    graph.outputs = [name + "o" for name in arrays]
+    backend = CudaBackend()
+    actual = backend.run(backend.compile(graph), input_data=arrays)[0].outputs
+    for name, values in arrays.items():
+        np.testing.assert_array_equal(actual[name + "o"], np.maximum(values, 0) if name == "y" else values)
 
 
 def _swept_reduce(*, per_cell: bool) -> TileOp:

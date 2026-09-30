@@ -66,6 +66,37 @@ def test_register_storage_refuses_cross_warp_state_reads():
     assert tile.register_program is None
 
 
+def test_register_step_keeps_a_time_coordinate_read_by_its_lift():
+    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.stmt import Assign, Body, Load
+
+    (tile,) = (n.op for n in _lift(_graph()).nodes.values() if isinstance(n.op, TileOp))
+    (carrying,) = (site.node for site in tile.sites if site.node.carries)
+    lift = carrying.lift
+    changed = replace(
+        carrying,
+        lift=replace(
+            lift,
+            body=Body(
+                (
+                    Load(name="phase", input="D", index=(Var(carrying.axis),)),
+                    *[
+                        replace(stmt, args=(stmt.args[0], "phase")) if isinstance(stmt, Assign) and stmt.name == lift.results[0] else stmt
+                        for stmt in lift.body
+                    ],
+                )
+            ),
+        ),
+    )
+
+    def substitute(term):
+        return changed if term is carrying else replace(term, operands=tuple(substitute(edge) for edge in term.operands))
+
+    program = replace(tile, op=substitute(tile.op)).register_program
+    assert program is not None
+    assert program.time in program.roots[-1].free_axes
+
+
 def test_a_descent_row_naming_other_families_offers_no_register_leaf():
     """A descent narrows every offered tier with the kernel's whole row: a row naming a family the register tier does
     not own describes another tier, so the register tier offers nothing for it, and a strict row must be its own."""
@@ -90,6 +121,59 @@ def test_chunk_loop_is_inside_one_launch(target):
     assert f"float _state0[{8 if target == (7, 0) else 4}]" in op.kernel_source and "for (int a0" in op.kernel_source
     assert "out__acc1[" not in op.kernel_source
     assert "#include <cuda_fp16.h>" in op.kernel_source  # The buffers are FP32; the direct loader constructs FP16 operands.
+
+
+def _with_output_batch_axis(graph, batch_extent):
+    from emmy.compiler.dim import Dim
+    from emmy.compiler.ir.expr import Literal
+    from emmy.compiler.ir.stmt import Write
+
+    node = graph.nodes["out"]
+    tensor = node.outputs[0]
+    tensor.shape = (tensor.shape[0], Dim(batch_extent), *tensor.shape[1:])
+    node.op = replace(
+        node.op,
+        body=node.op.body.map(lambda s: replace(s, index=(s.index[0], Literal(0, "int"), *s.index[1:])) if isinstance(s, Write) else s),
+    )
+    return graph
+
+
+@pytest.mark.parametrize("batch_extent", [1, 2])
+def test_register_output_keeps_a_unit_batch_coordinate(batch_extent):
+    graph = _with_output_batch_axis(_graph(), batch_extent)
+    node = graph.nodes["out"]
+    (tile,) = (n.op for n in _lift(graph).nodes.values() if isinstance(n.op, TileOp))
+    assert (tile.register_program is not None) == (batch_extent == 1)
+    if batch_extent == 1:
+        schedule = next(iter(_context(tile).extensions()))
+        node.op = materialize_register(tile, schedule, {})
+        lowered = Pipeline.build(["lowering/kernel", "lowering/cuda"]).run(graph, ctx=Context.from_target((12, 0)))
+        (cuda,) = (n.op for n in lowered.nodes.values() if isinstance(n.op, CudaOp))
+        assert "emmy_mma_m16n8k16" in cuda.kernel_source
+
+
+def test_classic_recurrence_does_not_reopen_the_launch_axis():
+    with pinned_knobs({"FAST_MATH": False}):
+        graph = Pipeline.build(CUDA_PASSES).run(_graph(), ctx=Context.from_target((12, 0)))
+    (cuda,) = (n.op for n in graph.nodes.values() if isinstance(n.op, CudaOp))
+    assert cuda.serial
+    for name, _extent in cuda.serial:
+        assert f"for (int {name} =" not in cuda.kernel_source
+
+
+def test_register_fork_keeps_the_carrier_when_classic_is_also_offered():
+    from importlib import import_module
+
+    from emmy.compiler.pipeline.fork import iter_leaves
+
+    classic_forks = import_module("emmy.compiler.pipeline.passes.tile.schedule.040_schedule").classic_forks
+    (tile,) = (n.op for n in _lift(_graph()).nodes.values() if isinstance(n.op, TileOp))
+    with pinned_knobs({"FAST_MATH": True}):
+        forks = classic_forks(tile, tile.name, {}, Context.from_target((12, 0)))
+        register = next(leaf for leaf in iter_leaves(forks) if leaf.knobs.get("STAGE") == "d1/reg")
+        (scheduled,) = register.expand()
+    assert scheduled.carries and not scheduled.place.serial
+    assert scheduled.register_program == tile.register_program
 
 
 @pytest.mark.parametrize("target", [(7, 0), (12, 0)], ids=["volta", "modern"])
@@ -158,21 +242,55 @@ def test_register_state_preserves_old_reads_on_cuda(half, warps):
 
 @requires_cuda
 @pytest.mark.xdist_group("cuda")
+@pytest.mark.parametrize("unit_batch", [False, True])
 @pytest.mark.parametrize("unit", [False, True], ids=["seed", "seed-with-a-size-one-dim"])
-def test_register_state_starts_from_the_seed_tensor_on_cuda(unit):
+def test_register_state_starts_from_the_seed_tensor_on_cuda(unit, unit_batch):
     """A loop that starts from a tensor rather than zeros: the first step reads the seed at its cell,
     and at 0 on a size-one dim the seed has and the state's cells do not."""
     from emmy.compiler.backend.cuda.program import run_program
 
     atom = ("mma_m8n8k4" if Context.probe().has_volta_mma else "mma_m16n8k16") + "_f16_f32"
+    source = _unit_seeded_graph() if unit else _graph(seed="S0")
+    if unit_batch:
+        source = _with_output_batch_axis(source, 1)
     with pinned_knobs({"STAGE": "d1/reg", "WORK": "w1x1", "TILE": f"{atom}/f1x1/k4"}):
-        graph = Pipeline.build(CUDA_PASSES).run(_unit_seeded_graph() if unit else _graph(seed="S0"))
+        graph = Pipeline.build(CUDA_PASSES).run(source)
     (op,) = (n.op for n in graph.nodes.values() if isinstance(n.op, CudaOp))
     assert not op.serial and "S0" in op.arg_order
     arrays = _inputs(seed="S0")
     result, _ = run_program(graph, {**arrays, "S0": arrays["S0"][None]} if unit else arrays)
     want = _reference(arrays, seed="S0")
     np.testing.assert_allclose(np.asarray(result.outputs["out"]).reshape(want.shape), want, rtol=2e-3, atol=2e-3)
+
+
+@requires_cuda
+@pytest.mark.xdist_group("cuda")
+@pytest.mark.parametrize("register", [False, True], ids=["classic", "register"])
+def test_seed_tensor_keeps_unit_dimensions_on_cuda(register):
+    from emmy.compiler.backend.cuda.program import run_program
+    from emmy.compiler.dim import Dim
+    from emmy.compiler.ir.expr import Literal
+    from emmy.compiler.ir.stmt import Carry, Pre
+
+    source = _graph(seed="S0")
+    seed = source.nodes["S0"].outputs[0]
+    seed.shape = (Dim(1), seed.shape[0], Dim(1), seed.shape[1])
+    op = source.nodes["out"].op
+    zero = Literal(0, "int")
+    source.nodes["out"].op = replace(
+        op, body=op.body.map(lambda s: replace(s, index=(zero, s.index[0], zero, s.index[1])) if isinstance(s, (Carry, Pre)) else s)
+    )
+    pins = {"FAST_MATH": False}
+    if register:
+        atom = ("mma_m8n8k4" if Context.probe().has_volta_mma else "mma_m16n8k16") + "_f16_f32"
+        pins.update(STAGE="d1/reg", WORK="w1x1", TILE=f"{atom}/f1x1/k4")
+    with pinned_knobs(pins):
+        graph = Pipeline.build(CUDA_PASSES).run(source)
+    arrays = _inputs(seed="S0")
+    want = _reference(arrays, seed="S0")
+    arrays["S0"] = arrays["S0"].reshape(1, *arrays["S0"].shape[:1], 1, -1)
+    result, _ = run_program(graph, arrays)
+    np.testing.assert_allclose(result.outputs["out"], want, rtol=2e-3 if register else 1e-5, atol=2e-3 if register else 1e-6)
 
 
 @requires_cuda

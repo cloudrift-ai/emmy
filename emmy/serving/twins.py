@@ -119,10 +119,12 @@ def capture_twin_graphs(
     from emmy.compiler.trace.huggingface import (
         # noqa: PLC0415,
         build_attention_split_wrapper,
+        build_gdn_state_wrapper,
         build_moe_split_wrapper,
         hyper_connection_seam,
         moe_block_parts,
         moe_expert_layout,
+        retarget_constants_to_model,
     )
     from emmy.serving.gen_runner import trace_split  # noqa: PLC0415
 
@@ -179,6 +181,22 @@ def capture_twin_graphs(
     layer_scopes: dict[str, set[int]] = {}
     for layer_idx, block, suffix in layers:
         members = {i for i, signature in enumerate(signatures) if signature == signatures[layer_idx]}
+        mixer = getattr(block, "linear_attn", None)
+        if mixer is not None:
+            if any(rows is None for _name, rows in buckets):
+                raise NotImplementedError("GDN state programs require static sequence widths; capture with symbolic=False")
+            wrapper = build_gdn_state_wrapper(block).to_empty(device="cpu").to(td)
+            for name, rows in buckets:
+                args = [
+                    torch.zeros(1, rows, hidden, dtype=td),
+                    torch.zeros(1, mixer.num_v_heads, mixer.head_k_dim, mixer.head_v_dim, dtype=torch.float32),
+                    torch.zeros(1, mixer.conv_dim, mixer.conv_kernel_size, dtype=td),
+                ]
+                twin_name = f"gdn{name}{suffix}"
+                graphs[twin_name] = trace_split(wrapper, args, None)
+                retarget_constants_to_model(graphs[twin_name], wrapper, block)
+                layer_scopes[twin_name] = members
+            continue
         parts = moe_block_parts(block.mlp)
         if parts is None:
             pre_w, post_w = build_attention_split_wrapper(block)
@@ -197,13 +215,18 @@ def capture_twin_graphs(
             # The symbolic program traces at the example width serving uses (8) and ties
             # axis-0 to a ``num_tokens`` Dim; a static twin traces at its bucket, no Dim.
             rows = 8 if m is None else m
+            post_args = [torch.zeros(rows, attn_width, dtype=td), torch.zeros(rows, carrier, dtype=td)]
+            post_names = ["attn_out", "residual"]
+            if getattr(pre_w, "emits_gate", False):
+                post_args.append(torch.zeros(rows, attn_width, dtype=td))
+                post_names.append("gate")
             halves = [
                 ("pre", pre_w, [torch.zeros(rows, carrier, dtype=td)], ["hidden"] if m is None else None),
                 (
                     "post",
                     post_w,
-                    [torch.zeros(rows, attn_width, dtype=td), torch.zeros(rows, carrier, dtype=td)],
-                    ["attn_out", "residual"] if m is None else None,
+                    post_args,
+                    post_names if m is None else None,
                 ),
             ]
             for half, wrapper, example_args, argnames in halves:
@@ -286,6 +309,11 @@ def _layer_signatures(trunk, config) -> list[tuple[str, str, int]]:
         attn = at(types, i, "homogeneous")
         attention = getattr(block, "self_attn", None)
         if attention is None:
+            mixer = getattr(block, "linear_attn", None)
+            if mixer is not None:
+                mlp = at(mlp_types, i, "sparse" if moe_block_parts(block.mlp) is not None else "dense")
+                out.append((str(mlp), "linear_attention", int(mixer.num_v_heads)))
+                continue
             raise NotImplementedError(
                 f"serving twins: layer {i} ({type(block).__name__}, {attn}) has no self_attn; "
                 "blocks whose token mixer is not attention (e.g. a gated delta net) have no serving program yet"
@@ -322,6 +350,10 @@ def _attention_query_layout(attn) -> tuple[int, int]:
             raise ValueError(
                 f"serving twin attention {type(attn).__name__} q_proj width {width!r} is not a positive multiple of head_dim={head_dim}"
             )
+        groups = getattr(attn, "num_key_value_groups", None)
+        kv_width = getattr(getattr(attn, "k_proj", None), "out_features", None)
+        if groups and kv_width and width == 2 * groups * kv_width:
+            width //= 2  # the other half is the per-query output gate carried by the pre wrapper
         num_heads = width // head_dim
         declared = getattr(attn, "num_heads", None)
         if declared is not None and declared != num_heads:

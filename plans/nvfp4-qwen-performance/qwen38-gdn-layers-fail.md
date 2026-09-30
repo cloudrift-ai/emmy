@@ -1,5 +1,12 @@
 # Qwen3.8 Gated DeltaNet: tracing, serving, codegen and scheduling failures
 
+2026-09-30 update: [PR #973](https://github.com/cloudrift-ai/emmy/pull/973) repairs the compiler failures and adds
+static explicit-state capture. Prefill-to-decode handoff, seeded state and reset pass on both RTX 5080 and RTX 5090;
+the compiler/capture fix is ready for review after full-suite validation and repair of a missing test prerequisite.
+Native request dispatch and whole-model serving remain separate integration work. The [staged plan](qwen38-gdn-fix-plan.md)
+records current evidence and limitations. The observations below are the original report, with their original revisions
+and dump provenance.
+
 ## Summary
 
 48 of the 64 layers of `Inferact/Qwen3.8-27B-NVFP4` are gated DeltaNet (GDN) layers. GDN is a linear-attention token

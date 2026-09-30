@@ -3296,12 +3296,10 @@ def _(s: FragmentApply, rename, sigma, axis_fn):
 def _(s: FragmentRepack, rename, sigma, axis_fn):
     # Pure register (the flash P→A handoff): route the destination and source C fragments through
     # ``rename`` (SSA canonicalizer / per-cell replicator); no index / axis to σ-substitute.
-    return FragmentRepack(
+    return replace(
+        s,
         frag=rename(s.frag),
         srcs=tuple(rename(src) for src in s.srcs),
-        ab_dtype=s.ab_dtype,
-        fragment_layout=s.fragment_layout,
-        part=s.part,
     )
 
 

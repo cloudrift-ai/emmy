@@ -37,6 +37,48 @@ _WARP_TILE = "mma_m16n8k16_f16_f32/f2x2/k2"
 _WARP_WORK = "w1x1"
 
 
+@requires_sm(8)
+@pytest.mark.xdist_group("cuda")
+@pytest.mark.parametrize("stage", ["d1/smem", "d2/smem"])
+@pytest.mark.parametrize("channels", [1, 2])
+@pytest.mark.parametrize("columns", [13, 16])
+def test_interleaved_weight_channels_use_gathers_before_mma(stage, channels, columns):
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.ir.expr import placeholder
+    from emmy.compiler.ir.tensor.ir import IndexMapOp, IndexSource
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("a", (32, 64), F16), node_id="a")
+    graph.add_node(InputOp(), [], Tensor("b", (64, 2 * columns), F16), node_id="b")
+    for channel in range(channels):
+        name = f"b{channel}"
+        graph.add_node(
+            IndexMapOp(
+                out_shape=(64, columns), sources=(IndexSource(input_idx=0, coord_map=(placeholder(0), placeholder(1) * 2 + channel)),)
+            ),
+            ["b"],
+            Tensor(name, (64, columns), F16),
+            node_id=name,
+        )
+        graph.add_node(MatmulOp(), ["a", name], Tensor(f"out{channel}", (32, columns), F16), node_id=f"out{channel}")
+    if channels == 2:
+        graph.add_node(ElementwiseOp(op="multiply"), ["out0", "out1"], Tensor("out", (32, columns), F16), node_id="out")
+    graph.inputs, graph.outputs = ["a", "b"], ["out" if channels == 2 else "out0"]
+    backend = CudaBackend()
+    with pinned_knobs({"PLACE": "fuse", "TILE": _WARP_TILE, "WORK": _WARP_WORK, "STAGE": stage}):
+        compiled = backend.compile(graph)
+    sources = [node.op.kernel_source for node in compiled.nodes.values() if hasattr(node.op, "kernel_source")]
+    assert len(sources) == 1
+    assert "emmy_cp_async_cg(&_b" not in sources[0], "a contiguous byte copy cannot gather alternate weight columns"
+    rng = np.random.default_rng(0)
+    arrays = {name: (rng.standard_normal(shape) * 0.1).astype(np.float16) for name, shape in (("a", (32, 64)), ("b", (64, 2 * columns)))}
+    actual = backend.run(compiled, input_data=arrays)[0].outputs
+    projections = [arrays["a"].astype(np.float32) @ arrays["b"][:, channel::2].astype(np.float32) for channel in range(channels)]
+    expected = projections[0] if channels == 1 else projections[0] * projections[1]
+    np.testing.assert_allclose(actual[graph.outputs[0]], expected, rtol=2e-3, atol=1e-3)
+
+
 def _pin_warp(monkeypatch) -> None:
     """Pin the one-warp mma tier — the TILE value at its site, the warps in WORK."""
     monkeypatch.setenv("EMMY_TILE", _WARP_TILE)

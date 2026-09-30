@@ -247,7 +247,10 @@ matrix contractions, read off the fold that carries the state (`Fold.carries`, i
 and the warp-owned row). The structural reading proves that each warp's rows are independent through every
 contraction, that every carrier read takes the previous step at the warp's own rows, and that output matrices
 share the same batch coordinates. Other recurrences retain the classic schedule, which realizes the carrying loop
-as one launch per step over a state buffer.
+as one launch per step over a state buffer. A zero-axis root derived from a step keeps the time coordinate as a
+trailing lambda parameter whenever its body still reads it. Unit batch coordinates are omitted only from ownership
+matching, after checking their external extents; the stored output indices remain unchanged. Both schedule families
+restore omitted unit coordinates against the seed tensor's bound shape before computing its address.
 
 `WORK=w<M>x1` assigns independent groups of sixteen value rows to warps. `TILE` names an FP16 atom with both
 C→A and C→B repacking support and `f1x<N>`, where `N` covers all state columns. The atom registry supplies

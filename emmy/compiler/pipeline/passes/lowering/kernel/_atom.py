@@ -73,7 +73,7 @@ from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.schedule import Side, Stage, Tile
 from emmy.compiler.ir.schedule.classic.refusals import chunk_partial_columns
 from emmy.compiler.ir.schedule.packing import block_scaled_atom, packed_readings
-from emmy.compiler.ir.schedule.staging import chunk_key_stage, chunk_slab_pad
+from emmy.compiler.ir.schedule.staging import chunk_key_stage, chunk_slab_pad, copied_b
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import (
     Accum,
@@ -1172,7 +1172,7 @@ def _sync_operands(
         tag = "b" if f == 0 else f"b_x{f}"
         # The channel's B is a TERM: a gmem read is a slab (one ``Load`` over its coordinates) and
         # copies; anything else is a producer cone and compute-fills.
-        slab = edge.as_slab() if isinstance(edge, Fold) else None
+        slab = edge.as_slab() if isinstance(edge, Fold) and copied_b(c, edge, inputs) else None
         bl = slab.load if slab is not None else edge
         if not isinstance(bl, Load):
             b_body = bl.lower(axes=axes)

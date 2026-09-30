@@ -83,6 +83,37 @@ def test_interleaved_loads_of_one_buffer_widen() -> None:
     assert out.index(loads[0]) == 0, "the widened load sits where the first element was loaded"
 
 
+def test_vector_loads_and_stores_require_aligned_row_offsets() -> None:
+    from emmy.compiler.graph import Tensor
+    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.stmt import Write
+
+    for columns, row, aligned in (
+        (3, Var("row"), False),
+        (4, Var("row"), True),
+        (3, Literal(1, "int"), False),
+        (3, Literal(2, "int"), True),
+    ):
+        tensor = Tensor("x", (4, columns), F32)
+        loads = Body(tuple(Load(name=f"v{i}", input="x", index=(row, Literal(i, "int")), dtype=F32) for i in range(2)))
+        stores = Body(tuple(Write(output="x", index=(row, Literal(i, "int")), value=f"v{i}", value_dtype=F32) for i in range(2)))
+        op = KernelOp(body=loads, inputs={"x": tensor}, outputs={"x": tensor})
+        assert len(_vectorize_loads(op, loads)) == (1 if aligned else 2)
+        assert len(_vectorize_stores(op, stores)) == (1 if aligned else 2)
+
+
+def test_vector_alignment_recomposes_split_coordinates() -> None:
+    from emmy.compiler.graph import Tensor
+    from emmy.compiler.ir.expr import BinaryExpr, Var
+    from emmy.compiler.pipeline.passes.lowering.kernel._vector import vector_run
+
+    tensor = Tensor("x", (4, 8), F32)
+    cells = [Var("i") * Literal(4, "int") + Literal(offset, "int") for offset in range(4)]
+    split = [(BinaryExpr("//", cell, Literal(8, "int")), BinaryExpr("%", cell, Literal(8, "int"))) for cell in cells]
+    assert vector_run(split, tensor, 4)
+    assert not vector_run([(Var("row"), Literal(i, "int")) for i in range(2)], None, 2)
+
+
 def test_a_load_whose_index_is_computed_in_between_stays_put() -> None:
     """A later load moves up only when its index needs nothing defined in between."""
     from emmy.compiler.dtype import F16
