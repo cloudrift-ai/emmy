@@ -89,3 +89,13 @@ def test_fold_combine_tracks_accum_rename() -> None:
     assert renamed.exposes == ("acc1_r",)
     (load,) = (stmt for edge in renamed.operands for stmt in edge.lift.body if isinstance(stmt, Load))
     assert load.names == ("v9_r",) and renamed.applied.results == ("v9_r",), (load.names, renamed.applied.results)
+
+
+def test_canonical_names_do_not_capture_free_arguments():
+    body = Body((Loop(Axis("k", 4), (Load("value", "x", (Var("a0"), Var("k"), Var("in0"))), Accum("total", "value"))),))
+    renamed = rename_ssa_sequential(body)
+    (loop,) = renamed
+    load = _find_load(renamed, "x")
+    assert loop.axis.name != "a0" and load.name != "in0"
+    assert load.index == (Var("a0"), Var(loop.axis.name), Var("in0"))
+    assert rename_ssa_sequential(renamed) == renamed

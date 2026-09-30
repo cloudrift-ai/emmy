@@ -1,7 +1,7 @@
 """Loop IR — post-fusion kernel representation plus its analysis/normalization.
 
 Submodules:
-- :mod:`.ir` — ``LoopOp`` (one kernel) plus ``LoopMeta`` / ``Scope``
+- :mod:`.ir` — ``LoopOp`` (one kernel) plus ``BodyAnalysis`` / ``Scope``
   helpers. The body statement vocabulary (``Loop``, ``Load``, ``Write``,
   ``Assign``, ``Accum``, ``Select``, ``SelectBranch``, ``Cond``,
   ``StridedLoop``, ``Stmt``, ``iter_body``, ``map_body``) lives in
@@ -14,7 +14,7 @@ The public surface below re-exports the common types so callers use
 ``from emmy.compiler.ir.loop import LoopOp, ...``.
 """
 
-from emmy.compiler.ir.loop.builder import LoopBuilder
+from emmy.compiler.ir.stmt.builder import BodyBuilder
 from emmy.compiler.ir.loop.ir import (
     Accum,
     Assign,
@@ -22,7 +22,7 @@ from emmy.compiler.ir.loop.ir import (
     Cond,
     Load,
     Loop,
-    LoopMeta,
+    BodyAnalysis,
     LoopOp,
     Scope,
     Select,
@@ -40,8 +40,8 @@ __all__ = [
     "Cond",
     "Load",
     "Loop",
-    "LoopBuilder",
-    "LoopMeta",
+    "BodyBuilder",
+    "BodyAnalysis",
     "LoopOp",
     "Scope",
     "Select",

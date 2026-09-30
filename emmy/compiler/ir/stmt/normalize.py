@@ -29,7 +29,7 @@ from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
 from emmy.compiler.ir.stmt.body import Body, free_names
 from emmy.compiler.ir.stmt.leaves import Accum, Assign, Init, Load, Write
 from emmy.compiler.ir.stmt.order import bound_axes, ordering_constraints, relation_graph, topological_sort
-from emmy.compiler.ir.stmt.subroutine import Call, definitions, expand_calls
+from emmy.compiler.ir.stmt.subroutine import Call, definitions
 
 __all__ = ["normalize_body"]
 
@@ -50,6 +50,8 @@ def normalize_body(stmts: Body) -> Body:
 
 def _normalize_body(stmts: Body) -> Body:
     """Uncached implementation owned by :class:`Body`'s normalization property."""
+    from emmy.compiler.ir.stmt.splicer import expand_calls
+
     # Calls are storage sharing only. Full normalization sees every operation, so reduction
     # fusion, executable identity and Tile IR's common-cone detection use the same CSE form.
     if definitions(stmts):

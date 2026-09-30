@@ -41,7 +41,7 @@ def _assert_scoped_cse(body, available=()):
                 if isinstance(candidate, Assign) and candidate.op.commutative:
                     candidate = replace(candidate, args=tuple(sorted(candidate.args)))
                 for prior in available:
-                    renamed = prior.rename(dict(zip(prior.defines(), candidate.defines())))
+                    renamed = prior.rename(dict(zip(prior.defines(), candidate.defines(), strict=False)))
                     if isinstance(renamed, Assign) and renamed.op.commutative:
                         renamed = replace(renamed, args=tuple(sorted(renamed.args)))
                     assert candidate != renamed, f"available duplicate: {prior.pretty()} followed by {stmt.pretty()}"

@@ -97,7 +97,9 @@ def test_cse_shares_selections_and_their_downstream_cones() -> None:
 
 
 def test_cse_selection_predicates_observe_rebound_coordinates() -> None:
-    selection = lambda name: Select(name=name, branches=(SelectBranch("x", Var("k")), SelectBranch("y", Literal(1, "int"))))
+    def selection(name):
+        return Select(name=name, branches=(SelectBranch("x", Var("k")), SelectBranch("y", Literal(1, "int"))))
+
     body = Body((selection("a"), Loop(axis=Axis("k", 4), body=(selection("b"), Write(output="out", index=(Var("k"),), value="b")))))
     assert dedup_loads(body) == body
 

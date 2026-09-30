@@ -270,8 +270,7 @@ def test_reductions_share_dependencies_in_cse_form(dependent, offset):
     )
     assert merged is not None
     assert _elementwise_fns(merged).count("exp") == (2 if dependent or offset else 1)
-    if not offset:
-        assert sum(loop.is_reduce for loop in merged.body.iter_of_type(Loop)) == (2 if dependent else 1)
+    assert sum(loop.is_reduce for loop in merged.body.iter_of_type(Loop)) == (2 if dependent else 1)
     x = np.linspace(-1, 1, 4 * (16 + offset), dtype=np.float32).reshape(4, 16 + offset)
     results = dict(zip(merged.outputs, merged.forward(x), strict=True))
     values = np.exp(x)
@@ -597,7 +596,7 @@ def test_consumer_extra_input_source_remap():
 
 
 def test_live_axes_computed():
-    """``LoopMeta.live_axes`` captures axes transitively used through each
+    """``BodyAnalysis.live_axes`` captures axes transitively used through each
     dep's Expr subtrees. For Accum, the reduce axis is excluded.
 
     Normalization canonicalizes SSA and axis names (``Load→in0``,

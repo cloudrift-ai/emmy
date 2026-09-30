@@ -162,9 +162,14 @@ def test_nested_calls_freshen_locals_without_capturing_arguments():
     assert compact.structural_key() == _body(inner, 4).structural_key()
 
 
-def test_normalized_definition_preserves_formal_coordinates_named_like_canonical_axes():
+def test_expansion_preserves_unused_values_beside_output_writes():
+    body = Body((*_body(_project(), 0), Assign("unused", "exp", ("external",))))
+    normalized = normalize_body(body)
+    assert len(normalized.writes) == 1
+    assert any(isinstance(stmt, Assign) and stmt.op.name == "exp" and stmt.args == ("external",) for stmt in normalized.iter())
+
+
+def test_formal_coordinates_do_not_capture_canonical_axis_names():
     target = _project()
     target = replace(target, axes=(Axis("a0", 3), Axis("a1", 8)), body=Body(s.rename({"row": "a0", "col": "a1"}) for s in target.body))
-    expanded = target.expanded
-    assert set(expanded.params).isdisjoint(expanded.body.axis_names)
     assert _body(target, 4).structural_key() == _body(_project(), 4).structural_key()

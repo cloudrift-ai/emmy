@@ -28,9 +28,8 @@ Each IR layer adds its own scheduling-specific Stmts on top:
 - Kernel IR: ``Smem``, ``Sync``, ``TreeHalve``, plus the shared
   constructs.
 
-Loop-IR's ``LoopOp``, ``LoopMeta``, and validation stay in ``ir/loop/`` because they enforce
-Loop-IR-specific invariants. Shared body normalization and structural identity stay here in
-``ir/stmt/``.
+Loop-IR's ``LoopOp`` and validation stay in ``ir/loop/`` because they enforce Loop-IR-specific
+invariants. Body analysis, demand reconstruction, normalization and structural identity stay here.
 """
 
 from emmy.compiler.ir.stmt.base import (
