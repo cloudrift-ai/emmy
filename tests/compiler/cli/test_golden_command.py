@@ -162,6 +162,7 @@ def test_restamp_drops_a_piece_row_the_fresh_set_no_longer_mints_under_a_current
         handle_golden_restamp(Namespace(paths=[str(path)]))
     assert f"dropped row {piece['name']}: stored identity equals none" in caplog.text
     assert "its kernel set lost its measurements" in caplog.text
+    assert "1 rows kept" in caplog.text
     rows = GoldenFile.load(path).configs[0].realizations
     assert piece["identity"] not in [row.identity for row in rows]
     assert all(piece["name"] not in row.kernel_set for row in rows)

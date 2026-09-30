@@ -244,6 +244,7 @@ def _rekeyed_rows(document: GoldenFile, entry: Config, wire: dict, report: Resta
     )
 
     rows = []
+    demoted_rows: set[int] = set()
     for realization, old, new in zip(entry.realizations, old_records, survivors, strict=True):
         reason = decode_record(new, survivors)
         if reason is not None:
@@ -258,6 +259,7 @@ def _rekeyed_rows(document: GoldenFile, entry: Config, wire: dict, report: Resta
             ):
                 row = replace(row, measurements=None, latency=None)
                 report.rows_demoted.append(old.name)
+                demoted_rows.add(id(row))
             else:
                 report.rows_kept += 1
         else:
@@ -267,6 +269,10 @@ def _rekeyed_rows(document: GoldenFile, entry: Config, wire: dict, report: Resta
     # spells nothing, and a repository golden refuses a row that spells nothing.
     for row in [row for row in rows if row.kernel_set_state(rows) is GoldenEntryState.INVENTORY]:
         rows.remove(row)
+        if id(row) in demoted_rows:
+            report.rows_demoted.remove(row.name)
+        else:
+            report.rows_kept -= 1
         report.rows_dropped.append(f"{row.name}: its kernel set lost its measurements")
     names = {row.name for row in rows}
     return [replace(row, kernel_set=tuple(name for name in row.kernel_set if name in names)) for row in rows]
