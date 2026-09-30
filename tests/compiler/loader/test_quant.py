@@ -1563,15 +1563,15 @@ def _w4a4_graph(modules, *, k=32, dtype="f32"):
 
 
 def _static_quantize_ref(x, s2):
-    """The spelled quantize's f32 vLLM activation algebra, with exact reciprocals in NumPy."""
+    """The spelled quantize's f32 activation algebra, with exact division in NumPy."""
     blocks = x.astype(np.float32).reshape(*x.shape[:-1], -1, 16)
-    inv = np.float32(1) / np.float32(s2)
-    ratio = (np.abs(blocks).max(axis=-1) * (np.float32(1) / np.float32(6))) * inv
+    ratio = (np.abs(blocks).max(axis=-1) * (np.float32(1) / np.float32(6))) * (
+        np.float32(1) / np.float32(s2)
+    )
     scale_bits = encode_f8(ratio, "f8e4m3")
     decoded = decode_f8(scale_bits, "f8e4m3")
-    fused = decoded * (np.float32(1) / inv)
-    output_scale = np.float32(1) / np.maximum(fused, np.float32(1e-12))
-    quot = blocks * output_scale[..., None]
+    fused = decoded * np.float32(s2)
+    quot = blocks / np.maximum(fused[..., None], np.float32(1e-12))
     return dequantize_nvfp4(encode_f4x2(quot.reshape(x.shape)), scale_bits, np.float32(s2).reshape(1))
 
 
@@ -1616,7 +1616,7 @@ def test_spell_static_fp4_encodes_before_f16_fused_scale_rounding(tmp_path):
     g = _w4a4_graph({"layer": 8})
     assert spell_quantized_constants(g, str(tmp_path)) == 1
     assert spell_static_fp4_activations(g, str(tmp_path)) == 1
-    assert g.buffer("x_static_fp4_output_scale").dtype.name == "f32"
+    assert g.buffer("x_static_fp4_fused32").dtype.name == "f32"
     g.outputs.extend(["x_static_fp4_scale_bits", "x_static_fp4_bits"])
 
     x = np.zeros((4, 32), dtype=np.float32)
@@ -2004,6 +2004,7 @@ _FRONTEND_BAND_ALLOWLIST = {
     "emmy/compiler/loader/safetensors.py",  # checkpoint reads (fp8 bits, scale tensors)
     "emmy/compiler/loader/synthesize.py",  # writes the checkpoint ``--quantize`` then reads back through the speller
     "emmy/compiler/trace/huggingface.py",  # quantized-twin construction + detection
+    "emmy/serving/mlp.py",  # checkpoint leaf/profile reader and post-trace spelling for the mixed MLP lane
     "emmy/serving/native/prepare.py",  # checkpoint preparation: rejects quantized models before tracing
     "emmy/serving/vllm_model_gen.py",  # loader-role: routes checkpoint keys (scale siblings included) into the fork's attention
 }
