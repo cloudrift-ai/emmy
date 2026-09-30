@@ -161,7 +161,7 @@ class Realization(Wire, Row):
         describes. This is the one reading of "verified" that a repository check, a whole-file
         bench walk and the tuner's do-not-overwrite check share."""
         state = self.state
-        if state is GoldenEntryState.VERIFIED or not self.kernel_set:
+        if not self.kernel_set:
             return state
         by_name = {row.name: row for row in realizations}
         members = [by_name.get(name) for name in self.kernel_set]
@@ -171,7 +171,7 @@ class Realization(Wire, Row):
             if row.identity and row is not self and row.knobs and any(family_of(str(key)) != "PLACE" for key in row.knobs)
         ]
         if any(member is None for member in members):
-            return state
+            return GoldenEntryState.INVENTORY
         if all(member.state is GoldenEntryState.VERIFIED for member in [*members, *receipts]):
             return GoldenEntryState.VERIFIED
         return state
