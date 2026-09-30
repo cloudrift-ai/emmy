@@ -17,6 +17,7 @@ is reachable from Loop IR and from the digest, not from a materialized
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable, Iterator
 from dataclasses import replace
 from itertools import count, product
@@ -54,16 +55,12 @@ def _normalize_body(stmts: Body) -> Body:
     expanded = expand_calls(stmts)
     # Calls are storage sharing only. Full normalization sees every operation, so reduction
     # fusion, executable identity and Tile IR's common-cone detection use the same CSE form.
-    stmts = prepare_body(expanded) if expanded is not stmts else stmts
-    stmts = dedup_loads(stmts)
-    # Close the structural cleanup before labeling the relation graph. Coordinate spelling
-    # exposes duplicates without paying for canonical sibling order at every round.
-    stmts = _canonicalize_exprs(stmts)
+    stmts = expanded
     while True:
-        reduced = dedup_loads(merge_sibling_reduce_loops(stmts))
+        reduced = dedup_loads(_canonicalize_exprs(prepare_body(stmts)))
         if reduced == stmts:
             return _canonical_order(reduced)
-        stmts = _canonicalize_exprs(reduced)
+        stmts = reduced
 
 
 def prepare_body(stmts: Body) -> Body:
@@ -697,96 +694,86 @@ def simplify_body(body: Body) -> Body:
 # ---------------------------------------------------------------------------
 
 
+def _value_key(stmt: Stmt) -> Stmt | None:
+    """A value's structural operation with anonymous results, retaining every semantic field."""
+    if stmt.nested() or not (stmt.pure or isinstance(stmt, Accum)) or isinstance(stmt, Load) and stmt.carried:
+        return None
+    if isinstance(stmt, Assign) and stmt.op.commutative:
+        stmt = replace(stmt, args=tuple(sorted(stmt.args)))
+    if isinstance(stmt, Accum) and stmt.base == stmt.name:
+        stmt = replace(stmt, base=None)
+    names = {name: f"${index}" for index, name in enumerate(stmt.defines())}
+    return stmt.rename(names)
+
+
 def dedup_loads(stmts: Body) -> Body:
-    """Drop duplicate ``Load`` stmts within nested scopes, and with them the duplicate pure
-    statements they feed.
+    """Scoped value numbering of pure bindings and canonical reductions.
 
-    Two ``Load`` stmts with the same ``(input, index)`` read the same
-    value; keep the first and rewire downstream SSA references to its
-    name. Operates per-scope: a Load at an outer scope is reused by
-    inner siblings (their identical ``index`` doesn't reference any
-    inner-axis Var, so the values are equal). Loads inside a nested
-    scope are not visible to outer / sibling scopes.
+    Structural keys include operand representatives and every semantic field, never printed
+    expressions. Dominating values remain available until a buffer write or a rebound operand
+    invalidates them. Each lexical scope owns its aliases; only equivalent finalized reductions
+    export aliases to their enclosing scope. Ordinary values become available across sibling
+    scopes through legal code motion and fusion in the normalization fixed point.
 
-    An ``Assign`` or ``Accum`` spelling the same operation over the same (already rewired) names
-    as one before it in scope is the same value too — the fusion splice inlines a producer at
-    every use, and two consumers in one reduce loop then carry two copies of one accumulation
-    (a decoder half's gate and up channels each fold the o_proj result their norm reads). Keeping
-    the first and aliasing the second is what makes those copies one cone the tile lift can cut
-    once; the pass is named for the loads because that is where a duplicate chain starts.
-
-    Hygienic: an inner scope that re-binds a name the outer scope
-    deduped keeps its own binding — those are different variables
-    (see :func:`~emmy.compiler.ir.stmt.passes.rename_free`)."""
+    A reduction is equivalent only with a common seed and one update per iteration, with no
+    in-loop reads of its partial state. Repeated updates and unseeded state are not SSA values.
+    """
     from emmy.compiler.ir.stmt.passes import rename_free  # noqa: PLC0415
 
-    stmts = Body.coerce(stmts)
-
-    def written_buffers(stmt: Stmt) -> frozenset[str]:
-        return frozenset(
-            (*stmt.external_writes(), *(name for child in stmt.nested() for member in child.iter() for name in member.external_writes()))
-        )
-
-    def walk(body: Body, env: dict[tuple, tuple[str, ...]], carried: dict[str, str]) -> Body:
+    def walk(body: Body, env: dict[Stmt, tuple[str, ...]], carried: dict[str, str], seeded: bool = False) -> Body:
         local = dict(env)
         alias: dict[str, str] = {}
+        counts = Counter(name for stmt in body for name in stmt.defines())
+        reductions = {
+            stmt.name for stmt in body if isinstance(stmt, Accum) and seeded
+            and counts[stmt.name] == 1 and stmt.name not in body.ssa_uses
+        }
 
-        def rename(n: str) -> str:
-            return alias.get(n, n)
-
-        def descend(inner: Body, clobbered: frozenset[str], coordinates: frozenset[str]) -> Body:
-            """Keep cached values only while their definitions and dependencies retain their bindings.
-            Rebound coordinates change a read even when its index has the same spelling. Accumulator
-            aliases carry out of the inner loop to the scope that reads the sum."""
-            shadowed = Body.coerce(inner).ssa_defs | coordinates
-            env = {k: v for k, v in local.items() if k[0] not in clobbered and not shadowed.intersection((*v, *k[-1]))}
-            return walk(inner, env, alias)
-
-        def invalidate(buffers: frozenset[str]) -> None:
-            for key in tuple(local):
-                if key[0] in buffers:
+        def invalidate(buffers: frozenset[str], names: frozenset[str] = frozenset()) -> None:
+            if not buffers and not names:
+                return
+            for key, values in tuple(local.items()):
+                if buffers.intersection(key.external_reads()) or names.intersection((*values, *free_names(key))):
                     del local[key]
 
         out: list[Stmt] = []
-        for s in body:
-            if isinstance(s, Load):
-                # Rewire any SSA names in this Load's *index* to their deduped
-                # alias first — a gather ``weight[(int)in0, a]`` whose index
-                # Load ``in0`` was itself deduped must follow ``in0`` to the
-                # kept name, or the index dangles after the duplicate is
-                # dropped. (No-op for plain axis indices: axes aren't aliased.)
-                s = s.rewrite(rename)
-                key = (s.input, tuple(e.pretty() for e in s.index), s.width, s.dtype, s.deps())
-                if key in local:
-                    alias.update(dict(zip(s.names, local[key], strict=True)))
-                    continue
-                local[key] = s.names
-                out.append(s)
-            elif isinstance(s, Assign | Accum):
-                s = rename_free(s, alias)
-                key = (
-                    ("assign", s.op, tuple(sorted(s.args)) if s.op.commutative else s.args, s.dtype)
-                    if isinstance(s, Assign)
-                    else ("accum", s.value, s.op, s.dtype, s.axes, repr(s.base))
-                ) + (frozenset(s.deps()),)
-                if key in local:
-                    alias[s.name] = local[key][0]
-                    if isinstance(s, Accum):
-                        carried[s.name] = local[key][0]
-                    continue
-                local[key] = (s.name,)
-                out.append(s)
-            elif s.nested():
-                clobbered = written_buffers(s)
-                renamed = rename_free(s, alias)
-                out.append(renamed.with_bodies(tuple(descend(child, clobbered, renamed.binds_axes()) for child in renamed.nested())))
+        for original in body:
+            rebound = frozenset(name for name in original.defines() if counts[name] > 1)
+            if rebound:
+                invalidate(frozenset(), rebound)
+                alias = {name: value for name, value in alias.items() if name not in rebound and value not in rebound}
+            stmt = rename_free(original, alias)
+            if stmt.nested():
+                clobbered = frozenset(name for child in stmt.nested() for member in child.iter() for name in member.external_writes())
+                children = []
+                for child in stmt.nested():
+                    shadowed = child.ssa_defs | stmt.binds_axes()
+                    available = {
+                        key: values for key, values in local.items()
+                        if not clobbered.intersection(key.external_reads())
+                        and not shadowed.intersection((*values, *free_names(key)))
+                        and not isinstance(key, Accum)
+                    }
+                    children.append(walk(child, available, alias, isinstance(stmt, Loop) and stmt.seed))
+                out.append(stmt.with_bodies(tuple(children)))
                 invalidate(clobbered)
-            else:
-                out.append(rename_free(s, alias))
-                invalidate(frozenset(s.external_writes()))
+                continue
+            key = _value_key(stmt)
+            if rebound or isinstance(stmt, Accum) and stmt.name not in reductions:
+                key = None
+            if key is not None:
+                if key in local:
+                    aliases = dict(zip(stmt.defines(), local[key], strict=True))
+                    alias.update(aliases)
+                    if isinstance(stmt, Accum):
+                        carried.update(aliases)
+                    continue
+                local[key] = stmt.defines()
+            out.append(stmt)
+            invalidate(frozenset(stmt.external_writes()))
         return Body(out)
 
-    return walk(stmts, {}, {})
+    return walk(Body.coerce(stmts), {}, {})
 
 
 # ---------------------------------------------------------------------------

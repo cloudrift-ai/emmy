@@ -1,10 +1,10 @@
 """Tests for Load deduplication during body normalization."""
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Literal, Var
+from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.stmt.blocks import Loop
 from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.stmt.leaves import Assign, Load, Write
+from emmy.compiler.ir.stmt.leaves import Accum, Assign, Let, Load, Select, SelectBranch, Write
 from emmy.compiler.ir.stmt.normalize import dedup_loads, normalize_body
 
 
@@ -72,6 +72,67 @@ def test_normalize_body_dedups_loads_and_rewires_gather_indices() -> None:
 
 
 ZERO = (Literal(0, "int"),)
+
+
+def test_cse_does_not_use_expression_printing(monkeypatch) -> None:
+    monkeypatch.setattr(BinaryExpr, "pretty", lambda self: "index")
+    indices = [BinaryExpr("+", Var("i"), Literal(n, "int")) for n in (1, 2)]
+    body = Body(Load(name=f"x{n}", input="x", index=(index,)) for n, index in enumerate(indices))
+    assert dedup_loads(body) == body
+
+
+def test_cse_shares_selections_and_their_downstream_cones() -> None:
+    body = Body((
+        Let(name="zero", value=Literal(0, "int")),
+        Let(name="other_zero", value=Literal(0, "int")),
+        Select(name="left", branches=(SelectBranch("x", Var("p")), SelectBranch("zero", Literal(1, "int")))),
+        Select(name="right", branches=(SelectBranch("x", Var("p")), SelectBranch("other_zero", Literal(1, "int")))),
+        Assign(name="a", op="exp", args=("left",)),
+        Assign(name="b", op="exp", args=("right",)),
+        Write(output="out", index=ZERO, value="b"),
+    ))
+    out = dedup_loads(body)
+    assert [type(s) for s in out] == [Let, Select, Assign, Write]
+    assert out[-1].value == "a"
+
+
+def test_cse_selection_predicates_observe_rebound_coordinates() -> None:
+    selection = lambda name: Select(name=name, branches=(SelectBranch("x", Var("k")), SelectBranch("y", Literal(1, "int"))))
+    body = Body((selection("a"), Loop(axis=Axis("k", 4), body=(selection("b"), Write(output="out", index=(Var("k"),), value="b")))))
+    assert dedup_loads(body) == body
+
+
+def test_cse_does_not_drop_repeated_accumulator_updates() -> None:
+    update = Accum(name="sum", value="x", axes=("k",))
+    body = Body((Loop(axis=Axis("k", 8), body=(update, update)),))
+    assert dedup_loads(body) == body
+
+
+def test_cse_does_not_alias_distinct_unseeded_accumulators() -> None:
+    body = Body((Loop(axis=Axis("k", 8), seed=False, body=(
+        Accum(name="left", value="x", axes=("k",)), Accum(name="right", value="x", axes=("k",)),
+    )),))
+    assert dedup_loads(body) == body
+
+
+def test_normalization_closes_simplification_cse_and_invariant_motion() -> None:
+    """An equal gather index exposes a constant predicate, then an invariant shared cone."""
+    body = Body((
+        Load(name="x", input="x", index=ZERO),
+        Loop(axis=Axis("i", 4), body=(
+            Load(name="a", input="indices", index=(Var("i"),)),
+            Load(name="b", input="indices", index=(Var("i"),)),
+            Select(name="s", branches=(
+                SelectBranch("x", BinaryExpr("<", BinaryExpr("-", Var("a"), Var("b")), Literal(1, "int"))),
+                SelectBranch("a", Literal(1, "int")),
+            )),
+            Assign(name="v", op="exp", args=("s",)),
+            Write(output="out", index=(Var("i"),), value="v"),
+        )),
+    ))
+    normalized = normalize_body(body)
+    assert any(isinstance(s, Assign) and s.op.name == "exp" for s in normalized)
+    assert normalize_body(Body(tuple(normalized))) == normalized
 
 
 def test_dedup_loads_closes_commutative_chains_after_aliasing() -> None:
