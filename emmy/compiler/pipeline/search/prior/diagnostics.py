@@ -6,7 +6,7 @@ prints :func:`report`: how many rows and op structures it holds, and how many go
 it has any data for. Counting, not judging.
 
 **Ranking quality is deliberately not computed here.** It was, until 2026-08: a per-op pick ratio
-and a median Spearman over the reservoir, grouped by :meth:`Dataset.group_by_op`. That key is the
+and a median Spearman over the reservoir, grouped by :meth:`Samples.group_by_op`. That key is the
 ``S_*`` signature alone, so one group pooled measurements taken under different opt levels — a
 sweep of that era wrote both into one reservoir — and pooled cards. The regimes invert, so the
 ratio compared measurements taken under different compilers. Both
@@ -20,7 +20,7 @@ per-feature blame and ablation Δ — were retired at the same time; see Part 8 
 
 from __future__ import annotations
 
-from emmy.compiler.pipeline.search.data import Dataset, ShapeKey, is_matmul
+from emmy.compiler.pipeline.search.dataset import Samples, ShapeKey, is_matmul
 from emmy.compiler.pipeline.search.prior.report import TOP_KS
 
 
@@ -72,7 +72,7 @@ def golden_prior_eval(prior, kernel_filter: str | None = None) -> str:
     # twins never merge) so each golden shape maps to the S_* signature it was
     # tuned under.
     index: dict[ShapeKey, dict] = {}
-    for sig in Dataset.from_prior(prior).group_by_op():
+    for sig in Samples.from_prior(prior).group_by_op():
         d = dict(sig)
         if not is_matmul(d):
             continue
@@ -115,37 +115,33 @@ def golden_prior_eval(prior, kernel_filter: str | None = None) -> str:
     return "\n".join(lines)
 
 
-def golden_deploy_perf(prior, kernel_filter: str | None = None) -> dict[str, float]:
-    """Per golden shape, ``pick_us / golden_us`` — the deployable (-O3) latency of the
-    prior's predicted-best **measured** config over the golden's recorded latency, read
-    from the prior's reservoir with **no re-bench**.
+def golden_deploy_perf(prior, pools) -> dict[tuple[str, str, str], float]:
+    """Per golden pool, keyed ``(gpu, name, regime)``, ``pick_us / golden_us`` — the deployable (-O3) latency of
+    the prior's predicted-best **measured** config over the pool's fastest golden row, read from the prior's
+    reservoir with **no re-bench**.
 
     Tuning measures in the deployable regime and feeds every row to the prior, so each tuned
     shape's best config has a deployable row in the reservoir. For each
-    golden shape we take the op group's ``H_opt=3`` rows (the filter still earns its place: a
+    pool we take the op group's ``H_opt=3`` rows (the filter still earns its place: a
     legacy checkpoint can hold rows from the era of a separate ranking lane), pick the one
     ``Prior.pick`` deploys (measured evidence first, model argmin otherwise — the same selection
     greedy ``compile`` / ``run`` make), and divide its measured latency by the golden's
-    recorded ``emmy_us`` (also -O3 → same regime, so the ratio is a real
-    deployable speed comparison; <1.0 = the prior's pick is faster than golden). Shapes
+    recorded time (also -O3 → same regime, so the ratio is a real
+    deployable speed comparison; <1.0 = the prior's pick is faster than golden). Pools
     with no -O3 reservoir row are omitted (the caller renders ``—``). The reservoir is
     used rather than the raw ``perf`` table because only it carries the ``H_*`` regime
     columns needed to isolate the deployable measurements.
 
-    Goldens are scoped to the live card (:func:`goldens_for_live_gpu`) so a multi-GPU
-    goldens dir doesn't make a name's per-card entries collide on the GPU-blind
-    ``ShapeKey`` (e.g. RTX 5090 / RTX PRO 6000 both ``(12, 0)``)."""
-    from emmy.compiler.pipeline.search.golden import goldens_for_live_gpu
-    from emmy.compiler.pipeline.search.pins import fast_math_knobs, precision_trading_pins
-
-    GOLDEN_RECORDS = goldens_for_live_gpu()
+    The caller scopes ``pools`` to the live card, so a multi-GPU dataset doesn't make one shape's per-card
+    pools collide on the GPU-blind ``ShapeKey`` (e.g. RTX 5090 / RTX PRO 6000 both ``(12, 0)``)."""
+    from emmy.compiler.pipeline.search.pins import fast_math_knobs, precision_trading_pins  # noqa: PLC0415
 
     # Deployable (-O3) measured rows per matmul op group, indexed by ShapeKey.
     # An fp32 square and its ``.fp16`` twin share (free_prod, reduce), so the key's
     # dtype flag is what keeps them apart — ``ShapeKey.from_s_features`` derives it
     # from ``S_dtype_f32`` (see its docstring for why nothing else can be the key).
     index: dict[ShapeKey, list] = {}
-    for sig, samples in Dataset.from_prior(prior).group_by_op().items():
+    for sig, samples in Samples.from_prior(prior).group_by_op().items():
         d = dict(sig)
         if not is_matmul(d):
             continue
@@ -154,34 +150,25 @@ def golden_deploy_perf(prior, kernel_filter: str | None = None) -> dict[str, flo
             continue
         index.setdefault(ShapeKey.from_s_features(d), []).extend(o3)
 
-    out: dict[str, float] = {}
-    for g in GOLDEN_RECORDS:
-        if not g.is_matmul or not g.emmy_us:
-            continue
-        if kernel_filter and kernel_filter not in g.name:
-            continue
-        leaves = index.get(g.shape_key)
+    out: dict[tuple[str, str, str], float] = {}
+    for pool in pools:
+        leaves = index.get(ShapeKey.from_s_features(pool.kernel.stamps))
         if not leaves:
             continue
         best_i, _ = prior.pick([s.all_knobs() for s in leaves])
-        # Within-regime comparison (the golden.py convention: a shape's fast-math entry sits
-        # BESIDE its standard one, and each regime is judged against its own): a gate-off pick
-        # must not be measured against an [fm] golden it cannot reach — and vice versa. Skip
-        # cross-regime pairs; the pick's regime derives from its knobs like the golden's.
-        if fast_math_knobs(leaves[best_i].knobs) != precision_trading_pins(g.pin_map):
+        # Within-regime comparison (each regime is judged against its own): a gate-off pick must not be
+        # measured against an [fm] golden it cannot reach — and vice versa. Skip cross-regime pairs; the
+        # pick's regime derives from its knobs like the pool's from its pins.
+        if fast_math_knobs(leaves[best_i].knobs) != precision_trading_pins(pool.pins):
             continue
-        ratio = leaves[best_i].latency_us / g.emmy_us
-        # A shape may record several parity entries under one name — compare against the BEST
-        # (fastest) recorded golden of the pick's regime, not whichever entry iterates last
-        # (max ratio = min emmy_us).
-        out[g.name] = max(out.get(g.name, ratio), ratio)
+        out[(pool.gpu, pool.name, pool.regime)] = leaves[best_i].latency_us / pool.emmy_us
     return out
 
 
 def report(prior) -> str:
     """The full offline diagnostics block for a (re)fit prior."""
     dataset = prior._dataset
-    groups = Dataset.from_prior(prior).group_by_op()
+    groups = Samples.from_prior(prior).group_by_op()
     lines = [f"[prior] dataset: {len(dataset)} rows, {len(groups)} op-structures, fitted={prior.fitted}"]
     if not prior.fitted:
         lines.append("  no model — dataset below min_rows; run `emmy tune <model>` to gather more")
@@ -197,5 +184,5 @@ def report(prior) -> str:
     lines.append(f"[prior] golden coverage: {covered}/{total} golden matmul shapes have data in the dataset")
     if covered == 0:
         lines.append("  none yet — tune a working golden file (`emmy tune --golden-file PATH`) to validate against them")
-    lines.append("[prior] ranking quality: run `emmy eval prior --dataset db` (this block counts coverage only)")
+    lines.append("[prior] ranking quality: run `emmy eval prior --pools measured` (this block counts coverage only)")
     return "\n".join(lines)

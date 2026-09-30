@@ -50,7 +50,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from emmy.compiler.pipeline.search.data.group import GoldenGroup, Group, MeasuredGroup
+from emmy.compiler.pipeline.search.dataset.group import GoldenGroup, Group, MeasuredGroup
 from emmy.compiler.pipeline.search.metrics import best_dual_rank, spearman, topk_regret
 
 # Minimum pool size a Spearman is reported over. Two rows make ``rho`` computable and meaningless: it is +1 or
@@ -185,7 +185,7 @@ def _measured_metrics(entries: list[tuple[MeasuredGroup, np.ndarray]]) -> dict:
 
 
 def measured_summaries(half: str, groups: Sequence[MeasuredGroup], score: Scorer) -> list[Summary]:
-    """Cells over benched pools, keyed ``gpu`` x ``H_opt`` — the axes :func:`~..data.group.group_measured`
+    """Cells over benched pools, keyed ``gpu`` x ``H_opt`` — the axes :func:`~..db.export.measured_groups`
     already grouped on, minus the op identity that separates the pools within a summary."""
     return _summaries(groups, score, lambda g: {"gpu": g.gpu, "H_opt": f"O{g.h_opt:g}"}, _measured_metrics, half=half)
 

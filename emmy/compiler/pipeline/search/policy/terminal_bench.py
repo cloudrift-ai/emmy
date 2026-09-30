@@ -15,7 +15,7 @@ from emmy.compiler.backend.cuda.program import compile_budget_overrun
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.cuda.ir import CudaOp
 from emmy.compiler.pipeline.passes.identity import kernel_stamps
-from emmy.compiler.pipeline.search.db import KernelRow, PerfStats
+from emmy.compiler.pipeline.search.db import KernelDef, PerfStats
 from emmy.compiler.wire import formed_from, kernel_bindings, kernel_tile, kernel_wire
 
 # The engine logger keeps the existing ``[tune]`` log channel and verbosity toggles.
@@ -249,7 +249,7 @@ def kernel_key(cuda_op) -> tuple | None:
     return None if identity is None else (tile, identity, kernel_bindings(tile))
 
 
-def kernel_row(tile, name: str) -> KernelRow:
+def kernel_row(tile, name: str) -> KernelDef:
     """The ``kernel`` row of a tile kernel: both identities, its wire, the C name it was rendered
     under, whether the wire is the body it was formed from, and its ``S_*`` stamps — the ones the
     identity strategy wrote onto it, which every reader joins evidence on (the deploy's fork signature,
@@ -258,7 +258,7 @@ def kernel_row(tile, name: str) -> KernelRow:
     test's lifted target) gets the features of its wire instead (:func:`kernel_stamps`)."""
     wire = kernel_wire(tile)
     stamped = {str(k): float(v) for k, v in (tile.knobs or {}).items() if str(k).startswith("S_")}
-    return KernelRow(
+    return KernelDef(
         exact_identity=tile.identity_key(structural=False, with_io=True),
         structural_identity=tile.identity_key(with_io=True),
         loop_ir=wire,

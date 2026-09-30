@@ -1460,7 +1460,7 @@ def _print_kernel_stats(graph, bench, golden_benches=None, greedy_fail=None, gre
     from emmy.compiler.ir.cuda.ir import CudaOp, resolve_dim
     from emmy.compiler.ir.expr import Var  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import tuning_knob_items  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.data import ShapeKey  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.dataset import ShapeKey  # noqa: PLC0415
 
     cuda_nodes = _launch_order_cuda_nodes(graph)
     if not cuda_nodes:

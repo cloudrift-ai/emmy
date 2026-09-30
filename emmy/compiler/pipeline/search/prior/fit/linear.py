@@ -10,7 +10,7 @@ This module owns what is specific to the linear model class: the default loss (:
 raw-space L2 regularizer (:func:`l2_penalty`), the optimizer (:func:`fit_weights` — random search plus
 coordinate descent), and the static→dynamic chaining. Anything a different model class would also need lives
 elsewhere: the scoring function itself in :mod:`..linear_model`, the dataset representation in
-``search/data/group.py``,
+``search/dataset/group.py``,
 the model-agnostic rank metrics in :mod:`~..metrics`, and the fold/metrics harness in :mod:`.cv`.
 
 What is optimized is the **deployed** scoring function, not a proxy for it. The descent scores through
@@ -33,7 +33,7 @@ from dataclasses import dataclass, replace
 
 import numpy as np
 
-from emmy.compiler.pipeline.search.data.group import GoldenGroup
+from emmy.compiler.pipeline.search.dataset.group import GoldenGroup
 from emmy.compiler.pipeline.search.metrics import best_rank
 from emmy.compiler.pipeline.search.prior.fit.tables import topk_table
 from emmy.compiler.pipeline.search.prior.linear_model import (

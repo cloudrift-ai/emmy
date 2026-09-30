@@ -7,10 +7,11 @@ the answer, and :class:`MeasuredGroup` holds a benched latency PER ROW, so it al
 pick cost. Nothing generic reads either — the metrics take plain sequences and never see a group — so a
 single label column on the base would be a field with no consumer and two mutually exclusive meanings.
 
-Groups are built by plain functions — :func:`group_measured` below for benched rows, and the golden one in
-``emmy/commands/fit.py``, because case building needs the snippet tracer that ``pipeline/`` must not import —
-and are consumed by the trainers and the fold harness through this one shape; there is no iterator/batching
-layer, the whole dataset is a small in-memory list.
+Groups are built on the DB side (``db/export.py``: ``measured_groups`` for benched rows, and
+``ranking.build_golden_groups`` over the golden pools the export reads — a golden pool is one kernel's schedule
+space, which the builder has to enumerate before it is a group) and travel as a :class:`~.document.Dataset`; the
+trainers and the fold harness consume them through this one shape. There is no iterator/batching layer, the whole
+dataset is a small in-memory list.
 
 It lives with the other data types rather than under ``prior/fit/`` because a candidate pool is data, not a
 fitter detail — the fit is only its first consumer. The planned evaluation reports rank over the same pools, and
@@ -42,17 +43,13 @@ the answer.
 
 from __future__ import annotations
 
-from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 import numpy as np
 
-from emmy.compiler.pipeline.search.data.freeze import freeze_reason, regime_of
-from emmy.compiler.pipeline.search.data.sample import measured_features
-from emmy.compiler.pipeline.search.db import knobs_json
-from emmy.compiler.pipeline.search.features import ROUTING_FEATURES, is_dynamic_row, knob_features
-from emmy.compiler.structural import digest
+from emmy.compiler.pipeline.search.dataset.pool import GoldenPool
+from emmy.compiler.pipeline.search.features import ROUTING_FEATURES, is_dynamic_row
 
 # The default feature view: the ``D_*`` geometry/occupancy features plus the two ``MMA_*`` atom features that
 # vary between a pool's candidates — ``MMA_tier`` (the warp/scalar tier discriminator) and ``MMA_acc_bits``
@@ -168,7 +165,7 @@ class Group:
     tier: str
     gpu: str
     # The cross-validation fold group: this pool's extent identity — spelled by the golden builder from the
-    # source record's ``ShapeKey``, and by :func:`group_measured` as the op's own signature. Goldens sharing it
+    # source record's ``ShapeKey``, and by :func:`measured_groups` as the op's own signature. Goldens sharing it
     # compete over the same candidates, so they must be held out TOGETHER by the fold harness. Unlike ``gpu``
     # (a report axis) this decides folds; unlike ``tier`` (a label) it is load-bearing.
     shape: str
@@ -235,7 +232,7 @@ class MeasuredGroup(Group):
     takes the base and this class adds only the one fact the base has nowhere to put.
 
     :attr:`h_opt` is the compile regime every row in the pool was measured under. It is part of the grouping key
-    (:func:`group_measured`) rather than a description of it: ``-O1`` and ``-O3`` reorder the same candidates
+    (:func:`measured_groups`) rather than a description of it: ``-O1`` and ``-O3`` reorder the same candidates
     often enough that a pool spanning both would measure neither, so the regime is what makes these rows
     comparable at all. A report reads it as an axis, and it is a FIELD rather than a lookup into the packed
     ``H_opt`` column for a mechanical reason: :meth:`Group.matrix` memoizes exactly one projection, so asking
@@ -294,6 +291,9 @@ class GoldenGroup(Group):
     # single-golden functions exactly. Stored as the indices themselves: the metrics take indices, so a
     # per-row marker column would only be an encoding to decode back on every read.
     golden_ids: tuple[int, ...] = field(kw_only=True)
+    # The golden pools this group was built from — one, or several that packed identically and folded — each with
+    # its kernel's definition and its verified rows, so a dataset carries what the deploy check re-lowers.
+    pools: tuple[GoldenPool, ...] = field(default=(), kw_only=True)
 
     @classmethod
     def from_dicts(
@@ -324,6 +324,7 @@ class GoldenGroup(Group):
         packed: tuple[tuple[str, ...], np.ndarray, bool],
         goldens: int | Sequence[int],
         total: int | None = None,
+        pools: Sequence[GoldenPool] = (),
     ) -> GoldenGroup:
         """The same over an already-packed pool — the entry point for a builder that had to pack before it
         could know which goldens landed in it, which is every builder that deduplicates pools. ``goldens`` is
@@ -343,55 +344,16 @@ class GoldenGroup(Group):
             )
         rows = (goldens,) if isinstance(goldens, int) else goldens
         ids = tuple(sorted({int(i) for i in rows}))
-        return cls(key, name, tier, gpu, shape, dynamic, packed[0], matrix, len(matrix) if total is None else total, golden_ids=ids)
-
-
-def kernel_sig(feats: dict) -> str:
-    """The op signature of the kernel a row measured, digested from its own ``S_*`` stamps — exactly what
-    :meth:`~...passes.identity.Identity.op_sig` computes for an op, applied to the row's recorded stamps."""
-    return digest(*sorted((k, float(v)) for k, v in feats.items() if k.startswith("S_")))
-
-
-def group_measured(rows) -> tuple[list[MeasuredGroup], dict[str, int]]:
-    """Measured ``perf`` rows (:class:`~..db.PerfRow`) as groups labelled with measured µs, keyed
-    ``(gpu, kernel_sig, opt, flags)`` — one group per set of configs that genuinely competed, plus a count
-    of what was dropped and why.
-
-    Each part of the key is load-bearing, and each has a plausible wrong answer:
-
-    - **The kernel's own structural signature** (:func:`kernel_sig`). Two kernels of the same structure
-      on the same card are ONE tuning problem whatever produced them — which is already how the deploy
-      path joins evidence (``Prior.evidence_pick`` and ``policy/greedy._db_measured_pick`` both index on
-      the ``S_*`` signature), so this makes the candidate pools agree with the tier that consumes them.
-      Keying on where a decision was OFFERED instead gets it wrong in both directions: a site realized
-      as several kernels files a piece beside the whole (the RTX 5090 freeze once paired a 5.9 µs norm
-      kernel with a 131 ms whole-op row), and one kernel reached from two sites is tuned twice.
-    - **The opt level and the precision regime.** The regimes must not pool — ``-O1`` and ``-O3`` invert
-      often enough that a merged group measures neither, and fast math changes the code a kernel runs as.
-      No other compiler flag is a regime.
-    - **``gpu``.** Cards never pool.
-
-    Admission is :func:`~.freeze.freeze_reason`, the rule a freeze is written under, failures excluded
-    among the rest: the watchdog sentinel is a huge positive that any model gets right for free and that
-    inflates every correlation over the pool.
-
-    The counts are returned rather than logged because a report has to publish them: "Spearman 0.6 over
-    340 groups" means something different when 143 rows were dropped than when none were. Reasons are
-    keyed by their leading clause, the same normalization ``write_freeze`` counts its own drops by, so
-    the two publish one vocabulary."""
-    dropped: dict[str, int] = defaultdict(int)
-    buckets: dict[tuple, list] = defaultdict(list)
-    for r in rows:
-        reason = freeze_reason(r)
-        if reason is not None:
-            dropped[reason.split(":")[0]] += 1
-        else:
-            buckets[(r.gpu, kernel_sig(r.knobs), float(r.opt), regime_of(r.flags))].append(r)
-
-    groups = []
-    for (gpu, sig, h_opt, regime), grp in sorted(buckets.items()):
-        grp.sort(key=lambda r: (r.kernel, knobs_json(r.knobs)))  # a pool's row order is its own, not the DB's
-        feats = [knob_features(measured_features(r)) for r in grp]
-        key = f"{gpu}/{sig}@O{h_opt:g}" + (f" {regime}" if regime else "")
-        groups.append(MeasuredGroup.from_measured(key, gpu, sig, h_opt, [r.stats.median for r in grp], feats))
-    return groups, dict(dropped)
+        return cls(
+            key,
+            name,
+            tier,
+            gpu,
+            shape,
+            dynamic,
+            packed[0],
+            matrix,
+            len(matrix) if total is None else total,
+            golden_ids=ids,
+            pools=tuple(pools),
+        )

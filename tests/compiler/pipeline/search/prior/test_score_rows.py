@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from emmy.compiler.pipeline.search.data.group import GoldenGroup
+from emmy.compiler.pipeline.search.dataset.group import GoldenGroup
 from emmy.compiler.pipeline.search.prior.fallback import FallbackPrior
 from emmy.compiler.pipeline.search.prior.linear_model import LinearModel
 from emmy.compiler.pipeline.search.prior.offline import OfflinePrior
@@ -46,7 +46,7 @@ def test_the_linear_half_scores_a_whole_pool_by_its_own_weights():
 
 
 def test_a_narrower_feature_view_does_not_move_the_linear_halfs_ranks():
-    """Why ``eval prior --dataset golden`` may build its pools over the FULL featurization while ``emmy fit``
+    """Why ``eval prior --pools golden`` may build its pools over the FULL featurization while ``emmy fit``
     trains under a narrow ``D_*`` view, and still report the same rank: the model projects the pool onto its
     own weight names, so every column outside them is inert."""
     prior = _linear(D_a=2.0)

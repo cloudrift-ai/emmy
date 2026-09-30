@@ -41,19 +41,6 @@ relevant `ARCHITECTURE.md` before answering.
   (graphs, CUDA kernels, execution plans) to this directory. Frontend provenance slices used by `tune --bench` stay
   in memory; stable Torch IR is persisted only inside golden files. Kernels are named after the operations they realize
   (`k_rms_norm`, `k_sdpa_reduce`).
-- `EMMY_FREEZE_DIR` environment variable (optional) — overrides the measurement freeze `emmy dataset import` loads
-  into the dataset DB by default, the instance `emmy eval prior --dataset db` reads. Defaults to
-  `emmy/compiler/pipeline/search/freezes/`, where a snapshot that is identical on every machine is checked in once a
-  card has been collected — what makes a reported prior number reproducible. A freeze is a golden file per card:
-  each kernel's definition (its Loop IR body) and its measured schedule rows, nothing the compiler computed, so the
-  import re-lowers every kernel and a compiler change is a re-import, never a re-collection. None is checked in at
-  the moment (the RTX 5090 is re-collected through the `perf` writer); until then name a tune DB on the `emmy dataset
-  import` command line. The tune DB and the online reservoir are machine-local and mutable; reach them with `--db`
-  when you want one machine's data, not as the default. The freeze's files are tracked in **git LFS**. Re-freeze with
-  `emmy dataset freeze`; `emmy dataset check` counts the rows of an instance whose tables disagree with themselves.
-- `EMMY_DATASET_DB` environment variable (optional) — overrides the dataset DB path (`~/.cache/emmy/dataset.db`):
-  the tune DB's tables in a file of their own, filled by `emmy dataset import` and read by the measurement-data
-  readers, never by a compile.
 - `EMMY_TUNE_DB` environment variable (optional) — overrides the default tuning SQLite cache path
   (`~/.cache/emmy/autotune.db`). `emmy tune` reads from / writes to this path, and a greedy `compile` / `run` /
   `serve` creates it on first use: the golden rows in scope (the live card's repository goldens, or the file
@@ -194,10 +181,20 @@ it before answering any CLI-flag question. Quickstart for the common paths:
 | `emmy compile <model_or_ir> [--layer N] [--ir STAGE] [--dynamic …] [--target sm_NN]`, `emmy compile --golden PATH --program N --ir loop -o fresh.json` | trace + run the compiler; print or save any IR stage; lower a golden's stored program and write the stage as the golden's wire |
 | `emmy run <model_or_ir_or_--code> [--bench]` | compile + execute on the CUDA backend, check accuracy, optionally bench vs eager / `torch.compile` |
 | `emmy tune <target> [--bench] [--gpus N]` | two-level autotune; writes the online prior + tune DB |
-| `emmy eval {knobs,prior,golden,variants,failures} [--dataset {golden,db}]` | inspect the priors / tune DB |
+| `emmy eval {knobs,prior,golden,variants,failures} DATASET [--pools {golden,measured}]` | inspect the priors / tune DB |
 | `emmy golden {check,restamp} [PATH…]`, `emmy golden kernels PATH [--program N]` | name the stored targets a fresh lowering of a golden's programs no longer writes; rewrite the golden onto that lowering (every repository golden by default); print the Loop IR pool a golden stores |
-| `emmy dataset {import,freeze,check} …` | fill the dataset DB from measurement freezes, golden files and tune DBs, every kernel re-lowered; snapshot a DB into a freeze; check a DB's tables agree with themselves |
+| `emmy fit DATASET WEIGHTS [--folds N]` | fit the offline prior from a dataset's golden groups and cross-validate it; the whole refit is README's "Fit the offline prior" |
+| `emmy db {import,export,freeze,check} --db PATH …` | fill a DB instance from the freeze directories, golden files and tune DBs named on the command line (nothing by default, and never the tune DB), every kernel re-lowered; export its rows as the dataset the fit and `eval prior` read; snapshot it into a freeze; check its tables agree with themselves |
 | `emmy {pull,trace,generate,inspect,compare} …` | model download, IR tracing, the naive generation oracle, IR inspection, dump diffing |
+ Refitting the offline prior is the four commands under README's "Fit the offline prior". Every path is explicit — the
+DB instance `emmy db import --db PATH` fills (the tune DB's tables in a file of their own, never read by a compile; a
+measurement freeze directory under `emmy/compiler/pipeline/search/freezes/`, tracked in **git LFS**, none checked in
+at the moment, or a tune DB joins the goldens the same way), and the dataset `emmy db export` writes from it (a
+`manifest.json` beside one matrix file per pool, which `emmy fit` and `emmy eval prior` read; the readers never open
+the DB) — and nothing has a default, so a refit never touches the tune DB. The examples keep both under `_data/`,
+which git ignores. `emmy fit DATASET emmy/compiler/pipeline/search/prior/weights/offline.json` rewrites the checked-in
+weights. Re-export and refit after a featurizer version bump (a stale dataset or artifact is refused at load) and when
+the hardware goldens change; the recipe goldens are not in the documented set yet.
 
 Quick test models / scripts (for local iteration):
 

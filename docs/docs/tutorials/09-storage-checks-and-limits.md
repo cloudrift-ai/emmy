@@ -52,7 +52,7 @@ is a decision, not a measurement of one kernel.
 **Nothing migrates.** A database file written by an older version of the compiler is re-created empty on the next
 write, since every row in it can be measured again, and refused by a reader.
 
-**The tables are checked, not the code.** `emmy dataset check` verifies that an instance's tables agree with
+**The tables are checked, not the code.** `emmy db check` verifies that an instance's tables agree with
 themselves — every knob row's digest, every reference, every card, the two knob vocabularies — and counts the rows
 that fail. It does not re-derive what the compiler wrote: the tuning database is a cache, and a row the current code
 disagrees with is re-tuned or re-imported. The freeze is what travels between machines.
@@ -63,9 +63,10 @@ card: every kernel's definition — the loop body the compiler formed it from �
 with the setting it was measured under and its median. Nothing the compiler computed is stored: no identity, no
 features. Importing a freeze re-lowers every kernel from its definition, so the dataset holds the current compiler's
 identities and features whatever compiler wrote the snapshot, and a compiler change is a re-import. Freezing the same
-database twice produces byte-identical files. A freeze checked into the repository is what `emmy dataset import`
-loads into the dataset database by default, which is what every evaluation reads; none is checked in at the moment,
-so a tuning database — from this machine or a rented card — is named on the command line instead.
+database twice produces byte-identical files. A freeze is named on the `emmy db import` command line like any
+other source — a golden configuration file, or a tuning database from this machine or a rented card — and that
+database is what every evaluation and the offline fit read; nothing is loaded into it by default, and no freeze is
+checked in at the moment.
 
 **Hand-run measurements are recorded too.** A `run --bench` that measured configurations with knob values forced by
 hand records each clean result through the tuner's own writer, so that manually found optima are not lost when the
@@ -146,20 +147,21 @@ Gathered in one place, honestly.
    the release gate compiles the serving matrix under it; a plain deploy without the flag falls through silently.
 7. **There is no per-fork report of which row decided.** Answering "which evidence answered this fork, and did I
    expect that one?" means correlating warnings, the resolution record and the release gate.
-8. **The measured pools are diagnostic-only.** The dataset database is never consulted when deploying. Fitting the
-   offline prior on it is a planned path, not a current one — today `emmy fit` trains on the golden configurations
-   only.
+8. **The measured pools are diagnostic-only.** The dataset database is never consulted when deploying, and the
+   offline prior trains only on the golden rows in it — fitting it on the measured pools too is a planned path, not
+   a current one.
 9. **Nothing evaluates a fork the search never descended into.** Both views score configurations that were built
    and offered as candidates. A search decides one fork at a time, and a fork it never took leaves no row
    anywhere — a good configuration sitting past one is silence that reads as health.
 
 ## See it yourself
 
-The measured view reads the dataset database, filled from a freeze or from a tuning database:
+The measured view reads the dataset exported from the dataset database, filled from a freeze or from a tuning database:
 
 ```bash
-emmy dataset import ~/.cache/emmy/autotune.db
-emmy eval prior --dataset db
+emmy db import --db _data/tune.db ~/.cache/emmy/autotune.db
+emmy db export --db _data/tune.db _data/tune
+emmy eval prior _data/tune --pools measured
 ```
 
 And the two halves can be compared against candidate artifacts without touching the installed ones, which is how two

@@ -33,8 +33,6 @@ from pathlib import Path
 
 PREFIX = "EMMY_"
 TUNE_DB = "EMMY_TUNE_DB"
-DATASET_DB = "EMMY_DATASET_DB"
-FREEZE_DIR = "EMMY_FREEZE_DIR"
 ONLINE_FILE = "EMMY_ONLINE_FILE"
 OFFLINE_FILE = "EMMY_OFFLINE_FILE"
 GOLDEN_FILE = "EMMY_GOLDEN_FILE"
@@ -177,39 +175,6 @@ def tune_db_path() -> Path:
     return Path(override) if override else _CACHE_ROOT / "autotune.db"
 
 
-def dataset_db_path() -> Path:
-    """The dataset DB instance: ``EMMY_DATASET_DB`` → ``~/.cache/emmy/dataset.db``.
-
-    The same tables as the tune DB, filled by ``emmy dataset import`` rather than by tuning — the
-    measurement freeze by default, and any tune DB named on the command line. It is what the
-    measurement-data readers (``eval prior``, the fit) read, and it is never read by a compile, so an
-    import cannot change what a deploy picks. Regenerable at any time from its sources.
-
-    Advisory, like :func:`tune_db_path`: callers check it exists."""
-    override = os.environ.get(DATASET_DB)
-    return Path(override) if override else _CACHE_ROOT / "dataset.db"
-
-
-def freeze_path() -> Path:
-    """The measurement freeze ``emmy dataset import`` reads by default: ``EMMY_FREEZE_DIR`` → the
-    repo's ``search/freezes/`` (empty until a card is re-collected through the ``perf`` writer).
-
-    A freeze is the only measurement store that is a durable, comparable ARTIFACT: a golden file
-    per card holding each kernel's definition and its measured rows, identical on any machine that
-    has it and re-lowered by the current compiler on import — so two evaluations of two models are
-    a fair comparison, and a number in a report is one someone else can reproduce. The tune DB and
-    the online prior's reservoir are neither: both are machine-local, both are rewritten as tuning
-    continues, and the reservoir is additionally a bounded random SAMPLE that churns, so one model
-    evaluated twice on one machine need not score the same. A report names the sources its dataset
-    holds, so a number computed over a freeze says so.
-
-    Advisory, like :func:`tune_db_path`: callers check it exists."""
-    override = os.environ.get(FREEZE_DIR)
-    if override:
-        return Path(override)
-    return Path(__file__).resolve().parent / "compiler" / "pipeline" / "search" / "freezes"
-
-
 def online_path() -> Path:
     """Online-prior checkpoint file: ``EMMY_ONLINE_FILE`` →
     ``~/.cache/emmy/online.json``. A single JSON file (not
@@ -305,7 +270,7 @@ def strict_evidence_override(flag: bool | None):
 def offline_path() -> Path | None:
     """Offline-prior weights artifact override: ``EMMY_OFFLINE_FILE`` → ``None``.
 
-    ``None`` means the repo-checked default (``offline_weights.json`` next to
+    ``None`` means the repo-checked default (``weights/offline.json`` next to
     ``search/prior/offline.py`` — package-relative, so it resolves there, not
     here). Swap in a candidate fit for an A/B by pointing this at another
     artifact; a version-mismatched or missing file is a hard error, never a

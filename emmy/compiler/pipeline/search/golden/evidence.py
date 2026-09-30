@@ -23,8 +23,10 @@ file's earlier rows are let go first — or into a fresh in-memory instance when
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from collections import Counter
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from emmy.compiler.context import FAST_MATH_FLAG, Context
@@ -34,8 +36,8 @@ from emmy.compiler.pipeline import CUDA_PASSES, LOWERING_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import iter_leaves, leaf_for
 from emmy.compiler.pipeline.knob import family_of
 from emmy.compiler.pipeline.pipeline import Run, _is_structural_option
-from emmy.compiler.pipeline.search.data.freeze import freeze_source, is_lfs_pointer
 from emmy.compiler.pipeline.search.db import SearchDB, is_placement_knob
+from emmy.compiler.pipeline.search.db.freeze import is_lfs_pointer
 from emmy.compiler.pipeline.search.pins import (
     composed_routes,
     note_place_key,
@@ -55,7 +57,6 @@ from .repository import records_for_card, scope_digest, scope_explicit
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-    from pathlib import Path
 
     from emmy.compiler.context import Context
     from emmy.compiler.pipeline.search.golden import GoldenRecord
@@ -186,18 +187,25 @@ def _lower(pipeline, ctx: Context, entries: list[GoldenRecord]):
     return graph, asked_by - spelled_by
 
 
-def import_file(db: SearchDB, path: Path) -> Counter:
+def file_source(kind: str, path: Path | str) -> str:
+    """The ``source`` an import files a file's rows under: what kind of file it is (``freeze`` or ``golden``) and the
+    digest of its own bytes — a re-recorded file is another source, and a dataset holds a file once."""
+    return f"{kind}:{hashlib.sha256(Path(path).read_bytes()).hexdigest()[:12]}"
+
+
+def import_file(db: SearchDB, path: Path, source: str) -> Counter:
     """Import one golden-shaped file — a freeze's card file, or a golden file — into ``db``: every kernel
     re-lowered from its definition through the lowering passes alone (a stored kernel body must not meet the
     Loop passes, which would normalize it into another kernel), once per regime the file's rows record, its rows
-    sourced by the file's digest (``freeze.freeze_source``). The rows were measured at the deployable opt level
-    under their regime's flags, whatever this machine compiles at. A file the instance already holds is skipped;
-    a git-LFS pointer in the data's place is refused by name. Returns what became of the entries, by kind."""
+    filed under ``source`` (:func:`file_source`), which the instance then holds (``SearchDB.record_source``) whatever
+    became of the rows — a file none of whose rows is a measurement is held too, so the readers' freshness check
+    can be met. The rows were measured at the deployable opt level under their regime's flags, whatever this machine
+    compiles at. A source the instance already holds is skipped; a git-LFS pointer in the data's place is refused by
+    name. Returns what became of the entries, by kind."""
 
     if is_lfs_pointer(path):
         raise ValueError(f"{path} is a git-LFS pointer, not the data: run `git lfs install && git lfs pull` (in CI, check out with lfs)")
-    source = freeze_source(path)
-    if source in db.perf_sources():
+    if source in db.sources():
         logger.info("%s is already held (%s)", path.name, source)
         return Counter()
     document = GoldenFile.load(path)
@@ -209,6 +217,7 @@ def import_file(db: SearchDB, path: Path) -> Counter:
             ctx = Context.from_target(cap, gpu_name=gpu_name, compile_flags=FAST_MATH_FLAG if dict(regime).get("FAST_MATH") else "")
             in_regime = [record for record in records if tuple(sorted(regime_pins(record).items())) == regime]
             counts += import_goldens(db, ctx, in_regime, source=source, passes=LOWERING_PASSES)
+    db.record_source(source)
     logger.info("imported %s as %s: %s", path.name, source, ", ".join(f"{n} {what}" for what, n in sorted(counts.items())) or "nothing")
     return counts
 

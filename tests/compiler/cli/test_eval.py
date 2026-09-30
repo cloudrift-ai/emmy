@@ -1,8 +1,11 @@
 """Tests for ``emmy eval golden`` — the release audit of one canonical golden against its serving
-configuration — and the offer audit the golden views share."""
+configuration — the offer audit the golden views share, and ``eval prior`` over an exported dataset."""
 
 from __future__ import annotations
 
+import argparse
+import json
+import logging
 from pathlib import Path
 
 from emmy.compiler.pipeline.search.golden import GoldenFile
@@ -190,7 +193,6 @@ def test_eval_golden_fails_when_a_twin_is_not_decided_by_the_golden_rows(monkeyp
     )
     ctx = Context.from_target((8, 9), gpu_name="NVIDIA GeForce RTX 4090")
     monkeypatch.setattr(Context, "probe", staticmethod(lambda: ctx))
-    monkeypatch.setattr(eval_cmd, "_emit_prior_golden_check", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(eval_cmd, "_emit_offer_audit", lambda _records: False)
     undecided = object()
     monkeypatch.setattr(twins, "capture_twin_graphs", lambda source, **kwargs: {"pre1": object(), "post1": undecided})
@@ -259,7 +261,6 @@ def test_eval_golden_compiles_a_static_twin_only_in_the_lanes_that_warm_its_widt
     )
     ctx = Context.from_target((8, 9), gpu_name="NVIDIA GeForce RTX 4090")
     monkeypatch.setattr(Context, "probe", staticmethod(lambda: ctx))
-    monkeypatch.setattr(eval_cmd, "_emit_prior_golden_check", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(eval_cmd, "_emit_offer_audit", lambda _records: False)
     graphs = {"pre8": object(), "pre64": object(), "pre-sym": object()}
     monkeypatch.setattr(twins, "capture_twin_graphs", lambda source, **kwargs: dict(graphs))
@@ -384,3 +385,25 @@ def test_offer_audit_flags_unrealized_entries(monkeypatch, caplog):
     msgs = [r.getMessage() for r in caplog.records]
     assert any("equal an enumerated leaf" in m for m in msgs)
     assert not any("UNREALIZED" in m or "FALL-THROUGH" in m for m in msgs)
+
+
+def test_eval_prior_golden_ranks_an_exported_datasets_golden_pools(tmp_path, caplog):
+    """``eval prior`` reads the golden pools of a dataset ``emmy db export`` wrote — the positional argument names the
+    directory — and its header names the dataset and the golden files its rows came from. The deploy-faithful check
+    runs over the same pools, re-lowering each kernel from the definition the dataset carries."""
+    from emmy.commands.eval import register_eval_command
+    from emmy.compiler.pipeline.search.db.export import export_dataset
+    from tests.compiler.pipeline.search.helpers import tuned_db
+
+    db = tuned_db(None, ("matmul/f16-mma-m128n128k128-f32.json",), source="golden:case")
+    export_dataset(db, source="test", pool_sample=0, seed=0).dump(tmp_path / "dataset")
+    parser = argparse.ArgumentParser()
+    register_eval_command(parser.add_subparsers())
+    dataset, out = str(tmp_path / "dataset"), str(tmp_path / "r.json")
+    args = parser.parse_args(["eval", "prior", dataset, "--json", out])
+    with caplog.at_level(logging.INFO):
+        args.func(args)
+    header = json.loads((tmp_path / "r.json").read_text())["header"]
+    assert (header["dataset"], header["source"], header["sources"]) == ("golden", dataset, {"golden:case": 1})
+    assert (header["groups"], header["positives"], header["skipped"]) == (1, 1, 0)
+    assert "Golden reproduction" in caplog.text and "k_matmul_" in caplog.text

@@ -179,6 +179,25 @@ __launch_bounds__(256) void k_rms_norm_reduce(const float* x, const float* p_wei
 }
 ```
 
+## Fit the offline prior
+
+The offline prior is the cold-start ranker a compile falls back on where nothing was measured. It is fitted on the
+golden files, GPU-free, and ships in the repo as `emmy/compiler/pipeline/search/prior/weights/offline.json`.
+
+```bash
+# 1. Load the hardware goldens into a DB of their own (--fresh: it then holds exactly these files)
+emmy db import --db _data/dataset.db --fresh emmy/compiler/pipeline/search/golden/records/*.json
+# 2. Export its rows as the dataset: every golden pool enumerated and featurized, every measured pool
+emmy db export --db _data/dataset.db _data/dataset
+# 3. Fit the offline prior from it, rewriting the checked-in weights file
+emmy fit _data/dataset emmy/compiler/pipeline/search/prior/weights/offline.json
+# 4. Where each golden row now ranks among the candidates its kernel offers, under the shipped weights
+emmy eval prior _data/dataset
+```
+
+Additionally, `emmy fit` writes a metrics file under `_tune/fits/<timestamp>-linear/`; two fits
+are compared by diffing their metrics files.
+
 ## Benchmark
 
 ```bash

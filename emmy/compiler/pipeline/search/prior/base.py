@@ -48,7 +48,7 @@ from emmy.compiler.pipeline.search.features import DEPLOYABLE_OPT
 from emmy.compiler.pipeline.search.metrics import spearman
 
 if TYPE_CHECKING:
-    from emmy.compiler.pipeline.search.data.group import Group
+    from emmy.compiler.pipeline.search.dataset.group import Group
 
 logger = logging.getLogger(__name__)
 

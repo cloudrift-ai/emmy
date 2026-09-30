@@ -65,10 +65,11 @@ error — refit it, never silently continue with something else. (A compile trea
 artifact does not abort a deployment; what it gets instead is the no-prior behaviour from [the hierarchy
 page](./06-deploy-evidence-hierarchy.md), where golden configurations still decide and the rest falls to the rule's first
 option.)
-
-**It is fitted on the golden configurations**, by `emmy fit`. For each recorded golden, the fitter reconstructs the
-set of candidates that golden competed against — by tracing the shape's own small program and enumerating the fork —
-and trains the weights to rank the recorded configuration well inside that set. The loss has two parts:
+ **It is fitted on the golden configurations**, by `emmy fit`, read from the dataset `emmy db export` writes out of
+the previous page's store (which `emmy db import` fills from the golden files named on its command line). For each
+kernel a golden row was measured on, the fitter enumerates the candidates that kernel offers — from the kernel's own
+definition, as the database holds it — and trains the weights to rank the recorded configuration well inside that set.
+The loss has two parts:
 
 - an objective pushing each golden's rank up within its own candidate set, with the kinds of case weighted so that no
   one kind dominates the fit;
@@ -168,12 +169,15 @@ The point of the blend is to keep exploring regions the cold heuristic rates wel
 buried, while making sure the offline factor's arbitrary magnitude never touches the times a deployment sees.
 
 ## See it yourself
-
-Evaluate both halves against the golden configurations — where each recorded configuration ranks among the candidates
-it competed against. Both halves are reported side by side, labelled, because they fail for different reasons:
+ Evaluate both halves against the golden configurations — where each recorded configuration ranks among the candidates
+it competed against. Both read the dataset `emmy db export` writes, so fill the database from the hardware golden
+files and export it first; nothing fills either on its own. Both halves are reported side by side, labelled, because
+they fail for different reasons:
 
 ```bash
-emmy eval prior --dataset golden
+emmy db import --db _data/dataset.db --fresh emmy/compiler/pipeline/search/golden/records/*.json
+emmy db export --db _data/dataset.db _data/dataset
+emmy eval prior _data/dataset
 ```
 
 A rank is only a screen. It says where a good configuration landed in the ordering, never what missing it costs — two
@@ -181,8 +185,9 @@ neighbouring ranks in a large pool can be a fraction of a percent apart or three
 cannot answer is asked over configurations that were actually measured, which is the next page's dataset:
 
 ```bash
-emmy dataset import ~/.cache/emmy/autotune.db
-emmy eval prior --dataset db
+emmy db import --db _data/tune.db ~/.cache/emmy/autotune.db
+emmy db export --db _data/tune.db _data/tune
+emmy eval prior _data/tune --pools measured
 ```
 
 That one reports, per card and compile setting, how closely the model's ordering follows the hardware's and what its
@@ -191,16 +196,16 @@ best guess costs against the fastest configuration measured.
 Print the feature row the model actually sees for each golden:
 
 ```bash
-emmy eval prior --dataset golden --features
+emmy eval prior _data/dataset --features
 ```
 
 And refit the offline half from the golden configurations, with cross-validation, no GPU required:
 
 ```bash
-emmy fit
+emmy fit _data/dataset _tune/fits/offline.json
 ```
 
-That writes a metrics file and a weights file to a fresh directory under `_tune/fits/`, so two fits can be compared by
-diffing their metrics rather than by argument.
+That writes the weights to the path you named and a metrics file to a fresh directory under `_tune/fits/`, so two
+fits can be compared by diffing their metrics rather than by argument.
 
 Next: [9. Storage, checks and limits](./09-storage-checks-and-limits.md).

@@ -4,8 +4,6 @@ passes, its lift to Tile IR, its structural features."""
 
 from __future__ import annotations
 
-import hashlib
-import json
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from functools import cached_property
@@ -13,7 +11,6 @@ from typing import TYPE_CHECKING
 
 from emmy import gpu
 from emmy.compiler.context import Context
-from emmy.compiler.dim import DEFAULT_SEQ_HINT
 from emmy.compiler.graph import Graph
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.loop import LoopOp
@@ -21,10 +18,9 @@ from emmy.compiler.pipeline import LOOP_PASSES, CompilerDump, Pipeline
 from emmy.compiler.pipeline.knob import STRUCT_PREFIX, family_of, tuning_knob_items
 from emmy.compiler.pipeline.passes.tile._fromloop import lift_loop_op
 from emmy.compiler.pipeline.passes.tile._twist import rewrite_twisted
-from emmy.compiler.pipeline.search.data.shape import ShapeKey
+from emmy.compiler.pipeline.search.dataset.shape import ShapeKey
 from emmy.compiler.pipeline.search.pins import pins_freeze_cut, stampable_reduce
 from emmy.compiler.specialize import specialize_program
-from emmy.compiler.structural import digest
 
 if TYPE_CHECKING:
     from .format import Latency, Measurements
@@ -126,46 +122,6 @@ class GoldenRecord:
         index carries them (an OFF ``''`` is a decided value and stays)."""
 
         return {key: value for key, value in tuning_knob_items(self.knobs) if family_of(key) != "PLACE"}
-
-    @cached_property
-    def pool_group(self) -> tuple:
-        """Which candidate pool this record belongs to — the ONE place that question is answered, so every
-        consumer that groups goldens groups them the same way. (A grouping key over RECORDS —
-        distinct from the scheduler's per-compile ``pool_id`` stamp.)
-
-        Composed from the target kernels' identity keys — the one identity function — around the
-        card and the record's pin regime: per fused kernel, the structural variant key
-        (``identity_key(with_io=True, with_knobs=True)`` — cluster siblings share a schedule
-        space, so they rightly share a pool) folded with the symbolic-dim hints the enumeration
-        sizes against. Node-id spelling never enters, so two recordings of one program made in
-        different sessions FUSE — the wire-digest key this replaces split them — and any fact
-        that changes the kernels shows up in their keys, so the key stays sufficient. It keys on
-        what the enumeration READS, never on what it produced, so it does not go stale when the
-        scheduler changes; bindings stay out (they bind replay values, not the space).
-
-        Best-effort like every record-side derivation: a target the current compiler no longer
-        lowers falls back to the persisted wire's digest, so a stale record still groups
-        deterministically (alone) instead of breaking a fit."""
-
-        try:
-            _lowered, nodes = _target_kernel_nodes(self)
-            kernels = tuple(
-                sorted(
-                    digest(
-                        op.identity_key(with_io=True, with_knobs=True) or "",
-                        tuple(
-                            d.hint or DEFAULT_SEQ_HINT
-                            for t in (*op.inputs.values(), *op.outputs.values())
-                            for d in t.shape
-                            if not d.is_static
-                        ),
-                    )
-                    for op in (node.op for node in nodes)
-                )
-            )
-        except Exception:  # noqa: BLE001 — a stale record must never break the fit's dataset build
-            kernels = (hashlib.blake2b(json.dumps(self.loop_wire, sort_keys=True).encode(), digest_size=16).digest(),)
-        return (self.gpu_name, tuple(self.compute_cap), kernels, self.pin_key)
 
     @cached_property
     def pin_key(self) -> tuple:

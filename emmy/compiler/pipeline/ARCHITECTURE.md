@@ -78,10 +78,11 @@ lifetimes, and telling them apart is the single most useful thing to learn early
 
 | Store | Where it lives | Written by | Consulted by |
 |-------|----------------|------------|--------------|
-| **Golden configs** | model goldens under `recipes/<model>/golden/`; model-agnostic ones under `search/golden/records/` | promoted from deployable `run --bench` golden / `--ab` rows (Part 7) | greedy compile — measured rows in the one evidence index (the per-card files, or `--golden PATH`); `run --golden PATH --bench` measures them; `emmy fit` trains the offline prior on them; `emmy eval` datasets |
+| **Golden configs** | model goldens under `recipes/<model>/golden/`; model-agnostic ones under `search/golden/records/` | promoted from deployable `run --bench` golden / `--ab` rows (Part 7) | greedy compile — measured rows in the one evidence index (the per-card files, or `--golden PATH`); `run --golden PATH --bench` measures them; `emmy db import` loads them into the dataset DB, whose export (`emmy db export`) is the dataset `emmy fit` and `emmy eval prior` read |
 | **Reservoir** | inside the online prior checkpoint (`~/.cache/emmy/online.json`) — the sample of past measurements the model trains on | `emmy tune` — every deployable-regime training row | greedy compile (measured evidence, consulted first); the online prior's own refits |
 | **`perf` table** | the tune DB (`~/.cache/emmy/autotune.db`), beside the `kernel` and `routing` rows its rows are of | `emmy tune` — one measurement per compilable kernel it benched, at the sweep's flags; `run --bench` — every clean pinned row (golden / `--ab`) and the greedy re-bench, per kernel, through the tuner's own writer | greedy compile (measured evidence); the per-variant replay cache |
-| **Dataset DB** | `~/.cache/emmy/dataset.db` — the same tables in a file of their own | `emmy dataset import`, from measurement freezes (`search/freezes/` when one is checked in), golden files and tune DB files — every kernel re-lowered from its definition | `emmy eval prior --dataset db` — **never** a deploy |
+| **Dataset DB** | the file `emmy db … --db PATH` names (`_data/dataset.db` in the examples, under the ignored `_data/`; never the tune DB) — the same tables in a file of their own | `emmy db import`, from the freeze directories, golden files and tune DB files named on its command line (the hardware goldens `search/golden/records/*.json` for the offline prior; nothing by default) — every kernel re-lowered from its definition | `emmy db export` and nothing else — **never** a deploy |
+| **Dataset** | the directory `emmy db export` is given (`_data/dataset` in the examples) — a `manifest.json` beside one matrix file per pool (`search/dataset/document.py`) | `emmy db export`: every golden pool enumerated from its kernel's definition and featurized, every measured pool, the provenance | `emmy eval prior` (both kinds of pool) and `emmy fit` — **never** a deploy |
 
 Of the four, only the goldens travel with a clone: they are the only *measured* data a fresh machine has. The
 reservoir and the tune DB are machine-local caches written by local tunes, so a freshly rented box starts with the
@@ -94,11 +95,12 @@ emmy tune ─┬─ sweep benches ─────────▶ perf table   (a
            └─ every training row ────▶ reservoir    (online.json) ─┼──▶ greedy compile: ONE measured-evidence index
 run --bench pinned/golden/--ab rows ──▶ perf table   (autotune.db) ─┘    (reservoir first, then perf + golden rows on
                                                                          µs) — schedule AND kernel-set forks
-emmy dataset import ◀─ freezes, tune DBs ────▶ dataset DB (dataset.db) ─▶ emmy eval prior --dataset db (never a deploy)
-recorded from those rows ────────────▶ recipe-local / hardware golden file ─┬▶ greedy compile (golden rows: the
-                                                                            │  card's files, or --golden PATH)
-                                                                            └─ emmy fit ─▶ offline_weights.json (repo)
-                                       offline_weights.json ──────────────▶ greedy compile, the prior (cold)
+emmy db import ◀─ freezes, goldens, tune DBs ─▶ dataset DB (_data/dataset.db) ─▶ emmy db export ─▶ dataset (_data/dataset)
+dataset (manifest.json + one matrix per pool) ─┬▶ emmy eval prior (never a deploy)
+                                               └▶ emmy fit ─▶ weights/offline.json (repo)
+recorded from those rows ────────────▶ recipe-local / hardware golden file ──▶ greedy compile (golden rows: the
+                                                                              card's files, or --golden PATH)
+                                       weights/offline.json ──────────────▶ greedy compile, the prior (cold)
                                        online prior model (online.json) ──▶ greedy compile, the prior (trusted)
 ```
 
@@ -172,9 +174,10 @@ Everything in this table recurs on nearly every page below. The rest of the docu
 | `search/policy/mcts.py` | The in-memory MCTS (`SearchTree`) colocated with its only reader, `TuningSearch`. |
 | `search/policy/greedy.py` | `greedy_decide` — the no-tree fork resolver used by `compile` / `run`. |
 | `search/strategy/` | The search shapes: `base.SearchStrategy`, `greedy.GreedyStrategy`, `two_level.TwoLevelStrategy`. |
-| `search/prior/` | The ONE ranking path: a `Prior` ABC with the cold `OfflinePrior` and the `OnlinePrior` composed behind `FallbackPrior` (`load_prior`). `linear_model.py` holds `LinearModel`, the offline prior's scoring function as a value object — the one definition the fitter optimizes and the deploy path ranks by. `diagnostics.py` backs the `eval` reachability / calibration reports; `fit/` is the offline fitter, split by responsibility — `linear.py` trainer, `cv.py` fold harness, `tables.py` the rank-table rendering, `run.py` the pure `emmy fit` run harness. The candidate pool it all trains over is `search/data/group.Group`, one layer down: a pool is data, not a fitter detail. |
+| `search/prior/` | The ONE ranking path: a `Prior` ABC with the cold `OfflinePrior` and the `OnlinePrior` composed behind `FallbackPrior` (`load_prior`). `linear_model.py` holds `LinearModel`, the offline prior's scoring function as a value object — the one definition the fitter optimizes and the deploy path ranks by. `diagnostics.py` backs the `eval` reachability / calibration reports; `fit/` is the offline fitter, split by responsibility — `linear.py` trainer, `cv.py` fold harness, `tables.py` the rank-table rendering, `run.py` the pure `emmy fit` run harness. The candidate pool it all trains over is `search/dataset/group.Group`, one layer down: a pool is data, not a fitter detail. |
 | `search/metrics.py` | What a scored candidate pool is worth, as pure functions over numbers: golden ranks and their tie conventions, `topk_pick` / `topk_regret` against measured latencies, and Spearman ρ. No model, no I/O, no strings, so the callers cannot each hold a slightly different definition — the rank metrics, the three calibration paths and the reachability ratio all resolve here. Rendering lives with the caller (`prior/fit/tables.py` for the fit's rank tables; the other top-k summaries have not been unified yet). |
-| `search/data/` | The harmonized read-view over the three data sources (golden records / DB `perf` rows / prior reservoir): `Sample`, `Dataset`, the derived `ShapeKey` index, and `group.py`'s `Group` — one candidate pool packed as a matrix plus one label per row. The base says nothing about what the labels mean, which is all a ranking metric needs; `GoldenGroup` is the subclass whose labels MARK rows (`golden_ids`) rather than measure them, and only it can be asked which rows are the answer. `group_measured` builds base groups from benched node rows, labelled with measured µs. Nothing here imports `search/prior/`: a group carries every column it was given, and each model class narrows to the ones it wants when it asks for the matrix — `TREE_FEATURES`, the view argued entirely from what a tree can re-derive, lives with the CatBoost trainer for the same reason. |
+| `search/dataset/` | The training data as values and as a document. `Group` (`group.py`) — one candidate pool packed as a matrix plus one label per row; the base says nothing about what the labels mean, which is all a ranking metric needs. `GoldenGroup` is the subclass whose labels MARK rows (`golden_ids`) rather than measure them, and it carries the `GoldenPool`s it was built from (`pool.py`: card, regime, sizes, the verified `GoldenRow`s, and the `KernelDef` the pool is enumerated from — `kernel.py`); `MeasuredGroup` is the one whose labels ARE the microseconds. `Dataset` (`document.py`) is the groups as a directory — `manifest.json` beside one `.npy` per group — written by `emmy db export`, read by `emmy fit` and `eval prior`; the leaf values are wire classes. `Sample` / `Samples` and `ShapeKey` are the per-row read-view the per-kernel `eval` views and the prior diagnostics use. Nothing here reads a DB — `db/export.py` builds the groups, the one place the two packages meet — and nothing imports `search/prior/`: a group carries every column it was given, and each model class narrows to the ones it wants when it asks for the matrix — `TREE_FEATURES`, the view argued entirely from what a tree can re-derive, lives with the CatBoost trainer for the same reason. |
+| `search/db/` | The SQLite store (`SearchDB`: the kernels, the decisions that minted them, their measurements) and what fills and drains it: `freeze.py`, a DB's admitted rows as a golden file per card (`freeze_reason` is the one admission rule every measured-pool reader applies), and `export.py`, its rows as the dataset (`golden_pools`, `measured_groups`, `export_dataset`) — where `db` rows become `dataset` values, in that one direction. |
 | `search/golden/` | The golden package, one module per job: the file format (`format`), the flattened record and its derivations (`record`), the strict decode (`decode`), the evidence seam (`evidence`), the repository index and evidence scope (`repository`); see Part 7. |
 | `slice.py` | Isolates one finalized kernel into a standalone graph (used by the inner tune and structural pricing). |
 | `dump.py`, `rule_diff.py` | The dump and `-vv` presentation layers (see the end of this file). |
@@ -409,14 +412,15 @@ one because it is what answers on a machine that has no local measurements yet �
 
 `OfflinePrior` scores a candidate with a linear formula over the `D_*` features — hand-designed descriptions of a
 tile's geometry and its occupancy — fitted ahead of time. It never falls back on the order the rule emitted its
-options in. The complete scoring function lives in the repo-checked artifact `search/prior/offline_weights.json`:
+options in. The complete scoring function lives in the repo-checked artifact `search/prior/weights/offline.json`:
 both weight sets plus the scalar params, carrying a `feat_ver` version and a `provenance` block. The offline fitter
-writes it (`search/prior/fit/`, driven by `emmy fit`). Building the training cases from the goldens lives in
-`emmy/commands/fit.py`, because reconstructing the set of candidates a golden competed against needs the command
-layer's tracer for the golden's little PyTorch snippet, which `pipeline/` never imports.
+writes it (`search/prior/fit/`, driven by `emmy fit`). The training pools are the golden groups of the dataset
+`emmy db export` writes (`db/export.py` over `search/ranking.build_golden_groups`, Part 8): one per kernel, card,
+regime and sizes a golden file recorded a row on, enumerated from the kernel's own definition — the fit reads the
+directory and enumerates nothing.
 
-`offline_weights.json` is the one artifact anything loads by default. A sibling file in that directory is a **scoped
-experiment**, not a second default: `offline_weights_matmul_rtx5090.json` is fit on RTX 5090 matmul goldens alone and
+`weights/offline.json` is the one artifact anything loads by default. A sibling file in that directory is a **scoped
+experiment**, not a second default: `weights/offline_matmul_rtx5090.json` is fit on RTX 5090 matmul goldens alone and
 is reached only by pointing `EMMY_OFFLINE_FILE` (or `--offline-file`) at it. Each such file says so in its
 `provenance.scope`; read that before drawing conclusions from one, because a scoped artifact has no reason to beat
 the shipped weights outside the slice it was fit on.
@@ -453,7 +457,7 @@ What a newcomer needs to know about the fit:
   At one positive it is the single-golden rank exactly, so the
   supervision generalized without moving any fitted artifact. The sibling positives also stop being drawn as the
   tree fit's negatives, which had been teaching it that a measured-good config was bad.
-- **A pool may be a SAMPLE of itself.** `emmy fit --pool-sample N` draws its candidates during enumeration
+- **A pool may be a SAMPLE of itself.** `emmy db export --pool-sample N` draws its candidates during enumeration
   (`search/pool.py`), so `Group` carries both the drawn rows and `total`, the true pool size. The linear
   trainer's z-scoring is over the FULL pools' moments, now estimated rather than counted: each group's rows
   carry weight `total / len(feats)` in the two streaming passes, so a 5-row pool and a 325k one do not weigh
@@ -659,9 +663,9 @@ on the path where a prior exists, so every fork then falls to the first emitted 
 raises). That leaf is not a chosen default and nothing arranges the enumeration to make it a good one; it is simply
 what is left when there is nothing to rank with. Env pins still apply (they never reach a decide).
 
-**What is deliberately NOT in this hierarchy: the dataset DB** (Part 6). A compile reads the tune DB. The dataset DB
-— the same tables, filled by `emmy dataset import` — feeds the `emmy eval` measured-pool report (Part 8) and is what
-the offline fitter will train on once goldens are imported into it too (today `emmy fit` trains on golden files).
+**What is deliberately NOT in this hierarchy: the dataset DB, and the dataset exported from it** (Part 6). A compile
+reads the tune DB. The dataset DB — the same tables, filled by `emmy db import` — becomes, through `emmy db export`,
+the dataset the `emmy eval` reports (Part 8) and the offline fitter (`emmy fit`) read.
 
 **Whichever source decides, the µs of the winning row is written onto the fork's trace entry** (`Decision.score`): a
 measured µs when an evidence row decided, the model's predicted µs otherwise. That number is what the
@@ -690,7 +694,8 @@ so a rewritten checkpoint or a fresh perf commit is still picked up.
 **The per-GPU golden files are the only *measured* data that ships with a clone.** A golden record is a named,
 reviewed, pinned measurement: the input-pin regime it was measured under, the knob row that was selected inside
 that regime, and the paired Emmy/reference timings. Its uses are measured evidence for the greedy compile (above),
-pinned measurement (`run --golden PATH --bench`, `--ab`), training data for the offline prior (`emmy fit`), the
+pinned measurement (`run --golden PATH --bench`, `--ab`), training data for the offline prior (`emmy fit`, through
+`emmy db import` and `emmy db export`), the
 `emmy eval` datasets, and regression reference points.
 
 At deploy a record is tune DB rows, nothing more, and every row is keyed by the kernel it decides
@@ -722,8 +727,8 @@ fork size.
 **Whether goldens are training data differs between the two halves of the prior.** The **online** prior never trains
 on them: a recorded golden row enters no reservoir and no checkpoint. (Benchmarks of a golden *shape* during a tune
 are ordinary measurements and do train it; it is the recorded configs and their µs that never become labels.) The
-**offline** prior IS fitted on them: `emmy fit` reconstructs the set of candidates each golden competed against and
-trains the weights to rank the recorded config well inside that set.
+**offline** prior IS fitted on them: `emmy fit` enumerates, for each kernel a golden row was measured on, the candidates
+that kernel offers, and trains the weights to rank the recorded row well inside that set.
 
 ### `FallbackPrior` and the calibration gate
 
@@ -1230,12 +1235,11 @@ don't invent a third:
   so it cannot key a definition.
 
 ### Search persistence: the tables on disk vs in-memory MCTS
-
-**`SearchDB`** (`db.py`) is a SQLite store — one schema in several instances. The tune DB (`EMMY_TUNE_DB`) is what
+ **`SearchDB`** (`db.py`) is a SQLite store — one schema in several instances. The tune DB (`EMMY_TUNE_DB`) is what
 compile reads and tune writes — a compile creates it on first use and imports the golden rows in scope into it before
-it picks (`golden/evidence.py`); the dataset DB (`EMMY_DATASET_DB`) holds the same tables filled by `emmy dataset
-import`, and is what the measurement-data readers read, so an import there can never change a deploy. The tables hold
-compilable kernels, the decisions that minted them, and measurements of them — nothing else.
+it picks (`golden/evidence.py`); a dataset DB (the file `emmy db … --db PATH` names) holds the same tables filled by
+`emmy db import`, and is what the measurement-data readers read, so an import there can never change a deploy. The
+tables hold compilable kernels, the decisions that minted them, and measurements of them — nothing else.
 
 - **`kernel`** — one row per kernel, keyed by its exact identity: the clustered deploy identity beside it, its Loop IR
   wire (`wire.kernel_wire` — the one-node program of the loop body the kernel was formed from, bound to its own
@@ -1281,16 +1285,16 @@ joins live in `db.py` and nowhere else.
 
 **Nothing migrates.** A file whose tables have other columns than the DDL was written by another emmy: a writer open
 re-creates EVERY table empty (dropping one would orphan the rows that reference it) — the rows are regenerable
-(re-tune, or `emmy dataset import --fresh`) — and a read-only open refuses the file. Foreign keys are enforced on
+(re-tune, or `emmy db import --fresh`) — and a read-only open refuses the file. Foreign keys are enforced on
 every connection.
 
-**Drift checks** (`emmy dataset check`, `SearchDB.drift`). A tune DB is a cache: a row the current code disagrees with
+**Drift checks** (`emmy db check`, `SearchDB.drift`). A tune DB is a cache: a row the current code disagrees with
 is re-tuned or re-imported, never patched, so the checks are the cheap ones over the tables themselves — a schedule or
 placement digest matches its knob rows, every row names the rows it references, every context names a registry card,
 schedule knobs and placement knobs stay apart. Nothing decodes a stored wire, and the stamps are not re-derived
 here. The artifact that has to survive a code change is the freeze, which is re-lowered on import.
 
-**Measurement freeze** (`data/freeze.py`, written by `emmy dataset freeze`). The tune DB is a live store, so a model
+**Measurement freeze** (`db/freeze.py`, written by `emmy db freeze`). The tune DB is a live store, so a model
 fit or evaluated straight from it is not reproducible. A *freeze* is a snapshot written as a golden file per card
 (Part 7's format): the `loops` pool holds each kernel's definition — its `kernel` row's wire — one config per kernel
 set and binding, and a realization per measured row: its schedule row, its regime as the input pin `FAST_MATH`, its
@@ -1307,19 +1311,26 @@ writes — and nothing else is written that way.
   failed bench is not a measurement (the tune DB keeps it), and a row a compile imported from a golden file is the
   file's. The opt-level gate is what keeps a freeze a fair yardstick: a freeze is the corpus a reported prior number
   is computed over, so rows from a regime nothing deploys in would put half a card's pools in a lane no one runs.
-  `group_measured` inherits the same filter, and keys its pools by regime, so an analysis over a live DB agrees with
+  `measured_groups` inherits the same filter, and keys its pools by regime, so an analysis over a live DB agrees with
   one over a freeze.
 - **Freezing the same DB twice yields the same bytes**: rows sort by content, and the golden dump is deterministic.
-  A file's identity is its bytes: `emmy dataset import` sources its rows as `freeze:<sha256[:12]>` of the file, and
-  `commands/dataset.dataset_db` refuses a default dataset DB that does not hold every file of the checked-in freeze,
-  when one is, with the command that fixes it.
-- **Importing re-lowers.** `emmy dataset import` reads a freeze directory, a golden file or a tune DB (frozen first,
-  so one path serves all) and hands each file's records to the golden importer (`golden.evidence.import_goldens`) once
-  per regime the file holds, entering at the LOWERING passes as the tuner runs a slice. Every kernel comes back with
-  the current compiler's exact identity and stamps, and a definition the compiler no longer lowers is counted, not
-  guessed at. A compiler change is therefore a re-import (`--fresh`), never a re-collection.
+  A file's identity is its bytes: `emmy db import` sources its rows by the file's kind and digest —
+  `freeze:<sha256[:12]>` for a freeze directory's files, `golden:<sha256[:12]>` for a golden file
+  (`golden.evidence.file_source`) — so a report over an instance names the exact files it was computed over, and
+  naming a file again is a no-op. A held file is a fact of its own (the `source` table, written by the import whatever
+  became of the file's rows), so a golden none of whose rows is a measurement — a restamped one keeps its schedules
+  and loses its microseconds — is held and simply contributes no row.
+- **Importing re-lowers.** `emmy db import` reads freeze directories, golden files and tune DBs (frozen first, so one
+  path serves all) named on its command line — nothing by default; the hardware goldens `search/golden/records/*.json`
+  are the offline prior's documented set (README, "Fit the offline prior") — and hands each file's records to the
+  golden importer (`golden.evidence.import_goldens`) once per regime the file holds, entering at the LOWERING passes
+  as the tuner runs a slice. Every kernel comes back with the current compiler's exact identity and stamps, and a
+  definition the compiler no longer lowers is counted, not guessed at. A compiler change is therefore a re-import
+  (`--fresh`), never a re-collection. A golden file's rows become, through `emmy db export`, the golden pools `emmy
+  fit` and `eval prior` read (Part 8); a compile never reads this instance, and the tune DB imports the goldens on its
+  own.
 - No freeze is checked in at the moment. The RTX 5090 freeze predates the `kernel` table and was dropped rather than
-  converted; the card is re-collected through the `perf` writer, after which `emmy dataset freeze` writes the next
+  converted; the card is re-collected through the `perf` writer, after which `emmy db freeze` writes the next
   one into `search/freezes/`.
 
 **Recording benches** (`search/bench_record.py`). A `run --bench` that benched rows with hand-forced knob values
@@ -1589,7 +1600,7 @@ lands in the record.
 ## Part 8: Evaluating the prior (`emmy eval prior`)
 
 `emmy eval prior` is how you find out whether the prior is any good and, when it isn't, where it goes wrong. It runs
-over the goldens or over a DB instance (the dataset DB, filled from a measurement freeze), and it reports BOTH halves
+over a dataset `emmy db export` wrote — its golden pools or its measured pools — and it reports BOTH halves
 of the composite prior, each labelled — they fail for different reasons, so an unlabelled "prior" number destroys the
 diagnostic.
 
@@ -1599,12 +1610,11 @@ the same `report.rank_metrics`. The report computes nothing itself:
 `search/metrics.py` owns every metric's definition, and `Prior.score_rows(group)` — the pool-shaped scoring surface
 both halves answer, projecting the packed matrix onto each model's own columns with its own absent-value fill — is
 where a score comes from.
-
-- A MEASURED pool (`--dataset db`: the dataset DB's `perf` rows, every candidate benched, grouped by
-  `(gpu, kernel signature, H_opt)`) can answer what a wrong pick COST — Spearman over the pool, and regret at k=1
-  (the deploy question: the pick ships, so its latency IS the cost) and k=10 (the tuning question: bench the top ten,
-  keep the measured best). This is the half that tracks deployed speed.
-- A GOLDEN pool (`--dataset golden`: an enumeration with the verified-optimum row marked) can only answer WHERE the
+ - A MEASURED pool (`--pools measured`: the dataset's measured pools — the DB's `perf` rows, every candidate benched,
+grouped by `(gpu, kernel signature, H_opt)`) can answer what a wrong pick COST — Spearman over the pool, and regret at
+k=1 (the deploy question: the pick ships, so its latency IS the cost) and k=10 (the tuning question: bench the top
+ten, keep the measured best). This is the half that tracks deployed speed.
+- A GOLDEN pool (`--pools golden`: an enumeration with the verified-optimum row marked) can only answer WHERE the
   known-good row landed, and is reported as a SCREEN. A rank is blind to the latency gap behind it, and the corpus
   aggregate is dominated by pools small enough to rank by accident, so golden summaries are stratified by pool size.
 
@@ -1632,13 +1642,13 @@ were searched in two separate pools, the losing pool's best landing a median 1.4
 kernel key gives 336 pools rather than 401, but more rows sitting beside a rival (3778 of 3817 against 3760) and a
 median pool of 7 rather than 5; the pool count falls because merging is the point.
 
-**`--dataset golden` also runs the deploy-faithful check the rank is only a screen for**: the greedy tile-pipeline
-pick vs the recorded golden, per shape, with the deployable `-O3` latency of the prior's pick beside it
-(`golden_deploy_perf`, read from the reservoir with no re-bench).
-
-**`--dataset db` reads a DB instance** (`commands/dataset.dataset_db`): `--db PATH` reads any instance as it is — a
-tune DB, for one machine's data — while the default is the dataset DB, which must hold the checked-in freeze when one
-is, so a report carries the freeze it names and not yesterday's rows under today's label.
+**`--pools golden` also runs the deploy-faithful check the rank is only a screen for**: the greedy tile-lowering
+pick vs the golden rows, per matmul pool of the live card, with the deployable `-O3` latency of the prior's pick
+beside it (`golden_deploy_perf`, read from the reservoir with no re-bench).
+ **Both kinds of pool come from the dataset** (`Dataset.load`): the positional argument names the directory — the
+export of the dataset DB `emmy db import --db PATH` filled. Another instance's data — a tune DB, for one machine's
+measurements — reaches the report through `emmy db export --db PATH OUT`, never through the report opening a DB
+itself.
 
 **A golden's rank counts ties against it** (via `search/metrics.dual_rank`). The
 golden's rank counts every candidate scoring strictly better PLUS every candidate that ties with it and was emitted
@@ -1649,15 +1659,24 @@ ONE computation (`search/metrics.dual_rank`): the pessimistic rank is
 the one that gates, and the strictly-better **optimistic** rank is reported beside it in `emmy fit`'s metrics file.
 The gap between them is the width of the tie plateau at the golden's score, and thus an early warning that the scores
 are saturating.
+ **A golden pool is one kernel's schedule space, read from the dataset DB by the export.** `db/export.golden_pools`
+groups the instance's `golden:` rows the freeze admits (`freeze_reason`, the one admission rule) by card, regime,
+kernel (the exact one the rows were measured on — the pool has to be enumerated from a definition, which is why it
+keys on the kernel where the measured pools key on the stamp signature) and sizes, beside a count of the rows it
+dropped, as `measured_groups` does; `ranking.build_golden_groups` enumerates each pool from the kernel's own
+definition (`KernelDef.program`: the stored body at the rows' sizes, through the tile lowering alone, under the
+regime's pins) and finds each golden row in it by `features.tile_signature`. The base features are the pool's context
+and the kernel's stamps as the DB holds them — nothing is lowered, and a golden's program is never read. Two pools
+that featurize byte-identically fold into one group after packing, so pointwise siblings of one shape still train as
+one pool. `emmy db export` runs this ONE builder and writes its groups as the dataset `emmy fit` and `eval prior`
+read, so the eval and the fit see the same pools, the same sampling draw and the same rows. A pool's context is
+`Context.from_target(cap, gpu_name=…, compile_flags=regime)` — the card the rows were measured on with its known SM
+count and smem specs, and the regime's flags — never the host's. Building them for the host's context makes golden
+ranks machine-dependent, because the occupancy features then describe tiles for a GPU that is not the one the row came
+from. A golden that lowers to several kernels is one pool per piece, each holding the receipt measured on it; a kernel
+formed from no loop op (a piece carved from a twisted tree) is skipped by name.
 
-**Golden evaluations build their features for the golden's own GPU.** They go through ONE golden group builder —
-`emmy fit`'s `build_golden_groups`, which `eval prior --dataset golden` calls — so the eval and the fit see the
-same corpus, the same sampling draw and the same rows. Each golden's compile context is rebuilt as
-`Context.from_target(compute_cap, gpu_name=…)`, using the GPU recorded in the golden file along with its known SM
-count and smem specs — never the host's. Building them for the host's context makes golden ranks machine-dependent,
-because the occupancy features then describe tiles for a GPU that is not the one the row came from.
-
-The eval builds its pools over the FULL featurization while a fit trains under its trainer's feature view. The view is
+The export packs the pools over the FULL featurization; a fit projects them onto its trainer's feature view. The view is
 a property of the model being fitted, and the eval scores two model classes: the linear half reads only its own weight
 names, so its ranks are identical either way, while the online half regresses on the `S_*` / `H_*` columns a narrow
 view drops and would otherwise be asked about a kernel with no shape.
