@@ -1852,6 +1852,7 @@ def load_quantized_split(
         _is_skipped,
         _mxfp4_quant_config,
         _packed_int4_config,
+        _packed_int4_spent,
         _skip_patterns,
         dequantize,
         dequantize_nvfp4,
@@ -1936,10 +1937,10 @@ def load_quantized_split(
                 continue
             f = _open(shard_path)
             for k in owned_keys:
-                if packed4 is not None and k.endswith(".qweight"):
+                if packed4 is not None and k.endswith("." + packed4[1].leaves[0]):
                     qc4, layout = packed4
-                    base = k[: -len(".qweight")]
-                    qzeros_key, scales_key = base + ".qzeros", base + ".scales"
+                    base = k[: -len("." + layout.leaves[0])]
+                    qzeros_key, scales_key = base + "." + layout.leaves[1], base + "." + layout.leaves[2]
                     if qzeros_key not in index or scales_key not in index:
                         raise ValueError(f"packed int4 linear {base!r} is missing qzeros or scales")
                     model_key = _checkpoint_to_model_key(rename(base + ".weight"))
@@ -1949,16 +1950,16 @@ def load_quantized_split(
                         values = dequantize_packed_int4(
                             f.get_tensor(k).numpy(),
                             _sibling(qzeros_key).numpy(),
-                            _sibling(scales_key).numpy(),
+                            _sibling(scales_key).float().numpy(),  # numpy has no bfloat16
                             int(qc4.get("group_size", qc4.get("q_group_size", -1))),
                             layout=layout,
                         ).T
                         state[model_key] = torch.from_numpy(values).to(dtype)
                     fmt = layout.name
                     continue
-                if packed4 is not None and k.endswith((".qzeros", ".scales", ".g_idx")):
+                if packed4 is not None and k.endswith(_packed_int4_spent(packed4[1])):
                     base = k.rsplit(".", 1)[0]
-                    if base + ".qweight" in index:
+                    if base + "." + packed4[1].leaves[0] in index:
                         continue
                 slot = _expert_slot(rename(k))
                 if slot is not None:
@@ -2056,7 +2057,9 @@ def load_quantized_split(
                         state[_checkpoint_to_model_key(rename(k))] = torch.from_numpy(vals).to(dtype)
                         continue
                     t = t.float()  # unpaired / skipped fp8: exact value decode, no scale
-                state[_checkpoint_to_model_key(rename(k))] = t.to(dtype) if t.is_floating_point() else t
+                model_key = _checkpoint_to_model_key(rename(k))
+                cast_to = torch.float32 if model_key.endswith(".e_score_correction_bias") else dtype  # see ``serving_router``
+                state[model_key] = t.to(cast_to) if t.is_floating_point() else t
 
     # POP per layer: the stacked tensors are a full second copy of the expert bytes, so holding the
     # per-expert dict alive across the whole loop peaks at 2× (GLM-4.5-Air: 50 GiB, which no 60 GB

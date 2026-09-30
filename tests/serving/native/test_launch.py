@@ -18,10 +18,26 @@ def arguments(*flags):
     return args, forwarded
 
 
+def test_native_probes_the_runner_of_the_pinned_revision(monkeypatch):
+    """The pin in ``MODEL@rev`` reaches the runner probe as ``--revision`` before any config is read."""
+    seen = []
+
+    def runner(model, vllm_args):
+        seen.append((model, list(vllm_args)))
+        return "generate"
+
+    monkeypatch.setattr("emmy.commands.serve.serving_runner", runner)
+    args, forwarded = arguments("--native", "--dry-run")
+    args.model = "Qwen/Qwen3-0.6B@abc"
+    launch(args, forwarded)
+    assert seen == [("Qwen/Qwen3-0.6B", ["--revision", "abc"])]
+
+
 def test_native_dry_run(caplog):
     args, forwarded = arguments(
         "--native",
-        "--generate",
+        "--runner",
+        "generate",
         "--dry-run",
         "--revision",
         "pinned",
@@ -43,7 +59,9 @@ def test_native_dry_run(caplog):
     assert "--port 8123" in caplog.text
 
 
-@pytest.mark.parametrize("flags", [("--stock", "--generate"), (), ("--generate", "--revision", "b")])
+@pytest.mark.parametrize(
+    "flags", [("--stock", "--runner", "generate"), ("--runner", "pooling"), ("--runner", "generate", "--revision", "b")]
+)
 def test_native_rejects_incompatible_modes(flags):
     args, forwarded = arguments("--native", "--dry-run", *flags)
     args.model += "@a"
@@ -62,6 +80,19 @@ def test_native_command_and_capacity():
     assert command("model", opts, opts.native_pack)[-2:] == ["--max-model-len", "128"]
     with pytest.raises(ValueError):
         options(["--max-model-len", "4097"])
+
+
+def test_native_page_size_divides_the_context(caplog):
+    """The page size is a preparation choice: it must divide the context, it is logged with the
+    other preparation settings, and it cannot be applied to an already prepared pack."""
+    assert options(["--max-model-len", "128", "--page-tokens", "16"]).page_tokens == 16
+    args, forwarded = arguments("--native", "--runner", "generate", "--dry-run", "--page-tokens", "16")
+    with caplog.at_level("INFO"):
+        launch(args, forwarded)
+    assert "page_tokens=16" in caplog.text
+    args, forwarded = arguments("--native", "--runner", "generate", "--dry-run", "--native-pack", "/tmp/prepared", "--page-tokens", "16")
+    with pytest.raises(ValueError):
+        launch(args, forwarded)
 
 
 @pytest.mark.parametrize("flags", [["--prefill-size", "0"], ["--prefill-size", "4097"], ["--prefill-size", "16", "--native-pack", "pack"]])

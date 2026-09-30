@@ -1,0 +1,83 @@
+# Compare FP16 and FP32 logits with matching artifact-format server binaries.
+command:
+  stage:
+  - emmy
+  - crates
+  - Cargo.toml
+  - Cargo.lock
+  run: |
+    set -eu
+    cd $repo_dir
+    export PATH=$repo_dir/target/release:$repo_dir/venv/bin:/usr/local/cuda/bin:$$PATH
+    export PYTHONPATH=$repo_dir
+    export CUDA_VISIBLE_DEVICES=$gpu_device_ids
+    export HF_HUB_OFFLINE=1
+    export EMMY_TUNE_DB=$task_dir/autotune.db
+    export EMMY_ONLINE_FILE=$task_dir/online.json
+    export EMMY_PACK_DIR=$task_dir/packs
+    export EMMY_GPU_LOCK=/tmp/emmy-gpu.lock
+    ./venv/bin/python -c '
+    import subprocess
+    from emmy.compiler.backend.gpu_lock import gpu_lock
+    with gpu_lock():
+        subprocess.run(["bash", "-se"], check=True)
+    ' <<'NATIVE_BENCH'
+    model=Qwen/Qwen3-0.6B
+    ./venv/bin/python -m pip freeze --all > $task_dir/requirements.txt
+    if [ "$lane" = baseline ]; then
+      artifact=$${BASELINE_ARTIFACT:?Set BASELINE_ARTIFACT to the format-3 width-16 bundle}
+      server=$${BASELINE_SERVER:?Set BASELINE_SERVER to its matching server binary}
+    else
+      artifact=$${TUNED_ARTIFACT:?Set TUNED_ARTIFACT to the format-4 width-16 bundle}
+      server=$${TUNED_SERVER:?Set TUNED_SERVER to its matching server binary}
+    fi
+    sha256sum $$artifact/manifest.json $$artifact/plan/decode.json $$artifact/plan/prefill.json \
+      $$artifact/serving.json $$artifact/tokenizer.json $$server > $task_dir/identity.txt
+    $$server --artifact $$artifact --model $$model --host 127.0.0.1 --port 8128 \
+      --max-model-len 4096 > $task_dir/server.log 2>&1 &
+    server_pid=$$!
+    stop() {
+      kill "$$server_pid" 2>/dev/null || true
+      for attempt in $$(seq 1 10); do
+        kill -0 "$$server_pid" 2>/dev/null || break
+        sleep 1
+      done
+      kill -KILL "$$server_pid" 2>/dev/null || true
+      wait "$$server_pid" 2>/dev/null || true
+    }
+    trap stop EXIT
+    ready=0
+    for attempt in $$(seq 1 180); do
+      if curl -sf http://127.0.0.1:8128/health >/dev/null; then ready=1; break; fi
+      kill -0 "$$server_pid" 2>/dev/null || exit 1
+      sleep 5
+    done
+    test "$$ready" = 1
+    nvidia-smi --query-gpu=name,driver_version,memory.used,memory.total --format=csv > $task_dir/memory.txt
+    curl -fsS http://127.0.0.1:8128/v1/completions -H 'Content-Type: application/json' \
+      --data "{\"model\":\"$$model\",\"prompt\":\"The capital of France is\",\"max_tokens\":16,\"temperature\":0,\"seed\":0}" \
+      > $task_dir/generation.json
+    for temperature in 0 0.7; do
+      for repeat in 1 2 3; do
+        label=c1_i32_t$${temperature}_r$${repeat}
+        ./venv/bin/vllm bench serve --model $$model --tokenizer $$model --dataset-name random \
+          --base-url http://127.0.0.1:8128 --random-input-len 32 --random-output-len 32 \
+          --random-range-ratio 0 --num-prompts 4 --max-concurrency 1 --num-warmups 1 \
+          --ignore-eos --temperature $$temperature --top-p 0.8 --seed $$repeat --save-result --save-detailed \
+          --result-dir $task_dir --result-filename $$label.json > $task_dir/$$label.log 2>&1
+      done
+    done
+    NATIVE_BENCH
+  result_files:
+  - '*.json'
+  - '*.log'
+  - '*.txt'
+  - '*.csv'
+  timeout: 2400
+matrices:
+  cross:
+    deploy.gpu: NVIDIA GeForce RTX 4080
+    deploy.gpu_count: 1
+    lane:
+    - baseline
+    - fp32

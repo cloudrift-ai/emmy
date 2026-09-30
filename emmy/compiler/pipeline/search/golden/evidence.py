@@ -36,7 +36,15 @@ from emmy.compiler.pipeline.knob import family_of
 from emmy.compiler.pipeline.pipeline import Run, _is_structural_option
 from emmy.compiler.pipeline.search.data.freeze import freeze_source, is_lfs_pointer
 from emmy.compiler.pipeline.search.db import SearchDB, is_placement_knob
-from emmy.compiler.pipeline.search.pins import composed_routes, pinned_knobs, regime_live, spelled_arm, unpinned_decisions
+from emmy.compiler.pipeline.search.pins import (
+    composed_routes,
+    note_place_key,
+    pinned_knobs,
+    regime_live,
+    spelled_arm,
+    tracking_place_keys,
+    unpinned_decisions,
+)
 from emmy.compiler.pipeline.search.policy.terminal_bench import persist_kernel_perf, point_stats
 from emmy.compiler.wire import kernel_tile
 
@@ -85,7 +93,7 @@ def import_goldens(
             counts["unmeasured or in another regime"] += len(entries)
             continue
         try:
-            graph = _lower(pipeline, ctx, entries)
+            graph, unspelled = _lower(pipeline, ctx, entries)
         except Exception:  # noqa: BLE001 — a set the current compiler cannot lower is no evidence
             logger.debug("golden import: %s did not lower", entries[0].name, exc_info=True)
             counts["did not lower"] += len(entries)
@@ -108,6 +116,12 @@ def import_goldens(
             if op is None:
                 counts[what] += 1
                 continue
+            if id(entry) in unspelled:
+                # A row its kernel does not offer would sit in perf where no leaf ever reads it, and the
+                # greedy would price the kernel from the prior with the file apparently loaded.
+                logger.warning("golden row %s spells no schedule its kernel offers (%s) — it is no evidence", entry.name, row)
+                counts["rows no schedule of their kernel equals"] += 1
+                continue
             stats = point_stats(entry.emmy_us)
             if persist_kernel_perf(db, ctx, "cuda", op, stats=stats, status="ok", captured=True, knobs=row, source=source):
                 counts["perf rows"] += 1
@@ -120,7 +134,8 @@ def _lower(pipeline, ctx: Context, entries: list[GoldenRecord]):
     entry every other; a kernel-set fork takes the arm the decider's route spells, a schedule fork the leaf
     its row vouches for, either the first leaf when it spells none. The live decision pins are withdrawn: the
     rows filed hold for every pinned compile. The seams an entry marks cut together are one composed
-    decision, offered to the cut pass as the deploy offers them."""
+    decision, offered to the cut pass as the deploy offers them. Also returns the entries whose row equals no
+    leaf of their own kernel's schedule fork: a lowering took its first leaf, which the row did not measure."""
 
     lead = entries[0]
     spelling = {
@@ -128,9 +143,13 @@ def _lower(pipeline, ctx: Context, entries: list[GoldenRecord]):
         for entry in entries
     }
     named = {entry.identity: entry for entry in sorted(entries, key=lambda entry: bool(entry.route)) if entry.identity is not None}
+    asked_by: set[int] = set()
+    spelled_by: set[int] = set()
     composed: list[tuple[None, tuple[str, ...]]] = []
+    routed: set[str] = set()
     for row in spelling.values():
         keys = tuple(sorted(key for key, value in row.items() if family_of(key) == "PLACE" and value == "cut"))
+        routed.update(key for key in keys if key != "PLACE")
         if len(keys) > 1 and (None, keys) not in composed:
             composed.append((None, keys))
 
@@ -146,15 +165,25 @@ def _lower(pipeline, ctx: Context, entries: list[GoldenRecord]):
                     # A decision consumes the keys that spelled it (a bare ``PLACE=cut`` its one root-most
                     # cut), so the pieces are read against what the entry has left to say.
                     for key in (*(set(knobs) & set(row)), *(("PLACE",) if row.get("PLACE") == "cut" else ())):
+                        note_place_key(key)
                         row.pop(key, None)
                 return option
-        elif (asked := piece_row(decider.schedule_row)) and (hit := leaf_for(fp.options, asked)) is not None:
-            return hit[0]
+        elif asked := piece_row(decider.schedule_row):
+            own = named.get(identity) is decider or (decider is lead and lead.identity is None)
+            if own:
+                asked_by.add(id(decider))
+            if (hit := leaf_for(fp.options, asked)) is not None:
+                if own:
+                    spelled_by.add(id(decider))
+                return hit[0]
         return next(iter_leaves(fp.options))
 
-    with unpinned_decisions(), composed_routes(composed):
+    with unpinned_decisions(), composed_routes(composed), tracking_place_keys() as resolved:
         graph, _trace = Run(pipeline=pipeline, ctx=ctx).resolve(lead.target_program.copy(), decide)
-    return graph
+    for key in sorted(routed - resolved):
+        # The route still decides its other seams; this one addresses nothing the fresh lowering has.
+        logger.warning("golden route of %s: %s names no seam of the fresh lowering — it decided nothing", lead.name, key)
+    return graph, asked_by - spelled_by
 
 
 def import_file(db: SearchDB, path: Path) -> Counter:

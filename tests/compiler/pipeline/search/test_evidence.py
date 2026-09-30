@@ -115,6 +115,20 @@ def test_an_entry_naming_a_kernel_the_compiler_no_longer_mints_writes_nothing() 
     assert counts["identities no kernel carries"] == 1 and counts["perf rows"] == len(rest)
 
 
+def test_a_row_its_kernel_does_not_offer_writes_nothing(caplog) -> None:
+    """A row that equals no leaf of its kernel's schedule fork (a ring deeper than the catalog, spelled by
+    hand into a working golden) is no evidence: the import used to file it under the kernel, where no leaf
+    reads it, and the deploy fell to the prior with the file apparently loaded. It is counted and named."""
+    case = corpus.load_case(corpus.CASES_DIR / "fused/gate-up-staged-async.json")
+    [record] = _records(case)
+    deep = replace(record, knobs={**record.knobs, "STAGE": "d5/smem-async"})
+    db, ctx = SearchDB(), case.context()
+    with pinned_knobs(_regime(record)), caplog.at_level("WARNING"):
+        counts = import_goldens(db, ctx, [deep], source="golden:test")
+    assert counts == {"rows no schedule of their kernel equals": 1} and not list(db.iter_perf_rows())
+    assert record.name in caplog.text and "d5/smem-async" in caplog.text
+
+
 def test_a_compile_imports_its_scope_once_and_lets_a_re_recorded_files_rows_go(tmp_path) -> None:
     """The tune DB imports a golden scope once per digest; a scope the DB has not seen replaces the
     earlier golden rows of that card and regime (keep-best would keep a stale faster row), and an

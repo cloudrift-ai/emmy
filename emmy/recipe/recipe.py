@@ -7,7 +7,7 @@ import yaml
 
 from emmy.recipe.engines import banned_extra_arg_flags
 from emmy.recipe.lifecycle import recipe_is_runnable, recipe_lifecycle, validate_recipe_tags
-from emmy.recipe.types import Recipe
+from emmy.recipe.types import LLMConfig, Recipe
 
 
 def deep_merge(base, override):
@@ -128,15 +128,19 @@ def load_recipe(recipe_dir):
     return _validate_and_build(config)
 
 
-def resolve_for_hardware(recipe_dir: str, gpu_name: str, gpu_count: int | None = None) -> "Recipe":
-    """Load recipe and resolve the best matrix entry for the given hardware.
+def resolve_for_hardware(
+    recipe_dir: str, gpu_name: str, gpu_count: int | None = None, gpu_memory_utilization: float | None = None
+) -> "Recipe":
+    """Load recipe and resolve the matrix entry for the given hardware.
 
-    Expands the full matrix (cross/zip), then picks the best match:
-    1. Exact match: deploy.gpu == gpu_name AND deploy.gpu_count == gpu_count
-    2. Divisible match: deploy.gpu == gpu_name AND gpu_count is a multiple of
-       the entry's deploy.gpu_count (for scale-out). Picks the largest entry
-       gpu_count that divides evenly.
-    3. Name-only match: deploy.gpu == gpu_name (when gpu_count is None)
+    Expands the full matrix (cross/zip), keeps the entries naming ``gpu_name``, then picks:
+    1. With ``gpu_memory_utilization``: the entry whose deploy.gpu_count and fraction both match
+       exactly, and nothing else — a plan names the qualified entry it wants.
+    2. Otherwise, among the entries whose deploy.gpu_count matches exactly, the highest fraction
+       (the whole-GPU qualification); ties keep the first declared.
+    3. Divisible match: gpu_count is a multiple of the entry's deploy.gpu_count (for scale-out).
+       The largest entry count that divides evenly wins.
+    4. Name-only match: the first entry for the GPU (when gpu_count is None).
 
     If no matrices section exists, returns the base recipe.
     Raises ValueError if no match is found.
@@ -149,49 +153,38 @@ def resolve_for_hardware(recipe_dir: str, gpu_name: str, gpu_count: int | None =
     if not matrices:
         return _validate_and_build(config)
 
+    base_fraction = (config.get("engine") or {}).get("llm", {}).get("gpu_memory_utilization", LLMConfig.gpu_memory_utilization)
+
+    def build(combo):
+        return _validate_and_build(deep_merge(config, build_override(combo)))
+
+    def fraction(combo):
+        return combo.get("engine.llm.gpu_memory_utilization", base_fraction)
+
     combinations = expand_matrix(matrices)
-
-    # Collect combinations matching gpu_name
-    available_gpus = set()
-    candidates = []
-    for combo in combinations:
-        gpu = combo.get("deploy.gpu")
-        if gpu is not None:
-            available_gpus.add(gpu)
-        if gpu == gpu_name:
-            candidates.append(combo)
-
+    candidates = [combo for combo in combinations if combo.get("deploy.gpu") == gpu_name]
     if not candidates:
-        raise ValueError(f"No matrix entry matches GPU '{gpu_name}'. Available GPUs: {', '.join(sorted(available_gpus))}")
+        available_gpus = sorted({combo["deploy.gpu"] for combo in combinations if combo.get("deploy.gpu") is not None})
+        raise ValueError(f"No matrix entry matches GPU '{gpu_name}'. Available GPUs: {', '.join(available_gpus)}")
 
-    # If no gpu_count specified, return first name match
     if gpu_count is None:
-        override = build_override(candidates[0])
-        merged = deep_merge(config, override)
-        return _validate_and_build(merged)
+        return build(candidates[0])
 
-    # Try exact count match first
-    for combo in candidates:
-        entry_count = combo.get("deploy.gpu_count", 1)
-        if entry_count == gpu_count:
-            override = build_override(combo)
-            merged = deep_merge(config, override)
-            return _validate_and_build(merged)
+    exact = [combo for combo in candidates if combo.get("deploy.gpu_count", 1) == gpu_count]
+    if gpu_memory_utilization is not None:
+        for combo in exact:
+            if fraction(combo) == gpu_memory_utilization:
+                return build(combo)
+        raise ValueError(
+            f"No matrix entry for GPU '{gpu_name}' x{gpu_count} at gpu_memory_utilization={gpu_memory_utilization}. "
+            f"Available fractions: {sorted({fraction(combo) for combo in exact})}"
+        )
+    if exact:
+        return build(max(exact, key=fraction))
 
-    # Try divisible match: gpu_count is a multiple of entry's count.
-    # Pick largest entry count that divides evenly.
-    best = None
-    best_count = 0
-    for combo in candidates:
-        entry_count = combo.get("deploy.gpu_count", 1)
-        if gpu_count % entry_count == 0 and entry_count > best_count:
-            best = combo
-            best_count = entry_count
+    divisible = [combo for combo in candidates if gpu_count % combo.get("deploy.gpu_count", 1) == 0]
+    if divisible:
+        return build(max(divisible, key=lambda combo: combo.get("deploy.gpu_count", 1)))
 
-    if best is not None:
-        override = build_override(best)
-        merged = deep_merge(config, override)
-        return _validate_and_build(merged)
-
-    entry_counts = sorted({c.get("deploy.gpu_count", 1) for c in candidates})
+    entry_counts = sorted({combo.get("deploy.gpu_count", 1) for combo in candidates})
     raise ValueError(f"No matrix entry for GPU '{gpu_name}' matches gpu_count={gpu_count}. Available counts: {entry_counts}")

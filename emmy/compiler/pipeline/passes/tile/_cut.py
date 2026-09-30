@@ -327,9 +327,10 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
             continue
         if not all(_closed_at(node, scope) for scope in scopes):
             continue
-        if node.observe is not None:
+        if node.observe is not None or node.carries:
             # An observed fold's per-step results exist only inside its stream — a cut would
             # separate the scan from its streamed boundary store, which no piece can then spell.
+            # A carried state is the same: its steps run in order inside one loop.
             continue
         if not taken.get(id(node), node.exposes):
             # No reader takes any component: lowering drops the edge outright, so a workspace
@@ -623,6 +624,47 @@ def _read_at(rn: str, mn: str, rep: CutSite, member: CutSite, rep_reads: dict, m
     return read if min(values) >= 0 and max(values) < extent.as_static() else None
 
 
+def _channel_copies(seam: CutSite, axes: tuple) -> dict[int, tuple[int, dict[str, Expr]]]:
+    """The components of ONE seam that are another component read at other coordinates, as
+    ``{position: (position read, {axis: address})}``. Lifting folds every contraction over one input
+    into one twin, so RoPE's rotate-half copies of a projection become channels beside the plain one,
+    and each channel reads the weight again. Compared one component at a time, a copy is the plain
+    channel's value at the address its index expression computes (:func:`_read_at`), so the workspace
+    stores the plain channel and the copy reads it there."""
+    node = seam.node
+    if (
+        len(node.exposes) < 2
+        or node.twist is not None
+        or node.observe is not None
+        or node.carries
+        or seam.frontier is not None
+        or seam.owned is not None
+    ):
+        return {}  # a twisted or observed state is one whole: its components depend on each other
+    scoped = tuple(axis.name for axis in seam.axes if axis.name in seam.node.free_axes)
+    forms = [_value_forms(replace(seam, node=seam.node.exposing((name,))), axes) for name in seam.node.exposes]
+    # Within one value the channel reading the fewest coordinates through an expression holds it.
+    reps = {}
+    for position, ((form,), _reads) in sorted(enumerate(forms), key=lambda item: len(item[1][1])):
+        reps.setdefault(form, position)
+    copies: dict[int, tuple[int, dict[str, Expr]]] = {}
+    for position, ((form,), reads) in enumerate(forms):
+        rep = reps[form]
+        if rep == position or seam.dtypes[rep] != seam.dtypes[position]:
+            continue
+        mapping = {name: _read_at(name, name, seam, seam, forms[rep][1], reads) for name in scoped}
+        if all(read is not None for read in mapping.values()):
+            copies[position] = (rep, mapping)
+    return copies
+
+
+def _channels(node: Fold, names: tuple[str, ...]) -> Fold:
+    """``node`` computing only the components ``names``, every operand it no longer reads dropped."""
+    from emmy.compiler.ir.tile.normalize import _prune_unread  # noqa: PLC0415
+
+    return _prune_unread(node.exposing(names), frozenset(names))
+
+
 def _unchanged(pieces: tuple, members) -> bool:
     return len(pieces) == len(members) and all(piece is member for piece, member in zip(pieces, members, strict=True))
 
@@ -761,41 +803,64 @@ def _workspace_axes(seam: CutSite, produced: Fold) -> tuple:
     return tuple(axis for axis in seam.axes if axis.name in read or _unit(axis))
 
 
-def _workspace_strides(produced: Fold, axes: tuple) -> dict[str, int]:
-    """A coordinate used only as ``i // d`` needs one stored value per group of ``d`` cells.
+def _workspace_strides(produced: Fold, axes: tuple) -> dict[str, tuple[int, int]]:
+    """``{coordinate: (d, c)}`` for each coordinate the stored terms read only as ``i // d`` and ``i % c``.
 
-    Every occurrence must be the numerator of a positive integer division. Different divisors
-    share their greatest common divisor; a direct read or a remainder keeps the full extent.
-    Read the stored terms, including coordinate predicates, before choosing a representative.
-    """
-    factors = dict.fromkeys((axis.name for axis in axes), 0)
-    pending = [produced]
-    while pending:
-        term = pending.pop()
-        pending.extend(term.operands)
-        for name in factors:
+    Such a value holds one stored cell per ``(i // d, i % c)``: ``c`` of every ``d`` cells, at
+    ``(i // d) * c + i % c``. With no remainder (``c = 1``) that is one cell per group of ``d``
+    (GQA's k read at the head ``h // 2``); with one it is a fused (head, head-dim) channel whose
+    head is divided again (GQA's v read at ``(i // 128 // 2) * 128 + i % 128``), stored once per
+    kv head instead of once per q head. Different divisors share their greatest common divisor,
+    which the remainder must divide; a direct read, or a coordinate a statement computes with,
+    keeps the full extent. Read the stored terms, including coordinate predicates."""
+    out: dict[str, tuple[int, int]] = {}
+    for axis in axes:
+        name = axis.name
+        reads: set[tuple[str, int]] = set()
+        plain = False
+        pending = [produced]
+        while pending:
+            term = pending.pop()
+            pending.extend(term.operands)
             if name not in term.free_axes:
                 continue
-            if term.observe is not None or name in term.lift.results:
-                factors[name] = 1
+            plain = plain or term.observe is not None or name in term.lift.results
             for stmt in term.lift.body.iter():
-                if not isinstance(stmt, Load) and name in stmt.deps():
-                    factors[name] = 1
+                plain = plain or (not isinstance(stmt, Load) and name in stmt.deps())
                 for expr in stmt.exprs():
-                    parts = tuple(expr.subterms())
-                    uses = sum(isinstance(part, Var) and part.name == name for part in parts)
-                    divisors = [
-                        int(part.right.value)
-                        for part in parts
-                        if isinstance(part, BinaryExpr)
-                        and part.op in ("/", "//")
-                        and part.left == Var(name)
-                        and isinstance(part.right, Literal)
-                        and part.right.dtype == "int"
-                        and part.right.value > 0
-                    ]
-                    factors[name] = gcd(factors[name], *divisors) if uses == len(divisors) else 1
-    return {name: factor for name, factor in factors.items() if factor > 1}
+                    reads.update(_divmod_reads(expr, name))
+        divisors = [value for op, value in reads if op == "/"]
+        remainders = {value for op, value in reads if op == "%"}
+        if plain or ("", 1) in reads or not divisors or len(remainders) > 1:
+            continue
+        d, c = gcd(*divisors), next(iter(remainders), 1)
+        if d <= c or d % c or (c > 1 and not (axis.extent.is_static and axis.extent.as_static() % d == 0)):
+            continue
+        out[name] = (d, c)
+    return out
+
+
+def _compressed(axis, stride: tuple[int, int]):
+    """``axis`` with the extent its workspace keeps under :func:`_workspace_strides`' ``(d, c)``."""
+    d, c = stride
+    return replace(axis, extent=axis.extent.ceil_div(d) if c == 1 else Dim(axis.extent.as_static() // d * c))
+
+
+def _compressed_index(name: str, stride: tuple[int, int]) -> Expr:
+    """Where the workspace stores coordinate ``name``'s value: ``(i // d) * c + i % c``."""
+    d, c = stride
+    return Var(name) / d if c == 1 else (Var(name) / d) * c + BinaryExpr("%", Var(name), Literal(c, "int"))
+
+
+def _divisor(expr, name: str) -> int | None:
+    """What ``expr`` divides the bare coordinate ``name`` by through positive integer divisions, or ``None``."""
+    if expr == Var(name):
+        return 1
+    if not (isinstance(expr, BinaryExpr) and expr.op in ("/", "//") and isinstance(expr.right, Literal)):
+        return None
+    if expr.right.dtype != "int" or expr.right.value <= 0 or (inner := _divisor(expr.left, name)) is None:
+        return None
+    return inner * int(expr.right.value)
 
 
 class _FoldingSigma(Sigma):
@@ -829,8 +894,10 @@ def _substitute_and_fold(produced: Fold, name: str, sigma: Sigma, ctx: SimplifyC
 def _divmod_in_edge(edge: Fold, name: str, factor: int) -> tuple[bool, bool]:
     """``(the edge reads name / factor, the edge reads name's low part)`` anywhere under it.
 
-    The low part is ``name % factor`` or ``name`` itself: a plain read depends on both halves, as
-    a workspace indexed by the fused name does when a cut materialized one operand at it."""
+    A division by a multiple of ``factor`` reads the high part too: ``i // (factor * g)`` is the
+    high part divided again, as GQA's k reads the head. The low part is ``name % factor`` or
+    ``name`` itself: a plain read depends on both halves, as a workspace indexed by the fused
+    name does when a cut materialized one operand at it."""
     div = low = False
     pending = [edge]
     while pending:
@@ -838,20 +905,38 @@ def _divmod_in_edge(edge: Fold, name: str, factor: int) -> tuple[bool, bool]:
         pending.extend(term.operands)
         for stmt in term.lift.body.iter():
             for expr in stmt.exprs():
-                uses = covered = 0
-                for part in expr.subterms():
-                    uses += isinstance(part, Var) and part.name == name
-                    if (
-                        isinstance(part, BinaryExpr)
-                        and part.left == Var(name)
-                        and isinstance(part.right, Literal)
-                        and part.right.value == factor
-                    ):
-                        covered += 1
-                        div = div or part.op in ("/", "//")
-                        low = low or part.op == "%"
-                low = low or uses > covered
+                for op, value in _divmod_reads(expr, name):
+                    high = op == "/" and value % factor == 0
+                    div = div or high
+                    low = low or not high
     return div, low
+
+
+def _divmod_reads(expr, name: str) -> list[tuple[str, int]]:
+    """How ``expr`` reads the coordinate ``name``: ``("/", d)`` per outermost chain of integer
+    divisions (``(i // a) // b`` reads ``i // (a * b)``), ``("%", m)`` per remainder, ``("", 1)``
+    per bare use."""
+    parts = tuple(expr.subterms())
+    chains = {
+        id(part): divisor
+        for part in parts
+        if isinstance(part, BinaryExpr) and (divisor := _divisor(part, name)) is not None and divisor > 1
+    }
+    inner = {id(part.left) for part in parts if id(part) in chains}
+    reads = [("/", divisor) for key, divisor in chains.items() if key not in inner]
+    reads += [
+        ("%", int(part.right.value))
+        for part in parts
+        if isinstance(part, BinaryExpr)
+        and part.op == "%"
+        and part.left == Var(name)
+        and isinstance(part.right, Literal)
+        and part.right.dtype == "int"
+        and isinstance(part.right.value, int)
+        and part.right.value > 1
+    ]
+    uses = sum(isinstance(part, Var) and part.name == name for part in parts)
+    return reads + [("", 1)] * (uses - len(reads))
 
 
 def _straddles_a_contraction(produced: Fold, name: str, factor: int) -> bool:
@@ -902,9 +987,7 @@ def _fused_pair_factor(produced: Fold, axes: tuple) -> tuple[str, int] | None:
         if not axis.extent.is_static:
             continue
         extent = axis.extent.as_static()
-        divisors: set[int] = set()
-        remainders: set[int] = set()
-        uses = covered = 0
+        reads: set[tuple[str, int]] = set()
         pending = [produced]
         while pending:
             term = pending.pop()
@@ -913,25 +996,13 @@ def _fused_pair_factor(produced: Fold, axes: tuple) -> tuple[str, int] | None:
                 continue
             for stmt in term.lift.body.iter():
                 for expr in stmt.exprs():
-                    for part in expr.subterms():
-                        if isinstance(part, Var) and part.name == name:
-                            uses += 1
-                        if (
-                            isinstance(part, BinaryExpr)
-                            and part.left == Var(name)
-                            and isinstance(part.right, Literal)
-                            and part.right.dtype == "int"
-                            and isinstance(part.right.value, int)
-                            and part.right.value > 1
-                        ):
-                            if part.op in ("/", "//"):
-                                divisors.add(int(part.right.value))
-                                covered += 1
-                            elif part.op == "%":
-                                remainders.add(int(part.right.value))
-                                covered += 1
-        if len(divisors) == 1 and remainders <= divisors and (remainders or uses > covered):
-            (factor,) = divisors
+                    reads.update(_divmod_reads(expr, name))
+        divisors = {value for op, value in reads if op == "/"}
+        remainders = {value for op, value in reads if op == "%"}
+        # The pair's factor is the finest division; a coarser one that it divides reads the high
+        # part again (GQA's k at ``head // group``), which the split folds to ``hi // group``.
+        factor = min(divisors, default=0)
+        if divisors and all(value % factor == 0 for value in divisors) and remainders <= {factor} and (remainders or ("", 1) in reads):
             if 1 < factor < extent and extent % factor == 0 and _straddles_a_contraction(produced, name, factor):
                 return name, factor
     return None
@@ -1124,6 +1195,9 @@ def realize(
         for sibling, _, channels in seam.siblings:
             read = taken.get(id(sibling), set(sibling.exposes))
             shared.update(child.exposes[channel] for position, channel in enumerate(channels) if sibling.exposes[position] in read)
+        # A channel that is another channel read elsewhere stores nothing of its own: it reads that one.
+        copies = _channel_copies(seam, tile.axes) if front is None else {}
+        shared = {child.exposes[copies.get(position, (position,))[0]] for position, name in enumerate(child.exposes) if name in shared}
         # ONE workspace per DISTINCT component, not one per position. A carrier seats a component
         # once per reader, so a value two readers share is exposed at SEVERAL positions naming the
         # one accumulator (flash's numerator, read straight and again through its normalizing
@@ -1133,32 +1207,54 @@ def realize(
         owner = {name: position for position, name in reversed(list(enumerate(child.exposes))) if name in shared}
         slots = tuple(owner.get(name) == position for position, name in enumerate(child.exposes))
         wanted = tuple(name for position, name in enumerate(child.exposes) if slots[position])
-        if front is not None:
-            names = (front.name,)
-            produced = front.producer
-            dtypes = seam.dtypes
-        else:
-            names = wanted
-            produced = child
-            dtypes = tuple(dtype for dtype, keep in zip(seam.dtypes, slots, strict=True) if keep)
-        axes = _workspace_axes(seam, produced)
-        strides = _workspace_strides(produced, axes)
-        axes = tuple(replace(axis, extent=axis.extent.ceil_div(strides[axis.name])) if axis.name in strides else axis for axis in axes)
-        index = tuple(Var(axis.name) / strides[axis.name] if axis.name in strides else Var(axis.name) for axis in axes)
         token = digest(tile.identity_key(structural=False) or "", seam.spelling)[:10]
-        # The ordinal names the component the workspace holds, so a narrowed seam keeps the
-        # spelling of the components it did keep.
-        ordinals = range(len(names)) if front is not None else (i for i, keep in enumerate(slots) if keep)
-        buffers = tuple(f"{root.id}__place_{token}_{i}" for i in ordinals)
+        # One piece per stride: a channel that reads a coordinate only as ``i // d`` where another reads
+        # it plainly (GQA's k beside q) is computed and stored once per group of ``d`` cells by its own
+        # piece, instead of ``d`` times beside the other channel. Channels over different axes stay
+        # one piece: they share the reads a twin folds them over. The ordinal names the component a
+        # workspace holds, so a narrowed seam keeps the spelling of the components it did keep.
+        if front is not None:
+            groups = [((front.name,), front.producer, seam.dtypes, (0,))]
+        else:
+            kept = tuple(position for position in range(len(child.exposes)) if slots[position])
+            by_shape: dict[tuple, list[int]] = {}
+            for position in kept:
+                alone = _channels(child, (child.exposes[position],)) if len(kept) > 1 else child
+                axes = _workspace_axes(seam, alone)
+                by_shape.setdefault((axes, frozenset(_workspace_strides(alone, axes).items())), []).append(position)
+            if len({axes for axes, _ in by_shape}) > 1:
+                by_shape = {None: list(kept)}
+            groups = []
+            for positions in by_shape.values():
+                names = tuple(child.exposes[position] for position in positions)
+                produced = child if len(by_shape) == 1 else _channels(child, names)
+                groups.append((names, produced, tuple(seam.dtypes[position] for position in positions), tuple(positions)))
+        held: dict[int, str] = {}
+        indexes: dict[int, tuple] = {}
+        for number, (names, produced, dtypes, ordinals) in enumerate(groups):
+            axes = _workspace_axes(seam, produced)
+            strides = _workspace_strides(produced, axes)
+            index = tuple(_compressed_index(axis.name, strides[axis.name]) if axis.name in strides else Var(axis.name) for axis in axes)
+            axes = tuple(_compressed(axis, strides[axis.name]) if axis.name in strides else axis for axis in axes)
+            buffers = tuple(f"{root.id}__place_{token}_{i}" for i in ordinals)
+            for name, buffer in zip(names, buffers, strict=True) if front is None else ():
+                held.update({position: buffer for position, own in enumerate(child.exposes) if own == name})
+                indexes.update({position: index for position, own in enumerate(child.exposes) if own == name})
+            pieces.append(
+                (replace(seam, dtypes=dtypes), produced, axes, strides, token if number == 0 else f"{token}_{number}", names, buffers)
+            )
 
         # SLABS, not bare Loads: these replace an operand edge, and an operand is a term. The
         # workspace read declares the seam axes it indexes, exactly as any other gmem read does.
         # Positional over what the edge exposed, ``None`` where the reader took nothing. A
         # frontier's workspace is the one raw waypoint, which the block below spells instead.
-        by_name = dict(zip(wanted, buffers, strict=True))
-        held = {} if front is not None else {position: by_name[name] for position, name in enumerate(child.exposes) if name in by_name}
+        # A channel that copies another is read from that channel's buffer at the address it computes.
+        for position, (rep, mapping) in copies.items():
+            if rep in held:
+                held[position] = held[rep]
+                indexes[position] = tuple(expr.substitute(mapping) for expr in indexes[rep])
         loads: tuple = tuple(
-            Fold.slab(Load(name=_read_name(name, token), input=held[position], index=index)) if position in held else None
+            Fold.slab(Load(name=_read_name(name, token), input=held[position], index=indexes[position])) if position in held else None
             for position, name in enumerate(child.exposes)
         )
         if front is not None:
@@ -1175,7 +1271,8 @@ def realize(
         # The names the consumer reads this workspace back under. A frontier seam's workspace holds
         # the raw storage waypoint, so its piece is named after the FRONTIER while the consumer
         # still exposes the cone's decoded results — the rename is over those.
-        read_names.update({name: _read_name(name, token) for name in (names if front is None else child.lift.results)})
+        read_names.update({name: _read_name(name, token) for name in (wanted if front is None else child.lift.results)})
+        read_names.update({child.exposes[position]: _read_name(child.exposes[position], token) for position in copies})
         replacements = {id(child): loads}
         for ordinal, (sibling, pairs, channels) in enumerate(seam.siblings):
             # A clustered duplicate reads the SAME workspace, spelled through its own captured
@@ -1184,10 +1281,17 @@ def realize(
             # reads the component that is its value: a lone contraction reads one channel of the
             # twin it equals.
             mapping = dict(pairs)
-            mapping.update({axis.name: Literal(0, "int") for axis in axes if _unit(axis) and axis.name not in mapping})
-            sibling_index = tuple(expr.substitute(mapping) for expr in index)
+            mapping.update({axis.name: Literal(0, "int") for axis in seam.axes if _unit(axis) and axis.name not in mapping})
             replacements[id(sibling)] = tuple(
-                Fold.slab(Load(name=_read_name(own, token, ordinal), input=held[channel], index=sibling_index)) if channel in held else None
+                Fold.slab(
+                    Load(
+                        name=_read_name(own, token, ordinal),
+                        input=held[channel],
+                        index=tuple(expr.substitute(mapping) for expr in indexes[channel]),
+                    )
+                )
+                if channel in held
+                else None
                 for own, channel in zip(sibling.exposes, channels, strict=True)
             )
             # The representative wins a shared name: a boundary store of a value both occurrences
@@ -1195,7 +1299,7 @@ def realize(
             for name, channel in zip(sibling.exposes, channels, strict=True):
                 if channel in held:
                     read_names.setdefault(name, _read_name(name, token, ordinal))
-        pieces.append((replace(seam, dtypes=dtypes), produced, axes, strides, token, names, buffers, replacements))
+        pieces[len(pieces) - len(groups) :] = [(*piece, replacements) for piece in pieces[len(pieces) - len(groups) :]]
 
     # Every replacement applies to the consumer AND to every OTHER seam's produced piece: a
     # composed decision may cut a cone nested inside another seam's value (attention's statistics
@@ -1216,8 +1320,18 @@ def realize(
         # its own stores name those values.
         derived: dict[str, str] = {}
         produced = _without_identity_casts(_replace_fold(produced, others, derived) if others else produced, stored)
-        if strides:
-            produced = rewrite_stmt(produced, lambda name: name, Sigma({name: Var(name) * stride for name, stride in strides.items()}))
+        # The piece sweeps the stored cells: coordinate ``j`` is the original ``(j // c) * d + j % c``,
+        # folded under ``j``'s range so ``i // d`` and ``i % c`` read back as ``j // c`` and ``j % c``.
+        for axis in axes:
+            if (stride := strides.get(axis.name)) is None:
+                continue
+            d, c = stride
+            if c == 1:
+                produced = rewrite_stmt(produced, lambda name: name, Sigma({axis.name: Var(axis.name) * d}))
+                continue
+            folding = _FoldingSigma({axis.name: (Var(axis.name) / c) * d + BinaryExpr("%", Var(axis.name), Literal(c, "int"))})
+            object.__setattr__(folding, "_ctx", SimplifyCtx(ranges={axis.name: Interval(0, axis.extent.as_static() - 1)}))
+            produced = rewrite_stmt(produced, lambda name: name, folding)
         index = tuple(Var(axis.name) for axis in axes)
         produced_pieces.append((seam, produced, axes, index, token, tuple(derived.get(name, name) for name in names), buffers))
 

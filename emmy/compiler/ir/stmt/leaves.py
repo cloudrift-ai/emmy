@@ -13,7 +13,7 @@ from functools import cached_property
 from emmy.compiler.dtype import F32, DataType
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl, reduce_spelling
-from emmy.compiler.ir.expr import BinaryExpr, Expr, FlatIndex, Literal, Var, _float_lit
+from emmy.compiler.ir.expr import BinaryExpr, Expr, FlatIndex, FuncCallExpr, Literal, Var, _float_lit
 from emmy.compiler.ir.stmt.base import (
     _INTEGER_DTYPES,
     RenderCtx,
@@ -46,7 +46,6 @@ def _args_at_dtype(target, args: tuple[str, ...], arg_dtypes: list[str], dst_dt:
     target's conversion intrinsic (e.g. ``__half2float(name)``) by
     parsing ``target.convert``'s output back into a ``FuncCallExpr`` so
     it composes with the Expr renderer."""
-    from emmy.compiler.ir.expr import FuncCallExpr  # noqa: PLC0415
 
     out: list[Expr] = []
     for a, dt in zip(args, arg_dtypes, strict=True):
@@ -68,7 +67,6 @@ def _dtype_intrinsics(target, result_dt: str, expr: Expr) -> dict[str, str]:
     when resolving ``FuncCallExpr.name`` to a target spelling; we patch
     in the dtype-specific spellings while rendering the fp16-native
     path."""
-    from emmy.compiler.ir.expr import FuncCallExpr  # noqa: PLC0415
 
     overrides: dict[str, str] = {}
 
@@ -122,12 +120,22 @@ class Load(Stmt):
     matcher-populated ``KernelOp.inputs``/``outputs`` side channels.
     ``None`` keeps the legacy render-time inference path working for
     tests that construct Loads by hand without dtype.
+
+    ``carried`` marks the two halves of a staged copy that crosses the chunk loop's back edge. The
+    names and their packed vector are the ones an earlier Load of the same names DECLARED ahead of
+    the loop. ``"load"`` re-assigns only the packed vector, through the read-only (non-coherent)
+    path — the operand is one the kernel never writes — so the loaded chunk survives into the next
+    iteration as the few registers the vector holds. ``"unpack"`` re-assigns the names from that
+    vector and touches no memory; it sits right before the names' consumer. Measured on the V100:
+    unpacking at the load instead keeps every element live across the mma stream and ptxas then
+    serializes the loads behind it (a 128x128 partial 84 us against 67).
     """
 
     names: tuple[str, ...]
     input: str
     index: tuple[Expr, ...]
     dtype: DataType | None
+    carried: str = ""  # a default, so a Load that does not set it renders (and keys) as before
 
     pure = True  # a pure value binding — legal inside a stored ``Lambda`` body
 
@@ -139,6 +147,7 @@ class Load(Stmt):
         *,
         names: tuple[str, ...] | None = None,
         dtype: DataType | None = None,
+        carried: str = "",
     ) -> None:
         if names is None:
             if name is None:
@@ -156,6 +165,7 @@ class Load(Stmt):
         object.__setattr__(self, "input", input)
         object.__setattr__(self, "index", tuple(index))
         object.__setattr__(self, "dtype", dtype)
+        object.__setattr__(self, "carried", carried)
 
     @property
     def name(self) -> str:
@@ -229,30 +239,31 @@ class Load(Stmt):
         # fall back to ``ctx.buffer_dtypes`` so handwritten test fixtures
         # without a stamped dtype still render correctly.
         src_dt = self.dtype.name if self.dtype is not None else ctx.buffer_dtypes.get(self.input, "f32")
+        mem = ctx.memory_for(self.input)
         if self.is_scalar:
             # Scalar path. Declare the local in the source buffer's
             # element type so downstream ``Assign``s can pick native ops
             # without an immediate promote.
-            flat = render_index(self.input, self.index, ctx)
             ctx.ssa_dtypes[self.names[0]] = src_dt
-            return [f"{pad}{ctx.type_name(src_dt)} {self.names[0]} = {self.input}[{flat}];"]
+            return [f"{pad}{ctx.type_name(src_dt)} {self.names[0]} = {mem.base(self.index, ctx)}[{mem.flat(self.index, ctx)}];"]
         # Vector path: one ``<vec_type>`` reinterpret-cast read + N
         # ``.x/.y/.z/.w`` (or indexed) unpacks.
         n = self.width
         vec_pair = ctx.target.vector_type(src_dt, n)
-        if vec_pair is None:
-            # Target doesn't support this width — fall back to scalar
+        if vec_pair is None or not mem.vectorizable:
+            # Target doesn't support this width, or the buffer does not guarantee consecutive
+            # elements are contiguous (a paged read may cross a page) — fall back to scalar
             # Loads. The vectorize pass should have avoided this, but
             # render's job is to always produce valid code.
             out: list[str] = []
             for k, nm in enumerate(self.names):
                 idx_k = tuple(self.index[:-1]) + (BinaryExpr("+", self.index[-1], Literal(k, "int")),)
-                flat = render_index(self.input, idx_k, ctx)
+                flat = f"{mem.base(idx_k, ctx)}[{mem.flat(idx_k, ctx)}]"
                 ctx.ssa_dtypes[nm] = src_dt
-                out.append(f"{pad}{ctx.type_name(src_dt)} {nm} = {self.input}[{flat}];")
+                out.append(f"{pad}{ctx.type_name(src_dt)} {nm} = {flat};")
             return out
         vec_type, elem_type = vec_pair
-        flat = render_index(self.input, self.index, ctx)
+        flat = render_index(self.input, self.index, ctx)  # vectorizable ⇒ Flat, so the plain index
         vname = f"_v_{self.names[0]}"
         # ``.x/.y/.z/.w`` accessors only work when ``vec_type``'s native
         # components match ``elem_type`` 1:1 (``float2``→``float``,
@@ -263,6 +274,12 @@ class Load(Stmt):
         # reinterpret-cast.
         native_n = {"float2": 2, "float4": 4, "__half2": 2}.get(vec_type)
         use_array_index = native_n != n
+        if self.carried == "load":  # re-assign the declared vector only (see the class doc)
+            return [f"{pad}{vname} = __ldg(reinterpret_cast<const {vec_type}*>(&{self.input}[{flat}]));"]
+        if self.carried == "unpack":
+            if use_array_index:
+                return [f"{pad}{nm} = {vname}_h[{k}];" for k, nm in enumerate(self.names)]
+            return [f"{pad}{nm} = {vname}.{c};" for nm, c in zip(self.names, ("x", "y", "z", "w"), strict=False)]
         out_lines = [f"{pad}{vec_type} {vname} = *reinterpret_cast<const {vec_type}*>(&{self.input}[{flat}]);"]
         if use_array_index:
             arr_name = f"{vname}_h"
@@ -348,6 +365,9 @@ class Assign(Stmt):
             # precision better than converting each arg to fp16 first.
             args = _args_at_dtype(ctx.target, self.args, arg_dtypes, result_dt)
             expr = op_to_expr(op_name, args, dtype=result_dt)
+            if isinstance(expr, BinaryExpr) and ctx.target.intrinsic(op_name, result_dt) != op_name:
+                # A target that spells this operator as a call (CUDA's non-contracting f16 ``_rn`` ops).
+                expr = FuncCallExpr(op_name, tuple(args))
             saved_intr = ctx.intrinsics
             saved_lit = ctx.literal_default_dtype
             ctx.intrinsics = {**saved_intr, **_dtype_intrinsics(ctx.target, result_dt, expr)}
@@ -563,7 +583,12 @@ class Pre(Stmt):
     step) — no read of a step sees what that step defines; after that loop closes, the last
     step's. ``index`` is any coordinate expression, so a step may read a cell other than the one
     it defines — under a reduce over it, a contraction over the state. See :class:`Carry`.
+
+    A read like a ``Load``, so a term may hold one: a carrier read is a slab over one ``Pre``
+    (``Fold.carrier_read``), the way a gmem read is a slab over one ``Load``.
     """
+
+    pure = True
 
     name: str
     carrier: str
@@ -816,18 +841,19 @@ class Write(Stmt):
         # Prefer the stamped ``self.value_dtype`` (set by ``030_stamp_types``);
         # fall back to ``ctx.ssa_dtypes`` for legacy/handwritten paths.
         stamped_value_dt = self.value_dtype.name if self.value_dtype is not None else None
+        mem = ctx.memory_for(self.output)
         if self.is_scalar:
             # Scalar path. Convert at the store boundary only when the
             # value's SSA dtype disagrees with the destination buffer's
             # dtype — native chains write through with no conversion.
-            flat = self._swizzled(render_index(self.output, self.index, ctx), ctx)
+            flat = self._swizzled(mem.flat(self.index, ctx), ctx)
             value_dt = stamped_value_dt or ctx.ssa_dtypes.get(self.value, "f32")
             rhs = ctx.target.convert(_resolve_value(self.value, ctx), value_dt, out_dt)
             if self.atomic:
                 # Cross-CTA additive finalize: every contributing CTA accumulates into the
                 # same cell (the output is zero-init'd per launch — ``CudaOp.zero_outputs``).
-                return [f"{pad}atomicAdd(&{self.output}[{flat}], {rhs});"]
-            return [f"{pad}{self.output}[{flat}] = {rhs};"]
+                return [f"{pad}atomicAdd(&{mem.base(self.index, ctx)}[{flat}], {rhs});"]
+            return [f"{pad}{mem.base(self.index, ctx)}[{flat}] = {rhs};"]
         # Vectorized path. Per-value dtype conversion: every SSA arg
         # must be at ``out_dt`` before packing.
         n = self.width
@@ -837,15 +863,16 @@ class Write(Stmt):
             resolved = _resolve_value(nm, ctx)
             converted.append(resolved if src_dt == out_dt else ctx.target.convert(resolved, src_dt, out_dt))
         vec_pair = ctx.target.vector_type(out_dt, n)
-        if vec_pair is None:
-            # Target doesn't support this width — fall back to scalar
+        if vec_pair is None or not mem.vectorizable:
+            # Target doesn't support this width, or the buffer does not guarantee consecutive
+            # elements are contiguous (a paged store may cross a page) — fall back to scalar
             # writes. The vectorize pass should have avoided this, but
             # render's job is to always produce valid code.
             lines: list[str] = []
             for k in range(n):
                 idx_k = tuple(self.index[:-1]) + (BinaryExpr("+", self.index[-1], Literal(k, "int")),)
-                flat = self._swizzled(render_index(self.output, idx_k, ctx), ctx, idx_k)
-                lines.append(f"{pad}{self.output}[{flat}] = {converted[k]};")
+                flat = self._swizzled(mem.flat(idx_k, ctx), ctx, idx_k)
+                lines.append(f"{pad}{mem.base(idx_k, ctx)}[{flat}] = {converted[k]};")
             return lines
         vec_type, _elem_type = vec_pair
         logical_flat = render_index(self.output, self.index, ctx)

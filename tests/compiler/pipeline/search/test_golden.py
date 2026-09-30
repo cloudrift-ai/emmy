@@ -70,6 +70,25 @@ def test_recorded_row_decodes(path: Path, label: str) -> None:
     assert (reason := _decode(record, records)) is None, reason
 
 
+def _file_parameters():
+    with _repository_golden_paths() as paths:
+        return [pytest.param(path, id=_golden_id(path)) for path in sorted(paths, key=_golden_id)]
+
+
+@pytest.mark.parametrize("path", _file_parameters())
+def test_every_kernel_set_imports(path: Path) -> None:
+    """Every kernel set of a repository golden must lower when a compile imports it as evidence.
+
+    Decoding asks each row against its target's enumeration; the import also builds each kernel's
+    wire, and a set that fails there is dropped with nothing but a debug line, leaving the deploy to
+    the prior with the file apparently loaded."""
+    from emmy.compiler.pipeline.search.db import SearchDB
+    from emmy.compiler.pipeline.search.golden.evidence import import_file
+
+    counts = import_file(SearchDB(), path)
+    assert not counts["did not lower"], counts
+
+
 def test_scope_digest_follows_the_cards_rows_only(tmp_path, monkeypatch) -> None:
     """The digest a serving pack keys on moves with the rows this card's compile reads and with nothing else: another
     card's file, or a file scope that names a different file."""
@@ -91,6 +110,20 @@ def test_scope_digest_follows_the_cards_rows_only(tmp_path, monkeypatch) -> None
     assert scoped not in (base, changed)
     monkeypatch.setenv("EMMY_GOLDEN_FILE", "")
     assert scope_digest(card) not in (base, changed, scoped)
+
+
+def test_a_scope_says_when_another_card_measured_its_rows(caplog) -> None:
+    """An explicit scope reads a row only on the card that measured it, or everywhere when the row names no
+    card. The rows it drops are named: a working golden seeded from another card's file and recorded here
+    kept every row under that card, and its replay built the fused kernel with nothing said."""
+    from types import SimpleNamespace
+
+    sxm2, sxm3 = "NVIDIA Tesla V100 SXM2 16GB", "NVIDIA Tesla V100 SXM3 32GB"
+    rows = [SimpleNamespace(gpu_name=name, compute_cap=(7, 0)) for name in (sxm2, sxm3, "")]
+    with golden.records_override(rows), caplog.at_level("WARNING"):
+        kept = golden.repository.records_for_card(sxm3, (7, 0))
+    assert kept == rows[1:]
+    assert f"1 row(s) measured on {sxm2} are no evidence on {sxm3}" in caplog.text
 
 
 def test_decode_ignores_off_anchors_but_not_a_decided_value() -> None:

@@ -129,7 +129,7 @@ def _prune_unread(root: Fold, stored: frozenset[str] = frozenset()) -> Fold:
                 continue
             new, want = visit(edge), kept.get(id(edge), set())
             same = same and new is edge
-            if edge.twist is not None or edge.observe is not None or id(edge) in opaque or len(want) == len(slots):
+            if edge.twist is not None or edge.observe is not None or edge.carries or id(edge) in opaque or len(want) == len(slots):
                 operands.append(new)
                 params.extend(slots)
                 continue

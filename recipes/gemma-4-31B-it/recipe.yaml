@@ -1,10 +1,10 @@
 tags:
-  - maintained
+  - best-effort
 
 model:
   huggingface: "google/gemma-4-31B-it"
-  rationale: "Cooling family with solid arena quality supporting established interest, but no fresh momentum."
-  heat: 40
+  rationale: "Established interest but family cooling; maintained runnable shell, no fresh community or serving evidence."
+  heat: 35
 engine:
   llm:
     tensor_parallel_size: 1

@@ -430,7 +430,7 @@ def _cut_fork(db_ctx):
     tile = case_target_tile("fused/norm-linear-f16-scalar-reduce.json")
     fuse = DeferredFork(materialize=lambda: None, knobs={"PLACE": "fuse"})
     cut = DeferredFork(materialize=lambda: None, knobs={"PLACE@map.1/map": "cut"}, structural=True)
-    return SimpleNamespace(options=[fuse, cut], node_id="node", root_op=tile, ctx=db_ctx), tile, fuse, cut
+    return SimpleNamespace(options=[fuse, cut], splices=(), node_id="node", root_op=tile, ctx=db_ctx), tile, fuse, cut
 
 
 def test_a_stored_cut_is_priced_from_its_pieces_at_the_fork() -> None:
@@ -462,6 +462,64 @@ def test_a_stored_cut_is_priced_from_its_pieces_at_the_fork() -> None:
     assert _route_candidates(point, greedy._EMPTY_MEASURED, None) == []
     other = Context.from_target((12, 0), gpu_name="NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition")
     assert _route_candidates(SimpleNamespace(**{**vars(point), "ctx": other}), greedy._EMPTY_MEASURED, db) == []
+
+
+def test_a_measured_split_is_priced_from_its_pieces_with_no_routing_row() -> None:
+    """A sweep benches a split's pieces but writes no routing row: the deploy reads only perf rows. The
+    split arm is then priced as the sum of its pieces' fastest rows, so a 21 + 1.4 us split beats a
+    52 us unsplit GEMV, and a split whose pieces are slower than the GEMV loses to it."""
+    from emmy.compiler.context import Context
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import InputOp
+    from emmy.compiler.ir.frontend.ir import MatmulOp
+    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
+    from emmy.compiler.pipeline.pipeline import Run
+    from emmy.compiler.pipeline.search.db import PerfStats, SearchDB
+    from emmy.compiler.pipeline.search.policy.terminal_bench import kernel_row
+    from tests.compiler.pipeline.search.helpers import GPU_5090
+
+    ctx = Context.from_target((12, 0), gpu_name=GPU_5090)
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (1, 1024), "f16"), node_id="x")
+    g.add_node(InputOp(), [], Tensor("w", (1024, 16), "f16"), node_id="w")
+    g.add_node(MatmulOp(), ["x", "w"], Tensor("y", (1, 16), "f16"), node_id="y")
+    g.inputs, g.outputs = ["x", "w"], ["y"]
+
+    def kernels(decide) -> dict:
+        """The kernels the cut pass leaves, by node id: what a sweep benches, before any is scheduled."""
+        lowered = Pipeline.build(LOOP_PASSES).run(g, ctx=ctx)
+        terminal, _trace = Run(pipeline=Pipeline.build(["tile/lift", "tile/cut"]), ctx=ctx).resolve(lowered, decide)
+        return {nid: node.op for nid, node in terminal.nodes.items() if isinstance(node.op, TileOp)}
+
+    def arm(reduce: str):
+        return lambda fp: next(o for o in fp.options if leaf_knobs(o).get("REDUCE", "") == reduce)
+
+    def measured(db, op, us: float) -> None:
+        stats = PerfStats(median=us, min=us, max=us, mean=us, variance=0.0, n_samples=30)
+        db.record_kernel(kernel_row(op, op.name))
+        db.record_perf(
+            ctx,
+            op.identity_key(structural=False, with_io=True),
+            bindings={},
+            knobs={"WORK": "w1x8"},
+            backend="cuda",
+            status="ok",
+            stats=stats,
+        )
+
+    [fused] = kernels(arm("")).values()
+    pieces = kernels(arm("g8k"))
+    assert set(pieces) == {"y__partial", "y"}, "the g8k arm runs as a partial and a finalize"
+
+    def deployed(partial_us: float) -> set[str]:
+        db = SearchDB()
+        measured(db, fused, 52.0)
+        for nid, op in pieces.items():
+            measured(db, op, partial_us if nid == "y__partial" else 1.4)
+        return set(kernels(greedy.greedy_decide(prior=None, db=db)))
+
+    assert deployed(21.0) == {"y__partial", "y"}, "a measured split faster than the unsplit kernel must be taken"
+    assert deployed(60.0) == {"y"}, "a measured split slower than the unsplit kernel must lose to it"
 
 
 def test_a_stored_composed_cut_is_offered_to_the_cut_pass() -> None:

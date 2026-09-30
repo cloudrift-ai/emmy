@@ -15,7 +15,7 @@ import pytest
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.expr import Literal, TernaryExpr, Var
+from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.loop.runner import execute_loop_op_cpp
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Load, Loop, Pre, Write
@@ -30,8 +30,8 @@ c, i, j, k = Var("c"), Var("i"), Var("j"), Var("k")
 ZERO = Literal(0, "int")
 
 
-def _step(out_index: tuple) -> Body:
-    """``S_c = decay_c * S_{c-1} + W @ S_{c-1} + U_c``, storing the state each step READ."""
+def _step(out_index: tuple, seed: float | str = 0.0, u_index: tuple = (c, i, j), steps: int = STEPS) -> Body:
+    """``S_c = decay_c * S_{c-1} + W @ S_{c-1} + U_c``, storing the state each step READ, from ``seed``."""
     mix = Loop(
         axis=Axis("k", N),
         body=(
@@ -43,34 +43,41 @@ def _step(out_index: tuple) -> Body:
     )
     cell = (
         mix,
-        Load(name="u", input="U", index=(c, i, j)),
+        Load(name="u", input="U", index=u_index),
         Pre(name="own", carrier="S", index=(i, j)),
         Assign(name="kept", op="multiply", args=("own", "decay")),
         Assign(name="moved", op="add", args=("kept", "mixed")),
         Assign(name="next", op="add", args=("moved", "u")),
-        Carry(name="S", value="next", index=(i, j), seed=0.0),
+        Carry(name="S", value="next", index=(i, j), seed=seed),
         Write(output="out", index=out_index, value="own"),
     )
     cells = Loop(axis=Axis("i", N), body=(Loop(axis=Axis("j", N), body=cell),))
-    return Body((Loop(axis=Axis("c", STEPS), body=(Load(name="decay", input="D", index=(c,)), cells)),))
+    return Body((Loop(axis=Axis("c", steps), body=(Load(name="decay", input="D", index=(c,)), cells)),))
 
 
 def _loops(body: Body) -> list[Loop]:
     return [stmt for stmt in body.iter() if isinstance(stmt, Loop)]
 
 
-def _inputs() -> dict[str, np.ndarray]:
+def _inputs(seed: float | str = 0.0, batch: int | None = None, steps: int = STEPS) -> dict[str, np.ndarray]:
     rng = np.random.default_rng(0)
-    return {
-        "D": rng.standard_normal(STEPS).astype(np.float32),
+    arrays = {
+        "D": rng.standard_normal(steps).astype(np.float32),
         "W": (rng.standard_normal((N, N)) * 0.3).astype(np.float32),
-        "U": rng.standard_normal((STEPS, N, N)).astype(np.float32),
+        "U": rng.standard_normal((*(() if batch is None else (batch,)), steps, N, N)).astype(np.float32),
     }
+    if isinstance(seed, str):
+        arrays[seed] = rng.standard_normal((N, N)).astype(np.float32)
+    return arrays
 
 
-def _reference(arrays: dict[str, np.ndarray]) -> np.ndarray:
-    state, want = np.zeros((N, N), np.float32), np.zeros((STEPS, N, N), np.float32)
-    for step in range(STEPS):
+def _reference(arrays: dict[str, np.ndarray], seed: float | str = 0.0) -> np.ndarray:
+    if arrays["U"].ndim == 4:  # a batch of recurrences, one per leading row of U
+        return np.stack([_reference({**arrays, "U": u}, seed) for u in arrays["U"]])
+    state = arrays[seed].copy() if isinstance(seed, str) else np.full((N, N), seed, np.float32)
+    steps = arrays["U"].shape[0]
+    want = np.zeros((steps, N, N), np.float32)
+    for step in range(steps):
         want[step] = state
         state = arrays["D"][step] * state + arrays["W"] @ state + arrays["U"][step]
     return want
@@ -92,48 +99,100 @@ def test_a_step_reads_other_cells_of_its_own_state(step_major: bool) -> None:
     np.testing.assert_allclose(got if step_major else np.moveaxis(got, -1, 0), _reference(arrays), rtol=1e-5, atol=1e-6)
 
 
-def _graph() -> Graph:
+def _graph(seed: float | str = 0.0, steps: int = STEPS) -> Graph:
+    """The step as a graph; a named ``seed`` is an input tensor of the state's shape the loop starts from."""
     graph = Graph()
-    for name, shape in (("D", (STEPS,)), ("W", (N, N)), ("U", (STEPS, N, N))):
+    inputs = [("D", (steps,)), ("W", (N, N)), ("U", (steps, N, N)), *([(seed, (N, N))] if isinstance(seed, str) else [])]
+    for name, shape in inputs:
         graph.add_node(InputOp(), [], Tensor(name, shape, "f32"), node_id=name)
-    graph.add_node(LoopOp(body=_step((c, i, j)), name="k_step"), ["D", "W", "U"], Tensor("out", (STEPS, N, N), "f32"), node_id="out")
+    names = [name for name, _ in inputs]
+    graph.add_node(
+        LoopOp(body=_step((c, i, j), seed, steps=steps), name="k_step"), names, Tensor("out", (steps, N, N), "f32"), node_id="out"
+    )
+    graph.inputs, graph.outputs = names, ["out"]
+    return graph
+
+
+def _batched_graph(batch: int = 2, steps: int = STEPS) -> Graph:
+    """The step under a FREE loop outside the carrying one — one recurrence per row of the batch,
+    ``U`` and ``out`` carrying the batch coordinate first. The roll never makes this shape (its
+    batch loops sit inside the step, as cells); the lift takes it all the same."""
+    b = Var("b")
+    graph = Graph()
+    for name, shape in (("D", (steps,)), ("W", (N, N)), ("U", (batch, steps, N, N))):
+        graph.add_node(InputOp(), [], Tensor(name, shape, "f32"), node_id=name)
+    body = Body((Loop(axis=Axis("b", batch), body=_step((b, c, i, j), u_index=(b, c, i, j), steps=steps)),))
+    graph.add_node(LoopOp(body=body, name="k_step"), ["D", "W", "U"], Tensor("out", (batch, steps, N, N), "f32"), node_id="out")
     graph.inputs, graph.outputs = ["D", "W", "U"], ["out"]
     return graph
 
 
-def test_the_lift_spells_the_state_as_a_buffer_read_one_launch_back() -> None:
-    """The loop that carries the state becomes the kernel's serial launch axis and the state a
-    buffer the node owns; the step's ``W @ S`` stays a contraction, its B slab the previous state."""
+def test_a_carrying_loop_under_an_outer_loop_keeps_that_coordinate_in_its_port() -> None:
+    """The classic buffer is indexed ``(time, *outer, *cells)``, so the port the lift adds spells
+    the outer coordinate too; the serial form the classic schedule lifts writes that port at that
+    rank, keeps the kernel's bound I/O, and the register program declines the shape."""
+    from importlib import import_module
+
+    serial_form = import_module("emmy.compiler.pipeline.passes.tile.schedule.040_schedule").serial_form
+    lifted = Pipeline.build(["tile/lift"], select=["lift"]).run(_batched_graph())
+    (node,) = (node for node in lifted.nodes.values() if isinstance(node.op, TileOp))
+    tile: TileOp = node.op
+
+    assert tile.carries and [axis.extent.as_static() for axis in tile.place.free] == [2] and tile.register_program is None
+    (state,) = (tensor for tensor in node.outputs if tensor.name != "out")
+    assert tuple(dim.as_static() for dim in state.shape) == (STEPS, 2, N, N)
+    serial = serial_form(tile, node.id)
+    assert serial.inputs == tile.inputs and serial.outputs == tile.outputs
+    (spec,) = (spec for spec in serial.output_specs if spec.write.output == state.name)
+    (carrying,) = (site.node for site in tile.sites if site.node.carries)
+    assert len(spec.write.index) == len(state.shape) and [axis.name for axis in serial.place.serial] == [carrying.axis]
+
+    arrays = _inputs(batch=2)
+    for closed in (LoopOp(body=tile.loop_body), LoopOp(body=serial.loop_body)):
+        shapes = {"out": (2, STEPS, N, N), state.name: (STEPS, 2, N, N)}
+        got = execute_loop_op_cpp(closed, arrays, {name: shape for name, shape in shapes.items() if name in closed.outputs})
+        got = dict(zip(closed.outputs, got if isinstance(got, tuple) else (got,), strict=True))["out"]
+        np.testing.assert_allclose(np.asarray(got), _reference(arrays), rtol=1e-5, atol=1e-6)
+
+
+def test_the_lift_carries_the_state_in_the_term() -> None:
+    """The term carries the state: the kernel root folds the action ``next`` over the steps, its
+    cells the two free coordinates the block is indexed by, its seed the loop's; the step's ``W @ S``
+    stays a contraction, its B a read of the carrier one step back. The node gains the state's port
+    for the classic realization, and the closed program spells the carrying loop outside the cells."""
     lifted = Pipeline.build(["tile/lift"], select=["lift"]).run(_graph())
     (node,) = (node for node in lifted.nodes.values() if isinstance(node.op, TileOp))
     tile: TileOp = node.op
 
-    (time,) = tile.place.serial
-    assert time.extent.as_static() == STEPS and len(tile.place.free) == 2
+    assert tile.carries and not tile.place.serial and not tile.place.free
+    (root,) = (site.node for site in tile.sites if site.node.carries)  # under the projection passing its streamed value on
+    assert root.init == (0.0,) and len(root.cells) == 2
+    assert tile.axis_of(root.axis).extent.as_static() == STEPS and all(tile.axis_of(cell).extent.as_static() == N for cell in root.cells)
     (state,) = (tensor for tensor in node.outputs if tensor.name != "out")
     assert tuple(dim.as_static() for dim in state.shape) == (STEPS, N, N) and lifted.outputs == ["out"]
-    reads = [load for load in loaded_buffers(tile.op) if load.input == state.name]
-    assert len(reads) == 2
-    assert all(isinstance(load.index[0], TernaryExpr) and load.index[0].if_true.pretty() == f"({time.name} - 1)" for load in reads)
-    (mix,) = (edge for edge in tile.op.operands if edge.axis is not None)
-    assert mix.as_contraction() is not None and any(load.input == state.name for load in loaded_buffers(mix))
+    assert not [load for load in loaded_buffers(root) if load.input == state.name], "the term reads no buffer of its own"
+    (mix,) = (edge for edge in root.operands if edge.axis is not None)
+    assert mix.as_contraction() is not None and any(edge.as_carrier_read() is not None for edge in mix.operands)
+    (carrying,) = (loop for loop in tile.loop_body if isinstance(loop, Loop))
+    assert list(carrying.carries) == list(root.base.results)
 
     arrays = _inputs()
     closed = LoopOp(body=tile.loop_body)
-    shapes = {tensor.name: tuple(dim.as_static() for dim in tensor.shape) for tensor in node.outputs}
-    got = dict(zip(closed.outputs, execute_loop_op_cpp(closed, arrays, shapes), strict=True))
-    np.testing.assert_allclose(got["out"], _reference(arrays), rtol=1e-5, atol=1e-6)
+    got = np.asarray(execute_loop_op_cpp(closed, arrays, {"out": (STEPS, N, N)}))
+    np.testing.assert_allclose(got, _reference(arrays), rtol=1e-5, atol=1e-6)
 
 
 @requires_cuda
 @pytest.mark.xdist_group("cuda")
-def test_the_lifted_step_runs_one_launch_per_step_on_the_gpu() -> None:
+@pytest.mark.parametrize("batched", [False, True], ids=["root", "under-an-outer-loop"])
+def test_the_lifted_step_runs_one_launch_per_step_on_the_gpu(batched: bool) -> None:
     from emmy.compiler.backend.cuda.program import run_program  # noqa: PLC0415
 
-    arrays = _inputs()
-    result, _ = run_program(Pipeline.build(CUDA_PASSES).run(_graph()), arrays)
+    arrays = _inputs(batch=2 if batched else None)
+    result, _ = run_program(Pipeline.build(CUDA_PASSES).run(_batched_graph() if batched else _graph()), arrays)
 
-    np.testing.assert_allclose(np.asarray(result.outputs["out"]).reshape(STEPS, N, N), _reference(arrays), rtol=1e-5, atol=1e-6)
+    want = _reference(arrays)
+    np.testing.assert_allclose(np.asarray(result.outputs["out"]).reshape(want.shape), want, rtol=1e-5, atol=1e-6)
 
 
 def test_a_loop_over_the_cells_carries_nothing() -> None:

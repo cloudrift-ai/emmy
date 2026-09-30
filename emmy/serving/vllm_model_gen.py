@@ -8,7 +8,7 @@ sliding/global attention rides vLLM's `per_layer_sliding_window` + a per-layer-t
       --dtype float16 --hf-overrides '{"architectures":["EmmyGenModel"]}' \\
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1, 2, 4, 8, 16]}'
 
-(the whole-step decode-capture default `emmy serve --generate` assembles; add `--enforce-eager`
+(the whole-step decode-capture default `emmy serve --runner generate` assembles; add `--enforce-eager`
 instead to serve eager — the runner's `run_device` is capture-aware either way).
 
 NOT ``IsAttentionFree``: it constructs real vLLM ``Attention`` layers (one per decoder
@@ -531,7 +531,7 @@ class EmmyGenModel(nn.Module, SupportsPP):
                         f"MoE decode capture is limited to capture size 1 (the fixed-slot tier covers "
                         f"single-token steps only; wider decode steps run the routed dispatch eager) — "
                         f"capture sizes {over} exceed that; use cudagraph_capture_sizes [1] (the "
-                        f"emmy serve --generate default for MoE) or --enforce-eager"
+                        f"emmy serve --runner generate default for MoE) or --enforce-eager"
                     )
 
         sliding_window = getattr(config, "sliding_window", None)

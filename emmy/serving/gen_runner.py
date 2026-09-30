@@ -37,6 +37,18 @@ _LAGUNA_EXL3_PRECISION_CONTRACT = "laguna-exl3-precision-v4"
 _GPT_OSS_MXFP4_PRECISION_CONTRACT = "gpt-oss-mxfp4-fp32-residual-v1"
 
 
+def serving_router(gate, dtype):
+    """The runner's own copy of an HF router, cast to ``dtype`` except for its expert-selection bias:
+    Transformers keeps that float32 whatever the model dtype. The bias shifts O(1) scores by up to ~27
+    on DeepSeek V4, where float16 rounding (up to 8e-3) flips the last of the top-k picks."""
+    import copy
+
+    router = copy.deepcopy(gate).to(dtype)
+    if (bias := getattr(gate, "e_score_correction_bias", None)) is not None:
+        router.e_score_correction_bias = bias.float()
+    return router
+
+
 def _generation_precision_contract(model_type, expert_store):
     """Pack-key component for architecture precision rewrites that run only on cold trace."""
     if model_type == "laguna" and (expert_store or {}).get("fmt") == "exl3":
@@ -1357,8 +1369,6 @@ class EmmyGenRunner:
             )
             moe_parts = moe_block_parts(block.mlp) if hasattr(block, "mlp") else None
             if moe_parts is not None:
-                import copy
-
                 gate, experts = moe_parts
                 expert_fmt = (expert_store or {}).get("fmt")
                 trellis = expert_fmt == "exl3"
@@ -1389,9 +1399,13 @@ class EmmyGenRunner:
                         for nm in ("w_gate_up", "b_gate_up"):
                             if nm in einputs:
                                 einputs[nm] = deinterleave_gate_up(einputs[nm])
+                # DeepSeek V4's reference runtime scores its experts in float32; in float16 a near-tie
+                # for the last of the top-k flips on rounding alone, and the tokens part ways.
+                router_float32 = getattr(text_config, "model_type", None) == "deepseek_v4"
                 moe_meta.append(
                     {
-                        "gate": copy.deepcopy(gate).to(dtype),
+                        "gate": serving_router(gate, torch.float32 if router_float32 else dtype),
+                        "router_float32": router_float32,
                         # A hash router selects experts by TOKEN ID (a frozen tid2eid table); the
                         # learned gate only weights them. Its call needs the step's token ids.
                         "hash": getattr(gate, "tid2eid", None) is not None,
@@ -2157,6 +2171,8 @@ class EmmyGenRunner:
         """One HF router call. A hash router selects experts by the step's TOKEN IDS (its frozen
         ``tid2eid`` table); the learned gate only weights the selection — so a hash layer without
         the ids cannot route at all, and silently routing on garbage would serve noise."""
+        if moe.get("router_float32"):
+            xn = xn.float()
         if not moe.get("hash"):
             return moe["gate"](xn)
         if token_ids is None:

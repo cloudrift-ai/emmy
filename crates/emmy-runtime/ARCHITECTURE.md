@@ -41,14 +41,42 @@ directory. The whole plan grammar is read: an `int` literal, a `"name"` variable
   largest first, deterministically. The host lends memory for every region or the runtime allocates and zeroes its
   own; a region that survives a rebind keeps its contents. Empty buffers have an address but return zero bytes.
 - Ordered launch arguments follow `args`. An indirect operand expands in place to its table pointer, selector pointer
-  and slot — operands the host binds by address, which the plan never declares as buffers. A TMA descriptor is
-  encoded per environment at the source buffer's resolved shape (a prefix-packed symbolic source has the resolved
-  strides, not the allocation's) and passed as a pointer to its 128 bytes. `zero_outputs` clears a buffer before its
-  launch; `zero_prologues` records zeroing performed inside the kernel and adds no extra memset.
+  and slot — operands the host binds by address, which the plan never declares as buffers; a paged buffer's page
+  table (below) is bound the same way. A TMA descriptor is encoded per environment at the source buffer's resolved
+  shape (a prefix-packed symbolic source has the resolved strides, not the allocation's) and passed as a pointer to
+  its 128 bytes. `zero_outputs` clears a buffer before its launch; `zero_prologues` records zeroing performed inside
+  the kernel and adds no extra memset.
+- On sm_90 and later, a whole-program submission launches a kernel whose plan entry sets `dependent_launch` as a
+  programmatic dependent launch: the kernel waits on the grid ahead of it (`griddepcontrol.wait`) before any memory
+  access, so its launch overlaps that grid's drain. A launch behind a memset, and every launch of a single-launch
+  batch timing, stays serialized, so a kernel timed on its own measures that kernel alone. No kernel releases its
+  dependent early: a grid launched while its predecessor still runs stacks its blocks on the SMs free at that moment.
 - Cubins must load on the live device. A pack's recorded architecture must equal the device's exact
   `sm_<major><minor>`; an in-process program was compiled for the live device by the host.
 - A timed launch whose completion event misses its deadline raises `HungKernel`; a launch that reports zero elapsed
   time is a degenerate no-op and raises, so it can never win a benchmark.
+
+## Paged buffers
+
+A KV cache stops being one allocation as soon as it belongs to a request rather than to a program. A plan may therefore
+declare an input or output buffer **paged** (`paged: {name: {axis, page}}`): cut along one axis every `page` elements.
+The compiler renames that buffer's launch argument to `<name>__pages`, so what the kernel receives is a table of page
+pointers rather than one base, and every read and write resolves its page before its offset inside one. Shapes are
+unchanged — the declaration says how the memory is reached, not what it holds. The position a step writes its rows at
+is an i64 scalar the kernel reads from device memory, bound like any input, so the step replays as one graph at every
+position.
+
+A paged buffer has no place in the layout: no region, no placement, nothing to zero per launch, no host bytes in or
+out. Its table is an operand the plan names but never declares, bound like an indirect operand's. A load gives every
+paged buffer zeroed pages of the runtime's own spanning its declared shape — a cache covering the context — and binds
+their table; `page_table` hands that table to a host that lends the same pages to another executor, which is how the
+prefill program writes the decode program's cache. A host may instead bind a table of its own (`set_external`), and
+then owns the pages behind it — how the compiler's tests fill a cache chunk by chunk and read it back.
+
+Residency is deliberately absent. Whether a page lives in device or host memory would be a property of a page, and
+nothing above it would change; which processor runs a launch is a separate axis again, and belongs on the launch, not
+on the buffer. Neither exists yet, and a host-resident page read by a CUDA kernel crosses PCIe per access, so neither
+is worth building before there is something to measure.
 
 ## Artifact contract
 
@@ -137,15 +165,17 @@ executor. The model remains compiler-prepared; the Rust library has no Qwen3 mat
 The native preparation and attention contract lives in
 [`serving/native/ARCHITECTURE.md`](../../emmy/serving/native/ARCHITECTURE.md).
 
-`start` binds the prompt and sampling controls once and resets request state. `advance` processes one prefill chunk
-or one decode token at the current absolute position. It leaves the final prompt token for decode to produce logits
-and sample. The diagnostic `step` always processes one token. Before prompt completion either returns no token;
-afterward it returns the GPU-selected
-ID, which stays on the GPU for the next step. Its explicit `ignore_eos` control permits fixed-output serving
-benchmarks to continue after EOS; ordinary worker generation retains EOS stopping. `generate` owns the complete
-prompt/decode loop and stops at EOS or the requested output count.
-Prompt plus requested output must fit capacity. `logits` is an explicit diagnostic download. All CUDA operations stay
-inside `cuda`, and a failed step cannot continue the current request.
+`start` binds the prompt once, keeps the sampling controls and resets request state. `advance` processes one prefill
+chunk or one decode token at the current absolute position, leaving the final prompt token to decode and taking a
+chunk only where every one of its rows fits the context; the diagnostic `step` always processes one token. Before
+prompt completion either returns no token; afterward it reads back the token the program selected, or at positive
+temperature downloads the step's FP32 logits and draws one on the host as the native contract describes, and uploads
+it as the next step's input.
+Nothing the device runs is hand-written. Its explicit `ignore_eos` control permits fixed-output serving benchmarks to
+continue after EOS; ordinary worker generation retains EOS stopping. `generate` owns the complete prompt/decode loop
+and stops at EOS or the requested output count. Prompt plus requested output must fit capacity. `logits` is an
+explicit diagnostic download. All CUDA operations stay inside `cuda`, and a failed step cannot continue the current
+request.
 
 The executor's stateful `advance` differs from benchmark `execute`: capture does not run an initialization step or
 warmup, since executing twice would consume the next token twice. Stable allocations allow the same graph to serve
@@ -156,5 +186,6 @@ controls select greedy decoding. The library validates them before binding or su
 
 The worker adds `load_generation`, `start_generation`, `generation_step`, and `generate`. Prompt and result token
 arrays are little-endian i64 binary files. Step responses contain a selected token or null during prefill; optional
-logits use a binary output file. Loading either a generation model or a benchmark program releases the previous
+logits use a little-endian f32 binary output file under generation artifact version 5. Loading either a generation
+model or a benchmark program releases the previous
 object, and `release` handles both. These additive operations use the existing framed protocol and failure retirement.

@@ -1,0 +1,11 @@
+tags:
+- onboarding
+- untested
+model:
+  huggingface: Altworld/Hemmingway-1
+  rationale: New 27B dense with 262K native context; ~756 likes, alternative to Qwen3.8 at same class.
+  heat: 45
+  task: generate
+matrices:
+- deploy.gpu: NVIDIA H200 141GB
+  deploy.gpu_count: 1

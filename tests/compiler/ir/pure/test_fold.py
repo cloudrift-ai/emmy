@@ -20,7 +20,7 @@ from dataclasses import replace
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.pure.twist import SOFTMAX, Twist
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Let, Load, Loop, OutputSpec, Write
@@ -203,6 +203,14 @@ def test_sweeps_no_term_shares_are_sibling_loops_and_a_reader_makes_them_a_chain
     assert [loop.axis.name for loop in m_loop.body] == ["q", "n"]
     assert all(_chain(loop.body) == ["k"] for loop in m_loop.body)
 
+    # A multi-output root's constant result reads none of its parameters: still a wrapper, placed
+    # ahead of the loops, which stay siblings rather than nesting every sweep inside every other.
+    constant = Body((Load(name="z", input="zero", index=(Literal(0, "int"),), dtype="float32"),))
+    rooted = Fold(operands=(over_q, over_n), lift=Lambda.closing(("sq", "sn"), constant, ("z",)))
+    stores = tuple(OutputSpec(write=Write(output=f"o{v}", index=(Var("m"), Var(v)), value=f"s{v}")) for v in ("q", "n"))
+    ahead, m_loop = rooted.lower(frozenset(), stores, axes=scope)
+    assert isinstance(ahead, Load) and [loop.axis.name for loop in m_loop.body] == ["q", "n"]
+
     total = Body((Assign(name="t", op="add", args=("sq", "sn")),))
     reader = Fold(operands=(over_q, over_n), lift=Lambda.closing(("sq", "sn"), total, ("t",)))
     (m_loop,) = reader.lower(frozenset(), axes=scope)
@@ -223,6 +231,15 @@ def test_a_store_follows_the_term_defining_its_value_at_that_terms_scope() -> No
     (n_loop,) = m_loop.body
     assert [type(stmt).__name__ for stmt in n_loop.body] == ["Loop", "Write"] and n_loop.body[-1] == store.write
     assert mm.lower(mm.free_axes, (store,), axes=SCOPE) == Body((*mm.lower(axes=SCOPE), store.write))
+
+
+def test_a_shared_term_and_its_boundary_store_are_emitted_once() -> None:
+    total, swept = _normalized_sum()
+    root = projection(operands=(total, swept), body=(Assign(name="out", op="add", args=("tot", "acc")),), results=("out",))
+    store = OutputSpec(write=Write(output="stats", index=(Var("m"),), value="tot", atomic=True))
+    body = root.lower(root.free_axes, (store,), axes=SCOPE)
+    assert len(body.writes) == 1
+    assert [stmt.name for stmt in body.accums].count("tot") == 1
 
 
 def test_a_sweep_store_rides_the_loop_the_term_opened() -> None:

@@ -25,7 +25,9 @@ from tests.compiler.helpers import requires_cuda
 @requires_cuda
 @pytest.mark.parametrize(("dtype", "delta"), [(dt.F16, 2**-10), (dt.F32, 2**-13)])
 def test_separate_multiply_and_add_preserve_rounding(dtype, delta):
-    """Disable contraction explicitly when checking separate frontend rounding."""
+    """A multiply and an add round separately, as eager does. f16 needs no flag: its ops are spelled
+    ``__hmul_rn`` / ``__hadd_rn``, which nvcc never contracts. f32 keeps nvcc's default contraction,
+    so the check turns it off explicitly."""
     from emmy.compiler.backend.cuda.backend import CudaBackend
 
     graph = Graph()
@@ -36,7 +38,8 @@ def test_separate_multiply_and_add_preserve_rounding(dtype, delta):
     graph.inputs, graph.outputs = ["a", "b", "c"], ["out"]
     inputs = {name: np.full(32, value, dtype=dtype.np) for name, value in (("a", 1 + delta), ("b", 1 - delta), ("c", -1))}
     backend = CudaBackend()
-    with config.nvcc_flags_override(f"{config.nvcc_flags()} --fmad=false"):
+    flags = config.nvcc_flags() if dtype == dt.F16 else f"{config.nvcc_flags()} --fmad=false"
+    with config.nvcc_flags_override(flags):
         compiled = backend.compile(graph)
         result, _ = backend.run(compiled, input_data=inputs)
     np.testing.assert_array_equal(result.outputs["out"], inputs["a"] * inputs["b"] + inputs["c"])
@@ -210,7 +213,7 @@ def test_fp16_fallback_to_float_for_non_native_op():
     sources = "\n".join(n.op.kernel_source for n in compiled.nodes.values() if isinstance(n.op, CudaOp))
     # Signature stays __half; the fallback inserts __half2float on the
     # input and __float2half on the store, with f32 erff in between.
-    assert "__half* y" in sources or "__half* x" in sources, sources
+    assert "__half* __restrict__ y" in sources or "__half* __restrict__ x" in sources, sources
     assert "erff" in sources, f"expected fallback to f32 erff, got:\n{sources}"
     assert "__half2float" in sources, f"expected promote-to-float at use, got:\n{sources}"
     assert "__float2half" in sources, f"expected demote-to-half at store, got:\n{sources}"

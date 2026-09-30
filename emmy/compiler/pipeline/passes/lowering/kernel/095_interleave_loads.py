@@ -78,7 +78,10 @@ def _walk(body: Body) -> tuple[Body, bool]:
                 nested_changed = True
         new_stmts.append(s)
     rebuilt = Body(tuple(new_stmts))
-    if not _has_load_and_assign(rebuilt):
+    # A carried staged copy (``Load.carried``) is ordered against the barrier and the unpack that
+    # reads its vector, neither of which its ``defines`` names: it keeps its place, and so does the
+    # rest of that body.
+    if not _has_load_and_assign(rebuilt) or any(isinstance(s, Load) and s.carried for s in rebuilt):
         return (rebuilt if nested_changed else body), nested_changed
     sunk = _sink_loads(rebuilt)
     changed = nested_changed or sunk != rebuilt

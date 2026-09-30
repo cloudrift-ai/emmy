@@ -1,0 +1,11 @@
+tags:
+- onboarding
+- untested
+model:
+  huggingface: zai-org/GLM-5.3
+  rationale: 'Verified FP8 repo, OpenRouter 30-day growth leader, LMArena text #24, webdev top 15, MIT license.'
+  heat: 95
+  task: generate
+matrices:
+- deploy.gpu: NVIDIA B200
+  deploy.gpu_count: 8

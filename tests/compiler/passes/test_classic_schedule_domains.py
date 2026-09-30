@@ -22,7 +22,7 @@ from emmy.compiler.ir.schedule.classic import (
     ReductionSchedule,
 )
 from emmy.compiler.ir.schedule.classic import refusals as classic
-from emmy.compiler.ir.schedule.classic.schedule import output_sweep_works
+from emmy.compiler.ir.schedule.classic.schedule import output_sweep_works, packed_works
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.ops import carries_partition
@@ -209,7 +209,9 @@ def test_reduction_enumeration_filters_the_independent_product_by_compatibility(
     codec = ClassicScheduleCodec(_context(tile, target))
 
     assert {_signature(codec, leaf.schedule) for leaf in leaves} == {_signature(codec, schedule) for schedule in reference}
-    assert len(reference) == len(expected_reductions)
+    # A warp-wide cooperative fold is offered once more on its packed inventory (several cells per CTA).
+    packed = sum(len(packed_works(Work(kind="thread", units=(plan.coop, 1)))) for plan in coop_reduce_moves() if not plan.coop_transposed)
+    assert len(reference) == len(expected_reductions) + packed
     assert offers.bounds[0] > len(reference)
 
 
@@ -488,6 +490,27 @@ def test_union_parameter_ignores_a_global_value_unsupported_by_this_kernel() -> 
     assert tuple(enumerate_classic_reference(c))
 
 
+def test_a_cut_piece_keeps_its_catalog_when_published_pins_leave_it_no_row(monkeypatch) -> None:
+    """A pin published to every piece of a cut takes where it fits. ``STAGE=d1/smem`` fits this piece's edge
+    alone yet composes with none of its rows; the piece keeps its catalog instead of running unscheduled,
+    while a kernel pin naming it still holds. A GEMM sweep's pins left two GDN pieces of a Qwen3.8 layer
+    unscheduled this way on every row, and the recorded golden carried them as loops."""
+    k = Axis("k", 64)
+    root = contraction(
+        k, Load(name="a_e", input="a", index=(Var("m"), Var("k"))), (Load(name="b_e", input="b", index=(Var("k"), Var("n"))), "acc")
+    )
+    tile = TileOp(op=root, place=Placement(free=(Axis("m", 64), Axis("n", 64))), axes=(Axis("m", 64), Axis("n", 64), k))
+    target = Context.from_target((7, 0))
+    monkeypatch.setenv("EMMY_STAGE", "d1/smem")
+    assert tuple(iter_leaves(classic_forks(tile, "k__place_ab12", {}, target, kernel_set=True, published=True)))
+    with pytest.raises(ValueError, match="does not resolve"):  # a kernel of its own is held to the pin, loudly
+        tuple(iter_leaves(classic_forks(tile, "k", {}, target)))
+
+    monkeypatch.setenv("EMMY_WORK@place_ab12", "t16x16")
+    leaves = tuple(iter_leaves(classic_forks(tile, "k__place_ab12", {}, target, kernel_set=True, node="out__place_ab12_0")))
+    assert leaves and {leaf.schedule.kernel.work.spell() for leaf in leaves} == {"t16x16"}
+
+
 def test_schedule_restriction_snapshots_parameter_values() -> None:
     tile = _pointwise()
     target = Context.from_target((12, 0))
@@ -569,7 +592,12 @@ def test_compute_fill_edges_remain_independent_product_factors(monkeypatch) -> N
     context = _plain(tile, target)
     site = context.tile_op.node_sites[0]
 
-    assert all({choice.stage.spell() for choice in site.edges} == {"", "d1/smem", "d2/smem"} for site in offers.node_sites if site.edges)
+    # The computed A keeps the compute fill; on a TMA target its stored B may also ride box copies.
+    fill = {"", "d1/smem", "d2/smem", "d1/smem-tma", "d1/smem-tma/p2", "d2/smem-tma", "d2/smem-tma/p2"}
+    assert all({choice.stage.spell() for choice in site.edges} == fill for site in offers.node_sites if site.edges)
+    # A card without TMA keeps the fill's cp.async ring only.
+    no_tma = _offers(tile, Context.from_target((8, 0)))
+    assert all({choice.stage.spell() for choice in site.edges} == {"", "d1/smem", "d2/smem"} for site in no_tma.node_sites if site.edges)
     reference = tuple(_reference(tile, target))
     leaves = _schedule_leaves(tile, "computed_a", target)
     codec = ClassicScheduleCodec(_context(tile, target))
@@ -577,7 +605,40 @@ def test_compute_fill_edges_remain_independent_product_factors(monkeypatch) -> N
     assert offers.bounds[0] > len(reference)
     warp_schedules = tuple(schedule for schedule in reference if schedule.nodes[site].tile.is_warp)
     assert warp_schedules
-    assert all({edge.stage.transport for edge in schedule.edges.values()} == {"smem"} for schedule in warp_schedules)
+    assert {edge.stage.transport for schedule in warp_schedules for edge in schedule.edges.values()} == {"smem", "smem-tma"}
+    # Beside a compute fill the box copies run as one group of the uniform K loop, so no producer
+    # band is ever composed with them, although the kernel catalog offers bands.
+    assert any(choice.work.producer for choice in offers.kernel_site.kernels)
+    assert not any(schedule.kernel.work.producer for schedule in reference)
+
+
+def test_computed_f16_tma_needs_a_stored_slab_to_copy(monkeypatch) -> None:
+    """With both operands computed, every slab is the compute fill's and a TMA stage has nothing to
+    copy: the catalog names it and the resolver declines it. So does the fill's ring, which has no
+    copied slab to prefetch either, leaving the single-buffer fill."""
+    monkeypatch.setenv("EMMY_FAST_MATH", "0")
+    m, n, k = Axis("m", 64), Axis("n", 64), Axis("k", 64)
+
+    def exp_of(name: str, *index: str):
+        return projection(
+            (), (Load(name=f"{name}_v", input=name, index=tuple(Var(i) for i in index)), Assign(f"{name}_e", "exp", (f"{name}_v",)))
+        )
+
+    tile = TileOp(
+        op=contraction(k, exp_of("scores", "m", "k"), (exp_of("weights", "k", "n"), "acc")),
+        place=Placement(free=(m, n)),
+        axes=(m, n, k),
+        inputs={"scores": Tensor("scores", (64, 64), "f16"), "weights": Tensor("weights", (64, 64), "f16")},
+        outputs={"out": Tensor("out", (64, 64), "f16")},
+    )
+    target = Context.from_target((12, 0))
+    warp = Tile.parse("mma_m16n8k16_f16_f32/f1x1", Work.parse("w1x1"))
+    monkeypatch.setattr(classic, "scalar_tile_moves", lambda: [Tile()])
+    monkeypatch.setattr(classic, "warp_tile_moves", lambda atoms: [warp] if warp.atom.name in atoms else [])
+    reference = tuple(_reference(tile, target))
+    warp_schedules = [schedule for schedule in reference if any(node.tile.is_warp for node in schedule.nodes.values())]
+    assert warp_schedules
+    assert {edge.stage.spell() for schedule in warp_schedules for edge in schedule.edges.values()} == {"d1/smem"}
 
 
 def _two_root_projection(m: Axis, n: Axis, body, results: tuple[str, ...], outputs: dict, specs: tuple) -> TileOp:

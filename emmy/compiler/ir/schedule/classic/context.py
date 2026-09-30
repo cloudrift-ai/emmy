@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 from frozendict import frozendict
 
 from emmy.compiler.ir.pure.fold import Fold
-from emmy.compiler.ir.schedule.base import Schedule, ScheduleContext, ScheduleRefused
+from emmy.compiler.ir.schedule.base import Schedule, ScheduleContext, ScheduleRefused, note_pin_refusal
 from emmy.compiler.ir.schedule.choices import PlacedTile, Reduce, Stage, Tile, Work, derive_inventory
 from emmy.compiler.ir.schedule.views import EdgeSite, NodeId
 from emmy.compiler.structural import instance_memo
@@ -28,6 +28,7 @@ from .refusals import (
     _resolve_stage,
     _wgmma_refusal,
     fill_stage_moves,
+    fill_tma_moves,
 )
 from .schedule import (
     ClassicSchedule,
@@ -43,6 +44,7 @@ from .schedule import (
     edge_site_spelling,
     node_id_spelling,
     output_sweep_works,
+    packed_works,
 )
 
 if TYPE_CHECKING:
@@ -395,7 +397,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             resolved_stage = next(iter(resolved)) if len(resolved) == 1 else None
         elif _needs_fill(tile_op, fold, node.tile):
             packed_copy = tile_op.packed_reading(fold)[0] is not None and stage.transport in ("smem-async", "smem-tma")
-            if not packed_copy and stage not in fill_stage_moves():
+            if not packed_copy and stage not in (*fill_stage_moves(), *fill_tma_moves(self.target)):
                 cache[key] = None
                 return None
             resolved_stage = _resolve_stage(tile_op, self.target, fold, node.tile, geometry, stage, facts)
@@ -434,7 +436,9 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             # A producer band splits the staged K-loop's phases across warp bands, which only the
             # contraction tier's skeleton drives; the chunk tier runs every warp through one uniform
             # ring, where an aux band decoding onto warp 0 would re-issue its elected TMA arrive.
-            producer_eligible=not fold.chunked() and not (tile_op.packed_reading(fold)[0] is not None and stage.transport == "smem-tma"),
+            # TMA copies beside a compute fill (a packed weight's scales, a computed activation)
+            # run as two groups of one uniform loop, which has no band split either.
+            producer_eligible=not fold.chunked() and not (stage.transport == "smem-tma" and _needs_fill(tile_op, fold, node.tile)),
         )
         cache[key] = support
         return support
@@ -524,7 +528,23 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         )
 
     def _support_refusal(self, site: NodeId, support: _LocalSupport) -> str | None:
-        """Return why one locally supported pick cannot extend this prefix."""
+        """Return why one locally supported pick cannot extend this prefix. A pick that spells a
+        pinned value records the reason against that pin (:func:`note_pin_refusal`)."""
+        why = self._support_refusal_reason(site, support)
+        if why is not None and self.problem is not None:
+            families = self.tile_op.family_sites
+            spelled = {classic_node_key(self.tile_op, "TILE", site): support.node.tile.spell()} if site in families["TILE"] else {}
+            if isinstance(support.node, ReductionSchedule) and site in families["REDUCE"]:
+                spelled[classic_node_key(self.tile_op, "REDUCE", site)] = support.node.reduce.spell()
+            for edge in support.edges.values():
+                if (stage_key := self.problem.node_site(site).stage_key) is not None:
+                    spelled[stage_key] = edge.stage.spell()
+            for key, value in spelled.items():
+                if key is not None and self.problem.row.get(key) == value:
+                    note_pin_refusal(key, value, why)
+        return why
+
+    def _support_refusal_reason(self, site: NodeId, support: _LocalSupport) -> str | None:
         if (
             site in self._shared_roots
             and binds_root(support.node)
@@ -564,7 +584,12 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         if work is not None and support.work is not None and support.work != work:
             return "pick requires a different worker inventory"
         resolved_work = support.work or work
-        if allowed_works is not None and resolved_work is not None and (resolved_work.kind, resolved_work.units) not in allowed_works:
+        if (
+            allowed_works is not None
+            and resolved_work is not None
+            and (resolved_work.kind, resolved_work.units) not in allowed_works
+            and not any((packed.kind, packed.units) in allowed_works for packed in packed_works(resolved_work))
+        ):
             return "pick cannot reach a kernel allowed by the schedule restriction"
         if work is None and resolved_work is not None:
             if not all(choice.tile.is_canonical_for(resolved_work) for choice in (*previous_nodes, support.node)):
@@ -588,13 +613,17 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             need, offer = (claim.value, other) if claim.role == "need" else (other, claim.value)
             if need[0] == "chunk":
                 rows, keys = offer[5] if offer[0] == "warp" else ((), ())
-                compatible = (
-                    offer[0] == "warp"
-                    and need[1:3] == offer[1:3]
-                    and keys[0] == need[5]  # the producer's N is the carrier's key: a (row, chunk) tile
-                    and keys[1:3] == (1, need[3])  # one warp column, and that column IS the chunk
-                    and rows[3] == need[4]  # the same register rows the carrier holds
-                )
+                if offer[0] != "warp":
+                    return "the chunk tier's score must be warp-tiled"
+                if need[1:3] != offer[1:3]:
+                    return f"the score's cell {offer[1]} {offer[2]} is not the carrier's {need[1]} {need[2]}"
+                if keys[0] != need[5]:  # the producer's N is the carrier's key: a (row, chunk) tile
+                    return "the score's N tile is not the carrier's key axis"
+                if keys[1:3] != (1, need[3]):  # one warp column, and that column IS the chunk
+                    return f"the score's N tile ({keys[1]} warp columns, {keys[2]} wide) is not the carrier's chunk ({need[3]} wide)"
+                if rows[3] != need[4]:  # the same register rows the carrier holds
+                    return f"the score holds {rows[3]} register rows where the carrier holds {need[4]}"
+                compatible = True
             elif offer[0] == "free":
                 compatible = need[0] != "step"
             else:
@@ -624,7 +653,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         # Same rule as :meth:`_kernel_composes`: serial node choices leave output sweeps free to
         # take one of their own offered worker inventories.
         if (pick.kernel.work.kind != work.kind or pick.kernel.work.units != work.units) and not (
-            self._output_sweeps_take(pick.kernel.work)
+            self._output_sweeps_take(pick.kernel.work) or self._packs(pick.kernel.work)
         ):
             self._refuse("kernel WORK does not realize the node choices")
         if not pick.kernel.raster.is_direct and not self._raster_eligible:
@@ -697,11 +726,26 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         """Whether this serial-node prefix may take this exact output-sweep WORK offer."""
         return work in output_sweep_works(self.tile_op, self._work)
 
+    def _packs(self, work: Work) -> bool:
+        """Whether ``work`` stacks several cells of this prefix's cooperative reduce in one CTA
+        (:func:`packed_works`). Every operand reads gmem directly: a staged row is one CTA-wide
+        shared slab per cell, which a packed CTA would share between its cells."""
+        cooperative = any(
+            isinstance(choice, ReductionSchedule) and choice.reduce.coop > 1 and not choice.reduce.coop_transposed
+            for choice in self.schedule.nodes.values()
+        )
+        return cooperative and work in packed_works(self._work) and all(choice.stage.is_direct for choice in self.schedule.edges.values())
+
     def _kernel_composes(self, kernel: KernelSchedule) -> bool:
         work = self._work or Work()
         # Serial node choices do not constrain a worker inventory used only to stripe output
-        # sweeps; a node-owned inventory still follows the ordinary equality relation.
-        agrees = (kernel.work.kind == work.kind and kernel.work.units == work.units) or self._output_sweeps_take(kernel.work)
+        # sweeps; a node-owned inventory still follows the ordinary equality relation, or packs
+        # several of its cells into one CTA.
+        agrees = (
+            (kernel.work.kind == work.kind and kernel.work.units == work.units)
+            or self._output_sweeps_take(kernel.work)
+            or self._packs(kernel.work)
+        )
         return agrees and (not kernel.work.producer or self._producer_eligible) and (kernel.raster.is_direct or self._raster_eligible)
 
     def node_choice(self, site: NodeId) -> NodeSchedule:

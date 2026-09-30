@@ -128,6 +128,10 @@ class ReduceStage:
     # lane-indexed smem tree across k-slices (no shuffle stage — each lane holds a
     # different output). The interleaved default keeps lanes on the reduce axis.
     transposed: bool = False
+    # BLOCK + transposed only (the ``/v<n>`` codec token): each lane owns ``columns`` adjacent
+    # output columns, so its B reads at one k step are one contiguous run the load vectorizer
+    # widens into a single 4-, 8- or 16-byte load.
+    columns: int = 1
 
     def __post_init__(self) -> None:
         if not isinstance(self.level, Level):
@@ -142,6 +146,8 @@ class ReduceStage:
             raise TypeError("ReduceStage transposed must be a bool")
         if self.level is not Level.BLOCK and self.transposed:
             raise ValueError("only a BLOCK ReduceStage can transpose its cooperative mapping")
+        if type(self.columns) is not int or self.columns < 1 or (self.columns > 1 and not self.transposed):
+            raise ValueError(f"ReduceStage columns must be a positive integer on a transposed band, got {self.columns!r}")
 
     def combine(self, *, warp_size: int, segmented: bool = False) -> tuple[FoldMove, ...]:
         """The derived per-level combine fold(s), fine→coarse within this stage — the ONE
@@ -191,7 +197,16 @@ class Reduce:
             raise ValueError("Reduce stages must be unique, active, and ordered GRID -> BLOCK -> REG")
 
     @classmethod
-    def of(cls, *, cta: int = 1, coop: int = 1, reg: int = 1, finalize: str = "kernel", coop_transposed: bool = False) -> Reduce:
+    def of(
+        cls,
+        *,
+        cta: int = 1,
+        coop: int = 1,
+        reg: int = 1,
+        finalize: str = "kernel",
+        coop_transposed: bool = False,
+        columns: int = 1,
+    ) -> Reduce:
         """Build a plan from per-level widths (1 = absent). Order is coarse→fine:
         GRID (cta) → BLOCK (coop) → REG (reg). ``finalize`` rides the GRID stage;
         ``coop_transposed`` rides the BLOCK stage (the ``coop-t`` k-major lane swap)."""
@@ -209,7 +224,7 @@ class Reduce:
         if cta > 1:
             stages.append(ReduceStage(Level.GRID, cta, finalize=finalize))
         if coop > 1:
-            stages.append(ReduceStage(Level.BLOCK, coop, transposed=coop_transposed))
+            stages.append(ReduceStage(Level.BLOCK, coop, transposed=coop_transposed, columns=columns))
         if reg > 1:
             stages.append(ReduceStage(Level.REG, reg))
         return cls(tuple(stages))
@@ -217,7 +232,7 @@ class Reduce:
     def spell(self) -> str:
         """The ``REDUCE`` codec value for this plan — the pipeline coarse→fine, SITE-LOCAL: the
         coop WIDTH lives in the kernel's ``WORK`` inventory, never here, so the value is
-        ``[g<n>[a|k]][/coop[-t]][/r<n>]``. ``""`` for the scalar serial fold (the per-thread
+        ``[g<n>[a|k]][/coop[-t][/v<n>]][/r<n>]``. ``""`` for the scalar serial fold (the per-thread
         serial remainder is never spelled — it derives as ``ceil(extent / parallel)``). The GRID
         finalize letter IS kept: ``a``/``k`` is the atomic-vs-deferred finalize MODE, a site-local
         fact — ``g4a`` and ``g2k`` are semantically different rows, both live in the golden
@@ -227,6 +242,8 @@ class Reduce:
             parts.append(f"g{self.cta}{'a' if self.finalize == 'atomic' else 'k'}")
         if self.coop > 1:
             parts.append("coop-t" if self.coop_transposed else "coop")
+        if self.coop_columns > 1:
+            parts.append(f"v{self.coop_columns}")
         if self.reg > 1:
             parts.append(f"r{self.reg}")
         return "/".join(parts)
@@ -234,11 +251,12 @@ class Reduce:
     @classmethod
     def parse(cls, spec: str | None, work: Work | None) -> Reduce:
         """Decode a ``REDUCE`` value against the kernel's ``WORK`` inventory (inverse of
-        :meth:`spell` — the coop width is ``work.count``, never the string). Empty / ``None`` =
-        the scalar serial fold. An unknown token raises, so a width-carrying spelling (the retired
-        ``b<n>`` embedded-worker grammar) is a loud error, not a silent second reading."""
+        :meth:`spell` — the coop width is the inventory's first unit, never the string; a second
+        unit packs cells per CTA). Empty / ``None`` = the scalar serial fold. An unknown token
+        raises, so a width-carrying spelling (the retired ``b<n>`` embedded-worker grammar) is a
+        loud error, not a silent second reading."""
         s = (spec or "").strip()
-        cta, coop, reg, finalize, transposed = 1, 1, 1, "kernel", False
+        cta, coop, reg, finalize, transposed, columns = 1, 1, 1, "kernel", False, 1
         for t in s.split("/") if s else ():
             if t.startswith("g"):
                 body = t[1:]
@@ -249,15 +267,19 @@ class Reduce:
             elif t in ("coop", "coop-t"):
                 if work is None or work.kind != "thread":
                     raise ValueError(f"REDUCE {spec!r}: 'coop' requires a thread WORK inventory (t<N>)")
-                coop, transposed = work.count, t.endswith("-t")
+                coop, transposed = work.units[0], t.endswith("-t")
             elif t.startswith("r") and t[1:].isdigit():
                 reg = _codec_width(t[1:], tok=t, codec="REDUCE")
+            elif t.startswith("v") and t[1:].isdigit():
+                if not transposed:
+                    raise ValueError(f"REDUCE {spec!r}: 'v<n>' follows 'coop-t'")
+                columns = _codec_width(t[1:], tok=t, codec="REDUCE")
             else:
-                raise ValueError(f"REDUCE {spec!r}: unknown token {t!r} (expect g<n>[a|k] / coop[-t] / r<n>)")
+                raise ValueError(f"REDUCE {spec!r}: unknown token {t!r} (expect g<n>[a|k] / coop[-t][/v<n>] / r<n>)")
         return _canonical_choice(
             "REDUCE",
             spec,
-            cls.of(cta=cta, coop=coop, reg=reg, finalize=finalize, coop_transposed=transposed),
+            cls.of(cta=cta, coop=coop, reg=reg, finalize=finalize, coop_transposed=transposed, columns=columns),
         )
 
     @property
@@ -308,6 +330,11 @@ class Reduce:
     def coop_transposed(self) -> bool:
         """True iff the BLOCK stage carries the ``coop-t`` k-major lane swap."""
         return any(s.transposed for s in self.stages if s.level is Level.BLOCK)
+
+    @property
+    def coop_columns(self) -> int:
+        """The adjacent output columns each lane of a ``coop-t`` band owns, or 1."""
+        return next((s.columns for s in self.stages if s.level is Level.BLOCK), 1)
 
 
 @dataclass(frozen=True)
@@ -749,6 +776,9 @@ class Stage:
     fragment-load ping-pong over the inner atom-K steps, breaking the WAR hazard on the operand fragments). They are
     orthogonal — ``d3/smem-async/p2`` is a 3-deep gmem ring feeding a 2-deep register ping-pong.
     ``reg_depth = 1`` (the default) is the "optional register" OFF point (no inner prefetch).
+    A ``wgmma`` drain loads no operand fragments; its ``reg_depth`` counts the MMA groups in
+    flight instead: ``p2`` leaves each chunk's group running while the next one is issued, and
+    releases its ring slot one chunk later.
     The slab K-*granularity* (how much K is resident) is ``Tile.bk``, NOT a third depth
     here — granularity and buffer depth are kept distinct.
 
@@ -889,12 +919,13 @@ class WarpSpec:
     The band is DECIDED as inventory — it rides ``WORK``'s ``+p<n>`` (``Work.producer``), which
     is where the retired ``WSPEC`` knob's one live decision went. ``ClassicScheduleContext`` and
     the private enumerator require a resolved TMA stage on an unsplit kernel that is not split
-    across CTAs and does not stage a packed byte slab. The box copy is issued by one elected
+    across CTAs and does not compute-fill a slab beside its box copies (a packed byte slab's
+    scales, a computed activation). The box copy is issued by one elected
     thread onto a slot mbarrier any thread can parity-wait, so the fill moves warps freely, while
     ``cp.async``'s wait-group is issuing-thread-scoped and an ``smem`` compute fill has no async load
-    half. The packed byte slab is refused for a different reason: its own TMA lowering returns the
-    plain staged K-loop and emits no split, so the widened block's spare warps reach the compute
-    body and a second thread arms the box-copy barrier.
+    half. TMA copies beside a compute fill are refused for a different reason: their lowering runs
+    both as groups of the plain staged K-loop and emits no split, so the widened block's spare
+    warps reach the compute body and a second thread arms the box-copy barrier.
 
     Materialized by the staged K-loop (``lowering/kernel/_stage.staged_kloop``): the producer band
     rides at the TAIL of the thread block (``threadIdx.x >= block_threads``), so the compute warps'

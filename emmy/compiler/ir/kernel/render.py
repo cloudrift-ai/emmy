@@ -16,6 +16,7 @@ from emmy.compiler.backend.cuda.render_target import CudaRenderTarget
 from emmy.compiler.dtype import F4_VALUES, F32
 from emmy.compiler.ir.kernel.ir import (
     CpAsyncCopy,
+    FragmentRepack,
     KernelOp,
     LdmatrixLoad,
     RegStore,
@@ -27,7 +28,7 @@ from emmy.compiler.ir.kernel.ir import (
     swizzle_fn,
     swizzle_xor,
 )
-from emmy.compiler.ir.stmt import RenderCtx, render_body
+from emmy.compiler.ir.stmt import Paged, RenderCtx, render_body
 from emmy.compiler.ir.stmt.leaves import Assign, Write
 from emmy.compiler.tensor import Tensor
 
@@ -191,11 +192,17 @@ static __device__ __forceinline__ void cp_async_bulk_tensor_5d(
 # same helper style the mma / mbarrier preludes use; same SASS. ``cg`` =
 # cache-global / bypass-L1 (16 B, the streaming form); ``ca`` = cache-all (4/8 B).
 # ``commit`` closes a batch of issued copies; ``wait<N>`` blocks until ≤ N of
-# those batches are still in flight.
+# those batches are still in flight. ``_z`` copies only when ``ok`` and writes zeros
+# otherwise, reading nothing: a tile row past a masked edge.
 _CP_ASYNC_PRELUDE = """\
 static __device__ __forceinline__ void emmy_cp_async_cg(void* smem, const void* gmem) {
     unsigned addr = __cvta_generic_to_shared(smem);
     asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\\n" :: "r"(addr), "l"(gmem) : "memory");
+}
+
+static __device__ __forceinline__ void emmy_cp_async_cg_z(void* smem, const void* gmem, bool ok) {
+    unsigned addr = __cvta_generic_to_shared(smem);
+    asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\\n" :: "r"(addr), "l"(gmem), "r"(ok ? 16 : 0) : "memory");
 }
 
 template <int Bytes>
@@ -271,7 +278,8 @@ static __device__ __forceinline__ void emmy_mma884_load_gmem4(unsigned* r, const
     int comp = (lane & 15) >> 2;
     int row = ((A ? comp >> 1 : comp & 1) << 3) + (lane & 3) + ((lane >> 4) << 2);
     row = min(row, max(left - 1, 0));
-    emmy_mma884_load4(r, g + row * ldm);
+    r[0] = r[1] = 0u;
+    if (left > 0) emmy_mma884_load4(r, g + row * ldm);  // wholly past the bound: read nothing
 }
 
 template <typename T, typename F = T>
@@ -285,8 +293,8 @@ static __device__ __forceinline__ void emmy_mma884_load_a_impl(
     for (int p = 0; p < 2; ++p) {
         int k = p << 1;
         unsigned packed = 0;
-        if (k < k_left) ((F*)&packed)[0] = F(g[row * ldm + k]);
-        if (k + 1 < k_left) ((F*)&packed)[1] = F(g[row * ldm + k + 1]);
+        if (rows_left > 0 && k < k_left) ((F*)&packed)[0] = F(g[row * ldm + k]);
+        if (rows_left > 0 && k + 1 < k_left) ((F*)&packed)[1] = F(g[row * ldm + k + 1]);
         r[p] = packed;
     }
 }
@@ -302,8 +310,8 @@ static __device__ __forceinline__ void emmy_mma884_load_b_impl(
     for (int p = 0; p < 2; ++p) {
         int k = p << 1;
         unsigned packed = 0;
-        if (k < k_left) ((F*)&packed)[0] = F(trans ? g[col * ldm + k] : g[k * ldm + col]);
-        if (k + 1 < k_left) ((F*)&packed)[1] = F(trans ? g[col * ldm + k + 1] : g[(k + 1) * ldm + col]);
+        if (cols_left > 0 && k < k_left) ((F*)&packed)[0] = F(trans ? g[col * ldm + k] : g[k * ldm + col]);
+        if (cols_left > 0 && k + 1 < k_left) ((F*)&packed)[1] = F(trans ? g[col * ldm + k + 1] : g[(k + 1) * ldm + col]);
         r[p] = packed;
     }
 }
@@ -683,11 +691,13 @@ static __device__ __forceinline__ void emmy_mma_load_b_gmem(unsigned* r, const T
 // Masked-tile (M9) variants of the gmem-direct fragment loads: a tile straddling a masked axis's
 // bound would read rows / cols past the runtime-sized buffer, so the lane coordinate on the gated
 // axis clamps INTO the live range — ``left - 1`` (``left`` = in-range elements from the tile base)
-// where the fragment straddles the bound, the tile base where it OVERHANGS it entirely. The latter
-// is a tile wider than its axis (M=1 under a 128-row tile): ``left`` goes <= 0, and a bare
-// ``left - 1`` addresses tens of KB BELOW the buffer — an out-of-bounds read that faults the context
-// wherever that memory is unmapped. Clamped lanes read a duplicate in-bounds value — harmless,
-// their stores are masked by the RegStore guard (the tile path's ``clamp_last``, same contract).
+// where the fragment straddles the bound. A fragment that OVERHANGS the bound entirely (``left <= 0``:
+// a tile wider than its axis, M=1 under a 128-row tile, or 512 rows under eight 128-row warps) reads
+// nothing and zero-fills: no address is in range there. Clamping to ``left - 1`` read tens of KB below
+// the buffer, and clamping to the fragment base read past its end (an intermittent
+// CUDA_ERROR_ILLEGAL_ADDRESS, wherever that memory was unmapped). Clamped lanes read a duplicate
+// in-bounds value; zero-filled and clamped lanes alike have their stores masked by the RegStore
+// guard (the tile path's ``clamp_last``, same contract).
 template <typename T, typename F = T>
 static __device__ __forceinline__ void emmy_mma_load_a_gmem_mclamp(unsigned* r, const T* g, int ldm, int rows_left) {
     int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
@@ -697,9 +707,11 @@ static __device__ __forceinline__ void emmy_mma_load_a_gmem_mclamp(unsigned* r, 
         if (row >= rows_left) row = max(rows_left - 1, 0);   // M: clamp to the runtime extent
         int col = (tig << 1) + ((i & 2) ? 8 : 0);
         const T* p = g + row * ldm + col;
-        unsigned packed;
-        ((F*)&packed)[0] = F(p[0]);
-        ((F*)&packed)[1] = F(p[1]);
+        unsigned packed = 0u;
+        if (rows_left > 0) {  // wholly past the bound: read nothing
+            ((F*)&packed)[0] = F(p[0]);
+            ((F*)&packed)[1] = F(p[1]);
+        }
         r[i] = packed;
     }
 }
@@ -712,9 +724,11 @@ static __device__ __forceinline__ void emmy_mma_load_b_gmem_nclamp(unsigned* r, 
         int n = grp;
         if (n >= cols_left) n = max(cols_left - 1, 0);       // N: clamp to the runtime extent
         int k = (tig << 1) + (i ? 8 : 0);
-        unsigned packed;
-        ((F*)&packed)[0] = F(g[k * ldm + n]);
-        ((F*)&packed)[1] = F(g[(k + 1) * ldm + n]);
+        unsigned packed = 0u;
+        if (cols_left > 0) {  // wholly past the bound: read nothing
+            ((F*)&packed)[0] = F(g[k * ldm + n]);
+            ((F*)&packed)[1] = F(g[(k + 1) * ldm + n]);
+        }
         r[i] = packed;
     }
 }
@@ -751,9 +765,11 @@ static __device__ __forceinline__ void emmy_mma_load_b_gmem_trans_nclamp(unsigne
         int n = grp;
         if (n >= cols_left) n = max(cols_left - 1, 0);       // N: clamp to the runtime extent
         int k = (tig << 1) + (i ? 8 : 0);
-        unsigned packed;
-        ((F*)&packed)[0] = F(g[n * ldm + k]);
-        ((F*)&packed)[1] = F(g[n * ldm + k + 1]);
+        unsigned packed = 0u;
+        if (cols_left > 0) {  // wholly past the bound: read nothing
+            ((F*)&packed)[0] = F(g[n * ldm + k]);
+            ((F*)&packed)[1] = F(g[n * ldm + k + 1]);
+        }
         r[i] = packed;
     }
 }
@@ -791,8 +807,8 @@ static __device__ __forceinline__ void emmy_mma_load_a_gmem_mclamp_kzero(unsigne
         int col = (tig << 1) + ((i & 2) ? 8 : 0);
         const T* p = g + row * ldm + col;
         unsigned packed = 0;
-        if (col < k_left) ((F*)&packed)[0] = F(p[0]);
-        if (col + 1 < k_left) ((F*)&packed)[1] = F(p[1]);
+        if (rows_left > 0 && col < k_left) ((F*)&packed)[0] = F(p[0]);
+        if (rows_left > 0 && col + 1 < k_left) ((F*)&packed)[1] = F(p[1]);
         r[i] = packed;
     }
 }
@@ -822,8 +838,8 @@ static __device__ __forceinline__ void emmy_mma_load_b_gmem_nclamp_kzero(unsigne
         if (n >= cols_left) n = max(cols_left - 1, 0);
         int k = (tig << 1) + (i ? 8 : 0);
         unsigned packed = 0;
-        if (k < k_left) ((F*)&packed)[0] = F(g[k * ldm + n]);
-        if (k + 1 < k_left) ((F*)&packed)[1] = F(g[(k + 1) * ldm + n]);
+        if (cols_left > 0 && k < k_left) ((F*)&packed)[0] = F(g[k * ldm + n]);
+        if (cols_left > 0 && k + 1 < k_left) ((F*)&packed)[1] = F(g[(k + 1) * ldm + n]);
         r[i] = packed;
     }
 }
@@ -857,8 +873,8 @@ static __device__ __forceinline__ void emmy_mma_load_b_gmem_trans_nclamp_kzero(
         if (n >= cols_left) n = max(cols_left - 1, 0);       // N: clamp to the runtime extent
         int k = (tig << 1) + (i ? 8 : 0);
         unsigned packed = 0;
-        if (k < k_left) ((F*)&packed)[0] = F(g[n * ldm + k]);
-        if (k + 1 < k_left) ((F*)&packed)[1] = F(g[n * ldm + k + 1]);
+        if (cols_left > 0 && k < k_left) ((F*)&packed)[0] = F(g[n * ldm + k]);
+        if (cols_left > 0 && k + 1 < k_left) ((F*)&packed)[1] = F(g[n * ldm + k + 1]);
         r[i] = packed;
     }
 }
@@ -989,9 +1005,9 @@ static __device__ __forceinline__ void emmy_mma_load_a_gmem_mclamp_b8(unsigned* 
         int row = grp + ((i & 1) ? 8 : 0);
         if (row >= rows_left) row = max(rows_left - 1, 0);   // M: clamp to the runtime extent
         int col = (tig << 2) + ((i & 2) ? 16 : 0);
-        unsigned packed;
+        unsigned packed = 0u;
         #pragma unroll
-        for (int j = 0; j < 4; ++j) ((unsigned char*)&packed)[j] = p[row * ldm + col + j];
+        for (int j = 0; j < 4; ++j) if (rows_left > 0) ((unsigned char*)&packed)[j] = p[row * ldm + col + j];
         r[i] = packed;
     }
 }
@@ -1005,9 +1021,9 @@ static __device__ __forceinline__ void emmy_mma_load_b_gmem_nclamp_b8(unsigned* 
         int n = grp;
         if (n >= cols_left) n = max(cols_left - 1, 0);       // N: clamp to the runtime extent
         int k = (tig << 2) + (i ? 16 : 0);
-        unsigned packed;
+        unsigned packed = 0u;
         #pragma unroll
-        for (int j = 0; j < 4; ++j) ((unsigned char*)&packed)[j] = p[(k + j) * ldm + n];
+        for (int j = 0; j < 4; ++j) if (cols_left > 0) ((unsigned char*)&packed)[j] = p[(k + j) * ldm + n];
         r[i] = packed;
     }
 }
@@ -1021,9 +1037,9 @@ static __device__ __forceinline__ void emmy_mma_load_b_gmem_trans_nclamp_b8(unsi
         int n = grp;
         if (n >= cols_left) n = max(cols_left - 1, 0);       // N: clamp to the runtime extent
         int k = (tig << 2) + (i ? 16 : 0);
-        unsigned packed;
+        unsigned packed = 0u;
         #pragma unroll
-        for (int j = 0; j < 4; ++j) ((unsigned char*)&packed)[j] = p[n * ldm + k + j];
+        for (int j = 0; j < 4; ++j) if (cols_left > 0) ((unsigned char*)&packed)[j] = p[n * ldm + k + j];
         r[i] = packed;
     }
 }
@@ -1391,6 +1407,9 @@ _BUILTIN_TO_CUDA: dict[str, str] = {
 _BLOCK_SIZE = 256
 
 
+_GRID_DEPENDENCY = '#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900\n    asm volatile("griddepcontrol.wait;" ::: "memory");\n#endif\n'
+
+
 def render_kernelop(
     kernel_op: KernelOp,
     tensors: dict[str, Tensor] | None = None,
@@ -1398,6 +1417,8 @@ def render_kernelop(
     literal_constants: dict[str, float] | None = None,
     runtime_args: tuple[str, ...] = (),
     indirect_inputs: tuple[str, ...] = (),
+    paged_buffers: tuple[tuple[str, int, int, str | None], ...] = (),
+    starts: tuple[str, ...] = (),
 ) -> str:
     """Render a complete ``extern "C" __global__`` CUDA function for a ``KernelOp``.
 
@@ -1429,6 +1450,21 @@ def render_kernelop(
     ``kernel_op.inputs`` are ignored. Empty (the default) renders exactly
     the historical signature — non-indirect kernel sources stay
     byte-identical.
+
+    ``paged_buffers`` names buffers virtualized along one axis, as
+    ``(name, axis, page_size, start)``: instead of a plain pointer the signature
+    takes ``<n>__pages``, a table of equal-sized pages, and every read or
+    write resolves its page before its offset (see ``render_paged_access``)
+    — the KV cache, whose pages are allocated per request and are not one
+    contiguous block. Shapes are untouched, so the paged axis stays
+    ``kv_len`` everywhere above the load. ``start`` names an i64 scalar in
+    device memory, listed in ``starts``: the signature takes its pointer
+    (after the outputs, unless the body already loads it), the preamble
+    reads ``<start>__at`` from it once, and that is added to the paged
+    index before the split — the absolute position a cache write lands
+    at, with the step still one replayable graph whatever the position.
+    ``None`` addresses from page 0. Empty (the default) renders every
+    buffer flat.
 
     Kernel signature is derived from the body: ``kernel_op.inputs``
     (distinct ``Load.input`` names) become input params,
@@ -1469,14 +1505,33 @@ def render_kernelop(
             )
 
     indirect = tuple(n for n in kernel_op.inputs if n in indirect_inputs and n not in literals)
+    paged = {
+        n: Paged(n, axis, page, None if start is None else f"{start}__at")
+        for n, axis, page, start in paged_buffers
+        if n not in literals and (n in kernel_op.inputs or n in kernel_op.outputs)
+    }
+    ctx.memory = dict(paged)
     sig_parts = [
         f"const {cuda_name(_dtype_for(n))}* const* {n}__table, const int* {n}__sel, int {n}__slot"
         if n in indirect
-        else f"const {cuda_name(_dtype_for(n))}* {n}"
+        else f"const {cuda_name(_dtype_for(n))}* const* {n}__pages"
+        if n in paged
+        else f"const {cuda_name(_dtype_for(n))}* __restrict__ {n}"
         for n in kernel_op.inputs
         if n not in literals
     ]
-    sig_parts.extend(f"{cuda_name(_dtype_for(n))}* {n}" for n in kernel_op.outputs)
+
+    def _out_param(n: str) -> str:
+        """A paged output takes its page table; every other output stays a plain pointer."""
+        elem = cuda_name(_dtype_for(n))
+        return f"{elem}* const* {n}__pages" if n in paged else f"{elem}* __restrict__ {n}"
+
+    # Every plain buffer parameter is ``__restrict__``: a launch's output never shares memory with its
+    # inputs (the arena's live intervals end one launch past the last read, and a chained buffer
+    # joins two programs, never one launch's read and write), so the compiler may keep a read-only
+    # operand in registers across the kernel's stores and read it through the non-coherent path.
+    sig_parts.extend(_out_param(n) for n in kernel_op.outputs)
+    sig_parts.extend(f"const long long* {n}" for n in starts if n not in kernel_op.inputs)
     # TMA descriptors are passed as ``__grid_constant__`` value parameters.
     # The kernel only takes their address (``&desc``) for inline asm, so
     # the opaque ``CUtensorMap`` forward decl above suffices.
@@ -1520,6 +1575,16 @@ def render_kernelop(
         # Indirect-operand preamble: resolve each marked input's base pointer from its device
         # table before any body statement runs; downstream loads use the plain name unchanged.
         body_text = "".join(f"    const {cuda_name(_dtype_for(n))}* {n} = {n}__table[{n}__sel[{n}__slot]];\n" for n in indirect) + body_text
+    if starts:
+        # A paged write's start read off the device: the position a step lands its rows at.
+        body_text = "".join(f"    const int {n}__at = (int){n}[0];\n" for n in starts) + body_text
+    # Programmatic dependent launch (sm_90+): wait for the grid ahead before any memory access (the
+    # preambles above already read device memory it may write). A no-op without the launch attribute.
+    # No kernel releases its dependent early (``griddepcontrol.launch_dependents``): a dependent
+    # launched while its predecessor still runs places its blocks on the few SMs free at that moment,
+    # and a 128-block GEMM stacked that way ran 3-4x slower once released (s512 layer 133 -> 192 us).
+    # Released at the predecessor's exit, it still overlaps the launch with the predecessor's drain.
+    body_text = _GRID_DEPENDENCY + body_text
     prelude = _TMA_PRELUDE if desc_names else ""
     sig_dtypes = [_dtype_for(n) for n in kernel_op.inputs if n not in literals]
     sig_dtypes.extend(_dtype_for(n) for n in kernel_op.outputs)
@@ -1535,7 +1600,11 @@ def render_kernelop(
 
     mma_stmts = tuple(s for s in kernel_op.body.iter() if isinstance(s, MmaSyncPtx))
     uses_m8n8k4 = any(s.shape == (8, 8, 4) for s in mma_stmts)
-    uses_modern_mma = any(s.shape != (8, 8, 4) for s in mma_stmts)
+    # A register-form ``wgmma`` cell reads the ``m16n8k16`` A fragment, loaded and repacked by the same
+    # wrappers, so a kernel whose every cell is warp-group still needs them.
+    uses_modern_mma = any(s.shape != (8, 8, 4) for s in mma_stmts) or any(
+        isinstance(s, (LdmatrixLoad, FragmentRepack)) and s.fragment_layout != "m8n8k4" for s in kernel_op.body.iter()
+    )
     mma_sync_prelude = (_MMA_M8N8K4_PRELUDE if uses_m8n8k4 else "") + (_MMA_SYNC_PRELUDE if uses_modern_mma else "")
     # The fp8 wrappers + byte-gather loaders join only when an fp8 mma is present, so every
     # 16-bit mma kernel's source stays byte-identical (the kernel-source digest gate). The

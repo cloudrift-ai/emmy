@@ -11,6 +11,7 @@ skills and CloudRift inference endpoint.
 | Workflow | Trigger | Runner | Result |
 | --- | --- | --- | --- |
 | **Tests** | Pull request to `main` | GitHub-hosted + `ubuntu-runners` | Runs Ruff, the complete test suite, and a PyPI package dry run. |
+| **Review pull requests** | Ready PR or new commit | GitHub-hosted | Posts a PR Agent review using the nightly CloudRift model. |
 | **Publish to PyPI** | Manual dispatch or published GitHub release | GitHub-hosted | Verifies the source and distribution, publishes to PyPI, and optionally creates the release. |
 | **Verify or onboard model** | Nightly schedule or manual dispatch | `agent-runners` / `agents` | Qualifies one available exact model/GPU deployment and updates the rolling lifecycle PR. |
 | **Discover model** | Nightly schedule or manual dispatch | `agent-runners` / `agents` | Refreshes recipe lifecycle tags and onboarding shells in one rolling PR without renting a VM. |
@@ -46,6 +47,13 @@ installation and cache setup.
 
 The native-runtime job runs Rustfmt, Clippy with warnings denied, and locked Cargo tests on a GitHub-hosted runner.
 These checks require no GPU. Native GPU parity and failure recovery run through `make test-native` on supplied hardware.
+
+**Review pull requests** runs the pinned PR Agent image when a PR is opened, reopened, marked ready, or updated. It
+reviews ready PRs from both repository branches and forks, including bot-authored PRs. The action reads the diff through
+the GitHub API without checking out PR code, and its token can read contents and write PR comments but cannot push.
+Only `/review` runs; PR descriptions and code suggestions are left to the author. New commits replace an in-progress
+review for the same PR. The model, endpoint, and credential are shared with the nightly agent workflows, and Qwen's
+chat-template thinking mode is disabled for review output. PR Agent can use up to 128,000 tokens of model context.
 
 ## Package publication
 
@@ -129,10 +137,11 @@ expose the same packages through OpenCode's native skill tool.
 exact workflow SHA. Manual dispatch supplies one exact external candidate; scheduled dispatch queries declared
 deployments. A filtered-out manual candidate is an error, while no scheduled match is a successful no-op.
 The query's filters and sorts read CloudRift VM variant availability without filtering on public-IP supply and consider
-only declared deployments with an available exact CloudRift GPU count. Pending `onboarding`/`untested` recipes are the
-first priority, ordered by descending heat, then model ID and deployment declaration order. If none can run, the
-selector performs a second generic query for a `maintained` recipe whose committed `RESULTS.md` has the oldest
-last-change timestamp; a missing report is oldest. No eligible deployment is a successful no-op.
+only declared deployments with an available exact CloudRift GPU count. It tries five queries in order and takes the
+first match: `onboarding` shells with heat 70 or more; `maintained` or `best-effort` recipes with heat 70 or more and
+no Emmy serving variant (`emmy_serving`); other shells; recipes tagged `onboarding-failed`, oldest report first; and
+`maintained` recipes, oldest report first. The first three skip `onboarding-failed` recipes. Ties fall to heat, then
+model ID and deployment declaration order. No eligible deployment is a successful no-op.
 
 The workflow requires the repository's `CLOUDRIFT_TEAM_ID` variable to contain the exact Robots team UUID. Before it
 checks capacity, it validates that `CLOUDRIFT_API_KEY` can act for that UUID through a team-scoped account request;
@@ -155,7 +164,10 @@ requires `$HOME/.cache/emmy` to be durable storage with at least 8 GiB free. Com
 venv, cache, and build temporary files there rather than on a small `/tmp` tmpfs. The job has a 24-hour limit and gives
 the agent a 23.5-hour deadline so artifact validation and cleanup retain 30 minutes. The deadline is the agent's only
 budget. It has no step cap: a capped agent can only answer in text once it reaches the cap, so it never writes its
-summary. An agent that ends without a summary fails its step, and the failure notice says so. For the selected
+summary. An agent that ends without a summary fails its step, and the failure notice says so. A failed run adds the
+`onboarding-failed` tag to its recipe (and nothing else there) and a dated failure entry to its `RESULTS.md`, and
+keeps any complete golden, corpus case, or bounded compiler fix; the workflow validates and commits those, then fails
+the job. A successful run must remove the tag. For the selected
 recipe and GPU, the same nightly qualification validates the recipe-local golden schema, strictly decodes every stored
 row, and replays it on the exact card; pull-request tests do not load checked-in golden files. The shared serving
 experiment retains one LFS archive per exact GPU platform plus one cumulative `RESULTS.md`; each archive includes its
@@ -300,15 +312,16 @@ configuration live only under run-specific `/tmp/emmy-*` paths and are removed b
 
 Agent workflows use these repository secrets as applicable:
 
-- `CLOUDRIFT_API_KEY` for model discovery, Robots-team resolution, availability, and CloudRift provisioning;
+- `CLOUDRIFT_API_KEY` for model discovery, PR review, Robots-team resolution, availability, and CloudRift provisioning;
 - `DISCORD_EMMY_ROBOTS_WEBHOOK_URL` for non-pinging model discovery, verification, and onboarding summaries;
 - `HF_TOKEN` for gated checkpoints;
 - `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` for an eligible verified prebuilt image.
 
-`ONBOARD_AGENT_MODEL` selects the discovery/onboarding model and defaults to `Qwen/Qwen3.8-27B-FP8`.
+`ONBOARD_AGENT_MODEL` selects the discovery, onboarding, and PR review model and defaults to
+`Qwen/Qwen3.8-27B-FP8`.
 `CLOUDRIFT_TEAM_ID` must be the exact Robots team UUID; the verification/onboarding workflow fails before capacity
 selection if the variable is absent, malformed, or inaccessible to `CLOUDRIFT_API_KEY`.
-`CLOUDRIFT_INFERENCE_URL` selects its OpenAI-compatible endpoint and defaults to
+`CLOUDRIFT_INFERENCE_URL` selects the agent workflows' OpenAI-compatible endpoint and defaults to
 `https://inference.cloudrift.ai/v1`.
 `NIGHTLY_ONBOARD_PUBLISH_IMAGE=true` authorizes a nightly qualification to publish an otherwise eligible image; it is
 false when unset.

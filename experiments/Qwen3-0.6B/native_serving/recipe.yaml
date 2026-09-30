@@ -20,10 +20,10 @@ command:
     if [ "$lane" = native ]; then
       artifact=$${NATIVE_ARTIFACT:?Set NATIVE_ARTIFACT to the qualified serving bundle}
       sha256sum $$artifact/manifest.json $$artifact/serving.json $$artifact/tokenizer.json target/release/emmy-server > $task_dir/identity.txt
-      ./venv/bin/emmy serve $$model --generate --native --native-pack $$artifact --revision $$revision \
+      ./venv/bin/emmy serve $$model --runner generate --native --native-pack $$artifact --revision $$revision \
         --host 127.0.0.1 --port 8128 --max-model-len 4096 > $task_dir/server.log 2>&1 &
     else
-      ./venv/bin/emmy serve $$model --generate --stock --revision $$revision \
+      ./venv/bin/emmy serve $$model --runner generate --stock --revision $$revision \
         --host 127.0.0.1 --port 8128 --dtype float16 --max-model-len 4096 \
         --gpu-memory-utilization 0.6 --max-num-seqs 4 --max-num-batched-tokens 256 \
         --no-enable-prefix-caching --attention-backend TRITON_ATTN \

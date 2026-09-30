@@ -31,7 +31,8 @@ def test_serving_reference_deploys_the_named_golden_at_the_named_decode_width(mo
     assert cmd == [
         "./venv/bin/emmy",
         "serve",
-        "--generate",
+        "--runner",
+        "generate",
         "nvidia/Qwen3-8B-NVFP4",
         "--max-model-len",
         "4096",

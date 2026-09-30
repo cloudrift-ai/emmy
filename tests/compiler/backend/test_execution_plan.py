@@ -7,6 +7,7 @@ including the composite ceil-div grid factors that the Graph-JSON path can't
 round-trip — and (3) the pack-side weight load-op vocabulary matching the binder.
 """
 
+import dataclasses
 import json
 
 import numpy as np
@@ -15,6 +16,7 @@ import pytest
 from emmy.compiler.backend.plan import (
     PLAN_FORMAT_GENERATED,
     PLAN_FORMAT_INDIRECT,
+    PLAN_FORMAT_PAGED,
     PLAN_FORMAT_VERSION,
     WeightSpec,
     _encode_load_ops,
@@ -99,6 +101,22 @@ def test_a_plan_stored_under_the_old_tma_key_still_reads():
     assert plan_from_dict(wire).kernels["k_test"].arch_specific is True
 
 
+def test_only_a_kernel_that_waits_on_its_predecessor_launches_dependent():
+    """A programmatic dependent launch may start a kernel before the grid ahead of it finished, so
+    only a kernel whose source waits on that grid (``griddepcontrol.wait``) is marked, and a plan
+    stored before the mark existed reads unmarked: its kernels launch serialized."""
+    graph = _sample_graph()
+    assert plan_from_graph(graph).kernels["k_test"].dependent_launch is False
+    node = graph.nodes["y"]
+    node.op = dataclasses.replace(node.op, kernel_source='__global__ void k_test() { asm volatile("griddepcontrol.wait;"); }')
+    plan = plan_from_graph(graph)
+    assert plan.kernels["k_test"].dependent_launch is True
+    wire = json.loads(json.dumps(plan_to_dict(plan)))
+    assert plan_from_dict(wire).kernels["k_test"].dependent_launch is True
+    del wire["kernels"]["k_test"]["dependent_launch"]
+    assert plan_from_dict(wire).kernels["k_test"].dependent_launch is False
+
+
 def test_a_plan_without_the_dtype_field_keeps_the_stored_dtype_read():
     """A pack baked before ``WeightSpec.graph_dtype`` existed must keep loading.
 
@@ -138,7 +156,7 @@ def test_plan_round_trip_preserves_binary_key():
 
 def test_plan_format_version_gate():
     d = plan_to_dict(plan_from_graph(_sample_graph()))
-    d["format"] = max(PLAN_FORMAT_INDIRECT, PLAN_FORMAT_GENERATED) + 1  # past every format the runtime speaks
+    d["format"] = max(PLAN_FORMAT_INDIRECT, PLAN_FORMAT_GENERATED, PLAN_FORMAT_PAGED) + 1  # past every format the runtime speaks
     with pytest.raises(ValueError, match="format"):
         plan_from_dict(d)
 

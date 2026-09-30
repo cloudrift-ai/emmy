@@ -60,6 +60,7 @@ from emmy.compiler.ir.kernel.ir import (
     MmaSyncPtx,
     RegFragment,
     RegStore,
+    Smem,
     WgmmaCommit,
     WgmmaDescriptor,
     WgmmaFence,
@@ -89,7 +90,7 @@ from emmy.compiler.ir.stmt import (
     Write,
     mask_select_predicate,
 )
-from emmy.compiler.ir.stmt.body import _exposed_defines, dedup_recomputes, free_names
+from emmy.compiler.ir.stmt.body import _exposed_defines, free_names
 from emmy.compiler.ir.stmt.passes import rename_free
 from emmy.compiler.ir.tile.ops import cone_stat, cone_stat_dtypes
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
@@ -99,8 +100,13 @@ from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     SyncOperand,
     SyncTransport,
     TmaTransport,
+    _fill_align,
+    cp_async_commit,
+    cp_async_fill,
+    cp_async_wait,
     pick_swizzle_atom,
     pipelined_kloop,
+    slab_smem,
     software_swizzle,
     staged_kloop,
     stat_rows,
@@ -422,6 +428,7 @@ def _staged_inner_atom_loop(
     pads=None,
     frag_ns: str = "",
     scales=None,
+    parts: bool = False,
 ) -> list[Stmt]:
     """The inner atom-K drain shared by every staged path: read the A/B ``slabs`` via
     ``LdmatrixLoad(staged=True)`` + ``MmaSyncPtx``. The leaf uses modern ``ldmatrix`` instructions
@@ -592,6 +599,8 @@ def _staged_inner_atom_loop(
             for j in range(n.reg)
         ]
 
+    if parts:  # the pieces themselves, for a K loop that carries the fragments across chunks
+        return n_steps, lambda step, suffix: ldms(Literal(step * atom_k, "int"), suffix), mmas
     if reg_depth < 2 or n_steps < 2:  # single-buffer: the inline fragment-load → mma loop
         body = ldms(Var(ki), "") + mmas("")
         return [
@@ -619,7 +628,7 @@ def _staged_inner_atom_loop(
     return stmts
 
 
-def _wgmma_drain(*, operands, slot, mn, atom, bk_elems: int, frag_ns: str, n_folds: int) -> list[Stmt]:
+def _wgmma_drain(*, operands, slot, mn, atom, bk_elems: int, frag_ns: str, n_folds: int, wait: bool = True) -> list[Stmt]:
     """The warp-group drain — the ``wgmma`` leaf reading ring ``slot``. Both operands stay in
     shared memory: each k16 step builds one matrix descriptor per operand and issues one
     ``wgmma.mma_async`` per group of ``cells_per_instruction`` accumulator cells along N, and the
@@ -697,7 +706,7 @@ def _wgmma_drain(*, operands, slot, mn, atom, bk_elems: int, frag_ns: str, n_fol
                         trans_b=0 if trans else 1,
                     )
                 )
-    stmts += [WgmmaCommit(), WgmmaWait(0)]
+    stmts += [WgmmaCommit(), WgmmaWait(0)] if wait else [WgmmaCommit()]
     return stmts
 
 
@@ -859,7 +868,12 @@ def _slab_operands(
         if i not in roles:
             continue
         tile, tile_base, sibling = mn[i], base[i], mn[1 - i]
-        atoms = b_atoms if i == 1 and not is_row else 1
+        # An operand streamed along its sibling's own axis (the chunk tier's query, whose rows ARE the
+        # slab's streamed axis) has no residual sibling reference to bind: that axis is the k map's.
+        sibling = None if sibling.axis.name == k_axis.name else sibling
+        # A slab whose tile axis is not its row (B, or the chunk tier's key under ``rows``) stacks its
+        # 128-byte swizzle atoms along the rows when a descriptor reads it (:attr:`Operand.atoms`).
+        atoms = b_atoms if not is_row else 1
         block = (tile.tile, bk_elems) if is_row else (bk_elems, tile.tile // atoms)
         elem = elems[i]
         # A >2-D operand (batched / unit-batch view) boxes as rank-N with leading extent-1 dims;
@@ -882,9 +896,19 @@ def _slab_operands(
                 trans=i == 1 and b_trans,
                 atoms=atoms,
                 pad_cols=pads[i],
+                valid=_inside(tile, tile_base, is_row) if atoms == 1 else None,
             )
         )
     return tuple(ops)
+
+
+def _inside(tile: Side, tile_base: Expr, is_row: bool):
+    """The slab cells inside a masked tile edge — ``(row, col) -> base + <tile coord> < ext`` —
+    or ``None`` for an unmasked tile, or one whose tile axis runs along the slab row (a copy chunk
+    there could straddle the edge)."""
+    if not tile.mask or not is_row:
+        return None
+    return lambda row, col: BinaryExpr("<", BinaryExpr("+", tile_base, row), tile.ext)
 
 
 def _cta(mn: tuple[Side, Side], lanes: int, n_threads: int) -> CtaTile:
@@ -1151,7 +1175,7 @@ def _sync_operands(
         slab = edge.as_slab() if isinstance(edge, Fold) else None
         bl = slab.load if slab is not None else edge
         if not isinstance(bl, Load):
-            b_body = dedup_recomputes(bl.lower(axes=axes))
+            b_body = bl.lower(axes=axes)
             exposed = multiplied.get(acc, bl.exposes[-1])
 
             def b_value(k0, row, col, *, body=b_body, exposed=exposed):
@@ -1407,11 +1431,17 @@ def _block_scaled_operands(
 
             return gmem
 
+        # The TMA box ends at the index's K dim. Any dims past it are unit dims (an activation's
+        # scales carry one, ``[.., K/16, 1]``), and a box whose innermost dim were that unit dim
+        # would have a one-byte inner span, below TMA's 16 B minimum. Leading unit dims keep a box
+        # extent of 1, as the other staged operands' boxes do.
+        rank = max(i for i, e in enumerate(load.index) if k_axis.name in e.free_vars()) + 1
         return Operand(
             tag=tag,
             buf=load.input,
             shape=(side.tile, cols),
-            coords=lambda k0: at(k0, base),
+            box=(1,) * (rank - 2) + (side.tile, cols) if rank > 2 else None,
+            coords=lambda k0: at(k0, base)[:rank],
             index=index,
             trans=trans,
             pad_cols=pad,
@@ -1545,12 +1575,12 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
     cta = _cta(mn, tile.atom.lanes, tile.launch_threads)
     finalize: list[Stmt] = []
     # The BLOCK-SCALED pair, keyed on the ATOM: both operands packed under a 16-bit atom is still
-    # the single-sided shape, whose drain decodes each into 16-bit fragments. cp.async only; the
-    # four-descriptor TMA box copy is not built.
+    # the single-sided shape, whose drain decodes each into 16-bit fragments.
     single, pair = packed_readings((c,), ops.inputs)[id(c)]
-    bs_pair = pair if stage.transport == "smem-async" and block_scaled_atom(tile.atom) else None
-    packed = single if bs_pair is None and stage.transport in ("smem-async", "smem-tma") else None
+    bs_pair = pair if stage.is_async and block_scaled_atom(tile.atom) else None
+    packed = single if bs_pair is None and stage.is_async else None
     if bs_pair is not None:
+        tma = stage.transport == "smem-tma"
         operands, copies, fills = _block_scaled_operands(
             c,
             bs_pair,
@@ -1558,15 +1588,20 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
             mn,
             ops.inputs[bs_pair.b[0].bits.input].dtype,
             ops.inputs[bs_pair.a.scale.input].dtype,
-            pad=BYTE_SLAB_PAD,
+            pad=0 if tma else BYTE_SLAB_PAD,
             k_axis=k_axis,
         )
         common = dict(slab_dtype=cuda_name(elem), elem_bytes=elem.nbytes, cta=cta)
         # Pure copies when both operands' codes are stored; a fill underneath them when this
         # matmul computes its own A codes, which is the same two-group shape the packed
-        # byte-slab stage takes for its scale fill.
+        # byte-slab stage takes for its scale fill. ``staging._block_scaled_warp_stage`` offers
+        # TMA only for pure copies.
         transport = (
-            CpAsyncTransport(operands=copies, **common) if not fills else SyncTransport(operands=fills, copy_operands=copies, **common)
+            TmaTransport(operands=copies, **common)
+            if tma
+            else CpAsyncTransport(operands=copies, **common)
+            if not fills
+            else SyncTransport(operands=fills, copy_operands=copies, **common)
         )
         # The per-tensor scale levels, applied once per output element after the K-loop. The cell
         # multiplies the RAW e4m3 block scales into each block's sum and knows nothing of the
@@ -1605,77 +1640,78 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
                 for cf in (_fold_frag(ops.frag(f"_c{i}_{j}"), f),)
             ),
         ]
-    elif packed is not None:
-        # The packed-pair (NVFP4) weight: the bits copy beside A, the block scales decode into
-        # their own slab, and the drain combines them at the fragment (:func:`_packed_operands`).
-        tma = stage.transport == "smem-tma"
-        operands, sync_ops, async_ops, packed_pro = _packed_operands(
-            c,
-            packed,
-            stage.bk_elems,
-            mn,
-            ops.slab_swizzles(mn, elem.nbytes)[0],
-            ops.inputs[packed.bits.input].dtype,
-            pad=0 if tma else BYTE_SLAB_PAD,
-            cta=cta,
-            seam=ops.cone,
-            inputs=ops.inputs,
-            k_axis=k_axis,
-            axes=ops.axes,
-        )
+    elif packed is not None or stage.transport == "smem" or stage.smem:
+        if packed is not None:
+            # The packed-pair (NVFP4) weight: the bits copy beside A, the block scales decode into
+            # their own slab, and the drain combines them at the fragment (:func:`_packed_operands`).
+            operands, sync_ops, copy_ops, prologue = _packed_operands(
+                c,
+                packed,
+                stage.bk_elems,
+                mn,
+                ops.slab_swizzles(mn, elem.nbytes)[0],
+                ops.inputs[packed.bits.input].dtype,
+                pad=0 if stage.transport == "smem-tma" else BYTE_SLAB_PAD,
+                cta=cta,
+                seam=ops.cone,
+                inputs=ops.inputs,
+                k_axis=k_axis,
+                axes=ops.axes,
+            )
+        else:
+            # The compute fill: every inline edge is evaluated into its canonical slab (converting
+            # on the store when dtypes differ); every materialized counterpart is COPIED underneath
+            # that work — with ``cp.async`` or TMA, or with the blocking vector copy on an atom whose
+            # target has neither. A term with no inline edge at all lands here too: then it is only
+            # the copy.
+            operands, sync_ops, copy_ops, prologue = _sync_operands(
+                c,
+                stage.bk_elems,
+                mn,
+                cta,
+                ops.slab_swizzles(mn, elem.nbytes),
+                ops.channels,
+                ops.cone,
+                ops.inputs,
+                slab_dtype=elem,
+                k_axis=k_axis,
+                axes=ops.axes,
+                b_atoms=ops.b_atoms(mn),
+            )
         common = dict(slab_dtype=cuda_name(elem), elem_bytes=elem.nbytes, cta=cta)
-        if tma:
+        if stage.transport == "smem-tma":
             # TWO operand groups, not one. cp.async can ride inside the ``sync`` producer because
             # both are issued by the same threads under one CTA barrier; a TMA copy is armed on an
             # mbarrier by one elected thread and waited on by parity, which no compute fill can be
             # folded into. The K-loop skeleton already schedules a LIST of groups, so the copies
-            # and the scale fill are simply two of them over one drain segment: the box copies ring
-            # at the stage's depth, the compute fill stays single-buffer as it always is.
-            copies = TmaTransport(operands=async_ops, **common)
-            fill = SyncTransport(operands=sync_ops, prologue_stmts=tuple(packed_pro), **common)
-            slabs = frozenset(op.slab for op in (*async_ops, *sync_ops))
-            return pipelined_kloop(
+            # and the compute fill are simply two of them over one drain segment: the box copies
+            # ring at the stage's depth, the compute fill stays single-buffer as it always is.
+            copies = TmaTransport(operands=copy_ops, **common)
+            fill = SyncTransport(operands=sync_ops, prologue_stmts=tuple(prologue), **common)
+            slabs = frozenset(op.slab for op in (*copy_ops, *sync_ops))
+            decls, region = pipelined_kloop(
                 operands=((copies, stage.depth), (fill, 1)),
                 build_segments=lambda slots: [(ops.staged_drain(operands, slots[0], cells, offset, mn), slabs)],
                 bk_elems=stage.bk_elems,
                 n_chunks=K // stage.bk_elems,
                 k_extent=K,
             )
-        # cp.async: one ``sync`` producer whose copied peers are the two copied slabs — the
-        # same shape the fused norm→linear edge takes.
-        transport = SyncTransport(operands=sync_ops, copy_operands=async_ops, prologue_stmts=tuple(packed_pro), **common)
-    elif stage.transport == "smem":
-        # The synchronous fill: every inline edge is evaluated into its canonical slab (converting
-        # on the store when dtypes differ); every materialized counterpart is COPIED underneath
-        # that work — with ``cp.async``, or with the blocking vector copy on an atom whose target
-        # has none. A term with no inline edge at all lands here too: then it is only the copy.
-        operands, sync_ops, copy_ops, stat_pro = _sync_operands(
-            c,
-            stage.bk_elems,
-            mn,
-            cta,
-            ops.slab_swizzles(mn, elem.nbytes),
-            ops.channels,
-            ops.cone,
-            ops.inputs,
-            slab_dtype=elem,
-            k_axis=k_axis,
-            axes=ops.axes,
-            b_atoms=ops.b_atoms(mn),
-        )
+            # The shared pool packs in declaration order. The ring's few-byte barrier array would
+            # otherwise sit between the copied slabs and the filled ones and push the next swizzled
+            # slab to its 1024 B boundary: a kilobyte that can cost a resident block.
+            barrier = [d for d in decls if isinstance(d, Smem) and d.name == copies.mbar]
+            return [*(d for d in decls if d not in barrier), *barrier], region
         transport = SyncTransport(
             operands=sync_ops,
             copy_operands=copy_ops,
-            slab_dtype=cuda_name(elem),
-            elem_bytes=elem.nbytes,
-            cta=cta,
-            prologue_stmts=tuple(stat_pro),
+            prologue_stmts=tuple(prologue),
             copy_sync=not tile.is_warp or tile.atom.sync_copy_staging,
             # A ring under a blocking copy asks for the register-staged split — that is what makes
             # ``depth`` mean chunks-in-flight here, as it does on the cp.async / TMA transports.
             # A static one-chunk stream has no resident chunk to overlap, so splitting its only
             # copy would issue before the drain and deposit after the drain into uninitialized smem.
             staged=stage.depth >= 2 and (not isinstance(n_chunks, int) or n_chunks >= 2),
+            **common,
         )
     else:
         # A cp.async-staged 1-byte (fp8) slab pads its rows (`BYTE_SLAB_PAD`) so the cooperative
@@ -1726,6 +1762,8 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
         k_extent=K,
         workers=ops.workers,
         block_threads=tile.launch_threads,
+        carried=ops.carried_drain(operands, mn) if isinstance(transport, CpAsyncTransport) else None,
+        in_flight=ops.in_flight_drain(operands, mn),
     )
     # The block-scaled cell's per-tensor scale levels land on the output fragments here — after
     # the K-loop, before the sink.
@@ -2035,6 +2073,42 @@ class _MmaOps(_AtomOps):
             t = self.inputs.get(edge.as_slab().load.input) if self.inputs and edge.as_slab() is not None else None
             out.append(t.dtype if t is not None and t.dtype.nbytes == 1 else dt)
         return tuple(out)
+
+    def carried_drain(self, operands, mn):
+        """The drain as ``slot -> (steps, loads(step, suffix), mmas(suffix))`` for a K loop that
+        double-buffers the fragments across chunk boundaries (``STAGE`` ``/p2`` on a cp.async ring,
+        :func:`pipelined_kloop`), or ``None`` where the drain has more to it than loads and mmas."""
+        if self.tile.atom.is_wgmma or _f16acc(self.tile.atom) or self.stage.reg_depth != 2:
+            return None
+        if any(getattr(op, "scale", None) is not None for op in operands):
+            return None
+        return lambda slot: _staged_inner_atom_loop(
+            slabs=tuple(op.slab for op in operands),
+            offs=tuple(op.slot_row(slot) for op in operands),
+            mn=mn,
+            atom=self.tile.atom,
+            bk_elems=self.stage.bk_elems,
+            ki="_ki",
+            swizzles=tuple(getattr(op, "swizzle", "NONE") for op in operands),
+            trans=tuple(getattr(op, "trans", False) for op in operands),
+            byte_slabs=tuple((getattr(op, "elem_bytes", None) or self.tile.atom.operand_dtype("a").nbytes) == 1 for op in operands),
+            pads=tuple(getattr(op, "pad_cols", 0) for op in operands),
+            frag_ns=self.frag_ns,
+            parts=True,
+        )
+
+    def in_flight_drain(self, operands, mn):
+        """The ``wgmma`` drain that leaves its chunk's group running — ``(issue(slot), settle(n))``,
+        ``settle`` waiting until at most ``n`` groups run (:func:`_in_flight_kloop`) — or ``None``.
+        A ``wgmma`` drain loads no fragments, so its ``STAGE`` ``/p2`` is this register-side
+        pipeline instead: one group in the tensor cores while the next is issued. ``/p1`` waits
+        each chunk out, which keeps one more chunk of the ring in flight."""
+        if not self.tile.atom.is_wgmma or self.stage.reg_depth < 2:
+            return None
+        common = dict(
+            operands=operands, mn=mn, atom=self.tile.atom, bk_elems=self.stage.bk_elems, frag_ns=self.frag_ns, n_folds=len(self.channels)
+        )
+        return (lambda slot: _wgmma_drain(slot=slot, wait=False, **common)), (lambda n: [WgmmaWait(n)])
 
     def staged_drain(self, operands, slot, cells, offset, mn):
         """The mma slab drain — the fragment-load + ``mma.sync`` leaf reading ring ``slot``
@@ -2427,6 +2501,14 @@ class _ScalarOps(_AtomOps):
         """Each gmem operand's OWN dtype — A and B may differ on the scalar tier (fp32 split
         partials × fp16 weights); the drain's fma converts like the gmem-direct path does."""
         return (self.inputs[self.c.operands[0].as_slab().load.input].dtype, self.inputs[self.c.operands[1].as_slab().load.input].dtype)
+
+    def carried_drain(self, operands, mn):  # noqa: ARG002 — the scalar drain carries no fragments
+        """``None``: a scalar drain has no fragments to carry across chunks."""
+        return None
+
+    def in_flight_drain(self, operands, mn):  # noqa: ARG002 — the scalar drain issues nothing asynchronous
+        """``None``: a scalar drain has no MMA group to leave running."""
+        return None
 
     def staged_drain(self, operands, slot, cells, offset, mn):
         """The scalar slab drain — the plain-``Load`` fma leaf (:func:`_scalar_drain`), reading by
@@ -2853,7 +2935,7 @@ class _FlashOps(_MmaOps):
             "the chunk tier reads the score's prefix leaves once, ahead of the chunk loop"
         )
         pre = [stmt for edge in leaves for stmt in edge.lower(axes=self.axes)]
-        pre += self._query(offset, mn)
+        pre += self._query_slab(mn) if self._score_atom.is_wgmma else self._query(offset, mn)
         # A coordinate mask makes every chunk outside this CTA's rows pure identity work, and the
         # loop skips it: it stops at a causal diagonal (``k_end``) and starts at a band's near edge
         # (``k_first``), which gives a causal stream half its work back and a banded one its band.
@@ -2979,7 +3061,7 @@ class _FlashOps(_MmaOps):
             if streams is None:
                 return [(scored_stmts + body, frozenset())]
             if len(streams.transports) == 1:
-                slabs = frozenset(op.slab for op in streams.transports[0].operands)
+                slabs = frozenset(op.slab for op in (streams.key, streams.value) if op is not None)
                 return [(scored_stmts + body, slabs)]
             return [(scored_stmts, frozenset({streams.key.slab})), (body, frozenset({streams.value.slab}))]
 
@@ -3045,6 +3127,7 @@ class _FlashOps(_MmaOps):
             swizzles=("NONE", swizzle),
             elems=(None, elem),
             b_trans=trans,
+            b_atoms=self.b_atoms(mn),
             pads=(0, pad),
             roles=(1,),
         )
@@ -3053,6 +3136,9 @@ class _FlashOps(_MmaOps):
             k_load, span = staged_key
             span_axis = self._score_k
             side = Side(axis=span_axis, tile=span, units=1, reg=1, block=span_axis.name + "_b", unit=span_axis.name + "_u")
+            # A warp-group score reads the key through a descriptor, whose K step stays inside one
+            # 128-byte swizzle atom: a wider head stacks its atoms along the slab rows.
+            atoms = max(1, span * elem.nbytes // 128) if self._score_atom.is_wgmma else 1
             (key,) = _slab_operands(
                 index_srcs=(k_load.index, None),
                 bufs=(k_load.input, None),
@@ -3060,7 +3146,8 @@ class _FlashOps(_MmaOps):
                 k_axis=self.k_axis,
                 bk_elems=bk,
                 base=(Literal(0, "int"), _tile_base(mn)[1]),
-                swizzles=("NONE" if pad else self.slab_swizzle(span, elem.nbytes), "NONE"),
+                b_atoms=atoms,
+                swizzles=("NONE" if pad else self.slab_swizzle(span // atoms, elem.nbytes), "NONE"),
                 elems=(elem, None),
                 rows=(False, trans),
                 pads=(pad, 0),
@@ -3071,8 +3158,11 @@ class _FlashOps(_MmaOps):
         def group(operands: tuple, tag: str = ""):
             common = dict(slab_dtype=cuda_name(elem), elem_bytes=elem.nbytes, cta=cta)
             if self.stage.transport == "smem":
-                # Volta: the same slabs, filled by the blocking vector copy the CTA barrier closes.
-                return SyncTransport(operands=(), copy_operands=operands, copy_sync=True, **common)
+                # Volta: the same slabs, filled by the blocking vector copy the CTA barrier closes; a
+                # two-slot ring splits that copy so the next chunk's loads fly under this one's softmax.
+                n_chunks = _chunk_stream(self.k_axis, bk)[1]
+                staged = self.stage.depth >= 2 and (not isinstance(n_chunks, int) or n_chunks >= 2)
+                return SyncTransport(operands=(), copy_operands=operands, copy_sync=True, staged=staged, **common)
             # A TMA group parity-waits its own barrier, so two groups in one loop take two names.
             if self.stage.transport == "smem-tma":
                 return TmaTransport(operands=operands, mbar=f"_mbar{tag}", **common)
@@ -3093,7 +3183,16 @@ class _FlashOps(_MmaOps):
         (:func:`wide_accumulate`). The chunk's pivot, its denominator and every channel's pattern
         are f32 registers read off these fragments, so the score does not take the reduced cell
         even when the expectation does."""
-        return wide_accumulate(self.tile.atom)
+        return wide_accumulate(self._score_tile_atom)
+
+    @property
+    def _score_tile_atom(self):
+        """The score's own cell. A warp-group expectation (``wgmma``, register-form A) still takes
+        its score from the ``mma.sync`` cell the score's tile names: the P→A handoff is the same
+        ``m16n8k16`` register layout either way, and only the expectation reads a descriptor."""
+        if self.inner is not None and (self.tile.atom.is_wgmma or self.inner[1].atom.is_wgmma):
+            return self.inner[1].atom
+        return self.tile.atom
 
     @property
     def _score_k(self) -> Axis:
@@ -3158,6 +3257,8 @@ class _FlashOps(_MmaOps):
         b_load = next(edge for edge in score.operands if key.name in edge.free_axes).as_slab().load
         trans = score.axis in b_load.index[-1].free_vars()
         staged = None if streams is None else streams.key
+        if atom.is_wgmma:
+            return self._wgmma_score(m, cols, staged, slot)
         decls: list[Stmt] = [self._frag(f"_kb{j}", "b", atom) for j in range(cols)]
         decls += [self._frag(f"_s{i}_{j}", "c", atom) for i in range(m.reg) for j in range(cols)]
 
@@ -3179,6 +3280,121 @@ class _FlashOps(_MmaOps):
             ]
 
         return [*decls, *(stmt for t in range(self._score_steps()) for stmt in at_step(t))]
+
+    def _query_operand(self, mn) -> Operand:
+        """The query's shared-memory slab for a warp-group score, read through a descriptor.
+
+        It is K-major like any wgmma A: the CTA's query rows are its rows, the head dim its columns.
+        A descriptor's K step stays inside one 128-byte swizzle atom, so a head wider than one atom
+        stacks its atoms along the rows (``Operand.atoms``) — the key slab's stacking, with the query
+        row where the key's chunk row is. Built through the one slab factory with the query row as
+        its streamed axis, so the fill's gmem map is the ordinary one."""
+        m, _ = mn
+        elem = self._score_atom.operand_dtype("a")
+        load = next(edge for edge in self.inner[0].operands if m.axis.name in edge.free_axes).as_slab().load
+        span_axis = self._score_k
+        span = span_axis.extent.as_static()
+        atoms = max(1, span * elem.nbytes // 128)
+        side = Side(axis=span_axis, tile=span, units=1, reg=1, block=span_axis.name + "_b", unit=span_axis.name + "_u")
+        (query,) = _slab_operands(
+            index_srcs=(None, load.index),
+            bufs=(None, load.input),
+            mn=(m, side),
+            k_axis=m.axis,
+            bk_elems=m.tile,
+            base=(Literal(0, "int"), Literal(0, "int")),
+            b_atoms=atoms,
+            swizzles=("NONE", self.slab_swizzle(span // atoms, elem.nbytes)),
+            elems=(None, elem),
+            roles=(1,),
+        )
+        return replace(query, tag="q")
+
+    def _query_slab(self, mn) -> list[Stmt]:
+        """Fill the query's slab once, ahead of the chunk loop: it does not move with the chunk.
+        A cp.async copy the CTA waits on and barriers before the first score reads it."""
+        m, _ = mn
+        if m.mask:
+            raise ValueError("the wgmma score stages a whole query tile (an overhanging query tile is not staged)")
+        query = self._query_operand(mn)
+        elem = self._score_atom.operand_dtype("a")
+        cta = _cta(mn, self.tile.atom.lanes, self.tile.launch_threads)
+        fill = cp_async_fill(
+            slab=query.slab,
+            shape=query.shape,
+            src=query.buf,
+            gmem_index=query.index(_tile_base(mn)[0]),
+            cta=cta,
+            elem_bytes=elem.nbytes,
+            name=query.tag,
+            swizzle=query.swizzle,
+        )
+        decl = slab_smem(
+            query.slab, query.shape[0], query.shape[1], cuda_name(elem), align=_fill_align(query.shape[1], elem.nbytes, query.swizzle)
+        )
+        return [decl, *fill, *cp_async_commit(), *cp_async_wait(0)]
+
+    def _wgmma_score(self, m, cols: int, key, slot) -> list[Stmt]:
+        """The chunk's score on the warp-group cell: both operands through descriptors — the query
+        off its slab staged once ahead of the loop (:meth:`_query_slab`), the key off its ring slot;
+        the key slab is K-major (the chunk's keys are its rows, the score's contraction its
+        columns), the GEMM drain's transposed-B geometry (:func:`_wgmma_drain`). The score's C
+        fragments are fresh each chunk; a fence opens the steps and a commit and a wait close them
+        before the softmax reads them."""
+        atom = self._score_atom
+        cells = atom.cells_per_instruction
+        elem_bytes = atom.operand_dtype("b").nbytes
+        if key is None or m.reg != 1 or cols % cells:
+            raise ValueError(f"the wgmma score reads a staged key at f1x<C>, C a multiple of {cells}")
+        if key.shape[1] * elem_bytes != 128:
+            raise ValueError("the wgmma score reads a key stored one 128-byte swizzle atom per slab row")
+        row_cols = key.shape[1] + key.pad_cols
+        chunk = key.shape[0] // key.atoms  # the chunk's keys: one atom's rows
+        query = self._query_operand((m, None))
+        q_rows = query.shape[0] // query.atoms  # the CTA's query rows: one atom's rows
+        # Each warp group reads its own 64 query rows of the tile.
+        grp_row = BinaryExpr("*", BinaryExpr("/", Var(m.unit), Literal(4, "int")), Literal(64, "int"))
+        out: list[Stmt] = [self._frag(f"_s0_{j}", "c", atom) for j in range(cols)]
+        out.append(WgmmaFence())
+        for t in range(self._score_steps()):
+            k0 = t * atom.atom_k
+            q_row = BinaryExpr("+", Literal(k0 // row_cols * q_rows, "int"), grp_row)
+            q_index = BinaryExpr("+", BinaryExpr("*", q_row, Literal(row_cols, "int")), Literal(k0 % row_cols, "int"))
+            q_desc = self.frag(f"_dq{t}")
+            out.append(
+                WgmmaDescriptor(
+                    name=q_desc,
+                    smem=query.slab,
+                    smem_index=q_index,
+                    swizzle=query.swizzle,
+                    lbo_bytes=16,
+                    sbo_bytes=8 * row_cols * elem_bytes,
+                )
+            )
+            for jg in range(cols // cells):
+                # The step's K lies in atom ``k0 // row_cols``, stacked ``chunk`` rows per atom down.
+                nbase = Literal(k0 // row_cols * chunk + jg * cells * atom.atom_n, "int")
+                index = BinaryExpr(
+                    "+", BinaryExpr("*", _slab_row(key, slot, nbase), Literal(row_cols, "int")), Literal(k0 % row_cols, "int")
+                )
+                desc = self.frag(f"_dk{jg}_{t}")
+                out.append(
+                    WgmmaDescriptor(
+                        name=desc, smem=key.slab, smem_index=index, swizzle=key.swizzle, lbo_bytes=16, sbo_bytes=8 * row_cols * elem_bytes
+                    )
+                )
+                out.append(
+                    WgmmaMma(
+                        c_frags=tuple(self.frag(f"_s0_{j}") for j in range(jg * cells, (jg + 1) * cells)),
+                        a_desc=q_desc,
+                        b_desc=desc,
+                        shape=atom.ptx_shape,
+                        ab_dtype=atom.ab_dtype,
+                        scale_d=1,
+                        trans_b=0,
+                    )
+                )
+        return [*out, WgmmaCommit(), WgmmaWait(0)]
 
     def _score_steps(self) -> int:
         """The score's atom-K steps within one chunk. They go STRAIGHT-LINE, which is what lets the
@@ -3268,6 +3484,8 @@ class _FlashOps(_MmaOps):
         m, n = mn
         atom = self.tile.atom
         staged = None if streams is None else streams.value
+        if atom.is_wgmma:
+            return self._wgmma_expectation(mn, weights, steps, staged, slot)
         v_load = self.c.operands[1].as_slab().load
         # The mma's own target. On a REDUCED-accumulate cell that is the packed ``_ph`` fragment,
         # promoted into the f32 carrier once this chunk's mmas are done — the chunk IS the promote
@@ -3328,6 +3546,59 @@ class _FlashOps(_MmaOps):
                     for j in cols
                 ]
         return out
+
+    def _wgmma_expectation(self, mn, weights, steps, value, slot) -> list[Stmt]:
+        """The expectation on the warp-group cell: per chunk step, the weight repacks into the
+        register-form A (the ``m16n8k16`` A fragment, exactly as the ``mma.sync`` form repacks it)
+        and one ``wgmma.mma_async`` per group of ``cells_per_instruction`` accumulator cells reads
+        the streamed value through a descriptor on its slab — the same MN-major, atom-major B the
+        GEMM drain reads (:func:`_wgmma_drain`). The accumulator was just rescaled, so a fence
+        opens the chunk's cells; a commit and a wait close them before anything reads it again or
+        the slot is released. The streamed value is always staged here: the wgmma legality rule
+        refuses a direct stage (``_wgmma_refusal``)."""
+        m, n = mn
+        atom = self.tile.atom
+        cells = atom.cells_per_instruction
+        if value is None or m.reg != 1 or n.reg % cells:
+            raise ValueError(f"the wgmma expectation reads a staged value at f1x<C>, C a multiple of {cells}")
+        trans = getattr(value, "trans", False)
+        elem_bytes = atom.operand_dtype("b").nbytes
+        atom_cols = 128 // elem_bytes
+        if not trans and value.shape[1] != atom_cols:
+            raise ValueError("the wgmma expectation reads an N-contiguous value stored one 128-byte atom per slab row")
+        bk = steps * atom.atom_k
+        out: list[Stmt] = [self._frag(f"_a0_{t}", "a", self._score_tile_atom) for t in range(steps)]
+        for t in range(steps):
+            out += [FragmentRepack(frag=self.frag(f"_a0_{t}"), srcs=(weights[0, 2 * t], weights[0, 2 * t + 1]), ab_dtype=atom.ab_dtype)]
+        out.append(WgmmaFence())
+        for t in range(steps):
+            kstep = Literal(t * atom.atom_k, "int")
+            for jg in range(n.reg // cells):
+                nbase = BinaryExpr("+", BinaryExpr("*", Var(n.unit), Literal(n.reg * 8, "int")), Literal(jg * cells * 8, "int"))
+                if trans:  # K-major (tile_n × chunk): the value's column is the slab row, the key the column
+                    cols = bk + value.pad_cols
+                    index = BinaryExpr("+", BinaryExpr("*", _slab_row(value, slot, nbase), Literal(cols, "int")), kstep)
+                    lbo, sbo = 16, 8 * cols * elem_bytes
+                else:  # MN-major, atom-major: atom ``nbase / atom`` starts ``chunk`` rows down, the key step its row
+                    row = BinaryExpr("+", BinaryExpr("*", BinaryExpr("/", nbase, Literal(atom_cols, "int")), Literal(bk, "int")), kstep)
+                    index = BinaryExpr("*", _slab_row(value, slot, row), Literal(atom_cols, "int"))
+                    lbo, sbo = bk * atom_cols * elem_bytes, 8 * atom_cols * elem_bytes
+                desc = self.frag(f"_dv{jg}_{t}")
+                out.append(
+                    WgmmaDescriptor(name=desc, smem=value.slab, smem_index=index, swizzle=value.swizzle, lbo_bytes=lbo, sbo_bytes=sbo)
+                )
+                out.append(
+                    WgmmaMma(
+                        c_frags=tuple(self.frag(f"_c0_{j}") for j in range(jg * cells, (jg + 1) * cells)),
+                        a_frag=self.frag(f"_a0_{t}"),
+                        b_desc=desc,
+                        shape=atom.ptx_shape,
+                        ab_dtype=atom.ab_dtype,
+                        scale_d=1,
+                        trans_b=0 if trans else 1,
+                    )
+                )
+        return [*out, WgmmaCommit(), WgmmaWait(0)]
 
     def _value_read(self, value, slot, n, offset, j: int, t: int, v_load, row, bound) -> Stmt:
         """One fragment of the streamed value at chunk step ``t``, column ``j`` — from its staged

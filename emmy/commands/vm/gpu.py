@@ -16,12 +16,11 @@ import json
 import logging
 import os
 import sys
-from pathlib import Path
 
 from emmy.benchmark.config import load_config
 from emmy.provisioning.cloud import provision_cloud_vm, read_public_key_files
 from emmy.provisioning.errors import CapacityExhausted, TerminalProvisionError
-from emmy.provisioning.lease import VmLeaseObserver, load_owned_lease
+from emmy.provisioning.lease import add_lease_arguments, lease_observer, load_owned_lease
 
 logger = logging.getLogger(__name__)
 
@@ -34,11 +33,8 @@ def handle_create(args):
 async def _handle_create(args):
     ssh_key = os.path.expanduser(args.ssh_key)
 
-    if bool(args.lease) != bool(args.owner):
-        logger.error("--lease and --owner must be supplied together")
-        sys.exit(1)
-
     try:
+        observer = lease_observer(args, args.gpu, args.gpu_count)
         extra_authorized_keys = read_public_key_files(args.authorized_key)
     except (FileNotFoundError, ValueError) as exc:
         logger.error(str(exc))
@@ -57,10 +53,6 @@ async def _handle_create(args):
             providers_config["cloudrift"]["billing_exempt"] = True
         if args.network:
             providers_config["cloudrift"]["network"] = args.network
-
-    observer = None
-    if args.lease is not None and not args.dry_run:
-        observer = VmLeaseObserver(args.lease, args.owner, args.gpu, args.gpu_count)
 
     try:
         conn = await provision_cloud_vm(
@@ -148,7 +140,6 @@ def register_create_target(subparsers):
         help="CloudRift network name (must exist in target datacenter; default: provider picks a public network)",
     )
     parser.add_argument("--dry-run", action="store_true", help="Print actions without executing")
-    parser.add_argument("--lease", type=Path, help="Atomically persist the allocation handle and connection details")
-    parser.add_argument("--owner", help="Exact owner recorded in --lease; required with --lease")
+    add_lease_arguments(parser)
     parser.add_argument("--json", action="store_true", help="Print machine-readable connection details after provisioning")
     parser.set_defaults(func=handle_create)

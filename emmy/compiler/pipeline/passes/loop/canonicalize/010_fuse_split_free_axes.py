@@ -156,34 +156,73 @@ def _fuse_once(body: Body, shapes: dict) -> Body | None:
     return None
 
 
+def _reads_whole(e: Expr, name: str) -> bool:
+    """Whether ``e`` reads ``name`` outside every ``/`` / ``%`` dividend."""
+    if isinstance(e, Var):
+        return e.name == name
+    if isinstance(e, BinaryExpr):
+        if e.op in ("/", "//", "%"):
+            return _reads_whole(e.right, name)
+        return _reads_whole(e.left, name) or _reads_whole(e.right, name)
+    if isinstance(e, TernaryExpr):
+        return any(_reads_whole(x, name) for x in (e.cond, e.if_true, e.if_false))
+    if isinstance(e, CastExpr):
+        return _reads_whole(e.expr, name)
+    if isinstance(e, FuncCallExpr):
+        return any(_reads_whole(a, name) for a in e.args)
+    return False
+
+
+def _divisors(loads, name: str) -> dict[int, set[str]]:
+    """The literal divisors ``name`` is read through, and whether as quotient, remainder or both."""
+    divisors: dict[int, set[str]] = {}
+    for load in loads:
+        for index in load.index:
+            for expr in index.subterms():
+                if (
+                    isinstance(expr, BinaryExpr)
+                    and expr.op in ("/", "//", "%")
+                    and expr.left == Var(name)
+                    and isinstance(expr.right, Literal)
+                    and isinstance(expr.right.value, int)
+                    and expr.right.value > 1
+                ):
+                    divisors.setdefault(expr.right.value, set()).add("%" if expr.op == "%" else "/")
+    return divisors
+
+
+def _owned_whole(stmt: Loop, name: str, factor: int) -> bool:
+    """Whether every reduction that reads ``name`` through ``factor`` also reads it whole — one
+    operand owning the coordinate, not two operands sharing its factors. A packed int4 weight reads
+    its channel whole beside the zero-point's ``n / 8`` and the shift's ``n % 8``; splitting that
+    channel leaves the contraction two own axes on its channel side, of which the tile can take
+    only the 8-wide one. A reduction reading only the factors (a head/dim pair) still needs the split."""
+    sharing = [
+        loads
+        for loop in stmt.body.iter_of_type(Loop)
+        if loop.is_reduce
+        for loads in [list(loop.body.iter_of_type(Load))]
+        if factor in _divisors(loads, name)
+    ]
+    return bool(sharing) and all(any(_reads_whole(i, name) for load in loads for i in load.index) for loads in sharing)
+
+
 def _split_once(body: Body, names: frozenset[str]) -> Body | None:
     """Expose a free coordinate's quotient and remainder as separate operand axes.
 
     A flattened row/head coordinate reads A through ``i / H`` and B through ``i % H``.
     Neither operand owns that mixed axis. The exact inverse of the fusion above restores both
     coordinates; fusion cannot undo it because those separate operand reads do not fold clean.
+    A reduction that also reads the coordinate whole owns it (:func:`_owned_whole`) and keeps it.
     """
     for i, stmt in enumerate(body):
         if not isinstance(stmt, Loop) or stmt.is_reduce:
             continue
         axis = stmt.axis
         if axis.extent.is_static and axis.window is None and not stmt.body.carries:
-            divisors: dict[int, set[str]] = {}
-            for load in stmt.body.iter_of_type(Load):
-                for index in load.index:
-                    for expr in index.subterms():
-                        if (
-                            isinstance(expr, BinaryExpr)
-                            and expr.op in ("/", "//", "%")
-                            and expr.left == Var(axis.name)
-                            and isinstance(expr.right, Literal)
-                            and isinstance(expr.right.value, int)
-                            and expr.right.value > 1
-                        ):
-                            divisors.setdefault(expr.right.value, set()).add("%" if expr.op == "%" else "/")
             extent = axis.extent.as_static()
-            for factor, uses in sorted(divisors.items()):
-                if uses != {"/", "%"} or factor >= extent or extent % factor:
+            for factor, uses in sorted(_divisors(stmt.body.iter_of_type(Load), axis.name).items()):
+                if uses != {"/", "%"} or factor >= extent or extent % factor or _owned_whole(stmt, axis.name, factor):
                     continue
                 outer = axis.name + "_quotient"
                 while outer in names:

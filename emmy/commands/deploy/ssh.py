@@ -5,7 +5,7 @@ import logging
 import os
 import sys
 
-from emmy.deploy import DEFAULT_STRATEGY, STRATEGIES, DeployParams
+from emmy.deploy import DEFAULT_STRATEGY, STRATEGIES, DeployParams, replica_services
 from emmy.deploy import (
     deploy as deploy_entry,
 )
@@ -61,11 +61,13 @@ async def _handle_ssh(args):
 
     hf_token = args.hf_token or os.environ.get("HF_TOKEN", "")
     register_secret(hf_token)
+    services, load_balancer = replica_services(recipe)
     params = DeployParams(
         server=server,
         ssh_key=args.ssh_key,
         ssh_port=port,
-        recipe=recipe,
+        services=services,
+        load_balancer=load_balancer,
         model_dir=args.model_dir,
         hf_token=hf_token,
         dry_run=args.dry_run,

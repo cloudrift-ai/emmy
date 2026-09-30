@@ -11,6 +11,9 @@ permission:
   list: allow
   webfetch: allow
   websearch: allow
+  external_directory:
+    "*": deny
+    "/tmp/emmy-discovery-task-*": allow
   task:
     "*": deny
     "discover-fit": allow

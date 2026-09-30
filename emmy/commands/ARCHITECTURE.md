@@ -217,8 +217,9 @@ lowering; `check` and `restamp` default to every repository golden, none of the 
 `compiler/pipeline/search/restamp.py`: a measurement survives only when the row's kernel renders the same CUDA source
 from the fresh Loop IR, otherwise the row becomes a proposal. A row naming the target takes the fresh target's
 identity; a row naming a piece of the target's cut or split set keeps its own and survives only if the fresh set
-still mints that piece. A row that no longer decodes, a row whose kernel no fresh kernel writes, and a kernel-set row
-whose members all lost their measurements are dropped and named. The command never deletes a file: one nothing survives
+still mints that piece; this holds for a target whose own Loop IR is unchanged too, since its cut or split pieces can
+take new identities without it. A row that no longer decodes, a row whose kernel no fresh kernel writes, and a
+kernel-set row whose members all lost their measurements are dropped and named. The command never deletes a file: one nothing survives
 in is left alone and reported. The lowering behind the check, the restamp and `emmy trace`'s inventory is one function
 (`working_golden.lowered_kernels`), and every command that reads a golden by path loads it through
 `golden.load_golden`, which validates a repository golden strictly and anything else as a working file.
@@ -370,9 +371,11 @@ the prior.
 
 **Command modules:** `commands/bench/`, `commands/deploy/{ssh,local,cloud}.py` (`deploy ssh` auto-detects the remote GPU
 via SSH, `deploy local` the local GPU
-via PCI sysfs, both resolve the matrix + apply a scale-out strategy; `deploy cloud` uses the recipe's `deploy.gpu` for
-matrix resolution), `commands/teardown.py`, and `commands/vm/` (a CLI handler per provider). Each exposes a `handle_*`
-and a `register_*` function.
+via PCI sysfs, both resolve the matrix + apply a scale-out strategy; `deploy cloud` resolves the matrix from
+`--gpu`/`--gpu-count`, or from a plan file naming several models), `commands/teardown.py`, and `commands/vm/` (a CLI
+handler per provider). Each exposes a `handle_*` and a `register_*` function. Every deploy hands the orchestrator one
+list of services (a resolved recipe, its GPU devices, its host port), built by `replica_services` for one recipe and
+by `deploy/plan.py` for a plan.
 
 ## Data Flow
 
@@ -546,7 +549,43 @@ sets fallback preference; pass `--provider {gcp,cloudrift}` to restrict the sear
 
 ```bash
 emmy deploy cloud --recipe <path> --gpu "NVIDIA H200 141GB" --gpu-count 8 [--provider gcp] [--name prefix]
+emmy deploy cloud --plan plan.json [--result-json out.json] [--lease lease.json --owner NAME]
 ```
+
+Without a fraction, `--gpu`/`--gpu-count` pick the highest `engine.llm.gpu_memory_utilization` among the entries
+for that GPU and count: the whole-GPU qualification, whatever order the recipe lists them in.
+
+`--plan` (exclusive with `--recipe`) deploys several models on one VM. The plan is JSON:
+
+```json
+{
+  "schema_version": 1,
+  "gpu": "NVIDIA H200 141GB",
+  "gpu_count": 2,
+  "models": [
+    {"recipe": "Qwen3-30B-A3B-Instruct-2507", "gpu_memory_utilization": 0.55, "gpu_device_ids": [0]},
+    {"recipe": "Qwen3-Embedding-0.6B",        "gpu_memory_utilization": 0.35, "gpu_device_ids": [0]},
+    {"recipe": "Qwen3.5-27B-AWQ",             "gpu_memory_utilization": 0.9,  "gpu_device_ids": [1]}
+  ]
+}
+```
+
+Every check runs before anything is rented, and each error names the model: a recipe (bare name or path, resolved
+like `--recipe`) must have a matrix entry matching the plan's GPU, `len(gpu_device_ids)` and the fraction exactly;
+that entry must run as one container (its GPU count equals its tensor × pipeline × data parallelism, so an entry that
+relies on replica fan-out is rejected); device ids are distinct and below `gpu_count`; the fractions of the models
+sharing a device add up to at most 0.95; the recipes agree on driver/CUDA pins. The VM is rented at exactly this
+shape (no larger fallback candidate) with ports 22 and `8000 + i` for model *i*, which becomes Compose service
+`{engine}_{i}` pinned to its devices. A service starts only after every earlier service it shares a GPU with is
+healthy (vLLM checks free memory against its whole fraction at start-up), and each is health-checked and
+smoke-tested on its own port. No nginx.
+
+`--result-json PATH` writes, atomically and only on success, `{"schema_version": 1, "cloud_instance_id": …,
+"models": [{"index": i, "recipe": …, "endpoint": "http://HOST:PORT/v1"}, …]}` with the externally reachable port
+of each model. `--lease PATH --owner NAME` persists the instance id the moment the provider returns it, before the
+VM is ready, and leaves it in place on every later failure so the VM can always be torn down; it is the same lease
+`vm create gpu` writes and `vm delete lease` consumes (see the provisioning architecture). Neither file is written
+in `--dry-run`, which validates the plan and prints what would run.
 
 ### Hardware-Aware Deploy (Local / SSH)
 
@@ -554,13 +593,15 @@ Both `deploy local` and `deploy ssh` auto-detect the target GPU by scanning PCI 
 
 ### `emmy serve`
 
-`--generate --native` selects the experimental Rust text server. Its launcher prepares or reuses a checkpoint-owned
+`--runner generate --native` selects the experimental Rust text server. Its launcher prepares or reuses a checkpoint-owned
 bundle and executes a prebuilt binary. Native arguments are validated separately; vLLM forwarding remains the default.
 See the [native serving contract](../serving/native/ARCHITECTURE.md) for supported options and preparation controls.
 
 
-Serves an embedding model (or a generative chat model via `EmmyGenModel` with `--generate` — `--runner generate` +
-fp16) through vLLM with the emmy plugin flags baked in (`serving/` plugin; needs the `serving` extra). Unrecognized flags forward to `vllm serve`; tokens after a literal `--` forward verbatim (emmy's
+Serves an embedding model (or a generative chat model via `EmmyGenModel` with `--runner generate`, in
+fp16) through vLLM with the emmy plugin flags baked in (`serving/` plugin; needs the `serving` extra). Without `--runner` the
+runner is resolved the way vLLM resolves `--runner auto`, from the checkpoint's config and a Sentence Transformers
+`modules.json`, cached or fetched, so a bare `emmy serve MODEL` needs no flag. Unrecognized flags forward to `vllm serve`; tokens after a literal `--` forward verbatim (emmy's
 own flags are otherwise extracted wherever they appear — argparse REMAINDER swallows everything after MODEL, so the
 handler re-parses it; see `commands/serve.py::_split_own_flags`). `--max-model-len 4096` (the dynamic-dim cap) is
 applied for both engines unless overridden, so `--stock` is an apples-to-apples baseline. **`--revision` forwards to
@@ -612,7 +653,7 @@ the model; raise it when a fresh-serving-shape compile runs longer, e.g. a new p
 combination on a big model, or the kill lands mid-compile and no pack is saved), then
 `vllm bench serve` runs against it (`--max-concurrency` / `--num-prompts` / `--random-input-len` / `--bench-seed`) and
 the server is torn down. The bench backend follows the model: embeddings hit `--backend openai-embeddings --endpoint
-/v1/embeddings`; **`--generate`** hits `--backend openai --endpoint /v1/completions` with `--random-output-len`.
+/v1/embeddings`; **`--runner generate`** hits `--backend openai --endpoint /v1/completions` with `--random-output-len`.
 
 The vLLM child inherits an environment with this interpreter's bin dir prepended to `PATH` (`serve.py::_child_env`):
 invoking `./venv/bin/emmy` by absolute path does not activate the venv, so the generative server's inductor-compile
@@ -895,5 +936,5 @@ tokenizer I/O; model preparation and binary worker transport live in `serving/na
 `--temperature`, `--top-p`, and `--seed`; temperature zero is greedy, and nonzero `--top-k` is rejected.
 `--prefill-size` selects the exported chunk width (default 16; one selects sequential prefill) and requires preparation.
 `--timeout` controls the native worker operation deadline, including the complete prefill/decode loop.
-Native HTTP serving is opt-in through `serve --generate --native`; vLLM remains the default. Generation artifacts
+Native HTTP serving is opt-in through `serve --runner generate --native`; vLLM remains the default. Generation artifacts
 from before the chunked prefill contract must be exported again.

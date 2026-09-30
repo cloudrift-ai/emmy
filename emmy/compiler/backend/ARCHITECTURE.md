@@ -29,7 +29,9 @@ Not a `Backend` — a small Graph→torch evaluator that runs a frontend-dialect
 `torch.compile` baseline for `emmy run --ir`. Each frontend / tensor op is mapped to its torch twin
 (`RmsNormOp`→`F.rms_norm`, `LayerNormOp`→`F.layer_norm`, `SdpaOp`→`F.scaled_dot_product_attention`,
 `LinearOp`→`F.linear`, `ElementwiseOp`/`ReduceOp`/additive `ScanOp`→the torch elementwise/reduce/scan, layout
-ops→view/transpose/cat).
+ops→view/transpose/cat). A two-axis transpose swaps those axes, including for rank-two inputs. Matrix multiplication
+promotes its operands to include the declared output dtype, so an FP32 result from FP16 inputs is not rounded to
+FP16 before widening.
 Single-source index maps with unchanged coordinates, broadcasts, permutations, diagonals, or constant-zero coordinates
 use strided views. These preserve noncontiguous input storage and avoid unnecessary gather/clamp expressions that can
 break Inductor fusion across a later slice. Other maps retain the clipped gather and source-selection semantics.
@@ -134,7 +136,11 @@ target (`sm_120a`, `sm_90a`). Three unrelated instruction families need that suf
 through the launch's descriptors, and the block-scaled fp4 mma and Hopper's `wgmma`, which a plan can only recognize
 by their wrapper names in
 the rendered source. Plans stored under the older `uses_tma` key still read, since the meaning is the same and
-only the name narrowed. A deterministic source-free bind record is the third binding kind: `plan_from_graph`
+only the name narrowed. A kernel ref also records `dependent_launch`, read the same way off the source: every kernel
+the renderer emits waits on the grid ahead of it (`griddepcontrol.wait`, compiled in on sm_90 and later) before its
+first memory access, and that wait is what lets the runtime launch it as a programmatic dependent launch. A plan
+stored before the renderer emitted the wait carries no flag, and its kernels launch serialized.
+A deterministic source-free bind record is the third binding kind: `plan_from_graph`
 evaluates it once and its bytes ride the plan (`WeightSpec.generated`), so no checkpoint can supply it and
 `build_from_plan` fills that buffer from the plan itself — a caller-supplied array still wins, but an
 unsupplied constant buffer would otherwise allocate as ZEROS and run a silently weightless program.
@@ -171,6 +177,17 @@ expands it in place to `arrays[table], arrays[sel], slot`. An indirect operand s
 fails the lowering loudly (descriptors bake the base address at encode). A plan carrying the field serializes as
 `PLAN_FORMAT_INDIRECT` (2) — a runtime that ignored it would pass the wrong arg pack, so old readers reject such
 a plan and fall back to the full compile; plans without the field keep format 1 byte-compatibly.
+
+**Paged buffers** (`ExecutionPlan.paged`, `name -> (axis, page)`): a buffer that is a table of equal-sized pages
+rather than one allocation — the shape a KV cache has once it is allocated per request. The kernel takes
+`T* const* <name>__pages` in place of the plain pointer and every read or write resolves its page before its offset
+inside one. Like an indirect operand it enters as a graph hint (`cuda.paged_buffers`, `(name, axis, page, start)`
+per buffer) read by the final kernel lowering, so shapes, schedules, goldens and cubin keys of unpaged programs do
+not move. `start`, when given, names a graph tensor — an i64 scalar the kernel reads in its preamble — that shifts
+the buffer's own coordinate to an absolute one, so a step producing a chunk of new rows lands them anywhere in the
+cache while it stays one replayable graph. The plan carries the declaration so the runtime knows the buffer has no
+slab: it is never allocated, uploaded, zeroed or read back as one; its page table is bound by address
+(`CompiledProgram.alias_buffer`, or pages the runtime allocates itself for a standalone pack).
 
 `pack.py` bundles plans on disk: one directory per model × GPU × serving shape holding `manifest.json` (validity
 key + environment tags + provenance + program index) and `plan/<program>.json`. The validity key is composed by

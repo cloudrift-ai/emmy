@@ -472,6 +472,129 @@ def test_validate_summary_rejects_lifecycle_change(tmp_path):
         )
 
 
+def _failed_run(workspace, tags="[best-effort, onboarding-failed]"):
+    _write_artifacts(workspace)
+    _init_repo(workspace)
+    subprocess.run(["git", "add", "-A"], cwd=workspace, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "base"], cwd=workspace, check=True)
+    (workspace / "recipes/Model/recipe.yaml").write_text(f"tags: {tags}\nmodel:\n  huggingface: org/Model\n  heat: 77\n")
+
+
+def _failure_summary(tmp_path, artifacts):
+    summary_path = tmp_path / "summary.json"
+    summary_path.write_text(
+        json.dumps(
+            {
+                "status": "failed",
+                "mode": "onboarding",
+                "model_id": "org/Model",
+                "target": {"gpu": "NVIDIA H200 141GB", "gpu_count": 1, "ssh": "user@host"},
+                "failure": {"gate": "engine-support", "message": "No engine loads the checkpoint.", "regression": False},
+                "report": "recipes/Model/RESULTS.md",
+                "artifacts": artifacts,
+                "cleanup": {"workloads": "complete", "docker_logout": True},
+            }
+        )
+    )
+    return onboarding_artifacts.validate_summary(
+        summary_path, tmp_path, "org/Model", "NVIDIA H200 141GB", 1, "user@host", "onboarding", "best-effort"
+    )
+
+
+def test_failed_run_tags_its_recipe_and_keeps_its_report_and_golden(tmp_path):
+    _failed_run(tmp_path)
+    golden = tmp_path / "recipes/Model/golden/h200_90.json"
+    golden.parent.mkdir()
+    golden.write_text("{}\n")
+
+    _, artifacts = _failure_summary(tmp_path, ["recipes/Model/golden/h200_90.json"])
+
+    assert artifacts == [
+        Path("recipes/Model/recipe.yaml"),
+        Path("recipes/Model/RESULTS.md"),
+        Path("recipes/Model/golden/h200_90.json"),
+    ]
+
+
+@pytest.mark.parametrize("tags", ["[best-effort]", "[maintained, onboarding-failed]"])
+def test_failed_run_changes_only_the_failure_tag(tmp_path, tags):
+    _failed_run(tmp_path, tags)
+
+    with pytest.raises(ValueError, match="add only the 'onboarding-failed' tag"):
+        _failure_summary(tmp_path, [])
+
+
+def test_failed_run_rejects_a_deleted_golden(tmp_path):
+    golden = tmp_path / "recipes/Model/golden/h200_90.json"
+    golden.parent.mkdir(parents=True)
+    golden.write_text("{}\n")
+    _failed_run(tmp_path)
+    golden.unlink()
+
+    with pytest.raises(ValueError, match="only its report, golden, and compiler work"):
+        _failure_summary(tmp_path, ["recipes/Model/golden/h200_90.json"])
+
+
+def test_failed_run_requires_a_failure_object(tmp_path):
+    _failed_run(tmp_path)
+    summary_path = tmp_path / "summary.json"
+    summary_path.write_text(
+        json.dumps(
+            {
+                "status": "failed",
+                "mode": "onboarding",
+                "model_id": "org/Model",
+                "target": {"gpu": "NVIDIA H200 141GB", "gpu_count": 1, "ssh": "user@host"},
+                "failure": None,
+                "report": "recipes/Model/RESULTS.md",
+                "artifacts": [],
+                "cleanup": {"workloads": "complete", "docker_logout": True},
+            }
+        )
+    )
+
+    with pytest.raises(ValueError, match="failure object"):
+        onboarding_artifacts.validate_summary(
+            summary_path, tmp_path, "org/Model", "NVIDIA H200 141GB", 1, "user@host", "onboarding", "best-effort"
+        )
+
+
+def test_failed_run_rejects_serving_artifacts(tmp_path):
+    _failed_run(tmp_path)
+
+    with pytest.raises(ValueError, match="only its report, golden, and compiler work"):
+        _failure_summary(tmp_path, ["experiments/Model/serving/RESULTS.md"])
+
+
+def test_successful_run_removes_the_failure_tag(tmp_path):
+    paths = _write_artifacts(tmp_path)
+    (tmp_path / paths[0]).write_text("tags: [best-effort, onboarding-failed]\nmodel:\n  huggingface: org/Model\n")
+    summary_path = tmp_path / "summary.json"
+    summary_path.write_text(
+        json.dumps(
+            {
+                "status": "success",
+                "mode": "onboarding",
+                "model_id": "org/Model",
+                "target": {"gpu": "NVIDIA H200 141GB", "gpu_count": 1, "ssh": "user@host"},
+                "deployment_summary": "vLLM 0.22.1, 32K context, concurrency 8",
+                "performance_summary": "100 requests, 2,400 output tok/s, p50 TTFT 42 ms, 0 failures",
+                "recipe": paths[0],
+                "report": paths[1],
+                "experiment": paths[2],
+                "experiment_artifacts": paths[2:],
+                "artifacts": paths,
+                "cleanup": {"workloads": "complete", "docker_logout": True},
+            }
+        )
+    )
+
+    with pytest.raises(ValueError, match="must remove the 'onboarding-failed' tag"):
+        onboarding_artifacts.validate_summary(
+            summary_path, tmp_path, "org/Model", "NVIDIA H200 141GB", 1, "user@host", "onboarding", "best-effort"
+        )
+
+
 def test_stage_artifacts_rejects_unmanifested_agent_changes(tmp_path):
     _init_repo(tmp_path)
     baseline = tmp_path / "README.md"
