@@ -235,11 +235,10 @@ def _rekeyed_rows(document: GoldenFile, entry: Config, wire: dict, report: Resta
     # the case of a kernel whose Loop IR stayed while what the lift makes of it changed.
     old_key = replace(old_records[0], identity=None).kernel_identity
     new_key = replace(new_records[0], identity=None).kernel_identity
-    moved = len({old.identity for old in old_records}) == 1 and old_records[0].identity != old_key
-    if moved:
-        report.rows_rekeyed.extend(old.name for old in old_records)
+    target_identity = old_records[0].identity if old_records[0].is_routing or len({old.identity for old in old_records}) == 1 else old_key
+    report.rows_rekeyed.extend(old.name for old in old_records if old.identity == target_identity and target_identity != old_key)
     survivors = [
-        replace(new, identity=new_key) if moved or old.identity == old_key else new
+        replace(new, identity=new_key) if old.identity in (old_key, target_identity) else new
         for old, new in zip(old_records, new_records, strict=True)
     ]
 

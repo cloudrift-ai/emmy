@@ -116,6 +116,26 @@ def test_restamp_keeps_the_piece_rows_of_a_kernel_set_whose_target_only_reordere
     assert [row.identity for row in rows] == [row.get("identity") for row in entry["realizations"]], "each piece keeps its own"
 
 
+def test_restamp_rekeys_a_mixed_set_lead_without_dropping_its_pieces(tmp_path):
+    document = json.loads((_RECORDS_DIR / "rtx5090_sm120.json").read_text())
+    entry = next(entry for entry in document["configs"] if entry["realizations"][0]["name"] == "attention.hd128.gqa.decode.split")
+    loop = document["loops"][entry["target"]["loop"]]
+    loop["inputs"] = loop["inputs"][::-1]
+    document.update(programs=[document["programs"][entry["program"]]], loops=[loop])
+    document["configs"] = [{**entry, "program": 0, "target": {**entry["target"], "loop": 0}}]
+    lead, *pieces = document["configs"][0]["realizations"]
+    lead["identity"] = "0" * len(lead["identity"])
+    path = tmp_path / "golden.json"
+    path.write_text(json.dumps(document))
+
+    handle_golden_restamp(Namespace(paths=[str(path)]))
+
+    rows = GoldenFile.load(path).configs[0].realizations
+    assert len(rows) == 1 + len(pieces)
+    assert rows[0].identity != lead["identity"]
+    assert [row.identity for row in rows[1:]] == [piece["identity"] for piece in pieces]
+
+
 def test_restamp_drops_a_piece_row_the_fresh_set_no_longer_mints_under_a_current_target(tmp_path, caplog):
     """A cut can re-form a piece while the target's own Loop IR stays the same: the piece row then names no
     kernel, and restamp drops it though the target is already the fresh lowering."""
