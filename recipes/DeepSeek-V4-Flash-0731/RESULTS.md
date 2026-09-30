@@ -173,6 +173,26 @@ The committed golden is now the serving-twin inventory: the 152 kernels the TP8 
 16 and 4096 and the dynamic width. The per-layer coverage, verification and tuning notes below describe the earlier
 279-target per-layer file it replaced.
 
+### Golden refresh after CSE (2026-09-30)
+
+The V100 SXM3 golden was remeasured after #981 with strict correctness and 10 warmups / 100 timed iterations. These
+are kernel-level route measurements, not serving throughput. Each selected route also replayed with strict evidence
+from a fresh tune database. The previous column is the route row measured before #981, under its earlier compiler and
+measurement conditions.
+
+| Route | Previous golden | Current whole program | Result |
+| --- | ---: | ---: | --- |
+| Dynamic pre-attention mean/reduce | 4,590 µs | 312 µs | A four-kernel cut and `WORK=t32x4` recover the route. |
+| Dynamic post-attention matmul/reduce | 442 µs | 461 µs | `WORK=w2x2` on the first MMA is best measured; 4% slower. |
+| 4,096-token post-attention matmul/reduce | 2,999 µs | 3,359 µs | Prior schedule is best of the tested variants; 12% slower. |
+
+The 4,096-token pre-attention mean/reduce route runs in 2,906 µs with three kernels after choosing its own two cuts
+and changing the large child's tile to `f2x2`. A replay bug had combined cuts from sibling routing rows, producing a
+five-kernel route with a 22.5 ms child and about 25 ms whole time. The target Loop body did not change across #981;
+only its input order changed. Its old 2,719 µs nested route row is not a whole-program timing, so it is not used as a
+whole-program comparison. The older unmeasured route rows remain in the golden as proposals. The single-token
+post-attention matmul route remains a performance gap and is not promoted as measured evidence here.
+
 ### Kernel reference numbers (2026-09-11)
 
 Each recorded row of the golden carries a `latency` block for this card: Emmy, eager PyTorch where the kernel has a
