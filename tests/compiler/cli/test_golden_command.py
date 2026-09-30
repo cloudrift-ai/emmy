@@ -82,6 +82,15 @@ def test_restamp_rewrites_the_golden_onto_the_fresh_lowering(golden, caplog):
     assert "already the fresh lowering" in caplog.text
 
 
+def test_restamp_demotes_a_measurement_when_source_compile_fails(golden, monkeypatch):
+    _make_stale(golden)
+    monkeypatch.setattr("emmy.compiler.pipeline.search.restamp._kernel_sources", lambda *_: None)
+    handle_golden_restamp(Namespace(paths=[str(golden)]))
+    document = GoldenFile.load(golden)
+    row = next(row for entry in document.configs for row in entry.realizations if row.name == "matmul.square.512")
+    assert row.state is GoldenEntryState.PROPOSAL
+
+
 def test_restamp_drops_a_kernel_set_row_whose_members_lose_their_measurements(golden, caplog):
     """A kernel-set row carries no schedule of its own; once its member is demoted it spells nothing."""
     _make_stale(golden)

@@ -1,5 +1,27 @@
 # Golden-bench kernel corpus
 
+## CSE re-record on exact cards
+
+The CSE change shifted kernel identities. All ten Qwen3-0.6B layer goldens have been restamped and measured
+again on their named cards. These current numbers are strict, whole-program golden replays in microseconds. The #967
+numbers are model-form runs with a different warmup and iteration count, so the side-by-side values show recovery of
+the earlier schedules rather than a controlled speed comparison.
+
+| card | s1 #967 | s1 current | s512 #967 | s512 current |
+| --- | ---: | ---: | ---: | ---: |
+| RTX 5090 | 20 | 20.47 | 130 | 129.47 |
+| RTX 4090 | 26.4 | 26.51 | 157.2 | 156.13 |
+| H100 | 28.8 | 25.24 | 87.3 | 87.4 |
+| A100 40GB | 53 | 52.6 | 179 | 179.7 |
+| V100 SXM2 | 72 | 71.7 | 513 | 503.3 |
+
+The H100 s1 route needed five additional reduction splits after CSE; without them its replay took 947 us. The recorded
+16-kernel route takes 25.24 us and passes strict correctness. The V100 s512 restamp demoted 20 measured rows after its
+CUDA sources changed. Its old route had no receipt for one GEMM, which took 657 us under the prior after CSE. Manually
+pinning that GEMM to a measured warp and tile schedule reduced it to 112 us. The complete 21-kernel route passes strict
+correctness at 500.2 us under the recording pins. A fresh-DB strict-evidence replay without hand pins takes 503.3 us
+and picks the 21 measured route and kernel rows.
+
 ## Five cards — margin over torch.compile on the Hugging Face layer (2026-09-29)
 
 ### Question and scope

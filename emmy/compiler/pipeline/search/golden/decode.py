@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence
 from typing import NamedTuple
 
 from emmy.compiler.context import Context
+from emmy.compiler.graph import Graph
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import exact_schedule_leaf, fork_signature, iter_leaves, leaf_for, leaf_knobs
@@ -151,6 +152,7 @@ class _Replay(NamedTuple):
     #: what a per-kernel entry for a kernel the set leaves undescribed would record.
     realized: dict[str, dict[str, str]]
     offered: dict[str | None, tuple[frozenset[str], frozenset[tuple[str, str]]]]
+    graph: Graph
 
 
 def piece_row(row: Mapping[str, str]) -> dict[str, str]:
@@ -392,5 +394,6 @@ def _replay(
         tuple(sorted(pending)),
         realized,
         {identity: (frozenset(keys), frozenset(offered_pairs.get(identity, ()))) for identity, keys in offered_keys.items()},
+        out,
     )
     return result
