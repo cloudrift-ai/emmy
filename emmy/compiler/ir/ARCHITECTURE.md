@@ -653,13 +653,17 @@ also starts from that CSE form, so it sees operations inside definitions. Subrou
   fusion, so an equality exposed by CSE can remove an axis dependency or expose a new merge in the next round.
   Within a pure acyclic scope, bottom-up operand substitution eliminates every structurally congruent computation
   whose representative is available. Legal motion and fusion expose additional availability; equality alone does
-  not justify moving a value across a scope or effect.
+  not justify moving a value across a scope or effect. This is scoped value numbering, not general maximal CSE:
+  partial redundancies, separately executed sibling scopes and equality through mutable loop-carried state may
+  remain. Loads are invalidated by writes to any element of their buffer; no index-aware alias analysis is claimed.
+  The corpus check audits remaining pure bindings against earlier available values and checks uncached idempotence.
+  Neither that check nor reaching a fixed point proves termination on every input or confluence across pass orders.
   Affine integer expressions over bound loop coordinates have a unique coefficient form in lexical axis order.
   For proven nonnegative indices, positive constant quotient chains collapse to one divisor, and `/` and `//` share
   that spelling. Range-proven div/mod decomposition and quotient/remainder reconstruction run in the same closure.
   This is a defined arithmetic contract, not completeness for arbitrary expressions containing division, modulo,
   symbolic products or floating-point arithmetic. Unsupported expressions compare structurally after these rewrites.
-  Maximal sharing under these rules is separate from stable identity. The final
+  Reusing available equivalent values is separate from stable identity. The final
   ordering pass builds one colored relation graph for the complete body tree and chooses one dependency- and
   effect-valid statement order. Vertices represent
   scopes, statements, lexical definitions, axes, source axes, and external buffers; colored relations retain operand
