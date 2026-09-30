@@ -5,7 +5,7 @@
  ],
  "configs": [
   {"program": 0, "target": {"loop": 0, "origins": ["add", "add_c1_bc", "mean", "mul", "mul_static_fp4_abs", "mul_static_fp4_amax", "mul_static_fp4_bits", "mul_static_fp4_blk", "mul_static_fp4_byte", "mul_static_fp4_codes", "mul_static_fp4_codes_flat", "mul_static_fp4_denom", "mul_static_fp4_div32", "mul_static_fp4_even", "mul_static_fp4_f4_max_bc", "mul_static_fp4_floor_bc", "mul_static_fp4_fused", "mul_static_fp4_fused32", "mul_static_fp4_hi", "mul_static_fp4_norm", "mul_static_fp4_odd", "mul_static_fp4_ratio", "mul_static_fp4_safe", "mul_static_fp4_safe_bc", "mul_static_fp4_scale_2_bc", "mul_static_fp4_scale_bits", "mul_static_fp4_scale_vals", "mul_static_fp4_shift_bc", "pow_1", "rsqrt", "rsqrt_bc"]}, "realizations": [
-   {"name": "k_mean_e934a3", "pins": {"FAST_MATH": false}, "knobs": {"PLACE@map.1/map.2/reduce.2/map": "cut"}, "identity": "4f5e91533406911cecb9d5fb684d0885f81fdc9f32e5236a2408be02774a5f68"},
+   {"name": "k_mean_e934a3", "pins": {"FAST_MATH": false}, "knobs": {"PLACE@map.1/map.2/reduce.2/map": "cut"}, "identity": "323a59c08427d189fdb95055db4c75ef55b1232f3b03c27762133b61e28dbd4e"},
    {"name": "k_mean_e934a3.5ab3d806c685", "pins": {"FAST_MATH": false}, "knobs": {"REDUCE@map.1/map.2/reduce": "", "REDUCE@map.2/map.2/reduce": "", "WORK": "", "RASTER": ""}, "identity": "a5cb7473387b4eaae6c0d9357d28c98dc563b4aac790ee9efc0e4e79737286fc"},
    {"name": "k_mean_e934a3.d074fcf531fc", "pins": {"FAST_MATH": false}, "knobs": {"WORK": "", "REDUCE": "", "RASTER": ""}, "identity": "d356a1ad54ddc05828f7b836f4d8767c2ecddf19e01c1b4f525eb012dccc88c0"}
   ]}
