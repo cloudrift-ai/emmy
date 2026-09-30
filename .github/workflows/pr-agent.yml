@@ -18,6 +18,19 @@ jobs:
       issues: write
       pull-requests: write
     steps:
+      - name: Record existing reviews
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" |
+            jq -s '
+              [.[][] | select(.user.login == "github-actions[bot]"
+                and (.body | contains("<!-- pr-agent:review:full -->")))
+                | {key: (.id | tostring), value: .updated_at}] | from_entries
+            ' > "$RUNNER_TEMP/pr-agent-reviews.json"
+
       - name: Review pull request
         # PR Agent v0.46.0 GitHub Action image.
         uses: docker://pragent/pr-agent@sha256:65e5b196e38cecd7df8a71fe29942052e081a0c6645132c2ac874df60b1760c7
@@ -35,3 +48,16 @@ jobs:
           GITHUB_ACTION_CONFIG__AUTO_DESCRIBE: 'false'
           GITHUB_ACTION_CONFIG__AUTO_IMPROVE: 'false'
           GITHUB_ACTION_CONFIG__PR_ACTIONS: '["opened", "reopened", "ready_for_review", "synchronize"]'
+
+      - name: Verify review was posted
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" |
+            jq -se --slurpfile before "$RUNNER_TEMP/pr-agent-reviews.json" '
+              any(.[][]; .user.login == "github-actions[bot]"
+                and (.body | contains("<!-- pr-agent:review:full -->"))
+                and .updated_at > ($before[0][(.id | tostring)] // ""))
+            '
