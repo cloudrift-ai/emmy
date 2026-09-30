@@ -86,6 +86,24 @@ def _working_placement_route(path):
     return document
 
 
+def test_named_routing_row_does_not_inherit_sibling_cuts(tmp_path):
+    from emmy.commands.compile import resolve_golden_arg
+    from emmy.commands.run import _sample_replay_knobs
+
+    path = tmp_path / "working.json"
+    document = _working_placement_route(path)
+    sibling = copy.deepcopy(document.configs[0].realizations[0])
+    sibling.name = "working.other-route"
+    sibling.knobs["PLACE@inner.2/map"] = "cut"
+    document.configs[0].realizations.append(sibling)
+    document.dump(path, overwrite=True)
+
+    args = _args(path, realization="working.route")
+    resolve_golden_arg(args)
+    (sample,) = args.golden_configs
+    assert _sample_replay_knobs(sample) == {"FAST_MATH": False, "PLACE@inner.1/map": "cut"}
+
+
 def _args(path, **overrides):
     values = {
         "realization": "working.relu",

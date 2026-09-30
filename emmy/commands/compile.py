@@ -309,7 +309,7 @@ def resolve_golden_arg(args) -> None:
 
     def row(match):
         sample = golden_row(match, records)
-        if route and match.identity is not None and (match.is_routing or match.identity not in minted):
+        if route and match.identity is not None and match.identity not in minted:
             sample.route = {key: value for key, value in route.items() if key not in match.knobs}
         return sample
 
