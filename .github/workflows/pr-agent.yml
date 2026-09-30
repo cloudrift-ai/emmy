@@ -18,9 +18,18 @@ jobs:
       issues: write
       pull-requests: write
     steps:
-      - name: Record review start
-        id: review_start
-        run: echo "at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+      - name: Record existing reviews
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" |
+            jq -s '
+              [.[][] | select(.user.login == "github-actions[bot]"
+                and (.body | contains("<!-- pr-agent:review:full -->")))
+                | {key: (.id | tostring), value: .updated_at}] | from_entries
+            ' > "$RUNNER_TEMP/pr-agent-reviews.json"
 
       - name: Review pull request
         # PR Agent v0.46.0 GitHub Action image.
@@ -44,12 +53,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          REVIEW_STARTED_AT: ${{ steps.review_start.outputs.at }}
         run: |
           set -euo pipefail
           gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" |
-            jq -se --arg started "$REVIEW_STARTED_AT" '
+            jq -se --slurpfile before "$RUNNER_TEMP/pr-agent-reviews.json" '
               any(.[][]; .user.login == "github-actions[bot]"
-                and .updated_at >= $started
-                and (.body | contains("<!-- pr-agent:review:full -->")))
+                and (.body | contains("<!-- pr-agent:review:full -->"))
+                and .updated_at > ($before[0][(.id | tostring)] // ""))
             '
