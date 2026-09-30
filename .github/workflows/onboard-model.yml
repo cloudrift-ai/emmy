@@ -260,22 +260,17 @@ jobs:
             )
             selection=$(./venv/bin/emmy "${query[@]}")
           else
-            # Nightly work in priority order; the first tier with an available deployment wins. A failed run
-            # tags its recipe onboarding-failed, which holds it back until every other tier is empty.
+            # Nightly work never retries a failed recipe; a manual dispatch can retry it after a fix.
+            query+=(--filter 'tags not contains "onboarding-failed"')
             pick() {
               selection=$(./venv/bin/emmy "${query[@]}" "$@" --sort 'model_id asc' --sort 'deployment.index asc') || exit 1
               [ "$(jq '.rows | length' <<< "$selection")" -gt 0 ]
             }
-            # Hot shells, hot runnable recipes without Emmy serving, other shells, failed recipes (oldest attempt
-            # first), then maintained recipes (oldest report first).
-            pick --filter 'lifecycle == "onboarding"' --filter 'heat >= 70' \
-                --filter 'tags not contains "onboarding-failed"' --sort 'heat desc' \
+            # Hot shells, hot runnable recipes without Emmy serving, other shells, then maintained recipes.
+            pick --filter 'lifecycle == "onboarding"' --filter 'heat >= 70' --sort 'heat desc' \
               || pick --filter 'lifecycle in ["maintained", "best-effort"]' --filter 'runnable == true' --filter 'heat >= 70' \
-                --filter 'emmy_serving == false' --filter 'tags not contains "onboarding-failed"' --sort 'heat desc' \
-              || pick --filter 'lifecycle == "onboarding"' --filter 'tags not contains "onboarding-failed"' \
-                --sort 'heat desc' \
-              || pick --filter 'tags contains "onboarding-failed"' --filter 'lifecycle != "obsolete"' \
-                --sort 'results.last_run_at asc nulls-first' --sort 'heat desc' \
+                --filter 'emmy_serving == false' --sort 'heat desc' \
+              || pick --filter 'lifecycle == "onboarding"' --sort 'heat desc' \
               || pick --filter 'lifecycle == "maintained"' --sort 'results.last_run_at asc nulls-first' \
               || true
           fi

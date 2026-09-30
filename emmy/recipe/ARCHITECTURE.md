@@ -50,10 +50,10 @@ the recipe should no longer be used. Low demand or age alone is not enough. Disc
 `best-effort` recipe. Untagged recipes remain runnable for backward compatibility and are classified by the next
 discovery lifecycle run.
 
-Tag values are unique lowercase kebab-case strings. `onboarding` and `untested` must appear together. `onboarding-failed` is
-not a lifecycle state: onboarding adds it when an attempt fails and removes it on success, and nightly selection
-holds such a recipe back until nothing else can run. The runtime
-rejects direct use of disabled recipes, while bulk benchmark enumeration and package staging skip them.
+Tag values are unique lowercase kebab-case strings. `onboarding` and `untested` must appear together.
+`onboarding-failed` is not a lifecycle state: onboarding adds it when an attempt fails and removes it on success.
+Nightly selection skips such a recipe; an explicit manual dispatch can retry it after the failure is addressed. The
+runtime rejects direct use of disabled recipes, while bulk benchmark enumeration and package staging skip them.
 
 `model.rationale` is descriptive lifecycle metadata. It records why the model currently belongs in the inventory and
 does not affect engine arguments, deployment, or benchmark behavior. `model.heat` is an optional integer from 0

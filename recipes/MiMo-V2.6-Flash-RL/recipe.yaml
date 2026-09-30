@@ -1,6 +1,7 @@
 tags:
 - onboarding
 - untested
+- onboarding-failed
 model:
   huggingface: XiaomiMiMo/MiMo-V2.6-Flash-RL
   rationale: "#7 weekly, >999% WoW, arena #23, 28k downloads; strong current breakout attention."
