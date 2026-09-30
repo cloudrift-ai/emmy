@@ -190,8 +190,14 @@ The 4,096-token pre-attention mean/reduce route runs in 2,906 µs with three ker
 and changing the large child's tile to `f2x2`. A replay bug had combined cuts from sibling routing rows, producing a
 five-kernel route with a 22.5 ms child and about 25 ms whole time. The target Loop body did not change across #981;
 only its input order changed. Its old 2,719 µs nested route row is not a whole-program timing, so it is not used as a
-whole-program comparison. The older unmeasured route rows remain in the golden as proposals. The single-token
-post-attention matmul route remains a performance gap and is not promoted as measured evidence here.
+whole-program comparison. The older unmeasured route rows remain in the golden as proposals.
+
+The single-token post-attention matmul route remains unpromoted. Its old measured row was 180 µs. With the same current
+compiler, card and tune database, its pre-#981 and current Loop input orders replay at 274 and 275 µs; an earlier
+current-target run under different measurement conditions was about 297 µs. The final child is now about 187 µs,
+against 64 µs in the old row. A different tile or staging choice was slower, one work choice and an added cut failed
+strict correctness, and another cut pin did not realize. The old rows remain as proposals until a correct schedule
+recovers their performance.
 
 ### Kernel reference numbers (2026-09-11)
 
