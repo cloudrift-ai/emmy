@@ -52,7 +52,7 @@ is a decision, not a measurement of one kernel.
 **Nothing migrates.** A database file written by an older version of the compiler is re-created empty on the next
 write, since every row in it can be measured again, and refused by a reader.
 
-**The tables are checked, not the code.** `emmy dataset check` verifies that an instance's tables agree with
+**The tables are checked, not the code.** `emmy db check` verifies that an instance's tables agree with
 themselves — every knob row's digest, every reference, every card, the two knob vocabularies — and counts the rows
 that fail. It does not re-derive what the compiler wrote: the tuning database is a cache, and a row the current code
 disagrees with is re-tuned or re-imported. The freeze is what travels between machines.
@@ -63,7 +63,7 @@ card: every kernel's definition — the loop body the compiler formed it from �
 with the setting it was measured under and its median. Nothing the compiler computed is stored: no identity, no
 features. Importing a freeze re-lowers every kernel from its definition, so the dataset holds the current compiler's
 identities and features whatever compiler wrote the snapshot, and a compiler change is a re-import. Freezing the same
-database twice produces byte-identical files. A freeze is named on the `emmy dataset import` command line like any
+database twice produces byte-identical files. A freeze is named on the `emmy db import` command line like any
 other source — a golden configuration file, or a tuning database from this machine or a rented card — and that
 database is what every evaluation and the offline fit read; nothing is loaded into it by default, and no freeze is
 checked in at the moment.
@@ -156,11 +156,12 @@ Gathered in one place, honestly.
 
 ## See it yourself
 
-The measured view reads the dataset database, filled from a freeze or from a tuning database:
+The measured view reads the dataset exported from the dataset database, filled from a freeze or from a tuning database:
 
 ```bash
-emmy dataset import ~/.cache/emmy/autotune.db
-emmy eval prior --dataset db
+emmy db import --db _data/tune.db ~/.cache/emmy/autotune.db
+emmy db export --db _data/tune.db _data/tune
+emmy eval prior _data/tune --pools measured
 ```
 
 And the two halves can be compared against candidate artifacts without touching the installed ones, which is how two

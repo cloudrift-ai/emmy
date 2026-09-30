@@ -8,7 +8,7 @@ runs on identical inputs give models that differ in the last bits. Deliberate: t
 ``thread_count=1``, and the metrics file plus the rank tables are what a fit is compared by, not a checksum.
 
 This module owns what is specific to the model class; everything a different model class would also need lives
-elsewhere (the scoring function in :mod:`..catboost_model`, the dataset in ``search/data/group.py``, the rank
+elsewhere (the scoring function in :mod:`..catboost_model`, the dataset in ``search/dataset/group.py``, the rank
 metrics in :mod:`~..metrics`, the fold harness in :mod:`.cv`).
 
 **The objective.** ``QuerySoftMax`` over one group per pool: every pinned row is a positive (label 1.0) and the
@@ -42,7 +42,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from emmy.compiler.pipeline.search.data.group import GoldenGroup
+from emmy.compiler.pipeline.search.dataset.group import GoldenGroup
 from emmy.compiler.pipeline.search.metrics import best_rank
 from emmy.compiler.pipeline.search.prior.catboost_model import ABSENT, DEFAULT_SCALE, CatBoostModel, new_ranker
 from emmy.compiler.pipeline.search.prior.fit.tables import topk_table

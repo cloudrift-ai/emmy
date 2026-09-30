@@ -1,8 +1,9 @@
 """SQLite-backed measurement store for the search package.
 
 Pure persistence layer — no MCTS state, no propagation walks. One schema, several instances: the tune
-DB (``EMMY_TUNE_DB``) is what compile reads and tune writes; a dataset instance (``EMMY_DATASET_DB``)
-holds the same tables filled by ``emmy dataset import``, and is what the measurement-data readers read.
+DB (``EMMY_TUNE_DB``) is what compile reads and tune writes; a dataset instance — the file
+``emmy db import --db PATH`` names — holds the same tables, and ``emmy db export`` turns it into the dataset the
+measurement-data readers read.
 
 Tables (the DDL is the reference):
 
@@ -42,7 +43,7 @@ nowhere else.
 
 Nothing migrates. A file whose tables have other columns than this DDL was written by another emmy: a
 writer open re-creates every table empty — the rows are regenerable (a tune DB re-tunes, a dataset DB
-re-imports with ``emmy dataset import --fresh``) — and a read-only open refuses the file. Foreign keys are
+re-imports with ``emmy db import --fresh``) — and a read-only open refuses the file. Foreign keys are
 enforced on every connection (``PRAGMA foreign_keys = ON``, off only while the re-create drops tables).
 
 Concurrency: opened in WAL mode so parallel benches can read while one writes. The connection is kept
@@ -56,7 +57,7 @@ import fcntl
 import json
 import logging
 import sqlite3
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -64,6 +65,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from emmy.compiler.pipeline.knob import KERNEL_IDENTITY, METADATA_PREFIXES, family_of
+from emmy.compiler.pipeline.search.dataset.kernel import KernelDef
 from emmy.compiler.structural import digest
 
 if TYPE_CHECKING:
@@ -132,29 +134,6 @@ class PerfRow:
     captured: bool = False
     error: str | None = None
     source: str = "measured"
-
-
-@dataclass(frozen=True)
-class KernelRow:
-    """One ``kernel`` row with its stamps: the exact identity, the clustered deploy identity, the Loop IR
-    wire, the C name, the ``S_*`` dict, and whether the wire is the body the kernel was formed from
-    (``formed``: the lowering passes take it back to the kernel, identity and stamps alike) or the derived
-    body of a kernel formed from no loop op, which only its parent's program reaches."""
-
-    exact_identity: str
-    structural_identity: str
-    loop_ir: dict
-    name: str
-    stamps: dict
-    formed: bool
-
-    def program(self, bindings: Mapping[str, int]):
-        """The kernel's definition as a program, its symbolic dims hinted at ``bindings`` — the sizes a measurement
-        of it ran at — so the program stays symbolic; binding them would make the dims static, another kernel."""
-        from emmy.compiler.graph import Graph  # noqa: PLC0415 — the graph package imports this module's neighbours
-        from emmy.compiler.specialize import rehint_program  # noqa: PLC0415
-
-        return rehint_program(Graph.from_wire(self.loop_ir), bindings)
 
 
 @dataclass(frozen=True)
@@ -433,13 +412,13 @@ class SearchDB:
             with p.open("rb") as fh:
                 magic = fh.read(16)
             if magic and magic != b"SQLite format 3\x00":  # empty file = valid empty DB
-                raise RuntimeError(f"{p} is not a sqlite database — a measurement freeze is read by `emmy dataset import`")
+                raise RuntimeError(f"{p} is not a sqlite database — a measurement freeze is read by `emmy db import`")
         self = cls.__new__(cls)
         self._path = p
         self._conn = sqlite3.connect(f"file:{p}?mode=ro", uri=True, check_same_thread=False)
         if self._mismatched():
             self._conn.close()
-            raise RuntimeError(f"{p}: tables written by another emmy — re-tune it, or `emmy dataset import --fresh` a dataset DB")
+            raise RuntimeError(f"{p}: tables written by another emmy — re-tune it, or `emmy db import --fresh` a dataset DB")
         self._conn.execute("PRAGMA foreign_keys = ON")
         return self
 
@@ -496,7 +475,7 @@ class SearchDB:
     # Kernel
     # ------------------------------------------------------------------
 
-    def record_kernel(self, row: KernelRow) -> None:
+    def record_kernel(self, row: KernelDef) -> None:
         """Store a kernel's definition and its stamps. A kernel already stored keeps its row (the definition
         is the same; the name only serves the per-kernel views); its stamps are replaced when they differ —
         the one place a re-stamp under a new featurizer lands."""
@@ -518,11 +497,11 @@ class SearchDB:
         """Every stored kernel's C name by exact identity — the per-kernel views' grouping key."""
         return dict(self._conn.execute("SELECT exact_identity, kernel_name FROM kernel"))
 
-    def iter_kernels(self) -> Iterator[KernelRow]:
+    def iter_kernels(self) -> Iterator[KernelDef]:
         for exact, structural, loop_ir, name, formed in self._conn.execute(
             "SELECT exact_identity, structural_identity, loop_ir, kernel_name, formed FROM kernel ORDER BY exact_identity"
         ).fetchall():
-            yield KernelRow(exact, structural, json.loads(loop_ir), name, self._stamps(exact), formed=bool(formed))
+            yield KernelDef(exact, structural, json.loads(loop_ir), name, self._stamps(exact), formed=bool(formed))
 
     # ------------------------------------------------------------------
     # Routing
@@ -708,7 +687,7 @@ class SearchDB:
 
     def iter_perf_rows(self, *, backend: str | None = "cuda") -> Iterator[PerfRow]:
         """Every ``perf`` row, of every card and regime — the view the measurement-data readers and
-        ``emmy dataset`` read. ``backend=None`` spans every backend."""
+        ``emmy db`` read. ``backend=None`` spans every backend."""
         sql = f"SELECT {_PERF_SEL} {_PERF_FROM}"  # noqa: S608
         params: list = []
         if backend is not None:

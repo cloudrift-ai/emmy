@@ -24,7 +24,7 @@ import functools
 from dataclasses import dataclass, field
 
 from emmy.compiler.pipeline.knob import CTX_PREFIX, IDENTITY_PREFIX, METADATA_PREFIXES, STRUCT_PREFIX
-from emmy.compiler.pipeline.search.data.shape import ShapeKey
+from emmy.compiler.pipeline.search.dataset.shape import ShapeKey
 from emmy.compiler.pipeline.search.features import knob_features
 
 

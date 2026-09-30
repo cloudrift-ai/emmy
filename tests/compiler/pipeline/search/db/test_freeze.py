@@ -1,5 +1,5 @@
 """The measurement freeze — the admission filter, the golden file per card a DB instance freezes to, and the
-round trip: a freeze re-lowered by ``emmy dataset import`` is the rows it was written from.
+round trip: a freeze re-lowered by ``emmy db import`` is the rows it was written from.
 
 The DB a freeze is written from is what a tune of the realization corpus leaves behind (``helpers.tuned_db``),
 so every kind of kernel the compiler mints is on the way: a fused kernel, a twisted attention kernel, cut
@@ -13,8 +13,9 @@ import dataclasses
 import pytest
 
 from emmy.compiler.pipeline.knob import METADATA_PREFIXES
-from emmy.compiler.pipeline.search.data.freeze import REGIME_PINS, freeze_documents, freeze_reason, regime_of, write_freeze
+from emmy.compiler.pipeline.search.dataset import REGIME_PINS, regime_of
 from emmy.compiler.pipeline.search.db import SearchDB, knobs_json
+from emmy.compiler.pipeline.search.db.freeze import freeze_documents, freeze_reason, write_freeze
 from emmy.compiler.pipeline.search.golden import GoldenFile
 from emmy.compiler.pipeline.search.golden.evidence import file_source, import_file
 from tests.compiler.pipeline.search.helpers import F16_MATMUL_FEATS, impossible_staged_feats, tuned_db
@@ -270,7 +271,7 @@ def test_the_rtx_5090_hardware_goldens_rows_round_trip_through_a_freeze(tmp_path
     """A card's recorded rows — attention and softmax kernels, split winners' routing rows, cut receipts — imported
     as a tune of that card would leave them, freeze to one file that re-lowers to the same rows and kernels. The
     same file imported straight from the repository, its traced slices entering at the lowering passes, files the
-    same rows too: a golden file is a source ``emmy dataset import`` accepts."""
+    same rows too: a golden file is a source ``emmy db import`` accepts."""
     from emmy.compiler.context import Context
     from emmy.compiler.pipeline.search.golden.evidence import import_goldens
     from emmy.compiler.pipeline.search.golden.repository import _RECORDS_DIR

@@ -14,9 +14,9 @@ import pytest
 from emmy.commands.fit import TRAINERS, register_fit_command
 from emmy.compiler.context import FAST_MATH_FLAG
 from emmy.compiler.pipeline.search import features, ranking
-from emmy.compiler.pipeline.search.data.group import DEFAULT_FEATURES, MATMUL_FEATURES, GoldenGroup, GoldenPool, feature_view
-from emmy.compiler.pipeline.search.data.shape import ShapeKey
-from emmy.compiler.pipeline.search.db import SearchDB
+from emmy.compiler.pipeline.search.dataset import Dataset, GoldenPool, GoldenRow
+from emmy.compiler.pipeline.search.dataset.group import DEFAULT_FEATURES, MATMUL_FEATURES, GoldenGroup, feature_view
+from emmy.compiler.pipeline.search.dataset.shape import ShapeKey
 from emmy.compiler.pipeline.search.pool import Candidates
 from emmy.compiler.pipeline.search.prior.fit import LinearFit, LinearTrainer
 from emmy.compiler.pipeline.search.prior.fit import cv as fit_cv
@@ -24,7 +24,7 @@ from emmy.compiler.pipeline.search.prior.fit.catboost import TREE_FEATURES
 from emmy.compiler.pipeline.search.prior.fit.run import run_fit
 from emmy.compiler.pipeline.search.prior.linear_model import LinearModel, descent_cols
 from emmy.compiler.pipeline.search.ranking import build_golden_groups
-from tests.compiler.pipeline.search.helpers import kernel_row, perf_row
+from tests.compiler.pipeline.search.helpers import kernel_row
 
 # --- feature view ------------------------------------------------------------------
 
@@ -87,8 +87,8 @@ def _pool(name, rows, goldens, *, regime="", kernel="k"):
     signature reads; ``goldens`` the tokens the pool's golden rows recorded. ``kernel`` is the kernel row's
     identity, so two pools can be two kernels; the pool is labelled ``<name>.<kernel>``."""
     row = replace(kernel_row(kernel, name=name), loop_ir={"rows": rows})
-    measured = tuple(perf_row(kernel, us=1.0, knobs={"TILE": tag}, gpu="gpuA") for tag in goldens)
-    return GoldenPool("gpuA", (12, 0), regime, row, {}, measured)
+    rows_ = tuple(GoldenRow({"TILE": tag}, 1.0, "golden:test") for tag in goldens)
+    return GoldenPool("gpuA", (12, 0), regime, row, {}, rows_)
 
 
 @dataclass(frozen=True)
@@ -537,12 +537,18 @@ def test_run_fit_stub_trainer_deterministic():
 def test_fit_command_defaults():
     parser = argparse.ArgumentParser()
     register_fit_command(parser.add_subparsers())
-    args = parser.parse_args(["fit"])
-    assert (args.trainer, args.db, args.samples, args.seed, args.folds) == ("linear", None, 0, 0, 5)
-    # --artifact: absent = no extra write, bare = "" (the shipped offline_weights.json), a value = that path.
-    assert args.artifact is None
-    assert parser.parse_args(["fit", "--artifact"]).artifact == ""
-    assert parser.parse_args(["fit", "--artifact", "/tmp/cand.json"]).artifact == "/tmp/cand.json"
+    args = parser.parse_args(["fit", "_data/dataset", "_tune/offline.json"])
+    assert (args.trainer, args.dataset, args.weights, args.samples, args.seed, args.folds) == (
+        "linear",
+        "_data/dataset",
+        "_tune/offline.json",
+        0,
+        0,
+        5,
+    )
+    # Both paths are explicit: a fit never writes anywhere it was not told to, the shipped weights included.
+    with pytest.raises(SystemExit):
+        parser.parse_args(["fit", "_data/dataset"])
 
     # --features defaults to the TRAINER's view, resolved in the handler rather than by argparse:
     # the linear model needs the engineered step / fold / interaction features, the tree re-derives them.
@@ -551,15 +557,17 @@ def test_fit_command_defaults():
     assert TRAINERS["catboost"][1] == TREE_FEATURES
 
 
-def test_handle_fit_writes_metrics_and_a_loadable_artifact(tmp_path, monkeypatch):
+def test_handle_fit_writes_metrics_and_a_loadable_artifact(tmp_path):
     """The command layer end to end on a synthetic dataset — trainer wiring, artifact assembly and
-    both output files — without enumerating a single pool. ``--artifact`` is absent, so the run writes
-    only into its own directory and never touches the shipped weights."""
-    monkeypatch.setattr("emmy.commands.fit.build_golden_groups", lambda pools, spec, **_kw: (_cases(), []))  # noqa: ARG005
-    SearchDB(tmp_path / "dataset.db").close()  # an empty instance: the builder is stubbed, the DB only has to open
+    both output files — without enumerating a single pool. The weights path is the test's own, so the run never
+    touches the shipped weights."""
+    provenance = {"source": "stub", "sources": {}, "pool_sample": 0, "seed": 0, "feat_ver": features.FEATURIZER_VERSION, "compiler": "test"}
+    Dataset(_cases(), [], [], {"golden": {}, "measured": {}}, provenance).dump(tmp_path / "dataset")
     parser = argparse.ArgumentParser()
     register_fit_command(parser.add_subparsers())
-    args = parser.parse_args(["fit", "--folds", "3", "--out", str(tmp_path / "run"), "--db", str(tmp_path / "dataset.db")])
+    args = parser.parse_args(
+        ["fit", str(tmp_path / "dataset"), str(tmp_path / "weights.json"), "--folds", "3", "--out", str(tmp_path / "run")]
+    )
     args.func(args)
 
     metrics = json.loads((tmp_path / "run" / "metrics.json").read_text())
@@ -571,7 +579,7 @@ def test_handle_fit_writes_metrics_and_a_loadable_artifact(tmp_path, monkeypatch
     # otherwise a group count that fell because two goldens shared a pool reads as lost data.
     assert metrics["header"]["groups"] == {"total": 8, "positives": 8, "merged": 0}
 
-    artifact = json.loads((tmp_path / "run" / "weights.json").read_text())
+    artifact = json.loads((tmp_path / "weights.json").read_text())
     assert artifact["kind"] == "linear" and artifact["weights"] and artifact["weights_dynamic"]
     assert artifact["provenance"]["groups"] == {"static": 6, "dynamic": 2} and artifact["provenance"]["positives"] == 8
     assert "static top1=" in artifact["provenance"]["notes"]

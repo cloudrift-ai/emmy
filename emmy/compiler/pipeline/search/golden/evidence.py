@@ -36,8 +36,8 @@ from emmy.compiler.pipeline import CUDA_PASSES, LOWERING_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import iter_leaves, leaf_for
 from emmy.compiler.pipeline.knob import family_of
 from emmy.compiler.pipeline.pipeline import Run, _is_structural_option
-from emmy.compiler.pipeline.search.data.freeze import is_lfs_pointer
 from emmy.compiler.pipeline.search.db import SearchDB, is_placement_knob
+from emmy.compiler.pipeline.search.db.freeze import is_lfs_pointer
 from emmy.compiler.pipeline.search.pins import (
     composed_routes,
     note_place_key,

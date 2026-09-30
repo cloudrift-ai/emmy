@@ -43,7 +43,7 @@ from emmy.compiler.pipeline.search.prior.base import latency_proxy
 if TYPE_CHECKING:
     # Annotation only: importing ``search.data`` for real would pull it (and, through ``freeze.py``, the golden format and
     # subprocess) onto the deploy path, which loads none of it today.
-    from emmy.compiler.pipeline.search.data.group import Group
+    from emmy.compiler.pipeline.search.dataset.group import Group
 
 
 def descent_cols(names) -> tuple[str, ...]:
@@ -70,7 +70,7 @@ FITTED_PARAMS = ("atomic_free_weight", "atomic_free_split_threshold")
 # coordinates are drawn from, so writer, validator and descent cannot drift — add a scalar param once, here.
 #
 # The order matches what the fitter has emitted since the scalar params became fitted coordinates; it is NOT the
-# order in the currently shipped ``offline_weights.json``, which predates that, so the next refit rewrites those
+# order in the currently shipped ``weights/offline.json``, which predates that, so the next refit rewrites those
 # two lines once. Reordering to match the shipped file would instead change what a refit emits.
 PARAM_ORDER = ("scale", *FITTED_PARAMS)
 

@@ -357,7 +357,7 @@ def selected_decisions(args) -> dict[str, str]:
 
 def golden_row(record, records=()):
     """A golden record as the duck-typed pinned row ``run`` benches and reports: the
-    :class:`~emmy.compiler.pipeline.search.data.Sample` view (``name`` / ``pins`` / ``knobs`` /
+    :class:`~emmy.compiler.pipeline.search.dataset.Sample` view (``name`` / ``pins`` / ``knobs`` /
     ``shape`` / ``dynamic``) plus the ``record`` itself — the row ``run`` measures under a hand pin and records as
     deploy evidence.
 
@@ -368,7 +368,7 @@ def golden_row(record, records=()):
     whatever the unpinned fork picks under the realization's name."""
     from types import SimpleNamespace  # noqa: PLC0415
 
-    from emmy.compiler.pipeline.search.data import Sample  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.dataset import Sample  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden import kernel_set_pins  # noqa: PLC0415
 
     sample = vars(Sample.from_golden(record))

@@ -4,10 +4,10 @@ Five subcommands:
 
 - ``eval knobs``     — print the registered knob schema, then (with a tune DB)
   per-knob **regret** + a knob-interaction matrix (the analysis below).
-- ``eval prior``     — how well the prior RANKS: one report over benched pools
-  (``--dataset db``: Spearman + regret, what a wrong pick costs) or over the dataset DB's
-  golden pools (``--dataset golden``: the golden-rank screen, plus the greedy pipeline pick vs
-  golden). BOTH prior halves are reported, labelled — they fail for different reasons.
+- ``eval prior``     — how well the prior RANKS, over a dataset ``emmy db export`` wrote: its golden
+  pools (``--pools golden``: the golden-rank screen, plus the greedy pipeline pick vs golden) or its
+  measured pools (``--pools measured``: Spearman + regret, what a wrong pick costs). BOTH prior halves
+  are reported, labelled — they fail for different reasons.
   The summaries are assembled by ``search/prior/report.py`` and rendered here; ``emmy fit``
   writes the same summaries into its ``metrics.json``, so a fit and an eval state the golden
   screen with one implementation rather than two that agree by coincidence.
@@ -54,13 +54,12 @@ from statistics import median
 
 from emmy import storage
 from emmy.commands.compile import resolve_tune_db
-from emmy.commands.dataset_args import add_dataset_args, require_source, resolve_offline_arg, resolve_online_arg
+from emmy.commands.db import read_samples
+from emmy.commands.eval_args import add_dataset_args, add_db_args, resolve_offline_arg, resolve_online_arg
 from emmy.commands.table import GREEN as _GREEN
 from emmy.commands.table import RED as _RED
 from emmy.commands.table import YELLOW as _YELLOW
 from emmy.commands.table import Col, col_widths, knob_columns, render_table
-from emmy.compiler.pipeline.search.data import Dataset
-from emmy.compiler.pipeline.search.pool import DEFAULT_SAMPLE
 from emmy.compiler.pipeline.search.prior import report as report_mod
 
 logger = logging.getLogger(__name__)
@@ -87,12 +86,12 @@ def register_eval_command(subparsers) -> None:
     sub = parser.add_subparsers(dest="eval_target", required=True)
 
     pk = sub.add_parser("knobs", help="Print the registered knob schema + (with a tune DB) per-knob regret + interactions")
-    add_dataset_args(pk, default="db", with_min_variants=True)
+    add_db_args(pk, with_min_variants=True)
     pk.set_defaults(func=handle_eval_knobs)
 
     pp = sub.add_parser(
         "prior",
-        help="Report how well each prior half ranks — over measured pools (--dataset db) or the golden corpus",
+        help="Report how well each prior half ranks the pools of an exported dataset — golden (default) or measured",
     )
     pp.add_argument(
         "--online-file",
@@ -106,21 +105,14 @@ def register_eval_command(subparsers) -> None:
         "--analytic-file",  # pre-rename spelling
         dest="offline_file",
         help="Offline weights artifact (JSON) to score the offline half with, for A/Bing candidate fits. "
-        "Default: EMMY_OFFLINE_FILE or the repo-checked offline_weights.json.",
+        "Default: EMMY_OFFLINE_FILE or the repo-checked prior/weights/offline.json.",
     )
-    add_dataset_args(pp, default="golden")
-    pp.add_argument(
-        "--pool-sample",
-        type=int,
-        default=DEFAULT_SAMPLE,
-        help=f"--dataset golden: candidates drawn per pool during enumeration (default {DEFAULT_SAMPLE}; 0 enumerates "
-        "every row). Recorded in the report header — a rank is only comparable against a fit that drew the same way.",
-    )
+    add_dataset_args(pp)
     pp.add_argument("--json", dest="json_out", metavar="PATH", help="Also write the report as JSON, for diffing two runs.")
     pp.add_argument(
         "--features",
         action="store_true",
-        help="--dataset golden: also print the exact feature vector the prior regresses on per golden config (features.knob_features).",
+        help="--pools golden: also print the exact feature vector the prior regresses on per golden config (features.knob_features).",
     )
     pp.set_defaults(func=handle_eval_prior)
 
@@ -147,7 +139,7 @@ def register_eval_command(subparsers) -> None:
         dest="online_file",
         help="Online-prior JSON to load (default: EMMY_ONLINE_FILE or ~/.cache/emmy/online.json).",
     )
-    add_dataset_args(pv, default="db")
+    add_db_args(pv)
     pv.add_argument(
         "--top",
         type=int,
@@ -160,14 +152,13 @@ def register_eval_command(subparsers) -> None:
         "failures",
         help="Cluster the tune DB's bench_fail rows by kernel + error, with the knob values shared by every failing row",
     )
-    add_dataset_args(pf, default="db")
+    add_db_args(pf)
     pf.set_defaults(func=handle_eval_failures)
 
 
 def handle_eval_knobs(args) -> None:
     """``eval knobs`` — the registered knob schema, then (with a tune DB) per-knob
     regret + the knob-interaction matrix."""
-    require_source(args, {"db"}, "eval knobs regret needs DB rows — use --dataset db (golden configs carry no kernel identity).")
     _emit_registry()
 
     db_path = Path(args.db) if args.db else resolve_tune_db()
@@ -178,7 +169,7 @@ def handle_eval_knobs(args) -> None:
     logger.info("")
     logger.info("Reading: %s", db_path)
 
-    all_kernels = Dataset.from_db(db_path, kernel=args.kernel).group_by_kernel_name()
+    all_kernels = read_samples(db_path, kernel=args.kernel).group_by_kernel_name()
     kernels = {
         name: [(s.all_knobs(), s.latency_us) for s in samples] for name, samples in all_kernels.items() if len(samples) >= args.min_variants
     }
@@ -229,98 +220,89 @@ def _prior_halves():
     return halves
 
 
-def _measured_report(args, halves):
-    """``eval prior --dataset db`` — the report over measured pools.
+def _measured_report(args, halves, dataset, source: str):
+    """``eval prior --pools measured`` — the report over the dataset's measured pools: every benched row of the DB
+    the export read, grouped by ``db/export.measured_groups`` (one op, one card, one regime). The header names the
+    sources the rows came from: two reports are comparable only when computed over the same rows, and a freeze's
+    digest in the source name is what says so.
 
-    Reads the ``perf`` rows of a DB instance — the dataset DB by default (:func:`dataset_db`), any tune DB
-    with ``--db``. The grouping, its key and every admission rule are :func:`group_measured`'s, so this
-    reads the same pools the training-data work will. The header names the sources the rows came from:
-    two reports are comparable only when they were computed over the same rows, and a freeze's digest in
-    the source name is what says so.
-
-    ``--kernel`` matches the op LABEL, since a row's own op identity is a digest with nothing readable in
-    it. The label is a function of the row's ``S_*`` stamps, which every row of one kernel shares, so a
-    filter keeps or drops a whole pool atomically — a pool is never split against its own siblings."""
-    from emmy.commands.dataset import dataset_db  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.data import op_label  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.data.group import group_measured  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.db import SearchDB  # noqa: PLC0415
+    ``--kernel`` matches the op LABEL, since a pool's own op identity is a digest with nothing readable in it. The
+    label is a function of the ``S_*`` stamps every row of one pool shares — read off the pool's first row — so a
+    filter keeps or drops a whole pool atomically."""
+    from emmy.compiler.pipeline.search.dataset import op_label  # noqa: PLC0415
     from emmy.compiler.pipeline.search.prior.report import EvalReport, measured_summaries  # noqa: PLC0415
 
-    db_path = dataset_db(args.db)
-    db = SearchDB.open_readonly(db_path)
-    try:
-        rows = list(db.iter_perf_rows(backend="cuda"))
-        sources = db.perf_sources()
-    finally:
-        db.close()
+    groups = dataset.measured
     if args.kernel:
-        rows = [r for r in rows if args.kernel in op_label(r.knobs)]
-    groups, dropped = group_measured(rows)
+        groups = [g for g in groups if args.kernel in op_label(_stamps(g))]
     header = {
-        "dataset": "db",
-        "source": str(db_path),
-        "sources": sources,
+        "dataset": "measured",
+        "source": source,
+        **{k: v for k, v in dataset.provenance.items() if k != "source"},
         "kernel": args.kernel,
-        "rows": len(rows),
+        "rows": sum(len(g.feats) for g in groups),
         "groups": len(groups),
-        "dropped": dropped,
+        "dropped": dataset.dropped["measured"],
     }
     return EvalReport(header, [c for half, prior in halves for c in measured_summaries(half, groups, prior.score_rows)])
 
 
-def _golden_report(args, halves, db_path, pools, dropped):
-    """``eval prior --dataset golden`` — the report over the golden pools of a dataset DB (the dataset DB by
-    default, any instance with ``--db``): the rows the golden files record, read the way ``emmy fit`` reads
-    them (``ranking.build_golden_groups``) over the FULL featurization, not the fit's ``D_*`` view. The
-    view is a property of the model being fitted, and this command scores two model classes: the linear half
-    reads only its own weight names, so its ranks are identical either way, while the online half regresses
-    on the ``S_*`` / ``H_*`` columns a narrow view drops and would otherwise be asked about a kernel with no
-    shape. The header names the golden files the pools' rows came from, as the measured report does."""
-    from emmy.compiler.pipeline.search.prior.report import EvalReport, golden_summaries  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.ranking import build_golden_groups  # noqa: PLC0415
+def _stamps(group) -> dict[str, float]:
+    """The ``S_*`` stamps every row of a measured pool shares, read off its first row; the matrix fills an absent
+    feature with NaN, which is no stamp."""
+    return {k: float(v) for k, v in zip(group.feat_names, group.feats[0], strict=True) if k.startswith("S_") and not math.isnan(v)}
 
-    logger.info("Building golden pools (each under its own card's context) ...")
-    groups, skipped = build_golden_groups(pools, "*", sample=args.pool_sample, kernel=args.kernel)
+
+def _golden_report(args, halves, dataset, source: str):
+    """``eval prior --pools golden`` — the report over the dataset's golden pools: the rows the golden files record,
+    each ranked among the candidates its kernel offers — the groups ``emmy fit`` trains on, over the FULL
+    featurization rather than the fit's ``D_*`` view. The view is a property of the model being fitted, and this
+    command scores two model classes: the linear half reads only its own weight names, so its ranks are identical
+    either way, while the online half regresses on the ``S_*`` / ``H_*`` columns a narrow view drops and would
+    otherwise be asked about a kernel with no shape. ``--kernel`` keeps the pools whose kernel's C name contains it
+    — a view; each retained pool's rank is unchanged by it."""
+    from emmy.compiler.pipeline.search.prior.report import EvalReport, golden_summaries  # noqa: PLC0415
+
+    groups = [g for g in dataset.golden if not args.kernel or args.kernel in g.name]
     header = {
         "dataset": "golden",
-        "source": str(db_path),
-        "sources": dict(Counter(row.source for pool in pools for row in pool.rows)),
+        "source": source,
+        **{k: v for k, v in dataset.provenance.items() if k != "source"},
         "kernel": args.kernel,
-        "pool_sample": args.pool_sample,
         "groups": len(groups),
         "positives": sum(len(g.golden_ids) for g in groups),
-        "skipped": len(skipped),
-        "dropped": dropped,
+        "skipped": len(dataset.skipped),
+        "dropped": dataset.dropped["golden"],
     }
     return EvalReport(header, [c for half, prior in halves for c in golden_summaries(half, groups, prior.score_rows)])
 
 
 def handle_eval_prior(args) -> None:
-    """``eval prior`` — how well each prior half ranks a candidate pool.
+    """``eval prior`` — how well each prior half ranks a candidate pool, over a dataset ``emmy db export`` wrote.
 
-    Two datasets, two different questions, one report schema (see ``search/prior/report.py``): benched pools
-    say what a wrong pick COST, golden pools only say where the known-good row landed. ``--dataset golden``
-    additionally runs the deploy-faithful check the ranks are a screen for — the greedy pipeline pick vs the
-    golden rows, with the deployable -O3 latency of the prior's pick beside it."""
-    from emmy.commands.dataset import golden_dataset  # noqa: PLC0415
+    Two kinds of pool, two different questions, one report schema (see ``search/prior/report.py``): benched pools
+    say what a wrong pick COST, golden pools only say where the known-good row landed. ``--pools golden``
+    additionally runs the deploy-faithful check the ranks are a screen for — the greedy pipeline pick vs the golden
+    rows, with the deployable -O3 latency of the prior's pick beside it."""
+    from emmy.compiler.pipeline.search.dataset import Dataset  # noqa: PLC0415
 
     resolve_online_arg(args)
     resolve_offline_arg(args)
     _check_offline_artifact()
     halves = _prior_halves()
-    golden = args.dataset == "golden"
-    if golden:
-        db_path, pools, dropped = golden_dataset(args.db)
-        report = _golden_report(args, halves, db_path, pools, dropped)
-    else:
-        report = _measured_report(args, halves)
+    try:
+        dataset = Dataset.load(args.dataset)
+    except (OSError, ValueError) as exc:
+        logger.error("%s", exc)
+        sys.exit(2)
+    golden = args.pools == "golden"
+    report = (_golden_report if golden else _measured_report)(args, halves, dataset, str(args.dataset))
     _emit_report(report)
     if args.json_out:
         storage.write_json(Path(args.json_out), report.to_json(), indent=2)
         logger.info("wrote %s", args.json_out)
     if golden:
-        _emit_golden_deploy_check(args, pools)
+        _emit_golden_deploy_check(args, [pool for group in dataset.golden for pool in group.pools])
 
 
 def _metric(block: dict, key: str, fmt: str) -> str:
@@ -364,7 +346,7 @@ _REPORT_CAPTIONS = {
     ],
     "golden": [
         "golden rank — a SCREEN, not a gate: it says where a verified config landed, never what",
-        "missing it costs. Only regret over measured pools (--dataset db) measures that.",
+        "missing it costs. Only regret over measured pools (--pools measured) measures that.",
     ],
 }
 
@@ -407,7 +389,7 @@ def _emit_report(report) -> None:
 
 
 def _emit_golden_deploy_check(args, pools: list) -> None:
-    """The deploy-faithful half of ``eval prior --dataset golden``: the greedy tile-lowering pick vs the golden
+    """The deploy-faithful half of ``eval prior --pools golden``: the greedy tile-lowering pick vs the golden
     rows, per matmul pool of the **live** card (every card's when none is visible), with the deployable (-O3)
     latency of the prior's pick read from the online reservoir where one exists. This is what the golden RANK is
     only a screen for — a rank says where the verified row sat in the enumeration, this says what actually gets
@@ -426,7 +408,7 @@ def _emit_golden_deploy_check(args, pools: list) -> None:
     from emmy import config  # noqa: PLC0415
     from emmy.compiler.pipeline import TILE_LOWERING, Pipeline  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import METADATA_PREFIXES  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.data import is_matmul  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.dataset import is_matmul  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden.repository import live_gpu_key  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import pinned_knobs, unpinned_decisions  # noqa: PLC0415
     from emmy.compiler.pipeline.search.prior import OnlinePrior, diagnostics  # noqa: PLC0415
@@ -622,7 +604,6 @@ def handle_eval_variants(args) -> None:
     deploy marked + ranked. The per-kernel "did the
     search/prior reach the best measured config, and which knobs distinguish
     it?" drill-down view."""
-    require_source(args, {"db"}, "eval variants lists measured tune-DB rows — --dataset golden has no per-variant measurements.")
     resolve_online_arg(args)
     from emmy import config  # noqa: PLC0415
     from emmy.compiler.pipeline.search.prior import load_prior  # noqa: PLC0415
@@ -631,11 +612,11 @@ def handle_eval_variants(args) -> None:
     if not db_path.exists():
         logger.error("no tune DB at %s — pass --db or run `emmy tune` first.", db_path)
         return
-    groups = Dataset.from_db(db_path, kernel=args.kernel).group_by_kernel_name()
+    groups = read_samples(db_path, kernel=args.kernel).group_by_kernel_name()
     if not groups:
         logger.info("No measured variants%s in %s.", f" matching --kernel '{args.kernel}'" if args.kernel else "", db_path)
         return
-    fails = Counter(s.name for s in Dataset.from_db(db_path, kernel=args.kernel, status="bench_fail") if s.name)
+    fails = Counter(s.name for s in read_samples(db_path, kernel=args.kernel, status="bench_fail") if s.name)
     # FallbackPrior: the online CatBoost when fitted, else the cold OfflinePrior — the same ranking compile/run use.
     prior = load_prior()
     if not prior.fitted:
@@ -650,13 +631,12 @@ def handle_eval_failures(args) -> None:
     assignments shared by EVERY failing row (the "all 28 rows have ``TMA=1``"
     signal). Replaces grepping the tune log against hand-written SQL; rows from
     pre-error-column DBs cluster under ``(no error recorded)``."""
-    require_source(args, {"db"}, "eval failures reads tune-DB bench_fail rows — --dataset golden records no failures.")
     db_path = Path(args.db) if args.db else resolve_tune_db()
     if not db_path.exists():
         logger.error("no tune DB at %s — pass --db or run `emmy tune` first.", db_path)
         return
-    fails = [s for s in Dataset.from_db(db_path, kernel=args.kernel, status="bench_fail") if s.name]
-    n_ok = len(Dataset.from_db(db_path, kernel=args.kernel))
+    fails = [s for s in read_samples(db_path, kernel=args.kernel, status="bench_fail") if s.name]
+    n_ok = len(read_samples(db_path, kernel=args.kernel))
     if not fails:
         logger.info("No bench_fail rows%s in %s (%d ok rows).", f" matching --kernel '{args.kernel}'" if args.kernel else "", db_path, n_ok)
         return
@@ -683,7 +663,7 @@ def _emit_variant_table(name: str, samples: list, prior, *, n_fail: int, top: in
 
     The ``us`` column is the measured latency as stored. A sweep measures in the deployable
     regime, so on a store written since that became true every row is a deploy latency — but
-    ``Dataset.from_db`` reads every regime and a ``Sample`` carries none, so a store holding rows
+    ``Samples.from_db`` reads every regime and a ``Sample`` carries none, so a store holding rows
     from the era of a separate ranking lane still pools both here."""
     from emmy.compiler.pipeline.knob import tuning_knob_items  # noqa: PLC0415
 

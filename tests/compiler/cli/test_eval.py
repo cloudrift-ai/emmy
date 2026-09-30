@@ -1,5 +1,5 @@
 """Tests for ``emmy eval golden`` — the release audit of one canonical golden against its serving
-configuration — the offer audit the golden views share, and ``eval prior --dataset golden`` over a dataset DB."""
+configuration — the offer audit the golden views share, and ``eval prior`` over an exported dataset."""
 
 from __future__ import annotations
 
@@ -387,21 +387,23 @@ def test_offer_audit_flags_unrealized_entries(monkeypatch, caplog):
     assert not any("UNREALIZED" in m or "FALL-THROUGH" in m for m in msgs)
 
 
-def test_eval_prior_golden_ranks_the_dataset_dbs_golden_pools(tmp_path, caplog):
-    """``eval prior --dataset golden`` reads the golden pools of a dataset DB — ``--db`` names the instance —
-    and its header names the golden files the rows came from, the way the measured report does. The
-    deploy-faithful check runs over the same pools."""
+def test_eval_prior_golden_ranks_an_exported_datasets_golden_pools(tmp_path, caplog):
+    """``eval prior`` reads the golden pools of a dataset ``emmy db export`` wrote — the positional argument names the
+    directory — and its header names the dataset and the golden files its rows came from. The deploy-faithful check
+    runs over the same pools, re-lowering each kernel from the definition the dataset carries."""
     from emmy.commands.eval import register_eval_command
+    from emmy.compiler.pipeline.search.db.export import export_dataset
     from tests.compiler.pipeline.search.helpers import tuned_db
 
-    tuned_db(tmp_path / "dataset.db", ("matmul/f16-mma-m128n128k128-f32.json",), source="golden:case").close()
+    db = tuned_db(None, ("matmul/f16-mma-m128n128k128-f32.json",), source="golden:case")
+    export_dataset(db, source="test", pool_sample=0, seed=0).dump(tmp_path / "dataset")
     parser = argparse.ArgumentParser()
     register_eval_command(parser.add_subparsers())
-    db, out = str(tmp_path / "dataset.db"), str(tmp_path / "r.json")
-    args = parser.parse_args(["eval", "prior", "--dataset", "golden", "--db", db, "--pool-sample", "0", "--json", out])
+    dataset, out = str(tmp_path / "dataset"), str(tmp_path / "r.json")
+    args = parser.parse_args(["eval", "prior", dataset, "--json", out])
     with caplog.at_level(logging.INFO):
         args.func(args)
     header = json.loads((tmp_path / "r.json").read_text())["header"]
-    assert (header["dataset"], header["source"], header["sources"]) == ("golden", db, {"golden:case": 1})
+    assert (header["dataset"], header["source"], header["sources"]) == ("golden", dataset, {"golden:case": 1})
     assert (header["groups"], header["positives"], header["skipped"]) == (1, 1, 0)
     assert "Golden reproduction" in caplog.text and "k_matmul_" in caplog.text

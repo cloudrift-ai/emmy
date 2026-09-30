@@ -33,7 +33,6 @@ from pathlib import Path
 
 PREFIX = "EMMY_"
 TUNE_DB = "EMMY_TUNE_DB"
-DATASET_DB = "EMMY_DATASET_DB"
 ONLINE_FILE = "EMMY_ONLINE_FILE"
 OFFLINE_FILE = "EMMY_OFFLINE_FILE"
 GOLDEN_FILE = "EMMY_GOLDEN_FILE"
@@ -176,20 +175,6 @@ def tune_db_path() -> Path:
     return Path(override) if override else _CACHE_ROOT / "autotune.db"
 
 
-def dataset_db_path() -> Path:
-    """The dataset DB instance: ``EMMY_DATASET_DB`` → ``~/.cache/emmy/dataset.db``.
-
-    The same tables as the tune DB, filled by ``emmy dataset import`` rather than by tuning — from the
-    sources named on its command line (the hardware goldens for the offline prior; a measurement freeze or
-    a tune DB when one is named), nothing by default. It is what the measurement-data readers (``eval
-    prior``, the fit) read, and it is never read by a compile, so an import cannot change what a deploy
-    picks. Regenerable at any time from its sources.
-
-    Advisory, like :func:`tune_db_path`: callers check it exists."""
-    override = os.environ.get(DATASET_DB)
-    return Path(override) if override else _CACHE_ROOT / "dataset.db"
-
-
 def online_path() -> Path:
     """Online-prior checkpoint file: ``EMMY_ONLINE_FILE`` →
     ``~/.cache/emmy/online.json``. A single JSON file (not
@@ -285,7 +270,7 @@ def strict_evidence_override(flag: bool | None):
 def offline_path() -> Path | None:
     """Offline-prior weights artifact override: ``EMMY_OFFLINE_FILE`` → ``None``.
 
-    ``None`` means the repo-checked default (``offline_weights.json`` next to
+    ``None`` means the repo-checked default (``weights/offline.json`` next to
     ``search/prior/offline.py`` — package-relative, so it resolves there, not
     here). Swap in a candidate fit for an A/B by pointing this at another
     artifact; a version-mismatched or missing file is a hard error, never a

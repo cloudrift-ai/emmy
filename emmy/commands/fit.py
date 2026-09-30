@@ -1,16 +1,17 @@
 """``emmy fit`` — fit an offline-prior artifact and cross-validate it, writing a per-run
 metrics file.
 
-The fitter entry point: one pipeline, one switch — ``--trainer`` (model class: the incumbent ``linear``
-weights or a ``catboost`` ranker) — over the golden pools of the dataset DB
-(:func:`~emmy.compiler.pipeline.search.ranking.build_golden_groups`; ``--db`` names another instance).
-Both trainers write the same artifact shape, distinguished by its ``kind`` field, so either can be pointed at
-with ``EMMY_OFFLINE_FILE`` and A/B'd against the other.
+The fitter entry point: one pipeline, one switch — ``--trainer`` (model class: the incumbent ``linear`` weights
+or a ``catboost`` ranker) — over the golden groups of a dataset ``emmy db export`` wrote
+(:class:`~emmy.compiler.pipeline.search.dataset.Dataset`, the directory the positional argument names). The
+trainer's feature view is a projection of the dataset's full featurization, taken here. Both trainers write the
+same artifact shape, distinguished by its ``kind`` field, so either can be pointed at with ``EMMY_OFFLINE_FILE``
+and A/B'd against the other.
 
 A run writes ``<out>/metrics.json`` — the deterministic, diff-able record two fits are
 compared by (same header inputs → identical content; the run dir name, not the file,
-carries the timestamp) — and ``<out>/weights.json``, the full-train artifact in the
-shipped ``offline_weights.json`` format. The metrics layout (``full_train`` +
+carries the timestamp) — and the full-train artifact at the path the second positional argument names, in the shipped
+``weights/offline.json`` format. The metrics layout (``full_train`` +
 a ``cv`` holdout/train/gap block, both carrying ``prior/report.py`` summaries) is documented on
 :mod:`emmy.compiler.pipeline.search.prior.fit.cv`, which owns all the fold machinery;
 the run itself is :func:`~emmy.compiler.pipeline.search.prior.fit.run.run_fit`. This
@@ -21,23 +22,19 @@ from __future__ import annotations
 
 import json
 import logging
-import subprocess
+import sys
 import time
-from collections import Counter
 from dataclasses import replace
 from pathlib import Path
 
 from emmy import config, storage
-from emmy.commands.dataset import golden_dataset
 from emmy.compiler.pipeline.search import features
-from emmy.compiler.pipeline.search.data.group import DEFAULT_FEATURES
-from emmy.compiler.pipeline.search.pool import DEFAULT_SAMPLE
+from emmy.compiler.pipeline.search.dataset import DEFAULT_FEATURES, Dataset, feature_view, repo_commit
 from emmy.compiler.pipeline.search.prior.fit import catboost as fit_catboost
 from emmy.compiler.pipeline.search.prior.fit import cv as fit_cv
 from emmy.compiler.pipeline.search.prior.fit import linear as fit_linear
 from emmy.compiler.pipeline.search.prior.fit.run import run_fit
 from emmy.compiler.pipeline.search.prior.linear_model import LinearModel
-from emmy.compiler.pipeline.search.ranking import build_golden_groups
 
 logger = logging.getLogger(__name__)
 
@@ -48,11 +45,7 @@ def register_fit_command(subparsers) -> None:
         help="Fit the offline prior and cross-validate it (linear trainer x golden dataset), writing a metrics file",
     )
     parser.add_argument("--trainer", choices=("linear", "catboost"), default="linear")
-    parser.add_argument(
-        "--db",
-        help="Dataset DB whose golden pools are the training data (default: the dataset DB — EMMY_DATASET_DB, else "
-        "~/.cache/emmy/dataset.db — filled by `emmy dataset import`).",
-    )
+    parser.add_argument("dataset", help="Dataset directory written by `emmy db export`, e.g. _data/dataset.")
     parser.add_argument(
         "--samples",
         type=int,
@@ -80,13 +73,6 @@ def register_fit_command(subparsers) -> None:
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
-        "--pool-sample",
-        type=int,
-        default=DEFAULT_SAMPLE,
-        help=f"Candidates drawn per pool during enumeration (default {DEFAULT_SAMPLE}; 0 enumerates every row). "
-        "Recorded in the metrics header and the artifact provenance - two fits are comparable only when it matches.",
-    )
-    parser.add_argument(
         "--folds",
         type=int,
         default=fit_cv.DEFAULT_FOLDS,
@@ -101,11 +87,9 @@ def register_fit_command(subparsers) -> None:
         "'catboost' that set minus the features a tree re-derives from the columns it keeps.",
     )
     parser.add_argument(
-        "--artifact",
-        nargs="?",
-        const="",
-        default=None,
-        help="Also write the fitted weights artifact to this path (no value: the repo-checked offline_weights.json).",
+        "weights",
+        help="Weights artifact to write — emmy/compiler/pipeline/search/prior/weights/offline.json is the shipped offline prior "
+        "(README, 'Fit the offline prior'); any other path is a candidate to A/B through EMMY_OFFLINE_FILE.",
     )
     parser.add_argument("--out", default=None, help="Run dir (default: _tune/fits/<timestamp>-<trainer>/).")
     parser.set_defaults(func=handle_fit)
@@ -126,14 +110,6 @@ def _write_artifact(path: Path, model, provenance: dict) -> None:
     storage.write_json(path, artifact, indent=2)
     if "model_file" in artifact:
         (path.parent / artifact["model_file"]).write_bytes(model.blob)
-
-
-def _repo_commit() -> str:
-    try:
-        out = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, check=True, timeout=10)
-        return out.stdout.strip()
-    except Exception:  # noqa: BLE001 — a fit outside a git checkout still gets a metrics file
-        return "unknown"
 
 
 def _linear_trainers(args, names: list[str]):
@@ -226,18 +202,20 @@ def _log_cells(metrics: dict) -> None:
 
 
 def handle_fit(args) -> None:
-    from emmy.compiler.pipeline.search.prior.offline import _DEFAULT_FILE  # noqa: PLC0415
-
     out_dir = Path(args.out) if args.out else Path("_tune/fits") / f"{time.strftime('%Y%m%d-%H%M%S')}-{args.trainer}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     make_trainers, default_view = TRAINERS[args.trainer]
     view = args.features or default_view
 
-    db_path, pools, dropped = golden_dataset(args.db)
-    logger.info("Building golden pools from %s (each under its own card's context) ...", db_path)
-    groups, skipped = build_golden_groups(pools, view, sample=args.pool_sample, seed=args.seed)
-    names = sorted({n for c in groups for n in c.feat_names})
+    try:
+        dataset = Dataset.load(args.dataset)
+    except (OSError, ValueError) as exc:
+        logger.error("%s", exc)
+        sys.exit(2)
+    keep = feature_view(view)
+    groups, skipped = dataset.golden, dataset.skipped
+    names = sorted({n for c in groups for n in c.feat_names if keep(n)})
     n_dyn = sum(1 for c in groups if c.dynamic)
     # A group is a candidate pool and may carry several verified rows, so the group count alone no longer says
     # how much supervision the fit saw — both numbers travel together, into the header and the provenance.
@@ -259,21 +237,21 @@ def handle_fit(args) -> None:
         "trainer": args.trainer,
         # The rows the pools were read from: two fits are comparable only when they were computed over the
         # same golden files, and a file's digest in the source name is what says so.
-        "source": str(db_path),
-        "sources": dict(Counter(row.source for pool in pools for row in pool.rows)),
-        "dropped": dropped,
+        "source": str(args.dataset),
+        "dataset": dataset.provenance,
+        "dropped": dataset.dropped["golden"],
         "seed": args.seed,
         "feat_ver": features.FEATURIZER_VERSION,
         "features": view,
         "folds": args.folds,
         # Two fits are comparable only when they drew the same way: a sampled fit's ranks are RAW
         # ranks within the draw, and ``per_golden`` prints the true pool size beside them.
-        "pool_sample": args.pool_sample,
+        "pool_sample": dataset.provenance["pool_sample"],
         # A group IS a candidate pool; positives are the verified rows marked in it, and a pool can hold more
         # than one. Recorded so a metrics file whose group count dropped against an earlier fit says why,
         # instead of looking like lost data.
         "groups": {"total": len(groups), "positives": positives, "merged": positives - len(groups)},
-        "repo_commit": _repo_commit(),
+        "repo_commit": repo_commit(),
         "trainer_params": trainer_params,
     }
     import datetime  # noqa: PLC0415
@@ -296,17 +274,15 @@ def handle_fit(args) -> None:
         "script": "emmy fit",
         "args": {"trainer": args.trainer, "seed": args.seed, **trainer_params},
         "features": view,
-        "pool_sample": args.pool_sample,
+        "sources": dataset.provenance["sources"],
+        "pool_sample": dataset.provenance["pool_sample"],
         "groups": {"static": len(groups) - n_dyn, "dynamic": n_dyn},
         "positives": positives,
         "notes": notes,
     }
     (out_dir / "metrics.json").write_text(json.dumps(metrics, indent=2, sort_keys=True) + "\n")
-    _write_artifact(out_dir / "weights.json", model, provenance)
-    if args.artifact is not None:
-        artifact_path = Path(args.artifact) if args.artifact else _DEFAULT_FILE
-        _write_artifact(artifact_path, model, provenance)
-        logger.info("wrote %s", artifact_path)
+    _write_artifact(Path(args.weights), model, provenance)
+    logger.info("wrote %s", args.weights)
 
     _log_cells(metrics)
     logger.info("wrote %s", out_dir / "metrics.json")

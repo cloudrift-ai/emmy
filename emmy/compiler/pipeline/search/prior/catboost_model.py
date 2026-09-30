@@ -41,7 +41,7 @@ from emmy.compiler.pipeline.search.prior.base import latency_proxy
 if TYPE_CHECKING:
     # Annotation only: importing ``search.data`` for real would pull it (and, through ``freeze.py``, the golden format and
     # subprocess) onto the deploy path, which loads none of it today.
-    from emmy.compiler.pipeline.search.data.group import Group
+    from emmy.compiler.pipeline.search.dataset.group import Group
 
 # The artifact's ``params`` block for this model class, in written order — the twin of the linear model's
 # ``PARAM_ORDER``. ``offline._load_artifact`` demands exactly the keys the writer emits, so a new scalar param is

@@ -2,17 +2,17 @@
 
 A tune DB is a live store (tunes and imports write into it), so a model fit or evaluated straight from it is
 not reproducible. A *freeze* is the snapshot a reported number is computed over — identical wherever it is
-read — and the training data the priors are fit on (``eval prior --dataset db``). It is written in the
+read — and the training data the priors are fit on (``eval prior --pools measured``). It is written in the
 golden file's shape: one document per card, its ``loops`` pool holding each kernel's definition, one config
 per kernel set and binding, a realization per measured row — its schedule row, the regime it was measured
 under (``FAST_MATH`` on or off, the two a golden records) and its median. Nothing the compiler computed is
-stored: no identity a reader has to trust, no stamps spelled in one featurizer's vocabulary. ``emmy dataset
+stored: no identity a reader has to trust, no stamps spelled in one featurizer's vocabulary. ``emmy db
 import`` re-lowers every kernel from its definition (``golden.evidence.import_goldens``, entering at the
 lowering passes as the tuner runs a slice), so the dataset DB's identities and stamps are the current
 compiler's, and a compiler change is a re-import, never a re-collection.
 
 A kernel's definition is its ``kernel`` row's wire: the body it was formed from, which the lowering passes
-take back to the kernel (``KernelRow.formed``). A piece carved from a twisted tree has no such body; its rows
+take back to the kernel (``KernelDef.formed``). A piece carved from a twisted tree has no such body; its rows
 are written under the nearest formed ancestor the routing table reaches — a routing entry per decision on the
 path, the rows as receipts naming their kernel and listing the entries in ``kernel_set`` — the way a golden
 records a kernel set, and nothing else is written that way.
@@ -24,12 +24,12 @@ not a measurement; the tune DB keeps it. A row a compile imported from a golden 
 not frozen again.
 
 Freezing the same rows twice yields the same bytes: rows sort by content and the golden dump is
-deterministic. A file's identity is its bytes — ``emmy dataset import`` sources its rows as
+deterministic. A file's identity is its bytes — ``emmy db import`` sources its rows as
 ``freeze:<sha256[:12]>`` of the file (``golden.evidence.file_source``), so a report over a dataset DB names the
 exact snapshot it was computed over. A freeze checked into the repository lives under ``search/freezes/`` (payload
 in git LFS) and is named on the import command line like any other source.
 
-Produced by ``emmy dataset freeze``.
+Produced by ``emmy db freeze``.
 """
 
 from __future__ import annotations
@@ -42,26 +42,16 @@ import shutil
 from collections import Counter, defaultdict, deque
 from pathlib import Path
 
-from emmy.compiler.context import FAST_MATH_FLAG
 from emmy.compiler.pipeline.knob import METADATA_PREFIXES
-from emmy.compiler.pipeline.search.db import KernelRow, PerfRow, SearchDB, knobs_json
+from emmy.compiler.pipeline.search.dataset import KernelDef, regime_of
+from emmy.compiler.pipeline.search.dataset.pool import REGIME_PINS
+from emmy.compiler.pipeline.search.db import PerfRow, SearchDB, knobs_json
 from emmy.compiler.pipeline.search.features import DEPLOYABLE_OPT
 from emmy.compiler.wire import intern_wire
 
 logger = logging.getLogger(__name__)
 
 _LFS_POINTER = "version https://git-lfs.github.com/spec/v1"
-
-#: The two precision regimes a golden records — fast math off, and on (the default since #868) — by the one
-#: compiler flag that decides them, each mapped to the input pin a freeze row carries.
-REGIME_PINS = {"": {"FAST_MATH": False}, FAST_MATH_FLAG: {"FAST_MATH": True}}
-
-
-def regime_of(flags: str) -> str:
-    """The regime a row's residual compiler flags put it in — a key of :data:`REGIME_PINS`. The fast-math flag is
-    the one flag that is a regime; any other flag a row was compiled with is not, and is not what a freeze
-    stores."""
-    return FAST_MATH_FLAG if FAST_MATH_FLAG in flags.split() else ""
 
 
 def freeze_reason(row: PerfRow) -> str | None:
@@ -199,7 +189,7 @@ def _gpu_filename(gpu_name: str, cap: tuple[int, int]) -> str:
     return f"{slug}_sm{cap[0]}{cap[1]}.json"
 
 
-def _path_to(kernel: str, kernels: dict[str, KernelRow], parents: dict[str, list[tuple[str, dict]]]) -> tuple | None:
+def _path_to(kernel: str, kernels: dict[str, KernelDef], parents: dict[str, list[tuple[str, dict]]]) -> tuple | None:
     """The decisions from the nearest formed kernel down to ``kernel``, as ``(parent, arm)`` pairs: ``()`` when the
     kernel is formed itself, ``None`` when no formed kernel reaches it through the routing table."""
     if kernels[kernel].formed:
@@ -224,7 +214,7 @@ def schedule_row(row: PerfRow) -> dict[str, str]:
     return {str(k): str(v) for k, v in row.knobs.items() if not str(k).startswith(METADATA_PREFIXES)}
 
 
-def _document(gpu_name: str, cap: tuple[int, int], rows: list[PerfRow], kernels: dict[str, KernelRow], parents, dropped: Counter) -> dict:
+def _document(gpu_name: str, cap: tuple[int, int], rows: list[PerfRow], kernels: dict[str, KernelDef], parents, dropped: Counter) -> dict:
     """One card's golden document: a config per kernel set, size and regime, in content order."""
     sets: dict[tuple, list[PerfRow]] = defaultdict(list)
     paths: dict[tuple, tuple] = {}

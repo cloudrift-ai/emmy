@@ -34,7 +34,7 @@ because they have different writers, different readers and different lifetimes.
 | **Golden configurations** | model files under `recipes/<model>/golden/`, one per exact GPU; model-agnostic files under compiler search | promoted from measured comparisons | an ordinary compile, first of all; also, through the dataset database, the training data for the offline prior |
 | **Reservoir** | inside the online prior's checkpoint, `~/.cache/emmy/online.json` | `emmy tune`, every training row | the online prior's own training; and an ordinary compile, for the rows measured at deployable settings |
 | **Measurements table** | the tuning database, `~/.cache/emmy/autotune.db` | `emmy tune`, one row per benchmarked kernel; also `emmy run --bench` for hand-forced measurements | an ordinary compile, after the two above; and as a cache, so a configuration already measured is never re-run |
-| **Dataset database** | `~/.cache/emmy/dataset.db`, the same tables in a file of their own | `emmy dataset import`, from measurement freezes, the golden configuration files and tuning databases | the `emmy eval` views and the offline fit — **never** consulted when compiling |
+| **Dataset database** | a file of its own that every `emmy db` command names (`_data/dataset.db` in the examples), the same tables | `emmy db import`, from measurement freezes, the golden configuration files and tuning databases | `emmy db export`, which writes the dataset (`_data/dataset`, a manifest beside one matrix file per pool) the `emmy eval` views and the offline fit read — **never** consulted when compiling |
 
 The last row surprises people. The dataset database holds the same kind of rows as the tuning database — every
 benchmarked configuration, failures included — but it is filled from a pinned snapshot rather than from this
@@ -49,8 +49,8 @@ emmy tune ─┬─ each benchmark ─────────────▶ me
 
 emmy run --bench, hand-forced rows ───────▶ measurements table
 
-emmy dataset import, snapshots/goldens/tune DBs ──▶ dataset database ──────────▶ emmy eval
-                                                                └── emmy fit ─────────▶ offline prior weights ──▶ ordinary compile
+emmy db import, snapshots/goldens/tune DBs ──▶ dataset database ──▶ emmy db export ──▶ dataset ──▶ emmy eval
+                                                                                               └── emmy fit ──▶ offline prior weights ──▶ ordinary compile
 
 recorded by hand from those rows ─────────▶ golden configuration files ────────▶ ordinary compile
 ```

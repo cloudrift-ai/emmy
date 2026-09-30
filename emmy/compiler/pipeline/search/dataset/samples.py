@@ -1,4 +1,4 @@
-"""``Dataset`` — a queryable read-view over a bag of :class:`Sample`s, with one
+"""``Samples`` — a queryable read-view over a bag of :class:`Sample`s, with one
 adapter per measurement-data source (a DB instance's ``perf`` rows / the online-prior
 reservoir) and the two grouping axes the consumers need.
 
@@ -8,7 +8,7 @@ The two groupings are deliberately distinct and do **not** collapse:
   shapes are different groups. The golden joins in ``prior/diagnostics.py`` index on it.
   It is deliberately NOT a comparison key: it carries no card and no ``H_opt``, so rows
   measured on different hardware or under different nvcc settings land in one group.
-  Anything ranking measured latencies wants ``data/group.group_measured`` instead.
+  Anything ranking measured latencies wants ``db/export.measured_groups`` instead.
 - :meth:`group_by_kernel_name` keys on the kernel C identifier (the ``kernel`` row's
   name) — which *merges* shapes of the same kernel, by design, so the per-knob regret
   analysis measures relative knob impact across shapes.
@@ -18,12 +18,11 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Iterator
-from pathlib import Path
 
-from emmy.compiler.pipeline.search.data.sample import Sample
+from emmy.compiler.pipeline.search.dataset.sample import Sample
 
 
-class Dataset:
+class Samples:
     """A bag of :class:`Sample`s plus source adapters + grouping."""
 
     def __init__(self, samples: list[Sample]) -> None:
@@ -38,33 +37,20 @@ class Dataset:
     # --- adapters: one per source -----------------------------------------
 
     @classmethod
-    def from_db(
-        cls, path: Path | str, *, kernel: str | None = None, min_latency: float = 0.0, backend: str | None = None, status: str = "ok"
-    ) -> Dataset:
-        """Every measured ``ok`` variant in a DB instance's ``perf`` rows, opened
-        read-only so a concurrent ``tune`` writer isn't blocked. ``backend=None``
-        spans every backend (matching the legacy ``eval knobs`` query); ``kernel``
-        filters on the kernel row's C identifier. ``status`` selects the row status
-        (``bench_fail`` rows carry the watchdog-timeout sentinel latency, so the
-        default ``min_latency`` admits them)."""
-        from emmy.compiler.pipeline.search.db import SearchDB  # noqa: PLC0415
-
-        db = SearchDB.open_readonly(path)
-        try:
-            names = db.kernel_names()
-            samples = [
-                Sample.from_perf_row(row, names.get(row.kernel))
-                for row in db.iter_perf_rows(backend=backend)
-                if row.status == status and row.stats.median > min_latency
-            ]
-        finally:
-            db.close()
+    def from_rows(cls, rows, names: dict[str, str], *, kernel: str | None = None, min_latency: float = 0.0, status: str = "ok") -> Samples:
+        """Every ``perf`` row of ``status`` among ``rows`` as samples, ``names`` the kernel rows' C identifiers by
+        exact identity (``SearchDB.kernel_names``); ``kernel`` filters on that identifier. ``bench_fail`` rows carry
+        the watchdog-timeout sentinel latency, so the default ``min_latency`` admits them. The caller opens the DB
+        (``commands/db.read_samples``): this package describes rows and never reads a store."""
+        samples = [
+            Sample.from_perf_row(row, names.get(row.kernel)) for row in rows if row.status == status and row.stats.median > min_latency
+        ]
         if kernel:
             samples = [s for s in samples if s.name and kernel in s.name]
         return cls(samples)
 
     @classmethod
-    def from_prior(cls, prior) -> Dataset:
+    def from_prior(cls, prior) -> Samples:
         """The online prior's bounded reservoir as samples. Works through
         ``FallbackPrior`` (it delegates ``_dataset`` to the online half)."""
         return cls([Sample.from_prior_row(k, v) for k, v in prior._dataset])

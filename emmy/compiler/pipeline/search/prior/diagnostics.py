@@ -6,7 +6,7 @@ prints :func:`report`: how many rows and op structures it holds, and how many go
 it has any data for. Counting, not judging.
 
 **Ranking quality is deliberately not computed here.** It was, until 2026-08: a per-op pick ratio
-and a median Spearman over the reservoir, grouped by :meth:`Dataset.group_by_op`. That key is the
+and a median Spearman over the reservoir, grouped by :meth:`Samples.group_by_op`. That key is the
 ``S_*`` signature alone, so one group pooled measurements taken under different opt levels — a
 sweep of that era wrote both into one reservoir — and pooled cards. The regimes invert, so the
 ratio compared measurements taken under different compilers. Both
@@ -20,7 +20,7 @@ per-feature blame and ablation Δ — were retired at the same time; see Part 8 
 
 from __future__ import annotations
 
-from emmy.compiler.pipeline.search.data import Dataset, ShapeKey, is_matmul
+from emmy.compiler.pipeline.search.dataset import Samples, ShapeKey, is_matmul
 from emmy.compiler.pipeline.search.prior.report import TOP_KS
 
 
@@ -72,7 +72,7 @@ def golden_prior_eval(prior, kernel_filter: str | None = None) -> str:
     # twins never merge) so each golden shape maps to the S_* signature it was
     # tuned under.
     index: dict[ShapeKey, dict] = {}
-    for sig in Dataset.from_prior(prior).group_by_op():
+    for sig in Samples.from_prior(prior).group_by_op():
         d = dict(sig)
         if not is_matmul(d):
             continue
@@ -141,7 +141,7 @@ def golden_deploy_perf(prior, pools) -> dict[tuple[str, str, str], float]:
     # dtype flag is what keeps them apart — ``ShapeKey.from_s_features`` derives it
     # from ``S_dtype_f32`` (see its docstring for why nothing else can be the key).
     index: dict[ShapeKey, list] = {}
-    for sig, samples in Dataset.from_prior(prior).group_by_op().items():
+    for sig, samples in Samples.from_prior(prior).group_by_op().items():
         d = dict(sig)
         if not is_matmul(d):
             continue
@@ -168,7 +168,7 @@ def golden_deploy_perf(prior, pools) -> dict[tuple[str, str, str], float]:
 def report(prior) -> str:
     """The full offline diagnostics block for a (re)fit prior."""
     dataset = prior._dataset
-    groups = Dataset.from_prior(prior).group_by_op()
+    groups = Samples.from_prior(prior).group_by_op()
     lines = [f"[prior] dataset: {len(dataset)} rows, {len(groups)} op-structures, fitted={prior.fitted}"]
     if not prior.fitted:
         lines.append("  no model — dataset below min_rows; run `emmy tune <model>` to gather more")
@@ -184,5 +184,5 @@ def report(prior) -> str:
     lines.append(f"[prior] golden coverage: {covered}/{total} golden matmul shapes have data in the dataset")
     if covered == 0:
         lines.append("  none yet — tune a working golden file (`emmy tune --golden-file PATH`) to validate against them")
-    lines.append("[prior] ranking quality: run `emmy eval prior --dataset db` (this block counts coverage only)")
+    lines.append("[prior] ranking quality: run `emmy eval prior --pools measured` (this block counts coverage only)")
     return "\n".join(lines)

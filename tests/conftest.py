@@ -113,7 +113,7 @@ def _isolate_prior_file(tmp_path, monkeypatch):
 @pytest.fixture(autouse=True)
 def _isolate_offline_file(monkeypatch):
     """Drop any dev-machine ``EMMY_OFFLINE_FILE`` override so tests always score
-    through the repo-checked ``offline_weights.json``. Unlike the prior file, the
+    through the repo-checked ``weights/offline.json``. Unlike the prior file, the
     default here must NOT be a tmp path — a missing offline artifact is a hard
     error by design (no silent fallback), and the shipped one is what tests
     exercise."""

@@ -18,7 +18,7 @@ from emmy.compiler.pipeline import LOOP_PASSES, CompilerDump, Pipeline
 from emmy.compiler.pipeline.knob import STRUCT_PREFIX, family_of, tuning_knob_items
 from emmy.compiler.pipeline.passes.tile._fromloop import lift_loop_op
 from emmy.compiler.pipeline.passes.tile._twist import rewrite_twisted
-from emmy.compiler.pipeline.search.data.shape import ShapeKey
+from emmy.compiler.pipeline.search.dataset.shape import ShapeKey
 from emmy.compiler.pipeline.search.pins import pins_freeze_cut, stampable_reduce
 from emmy.compiler.specialize import specialize_program
 

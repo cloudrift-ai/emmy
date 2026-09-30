@@ -1,12 +1,16 @@
-"""The golden pools of a dataset DB (``data/group.golden_pools`` / ``ranking.build_golden_groups``): one pool per
+"""The golden pools of a DB instance (``db/export.golden_pools`` / ``ranking.build_golden_groups``): one pool per
 card, regime, exact kernel and sizes holding a golden file's rows, enumerated from the kernel's own definition — the
-same candidates the golden's stored program opens through the whole tile pipeline, at unit scale."""
+same candidates the golden's stored program opens through the whole tile pipeline, at unit scale — and the export
+that writes them as a dataset the readers load back unchanged."""
 
 from __future__ import annotations
 
+import numpy as np
+
 from emmy.compiler.context import Context
-from emmy.compiler.pipeline.search.data.group import golden_pools
+from emmy.compiler.pipeline.search.dataset import Dataset
 from emmy.compiler.pipeline.search.db import SearchDB
+from emmy.compiler.pipeline.search.db.export import export_dataset, golden_pools
 from emmy.compiler.pipeline.search.features import tile_signature
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from emmy.compiler.pipeline.search.ranking import build_golden_groups, enumerate_graph, enumerate_pool, pool_context
@@ -17,7 +21,7 @@ _MATMUL = "matmul/f16-mma-m128n128k128-f32.json"
 _SPLIT = "matmul/f16-mma-splitk-deferred.json"
 
 
-def test_a_kernel_pool_opens_the_candidates_its_golden_program_opens():
+def test_a_kernel_pool_opens_the_candidates_its_golden_program_opens(tmp_path):
     """The DB pool is enumerated from the kernel's definition through the tile lowering alone; the golden
     file's program goes through the whole tile pipeline. Same candidates in the same order, the same golden
     row among them — so a rank over the DB is the rank the file-side fit computed. A pool holds only what a
@@ -43,6 +47,14 @@ def test_a_kernel_pool_opens_the_candidates_its_golden_program_opens():
 
     assert golden_pools(tuned_db(None, (_MATMUL,), source="measured")) == ([], {})
 
+    # The export carries the group, its pool (rows and kernel definition) and the provenance to a directory and back.
+    dataset = export_dataset(db, source="test", pool_sample=0, seed=0)
+    back = Dataset.load(dataset.dump(tmp_path / "dataset"))
+    [loaded] = back.golden
+    assert (loaded.golden_ids, loaded.feat_names, loaded.total) == (group.golden_ids, group.feat_names, group.total)
+    assert np.array_equal(loaded.feats, group.feats, equal_nan=True) and loaded.pools == (pool,)
+    assert dataset.provenance["sources"] == {"golden:case": 1} and back.provenance == dataset.provenance
+
 
 def test_a_golden_over_a_kernel_set_is_one_pool_per_piece():
     """A golden that lowers to several kernels — a deferred split-K, its main kernel and its combine — is one
@@ -51,7 +63,7 @@ def test_a_golden_over_a_kernel_set_is_one_pool_per_piece():
     pools, _dropped = golden_pools(tuned_db(None, (_SPLIT,), source="golden:case"))
     assert len(pools) == 2 and [len(pool.rows) for pool in pools] == [1, 1]
     assert len({pool.kernel.exact_identity for pool in pools}) == 2
-    assert all(row.kernel == pool.kernel.exact_identity for pool in pools for row in pool.rows)
+    assert all(row.source == "golden:case" for pool in pools for row in pool.rows)
 
 
 def test_a_pool_of_a_kernel_formed_from_no_loop_op_is_skipped_by_name():

@@ -1,4 +1,4 @@
-"""Enumerate and rank candidates for the goldens: the dataset DB's golden pools (``data/group.golden_pools``)
+"""Enumerate and rank candidates for the goldens: the DB's golden pools (``db/export.golden_pools``)
 as training groups (:func:`build_golden_groups`), and one program-backed record's own enumeration
 (:func:`evaluate_record`).
 
@@ -21,8 +21,9 @@ from dataclasses import dataclass, replace
 
 from emmy.compiler.context import Context
 from emmy.compiler.pipeline.search import features
-from emmy.compiler.pipeline.search.data.group import DEFAULT_FEATURES, GoldenGroup, GoldenPool, feature_view, pack_features
-from emmy.compiler.pipeline.search.data.shape import ShapeKey
+from emmy.compiler.pipeline.search.dataset.group import DEFAULT_FEATURES, GoldenGroup, feature_view, pack_features
+from emmy.compiler.pipeline.search.dataset.pool import GoldenPool
+from emmy.compiler.pipeline.search.dataset.shape import ShapeKey
 from emmy.compiler.pipeline.search.metrics import dual_rank
 from emmy.compiler.pipeline.search.pool import Candidates, PoolSample
 
@@ -165,6 +166,7 @@ class _Packed:
     packed: tuple
     total: int
     goldens: list[int]
+    pools: list[GoldenPool]
 
 
 def _pool_identity(gpu: str, tier: str, shape: str, packed) -> tuple:
@@ -182,7 +184,7 @@ def _pool_identity(gpu: str, tier: str, shape: str, packed) -> tuple:
 def build_golden_groups(
     pools: Sequence[GoldenPool], features_spec: str = DEFAULT_FEATURES, *, sample: int = 0, seed: int = 0, kernel: str | None = None
 ) -> tuple[list[GoldenGroup], list[tuple[str, str, str]]]:
-    """Enumerate each golden pool (``data/group.golden_pools``), pin its golden rows, and featurize every
+    """Enumerate each golden pool (``db/export.golden_pools``), pin its golden rows, and featurize every
     candidate, as :class:`GoldenGroup` records (name, tier, card, pinned rows, per-row features filtered through
     the ``features_spec`` view; ``key`` is ``"<gpu>/<pool name>"``, suffixed ``#2``, ``#3``, … when one name
     opens several distinct pools). The second return is the golden rows that did NOT land in a group, as
@@ -268,7 +270,7 @@ def build_golden_groups(
         tier = "dyn" if shape.is_dyn else (shape.kind or ("warp" if shape.is_warp else "thread"))
         fold_group = _shape_group(shape)
         # The feature view (default ``DEFAULT_FEATURES``: ``D_*`` geometry/occupancy plus ``MMA_tier`` — see
-        # its rationale in ``search/data/group.py``) filters here, before the pool is packed, so the
+        # its rationale in ``search/dataset/group.py``) filters here, before the pool is packed, so the
         # trained-under view is exactly what the Group stores. ``feature_view`` keeps the routing features
         # whatever the spec says, so a narrower ``--features`` cannot silently misroute a symbolic-axis pool.
         feats = [{k: v for k, v in features.knob_features({**base, **r}).items() if keep(k)} for r in rows]
@@ -278,9 +280,10 @@ def build_golden_groups(
         identity = _pool_identity(pool.gpu, tier, fold_group, packed)
         found = packed_pools.get(identity)
         if found is None:
-            packed_pools[identity] = _Packed(pool, tier, fold_group, packed, candidates.total, goldens)
+            packed_pools[identity] = _Packed(pool, tier, fold_group, packed, candidates.total, goldens, [pool])
         else:
             found.goldens.extend(goldens)
+            found.pools.append(pool)
 
     # Every pool now knows every golden in it, so each becomes ONE group whose labels are final at
     # construction. The ``#N`` suffix keeps ``Group.key`` unique (``cv.run_folds`` keys its train accumulator
@@ -298,6 +301,7 @@ def build_golden_groups(
                 entry.packed,
                 entry.goldens,
                 entry.total,
+                pools=entry.pools,
             )
         )
     logger.info(
