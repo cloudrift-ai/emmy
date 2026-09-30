@@ -110,6 +110,7 @@
  "tests/compiler/cli/test_eval.py::test_offer_audit_flags_unrealized_entries": 0.14,
  "tests/compiler/cli/test_golden_command.py::test_check_passes_a_current_golden_and_names_each_stale_target": 1.64,
  "tests/compiler/cli/test_golden_command.py::test_kernels_and_a_json_compile_output_are_the_same_pool_for_a_current_golden": 9.7,
+ "tests/compiler/cli/test_golden_command.py::test_restamp_demotes_a_measurement_when_source_compile_fails": 0.52,
  "tests/compiler/cli/test_golden_command.py::test_restamp_drops_a_kernel_set_row_whose_members_lose_their_measurements": 1.5,
  "tests/compiler/cli/test_golden_command.py::test_restamp_drops_a_piece_row_the_fresh_set_no_longer_mints_under_a_current_target": 0.76,
  "tests/compiler/cli/test_golden_command.py::test_restamp_keeps_the_piece_rows_of_a_kernel_set_whose_target_only_reordered_its_inputs": 15.4,
