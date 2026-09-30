@@ -57,8 +57,8 @@ from emmy.compiler.ir.stmt import (  # noqa: F401  (re-exported via __init__)
     Write,
     pretty_body,
 )
-from emmy.compiler.ir.stmt.ir import BodyOp
 from emmy.compiler.ir.stmt.analysis import BodyAnalysis, Scope  # noqa: F401 — public Loop IR aliases
+from emmy.compiler.ir.stmt.ir import BodyOp
 
 # Body Stmts (Stmt, Load, Assign, Accum, Write, Select, SelectBranch,
 # Loop, Cond) and the tree-walk helpers (map_body) live in

@@ -29,7 +29,8 @@ def _assert_scoped_cse(body, available=()):
             for child in stmt.nested():
                 shadowed = child.local_defs | stmt.binds_axes()
                 inherited = [
-                    prior for prior in available
+                    prior
+                    for prior in available
                     if not shadowed.intersection((*prior.defines(), *free_names(prior)))
                     and (isinstance(stmt, Cond) or not writes.intersection(prior.external_reads()))
                 ]

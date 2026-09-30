@@ -10,6 +10,7 @@ from emmy.compiler.ir.stmt.blocks import Cond, Loop
 from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.leaves import Accum, Assign, Load, Select, Write
 
+
 @dataclass(frozen=True)
 class Scope:
     """Enclosing loop nest from outermost to innermost.
@@ -99,5 +100,3 @@ class BodyAnalysis:
             writes=tuple(writes),
             live_axes=bound.axis_dependencies,
         )
-
-

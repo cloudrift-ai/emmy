@@ -572,12 +572,13 @@ canonicalized before validation:
 Fusion may construct a compact body containing scalar `Call` statements. Each references one read-only `Subroutine`
 with explicit coordinate parameters and captured input buffers. Early ordering, alias elimination, invariant motion
 and coordinate simplification operate on the calls; each shared definition is prepared once. Identical calls to the
-same definition share by argument structure without searching their bodies. Before full CSE, the statement layer
-inlines calls by freshening local bindings, substituting coordinate arguments and copying each result. Ordinary
-reduction merging and invariant motion expose sharing across definitions. Normalization also accepts bodies without
-output writes. The expanded body is the only form used by validation, executable identity, serialization and Tile IR
-lifting. Operation clustering
-also starts from that CSE form, so it sees operations inside definitions. Subroutine boundaries never limit fusion.
+same definition share by argument structure without searching their bodies. Before full CSE, the statement-layer
+splicer expands calls using the same demand reconstruction as fusion. Independent reductions with equal extents and
+reduction depths share axes; coordinate substitutions keep different arguments distinct. Full CSE then shares common
+producers across definitions. Terminal values also seed expansion, so normalization accepts bodies without output
+writes and preserves unused values beside writes. The expanded body is the only form used by validation, executable
+identity, serialization and Tile IR lifting. Operation clustering also starts from that CSE form, so it sees operations
+inside definitions. Subroutine boundaries never limit fusion.
 
 - `topo_sort_siblings` — stable Kahn reorder so SSA defs precede their uses
   within each body (fixes splicer-produced use-before-def).
@@ -592,7 +593,7 @@ also starts from that CSE form, so it sees operations inside definitions. Subrou
 
 - `eliminate_copy_aliases` — drop `y = copy(x)` Assigns. Each nested body owns its alias map, so source spellings
   reused by sibling scopes remain separate binders. Enclosing aliases travel through that same walk, pruned at each
-  child scope, instead of renaming its entire subtree before descending again.
+  child scope by the shared hygienic rewrite.
 - `merge_sibling_reduce_loops` — unify sibling reduce axes whose Load positions overlap, then merge matching Loops
   before descending into their children. A parent merge therefore exposes child reductions to the same walk.
   Overlapping reductions share one canonical axis name (softmax's max + sum sweeps; the two matmul reductions in
@@ -756,7 +757,7 @@ The machinery `pipeline/passes/loop/fusion/010_merge_loop_ops.py` calls to splic
 use the same path. Every graph output supplies an explicit `(loop tag, Write.output)` root. Separate terminal loops
 therefore seed one worklist; its one binding table shares equal upstream demands across output ports instead of
 inlining a shared producer per consumer. The single-sink convenience form still derives the unique terminal loop and
-selects all its Writes. Every `_NotSupported` carries a reason string, logged at DEBUG by `splice_loops` —
+selects all its Writes. Every `NotSupported` carries a reason string, logged at DEBUG by `splice_loops` —
 `compile -vv` shows which pattern a rejected edge hit.
 
 The splicer forms one subroutine per demanded source reduction, with nested reductions represented by calls to their
@@ -764,11 +765,12 @@ own shared definitions. Equal calls reuse the same demand before expanding their
 distinct calls. `compile -vv` prints this intermediate form as `sub name(buffers, coordinates):` and one-line calls.
 The final Loop IR listing is expanded and fully CSE'd, as are all persisted kernels.
 
-Subroutine expansion belongs to the generic statement layer and does not run the splicer again. Each call gets fresh
-local SSA and axis names before its formal coordinates are substituted, preventing capture by the caller or nested
-calls. The normalizer merges independent reductions and shares their common producers after expansion. A reduction
-that reads another's finalized value remains a separate sweep. Different input offsets retain their own coordinate
-substitutions. Every legal fusion region is still built whole; subroutine boundaries do not affect final CSE.
+Body analysis, mutable construction and demand reconstruction belong to the generic statement layer. `stmt/splicer`
+consumes bodies and splice edges; it imports no Loop IR types. The Loop IR adapter chooses graph regions and wraps
+the reconstructed body in a validated `LoopOp`. Normalization uses the same engine to expand subroutines, sharing
+equal demands before constructing duplicate cones. Fresh names and coordinate substitution prevent capture; equal
+reduction depth keeps a reduction that reads another's finalized value in a separate sweep. Every legal fusion
+region is still built whole; subroutine boundaries do not affect final CSE.
 
 Before dependency reconstruction, `splice_graph` finds output equivalence clusters: single-owner copy chains ending
 at a terminal graph output, with the same dtype and element count and an exact symbolic proof that the source and
@@ -823,9 +825,9 @@ order. Each Write's own scope determines its output shape, so independent siblin
 different extents. This powers `LoopOp.forward`, so post-fusion graphs run through the default `Backend.run` topo-walk
 like any pre-fusion graph.
 
-### `loop/builder.py` — fluent construction
+### `stmt/builder.py` — body construction
 
-`LoopBuilder` constructs merged `LoopOp` bodies for the fusion splicer without spelling out every `Loop(Axis(…))`
+`BodyBuilder` constructs bodies for fusion and subroutine expansion without spelling out every `Loop(Axis(…))`
 nest. Construction is mutable — descent is a dict lookup per scope level and a prepend is an append to a
 reverse-ordered list — and the immutable body is materialized once by `finish()`. Rebuilding the tuple tree per
 insert is quadratic in program size and re-runs each level's `Loop` construction normalization per insert, which is

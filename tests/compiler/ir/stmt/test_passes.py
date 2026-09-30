@@ -11,9 +11,19 @@ from emmy.compiler.ir.stmt.passes import projection_distributes, rename_free
 
 
 def test_copy_alias_does_not_capture_an_inner_binding():
-    body = Body((Assign("b", "copy", ("a",)), Cond(cond=Var("p"), body=(
-        Assign("a", "exp", ("x",)), Assign("v", "subtract", ("a", "b")), Write("out", (), "v"),
-    ))))
+    body = Body(
+        (
+            Assign("b", "copy", ("a",)),
+            Cond(
+                cond=Var("p"),
+                body=(
+                    Assign("a", "exp", ("x",)),
+                    Assign("v", "subtract", ("a", "b")),
+                    Write("out", (), "v"),
+                ),
+            ),
+        )
+    )
     (branch,) = eliminate_copy_aliases(body)
     assert branch.body[0].name != "a"
     assert branch.body[1].args == (branch.body[0].name, "a")

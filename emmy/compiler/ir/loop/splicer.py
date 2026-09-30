@@ -65,9 +65,7 @@ import math
 from dataclasses import dataclass, replace
 
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Interval, Literal, SimplifyCtx, Var, affine_form
-from emmy.compiler.ir.loop.ir import Axis, Load, Loop, LoopOp, Write
-from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt.body import Body
+from emmy.compiler.ir.loop.ir import Load, Loop, LoopOp, Write
 from emmy.compiler.ir.stmt.splicer import NotSupported, Program, Splicer, UnfusableStmt
 from emmy.compiler.ir.stmt.splicer import observes_running_accumulator as _observes_running_accumulator
 
@@ -478,5 +476,3 @@ def _loop_extents(op: LoopOp, *, leading: str | None = None) -> dict[str, int] |
             return None
         extents[stmt.axis.name] = extent
     return extents
-
-

@@ -772,16 +772,20 @@ def dedup_loads(stmts: Body) -> Body:
     from emmy.compiler.ir.stmt.passes import rename_free  # noqa: PLC0415
 
     def walk(
-        body: Body, env: dict[Stmt, tuple[str, ...]], carried: dict[str, str],
-        seeded: bool = False, initialized: frozenset[str] = frozenset(),
+        body: Body,
+        env: dict[Stmt, tuple[str, ...]],
+        carried: dict[str, str],
+        seeded: bool = False,
+        initialized: frozenset[str] = frozenset(),
     ) -> Body:
         local = dict(env)
         alias: dict[str, str] = {}
         state = set(initialized)
         counts = Counter(name for stmt in body for name in stmt.defines())
         reductions = {
-            stmt.name for stmt in body if isinstance(stmt, Accum) and seeded
-            and counts[stmt.name] == 1 and stmt.name not in body.ssa_uses and stmt.name not in state
+            stmt.name
+            for stmt in body
+            if isinstance(stmt, Accum) and seeded and counts[stmt.name] == 1 and stmt.name not in body.ssa_uses and stmt.name not in state
         }
 
         def invalidate(buffers: frozenset[str], names: frozenset[str] = frozenset()) -> None:
@@ -811,7 +815,8 @@ def dedup_loads(stmts: Body) -> Body:
                 for child in stmt.nested():
                     shadowed = child.local_defs | stmt.binds_axes()
                     available = {
-                        key: values for key, values in local.items()
+                        key: values
+                        for key, values in local.items()
                         if not entry_writes.intersection(key.external_reads())
                         and not shadowed.intersection((*values, *free_names(key)))
                         and not isinstance(key, Accum)

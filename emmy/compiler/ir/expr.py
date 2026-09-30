@@ -409,9 +409,13 @@ class BinaryExpr(Expr):
                 return _make_int_literal(0)
             if isinstance(right, Literal) and right.dtype == "int" and isinstance(right.value, int) and right.value > 1:
                 if (
-                    isinstance(left, BinaryExpr) and left.op in ("/", "//")
-                    and isinstance(left.right, Literal) and left.right.dtype == "int" and left.right.value > 0
-                    and (bounds := left.left.range(ctx)) is not None and bounds.lo >= 0
+                    isinstance(left, BinaryExpr)
+                    and left.op in ("/", "//")
+                    and isinstance(left.right, Literal)
+                    and left.right.dtype == "int"
+                    and left.right.value > 0
+                    and (bounds := left.left.range(ctx)) is not None
+                    and bounds.lo >= 0
                 ):
                     # Positive constant quotient chains have one denominator in index normal form.
                     return BinaryExpr("/", left.left, Literal(left.right.value * right.value, "int")).simplify(ctx)
