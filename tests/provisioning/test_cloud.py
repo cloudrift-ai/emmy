@@ -8,10 +8,12 @@ import yaml
 
 from emmy.provisioning.candidates import VmCandidate
 from emmy.provisioning.cloud import (
+    DEFAULT_VM_ACTIVE_TIMEOUT,
     _provision_cloudrift,
     _provision_gcp,
     _ssh_keys_metadata_value,
     delete_cloud_vm,
+    provision_cloud_vm,
     read_public_key_files,
     resolve_vm_spec,
 )
@@ -391,3 +393,21 @@ async def test_provision_cloudrift_opens_the_requested_ports(mock_create, tmp_pa
 
     await _provision_cloudrift(_cr_cand(), str(key_file), {}, False, logging.getLogger())
     assert mock_create.call_args.kwargs["ports"] == [22, 8000, 8080]
+
+
+# ── VM Active timeout ───────────────────────────────────────────
+
+
+@patch.dict("os.environ", {"CLOUDRIFT_API_KEY": "test-key"})
+@patch("emmy.provisioning.cloud.cr_provider.create_instance", new_callable=AsyncMock)
+async def test_provision_cloud_vm_forwards_the_active_timeout(mock_create, tmp_path):
+    """The Active wait reaches create_instance as its timeout; a caller that names none keeps the 1800 s default."""
+    key_file = tmp_path / "id_ed25519"
+    key_file.write_text("private-key")
+    mock_create.return_value = VMConnectionInfo(host="1.2.3.4", username="user", ssh_port=22222)
+
+    await provision_cloud_vm("NVIDIA GeForce RTX 4090", 1, str(key_file), provider="cloudrift", vm_active_timeout=3600)
+    assert mock_create.call_args.kwargs["timeout"] == 3600
+
+    await provision_cloud_vm("NVIDIA GeForce RTX 4090", 1, str(key_file), provider="cloudrift")
+    assert mock_create.call_args.kwargs["timeout"] == DEFAULT_VM_ACTIVE_TIMEOUT == 1800

@@ -44,6 +44,9 @@ from emmy.redact import register_secret
 # non-terminal) error before moving on to the next candidate.
 SAME_CANDIDATE_RETRIES = 2
 PROVISION_RETRY_DELAY = 10  # seconds
+# How long a rented CloudRift VM may take to become Active before it is terminated and the
+# orchestrator advances to the next candidate. A node that first downloads the VM image needs more.
+DEFAULT_VM_ACTIVE_TIMEOUT = 1800  # seconds
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +136,7 @@ async def provision_cloud_vm(
     allocation_observer: AllocationObserver | None = None,
     exact_gpu_count: bool = False,
     ports: list[int] | None = None,
+    vm_active_timeout: int = DEFAULT_VM_ACTIVE_TIMEOUT,
 ):
     """Provision a cloud VM for the given GPU requirements.
 
@@ -157,6 +161,10 @@ async def provision_cloud_vm(
         exact_gpu_count: reject candidates that contain more GPUs than requested.
         ports: the ports to open on the VM (CloudRift only; default SSH, the engine
             port and the load balancer's: ``[22, 8000, 8080]``).
+        vm_active_timeout: seconds to wait for a rented CloudRift VM to become
+            Active before it is terminated and the next candidate is tried
+            (default :data:`DEFAULT_VM_ACTIVE_TIMEOUT`); GCP has its own
+            ``create_timeout_*`` provider keys.
 
     Returns:
         VMConnectionInfo on success, None when every candidate is exhausted.
@@ -191,6 +199,7 @@ async def provision_cloud_vm(
                     provisioning_model,
                     allocation_observer,
                     ports,
+                    vm_active_timeout,
                 )
             except CapacityExhausted as exc:
                 logger.warning(f"{cand.describe()}: capacity exhausted ({exc}); advancing to next candidate.")
@@ -238,6 +247,7 @@ async def _provision_candidate(
     provisioning_model=None,
     allocation_observer: AllocationObserver | None = None,
     ports=None,
+    vm_active_timeout=DEFAULT_VM_ACTIVE_TIMEOUT,
 ):
     """Single provisioning attempt for one resolved candidate.
 
@@ -256,6 +266,7 @@ async def _provision_candidate(
             extra_authorized_keys,
             allocation_observer,
             ports,
+            vm_active_timeout,
         )
     if cand.provider == "gcp":
         return await _provision_gcp(
@@ -282,6 +293,7 @@ async def _provision_cloudrift(
     extra_authorized_keys=None,
     allocation_observer: AllocationObserver | None = None,
     ports=None,
+    vm_active_timeout=DEFAULT_VM_ACTIVE_TIMEOUT,
 ):
     api_key = os.environ.get("CLOUDRIFT_API_KEY")
     if not api_key and not dry_run:
@@ -306,7 +318,7 @@ async def _provision_cloudrift(
         ssh_key_path=pub_key_path,
         image_url=image_url,
         ports=ports or [22, 8000, 8080],
-        timeout=1800,
+        timeout=vm_active_timeout,
         dry_run=dry_run,
         fail_statuses={"Inactive"},
         wait_ssh=True,
