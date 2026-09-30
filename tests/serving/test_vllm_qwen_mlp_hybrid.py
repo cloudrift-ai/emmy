@@ -1,7 +1,5 @@
 """The mixed Qwen3.5 adapter retains vLLM's hybrid decoder modules."""
 
-import socket
-
 import pytest
 
 
@@ -27,14 +25,14 @@ def test_real_qwen35_hybrid_modules_survive_mlp_replacement(tmp_path, monkeypatc
 
     text = Qwen3_5TextConfig(
         vocab_size=64,
-        hidden_size=64,
-        intermediate_size=128,
+        hidden_size=128,
+        intermediate_size=256,
         num_hidden_layers=2,
         num_attention_heads=4,
         num_key_value_heads=2,
-        head_dim=16,
-        linear_key_head_dim=16,
-        linear_value_head_dim=16,
+        head_dim=128,
+        linear_key_head_dim=128,
+        linear_value_head_dim=128,
         linear_num_key_heads=2,
         linear_num_value_heads=4,
         linear_conv_kernel_dim=4,
@@ -51,6 +49,7 @@ def test_real_qwen35_hybrid_modules_survive_mlp_replacement(tmp_path, monkeypatc
         max_num_batched_tokens=64,
         language_model_only=True,
         enforce_eager=True,
+        enable_prefix_caching=False,
         skip_tokenizer_init=True,
     ).create_engine_config()
     monkeypatch.setenv("EMMY_FAST_MATH", "false")
@@ -66,14 +65,13 @@ def test_real_qwen35_hybrid_modules_survive_mlp_replacement(tmp_path, monkeypatc
         before["parameters"] = {name: param for name, param in self.named_parameters() if ".mlp." not in name}
 
     monkeypatch.setattr(Qwen3_5ForConditionalGeneration, "__init__", capture_stock_modules)
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
     if not torch.distributed.is_initialized():
         request.addfinalizer(destroy_distributed_environment)
         request.addfinalizer(destroy_model_parallel)
     with set_current_vllm_config(vllm_config):
-        init_distributed_environment(world_size=1, rank=0, local_rank=0, distributed_init_method=f"tcp://127.0.0.1:{port}", backend="gloo")
+        init_distributed_environment(
+            world_size=1, rank=0, local_rank=0, distributed_init_method=f"file://{tmp_path / 'dist_init'}", backend="gloo"
+        )
         ensure_model_parallel_initialized(tensor_model_parallel_size=1, pipeline_model_parallel_size=1, backend="gloo")
         with torch.device("meta"):
             model = EmmyQwen35MlpModel(vllm_config=vllm_config)
