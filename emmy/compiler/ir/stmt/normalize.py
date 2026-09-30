@@ -896,6 +896,7 @@ class _SequentialScope:
         inherited_axes: dict[str, str] | None = None,
         owned: set[str] | None = None,
         fixed: frozenset[str] = frozenset(),
+        reserved: frozenset[str] = frozenset(),
     ) -> None:
         self.counters = {kind: 0 for kind in ("v", "in", "acc", "a", "p")} if counters is None else counters
         self.ssa = {} if ssa is None else ssa
@@ -903,12 +904,18 @@ class _SequentialScope:
         self.inherited_axes = {} if inherited_axes is None else inherited_axes
         self.owned = set() if owned is None else owned
         self.fixed = fixed
+        self.reserved = reserved
+
+    def _fresh(self, kind: str) -> str:
+        while (name := f"{kind}{self.counters[kind]}") in self.reserved:
+            self.counters[kind] += 1
+        self.counters[kind] += 1
+        return name
 
     def _allocate(self, old: str, kind: str) -> None:
         if old in self.owned or old in self.fixed:
             return
-        self.ssa[old] = f"{kind}{self.counters[kind]}"
-        self.counters[kind] += 1
+        self.ssa[old] = self._fresh(kind)
         self.owned.add(old)
 
     def step(self, stmt: Stmt) -> Stmt:
@@ -924,13 +931,11 @@ class _SequentialScope:
 
         axes = dict(self.inherited_axes)
         for old in stmt.binds_axes():
-            axes[old] = f"a{self.counters['a']}"
-            self.counters["a"] += 1
+            axes[old] = self._fresh("a")
         for axis in bound_axes(stmt):
             for source in axis.sources():
                 if source.name not in self.sources:
-                    self.sources[source.name] = f"p{self.counters['p']}"
-                    self.counters["p"] += 1
+                    self.sources[source.name] = self._fresh("p")
 
         names = {**self.ssa, **self.sources, **axes}
         shell = stmt.with_bodies(tuple(Body() for _ in children)) if children else stmt
@@ -945,6 +950,7 @@ class _SequentialScope:
                     sources=dict(self.sources),
                     inherited_axes=dict(axes),
                     fixed=exported,
+                    reserved=self.reserved,
                 )
                 renamed_children.append(Body(tuple(scope.step(member) for member in child)))
             renamed = renamed.with_bodies(tuple(renamed_children))
@@ -968,8 +974,9 @@ def rename_ssa_sequential(stmts: Body) -> Body:
 
     Idempotent: bodies already in canonical form round-trip unchanged."""
 
-    scope = _SequentialScope()
-    return Body(tuple(scope.step(stmt) for stmt in Body.coerce(stmts)))
+    stmts = Body.coerce(stmts)
+    scope = _SequentialScope(reserved=frozenset().union(*(free_names(stmt) for stmt in stmts)) - stmts.ssa_defs)
+    return Body(tuple(scope.step(stmt) for stmt in stmts))
 
 
 # ---------------------------------------------------------------------------

@@ -160,3 +160,11 @@ def test_nested_calls_freshen_locals_without_capturing_arguments():
     # A name resembling an inliner's generated local must remain a caller coordinate.
     compact = _body(outer, 4).map(lambda stmt: stmt.rename({"k": "k__call0"}))
     assert compact.structural_key() == _body(inner, 4).structural_key()
+
+
+def test_normalized_definition_preserves_formal_coordinates_named_like_canonical_axes():
+    target = _project()
+    target = replace(target, axes=(Axis("a0", 3), Axis("a1", 8)), body=Body(s.rename({"row": "a0", "col": "a1"}) for s in target.body))
+    expanded = target.expanded
+    assert set(expanded.params).isdisjoint(expanded.body.axis_names)
+    assert _body(target, 4).structural_key() == _body(_project(), 4).structural_key()

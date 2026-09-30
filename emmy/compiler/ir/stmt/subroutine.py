@@ -9,7 +9,7 @@ from itertools import count
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Expr
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt.leaves import Assign
+from emmy.compiler.ir.stmt.leaves import Assign, Write
 from emmy.compiler.ir.stmt.base import Stmt, pretty_body
 from emmy.compiler.ir.stmt.body import Body, free_names
 from emmy.compiler.ir.stmt.passes import _rename_ssa_vars_in_expr, _rewrite_kind
@@ -52,6 +52,16 @@ class Subroutine:
     @property
     def params(self) -> tuple[str, ...]:
         return tuple(axis.name for axis in self.axes)
+
+    @cached_property
+    def expanded(self) -> Subroutine:
+        """Normalize a shared definition once before copying it into callers."""
+        from emmy.compiler.ir.stmt.normalize import normalize_body
+
+        # Keep the result visible through alias elimination and canonical renaming.
+        body = normalize_body(Body((*self.body, Write("_return", (), self.result))))
+        returned = next(stmt for stmt in body if isinstance(stmt, Write))
+        return replace(self, body=Body(stmt for stmt in body if stmt is not returned), result=returned.value)
 
     def pretty(self, indent: str = "") -> list[str]:
         return [
@@ -140,13 +150,14 @@ def expand_calls(body: Body) -> Body:
     def inline(stmt: Stmt) -> Stmt | Body:
         if not isinstance(stmt, Call):
             return stmt
+        target = stmt.target.expanded
         rename = {}
-        for name in sorted(stmt.target.body.ssa_defs | stmt.target.body.axis_names):
+        for name in sorted(target.body.ssa_defs | target.body.axis_names):
             fresh = next(candidate for n in suffixes if (candidate := f"{name}__call{n}") not in used)
             rename[name] = fresh
             used.add(fresh)
-        sigma = Sigma(dict(zip(stmt.target.params, stmt.args, strict=True)))
-        expanded = Body(s.rename(rename).substitute(sigma) for s in stmt.target.body).map(inline)
-        return Body((*expanded, Assign(stmt.name, "copy", (rename[stmt.target.result],))))
+        sigma = Sigma(dict(zip(target.params, stmt.args, strict=True)))
+        expanded = Body(s.rename(rename).substitute(sigma) for s in target.body)
+        return Body((*expanded, Assign(stmt.name, "copy", (rename[target.result],))))
 
     return body.map(inline)
