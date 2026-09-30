@@ -10,7 +10,7 @@ from emmy.compiler.context import Context
 from emmy.compiler.graph import Graph
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import TILE_PASSES, Pipeline
-from emmy.compiler.pipeline.fork import exact_schedule_leaf, fork_signature, iter_leaves, leaf_for, leaf_knobs
+from emmy.compiler.pipeline.fork import exact_schedule_leaf, fork_signature, leaf_knobs
 from emmy.compiler.pipeline.knob import family_of, schedule_match_key, schedule_row_key, validate_family_value
 from emmy.compiler.pipeline.pipeline import NO_OPTION, Run, _is_structural_option
 from emmy.compiler.pipeline.search.pins import composed_routes, pinned_knobs, spelled_arm, stampable_reduce, unpinned_decisions
@@ -303,8 +303,8 @@ def _replay(
             else:
                 hit = None
             if hit is None:
-                hit = leaf_for(fp.options, asked) if asked else None
-            return hit[0] if hit is not None else next(iter_leaves(fp.options))
+                hit = fp.find(asked) if asked else None
+            return hit[0] if hit is not None else next(fp.leaves())
         # An unsampled semantic schedule decodes the complete wanted row through the same codec and
         # compatibility context that validates a direct schedule. Other forks retain the generic
         # lazy descent; ``skip`` keeps that answer exact where a partial row vouches for more than
@@ -329,8 +329,8 @@ def _replay(
                 if not explain and not fp.structural:
                     declined.add(fp.node_id)
                     return NO_OPTION
-                return next(iter_leaves(fp.options))
-            hit = leaf_for(fp.options, piece, skip=lambda knobs: schedule_match_key(knobs) != wanted)
+                return next(fp.leaves())
+            hit = fp.find(piece, skip=lambda knobs: schedule_match_key(knobs) != wanted)
             if hit is not None and not _is_structural_option(hit[0]):
                 buckets.setdefault(identity, set()).add(wanted)
                 _offer(identity, wanted)
@@ -341,7 +341,7 @@ def _replay(
                 return NO_OPTION
         first_leaf = None
         first_op = None
-        for leaf in iter_leaves(fp.options):
+        for leaf in fp.leaves():
             if first_leaf is None:
                 first_leaf = leaf
             if _is_structural_option(leaf):

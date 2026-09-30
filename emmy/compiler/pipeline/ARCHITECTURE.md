@@ -810,7 +810,12 @@ an option that only rebinds an `Op` is a variant of one kernel (`False`).
 rule-batch body (`Run._step`), but `resolve` walks the graph once instead of searching: ONE live graph is mutated in
 place, with no sibling snapshots and no per-fork copies, so the terminal IS the graph it started from. At each
 undecided fork a `decide` callback gets a `ForkPoint` (the `Match`, the raw options as the rule emitted them, the op
-as it was before the decision, `ctx`) and returns the option to apply.
+as it was before the decision, `ctx`) and returns the option to apply. The fork point owns the walk over its offer:
+`leaves()` streams the complete leaves depth-first in emission order (the order a score tie falls back to, option-0
+first), `flat()` lists them, and `find(row)` is the one row-directed descent the evidence pick, the decision memo's
+replay and the golden replay share — so every consumer reads an offer the same way. The `fork` module's `iter_leaves`
+and `leaf_for` remain for option sequences that are no fork point: a rule's forks before they are offered, a
+filtered sibling list.
 
 The returned trace — one `Decision(rule_name, node_id, chosen_kind, knob_delta, score, n_options)` per decided fork —
 is the resolution's process-state output. Questions like "did this compile take a structural pick" or "what did the

@@ -33,7 +33,6 @@ from emmy.compiler.context import FAST_MATH_FLAG, Context
 from emmy.compiler.ir.cuda.ir import CudaOp
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, LOWERING_PASSES, Pipeline
-from emmy.compiler.pipeline.fork import iter_leaves, leaf_for
 from emmy.compiler.pipeline.knob import family_of
 from emmy.compiler.pipeline.pipeline import Run, _is_structural_option
 from emmy.compiler.pipeline.search.db import SearchDB, is_placement_knob
@@ -173,11 +172,11 @@ def _lower(pipeline, ctx: Context, entries: list[GoldenRecord]):
             own = named.get(identity) is decider or (decider is lead and lead.identity is None)
             if own:
                 asked_by.add(id(decider))
-            if (hit := leaf_for(fp.options, asked)) is not None:
+            if (hit := fp.find(asked)) is not None:
                 if own:
                     spelled_by.add(id(decider))
                 return hit[0]
-        return next(iter_leaves(fp.options))
+        return next(fp.leaves())
 
     with unpinned_decisions(), composed_routes(composed), tracking_place_keys() as resolved:
         graph, _trace = Run(pipeline=pipeline, ctx=ctx).resolve(lead.target_program.copy(), decide)

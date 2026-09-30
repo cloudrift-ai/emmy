@@ -294,18 +294,6 @@ def iter_leaves(options: Iterable[Op | Graph | Fork]) -> Iterator[Op | Graph | F
             yield option
 
 
-def flatten_leaves(options: Sequence[Op | Graph | Fork]) -> list[Op | Graph | Fork]:
-    """Expand every option down to its leaf options, **depth-first in emission
-    order** — each option's leaves precede the next's, so a tie in a prior's
-    scores still falls to enumeration order (option-0 first). Branch Forks
-    expand recursively — cheap, building only the next levels' knob dicts;
-    leaf Forks and concrete ``Op`` / ``Graph`` options terminate, their
-    materialization deferred to whoever applies the one chosen leaf. Used for
-    small non-schedule forks whose alternatives must be compared together;
-    schedule spaces instead retain this hierarchy during greedy descent."""
-    return list(iter_leaves(options))
-
-
 #: The ``S_*`` stamps the SCHEDULE fork mints on its own rows — properties of the offered schedule
 #: SPACE, not of the kernel. A kernel-set fork is decided before any schedule exists, so its
 #: candidates cannot carry them however warp-eligible the kernel turns out to be; a recorded row's

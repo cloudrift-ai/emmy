@@ -70,7 +70,7 @@ from functools import lru_cache
 from typing import TYPE_CHECKING, NamedTuple
 
 from emmy.compiler.graph import Graph
-from emmy.compiler.pipeline.fork import Fork, flatten_leaves, fork_signature, iter_leaves, leaf_for, leaf_knobs, stamp_signature
+from emmy.compiler.pipeline.fork import Fork, fork_signature, iter_leaves, leaf_knobs, stamp_signature
 from emmy.compiler.pipeline.knob import EVIDENCE_PREFIXES, METADATA_PREFIXES, schedule_pin_fingerprint
 
 logger = logging.getLogger(__name__)
@@ -154,12 +154,12 @@ def _load_prior_safe():
         return None
 
 
-def _find_decided_leaf(options: list, want: dict) -> object | None:
+def _find_decided_leaf(fp, want: dict) -> object | None:
     """The leaf carrying exactly the memoized row ``want`` — the row-directed descent
-    (:func:`~emmy.compiler.pipeline.fork.leaf_for`: the schedule root re-sourced to the row, so
-    the walk is one path), held to an exact match at the leaf. ``None`` when no leaf matches —
-    emission drift between two offers of one key — and the caller re-decides."""
-    hit = leaf_for(options, want)
+    (``ForkPoint.find``: the schedule root re-sourced to the row, so the walk is one path), held
+    to an exact match at the leaf. ``None`` when no leaf matches — emission drift between two
+    offers of one key — and the caller re-decides."""
+    hit = fp.find(want)
     return hit[0] if hit is not None and hit[1] == want else None
 
 
@@ -727,7 +727,7 @@ def _direct_measured_pick(fp: ForkPoint, blocked, db_index: dict) -> tuple[objec
         ordered = sorted(records, key=lambda item: (item[1], canonical_row_key(item[0])))
         skip = (lambda knobs: _tile_blocked(knobs, node_blocked)) if node_blocked is not None else None
         for record, price in ordered:
-            if (hit := leaf_for(fp.options, record, skip=skip)) is not None:
+            if (hit := fp.find(record, skip=skip)) is not None:
                 return hit[0], hit[1], float(price)
         return None
 
@@ -1015,7 +1015,7 @@ def greedy_decide(
         dkey = _decision_key(fp, blocked)
         if dkey is not None and dkey in decisions:
             want, price = decisions[dkey]
-            found = _find_decided_leaf(fp.options, want)
+            found = _find_decided_leaf(fp, want)
             if found is not None:
                 fp.score = price
                 return found
@@ -1034,7 +1034,7 @@ def greedy_decide(
             # (``prior=None``): emission order (option-0, first leaf).
             if len(fp.options) > 1:
                 _require_evidence(fp, "no prior loaded; emission order would decide")
-            return next(iter_leaves(fp.options))
+            return next(fp.leaves())
         if dkey is not None and _schedule_fork(fp):
             picked = _direct_measured_pick(fp, blocked, db_index())
             if picked is not None:
@@ -1105,7 +1105,7 @@ def greedy_decide(
         # Reached on: an unpriceable splice, an all-splice fork, a degenerate op side beside
         # splices, or a structural leaf that surfaced mid-stream (outside the top-level
         # construction) — all small-pool corners; the flatten path handles them as before.
-        leaves = flatten_leaves(fp.options if price_structural else (plain or fp.options))
+        leaves = fp.flat() if price_structural or not plain else list(iter_leaves(plain))
         base = {**fp.ctx.features(), **dict(fp.root_op.knobs)}
         # Structural options (Graph splices that change the kernel set): the
         # per-op prior prices ONE kernel's knob row, so its score for a

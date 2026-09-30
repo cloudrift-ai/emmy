@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.pipeline.fork import DeferredFork, Level, build_fork_tree, flatten_leaves, leaf_knobs
+from emmy.compiler.pipeline.fork import DeferredFork, Level, build_fork_tree, leaf_knobs
 from emmy.compiler.pipeline.knob import canonical_row_key
 from emmy.compiler.pipeline.pipeline import NO_OPTION
 from emmy.compiler.pipeline.search.policy import greedy
@@ -253,7 +253,7 @@ def test_streamed_model_pick_equals_flattened_argmin(monkeypatch) -> None:
     leaf, knobs, price, _tier = got
 
     base = {"H_opt": 3.0, "S_shape": 128}
-    flat = [(o, leaf_knobs(o)) for o in flatten_leaves(point.options)]
+    flat = [(o, leaf_knobs(o)) for o in point.flat()]
     rows = [{**base, **k} for _, k in flat]
     scores = _BarePrior().mean_scores(rows)
     best_i = min(range(len(rows)), key=lambda i: (scores[i], canonical_row_key(rows[i])))

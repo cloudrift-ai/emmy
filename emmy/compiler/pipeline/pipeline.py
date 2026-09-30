@@ -27,14 +27,14 @@ import logging
 import re
 import sys
 import time
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from emmy.compiler.graph import Graph, Node
-from emmy.compiler.pipeline.fork import Fork
+from emmy.compiler.pipeline.fork import Fork, iter_leaves, leaf_for
 from emmy.compiler.pipeline.knob import Knob, apply_off_defaults, decision_view, family_of, format_tuning_knobs
 from emmy.compiler.pipeline.strategy import PassEndEvent, RunStartEvent, discovered_strategies
 
@@ -663,6 +663,26 @@ class ForkPoint:
     # (``_is_structural_option``: schedule-product branches contain only ``TileOp`` leaves), so
     # the engine can classify without expanding anything, and consumers read the partition
     # instead of each re-deriving it from the raw list.
+    # The offer's LEAVES. Every consumer that walks, flattens or searches an offer goes through these three, so
+    # the depth-first emission order a score tie falls back to (option-0 first) and the one row-directed descent
+    # have a single home; the ``fork`` module's free functions stay for option sequences that are no fork point
+    # (a rule's forks before they are offered, a filtered sibling list).
+    def leaves(self) -> Iterator:
+        """The offer's complete leaves, depth-first in emission order, streamed without retaining the expanded
+        tree — ``next(fp.leaves())`` is what emission order decides."""
+        return iter_leaves(self.options)
+
+    def flat(self) -> list:
+        """:meth:`leaves` as a list, for the small non-schedule forks whose alternatives are compared together."""
+        return list(self.leaves())
+
+    def find(self, row: Mapping, *, skip: Callable[[dict], bool] | None = None):
+        """The first leaf a (possibly partial) knob ``row`` vouches for, as ``(leaf, its knobs)``, or ``None`` —
+        the one row-directed descent the evidence pick, the decision memo's replay and the golden replay share
+        (:func:`~emmy.compiler.pipeline.fork.leaf_for`: a schedule root is narrowed to the row, so the walk below
+        it is one path). ``skip`` drops a leaf by its knobs (a blocklisted tile)."""
+        return leaf_for(self.options, row, skip=skip)
+
     @cached_property
     def splices(self) -> tuple:
         """The structural (``Graph``-splicing, kernel-set-changing) offers."""

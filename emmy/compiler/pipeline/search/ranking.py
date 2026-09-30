@@ -69,7 +69,7 @@ def enumerate_graph(graph, ctx: Context, *, family: str = "", passes: Sequence[s
     within the space the fit actually ranks. With no sample the rows are every kernel's fork rows
     and ``total`` is ``len(rows)``, so a caller that reports both prints today's numbers unchanged."""
     from emmy.compiler.pipeline import TILE_PASSES, Pipeline  # noqa: PLC0415
-    from emmy.compiler.pipeline.fork import iter_leaves, leaf_knobs  # noqa: PLC0415
+    from emmy.compiler.pipeline.fork import leaf_knobs  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
     from emmy.compiler.pipeline.pipeline import Run  # noqa: PLC0415
     from emmy.compiler.pipeline.search.space import WORK  # noqa: PLC0415
@@ -92,8 +92,8 @@ def enumerate_graph(graph, ctx: Context, *, family: str = "", passes: Sequence[s
             opened = set(sample.totals) - seen_pools
             seen_pools.update(opened)
             if not opened:
-                return _first(fp.options)
-        for leaf in iter_leaves(fp.options):
+                return _first(fp)
+        for leaf in fp.leaves():
             row = leaf_knobs(leaf)
             # A schedule row always spells the kernel-global ``WORK``; a structural arm's knob
             # delta (a cut, the cross-CTA split's g-half or the unsplit receipt) never does — the
@@ -102,13 +102,13 @@ def enumerate_graph(graph, ctx: Context, *, family: str = "", passes: Sequence[s
                 continue
             if any(family_of(k) in wanted for k in row):
                 rows.append(row)
-        return _first(fp.options)
+        return _first(fp)
 
-    def _first(options):
+    def _first(fp):
         # A pin may empty an early lazy branch while leaving a later sibling live. Walk to the
         # first complete leaf across the whole sibling set, matching the resolver's own traversal;
         # only an entirely empty fork means the schedule is not offered.
-        option = next(iter_leaves(options), None)
+        option = next(fp.leaves(), None)
         if option is None:
             from emmy.compiler.pipeline.pipeline import NO_OPTION  # noqa: PLC0415
 
