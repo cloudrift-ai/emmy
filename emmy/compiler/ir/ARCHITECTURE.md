@@ -558,8 +558,8 @@ If an alias's destination is shadowed, the local binding is renamed before subst
 `Body.local_defs` distinguishes bindings at this scope from definitions in deeper scopes; a deeper shadow must not
 hide an available enclosing value. Copy elimination and CSE both use the hygienic rewrite.
 `normalize.dedup_loads` threads its own per-scope environment. σ has the same hazard with axis names, which collide
-across a tree by design (a cone statistic's axis
-may spell the same as the enclosing contraction's): `fold.subst_free(stmt, sigma)` is σ's hygienic form — it stops at
+across a tree by design (a cone statistic's axis may spell the same as the enclosing contraction's):
+`fold.subst_free(stmt, sigma)` is σ's hygienic form — it stops at
 a `Loop` / reducing `Fold` binder that re-binds a substituted name, and is what the smem compute fill substitutes
 cell coordinates through.
 
