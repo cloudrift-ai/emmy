@@ -760,7 +760,7 @@ class _Splicer(LoopBuilder):
                 target_tag, target_output_buf = edge
                 self._resolve_splice_load(stmt, d, target_tag, target_output_buf)
             else:
-                self._resolve_external_load(stmt, d)
+                self._resolve_plain(stmt, d)
         elif isinstance(stmt, Accum):
             if self.expand is not None or (d.origin, d.name) == self.outline:
                 self._resolve_accum(stmt, d)
@@ -784,21 +784,7 @@ class _Splicer(LoopBuilder):
             raise _NotSupported(f"_resolve: unsupported stmt type {type(stmt).__name__} for {d.name!r} in loop {d.origin!r}")
 
     def _resolve_plain(self, stmt: Stmt, d: _Demand) -> None:
-        """Generic Assign / Select emission — rewrite the stmt with fresh args
-        and σ-substituted Exprs, insert at ``d.demand_scope``."""
-        rename = {arg: self._ensure_dep(arg, d.origin, d.sigma, d.demand_scope) for arg in stmt.deps()}
-        rename[stmt.name] = d.bound_as  # type: ignore[attr-defined]
-        self.insert(stmt.rewrite(lambda n: rename.get(n, n), d.sigma), d.demand_scope)
-
-    def _resolve_external_load(self, stmt: Load, d: _Demand) -> None:
-        """A Load that isn't a splice edge — keep its buf name as-is (buf
-        identity is global across kernels), σ-sub the index, emit.
-
-        A data-dependent index (gather ``weight[(int)in0, a]``) reads SSA names
-        via ``Load.deps()``. Resolve each one that names a source-loop def the
-        same way ``_resolve_plain`` resolves an Assign's args, then ``rewrite``
-        renames it inside the index. Axis-name deps aren't in ``meta.defs`` and
-        are left to σ."""
+        """Resolve SSA operands, leaving coordinates to σ, for an ordinary scalar binding."""
         meta = self.loops[d.origin]
         rename = {v: self._ensure_dep(v, d.origin, d.sigma, d.demand_scope) for v in stmt.deps() if v in meta.defs}
         rename[stmt.name] = d.bound_as

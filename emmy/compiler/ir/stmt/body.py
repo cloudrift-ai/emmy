@@ -425,12 +425,18 @@ class Body(tuple[Stmt, ...], Wire):
         return tuple(dict.fromkeys(name for stmt in self.iter_of_type(Accum, Carry) for name in stmt.carried_names()))
 
     @cached_property
+    def local_defs(self) -> frozenset[str]:
+        """Bindings at this scope, including states exported by nested statements."""
+        from emmy.compiler.ir.stmt.order import _ordered_sibling_defs  # noqa: PLC0415
+
+        return frozenset(name for stmt in self for name in _ordered_sibling_defs(stmt))
+
+    @cached_property
     def free_ssa(self) -> frozenset[str]:
         """SSA reads from the enclosing scope, excluding this scope's definitions and exported states."""
-        from emmy.compiler.ir.stmt.order import _free_ssa, _ordered_sibling_defs  # noqa: PLC0415
+        from emmy.compiler.ir.stmt.order import _free_ssa  # noqa: PLC0415
 
-        defined = {name for stmt in self for name in _ordered_sibling_defs(stmt)}
-        return frozenset().union(*(_free_ssa(stmt) for stmt in self)) - defined
+        return frozenset().union(*(_free_ssa(stmt) for stmt in self)) - self.local_defs
 
     @cached_property
     def definitions(self) -> dict[str, Stmt]:

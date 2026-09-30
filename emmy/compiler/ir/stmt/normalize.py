@@ -805,7 +805,7 @@ def dedup_loads(stmts: Body) -> Body:
                 clobbered = frozenset(name for child in stmt.nested() for member in child.iter() for name in member.external_writes())
                 children = []
                 for child in stmt.nested():
-                    shadowed = child.ssa_defs | stmt.binds_axes()
+                    shadowed = child.local_defs | stmt.binds_axes()
                     available = {
                         key: values for key, values in local.items()
                         if not clobbered.intersection(key.external_reads())

@@ -250,6 +250,33 @@ def test_dedup_loads_still_rewires_an_inner_use_of_the_dropped_name() -> None:
     assert out[-1].body == Body((Assign(name="v", op="add", args=("in0", "in0")),))
 
 
+def test_cse_alias_cannot_be_captured_by_its_destination_name() -> None:
+    body = Body((
+        Load(name="a", input="x", index=ZERO),
+        Load(name="b", input="x", index=ZERO),
+        Cond(cond=Var("p"), body=(
+            Load(name="a", input="y", index=ZERO),
+            Assign(name="v", op="subtract", args=("a", "b")),
+            Write(output="out", index=ZERO, value="v"),
+        )),
+    ))
+    out = dedup_loads(body)
+    assert len(out) == 2
+    inner = out[1].body
+    assert inner[0].name != out[0].name
+    assert inner[1].args == (inner[0].name, out[0].name)
+
+
+def test_cse_reuses_dominating_values_in_both_branches() -> None:
+    outer = Load(name="a", input="x", index=ZERO)
+    body = Body((outer, Cond(cond=Var("p"), body=(
+        Load(name="b", input="x", index=ZERO), Write(output="left", index=ZERO, value="b"),
+    ), else_body=(Load(name="c", input="x", index=ZERO), Write(output="right", index=ZERO, value="c")))))
+    out = dedup_loads(body)
+    assert len(out.loads) == 1
+    assert all(child[0].value == "a" for child in out[1].nested())
+
+
 def test_dedup_loads_rewires_every_vector_lane() -> None:
     """A duplicate vector load aliases each lane to the corresponding kept lane."""
     body = Body(
