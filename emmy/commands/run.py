@@ -695,6 +695,7 @@ def _run_golden_targets(args) -> None:
     targets: dict[int, list] = {}
     for record in records:
         targets.setdefault(id(lead_of(record, records)), []).append(record)
+
     def target_name(rows):
         inventory = next((row for row in rows if row.identity is None), None)
         if inventory is not None:
