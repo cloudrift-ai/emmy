@@ -29,12 +29,14 @@ jobs:
           CONFIG__FALLBACK_MODELS: '[]'
           CONFIG__CUSTOM_MODEL_MAX_TOKENS: '128000'
           CONFIG__MAX_MODEL_TOKENS: '128000'
+          CONFIG__PATCH_EXTRA_LINES_BEFORE: '30'
           CONFIG__PROPAGATE_TOOL_ERRORS: 'true'
           CONFIG__RESTRICTED_MODE: 'true'
           PR_REVIEWER__PUBLISH_OUTPUT_NO_SUGGESTIONS: 'false'
           PR_REVIEWER__EXTRA_INSTRUCTIONS: >-
-            Report only actionable defects introduced by this change. Check the trigger against the visible code
-            before posting a finding. Do not publish a concern that your own analysis resolves.
+            Report only actionable defects introduced by this change. Every finding needs a concrete failing path.
+            For a missing import or undefined name, check the surrounding unchanged lines before posting; if that
+            context is unavailable, omit the finding. Do not publish a concern that your own analysis resolves.
           GITHUB__IGNORE_BOT_PR: 'false'
           GITHUB_ACTION_CONFIG__AUTO_REVIEW: 'true'
           GITHUB_ACTION_CONFIG__AUTO_DESCRIBE: 'false'
