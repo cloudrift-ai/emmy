@@ -173,3 +173,11 @@ def test_formal_coordinates_do_not_capture_canonical_axis_names():
     target = _project()
     target = replace(target, axes=(Axis("a0", 3), Axis("a1", 8)), body=Body(s.rename({"row": "a0", "col": "a1"}) for s in target.body))
     assert _body(target, 4).structural_key() == _body(_project(), 4).structural_key()
+
+
+def test_expansion_does_not_capture_free_caller_coordinates():
+    body = Body((Call("result", _project(), (Var("wv_s1"), Literal(0, "int"))),))
+    normalized = normalize_body(body)
+    (load,) = [stmt for stmt in normalized.loads if stmt.input == "x"]
+    assert load.index[0] == Var("wv_s1")
+    assert "wv_s1" not in normalized.ssa_defs

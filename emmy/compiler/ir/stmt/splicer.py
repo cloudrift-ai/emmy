@@ -114,7 +114,8 @@ class Program:
     def used_names(self) -> set[str]:
         return set().union(
             *(
-                set(meta.body.ssa_defs | meta.body.axis_names) | {axis.name for scope in meta.scopes.values() for axis in scope.enclosing}
+                set(meta.body.ssa_defs | meta.body.free_ssa | meta.body.axis_names)
+                | {axis.name for scope in meta.scopes.values() for axis in scope.enclosing}
                 for meta in self.loops.values()
             )
         )
