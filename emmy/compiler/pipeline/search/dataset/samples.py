@@ -1,12 +1,10 @@
-"""``Samples`` — a queryable read-view over a bag of :class:`Sample`s, with one
-adapter per measurement-data source (a DB instance's ``perf`` rows / the online-prior
-reservoir) and the two grouping axes the consumers need.
+"""``Samples`` — a queryable read-view over a bag of :class:`Sample`s, built from a DB instance's
+``perf`` rows, with the two grouping axes the consumers need.
 
 The two groupings are deliberately distinct and do **not** collapse:
 
 - :meth:`group_by_op` keys on the full ``S_*`` structural signature — two different
-  shapes are different groups. The golden joins in ``prior/diagnostics.py`` index on it.
-  It is deliberately NOT a comparison key: it carries no card and no ``H_opt``, so rows
+  shapes are different groups. It is deliberately NOT a comparison key: it carries no card and no ``H_opt``, so rows
   measured on different hardware or under different nvcc settings land in one group.
   Anything ranking measured latencies wants ``db/export.measured_groups`` instead.
 - :meth:`group_by_kernel_name` keys on the kernel C identifier (the ``kernel`` row's
@@ -49,18 +47,11 @@ class Samples:
             samples = [s for s in samples if s.name and kernel in s.name]
         return cls(samples)
 
-    @classmethod
-    def from_prior(cls, prior) -> Samples:
-        """The online prior's bounded reservoir as samples. Works through
-        ``FallbackPrior`` (it delegates ``_dataset`` to the online half)."""
-        return cls([Sample.from_prior_row(k, v) for k, v in prior._dataset])
-
     # --- grouping ----------------------------------------------------------
 
     def group_by_op(self) -> dict[tuple, list[Sample]]:
-        """Group by the full ``S_*`` structural signature (sorted items) — the key
-        the prior diagnostics group on, so structurally-distinct same-extent ops
-        stay separate."""
+        """Group by the full ``S_*`` structural signature (sorted items), so structurally-distinct
+        same-extent ops stay separate."""
         g: dict[tuple, list[Sample]] = defaultdict(list)
         for s in self.samples:
             g[tuple(sorted(s.s_features().items()))].append(s)
@@ -68,7 +59,7 @@ class Samples:
 
     def group_by_kernel_name(self, *, min_variants: int = 1, kernel: str | None = None) -> dict[str, list[Sample]]:
         """Group by kernel C identifier (the ``kernel`` row's name), dropping samples with
-        no name (golden / prior rows) and groups below ``min_variants``."""
+        no name (golden rows) and groups below ``min_variants``."""
         g: dict[str, list[Sample]] = defaultdict(list)
         for s in self.samples:
             if s.name is None or (kernel and kernel not in s.name):

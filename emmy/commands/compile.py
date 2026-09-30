@@ -157,7 +157,7 @@ def add_golden_arg(parser) -> None:
         "--strict-evidence",
         action="store_true",
         help=(
-            "Fail instead of deploying a prediction: every fork must be decided by a measured row (reservoir, tune DB "
+            "Fail instead of deploying a prediction: every fork must be decided by a measured row (tune DB "
             "or golden). A kernel nothing measured raises EvidenceError naming it."
         ),
     )

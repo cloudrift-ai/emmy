@@ -1,8 +1,7 @@
 """``Sample`` — one measured-or-recorded ``(config, latency, identity)`` row,
-the common currency over all three measurement-data sources.
+the common currency over both measurement-data sources.
 
-A golden config, a tune-DB ``perf`` row, and a online-prior reservoir row are all
-the same thing once normalized: a tunable-knob dict, a measured latency, a
+A golden config and a tune-DB ``perf`` row are the same thing once normalized: a tunable-knob dict, a measured latency, a
 structural identity, and (for golden) a reference latency. ``Sample`` is that
 normal form. The split into ``knobs`` (tunable) / ``context`` (``H_*``) /
 ``s_features`` (``S_*``) is by key prefix and therefore lossless — :meth:`all_knobs`
@@ -10,9 +9,8 @@ re-merges them to the exact original dict, and :meth:`features` runs the single
 featurizer (:func:`features.knob_features`) on that merge, so a ``Sample`` reproduces
 the feature vector each source built inline today.
 
-Featurization fidelity (the load-bearing invariant): a trained ``OnlinePrior``
-regresses on the full ``S_*`` histogram stamped by
-the ``IdentityStrategy``. DB / prior rows carry that histogram inline;
+Featurization fidelity (the load-bearing invariant): the prior scores the full ``S_*``
+histogram stamped by the ``IdentityStrategy``. DB rows carry that histogram inline;
 golden rows derive it by lowering their embedded frontend program and selecting
 the target through provenance. Neither the histogram nor ``ShapeKey`` is part of
 the stable golden format.
@@ -63,7 +61,7 @@ class Sample:
     empty for measurement rows from other sources. ``shape`` is the arithmetic
     identity; ``ref_us`` is the cuBLAS / torch reference (golden only, ``None``
     elsewhere); ``name`` carries the kernel C identifier for DB rows.
-    ``source`` ∈ ``{"golden", "db", "prior"}`` marks provenance for the
+    ``source`` ∈ ``{"golden", "db"}`` marks provenance for the
     orthogonality fail-fast (``dataset_args.require_source``)."""
 
     knobs: dict
@@ -136,11 +134,3 @@ class Sample:
         ``None`` when the caller has none)."""
         tunable, ctx, s = _split_by_prefix(row.knobs)
         return cls(knobs=tunable, latency_us=row.stats.median, name=name, context=ctx, source="db", s_full=s, error=row.error)
-
-    @classmethod
-    def from_prior_row(cls, knobs: dict, latency_us: float) -> Sample:
-        """A online-prior reservoir row ``(stamped_knobs, latency)`` as a ``Sample``.
-        The reservoir dicts already carry ``S_*`` / ``H_*`` inline (stamped by the
-        live pipeline), so the split + re-merge is lossless for grouping / scoring."""
-        tunable, ctx, s = _split_by_prefix(knobs)
-        return cls(knobs=tunable, latency_us=latency_us, context=ctx, source="prior", s_full=s)

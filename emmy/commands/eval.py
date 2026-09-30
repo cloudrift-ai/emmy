@@ -6,8 +6,7 @@ Five subcommands:
   per-knob **regret** + a knob-interaction matrix (the analysis below).
 - ``eval prior``     — how well the prior RANKS, over a dataset ``emmy db export`` wrote: its golden
   pools (``--pools golden``: the golden-rank screen, plus the greedy pipeline pick vs golden) or its
-  measured pools (``--pools measured``: Spearman + regret, what a wrong pick costs). BOTH prior halves
-  are reported, labelled — they fail for different reasons.
+  measured pools (``--pools measured``: Spearman + regret, what a wrong pick costs).
   The summaries are assembled by ``search/prior/report.py`` and rendered here; ``emmy fit``
   writes the same summaries into its ``metrics.json``, so a fit and an eval state the golden
   screen with one implementation rather than two that agree by coincidence.
@@ -55,7 +54,7 @@ from statistics import median
 from emmy import storage
 from emmy.commands.compile import resolve_tune_db
 from emmy.commands.db import read_samples
-from emmy.commands.eval_args import add_dataset_args, add_db_args, resolve_offline_arg, resolve_online_arg
+from emmy.commands.eval_args import add_dataset_args, add_db_args, resolve_offline_arg
 from emmy.commands.table import GREEN as _GREEN
 from emmy.commands.table import RED as _RED
 from emmy.commands.table import YELLOW as _YELLOW
@@ -91,20 +90,13 @@ def register_eval_command(subparsers) -> None:
 
     pp = sub.add_parser(
         "prior",
-        help="Report how well each prior half ranks the pools of an exported dataset — golden (default) or measured",
-    )
-    pp.add_argument(
-        "--online-file",
-        "--prior",  # pre-rename spelling
-        dest="online_file",
-        help="Path to the online-prior JSON to load. Default: EMMY_ONLINE_FILE or ~/.cache/emmy/online.json. "
-        "(`emmy tune` writes this file; it is NOT the tune DB.)",
+        help="Report how well the prior ranks the pools of an exported dataset — golden (default) or measured",
     )
     pp.add_argument(
         "--offline-file",
         "--analytic-file",  # pre-rename spelling
         dest="offline_file",
-        help="Offline weights artifact (JSON) to score the offline half with, for A/Bing candidate fits. "
+        help="Offline weights artifact (JSON) to score with, for A/Bing candidate fits. "
         "Default: EMMY_OFFLINE_FILE or the repo-checked prior/weights/offline.json.",
     )
     add_dataset_args(pp)
@@ -132,12 +124,6 @@ def register_eval_command(subparsers) -> None:
     pv = sub.add_parser(
         "variants",
         help="Per-kernel leaderboard of the tune DB's measured variants, with the prior's deployed pick marked and ranked",
-    )
-    pv.add_argument(
-        "--online-file",
-        "--prior",  # pre-rename spelling
-        dest="online_file",
-        help="Online-prior JSON to load (default: EMMY_ONLINE_FILE or ~/.cache/emmy/online.json).",
     )
     add_db_args(pv)
     pv.add_argument(
@@ -202,22 +188,10 @@ def _check_offline_artifact() -> None:
 
 
 def _prior_halves():
-    """The two halves the report labels, in the order a failure is diagnosed in: the offline half decides what a
-    cold sweep measures at all, so its ranking is upstream of everything the online half ever sees.
+    """The priors the report labels — one today, the offline model."""
+    from emmy.compiler.pipeline.search.prior import OfflinePrior  # noqa: PLC0415
 
-    An unfitted online half is dropped with a line saying so rather than reported. It would score every row the
-    same constant, which reads as a model with no ranking ability — indistinguishable in a table from a trained
-    model that collapsed, which is a real and different failure."""
-    from emmy import config  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.prior import OfflinePrior, OnlinePrior  # noqa: PLC0415
-
-    halves = [("offline", OfflinePrior())]
-    online = OnlinePrior.load()
-    if online.fitted:
-        halves.append(("online", online))
-    else:
-        logger.info("No fitted online prior at %s — reporting the offline half only (run `emmy tune`).", config.online_path())
-    return halves
+    return [("offline", OfflinePrior())]
 
 
 def _measured_report(args, halves, dataset, source: str):
@@ -257,8 +231,8 @@ def _golden_report(args, halves, dataset, source: str):
     """``eval prior --pools golden`` — the report over the dataset's golden pools: the rows the golden files record,
     each ranked among the candidates its kernel offers — the groups ``emmy fit`` trains on, over the FULL
     featurization rather than the fit's ``D_*`` view. The view is a property of the model being fitted, and this
-    command scores two model classes: the linear half reads only its own weight names, so its ranks are identical
-    either way, while the online half regresses on the ``S_*`` / ``H_*`` columns a narrow view drops and would
+    command scores the model class the artifact names: the linear model reads only its own weight names, so its
+    ranks are identical either way, while a tree model reads the ``S_*`` / ``H_*`` columns a narrow view drops and would
     otherwise be asked about a kernel with no shape. ``--kernel`` keeps the pools whose kernel's C name contains it
     — a view; each retained pool's rank is unchanged by it."""
     from emmy.compiler.pipeline.search.prior.report import EvalReport, golden_summaries  # noqa: PLC0415
@@ -278,7 +252,7 @@ def _golden_report(args, halves, dataset, source: str):
 
 
 def handle_eval_prior(args) -> None:
-    """``eval prior`` — how well each prior half ranks a candidate pool, over a dataset ``emmy db export`` wrote.
+    """``eval prior`` — how well the prior ranks a candidate pool, over a dataset ``emmy db export`` wrote.
 
     Two kinds of pool, two different questions, one report schema (see ``search/prior/report.py``): benched pools
     say what a wrong pick COST, golden pools only say where the known-good row landed. ``--pools golden``
@@ -286,7 +260,6 @@ def handle_eval_prior(args) -> None:
     rows, with the deployable -O3 latency of the prior's pick beside it."""
     from emmy.compiler.pipeline.search.dataset import Dataset  # noqa: PLC0415
 
-    resolve_online_arg(args)
     resolve_offline_arg(args)
     _check_offline_artifact()
     halves = _prior_halves()
@@ -390,28 +363,23 @@ def _emit_report(report) -> None:
 
 def _emit_golden_deploy_check(args, pools: list) -> None:
     """The deploy-faithful half of ``eval prior --pools golden``: the greedy tile-lowering pick vs the golden
-    rows, per matmul pool of the **live** card (every card's when none is visible), with the deployable (-O3)
-    latency of the prior's pick read from the online reservoir where one exists. This is what the golden RANK is
-    only a screen for — a rank says where the verified row sat in the enumeration, this says what actually gets
-    compiled. Scoping to the live GPU keeps the view about the card in hand: the reservoir join is by the
-    GPU-blind ``ShapeKey``, and two cards' pools of one shape would otherwise mix (RTX 5090 / RTX PRO 6000 even
-    share ``compute_cap``).
+    rows, per matmul pool of the **live** card (every card's when none is visible). This is what the golden RANK
+    is only a screen for — a rank says where the verified row sat in the enumeration, this says what actually
+    gets compiled. Scoping to the live GPU keeps the view about the card in hand: two cards' pools of one shape
+    would otherwise mix (RTX 5090 / RTX PRO 6000 even share ``compute_cap``).
 
-    The pick reads the online-prior JSON (``config.online_path()``: ``EMMY_ONLINE_FILE`` / ``--prior``);
-    option-0 with no fitted prior. Stops at the tile dialect (every knob fork resolves there: no codegen /
+    Stops at the tile dialect (every knob fork resolves there: no codegen /
     nvcc). One row per pool — the kernel's definition at the pool's sizes, under the regime's pins alone: the
     pick is scored against the pool's *closest* golden row (most knobs reproduced), so several goldens on one
     pool don't duplicate rows. A trailing ``TOTAL`` row carries per-knob match counts over the rows + the
     exactly-reproduced row count. Rows print with column-aligned ``found/golden`` knobs (canonical order)."""
     import logging as _logging  # noqa: PLC0415
 
-    from emmy import config  # noqa: PLC0415
     from emmy.compiler.pipeline import TILE_LOWERING, Pipeline  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import METADATA_PREFIXES  # noqa: PLC0415
     from emmy.compiler.pipeline.search.dataset import is_matmul  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden.repository import live_gpu_key  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import pinned_knobs, unpinned_decisions  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.prior import OnlinePrior, diagnostics  # noqa: PLC0415
 
     pools = [p for p in pools if p.kernel.formed and is_matmul(p.kernel.stamps) and (not args.kernel or args.kernel in p.kernel.name)]
     if (live := live_gpu_key()) is not None:
@@ -419,10 +387,6 @@ def _emit_golden_deploy_check(args, pools: list) -> None:
         pools = [p for p in pools if (p.gpu, p.cap) == live] or pools
     if args.features:
         _emit_golden_features(pools)
-    prior = OnlinePrior.load()
-    # Deployable (-O3) perf of the prior's pick vs golden, read from the reservoir (no
-    # re-bench); empty when there's no tuned -O3 data (column shows '—').
-    perf = diagnostics.golden_deploy_perf(prior, pools) if prior.fitted else {}
 
     def tunable(knobs: dict) -> dict:
         return {k: v for k, v in knobs.items() if not k.startswith(METADATA_PREFIXES)}
@@ -437,13 +401,8 @@ def _emit_golden_deploy_check(args, pools: list) -> None:
                 knobs.update(k)
         return _bare_families(tunable(knobs))
 
-    online_path = config.online_path()
     logger.info("")
-    logger.info(
-        "Golden reproduction — greedy pipeline pick vs the golden rows; prior: %s (%s):",
-        online_path,
-        "loaded" if online_path.exists() else "MISSING → option-0",
-    )
+    logger.info("Golden reproduction — greedy pipeline pick vs the golden rows:")
     # Silence the compile chatter so this function's own ``logger`` can stream one clean result line per pool.
     quiet = _logging.getLogger("emmy.compiler")
     prev = quiet.level
@@ -469,27 +428,16 @@ def _emit_golden_deploy_check(args, pools: list) -> None:
             for k in gold:
                 knob_total[k] = knob_total.get(k, 0) + 1
                 knob_match[k] = knob_match.get(k, 0) + _knob_eq(k, gold[k], got)
-            lead = [
-                label,
-                (f"{matched}/{len(gold)}", _ratio_color(matched, len(gold))),
-                _perf_cell(perf, (pool.gpu, pool.name, pool.regime)),
-            ]
+            lead = [label, (f"{matched}/{len(gold)}", _ratio_color(matched, len(gold)))]
             entries.append(("row", lead, gold, got))
     finally:
         quiet.setLevel(prev)
     # Totals row (replaces a trailing summary line): per-knob match counts over the rows, plus the
-    # exactly-reproduced row count in the m/t column and the geometric mean of the perf ratios.
+    # exactly-reproduced row count in the m/t column.
     total_cells = {k: (f"{knob_match[k]}/{knob_total[k]}", knob_match[k] != knob_total[k]) for k in knob_total}
     total_lead = ["TOTAL", (f"{n_match}/{n_rows}", _ratio_color(n_match, n_rows))]
-    if perf:
-        import statistics  # noqa: PLC0415
-
-        geo = statistics.geometric_mean(perf.values())
-        total_lead.append((f"{geo:.2f}x", _perf_color(geo)))
-    else:
-        total_lead.append(("—", ""))
     entries.append(("total", total_lead, total_cells))
-    _emit_golden_table([Col("kernel"), Col("m/t"), Col("vs gold", "r")], entries, "knobs (found/golden)")
+    _emit_golden_table([Col("kernel"), Col("m/t")], entries, "knobs (found/golden)")
 
 
 def handle_eval_golden(args) -> None:
@@ -604,23 +552,18 @@ def handle_eval_variants(args) -> None:
     deploy marked + ranked. The per-kernel "did the
     search/prior reach the best measured config, and which knobs distinguish
     it?" drill-down view."""
-    resolve_online_arg(args)
-    from emmy import config  # noqa: PLC0415
     from emmy.compiler.pipeline.search.prior import load_prior  # noqa: PLC0415
 
     db_path = Path(args.db) if args.db else resolve_tune_db()
     if not db_path.exists():
-        logger.error("no tune DB at %s — pass --db or run `emmy tune` first.", db_path)
+        logger.error("no tune DB at %s — pass --db or record one with `emmy run --bench` first.", db_path)
         return
     groups = read_samples(db_path, kernel=args.kernel).group_by_kernel_name()
     if not groups:
         logger.info("No measured variants%s in %s.", f" matching --kernel '{args.kernel}'" if args.kernel else "", db_path)
         return
     fails = Counter(s.name for s in read_samples(db_path, kernel=args.kernel, status="bench_fail") if s.name)
-    # FallbackPrior: the online CatBoost when fitted, else the cold OfflinePrior — the same ranking compile/run use.
-    prior = load_prior()
-    if not prior.fitted:
-        logger.info("No fitted prior at %s — the pick is the cold OfflinePrior's (the ranking compile/run use).", config.online_path())
+    prior = load_prior()  # the same ranking compile/run use
     for name in sorted(groups):
         _emit_variant_table(name, groups[name], prior, n_fail=fails.get(name, 0), top=args.top)
 
@@ -633,7 +576,7 @@ def handle_eval_failures(args) -> None:
     pre-error-column DBs cluster under ``(no error recorded)``."""
     db_path = Path(args.db) if args.db else resolve_tune_db()
     if not db_path.exists():
-        logger.error("no tune DB at %s — pass --db or run `emmy tune` first.", db_path)
+        logger.error("no tune DB at %s — pass --db or record one with `emmy run --bench` first.", db_path)
         return
     fails = [s for s in read_samples(db_path, kernel=args.kernel, status="bench_fail") if s.name]
     n_ok = len(read_samples(db_path, kernel=args.kernel))
@@ -783,8 +726,8 @@ def _emit_golden_table(lead_cols: list[Col], entries: list[tuple], caption: str)
 
 
 def _emit_golden_features(pools: list) -> None:
-    """Print, per golden row of the pools, the exact feature vector the online :class:`OnlinePrior`
-    regresses on — ``features.knob_features(merged)`` where ``merged`` is the ``H_*`` host/regime features of
+    """Print, per golden row of the pools, the exact feature vector the prior scores —
+    ``features.knob_features(merged)`` where ``merged`` is the ``H_*`` host/regime features of
     the pool's card, the kernel's ``S_*`` stamps as the DB holds them, and the row's tuning knobs. This is the
     model's *input* for that shape+config — note the shape enters only as the coarse ``S_ext_*`` extent
     products/maxes; the occupancy / CTA-count / reuse terms that drive matmul perf (the engineered ``D_*``
@@ -794,7 +737,7 @@ def _emit_golden_features(pools: list) -> None:
     from emmy.compiler.pipeline.search.ranking import pool_context  # noqa: PLC0415
 
     logger.info("")
-    logger.info("Online-prior feature vector (features.knob_features) — the CatBoost regressor's input per golden row:")
+    logger.info("Prior feature vector (features.knob_features) per golden row:")
     for pool in pools:
         base = {**pool_context(pool).features(), **pool.kernel.stamps}
         for row in pool.schedule_rows():
@@ -812,26 +755,6 @@ def _emit_golden_features(pools: list) -> None:
 
 def _mean(xs: list[float]) -> float:
     return sum(xs) / len(xs) if xs else 0.0
-
-
-def _perf_color(ratio: float) -> str:
-    """``vs gold`` colour: green = pick beats golden by >3%, **default (no colour)**
-    within 3% (the expected outcome — shouldn't stand out), yellow = up to 20% slower,
-    red = worse."""
-    if ratio < 0.97:
-        return _GREEN
-    if ratio <= 1.03:
-        return ""
-    return _YELLOW if ratio <= 1.2 else _RED
-
-
-def _perf_cell(perf: dict, key) -> tuple[str, str]:
-    """The ``vs gold`` lead summary for one pool: ``pick_us/golden_us`` as ``N.NNx`` (green >3% faster, white
-    within 3%, yellow/red slower), ``—`` when the pool has no -O3 measurement."""
-    ratio = perf.get(key)
-    if ratio is None:
-        return ("—", "")
-    return (f"{ratio:.2f}x", _perf_color(ratio))
 
 
 def _bare_families(knobs: dict) -> dict:

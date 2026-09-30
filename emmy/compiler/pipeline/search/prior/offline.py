@@ -1,14 +1,11 @@
 """Offline prior — a stateless, fit-offline :class:`Prior` over ``features.knob_features``.
 
-This is the *untrained* prior: the cold-start ranking the search uses before any tuning data exists. There is a
-SINGLE ranking path — a config is scored by a ``Prior`` (this one cold, ``OnlinePrior`` once trained), composed
-behind :class:`~emmy.compiler.pipeline.search.prior.fallback.FallbackPrior`.
+The ONE ranking model a compile consults where nothing measured decides a fork, fit by ``emmy fit`` from the
+dataset's golden groups and shipped with the repo.
 
-``mean_score`` returns a positive latency *proxy* (``exp(-scale · quality)``), **lower is better** — matching
-``OnlinePrior``'s polarity. The proxy is not calibrated µs; only its ordering matters (greedy argmin, and the
-sibling-relative ``Prior.policy`` PUCT consumes). Its magnitude may span ``e**±700``, so a consumer needing a
-bounded quantity derives one — which is why ``policy`` normalizes within a sibling set rather than using the raw
-value.
+``mean_score`` returns a positive latency *proxy* (``exp(-scale · quality)``), **lower is better**. The proxy is
+not calibrated µs; only its ordering matters (the greedy argmin). Its magnitude may span ``e**±700``, so a
+consumer needing a bounded quantity derives one.
 
 **Two model classes, one adapter.** The scoring itself lives in a model value object: :mod:`.linear_model` (fixed
 weights over the ``D_*`` geometry/occupancy features, plus one fitted non-linear interaction and a second weight
@@ -102,9 +99,8 @@ class OfflinePrior(Prior):
 
     An adapter, not a model: the scoring is a :class:`LinearModel` or a
     :class:`~emmy.compiler.pipeline.search.prior.catboost_model.CatBoostModel` (whichever the artifact's ``kind``
-    names — the same definition the fitter optimizes), and this class adds what ``Prior`` needs around it —
-    knob-dict featurization plus the training surface (``fit`` / ``add_rows`` / ``maybe_refit`` / ``to_json``),
-    which are no-ops here (it has nothing to learn) so it composes cleanly under :class:`FallbackPrior`.
+    names — the same definition the fitter optimizes), and this class adds what ``Prior`` needs around it:
+    knob-dict featurization.
     Two ways to construct, and they do not mix: pass a ready ``model``, or let it resolve from the weights
     artifact (``config.offline_path()`` override → the repo-checked default). The per-field kwargs are
     LINEAR-ONLY and win over the file field by field; passing one against a non-linear artifact raises, exactly
@@ -121,7 +117,6 @@ class OfflinePrior(Prior):
         atomic_free_split_threshold: float | None = None,
         atomic_free_weight: float | None = None,
     ) -> None:
-        super().__init__()
         # Keyed by LinearModel's own field names, which is what lets the merge below be a ``replace``.
         overrides = {
             "weights": weights,
@@ -164,18 +159,6 @@ class OfflinePrior(Prior):
     def fitted(self) -> bool:
         return True
 
-    def fit(self) -> None:  # nothing to learn
-        return None
-
-    def add_rows(self, rows) -> None:  # noqa: ARG002 — stateless, ignores observations
-        return None
-
-    def maybe_refit(self, *, force: bool = False) -> bool:  # noqa: ARG002
-        return False
-
-    def to_json(self) -> dict | None:  # not persisted
-        return None
-
     def mean_score(self, knobs: dict) -> float:
         """Latency proxy (``exp(-scale · quality)``), lower is better. Under the linear model a config the
         weights have no opinion on (no ``D_*`` features — e.g. a non-tiled kernel) scores the neutral ``1.0``,
@@ -213,3 +196,8 @@ class OfflinePrior(Prior):
         in, so a golden's rank under a fitted artifact and under this deployed prior are the same number by
         construction rather than by two paths agreeing."""
         return self._model.score_rows(group)
+
+
+def load_prior() -> OfflinePrior:
+    """The one prior a compile ranks with — the offline model the weights artifact names."""
+    return OfflinePrior()

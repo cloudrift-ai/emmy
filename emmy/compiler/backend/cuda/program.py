@@ -1080,11 +1080,10 @@ class _AsyncBenchWorker:
 
     Drives the ``_bench_worker`` protocol (``<8-byte LE length><pickle>``, both
     directions) over asyncio streams, so one event loop can keep N device-pinned
-    workers benching concurrently — the per-kernel multi-GPU autotune path
-    (``two_level.TwoLevelStrategy``). The deployable ``--bench`` comparison awaits
+    workers benching concurrently. The deployable ``--bench`` comparison awaits
     ``benchmark_compare_isolated_async`` over a one-shot instance (via
-    ``_run_job_oneshot``); the autotune sweep awaits a persistent instance per GPU
-    directly via ``benchmark_program_isolated_async``.
+    ``_run_job_oneshot``); a persistent instance per GPU is awaited directly via
+    ``benchmark_program_isolated_async``.
 
     Pin a worker to a physical GPU with ``device_id``: the spawn env gets
     ``CUDA_VISIBLE_DEVICES=<id>`` (so the child's logical device 0 *is* that

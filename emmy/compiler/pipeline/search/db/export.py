@@ -63,7 +63,7 @@ def measured_groups(rows) -> tuple[list[MeasuredGroup], dict[str, int]]:
 
     - **The kernel's own structural signature** (:func:`kernel_sig`). Two kernels of the same structure
       on the same card are ONE tuning problem whatever produced them — which is already how the deploy
-      path joins evidence (``Prior.evidence_pick`` and ``policy/greedy._db_measured_pick`` both index on
+      path joins evidence (``policy/greedy._db_measured_pick`` indexes on
       the ``S_*`` signature), so this makes the candidate pools agree with the tier that consumes them.
       Keying on where a decision was OFFERED instead gets it wrong in both directions: a site realized
       as several kernels files a piece beside the whole (the RTX 5090 freeze once paired a 5.9 µs norm

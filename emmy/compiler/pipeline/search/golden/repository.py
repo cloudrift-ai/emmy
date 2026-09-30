@@ -6,7 +6,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import tempfile
 from collections.abc import Sequence
 from contextlib import contextmanager
 from functools import cache
@@ -99,19 +98,13 @@ def records_override(records: list[GoldenRecord] | None):
 @contextmanager
 def sole_evidence(records: list[GoldenRecord]):
     """``records`` as a compile's ONLY evidence, strictly: the golden scope is these rows
-    (:func:`records_override`), the machine-local online prior and its reservoir are out of the
-    way (``EMMY_ONLINE_FILE`` at a nonexistent path) and strict evidence is on, so a fork none of
-    the rows decides is an ``EvidenceError`` naming the kernel instead of a prediction; a
-    ``Pipeline.run`` given no ``db`` consults no tune DB either. The release gate (``eval golden
-    --serving-config``) and the realization corpus ask their question inside this, which is what
-    makes the answer the same on every machine that holds the same rows."""
-    with tempfile.TemporaryDirectory(prefix="emmy-evidence-") as tmp:
-        with (
-            records_override(records),
-            config.online_file_override(Path(tmp) / "absent-online.json"),
-            config.strict_evidence_override(True),
-        ):
-            yield
+    (:func:`records_override`) and strict evidence is on, so a fork none of the rows decides is an
+    ``EvidenceError`` naming the kernel instead of a prediction; a ``Pipeline.run`` given no ``db``
+    consults no tune DB either. The release gate (``eval golden --serving-config``) and the
+    realization corpus ask their question inside this, which is what makes the answer the same on
+    every machine that holds the same rows."""
+    with records_override(records), config.strict_evidence_override(True):
+        yield
 
 
 def scope_explicit() -> bool:

@@ -172,12 +172,11 @@ class Context:
     # Whether the strict knob-pin validator (``tile/_validate``)
     # is active. ``True`` on the deterministic greedy compile (``compile`` / ``run``),
     # where a force-pinned env knob foreign to the kernel's resolved tier is a user
-    # error that should fail loudly instead of silently mis-compiling. ``False`` under
-    # the tune SEARCH (``Run.drive`` flips it): the search legitimately explores
-    # tier-foreign forks and steers heterogeneous multi-op graphs with a UNION pin
-    # vector (warp ``WM``/``WN`` + scalar ``BM``/``BN`` together — each op takes its
-    # tier's subset), so a per-op contradiction is a pruned branch, not an error. NOT
-    # in ``structural_key`` (it changes no codegen, only whether a contradiction raises).
+    # error that should fail loudly instead of silently mis-compiling. ``False`` for a
+    # caller that steers heterogeneous multi-op graphs with a UNION pin vector (warp
+    # ``WM``/``WN`` + scalar ``BM``/``BN`` together — each op takes its tier's subset),
+    # so a per-op contradiction is a pruned branch, not an error. NOT in
+    # ``structural_key`` (it changes no codegen, only whether a contradiction raises).
     validate_pins: bool = True
     # The candidate-pool sample this compile enumerates under, or ``None`` for a LIVE compile,
     # which always sees the whole pool. Set by the offline dataset builders (``emmy fit``), never

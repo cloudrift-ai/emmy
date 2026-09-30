@@ -35,6 +35,7 @@ from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, LOWERING_PASSES, Pipeline
 from emmy.compiler.pipeline.knob import family_of
 from emmy.compiler.pipeline.pipeline import Run, _is_structural_option
+from emmy.compiler.pipeline.search.bench_record import persist_kernel_perf, point_stats
 from emmy.compiler.pipeline.search.db import SearchDB, is_placement_knob
 from emmy.compiler.pipeline.search.db.freeze import is_lfs_pointer
 from emmy.compiler.pipeline.search.pins import (
@@ -46,7 +47,6 @@ from emmy.compiler.pipeline.search.pins import (
     tracking_place_keys,
     unpinned_decisions,
 )
-from emmy.compiler.pipeline.search.policy.terminal_bench import persist_kernel_perf, point_stats
 from emmy.compiler.wire import kernel_tile
 
 from .decode import _set_key, piece_row
@@ -73,7 +73,7 @@ def import_goldens(
     slice (the default), the lowering passes alone for a freeze's kernel body, which the Loop passes would
     normalize into another kernel."""
     # the strategy package imports this module's evidence_db: a real cycle, so the import stays local
-    from emmy.compiler.pipeline.search.strategy.two_level import KernelInventory, record_routing  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.inventory import KernelInventory, record_routing  # noqa: PLC0415
 
     counts: Counter[str] = Counter()
     consumed: set[str] = set()  # the deploy identities of the kernels a decision replaced: they ran as no kernel

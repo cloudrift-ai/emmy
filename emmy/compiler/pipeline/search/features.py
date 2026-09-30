@@ -1,4 +1,4 @@
-"""The online-prior featurizers — every knob-dict → feature-vector encoding, in one file.
+"""The prior featurizers — every knob-dict → feature-vector encoding, in one file.
 
 :func:`knob_features` is the single featurizer over a whole knob dict (the ``D_*`` engineered
 geometry / occupancy family, the ``MMA_*`` atom expansion, the ``S_*`` / ``H_*`` pass-throughs);

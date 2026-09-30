@@ -33,7 +33,6 @@ from pathlib import Path
 
 PREFIX = "EMMY_"
 TUNE_DB = "EMMY_TUNE_DB"
-ONLINE_FILE = "EMMY_ONLINE_FILE"
 OFFLINE_FILE = "EMMY_OFFLINE_FILE"
 GOLDEN_FILE = "EMMY_GOLDEN_FILE"
 STRICT_EVIDENCE = "EMMY_STRICT_EVIDENCE"
@@ -41,10 +40,6 @@ NVCC_FLAGS = "EMMY_NVCC_FLAGS"
 DEBUG = "EMMY_DEBUG"
 DUMP_DIR = "EMMY_DUMP_DIR"
 KNOBS = "EMMY_KNOBS"
-TUNE_PATIENCE = "EMMY_TUNE_PATIENCE"
-TUNE_EPS = "EMMY_TUNE_EPS"
-OFFLINE_TILT = "EMMY_OFFLINE_TILT"
-PRIOR_BLEND = "EMMY_PRIOR_BLEND"
 BENCH_BACKENDS = "EMMY_BENCH_BACKENDS"
 CUBIN_CACHE = "EMMY_CUBIN_CACHE"
 PACK_DIR = "EMMY_PACK_DIR"
@@ -175,39 +170,6 @@ def tune_db_path() -> Path:
     return Path(override) if override else _CACHE_ROOT / "autotune.db"
 
 
-def online_path() -> Path:
-    """Online-prior checkpoint file: ``EMMY_ONLINE_FILE`` →
-    ``~/.cache/emmy/online.json``. A single JSON file (not
-    the tune DB) holding the one global prior; ``tune`` writes it, ``compile`` /
-    ``run`` read it."""
-    override = os.environ.get(ONLINE_FILE)
-    if override:
-        return Path(override)
-    return _CACHE_ROOT / "online.json"
-
-
-@contextmanager
-def online_file_override(path: str | Path | None):
-    """Temporarily point ``EMMY_ONLINE_FILE`` at ``path`` (``None`` is a no-op).
-
-    ``search.golden.sole_evidence`` (the release gate and the realization corpus) uses this with a
-    nonexistent path so a compile's evidence hierarchy sees NO machine-local online prior /
-    reservoir — the golden rows in scope are the only evidence, which is what makes their
-    strict-evidence verdict machine-independent."""
-    if path is None:
-        yield
-        return
-    prev = os.environ.get(ONLINE_FILE)
-    os.environ[ONLINE_FILE] = str(path)
-    try:
-        yield
-    finally:
-        if prev is None:
-            os.environ.pop(ONLINE_FILE, None)
-        else:
-            os.environ[ONLINE_FILE] = prev
-
-
 def golden_scope() -> str | None:
     """The golden evidence scope ``EMMY_GOLDEN_FILE`` names: ``None`` when unset (the repository's
     per-card goldens), a path (that file's measured rows instead), or ``""`` — set but empty — for
@@ -244,7 +206,7 @@ def golden_file_override(path: str | Path | None):
 
 def strict_evidence() -> bool:
     """``EMMY_STRICT_EVIDENCE`` — whether a compile may decide a fork by the prior at all. On,
-    a kernel with no measured evidence (reservoir, tune DB or golden row) for one of its forks
+    a kernel with no measured evidence (tune DB or golden row) for one of its forks
     fails the compile with ``EvidenceError`` instead of deploying a prediction. ``run`` /
     ``compile`` / ``serve`` set it from ``--strict-evidence``; the vLLM child inherits it."""
     return _bool(STRICT_EVIDENCE)
@@ -334,48 +296,6 @@ def dump_dir() -> Path | None:
     """``EMMY_DUMP_DIR`` as an expanded ``Path``, or ``None`` when unset."""
     raw = os.environ.get(DUMP_DIR)
     return Path(raw).expanduser() if raw else None
-
-
-def tune_patience(default: int = 50) -> int:
-    """``EMMY_TUNE_PATIENCE`` — inner-MCTS patience fallback for ``tune``."""
-    return int_env(TUNE_PATIENCE, default)
-
-
-def tune_eps(default: float = 0.0) -> float:
-    """``EMMY_TUNE_EPS`` — inner-MCTS ε-greedy exploration fraction: the
-    probability a selection step descends a uniformly random child instead of the
-    PUCT argmax. Opt-in (default ``0`` = deterministic PUCT): on the fp16 sweep it
-    didn't recover the lost configs (the gap is a tune-path eligibility issue, not
-    selection) and pure randomness regresses
-    tuning, so it's a knob for shapes where the heuristic order is known-bad, not a
-    default."""
-    return float_env(TUNE_EPS, default)
-
-
-def prior_blend(default: str = "tilt") -> str:
-    """``EMMY_PRIOR_BLEND`` — how the online and offline priors interact:
-    ``tilt`` (default; online owns deploys, its PUCT policy tilted by the offline
-    one), ``gate`` (no interaction — whichever half is live answers), or the
-    single-half A/B arms ``online`` / ``offline``, which ignore the calibration
-    gate. See :mod:`emmy.compiler.pipeline.search.prior.blend`; an unknown name
-    raises there rather than silently defaulting, so a mislabelled A/B arm cannot
-    report the default's numbers."""
-    return os.environ.get(PRIOR_BLEND) or default
-
-
-def offline_tilt(default: float = 0.3) -> float:
-    """``EMMY_OFFLINE_TILT`` — exponent ``W`` in the ``tilt`` blend's PUCT policy,
-    ``p_online · p_offline**W`` (selection only): the cold heuristic's ranking nudges
-    exploration toward configs it favors without overriding the online model's order
-    (``W=0`` = pure online, large ``W`` = offline dominates). See
-    :class:`~emmy.compiler.pipeline.search.prior.blend.TiltBlend`."""
-    raw = os.environ.get(OFFLINE_TILT)
-    if not raw:
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        return default
 
 
 def serving_static(default: bool = False) -> bool:
@@ -556,8 +476,8 @@ def first_iter_timeout_ms() -> float:
 
 def bench_compile_timeout_s(default: float = 30.0) -> float:
     """``EMMY_BENCH_COMPILE_TIMEOUT_S`` — wall-clock cap on the compile stage of one
-    ``benchmark()`` call. ``default`` is the caller's own budget (constructor policy —
-    e.g. ``tune`` shrinks it for fast-fail single-kernel sweeps); the env var, when set,
+    ``benchmark()`` call. ``default`` is the caller's own budget (constructor policy);
+    the env var, when set,
     overrides every caller uniformly. Semantics live on ``Backend.bench_compile_timeout_s``."""
     return float_env(BENCH_COMPILE_TIMEOUT_S, default)
 

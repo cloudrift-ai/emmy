@@ -58,7 +58,7 @@ class LaunchTime:
     ``time_ms`` is the median over ``samples`` (the canonical selection
     statistic — robust to single-iter outliers from host framing
     jitter). ``samples`` carries every measured per-iter latency in
-    ms so callers downstream (e.g. ``search.policy.terminal_bench``) can
+    ms so callers downstream (e.g. ``search.bench_record``) can
     compute min/max/mean/variance without re-running the bench."""
 
     idx: int

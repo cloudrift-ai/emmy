@@ -115,16 +115,6 @@ bench-kernels-clean: setup
 	@rm -f /tmp/emmy-gpu.lock
 	./venv/bin/pytest tests/perf/ -m perf -n 4 --dist=loadgroup -v -p no:randomly --no-header
 
-bench-kernels-tuned: setup
-	@rm -f /tmp/emmy-gpu.lock
-	@test -f ~/.cache/emmy/tune-kernels.db || (echo "The kernel tuning DB not foud; run make tune-kernels"; exit 1)
-	EMMY_TUNE_DB=~/.cache/emmy/tune-kernels.db ./venv/bin/pytest tests/perf/ -m perf -n 4 --dist=loadgroup -v -p no:randomly --no-header
-
-tune-kernels: setup
-	@rm -f /tmp/emmy-gpu.lock
-	@rm -f ~/.cache/emmy/tune-kernels.db
-	EMMY_TUNE=1 EMMY_TUNE_DB=~/.cache/emmy/tune-kernels.db ./venv/bin/pytest tests/perf/ -m perf -n 4 --dist=loadgroup -v -p no:randomly --no-header
-
 # --- vLLM + emmy serving image (emmy/serving, docker/vllm-emmy) ---
 VLLM_VERSION ?= v0.23.0
 VLLM_BASE_IMAGE ?= vllm/vllm-openai:$(VLLM_VERSION)

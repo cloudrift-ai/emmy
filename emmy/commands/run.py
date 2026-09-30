@@ -2643,7 +2643,7 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
 
         db = SearchDB.for_compile(backend.tune_db)
         logger.info("Using tuning DB: %s", backend.tune_db)
-    from emmy.compiler.pipeline.search.strategy.two_level import KernelInventory  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.inventory import KernelInventory  # noqa: PLC0415
 
     # Every kernel-set decision the greedy compile takes, as the splice watcher reports it: the tile
     # kernel the fork was offered on, the arm, and the graph ids the splice consumed and minted.

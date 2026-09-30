@@ -1,5 +1,5 @@
 """Shared CLI vocabulary for ``emmy eval``: the tune-DB flags of the per-kernel views (:func:`add_db_args`), the
-dataset argument of ``eval prior`` (:func:`add_dataset_args`), and the prior-file overrides — so every command names
+dataset argument of ``eval prior`` (:func:`add_dataset_args`), and the prior-file override — so every command names
 a DB or a dataset through one spelling instead of opening files by hand."""
 
 from __future__ import annotations
@@ -41,13 +41,6 @@ def add_dataset_args(parser) -> None:
         help="Filter by substring: the pool's kernel C name for --pools golden; the op label (e.g. 'matmul', 'reduce', "
         "'free=512') for --pools measured.",
     )
-
-
-def resolve_online_arg(args) -> None:
-    """Publish ``--online-file`` into the env (``EMMY_ONLINE_FILE``) so the prior
-    loads from it — the single owner of the formerly-duplicated env poke."""
-    if getattr(args, "online_file", None):
-        os.environ[config.ONLINE_FILE] = str(Path(args.online_file).expanduser())
 
 
 def resolve_offline_arg(args) -> None:
