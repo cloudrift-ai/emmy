@@ -304,12 +304,6 @@ class GoldenRecords(Sequence):
     def __add__(self, other: Iterable[GoldenRecord]) -> GoldenRecords:
         return GoldenRecords((*self._records, *other))
 
-    def __radd__(self, other: Iterable[GoldenRecord]) -> GoldenRecords:
-        return GoldenRecords((*other, *self._records))
-
-    def __repr__(self) -> str:
-        return f"GoldenRecords({list(self._records)!r})"
-
     @cached_property
     def _sets(self) -> dict[tuple, tuple[GoldenRecord, ...]]:
         sets: dict[tuple, list[GoldenRecord]] = {}

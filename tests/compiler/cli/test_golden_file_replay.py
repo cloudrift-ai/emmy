@@ -16,8 +16,7 @@ from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.frontend.ir import MatmulOp, ReshapeOp, RmsNormOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
-from emmy.compiler.pipeline.search.golden import GoldenFile, Measurements, Realization, Target
-from emmy.compiler.pipeline.search.golden import write_trace_inventory
+from emmy.compiler.pipeline.search.golden import GoldenFile, Measurements, Realization, Target, write_trace_inventory
 from emmy.compiler.wire import kernel_bindings, kernel_tile
 from tests.compiler.helpers import loop_target
 
@@ -474,8 +473,8 @@ def test_named_run_records_only_the_selected_precision_regime(monkeypatch, tmp_p
 
     from emmy.commands import compile as compile_module
     from emmy.commands import run as run_module
-    from emmy.compiler.pipeline.search.pins import measured_precision_pins
     from emmy.compiler.pipeline.search.golden import record_greedy_pick
+    from emmy.compiler.pipeline.search.pins import measured_precision_pins
 
     path = tmp_path / "working.json"
     document = _working_loop(path, pins={"FAST_MATH": False})
@@ -912,9 +911,8 @@ def test_recorded_greedy_pick_is_picked_again_under_strict_evidence(tmp_path, ca
     monkeypatch.setenv("EMMY_FAST_MATH", "0")
     from emmy import config
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
-    from emmy.compiler.pipeline.search.golden import GoldenEntryState, records_override, sole_evidence
+    from emmy.compiler.pipeline.search.golden import GoldenEntryState, greedy_pick_rows, record_greedy_pick, records_override, sole_evidence
     from emmy.compiler.pipeline.search.pins import pinned_knobs
-    from emmy.compiler.pipeline.search.golden import greedy_pick_rows, record_greedy_pick
 
     path = tmp_path / "working-route.json"
     document = _working_placement_route(path)
@@ -961,9 +959,8 @@ def test_recorded_composed_pick_is_picked_again_under_strict_evidence(tmp_path, 
     monkeypatch.setenv("EMMY_FAST_MATH", "0")
     from emmy import config
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
-    from emmy.compiler.pipeline.search.golden import records_override, sole_evidence
+    from emmy.compiler.pipeline.search.golden import greedy_pick_rows, record_greedy_pick, records_override, sole_evidence
     from emmy.compiler.pipeline.search.pins import pinned_knobs
-    from emmy.compiler.pipeline.search.golden import greedy_pick_rows, record_greedy_pick
 
     path = tmp_path / "working-route.json"
     document = _working_placement_route(path)

@@ -592,7 +592,12 @@ def handle_compile(args):
     # the named realization records are pinned so the compile takes the kernel set it describes.
     scope = getattr(args, "_golden_records", None) or None
     with (
-        pinned_knobs({**GoldenRecords([sample.record for sample in args.golden_configs] or scope or []).shared_regime_pins(), **selected_decisions(args)}),
+        pinned_knobs(
+            {
+                **GoldenRecords([sample.record for sample in args.golden_configs] or scope or []).shared_regime_pins(),
+                **selected_decisions(args),
+            }
+        ),
         records_override(scope),
         config.strict_evidence_override(True if args.strict_evidence else None),
     ):

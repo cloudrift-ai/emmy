@@ -252,8 +252,10 @@ def handle_run(args):
         # A row is evidence only on the card its file names (``golden.records_for_card``): measurements
         # written under another card's header are what no replay on this card ever reads.
         from emmy.compiler.context import Context  # noqa: PLC0415
-        from emmy.compiler.pipeline.search.golden import GoldenFile  # noqa: PLC0415
-        from emmy.compiler.pipeline.search.golden import validate_working_gpu  # noqa: PLC0415
+        from emmy.compiler.pipeline.search.golden import (
+            GoldenFile,  # noqa: PLC0415
+            validate_working_gpu,  # noqa: PLC0415
+        )
 
         try:
             validate_working_gpu(GoldenFile.load(args.golden), Context.probe())
@@ -328,7 +330,9 @@ def _handle_run_once(args):
 
         if ir_path is not None:
             args.ir = ir_path
-        with pinned_knobs(GoldenRecords([s.record for s in args.golden_configs] or getattr(args, "_golden_records", None) or []).shared_regime_pins()):
+        with pinned_knobs(
+            GoldenRecords([s.record for s in args.golden_configs] or getattr(args, "_golden_records", None) or []).shared_regime_pins()
+        ):
             _handle_run_ir(args, CudaBackend, CompilerDump)
         return
 

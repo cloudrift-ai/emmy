@@ -15,8 +15,8 @@ import pytest
 
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.search.golden import GoldenFile
-from emmy.compiler.pipeline.search.pins import pinned_knobs
 from emmy.compiler.pipeline.search.golden.restamp import restamp, stale_targets, unresolved_route_keys
+from emmy.compiler.pipeline.search.pins import pinned_knobs
 
 _CASE = Path(__file__).parents[2] / "realization" / "cases" / "reduce" / "rms-norm-cut-sweep-work.json"
 _KEY = "PLACE@map.1/map"

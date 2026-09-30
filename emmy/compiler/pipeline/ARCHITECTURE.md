@@ -174,7 +174,7 @@ Everything in this table recurs on nearly every page below. The rest of the docu
 | `search/metrics.py` | What a scored candidate pool is worth, as pure functions over numbers: golden ranks and their tie conventions, `topk_pick` / `topk_regret` against measured latencies, and Spearman ρ. No model, no I/O, no strings, so the callers cannot each hold a slightly different definition — every rank and regret metric resolves here. Rendering lives with the caller (`prior/fit/tables.py` for the fit's rank tables; the other top-k summaries have not been unified yet). |
 | `search/dataset/` | The training data as values and as a document. `Group` (`group.py`) — one candidate pool packed as a matrix plus one label per row; the base says nothing about what the labels mean, which is all a ranking metric needs. `GoldenGroup` is the subclass whose labels MARK rows (`golden_ids`) rather than measure them, and it carries the `GoldenPool`s it was built from (`pool.py`: card, regime, sizes, the verified `GoldenRow`s, and the `KernelDef` the pool is enumerated from — `kernel.py`); `MeasuredGroup` is the one whose labels ARE the microseconds. `Dataset` (`document.py`) is the groups as a directory — `manifest.json` beside one `.npy` per group — written by `emmy db export`, read by `emmy fit` and `eval prior`; the leaf values are wire classes. `Sample` / `Samples` and `ShapeKey` are the per-row read-view over a DB's rows. Nothing here reads a DB — `db/export.py` builds the groups, the one place the two packages meet — and nothing imports `search/prior/`: a group carries every column it was given, and each model class narrows to the ones it wants when it asks for the matrix — `TREE_FEATURES`, the view argued entirely from what a tree can re-derive, lives with the CatBoost trainer for the same reason. |
 | `search/db/` | The SQLite store (`SearchDB`: the kernels, the decisions that minted them, their measurements) and what fills and drains it: `freeze.py`, a DB's admitted rows as a golden file per card (`freeze_reason` is the one admission rule every measured-pool reader applies), and `export.py`, its rows as the dataset (`golden_pools`, `measured_groups`, `export_dataset`) — where `db` rows become `dataset` values, in that one direction. |
-| `search/golden/` | The golden package, one module per job: the file format (`format`), the flattened record and its derivations (`record`), the strict decode (`decode`), the evidence seam (`evidence`), the repository index and evidence scope (`repository`); see Part 7. |
+| `search/golden/` | The golden package, one module per job: the file format (`format`), the flattened record, what a row says about itself and the set of records a consumer reads together (`record`: `Row`, `GoldenRecord`, `GoldenRecords`), the strict decode and the one spelling a replay follows (`decode`), the evidence seam (`evidence`), the repository index and evidence scope (`repository`), the working golden's writers (`working`) and the check and restamp against the fresh lowering (`restamp`); see Part 7. |
 | `slice.py` | Isolates one finalized kernel into a standalone graph (used by structural pricing and the working golden's per-kernel slices). |
 | `dump.py`, `rule_diff.py` | The dump and `-vv` presentation layers (see the end of this file). |
 | `passes/{frontend,loop,lowering}/` | The rules themselves — documented in [`passes/ARCHITECTURE.md`](passes/ARCHITECTURE.md); a per-pass overview table is near the end of this file. |
@@ -666,12 +666,14 @@ pinned measurement (`run --golden PATH --bench`, `--ab`), training data for the 
 
 At deploy a record is tune DB rows, nothing more, and every row is keyed by the kernel it decides
 (`golden.evidence.import_goldens`). A target's entries in one input regime — the ones that walk one kernel set together
-(`golden.siblings_of`) — are lowered once, under the record's pins (the environment it was measured under) and with
+(`GoldenRecords.sets`) — are lowered once, under the record's pins (the environment it was measured under) and with
 the live decision pins withdrawn (`pins.unpinned_decisions` — the rows filed hold for every pinned compile; the live
 pins decide the live forks, where a row they contradict finds no leaf), each entry deciding the forks of the kernel it
-names by identity and the leading entry every other: a kernel-set fork through the same `pins.spelled_arm` the deploy
-reads a row with — the seams an entry marks `cut` together offered as one composed arm, exactly as the deploy offers
-them — a schedule fork by the leaf the entry's row vouches for. Each decision the lowering took is a routing row on
+names by identity and the leading entry every other (`golden.decode.Spelling`, the one reading the strict decode's
+replay follows too): a kernel-set fork through the same `pins.spelled_arm` the deploy reads a row with — the seams an
+entry marks `cut` together offered as one composed arm, exactly as the deploy offers them, and the keys a decision
+spelled consumed so the pieces are read against what the entry has left to say — a schedule fork by the leaf the
+entry's row vouches for. Each decision the lowering took is a routing row on
 the kernel it was offered on; each measured entry's schedule row is the perf row of the kernel it names — an empty
 receipt row included, which says the child ran fused and unsplit — under that kernel's exact identity, captured, with
 the golden's digest as its source. A piece inherits nothing from the kernel it replaced. An entry naming a kernel the
@@ -1022,8 +1024,14 @@ evidence for the greedy compile (Part 3), pinned measurement (`run --golden PATH
 training data for the offline prior, and a regression reference. This Part covers the record format, its layout
 obligations, and the checks that keep the A/B honest.
 
-`golden/record.py` holds one generic `GoldenRecord` per realization. A structural config references a stable frontend
-Torch IR program by its document-local list index, and its target IS a kernel: an index into the document's `loops`
+`golden/record.py` holds one generic `GoldenRecord` per realization, and `GoldenRecords`, the records a consumer reads
+together — a file's rows (`GoldenFile.records`), the scope a compile installs (`records_override`), a card's
+(`records_for_card`) — which answers what they say as a set: a record's kernel set (`siblings`, `lead`), the pins a
+kernel-set listing publishes (`kernel_set_pins`), the one regime they share (`shared_regime_pins`). What a row says
+about itself — its input regime (pins minus `PLACE`), its route, whether it is a routing row or a receipt, its
+schedule row — is one `Row` base the file's `Realization` and the record share. A structural config references a
+stable frontend Torch IR program by its document-local list index, and its target IS a kernel: an index into the
+document's `loops`
 pool, which stores that standalone post-fusion Loop IR. A replay, a strict decode and an evidence import start from
 the stored kernel and never re-lower the program. The frontend provenance origins ride beside it (`target: {loop,
 origins}`) when the kernel computes every one of them whole, so they are its exact Torch twin; they select nothing and
@@ -1055,7 +1063,9 @@ missing key by its path. Leaf rules (a positive number, a hex digest) live in th
 `GoldenFile.check` holds only cross-object rules: pool references, known knobs, sibling sets, and repository file
 requirements. `GoldenFile.load` reads a file, checked as a repository golden when it lives in the
 repository and as a working file otherwise; `GoldenFile.dump` writes one the same way and refuses replacement unless
-its caller opts in explicitly. The program and Loop IR pools stay wires: decoding a kernel builds a Loop op, whose
+its caller opts in explicitly; `GoldenFile.edit` is the one read-modify-write, a load and a dump under a lock held
+against every other process on the machine, which every measurement written into a working golden goes through. The
+program and Loop IR pools stay wires: decoding a kernel builds a Loop op, whose
 construction normalizes the body, and that runs once, where a record's kernel graph is read, never at load — a
 whole-model golden loads in the time of its JSON parse. The dump writes a header key per line with `gpu_name` alone
 on the first (a card-scoped reader skips a foreign file off that line), a config per line with a realization per line
@@ -1104,10 +1114,10 @@ validation rejects a realization that schedules behind pinned cuts without a sto
 to the target's own lift is the corpus's derived stamp, not a receipt, and keeps the pooled decode.
 
 **A whole kernel set records as one set of entries, each naming its kernel by identity.** `run --golden PATH
---realization NAME --bench --record-greedy` (`working_golden.record_greedy_pick`) writes the kernel set the greedy
+--realization NAME --bench --record-greedy` (`golden.record_greedy_pick`) writes the kernel set the greedy
 compile picked back into the working file: one routing row per kernel-set decision the compile took — its `identity`
 the kernel the fork was offered on, its `knobs` the arm's `PLACE@seam: cut` or split-carrying `REDUCE` value, its
-`emmy_us` the summed isolated timings of the kernels the decision produced (`working_golden.kernel_set_prices`: the
+`emmy_us` the summed isolated timings of the kernels the decision produced (`golden.kernel_set_prices`: the
 splice's minted kernels, a later decision that consumed one of them standing in with its own; the whole graph's
 timing only where a kernel of the set has no launch) — the units the kernel-set fork ranks it in against the replaced
 kernel's own receipt, so a measured split never loses to the unsplit kernel for carrying the program's total — and
