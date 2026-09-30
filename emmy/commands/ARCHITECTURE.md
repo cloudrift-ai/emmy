@@ -539,7 +539,14 @@ Deploys to a remote server via SSH + SCP. Auto-detects the remote GPU and resolv
 
 ```bash
 emmy deploy ssh --recipe <path> --ssh user@host[:port] [--ssh-key ~/.ssh/id_ed25519] [--dry-run] [--teardown]
+emmy deploy ssh --plan plan.json --ssh user@host[:port]
 ```
+
+`--plan` (exclusive with `--recipe`) runs a plan's models on the host it was written for: the detected GPU name and
+count must equal the plan's `gpu` and `gpu_count`, or the command exits before provisioning anything. The plan is
+validated and its services deployed exactly as under `deploy cloud --plan` below (one container per model on host
+port `8000 + i`, shared-device start order, a health check and smoke test per slot, no nginx); there is no rental,
+lease or result file, so `--teardown` is how the project comes down.
 
 ### `emmy deploy cloud`
 
