@@ -26,7 +26,6 @@ engine:
       image: "cloudriftai/1cat-vllm-sm70:1.0.0"
       extra_args: >-
         --dtype half
-        --language-model-only
         --attention-backend FLASH_ATTN_V100
         --max-num-batched-tokens 4096
         --tokenizer hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4
