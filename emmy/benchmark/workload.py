@@ -3,12 +3,13 @@
 import logging
 from pathlib import Path
 
-from emmy.deploy.compose import calculate_num_instances
+from emmy.deploy.compose import replica_services
+from emmy.deploy.orchestrate import baked_hf_cache
 from emmy.recipe.types import Recipe, VllmConfig
 from emmy.redact import redact_secrets
 
 
-def _bench_args(recipe: Recipe, repeat: int = 0) -> list[str]:
+def _bench_args(recipe: Recipe, repeat: int = 0, tokenizer: str | None = None) -> list[str]:
     """The vllm bench serve argument list shared by the display string and the
     docker invocation. Embedding recipes target /v1/embeddings via the
     openai-embeddings backend and have no output length (nothing is generated),
@@ -16,12 +17,14 @@ def _bench_args(recipe: Recipe, repeat: int = 0) -> list[str]:
     ``seed + i`` (unset counts as 0): a replayed prompt set would hit the server's prefix cache."""
     bench = recipe.benchmark
     seed = None if bench.seed is None and not repeat else (bench.seed or 0) + repeat
-    num_instances = calculate_num_instances(recipe)
-    port = 8080 if num_instances > 1 else 8000
+    _, load_balancer = replica_services(recipe)
+    port = 8080 if load_balancer else 8000
     args = [
         f"--model {recipe.model_name}",
         "--trust-remote-code",
     ]
+    if tokenizer:
+        args.append(f"--tokenizer {tokenizer}")
     if recipe.is_embedding:
         args += ["--backend openai-embeddings", "--endpoint /v1/embeddings"]
     args += [
@@ -79,10 +82,17 @@ async def run_benchmark_workload(run_cmd, recipe: Recipe, dry_run=False):
 
     # benchmark.repeats reruns the client workload, with fresh prompts, against one deployed
     # server. The raw output retains one stanza per repeat; a failed repeat fails the task.
+    # The client runs in the serving image. One that bakes its model serves offline from its own HF
+    # cache, which holds the pinned snapshot and no branch ref, so a tokenizer lookup by repo id finds
+    # nothing there: name the snapshot instead.
+    tokenizer = None
+    if recipe.model.revision and (hf_home := await baked_hf_cache(run_cmd, image)):
+        tokenizer = f"{hf_home}/hub/models--{recipe.model_name.replace('/', '--')}/snapshots/{recipe.model.revision}"
+
     bench_command_str = build_bench_command(recipe)
     outputs = []
     for repeat in range(max(1, bench.repeats)):
-        args = " ".join(_bench_args(recipe, repeat))
+        args = " ".join(_bench_args(recipe, repeat, tokenizer))
         bench_cmd = f"docker run --rm --network host{device_flags} --entrypoint bash {image} -c 'vllm bench serve {args}'"
         rc, output, stderr = await run_cmd(bench_cmd, stream=False, timeout=10800)
         outputs.append(output)

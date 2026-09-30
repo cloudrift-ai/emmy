@@ -376,3 +376,18 @@ async def test_provision_gcp_warns_when_pubkey_missing(mock_create, tmp_path, ca
     assert any("No SSH public key" in r.message for r in caplog.records)
     extra = mock_create.call_args.kwargs["extra_gcloud_args"] or ""
     assert "ssh-keys" not in extra
+
+
+@patch.dict("os.environ", {"CLOUDRIFT_API_KEY": "test-key"})
+@patch("emmy.provisioning.cloud.cr_provider.create_instance", new_callable=AsyncMock)
+async def test_provision_cloudrift_opens_the_requested_ports(mock_create, tmp_path):
+    """A deployment names the ports it needs (one per service); the default stays SSH + engine + nginx."""
+    key_file = tmp_path / "id_ed25519"
+    key_file.write_text("private-key")
+    mock_create.return_value = VMConnectionInfo(host="1.2.3.4", username="user", ssh_port=22222)
+
+    await _provision_cloudrift(_cr_cand(), str(key_file), {}, False, logging.getLogger(), ports=[22, 8000, 8001])
+    assert mock_create.call_args.kwargs["ports"] == [22, 8000, 8001]
+
+    await _provision_cloudrift(_cr_cand(), str(key_file), {}, False, logging.getLogger())
+    assert mock_create.call_args.kwargs["ports"] == [22, 8000, 8080]

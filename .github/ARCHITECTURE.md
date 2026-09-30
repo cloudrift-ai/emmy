@@ -11,6 +11,7 @@ skills and CloudRift inference endpoint.
 | Workflow | Trigger | Runner | Result |
 | --- | --- | --- | --- |
 | **Tests** | Pull request to `main` | GitHub-hosted + `ubuntu-runners` | Runs Ruff, the complete test suite, and a PyPI package dry run. |
+| **Review pull requests** | Ready PR or new commit | GitHub-hosted | Posts a PR Agent review using the nightly CloudRift model. |
 | **Publish to PyPI** | Manual dispatch or published GitHub release | GitHub-hosted | Verifies the source and distribution, publishes to PyPI, and optionally creates the release. |
 | **Verify or onboard model** | Nightly schedule or manual dispatch | `agent-runners` / `agents` | Qualifies one available exact model/GPU deployment and updates the rolling lifecycle PR. |
 | **Discover model** | Nightly schedule or manual dispatch | `agent-runners` / `agents` | Refreshes recipe lifecycle tags and onboarding shells in one rolling PR without renting a VM. |
@@ -46,6 +47,14 @@ installation and cache setup.
 
 The native-runtime job runs Rustfmt, Clippy with warnings denied, and locked Cargo tests on a GitHub-hosted runner.
 These checks require no GPU. Native GPU parity and failure recovery run through `make test-native` on supplied hardware.
+
+**Review pull requests** runs the pinned PR Agent image when a PR is opened, reopened, marked ready, or updated. It
+reviews ready PRs from both repository branches and forks, including bot-authored PRs. The action reads the diff through
+the GitHub API without checking out PR code, and its token can read contents and write PR comments but cannot push.
+Only `/review` runs; PR descriptions and code suggestions are left to the author. New commits replace an in-progress
+review for the same PR. The model, endpoint, and credential are shared with the nightly agent workflows. PR Agent can
+use up to 128,000 tokens of model context. The job compares PR Agent review comments before and after the action, so
+a green check requires a newly posted or updated review even when PR Agent logs a model failure and exits successfully.
 
 ## Package publication
 
@@ -304,15 +313,16 @@ configuration live only under run-specific `/tmp/emmy-*` paths and are removed b
 
 Agent workflows use these repository secrets as applicable:
 
-- `CLOUDRIFT_API_KEY` for model discovery, Robots-team resolution, availability, and CloudRift provisioning;
+- `CLOUDRIFT_API_KEY` for model discovery, PR review, Robots-team resolution, availability, and CloudRift provisioning;
 - `DISCORD_EMMY_ROBOTS_WEBHOOK_URL` for non-pinging model discovery, verification, and onboarding summaries;
 - `HF_TOKEN` for gated checkpoints;
 - `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` for an eligible verified prebuilt image.
 
-`ONBOARD_AGENT_MODEL` selects the discovery/onboarding model and defaults to `Qwen/Qwen3.8-27B-FP8`.
+`ONBOARD_AGENT_MODEL` selects the discovery, onboarding, and PR review model and defaults to
+`Qwen/Qwen3.8-27B-FP8`.
 `CLOUDRIFT_TEAM_ID` must be the exact Robots team UUID; the verification/onboarding workflow fails before capacity
 selection if the variable is absent, malformed, or inaccessible to `CLOUDRIFT_API_KEY`.
-`CLOUDRIFT_INFERENCE_URL` selects its OpenAI-compatible endpoint and defaults to
+`CLOUDRIFT_INFERENCE_URL` selects the agent workflows' OpenAI-compatible endpoint and defaults to
 `https://inference.cloudrift.ai/v1`.
 `NIGHTLY_ONBOARD_PUBLISH_IMAGE=true` authorizes a nightly qualification to publish an otherwise eligible image; it is
 false when unset.

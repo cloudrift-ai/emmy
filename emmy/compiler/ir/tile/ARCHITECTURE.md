@@ -54,9 +54,7 @@ contraction over the previous state (`Σ_k W[i,k] · pre S[k,j]`) is an ordinary
 A per-step output is a further result of the lift — a `<value>__obs` copy of what the step defines or an operand
 exposes, or a pass-through of a value an output sweep beside the cells computes — stored inside the loop.
 `Fold.lower` opens the carrying loop outside the loops over the cells, with a nest of its own for the step's
-sweeps; the closed program is the Loop IR the roll wrote. Unit cell axes disappear from the carrier, while its seed
-keeps its external tensor shape. Serial lowering therefore receives bound input tensors and restores the seed's
-unit coordinates before flattening its address.
+sweeps; the closed program is the Loop IR the roll wrote.
 
 A carried state has one kernel-set decision, the **split across the sequence** (`REDUCE@…/scan=g<n>k`, offered
 by `030_cut` through `_split.realize_carry_split`). It needs the step AFFINE in the state and column-wise
@@ -71,7 +69,10 @@ substitution) offers nothing and stays one kernel.
 
 The classic schedule realizes the carrying loop as ordered launches with a global state buffer: at its fork it
 lifts the kernel's Loop IR again with the state as a buffer the node owns and the loop as the kernel's **serial
-axis** (`Placement.serial`, `lift_serial`), each launch reading the previous launch's stores one step back. The
+axis** (`Placement.serial`, `lift_serial`), each launch reading the previous launch's stores one step back. That
+form is a realization of the kernel, not another kernel: the kernel keeps the lifted tile's identity, the one its
+fork and its golden rows name. The state's cells are its axes alone, so a size-one dim the Loop IR spelled `0` holds
+no cell; a seed tensor keeps that dim, and both schedules read it with `0` there (`seed_index`). The
 register schedule reads the carrying fold itself and realizes the loop inside each CTA when the state rows are
 independent; the state's port, added at the lift for the classic realization, disappears during materialization,
 and externally read snapshots remain global outputs. Both preserve previous-state reads until the step has
@@ -160,13 +161,14 @@ operand reading the axis is the first — the coordinate is that contraction's o
 work per cell whatever the placement says, and a statistic evaluated ahead of the sweep beside them is cheap against
 it. Every reduce in the term reading the axis is the second: each cell folds its own, so binding the axis replicates
 none of them. A term with NO reduce satisfies that second ground vacuously, and then it promotes only where the
-placement has no free axis at all — a kernel with no free axis launches one block whatever it does, so its shared
-sweep is the only axis the launch could spread over. Where the placement already has an axis, a bare elementwise sweep
-stays a sweep: the kernel materializer distributes exactly that across a worker inventory, and binding it here would
-decide for the schedule that measured the alternative (`cases/reduce/rms-norm-cut-sweep-work.json`, 885.9 us walked in
-one thread against 4.2 us split across 512). The complement is what the reduce clause protects: a reduce that does NOT
-read the axis is the row's statistic, evaluated once for the whole sweep, and binding the sweep would recompute it per
-output element, which is why softmax's maximum and rms-norm's sum of squares keep their loops.
+placement launches one block — no free axis, or only static extent-one ones (a decode row) — and whatever it does, its
+shared sweep is then the only axis the launch could spread over. Where the placement already has an axis, a bare
+elementwise sweep stays a sweep: the kernel materializer distributes exactly that across a worker inventory, and
+binding it here would decide for the schedule that measured the alternative
+(`cases/reduce/rms-norm-cut-sweep-work.json`, 885.9 us walked in one thread against 4.2 us split across 512). The
+complement is what the reduce clause protects: a reduce that does NOT read the axis is the row's statistic, evaluated
+once for the whole sweep, and binding the sweep would recompute it per output element, which is why softmax's maximum
+and rms-norm's sum of squares keep their loops.
 
 A sibling output nest's axis is never promoted, however many contractions read it: the other nests do not ride it, so
 promoting it would evaluate them once per cell — DeepSeek-V4 post4096's residual root holds four sibling nests, and

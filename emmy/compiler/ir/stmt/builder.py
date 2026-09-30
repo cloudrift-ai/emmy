@@ -1,6 +1,6 @@
-"""LoopBuilder — incremental body construction for loop IR.
+"""BodyBuilder — incremental body construction for statement bodies.
 
-Accumulates a ``LoopOp`` body by inserting stmts one at a time at a given
+Accumulates a statement body by inserting stmts one at a time at a given
 enclosing ``Scope``. Callers drive two concerns:
 
 - **Fresh SSA names**: ``fresh(hint)`` returns an unused name derived from
@@ -13,7 +13,7 @@ Insertions are prepend-at-leaf. Callers that want defined-before-use
 ordering should insert in reverse-topological order (consumers first,
 producers after) — that's what the fusion splicer does.
 
-Construction is MUTABLE and the immutable body is built once, by :meth:`LoopBuilder.finish`.
+Construction is MUTABLE and the immutable body is built once, by :meth:`BodyBuilder.finish`.
 Descending a scope path is a dict lookup per level, and prepending is an append to a
 reverse-ordered list. The straightforward form — rebuild the ``Body`` tuple at every level on
 every insert, finding each level's ``Loop`` by scanning for a matching axis — is quadratic in the
@@ -24,8 +24,11 @@ level per insert. That is invisible on a small graph and decisive on a large one
 
 from __future__ import annotations
 
-from emmy.compiler.ir.loop.ir import Axis, Loop, Scope, Stmt
-from emmy.compiler.ir.stmt import Body
+from emmy.compiler.ir.axis import Axis
+from emmy.compiler.ir.stmt.analysis import Scope
+from emmy.compiler.ir.stmt.base import Stmt
+from emmy.compiler.ir.stmt.blocks import Loop
+from emmy.compiler.ir.stmt.body import Body
 
 
 class _Scope:
@@ -43,8 +46,8 @@ class _Scope:
         self.children: dict[Axis, _Scope] = {}
 
 
-class LoopBuilder:
-    """Mutable accumulator for a ``LoopOp`` body."""
+class BodyBuilder:
+    """Mutable accumulator for a statement body."""
 
     def __init__(self, used_names: set[str]) -> None:
         self._root = _Scope()

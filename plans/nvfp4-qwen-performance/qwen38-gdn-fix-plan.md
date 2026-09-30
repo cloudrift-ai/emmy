@@ -524,6 +524,23 @@ not yet available. The local checkout, matching runtime and completed checks sur
 suite restarted locally with four workers and temporary Bash/Git mounts; it collected 8,516 tests. Local runs
 remain correctness checks, not performance measurements.
 
+### Replacement 5090 and further main integration
+
+The final local run on `71f76c09` completed with **8,125 passed, 392 skipped and one failed** in 1,527.67 seconds.
+The sole failure is the existing 128-wide FP32-accumulator resource assertion: numerics pass, but ptxas reports
+255 registers and 24 local bytes. An isolated checkout of unchanged `e702de5d` reproduces those exact numbers.
+On the replacement 5090, all five capture, seed-address and no-spill checks pass in 19.69 seconds on `71f76c09`.
+The two-case block handoff run completed one case before its 110-second limit; it is not counted as a passing run.
+The remote environment is isolated under `/root/deltanet-pr973`, with CUDA 13.0, Python 3.12 and a matching runtime.
+
+Main then advanced to `73a19d81`. Of its changes, #978 independently repairs singleton seed addressing and preserves
+carried-kernel identity; #980 rejects incomplete buffer indices; #976 and #981 change normalization and keep reduction
+subroutines compact. The merge reuses main's `seed_index` implementation and removes this branch's duplicate
+`restore_unit_indices`. Tests combine main's singleton seed case with this branch's singleton output-batch case,
+and retain the larger multi-batch, two-singleton seed regression. The remaining fragment-role, output-domain,
+padding, vector-alignment and capture fixes are still part of this PR. The new runtime contract includes dependent
+launches, so the native extension must be rebuilt before GPU validation on the merged revision.
+
 ### Native serving follow-up boundary
 
 PR #973 supplies the static programs and validates their explicit state contract. Connecting them to native request

@@ -19,7 +19,7 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.pipeline import LOOP_PASSES, CompilerDump, Pipeline
 from emmy.compiler.pipeline.knob import STRUCT_PREFIX, family_of, tuning_knob_items
-from emmy.compiler.pipeline.passes.tile._fromloop import lift_loop_op, lift_serial
+from emmy.compiler.pipeline.passes.tile._fromloop import lift_loop_op
 from emmy.compiler.pipeline.passes.tile._twist import rewrite_twisted
 from emmy.compiler.pipeline.search.data.shape import ShapeKey
 from emmy.compiler.pipeline.search.pins import pins_freeze_cut, stampable_reduce
@@ -369,8 +369,9 @@ def _lifted_target(record: GoldenRecord):
         raise ValueError(f"{record.name}: target lowers to {len(nodes)} kernels — a row decorates exactly one")
     node = nodes[0]
     node.op = node.op.with_io(lowered, node)
-    # A serial kernel lifts its carried states as state buffers, as ``tile/lift`` does.
-    tile = lift_serial(node.op, name=node.id, prefix=node.id)[0] if node.op.body.carries else lift_loop_op(node.op, name=node.id)
+    # A kernel that carries a state lifts with the state in its term, as ``tile/lift`` does: the classic
+    # schedule's serial form is a realization of this kernel, not another kernel.
+    tile = lift_loop_op(node.op, name=node.id)
     tile = replace(tile, op=rewrite_twisted(tile.op, tile.axes))
     # A fork's root op is always matcher-refreshed (``_match_at`` runs ``with_io`` on every matched
     # node before the rule that offers the fork), so the record side mirrors the io through that

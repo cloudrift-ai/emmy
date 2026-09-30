@@ -254,15 +254,29 @@ def rename_free(stmt: Stmt, alias: Mapping[str, str]) -> Stmt:
     """
     if not alias:
         return stmt
-    renamed = rewrite(stmt, lambda nm: alias.get(nm, nm), Sigma.IDENTITY, _axis_identity)
     bodies = stmt.nested()
+    shell = stmt.with_bodies(tuple(Body() for _ in bodies)) if bodies else stmt
+    renamed = rewrite(shell, lambda nm: alias.get(nm, nm), Sigma.IDENTITY, _axis_identity)
     if not bodies:
         return renamed
-    # ``rewrite`` just descended into the child scopes under the full alias. Redo each one with the
-    # names that scope re-binds pruned out, and put those bodies back.
+    # Rewrite each child once, with only the aliases its scope does not rebind.
     inner = []
     for b in bodies:
-        pruned = {k: v for k, v in alias.items() if k not in b.ssa_defs}
+        bound = b.local_defs
+        pruned = {k: v for k, v in alias.items() if k not in bound and k not in stmt.binds_axes()}
+        # The surviving value may itself be shadowed here. Rename the local binding before
+        # substituting, so dropping outer ``b = a`` cannot capture the use of b as an inner a.
+        captured = bound.intersection(pruned.values())
+        if captured:
+            used = set(b.ssa_defs | b.ssa_uses | b.axis_names) | set(alias) | set(alias.values())
+            renames = {}
+            for name in sorted(captured):
+                fresh = name + "_local"
+                while fresh in used:
+                    fresh += "_local"
+                renames[name] = fresh
+                used.add(fresh)
+            b = Body(member.rename(renames) for member in b)
         inner.append(Body(tuple(rename_free(c, pruned) for c in b)))
     return renamed.with_bodies(tuple(inner))
 
@@ -274,8 +288,7 @@ def rename_free(stmt: Stmt, alias: Mapping[str, str]) -> Stmt:
 
 @singledispatch
 def simplify(stmt: Stmt, ctx: SimplifyCtx) -> Stmt:
-    # Default: no Expr fields to simplify (Assign / Accum / Init).
-    return stmt
+    return map_exprs(stmt, lambda expr: expr.simplify(ctx))
 
 
 @simplify.register

@@ -11,16 +11,21 @@ epilogue — so the bilinear reading is canonical by construction. There is no r
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING
 
-from emmy.compiler.ir.address import restore_unit_indices
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import BinaryExpr, Literal, TernaryExpr, Var
+from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, TernaryExpr, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Init, Let, Load, Loop, Pre, Select, SelectBranch, Stmt, Write
 from emmy.compiler.ir.tile import Placement, TileOp, extract_output_specs
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from emmy.compiler.graph import Tensor
 
 
 def _stamp_axes(loop: Loop) -> Loop:
@@ -598,7 +603,7 @@ def _carried_from_loop(loop: Loop, axes: tuple, levels: tuple) -> tuple[Fold, tu
     return fold, (*(replace(stmt, values=tuple(observed[value] for value in stmt.values)) for stmt in writes), *sweeps)
 
 
-def states_as_buffers(body: Body, prefix: str, inputs=None) -> tuple[Body, tuple[Axis, ...], dict[str, tuple]]:
+def states_as_buffers(body: Body, prefix: str, inputs: Mapping[str, Tensor]) -> tuple[Body, tuple[Axis, ...], dict[str, tuple]]:
     """``body`` with every carried state spelled as a STATE BUFFER — ``(body, serial axes,
     buffer shapes)`` — the form a serial launch axis realizes (:attr:`Placement.serial`): the
     classic schedule's realization of a carried state, taken at its fork from the carrying
@@ -608,7 +613,8 @@ def states_as_buffers(body: Body, prefix: str, inputs=None) -> tuple[Body, tuple
     buffer keeps every step, indexed by the step, the free axes outside the loop and the cell. A
     ``Pre`` read is a load one step back, the seed where there is no step before the first; the
     ``Carry`` is a store of its value at this step. Nothing of the step's own algebra changes, so the
-    rest of the nest lifts as it always did.
+    rest of the nest lifts as it always did. ``inputs`` are the kernel's input tensors, the seeds among
+    them (:func:`seed_index`).
     """
     serial: list[Axis] = []
     shapes: dict[str, tuple] = {}
@@ -622,10 +628,8 @@ def states_as_buffers(body: Body, prefix: str, inputs=None) -> tuple[Body, tuple
         start = seeds[stmt.carrier]
         # The seed is a buffer of the state's shape (the tensor an unrolled loop started from) or a constant.
         if isinstance(start, str):
-            seed_index = (*(Var(axis.name) for axis in outer), *stmt.index)
-            if inputs and start in inputs and inputs[start].shape:
-                seed_index = restore_unit_indices(seed_index, inputs[start].shape)
-            seeded: Stmt = Load(name=seed, input=start, index=seed_index)
+            cell = (*(Var(axis.name) for axis in outer), *stmt.index)
+            seeded: Stmt = Load(name=seed, input=start, index=seed_index(cell, inputs[start].shape))
         else:
             seeded = Let(name=seed, value=Literal(start))
         return (
@@ -750,6 +754,19 @@ def lift_loop_op(op: LoopOp, *, name: str = "", body: Body | None = None, serial
     )
 
 
+def seed_index(cell: tuple[Expr, ...], shape: tuple) -> tuple[Expr, ...]:
+    """A seed read at ``cell``, one coordinate per dim of the seed tensor (``shape``). The state's cells
+    are its axes alone: a size-one dim, which normalization pins to ``0`` in every index over the state,
+    holds no cell (``_carried_from_loop``). The seed keeps that dim, so it reads ``0`` there."""
+    if len(shape) == len(cell):
+        return cell
+    units = [dim for dim, extent in enumerate(shape) if extent == 1]
+    if len(shape) - len(cell) != len(units):
+        raise ValueError(f"a seed of shape {shape} is not its state's cells {len(cell)} with size-one dims beside them")
+    rest = iter(cell)
+    return tuple(Literal(0, "int") if dim in units else next(rest) for dim in range(len(shape)))
+
+
 def lift_serial(op: LoopOp, *, name: str, prefix: str) -> tuple[TileOp, dict[str, tuple]]:
     """A kernel that carries a state lifted as a serial kernel: its carried states become state
     buffers (:func:`states_as_buffers`, named under ``prefix``) and the loop that carries them the
@@ -758,4 +775,4 @@ def lift_serial(op: LoopOp, *, name: str, prefix: str) -> tuple[TileOp, dict[str
     return lift_loop_op(op, name=name, body=body, serial=serial), shapes
 
 
-__all__ = ["fold_from_loop", "lift_body", "lift_loop_op", "lift_serial", "states_as_buffers"]
+__all__ = ["fold_from_loop", "lift_body", "lift_loop_op", "lift_serial", "seed_index", "states_as_buffers"]

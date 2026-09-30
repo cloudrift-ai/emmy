@@ -83,15 +83,18 @@ class TestReplicaParallelismScaleOut:
         assert result.engine.llm.data_parallel_size == 1
 
     def test_with_tp(self):
-        """tp=2 on 8 GPUs -> gpu_count=8, dp stays 1 (4 replicas via calculate_num_instances)."""
+        """tp=2 on 8 GPUs -> gpu_count=8, dp stays 1 (4 replicas behind the load balancer)."""
         recipe = _make_recipe(tp=2, pp=1, dp=1, gpu_count=2)
         result = ReplicaParallelismScaleOutStrategy().apply(recipe, 8)
         assert result.deploy.gpu_count == 8
         assert result.engine.llm.data_parallel_size == 1
 
-        from emmy.deploy import calculate_num_instances
+        from emmy.deploy import replica_services
 
-        assert calculate_num_instances(result) == 4
+        services, load_balancer = replica_services(result)
+        assert [service.gpu_device_ids for service in services] == [[0, 1], [2, 3], [4, 5], [6, 7]]
+        assert [service.port for service in services] == [8000, 8001, 8002, 8003]
+        assert load_balancer
 
     def test_insufficient_gpus(self):
         """Fewer GPUs than gpus_per_instance -> ValueError."""

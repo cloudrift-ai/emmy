@@ -67,6 +67,16 @@ def test_build_model_args():
     }
 
 
+def test_chat_scores_through_the_chat_endpoint():
+    # The chat template adds the special tokens a raw completion prompt can miss (DeepSeek V4's
+    # tokenizer adds no start-of-sequence token to a raw prompt).
+    from run_lmeval_gate import build_model_args, completions_url
+
+    assert completions_url("http://localhost:8000/v1", chat=True) == "http://localhost:8000/v1/chat/completions"
+    assert completions_url("http://h/v1/chat/completions", chat=True) == "http://h/v1/chat/completions"
+    assert build_model_args("http://localhost:8000/v1", "m", chat=True)["base_url"] == "http://localhost:8000/v1/chat/completions"
+
+
 # --- extract_metrics ---
 
 

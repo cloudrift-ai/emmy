@@ -38,7 +38,7 @@ from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.pure.twist import Recipe, Twist
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Load, Loop, OutputSpec, Pre, Select, Stmt, StridedLoop
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Load, Loop, OutputSpec, Pre, Select, Stmt
 from emmy.compiler.ir.stmt.body import free_names
 
 # ``Body.structural_key()`` dispatches :func:`emmy.compiler.ir.stmt.passes.rewrite` over every
@@ -1438,7 +1438,7 @@ class Fold:
                 for name in self.opened[self.opened.index(path[-1]) + 1 :] if path else self.opened:
                     if (*path, name) in self.nest:
                         body.append(Loop(axis=coordinates[name], body=self.assemble((*path, name))))
-                return _scope(body)
+                return Body(body).coalesce()
 
         def attach(term: Fold, kind: str, target: list[Stmt], node: tuple[str, ...], scope: frozenset[str], nest: _Nest) -> None:
             # The stores over what ``term`` defines as ``kind`` — its step's results, its carried
@@ -1453,6 +1453,8 @@ class Fold:
                 )
                 nest.sink((*node, *(name for name in nest.opened if name in extra))).append(spec.write)
 
+        emitted: dict[tuple[int, int], tuple[Fold, list[Stmt]]] = {}
+
         def place(term: Fold, loops: list[tuple[str, frozenset[str], list[Stmt]]], path: tuple[str, ...] | None, nest: _Nest) -> None:
             # ``loops``: the reduce loops enclosing this position, outermost first, as (axis, scope, stmts).
             if any(axis in term.free_axes for axis, _, _ in loops):
@@ -1462,8 +1464,23 @@ class Fold:
             else:
                 node = nest.path_of(term.free_axes, path)
                 scope, stmts, loops = nest.bound | set(node), None, []
+            if term.axis is not None or term.step():
+                target = stmts if stmts is not None else nest.sink(node)
+                key = (id(term), id(target))
+                if key in emitted:
+                    return
+                # Retain both objects: a completed inner scope's list otherwise permits id reuse.
+                emitted[key] = term, target
             if term.axis is None:
                 step = term.step()
+                # A step reading nothing the tree binds or defines (a multi-output root's constant result)
+                # needs no coordinate, so it sits at the top of its path.
+                reads = {name for stmt in step for name in free_names(stmt)} - {name for stmt in step for name in stmt.defines()}
+                if step and stmts is None and not reads & {*term.lift.params, *origin}:
+                    node = nest.path_of(frozenset(), path)
+                    nest.sink(node).extend(step)
+                    attach(term, "step", nest.sink(node), node, nest.bound | set(node), nest)
+                    step = ()
                 for edge in placed(term):
                     place(edge, loops, node if step else path, nest)
                 if step:
@@ -1510,39 +1527,12 @@ class Fold:
             target = stmts if stmts is not None else nest.sink(node)
             if term.axis not in coordinates:
                 raise ValueError(f"lower: no extent for reduce axis {term.axis!r} — the kernel's axis table names it")
-            target.append(Loop(axis=coordinates[term.axis], body=_scope(inner)))
+            target.append(Loop(axis=coordinates[term.axis], body=Body(inner).coalesce()))
             attach(term, "state", target, node, scope, nest)
 
         root = _Nest(opened, frozenset(bound))
         place(self, [], None, root)
         return root.assemble()
-
-
-def _scope(stmts) -> Body:
-    """One scope's statements — a term reached through several operand positions defining its
-    names once, and sibling terms folding ONE coordinate iterating together.
-
-    The dedup is the shared-term rule. The FUSE is the same rule a level up: two loops over one
-    axis where neither reads what the other defines are two passes over one stream, and their
-    union is one pass, computing what they both read once. A loop that DOES read the loop above it (a
-    statistic's pass, then the pass that normalizes by it) reads a FINISHED accumulator, and
-    iterating together would hand it the in-flight one; that pair stays two loops.
-    """
-    out: list[Stmt] = []
-    for stmt in dict.fromkeys(stmts):
-        prior = out[-1] if out else None
-        if (
-            isinstance(stmt, (Loop, StridedLoop))
-            and isinstance(prior, (Loop, StridedLoop))
-            and prior.is_reduce
-            and stmt.is_reduce
-            and replace(prior, body=stmt.body) == stmt
-            and not (free_names(stmt) & prior.body.ssa_defs)
-        ):
-            stmt = replace(prior, body=_scope((*prior.body, *stmt.body)))
-            out.pop()
-        out.append(stmt)
-    return Body(tuple(out))
 
 
 @_rewrite_kind.register

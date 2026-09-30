@@ -43,10 +43,10 @@ def canonicalize_identity(stmts: Body, *, cluster: bool = False, types: Mapping[
     ``types`` colors each external buffer in the relation graph, so differently typed roles never
     share a rank and the order the buffers were declared in never reaches the key.
     """
-    stmts = Body.coerce(stmts)
-    if cluster:
-        stmts = _canonicalize_op_clusters(stmts)
+    # Cluster the executable CSE form, including operations hidden in shared definitions.
     stmts = normalize_body(stmts)
+    if cluster:
+        stmts = normalize_body(_canonicalize_op_clusters(stmts))
     labeling = stmts._ordering.label(None if types is None else types.get)
     ordered, _ = labeling.materialize(spelled=False)
     resources = labeling.resources()

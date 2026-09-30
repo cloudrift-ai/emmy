@@ -139,3 +139,25 @@ def test_a_write_to_the_buffer_in_between_stops_the_run() -> None:
 
     widths = sorted(len(stmt.names) for stmt in out if isinstance(stmt, Load))
     assert widths == [1, 1, 2], "x0 and x1 pair up; x3 cannot move above the store to meet x2"
+
+
+def test_ring_slot_transposed_b_fragments_pair() -> None:
+    """Two N-adjacent transposed-B fragments of a staged ring drain become one ldmatrix.x4.
+
+    The row is ``slot * rows + (warp_row + 8)``: the +8 sits inside the chain, and the slot term is
+    not affine. Left unpaired, every F.linear GEMM drained B with twice the ldmatrix count in its
+    main loop."""
+    from emmy.compiler.ir.expr import Var
+    from emmy.compiler.ir.kernel.ir import LdmatrixLoad
+
+    slot = (Var("_ks") / Literal(32, "int")) % Literal(4, "int") * Literal(64, "int")
+    warp_row = Var("a1_u") * Literal(32, "int")
+
+    def drain(frag: str, n: int) -> LdmatrixLoad:
+        row = slot + (warp_row + Literal(n, "int"))
+        return LdmatrixLoad(frag=frag, src_buffer="_b_smem", src_index=(row, Literal(0, "int")), role="b", ldm=32, b_trans=True)
+
+    paired, changed = _pair_ldmatrix(Body((drain("b0", 0), drain("b1", 8), drain("b2", 16), drain("b3", 24))))
+
+    assert changed
+    assert [(s.frag, s.pair_frag) for s in paired] == [("b0", "b1"), ("b2", "b3")]

@@ -8,6 +8,9 @@ itself rather than some upstream lowering quirk.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
+import numpy as np
 import pytest
 
 from emmy.compiler.dtype import F16, DataType
@@ -210,6 +213,71 @@ def test_shared_intermediate_deduped():
     assert merged is not None
     # Only one exp in the merged body (producer chain materializes once).
     assert _elementwise_fns(merged).count("exp") == 1
+
+
+@pytest.mark.parametrize("dependent", [False, True])
+@pytest.mark.parametrize("offset", [0, 3])
+def test_reductions_share_dependencies_in_cse_form(dependent, offset):
+    """Independent reductions share upstream work; a finalized maximum stays outside its consumer's sum."""
+
+    producer = LoopOp(
+        body=(
+            Loop(
+                axis=A0,
+                body=(
+                    Loop(
+                        axis=Axis("j", 16 + offset),
+                        body=(
+                            Load(name="x", input="X", index=(Var("a0"), Var("j"))),
+                            Assign(name="e", op="exp", args=("x",)),
+                            Write(output="P", index=(Var("a0"), Var("j")), value="e"),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+    left = _reduce_producer(source="P", output="left")
+    left = replace(left, body=left.body.map(lambda s: replace(s, op="maximum") if isinstance(s, Accum) else s))
+    prefix = (Load(name="m", input="left", index=(Var("a0"),)),) if dependent else ()
+    subtract = (Assign(name="shifted", op="subtract", args=("p", "m")),) if dependent else ()
+    right = LoopOp(
+        body=(
+            Loop(
+                axis=A0,
+                body=(
+                    *prefix,
+                    Loop(
+                        axis=K,
+                        body=(
+                            Load(name="p", input="P", index=(Var("a0"), Var("k") + Literal(offset, "int"))),
+                            *subtract,
+                            Accum(name="total", value="shifted" if dependent else "p", op="add"),
+                        ),
+                    ),
+                    Write(output="right", index=(Var("a0"),), value="total"),
+                ),
+            ),
+        ),
+    )
+    edges = {("left", "P"): ("producer", "P"), ("right", "P"): ("producer", "P")}
+    if dependent:
+        edges["right", "left"] = ("left", "left")
+    merged = splice_loops(
+        loops={"producer": producer, "left": left, "right": right},
+        splice_edges=edges,
+        roots=(("left", "left"), ("right", "right")),
+    )
+    assert merged is not None
+    assert _elementwise_fns(merged).count("exp") == (2 if dependent or offset else 1)
+    assert sum(loop.is_reduce for loop in merged.body.iter_of_type(Loop)) == (2 if dependent else 1)
+    x = np.linspace(-1, 1, 4 * (16 + offset), dtype=np.float32).reshape(4, 16 + offset)
+    results = dict(zip(merged.outputs, merged.forward(x), strict=True))
+    values = np.exp(x)
+    maximum = values[:, :16].max(axis=1)
+    summands = values[:, offset:] - maximum[:, None] if dependent else values[:, offset:]
+    np.testing.assert_allclose(results["left"], maximum, rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(results["right"], summands.sum(axis=1), rtol=1e-6, atol=1e-6)
 
 
 # ---------------------------------------------------------------------------
@@ -528,7 +596,7 @@ def test_consumer_extra_input_source_remap():
 
 
 def test_live_axes_computed():
-    """``LoopMeta.live_axes`` captures axes transitively used through each
+    """``BodyAnalysis.live_axes`` captures axes transitively used through each
     dep's Expr subtrees. For Accum, the reduce axis is excluded.
 
     Normalization canonicalizes SSA and axis names (``Load→in0``,
@@ -1011,56 +1079,61 @@ def test_literal_producer_write_index():
 
 def test_large_sigma_target_free_vars_walks_do_not_scale_with_producer_chain(monkeypatch):
     """A long producer chain reuses one large coordinate target without re-walking its tree."""
-    from emmy.compiler.ir.expr import BinaryExpr
 
-    producer_axis = Axis("p", 4096)
-    producer_stmts = [Load(name="x", input="X", index=(Var("p"),))]
-    previous = "x"
-    for i in range(128):
-        name = f"v{i}"
-        producer_stmts.append(Assign(name=name, op="negative", args=(previous,)))
-        previous = name
-    producer_stmts.append(Write(output="P", index=(Var("p"),), value=previous))
-    producer = LoopOp(body=(Loop(axis=producer_axis, body=tuple(producer_stmts)),))
+    def splice(chain_length):
+        from emmy.compiler.ir.expr import BinaryExpr
 
-    i_axis, j_axis = Axis("i", 8), Axis("j", 8)
-    target = Var("i")
-    for _ in range(128):
-        target = target * 2 + Var("j")
-    target = BinaryExpr("^", target, Literal(1, "int"))
-    consumer = LoopOp(
-        body=(
-            Loop(
-                axis=i_axis,
-                body=(
-                    Loop(
-                        axis=j_axis,
-                        body=(
-                            Load(name="pv", input="P", index=(target,)),
-                            Write(output="OUT", index=(Var("i"), Var("j")), value="pv"),
+        producer_axis = Axis("p", 4096)
+        producer_stmts = [Load(name="x", input="X", index=(Var("p"),))]
+        previous = "x"
+        for i in range(chain_length):
+            name = f"v{i}"
+            producer_stmts.append(Assign(name=name, op="negative", args=(previous,)))
+            previous = name
+        producer_stmts.append(Write(output="P", index=(Var("p"),), value=previous))
+        producer = LoopOp(body=(Loop(axis=producer_axis, body=tuple(producer_stmts)),))
+
+        i_axis, j_axis = Axis("i", 8), Axis("j", 8)
+        target = Var("i")
+        for _ in range(128):
+            target = target * 2 + Var("j")
+        target = BinaryExpr("^", target, Literal(1, "int"))
+        consumer = LoopOp(
+            body=(
+                Loop(
+                    axis=i_axis,
+                    body=(
+                        Loop(
+                            axis=j_axis,
+                            body=(
+                                Load(name="pv", input="P", index=(target,)),
+                                Write(output="OUT", index=(Var("i"), Var("j")), value="pv"),
+                            ),
                         ),
                     ),
                 ),
-            ),
+            )
         )
-    )
 
-    root_walks = 0
-    original = BinaryExpr.free_vars
+        root_walks = 0
+        original = BinaryExpr.free_vars
 
-    def counted_free_vars(expr):
-        nonlocal root_walks
-        if expr.op == "^":
-            root_walks += 1
-        return original(expr)
+        def counted_free_vars(expr):
+            nonlocal root_walks
+            if expr.op == "^":
+                root_walks += 1
+            return original(expr)
 
-    monkeypatch.setattr(BinaryExpr, "free_vars", counted_free_vars)
-    merged = splice_loops(loops={"producer": producer, "consumer": consumer}, splice_edges={("consumer", "P"): ("producer", "P")})
+        with monkeypatch.context() as patch:
+            patch.setattr(BinaryExpr, "free_vars", counted_free_vars)
+            merged = splice_loops(loops={"producer": producer, "consumer": consumer}, splice_edges={("consumer", "P"): ("producer", "P")})
 
-    assert merged is not None
-    # Loop construction and normalization also inspect the coordinate expression, but the count
-    # must not grow with the 128 producer dependencies (without the per-splice memo it exceeds 128).
-    assert root_walks < 32
+        assert merged is not None
+        return root_walks
+
+    # Reserving free operands and normalization each inspect the target a fixed number of times.
+    # Compare chain lengths so a constant amount of necessary analysis does not trip the guard.
+    assert splice(128) <= splice(8)
 
 
 # ---------------------------------------------------------------------------

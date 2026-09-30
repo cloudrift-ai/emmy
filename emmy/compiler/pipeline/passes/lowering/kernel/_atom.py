@@ -90,7 +90,7 @@ from emmy.compiler.ir.stmt import (
     Write,
     mask_select_predicate,
 )
-from emmy.compiler.ir.stmt.body import _exposed_defines, dedup_recomputes, free_names
+from emmy.compiler.ir.stmt.body import _exposed_defines, free_names
 from emmy.compiler.ir.stmt.passes import rename_free
 from emmy.compiler.ir.tile.ops import cone_stat, cone_stat_dtypes
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
@@ -628,7 +628,7 @@ def _staged_inner_atom_loop(
     return stmts
 
 
-def _wgmma_drain(*, operands, slot, mn, atom, bk_elems: int, frag_ns: str, n_folds: int) -> list[Stmt]:
+def _wgmma_drain(*, operands, slot, mn, atom, bk_elems: int, frag_ns: str, n_folds: int, wait: bool = True) -> list[Stmt]:
     """The warp-group drain — the ``wgmma`` leaf reading ring ``slot``. Both operands stay in
     shared memory: each k16 step builds one matrix descriptor per operand and issues one
     ``wgmma.mma_async`` per group of ``cells_per_instruction`` accumulator cells along N, and the
@@ -706,7 +706,7 @@ def _wgmma_drain(*, operands, slot, mn, atom, bk_elems: int, frag_ns: str, n_fol
                         trans_b=0 if trans else 1,
                     )
                 )
-    stmts += [WgmmaCommit(), WgmmaWait(0)]
+    stmts += [WgmmaCommit(), WgmmaWait(0)] if wait else [WgmmaCommit()]
     return stmts
 
 
@@ -896,9 +896,19 @@ def _slab_operands(
                 trans=i == 1 and b_trans,
                 atoms=atoms,
                 pad_cols=pads[i],
+                valid=_inside(tile, tile_base, is_row) if atoms == 1 else None,
             )
         )
     return tuple(ops)
+
+
+def _inside(tile: Side, tile_base: Expr, is_row: bool):
+    """The slab cells inside a masked tile edge — ``(row, col) -> base + <tile coord> < ext`` —
+    or ``None`` for an unmasked tile, or one whose tile axis runs along the slab row (a copy chunk
+    there could straddle the edge)."""
+    if not tile.mask or not is_row:
+        return None
+    return lambda row, col: BinaryExpr("<", BinaryExpr("+", tile_base, row), tile.ext)
 
 
 def _cta(mn: tuple[Side, Side], lanes: int, n_threads: int) -> CtaTile:
@@ -1165,7 +1175,7 @@ def _sync_operands(
         slab = edge.as_slab() if isinstance(edge, Fold) and copied_b(c, edge, inputs) else None
         bl = slab.load if slab is not None else edge
         if not isinstance(bl, Load):
-            b_body = dedup_recomputes(bl.lower(axes=axes))
+            b_body = bl.lower(axes=axes)
             exposed = multiplied.get(acc, bl.exposes[-1])
 
             def b_value(k0, row, col, *, body=b_body, exposed=exposed):
@@ -1753,6 +1763,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
         workers=ops.workers,
         block_threads=tile.launch_threads,
         carried=ops.carried_drain(operands, mn) if isinstance(transport, CpAsyncTransport) else None,
+        in_flight=ops.in_flight_drain(operands, mn),
     )
     # The block-scaled cell's per-tensor scale levels land on the output fragments here — after
     # the K-loop, before the sink.
@@ -2085,6 +2096,19 @@ class _MmaOps(_AtomOps):
             frag_ns=self.frag_ns,
             parts=True,
         )
+
+    def in_flight_drain(self, operands, mn):
+        """The ``wgmma`` drain that leaves its chunk's group running — ``(issue(slot), settle(n))``,
+        ``settle`` waiting until at most ``n`` groups run (:func:`_in_flight_kloop`) — or ``None``.
+        A ``wgmma`` drain loads no fragments, so its ``STAGE`` ``/p2`` is this register-side
+        pipeline instead: one group in the tensor cores while the next is issued. ``/p1`` waits
+        each chunk out, which keeps one more chunk of the ring in flight."""
+        if not self.tile.atom.is_wgmma or self.stage.reg_depth < 2:
+            return None
+        common = dict(
+            operands=operands, mn=mn, atom=self.tile.atom, bk_elems=self.stage.bk_elems, frag_ns=self.frag_ns, n_folds=len(self.channels)
+        )
+        return (lambda slot: _wgmma_drain(slot=slot, wait=False, **common)), (lambda n: [WgmmaWait(n)])
 
     def staged_drain(self, operands, slot, cells, offset, mn):
         """The mma slab drain — the fragment-load + ``mma.sync`` leaf reading ring ``slot``
@@ -2480,6 +2504,10 @@ class _ScalarOps(_AtomOps):
 
     def carried_drain(self, operands, mn):  # noqa: ARG002 — the scalar drain carries no fragments
         """``None``: a scalar drain has no fragments to carry across chunks."""
+        return None
+
+    def in_flight_drain(self, operands, mn):  # noqa: ARG002 — the scalar drain issues nothing asynchronous
+        """``None``: a scalar drain has no MMA group to leave running."""
         return None
 
     def staged_drain(self, operands, slot, cells, offset, mn):

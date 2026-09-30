@@ -28,16 +28,6 @@ from emmy.compiler.ir.stmt import Load
 BYTE_SLAB_PAD = 16
 
 
-def restore_unit_indices(index: tuple[Expr, ...], shape: tuple) -> tuple[Expr, ...]:
-    """Restore the zero coordinates a carried state dropped when its unit axes disappeared."""
-    if len(index) == len(shape):
-        return index
-    if len(index) != sum(size != 1 for size in shape):
-        raise ValueError(f"Cannot restore unit coordinates: {len(index)} indices for shape {shape}")
-    cells = iter(index)
-    return tuple(Literal(0, "int") if size == 1 else next(cells) for size in shape)
-
-
 def add(*terms) -> Expr:
     """Sum int / Expr terms into one Expr (dropping literal zeros)."""
     out = None
@@ -244,7 +234,7 @@ def _delinearized(index: tuple, shape: tuple) -> Expr | None:
 
 
 def split_pair(index: tuple, name: str) -> int | None:
-    """``Q`` when the exprs of ``index`` mentioning ``name`` are exactly one ``name // Q`` and one
+    """``Q`` when the exprs of ``index`` mentioning ``name`` are exactly one integer quotient and one
     ``name % Q`` (the split-store spelling a re-fused axis reaches a buffer with, in either dim
     order), else ``None``."""
     carrying = [e for e in index if name in e.free_vars()]
@@ -252,10 +242,10 @@ def split_pair(index: tuple, name: str) -> int | None:
         return None
     parts: dict[str, int] = {}
     for e in carrying:
-        if not (isinstance(e, BinaryExpr) and e.op in ("//", "%") and e.left == Var(name) and isinstance(e.right, Literal)):
+        if not (isinstance(e, BinaryExpr) and e.op in ("/", "//", "%") and e.left == Var(name) and isinstance(e.right, Literal)):
             return None
-        parts[e.op] = int(e.right.value)
-    return parts["//"] if set(parts) == {"//", "%"} and parts["//"] == parts["%"] else None
+        parts["/" if e.op == "//" else e.op] = int(e.right.value)
+    return parts["/"] if set(parts) == {"/", "%"} and parts["/"] == parts["%"] else None
 
 
 def split_addressable(index: tuple, shape, name: str, atom_ext: int, trailing: bool) -> bool:

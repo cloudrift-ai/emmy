@@ -18,7 +18,7 @@ from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.passes.lowering.kernel._register import factorize_register
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from tests.compiler.helpers import requires_cuda
-from tests.compiler.ir.test_carried_state import _graph, _inputs, _reference
+from tests.compiler.ir.test_carried_state import _graph, _inputs, _reference, _unit_seeded_graph
 
 
 def _lift(graph):
@@ -243,12 +243,14 @@ def test_register_state_preserves_old_reads_on_cuda(half, warps):
 @requires_cuda
 @pytest.mark.xdist_group("cuda")
 @pytest.mark.parametrize("unit_batch", [False, True])
-def test_register_state_starts_from_the_seed_tensor_on_cuda(unit_batch):
-    """A loop that starts from a tensor rather than zeros: the first step reads the seed at its cell."""
+@pytest.mark.parametrize("unit", [False, True], ids=["seed", "seed-with-a-size-one-dim"])
+def test_register_state_starts_from_the_seed_tensor_on_cuda(unit, unit_batch):
+    """A loop that starts from a tensor rather than zeros: the first step reads the seed at its cell,
+    and at 0 on a size-one dim the seed has and the state's cells do not."""
     from emmy.compiler.backend.cuda.program import run_program
 
     atom = ("mma_m8n8k4" if Context.probe().has_volta_mma else "mma_m16n8k16") + "_f16_f32"
-    source = _graph(seed="S0")
+    source = _unit_seeded_graph() if unit else _graph(seed="S0")
     if unit_batch:
         source = _with_output_batch_axis(source, 1)
     with pinned_knobs({"STAGE": "d1/reg", "WORK": "w1x1", "TILE": f"{atom}/f1x1/k4"}):
@@ -256,7 +258,7 @@ def test_register_state_starts_from_the_seed_tensor_on_cuda(unit_batch):
     (op,) = (n.op for n in graph.nodes.values() if isinstance(n.op, CudaOp))
     assert not op.serial and "S0" in op.arg_order
     arrays = _inputs(seed="S0")
-    result, _ = run_program(graph, arrays)
+    result, _ = run_program(graph, {**arrays, "S0": arrays["S0"][None]} if unit else arrays)
     want = _reference(arrays, seed="S0")
     np.testing.assert_allclose(np.asarray(result.outputs["out"]).reshape(want.shape), want, rtol=2e-3, atol=2e-3)
 

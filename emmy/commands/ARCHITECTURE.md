@@ -371,9 +371,11 @@ the prior.
 
 **Command modules:** `commands/bench/`, `commands/deploy/{ssh,local,cloud}.py` (`deploy ssh` auto-detects the remote GPU
 via SSH, `deploy local` the local GPU
-via PCI sysfs, both resolve the matrix + apply a scale-out strategy; `deploy cloud` uses the recipe's `deploy.gpu` for
-matrix resolution), `commands/teardown.py`, and `commands/vm/` (a CLI handler per provider). Each exposes a `handle_*`
-and a `register_*` function.
+via PCI sysfs, both resolve the matrix + apply a scale-out strategy; `deploy cloud` resolves the matrix from
+`--gpu`/`--gpu-count`, or from a plan file naming several models), `commands/teardown.py`, and `commands/vm/` (a CLI
+handler per provider). Each exposes a `handle_*` and a `register_*` function. Every deploy hands the orchestrator one
+list of services (a resolved recipe, its GPU devices, its host port), built by `replica_services` for one recipe and
+by `deploy/plan.py` for a plan.
 
 ## Data Flow
 
@@ -537,7 +539,14 @@ Deploys to a remote server via SSH + SCP. Auto-detects the remote GPU and resolv
 
 ```bash
 emmy deploy ssh --recipe <path> --ssh user@host[:port] [--ssh-key ~/.ssh/id_ed25519] [--dry-run] [--teardown]
+emmy deploy ssh --plan plan.json --ssh user@host[:port]
 ```
+
+`--plan` (exclusive with `--recipe`) runs a plan's models on the host it was written for: the detected GPU name and
+count must equal the plan's `gpu` and `gpu_count`, or the command exits before provisioning anything. The plan is
+validated and its services deployed exactly as under `deploy cloud --plan` below (one container per model on host
+port `8000 + i`, shared-device start order, a health check and smoke test per slot, no nginx); there is no rental,
+lease or result file, so `--teardown` is how the project comes down.
 
 ### `emmy deploy cloud`
 
@@ -547,7 +556,43 @@ sets fallback preference; pass `--provider {gcp,cloudrift}` to restrict the sear
 
 ```bash
 emmy deploy cloud --recipe <path> --gpu "NVIDIA H200 141GB" --gpu-count 8 [--provider gcp] [--name prefix]
+emmy deploy cloud --plan plan.json [--result-json out.json] [--lease lease.json --owner NAME]
 ```
+
+Without a fraction, `--gpu`/`--gpu-count` pick the highest `engine.llm.gpu_memory_utilization` among the entries
+for that GPU and count: the whole-GPU qualification, whatever order the recipe lists them in.
+
+`--plan` (exclusive with `--recipe`) deploys several models on one VM. The plan is JSON:
+
+```json
+{
+  "schema_version": 1,
+  "gpu": "NVIDIA H200 141GB",
+  "gpu_count": 2,
+  "models": [
+    {"recipe": "Qwen3-30B-A3B-Instruct-2507", "gpu_memory_utilization": 0.55, "gpu_device_ids": [0]},
+    {"recipe": "Qwen3-Embedding-0.6B",        "gpu_memory_utilization": 0.35, "gpu_device_ids": [0]},
+    {"recipe": "Qwen3.5-27B-AWQ",             "gpu_memory_utilization": 0.9,  "gpu_device_ids": [1]}
+  ]
+}
+```
+
+Every check runs before anything is rented, and each error names the model: a recipe (bare name or path, resolved
+like `--recipe`) must have a matrix entry matching the plan's GPU, `len(gpu_device_ids)` and the fraction exactly;
+that entry must run as one container (its GPU count equals its tensor × pipeline × data parallelism, so an entry that
+relies on replica fan-out is rejected); device ids are distinct and below `gpu_count`; the fractions of the models
+sharing a device add up to at most 0.95; the recipes agree on driver/CUDA pins. The VM is rented at exactly this
+shape (no larger fallback candidate) with ports 22 and `8000 + i` for model *i*, which becomes Compose service
+`{engine}_{i}` pinned to its devices. A service starts only after every earlier service it shares a GPU with is
+healthy (vLLM checks free memory against its whole fraction at start-up), and each is health-checked and
+smoke-tested on its own port. No nginx.
+
+`--result-json PATH` writes, atomically and only on success, `{"schema_version": 1, "cloud_instance_id": …,
+"models": [{"index": i, "recipe": …, "endpoint": "http://HOST:PORT/v1"}, …]}` with the externally reachable port
+of each model. `--lease PATH --owner NAME` persists the instance id the moment the provider returns it, before the
+VM is ready, and leaves it in place on every later failure so the VM can always be torn down; it is the same lease
+`vm create gpu` writes and `vm delete lease` consumes (see the provisioning architecture). Neither file is written
+in `--dry-run`, which validates the plan and prints what would run.
 
 ### Hardware-Aware Deploy (Local / SSH)
 

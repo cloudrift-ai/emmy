@@ -106,13 +106,15 @@ class IdentityStrategy(PipelineStrategy):
     def on_rebind(self, e: RebindEvent) -> None:
         # A lowering rewrite that gives a kernel a body of its own — the lift of a loop op into a
         # tile, the twist of a tile's exp-family cluster — is the same logical kernel under a new
-        # exact identity, re-derived here; the ``S_*`` row stays the fused body's. A rebind that
-        # keeps the body (a schedule) keeps the stamp.
+        # exact identity, re-derived here; the ``S_*`` row stays the fused body's. A schedule keeps the
+        # stamp, even one that realizes the kernel through another term (a carried state's serial form):
+        # the kernel is the tile its schedule fork was offered, which its rows are filed under.
         op, old = e.node.op, e.replaced
         if not e.pass_name.startswith(_LOWERING) or not isinstance(op, (LoopOp, TileOp)):
             return
+        scheduled = isinstance(op, TileOp) and op.schedule is not None and isinstance(old, TileOp) and old.schedule is None
         same_body = type(op) is type(old) and (op.op is old.op if isinstance(op, TileOp) else op.body is old.body)
-        if not same_body:
+        if not (scheduled or same_body):
             self._stamp(e.node, e.graph, exact=True)
 
     def _stamp(self, node, graph: Graph, *, exact: bool = False) -> None:

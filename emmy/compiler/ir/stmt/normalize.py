@@ -17,6 +17,7 @@ is reachable from Loop IR and from the digest, not from a materialized
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable, Iterator
 from dataclasses import replace
 from itertools import count, product
@@ -26,8 +27,9 @@ from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
 from emmy.compiler.ir.stmt.body import Body, free_names
-from emmy.compiler.ir.stmt.leaves import Accum, Assign, Init, Load, SelectBranch, Write
-from emmy.compiler.ir.stmt.order import _ordered_exported_accs, bound_axes, ordering_constraints, relation_graph, topological_sort
+from emmy.compiler.ir.stmt.leaves import Accum, Assign, Init, Load, Write
+from emmy.compiler.ir.stmt.order import bound_axes, ordering_constraints, relation_graph, topological_sort
+from emmy.compiler.ir.stmt.subroutine import Call, definitions
 
 __all__ = ["normalize_body"]
 
@@ -48,33 +50,31 @@ def normalize_body(stmts: Body) -> Body:
 
 def _normalize_body(stmts: Body) -> Body:
     """Uncached implementation owned by :class:`Body`'s normalization property."""
+    from emmy.compiler.ir.stmt.splicer import expand_calls
+
+    # Motion can put two lexical bindings in one scope. Give them distinct names first.
+    stmts = rename_ssa_sequential(topo_sort_siblings(stmts))
+    # Calls are storage sharing only. Full normalization sees every operation, so reduction
+    # fusion, executable identity and Tile IR's common-cone detection use the same CSE form.
+    if definitions(stmts):
+        stmts = expand_calls(dedup_loads(_canonicalize_exprs(prepare_body(stmts))))
+    while True:
+        reduced = dedup_loads(hoist_common_branches(_canonicalize_exprs(prepare_body(stmts))))
+        if reduced == stmts:
+            return _canonical_order(reduced)
+        stmts = reduced
+
+
+def prepare_body(stmts: Body) -> Body:
+    """Normalize coordinates and aliases while shared subroutine definitions remain compact."""
     stmts = topo_sort_siblings(stmts)
     stmts = drop_size_one_free_axes(stmts)
     stmts = drop_size_one_reduce_axes(stmts)
     stmts = canonicalize_free_axis_order(stmts)
     stmts = eliminate_copy_aliases(stmts)
-    stmts = unify_sibling_reduce_axes(stmts)
     stmts = merge_sibling_reduce_loops(stmts)
     stmts = hoist_loop_invariants(stmts)
-    stmts = simplify_body(stmts)
-    stmts = dedup_loads(stmts)
-    # Hoisting, simplification, and a parent merge can expose sibling reductions after the first
-    # merge. Close that dependency here: unifying their axes may enable a merge, which may then
-    # expose duplicate loads and require one new canonical order. Every changed round removes a
-    # loop or a load, so this reaches a fixed point without a fixed iteration bound.
-    stmts = _canonical_order(stmts)
-    while True:
-        # Unification renames sibling reduce axes in place: an order-preserving alpha-rename the
-        # relation graph never spelled, so the graph the order came from still describes it.
-        unified = unify_sibling_reduce_axes(stmts)
-        if unified == stmts:
-            unified = stmts
-        else:
-            unified.__dict__["_ordering"] = stmts._ordering
-        reduced = dedup_loads(merge_sibling_reduce_loops(unified))
-        if reduced == unified:
-            return unified
-        stmts = _canonical_order(reduced)
+    return Body.coerce(simplify_body(stmts))
 
 
 # ---------------------------------------------------------------------------
@@ -287,31 +287,18 @@ def eliminate_copy_aliases(stmts: Body) -> Body:
     copies as bridges between producer writes and consumer reads; a long
     chain stacks them. Every such Assign is dropped and downstream
     references to ``y`` are rewired to the alias root. Pure IR hygiene."""
+
     from emmy.compiler.ir.stmt.passes import rename_free  # noqa: PLC0415
 
     def walk(body: Body) -> Body:
         alias: dict[str, str] = {}
-
-        def resolve(name: str) -> str:
-            seen: set[str] = set()
-            while name in alias and name not in seen:
-                seen.add(name)
-                name = alias[name]
-            return name
-
         out: list[Stmt] = []
         for stmt in body:
+            stmt = rename_free(stmt, alias)
             if isinstance(stmt, Assign) and stmt.op.name == "copy" and len(stmt.args) == 1 and stmt.dtype is None:
-                alias[stmt.name] = resolve(stmt.args[0])
+                alias[stmt.name] = stmt.args[0]
                 continue
-            if stmt.nested():
-                # Apply aliases from the enclosing scope hygienically, then give each child its
-                # own alias table. A spelling reused by sibling bodies denotes separate binders.
-                stmt = rename_free(stmt, alias)
-                stmt = stmt.with_bodies(tuple(walk(child) for child in stmt.nested()))
-                out.append(stmt)
-            else:
-                out.append(stmt.rewrite(resolve))
+            out.append(stmt.with_bodies(tuple(walk(child) for child in stmt.nested())))
         return Body(out)
 
     return walk(Body.coerce(stmts))
@@ -320,31 +307,6 @@ def eliminate_copy_aliases(stmts: Body) -> Body:
 # ---------------------------------------------------------------------------
 # Pass 4: unify sibling reduce-loop axis names
 # ---------------------------------------------------------------------------
-
-
-def unify_sibling_reduce_axes(stmts: Body) -> Body:
-    """At every scope, find sibling reduce ``Loop``s whose reduce axes
-    index overlapping ``(Load.source, dim)`` positions and rename them
-    to a single canonical axis name. Recurses through every block-
-    structured Stmt (Loop / StridedLoop / Tile / Cond) to find nested
-    scopes."""
-    stmts = Body.coerce(stmts)
-
-    def walk(body: Body) -> Body:
-        # Recurse into nested bodies first (post-order) via the canonical
-        # nested() / with_bodies() descent, then group siblings at this
-        # scope. Splitting the recursion from the sibling-grouping keeps
-        # this pass's scope-level logic isolated in ``_unify_siblings``.
-        recursed: list[Stmt] = []
-        for s in body:
-            nested = s.nested()
-            if nested:
-                recursed.append(s.with_bodies(tuple(walk(b) for b in nested)))
-            else:
-                recursed.append(s)
-        return _unify_siblings(Body(recursed))
-
-    return walk(stmts)
 
 
 def _unify_siblings(body: Body) -> Body:
@@ -467,7 +429,7 @@ def _reduce_axis_source_positions(body: Body, reduce_axis_name: str) -> set[tupl
 # Pass 4b: merge sibling reduce Loops with matching axis into one Loop.
 # ---------------------------------------------------------------------------
 #
-# After :func:`unify_sibling_reduce_axes` renames sibling reduce axes
+# After :func:`_unify_siblings` renames sibling reduce axes
 # that index overlapping ``(source, dim)`` positions to one canonical
 # name, adjacent reduce Loops with the same axis name/extent become
 # structurally identical iteration scopes. Merging concatenates their
@@ -509,19 +471,20 @@ def merge_sibling_reduce_loops(stmts: Body) -> Body:
     statements that originally followed it now resolve to the merged
     Loop above them — still defs-before-uses.
 
-    Recurses through every block-structured Stmt to find nested scopes.
+    Unifies overlapping reduction axes and merges parents before visiting their children, so a
+    parent merge exposes matching child reductions to the same walk.
     """
     stmts = Body.coerce(stmts)
 
     def walk(body: Body) -> Body:
         recursed: list[Stmt] = []
-        for s in body:
+        for s in _merge_sibling_reduce_loops(_unify_siblings(body)):
             nested = s.nested()
             if nested:
                 recursed.append(s.with_bodies(tuple(walk(b) for b in nested)))
             else:
                 recursed.append(s)
-        return _merge_sibling_reduce_loops(Body(recursed))
+        return Body(recursed)
 
     return walk(stmts)
 
@@ -726,94 +689,172 @@ def simplify_body(body: Body) -> Body:
 # ---------------------------------------------------------------------------
 
 
-def dedup_loads(stmts: Body) -> Body:
-    """Drop duplicate ``Load`` stmts within nested scopes, and with them the duplicate pure
-    statements they feed.
+def _value_key(stmt: Stmt) -> Stmt | None:
+    """A value's structural operation with anonymous results, retaining every semantic field."""
+    if stmt.nested() or not (stmt.pure or isinstance(stmt, (Accum, Call))) or isinstance(stmt, Load) and stmt.carried:
+        return None
+    if isinstance(stmt, Assign) and stmt.op.commutative:
+        stmt = replace(stmt, args=tuple(sorted(stmt.args)))
+    if isinstance(stmt, Accum) and stmt.base == stmt.name:
+        stmt = replace(stmt, base=None)
+    names = {name: f"${index}" for index, name in enumerate(stmt.defines())}
+    return stmt.rename(names)
 
-    Two ``Load`` stmts with the same ``(input, index)`` read the same
-    value; keep the first and rewire downstream SSA references to its
-    name. Operates per-scope: a Load at an outer scope is reused by
-    inner siblings (their identical ``index`` doesn't reference any
-    inner-axis Var, so the values are equal). Loads inside a nested
-    scope are not visible to outer / sibling scopes.
 
-    An ``Assign`` or ``Accum`` spelling the same operation over the same (already rewired) names
-    as one before it in scope is the same value too — the fusion splice inlines a producer at
-    every use, and two consumers in one reduce loop then carry two copies of one accumulation
-    (a decoder half's gate and up channels each fold the o_proj result their norm reads). Keeping
-    the first and aliasing the second is what makes those copies one cone the tile lift can cut
-    once; the pass is named for the loads because that is where a duplicate chain starts.
+def hoist_common_branches(stmts: Body) -> Body:
+    """Place pure computations performed by both branches in their common enclosing scope.
 
-    Hygienic: an inner scope that re-binds a name the outer scope
-    deduped keeps its own binding — those are different variables
-    (see :func:`~emmy.compiler.ir.stmt.passes.rename_free`)."""
+    A computation moves only when all its ordering predecessors move with it on BOTH paths.
+    This factors complete common cones without speculating a load from just one path or moving
+    a read across a write. Alias substitution exposes the next common operation bottom-up.
+    """
     from emmy.compiler.ir.stmt.passes import rename_free  # noqa: PLC0415
 
-    stmts = Body.coerce(stmts)
+    used = set(stmts.ssa_defs | stmts.ssa_uses | stmts.axis_names)
+    fresh = (f"shared{n}" for n in count())
 
-    def written_buffers(stmt: Stmt) -> frozenset[str]:
-        return frozenset(
-            (*stmt.external_writes(), *(name for child in stmt.nested() for member in child.iter() for name in member.external_writes()))
+    def factor(stmt: Stmt) -> Stmt | Body:
+        if not isinstance(stmt, Cond) or not stmt.body or not stmt.else_body:
+            return stmt
+        branches = stmt.nested()
+        predecessors = [ordering_constraints(branch, effects=True) for branch in branches]
+        mutable = [
+            {name for name, occurrences in Counter(name for member in branch for name in member.defines()).items() if occurrences > 1}
+            for branch in branches
+        ]
+        taken: list[set[int]] = [set(), set()]
+        aliases: list[dict[str, str]] = [{}, {}]
+        shared = []
+        while True:
+            ready = []
+            for side, branch in enumerate(branches):
+                candidates = {}
+                for index, member in enumerate(branch):
+                    if index in taken[side] or predecessors[side][index] - taken[side] or not member.pure:
+                        continue
+                    if mutable[side].intersection(member.defines()):
+                        continue
+                    renamed = rename_free(member, aliases[side])
+                    if (key := _value_key(renamed)) is not None:
+                        candidates.setdefault(key, (index, renamed))
+                ready.append(candidates)
+            common = next((key for key in ready[0] if key in ready[1]), None)
+            if common is None:
+                break
+            names = tuple(next(name for name in fresh if name not in used) for _ in common.defines())
+            used.update(names)
+            shared.append(common.rename(dict(zip(common.defines(), names, strict=True))))
+            for side in (0, 1):
+                index, member = ready[side][common]
+                taken[side].add(index)
+                aliases[side].update(zip(member.defines(), names, strict=True))
+        if not shared:
+            return stmt
+        children = tuple(
+            Body(rename_free(member, aliases[side]) for index, member in enumerate(branch) if index not in taken[side])
+            for side, branch in enumerate(branches)
         )
+        return Body((*shared, stmt.with_bodies(children)))
 
-    def walk(body: Body, env: dict[tuple, tuple[str, ...]], carried: dict[str, str]) -> Body:
+    return stmts.map(factor)
+
+
+def dedup_loads(stmts: Body) -> Body:
+    """Scoped value numbering of pure bindings and canonical reductions.
+
+    Structural keys include operand representatives and every semantic field, never printed
+    expressions. Dominating values remain available until a buffer write or a rebound operand
+    invalidates them. Each lexical scope owns its aliases; only equivalent finalized reductions
+    export aliases to their enclosing scope. Ordinary values become available across sibling
+    scopes through legal code motion and fusion in the normalization fixed point.
+
+    A reduction is equivalent only with a common seed and one update per iteration, with no
+    in-loop reads of its partial state. Repeated updates and unseeded state are not SSA values.
+    """
+    from emmy.compiler.ir.stmt.passes import rename_free  # noqa: PLC0415
+
+    def walk(
+        body: Body,
+        env: dict[Stmt, tuple[str, ...]],
+        carried: dict[str, str],
+        seeded: bool = False,
+        initialized: frozenset[str] = frozenset(),
+    ) -> Body:
         local = dict(env)
         alias: dict[str, str] = {}
+        state = set(initialized)
+        counts = Counter(name for stmt in body for name in stmt.defines())
+        reductions = {
+            stmt.name
+            for stmt in body
+            if isinstance(stmt, Accum) and seeded and counts[stmt.name] == 1 and stmt.name not in body.ssa_uses and stmt.name not in state
+        }
 
-        def rename(n: str) -> str:
-            return alias.get(n, n)
-
-        def descend(inner: Body, clobbered: frozenset[str], coordinates: frozenset[str]) -> Body:
-            """Keep cached values only while their definitions and dependencies retain their bindings.
-            Rebound coordinates change a read even when its index has the same spelling. Accumulator
-            aliases carry out of the inner loop to the scope that reads the sum."""
-            shadowed = Body.coerce(inner).ssa_defs | coordinates
-            env = {k: v for k, v in local.items() if k[0] not in clobbered and not shadowed.intersection((*v, *k[-1]))}
-            return walk(inner, env, alias)
-
-        def invalidate(buffers: frozenset[str]) -> None:
-            for key in tuple(local):
-                if key[0] in buffers:
+        def invalidate(buffers: frozenset[str], names: frozenset[str] = frozenset()) -> None:
+            if not buffers and not names:
+                return
+            for key, values in tuple(local.items()):
+                if buffers.intersection(key.external_reads()) or names.intersection((*values, *free_names(key))):
                     del local[key]
 
         out: list[Stmt] = []
-        for s in body:
-            if isinstance(s, Load):
-                # Rewire any SSA names in this Load's *index* to their deduped
-                # alias first — a gather ``weight[(int)in0, a]`` whose index
-                # Load ``in0`` was itself deduped must follow ``in0`` to the
-                # kept name, or the index dangles after the duplicate is
-                # dropped. (No-op for plain axis indices: axes aren't aliased.)
-                s = s.rewrite(rename)
-                key = (s.input, tuple(e.pretty() for e in s.index), s.width, s.dtype, s.deps())
-                if key in local:
-                    alias.update(dict(zip(s.names, local[key], strict=True)))
-                    continue
-                local[key] = s.names
-                out.append(s)
-            elif isinstance(s, Assign | Accum):
-                s = rename_free(s, alias)
-                key = (
-                    ("assign", s.op, s.args, s.dtype) if isinstance(s, Assign) else ("accum", s.value, s.op, s.dtype, s.axes, repr(s.base))
-                ) + (s.deps(),)
-                if key in local:
-                    alias[s.name] = local[key][0]
-                    if isinstance(s, Accum):
-                        carried[s.name] = local[key][0]
-                    continue
-                local[key] = (s.name,)
-                out.append(s)
-            elif s.nested():
-                clobbered = written_buffers(s)
-                renamed = rename_free(s, alias)
-                out.append(renamed.with_bodies(tuple(descend(child, clobbered, renamed.binds_axes()) for child in renamed.nested())))
+        for original in body:
+            rebound = frozenset(name for name in original.defines() if counts[name] > 1)
+            # Carried state escapes a child scope; its update also invalidates enclosing values.
+            rebound |= frozenset(name for child in original.nested() for name in child.carried_names)
+            if isinstance(original, (Accum, Init)) and original.name not in reductions:
+                rebound |= frozenset(original.defines())
+            if isinstance(original, Load) and original.carried:
+                rebound |= frozenset(original.defines())
+            if rebound:
+                alias = {name: value for name, value in alias.items() if name not in rebound and value not in rebound}
+            stmt = rename_free(original, alias)
+            key = _value_key(stmt)
+            if (rebound and not stmt.pure) or isinstance(stmt, Accum) and stmt.name not in reductions:
+                key = None
+            if stmt.pure and set(stmt.defines()).intersection(stmt.deps()):
+                key = None
+            # A repeated copy of the same binding does not change its value. Cut projections
+            # can repeat a load this way; actual updates still invalidate it below.
+            if key is not None and local.get(key) == stmt.defines():
+                continue
+            invalidate(frozenset(), rebound)
+            if stmt.nested():
+                clobbered = frozenset(name for child in stmt.nested() for member in child.iter() for name in member.external_writes())
+                # A loop's write may precede this read on a back edge. A branch has no back
+                # edge: its dominating reads remain available until the actual write.
+                entry_writes = frozenset() if isinstance(stmt, Cond) else clobbered
+                children = []
+                for child in stmt.nested():
+                    shadowed = child.local_defs | stmt.binds_axes()
+                    available = {
+                        key: values
+                        for key, values in local.items()
+                        if not entry_writes.intersection(key.external_reads())
+                        and not shadowed.intersection((*values, *free_names(key)))
+                        and not isinstance(key, Accum)
+                    }
+                    children.append(walk(child, available, alias, isinstance(stmt, Loop) and stmt.seed, frozenset(state)))
+                    state.update(child.carried_names)
+                out.append(stmt.with_bodies(tuple(children)))
                 invalidate(clobbered)
-            else:
-                out.append(rename_free(s, alias))
-                invalidate(frozenset(s.external_writes()))
+                continue
+            if key is not None:
+                # Do not make another binding depend on a representative that will be overwritten.
+                if key in local and all(counts[name] <= 1 for name in local[key]):
+                    aliases = dict(zip(stmt.defines(), local[key], strict=True))
+                    alias.update(aliases)
+                    if isinstance(stmt, Accum):
+                        carried.update(aliases)
+                    continue
+                local[key] = stmt.defines()
+            out.append(stmt)
+            if isinstance(stmt, (Init, Accum)):
+                state.add(stmt.name)
+            invalidate(frozenset(stmt.external_writes()))
         return Body(out)
 
-    return walk(stmts, {}, {})
+    return walk(Body.coerce(stmts), {}, {})
 
 
 # ---------------------------------------------------------------------------
@@ -873,6 +914,7 @@ class _SequentialScope:
         inherited_axes: dict[str, str] | None = None,
         owned: set[str] | None = None,
         fixed: frozenset[str] = frozenset(),
+        reserved: frozenset[str] = frozenset(),
     ) -> None:
         self.counters = {kind: 0 for kind in ("v", "in", "acc", "a", "p")} if counters is None else counters
         self.ssa = {} if ssa is None else ssa
@@ -880,12 +922,18 @@ class _SequentialScope:
         self.inherited_axes = {} if inherited_axes is None else inherited_axes
         self.owned = set() if owned is None else owned
         self.fixed = fixed
+        self.reserved = reserved
+
+    def _fresh(self, kind: str) -> str:
+        while (name := f"{kind}{self.counters[kind]}") in self.reserved:
+            self.counters[kind] += 1
+        self.counters[kind] += 1
+        return name
 
     def _allocate(self, old: str, kind: str) -> None:
         if old in self.owned or old in self.fixed:
             return
-        self.ssa[old] = f"{kind}{self.counters[kind]}"
-        self.counters[kind] += 1
+        self.ssa[old] = self._fresh(kind)
         self.owned.add(old)
 
     def step(self, stmt: Stmt) -> Stmt:
@@ -893,7 +941,7 @@ class _SequentialScope:
         children = stmt.nested()
         if children:
             for child in children:
-                for name in _ordered_exported_accs(child):
+                for name in child.carried_names:
                     self._allocate(name, "acc")
         else:
             for name in stmt.defines():
@@ -901,19 +949,17 @@ class _SequentialScope:
 
         axes = dict(self.inherited_axes)
         for old in stmt.binds_axes():
-            axes[old] = f"a{self.counters['a']}"
-            self.counters["a"] += 1
+            axes[old] = self._fresh("a")
         for axis in bound_axes(stmt):
             for source in axis.sources():
                 if source.name not in self.sources:
-                    self.sources[source.name] = f"p{self.counters['p']}"
-                    self.counters["p"] += 1
+                    self.sources[source.name] = self._fresh("p")
 
         names = {**self.ssa, **self.sources, **axes}
         shell = stmt.with_bodies(tuple(Body() for _ in children)) if children else stmt
         renamed = shell.rename(names)
         if children:
-            exported = frozenset(name for child in children for name in _ordered_exported_accs(child))
+            exported = frozenset(name for child in children for name in child.carried_names)
             renamed_children: list[Body] = []
             for child in children:
                 scope = _SequentialScope(
@@ -922,6 +968,7 @@ class _SequentialScope:
                     sources=dict(self.sources),
                     inherited_axes=dict(axes),
                     fixed=exported,
+                    reserved=self.reserved,
                 )
                 renamed_children.append(Body(tuple(scope.step(member) for member in child)))
             renamed = renamed.with_bodies(tuple(renamed_children))
@@ -945,8 +992,9 @@ def rename_ssa_sequential(stmts: Body) -> Body:
 
     Idempotent: bodies already in canonical form round-trip unchanged."""
 
-    scope = _SequentialScope()
-    return Body(tuple(scope.step(stmt) for stmt in Body.coerce(stmts)))
+    stmts = Body.coerce(stmts)
+    scope = _SequentialScope(reserved=frozenset().union(*(free_names(stmt) for stmt in stmts)) - stmts.ssa_defs)
+    return Body(tuple(scope.step(stmt) for stmt in stmts))
 
 
 # ---------------------------------------------------------------------------
@@ -984,14 +1032,16 @@ def _canonical_order(stmts: Body) -> Body:
     stmts = _canonicalize_exprs(stmts)
     ordered, ordering = relation_graph(stmts).label().materialize(spelled=True)
     result = Body.coerce(sort_commutative_args(rename_ssa_sequential(ordered)))
+    # Sequential naming separates lexical binders. Restore shared reduction dimensions without
+    # merging dependent loops or changing the order represented by the relation graph.
+    result = _unify_siblings(result.map(lambda stmt: stmt.with_bodies(tuple(_unify_siblings(child) for child in stmt.nested()))))
     result.__dict__["_ordering"] = ordering
     return result
 
 
 def _canonicalize_exprs(stmts: Body, axes: tuple[str, ...] = ()) -> Body:
     """Canonicalize integer expressions using lexical binding order, never axis spelling."""
-    from dataclasses import fields  # noqa: PLC0415
-
+    from emmy.compiler.ir.stmt.passes import map_exprs  # noqa: PLC0415
     from emmy.compiler.structural import form  # noqa: PLC0415
 
     commutative = frozenset({"+", "*", "==", "!=", "&&", "||", "&", "|", "^"})
@@ -1037,18 +1087,8 @@ def _canonicalize_exprs(stmts: Body, axes: tuple[str, ...] = ()) -> Body:
             return CastExpr(expr.dtype, expression(expr.expr))
         return expr
 
-    def value(item):
-        if isinstance(item, Expr):
-            return expression(item)
-        if isinstance(item, tuple):
-            return tuple(value(member) for member in item)
-        if isinstance(item, SelectBranch):
-            return SelectBranch(value=item.value, select=expression(item.select))
-        return item
-
     def statement(stmt: Stmt) -> Stmt:
-        changes = {field.name: value(getattr(stmt, field.name)) for field in fields(stmt)}
-        rewritten = replace(stmt, **changes)
+        rewritten = map_exprs(stmt, expression)
         bound = (*axes, *(axis.name for axis in bound_axes(stmt)))
         return rewritten.with_bodies(tuple(_canonicalize_exprs(child, bound) for child in rewritten.nested()))
 

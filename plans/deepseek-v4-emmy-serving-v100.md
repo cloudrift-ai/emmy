@@ -116,16 +116,17 @@ checkpoint stays impractical here.
    compiler changes); the headroom sweep did not run, and the config keeps the 0.90 every boot since 09-11 has served at
    (30.8 GiB resident on a first-stage card, 31.75 of 32 on a second-stage one); registry publication is a separate
    approval.
-6. **Stage 5 — the A/B, the deliverable.** One `emmy bench` run over both arms at one envelope with their order
-   alternated inside each repeat, the way the RTX 5090 gemma-4 experiment balances time and thermal drift, against
-   immutable image digests and one checkpoint revision. Profile in a separate run — profiling the fork's multi-stream
-   execution perturbs the A/B — with a per-phase split (expert dispatch, attention, stream mixing) so Stage 6's
-   hypothesis is grounded. Quality gates the A/B (2026-09-29, GSM8K 200, chat template, one envelope): the fork scores
-   0.91 strict / 0.975 flexible; the release image 0.86 / 0.88 because the loader and the runner's router copy rounded
-   the router's float32 selection bias to float16 (fixed by PR #964: 0.71 / 0.96 with it). Emmy still gives every probed
-   prompt 0.05-0.15 nats/token less likelihood than the fork and keeps the few-shot `#### N` answer format less often;
-   routed experts match an fp32 reference, the attention call is identical, and neither of HF's float16
-   hyper-connection choices explains it on the fork. The open suspect is Emmy's compiled `pre`/`post` programs.
+6. **Stage 5 — the A/B, the deliverable. Ran 2026-09-29** (PR #960, `experiments/DeepSeek-V4-Flash-0731/
+   emmy_ab_v100_sxm3/RESULTS.md`): the release image built from `4781e138` (#964's merge, before #969's Sinkhorn seed
+   miscompile that #978 fixes) against the fork digest, rounds fork/Emmy/Emmy/fork, 3 repeats each. Emmy takes 2.14×
+   the fork's time per output token for one 2,048-token request (316.7 vs 148.0 ms), 2.9× its time to first token, and
+   delivers a third of its throughput at 8 concurrent; start-up 440 vs 164 s (weights load 300 vs 26 s). The workers
+   log the 4,096-token prefill post at 10× and pre at 104× their floor. Quality: after #964's router-bias fix Emmy
+   scores GSM8K 0.71 strict / 0.96 flexible; the fork's 0.91 / 0.975 is an artifact of its prefill mHC prenorm kernels
+   squaring fp16 in fp16 (overflow once |x| ≥ 256, the row's mixing falls back to its bias); with that square in fp32
+   the fork's prompt likelihood equals Emmy's and it scores 0.755 / 0.96. Not done: the per-phase profile, and a
+   same-workload run of the `a98fd4f8` image to tell whether #964's float32 router costs decode time (0.269 s per
+   token then, on a different workload). The image is not published: it is slower than the fork it is built on.
 7. **Stage 6 — MXFP4 expert inputs**, only if Stage 5's profile shows expert weight streaming dominates and a
    fused-unpack GEMM can plausibly beat TurboMind's on Volta. `main` spells native MXFP4 expert twins; this checkpoint
    needs its declaration mapped onto that spelling (`quant_method: fp8` with `expert_dtype: fp4`, packed as `w1.weight
@@ -375,11 +376,8 @@ expert route's `--record-greedy` under its one cut pin runs past 600 s of GPU ti
 
 ### Not established
 
-The fork and Emmy numbers are directional, not a balanced A/B: separate invocations, different envelopes (the fork at
-`gpu_memory_utilization` 0.80 with prefix caching off, Emmy at 0.90 with it on), different prompt shapes, the Emmy
-rows one repeat each from direct HTTP requests with no experiment record. The baked image exists since #928; the
-A/B recipe (PR #960) runs it and the fork image as two arms. Correctness: see Stage 5 — GSM8K and per-layer tensor
-comparisons against the fork have run, and a likelihood gap remains open.
+The numbers above Stage 5 are directional: separate invocations, different envelopes and prompt shapes, one repeat
+each. Stage 5's A/B is the balanced comparison, at one envelope only (context 4,096).
 
 ## Operations handoff
 

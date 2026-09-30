@@ -4,6 +4,7 @@ from typing import Any
 
 import yaml
 
+from emmy.deploy.params import Service
 from emmy.recipe.engines import build_engine_args
 from emmy.recipe.types import Recipe
 
@@ -31,69 +32,63 @@ def _render_docker_options(docker_options: dict[str, Any]) -> str:
     return "\n" + "\n".join(lines)
 
 
-def calculate_num_instances(recipe: Recipe) -> int:
-    """Calculate number of instances from recipe deploy.gpu_count and parallelism."""
-    gpus_per_instance = recipe.engine.llm.gpus_per_instance
-
-    if recipe.deploy.gpu_count is None or recipe.deploy.gpu is None:
-        return 1
-
-    return max(1, recipe.deploy.gpu_count // gpus_per_instance)
+def service_name(index: int, service: Service) -> str:
+    """Compose service (and container) name of the service at ``index``."""
+    return f"{service.recipe.engine.llm.engine_name}_{index}"
 
 
-def generate_compose(recipe: Recipe, model_dir, hf_token, num_instances=1, gpu_device_ids=None, baked_hf_home=None):
-    """Build docker-compose.yaml string from resolved Recipe.
+def replica_services(recipe: Recipe, gpu_device_ids: list[int] | None = None) -> tuple[list[Service], bool]:
+    """Fan a resolved recipe out into its containers.
 
-    Single instance: 1 vllm service, count: all GPUs, port 8000.
-    Multi-instance: N vllm services with device IDs + nginx on 8080.
-
-    ``baked_hf_home``: the image's own HF cache path, when it ships one (see
-    ``_baked_hf_cache``). Setting HF_HOME on such an image would hide the snapshot it
-    baked in, so the override is dropped and the image's own value stands — UNLESS the
-    engine args name a model beyond the baked one (a ``--speculative-config`` drafter):
-    the baked cache holds only the one snapshot and the image pins ``HF_HUB_OFFLINE=1``,
-    so the extra model can resolve only from the host cache, and the override returns.
+    When ``deploy.gpu_count`` holds several instances of the recipe's parallelism, each replica
+    gets its own device slice and host port behind a load balancer; otherwise one service sees
+    the given devices (every GPU when None). Returns the services and whether they need nginx.
     """
-    llm = recipe.engine.llm
-    model_name = recipe.model_name
-    image = llm.image
-    engine = llm.engine_name
-    entrypoint = llm.entrypoint
-    gpus_per_instance = llm.gpus_per_instance
+    per_instance = recipe.engine.llm.gpus_per_instance
+    count = max(1, recipe.deploy.gpu_count // per_instance) if recipe.deploy.gpu is not None else 1
+    if count == 1:
+        return [Service(recipe, gpu_device_ids)], False
+    return [Service(recipe, list(range(i * per_instance, (i + 1) * per_instance)), 8000 + i) for i in range(count)], True
 
-    engine_args = build_engine_args(llm, model_name, recipe.model.revision)
-    command_str = "\n      ".join(engine_args)
-    extra_env_lines = "".join(f"\n      - {k}={v}" for k, v in _env_items(llm.extra_env))
-    needs_extra_model = any("--speculative-config" in a for a in engine_args)
-    hf_home_line = "" if baked_hf_home and not needs_extra_model else f"\n      - HF_HOME={model_dir}"
-    docker_options_lines = _render_docker_options(llm.docker_options)
 
-    is_amd = recipe.deploy.gpu is not None and recipe.deploy.gpu.startswith("AMD")
+def generate_compose(services: list[Service], model_dir, hf_token, load_balancer=False, baked_images=frozenset()):
+    """Build docker-compose.yaml string from the services of one deployment.
 
-    services = "services:\n"
+    One engine service per entry, named ``{engine}_{i}``, pinned to its device ids (``count: all``
+    when it has none) and published on its host port; with ``load_balancer``, an nginx service on
+    8080 in front of all of them. Nothing declares ``depends_on``: the orchestrator starts the
+    services in the order their GPUs allow and polls each one itself.
 
-    for i in range(num_instances):
-        if num_instances == 1:
-            if gpu_device_ids is not None:
-                gpu_ids_yaml = ", ".join(f"'{g}'" for g in gpu_device_ids)
-                gpu_config = f"device_ids: [{gpu_ids_yaml}]"
-            else:
-                gpu_config = "count: all"
-            port = 8000
-        else:
-            start = i * gpus_per_instance
-            gpu_ids = [str(g) for g in range(start, start + gpus_per_instance)]
-            gpu_ids_yaml = ", ".join(f"'{g}'" for g in gpu_ids)
-            gpu_config = f"device_ids: [{gpu_ids_yaml}]"
-            port = 8000 + i
+    ``baked_images``: the images that ship their own HF cache (see ``baked_hf_cache``).
+    Setting HF_HOME on such an image would hide the snapshot it baked in, so the override is
+    dropped and the image's own value stands — UNLESS the engine args name a model beyond the
+    baked one (a ``--speculative-config`` drafter): the baked cache holds only the one snapshot
+    and the image pins ``HF_HUB_OFFLINE=1``, so the extra model can resolve only from the host
+    cache, and the override returns.
+    """
+    compose = "services:\n"
 
-        entrypoint_line = f"\n    entrypoint: {entrypoint}" if entrypoint else ""
+    for index, service in enumerate(services):
+        recipe = service.recipe
+        llm = recipe.engine.llm
+        model_name = recipe.model_name
+        engine_args = build_engine_args(llm, model_name, recipe.model.revision)
+        command_str = "\n      ".join(engine_args)
+        extra_env_lines = "".join(f"\n      - {k}={v}" for k, v in _env_items(llm.extra_env))
+        needs_extra_model = any("--speculative-config" in a for a in engine_args)
+        hf_home_line = "" if llm.image in baked_images and not needs_extra_model else f"\n      - HF_HOME={model_dir}"
+        docker_options_lines = _render_docker_options(llm.docker_options)
+        entrypoint_line = f"\n    entrypoint: {llm.entrypoint}" if llm.entrypoint else ""
 
-        if is_amd:
+        if recipe.deploy.gpu is not None and recipe.deploy.gpu.startswith("AMD"):
             gpu_section = (
                 "    devices:\n      - /dev/kfd:/dev/kfd\n      - /dev/dri:/dev/dri\n    group_add:\n      - video\n      - render"
             )
         else:
+            if service.gpu_device_ids is None:
+                gpu_config = "count: all"
+            else:
+                gpu_config = "device_ids: [" + ", ".join(f"'{g}'" for g in service.gpu_device_ids) + "]"
             gpu_section = (
                 "    deploy:\n"
                 "      resources:\n"
@@ -104,17 +99,18 @@ def generate_compose(recipe: Recipe, model_dir, hf_token, num_instances=1, gpu_d
                 "              capabilities: [gpu]"
             )
 
-        services += f"""
-  {engine}_{i}:
-    image: {image}
-    container_name: {engine}_{i}{entrypoint_line}
+        name = service_name(index, service)
+        compose += f"""
+  {name}:
+    image: {llm.image}
+    container_name: {name}{entrypoint_line}
 {gpu_section}
     volumes:
       - {model_dir}:{model_dir}
     environment:
       - HUGGING_FACE_HUB_TOKEN={hf_token}{hf_home_line}{extra_env_lines}
     ports:
-      - "{port}:8000"
+      - "{service.port}:8000"
     shm_size: '16gb'
     ipc: host
     restart: unless-stopped{docker_options_lines}
@@ -128,9 +124,8 @@ def generate_compose(recipe: Recipe, model_dir, hf_token, num_instances=1, gpu_d
       start_period: 1200s
 """
 
-    if num_instances > 1:
-        depends = "\n".join(f"      {engine}_{i}:\n        condition: service_healthy" for i in range(num_instances))
-        services += f"""
+    if load_balancer:
+        compose += """
   nginx:
     image: nginx:alpine
     container_name: nginx_lb
@@ -139,16 +134,14 @@ def generate_compose(recipe: Recipe, model_dir, hf_token, num_instances=1, gpu_d
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
     restart: unless-stopped
-    depends_on:
-{depends}
 """
 
-    return services
+    return compose
 
 
-def generate_nginx_conf(num_instances, engine="vllm"):
-    """Generate nginx config with least_conn upstream."""
-    upstream_servers = "\n".join(f"        server {engine}_{i}:8000;" for i in range(num_instances))
+def generate_nginx_conf(names: list[str]):
+    """Generate nginx config with a least_conn upstream over the named services."""
+    upstream_servers = "\n".join(f"        server {name}:8000;" for name in names)
 
     return f"""worker_processes auto;
 

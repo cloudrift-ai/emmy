@@ -7,6 +7,7 @@ including the composite ceil-div grid factors that the Graph-JSON path can't
 round-trip — and (3) the pack-side weight load-op vocabulary matching the binder.
 """
 
+import dataclasses
 import json
 
 import numpy as np
@@ -98,6 +99,22 @@ def test_a_plan_stored_under_the_old_tma_key_still_reads():
     assert spec.pop("arch_specific") is True
     spec["uses_tma"] = True
     assert plan_from_dict(wire).kernels["k_test"].arch_specific is True
+
+
+def test_only_a_kernel_that_waits_on_its_predecessor_launches_dependent():
+    """A programmatic dependent launch may start a kernel before the grid ahead of it finished, so
+    only a kernel whose source waits on that grid (``griddepcontrol.wait``) is marked, and a plan
+    stored before the mark existed reads unmarked: its kernels launch serialized."""
+    graph = _sample_graph()
+    assert plan_from_graph(graph).kernels["k_test"].dependent_launch is False
+    node = graph.nodes["y"]
+    node.op = dataclasses.replace(node.op, kernel_source='__global__ void k_test() { asm volatile("griddepcontrol.wait;"); }')
+    plan = plan_from_graph(graph)
+    assert plan.kernels["k_test"].dependent_launch is True
+    wire = json.loads(json.dumps(plan_to_dict(plan)))
+    assert plan_from_dict(wire).kernels["k_test"].dependent_launch is True
+    del wire["kernels"]["k_test"]["dependent_launch"]
+    assert plan_from_dict(wire).kernels["k_test"].dependent_launch is False
 
 
 def test_a_plan_without_the_dtype_field_keeps_the_stored_dtype_read():

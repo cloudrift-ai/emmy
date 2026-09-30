@@ -784,9 +784,12 @@ def test_a_kernel_pin_is_checked_as_its_family():
     assert unreproducible_pin_flag({"WORK@place_ab12": "t128"}, rows) is None
     assert unreproducible_pin_flag({"WORK@place_ab12": "w4x1"}, rows) is not None
     # Named, it is asked of the kernels it reaches alone: the piece that ran w1x16 did not realize t128.
-    names = ["k_x__place_ab12__partial", "k_x__place_cd34__partial"]
+    names = [("k_x__place_ab12__partial",), ("k_x__place_cd34__partial",)]
     assert "WORK@place_ab12=t128" in unreproducible_pin_flag({"WORK@place_ab12": "t128"}, rows, kernel_names=names)
     assert unreproducible_pin_flag({"WORK@place_cd34": "t128"}, rows, kernel_names=names) is None
+    # A cut piece's node id carries its ordinal and its kernel name does not; the pin reaches the kernel by either.
+    pieces = [("k_x__place_ab12", "add_7__place_ab12_0"), ("k_x__place_cd34", "add_7__place_cd34_0")]
+    assert unreproducible_pin_flag({"WORK@place_cd34": "t128"}, rows, kernel_names=pieces) is None
 
 
 def test_a_kernel_scoped_place_pin_is_not_realized_by_a_sibling_seam():

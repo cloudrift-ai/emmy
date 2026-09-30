@@ -67,9 +67,10 @@ def test_common_kernel_corpus_is_small_and_identical(project_root) -> None:
     assert "./venv/bin/emmy run" in run
     assert "for repeat in 0 1 2 3 4" in run
     assert "--golden $task_dir/working.json --bench --strict" in run
-    assert "--bench-backends eager,tcompile" in run
+    assert '"$model_ref" --layer "$layer" --seq-len "$seq_len" --bench' in run
+    assert "EMMY_GOLDEN_FILE=$task_dir/working.json" in run
+    assert "--bench-backends eager,tcompile,emmy" in run
     assert "--bench-backends eager,emmy" in run
-    assert "--bench-backends eager,tcompile,emmy" not in run
     assert "torch-compile.status" in run
     assert "scripts/" not in run
     assert recipe.command.stage == [
@@ -77,6 +78,9 @@ def test_common_kernel_corpus_is_small_and_identical(project_root) -> None:
         "pyproject.toml",
         "requirements.txt",
         "Makefile",
+        "Cargo.toml",
+        "Cargo.lock",
+        "crates",
         "experiments/golden-bench-2026/kernels/recipe.yaml",
         "experiments/golden-bench-2026/kernels/golden",
     ]
@@ -110,38 +114,24 @@ def test_native_fp8_kernel_corpus_is_separate_and_identical(project_root) -> Non
         assert "EMMY_FP8_MMA=1" in command
 
 
-def test_quantized_support_check_covers_four_formats_and_replays_block_fp8(project_root) -> None:
+def test_quantized_support_check_covers_three_formats(project_root) -> None:
     recipe_dir = _experiment(project_root, "quantized_kernels_rtx5090")
     recipe = load_recipe(recipe_dir)
     tasks = enumerate_tasks([recipe_dir])
-    assert len(tasks) == 6
+    assert len(tasks) == 4
     assert {task.recipe.deploy.gpu for task in tasks} == {"NVIDIA GeForce RTX 5090"}
     assert all(task.recipe.deploy.gpu_count == 1 for task in tasks)
     by_format: dict[str, list] = {}
     for task in tasks:
         by_format.setdefault(task.variant.params["format"], []).append(task)
-    assert set(by_format) == {"nvfp4", "awq", "trellis", "fp8-block"}
+    assert set(by_format) == {"nvfp4", "awq", "trellis"}
     assert {task.variant.params["seq_len"] for task in by_format["nvfp4"]} == {1, 512}
-    assert {task.variant.params["seq_len"] for task in by_format["fp8-block"]} == {1, 512}
     assert all(task.variant.params["seq_len"] == 1 for task in by_format["awq"] + by_format["trellis"])
-    traced = by_format["nvfp4"] + by_format["awq"] + by_format["trellis"]
-    assert all(task.variant.params["golden"] == "" for task in traced)
-    # The block-FP8 rows replay committed hand-tuned goldens; a missing file must fail the row, not trace instead.
-    replayed = {task.variant.params["golden"] for task in by_format["fp8-block"]}
-    assert replayed == {"qwen3-06b-fp8-block-s1_rtx5090", "qwen3-06b-fp8-block-s512_rtx5090"}
-    assert {task.variant.params["model_ref"] for task in by_format["fp8-block"]} == {
-        "Qwen/Qwen3-0.6B-FP8@e5be08033360965ceca7b0ffd72d521a51331ce0"
-    }
-    # The decode (seq=1) golden is committed and fully tuned; the prefill (seq=512) golden is a documented
-    # partial recorded in the same directory.
-    for name in replayed:
-        assert (Path(recipe_dir) / "golden" / f"{name}.golden.json").is_file()
 
     run = recipe.command.run
     assert "./venv/bin/emmy trace" in run
     assert "./venv/bin/emmy tune" not in run
-    assert 'if [ -n "$golden" ]' in run
-    # Each post-fusion target is benched on its own so a committed golden's per-target evidence deploys.
+    # Each post-fusion target is benched on its own.
     assert '--realization "$$seed"' in run
     assert "--bench --strict --no-record-evidence" in run
     assert "--bench-backends eager,emmy" in run
@@ -152,7 +142,6 @@ def test_quantized_support_check_covers_four_formats_and_replays_block_fp8(proje
         "requirements.txt",
         "Makefile",
         "experiments/golden-bench-2026/quantized_kernels_rtx5090/recipe.yaml",
-        "experiments/golden-bench-2026/quantized_kernels_rtx5090/golden",
     ]
     assert recipe.command.strict is True
 
@@ -185,7 +174,7 @@ def test_large_layer_corpus_is_bounded_and_not_labeled_tp8(project_root) -> None
         )
         assert "--loop-targets" not in command
         assert "--golden /task/working.json --bench --strict" in command
-        assert "--bench-backends eager,tcompile" in command
+        assert "--bench-backends eager,tcompile,emmy" in command
         assert "--bench-backends eager,emmy" in command
 
 
@@ -408,4 +397,4 @@ def test_every_command_variant_renders(project_root) -> None:
             assert "/task" in command
             subprocess.run(["bash", "-n"], input=command, text=True, check=True)
             rendered += 1
-    assert rendered == 71
+    assert rendered == 69

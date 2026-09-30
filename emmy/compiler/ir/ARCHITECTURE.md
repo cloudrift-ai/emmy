@@ -195,6 +195,9 @@ kernel it produced went on to read.
   (dynamic grid), strided rows, and the tensor-core `warp_tile` are reserved future tiers.
 - **Kernel → CUDA** (after `lowering/cuda`): `KernelOp` replaced by
   `CudaOp` carrying rendered source.
+- **Every buffer index spells every dim of its buffer**, `0` at a size-one dim. `render_index` flattens it
+  row-major for both the CUDA render and the Loop IR C++ runner, and refuses any other count: without strides the
+  coordinates cannot be summed into an address. A single coordinate is an already-flat address.
 
 Multi-output ABI order always comes from `Node.buffer_names()`: matcher population reorders a body-carrying op's
 input/output maps to the graph ports after body normalization, Loop execution returns outputs in that order,
@@ -516,6 +519,18 @@ the shared substrate behind the rules that slice cones (the demoted-operand prod
 `tile/cut/030_cut`) — eligibility judgments stay in the rules, per
 `pipeline/passes/ARCHITECTURE.md`.
 
+`Body.dependency_depths` folds the def-use graph with a caller-selected set of statement kinds to count. External
+buffer depths let composition carry the result across producer/consumer boundaries without expanding either body.
+Counting accumulators gives a sufficient independence proof for early reduction sharing: equal-depth reductions
+cannot read each other's finalized result. The splicer supplies graph edges and keeps coordinate substitution local.
+
+`Body.coalesce` assembles repeated shared SSA definitions once and joins adjacent independent reduction loops with
+identical headers. Fold lowering and computed-operand assembly use this same operation. Its input is shared value
+cones, not arbitrary repeated accumulator updates. Effects retain their order and multiplicity and stop reuse across
+them; a read of a finalized reduction keeps the corresponding loops separate.
+Fold lowering also remembers each term placed at each scope before visiting its operands, so a shared term and its
+boundary stores are emitted once instead of relying on statement cleanup to remove duplicate effects.
+
 `backward_cone` resolves reads by NAME over a body it assumes is SSA, so it is only sound where one name has one
 def. `Lambda.cone` is the caller that cannot assume it: a stored combine takes its states in as params and writes
 them back on the way out to spell its results (`Recipe.program`), so a read of the INCOMING state would resolve
@@ -537,9 +552,14 @@ two are safe together only for a whole-subtree renumbering (`rename_ssa_sequenti
 from *dropping* a binding — load dedup, CSE — an inner scope that merely re-uses the dropped name's spelling is a
 different variable, and renaming it both redeclares the survivor inside the scope and rewires the inner arithmetic to
 the outer value. `passes.rename_free(stmt, alias)` is the hygienic form: it prunes the alias of whatever each child
-scope re-binds before descending. `normalize.dedup_loads` applies the same rule while threading its own per-scope
-environment. σ has the same hazard with axis names, which collide across a tree by design (a cone statistic's axis
-may spell the same as the enclosing contraction's): `fold.subst_free(stmt, sigma)` is σ's hygienic form — it stops at
+scope re-binds before descending. It rewrites the wrapper with empty child bodies, then visits each child once;
+rewriting the full subtree first would repeat and discard work at every enclosing level.
+If an alias's destination is shadowed, the local binding is renamed before substitution to prevent capture.
+`Body.local_defs` distinguishes bindings at this scope from definitions in deeper scopes; a deeper shadow must not
+hide an available enclosing value. Copy elimination and CSE both use the hygienic rewrite.
+`normalize.dedup_loads` threads its own per-scope environment. σ has the same hazard with axis names, which collide
+across a tree by design (a cone statistic's axis may spell the same as the enclosing contraction's):
+`fold.subst_free(stmt, sigma)` is σ's hygienic form — it stops at
 a `Loop` / reducing `Fold` binder that re-binds a substituted name, and is what the smem compute fill substitutes
 cell coordinates through.
 
@@ -548,6 +568,17 @@ cell coordinates through.
 Pure `body → body` passes run from `LoopOp.__post_init__` so every
 constructed `LoopOp` (including intermediate fusion results) is
 canonicalized before validation:
+
+Fusion may construct a compact body containing scalar `Call` statements. Each references one read-only `Subroutine`
+with explicit coordinate parameters and captured input buffers. Early ordering, alias elimination, invariant motion
+and coordinate simplification operate on the calls; each shared definition is prepared once. Identical calls to the
+same definition share by argument structure without searching their bodies. Before full CSE, the statement-layer
+splicer expands calls using the same demand reconstruction as fusion. Independent reductions with equal extents and
+reduction depths share axes; coordinate substitutions keep different arguments distinct. Full CSE then shares common
+producers across definitions. Terminal values also seed expansion, so normalization accepts bodies without output
+writes and preserves unused values beside writes. The expanded body is the only form used by validation, executable
+identity, serialization and Tile IR lifting. Operation clustering also starts from that CSE form, so it sees operations
+inside definitions. Subroutine boundaries never limit fusion.
 
 - `topo_sort_siblings` — stable Kahn reorder so SSA defs precede their uses
   within each body (fixes splicer-produced use-before-def).
@@ -561,13 +592,16 @@ canonicalized before validation:
   workspace's leading index, so the same rule keeps it outside the axes it partitions without a naming convention.
 
 - `eliminate_copy_aliases` — drop `y = copy(x)` Assigns. Each nested body owns its alias map, so source spellings
-  reused by sibling scopes remain separate binders.
-- `unify_sibling_reduce_axes` — rename sibling reduce Loops whose reduce-axis Load positions overlap so they share one
-  canonical axis name (softmax's max + sum sweeps; the two matmul reductions in `silu(x@Wg) * (x@Wu)` that both index
-  `x` at the same K slot). A position is `(source, dim, anchor, coefficient)`, read through `affine_form`: a blocked
-  reduce indexes its stream at `o·B + i` and still walks that dimension, while the anchor keeps `o·B + i` apart from
-  `o·B + 32 + j`, which walk different halves. Union-find groups all transitively-overlapping Loops at one scope.
-- `merge_sibling_reduce_loops` — concatenate sibling reduce Loops that share `axis.name` / `extent` into one Loop body.
+  reused by sibling scopes remain separate binders. Enclosing aliases travel through that same walk, pruned at each
+  child scope by the shared hygienic rewrite.
+- `merge_sibling_reduce_loops` — unify sibling reduce axes whose Load positions overlap, then merge matching Loops
+  before descending into their children. A parent merge therefore exposes child reductions to the same walk.
+  Overlapping reductions share one canonical axis name (softmax's max + sum sweeps; the two matmul reductions in
+  `silu(x@Wg) * (x@Wu)` that both index `x` at the same K slot). A position is `(source, dim, anchor, coefficient)`,
+  read through `affine_form`: a blocked reduce indexes its stream at `o·B + i` and still walks that dimension, while
+  the anchor keeps `o·B + i` apart from `o·B + 32 + j`, which walk different halves. Union-find groups all
+  transitively-overlapping Loops at one scope.
+  Sibling reduce Loops that share `axis.name` / `extent` concatenate into one Loop body.
   Every gate is phrased over what the second Loop reads from its ENCLOSING scope (`free_names` — what it uses and does
   not bind itself): it must read no name the first body defines (blocking softmax-style sequential reduces where
   sum-exp reads `acc_max`), and no between-stmt def. Names both bodies merely happen to bind are a COLLISION, not a
@@ -585,35 +619,68 @@ canonicalized before validation:
   linear in definitions × loop depth instead of materializing the quadratic full SSA dependency closure.
   Division retains its own rounding even when its denominator is invariant; reciprocal multiplication can change
   quantization at a rounding boundary and is not a normalization.
-- `dedup_loads` — after expression simplification, keep one `Load` for each identical
-  `(input, index, width, dtype)` read in a scope and rewire every scalar or vector lane. A write invalidates retained
-  reads of that buffer, including around a nested scope with a write. Entering a scope also drops cached values whose
+- `dedup_loads` — scoped value numbering after expression normalization. Structural keys retain every semantic field
+  and replace output names with anonymous result positions; neither expression printing nor `repr` determines value
+  equality. Keep one equivalent pure binding and rewire every scalar or vector lane. Exact copies of one binding also
+  share, but an overwritten name cannot represent another binding. A buffer write invalidates its retained reads,
+  including around a nested scope with a write. Entering a scope also drops cached values whose
   definitions or dependencies are rebound there; an identical index spelling can name a different loop coordinate.
-  The same walk keeps one `Assign` per identical
-  operation over identical arguments and one `Accum` per identical accumulation — a value the loop tree computes
+  The same walk handles expressions, selections, carried-state reads and compact calls. Selection predicates are
+  dependencies too. Assignments treat commutative operands as unordered after alias substitution; floating-point
+  reassociation is not an equivalence. One-update reductions with the same implicit seed and no reads of partial
+  state also share. Repeated updates, explicitly initialized or unseeded accumulators, and staged load assignments
+  retain their state transitions; changing a state invalidates dependent available values in enclosing scopes too.
+  A value the loop tree computes
   twice (a contraction spelled on both sides of a cut seam, a repeated pure expression) folds to one definition, and
   an accumulator alias carries out of the loop that defined it to the scope that reads the sum. This is
   canonicalization for every Loop / Tile body, not a fusion profitability decision; the structural key inherits it,
   so two bodies that differ by a repeated computation key alike.
-- `rename_ssa_sequential` — cosmetic: `Load` names become `in0, in1, …`, accumulator state becomes `acc0, …`, and
+- `hoist_common_branches` — move a pure computation executed by both branches to their enclosing scope when every
+  ordering predecessor can move on both paths. Operand substitution then exposes the next common computation. This
+  shares complete common cones while preserving writes and ordered protocols; it never speculates a load present
+  on only one path. Loop invariants and fused reduction bodies provide availability across loop scopes. These rules
+  do not claim general partial redundancy elimination.
+- `rename_ssa_sequential` — `Load` names become `in0, in1, …`, accumulator state becomes `acc0, …`, and
   every other definition becomes `v0, v1, …`, in lexical definition order. Names stay globally unique while each
   nested body tracks its own binders, so sibling scopes may reuse the same source spelling without collapsing. Axis
   renames reach conditions, reduction metadata, and `Window` parent/base/bound metadata as well as indices; a
   reduction's axis tuple is canonicalized as a set. SSA values travel only through the rename channel, never `sigma`,
-  so indirect indices cannot be renamed twice.
+  so indirect indices cannot be renamed twice. Normalization separates lexical bindings before motion can put them
+  in one scope, then assigns canonical names again after ordering the result.
 - `sort_commutative_args` — sort `Assign.args` for commutative ops
   (`add` / `multiply` / `maximum` / `minimum`) so two bodies that
   differ only by argument order land in the same canonical form.
   Runs last so the sort key is the post-rename canonical SSA / buffer
   names.
-- The final ordering pass canonicalizes integer coordinate expressions, builds one colored relation graph for the
-  complete body tree, and chooses one dependency- and effect-valid statement order. Vertices represent scopes,
-  statements, lexical definitions, axes, source axes, and external buffers; colored relations retain operand
+- Preparation, coordinate normalization, common-branch motion and value numbering run to a joint fixed point before
+  canonical ordering. Each round includes simplification, copy elimination, loop-invariant motion and reduction
+  fusion, so an equality exposed by CSE can remove an axis dependency or expose a new merge in the next round.
+  Within a pure acyclic scope, bottom-up operand substitution eliminates every structurally congruent computation
+  whose representative is available. Legal motion and fusion expose additional availability; equality alone does
+  not justify moving a value across a scope or effect. This is scoped value numbering, not general maximal CSE:
+  partial redundancies, separately executed sibling scopes and equality through mutable loop-carried state may
+  remain. Loads are invalidated by writes to any element of their buffer; no index-aware alias analysis is claimed.
+  The corpus check audits remaining pure bindings against earlier available values and checks uncached idempotence.
+  Neither that check nor reaching a fixed point proves termination on every input or confluence across pass orders.
+  Affine integer expressions over bound loop coordinates have a unique coefficient form in lexical axis order.
+  For proven nonnegative indices, positive constant quotient chains collapse to one divisor, and `/` and `//` share
+  that spelling. Range-proven div/mod decomposition and quotient/remainder reconstruction run in the same closure.
+  This is a defined arithmetic contract, not completeness for arbitrary expressions containing division, modulo,
+  symbolic products or floating-point arithmetic. Unsupported expressions compare structurally after these rewrites.
+  Reusing available equivalent values is separate from stable identity. The final
+  ordering pass builds one colored relation graph for the complete body tree and chooses one dependency- and
+  effect-valid statement order. Vertices represent
+  scopes, statements, lexical definitions, axes, source axes, and external buffers; colored relations retain operand
   positions, captures, aliases, nesting, resource hazards, and ordered execution protocols. The graph is independent
   of source order and spelling, and it rides the normalized body: structural identity labels the same graph again
   under its own buffer coloring instead of building it a second time. A scope's definitions bind its reads in any
   order and shadow an enclosing binding of the same spelling; a deeper scope's definition binds nothing read above
-  it, so the block still depends on the enclosing definition it reads. Affine coordinates sort by lexical binding
+  it, so the block still depends on the enclosing definition it reads. Immutable bodies cache their enclosing SSA
+  reads and ordered carried-state names. State names derive from the shared type-filtered lookup, which reuses each
+  child's query result. A subtree's full spelling is computed only when sibling statement shapes leave a tie.
+  Sequential renaming gives each lexical binder its own name; a final axis unification restores shared reduction
+  dimensions without merging dependent loops or changing the relation graph's order.
+  Affine coordinates sort by lexical binding
   order, so renaming axes or loading a saved body preserves their normal form and exact identity. Identity normalizes
   remaining commutative expressions again after its final rename.
 - A standard smaller-half worklist computes the equitable partition in
@@ -693,8 +760,20 @@ The machinery `pipeline/passes/loop/fusion/010_merge_loop_ops.py` calls to splic
 use the same path. Every graph output supplies an explicit `(loop tag, Write.output)` root. Separate terminal loops
 therefore seed one worklist; its one binding table shares equal upstream demands across output ports instead of
 inlining a shared producer per consumer. The single-sink convenience form still derives the unique terminal loop and
-selects all its Writes. Every `_NotSupported` carries a reason string, logged at DEBUG by `splice_loops` —
+selects all its Writes. Every `NotSupported` carries a reason string, logged at DEBUG by `splice_loops` —
 `compile -vv` shows which pattern a rejected edge hit.
+
+The splicer forms one subroutine per demanded source reduction, with nested reductions represented by calls to their
+own shared definitions. Equal calls reuse the same demand before expanding their bodies; different coordinates retain
+distinct calls. `compile -vv` prints this intermediate form as `sub name(buffers, coordinates):` and one-line calls.
+The final Loop IR listing is expanded and fully CSE'd, as are all persisted kernels.
+
+Body analysis, mutable construction and demand reconstruction belong to the generic statement layer. `stmt/splicer`
+consumes bodies and splice edges; it imports no Loop IR types. The Loop IR adapter chooses graph regions and wraps
+the reconstructed body in a validated `LoopOp`. Normalization uses the same engine to expand subroutines, sharing
+equal demands before constructing duplicate cones. Fresh names and coordinate substitution prevent capture; equal
+reduction depth keeps a reduction that reads another's finalized value in a separate sweep. Every legal fusion
+region is still built whole; subroutine boundaries do not affect final CSE.
 
 Before dependency reconstruction, `splice_graph` finds output equivalence clusters: single-owner copy chains ending
 at a terminal graph output, with the same dtype and element count and an exact symbolic proof that the source and
@@ -749,9 +828,9 @@ order. Each Write's own scope determines its output shape, so independent siblin
 different extents. This powers `LoopOp.forward`, so post-fusion graphs run through the default `Backend.run` topo-walk
 like any pre-fusion graph.
 
-### `loop/builder.py` — fluent construction
+### `stmt/builder.py` — body construction
 
-`LoopBuilder` constructs merged `LoopOp` bodies for the fusion splicer without spelling out every `Loop(Axis(…))`
+`BodyBuilder` constructs bodies for fusion and subroutine expansion without spelling out every `Loop(Axis(…))`
 nest. Construction is mutable — descent is a dict lookup per scope level and a prepend is an append to a
 reverse-ordered list — and the immutable body is materialized once by `finish()`. Rebuilding the tuple tree per
 insert is quadratic in program size and re-runs each level's `Loop` construction normalization per insert, which is
@@ -809,7 +888,7 @@ directly (no separate AST class).
 | `FragmentApply`    | The one pointwise node over a C fragment. Each argument resides in another fragment, a per-row register pair, a cell-uniform scalar, a predicate over the element's absolute coordinates (`COORD`), or a global-memory load template at those coordinates (`GMEM`). A coordinate mask is a `where` over a `COORD` predicate — the masked branch takes the carrier's finite identity, avoiding `-inf - -inf` in an all-masked chunk, and an additive mask applies its keep op first; an additive bias is an `add` of a `GMEM` operand. The atom's fragment-layout descriptor supplies the element count and row mapping, so the same leaf serves m16n8k16 and Volta m8n8k4. |
 | `FragmentRowReduce` | Fold one warp's C fragments along the atom's N direction, per ROW: in-lane columns combine first, then the layout's `__shfl_xor` masks combine the column-group lanes. The resulting register pair is what a `FragmentApply` broadcasts as a `ROW` operand. The chunk tier's pivot and summed channel partials are exactly this, which is why the tier needs the chunk inside one warp column. |
 | `FragmentRepack`   | Convert C fragments into a 16-bit operand in registers. The m16n8k16 f16 B form exchanges packed column pairs across the warp; the A form uses the existing lane layout. m16n8k16 consumes two adjacent fragments; Volta m8n8k4 selects a four-column A slice or four-row B slice from one logical 16×16 C fragment with warp shuffles of packed FP16 pairs. |
-| `RegStore`         | Layout-aware per-lane epilogue store: four C elements for m16n8k16 or eight elements covering the four Volta output quadrants for m8n8k4. A paired Volta tile derives the matching interleaved 32×32 accumulator map from its cell position; it is not a schedule field. Adjacent elements leave as one packed pair when N is contiguous, including under an M-only tail guard; an N guard or strided physical orientation keeps scalar stores. Stores f32 directly or downconverts to f16. An optional epilogue is a pure `Lambda` over the projection tail's own `Load` / `Assign` / `Select` stmts, its leading params bound to the store's fragments; it is evaluated at each element's own coordinates. |
+| `RegStore`         | Layout-aware per-lane epilogue store: four C elements for m16n8k16 or eight elements covering the four Volta output quadrants for m8n8k4. A paired Volta tile derives the matching interleaved 32×32 accumulator map from its cell position; it is not a schedule field. Adjacent elements leave as one packed pair when N is contiguous, including under an M-only tail guard; an N guard or strided physical orientation keeps scalar stores. Stores f32 directly or downconverts to f16. An optional epilogue is a pure `Lambda` over the projection tail's own `Load` / `Assign` / `Select` stmts, its leading params bound to the store's fragments; it is evaluated at each element's own coordinates. `run` holds the next three N-adjacent cells of a 16-bit `wgmma` output: the quad's lanes exchange packed column pairs so each lane stores one cell's eight columns of a row as one 16-byte store (`097_widen_fragment_stores`). |
 | Shared from `tile` | `Tile` (launch geometry); from `ir/stmt/`: `Loop`, `StridedLoop`, `Load`, `Assign`, `Accum`, `Init`, `Let`, `Write`, `Select`, `Cond`, `ZeroPrologue`. |
 
 Volta direct A and transposed-B loads use the shared four-value loader when the flattened base and row stride

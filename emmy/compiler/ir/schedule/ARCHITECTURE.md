@@ -60,7 +60,8 @@ operand-edge sites, each site's projection or reduction view, and each contracti
 (`cone_seam`) splits the cone's edges at the K axis into a row-invariant prologue, a per-chunk statistic (a reduce
 that reads K only through one block guard, such as a grouped activation scale's maximum) and a per-cell body. Only
 external reads cross these parts; a value defined inside the consuming body is not bridged. Equal folds shared by
-cell edges lower once, so attention's output and row sum do not redeclare the same states in a replicated fill.
+cell edges lower once through `Body.coalesce`, so attention's output and row sum do not redeclare the same states in
+a replicated fill.
 `ir/schedule/views` supplies the vocabulary (`node_view`, `Projection`, `Reduction`, `Contraction`,
 `ContractionFacts`) and the one derivation that is not a projection of the site table, `contraction_facts`; the tile
 layer reads through them. The composition context publishes the schedule-facing API (`node`, `site`, `operand`,
@@ -181,7 +182,14 @@ is N-fastest, so contiguous warp ids stack along M), one fragment row per warp (
 64 rows down) with `C` a multiple of N/8 (whole instructions along N), a `k4` chunk (one 128-byte swizzle row per
 descriptor) and a shared-memory stage on every operand (the instruction reads descriptors, never fragments). The
 unpinned catalog drops such rows; a pin raises with the rule's message, and the tile check runs before the stage
-check so that message wins.
+check so that message wins. A `wgmma` also holds its whole accumulator in registers at once, so it cannot spill:
+`_wgmma_register_refusal` refuses a row whose accumulators, plus the registers a lane keeps beside them
+(descriptors, addresses, ring counters), exceed the per-thread register envelope its CTA size leaves — ptxas would
+refuse that kernel.
+
+`stage_moves` offers the `STAGE` product of transport, ring depth and register depth. A node's stage filter keeps the
+8-deep ring to `wgmma` tiles, the only ones it has paid on; elsewhere it would only multiply the candidates every
+compile prices.
 
 `TileOp.stage_edges` offers a transport at every operand of every contracting site, a chunked carrier's included —
 which tier then puts which operand on a slab is the tier's own business. The chunked site used to be excluded on the

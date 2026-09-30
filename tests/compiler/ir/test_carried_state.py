@@ -9,6 +9,8 @@ loop that carries it is read off the body.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
@@ -155,6 +157,44 @@ def test_a_carrying_loop_under_an_outer_loop_keeps_that_coordinate_in_its_port()
         np.testing.assert_allclose(np.asarray(got), _reference(arrays), rtol=1e-5, atol=1e-6)
 
 
+def _unit_seeded_graph() -> Graph:
+    """The step over a state with a size-one leading dim, started from a seed tensor of that shape: the
+    Loop IR spells that dim's coordinate 0 in every index over the state, as the Sinkhorn loop of
+    DeepSeek V4's hyper-connections does."""
+
+    def lead(stmt):
+        return replace(stmt, index=(ZERO, *stmt.index)) if isinstance(stmt, (Pre, Carry)) else stmt
+
+    graph = Graph()
+    inputs = [("D", (STEPS,)), ("W", (N, N)), ("U", (STEPS, N, N)), ("S0", (1, N, N))]
+    for name, shape in inputs:
+        graph.add_node(InputOp(), [], Tensor(name, shape, "f32"), node_id=name)
+    names = [name for name, _ in inputs]
+    step = LoopOp(body=_step((c, i, j), "S0").map(lead), name="k_step")
+    graph.add_node(step, names, Tensor("out", (STEPS, N, N), "f32"), node_id="out")
+    graph.inputs, graph.outputs = names, ["out"]
+    return graph
+
+
+def test_the_serial_form_reads_a_seed_at_every_dim_the_seed_has() -> None:
+    """The lift keeps a state's cells alone and drops the coordinate a size-one dim pins to 0; the seed
+    tensor keeps that dim, so the serial form reads it with a 0 there. Read at the cells alone, the
+    address loses its strides and the first step starts from the wrong cells."""
+    from importlib import import_module
+
+    serial_form = import_module("emmy.compiler.pipeline.passes.tile.schedule.040_schedule").serial_form
+    lifted = Pipeline.build(["tile/lift"], select=["lift"]).run(_unit_seeded_graph())
+    (node,) = (node for node in lifted.nodes.values() if isinstance(node.op, TileOp))
+    (state,) = (tensor for tensor in node.outputs if tensor.name != "out")
+    serial = LoopOp(body=serial_form(node.op, node.id).loop_body)
+
+    arrays = {**_inputs(), "S0": np.random.default_rng(1).standard_normal((1, N, N)).astype(np.float32)}
+    shapes = {"out": (STEPS, N, N), state.name: tuple(dim.as_static() for dim in state.shape)}
+    got = execute_loop_op_cpp(serial, arrays, {name: shape for name, shape in shapes.items() if name in serial.outputs})
+    got = dict(zip(serial.outputs, got if isinstance(got, tuple) else (got,), strict=True))["out"]
+    np.testing.assert_allclose(np.asarray(got), _reference({**arrays, "S0": arrays["S0"][0]}, "S0"), rtol=1e-5, atol=1e-6)
+
+
 def test_the_lift_carries_the_state_in_the_term() -> None:
     """The term carries the state: the kernel root folds the action ``next`` over the steps, its
     cells the two free coordinates the block is indexed by, its seed the loop's; the step's ``W @ S``
@@ -180,6 +220,25 @@ def test_the_lift_carries_the_state_in_the_term() -> None:
     closed = LoopOp(body=tile.loop_body)
     got = np.asarray(execute_loop_op_cpp(closed, arrays, {"out": (STEPS, N, N)}))
     np.testing.assert_allclose(got, _reference(arrays), rtol=1e-5, atol=1e-6)
+
+
+def test_the_classic_realization_is_filed_under_the_kernel_its_fork_was_offered() -> None:
+    """The classic schedule runs the serial form, a term of its own, but the kernel stays the lifted
+    one: its measurements are filed under that tile (``kernel_tile``) and its ``I_kernel`` stamp names
+    it, so a measured row vouches at the fork that offered the schedule."""
+    from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import KERNEL_IDENTITY  # noqa: PLC0415
+    from emmy.compiler.wire import kernel_tile  # noqa: PLC0415
+
+    lifted = Pipeline.build(["tile/lift"], select=["lift"]).run(_graph())
+    (tile,) = (node.op for node in lifted.nodes.values() if isinstance(node.op, TileOp))
+    compiled = Pipeline.build(CUDA_PASSES).run(_graph())
+    (op,) = (node.op for node in compiled.nodes.values() if isinstance(node.op, CudaOp))
+    scheduled = next(ancestor for ancestor in op.source_chain() if isinstance(ancestor, TileOp))
+
+    assert scheduled.place.serial, "the classic schedule realizes the serial form"
+    identity = tile.identity_key(structural=False, with_io=True)
+    assert kernel_tile(op).identity_key(structural=False, with_io=True) == identity == op.knobs[KERNEL_IDENTITY]
 
 
 @requires_cuda

@@ -36,6 +36,21 @@ def _flat() -> BinaryExpr:
     return BinaryExpr("+", BinaryExpr("*", Var("n"), _lit(K)), Var("k"))
 
 
+@pytest.mark.parametrize("ops", [("/", "/"), ("//", "/"), ("/", "//"), ("//", "//")])
+def test_constant_quotient_chains_have_one_normal_form(ops):
+    ctx = SimplifyCtx({"k": Interval(0, 16383)}, {})
+    nested = BinaryExpr(ops[1], BinaryExpr(ops[0], Var("k"), _lit(128)), _lit(2))
+    direct = BinaryExpr("/", Var("k"), _lit(256))
+    assert nested.simplify(ctx) == direct.simplify(ctx)
+    for k in (0, 127, 128, 255, 256, 257, 16383):
+        assert nested.eval({"k": k}) == direct.eval({"k": k})
+
+
+def test_quotient_chain_does_not_assume_unknown_operands_are_integer_indices():
+    nested = BinaryExpr("/", BinaryExpr("/", Var("value"), _lit(128)), _lit(2))
+    assert nested.simplify(SimplifyCtx.empty()) == nested
+
+
 def _same_value(a, b, ctx_desc: str) -> None:
     for nv in (0, 1, 7, 1023, N - 1):
         for kv in (0, 1, 2, 15, 16, 4095):
