@@ -52,6 +52,8 @@ def _normalize_body(stmts: Body) -> Body:
     """Uncached implementation owned by :class:`Body`'s normalization property."""
     from emmy.compiler.ir.stmt.splicer import expand_calls
 
+    # Motion can put two lexical bindings in one scope. Give them distinct names first.
+    stmts = rename_ssa_sequential(topo_sort_siblings(stmts))
     # Calls are storage sharing only. Full normalization sees every operation, so reduction
     # fusion, executable identity and Tile IR's common-cone detection use the same CSE form.
     if definitions(stmts):

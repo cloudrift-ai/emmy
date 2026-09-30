@@ -74,6 +74,31 @@ def test_normalize_body_dedups_loads_and_rewires_gather_indices() -> None:
 ZERO = (Literal(0, "int"),)
 
 
+def test_normalize_hoisted_shadowed_loads_keep_their_values() -> None:
+    """Motion preserves lexical bindings before CSE merges equal loads."""
+    from emmy.compiler.ir.loop import LoopOp
+
+    for inner_input in ("x", "y"):
+        op = LoopOp(
+            body=Body(
+                (
+                    Load("value", "x", ZERO),
+                    Loop(
+                        Axis("i", 4),
+                        body=(Load("value", inner_input, ZERO), Write("inner", (Var("i"),), "value")),
+                    ),
+                    Write("outer", ZERO, "value"),
+                )
+            )
+        )
+        loads = {stmt.name: stmt.input for stmt in op.body if isinstance(stmt, Load)}
+        writes = {stmt.output: stmt.value for stmt in op.body.iter() if isinstance(stmt, Write)}
+        assert loads[writes["outer"]] == "x"
+        assert loads[writes["inner"]] == inner_input
+        assert len(loads) == (1 if inner_input == "x" else 2)
+        assert normalize_body(op.body) == op.body
+
+
 def test_cse_does_not_use_expression_printing(monkeypatch) -> None:
     monkeypatch.setattr(BinaryExpr, "pretty", lambda self: "index")
     indices = [BinaryExpr("+", Var("i"), Literal(n, "int")) for n in (1, 2)]
