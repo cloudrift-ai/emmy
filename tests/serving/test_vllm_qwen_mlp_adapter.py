@@ -45,6 +45,8 @@ def adapter(monkeypatch):
     implementation = importlib.import_module(adapter_name)
     monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
     monkeypatch.setenv("EMMY_KNOBS", "FAST_MATH=false,WORK=w1x4")
+    monkeypatch.setenv("EMMY_FAST_MATH", "false")
+    monkeypatch.setenv("EMMY_WORK", "w1x4")
     yield implementation
     sys.modules.pop(adapter_name, None)
     if old_adapter is not None:
@@ -159,6 +161,20 @@ def test_unpinned_mlp_serving_is_rejected(adapter, monkeypatch):
         adapter.EmmyQwen35MlpModel(vllm_config=_config())
 
     monkeypatch.setenv("EMMY_KNOBS", "FAST_MATH=false")
+    monkeypatch.setenv("EMMY_FAST_MATH", "false")
+    monkeypatch.delenv("EMMY_WORK", raising=False)
     monkeypatch.delenv("EMMY_GOLDEN_FILE", raising=False)
     with pytest.raises(ValueError, match="schedule pins or EMMY_GOLDEN_FILE"):
         adapter.EmmyQwen35MlpModel(vllm_config=_config())
+
+
+def test_individual_knob_pins_override_aggregate_and_can_supply_schedule(adapter, monkeypatch):
+    monkeypatch.setenv("EMMY_KNOBS", "FAST_MATH=false,WORK=w1x4")
+    monkeypatch.setenv("EMMY_FAST_MATH", "true")
+    with pytest.raises(ValueError, match="FAST_MATH=false"):
+        adapter.EmmyQwen35MlpModel(vllm_config=_config())
+
+    monkeypatch.setenv("EMMY_KNOBS", "")
+    monkeypatch.setenv("EMMY_FAST_MATH", "false")
+    monkeypatch.setenv("EMMY_WORK", "w1x4")
+    assert isinstance(adapter.EmmyQwen35MlpModel(vllm_config=_config()), adapter.EmmyQwen35MlpModel)

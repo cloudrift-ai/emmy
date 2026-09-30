@@ -612,7 +612,12 @@ See the [native serving contract](../serving/native/ARCHITECTURE.md) for support
 
 
 Serves an embedding model (or a generative chat model via `EmmyGenModel` with `--runner generate`, in
-fp16) through vLLM with the emmy plugin flags baked in (`serving/` plugin; needs the `serving` extra). Without `--runner` the
+fp16) through vLLM with the emmy plugin flags baked in (`serving/` plugin; needs the `serving` extra). The opt-in
+`--compile-scope mlp` route instead subclasses vLLM 0.23's Qwen3.5 hybrid model, keeps its stock attention, GDN,
+state, scheduler and non-MLP ModelOpt NVFP4 loader, and compiles only its 64 dense text MLPs in checkpoint BF16.
+This route requires explicit Emmy schedule pins or a golden and `FAST_MATH=false`; its current RTX 5090 baseline and
+remaining checks are in [the mixed serving progress report](../../plans/nvfp4-qwen-mixed-serving-progress.md).
+Without `--runner` the
 runner is resolved the way vLLM resolves `--runner auto`, from the checkpoint's config and a Sentence Transformers
 `modules.json`, cached or fetched, so a bare `emmy serve MODEL` needs no flag. Unrecognized flags forward to `vllm serve`; tokens after a literal `--` forward verbatim (emmy's
 own flags are otherwise extracted wherever they appear — argparse REMAINDER swallows everything after MODEL, so the

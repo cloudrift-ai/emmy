@@ -255,6 +255,23 @@ emmy serve Qwen/Qwen3-Embedding-0.6B --bench --random-input-len 32
 emmy serve Qwen/Qwen3-Embedding-0.6B --bench --random-input-len 32 --stock
 ```
 
+## Experimental Qwen3.8 NVFP4 mixed generation
+
+For the pinned 27B ModelOpt NVFP4 checkpoint on one RTX 5090, `--compile-scope mlp` keeps vLLM 0.23's Qwen3.5
+hybrid model, attention, GDN state, scheduling, and non-MLP quantized loader. Emmy compiles the 64 dense text MLPs
+in BF16. This lane is still being qualified; see the [progress and measured limits](plans/nvfp4-qwen-mixed-serving-progress.md).
+
+```bash
+export EMMY_KNOBS='FAST_MATH=false,PLACE@map.1/map=cut,PLACE@map.1/map.2/inner=cut,PLACE@map.1/map.3/reduce.1/inner=cut,PLACE@map.2/map=cut,PLACE@map.2/map.2/reduce.1/inner=cut,WORK=w1x4,TILE=,STAGE=,REDUCE=,RASTER='
+emmy serve Inferact/Qwen3.8-27B-NVFP4@6128240ebaf4eaa7bad2b3d1c72c37d677c5f462 \
+  --runner generate --compile-scope mlp --dtype bfloat16 --max-model-len 4096 \
+  --max-num-seqs 1 --max-num-batched-tokens 64 --language-model-only \
+  --enforce-eager --no-enable-prefix-caching
+```
+
+This explicit pin is a functional scalar baseline. Current warm latency is slower than stock vLLM; the progress
+report records the exact 5090 measurements and open numerical checks. The adapter rejects an unpinned Emmy compile.
+
 ## Experimental native generation
 
 Dense FP16 Qwen3 can be prepared as a standalone artifact and run through the Rust cached-generation loop. This
