@@ -204,6 +204,9 @@ or byte-checked against the raw files.
 # Remote server via SSH
 emmy deploy ssh --recipe recipes/gemma-4-12B-it --ssh user@host
 
+# Remote server via SSH, several models on its GPUs (a plan file instead of --recipe)
+emmy deploy ssh --plan plan.json --ssh user@host
+
 # Local Docker Compose
 emmy deploy local --recipe recipes/gemma-4-12B-it
 
