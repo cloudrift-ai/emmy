@@ -167,6 +167,62 @@ def test_trace_serving_twins_static_only_release_forwards_exact_scope(monkeypatc
     assert {(record.bindings, record.pins) for record in records} == {((("num_tokens", 1),), (("FAST_MATH", False),))}
 
 
+def test_trace_mlp_scope_writes_only_mlp_inventory(monkeypatch, tmp_path) -> None:
+    import emmy.serving.twins as twins
+
+    static_graph = trace_inline_code("torch.relu(torch.randn(8))")["graph"]
+    symbolic_graph = trace_inline_code("torch.neg(torch.randn(8))")["graph"]
+    seen = {}
+
+    def fake_capture(model, serving):
+        seen.update(model=model, scope=serving.compile_scope)
+        return {"mlp1@nvfp4": static_graph, "mlp-sym@nvfp4": symbolic_graph}
+
+    monkeypatch.setattr(twins, "capture_serving_graphs", fake_capture)
+    output = tmp_path / "mlp.json"
+    config = tmp_path / "mlp.env"
+    config.write_text(
+        f"SERVE_MODEL=org/model\nSERVE_GPU=NVIDIA-Test\nSERVE_GOLDEN_FILE={output}\n"
+        "SERVE_COMPILE_SCOPE=mlp\nSERVE_MAX_NUM_BATCHED_TOKENS=64\n"
+    )
+    handle_trace(_parser().parse_args(["trace", "local-checkpoint", "--serving-twins", "--serving-config", str(config), "-o", str(output)]))
+
+    assert seen == {"model": "local-checkpoint", "scope": "mlp"}
+    document = GoldenFile.load(output)
+    assert document.model == "org/model"
+    assert {record.name.split(".", 1)[0] for record in document.records()} == {"mlp1@nvfp4", "mlp-sym@nvfp4"}
+    assert {(record.name.split(".", 1)[0], record.bindings) for record in document.records()} == {
+        ("mlp1@nvfp4", (("num_tokens", 1),)),
+        ("mlp-sym@nvfp4", ()),
+    }
+
+
+def test_trace_mlp_scope_uses_configured_revision_for_hub_input(monkeypatch, tmp_path) -> None:
+    import emmy.serving.twins as twins
+
+    seen = []
+    graph = trace_inline_code("torch.relu(torch.randn(8))")["graph"]
+    monkeypatch.setattr(twins, "capture_serving_graphs", lambda model, serving: seen.append(model) or {"mlp1@nvfp4": graph})
+    output = tmp_path / "mlp.json"
+    config = tmp_path / "mlp.env"
+    config.write_text(
+        f"SERVE_MODEL=org/model\nSERVE_REVISION=abc123\nSERVE_GPU=NVIDIA-Test\nSERVE_GOLDEN_FILE={output}\n"
+        "SERVE_COMPILE_SCOPE=mlp\nSERVE_MAX_NUM_BATCHED_TOKENS=64\n"
+    )
+    handle_trace(_parser().parse_args(["trace", "org/model", "--serving-twins", "--serving-config", str(config), "-o", str(output)]))
+    assert seen == ["org/model@abc123"]
+    assert GoldenFile.load(output).model == "org/model@abc123"
+
+    with pytest.raises(SystemExit) as exc:
+        handle_trace(
+            _parser().parse_args(
+                ["trace", "org/model@wrong", "--serving-twins", "--serving-config", str(config), "-o", str(tmp_path / "other.json")]
+            )
+        )
+    assert exc.value.code == 2
+    assert seen == ["org/model@abc123"]
+
+
 def test_trace_static_only_release_rejects_unsafe_config(tmp_path) -> None:
     config = tmp_path / "bad.env"
     config.write_text(

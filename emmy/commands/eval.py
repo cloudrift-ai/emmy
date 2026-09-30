@@ -420,7 +420,7 @@ def handle_eval_golden(args) -> None:
     from emmy.compiler.pipeline.search.golden import GoldenFile, sole_evidence
     from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
     from emmy.serving.release import load_serving_config, model_matches  # noqa: PLC0415
-    from emmy.serving.twins import capture_twin_graphs  # noqa: PLC0415
+    from emmy.serving.twins import capture_serving_graphs  # noqa: PLC0415
 
     try:
         serving = load_serving_config(args.serving_config)
@@ -451,6 +451,14 @@ def handle_eval_golden(args) -> None:
         recorded = sorted({record.model or "(missing)" for record in records})
         logger.error("golden model provenance %s does not cover %s", ", ".join(recorded) or "(none)", serving.model_provenance)
         sys.exit(1)
+    if serving.compile_scope == "mlp" and document.model != serving.model_provenance:
+        logger.error("mlp golden model provenance %r must match %r exactly", document.model, serving.model_provenance)
+        sys.exit(1)
+    graph_names = {entry.realizations[0].name.split(".", 1)[0] for entry in document.configs}
+    mlp_names = {name for name in graph_names if name.startswith("mlp")}
+    if (serving.compile_scope == "mlp" and mlp_names != graph_names) or (serving.compile_scope is None and mlp_names):
+        logger.error("golden inventory graph scope does not match SERVE_COMPILE_SCOPE=%s", serving.compile_scope or "full")
+        sys.exit(1)
 
     from emmy.serving.twins import twin_width  # noqa: PLC0415
 
@@ -478,18 +486,14 @@ def handle_eval_golden(args) -> None:
 
     source = serving.model_provenance
     try:
-        if serving.static_only:
-            graphs = capture_twin_graphs(source, decode_bucket=1, prefill_bucket=0, symbolic=False, static_only=True)
-        else:
-            graphs = capture_twin_graphs(
-                source,
-                decode_bucket=0,
-                prefill_bucket=0,
-                extra_widths=serving.static_widths,
-                symbolic=True,
-            )
+        graphs = capture_serving_graphs(source, serving)
     except (NotImplementedError, ValueError) as exc:
         logger.error("in-model audit cannot represent %s: %s", source, exc)
+        sys.exit(1)
+    if serving.compile_scope == "mlp" and set(graphs) != graph_names:
+        missing = sorted(set(graphs) - graph_names)
+        extra = sorted(graph_names - set(graphs))
+        logger.error("mlp golden graph inventory differs from checkpoint: missing=%s extra=%s", missing, extra)
         sys.exit(1)
 
     # The serving-matrix half of the gate: each lane's twins compiled with that lane's rows as

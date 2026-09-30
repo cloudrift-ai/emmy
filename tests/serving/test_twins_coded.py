@@ -591,7 +591,7 @@ def test_mxfp4_expert_twins_spell_native_blocks_and_scales():
         _spell_mxfp4_expert_twins("expert1", graph, ["model.layers.1.mlp.experts"], {0, 1}, True)
 
 
-def _nvfp4_checkpoint(path: Path) -> None:
+def _nvfp4_checkpoint(path: Path, *, scalar_scales: bool = False) -> None:
     """A tiny two-layer Qwen3 checkpoint whose every linear is stored as the NVFP4 packed trio,
     with the per-linear ``input_scale`` that declares the activation half.
 
@@ -640,11 +640,12 @@ def _nvfp4_checkpoint(path: Path) -> None:
             base = f"model.layers.{layer}.{module}"
             tensors[f"{base}.weight"] = torch.from_numpy(packed)
             tensors[f"{base}.weight_scale"] = torch.from_numpy(np.ascontiguousarray(scale_bits)).view(torch.float8_e4m3fn)
-            tensors[f"{base}.weight_scale_2"] = torch.from_numpy(scale_2)
+            tensors[f"{base}.weight_scale_2"] = torch.from_numpy(scale_2).reshape(()) if scalar_scales else torch.from_numpy(scale_2)
             # One calibrated activation level per linear, as modelopt writes it. ``q_proj``'s differs
             # from ``k_proj`` / ``v_proj``'s so the twin exercises both halves of the sharing rule:
             # equal levels over one activation share a single quantize, unequal ones get their own.
-            tensors[f"{base}.input_scale"] = torch.tensor([0.03 if module.startswith("self_attn.q") else 0.05], dtype=torch.float32)
+            input_scale = torch.tensor([0.03 if module.startswith("self_attn.q") else 0.05], dtype=torch.float32)
+            tensors[f"{base}.input_scale"] = input_scale.reshape(()) if scalar_scales else input_scale
     save_file(tensors, str(path / "model.safetensors"))
 
 
@@ -785,6 +786,17 @@ def test_nvfp4_mlp_capture_matches_serving_stamp_in_bf16(tmp_path):
             with pytest.raises(Stamped) as caught:
                 _compile_split(module, [torch.zeros(rows, 64, dtype=torch.bfloat16)], argnames, np.dtype("float32"), ckpt=ckpt)
             assert _structure(caught.value.graph) == _structure(twins[name])
+
+
+def test_nvfp4_mlp_capture_accepts_rank_zero_stored_scales(tmp_path):
+    pytest.importorskip("torch")
+    pytest.importorskip("transformers")
+
+    from emmy.serving.mlp import capture_mlp_graphs, layer_profiles
+
+    _nvfp4_checkpoint(tmp_path, scalar_scales=True)
+    assert len(layer_profiles(tmp_path, 2)) == 1
+    assert set(capture_mlp_graphs(tmp_path, 64, 128, 2)) == {"mlp1@nvfp4", "mlp-sym@nvfp4"}
 
 
 def _structure(graph: Graph):

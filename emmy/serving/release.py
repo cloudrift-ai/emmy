@@ -37,6 +37,7 @@ class ServingConfig:
     golden_file: Path
     realizations: tuple[ServingRealization, ...]
     static_only: bool
+    compile_scope: str | None = None
 
     @property
     def model_provenance(self) -> str:
@@ -183,6 +184,19 @@ def _realizations(values: dict[str, str], source: Path, *, static_only: bool) ->
     return tuple(sorted(rows, key=lambda row: (row.pins, not row.bindings, row.bindings, row.name)))
 
 
+def _mlp_realizations(values: dict[str, str], source: Path) -> tuple[ServingRealization, ...]:
+    maximum = _integer(values, "SERVE_MAX_NUM_BATCHED_TOKENS", minimum=2)
+    required = {"SERVE_DECODE_BUCKET": "1", "SERVE_PREFILL_BUCKET": "0", "SERVE_M1_TIER": "1"}
+    wrong = {key: values[key] for key, expected in required.items() if key in values and values[key] != expected}
+    if maximum > 64 or wrong or values.get("SERVE_WARM_SHAPES", "").strip() or values.get("SERVE_STATIC_ONLY", "0") != "0":
+        raise ValueError(f"{source}: mlp scope requires static M=1 and symbolic width <=64 with no warm shapes")
+    pins = (("FAST_MATH", False),)
+    return (
+        ServingRealization("m1", (("num_tokens", 1),), pins),
+        ServingRealization("dynamic", (), pins),
+    )
+
+
 def load_serving_config(path: str | Path) -> ServingConfig:
     """Parse a pinned release env without evaluating it as shell code."""
     source = Path(path).resolve()
@@ -193,6 +207,9 @@ def load_serving_config(path: str | Path) -> ServingConfig:
     if not model or not gpu_name or not golden:
         raise ValueError(f"{source}: SERVE_MODEL, SERVE_GPU, and SERVE_GOLDEN_FILE are required")
     revision = values.get("SERVE_REVISION", "").strip() or None
+    compile_scope = values.get("SERVE_COMPILE_SCOPE", "").strip() or None
+    if compile_scope not in (None, "mlp"):
+        raise ValueError(f"{source}: unsupported SERVE_COMPILE_SCOPE {compile_scope!r}")
     static_only = values.get("SERVE_STATIC_ONLY", "0") == "1"
     if values.get("SERVE_STATIC_ONLY", "0") not in {"0", "1"}:
         raise ValueError(f"{source}: SERVE_STATIC_ONLY must be 0 or 1")
@@ -211,7 +228,7 @@ def load_serving_config(path: str | Path) -> ServingConfig:
     golden_path = Path(golden)
     if not golden_path.is_absolute():
         golden_path = _root(source) / golden_path
-    realizations = _realizations(values, source, static_only=static_only)
+    realizations = _mlp_realizations(values, source) if compile_scope == "mlp" else _realizations(values, source, static_only=static_only)
     if static_only and realizations != (ServingRealization(name="m1", bindings=(("num_tokens", 1),), pins=(("FAST_MATH", False),)),):
         raise ValueError(f"{source}: static-only release warm shapes must stay in the standard M=1 lane")
     return ServingConfig(
@@ -222,6 +239,7 @@ def load_serving_config(path: str | Path) -> ServingConfig:
         golden_file=golden_path.resolve(),
         realizations=realizations,
         static_only=static_only,
+        compile_scope=compile_scope,
     )
 
 

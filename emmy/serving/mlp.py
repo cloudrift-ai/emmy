@@ -81,11 +81,32 @@ def layer_profiles(model_dir: str | Path, count: int, *, prefix: str | None = No
                     shape = tuple(slice_.get_shape())
                     stored_dtype = slice_.get_dtype()
                     scale = shard.get_tensor(key) if leaf == "input_scale" else None
+                if leaf in ("weight_scale_2", "input_scale") and shape == ():
+                    shape = (1,)
                 details.append((proj, leaf, shape, stored_dtype))
                 if scale is not None:
                     scales.append(np.asarray(scale, dtype=np.float32).tobytes())
         groups[(tuple(details), scales[0] == scales[1])].append(layer)
     return dict(groups)
+
+
+def _validate_packed_profiles(groups: dict[tuple, list[int]], hidden: int, intermediate: int) -> None:
+    if hidden % 16 or intermediate % 16:
+        raise ValueError("NVFP4 MLP dimensions must be divisible by 16")
+    for (details, _same_input_scale), members in groups.items():
+        expected = []
+        for proj in _PROJECTIONS:
+            n, k = (hidden, intermediate) if proj == "down_proj" else (intermediate, hidden)
+            expected.extend(
+                (
+                    (proj, "weight", (n, k // 2), "U8"),
+                    (proj, "weight_scale", (n, k // 16), "F8_E4M3"),
+                    (proj, "weight_scale_2", (1,), "F32"),
+                    (proj, "input_scale", (1,), "F32"),
+                )
+            )
+        if details != tuple(expected):
+            raise ValueError(f"MLP layer {members[0]} does not match the expected packed NVFP4 layout")
 
 
 def capture_mlp_graphs(model_dir: str | Path, hidden: int, intermediate: int, layers: int, *, dtype="bfloat16"):
@@ -97,6 +118,7 @@ def capture_mlp_graphs(model_dir: str | Path, hidden: int, intermediate: int, la
 
     td = getattr(torch, dtype)
     groups = layer_profiles(model_dir, layers)
+    _validate_packed_profiles(groups, hidden, intermediate)
     prefix = text_prefix(model_dir)
     graphs = {}
     for profile_index, (_profile, members) in enumerate(groups.items()):
@@ -137,7 +159,7 @@ class MLPPrograms:
         arena = BufferArena()
         plan_cache = PlanTemplateCache()
         np_dtype = np.dtype("float32") if dtype == torch.bfloat16 else np.dtype("float16")
-        layer_profiles(model_dir, layers)  # fail before compiling an incomplete checkpoint
+        _validate_packed_profiles(layer_profiles(model_dir, layers), hidden, intermediate)
         prefix = text_prefix(model_dir)
         for layer in range(layers):
             module = logical_mlp(hidden, intermediate, dtype)

@@ -97,19 +97,23 @@ def handle_trace(args):
             logger.error("--serving-twins is incompatible with %s", ", ".join(conflicts))
             sys.exit(2)
         from emmy.serving.release import load_serving_config  # noqa: PLC0415
-        from emmy.serving.twins import capture_twin_graphs  # noqa: PLC0415
+        from emmy.serving.twins import capture_serving_graphs  # noqa: PLC0415
 
         try:
             serving = load_serving_config(args.serving_config)
         except (OSError, ValueError) as exc:
             logger.error("invalid serving config: %s", exc)
             sys.exit(2)
-        # The release audit's graph set (``emmy eval golden``): the symbolic programs plus the
-        # config's static widths — a golden traced from fewer graphs leaves the audit with gaps.
-        if serving.static_only:
-            graphs = capture_twin_graphs(args.input, decode_bucket=1, prefill_bucket=0, symbolic=False, static_only=True)
-        else:
-            graphs = capture_twin_graphs(args.input, decode_bucket=0, prefill_bucket=0, extra_widths=serving.static_widths, symbolic=True)
+        # A hub input naming the configured repo must resolve at the configured revision;
+        # otherwise the inventory would trace main and stamp a different checkpoint's pin.
+        capture_source = args.input
+        if args.input == serving.model:
+            capture_source = serving.model_provenance
+        elif args.input.startswith(f"{serving.model}@") and args.input != serving.model_provenance:
+            logger.error("serving trace input revision must match the serving config (%s)", serving.model_provenance)
+            sys.exit(2)
+        # Trace exactly the graph family the release audit will compile.
+        graphs = capture_serving_graphs(capture_source, serving)
         source_name = args.input.rstrip("/").rsplit("/", 1)[-1].partition("@")[0]
         destination = args.output or f"{source_name}.serving-twins.golden.json"
         try:

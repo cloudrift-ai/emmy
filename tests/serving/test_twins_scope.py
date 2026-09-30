@@ -1,10 +1,11 @@
 import shlex
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from emmy.serving.release import load_serving_config
-from emmy.serving.twins import _serving_twin_buckets
+from emmy.serving.twins import _serving_twin_buckets, capture_serving_graphs
 
 
 def _release_config(path: Path, **overrides: str) -> Path:
@@ -73,3 +74,55 @@ def test_static_only_release_config_rejects_unsafe_warm_overrides(tmp_path, warm
     path = _release_config(tmp_path / "model.env", SERVE_WARM_SHAPES=warm)
     with pytest.raises(ValueError, match="static-only release"):
         load_serving_config(path)
+
+
+def test_mlp_release_scope_has_static_one_and_symbolic_realizations(tmp_path):
+    path = _release_config(
+        tmp_path / "mlp.env",
+        SERVE_COMPILE_SCOPE="mlp",
+        SERVE_STATIC_ONLY="0",
+        SERVE_MAX_NUM_BATCHED_TOKENS="64",
+        SERVE_PREFILL_CAPACITY="64",
+    )
+    serving = load_serving_config(path)
+    assert serving.compile_scope == "mlp"
+    assert serving.static_widths == (1,)
+    assert {(row.name, row.bindings) for row in serving.realizations} == {
+        ("m1", (("num_tokens", 1),)),
+        ("dynamic", ()),
+    }
+
+
+@pytest.mark.parametrize(
+    "field,value", [("SERVE_MAX_NUM_BATCHED_TOKENS", "65"), ("SERVE_WARM_SHAPES", "8::64"), ("SERVE_DECODE_BUCKET", "2")]
+)
+def test_mlp_release_scope_rejects_wider_envelopes(tmp_path, field, value):
+    path = _release_config(
+        tmp_path / "mlp.env",
+        SERVE_COMPILE_SCOPE="mlp",
+        SERVE_STATIC_ONLY="0",
+        **{"SERVE_MAX_NUM_BATCHED_TOKENS": "64", field: value},
+    )
+    with pytest.raises(ValueError, match="mlp scope"):
+        load_serving_config(path)
+
+
+def test_mlp_scope_capture_uses_checkpoint_and_bf16(monkeypatch, tmp_path):
+    import transformers
+
+    import emmy.compiler.loader.quant as quant
+    import emmy.serving.mlp as mlp
+
+    seen = {}
+    text = SimpleNamespace(model_type="qwen3_5_text", hidden_act="silu", hidden_size=128, intermediate_size=256, num_hidden_layers=2)
+    monkeypatch.setattr(
+        transformers.AutoConfig, "from_pretrained", lambda model, **kw: seen.update(config=(model, kw)) or SimpleNamespace(text_config=text)
+    )
+    monkeypatch.setattr(quant, "nvfp4_checkpoint_dir", lambda model, cfg, **kw: seen.update(checkpoint=(model, kw)) or tmp_path)
+    monkeypatch.setattr(mlp, "capture_mlp_graphs", lambda *args, **kw: seen.update(capture=(args, kw)) or {"mlp1@nvfp4": object()})
+
+    graphs = capture_serving_graphs("org/model@abc", SimpleNamespace(compile_scope="mlp"))
+    assert set(graphs) == {"mlp1@nvfp4"}
+    assert seen["config"] == ("org/model", {"revision": "abc"})
+    assert seen["checkpoint"] == ("org/model", {"revision": "abc"})
+    assert seen["capture"] == ((tmp_path, 128, 256, 2), {"dtype": "bfloat16"})

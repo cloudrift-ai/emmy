@@ -61,6 +61,29 @@ def twin_width(name: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def capture_serving_graphs(model: str, serving) -> dict[str, Graph]:
+    """Capture the graph family selected by the pinned serving scope."""
+    if serving.compile_scope == "mlp":
+        from transformers import AutoConfig  # noqa: PLC0415
+
+        from emmy.compiler.loader.quant import nvfp4_checkpoint_dir  # noqa: PLC0415
+        from emmy.compiler.loader.safetensors import split_revision  # noqa: PLC0415
+        from emmy.serving.mlp import capture_mlp_graphs  # noqa: PLC0415
+
+        repo, revision = split_revision(model)
+        cfg = AutoConfig.from_pretrained(repo, revision=revision)
+        text = getattr(cfg, "text_config", cfg)
+        if getattr(text, "model_type", None) != "qwen3_5_text" or getattr(text, "hidden_act", None) != "silu":
+            raise ValueError("mlp scope requires a Qwen3.5 text model with SiLU MLPs")
+        checkpoint = nvfp4_checkpoint_dir(repo, cfg, revision=revision)
+        if checkpoint is None:
+            raise ValueError("mlp scope requires an NVFP4 checkpoint")
+        return capture_mlp_graphs(checkpoint, text.hidden_size, text.intermediate_size, text.num_hidden_layers, dtype="bfloat16")
+    if serving.static_only:
+        return capture_twin_graphs(model, decode_bucket=1, prefill_bucket=0, symbolic=False, static_only=True)
+    return capture_twin_graphs(model, decode_bucket=0, prefill_bucket=0, extra_widths=serving.static_widths, symbolic=True)
+
+
 def _serving_twin_buckets(
     decode_bucket: int,
     prefill_bucket: int,

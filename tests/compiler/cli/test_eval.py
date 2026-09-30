@@ -46,6 +46,116 @@ def test_serving_config_derives_standard_and_fast_math_realizations(tmp_path):
     }
 
 
+def test_eval_golden_rejects_mlp_scope_mismatch_before_audit(monkeypatch, tmp_path, caplog):
+    from types import SimpleNamespace
+
+    import pytest
+
+    import emmy.commands.eval as eval_cmd
+    from emmy.compiler.context import Context
+
+    golden = tmp_path / "golden.json"
+    _write_release_golden(
+        golden,
+        [
+            {
+                "name": "pre1.m1",
+                "bindings": {"num_tokens": 1},
+                "pins": {"FAST_MATH": False},
+                "knobs": {},
+                "measurements": {"emmy_us": 1.0, "reference_us": 1.0, "reference_backend": "torch"},
+            }
+        ],
+    )
+    config = tmp_path / "mlp.env"
+    config.write_text(
+        f'SERVE_MODEL=org/model\nSERVE_GPU="NVIDIA GeForce RTX 4090"\nSERVE_GOLDEN_FILE={golden}\n'
+        "SERVE_COMPILE_SCOPE=mlp\nSERVE_MAX_NUM_BATCHED_TOKENS=64\n"
+    )
+    ctx = Context.from_target((8, 9), gpu_name="NVIDIA GeForce RTX 4090")
+    monkeypatch.setattr(Context, "probe", staticmethod(lambda: ctx))
+
+    with pytest.raises(SystemExit) as exc:
+        eval_cmd.handle_eval_golden(SimpleNamespace(golden=str(golden), serving_config=str(config)))
+    assert exc.value.code == 1
+    assert "graph scope does not match" in caplog.text
+
+
+def test_eval_golden_requires_exact_mlp_checkpoint_provenance(monkeypatch, tmp_path, caplog):
+    from types import SimpleNamespace
+
+    import pytest
+
+    import emmy.commands.eval as eval_cmd
+    from emmy.compiler.context import Context
+
+    golden = tmp_path / "golden.json"
+    _write_release_golden(
+        golden,
+        [
+            {
+                "name": "mlp1@nvfp4.m1",
+                "bindings": {"num_tokens": 1},
+                "pins": {"FAST_MATH": False},
+                "knobs": {},
+                "measurements": {"emmy_us": 1.0, "reference_us": 1.0, "reference_backend": "torch"},
+            }
+        ],
+    )
+    config = tmp_path / "mlp.env"
+    config.write_text(
+        f'SERVE_MODEL=org/model\nSERVE_REVISION=abc123\nSERVE_GPU="NVIDIA GeForce RTX 4090"\nSERVE_GOLDEN_FILE={golden}\n'
+        "SERVE_COMPILE_SCOPE=mlp\nSERVE_MAX_NUM_BATCHED_TOKENS=64\n"
+    )
+    ctx = Context.from_target((8, 9), gpu_name="NVIDIA GeForce RTX 4090")
+    monkeypatch.setattr(Context, "probe", staticmethod(lambda: ctx))
+
+    with pytest.raises(SystemExit) as exc:
+        eval_cmd.handle_eval_golden(SimpleNamespace(golden=str(golden), serving_config=str(config)))
+    assert exc.value.code == 1
+    assert "must match" in caplog.text
+
+
+def test_eval_golden_requires_every_mlp_profile_graph(monkeypatch, tmp_path, caplog):
+    from types import SimpleNamespace
+
+    import pytest
+
+    import emmy.commands.eval as eval_cmd
+    import emmy.serving.twins as twins
+    from emmy.compiler.context import Context
+
+    golden = tmp_path / "golden.json"
+    _write_release_golden(
+        golden,
+        [
+            {
+                "name": "mlp1@nvfp4.m1",
+                "bindings": {"num_tokens": 1},
+                "pins": {"FAST_MATH": False},
+                "knobs": {},
+                "measurements": {"emmy_us": 1.0, "reference_us": 1.0, "reference_backend": "torch"},
+            }
+        ],
+    )
+    config = tmp_path / "mlp.env"
+    config.write_text(
+        f'SERVE_MODEL=org/model\nSERVE_GPU="NVIDIA GeForce RTX 4090"\nSERVE_GOLDEN_FILE={golden}\n'
+        "SERVE_COMPILE_SCOPE=mlp\nSERVE_MAX_NUM_BATCHED_TOKENS=64\n"
+    )
+    ctx = Context.from_target((8, 9), gpu_name="NVIDIA GeForce RTX 4090")
+    monkeypatch.setattr(Context, "probe", staticmethod(lambda: ctx))
+    monkeypatch.setattr(eval_cmd, "_emit_offer_audit", lambda _records: False)
+    monkeypatch.setattr(
+        twins, "capture_serving_graphs", lambda source, serving: {"mlp1@nvfp4": object(), "mlp-sym-profile1@nvfp4": object()}
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        eval_cmd.handle_eval_golden(SimpleNamespace(golden=str(golden), serving_config=str(config)))
+    assert exc.value.code == 1
+    assert "mlp-sym-profile1@nvfp4" in caplog.text
+
+
 def _write_release_golden(path: Path, realizations: list[dict]) -> None:
     from emmy.commands.trace import trace_inline_code
 
