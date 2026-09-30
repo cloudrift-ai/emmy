@@ -220,6 +220,7 @@ def test_deploy_cloud_help(run_cli):
     assert "--dry-run" in stdout
     assert "--name" in stdout
     assert "--vm-active-timeout" in stdout
+    assert "--vm-proxy" in stdout
 
 
 def test_deploy_help_includes_cloud(run_cli):
@@ -335,3 +336,56 @@ def test_deploy_cloud_vm_active_timeout_must_be_positive(run_cli, tmp_path, time
     if expected_rc:
         assert "expected a positive integer" in stderr
         assert "Creating CloudRift instance" not in stdout
+
+
+# ── --vm-proxy ────────────────────────────────────────────────────
+
+
+def _proxy_dry_run(run_cli, tmp_path, url):
+    recipe = _plan_recipe(tmp_path, "one", [0.9])
+    plan = _write_plan(tmp_path, [{"recipe": recipe, "gpu_memory_utilization": 0.9, "gpu_device_ids": [0]}])
+    return run_cli("deploy", "cloud", "--plan", plan, "--vm-proxy", url, "--dry-run")
+
+
+def test_deploy_cloud_vm_proxy_configures_the_daemon_and_checks_it_before_the_pull(run_cli, tmp_path):
+    rc, stdout, stderr = _proxy_dry_run(run_cli, tmp_path, "http://10.0.0.1:3128")
+    assert rc == 0, f"stderr: {stderr}\nstdout: {stdout}"
+    configure = stdout.index("Configuring Docker daemon proxy http://10.0.0.1:3128 on ")
+    dropin = stdout.index(
+        'Environment="HTTP_PROXY=http://10.0.0.1:3128" "HTTPS_PROXY=http://10.0.0.1:3128" '
+        '"NO_PROXY=localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"'
+    )
+    assert "> /etc/systemd/system/docker.service.d/http-proxy.conf && systemctl daemon-reload && systemctl restart docker" in stdout
+    check = stdout.index(
+        "curl -sS --connect-timeout 10 -x http://10.0.0.1:3128 -o /dev/null -w '%{http_code}' https://registry-1.docker.io/v2/"
+    )
+    assert configure < dropin < check < stdout.index("docker compose pull")
+    # The weight download runs in its own container before compose up; it gets the proxy in both spellings.
+    download = next(line for line in stdout.splitlines() if "hf download" in line)
+    assert " -e HTTPS_PROXY=http://10.0.0.1:3128 " in download and " -e https_proxy=http://10.0.0.1:3128 " in download
+    assert "must be able to resolve" not in stdout
+
+
+def test_deploy_cloud_vm_proxy_named_by_hostname_warns(run_cli, tmp_path):
+    rc, stdout, stderr = _proxy_dry_run(run_cli, tmp_path, "http://squid.corp:3128")
+    assert rc == 0, f"stderr: {stderr}\nstdout: {stdout}"
+    assert "proxy http://squid.corp:3128 is named by hostname; the host itself must be able to resolve squid.corp" in stdout
+
+
+def test_deploy_cloud_vm_proxy_credentials_never_reach_the_output(run_cli, tmp_path):
+    rc, stdout, stderr = _proxy_dry_run(run_cli, tmp_path, "http://relay:hunter22@10.0.0.1:3128")
+    assert rc == 0, f"stderr: {stderr}\nstdout: {stdout}"
+    assert "hunter22" not in stdout + stderr
+    assert "Configuring Docker daemon proxy *** on " in stdout
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["10.0.0.1:3128", "socks5://10.0.0.1:1080", "http://10.0.0.1", "http://10.0.0.1:3128/path"],
+    ids=["no-scheme", "socks", "no-port", "path"],
+)
+def test_deploy_cloud_vm_proxy_must_be_an_http_url_with_a_port(run_cli, tmp_path, url):
+    rc, stdout, stderr = _proxy_dry_run(run_cli, tmp_path, url)
+    assert rc == 2, f"stderr: {stderr}\nstdout: {stdout}"
+    assert "expected http://HOST:PORT or https://HOST:PORT" in stderr
+    assert "Creating CloudRift instance" not in stdout

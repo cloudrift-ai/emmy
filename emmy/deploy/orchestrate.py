@@ -8,6 +8,7 @@ import math
 from emmy.deploy.compose import generate_compose, generate_nginx_conf, service_name
 from emmy.deploy.log_phases import decompose_model_load, parse_engine_load_phases
 from emmy.deploy.params import DeployParams, Service
+from emmy.provisioning.proxy import proxy_env
 from emmy.provisioning.ssh_transport import make_run_cmd, make_write_file
 from emmy.recipe.types import Recipe
 from emmy.timing import (
@@ -143,6 +144,7 @@ async def run_deploy(
     port_mappings=None,
     timer: PhaseTimer | None = None,
     check_smoke_output: bool = True,
+    proxy: str | None = None,
 ):
     """Shared deploy orchestration.
 
@@ -161,12 +163,14 @@ async def run_deploy(
         check_smoke_output: whether a valid smoke response must also satisfy the
             model-specific deployment check. Benchmark orchestration disables this
             semantic judgment and uses the probe only for API readiness.
+        proxy: HTTP proxy URL the host reaches the internet through; the weight download and every
+            engine service get it in their environment
     """
     timer = timer or PhaseTimer()
     names = [service_name(index, service) for index, service in enumerate(services)]
 
     # Generate and write compose file, and the nginx config when there is a load balancer
-    await write_file("docker-compose.yaml", generate_compose(services, model_dir, hf_token, load_balancer))
+    await write_file("docker-compose.yaml", generate_compose(services, model_dir, hf_token, load_balancer, proxy=proxy))
     if load_balancer:
         await write_file("nginx.conf", generate_nginx_conf(names))
 
@@ -208,12 +212,15 @@ async def run_deploy(
             logger.info(f"Image {image} ships its model cache at {baked_hf_home} (offline) — skipping download")
             baked.add(image)
     if baked:
-        await write_file("docker-compose.yaml", generate_compose(services, model_dir, hf_token, load_balancer, baked_images=baked))
+        await write_file(
+            "docker-compose.yaml", generate_compose(services, model_dir, hf_token, load_balancer, baked_images=baked, proxy=proxy)
+        )
     downloads = dict.fromkeys(
         (service.recipe.engine.llm.image, service.recipe.model_name, service.recipe.model.revision)
         for service in services
         if service.recipe.engine.llm.image not in baked
     )
+    proxy_args = "".join(f" -e {name}={value}" for name, value in proxy_env(proxy).items()) if proxy else ""
     async with timer.ameasure(PHASE_MODEL_DOWNLOAD):
         for image, model_name, revision in downloads:
             logger.info(f"Downloading model {model_name}...")
@@ -221,7 +228,7 @@ async def run_deploy(
             dl_cmd = (
                 f"docker run --rm"
                 f" -e HUGGING_FACE_HUB_TOKEN={hf_token}"
-                f" -e HF_HOME={model_dir}"
+                f" -e HF_HOME={model_dir}{proxy_args}"
                 f" -v {model_dir}:{model_dir}"
                 f" --entrypoint bash"
                 f" {image}"
@@ -401,6 +408,7 @@ async def deploy(params: DeployParams, timer: PhaseTimer | None = None, *, check
         port_mappings=params.port_mappings,
         timer=timer,
         check_smoke_output=check_smoke_output,
+        proxy=params.proxy,
     )
 
 

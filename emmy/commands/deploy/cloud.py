@@ -19,6 +19,7 @@ from emmy.provisioning.cloud import (
 from emmy.provisioning.errors import CapacityExhausted, TerminalProvisionError
 from emmy.provisioning.host import RemoteHost
 from emmy.provisioning.lease import add_lease_arguments, lease_observer
+from emmy.provisioning.proxy import add_proxy_argument
 from emmy.provisioning.remote import provision_remote
 from emmy.recipe import resolve_for_hardware, resolve_recipe_dir
 from emmy.redact import register_secret
@@ -119,8 +120,9 @@ async def _handle_cloud(args):
         hf_token=hf_token,
         dry_run=args.dry_run,
         port_mappings=conn.port_mappings,
+        proxy=args.vm_proxy,
     )
-    host = RemoteHost(params.server, params.ssh_key, params.ssh_port, dry_run=params.dry_run)
+    host = RemoteHost(params.server, params.ssh_key, params.ssh_port, dry_run=params.dry_run, proxy=params.proxy)
     deploy_config = services[0].recipe.deploy  # a plan validated that every recipe pins the same versions
     async with timer.ameasure(PHASE_REMOTE_PROVISION):
         await provision_remote(host, driver_version=deploy_config.driver_version, cuda_version=deploy_config.cuda_version)
@@ -197,6 +199,7 @@ def register_cloud_target(subparsers):
         help="Seconds to wait for a rented CloudRift VM to become Active before giving up on that candidate "
         f"(default: {DEFAULT_VM_ACTIVE_TIMEOUT})",
     )
+    add_proxy_argument(parser)
     add_lease_arguments(parser)
     parser.add_argument("--result-json", metavar="PATH", help="Write the instance id and one endpoint per model here on success")
     parser.set_defaults(func=handle_cloud)

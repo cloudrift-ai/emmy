@@ -67,6 +67,11 @@ orchestration uses the same probe as a transport-readiness check but does not in
 `model.revision` is the one immutable Hugging Face revision for a deployment. The model-download phase passes it to
 `hf download`, and Compose passes the same revision to vLLM or SGLang; recipes must not duplicate it in `extra_args`.
 
+`DeployParams.proxy` (`--vm-proxy` on `deploy ssh` and `deploy cloud`) is the HTTP proxy the host reaches the
+internet through. `generate_compose()` puts it into every engine service's environment, and the model-download
+container gets the same six variables (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` and their lower-case twins), so vLLM,
+SGLang and `hf download` fetch weights through it; nginx gets none. Without it the compose file is unchanged.
+
 **GPU visibility:** `generate_compose()` accepts a `gpu_device_ids` parameter to restrict GPU visibility via
 `device_ids: [...]` instead of `count: all`. Used by bench when a task needs fewer GPUs than the VM has.
 
@@ -76,6 +81,9 @@ VM lifecycle management and cloud provisioning. `VMConnectionInfo` is the connec
 provider-agnostic SSH polling. The `Host` / `LocalHost` / `RemoteHost` hierarchy is a sudo-gated command runner
 (`LocalHost.run(sudo=True)` raises so local deploys can't modify the dev box). `provision_remote()` installs Docker, the
 NVIDIA container toolkit, and optional NVIDIA driver/CUDA (rebooting and waiting for the host on driver/CUDA install).
+`RemoteHost(proxy=…)` exports the host's HTTP proxy to every command it runs, and `provision_remote()` writes the
+Docker daemon's proxy drop-in and checks the proxy answers before anything is pulled (see the provisioning
+architecture).
 `provision_cloud_vm()` / `delete_cloud_vm()` orchestrate cloud VMs over the CloudRift (REST API) and GCP (gcloud)
 providers.
 
@@ -540,7 +548,7 @@ Deploys to a remote server via SSH + SCP. Auto-detects the remote GPU and resolv
 
 ```bash
 emmy deploy ssh --recipe <path> --ssh user@host[:port] [--ssh-key ~/.ssh/id_ed25519] [--dry-run] [--teardown]
-emmy deploy ssh --plan plan.json --ssh user@host[:port]
+emmy deploy ssh --plan plan.json --ssh user@host[:port] [--vm-proxy URL]
 ```
 
 `--plan` (exclusive with `--recipe`) runs a plan's models on the host it was written for: the detected GPU name and
@@ -548,6 +556,9 @@ count must equal the plan's `gpu` and `gpu_count`, or the command exits before p
 validated and its services deployed exactly as under `deploy cloud --plan` below (one container per model on host
 port `8000 + i`, shared-device start order, a health check and smoke test per slot, no nginx); there is no rental,
 lease or result file, so `--teardown` is how the project comes down.
+
+`--vm-proxy URL` routes the host's image pulls, weight downloads and package installs through an HTTP proxy; it
+behaves exactly as under `deploy cloud` below.
 
 ### `emmy deploy cloud`
 
@@ -558,7 +569,7 @@ sets fallback preference; pass `--provider {gcp,cloudrift}` to restrict the sear
 ```bash
 emmy deploy cloud --recipe <path> --gpu "NVIDIA H200 141GB" --gpu-count 8 [--provider gcp] [--name prefix]
 emmy deploy cloud --plan plan.json [--result-json out.json] [--lease lease.json --owner NAME] \
-  [--vm-active-timeout SECONDS]
+  [--vm-active-timeout SECONDS] [--vm-proxy URL]
 ```
 
 Without a fraction, `--gpu`/`--gpu-count` pick the highest `engine.llm.gpu_memory_utilization` among the entries
@@ -568,6 +579,17 @@ for that GPU and count: the whole-GPU qualification, whatever order the recipe l
 Emmy terminates it and tries the next candidate. A node that has to download the VM image first can need more than
 the default (an on-prem cluster fetching it through a proxy took about an hour). GCP has its own `create_timeout_*`
 provider keys.
+
+`--vm-proxy URL` (also on `deploy ssh`) is for a host that reaches the internet only through an HTTP proxy, such as a
+VM on a VLAN with no default route. The URL must be `http://HOST:PORT` or `https://HOST:PORT` — anything else is an
+argparse error before anything is rented — and credentials in it are redacted from every log line. Once Docker is
+known to be installed and before the first pull, Emmy writes `/etc/systemd/system/docker.service.d/http-proxy.conf`
+(`HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY=localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16`),
+restarts the daemon only when that file changed, and fails the deploy at once if
+`curl -x URL https://registry-1.docker.io/v2/` gets no HTTP status back through the proxy. The same six variables, in
+both spellings, go into every engine container and the model-download container, and every provisioning command runs
+with them exported, so Docker, the NVIDIA packages and the weights all come through the proxy. Name the proxy by IP
+when the host has no working DNS: a hostname only draws a warning, since only the host itself could resolve it.
 
 `--plan` (exclusive with `--recipe`) deploys several models on one VM. The plan is JSON:
 
