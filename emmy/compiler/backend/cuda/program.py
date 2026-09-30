@@ -716,14 +716,20 @@ class CompiledProgram:
         exactly like :meth:`outputs`; without it the whole buffer view is returned."""
         return {name: self.buffer_view(name, sym_values) for name in self.plan.outputs}
 
-    def alias_buffer(self, name: str, tensor) -> None:
+    def alias_buffer(self, name: str, tensor, *, wait: bool = True) -> None:
         """Point one operand at ``tensor``'s memory: a buffer chained onto another program's (a
         producer's output onto a consumer's input, so the consumer's device upload becomes a
         self-copy skip), or an operand the plan never declares as a buffer — an indirect
         operand's pointer table or selector, or a paged buffer's page table (``<name>__pages``,
         the device addresses of its pages), which only the caller can supply. A buffer's
         tensor must be contiguous and at least as large as its region; the runtime drops any
-        captured graph, since it baked the old address."""
+        captured graph, since it baked the old address.
+
+        By default the swap waits for the program's queued work, so the memory the buffer
+        pointed at is free to reuse on return. ``wait=False`` skips that host wait: launches
+        already queued keep reading the old memory, so the caller must keep it alive and
+        unwritten until they finish — as with resident weight slices, which is what makes
+        swapping them before every expert launch cheap."""
         if not _is_device_tensor(tensor) or not tensor.is_contiguous():
             raise TypeError(f"operand {name!r}: expected a contiguous CUDA tensor")
         flat = _flat_bytes(tensor)
@@ -732,7 +738,7 @@ class CompiledProgram:
             self.executor.set_external(name, flat.data_ptr(), flat.numel())
             self._tensors[f"external:{name}"] = flat
         else:
-            self.executor.set_region(placement["region"], flat.data_ptr(), flat.numel())
+            self.executor.set_region(placement["region"], flat.data_ptr(), flat.numel(), wait)
             self._tensors[placement["region"]] = flat
 
     def release_buffer(self, name: str) -> None:

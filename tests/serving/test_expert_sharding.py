@@ -86,6 +86,44 @@ def test_an_unrouted_shard_contributes_exactly_zero():
     torch.testing.assert_close(partial, torch.zeros_like(partial))
 
 
+@pytest.mark.parametrize("expert_range", [None, (2, 6)])
+def test_a_single_row_routes_without_waiting_on_the_device(monkeypatch, expert_range):
+    """One row's combine reads its picks once and never asks the device how many rows an expert
+    got (``unique``, ``where``): each of those is a host wait on every decode step. Its sum is
+    bit-identical to the same row routed inside a batch, owned experts only, ascending order."""
+    torch = pytest.importorskip("torch")
+
+    from emmy.serving.gen_runner import combine_routed_experts
+
+    hidden, experts, top_k = 8, 8, 4
+    generator = torch.Generator().manual_seed(3)
+    xn = torch.randn(2, hidden, generator=generator)
+    weights = [torch.randn(hidden, hidden, generator=generator) for _ in range(experts)]
+    gated = _router_return(torch, 2, experts, top_k, seed=4)
+    lo = expert_range[0] if expert_range else 0
+
+    def run_expert(e, rows):
+        return rows @ weights[lo + e]
+
+    batch = combine_routed_experts(xn, gated, run_expert, expert_range=expert_range)
+    launched: list[int] = []
+
+    def run_recorded(e, rows):
+        launched.append(lo + e)
+        return run_expert(e, rows)
+
+    def refuse(*_args, **_kwargs):
+        raise AssertionError("a single row asked the device how its rows are routed")
+
+    monkeypatch.setattr(torch.Tensor, "unique", refuse)
+    monkeypatch.setattr(torch, "where", refuse)
+    row = combine_routed_experts(xn[:1], tuple(g[:1] for g in gated), run_recorded, expert_range=expert_range)
+
+    assert torch.equal(row, batch[:1])
+    owned = [e for e in gated[1][0].tolist() if expert_range is None or expert_range[0] <= e < expert_range[1]]
+    assert launched == sorted(owned)
+
+
 def test_hash_routing_needs_the_steps_token_ids():
     """A hash router selects experts by token id; the router call must pass the ids through and
     refuse to route without them (silently routing on garbage would serve noise)."""
