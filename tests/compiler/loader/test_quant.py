@@ -1014,6 +1014,39 @@ def test_quantized_checkpoint_dir_detects_ct_int4(tmp_path):
     assert quantized_checkpoint_dir(str(tmp_path)) == tmp_path
 
 
+def test_load_quantized_split_decodes_ct_int4_linears(tmp_path):
+    """The shard-streamed layer load reads compressed-tensors' own sibling names, not AWQ's
+    ``qweight``, and its bfloat16 scales: a coded projection left out of the state dict stays META
+    and fails the trace."""
+    transformers = pytest.importorskip("transformers")
+    from safetensors.torch import save_file
+
+    from emmy.compiler.trace.huggingface import load_quantized_split
+
+    cfg = transformers.Qwen3Config(
+        hidden_size=16, intermediate_size=32, num_hidden_layers=1, num_attention_heads=2, num_key_value_heads=1, head_dim=8, vocab_size=32
+    )
+    model = transformers.AutoModelForCausalLM.from_config(cfg).half()
+    tensors = {k: v.clone() for k, v in model.state_dict().items()}
+    q = "model.layers.0.self_attn.q_proj"
+    integers = (np.arange(16 * 16, dtype=np.int32).reshape(16, 16) * 7 + 3) % 16
+    zeros = (np.arange(4 * 16, dtype=np.int32).reshape(4, 16) * 5 + 1) % 16
+    scales = (np.arange(4 * 16, dtype=np.float32).reshape(4, 16) + 1) / 128  # exact in bfloat16
+    del tensors[q + ".weight"]
+    tensors[q + ".weight_packed"] = torch.from_numpy(_pack_gptq4(integers, rows=True).T.copy())
+    tensors[q + ".weight_zero_point"] = torch.from_numpy(_pack_gptq4(zeros, rows=False).T.copy())
+    tensors[q + ".weight_scale"] = torch.from_numpy(scales.T.copy()).bfloat16()  # the real checkpoint's dtype
+    tensors[q + ".weight_shape"] = torch.tensor([16, 16], dtype=torch.int64)
+    save_file(tensors, str(tmp_path / "model.safetensors"))
+    (tmp_path / "config.json").write_text(json.dumps({**cfg.to_dict(), "quantization_config": _CT_INT4_QC}))
+
+    loaded, _store = load_quantized_split(tmp_path, torch.float16)
+    ref = (integers - np.repeat(zeros, 4, axis=0)) * np.repeat(scales, 4, axis=0)
+    weight = loaded.state_dict()[q + ".weight"]
+    assert not weight.is_meta
+    np.testing.assert_array_equal(weight.float().numpy(), ref.T.astype(np.float16).astype(np.float32))
+
+
 @pytest.mark.parametrize("field, value", [("desc_act", True), ("sym", False), ("bits", 8), ("checkpoint_format", "gptq_v2")])
 def test_gptq_config_rejects_unverified_variants(tmp_path, field, value):
     """Each of these would decode without complaint and produce wrong weights, so each must raise."""

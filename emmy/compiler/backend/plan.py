@@ -123,10 +123,15 @@ class KernelSpec:
     # Whether this kernel must compile for the arch-SUFFIXED target (``sm_120a``). TMA needs it,
     # and so does the block-scaled fp4 mma, which ptxas refuses on the plain target.
     arch_specific: bool = False
+    # Whether the kernel waits on the grid ahead of it (``griddepcontrol.wait``) before its first
+    # memory access, which lets the runtime launch it as a programmatic dependent launch. A kernel
+    # that does not wait, or a plan stored before the renderer emitted the wait, launches serialized.
+    dependent_launch: bool = False
 
     @classmethod
     def from_op(cls, op) -> KernelSpec:
-        return cls(source=op.kernel_source, arch_specific=_needs_arch_isa(op))
+        source = op.kernel_source
+        return cls(source=source, arch_specific=_needs_arch_isa(op), dependent_launch="griddepcontrol.wait" in (source or ""))
 
 
 @dataclass
@@ -531,6 +536,7 @@ def plan_to_dict(plan: ExecutionPlan) -> dict:
                 **({"source": spec.source} if spec.source is not None else {}),
                 **({"binary_key": spec.binary_key} if spec.binary_key is not None else {}),
                 "arch_specific": spec.arch_specific,
+                **({"dependent_launch": True} if spec.dependent_launch else {}),
             }
             for name, spec in plan.kernels.items()
         },
@@ -612,6 +618,7 @@ def plan_from_dict(d: dict) -> ExecutionPlan:
                 binary_key=spec.get("binary_key"),
                 # ``uses_tma`` is the key packs baked before the fp4 atom wrote; same meaning, narrower name.
                 arch_specific=bool(spec.get("arch_specific", spec.get("uses_tma", False))),
+                dependent_launch=bool(spec.get("dependent_launch", False)),
             )
             for name, spec in d.get("kernels", {}).items()
         },

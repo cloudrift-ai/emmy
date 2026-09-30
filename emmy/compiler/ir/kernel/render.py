@@ -192,11 +192,17 @@ static __device__ __forceinline__ void cp_async_bulk_tensor_5d(
 # same helper style the mma / mbarrier preludes use; same SASS. ``cg`` =
 # cache-global / bypass-L1 (16 B, the streaming form); ``ca`` = cache-all (4/8 B).
 # ``commit`` closes a batch of issued copies; ``wait<N>`` blocks until ≤ N of
-# those batches are still in flight.
+# those batches are still in flight. ``_z`` copies only when ``ok`` and writes zeros
+# otherwise, reading nothing: a tile row past a masked edge.
 _CP_ASYNC_PRELUDE = """\
 static __device__ __forceinline__ void emmy_cp_async_cg(void* smem, const void* gmem) {
     unsigned addr = __cvta_generic_to_shared(smem);
     asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\\n" :: "r"(addr), "l"(gmem) : "memory");
+}
+
+static __device__ __forceinline__ void emmy_cp_async_cg_z(void* smem, const void* gmem, bool ok) {
+    unsigned addr = __cvta_generic_to_shared(smem);
+    asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\\n" :: "r"(addr), "l"(gmem), "r"(ok ? 16 : 0) : "memory");
 }
 
 template <int Bytes>
@@ -1401,6 +1407,9 @@ _BUILTIN_TO_CUDA: dict[str, str] = {
 _BLOCK_SIZE = 256
 
 
+_GRID_DEPENDENCY = '#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900\n    asm volatile("griddepcontrol.wait;" ::: "memory");\n#endif\n'
+
+
 def render_kernelop(
     kernel_op: KernelOp,
     tensors: dict[str, Tensor] | None = None,
@@ -1569,6 +1578,13 @@ def render_kernelop(
     if starts:
         # A paged write's start read off the device: the position a step lands its rows at.
         body_text = "".join(f"    const int {n}__at = (int){n}[0];\n" for n in starts) + body_text
+    # Programmatic dependent launch (sm_90+): wait for the grid ahead before any memory access (the
+    # preambles above already read device memory it may write). A no-op without the launch attribute.
+    # No kernel releases its dependent early (``griddepcontrol.launch_dependents``): a dependent
+    # launched while its predecessor still runs places its blocks on the few SMs free at that moment,
+    # and a 128-block GEMM stacked that way ran 3-4x slower once released (s512 layer 133 -> 192 us).
+    # Released at the predecessor's exit, it still overlaps the launch with the predecessor's drain.
+    body_text = _GRID_DEPENDENCY + body_text
     prelude = _TMA_PRELUDE if desc_names else ""
     sig_dtypes = [_dtype_for(n) for n in kernel_op.inputs if n not in literals]
     sig_dtypes.extend(_dtype_for(n) for n in kernel_op.outputs)

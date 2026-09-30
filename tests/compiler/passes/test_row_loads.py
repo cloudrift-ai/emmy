@@ -97,3 +97,57 @@ def test_a_lane_loop_unrolls_only_when_its_start_is_below_its_step() -> None:
     assert trips(loop(Literal(0, "int")), lanes) == 4
     assert trips(loop(Literal(32, "int")), lanes) is None
     assert trips(loop(Var("unknown")), lanes) is None
+
+
+def test_sibling_lane_loops_over_one_cone_unroll_to_distinct_names() -> None:
+    """Independently spliced operand cones bind the same names, each inside its own lane loop. Unrolled into
+    one scope, a repeat of those names is a second C declaration nvcc rejects; the later loop takes its own."""
+    import importlib
+
+    from emmy.compiler.ir.axis import Axis
+    from emmy.compiler.ir.expr import Interval, Literal, SimplifyCtx, Var
+    from emmy.compiler.ir.stmt import Assign, Body, StridedLoop
+    from emmy.compiler.ir.stmt.leaves import Load, Write
+
+    walk = importlib.import_module("emmy.compiler.pipeline.passes.lowering.kernel.047_reuse_lane_loads")._walk
+    lanes = SimplifyCtx.empty().extend("lane", Interval(0, 15))
+
+    def loop(out):
+        cone = (Load(name="v", input="x", index=(Var("i"),), dtype="float16"), Assign("w", "exp", ("v",)))
+        body = Body((*cone, Write(out, (Var("i"),), "w")))
+        return StridedLoop(axis=Axis("i", 64), start=Var("lane"), step=Literal(16, "int"), body=body)
+
+    one = walk(Body((loop("a"),)), frozenset({"a"}), lanes)
+    assert [s.name for s in one if isinstance(s, Assign)] == [f"w__u{k}" for k in range(4)]  # a lone loop keeps its names
+    two = walk(Body((loop("a"), loop("b"))), frozenset({"a", "b"}), lanes)
+    names = [name for s in two for name in s.defines()]
+    assert len(names) == len(set(names))
+    assert sum(isinstance(s, Load) for s in two) == 4  # the second cone still reads each cell from the first's loads
+
+
+def test_an_outer_reuse_never_renames_a_nested_trip_definition() -> None:
+    """A staging prologue's lane loop reads one constant each trip, so the reuse drops its second trip's
+    load (``in0__u1`` becomes ``in0__u0``). The K loop after it holds its own lane loop, unrolled on its
+    own with its own ``in0__u1``: that is a new value at another row, and renaming it onto ``in0__u0``
+    declared ``in0__u0`` twice in one C scope (an f16 mma GEMM with a computed A operand, nvcc refused it)."""
+    import importlib
+
+    from emmy.compiler.ir.axis import Axis
+    from emmy.compiler.ir.expr import Interval, Literal, SimplifyCtx, Var
+    from emmy.compiler.ir.stmt import Body, Loop, StridedLoop
+    from emmy.compiler.ir.stmt.leaves import Load, Write
+
+    walk = importlib.import_module("emmy.compiler.pipeline.passes.lowering.kernel.047_reuse_lane_loads")._walk
+    lanes = SimplifyCtx.empty().extend("lane", Interval(0, 15))
+
+    def lane_loop(load: Load, out: str) -> StridedLoop:
+        body = Body((load, Write(out, (Var("i"),), "in0")))
+        return StridedLoop(axis=Axis("i", 32), start=Var("lane"), step=Literal(16, "int"), body=body)
+
+    fill = lane_loop(Load(name="in0", input="c", index=(Literal(0, "int"),), dtype="float16"), "stat")
+    stage = Loop(axis=Axis("k", 4), body=Body((lane_loop(Load(name="in0", input="stat", index=(Var("i"),), dtype="float16"), "tile"),)))
+    out = walk(Body((fill, stage)), frozenset({"stat", "tile"}), lanes)
+    inner = next(s for s in out if isinstance(s, Loop)).body
+    loads = [(s.name, s.index[0].pretty()) for s in inner if isinstance(s, Load)]
+    assert [name for name, _ in loads] == ["in0__u0", "in0__u1"], loads
+    assert len({index for _, index in loads}) == 2, loads

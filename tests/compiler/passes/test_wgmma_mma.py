@@ -152,6 +152,22 @@ def test_domain_offers_only_group_aligned_wgmma_rows_and_stages_them(monkeypatch
     assert not set(WGMMA) & direct and "mma_m16n8k16_bf16_f32" in direct
 
 
+def test_a_row_past_the_register_envelope_is_not_offered(monkeypatch) -> None:
+    """Sixteen warps leave each lane 128 registers: an m64n128 row's 64 accumulators fit, a 128-accumulator
+    row does not (ptxas refuses such a kernel outright rather than spilling)."""
+    moves = classic.warp_tile_moves
+    monkeypatch.setattr(classic, "scalar_tile_moves", lambda: [Tile()])
+    monkeypatch.setattr(
+        classic, "warp_tile_moves", lambda atoms: [plan for plan in moves(atoms) if plan.units == (16, 1) and plan.atom.is_wgmma]
+    )
+    monkeypatch.setattr(classic, "stage_moves", lambda *, warp, ctx=None: [Stage(depth=2, transport="smem-tma")])
+    tile, target = _matmul(), Context.from_target((9, 0))
+    site = tile.node_sites[0]
+    rows = [choice.tile for choice in ClassicProblem(tile, target).node_site(site).nodes if isinstance(choice, ReductionSchedule)]
+    widths = {plan.reg_n for plan in rows if plan.is_warp}
+    assert 16 in widths and 32 not in widths
+
+
 @pytest.mark.parametrize(
     ("pins", "message"),
     [

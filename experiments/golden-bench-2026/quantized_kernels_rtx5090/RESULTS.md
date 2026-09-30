@@ -1,5 +1,10 @@
 # Quantized checkpoint kernels — results
 
+**Retired rows (2026-09-28).** The block-FP8 rows and their two goldens are gone from the recipe. Maximal fusion now
+traces the `Qwen/Qwen3-0.6B-FP8` layer as one whole-layer kernel, so no fresh lowering writes the norm and
+activation-quantize targets those goldens stored, and a re-record would need a hand-made cut route for the FP8 layer.
+The run below is kept as the record of what they measured.
+
 ## RTX 5090 x1 (`rtx5090x1`)
 
 **Question.** Does Emmy compile and strictly execute every recorded post-fusion target of one `Qwen/Qwen3-0.6B-FP8`
