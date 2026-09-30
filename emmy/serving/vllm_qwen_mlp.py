@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gc
 import logging
+import os
 from itertools import chain
 
 import torch
@@ -13,6 +14,20 @@ from vllm.model_executor.models.qwen3_5 import Qwen3_5ForConditionalGeneration
 from emmy.serving.mlp import MLPPrograms, checkpoint_keys, text_prefix
 
 logger = logging.getLogger(__name__)
+
+
+def _require_explicit_pins() -> None:
+    """Keep this lane off the known unusable unpinned prior route."""
+    from emmy import config
+    from emmy.compiler.pipeline.knob import parse_knob_spec
+
+    pins = parse_knob_spec(config.knobs_aggregate())
+    fast_math = pins.get("FAST_MATH", config.knob_raw("FAST_MATH"))
+    if fast_math is None or fast_math.lower() not in ("0", "false"):
+        raise ValueError("mixed Qwen MLP serving requires FAST_MATH=false in EMMY_KNOBS or EMMY_FAST_MATH")
+    schedule = any(key.split("@", 1)[0] in {"PLACE", "WORK", "TILE", "STAGE", "REDUCE", "RASTER"} for key in pins)
+    if not schedule and not os.environ.get(config.GOLDEN_FILE):
+        raise ValueError("mixed Qwen MLP serving requires explicit EMMY_KNOBS schedule pins or EMMY_GOLDEN_FILE")
 
 
 class _CompiledMLP(nn.Module):
@@ -55,6 +70,7 @@ class EmmyQwen35MlpModel(Qwen3_5ForConditionalGeneration):
         text = model.hf_text_config
         if getattr(text, "model_type", None) != "qwen3_5_text" or getattr(text, "hidden_act", None) != "silu":
             raise ValueError("mixed Qwen MLP serving requires a dense Qwen3.5 text model with SiLU")
+        _require_explicit_pins()
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         self._emmy_mlp_programs = None
         layers = self.language_model.model.layers

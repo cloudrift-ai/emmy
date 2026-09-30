@@ -44,6 +44,7 @@ def adapter(monkeypatch):
     old_attribute = getattr(serving, "vllm_qwen_mlp", None)
     implementation = importlib.import_module(adapter_name)
     monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+    monkeypatch.setenv("EMMY_KNOBS", "FAST_MATH=false,WORK=w1x4")
     yield implementation
     sys.modules.pop(adapter_name, None)
     if old_adapter is not None:
@@ -149,3 +150,15 @@ def test_bad_mlp_ledger_is_rejected(adapter, monkeypatch, defect, match):
     with pytest.raises(ValueError, match=match):
         model.load_weights((name, torch.zeros(1)) for name in keys)
     assert model._emmy_mlp_programs is None
+
+
+def test_unpinned_mlp_serving_is_rejected(adapter, monkeypatch):
+    monkeypatch.delenv("EMMY_KNOBS")
+    monkeypatch.delenv("EMMY_FAST_MATH", raising=False)
+    with pytest.raises(ValueError, match="FAST_MATH=false"):
+        adapter.EmmyQwen35MlpModel(vllm_config=_config())
+
+    monkeypatch.setenv("EMMY_KNOBS", "FAST_MATH=false")
+    monkeypatch.delenv("EMMY_GOLDEN_FILE", raising=False)
+    with pytest.raises(ValueError, match="schedule pins or EMMY_GOLDEN_FILE"):
+        adapter.EmmyQwen35MlpModel(vllm_config=_config())
