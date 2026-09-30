@@ -41,7 +41,6 @@ class GoldenRecord:
     pins: tuple[tuple[str, object], ...]
     knobs: dict
     measurements: Measurements | None
-    ranking: dict | None
     loop_index: int | None = None
     loop_wire: dict | None = None
     #: Which config entry of its document the record came from. A config is one kernel set of one target: several

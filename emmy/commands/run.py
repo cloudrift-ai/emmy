@@ -670,8 +670,8 @@ def _run_golden_targets(args) -> None:
 
     Reached only by a bare ``--golden PATH``; naming one realization with ``--realization NAME``
     goes straight down the single-run path, which already thinks in the (file, name) pair. The
-    walk benches each name's verified rows or tune winner (``_explicit_realization`` false), so a
-    tuner's proposals are not benched as if they were recorded truths.
+    walk benches each name's verified rows (``_explicit_realization`` false), so proposals are not
+    benched as if they were recorded truths.
     """
     from copy import copy  # noqa: PLC0415
 

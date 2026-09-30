@@ -2,8 +2,8 @@
 
 ``EmmyGenRunner`` compiles two programs per decoder layer (the ``pre`` and ``post``
 attention halves) at three widths (static decode bucket, static prefill chunk, symbolic).
-Capturing those graphs normally means downloading the full checkpoint
-(``scripts/capture_gen_twins.py``), but nothing in a TRACE reads a weight value — only
+Capturing those graphs normally means downloading the full checkpoint, but nothing in a TRACE
+reads a weight value — only
 config-derived shapes and dtypes matter. So this module builds a random-init skeleton from
 the model's ``config.json`` alone (a few-KB fetch, or a checked-in fixture directory) and
 traces the twins through the exact ``build_attention_split_wrapper`` / ``trace_split``
@@ -49,7 +49,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-#: Serving's default static widths (``EmmyGenRunner`` / ``capture_gen_twins`` conventions).
+#: Serving's default static widths (``EmmyGenRunner`` conventions).
 DECODE_BUCKET = 32
 PREFILL_BUCKET = 256
 

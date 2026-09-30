@@ -1,9 +1,5 @@
-"""``emmy eval <knobs|prior|golden|variants|failures>`` — evaluate the tuning machinery.
+"""``emmy eval <prior|golden>`` — evaluate the prior's ranking and a golden file's serving envelope.
 
-Five subcommands:
-
-- ``eval knobs``     — print the registered knob schema, then (with a tune DB)
-  per-knob **regret** + a knob-interaction matrix (the analysis below).
 - ``eval prior``     — how well the prior RANKS, over a dataset ``emmy db export`` wrote: its golden
   pools (``--pools golden``: the golden-rank screen, plus the greedy pipeline pick vs golden) or its
   measured pools (``--pools measured``: Spearman + regret, what a wrong pick costs).
@@ -12,33 +8,6 @@ Five subcommands:
   screen with one implementation rather than two that agree by coincidence.
 - ``eval golden``    — validate one canonical golden file against the pinned serving
   configuration and live GPU, then reproduce its rows and audit the exact serving matrix.
-- ``eval variants``  — per-kernel leaderboard of the tune DB's measured variants
-  (fastest first) and the config the prior deploys marked + ranked.
-- ``eval failures``  — the tune DB's ``bench_fail`` rows clustered by
-  ``(kernel, error)`` with the knob values shared by every failing row.
-
-The ``eval knobs`` regret analysis: for each kernel (grouped by the kernel C
-identifier, the ``kernel`` row's name), compute per-knob regret:
-
-    regret[K] = max(best_us | K=v) / min(best_us | K=v)
-
-where ``best_us | K=v`` is the minimum measured latency over variants
-pinning ``K=v`` (marginalizing the other knobs by taking min). Aggregate
-across kernels with median / p90 / geometric mean and print a sorted
-table.
-
-The intended use is to decide knob ordering for a hierarchical Fork tree
-in the planner: high-regret knobs go at the root of the tree (commit
-first), low-regret knobs go at the leaves. A second table shows
-pairwise knob interaction so coupled knobs (where the optimal value of
-K2 depends on K1) can be kept in the same Fork rather than split across
-levels.
-
-Grouping caveat: the analysis groups variants by kernel C identifier
-only — different shapes of the same kernel collapse into one group.
-Same-kernel-different-shape variants are comparable in *relative* knob
-impact even when absolute latencies differ, so the rank order of knobs
-is the load-bearing output here.
 """
 
 from __future__ import annotations
@@ -46,15 +15,10 @@ from __future__ import annotations
 import logging
 import math
 import sys
-from collections import Counter, defaultdict
-from dataclasses import dataclass
 from pathlib import Path
-from statistics import median
 
 from emmy import storage
-from emmy.commands.compile import resolve_tune_db
-from emmy.commands.db import read_samples
-from emmy.commands.eval_args import add_dataset_args, add_db_args, resolve_offline_arg
+from emmy.commands.eval_args import add_dataset_args, resolve_offline_arg
 from emmy.commands.table import GREEN as _GREEN
 from emmy.commands.table import RED as _RED
 from emmy.commands.table import YELLOW as _YELLOW
@@ -76,17 +40,12 @@ def _realization_label(name: str, pins) -> str:
 
 
 def register_eval_command(subparsers) -> None:
-    """``emmy eval <knobs|prior|golden|variants|failures>`` — evaluate the tuning knobs or
-    the prior's ranking."""
+    """``emmy eval <prior|golden>`` — evaluate the prior's ranking or a golden file."""
     parser = subparsers.add_parser(
         "eval",
-        help="Evaluate the tuning knobs / how well the prior ranks candidate pools",
+        help="Evaluate how well the prior ranks candidate pools, or a golden file's serving envelope",
     )
     sub = parser.add_subparsers(dest="eval_target", required=True)
-
-    pk = sub.add_parser("knobs", help="Print the registered knob schema + (with a tune DB) per-knob regret + interactions")
-    add_db_args(pk, with_min_variants=True)
-    pk.set_defaults(func=handle_eval_knobs)
 
     pp = sub.add_parser(
         "prior",
@@ -101,11 +60,6 @@ def register_eval_command(subparsers) -> None:
     )
     add_dataset_args(pp)
     pp.add_argument("--json", dest="json_out", metavar="PATH", help="Also write the report as JSON, for diffing two runs.")
-    pp.add_argument(
-        "--features",
-        action="store_true",
-        help="--pools golden: also print the exact feature vector the prior regresses on per golden config (features.knob_features).",
-    )
     pp.set_defaults(func=handle_eval_prior)
 
     pg = sub.add_parser(
@@ -120,62 +74,6 @@ def register_eval_command(subparsers) -> None:
         help="Pinned release env that names the model, GPU, golden file, and reachable realization matrix.",
     )
     pg.set_defaults(func=handle_eval_golden)
-
-    pv = sub.add_parser(
-        "variants",
-        help="Per-kernel leaderboard of the tune DB's measured variants, with the prior's deployed pick marked and ranked",
-    )
-    add_db_args(pv)
-    pv.add_argument(
-        "--top",
-        type=int,
-        default=20,
-        help="Variants shown per kernel, fastest first (0 = all; the pick row always shows). Default: 20.",
-    )
-    pv.set_defaults(func=handle_eval_variants)
-
-    pf = sub.add_parser(
-        "failures",
-        help="Cluster the tune DB's bench_fail rows by kernel + error, with the knob values shared by every failing row",
-    )
-    add_db_args(pf)
-    pf.set_defaults(func=handle_eval_failures)
-
-
-def handle_eval_knobs(args) -> None:
-    """``eval knobs`` — the registered knob schema, then (with a tune DB) per-knob
-    regret + the knob-interaction matrix."""
-    _emit_registry()
-
-    db_path = Path(args.db) if args.db else resolve_tune_db()
-    if not db_path.exists():
-        logger.info("")
-        logger.info("No tune DB at %s — skipping the measured per-knob regret analysis.", db_path)
-        return
-    logger.info("")
-    logger.info("Reading: %s", db_path)
-
-    all_kernels = read_samples(db_path, kernel=args.kernel).group_by_kernel_name()
-    kernels = {
-        name: [(s.all_knobs(), s.latency_us) for s in samples] for name, samples in all_kernels.items() if len(samples) >= args.min_variants
-    }
-    logger.info(
-        "Kernels with ≥%d measured variants: %d (of %d total)",
-        args.min_variants,
-        len(kernels),
-        len(all_kernels),
-    )
-    if not kernels:
-        return
-
-    rows = _compute_knob_regret(kernels)
-    if not rows:
-        logger.info("No knob varied across ≥2 values in any kernel — nothing to rank.")
-        return
-    _emit_regret_table(rows)
-
-    interactions = _compute_interactions(kernels, [r.knob for r in rows])
-    _emit_interaction_matrix([r.knob for r in rows], interactions)
 
 
 def _check_offline_artifact() -> None:
@@ -385,8 +283,6 @@ def _emit_golden_deploy_check(args, pools: list) -> None:
     if (live := live_gpu_key()) is not None:
         # The live card's pools, or every card's when none are recorded for it — as ``goldens_for_live_gpu`` scopes.
         pools = [p for p in pools if (p.gpu, p.cap) == live] or pools
-    if args.features:
-        _emit_golden_features(pools)
 
     def tunable(knobs: dict) -> dict:
         return {k: v for k, v in knobs.items() if not k.startswith(METADATA_PREFIXES)}
@@ -546,136 +442,6 @@ def handle_eval_golden(args) -> None:
         sys.exit(1)
 
 
-def handle_eval_variants(args) -> None:
-    """``eval variants`` — per-kernel leaderboard of the tune DB's measured
-    variants (fastest first, knob columns aligned), with the config the prior would
-    deploy marked + ranked. The per-kernel "did the
-    search/prior reach the best measured config, and which knobs distinguish
-    it?" drill-down view."""
-    from emmy.compiler.pipeline.search.prior import load_prior  # noqa: PLC0415
-
-    db_path = Path(args.db) if args.db else resolve_tune_db()
-    if not db_path.exists():
-        logger.error("no tune DB at %s — pass --db or record one with `emmy run --bench` first.", db_path)
-        return
-    groups = read_samples(db_path, kernel=args.kernel).group_by_kernel_name()
-    if not groups:
-        logger.info("No measured variants%s in %s.", f" matching --kernel '{args.kernel}'" if args.kernel else "", db_path)
-        return
-    fails = Counter(s.name for s in read_samples(db_path, kernel=args.kernel, status="bench_fail") if s.name)
-    prior = load_prior()  # the same ranking compile/run use
-    for name in sorted(groups):
-        _emit_variant_table(name, groups[name], prior, n_fail=fails.get(name, 0), top=args.top)
-
-
-def handle_eval_failures(args) -> None:
-    """``eval failures`` — the tune DB's ``bench_fail`` rows clustered by
-    ``(kernel, error)``, each cluster with its count and the tunable knob
-    assignments shared by EVERY failing row (the "all 28 rows have ``TMA=1``"
-    signal). Replaces grepping the tune log against hand-written SQL; rows from
-    pre-error-column DBs cluster under ``(no error recorded)``."""
-    db_path = Path(args.db) if args.db else resolve_tune_db()
-    if not db_path.exists():
-        logger.error("no tune DB at %s — pass --db or record one with `emmy run --bench` first.", db_path)
-        return
-    fails = [s for s in read_samples(db_path, kernel=args.kernel, status="bench_fail") if s.name]
-    n_ok = len(read_samples(db_path, kernel=args.kernel))
-    if not fails:
-        logger.info("No bench_fail rows%s in %s (%d ok rows).", f" matching --kernel '{args.kernel}'" if args.kernel else "", db_path, n_ok)
-        return
-    clusters: dict[tuple, list] = defaultdict(list)
-    for s in fails:
-        clusters[(s.name, s.error or "(no error recorded)")].append(s)
-    logger.info("%d bench_fail rows (beside %d ok) in %s:", len(fails), n_ok, db_path)
-    for (name, error), grp in sorted(clusters.items(), key=lambda kv: -len(kv[1])):
-        shared = dict(grp[0].knobs)
-        for s in grp[1:]:
-            shared = {k: v for k, v in shared.items() if s.knobs.get(k) == v}
-        knob_txt = ", ".join(f"{k}={v}" for k, v in sorted(shared.items())) or "(no shared knobs)"
-        logger.info("")
-        logger.info("  %s — %d row(s)", name, len(grp))
-        logger.info("    error: %s", error)
-        logger.info("    shared knobs: %s", knob_txt)
-
-
-def _emit_variant_table(name: str, samples: list, prior, *, n_fail: int, top: int) -> None:
-    """One kernel's leaderboard: measured leaf configs sorted by latency, the prior's pick marked,
-    knobs in the canonical aligned columns (``tuning_knob_items`` — the same filtered view the
-    ``run --bench`` kernel table renders). Non-leaf rows (partial-knob fork nodes) are dropped —
-    a partial config is not a variant.
-
-    The ``us`` column is the measured latency as stored. A sweep measures in the deployable
-    regime, so on a store written since that became true every row is a deploy latency — but
-    ``Samples.from_db`` reads every regime and a ``Sample`` carries none, so a store holding rows
-    from the era of a separate ranking lane still pools both here."""
-    from emmy.compiler.pipeline.knob import tuning_knob_items  # noqa: PLC0415
-
-    kmax = max(len(s.knobs) for s in samples)
-    leaves = sorted((s for s in samples if len(s.knobs) == kmax), key=lambda s: s.latency_us)
-    # Score through ``Prior.pick`` — measured evidence first, model argmin otherwise — so the
-    # marker shows the config greedy ``compile`` / ``run`` would actually deploy, not just the
-    # model's favourite.
-    best_i, _ = prior.pick([s.all_knobs() for s in leaves])
-    pick = leaves[best_i]
-    rank = best_i + 1
-
-    n_prefix = len(leaves) if not top else min(top, len(leaves))
-    shown = list(enumerate(leaves[:n_prefix], start=1))
-    if rank > n_prefix:
-        shown.append((rank, pick))
-    hidden = len(leaves) - n_prefix - (1 if rank > n_prefix else 0)
-
-    logger.info("")
-    logger.info("%s — %d measured configs%s", name, len(leaves), f", {n_fail} bench_fail" if n_fail else "")
-    kcols, kcells = knob_columns([{k: (v, False) for k, v in tuning_knob_items(s.knobs)} for _, s in shown])
-    columns = [Col("rank", "r"), Col("us", "r"), Col("pick"), *kcols]
-    data = []
-    for (r, s), kc in zip(shown, kcells, strict=True):
-        data.append([str(r), f"{s.latency_us:.1f}", ("◄", _GREEN) if s is pick else "", *kc])
-    for line in render_table(columns, data, indent="  "):
-        logger.info(line)
-    if hidden > 0:
-        logger.info("  … %d more (--top 0 shows all)", hidden)
-    if len(leaves) >= 2:
-        ratio = pick.latency_us / leaves[0].latency_us
-        flag = "  <-- misses best" if ratio > 1.2 else ""
-        logger.info("  pick: rank %d/%d, %.2fx of best (measured latency)%s", rank, len(leaves), ratio, flag)
-
-
-def _emit_registry() -> None:
-    """List every registered :class:`~emmy.compiler.pipeline.knob.Knob` — the
-    canonical tuning schema (name, type, candidate hints, help) collected
-    by ``knob.registry`` from all loaded passes, regardless of any DB."""
-    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline, knob  # noqa: PLC0415
-
-    # ``registry`` only sees passes already imported into ``sys.modules``; build
-    # the full pipeline once so every Knob-bearing rule module is loaded first.
-    Pipeline.build(CUDA_PASSES)
-    import textwrap  # noqa: PLC0415
-
-    reg = knob.registry()
-    names = sorted(reg)
-    kw = max((len(n) for n in names), default=4)  # knob-name column width
-    tw = max((len(reg[n].type.value) for n in names), default=4)  # type column width
-    hw = 33  # hints column width (truncated past this)
-    help_w = 64  # help wraps to this width; continuation lines indent under it
-    indent = " " * (kw + 2 + tw + 2 + hw + 2)
-
-    logger.info("Registered tuning knobs (%d) — the canonical schema:", len(reg))
-    logger.info(f"{'knob':<{kw}}  {'type':<{tw}}  {'candidates':<{hw}}  help")
-    logger.info("-" * (kw + 2 + tw + 2 + hw + 2 + help_w))
-    for name in names:
-        k = reg[name]
-        hints = ", ".join(str(h) for h in k.hints) if k.hints else "-"
-        if len(hints) > hw:
-            hints = hints[: hw - 1] + "…"
-        help_txt = " ".join((k.help or "").split())  # collapse whitespace/newlines
-        lines = textwrap.wrap(help_txt, width=help_w) or [""]
-        logger.info(f"{name:<{kw}}  {k.type.value:<{tw}}  {hints:<{hw}}  {lines[0]}")
-        for cont in lines[1:]:
-            logger.info(indent + cont)
-
-
 def _ratio_color(matched: int, total: int) -> str:
     """Green (all match) / yellow (>80%) / red (otherwise)."""
     frac = matched / total if total else 1.0
@@ -723,38 +489,6 @@ def _emit_golden_table(lead_cols: list[Col], entries: list[tuple], caption: str)
     logger.info(next(lines))  # header row (column names, knobs included)
     for e in entries:
         logger.info("  " + e[1].ljust(kernel_w) + "  ERR  " + e[2] if e[0] == "err" else next(lines))
-
-
-def _emit_golden_features(pools: list) -> None:
-    """Print, per golden row of the pools, the exact feature vector the prior scores —
-    ``features.knob_features(merged)`` where ``merged`` is the ``H_*`` host/regime features of
-    the pool's card, the kernel's ``S_*`` stamps as the DB holds them, and the row's tuning knobs. This is the
-    model's *input* for that shape+config — note the shape enters only as the coarse ``S_ext_*`` extent
-    products/maxes; the occupancy / CTA-count / reuse terms that drive matmul perf (the engineered ``D_*``
-    features) are NOT here."""
-    from emmy.compiler.pipeline.knob import CTX_PREFIX, STRUCT_PREFIX  # noqa: PLC0415
-    from emmy.compiler.pipeline.search import features  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.ranking import pool_context  # noqa: PLC0415
-
-    logger.info("")
-    logger.info("Prior feature vector (features.knob_features) per golden row:")
-    for pool in pools:
-        base = {**pool_context(pool).features(), **pool.kernel.stamps}
-        for row in pool.schedule_rows():
-            feats = features.knob_features({**base, **row})
-            logger.info("  %s  (%d features):", _realization_label(pool.name, pool.pins.items()), len(feats))
-            tuning = {k: v for k, v in feats.items() if not k.startswith((STRUCT_PREFIX, CTX_PREFIX))}
-            for label, sel in (
-                ("S_", {k: v for k, v in feats.items() if k.startswith(STRUCT_PREFIX)}),
-                ("H_", {k: v for k, v in feats.items() if k.startswith(CTX_PREFIX)}),
-                ("knob", tuning),
-            ):
-                if sel:
-                    logger.info("    %-5s %s", label, " ".join(f"{k}={v:g}" for k, v in sorted(sel.items())))
-
-
-def _mean(xs: list[float]) -> float:
-    return sum(xs) / len(xs) if xs else 0.0
 
 
 def _bare_families(knobs: dict) -> dict:
@@ -805,126 +539,3 @@ def _emit_offer_audit(configs: list) -> bool:
         return True
     logger.info("  offer audit: all %d entries equal an enumerated leaf", len(configs))
     return False
-
-
-@dataclass
-class KnobRow:
-    knob: str
-    n_kernels: int
-    median_values: int
-    median_regret: float
-    p90_regret: float
-    geomean_regret: float
-
-
-def _compute_knob_regret(kernels: dict[str, list[tuple[dict, float]]]) -> list[KnobRow]:
-    per_knob_regret: dict[str, list[float]] = defaultdict(list)
-    per_knob_n_values: dict[str, list[int]] = defaultdict(list)
-    for variants in kernels.values():
-        all_knobs: set[str] = set()
-        for knobs, _ in variants:
-            all_knobs.update(knobs.keys())
-        for K in all_knobs:
-            best_by_value: dict = {}
-            for knobs, us in variants:
-                v = knobs.get(K)
-                if v is None:
-                    continue
-                if v not in best_by_value or us < best_by_value[v]:
-                    best_by_value[v] = us
-            if len(best_by_value) < 2:
-                # Knob took only one distinct value across this kernel's
-                # variants — no choice to evaluate.
-                continue
-            latencies = list(best_by_value.values())
-            per_knob_regret[K].append(max(latencies) / min(latencies))
-            per_knob_n_values[K].append(len(best_by_value))
-
-    rows = [
-        KnobRow(
-            knob=K,
-            n_kernels=len(per_knob_regret[K]),
-            median_values=int(median(per_knob_n_values[K])),
-            median_regret=median(per_knob_regret[K]),
-            p90_regret=_percentile(per_knob_regret[K], 0.90),
-            geomean_regret=_geomean(per_knob_regret[K]),
-        )
-        for K in per_knob_regret
-    ]
-    rows.sort(key=lambda r: -r.geomean_regret)
-    return rows
-
-
-def _compute_interactions(
-    kernels: dict[str, list[tuple[dict, float]]],
-    knobs: list[str],
-) -> dict[tuple[str, str], float | None]:
-    """For each ordered pair (K1, K2): fraction of kernels where the
-    argmin K2 value changes across different K1 values."""
-    out: dict[tuple[str, str], float | None] = {}
-    for K1 in knobs:
-        for K2 in knobs:
-            if K1 == K2:
-                continue
-            n_changes = 0
-            n_total = 0
-            for variants in kernels.values():
-                argmin_by_v1: dict = {}
-                for knobs_dict, us in variants:
-                    v1 = knobs_dict.get(K1)
-                    v2 = knobs_dict.get(K2)
-                    if v1 is None or v2 is None:
-                        continue
-                    v1, v2 = v1, v2
-                    prev = argmin_by_v1.get(v1)
-                    if prev is None or us < prev[1]:
-                        argmin_by_v1[v1] = (v2, us)
-                if len(argmin_by_v1) < 2:
-                    continue
-                n_total += 1
-                if len({entry[0] for entry in argmin_by_v1.values()}) > 1:
-                    n_changes += 1
-            out[(K1, K2)] = (n_changes / n_total) if n_total else None
-    return out
-
-
-def _emit_regret_table(rows: list[KnobRow]) -> None:
-    cols = [
-        Col("knob"),
-        Col("n_kernels", "r"),
-        Col("median_n_vals", "r"),
-        Col("median_regret", "r"),
-        Col("p90_regret", "r"),
-        Col("geomean_regret", "r"),
-    ]
-    data = [
-        [r.knob, str(r.n_kernels), str(r.median_values), f"{r.median_regret:.2f}x", f"{r.p90_regret:.2f}x", f"{r.geomean_regret:.2f}x"]
-        for r in rows
-    ]
-    for line in render_table(cols, data, rule=True):
-        logger.info(line)
-
-
-def _emit_interaction_matrix(knobs: list[str], interactions: dict[tuple[str, str], float | None]) -> None:
-    logger.info("")
-    logger.info("knob interaction — frac of kernels where argmin(K2) changes across K1 values")
-    logger.info("(high value = knobs are coupled; can't commit to K1 then search K2 independently)")
-    cols = [Col("K1\\K2"), *(Col(k, "r") for k in knobs)]
-    data = []
-    for K1 in knobs:
-        row = [K1]
-        for K2 in knobs:
-            v = None if K1 == K2 else interactions.get((K1, K2))
-            row.append(f"{v:.2f}" if v is not None else "-")
-        data.append(row)
-    for line in render_table(cols, data):
-        logger.info(line)
-
-
-def _percentile(xs: list[float], p: float) -> float:
-    s = sorted(xs)
-    return s[int(round((len(s) - 1) * p))]
-
-
-def _geomean(xs: list[float]) -> float:
-    return math.exp(sum(math.log(x) for x in xs) / len(xs))

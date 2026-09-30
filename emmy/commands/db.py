@@ -180,17 +180,3 @@ def db_path(db_arg: str) -> Path:
         logger.error("no DB at %s — fill it with `emmy db import --fresh SOURCES…` (README, 'Fit the offline prior')", path)
         sys.exit(2)
     return path
-
-
-def read_samples(path: Path | str, *, kernel: str | None = None, status: str = "ok", backend: str | None = None):
-    """The per-kernel ``eval`` views' way into a tune DB: its ``perf`` rows of ``status`` as
-    :class:`~emmy.compiler.pipeline.search.dataset.Samples`, opened read-only so a concurrent ``tune`` writer is
-    not blocked. ``backend=None`` spans every backend; ``kernel`` filters on the kernel row's C identifier."""
-    from emmy.compiler.pipeline.search.dataset import Samples  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.db import SearchDB  # noqa: PLC0415
-
-    db = SearchDB.open_readonly(path)
-    try:
-        return Samples.from_rows(db.iter_perf_rows(backend=backend), db.kernel_names(), kernel=kernel, status=status)
-    finally:
-        db.close()

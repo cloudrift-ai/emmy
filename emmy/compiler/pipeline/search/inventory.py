@@ -6,13 +6,15 @@ from __future__ import annotations
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline.passes.identity import IdentityStrategy
 from emmy.compiler.pipeline.search.db import SearchDB, knobs_json
-from emmy.compiler.pipeline.strategy import SplicedEvent, SpliceEvent, discovered_strategies
+from emmy.compiler.pipeline.strategy import PipelineStrategy, SplicedEvent, SpliceEvent, discovered_strategies
 
 
 def _identity() -> IdentityStrategy:
     """The discovered IdentityStrategy instance — the one spelling of structural identity."""
     return next(s for s in discovered_strategies() if isinstance(s, IdentityStrategy))
 
+
+class KernelInventory(PipelineStrategy):
     """The splice watcher: how a run hears which kernels a lowering minted and which kernel-set
     decisions it took. The golden import and ``run --record-greedy`` compose one into the run's
     pipeline (``Pipeline.with_strategies``) to record the decisions. Reports each new kernel-bearing

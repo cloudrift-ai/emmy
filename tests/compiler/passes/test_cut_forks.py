@@ -342,7 +342,6 @@ def test_recorded_sdpa_cut_decodes_exactly_and_stale_path_fails_loudly() -> None
         "bindings": (),
         "pins": (),
         "measurements": None,
-        "ranking": None,
     }
     assert decode_record(GoldenRecord(knobs={"PLACE@map.1/twist.1/inner": "cut"}, **fields)) is None
     reason = decode_record(GoldenRecord(knobs={"PLACE@missing": "cut"}, **fields))
@@ -506,7 +505,6 @@ def _receipt_fields() -> dict:
         "bindings": (),
         "pins": (("PLACE@map.1/twist.1/inner", "cut"),),
         "measurements": None,
-        "ranking": None,
     }
 
 
@@ -778,7 +776,6 @@ def _routing_record(knobs: dict, *, name: str = "sdpa.route") -> GoldenRecord:
         knobs=knobs,
         identity=_sdpa_kernel_identity(),
         measurements=Measurements(emmy_us=1.0, reference_us=2.0, reference_backend="torch"),
-        ranking=None,
     )
 
 

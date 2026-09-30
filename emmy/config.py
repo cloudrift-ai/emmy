@@ -48,7 +48,6 @@ KERNEL_TIMEOUT_MS = "EMMY_KERNEL_TIMEOUT_MS"
 FIRST_ITER_TIMEOUT_MS = "EMMY_FIRST_ITER_TIMEOUT_MS"
 BENCH_COMPILE_TIMEOUT_S = "EMMY_BENCH_COMPILE_TIMEOUT_S"
 BENCH_RUN_TIMEOUT_S = "EMMY_BENCH_RUN_TIMEOUT_S"
-BENCH_WALL_TIMEOUT_S = "EMMY_BENCH_WALL_TIMEOUT_S"
 PRICE_BUDGET_S = "EMMY_PRICE_BUDGET_S"
 GPU_LOCK = "EMMY_GPU_LOCK"
 NCU_CHILD = "EMMY_NCU_CHILD"
@@ -500,20 +499,6 @@ def bench_run_timeout_s(default: float = 10.0) -> float:
     a program whose per-launch latency times the iter count exceeds the default budget.
     Semantics live on ``Backend.bench_run_timeout_s``."""
     return float_env(BENCH_RUN_TIMEOUT_S, default)
-
-
-def bench_wall_timeout_s(default: float | None = None) -> float | None:
-    """``EMMY_BENCH_WALL_TIMEOUT_S`` — hard SIGKILL wall-clock cap on one isolated-worker
-    ``benchmark()`` call. Same override contract as :func:`bench_compile_timeout_s`;
-    ``None`` (unset, no caller value) keeps the in-process path. Semantics live on
-    ``Backend.bench_wall_timeout_s``."""
-    raw = os.environ.get(BENCH_WALL_TIMEOUT_S)
-    if not raw:
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        return default
 
 
 def gpu_lock_path() -> str | None:

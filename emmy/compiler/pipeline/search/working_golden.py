@@ -1,8 +1,8 @@
-"""Mutable working-golden inventories, candidates, and ranking feedback.
+"""Mutable working-golden inventories and measurement write-back.
 
-This module owns the untrusted side of the golden file workflow: trace inventory
-generation, target reconstruction, exact proposal measurement, and atomic ranking
-persistence. CLI commands only validate argument combinations and report errors.
+This module owns the untrusted side of the golden file workflow: trace inventory generation and the
+atomic write-back of what a record run measures. CLI commands only validate argument combinations
+and report errors.
 """
 
 from __future__ import annotations

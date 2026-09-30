@@ -1,6 +1,5 @@
-"""Shared CLI vocabulary for ``emmy eval``: the tune-DB flags of the per-kernel views (:func:`add_db_args`), the
-dataset argument of ``eval prior`` (:func:`add_dataset_args`), and the prior-file override — so every command names
-a DB or a dataset through one spelling instead of opening files by hand."""
+"""Shared CLI vocabulary for ``emmy eval``: the dataset argument of ``eval prior`` (:func:`add_dataset_args`) and
+the prior-file override."""
 
 from __future__ import annotations
 
@@ -8,21 +7,6 @@ import os
 from pathlib import Path
 
 from emmy import config
-
-
-def add_db_args(parser, *, with_min_variants: bool = False) -> None:
-    """Register the tune-DB flags of a per-kernel view: ``--db`` and ``--kernel``, plus the regret analysis's
-    grouping threshold when ``with_min_variants``."""
-    parser.add_argument(
-        "--db",
-        help="Tune DB to read (default: EMMY_TUNE_DB, else ~/.cache/emmy/autotune.db), whose rows carry the kernel "
-        "sources they name kernels by.",
-    )
-    parser.add_argument("--kernel", help="Filter by substring of the kernel C identifier.")
-    if with_min_variants:
-        parser.add_argument(
-            "--min-variants", type=int, default=8, help="Skip kernels with fewer than this many measured variants (default: 8)."
-        )
 
 
 def add_dataset_args(parser) -> None:

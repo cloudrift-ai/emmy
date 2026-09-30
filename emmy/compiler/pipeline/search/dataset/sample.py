@@ -126,11 +126,3 @@ class Sample:
             source="golden",
             s_full=dict(cfg.structural_features),
         )
-
-    @classmethod
-    def from_perf_row(cls, row, name: str | None) -> Sample:
-        """A DB ``perf`` row (:class:`db.PerfRow`) as a ``Sample``: the recorded knob dict split by
-        prefix, and ``name`` the C identifier of its kernel row (for per-knob regret grouping;
-        ``None`` when the caller has none)."""
-        tunable, ctx, s = _split_by_prefix(row.knobs)
-        return cls(knobs=tunable, latency_us=row.stats.median, name=name, context=ctx, source="db", s_full=s, error=row.error)

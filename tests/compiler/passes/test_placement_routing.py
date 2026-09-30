@@ -84,7 +84,6 @@ def test_place_only_golden_rows_are_routing_rows() -> None:
         pins=(("FAST_MATH", False),),
         knobs={},
         measurements=Measurements(emmy_us=1.0, reference_us=1.0, reference_backend="test"),
-        ranking=None,
     )
     assert replace(base, knobs={"PLACE@inner.1/map": "cut"}).is_routing
     assert replace(base, knobs={"REDUCE@map.1/twist": "g8k"}).is_routing, "a cross-CTA split arm mints pieces like a cut"

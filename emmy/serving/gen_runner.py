@@ -406,8 +406,8 @@ def _plan_sources(plan, wrapper, np_dtype, ckpt_dir, id_to_key):
 
 def trace_split(wrapper, example_args, argnames):
     """Trace ``wrapper`` into the Graph :func:`_compile_split` compiles — the trace half,
-    split out so a capture harness (``scripts/capture_gen_twins.py``) records the graphs
-    serving actually runs rather than a hand-rolled approximation of them. ``argnames``
+    split out so a capture (``emmy trace --serving-twins``) records the graphs serving
+    actually runs rather than a hand-rolled approximation of them. ``argnames``
     ties each named arg's axis-0 to a shared symbolic ``num_tokens`` Dim; ``None`` traces
     fully static at the example shapes."""
     from emmy.compiler.trace.torch import trace_module
