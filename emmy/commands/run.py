@@ -686,20 +686,25 @@ def _run_golden_targets(args) -> None:
     except (OSError, ValueError) as exc:
         logger.error("cannot load --golden %s: %s", args.golden, exc)
         sys.exit(2)
-    names = list(dict.fromkeys(record.name for record in records))
-    if not names:
+    if not records:
         logger.error("--golden contains no realizations: %s", args.golden)
         sys.exit(2)
     # Group by the persisted target, bindings and input regime, just as golden replay does.
     # Dots in a name do not make one target a receipt of another. Prefer the inventory row;
-    # without it, the fastest routing row prices the whole target, unlike a child receipt.
+    # without it, a root routing row carries the parent cuts needed by child receipts.
     targets: dict[int, list] = {}
     for record in records:
         targets.setdefault(id(lead_of(record, records)), []).append(record)
-    names = [
-        next((row.name for row in rows if row.identity is None), min(rows, key=lambda r: (not r.is_routing, r.emmy_us)).name)
-        for rows in targets.values()
-    ]
+
+    def target_name(rows):
+        inventory = next((row for row in rows if row.identity is None), None)
+        if inventory is not None:
+            return inventory.name
+        root_routes = [row for row in rows if row.is_routing and row.identity == rows[0].identity]
+        routes = root_routes or [row for row in rows if row.is_routing]
+        return min(routes or rows, key=lambda row: row.emmy_us).name
+
+    names = [target_name(rows) for rows in targets.values()]
 
     output_dir = None
     if len(names) > 1 and args.json:
