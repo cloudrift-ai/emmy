@@ -13,7 +13,7 @@ from emmy.compiler.backend.numpy import NumpyBackend
 from emmy.compiler.dtype import DataType
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
-from emmy.compiler.ir.tensor.ir import ElementwiseOp
+from emmy.compiler.ir.tensor.ir import BitcastOp, CastOp, ElementwiseOp
 
 
 def test_datatype_resolution_aliases():
@@ -76,3 +76,33 @@ def test_numpy_backend_elementwise_chain_fp16():
     assert out.dtype == np.float16, f"expected float16 output, got {out.dtype}"
     expected = (-np.exp(x_data.astype(np.float32))).astype(np.float16)
     np.testing.assert_allclose(out, expected, rtol=1e-3, atol=1e-3)
+
+
+def test_numpy_backend_bf16_numeric_ops_use_bit_carrier():
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (3,), dt.BF16), node_id="x")
+    g.add_node(ElementwiseOp(op="add"), ["x", "x"], Tensor("twice", (3,), dt.BF16), node_id="twice")
+    g.add_node(CastOp(dtype="f32"), ["twice"], Tensor("decoded", (3,), dt.F32), node_id="decoded")
+    g.add_node(BitcastOp(dtype="u16"), ["twice"], Tensor("bits", (3,), dt.U16), node_id="bits")
+    g.outputs = ["twice", "decoded", "bits"]
+    g.inputs = ["x"]
+
+    values = np.array([1.0, -2.0, 3.140625], dtype=np.float32)
+    expected = dt.encode_bf16(values * 2)
+    backend = NumpyBackend()
+    for supplied in (values, dt.encode_bf16(values)):
+        got = backend.run(g, input_data={"x": supplied})[0].outputs
+        np.testing.assert_array_equal(got["twice"], expected)
+        np.testing.assert_array_equal(got["decoded"], dt.decode_bf16(expected))
+        np.testing.assert_array_equal(got["bits"], expected)
+
+
+def test_numpy_backend_bf16_computed_constant_encodes_values():
+    from emmy.compiler.loader.binder import evaluate_source_graph
+    from emmy.compiler.loader.quant import _f4_pair_table
+
+    graph = Graph()
+    table = _f4_pair_table(graph, name="pairs", out_name="pairs", dtype=dt.BF16)
+    got = evaluate_source_graph(graph.nodes[table].op.source_graph, {})
+    expected = np.stack((np.tile(dt.F4_VALUES, 16), np.repeat(dt.F4_VALUES, 16)), axis=1)
+    np.testing.assert_array_equal(got, dt.encode_bf16(expected))

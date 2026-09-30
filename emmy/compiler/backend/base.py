@@ -36,8 +36,9 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from emmy import config
+from emmy.compiler.dtype import BF16, DataType, decode_bf16, encode_bf16
 from emmy.compiler.ir.base import ConstantOp, InputOp
-from emmy.compiler.ir.tensor.ir import ElementwiseOp
+from emmy.compiler.ir.tensor.ir import BitcastOp, CastOp, ElementwiseOp
 
 if TYPE_CHECKING:
     from emmy.compiler.graph import Graph
@@ -201,14 +202,14 @@ class Backend(ABC):
                 for buf, t in zip(node.buffer_names(), node.outputs, strict=True):
                     if buf not in input_data:
                         raise KeyError(f"Missing input for node {nid!r}")
-                    values[buf] = _coerce(input_data[buf], _shape_of(t), t.dtype.np)
+                    values[buf] = _coerce(input_data[buf], _shape_of(t), t.dtype)
                 continue
 
             if isinstance(node.op, ConstantOp):
                 if nid in input_data:
-                    values[nid] = _coerce(input_data[nid], shape, dtype_np)
+                    values[nid] = _coerce(input_data[nid], shape, node.output.dtype)
                 elif node.op.value is not None:
-                    values[nid] = np.array([node.op.value], dtype=dtype_np)
+                    values[nid] = _coerce([node.op.value], shape, node.output.dtype)
                 else:
                     raise KeyError(f"ConstantOp {nid!r} has no value and was not supplied in input_data")
                 continue
@@ -216,10 +217,14 @@ class Backend(ABC):
             if isinstance(node.op, InputOp):
                 continue
 
-            args = [values[inp] for inp in node.inputs]
+            args = [
+                decode_bf16(values[inp]) if not isinstance(node.op, BitcastOp) and compiled.buffer(inp).dtype == BF16 else values[inp]
+                for inp in node.inputs
+            ]
             if isinstance(node.op, ElementwiseOp) and dtype_np.kind == "f":
                 args = [a.astype(np.promote_types(a.dtype, dtype_np), copy=False) if a.dtype.kind == "f" else a for a in args]
-            result = node.op.forward(*args)
+            # CastOp.forward sees BF16's uint16 carrier; numeric conversion belongs here.
+            result = args[0] if isinstance(node.op, CastOp) and node.op.dtype == "bf16" else node.op.forward(*args)
             # A multi-output node's ``forward`` returns a tuple matched
             # positionally to ``node.outputs``; values store per BUFFER.
             results = result if isinstance(result, tuple) else (result,)
@@ -227,15 +232,19 @@ class Backend(ABC):
             if len(results) != len(bufs):
                 raise ValueError(f"node {nid!r}: forward returned {len(results)} values for {len(bufs)} outputs")
             for buf, t, r in zip(bufs, node.outputs, results, strict=True):
-                values[buf] = _coerce(r, _shape_of(t), t.dtype.np)
+                values[buf] = _coerce(r, _shape_of(t), t.dtype, preserve_bits=isinstance(node.op, BitcastOp))
 
         elapsed = (time.perf_counter() - t0) * 1000
         outputs = {name: values[name] for name in compiled.outputs}
         return RunResult(outputs=outputs, time_ms=elapsed), pre_result
 
 
-def _coerce(data, shape: tuple[int, ...], dtype: np.dtype | None = None) -> np.ndarray:
-    arr = np.asarray(data, dtype=dtype if dtype is not None else np.float32)
+def _coerce(data, shape: tuple[int, ...], dtype: DataType | None = None, *, preserve_bits: bool = True) -> np.ndarray:
+    if dtype == BF16:
+        source = np.asarray(data)
+        arr = source if preserve_bits and source.dtype == np.uint16 else encode_bf16(source)
+    else:
+        arr = np.asarray(data, dtype=dtype.np if dtype is not None else np.float32)
     if shape and arr.shape != shape:
         arr = arr.reshape(shape)
     return arr
