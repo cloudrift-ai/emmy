@@ -807,9 +807,18 @@ def dedup_loads(stmts: Body) -> Body:
             if isinstance(original, Load) and original.carried:
                 rebound |= frozenset(original.defines())
             if rebound:
-                invalidate(frozenset(), rebound)
                 alias = {name: value for name, value in alias.items() if name not in rebound and value not in rebound}
             stmt = rename_free(original, alias)
+            key = _value_key(stmt)
+            if (rebound and not stmt.pure) or isinstance(stmt, Accum) and stmt.name not in reductions:
+                key = None
+            if stmt.pure and set(stmt.defines()).intersection(stmt.deps()):
+                key = None
+            # A repeated copy of the same binding does not change its value. Cut projections
+            # can repeat a load this way; actual updates still invalidate it below.
+            if key is not None and local.get(key) == stmt.defines():
+                continue
+            invalidate(frozenset(), rebound)
             if stmt.nested():
                 clobbered = frozenset(name for child in stmt.nested() for member in child.iter() for name in member.external_writes())
                 # A loop's write may precede this read on a back edge. A branch has no back
@@ -830,11 +839,9 @@ def dedup_loads(stmts: Body) -> Body:
                 out.append(stmt.with_bodies(tuple(children)))
                 invalidate(clobbered)
                 continue
-            key = _value_key(stmt)
-            if rebound or isinstance(stmt, Accum) and stmt.name not in reductions:
-                key = None
             if key is not None:
-                if key in local:
+                # Do not make another binding depend on a representative that will be overwritten.
+                if key in local and all(counts[name] <= 1 for name in local[key]):
                     aliases = dict(zip(stmt.defines(), local[key], strict=True))
                     alias.update(aliases)
                     if isinstance(stmt, Accum):

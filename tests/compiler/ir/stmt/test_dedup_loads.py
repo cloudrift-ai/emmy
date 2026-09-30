@@ -187,6 +187,22 @@ def test_cse_does_not_reuse_a_staged_load_assignment() -> None:
     assert dedup_loads(body) == body
 
 
+def test_cse_removes_repeated_copies_of_one_binding() -> None:
+    from emmy.compiler.ir.loop import LoopOp
+
+    load = Load("value", "x", ZERO)
+    body = Body((load, Write("first", ZERO, "value"), load, Write("second", ZERO, "value")))
+    assert dedup_loads(body) == Body((load, *body[1:2], body[-1]))
+    assert len([stmt for stmt in LoopOp(body=body).body if isinstance(stmt, Load)]) == 1
+
+
+def test_cse_never_aliases_a_value_to_an_overwritten_representative() -> None:
+    body = Body((Load("value", "x", ZERO), Load("copy", "x", ZERO), Load("value", "y", ZERO), Write("out", ZERO, "copy")))
+    assert dedup_loads(body) == body
+    update = Assign("value", "exp", ("value",))
+    assert dedup_loads(Body((update, update))) == Body((update, update))
+
+
 def test_cse_does_not_merge_reductions_with_distinct_explicit_seeds() -> None:
     body = Body(
         (
