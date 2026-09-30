@@ -241,7 +241,7 @@ the compile picks the kernel set from the evidence, and a routing row alone pric
 benching each target's verified rows or its one valid direct tune winner (proposals stay the tuner's). A routing row
 or child-identity receipt is evidence for its target's walk, not a target of its own. Grouping uses the stored target,
 not dotted name prefixes. A file that dropped its seed rows (a promoted serving-twin golden) benches each target
-through the row pricing all of it, its fastest routing row, else its fastest row. A
+through the row pricing all of it: the fastest root routing row, else its fastest routing row, else its fastest row. A
 failing target does not stop the walk: every target reports, and the command exits non-zero at the end naming
 the failures. A receipt of a piece a routing row minted (its identity is no routing row's) replays under the target's
 routing rows composed, plus `PLACE=fuse` when no
