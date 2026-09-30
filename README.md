@@ -267,10 +267,12 @@ scripts/serve_qwen38_nvfp4_mixed_5090.sh
 ```
 
 The recipe pins the checkpoint, vLLM envelope, compiler precision, shared cuts, and static-only native schedule.
-On five warm 5-input/16-output requests, the M=16/M=64 route measured 272 ms mean TTFT and 9.87 decode tokens/s,
-versus stock 288 ms and 9.08 tokens/s. The earlier scalar route measured 617 ms and 2.25 tokens/s. For one
-4,005-input/16-output request, native prefill took 11.55 s versus stock 12.45 s; earlier symbolic scalar prefill
-took 224 s. Broader numerical qualification remains open. The adapter rejects an unpinned Emmy compile.
+On five warm 5-input/16-output requests, the pinned M=16/M=64 route measured 271 ms mean TTFT and 9.88 decode
+tokens/s, versus stock 288 ms and 9.08 tokens/s. The earlier scalar route measured 617 ms and 2.25 tokens/s.
+An earlier native precision pin took 11.55 s for one 4,005-input/16-output request versus stock 12.45 s, while
+symbolic scalar prefill took 224 s. The current precision pin also completes the 4K shape. Four other deterministic
+64-token prompts diverged from stock, so numerical quality qualification remains open. The adapter rejects an
+unpinned Emmy compile.
 
 ## Experimental native generation
 

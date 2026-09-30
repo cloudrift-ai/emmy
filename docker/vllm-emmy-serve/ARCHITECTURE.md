@@ -176,8 +176,9 @@ the same cubins and the standard-lane pack never exists.
   `--language-model-only`, and `--enforce-eager` without a cudagraph compilation config. The initial 5090 recipe
   sets shared cuts and precision through `EMMY_KNOBS`, then supplies native contraction overrides for the two
   static programs through `EMMY_MLP_STATIC_KNOBS` and `EMMY_MLP_PREFILL_KNOBS`. A warm/baked image must carry all
-  three in `SERVE_ENV`. Per-program scopes matter because a kernel identity can offer different schedules at
-  M=16 and M=64.
+  three plus the explicit `EMMY_FAST_MATH=1` precision pin in `SERVE_ENV`; the release trace reads this runtime
+  precision pin when it names the `.fm` realizations. Per-program scopes matter because a kernel identity can offer
+  different schedules at M=16 and M=64.
 - `warm.sh` — runs the **plain** `vllm-emmy` image on the target GPU with `./warm` mounted at `/opt/emmy`, waits for
   `/health`, issues one completion (covers prefill + decode kernels), stops. Result: `warm/hf` (the model snapshot —
   the download happens here, once), `warm/cubin` (every compiled kernel), and `warm/pack`

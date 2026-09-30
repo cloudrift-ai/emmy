@@ -95,6 +95,34 @@ def test_mlp_release_scope_has_padded_static_decode_and_prefill_realizations(tmp
     }
 
 
+def test_mlp_release_scope_uses_runtime_fast_math_pin_for_quantized_5090_route(tmp_path):
+    path = _release_config(
+        tmp_path / "mlp-fast.env",
+        SERVE_COMPILE_SCOPE="mlp",
+        SERVE_STATIC_ONLY="0",
+        SERVE_MAX_NUM_BATCHED_TOKENS="64",
+        SERVE_DECODE_BUCKET="16",
+        SERVE_PREFILL_BUCKET="64",
+        SERVE_ENV="EMMY_FAST_MATH=1",
+    )
+    assert {(row.name, row.pins) for row in load_serving_config(path).realizations} == {
+        ("m16.fm", (("FAST_MATH", True),)),
+        ("m64.fm", (("FAST_MATH", True),)),
+    }
+
+    path = _release_config(
+        path,
+        SERVE_COMPILE_SCOPE="mlp",
+        SERVE_STATIC_ONLY="0",
+        SERVE_MAX_NUM_BATCHED_TOKENS="64",
+        SERVE_DECODE_BUCKET="16",
+        SERVE_PREFILL_BUCKET="64",
+        SERVE_ENV="EMMY_FAST_MATH=auto",
+    )
+    with pytest.raises(ValueError, match="SERVE_ENV EMMY_FAST_MATH"):
+        load_serving_config(path)
+
+
 @pytest.mark.parametrize(
     "field,value",
     [("SERVE_MAX_NUM_BATCHED_TOKENS", "65"), ("SERVE_WARM_SHAPES", "8::64"), ("SERVE_DECODE_BUCKET", "2"), ("SERVE_PREFILL_BUCKET", "0")],

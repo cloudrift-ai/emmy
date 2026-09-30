@@ -1,8 +1,8 @@
 # Qwen3.8 NVFP4 mixed serving: implementation and qualification
 
 Status: implementation in draft PR #993, September 30, 2026. The exact 27B endpoint booted with pinned native
-M=16 decode and M=64 prefill programs on the RTX 5090. Deterministic short and 4K completions matched stock.
-The independent quantized MLP and broader numerical gates remain open.
+M=16 decode and M=64 prefill programs on the RTX 5090. Selected deterministic short and 4K completions matched
+stock; four other 64-token prompts diverged. The independent quantized MLP and broader numerical gates remain open.
 
 ## Boundary and target
 
@@ -29,17 +29,18 @@ The qualification checkpoint is `Inferact/Qwen3.8-27B-NVFP4@6128240ebaf4eaa7bad2
 | Real hybrid preservation | A two-layer actual vLLM 0.23 Qwen3.5 model with GDN and full-attention layers retained non-MLP module and parameter identities and hybrid state interfaces after Emmy replaced its MLPs. | Pinned-container constructor regression passed. |
 | Full-size static MLP | Isolated layer-0 M=1 default compile yielded four launches and 150,410,260 bound weight bytes. Launch 0 took 0.393 ms. Uncaptured launch 1, `k_linear_reduce_93e407`, exceeded a 10,000 ms kernel watchdog. A corrected-quant M=16 program with scoped pins emits four native FP4 MMA kernels and completes. | Unpinned route blocked; isolated pinned native execution passed, endpoint speed pending. |
 | Warm text completions | Stock, scalar mixed and native mixed returned the same 16-token Paris continuation. Native mixed also returned expected Japan then Paris continuations with warm wall times 1.895 and 1.877 s; the initial native request took 152 s while stock vLLM/Triton kernels compiled on first use. | Deterministic text and simple cross-request state smoke passed; first-request latency needs warmed-cache handling. |
-| Single-request latency | Standard `vllm bench serve` with seed-42 random 5-input/16-output requests, one warmup, five measured, concurrency one, and ignore-EOS produced stock/scalar/M=16+symbolic/M=16+M=64 mean TTFT 288.16/617.07/390.51/271.86 ms and TPOT 110.10/444.49/100.27/101.32 ms. All 20 measured requests succeeded. | Final native route reached 9.87 decode tokens/s versus stock 9.08; TTFT was 16.3 ms lower than stock in this small warm run. This is a single request shape, not general throughput. |
+| Single-request latency | Standard `vllm bench serve` with seed-42 random 5-input/16-output requests, one warmup, five measured, concurrency one, and ignore-EOS produced stock/scalar/M=16+symbolic/M=16+M=64 false/M=16+M=64 true mean TTFT 288.16/617.07/390.51/271.86/270.97 ms and TPOT 110.10/444.49/100.27/101.32/101.19 ms. All 25 measured requests succeeded. | Final pinned route reached 9.88 decode tokens/s versus stock 9.08; TTFT was 17.2 ms lower than stock in this small warm run. This is a single request shape, not general throughput. |
 | Teacher-forced prompt | Stock and native mixed returned the same 14 token IDs and expected Tokyo continuation for one fixed 13-token prompt. Selected-token logprob differences across 13 positions had mean absolute 0.0700, RMS 0.0980, maximum 0.2431; earlier scalar maximum was 0.281. | Token smoke passed; numerical logit parity remains open. |
-| 4K context | The same 4,005 prompt tokens plus 16 generated tokens completed with identical stock and mixed text, 4,021 total tokens, HTTP 200, and no OOM. After a short first-use request, stock took 12.451 s, mixed symbolic scalar prefill took 224.22 s, and mixed native M=64 prefill took 11.547 s wall. | Full requested length envelope and long-prefill latency probe passed for one deterministic request. |
+| 4K context | The same 4,005 prompt tokens plus 16 generated tokens completed with identical stock and `FAST_MATH=false` mixed text, 4,021 total tokens, HTTP 200, and no OOM. After a short first-use request, stock took 12.451 s, mixed symbolic scalar prefill took 224.22 s, and mixed native M=64 prefill took 11.547 s wall. The final `FAST_MATH=true` route completed a second 4,005+16 request in 12.348 s with no OOM; its prompt differed, so that is a shape check rather than a paired stock comparison. | Full requested length envelope passed; matched false-pin native long latency passed. |
 | End-to-end correctness | Multiple prompts, teacher-forced logits, hybrid state and cache behavior beyond the tested short requests. | Pending broader comparison. |
 
 The stalled kernel source has grid 1 and block 256, but only one thread enters the body. It performs full-K scalar gate/up reductions for output codes and again for per-block scales, with no native FP4 MMA. At the actual layer width, nested loops amount to more than one billion serial scalar operations with repeated FP4 decode reads. The generated source and boot logs are retained in the RTX 5090 qualification workspace. This was an **unpinned default schedule**. The user has since clarified that prior tuning is broken and every Emmy compilation and serving run must use explicit knob pins through a golden or `EMMY_KNOBS`. The timeout is evidence about the default route; the pinned route boots and serves but is slow.
 
 ### Explicit knob experiments on the RTX 5090
 
-The earlier endpoint's simple scalar route used this exact `EMMY_KNOBS` value for both capture shapes. It remains
-the explicit shared baseline for the M=16 decode and symbolic prefill programs:
+The earlier endpoint's simple scalar route used this exact `EMMY_KNOBS` value for both capture shapes. The first
+M=16/M=64 route retained its `FAST_MATH=false` precision pin and shared cuts. A later numerical probe changed only
+that pin to `FAST_MATH=true`, retaining the native piece pins; the checked-in recipe uses the latter candidate:
 
 ```text
 FAST_MATH=false,PLACE@map.1/map=cut,PLACE@map.1/map.2/inner=cut,PLACE@map.1/map.3/reduce.1/inner=cut,PLACE@map.2/map=cut,PLACE@map.2/map.2/reduce.1/inner=cut,WORK=w1x4,TILE=,STAGE=,REDUCE=,RASTER=
@@ -60,6 +61,7 @@ FAST_MATH=false,PLACE@map.1/map=cut,PLACE@map.1/map.2/inner=cut,PLACE@map.1/map.
 | Same scoped native pins in a single global `EMMY_KNOBS` value for both programs | Full 27B boot failed while compiling symbolic prefill: `STAGE pin 'd2/smem-async' does not resolve for this contraction`. The two program shapes can share a kernel identity but offer different schedules. | Unusable global combination. Shared baseline pins remain in `EMMY_KNOBS`; native overrides are applied only around static compilation via `EMMY_MLP_STATIC_KNOBS`. |
 | Corrected quant graph, static M=64 with the old M=16 place identities | Eight kernels compiled, but only the down contraction emitted `mma.sync`; the gate/up override identities no longer matched. | A pin's presence is not evidence it selected a native kernel; inspect emitted source for each shape. |
 | Static M=64, same shared cuts and scoped current-piece pins in the recipe | Eight kernels compiled, with all three gate/up and down contractions emitting `mma.sync`. A full 64-row same-checkpoint stock MLP comparison gave 0.9946% relative RMS, mean absolute 0.0121, p99 absolute 0.0453. The full endpoint took 11.547 s on a 4,005+16 request versus stock 12.451 s. | Native execution and endpoint latency passed on measured shapes; zero-tolerance diagnostic still fails. |
+| Same native cuts and piece pins, explicitly `FAST_MATH=true` | Isolated layer-0 RMS versus stock fell from 1.1937% to 0.4661% at M=1 and from 0.9946% to 0.5469% at M=64. The M=1 first activation matched all 320 E4M3 scale bytes and all 2,560 packed FP4 bytes. Pinned exact-checkpoint trace produced two 148-node graphs, six kernels, and `.fm` realizations. Full endpoint bench TTFT/TPOT was 270.97/101.19 ms; a 4,005+16 request completed in 12.348 s. | This precision pin improves the measured MLP oracle and retains speed. Broader stock token parity still fails. |
 
 The first M=16 native probe used these overrides before the quant graph changed. Its place identities are stale and
 must not be used for the current model graph:
@@ -78,7 +80,7 @@ WORK@place_b5f468b49f=w1x1,TILE@place_b5f468b49f=mma_m16n8k64_e2m1_f32/f1x2/k4,S
 WORK@node_linear_2=w1x2,TILE@node_linear_2=mma_m16n8k64_e2m1_f32/f1x2/k4,STAGE@node_linear_2=d2/smem-async
 ```
 
-The M=64 prefill pins use the same base `EMMY_KNOBS` and the following
+The M=64 prefill pins use the same base cuts and the following
 `EMMY_MLP_PREFILL_KNOBS` values; each is scoped to this program's compile:
 
 ```text
@@ -113,19 +115,28 @@ code bytes. Raw reconstructed activation relative RMS fell to 0.3967%, gate/up p
 0.462%/0.458%, and full scalar MLP relative RMS to 1.1689%. The corrected M=16 all-native MLP has 1.1937%
 relative RMS. These measured residuals remain under investigation; the zero-tolerance diagnostic still fails.
 
-The corrected down-projection input differs from stock in 58/1088 E4M3 bytes and 373/8704 packed FP4 bytes,
+Under the earlier `FAST_MATH=false` pin, the corrected down-projection input differs from stock in 58/1088 E4M3 bytes and 373/8704 packed FP4 bytes,
 with 4.1487% raw reconstructed relative RMS. This accumulates prior projection and activation rounding and is
 amplified by another FP4 quantization. Stock-byte injection at the first activation producer lowers gate/up
 projection RMS to 0.1025%/0.0984%, which localizes most of the initial projection difference to two FP4 threshold
 flips. Stock uses approximate reciprocal instructions; Emmy currently uses exact FP32 divide at those thresholds.
 Further correction should be justified by full-model quality evidence rather than bit identity alone.
 
+That full-model evidence now includes four independent deterministic 64-token prompts. With the earlier
+`FAST_MATH=false` native route, all four eventually diverged from stock at token positions 1, 15, 29 and 58.
+Stock's top two tokens were exactly tied at the first position of the sky-explanation prompt; the other stock
+winning margins at their first divergences were 0.125, 0.375 and 0.125 logprob. This is a real numerical drift
+gate, even though the earlier Paris and 4K requests matched stock text. With `FAST_MATH=true`, the same prompts
+first diverged at positions 1, 27, 29 and 58: improved isolated FP4 matching did not eliminate full-model
+argmax drift. Do not infer exact stock quality from the matched smoke requests.
+
 An earlier two-layer synthetic build exited 139 once during compilation. Later full redirected and real 27B builds completed, so the cause is unestablished. It remains a cold-build stability risk until repeated boots or a native trace resolve it. The synthetic NumPy graph and GPU outputs are finite after the BF16 fix but differ at some BF16/W4A4 boundaries; that graph interpretation alone is not the independent stock quantized MLP oracle.
 
 ## Next qualification work
 
 1. Verify per-request state under the chosen M<=64 schedule and run the final release audit and repository gates.
-2. Decide whether the 0.99–1.19% same-checkpoint layer-0 MLP relative RMS residual affects end-to-end output.
+2. Decide whether the 0.47–0.55% same-checkpoint layer-0 MLP relative RMS residual is acceptable for end-to-end
+   quality. Four deterministic prompts prove it can affect token choice; no quality acceptance bound was established.
    The stock quantized MLP remains the independent numerical oracle; do not relax tolerance to pass a test.
 3. Measure memory and major latency blockers on the exact RTX 5090 envelope. Run final repository test and lint
    gates, record commands and versions, and update the draft PR with measured results and remaining limits.

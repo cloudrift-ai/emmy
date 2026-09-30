@@ -23,8 +23,8 @@ def _require_explicit_pins() -> None:
     # knob.py splats EMMY_KNOBS into live EMMY_<KNOB> keys on import. Individual
     # keys take precedence, so inspect the effective pins that compilation reads.
     fast_math = config.knob_raw("FAST_MATH")
-    if fast_math is None or fast_math.lower() not in ("0", "false"):
-        raise ValueError("mixed Qwen MLP serving requires FAST_MATH=false in EMMY_KNOBS or EMMY_FAST_MATH")
+    if fast_math is None or fast_math.lower() not in ("0", "false", "1", "true"):
+        raise ValueError("mixed Qwen MLP serving requires an explicit FAST_MATH=true/false pin")
     schedule = any(family_pins(family, kernels=True) for family in ("PLACE", "WORK", "TILE", "STAGE", "REDUCE", "RASTER"))
     if not schedule and config.golden_file() is None:
         raise ValueError("mixed Qwen MLP serving requires explicit EMMY_KNOBS schedule pins or EMMY_GOLDEN_FILE")

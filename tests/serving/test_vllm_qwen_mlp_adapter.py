@@ -157,7 +157,7 @@ def test_bad_mlp_ledger_is_rejected(adapter, monkeypatch, defect, match):
 def test_unpinned_mlp_serving_is_rejected(adapter, monkeypatch):
     monkeypatch.delenv("EMMY_KNOBS")
     monkeypatch.delenv("EMMY_FAST_MATH", raising=False)
-    with pytest.raises(ValueError, match="FAST_MATH=false"):
+    with pytest.raises(ValueError, match="explicit FAST_MATH"):
         adapter.EmmyQwen35MlpModel(vllm_config=_config())
 
     monkeypatch.setenv("EMMY_KNOBS", "FAST_MATH=false")
@@ -171,7 +171,10 @@ def test_unpinned_mlp_serving_is_rejected(adapter, monkeypatch):
 def test_individual_knob_pins_override_aggregate_and_can_supply_schedule(adapter, monkeypatch):
     monkeypatch.setenv("EMMY_KNOBS", "FAST_MATH=false,WORK=w1x4")
     monkeypatch.setenv("EMMY_FAST_MATH", "true")
-    with pytest.raises(ValueError, match="FAST_MATH=false"):
+    assert isinstance(adapter.EmmyQwen35MlpModel(vllm_config=_config()), adapter.EmmyQwen35MlpModel)
+
+    monkeypatch.setenv("EMMY_FAST_MATH", "auto")
+    with pytest.raises(ValueError, match="explicit FAST_MATH"):
         adapter.EmmyQwen35MlpModel(vllm_config=_config())
 
     monkeypatch.setenv("EMMY_KNOBS", "")

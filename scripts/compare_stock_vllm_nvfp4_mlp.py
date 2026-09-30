@@ -108,10 +108,13 @@ def activation_probe(intermediate, stem, stock_codes, stock_scales, width, globa
 
     report = {}
     for suffix, stock_tensor in (("bits", stock_codes), ("scale_bits", stock_scales)):
+        # A padded static program materializes every row. The stock producer sees
+        # only the active prefix, whose carriers occupy the first bytes.
         emmy_tensor = intermediate[f"{stem}_{suffix}"].contiguous().view(torch.uint8).flatten()
         stock_tensor = stock_tensor.contiguous().view(torch.uint8).flatten()
-        if emmy_tensor.numel() != stock_tensor.numel():
+        if emmy_tensor.numel() < stock_tensor.numel():
             raise AssertionError(f"{stem}_{suffix}: byte counts differ, Emmy {emmy_tensor.numel()}, stock {stock_tensor.numel()}")
+        emmy_tensor = emmy_tensor[: stock_tensor.numel()]
         mismatches = emmy_tensor != stock_tensor
         report[suffix] = {
             "bytes": stock_tensor.numel(),
@@ -123,8 +126,8 @@ def activation_probe(intermediate, stem, stock_codes, stock_scales, width, globa
         }
 
     def reconstructed(codes, scales):
-        packed = codes.contiguous().view(torch.uint8).cpu().numpy().reshape(1, width // 2)
-        sf_bits = scales.contiguous().view(torch.uint8).cpu().numpy().reshape(1, width // 16)
+        packed = codes.contiguous().view(torch.uint8).flatten()[: width // 2].cpu().numpy().reshape(1, width // 2)
+        sf_bits = scales.contiguous().view(torch.uint8).flatten()[: width // 16].cpu().numpy().reshape(1, width // 16)
         fp4 = decode_f4x2(packed).reshape(1, width // 16, 16)
         sf = decode_f8(sf_bits, "f8e4m3").reshape(1, width // 16, 1)
         return (fp4 * sf * global_factor).reshape(1, width)
@@ -230,15 +233,15 @@ def main() -> None:
     parser.add_argument("--padding-probe", action="store_true", help="check stale M=16 rows cannot affect a later M=1 decode")
     parser.add_argument("--atol", type=float, default=0.05, help="provisional diagnostic threshold, not a qualified error bound")
     parser.add_argument("--rtol", type=float, default=0.05, help="provisional diagnostic threshold, not a qualified error bound")
-    parser.add_argument("--emmy-knobs", default=config.knobs_aggregate(), help="explicit Emmy compile pins, including FAST_MATH=0")
+    parser.add_argument("--emmy-knobs", default=config.knobs_aggregate(), help="explicit Emmy compile pins, including FAST_MATH=true/false")
     args = parser.parse_args()
 
     entries = [item.strip() for item in (args.emmy_knobs or "").split(",") if item.strip()]
     if any("=" not in item for item in entries):
         parser.error("--emmy-knobs must be comma-separated KEY=VALUE pins")
     pins = dict(item.split("=", 1) for item in entries)
-    if pins.get("FAST_MATH", "").lower() not in {"0", "false"} or len(pins) < 2:
-        parser.error("--emmy-knobs must include FAST_MATH=0/false and at least one explicit schedule/placement pin")
+    if pins.get("FAST_MATH", "").lower() not in {"0", "false", "1", "true"} or len(pins) < 2:
+        parser.error("--emmy-knobs must include FAST_MATH=true/false and at least one explicit schedule/placement pin")
     if not 1 <= args.static_rows <= 64 or (args.static_rows != 1 and not args.static_only):
         parser.error("--static-rows requires --static-only and a row count between 1 and 64")
     if args.static_only and not 1 <= args.rows <= args.static_rows:

@@ -192,10 +192,22 @@ def _mlp_realizations(values: dict[str, str], source: Path) -> tuple[ServingReal
     wrong = {key: values[key] for key, expected in required.items() if key in values and values[key] != expected}
     if maximum > 64 or wrong or values.get("SERVE_WARM_SHAPES", "").strip() or values.get("SERVE_STATIC_ONLY", "0") != "0":
         raise ValueError(f"{source}: mlp scope requires static M={MLP_STATIC_ROWS} and M={MLP_PREFILL_ROWS} with no warm shapes")
-    pins = (("FAST_MATH", False),)
+    # serve.sh exports its default first, then applies SERVE_ENV. Read the same
+    # explicit runtime override so trace/audit cannot stamp a different lane.
+    runtime_env = {}
+    for word in shlex.split(values.get("SERVE_ENV", "")):
+        if "=" in word:
+            key, value = word.split("=", 1)
+            runtime_env[key] = value
+    precision = runtime_env.get("EMMY_FAST_MATH", "false").strip().lower()
+    if precision not in {"0", "false", "1", "true"}:
+        raise ValueError(f"{source}: SERVE_ENV EMMY_FAST_MATH must be true or false")
+    fast_math = precision in {"1", "true"}
+    pins = (("FAST_MATH", fast_math),)
+    suffix = ".fm" if fast_math else ""
     return (
-        ServingRealization(f"m{MLP_STATIC_ROWS}", (("num_tokens", MLP_STATIC_ROWS),), pins),
-        ServingRealization(f"m{MLP_PREFILL_ROWS}", (("num_tokens", MLP_PREFILL_ROWS),), pins),
+        ServingRealization(f"m{MLP_STATIC_ROWS}{suffix}", (("num_tokens", MLP_STATIC_ROWS),), pins),
+        ServingRealization(f"m{MLP_PREFILL_ROWS}{suffix}", (("num_tokens", MLP_PREFILL_ROWS),), pins),
     )
 
 
