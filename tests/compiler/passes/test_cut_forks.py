@@ -745,7 +745,6 @@ def _sdpa_kernel_identity() -> str:
     is the kernel a routing row names: the route it records is the one decision taken on that
     kernel, before any piece of it exists. Probed off a resolve rather than restated here, so these
     tests pin the routing lane and not a second copy of the identity derivation."""
-    from emmy.compiler.pipeline.fork import flatten_leaves
 
     ctx = Context.from_target((12, 0), gpu_name=_ROUTING_CARD)
     lowered = Pipeline.build(LOOP_PASSES).run(_sdpa_graph(), ctx=ctx)
@@ -754,7 +753,7 @@ def _sdpa_kernel_identity() -> str:
     def decide(fp):
         if not seen and isinstance(fp.root_op, TileOp) and fp.match.rule.name == _CUT.__name__.rsplit(".", 1)[-1]:
             seen.append(fp.root_op.identity_key(with_io=True))
-        return flatten_leaves(fp.options)[0]
+        return next(fp.leaves())
 
     Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(lowered, decide)
     assert seen, "the sdpa program must offer a placement fork"

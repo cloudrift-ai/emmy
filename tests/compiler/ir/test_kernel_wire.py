@@ -40,13 +40,12 @@ UNFORMED_CASES = (
 def _relowered(wire: dict, ctx):
     """The wire alone through the lowering passes, every fork at its first leaf — the tile kernels it mints."""
     from emmy.compiler.pipeline import LOWERING_PASSES, Pipeline
-    from emmy.compiler.pipeline.fork import iter_leaves
     from emmy.compiler.pipeline.pipeline import Run
     from emmy.compiler.pipeline.search.pins import unpinned_decisions
 
     run = Run(pipeline=Pipeline.build(LOWERING_PASSES), ctx=ctx)
     with unpinned_decisions():
-        graph, _trace = run.resolve(Graph.from_wire(wire), lambda fp: next(iter_leaves(fp.options)))
+        graph, _trace = run.resolve(Graph.from_wire(wire), lambda fp: next(fp.leaves()))
     return [kernel_tile(node.op) for node in graph.nodes.values() if isinstance(node.op, CudaOp)]
 
 

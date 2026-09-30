@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING
 from emmy.compiler.graph import Graph, Tensor, _fmt_op
 from emmy.compiler.ir.base import ConstantOp, InputOp, Op
 from emmy.compiler.pipeline.dump import _inline_scalar_loads, _scalar_constant_inputs
-from emmy.compiler.pipeline.fork import Fork, OptionFork
+from emmy.compiler.pipeline.fork import DeferredFork, Fork
 from emmy.compiler.pipeline.pipeline import _REWRITE_APPLIED, Cursor, RuleSkipped, _remember_structural_decision
 from emmy.compiler.pipeline.rule_diff import display_name, emit, format_skipped, render_rule_diff
 from emmy.compiler.pipeline.strategy import RebindEvent, SplicedEvent, SpliceEvent
@@ -276,7 +276,7 @@ class LazyCandidate:
 
     :meth:`from_option` is the supported way to spawn a non-trivial
     LazyCandidate — it lifts concrete ``Op`` / ``Graph`` options into
-    :class:`OptionFork` leaves so ``pending`` always carries a uniform
+    :class:`DeferredFork` leaves so ``pending`` always carries a uniform
     Fork shape.
 
     ``cursor`` is the lazy candidate's own pipeline cursor (typically a
@@ -309,13 +309,14 @@ class LazyCandidate:
         """The single fork-spawn constructor (used by ``Pipeline.search``
         and :meth:`expand`): a rule-emitted ``Fork`` passes through; a
         concrete ``Op`` / ``Graph`` (already validated upstream in
-        ``try_rewrite``'s filter) is lifted into an :class:`OptionFork`
-        leaf — an ``Op``'s knob delta rides along as the fork's ``knobs``."""
+        ``try_rewrite``'s filter) is lifted into a :class:`DeferredFork`
+        leaf — an ``Op``'s knob delta rides along as the fork's ``knobs``, a ``Graph`` marks itself structural."""
         if not isinstance(option, Fork):
             # A ``Graph`` option is a structural decomposition (a multi-kernel rewrite): the
             # graph itself carries no knobs, so it scores as a knob-less generic row.
-            knobs = dict(getattr(option, "knobs", None) or {}) if isinstance(option, Op) else {}
-            option = OptionFork(option=option, knobs=knobs)
+            structural = isinstance(option, Graph)
+            knobs = {} if structural else dict(getattr(option, "knobs", None) or {})
+            option = DeferredFork(lambda option=option: option, knobs, structural=structural)
         return cls(inner=inner, cursor=cursor, pending=(match, option), structural_domain=structural_domain)
 
     def is_expandable(self) -> bool:

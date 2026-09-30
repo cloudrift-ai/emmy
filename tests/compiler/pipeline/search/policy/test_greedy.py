@@ -1,14 +1,15 @@
 """Focused tests for greedy schedule-space traversal."""
 
 import math
+from dataclasses import dataclass
 from types import SimpleNamespace
 
 import pytest
 
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.pipeline.fork import DeferredFork, Level, build_fork_tree, flatten_leaves, leaf_knobs
+from emmy.compiler.pipeline.fork import DeferredFork, Fork, iter_leaves, leaf_knobs
 from emmy.compiler.pipeline.knob import canonical_row_key
-from emmy.compiler.pipeline.pipeline import NO_OPTION
+from emmy.compiler.pipeline.pipeline import NO_OPTION, ForkPoint
 from emmy.compiler.pipeline.search.policy import greedy
 from emmy.compiler.pipeline.search.policy.greedy import (
     EvidenceError,
@@ -118,18 +119,39 @@ def test_an_empty_recorded_signature_condemns_nothing() -> None:
     assert greedy._resolved_price(terminal, trace, ctx, None, failed={frozenset(): [2_000_000.0]}) == 5.0
 
 
+@dataclass(frozen=True)
+class _Branch(Fork):
+    """A synthetic branch: the knobs it pins and the options below it."""
+
+    knobs: dict
+    children: tuple
+
+    def expand(self):
+        return list(self.children)
+
+
+def _tree(rows, materialize) -> _Branch:
+    """A two-level tree over ``rows``: one branch per ``TILE`` value, one deferred leaf per row below it."""
+    by_tile: dict[str, list[dict]] = {}
+    for row in rows:
+        by_tile.setdefault(row["TILE"], []).append(row)
+    return _Branch(
+        {},
+        tuple(
+            _Branch({"TILE": tile}, tuple(DeferredFork(lambda row=row: materialize(row), dict(row)) for row in group))
+            for tile, group in by_tile.items()
+        ),
+    )
+
+
 def test_schedule_pick_descends_directly_to_complete_measured_row() -> None:
     materialized = []
     rows = [{"TILE": str(tile), "STAGE": str(stage)} for tile in range(100) for stage in range(100)]
-    tree = build_fork_tree(
-        params=rows,
-        levels=(Level(("TILE",), lambda row: (row["TILE"],)), Level(("STAGE",), lambda row: (row["STAGE"],))),
-        materialize=lambda row: materialized.append(row),
-    )
+    tree = _tree(rows, lambda row: materialized.append(row))
 
-    point = SimpleNamespace(
+    point = ForkPoint(
+        match=SimpleNamespace(root_node_id="node"),
         options=[tree],
-        node_id="node",
         root_op=SimpleNamespace(knobs={"S_shape": 128}),
         ctx=SimpleNamespace(features=lambda: {"H_opt": 3.0}),
     )
@@ -228,14 +250,10 @@ class _EvidencePrior(_BarePrior):
 
 
 def _point(rows):
-    tree = build_fork_tree(
-        params=rows,
-        levels=(Level(("TILE",), lambda row: (row["TILE"],)), Level(("STAGE",), lambda row: (row["STAGE"],))),
-        materialize=lambda row: (_ for _ in ()).throw(AssertionError("no leaf may materialize during ranking")),
-    )
-    return SimpleNamespace(
+    tree = _tree(rows, lambda row: (_ for _ in ()).throw(AssertionError("no leaf may materialize during ranking")))
+    return ForkPoint(
+        match=SimpleNamespace(root_node_id="node"),
         options=[tree],
-        node_id="node",
         root_op=SimpleNamespace(knobs={"S_shape": 128}),
         ctx=SimpleNamespace(features=lambda: {"H_opt": 3.0}),
     )
@@ -253,7 +271,7 @@ def test_streamed_model_pick_equals_flattened_argmin(monkeypatch) -> None:
     leaf, knobs, price, _tier = got
 
     base = {"H_opt": 3.0, "S_shape": 128}
-    flat = [(o, leaf_knobs(o)) for o in flatten_leaves(point.options)]
+    flat = [(o, leaf_knobs(o)) for o in list(iter_leaves(point.options))]
     rows = [{**base, **k} for _, k in flat]
     scores = _BarePrior().mean_scores(rows)
     best_i = min(range(len(rows)), key=lambda i: (scores[i], canonical_row_key(rows[i])))

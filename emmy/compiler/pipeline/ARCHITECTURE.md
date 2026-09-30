@@ -165,7 +165,7 @@ Everything in this table recurs on nearly every page below. The rest of the docu
 | Module | What lives there |
 |--------|------------------|
 | `pipeline.py` | Engine core: `Pattern` / `Match` / `Rule` / `Pass` / `Pipeline` (the frozen pass layout) plus `Run` — the per-run state and engine loop. |
-| `fork.py` | The `Fork` interface (`OptionFork`) and the reusable `Level` + `build_fork_tree`, which builds a tree of knob-value combinations lazily. |
+| `fork.py` | The `Fork` interface, `DeferredFork` (a leaf whose rewrite is built on expansion) and the lazy schedule tree (`_ScheduleTree` / `_ScheduleFork`) that `schedule.py` builds; `iter_leaves` / `leaf_for`, the walks `ForkPoint` wraps. |
 | `schedule.py` | The generic adapter from a semantic `ScheduleContext` and codec to lazy schedule Forks, including pool sampling. |
 | `knob.py` | The `Knob` descriptor system and the `EMMY_<KNOB>` env namespace (borrowing `config.knob_var` / `config.knob_raw`; `format_tuning_knobs` renders the real tuning knobs for `tune` output). Holds NO concrete knob declarations. |
 | `search/space.py` | **The single home of concrete `Knob` declarations.** It declares schedule codec knobs and kernel-lowering policy knobs; the classic typed move catalogs live with the classic model under `ir/schedule`. Registration is construction (`Knob.__post_init__`), and `knob.registry()` imports `space.py` before answering. |
@@ -336,16 +336,15 @@ trees. `Fork` (`fork.py`) is an interface with three members:
 - `expand()` — builds the next level of options.
 
 The search loop pops a `LazyCandidate` waiting on a fork, calls `expand()` to build the children, pushes them back and
-continues, so only the subtrees the search actually walks into ever get built. `OptionFork` wraps a concrete `Op` or
-`Graph`; `DeferredFork` is a leaf whose selected rewrite is materialized only when expanded. Structural leaves mark
-themselves directly, so graph-building can remain lazy without policy inspecting their implementation.
+continues, so only the subtrees the search actually walks into ever get built. `DeferredFork` is a leaf whose
+selected rewrite is materialized only when expanded — what the cut and split passes offer, and what the search lifts
+a concrete `Op` or `Graph` option into. Structural leaves mark themselves directly, so graph-building can remain lazy
+without policy inspecting their implementation.
 
-A fork whose levels form a cartesian product of knob values reuses **`build_fork_tree`**. A rule supplies one `Level`
-per level plus a `materialize=` callable, and gets back a lazy root `_Branch` whose `expand()` builds children on
-demand, in grouping order. The algorithm — group the parameters by each level's knob keys, collapse a level with one
-key, skip a level with no keys, and defer building a leaf until `expand()` — lives once in `fork.py`.
-Complete leaf walks are iterative and depth-first, so a maximal fused kernel with thousands of schedule levels does
-not consume the Python call stack.
+The one hierarchical fork is the lazy schedule tree (`schedule.py`, over a semantic `ScheduleContext`): each
+`_ScheduleFork` prefix expands to the next decided site, and its leaves are `ScheduleLeaf`s. Complete leaf walks are
+iterative and depth-first, so a maximal fused kernel with thousands of schedule levels does not consume the Python
+call stack.
 
 ### Every finished option carries a value for every knob
 
@@ -810,7 +809,12 @@ an option that only rebinds an `Op` is a variant of one kernel (`False`).
 rule-batch body (`Run._step`), but `resolve` walks the graph once instead of searching: ONE live graph is mutated in
 place, with no sibling snapshots and no per-fork copies, so the terminal IS the graph it started from. At each
 undecided fork a `decide` callback gets a `ForkPoint` (the `Match`, the raw options as the rule emitted them, the op
-as it was before the decision, `ctx`) and returns the option to apply.
+as it was before the decision, `ctx`) and returns the option to apply. The fork point owns the walk over its offer:
+`leaves()` streams the complete leaves depth-first in emission order (the order a score tie falls back to, option-0
+first), `flat()` lists them, and `find(row)` is the one row-directed descent the evidence pick, the decision memo's
+replay and the golden replay share — so every consumer reads an offer the same way. The `fork` module's `iter_leaves`
+and `leaf_for` remain for option sequences that are no fork point: a rule's forks before they are offered, a
+filtered sibling list.
 
 The returned trace — one `Decision(rule_name, node_id, chosen_kind, knob_delta, score, n_options)` per decided fork —
 is the resolution's process-state output. Questions like "did this compile take a structural pick" or "what did the
@@ -843,8 +847,8 @@ Greedy benches nothing, so it can only *use* a prior, never train one.
 factory call — one compile attempt; never shared ambient state, which would hand MCTS cached picks): the memo
 keys on the minted pool identity (`Fork.pool_id` — the deploy identity plus the knob / hint / pin
 discriminators it excludes) plus the node's blocklist content, so N same-shape kernels score once and the rest replay
-by descending the lazy tree to the one matching leaf (`_find_decided_leaf`, through the same `Fork.admits` — the
-O(path) descent `build_fork_tree` was built for),
+by descending the lazy tree to the one matching leaf (`_find_decided_leaf`, through the same `Fork.admits` — an
+O(path) descent),
 while a validate-retry with a blocked tile is a different key and re-decides.
 
 **Every deploy pick breaks ties by candidate content, never enumeration order.** The model can score many
