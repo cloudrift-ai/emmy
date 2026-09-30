@@ -74,17 +74,12 @@ def rewrite(match: Match, root: Node) -> LoopOp:
     edits: dict[int, tuple[Assign, Write]] = {}
 
     for write, _scope in meta.writes:
-        if not write.is_scalar:
-            continue
         buffer = graph.buffer(write.output)
-        if buffer is None or buffer.transient:
+        if not write.is_scalar or buffer is None or buffer.transient or not graph.buffer_users(write.output):
             continue
-        if not graph.buffer_users(write.output):
-            continue  # nothing reads it, so no fusion can delete the store that rounds
-        value = meta.defs.get(write.value)
-        value_dtype = (
-            value.dtype or F32 if isinstance(value, Assign) and buffer.dtype in {F16, BF16} else _accum_dtype(graph, meta, write)
-        )
+        value_dtype = _accum_dtype(graph, meta, write)
+        if isinstance(value := meta.defs.get(write.value), Assign) and buffer.dtype in {F16, BF16}:
+            value_dtype = value.dtype or F32
         if value_dtype is None or buffer.dtype == value_dtype:
             continue
         name = f"{write.output}__st"
