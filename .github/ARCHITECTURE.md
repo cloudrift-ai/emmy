@@ -53,7 +53,8 @@ reviews ready PRs from both repository branches and forks, including bot-authore
 the GitHub API without checking out PR code, and its token can read contents and write PR comments but cannot push.
 Only `/review` runs; PR descriptions and code suggestions are left to the author. New commits replace an in-progress
 review for the same PR. The model, endpoint, and credential are shared with the nightly agent workflows. PR Agent can
-use up to 128,000 tokens of model context.
+use up to 128,000 tokens of model context. The job checks for a review comment updated after it starts, because PR
+Agent can log a model failure and still exit successfully.
 
 ## Package publication
 

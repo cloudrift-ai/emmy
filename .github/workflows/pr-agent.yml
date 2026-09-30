@@ -18,6 +18,10 @@ jobs:
       issues: write
       pull-requests: write
     steps:
+      - name: Record review start
+        id: review_start
+        run: echo "at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
       - name: Review pull request
         # PR Agent v0.46.0 GitHub Action image.
         uses: docker://pragent/pr-agent@sha256:65e5b196e38cecd7df8a71fe29942052e081a0c6645132c2ac874df60b1760c7
@@ -35,3 +39,17 @@ jobs:
           GITHUB_ACTION_CONFIG__AUTO_DESCRIBE: 'false'
           GITHUB_ACTION_CONFIG__AUTO_IMPROVE: 'false'
           GITHUB_ACTION_CONFIG__PR_ACTIONS: '["opened", "reopened", "ready_for_review", "synchronize"]'
+
+      - name: Verify review was posted
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REVIEW_STARTED_AT: ${{ steps.review_start.outputs.at }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" |
+            jq -se --arg started "$REVIEW_STARTED_AT" '
+              any(.[][]; .user.login == "github-actions[bot]"
+                and .updated_at >= $started
+                and (.body | contains("<!-- pr-agent:review:full -->")))
+            '
