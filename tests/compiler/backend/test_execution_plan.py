@@ -30,6 +30,7 @@ from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.cuda import CudaOp, TmaDescMeta
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.frontend.ir import ReshapeOp, TransposeOp
+from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.loader.binder import apply_load_ops
 
 
@@ -218,6 +219,8 @@ def test_grid_expr_survives_round_trip():
         (TransposeOp(axes=(2, 0, 1)),),
         (ReshapeOp(shape=(6, -1)),),
         (TransposeOp(axes=(1, 0, 2)), ReshapeOp(shape=(4, 6))),
+        (ElementwiseOp(op="reciprocal"),),
+        (ElementwiseOp(op="reciprocal"), ReshapeOp(shape=(4, 6))),
     ],
 )
 def test_apply_weight_loads_matches_binder(load_ops):
@@ -298,6 +301,20 @@ def _one_weight_plan(op, nid="w"):
     )
     g.outputs = ["y"]
     return plan_from_graph(g)
+
+
+def test_reciprocal_load_op_rebinds_after_plan_json_round_trip():
+    """A saved plan replays the same f32 reciprocal as direct constant binding."""
+    source = np.array([[0.1, 0.03, 2.0, 4.0]] * 4, dtype=np.float32)
+    ops = (ElementwiseOp(op="reciprocal"),)
+    plan = _one_weight_plan(
+        ConstantOp(name="w", source_path="model.w", source_shape=(4, 4), source_dtype="f32", load_ops=ops)
+    )
+    wire = json.loads(json.dumps(plan_to_dict(plan)))
+    assert wire["weights"]["w"]["ops"] == [["reciprocal", []]]
+    restored = plan_from_dict(wire)
+    assert restored.weights["w"].load_ops == (("reciprocal", ()),)
+    np.testing.assert_array_equal(apply_weight_loads(source, restored.weights["w"].load_ops), apply_load_ops(source, ops))
 
 
 def _slice_index_map(out_shape, spans):
