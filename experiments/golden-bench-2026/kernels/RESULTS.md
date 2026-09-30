@@ -114,9 +114,9 @@ candidate is the TMA trial above and lost in the layer. The temporary `+p4` comp
 loss. No compiler, route, or canonical golden change survived the pass.
 
 The raw JSON, logs, working golden, search DB snapshot, and fuller findings are in
-`tuning_h100x1_2026-09-30.tar.gz`. The model-form gap still spans the projections and attention identified in the
-#967 pass; these schedule choices did not isolate a new winner. Hardware-counter profiling did not finish within the
-development time limit, so this pass makes no new counter claim.
+`tuning_h100x1_2026-09-30.tar.gz`. The #967 pass identified the projections and attention as contributors to its
+larger gap. This pass did not localize the current 1.78 µs gap further. Hardware-counter profiling did not finish
+within the development time limit, so this pass makes no new counter claim.
 
 ## CSE re-record on exact cards
 
