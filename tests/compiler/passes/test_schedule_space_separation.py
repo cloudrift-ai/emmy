@@ -63,6 +63,20 @@ def test_complete_pin_decodes_without_walking_the_compatibility_frontier(monkeyp
     assert leaves[0].schedule == ClassicScheduleCodec(ClassicScheduleContext(tile, ctx)).decode(row)
 
 
+def test_complete_pin_ignores_a_peer_kernel_site(monkeypatch) -> None:
+    tile, ctx = _unmapped_tile(8, 8), Context.from_target((7, 0))
+    row = _complete_classic_row(tile, ctx)
+
+    def unexpected_frontier(*_args):
+        raise AssertionError("a peer site must not force frontier traversal")
+
+    monkeypatch.setattr(ClassicScheduleContext, "_compatible_frontier", unexpected_frontier)
+    with pinned_knobs({**row, "REDUCE@peer": "coop"}):
+        leaves = list(iter_leaves(classic_forks(tile, tile.name, tile.knobs, ctx)))
+    assert len(leaves) == 1
+    assert {key: leaves[0].knobs[key] for key in row} == row
+
+
 def test_invalid_complete_pin_keeps_the_original_refusal() -> None:
     tile, ctx = _unmapped_tile(8, 8), Context.from_target((7, 0))
     row = {**_complete_classic_row(tile, ctx), "WORK": "not-a-work"}

@@ -173,9 +173,9 @@ def classic_forks(
         pool_id=pool_id,
         sample=getattr(ctx, "pool_sample", None),
     )
-    if set(row) == set(codec.keys()) and getattr(ctx, "pool_sample", None) is None:
+    if set(codec.keys()) <= set(row) and getattr(ctx, "pool_sample", None) is None:
         # A complete hand pin has one candidate; a refused pin keeps the usual peer fallback.
-        exact = exact_schedule_leaf(classic, row, frozenset(row))
+        exact = exact_schedule_leaf(classic, row, frozenset(codec.keys()))
         if exact is not None and exact[1] is not None:
             classic = [exact[1]]
     forks = register + classic
