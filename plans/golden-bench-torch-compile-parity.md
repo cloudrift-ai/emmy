@@ -152,6 +152,11 @@ are unrecorded on #930. Trace, sweep, record, and measure on the FP8-capable car
 3. **Golden-bench goldens are not in `make test`'s decode set** (only recipe and hardware goldens are); a compiler
    change can leave them stale unseen. The close-out replayed and decoded them by hand on each card.
 
+4. **Golden-bench rows need a record run after #976.** Its Loop IR normalization changed how the Qwen3-0.6B pieces
+   render on every card but the V100 s512 file: the restamp kept every route and schedule and demoted the piece
+   timings to proposals, so until `emmy run --golden FILE --bench --record` re-measures them on each card, those
+   cells compile from the prior. The AWQ V100 intra-chunk row (820 µs) is in the same state. Then re-run the lane.
+
 Resolved in #967's close-out: the s1 goldens are re-traced after #871 (`is_causal` at one token) and re-recorded on
 every card; the lane measures `torch.compile` on the HF layer and stages the Rust runtime; the root-sweep fix is merged
 (its first version dropped 36 Gemma and DeepSeek rows through a fold misclassification, fixed and restored).
