@@ -26,6 +26,7 @@ from emmy.compiler.ir.kernel.ir import (
     frag_layout,
 )
 from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Pre, Select, StridedLoop
+from emmy.compiler.pipeline.passes.tile._fromloop import seed_index
 
 from ._atom import _direct_operand
 
@@ -140,7 +141,7 @@ class _Fragments:
                     seed = self.program.seed
                     if isinstance(seed, str):
                         index = tuple(e.substitute(clipped).simplify(SimplifyCtx.empty()) for e in stmt.index)
-                        seeded = self.apply("copy", ((seed, index),), (GMEM,), rb, cb)
+                        seeded = self.apply("copy", ((seed, seed_index(index, self.tile.inputs[seed].shape)),), (GMEM,), rb, cb)
                     else:
                         seeded = Literal(float(seed))
                     first = BinaryExpr(">", Var(self.program.time), Literal(0, "int"))

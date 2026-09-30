@@ -332,13 +332,20 @@ def intern(pool: list[dict], graph) -> int:
 
 
 def kernel_tile(op):
-    """The tile kernel ``op`` lowered from — the first ``TileOp`` on its source chain — or ``None`` for
-    a kernel no tile stands behind. Every kernel the tuner and ``run --bench`` measure has one, the
-    kernel-cache replay included (a cached kernel keeps its chain); the deploy identity a golden
-    receipt names and the definition a ``kernel`` row stores are both read off it."""
+    """The tile kernel ``op`` lowered from — the ``TileOp`` on its source chain its ``I_kernel`` stamp
+    names, else the first — or ``None`` for a kernel no tile stands behind. The first is the scheduled
+    tile, which is the kernel unless its schedule realized it through another term (a carried state's
+    serial form): the stamp still names the tile the schedule fork was offered. Every kernel the tuner and
+    ``run --bench`` measure has one, the kernel-cache replay included (a cached kernel keeps its chain);
+    the deploy identity a golden receipt names and the definition a ``kernel`` row stores are both read
+    off it."""
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import KERNEL_IDENTITY  # noqa: PLC0415
 
-    return next((ancestor for ancestor in op.source_chain() if isinstance(ancestor, TileOp)), None)
+    tiles = [ancestor for ancestor in op.source_chain() if isinstance(ancestor, TileOp)]
+    stamp = (op.knobs or {}).get(KERNEL_IDENTITY)
+    named = (tile for tile in tiles if stamp is not None and tile.identity_key(structural=False, with_io=True) == stamp)
+    return next(named, tiles[0] if tiles else None)
 
 
 def formed_from(tile):

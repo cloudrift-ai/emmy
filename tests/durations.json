@@ -544,6 +544,8 @@
  "tests/compiler/passes/test_register_carry.py::test_register_state_preserves_old_reads_on_cuda[1-f32-acc]@cuda": 1.16,
  "tests/compiler/passes/test_register_carry.py::test_register_state_preserves_old_reads_on_cuda[2-f16-acc]@cuda": 1.02,
  "tests/compiler/passes/test_register_carry.py::test_register_state_preserves_old_reads_on_cuda[2-f32-acc]@cuda": 1.03,
+ "tests/compiler/passes/test_register_carry.py::test_register_state_starts_from_the_seed_tensor_on_cuda[seed-with-a-size-one-dim]@cuda": 1.33,
+ "tests/compiler/passes/test_register_carry.py::test_register_state_starts_from_the_seed_tensor_on_cuda[seed]@cuda": 1.84,
  "tests/compiler/passes/test_roll_recurrence.py::test_a_chain_whose_masks_and_extents_grow_with_the_step_rolls_and_matches_eager": 1.68,
  "tests/compiler/passes/test_roll_recurrence.py::test_a_recurrence_from_a_traced_state_with_alternating_steps_rolls_and_matches_eager": 5.1,
  "tests/compiler/passes/test_roll_recurrence.py::test_an_unrolled_delta_rule_rolls_into_one_kernel_that_carries_its_state": 1.24,
