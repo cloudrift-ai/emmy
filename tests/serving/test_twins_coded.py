@@ -748,6 +748,45 @@ def test_nvfp4_twin_is_the_graph_serving_stamps(tmp_path):
             assert _structure(caught.value.graph) == _structure(twins[f"{half}4@nvfp4"])
 
 
+def test_nvfp4_mlp_capture_matches_serving_stamp_in_bf16(tmp_path):
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("transformers")
+
+    import numpy as np
+
+    from emmy.serving.gen_runner import _compile_split
+    from emmy.serving.mlp import capture_mlp_graphs, logical_mlp, parameter_keys
+
+    _nvfp4_checkpoint(tmp_path)
+    twins = capture_mlp_graphs(tmp_path, 64, 128, 2)
+    assert set(twins) == {"mlp1@nvfp4", "mlp-sym@nvfp4"}
+    for graph in twins.values():
+        graph.validate()
+        assert len(_packed_weights(graph)) == 3
+        assert any(node.output.dtype.name == "f4e2m1x2" and not isinstance(node.op, ConstantOp) for node in graph.nodes.values())
+
+    module = logical_mlp(64, 128, torch.bfloat16)
+    ckpt = (str(tmp_path), parameter_keys(module, 0))
+
+    class Stamped(Exception):
+        def __init__(self, graph):
+            self.graph = graph
+
+    class CaptureBackend:
+        def __init__(self, **_kwargs):
+            pass
+
+        def compile(self, graph):
+            raise Stamped(graph)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr("emmy.compiler.backend.cuda.backend.CudaBackend", CaptureBackend)
+        for name, rows, argnames in (("mlp1@nvfp4", 1, None), ("mlp-sym@nvfp4", 8, ["x"])):
+            with pytest.raises(Stamped) as caught:
+                _compile_split(module, [torch.zeros(rows, 64, dtype=torch.bfloat16)], argnames, np.dtype("float32"), ckpt=ckpt)
+            assert _structure(caught.value.graph) == _structure(twins[name])
+
+
 def _structure(graph: Graph):
     """A graph's node structure, ignoring the values behind it: every node's op kind, operands,
     output dtype and output shape, plus the program's own input/output lists."""
