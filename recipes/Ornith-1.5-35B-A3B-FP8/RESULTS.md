@@ -63,6 +63,35 @@ emmy bench experiments/Ornith-1.5-35B-A3B-FP8/serving --ssh user@host \
   --filter "engine.llm.max_concurrent_requests=64"
 ```
 
+## Sharing one H200 with Qwen3-30B-A3B-Instruct-2507
+
+The recipe's second entry, H200 x1 at `gpu_memory_utilization 0.35`, exists for a two-model deploy plan beside
+`Qwen3-30B-A3B-Instruct-2507` at 0.55 (its own reduced-fraction entry, 131,072-token context). The budgets:
+0.35 x 141 GB is about 49 GiB for Ornith (36 GiB of weights and overhead, ~12.6 GiB of KV), 0.55 x 141 GB is
+about 77 GiB for Qwen (57 GiB of BF16 weights, ~16 GiB of KV), 0.90 of the card in all.
+
+```json
+{
+  "schema_version": 1,
+  "gpu": "NVIDIA H200 141GB",
+  "gpu_count": 1,
+  "models": [
+    {"recipe": "Qwen3-30B-A3B-Instruct-2507", "gpu_memory_utilization": 0.55, "gpu_device_ids": [0]},
+    {"recipe": "Ornith-1.5-35B-A3B-FP8", "gpu_memory_utilization": 0.35, "gpu_device_ids": [0]}
+  ]
+}
+```
+
+```bash
+emmy deploy cloud --plan plan.json --result-json out.json
+```
+
+Qwen starts first on port 8000, Ornith on port 8001 once Qwen is healthy. The plan validates in dry-run. The
+Ornith half was rehearsed on the H100 at the same 49 GiB budget (0.62 of the 80 GB card): 35.8 GiB of weights, a
+12.59 GiB KV pool of 642,509 tokens (2.45 full-context sequences), smoke test passed, and every capability
+probe above passed again including the 236,780-token recall. The pair does not fit an 80 GB card together
+(93 GiB of weights), so the two-model run itself is unverified until it happens on an H200.
+
 ## Emmy
 
 Not qualified: compiler qualification and the Emmy serving lane were out of scope for this onboarding. The
