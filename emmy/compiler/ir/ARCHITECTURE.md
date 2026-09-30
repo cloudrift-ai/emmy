@@ -621,8 +621,9 @@ inside definitions. Subroutine boundaries never limit fusion.
   quantization at a rounding boundary and is not a normalization.
 - `dedup_loads` — scoped value numbering after expression normalization. Structural keys retain every semantic field
   and replace output names with anonymous result positions; neither expression printing nor `repr` determines value
-  equality. Keep one equivalent pure binding and rewire every scalar or vector lane. A write invalidates retained
-  reads of that buffer, including around a nested scope with a write. Entering a scope also drops cached values whose
+  equality. Keep one equivalent pure binding and rewire every scalar or vector lane. Exact copies of one binding also
+  share, but an overwritten name cannot represent another binding. A buffer write invalidates its retained reads,
+  including around a nested scope with a write. Entering a scope also drops cached values whose
   definitions or dependencies are rebound there; an identical index spelling can name a different loop coordinate.
   The same walk handles expressions, selections, carried-state reads and compact calls. Selection predicates are
   dependencies too. Assignments treat commutative operands as unordered after alias substitution; floating-point

@@ -21,6 +21,8 @@ def _assert_scoped_cse(body, available=()):
     """
     available = list(available)
     for stmt in body:
+        if stmt.pure and not (isinstance(stmt, Load) and stmt.carried) and not set(stmt.defines()).intersection(stmt.deps()):
+            assert stmt not in available, f"available duplicate binding: {stmt.pretty()}"
         # A redefinition changes the value of an operand or of the earlier representative.
         rebound = set(stmt.defines()) | {name for child in stmt.nested() for name in child.carried_names}
         available = [prior for prior in available if not rebound.intersection((*prior.defines(), *free_names(prior)))]
@@ -75,6 +77,14 @@ def test_audit_respects_writes_and_shadowing():
     duplicate = Load("second", "x", (Var("i"),))
     _assert_scoped_cse(Body((first, Write("x", (Var("i"),), "first"), duplicate)))
     _assert_scoped_cse(Body((first, Loop(Axis("i", 4), (duplicate,)))))
+
+
+def test_audit_rejects_repeated_copies_but_respects_self_updates():
+    load = Load("value", "x", (Literal(0, "int"),))
+    with pytest.raises(AssertionError, match="duplicate binding"):
+        _assert_scoped_cse(Body((load, load)))
+    update = Assign("value", "exp", ("value",))
+    _assert_scoped_cse(Body((update, update)))
 
 
 def test_audit_respects_carried_state_updates():
