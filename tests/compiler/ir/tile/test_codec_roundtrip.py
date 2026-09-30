@@ -16,8 +16,16 @@ from emmy.compiler.ir.schedule import Reduce, Stage, Tile, Work
 @pytest.mark.parametrize(
     ("spec", "work"),
     [
-        ("", ""), ("coop", "t8"), ("coop-t", "t256"), ("coop-t/n8", "t512"), ("coop-t/n8/v2", "t256"),
-        ("r4", ""), ("g2a", ""), ("g2k", ""), ("g4a/coop", "t32"), ("g2k/coop/r4", "t16"),
+        ("", ""),
+        ("coop", "t8"),
+        ("coop-t", "t256"),
+        ("coop-t/n8", "t512"),
+        ("coop-t/n8/v2", "t256"),
+        ("r4", ""),
+        ("g2a", ""),
+        ("g2k", ""),
+        ("g4a/coop", "t32"),
+        ("g2k/coop/r4", "t16"),
     ],
 )
 def test_reduce_round_trip(spec: str, work: str) -> None:
