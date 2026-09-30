@@ -300,25 +300,33 @@ def test_failed_onboarding_keeps_report_and_discards_incomplete_experiment(tmp_p
     image.write_text("incomplete image\n")
     image.with_name("new.env").write_text("incomplete image\n")
     summary = tmp_path / "summary.json"
-    summary.write_text(json.dumps({
-        "status": "failed",
-        "mode": "onboarding",
-        "model_id": "org/Model",
-        "target": {"gpu": "AMD Instinct MI350X", "gpu_count": 4, "ssh": "user@host"},
-        "recipe": "recipes/Model/recipe.yaml",
-        "report": "recipes/Model/RESULTS.md",
-        "experiment": "experiments/Model/serving/recipe.yaml",
-        "experiment_artifacts": ["experiments/Model/serving/RESULTS.md"],
-        "artifacts": ["recipes/Model/recipe.yaml", "recipes/Model/RESULTS.md", "experiments/Model/serving/RESULTS.md"],
-        "deployment_summary": "unqualified",
-        "performance_summary": "incomplete",
-        "cleanup": {"workloads": "complete", "docker_logout": True},
-        "failure": {"gate": "serving", "message": "No supported image", "regression": False},
-    }))
+    summary.write_text(
+        json.dumps(
+            {
+                "status": "failed",
+                "mode": "onboarding",
+                "model_id": "org/Model",
+                "target": {"gpu": "AMD Instinct MI350X", "gpu_count": 4, "ssh": "user@host"},
+                "recipe": "recipes/Model/recipe.yaml",
+                "report": "recipes/Model/RESULTS.md",
+                "experiment": "experiments/Model/serving/recipe.yaml",
+                "experiment_artifacts": ["experiments/Model/serving/RESULTS.md"],
+                "artifacts": ["recipes/Model/recipe.yaml", "recipes/Model/RESULTS.md", "experiments/Model/serving/RESULTS.md"],
+                "deployment_summary": "unqualified",
+                "performance_summary": "incomplete",
+                "cleanup": {"workloads": "complete", "docker_logout": True},
+                "failure": {"gate": "serving", "message": "No supported image", "regression": False},
+            }
+        )
+    )
 
     subprocess.run(
-        [sys.executable, "-"], cwd=tmp_path, env={**os.environ, "ONBOARD_SUMMARY": str(summary)},
-        input=cleanup_source, text=True, check=True,
+        [sys.executable, "-"],
+        cwd=tmp_path,
+        env={**os.environ, "ONBOARD_SUMMARY": str(summary)},
+        input=cleanup_source,
+        text=True,
+        check=True,
     )
 
     assert recipe.read_text().startswith("tags: [onboarding, untested, onboarding-failed]")
@@ -331,10 +339,28 @@ def test_failed_onboarding_keeps_report_and_discards_incomplete_experiment(tmp_p
     assert cleaned["artifacts"] == ["recipes/Model/recipe.yaml", "recipes/Model/RESULTS.md"]
     assert cleaned["experiment"] is None and cleaned["experiment_artifacts"] == []
     subprocess.run(
-        [sys.executable, str(workspace / ".github/scripts/onboarding_artifacts.py"),
-         "--summary", str(summary), "--model-id", "org/Model", "--gpu", "AMD Instinct MI350X",
-         "--gpu-count", "4", "--ssh-target", "user@host", "--mode", "onboarding", "--expected-tag", "best-effort"],
-        cwd=tmp_path, check=True, capture_output=True, text=True,
+        [
+            sys.executable,
+            str(workspace / ".github/scripts/onboarding_artifacts.py"),
+            "--summary",
+            str(summary),
+            "--model-id",
+            "org/Model",
+            "--gpu",
+            "AMD Instinct MI350X",
+            "--gpu-count",
+            "4",
+            "--ssh-target",
+            "user@host",
+            "--mode",
+            "onboarding",
+            "--expected-tag",
+            "best-effort",
+        ],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
     )
 
 
