@@ -298,6 +298,16 @@ def test_cse_reuses_dominating_values_in_both_branches() -> None:
     assert all(child[0].value == "a" for child in out[1].nested())
 
 
+def test_cse_reuses_a_dominating_read_until_the_write_on_that_branch() -> None:
+    body = Body((Load("old", "x", ZERO), Cond(cond=Var("p"), body=(
+        Load("before", "x", ZERO), Write("out", ZERO, "before"),
+        Write("x", ZERO, "replacement"), Load("after", "x", ZERO), Write("new", ZERO, "after"),
+    ))))
+    out = dedup_loads(body)
+    assert out[1].body[0] == Write("out", ZERO, "old")
+    assert [load.name for load in out.loads] == ["old", "after"]
+
+
 def test_dedup_loads_rewires_every_vector_lane() -> None:
     """A duplicate vector load aliases each lane to the corresponding kept lane."""
     body = Body(

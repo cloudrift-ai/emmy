@@ -804,12 +804,15 @@ def dedup_loads(stmts: Body) -> Body:
             stmt = rename_free(original, alias)
             if stmt.nested():
                 clobbered = frozenset(name for child in stmt.nested() for member in child.iter() for name in member.external_writes())
+                # A loop's write may precede this read on a back edge. A branch has no back
+                # edge: its dominating reads remain available until the actual write.
+                entry_writes = frozenset() if isinstance(stmt, Cond) else clobbered
                 children = []
                 for child in stmt.nested():
                     shadowed = child.local_defs | stmt.binds_axes()
                     available = {
                         key: values for key, values in local.items()
-                        if not clobbered.intersection(key.external_reads())
+                        if not entry_writes.intersection(key.external_reads())
                         and not shadowed.intersection((*values, *free_names(key)))
                         and not isinstance(key, Accum)
                     }
