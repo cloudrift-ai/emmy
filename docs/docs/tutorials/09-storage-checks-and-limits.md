@@ -63,10 +63,10 @@ card: every kernel's definition — the loop body the compiler formed it from �
 with the setting it was measured under and its median. Nothing the compiler computed is stored: no identity, no
 features. Importing a freeze re-lowers every kernel from its definition, so the dataset holds the current compiler's
 identities and features whatever compiler wrote the snapshot, and a compiler change is a re-import. Freezing the same
-database twice produces byte-identical files. A freeze checked into the repository is what `emmy dataset import`
-loads into the dataset database by default, beside the golden configuration files, and that database is what every
-evaluation and the offline fit read; no freeze is checked in at the moment, so the default holds the goldens alone,
-and a tuning database — from this machine or a rented card — is named on the command line to join them.
+database twice produces byte-identical files. A freeze is named on the `emmy dataset import` command line like any
+other source — a golden configuration file, or a tuning database from this machine or a rented card — and that
+database is what every evaluation and the offline fit read; nothing is loaded into it by default, and no freeze is
+checked in at the moment.
 
 **Hand-run measurements are recorded too.** A `run --bench` that measured configurations with knob values forced by
 hand records each clean result through the tuner's own writer, so that manually found optima are not lost when the

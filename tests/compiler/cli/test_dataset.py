@@ -1,19 +1,17 @@
 """``emmy dataset import`` — a dataset DB filled from a measurement freeze, golden files and tune DBs, every
-kernel re-lowered by the current compiler — the readers' refusal of a default dataset DB that does not hold the
-checked-in freeze, and ``emmy dataset check``, the checks that an instance's tables agree with themselves."""
+kernel re-lowered by the current compiler — the readers' refusal of a missing dataset DB, and ``emmy dataset
+check``, the checks that an instance's tables agree with themselves."""
 
 from __future__ import annotations
 
 import dataclasses
 from argparse import Namespace
-from contextlib import nullcontext
 
 import pytest
 
 from emmy.commands.dataset import dataset_db, handle_dataset_check, handle_dataset_import
 from emmy.compiler.pipeline.search.data.freeze import write_freeze
 from emmy.compiler.pipeline.search.db import RoutingRow, SearchDB, knobs_json
-from emmy.compiler.pipeline.search.golden import repository as golden_repository
 from emmy.compiler.pipeline.search.golden.evidence import file_source
 from emmy.compiler.structural import digest
 from tests.compiler.pipeline.search.helpers import tuned_db
@@ -29,25 +27,17 @@ def _freeze(tmp_path, name: str, us: float):
     return {file_source("freeze", path) for path in (tmp_path / name).glob("*.json")}
 
 
-def test_the_default_dataset_holds_the_checked_in_freeze_or_is_refused(tmp_path, monkeypatch):
-    """A report over the default dataset DB carries the checked-in freeze's name as its data. A dataset
-    built from another freeze — or from an older one, after the checked-in freeze moved on — would put
-    yesterday's numbers under today's label, so the reader refuses it and names the command that fixes
-    it."""
+def test_a_reader_refuses_a_missing_dataset_db_and_reads_a_filled_one(tmp_path, monkeypatch):
+    """Nothing fills the dataset DB but an import naming its sources: a reader over a default instance that does
+    not exist exits with the command that fills it, and reads whatever an import put there — the sources are the
+    report's to name, not the reader's to check."""
     current = _freeze(tmp_path, "current", 500.0)
-    _freeze(tmp_path, "older", 400.0)
     monkeypatch.setenv("EMMY_DATASET_DB", str(tmp_path / "dataset.db"))
-    monkeypatch.setenv("EMMY_FREEZE_DIR", str(tmp_path / "current"))
-    monkeypatch.setattr(golden_repository, "repository_golden_paths", lambda: nullcontext([]))  # the freeze alone is the default here
 
     with pytest.raises(SystemExit):
         dataset_db(None)  # nothing imported yet
 
-    handle_dataset_import(Namespace(sources=[str(tmp_path / "older")], db=None, fresh=False))
-    with pytest.raises(SystemExit):
-        dataset_db(None)
-
-    handle_dataset_import(Namespace(sources=[], db=None, fresh=True))
+    handle_dataset_import(Namespace(sources=[str(tmp_path / "current")], db=None, fresh=True))
     assert dataset_db(None) == tmp_path / "dataset.db"
     db = SearchDB.open_readonly(tmp_path / "dataset.db")
     assert db.perf_sources() == dict.fromkeys(current, 1)
@@ -55,37 +45,28 @@ def test_the_default_dataset_holds_the_checked_in_freeze_or_is_refused(tmp_path,
     db.close()
 
 
-def test_the_default_import_holds_the_repository_goldens_too(tmp_path, monkeypatch):
-    """The goldens are measurements too: with no sources named, ``import`` loads the checked-in freeze and every
-    repository golden file, a golden's rows under its own ``golden:`` source — where the golden readers read them
-    — and the readers refuse a default dataset that lacks one of them, by name."""
+def test_a_golden_file_named_on_the_command_line_is_held_under_its_own_source(tmp_path, monkeypatch):
+    """A ``.json`` source is a golden file: its rows land under a ``golden:`` source of its own digest — where the
+    golden readers read them — and naming it again is a no-op, so the documented import can be re-run without
+    doubling a file's rows."""
     monkeypatch.setenv("EMMY_DATASET_DB", str(tmp_path / "dataset.db"))
-    monkeypatch.setenv("EMMY_FREEZE_DIR", str(tmp_path / "no-freeze-yet"))
     # A freeze file is golden-shaped; named as a golden it is one, and it carries the measurements a corpus case lacks.
     _freeze(tmp_path, "goldens", 500.0)
-    _freeze(tmp_path, "later", 400.0)
-    [mine], [later] = (tmp_path / "goldens").glob("*.json"), (tmp_path / "later").glob("*.json")
-    monkeypatch.setattr(golden_repository, "repository_golden_paths", lambda: nullcontext([mine]))
-    handle_dataset_import(Namespace(sources=[], db=None, fresh=True))
-    assert dataset_db(None) == tmp_path / "dataset.db"
-    db = SearchDB.open_readonly(tmp_path / "dataset.db")
+    [mine] = (tmp_path / "goldens").glob("*.json")
+    handle_dataset_import(Namespace(sources=[str(mine)], db=None, fresh=True))
+    handle_dataset_import(Namespace(sources=[str(mine)], db=None, fresh=False))
+    db = SearchDB.open_readonly(dataset_db(None))
     assert db.perf_sources() == {file_source("golden", mine): 1}
     db.close()
-
-    monkeypatch.setattr(golden_repository, "repository_golden_paths", lambda: nullcontext([mine, later]))
-    with pytest.raises(SystemExit):
-        dataset_db(None)
 
 
 def test_a_golden_whose_rows_yield_no_measurement_is_still_held(tmp_path, monkeypatch):
     """A source is a fact of its own, not a count of rows: a golden file none of whose rows becomes a measurement
     (a corpus case carries no timings; a restamped golden keeps its schedules and loses its microseconds) is held
-    after the import, so the readers' freshness check is met and the dataset holds no row for it."""
+    after the import — a report names it among its sources — and the dataset holds no row for it."""
     case = corpus.CASES_DIR / _CASE
     monkeypatch.setenv("EMMY_DATASET_DB", str(tmp_path / "dataset.db"))
-    monkeypatch.setenv("EMMY_FREEZE_DIR", str(tmp_path / "no-freeze"))
-    monkeypatch.setattr(golden_repository, "repository_golden_paths", lambda: nullcontext([case]))
-    handle_dataset_import(Namespace(sources=[], db=None, fresh=True))
+    handle_dataset_import(Namespace(sources=[str(case)], db=None, fresh=True))
     assert dataset_db(None) == tmp_path / "dataset.db"
     db = SearchDB.open_readonly(tmp_path / "dataset.db")
     assert db.sources() == {file_source("golden", case)} and db.perf_sources() == {}

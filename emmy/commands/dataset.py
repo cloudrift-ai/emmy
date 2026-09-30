@@ -5,9 +5,10 @@ A dataset DB is the tune DB's schema in its own file (``EMMY_DATASET_DB``): the 
 (``eval prior``) read it, and no compile ever does, so what is imported into it cannot change a deploy.
 
 - ``import`` loads golden-shaped sources into it: measurement freeze directories, golden files, and tune DB
-  files, which are frozen first (the way a card's measurements from a rented GPU reach the dataset). The
-  default sources are the checked-in freeze and the repository golden files — the goldens are measurements
-  too, and the golden readers (``emmy fit``, ``eval prior --dataset golden``) read them here. Every kernel is
+  files, which are frozen first (the way a card's measurements from a rented GPU reach the dataset). Nothing is
+  loaded by default: the sources are named on the command line — for the offline prior, the hardware goldens
+  (``search/golden/records/*.json``) under ``--fresh``, the README's "Fit the offline prior" workflow — and the
+  golden readers (``emmy fit``, ``eval prior --dataset golden``) read the goldens here. Every kernel is
   re-lowered from its definition by the current compiler (``golden.evidence.import_goldens``), so the instance
   holds today's identities and stamps whatever compiler wrote the source. A file's rows are sourced by its
   kind and digest (``freeze:`` for a freeze directory's files, ``golden:`` for a golden file), and a file the
@@ -18,9 +19,9 @@ A dataset DB is the tune DB's schema in its own file (``EMMY_DATASET_DB``): the 
   reference, a card, the two knob vocabularies). A DB is a cache: a row the current code disagrees with is
   re-tuned or re-imported, so nothing here decodes what the compiler wrote.
 
-:func:`dataset_db` is the readers' way in: it resolves the instance and refuses a missing one, or a
-default one that does not hold the checked-in freeze and the repository goldens, with the command that fixes
-it.
+:func:`dataset_db` is the readers' way in: it resolves the instance and refuses a missing one, with the command
+that fills it. What an instance holds is what was imported into it — a report names its sources — and nothing
+checks that against the repository.
 """
 
 from __future__ import annotations
@@ -42,9 +43,9 @@ def register_dataset_command(subparsers) -> None:
     pi = sub.add_parser("import", help="Import measurement freezes, golden files and tune DBs into a dataset DB")
     pi.add_argument(
         "sources",
-        nargs="*",
-        help="Freeze directories, golden files and tune DB files to import. Default: the checked-in measurement freeze "
-        "(EMMY_FREEZE_DIR, else search/freezes/) and the repository golden files.",
+        nargs="+",
+        help="Freeze directories, golden files and tune DB files to import — for the offline prior, the hardware goldens "
+        "emmy/compiler/pipeline/search/golden/records/*.json (README, 'Fit the offline prior'). Nothing is imported by default.",
     )
     pi.add_argument("--db", help="Dataset DB to fill (default: EMMY_DATASET_DB or ~/.cache/emmy/dataset.db).")
     pi.add_argument("--fresh", action="store_true", help="Delete the dataset DB first, so it holds exactly these sources.")
@@ -61,26 +62,12 @@ def register_dataset_command(subparsers) -> None:
 
 
 def handle_dataset_import(args) -> None:
-    from emmy.compiler.pipeline.search.golden.repository import repository_golden_paths  # noqa: PLC0415
-
-    db_path = Path(args.db).expanduser() if args.db else config.dataset_db_path()
-    # The repository paths live only inside their context (a wheel unpacks its recipes there), so the import runs in it.
-    with repository_golden_paths() as goldens:
-        _import(args, db_path, [Path(s).expanduser() for s in args.sources], goldens)
-    logger.info("dataset DB: %s", db_path)
-
-
-def _import(args, db_path: Path, sources: list[Path], goldens: list[Path]) -> None:
     from emmy.compiler.pipeline.search.data.freeze import write_freeze  # noqa: PLC0415
     from emmy.compiler.pipeline.search.db import SearchDB  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden.evidence import file_source, import_file  # noqa: PLC0415
 
-    if not sources:
-        freeze = config.freeze_path()
-        sources = ([freeze] if freeze.is_dir() and any(freeze.glob("*.json")) else []) + list(goldens)
-        if not sources:
-            logger.error("nothing to import: no measurement freeze at %s and no repository golden files", freeze)
-            sys.exit(2)
+    db_path = Path(args.db).expanduser() if args.db else config.dataset_db_path()
+    sources = [Path(s).expanduser() for s in args.sources]
     for src in sources:
         if not src.exists():
             logger.error("no freeze directory, golden file or tune DB at %s", src)
@@ -112,6 +99,7 @@ def _import(args, db_path: Path, sources: list[Path], goldens: list[Path]) -> No
                     sys.exit(2)
     finally:
         db.close()
+    logger.info("dataset DB: %s", db_path)
 
 
 def handle_dataset_freeze(args) -> None:
@@ -143,39 +131,13 @@ def handle_dataset_check(args) -> None:
 
 
 def dataset_db(db_arg: str | None) -> Path:
-    """The DB instance a measurement-data reader reads: ``--db`` when given, else the dataset DB.
-
-    Exits with the fixing command when the file is missing, or when the DEFAULT dataset DB does not hold
-    every file of the checked-in measurement freeze and every repository golden file — a report computed over
-    another freeze's rows, or an old golden's, would carry today's label and yesterday's numbers. An explicit
-    ``--db`` is read as it is."""
-    from emmy.compiler.pipeline.search.db import SearchDB  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden.evidence import file_source  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden.repository import repository_golden_paths  # noqa: PLC0415
-
-    if db_arg:
-        path = Path(db_arg).expanduser()
-        if not path.is_file():
-            logger.error("no DB at %s", path)
-            sys.exit(2)
-        return path
-    path = config.dataset_db_path()
+    """The DB instance a measurement-data reader reads: ``--db`` when given, else the dataset DB. Exits with the
+    command that fills it when the file is missing. What the instance holds is what was imported into it — the
+    reader names its sources — and nothing checks that against the repository."""
+    path = Path(db_arg).expanduser() if db_arg else config.dataset_db_path()
     if not path.is_file():
-        logger.error("no dataset DB at %s — run `emmy dataset import` to fill it from the measurement freeze and the goldens", path)
+        logger.error("no DB at %s — fill it with `emmy dataset import --fresh SOURCES…` (README, 'Fit the offline prior')", path)
         sys.exit(2)
-    freeze = config.freeze_path()
-    want = {file_source("freeze", f): f for f in sorted(freeze.glob("*.json"))} if freeze.is_dir() else {}
-    with repository_golden_paths() as goldens:
-        want.update((file_source("golden", f), f) for f in goldens)
-    if want:
-        db = SearchDB.open_readonly(path)
-        try:
-            held = db.sources()
-        finally:
-            db.close()
-        if missing := sorted(str(file) for source, file in want.items() if source not in held):
-            logger.error("dataset DB %s lacks the current %s — run `emmy dataset import --fresh`", path, ", ".join(missing))
-            sys.exit(2)
     return path
 
 

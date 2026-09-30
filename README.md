@@ -179,6 +179,30 @@ __launch_bounds__(256) void k_rms_norm_reduce(const float* x, const float* p_wei
 }
 ```
 
+## Fit the offline prior
+
+The offline prior is the cold-start ranker a compile falls back on where nothing was measured. It is fitted on the
+golden files, GPU-free, and ships in the repo as `emmy/compiler/pipeline/search/prior/offline_weights.json`. The fit
+reads the dataset DB, and nothing fills that DB but the import below, so a refit is three commands:
+
+```bash
+# 1. Load the hardware goldens into the dataset DB (--fresh: the DB then holds exactly these files)
+emmy dataset import --fresh emmy/compiler/pipeline/search/golden/records/*.json
+# 2. Fit the offline prior from it; --artifact with no path rewrites the checked-in weights file
+emmy fit --artifact
+# 3. Where each golden row now ranks among the candidates its kernel offers, under the shipped weights
+emmy eval prior --dataset golden
+```
+
+`emmy fit` writes a metrics file and the fitted weights under `_tune/fits/<timestamp>-linear/`; two fits are compared
+by diffing their metrics files. `--folds 0` skips the cross-validation for a quick fit, `--pool-sample 0` enumerates
+whole candidate pools instead of 2000 rows per pool, `--trainer catboost` fits the tree model instead of the linear
+one, and `--db PATH` fits from another instance. Any golden-shaped source joins the import the same way: the recipe
+goldens (`recipes/*/golden/*.json`) would add every model's measured rows, a tune DB (`~/.cache/emmy/autotune.db`)
+adds what this machine measured, a freeze directory adds a snapshot from another card. The hardware goldens alone are
+the documented set today; the recipe goldens are the first thing to add when the prior needs more shapes. Refit after
+any featurizer change: an artifact fitted under another feature version is refused at load, never guessed at.
+
 ## Benchmark
 
 ```bash

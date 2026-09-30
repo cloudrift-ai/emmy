@@ -365,8 +365,7 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   tuning continues, so a number computed over either cannot be checked by anyone else. A freeze is identical wherever
   it is read, which is what makes two models' scores a fair comparison and a reported score something a reader can
   reproduce, and `emmy dataset import` re-lowers every kernel from its definition, so a compiler change is a re-import.
-  When one is kept with the repository the import loads it into the dataset DB by default, beside the golden files;
-  none is at the moment.
+  One kept with the repository is named on the import command line like any other source; none is at the moment.
 - **Deploy evidence hierarchy** — The fixed order in which an ordinary compile answers a tuning choice: measured
   evidence first — the reservoir, then the tune database's rows, the golden rows in scope imported among them, the
   fastest compatible row winning — then the prior's prediction, and last the rule's own first option. A structural

@@ -25,9 +25,9 @@ not frozen again.
 
 Freezing the same rows twice yields the same bytes: rows sort by content and the golden dump is
 deterministic. A file's identity is its bytes — ``emmy dataset import`` sources its rows as
-``freeze:<sha256[:12]>`` of the file (``golden.evidence.file_source``), which is what ``commands.dataset.dataset_db``
-checks the default dataset DB holds for every file of the checked-in freeze directory
-(``config.freeze_path``, payload in git LFS).
+``freeze:<sha256[:12]>`` of the file (``golden.evidence.file_source``), so a report over a dataset DB names the
+exact snapshot it was computed over. A freeze checked into the repository lives under ``search/freezes/`` (payload
+in git LFS) and is named on the import command line like any other source.
 
 Produced by ``emmy dataset freeze``.
 """

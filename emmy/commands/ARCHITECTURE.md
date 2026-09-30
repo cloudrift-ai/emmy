@@ -809,18 +809,19 @@ GCP project is inferred from `gcloud` config. CloudRift reads `CLOUDRIFT_API_KEY
 
 ### `emmy dataset`
 
-The dataset DB (`EMMY_DATASET_DB`) is the tune DB's tables in a file of their own, read by `emmy eval prior` and
-`emmy fit` and never by a compile. `import [SOURCES…] [--db PATH] [--fresh]` fills it: a source is a measurement
-freeze directory, a golden file, or a tune DB file, which is frozen first; with none named it loads the checked-in
-freeze (when there is one) and every repository golden file. Every kernel is re-lowered from its definition through
+The dataset DB (`EMMY_DATASET_DB`) is the tune DB's tables in a file of their own, read by `emmy eval prior` and `emmy
+fit` and never by a compile. `import SOURCES… [--db PATH] [--fresh]` fills it, and nothing else does: a source is a
+measurement freeze directory, a golden file, or a tune DB file, which is frozen first — for the offline prior, the
+hardware goldens `search/golden/records/*.json` under `--fresh` (README, "Fit the offline prior"); the recipe goldens
+and a tune DB are the sources to add when the fit needs more. Every kernel is re-lowered from its definition through
 the lowering passes by the current compiler (`golden.evidence.import_goldens`), once per precision regime the file's
 rows record, and its rows are sourced by the file's kind and digest — `freeze:` for a freeze directory's files,
-`golden:` for a golden file; a source the instance already holds is skipped, and `--fresh` rebuilds from nothing.
-A held file is recorded in the `source` table whatever became of its rows, and the readers
-(`commands/dataset.dataset_db`) refuse a default instance missing a freeze file or a repository golden, naming it. `freeze --out DIR [--db PATH]` writes an instance's
-admitted rows (`data/freeze.freeze_reason`) as a golden file per card — the artifact that gets checked in. `check
-[--db PATH]` counts the rows of an instance whose tables disagree with themselves (`SearchDB.drift`) and exits
-non-zero when any do.
+`golden:` for a golden file; a source the instance already holds is skipped, and `--fresh` rebuilds from nothing. A
+held file is recorded in the `source` table whatever became of its rows, so naming a file again is a no-op and a
+report can list its sources; the readers (`commands/dataset.dataset_db`) refuse a missing instance and read a present
+one as it is. `freeze --out DIR [--db PATH]` writes an instance's admitted rows (`data/freeze.freeze_reason`) as a
+golden file per card — the artifact that gets checked in. `check [--db PATH]` counts the rows of an instance whose
+tables disagree with themselves (`SearchDB.drift`) and exits non-zero when any do.
 
 ### `emmy fit`
 
@@ -910,6 +911,7 @@ both seeding policies and the ranking loss the fit ran under; two fits are only 
 same way they must match on `--features`.
 
 ```bash
+emmy dataset import --fresh emmy/compiler/pipeline/search/golden/records/*.json   # the pools the fit reads
 emmy fit                                  # linear x golden, 5 shape folds, metrics under _tune/fits/
 emmy fit --folds 0 --out _tune/fits/ab    # full-train only, fixed run dir for an A/B
 ```

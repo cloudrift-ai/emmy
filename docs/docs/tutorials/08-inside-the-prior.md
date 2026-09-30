@@ -67,9 +67,10 @@ page](./06-deploy-evidence-hierarchy.md), where golden configurations still deci
 option.)
 
 **It is fitted on the golden configurations**, by `emmy fit`, read from the dataset database (the previous page's
-store, which `emmy dataset import` fills from the golden files by default). For each kernel a golden row was measured
-on, the fitter enumerates the candidates that kernel offers — from the kernel's own definition, as the database holds
-it — and trains the weights to rank the recorded configuration well inside that set. The loss has two parts:
+store, filled by `emmy dataset import` from the golden files named on its command line). For each kernel a golden row
+was measured on, the fitter enumerates the candidates that kernel offers — from the kernel's own definition, as the
+database holds it — and trains the weights to rank the recorded configuration well inside that set. The loss has two
+parts:
 
 - an objective pushing each golden's rank up within its own candidate set, with the kinds of case weighted so that no
   one kind dominates the fit;
@@ -171,12 +172,11 @@ buried, while making sure the offline factor's arbitrary magnitude never touches
 ## See it yourself
 
 Evaluate both halves against the golden configurations — where each recorded configuration ranks among the candidates
-it competed against. Both read the dataset database, so fill it first; with nothing named, the import loads the golden
-files (and the checked-in freeze, when there is one). Both halves are reported side by side, labelled, because they
-fail for different reasons:
+it competed against. Both read the dataset database, so fill it first from the hardware golden files; nothing fills it
+on its own. Both halves are reported side by side, labelled, because they fail for different reasons:
 
 ```bash
-emmy dataset import
+emmy dataset import --fresh emmy/compiler/pipeline/search/golden/records/*.json
 emmy eval prior --dataset golden
 ```
 

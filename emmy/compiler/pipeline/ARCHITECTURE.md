@@ -81,7 +81,7 @@ lifetimes, and telling them apart is the single most useful thing to learn early
 | **Golden configs** | model goldens under `recipes/<model>/golden/`; model-agnostic ones under `search/golden/records/` | promoted from deployable `run --bench` golden / `--ab` rows (Part 7) | greedy compile — measured rows in the one evidence index (the per-card files, or `--golden PATH`); `run --golden PATH --bench` measures them; `emmy dataset import` loads them into the dataset DB, where `emmy fit` and `emmy eval prior --dataset golden` read them |
 | **Reservoir** | inside the online prior checkpoint (`~/.cache/emmy/online.json`) — the sample of past measurements the model trains on | `emmy tune` — every deployable-regime training row | greedy compile (measured evidence, consulted first); the online prior's own refits |
 | **`perf` table** | the tune DB (`~/.cache/emmy/autotune.db`), beside the `kernel` and `routing` rows its rows are of | `emmy tune` — one measurement per compilable kernel it benched, at the sweep's flags; `run --bench` — every clean pinned row (golden / `--ab`) and the greedy re-bench, per kernel, through the tuner's own writer | greedy compile (measured evidence); the per-variant replay cache |
-| **Dataset DB** | `~/.cache/emmy/dataset.db` — the same tables in a file of their own | `emmy dataset import`, from measurement freezes (`search/freezes/` when one is checked in), the repository golden files and tune DB files — every kernel re-lowered from its definition | `emmy eval prior` (both datasets) and `emmy fit` — **never** a deploy |
+| **Dataset DB** | `~/.cache/emmy/dataset.db` — the same tables in a file of their own | `emmy dataset import`, from the freeze directories, golden files and tune DB files named on its command line (the hardware goldens `search/golden/records/*.json` for the offline prior; nothing by default) — every kernel re-lowered from its definition | `emmy eval prior` (both datasets) and `emmy fit` — **never** a deploy |
 
 Of the four, only the goldens travel with a clone: they are the only *measured* data a fresh machine has. The
 reservoir and the tune DB are machine-local caches written by local tunes, so a freshly rented box starts with the
@@ -1313,14 +1313,15 @@ writes — and nothing else is written that way.
 - **Freezing the same DB twice yields the same bytes**: rows sort by content, and the golden dump is deterministic.
   A file's identity is its bytes: `emmy dataset import` sources its rows by the file's kind and digest —
   `freeze:<sha256[:12]>` for a freeze directory's files, `golden:<sha256[:12]>` for a golden file
-  (`golden.evidence.file_source`) — and `commands/dataset.dataset_db` refuses a default dataset DB that does not hold
-  every file of the checked-in freeze, when one is, and every repository golden file, naming the missing file and
-  the command that fixes it. A held file is a fact of its own (the `source` table, written by the import whatever
+  (`golden.evidence.file_source`) — so a report over an instance names the exact files it was computed over, and
+  naming a file again is a no-op. A held file is a fact of its own (the `source` table, written by the import whatever
   became of the file's rows), so a golden none of whose rows is a measurement — a restamped one keeps its schedules
   and loses its microseconds — is held and simply contributes no row.
 - **Importing re-lowers.** `emmy dataset import` reads freeze directories, golden files and tune DBs (frozen first,
-  so one path serves all) — by default the checked-in freeze and the repository golden files — and hands each file's
-  records to the golden importer (`golden.evidence.import_goldens`) once per regime the file holds, entering at the
+  so one path serves all) named on its command line — nothing by default; the hardware goldens
+  `search/golden/records/*.json` are the offline prior's documented set (README, "Fit the offline prior") — and hands
+  each file's records to the golden importer (`golden.evidence.import_goldens`) once per regime the file holds,
+  entering at the
   LOWERING passes as the tuner runs a slice. Every kernel comes back with the current compiler's exact identity and
   stamps, and a definition the compiler no longer lowers is counted, not guessed at. A compiler change is therefore
   a re-import (`--fresh`), never a re-collection. A golden file's rows are what `emmy fit` and `eval prior --dataset
