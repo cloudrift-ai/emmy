@@ -696,10 +696,15 @@ def _run_golden_targets(args) -> None:
     targets: dict[int, list] = {}
     for record in records:
         targets.setdefault(id(lead_of(record, records)), []).append(record)
-    names = [
-        next((row.name for row in rows if row.identity is None), min(rows, key=lambda r: (not r.is_routing, r.emmy_us)).name)
-        for rows in targets.values()
-    ]
+    def target_name(rows):
+        inventory = next((row for row in rows if row.identity is None), None)
+        if inventory is not None:
+            return inventory.name
+        root_routes = [row for row in rows if row.is_routing and row.identity == rows[0].identity]
+        routes = root_routes or [row for row in rows if row.is_routing]
+        return min(routes or rows, key=lambda row: row.emmy_us).name
+
+    names = [target_name(rows) for rows in targets.values()]
 
     output_dir = None
     if len(names) > 1 and args.json:
