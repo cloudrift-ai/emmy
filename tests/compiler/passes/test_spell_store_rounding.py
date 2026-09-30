@@ -50,7 +50,7 @@ def _reduce_kernel() -> LoopOp:
 
 
 def _pointwise_kernel() -> LoopOp:
-    """``out[a0] = exp(x[a0])`` — an Assign already carries its input's width."""
+    """``out[a0] = exp(x[a0])`` — the public f16 store rounds the computed value."""
     return LoopOp(
         body=(
             Loop(
@@ -165,10 +165,45 @@ def test_matching_dtype_spells_nothing() -> None:
     assert _conversions(op) == []
 
 
-def test_non_accumulator_value_spells_nothing() -> None:
-    """An ``Assign`` chain carries its inputs' width — narrowing it would INVENT a rounding."""
+def test_public_pointwise_store_spells_its_rounding() -> None:
+    """A fused consumer must see the rounded f16 output of a pointwise operation."""
     op = _run(_pointwise_kernel(), Tensor("out", (4,), F16), input_shape=(4,))
-    assert _conversions(op) == []
+    assert _conversions(op) == [F16]
+
+
+@pytest.mark.parametrize("dtype, expected", [(F16, [F16]), (F32, [F32, F16])])
+def test_explicit_copy_only_rounds_when_wider_than_store(dtype: DataType, expected: list[DataType]) -> None:
+    kernel = LoopOp(
+        body=(
+            Loop(
+                axis=A0,
+                body=(
+                    Load(name="value", input="x", index=(Var("a0"),)),
+                    Assign(name="cast", op="copy", args=("value",), dtype=dtype),
+                    Write(output="out", index=(Var("a0"),), value="cast"),
+                ),
+            ),
+        ),
+    )
+    op = _run(kernel, Tensor("out", (4,), F16), input_shape=(4,))
+    assert _conversions(op) == expected
+
+
+def test_two_fused_adds_round_between_operations() -> None:
+    graph = Graph()
+    for name in ("x", "y", "z"):
+        graph.add_node(InputOp(), [], Tensor(name, (4,), F16), node_id=name)
+    graph.add_node(_add_kernel("x", "y", "middle"), ["x", "y"], Tensor("middle", (4,), F16), node_id="middle")
+    graph.add_node(_add_kernel("middle", "z", "out"), ["middle", "z"], Tensor("out", (4,), F16), node_id="out")
+    graph.inputs = ["x", "y", "z"]
+    graph.outputs = ["out"]
+
+    fused = Pipeline.build(["loop/lifting", "loop/fusion"]).run(graph)
+    (kernel,) = [node.op for node in fused.nodes.values() if isinstance(node.op, LoopOp)]
+    copies = [s for s in kernel.body.iter() if isinstance(s, Assign) and s.op.name == "copy" and s.dtype == F16]
+    adds = [s for s in kernel.body.iter() if isinstance(s, Assign) and s.op.name == "add"]
+    assert len(copies) == 1
+    assert any(copies[0].name in add.args for add in adds)
 
 
 @pytest.mark.parametrize("dtype", [F16, F32])
@@ -208,10 +243,10 @@ def test_public_copy_of_private_reduction_keeps_its_rounding_through_placement()
 
 
 def test_public_computation_from_private_reduction_stays_full_width() -> None:
-    """A private reduction used by public computation is not itself a rounding boundary."""
+    """The private reduction stays wide, while the public pointwise result rounds."""
     fused = Pipeline.build(["loop/lifting", "loop/fusion"]).run(_private_reduction_graph(public_copy=False))
     kernel = next(node.op for node in fused.nodes.values() if isinstance(node.op, LoopOp))
-    assert _conversions(kernel) == []
+    assert _conversions(kernel) == [F16]
 
 
 def test_a_reshaped_matmul_result_keeps_its_rounding_into_the_next_matmul() -> None:

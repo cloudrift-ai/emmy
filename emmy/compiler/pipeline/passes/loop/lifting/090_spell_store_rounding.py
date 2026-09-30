@@ -16,8 +16,9 @@ projection epilogue, and no pass needs a private channel for "this edge also con
 same boundary can appear one node later when a decomposition writes the accumulator to a transient
 shape buffer and a pass-through LoopOp copies it to the public buffer. The transient never stored,
 so that direct load still carries the accumulator's width and the public copy performs the source
-program's rounding. An ``Assign`` chain already carries its inputs' width, so narrowing it here
-would introduce a rounding the reference never performed.
+program's rounding. A public f16/bf16 pointwise result also needs its store rounding spelled when
+its ``Assign`` is not already typed to the buffer dtype: fusion can carry a wider input through
+that result into a later operation.
 
 **Which stores need it spelled.** Only one whose buffer something READS. The rounding has to
 survive fusion, and fusion is what deletes the store — but a buffer with no consumer is never
@@ -38,7 +39,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from emmy.compiler.dtype import F32
+from emmy.compiler.dtype import BF16, F16, F32
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.loop import Accum, Assign, Load, LoopOp, Write
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
@@ -75,14 +76,16 @@ def rewrite(match: Match, root: Node) -> LoopOp:
     for write, _scope in meta.writes:
         if not write.is_scalar:
             continue
-        value_dtype = _accum_dtype(graph, meta, write)
-        if value_dtype is None:
-            continue
         buffer = graph.buffer(write.output)
-        if buffer is None or buffer.transient or buffer.dtype == value_dtype:
+        if buffer is None or buffer.transient:
             continue
         if not graph.buffer_users(write.output):
             continue  # nothing reads it, so no fusion can delete the store that rounds
+        value = meta.defs.get(write.value)
+        value_dtype = _accum_dtype(graph, meta, write)
+        pointwise = isinstance(value, Assign) and value.dtype != buffer.dtype and buffer.dtype in {F16, BF16}
+        if not pointwise and (value_dtype is None or buffer.dtype == value_dtype):
+            continue
         name = f"{write.output}__st"
         while name in taken:
             name += "_"
