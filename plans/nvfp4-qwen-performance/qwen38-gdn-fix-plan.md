@@ -249,7 +249,7 @@ Stage deliverables are cumulative. The following sketches are intended results, 
 | ✅ 3. Output domains | One correct placement of computation and stores, with sibling-domain regression tests | Lowered IR has sibling `(a0,a1[,a6])` and `(a8,a10)/(a8,a11)` nests. Store counts are proportional to the sum of the output sizes. The real kernel set completes under the watchdog with correct outputs. |
 | ✅ 4. Padding | Constant zero-fill padding through existing index maps | Tensor IR expresses `y[t,d] = x[t,d] if t < T else 0`; guarded Loop/Kernel loads are in bounds; short GDN traces succeed and returned sequence length remains T. |
 | ✅ 5. Projections | Legal tensor-core routes for qkv and z, with measured cut/schedule alternatives | Tile IR offers activation-A / weight-B contractions with MMA TILE; emitted CUDA contains the expected MMA instructions; reference comparisons pass and measured latency is reported. |
-| 🚧 6. Serving | GDN capture and explicit persistent state, delivered separately if needed | `prefill(x,S0,H0) → (y,S1,H1)` followed by `decode(x1,S1,H1) → (y1,S2,H2)` matches an independent reference; H is convolution history; reset and request isolation pass. Mixed fallback is labelled separately. |
+| ✅ 6. Capture and state handoff | Static GDN capture and explicit state contract; native request dispatch remains the separate follow-up below | `prefill(x,S0,H0) → (y,S1,H1)` followed by `decode(x1,S1,H1) → (y1,S2,H2)` matches an independent reference; H is convolution history; reset and request isolation pass. This proves the block contract, not whole-model serving. |
 | 🚧 7. Review | Validated PR(s), measurements, updated docs and tracker | Required finalization checks pass, scope and remaining gaps are explicit, and the tracker changes to ✅ only with the ready-for-review fix PR. |
 
 - CPU tests preserve repack roles for both A/B and modern/Volta layouts; the checkpoint's actual loopification
@@ -510,6 +510,19 @@ shared-workstation runs do not establish a before/after compile-time comparison.
 The final full suite is now running on the 5090 with eight workers, the current tracked source and a freshly built
 Rust extension. Its first recipe-history check required adding Git history to the previously archive-only checkout;
 that check now passes independently. No other agent's remote files or environments were changed.
+
+Main advanced during finalization to `e702de5d` (#966, packed NVFP4 staging in cut matmul pieces). It is merged into
+this branch at `af63a978`. The change re-forms computed-operand contractions inside their output grid so activation
+remains A and packed weight becomes B, restoring async/TMA byte-slab staging. It complements the projection fixes;
+it does not replace the recurrence, seed-stride, output-domain or padding repairs. All six packed-cut regression
+checks and all 111 Qwen3.8 golden checks pass on the combined branch. The latter include row decoding and fresh
+target lowering and completed in 105.11 seconds. The superseded remote full run was stopped and the final gate restarted on
+this revision with Git history already present.
+
+After the workstation restart, the 5090 SSH endpoint refused connections, so that remote run's final result is
+not yet available. The local checkout, matching runtime and completed checks survived. The full combined-branch
+suite restarted locally with four workers and temporary Bash/Git mounts; it collected 8,516 tests. Local runs
+remain correctness checks, not performance measurements.
 
 ### Native serving follow-up boundary
 
