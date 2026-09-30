@@ -195,6 +195,9 @@ kernel it produced went on to read.
   (dynamic grid), strided rows, and the tensor-core `warp_tile` are reserved future tiers.
 - **Kernel → CUDA** (after `lowering/cuda`): `KernelOp` replaced by
   `CudaOp` carrying rendered source.
+- **Every buffer index spells every dim of its buffer**, `0` at a size-one dim. `render_index` flattens it
+  row-major for both the CUDA render and the Loop IR C++ runner, and refuses any other count: without strides the
+  coordinates cannot be summed into an address. A single coordinate is an already-flat address.
 
 Multi-output ABI order always comes from `Node.buffer_names()`: matcher population reorders a body-carrying op's
 input/output maps to the graph ports after body normalization, Loop execution returns outputs in that order,
