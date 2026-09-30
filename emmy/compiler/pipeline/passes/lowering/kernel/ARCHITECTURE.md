@@ -135,7 +135,7 @@ loop under the one name, while a name the replicated TAIL defines that is spelle
 states is renamed apart first (`_unshadowed`): both would take the same cell suffix and land on that cell's
 accumulator, two declarations of one name in one scope, and a tail that recomputes the carrier's own fold has
 exactly that shape (a cone that reads one fold through two edges lowers it twice as EQUAL statements instead, which
-the seam and the computed-B fill collapse to the first — `stmt.body.dedup_recomputes` — before any replication);
+`Body.coalesce` keeps the first while assembling the lowering and the seam, before any replication);
 anything else tiles nothing and folds one thread per
 output cell (the degenerate `op.lower()` + `with_store`) — except a kernel whose ONLY work is a free output sweep,
 which distributes that sweep across its `WORK` threads through the same `_lane_close` a cooperating reduce uses for

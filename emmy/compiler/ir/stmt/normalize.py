@@ -27,7 +27,7 @@ from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
 from emmy.compiler.ir.stmt.body import Body, free_names
 from emmy.compiler.ir.stmt.leaves import Accum, Assign, Init, Load, SelectBranch, Write
-from emmy.compiler.ir.stmt.order import _ordered_exported_accs, bound_axes, ordering_constraints, relation_graph, topological_sort
+from emmy.compiler.ir.stmt.order import bound_axes, ordering_constraints, relation_graph, topological_sort
 
 __all__ = ["normalize_body"]
 
@@ -53,28 +53,18 @@ def _normalize_body(stmts: Body) -> Body:
     stmts = drop_size_one_reduce_axes(stmts)
     stmts = canonicalize_free_axis_order(stmts)
     stmts = eliminate_copy_aliases(stmts)
-    stmts = unify_sibling_reduce_axes(stmts)
     stmts = merge_sibling_reduce_loops(stmts)
     stmts = hoist_loop_invariants(stmts)
     stmts = simplify_body(stmts)
     stmts = dedup_loads(stmts)
-    # Hoisting, simplification, and a parent merge can expose sibling reductions after the first
-    # merge. Close that dependency here: unifying their axes may enable a merge, which may then
-    # expose duplicate loads and require one new canonical order. Every changed round removes a
-    # loop or a load, so this reaches a fixed point without a fixed iteration bound.
-    stmts = _canonical_order(stmts)
+    # Close the structural cleanup before labeling the relation graph. Coordinate spelling
+    # exposes duplicates without paying for canonical sibling order at every round.
+    stmts = _canonicalize_exprs(stmts)
     while True:
-        # Unification renames sibling reduce axes in place: an order-preserving alpha-rename the
-        # relation graph never spelled, so the graph the order came from still describes it.
-        unified = unify_sibling_reduce_axes(stmts)
-        if unified == stmts:
-            unified = stmts
-        else:
-            unified.__dict__["_ordering"] = stmts._ordering
-        reduced = dedup_loads(merge_sibling_reduce_loops(unified))
-        if reduced == unified:
-            return unified
-        stmts = _canonical_order(reduced)
+        reduced = dedup_loads(merge_sibling_reduce_loops(stmts))
+        if reduced == stmts:
+            return _canonical_order(reduced)
+        stmts = _canonicalize_exprs(reduced)
 
 
 # ---------------------------------------------------------------------------
@@ -287,10 +277,9 @@ def eliminate_copy_aliases(stmts: Body) -> Body:
     copies as bridges between producer writes and consumer reads; a long
     chain stacks them. Every such Assign is dropped and downstream
     references to ``y`` are rewired to the alias root. Pure IR hygiene."""
-    from emmy.compiler.ir.stmt.passes import rename_free  # noqa: PLC0415
 
-    def walk(body: Body) -> Body:
-        alias: dict[str, str] = {}
+    def walk(body: Body, inherited: dict[str, str]) -> Body:
+        alias = {name: value for name, value in inherited.items() if name not in body.ssa_defs}
 
         def resolve(name: str) -> str:
             seen: set[str] = set()
@@ -304,47 +293,17 @@ def eliminate_copy_aliases(stmts: Body) -> Body:
             if isinstance(stmt, Assign) and stmt.op.name == "copy" and len(stmt.args) == 1 and stmt.dtype is None:
                 alias[stmt.name] = resolve(stmt.args[0])
                 continue
-            if stmt.nested():
-                # Apply aliases from the enclosing scope hygienically, then give each child its
-                # own alias table. A spelling reused by sibling bodies denotes separate binders.
-                stmt = rename_free(stmt, alias)
-                stmt = stmt.with_bodies(tuple(walk(child) for child in stmt.nested()))
-                out.append(stmt)
-            else:
-                out.append(stmt.rewrite(resolve))
+            children = stmt.nested()
+            shell = stmt.with_bodies(tuple(Body() for _ in children)).rewrite(resolve)
+            out.append(shell.with_bodies(tuple(walk(child, alias) for child in children)))
         return Body(out)
 
-    return walk(Body.coerce(stmts))
+    return walk(Body.coerce(stmts), {})
 
 
 # ---------------------------------------------------------------------------
 # Pass 4: unify sibling reduce-loop axis names
 # ---------------------------------------------------------------------------
-
-
-def unify_sibling_reduce_axes(stmts: Body) -> Body:
-    """At every scope, find sibling reduce ``Loop``s whose reduce axes
-    index overlapping ``(Load.source, dim)`` positions and rename them
-    to a single canonical axis name. Recurses through every block-
-    structured Stmt (Loop / StridedLoop / Tile / Cond) to find nested
-    scopes."""
-    stmts = Body.coerce(stmts)
-
-    def walk(body: Body) -> Body:
-        # Recurse into nested bodies first (post-order) via the canonical
-        # nested() / with_bodies() descent, then group siblings at this
-        # scope. Splitting the recursion from the sibling-grouping keeps
-        # this pass's scope-level logic isolated in ``_unify_siblings``.
-        recursed: list[Stmt] = []
-        for s in body:
-            nested = s.nested()
-            if nested:
-                recursed.append(s.with_bodies(tuple(walk(b) for b in nested)))
-            else:
-                recursed.append(s)
-        return _unify_siblings(Body(recursed))
-
-    return walk(stmts)
 
 
 def _unify_siblings(body: Body) -> Body:
@@ -467,7 +426,7 @@ def _reduce_axis_source_positions(body: Body, reduce_axis_name: str) -> set[tupl
 # Pass 4b: merge sibling reduce Loops with matching axis into one Loop.
 # ---------------------------------------------------------------------------
 #
-# After :func:`unify_sibling_reduce_axes` renames sibling reduce axes
+# After :func:`_unify_siblings` renames sibling reduce axes
 # that index overlapping ``(source, dim)`` positions to one canonical
 # name, adjacent reduce Loops with the same axis name/extent become
 # structurally identical iteration scopes. Merging concatenates their
@@ -509,19 +468,20 @@ def merge_sibling_reduce_loops(stmts: Body) -> Body:
     statements that originally followed it now resolve to the merged
     Loop above them — still defs-before-uses.
 
-    Recurses through every block-structured Stmt to find nested scopes.
+    Unifies overlapping reduction axes and merges parents before visiting their children, so a
+    parent merge exposes matching child reductions to the same walk.
     """
     stmts = Body.coerce(stmts)
 
     def walk(body: Body) -> Body:
         recursed: list[Stmt] = []
-        for s in body:
+        for s in _merge_sibling_reduce_loops(_unify_siblings(body)):
             nested = s.nested()
             if nested:
                 recursed.append(s.with_bodies(tuple(walk(b) for b in nested)))
             else:
                 recursed.append(s)
-        return _merge_sibling_reduce_loops(Body(recursed))
+        return Body(recursed)
 
     return walk(stmts)
 
@@ -794,8 +754,10 @@ def dedup_loads(stmts: Body) -> Body:
             elif isinstance(s, Assign | Accum):
                 s = rename_free(s, alias)
                 key = (
-                    ("assign", s.op, s.args, s.dtype) if isinstance(s, Assign) else ("accum", s.value, s.op, s.dtype, s.axes, repr(s.base))
-                ) + (s.deps(),)
+                    ("assign", s.op, tuple(sorted(s.args)) if s.op.commutative else s.args, s.dtype)
+                    if isinstance(s, Assign)
+                    else ("accum", s.value, s.op, s.dtype, s.axes, repr(s.base))
+                ) + (frozenset(s.deps()),)
                 if key in local:
                     alias[s.name] = local[key][0]
                     if isinstance(s, Accum):
@@ -893,7 +855,7 @@ class _SequentialScope:
         children = stmt.nested()
         if children:
             for child in children:
-                for name in _ordered_exported_accs(child):
+                for name in child.carried_names:
                     self._allocate(name, "acc")
         else:
             for name in stmt.defines():
@@ -913,7 +875,7 @@ class _SequentialScope:
         shell = stmt.with_bodies(tuple(Body() for _ in children)) if children else stmt
         renamed = shell.rename(names)
         if children:
-            exported = frozenset(name for child in children for name in _ordered_exported_accs(child))
+            exported = frozenset(name for child in children for name in child.carried_names)
             renamed_children: list[Body] = []
             for child in children:
                 scope = _SequentialScope(
@@ -984,6 +946,9 @@ def _canonical_order(stmts: Body) -> Body:
     stmts = _canonicalize_exprs(stmts)
     ordered, ordering = relation_graph(stmts).label().materialize(spelled=True)
     result = Body.coerce(sort_commutative_args(rename_ssa_sequential(ordered)))
+    # Sequential naming separates lexical binders. Restore shared reduction dimensions without
+    # merging dependent loops or changing the order represented by the relation graph.
+    result = _unify_siblings(result.map(lambda stmt: stmt.with_bodies(tuple(_unify_siblings(child) for child in stmt.nested()))))
     result.__dict__["_ordering"] = ordering
     return result
 

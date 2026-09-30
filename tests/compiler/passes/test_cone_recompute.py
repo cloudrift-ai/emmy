@@ -22,7 +22,6 @@ from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.schedule import Tile, Work
 from emmy.compiler.ir.schedule.views import cone_seam
 from emmy.compiler.ir.stmt import Body, Load, Loop, Write
-from emmy.compiler.ir.stmt.body import dedup_recomputes
 from emmy.compiler.ir.stmt.leaves import Assign
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import _hoist_k_invariant, reduce_codegen, store_sink
 from emmy.compiler.pipeline.passes.lowering.kernel._tiling import atomize, grid_tile, register_tile, unit_tile
@@ -62,10 +61,13 @@ def test_the_seam_lowers_a_twice_read_fold_once() -> None:
 
 
 def test_dedup_keeps_a_repeated_effect_and_the_first_definition() -> None:
-    fold = tuple(_pv().lower(axes=(S,)))
-    twice = (*fold, *fold)
-    assert dedup_recomputes(twice) == fold
-    assert dedup_recomputes(fold) == fold
+    fold = _pv().lower(axes=(S,))
+    assert (fold + fold).coalesce() == fold
+    assert fold.coalesce() == fold
+    write = Write(output="out", index=(Var("m"), Var("k")), value="acc", atomic=True)
+    assert Body((*fold, *fold, write, write)).coalesce() == (*fold, write, write)
+    effectful = Loop(axis=S, body=(*fold, write))
+    assert Body((effectful, effectful)).coalesce() == (effectful, effectful)
 
 
 def _norm_linear() -> tuple:
