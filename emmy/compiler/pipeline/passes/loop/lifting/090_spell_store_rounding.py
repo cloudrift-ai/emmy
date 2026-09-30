@@ -82,9 +82,10 @@ def rewrite(match: Match, root: Node) -> LoopOp:
         if not graph.buffer_users(write.output):
             continue  # nothing reads it, so no fusion can delete the store that rounds
         value = meta.defs.get(write.value)
-        value_dtype = _accum_dtype(graph, meta, write)
-        pointwise = isinstance(value, Assign) and value.dtype != buffer.dtype and buffer.dtype in {F16, BF16}
-        if not pointwise and (value_dtype is None or buffer.dtype == value_dtype):
+        value_dtype = (
+            value.dtype or F32 if isinstance(value, Assign) and buffer.dtype in {F16, BF16} else _accum_dtype(graph, meta, write)
+        )
+        if value_dtype is None or buffer.dtype == value_dtype:
             continue
         name = f"{write.output}__st"
         while name in taken:
