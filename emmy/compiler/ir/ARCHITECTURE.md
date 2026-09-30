@@ -554,8 +554,11 @@ different variable, and renaming it both redeclares the survivor inside the scop
 the outer value. `passes.rename_free(stmt, alias)` is the hygienic form: it prunes the alias of whatever each child
 scope re-binds before descending. It rewrites the wrapper with empty child bodies, then visits each child once;
 rewriting the full subtree first would repeat and discard work at every enclosing level.
-`normalize.dedup_loads` applies the same rule while threading its own per-scope
-environment. σ has the same hazard with axis names, which collide across a tree by design (a cone statistic's axis
+If an alias's destination is shadowed, the local binding is renamed before substitution to prevent capture.
+`Body.local_defs` distinguishes bindings at this scope from definitions in deeper scopes; a deeper shadow must not
+hide an available enclosing value. Copy elimination and CSE both use the hygienic rewrite.
+`normalize.dedup_loads` threads its own per-scope environment. σ has the same hazard with axis names, which collide
+across a tree by design (a cone statistic's axis
 may spell the same as the enclosing contraction's): `fold.subst_free(stmt, sigma)` is σ's hygienic form — it stops at
 a `Loop` / reducing `Fold` binder that re-binds a substituted name, and is what the smem compute fill substitutes
 cell coordinates through.
@@ -568,7 +571,8 @@ canonicalized before validation:
 
 Fusion may construct a compact body containing scalar `Call` statements. Each references one read-only `Subroutine`
 with explicit coordinate parameters and captured input buffers. Early ordering, alias elimination, invariant motion
-and coordinate simplification operate on the calls; each shared definition is prepared once. Before full CSE, calls
+and coordinate simplification operate on the calls; each shared definition is prepared once. Identical calls to the
+same definition share by argument structure without searching their bodies. Before full CSE, calls
 expand through the splicer's same demand table and reduction-axis unification. The resulting ordinary statement body
 is the only form used by validation, executable identity, serialization and Tile IR lifting. Operation clustering
 also starts from that CSE form, so it sees operations inside definitions. Subroutine boundaries never limit fusion.
@@ -612,16 +616,25 @@ also starts from that CSE form, so it sees operations inside definitions. Subrou
   linear in definitions × loop depth instead of materializing the quadratic full SSA dependency closure.
   Division retains its own rounding even when its denominator is invariant; reciprocal multiplication can change
   quantization at a rounding boundary and is not a normalization.
-- `dedup_loads` — after expression simplification, keep one `Load` for each identical
-  `(input, index, width, dtype)` read in a scope and rewire every scalar or vector lane. A write invalidates retained
+- `dedup_loads` — scoped value numbering after expression normalization. Structural keys retain every semantic field
+  and replace output names with anonymous result positions; neither expression printing nor `repr` determines value
+  equality. Keep one equivalent pure binding and rewire every scalar or vector lane. A write invalidates retained
   reads of that buffer, including around a nested scope with a write. Entering a scope also drops cached values whose
   definitions or dependencies are rebound there; an identical index spelling can name a different loop coordinate.
-  The same walk keeps one `Assign` per identical operation over identical arguments, treating commutative operands
-  as unordered after alias substitution, and one `Accum` per identical accumulation. A value the loop tree computes
+  The same walk handles expressions, selections, carried-state reads and compact calls. Selection predicates are
+  dependencies too. Assignments treat commutative operands as unordered after alias substitution; floating-point
+  reassociation is not an equivalence. One-update reductions with the same implicit seed and no reads of partial
+  state also share. Repeated updates, explicitly initialized or unseeded accumulators, and staged load assignments
+  retain their state transitions; changing a state invalidates dependent available values. A value the loop tree computes
   twice (a contraction spelled on both sides of a cut seam, a repeated pure expression) folds to one definition, and
   an accumulator alias carries out of the loop that defined it to the scope that reads the sum. This is
   canonicalization for every Loop / Tile body, not a fusion profitability decision; the structural key inherits it,
   so two bodies that differ by a repeated computation key alike.
+- `hoist_common_branches` — move a pure computation executed by both branches to their enclosing scope when every
+  ordering predecessor can move on both paths. Operand substitution then exposes the next common computation. This
+  shares complete common cones while preserving writes and ordered protocols; it never speculates a load present
+  on only one path. Loop invariants and fused reduction bodies provide availability across loop scopes. These rules
+  do not claim general partial redundancy elimination.
 - `rename_ssa_sequential` — cosmetic: `Load` names become `in0, in1, …`, accumulator state becomes `acc0, …`, and
   every other definition becomes `v0, v1, …`, in lexical definition order. Names stay globally unique while each
   nested body tracks its own binders, so sibling scopes may reuse the same source spelling without collapsing. Axis
@@ -633,8 +646,18 @@ also starts from that CSE form, so it sees operations inside definitions. Subrou
   differ only by argument order land in the same canonical form.
   Runs last so the sort key is the post-rename canonical SSA / buffer
   names.
-- Reduction merging and duplicate elimination reach a fixed point before canonical ordering. Coordinate expressions
-  normalize between rounds to expose duplicates; commutative duplicates resolve during alias substitution. The final
+- Preparation, coordinate normalization, common-branch motion and value numbering run to a joint fixed point before
+  canonical ordering. Each round includes simplification, copy elimination, loop-invariant motion and reduction
+  fusion, so an equality exposed by CSE can remove an axis dependency or expose a new merge in the next round.
+  Within a pure acyclic scope, bottom-up operand substitution eliminates every structurally congruent computation
+  whose representative is available. Legal motion and fusion expose additional availability; equality alone does
+  not justify moving a value across a scope or effect.
+  Affine integer expressions over bound loop coordinates have a unique coefficient form in lexical axis order.
+  For proven nonnegative indices, positive constant quotient chains collapse to one divisor, and `/` and `//` share
+  that spelling. Range-proven div/mod decomposition and quotient/remainder reconstruction run in the same closure.
+  This is a defined arithmetic contract, not completeness for arbitrary expressions containing division, modulo,
+  symbolic products or floating-point arithmetic. Unsupported expressions compare structurally after these rewrites.
+  Maximal sharing under these rules is separate from stable identity. The final
   ordering pass builds one colored relation graph for the complete body tree and chooses one dependency- and
   effect-valid statement order. Vertices represent
   scopes, statements, lexical definitions, axes, source axes, and external buffers; colored relations retain operand
