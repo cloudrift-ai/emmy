@@ -431,6 +431,11 @@ def test_family_value_reads_bare_or_suffixed():
     assert family_value({"REDUCE": "coop"}, "TILE") is None
 
 
+def test_reduce_family_validation_accepts_output_lanes_without_an_inventory() -> None:
+    assert knob_mod.validate_family_value("REDUCE", "coop-t") == "coop-t"
+    assert knob_mod.validate_family_value("REDUCE", "coop-t/n8") == "coop-t/n8"
+
+
 def test_pin_key_matches():
     """A global pin covers every site; a site pin matches only that exact site."""
     assert pin_key_matches("TILE", "TILE")
