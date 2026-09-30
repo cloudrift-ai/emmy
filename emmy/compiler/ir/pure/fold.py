@@ -39,6 +39,7 @@ from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.pure.twist import Recipe, Twist
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Load, Loop, OutputSpec, Pre, Select, Stmt
+from emmy.compiler.ir.stmt.body import free_names
 
 # ``Body.structural_key()`` dispatches :func:`emmy.compiler.ir.stmt.passes.rewrite` over every
 # stmt for SSA / Expr / axis canonicalization. Register the structural node's handler here — an
@@ -1472,6 +1473,14 @@ class Fold:
                 emitted[key] = term, target
             if term.axis is None:
                 step = term.step()
+                # A step reading nothing the tree binds or defines (a multi-output root's constant result)
+                # needs no coordinate, so it sits at the top of its path.
+                reads = {name for stmt in step for name in free_names(stmt)} - {name for stmt in step for name in stmt.defines()}
+                if step and stmts is None and not reads & {*term.lift.params, *origin}:
+                    node = nest.path_of(frozenset(), path)
+                    nest.sink(node).extend(step)
+                    attach(term, "step", nest.sink(node), node, nest.bound | set(node), nest)
+                    step = ()
                 for edge in placed(term):
                     place(edge, loops, node if step else path, nest)
                 if step:

@@ -58,15 +58,21 @@ def _walk(body: Body, written: frozenset[str], ctx: SimplifyCtx) -> Body:
             stmt = stmt.with_bodies(tuple(_walk(b, written, inner) for b in nested))
         stmts.append(stmt)
     unrolled: list[Stmt] = []
-    changed = False
+    loops = 0
     for stmt in stmts:
         trips = _trips(stmt, ctx)
         if trips is None:
             unrolled.append(stmt)
             continue
-        changed = True
-        unrolled.extend(_unroll(stmt, trips))
-    if not changed:
+        # Sibling loops over independently spliced cones bind the same names, each in its own C scope.
+        # Flattened into one, a repeat would be a second declaration: give such a loop's trips their own.
+        trip_stmts = _unroll(stmt, trips, "")
+        bound = {name for s in unrolled for name in s.defines()}
+        if any(name in bound for s in trip_stmts if not isinstance(s, (Init, Accum)) for name in s.defines()):
+            trip_stmts = _unroll(stmt, trips, f"_{loops}")
+        unrolled.extend(trip_stmts)
+        loops += 1
+    if not loops:
         return Body(tuple(stmts))
     return Body(tuple(_reuse(unrolled, written, ctx)))
 
@@ -89,7 +95,7 @@ def _trips(stmt: Stmt, ctx: SimplifyCtx) -> int | None:
     return extent // step
 
 
-def _unroll(loop: StridedLoop, trips: int) -> list[Stmt]:
+def _unroll(loop: StridedLoop, trips: int, tag: str) -> list[Stmt]:
     carried = {s.name for s in loop.body if isinstance(s, Accum)}
     out: list[Stmt] = []
     if loop.seed:
@@ -102,7 +108,7 @@ def _unroll(loop: StridedLoop, trips: int) -> list[Stmt]:
     for k in range(trips):
         coord = BinaryExpr("+", loop.start, Literal(k * loop.step.value, "int"))
         sigma = Sigma({loop.axis.name: coord})
-        suffix = f"__u{k}"
+        suffix = f"__u{k}{tag}"
         for s in loop.body:
             out.append(s.rewrite(lambda name, suffix=suffix: f"{name}{suffix}" if name in defined else name, sigma))
     return out
@@ -116,7 +122,12 @@ def _reuse(stmts: list[Stmt], written: frozenset[str], ctx: SimplifyCtx) -> list
     out: list[Stmt] = []
     for stmt in stmts:
         if rename:
-            stmt = stmt.rewrite(lambda name: rename.get(name, name))
+            # A name the statement defines, itself or anywhere in a nested body (a staging loop unrolled
+            # on its own, with trip names of its own), is a new value: only uses of this body's dropped
+            # loads are renamed. Renaming a nested trip's definition onto an outer one declared the
+            # outer name twice in one C scope.
+            local = {name for s in Body((stmt,)).iter() for name in s.defines()}
+            stmt = stmt.rewrite(lambda name, local=local: name if name in local else rename.get(name, name))
         if isinstance(stmt, Load) and stmt.is_scalar and stmt.input not in written and not stmt.carried:
             stmt = replace(stmt, index=tuple(e.simplify(ctx) for e in stmt.index))
             key = (stmt.input, stmt.dtype, tuple(_canonical(e) for e in stmt.index))
