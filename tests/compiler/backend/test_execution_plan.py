@@ -307,9 +307,7 @@ def test_reciprocal_load_op_rebinds_after_plan_json_round_trip():
     """A saved plan replays the same f32 reciprocal as direct constant binding."""
     source = np.array([[0.1, 0.03, 2.0, 4.0]] * 4, dtype=np.float32)
     ops = (ElementwiseOp(op="reciprocal"),)
-    plan = _one_weight_plan(
-        ConstantOp(name="w", source_path="model.w", source_shape=(4, 4), source_dtype="f32", load_ops=ops)
-    )
+    plan = _one_weight_plan(ConstantOp(name="w", source_path="model.w", source_shape=(4, 4), source_dtype="f32", load_ops=ops))
     wire = json.loads(json.dumps(plan_to_dict(plan)))
     assert wire["weights"]["w"]["ops"] == [["reciprocal", []]]
     restored = plan_from_dict(wire)

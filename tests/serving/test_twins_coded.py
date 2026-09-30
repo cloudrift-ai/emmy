@@ -760,7 +760,7 @@ def test_nvfp4_mlp_capture_matches_serving_stamp_in_bf16(tmp_path):
 
     _nvfp4_checkpoint(tmp_path)
     twins = capture_mlp_graphs(tmp_path, 64, 128, 2)
-    assert set(twins) == {"mlp16@nvfp4", "mlp-sym@nvfp4"}
+    assert set(twins) == {"mlp16@nvfp4", "mlp64@nvfp4"}
     for graph in twins.values():
         graph.validate()
         assert len(_packed_weights(graph)) == 3
@@ -782,7 +782,7 @@ def test_nvfp4_mlp_capture_matches_serving_stamp_in_bf16(tmp_path):
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr("emmy.compiler.backend.cuda.backend.CudaBackend", CaptureBackend)
-        for name, rows, argnames in (("mlp16@nvfp4", 16, None), ("mlp-sym@nvfp4", 8, ["x"])):
+        for name, rows, argnames in (("mlp16@nvfp4", 16, None), ("mlp64@nvfp4", 64, None)):
             with pytest.raises(Stamped) as caught:
                 _compile_split(module, [torch.zeros(rows, 64, dtype=torch.bfloat16)], argnames, np.dtype("float32"), ckpt=ckpt)
             assert _structure(caught.value.graph) == _structure(twins[name])
@@ -796,7 +796,8 @@ def test_nvfp4_mlp_capture_accepts_rank_zero_stored_scales(tmp_path):
 
     _nvfp4_checkpoint(tmp_path, scalar_scales=True)
     assert len(layer_profiles(tmp_path, 2)) == 1
-    assert set(capture_mlp_graphs(tmp_path, 64, 128, 2)) == {"mlp16@nvfp4", "mlp-sym@nvfp4"}
+    assert set(capture_mlp_graphs(tmp_path, 64, 128, 2)) == {"mlp16@nvfp4", "mlp64@nvfp4"}
+    assert set(capture_mlp_graphs(tmp_path, 64, 128, 2, prefill_rows=None)) == {"mlp16@nvfp4", "mlp-sym@nvfp4"}
 
 
 def _structure(graph: Graph):

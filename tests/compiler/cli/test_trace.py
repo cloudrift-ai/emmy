@@ -176,7 +176,7 @@ def test_trace_mlp_scope_writes_only_mlp_inventory(monkeypatch, tmp_path) -> Non
 
     def fake_capture(model, serving):
         seen.update(model=model, scope=serving.compile_scope)
-        return {"mlp16@nvfp4": static_graph, "mlp-sym@nvfp4": symbolic_graph}
+        return {"mlp16@nvfp4": static_graph, "mlp64@nvfp4": symbolic_graph}
 
     monkeypatch.setattr(twins, "capture_serving_graphs", fake_capture)
     output = tmp_path / "mlp.json"
@@ -190,10 +190,10 @@ def test_trace_mlp_scope_writes_only_mlp_inventory(monkeypatch, tmp_path) -> Non
     assert seen == {"model": "local-checkpoint", "scope": "mlp"}
     document = GoldenFile.load(output)
     assert document.model == "org/model"
-    assert {record.name.split(".", 1)[0] for record in document.records()} == {"mlp16@nvfp4", "mlp-sym@nvfp4"}
+    assert {record.name.split(".", 1)[0] for record in document.records()} == {"mlp16@nvfp4", "mlp64@nvfp4"}
     assert {(record.name.split(".", 1)[0], record.bindings) for record in document.records()} == {
         ("mlp16@nvfp4", (("num_tokens", 16),)),
-        ("mlp-sym@nvfp4", ()),
+        ("mlp64@nvfp4", (("num_tokens", 64),)),
     }
 
 

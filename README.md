@@ -259,18 +259,18 @@ emmy serve Qwen/Qwen3-Embedding-0.6B --bench --random-input-len 32 --stock
 
 For the pinned 27B ModelOpt NVFP4 checkpoint on one RTX 5090, `--compile-scope mlp` keeps vLLM 0.23's Qwen3.5
 hybrid model, attention, GDN state, scheduling, and non-MLP quantized loader. Emmy compiles the 64 dense text MLPs
-in BF16. This lane is still being qualified; the draft implementation PR records its measured limits.
+in BF16. Decode uses a padded M=16 static program and prefill uses a padded M=64 program, each with scoped native
+FP4 MMA pins. This lane is still being qualified; draft implementation PR #993 records its limits.
 
 ```bash
-export EMMY_KNOBS='FAST_MATH=false,PLACE@map.1/map=cut,PLACE@map.1/map.2/inner=cut,PLACE@map.1/map.3/reduce.1/inner=cut,PLACE@map.2/map=cut,PLACE@map.2/map.2/reduce.1/inner=cut,WORK=w1x4,TILE=,STAGE=,REDUCE=,RASTER='
-emmy serve Inferact/Qwen3.8-27B-NVFP4@6128240ebaf4eaa7bad2b3d1c72c37d677c5f462 \
-  --runner generate --compile-scope mlp --dtype bfloat16 --max-model-len 4096 \
-  --max-num-seqs 1 --max-num-batched-tokens 64 --language-model-only \
-  --enforce-eager --no-enable-prefix-caching
+scripts/serve_qwen38_nvfp4_mixed_5090.sh
 ```
 
-This explicit pin is a functional scalar baseline. Current warm latency is slower than stock vLLM; the progress
-report records the exact 5090 measurements and open numerical checks. The adapter rejects an unpinned Emmy compile.
+The recipe pins the checkpoint, vLLM envelope, compiler precision, shared cuts, and static-only native schedule.
+On five warm 5-input/16-output requests, the M=16/M=64 route measured 272 ms mean TTFT and 9.87 decode tokens/s,
+versus stock 288 ms and 9.08 tokens/s. The earlier scalar route measured 617 ms and 2.25 tokens/s. For one
+4,005-input/16-output request, native prefill took 11.55 s versus stock 12.45 s; earlier symbolic scalar prefill
+took 224 s. Broader numerical qualification remains open. The adapter rejects an unpinned Emmy compile.
 
 ## Experimental native generation
 

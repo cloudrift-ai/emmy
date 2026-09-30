@@ -10,7 +10,7 @@ import torch
 from torch import nn
 from vllm.model_executor.models.qwen3_5 import Qwen3_5ForConditionalGeneration
 
-from emmy.serving.mlp import MLP_STATIC_ROWS, MLPPrograms, checkpoint_keys, text_prefix
+from emmy.serving.mlp import MLP_PREFILL_ROWS, MLP_STATIC_ROWS, MLPPrograms, checkpoint_keys, text_prefix
 
 logger = logging.getLogger(__name__)
 
@@ -132,9 +132,12 @@ class EmmyQwen35MlpModel(Qwen3_5ForConditionalGeneration):
             dtype=torch.bfloat16,
             capacity=self._emmy_capacity,
             static_rows=MLP_STATIC_ROWS,
+            prefill_rows=MLP_PREFILL_ROWS,
         )
         logger.info(
             "Emmy bound %d packed BF16 MLP programs at token capacity %d (static rows %d)",
-            self._emmy_layers, self._emmy_capacity, MLP_STATIC_ROWS,
+            self._emmy_layers,
+            self._emmy_capacity,
+            MLP_STATIC_ROWS,
         )
         return loaded

@@ -1565,9 +1565,7 @@ def _w4a4_graph(modules, *, k=32, dtype="f32"):
 def _static_quantize_ref(x, s2):
     """The spelled quantize's f32 activation algebra, with exact division in NumPy."""
     blocks = x.astype(np.float32).reshape(*x.shape[:-1], -1, 16)
-    ratio = (np.abs(blocks).max(axis=-1) * (np.float32(1) / np.float32(6))) * (
-        np.float32(1) / np.float32(s2)
-    )
+    ratio = (np.abs(blocks).max(axis=-1) * (np.float32(1) / np.float32(6))) * (np.float32(1) / np.float32(s2))
     scale_bits = encode_f8(ratio, "f8e4m3")
     decoded = decode_f8(scale_bits, "f8e4m3")
     fused = decoded * np.float32(s2)

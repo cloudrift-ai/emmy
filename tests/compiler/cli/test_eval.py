@@ -147,13 +147,13 @@ def test_eval_golden_requires_every_mlp_profile_graph(monkeypatch, tmp_path, cap
     monkeypatch.setattr(Context, "probe", staticmethod(lambda: ctx))
     monkeypatch.setattr(eval_cmd, "_emit_offer_audit", lambda _records: False)
     monkeypatch.setattr(
-        twins, "capture_serving_graphs", lambda source, serving: {"mlp16@nvfp4": object(), "mlp-sym-profile1@nvfp4": object()}
+        twins, "capture_serving_graphs", lambda source, serving: {"mlp16@nvfp4": object(), "mlp64-profile1@nvfp4": object()}
     )
 
     with pytest.raises(SystemExit) as exc:
         eval_cmd.handle_eval_golden(SimpleNamespace(golden=str(golden), serving_config=str(config)))
     assert exc.value.code == 1
-    assert "mlp-sym-profile1@nvfp4" in caplog.text
+    assert "mlp64-profile1@nvfp4" in caplog.text
 
 
 def _write_release_golden(path: Path, realizations: list[dict]) -> None:

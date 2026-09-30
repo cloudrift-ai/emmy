@@ -44,6 +44,7 @@ DEBUG = "EMMY_DEBUG"
 DUMP_DIR = "EMMY_DUMP_DIR"
 KNOBS = "EMMY_KNOBS"
 MLP_STATIC_KNOBS = "EMMY_MLP_STATIC_KNOBS"
+MLP_PREFILL_KNOBS = "EMMY_MLP_PREFILL_KNOBS"
 TUNE_PATIENCE = "EMMY_TUNE_PATIENCE"
 TUNE_EPS = "EMMY_TUNE_EPS"
 OFFLINE_TILT = "EMMY_OFFLINE_TILT"
@@ -100,6 +101,11 @@ def knobs_aggregate() -> str:
 def mlp_static_knobs() -> str:
     """Extra pins applied only while compiling the mixed MLP's static decode program."""
     return _str(MLP_STATIC_KNOBS)
+
+
+def mlp_prefill_knobs() -> str:
+    """Extra pins applied only while compiling the mixed MLP's prefill program."""
+    return _str(MLP_PREFILL_KNOBS)
 
 
 def set_knob(name: str, value: str, *, overwrite: bool = True) -> bool:

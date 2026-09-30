@@ -185,17 +185,17 @@ def _realizations(values: dict[str, str], source: Path, *, static_only: bool) ->
 
 
 def _mlp_realizations(values: dict[str, str], source: Path) -> tuple[ServingRealization, ...]:
-    from emmy.serving.mlp import MLP_STATIC_ROWS
+    from emmy.serving.mlp import MLP_PREFILL_ROWS, MLP_STATIC_ROWS
 
     maximum = _integer(values, "SERVE_MAX_NUM_BATCHED_TOKENS", minimum=2)
-    required = {"SERVE_DECODE_BUCKET": str(MLP_STATIC_ROWS), "SERVE_PREFILL_BUCKET": "0"}
+    required = {"SERVE_DECODE_BUCKET": str(MLP_STATIC_ROWS), "SERVE_PREFILL_BUCKET": str(MLP_PREFILL_ROWS)}
     wrong = {key: values[key] for key, expected in required.items() if key in values and values[key] != expected}
     if maximum > 64 or wrong or values.get("SERVE_WARM_SHAPES", "").strip() or values.get("SERVE_STATIC_ONLY", "0") != "0":
-        raise ValueError(f"{source}: mlp scope requires static M={MLP_STATIC_ROWS} and symbolic width <=64 with no warm shapes")
+        raise ValueError(f"{source}: mlp scope requires static M={MLP_STATIC_ROWS} and M={MLP_PREFILL_ROWS} with no warm shapes")
     pins = (("FAST_MATH", False),)
     return (
         ServingRealization(f"m{MLP_STATIC_ROWS}", (("num_tokens", MLP_STATIC_ROWS),), pins),
-        ServingRealization("dynamic", (), pins),
+        ServingRealization(f"m{MLP_PREFILL_ROWS}", (("num_tokens", MLP_PREFILL_ROWS),), pins),
     )
 
 

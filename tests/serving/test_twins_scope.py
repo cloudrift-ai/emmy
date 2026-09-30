@@ -76,7 +76,7 @@ def test_static_only_release_config_rejects_unsafe_warm_overrides(tmp_path, warm
         load_serving_config(path)
 
 
-def test_mlp_release_scope_has_padded_static_and_symbolic_realizations(tmp_path):
+def test_mlp_release_scope_has_padded_static_decode_and_prefill_realizations(tmp_path):
     path = _release_config(
         tmp_path / "mlp.env",
         SERVE_COMPILE_SCOPE="mlp",
@@ -84,25 +84,27 @@ def test_mlp_release_scope_has_padded_static_and_symbolic_realizations(tmp_path)
         SERVE_MAX_NUM_BATCHED_TOKENS="64",
         SERVE_DECODE_BUCKET="16",
         SERVE_PREFILL_CAPACITY="64",
+        SERVE_PREFILL_BUCKET="64",
     )
     serving = load_serving_config(path)
     assert serving.compile_scope == "mlp"
-    assert serving.static_widths == (16,)
+    assert serving.static_widths == (16, 64)
     assert {(row.name, row.bindings) for row in serving.realizations} == {
         ("m16", (("num_tokens", 16),)),
-        ("dynamic", ()),
+        ("m64", (("num_tokens", 64),)),
     }
 
 
 @pytest.mark.parametrize(
-    "field,value", [("SERVE_MAX_NUM_BATCHED_TOKENS", "65"), ("SERVE_WARM_SHAPES", "8::64"), ("SERVE_DECODE_BUCKET", "2")]
+    "field,value",
+    [("SERVE_MAX_NUM_BATCHED_TOKENS", "65"), ("SERVE_WARM_SHAPES", "8::64"), ("SERVE_DECODE_BUCKET", "2"), ("SERVE_PREFILL_BUCKET", "0")],
 )
 def test_mlp_release_scope_rejects_wider_envelopes(tmp_path, field, value):
     path = _release_config(
         tmp_path / "mlp.env",
         SERVE_COMPILE_SCOPE="mlp",
         SERVE_STATIC_ONLY="0",
-        **{"SERVE_MAX_NUM_BATCHED_TOKENS": "64", "SERVE_DECODE_BUCKET": "16", field: value},
+        **{"SERVE_MAX_NUM_BATCHED_TOKENS": "64", "SERVE_DECODE_BUCKET": "16", "SERVE_PREFILL_BUCKET": "64", field: value},
     )
     with pytest.raises(ValueError, match="mlp scope"):
         load_serving_config(path)

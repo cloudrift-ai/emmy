@@ -61,7 +61,8 @@ def test_compile_split_feeds_bf16_input_as_bits(monkeypatch, input_dtype):
             self.weight = torch.nn.Parameter(torch.tensor([1.0, -2.0, 3.14], dtype=torch.bfloat16))
 
     plan = SimpleNamespace(
-        inputs=["x"], outputs=["y"],
+        inputs=["x"],
+        outputs=["y"],
         weights={"weight": WeightSpec(source_path="weight", graph_dtype="bf16")},
         buffers=[SimpleNamespace(name="x", dtype=BF16), SimpleNamespace(name="weight", dtype=BF16)],
     )
