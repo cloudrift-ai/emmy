@@ -62,9 +62,12 @@ onboarding work; it is not a benchmark score and does not affect serving behavio
 legacy recipes and sorts as null until the next discovery run.
 
 `recipe_catalog()` is the shared repository scan behind `emmy recipe list` and model-discovery validation. The
-versioned JSON document produced by `recipe_inventory_document()` adds the directory name, lifecycle-aware runnable
-state, whether any variant serves through Emmy, and each matrix-expanded deployment's effective context length to the identity, tags, task, rationale, and
-heat.
+versioned JSON document produced by `recipe_inventory_document()` (schema version 2) adds the directory name,
+lifecycle-aware runnable state, whether any variant serves through Emmy, and one entry per matrix-expanded
+deployment — its GPU, GPU count, GPU memory fraction (`engine.llm.gpu_memory_utilization`, default 0.9) and
+effective context length — to the identity, tags, task, rationale, and heat. Deployments are unique per (GPU, count,
+fraction): a recipe that may share its GPU lists a reduced-fraction entry beside its whole-GPU one, each with its
+own qualified context length, and both appear.
 This is the machine interface used by other services: consumers reject unknown `schema_version` values, while Emmy
 may add fields without removing or redefining fields in the current version. Editable installs read the checkout's
 live top-level `recipes/` and wheel installs read their packaged runnable recipes. `recipe list` deliberately exposes
@@ -87,7 +90,7 @@ The row fields are grouped by ownership:
 | `model_id`, `name`, `recipe_path`, `tags`, `lifecycle`, `task`, `runnable`, `rationale`, `heat` | Compact catalog metadata |
 | `emmy_serving` | Some matrix variant serves through the Emmy vLLM plugin (an `Emmy*Model` architecture override) |
 | `operation`, `expected_lifecycle` | Lifecycle-derived onboarding or verification action |
-| `deployment.index`, `deployment.gpu`, `deployment.gpu_count`, `deployment.context_length` | One declared or explicitly requested setup |
+| `deployment.index`, `deployment.gpu`, `deployment.gpu_count`, `deployment.gpu_memory_utilization`, `deployment.context_length` | One declared or explicitly requested setup |
 | `deployment.availability.cloudrift` | Exact-count capacity reported by CloudRift |
 | `results.path`, `results.last_run_at` | Sibling report path and its last committed change |
 | `provider.cloudrift.team_access` | Whether the configured key can act for the configured team UUID |
@@ -413,10 +416,13 @@ _load_raw_config(recipe_dir) -> raw dict
     +-- load_recipe(): strips matrices, calls _validate_and_build()
     |       -> base Recipe (for bench/cloud commands that don't need matrix resolution)
     |
-    +-- resolve_for_hardware(recipe_dir, gpu_name): expands full matrix,
-    |       finds best combo matching gpu_name, deep_merges with base,
-    |       calls _validate_and_build()
-    |       -> hardware-resolved Recipe (for deploy local/ssh commands)
+    +-- resolve_for_hardware(recipe_dir, gpu_name, gpu_count, gpu_memory_utilization):
+    |       expands full matrix, keeps the combos naming gpu_name, picks one:
+    |       with a fraction, the exact (count, fraction) entry and nothing else (a plan);
+    |       else the highest fraction among exact-count entries, else the largest
+    |       count dividing gpu_count (scale-out), else the first entry (no count);
+    |       deep_merges with base, calls _validate_and_build()
+    |       -> hardware-resolved Recipe (for the deploy commands)
     |
     +-- enumerate_tasks(): reads matrices, expands via cross/zip:
             |-- expand_matrix() -> list of combinations

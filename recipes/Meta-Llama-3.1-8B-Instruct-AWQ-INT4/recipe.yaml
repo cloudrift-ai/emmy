@@ -37,3 +37,12 @@ matrices:
   - deploy.gpu: "NVIDIA Tesla V100 SXM3 32GB"
     deploy.gpu_count: 1
     engine.llm.context_length: 131072
+
+  # Reduced-fraction entry so this model can share the 32 GB card with the FP16 recipe at 0.65.
+  # The 176864 KV tokens measured at 0.88 put weights and overhead near 6.6 GiB, so 0.3 x 32 GiB
+  # leaves ~3 GiB of KV: one and a half 16,384-token requests. Unverified until a record run on
+  # the card.
+  - deploy.gpu: "NVIDIA Tesla V100 SXM3 32GB"
+    deploy.gpu_count: 1
+    engine.llm.gpu_memory_utilization: 0.3
+    engine.llm.context_length: 16384
