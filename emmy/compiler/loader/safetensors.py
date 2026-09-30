@@ -81,7 +81,9 @@ def warn_if_unpinned(model_id_or_path: str) -> None:
         )
 
 
-def _resolve_model_dir(model_id_or_path: str, revision: str | None = None) -> Path:
+def _resolve_model_dir(
+    model_id_or_path: str, revision: str | None = None, *, cache_dir: str | None = None, local_files_only: bool = False
+) -> Path:
     """Return a local directory containing the model's safetensors files.
 
     If the argument is an existing directory, use it as-is. Otherwise treat it as an HF repo id
@@ -97,7 +99,7 @@ def _resolve_model_dir(model_id_or_path: str, revision: str | None = None) -> Pa
         warn_if_unpinned(repo)
     from huggingface_hub import snapshot_download
 
-    return Path(snapshot_download(repo, revision=revision))
+    return Path(snapshot_download(repo, revision=revision, cache_dir=cache_dir, local_files_only=local_files_only))
 
 
 def _build_index(model_dir: Path) -> dict[str, Path]:

@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import shlex
 import types
 from pathlib import Path
 
@@ -202,6 +203,67 @@ def test_serve_cmd_generate_branch():
     stock_cmd = build_serve_cmd(MODEL, stock=True, vllm_args=[], generate=True)
     assert "--gpu-memory-utilization=0.9" in stock_cmd
     assert "--attention-backend" not in stock_cmd
+
+
+@pytest.mark.parametrize("scope_before_model", [False, True])
+def test_serve_compile_scope_mlp_dry_run_preserves_quantization(tmp_path, capsys, scope_before_model):
+    quantization = {"quant_method": "modelopt", "quant_algo": "NVFP4"}
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "qwen3_5", "quantization_config": quantization}))
+    argv = ["serve", "--compile-scope", "mlp", str(tmp_path)] if scope_before_model else ["serve", str(tmp_path), "--compile-scope", "mlp"]
+    args = _parse([*argv, "--runner", "generate", "--dry-run"])
+    handle_serve(args)
+    cmd = shlex.split(capsys.readouterr().out.strip())
+
+    assert "--compile-scope" not in cmd
+    assert json.loads(cmd[cmd.index("--hf-overrides") + 1]) == {"architectures": ["EmmyQwen35MlpModel"]}
+    assert "quantization_config" in json.loads((tmp_path / "config.json").read_text())
+    assert "--quantization" not in cmd
+    for flag, value in (
+        ("--runner", "generate"),
+        ("--dtype", "bfloat16"),
+        ("--tensor-parallel-size", "1"),
+        ("--pipeline-parallel-size", "1"),
+        ("--max-num-seqs", "1"),
+        ("--max-num-batched-tokens", "64"),
+    ):
+        assert cmd[cmd.index(flag) + 1] == value
+    assert {"--language-model-only", "--enforce-eager", "--no-enable-prefix-caching"} <= set(cmd)
+    assert "--compilation-config" not in cmd and "--speculative-config" not in cmd
+
+
+def test_serve_compile_scope_mlp_keeps_compatible_user_limits():
+    user_args = ["--dtype=bf16", "--tp", "1", "--pp=1", "--max-num-batched-tokens", "32", "--max-num-seqs=1", "--enforce-eager"]
+    cmd = build_serve_cmd(MODEL, stock=False, vllm_args=user_args, generate=True, compile_scope="mlp")
+    assert cmd[-len(user_args) :] == user_args
+    assert "--dtype" not in cmd and cmd.count("--max-num-batched-tokens") == 1
+    assert "--tensor-parallel-size" not in cmd and "--pipeline-parallel-size" not in cmd
+    assert cmd.count("--enforce-eager") == 1
+
+
+@pytest.mark.parametrize(
+    "vllm_args",
+    [
+        ["--dtype", "float16"],
+        ["--tensor-parallel-size", "2"],
+        ["--tp", "2"],
+        ["--pipeline-parallel-size=2"],
+        ["--pp=2"],
+        ["--max-num-seqs", "2"],
+        ["--max-num-batched-tokens", "65"],
+        ["--enable-prefix-caching"],
+        ["--speculative-config", "{}"],
+        ["--hf-overrides", "{}"],
+    ],
+)
+def test_serve_compile_scope_mlp_rejects_incompatible_flags(vllm_args):
+    with pytest.raises(ValueError, match="--compile-scope mlp"):
+        build_serve_cmd(MODEL, stock=False, vllm_args=vllm_args, generate=True, compile_scope="mlp")
+
+
+@pytest.mark.parametrize("stock, generate", [(True, True), (False, False)])
+def test_serve_compile_scope_mlp_requires_plugin_generation(stock, generate):
+    with pytest.raises(ValueError, match="--compile-scope mlp"):
+        build_serve_cmd(MODEL, stock=stock, vllm_args=[], generate=generate, compile_scope="mlp")
 
 
 def test_serve_cmd_generate_capture_sizes_follow_max_num_seqs():

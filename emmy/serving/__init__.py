@@ -27,3 +27,5 @@ def register() -> None:
         ModelRegistry.register_model("EmmyEmbedModel", "emmy.serving.vllm_model:EmmyEmbedModel")
     if "EmmyGenModel" not in ModelRegistry.get_supported_archs():
         ModelRegistry.register_model("EmmyGenModel", "emmy.serving.vllm_model_gen:EmmyGenModel")
+    if "EmmyQwen35MlpModel" not in ModelRegistry.get_supported_archs():
+        ModelRegistry.register_model("EmmyQwen35MlpModel", "emmy.serving.vllm_qwen_mlp:EmmyQwen35MlpModel")

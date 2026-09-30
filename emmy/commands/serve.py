@@ -62,6 +62,7 @@ def _add_own_flags(parser, *, suppress_defaults: bool) -> None:
     parser.add_argument(
         "--stock", action="store_true", default=d(False), help="Serve stock vLLM kernels instead of the emmy plugin (A/B baseline)."
     )
+    parser.add_argument("--compile-scope", choices=("mlp",), default=d(None), help="Compile only the MLP with emmy (generate runner).")
     parser.add_argument(
         "--bench",
         action="store_true",
@@ -379,14 +380,60 @@ def serving_runner(model: str, vllm_args: list[str]) -> str:
     return "generate"
 
 
-def build_serve_cmd(model: str, *, stock: bool, vllm_args: list[str], generate: bool = False) -> list[str]:
+def build_serve_cmd(
+    model: str, *, stock: bool, vllm_args: list[str], generate: bool = False, compile_scope: str | None = None
+) -> list[str]:
     from emmy import config as emmy_config  # noqa: PLC0415
+
+    if compile_scope is not None:
+        if compile_scope != "mlp":
+            raise ValueError(f"unknown compile scope {compile_scope!r}")
+        if stock or not generate:
+            raise ValueError("--compile-scope mlp requires an emmy generate runner without --stock")
+        if _has_flag(vllm_args, "--hf-overrides"):
+            raise ValueError("--compile-scope mlp sets --hf-overrides; remove the supplied override")
+        if _has_flag(vllm_args, "--speculative-config"):
+            raise ValueError("--compile-scope mlp does not support speculative decoding")
+        if _has_flag(vllm_args, "--enable-prefix-caching"):
+            raise ValueError("--compile-scope mlp requires prefix caching disabled")
+        if _has_flag(vllm_args, "--runner") and _flag_value(vllm_args, "--runner", "") != "generate":
+            raise ValueError("--compile-scope mlp requires --runner generate")
+        required = (
+            ("--tensor-parallel-size", ("--tp", "-tp"), "1"),
+            ("--pipeline-parallel-size", ("--pp", "-pp"), "1"),
+            ("--max-num-seqs", (), "1"),
+        )
+        for flag, aliases, value in required:
+            for spelling in (flag, *aliases):
+                if _has_flag(vllm_args, spelling) and _flag_value(vllm_args, spelling, "") != value:
+                    raise ValueError(f"--compile-scope mlp requires {flag} {value}")
+        if _has_flag(vllm_args, "--max-num-batched-tokens"):
+            raw = _flag_value(vllm_args, "--max-num-batched-tokens", "")
+            if not raw.isdigit() or not 2 <= int(raw) <= 64:
+                raise ValueError("--compile-scope mlp requires --max-num-batched-tokens between 2 and 64")
+        if _has_flag(vllm_args, "--dtype") and _flag_value(vllm_args, "--dtype", "") not in ("auto", "bfloat16", "bf16"):
+            raise ValueError("--compile-scope mlp requires checkpoint BF16 (--dtype auto or bfloat16)")
 
     # The runner is vLLM's own flag: pass it only when the caller did not.
     cmd = ["vllm", "serve", model]
     if not _has_flag(vllm_args, "--runner"):
         cmd += ["--runner", "generate" if generate else "pooling"]
-    if not stock and generate:
+    if compile_scope == "mlp":
+        cmd += ["--hf-overrides", json.dumps({"architectures": ["EmmyQwen35MlpModel"]})]
+        defaults = (
+            ("--dtype", (), "bfloat16"),
+            ("--tensor-parallel-size", ("--tp", "-tp"), "1"),
+            ("--pipeline-parallel-size", ("--pp", "-pp"), "1"),
+            ("--max-num-seqs", (), "1"),
+            ("--max-num-batched-tokens", (), "64"),
+        )
+        for flag, aliases, value in defaults:
+            if not any(_has_flag(vllm_args, spelling) for spelling in (flag, *aliases)):
+                cmd += [flag, value]
+        for flag in ("--language-model-only", "--enforce-eager", "--no-enable-prefix-caching"):
+            if not _has_flag(vllm_args, flag):
+                cmd.append(flag)
+    elif not stock and generate:
         cmd += _gen_graph_args(vllm_args, model=model)
         # A checkpoint whose compressed weights emmy's loader owns end to end must be presented
         # to vLLM as unquantized — vLLM carries no method for the scheme and would refuse the
@@ -539,6 +586,8 @@ def handle_serve(args):
     from emmy.compiler.loader.safetensors import split_revision  # noqa: PLC0415
 
     vllm_args = _split_own_flags(args)  # re-parses own flags placed after MODEL into args
+    if args.compile_scope and args.native:
+        raise ValueError("--compile-scope is unavailable with --native")
     if args.native:
         from emmy.serving.native.launch import launch
 
@@ -554,7 +603,7 @@ def handle_serve(args):
         vllm_args = [*vllm_args, "--revision", revision]
     # Resolved after the pin lands in the args, so the probe reads the pinned checkpoint's config.
     generate = serving_runner(model, vllm_args) == "generate"
-    serve_cmd = build_serve_cmd(model, stock=args.stock, vllm_args=vllm_args, generate=generate)
+    serve_cmd = build_serve_cmd(model, stock=args.stock, vllm_args=vllm_args, generate=generate, compile_scope=args.compile_scope)
     port = _flag_value(vllm_args, "--port", "8000")
     bench_cmd = build_bench_cmd(
         model,
