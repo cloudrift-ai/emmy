@@ -124,9 +124,27 @@ checkpoint stays impractical here.
    log the 4,096-token prefill post at 10× and pre at 104× their floor. Quality: after #964's router-bias fix Emmy
    scores GSM8K 0.71 strict / 0.96 flexible; the fork's 0.91 / 0.975 is an artifact of its prefill mHC prenorm kernels
    squaring fp16 in fp16 (overflow once |x| ≥ 256, the row's mixing falls back to its bias); with that square in fp32
-   the fork's prompt likelihood equals Emmy's and it scores 0.755 / 0.96. Not done: the per-phase profile, and a
-   same-workload run of the `a98fd4f8` image to tell whether #964's float32 router costs decode time (0.269 s per
-   token then, on a different workload). The image is not published: it is slower than the fork it is built on.
+   the fork's prompt likelihood equals Emmy's and it scores 0.755 / 0.96. The image is not published: it is slower
+   than the fork it is built on. #964's float32 router costs nothing: the `a98fd4f8` image runs the same benchmark at
+   324 ms per token.
+
+   Per-phase profile (2026-09-30, vLLM torch profiler on both arms, one pipeline stage, one 2,048-token request):
+   - Decode step: Emmy 170-185 ms against the fork's ~80. Attention is the same kernel and time in both (31-33 ms);
+     Emmy's experts are faster (~19 ms against 29). The gap is the all-reduces (54-61 ms against 4.4: the fork
+     replays CUDA graphs, while Emmy runs eager and its routed expert dispatch syncs with the host every layer, so
+     ranks reach each all-reduce at different times) and the width-16 pre program's mixing piece, which ran as one
+     thread block (1.47 ms per layer). PR #995 gives that piece a cooperative reduce (1,164 -> 4.7 us), but a boot
+     shows the step is host-bound: pre drops from 32.5 to 0.35 ms per stage and the step time does not move, the
+     freed time becoming all-reduce wait and idle. Next: capture decode (the fixed-slot single-row expert tier, whose
+     expert program still has no measured row) and a routed dispatch with no host sync.
+   - Prefill: 5.7 s per stage against 1.9. The symbolic expert program takes 2.7 s against the fork's 1.0 (its main
+     kernel reaches ~0.1 TFLOP/s on large experts, not on tensor cores), and ranks holding whole experts finish
+     unevenly, so the others wait ~1.3 s per stage in all-reduces the fork does not wait in.
+
+   #981 (fusion CSE) left every DeepSeek program refusing strict evidence at its cut fork, which neither the row
+   decode nor the fresh-lowering check caught; #988 restored the pre and post routes and #995 re-measures the expert
+   routes #976 had demoted. Main plus #995 passes the release gate (9 of 9 twins) and serves: 309 ms per token and
+   7.7 s to first token for one 2,048-token request, 8.5 tokens/s at 8 concurrent.
 7. **Stage 6 — MXFP4 expert inputs**, only if Stage 5's profile shows expert weight streaming dominates and a
    fused-unpack GEMM can plausibly beat TurboMind's on Volta. `main` spells native MXFP4 expert twins; this checkpoint
    needs its declaration mapped onto that spelling (`quant_method: fp8` with `expert_dtype: fp4`, packed as `w1.weight
