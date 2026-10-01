@@ -362,13 +362,13 @@ def test_serve_sh_renders_the_quantized_moe_invocation(tmp_path):
     assert argv[-2:] == ["--kv-cache-dtype", "fp8_e4m3"], "SERVE_EXTRA_ARGS must word-split into flags"
 
 
-def test_serve_sh_renders_the_deepseek_v4_parallel_eager_invocation(tmp_path):
-    """DeepSeek V4 on 16 V100s: the vLLM arguments every strict boot of its golden ran (boot51's
-    non-default args), rendered from the pinned config. The pinned `--enforce-eager` drops the capture
-    config, as a caller's does in emmy serve: the hyper-connection MoE host-syncs every decode step."""
+def test_serve_sh_renders_the_deepseek_v4_parallel_invocation(tmp_path):
+    """DeepSeek V4 on 16 V100s: the vLLM arguments every strict boot of its golden ran, rendered from the
+    pinned config, with decode captured at size 1 only — single-token decode rides the fixed-slot expert
+    tier, and every wider step runs eager."""
     config = {key: value.strip('"') for key, value in config_values(SERVE_DIR / "models" / "deepseek-v4-flash-0731.env").items()}
     argv = render_serve_sh(tmp_path, config)
-    assert "--compilation-config" not in argv
+    capture = '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1], "custom_ops": ["+rotary_embedding"]}'
     assert argv == [
         "-m",
         "vllm.entrypoints.openai.api_server",
@@ -389,8 +389,10 @@ def test_serve_sh_renders_the_deepseek_v4_parallel_eager_invocation(tmp_path):
         "--no-enable-prefix-caching",
         "--hf-overrides",
         '{"architectures": ["EmmyGenModel"]}',
+        "--compilation-config",
+        capture,
         *"--tensor-parallel-size 8 --pipeline-parallel-size 2 --distributed-executor-backend mp".split(),
-        *"--kv-cache-dtype fp8 --block-size 256 --tokenizer-mode deepseek_v4 --enforce-eager".split(),
+        *"--kv-cache-dtype fp8 --block-size 256 --tokenizer-mode deepseek_v4".split(),
     ]
 
 
