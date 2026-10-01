@@ -465,9 +465,10 @@ What a newcomer needs to know about the fit:
 **A subtlety about features.** The `H_*` features (which GPU, which nvcc level) have the same value for every
 candidate competing at one fork, so on their own they cannot change a ranking within that set. A tree can still
 combine one with a per-candidate feature — split on the card, then on the accumulator width — which is how a single
-model can prefer f16 accumulation on one architecture and f32 on another. The `D_tma_*` features mirror the tile
-geometry onto rows that stage through TMA. The `D_w_grid_*` features separate candidates with the same tile but a
-different warp grid, which used to produce byte-identical feature vectors.
+model can prefer f16 accumulation on one architecture and f32 on another; the default view carries `H_cc` for that
+reason. The `D_w_grid_*` features separate candidates with the same tile but a different warp grid, which used to
+produce byte-identical feature vectors. A feature that is a monotone transform of another, or a threshold on one,
+does not exist: a tree forms it with a split.
 
 ### What a `Prior` offers its callers
 

@@ -47,43 +47,13 @@ import numpy as np
 from emmy.compiler.pipeline.search.dataset.pool import GoldenPool
 from emmy.compiler.pipeline.search.features import ROUTING_FEATURES, is_dynamic_row
 
-# The default feature view: the ``D_*`` geometry/occupancy features and the two ``MMA_*`` atom features that vary
+# The default feature view: the ``D_*`` geometry/occupancy features, the two ``MMA_*`` atom features that vary
 # between a pool's candidates — ``MMA_tier`` (the warp/scalar tier discriminator) and ``MMA_acc_bits`` (32 for the
-# f32-accumulate atom, 16 for the f16-accumulate one) — MINUS every feature that exists only because an additive
-# model cannot form it. A tree forms these itself from columns the view keeps, so carrying them spends split budget on
-# a fact the model can already express — and the hand-set constant inside each one (a target, a threshold)
-# is a constant the fit cannot revise. Each exclusion below is derivable by axis-aligned splits on kept
-# columns, which is exactly what a tree does; nothing here is a judgement about usefulness.
-#
-# - MONOTONE DUPLICATES of a kept column. A tree only ever compares a feature to a threshold, so any
-#   order-preserving transform of a column it already has is the same column: ``D_l2_threads`` =
-#   log2(``D_threads``), ``D_l2_reuse`` = log2(``D_reuse``), ``D_cells_cap`` = clipped ``D_cells``.
-# - FOLDS, ``-|x - target|`` around a hand-set target: ``D_near_threads``, ``D_near_area``,
-#   ``D_near_cells``, ``D_near_intensity``, ``D_near_tilen``, ``D_near_waves``, ``D_w_near_bk``, and
-#   ``D_square`` = ``-|D_aspect|``. A linear model cannot represent a peak, so the peak was precomputed;
-#   two splits on the kept column reproduce it, around a threshold the fit chooses rather than inherits.
-#   (The tier-aware targets in ``D_near_threads`` / ``D_near_area`` come back as a split on ``MMA_tier``.)
-# - THRESHOLDS on a kept column, i.e. one split each: ``D_stage_prefetch`` (``D_stage_depth`` >= 2),
-#   ``D_bk_ge32``, ``D_splitk_le2``, ``D_ctas_ge_sm`` (``D_log2_waves`` >= 0), ``D_bn_band``,
-#   ``D_bm_band``, ``D_tilen_clean``.
-# - MASKED INTERACTIONS of two kept columns — a copy of one feature gated on another being nonzero,
-#   which is a split on the gate followed by a split on the feature: the six ``D_tma_*`` mirrors (gated on
-#   ``D_stage_tma``) and ``D_l2_cells_occ`` (``D_cells`` gated on ``D_ctas_ge_sm``).
-#
-# What deliberately STAYS, because axis-aligned splits cannot reach it: ``D_pow2_threads`` (a periodic
-# predicate, not an interval), ``D_bn_ge_bm`` (a relation BETWEEN two columns), ``D_w_grid_aspect`` (a
-# difference), ``D_log2_area`` (a product), and the whole knob × state block — ``D_splitk_excess`` /
-# ``D_splitk_deficit`` / ``D_splitk_roundtrip`` / ``D_near_kchunks`` / ``D_scalar_on_warp_eligible`` —
-# whose state operand (the needed split count, the reduce extent, the warp-eligibility stamp) is not a
-# candidate column at all, so no split on the pool can recover it.
-DEFAULT_FEATURES = (
-    "D_*,MMA_tier,MMA_acc_bits,"
-    "-D_l2_threads,-D_l2_reuse,-D_cells_cap,"
-    "-D_near_threads,-D_near_area,-D_near_cells,-D_near_intensity,-D_near_tilen,-D_near_waves,-D_w_near_bk,-D_square,"
-    "-D_stage_prefetch,-D_bk_ge32,-D_splitk_le2,-D_ctas_ge_sm,-D_bn_band,-D_bm_band,-D_tilen_clean,"
-    "-D_tma_*,-D_l2_cells_occ"
-)
-
+# f32-accumulate atom, 16 for the f16-accumulate one) — and ``H_cc``, the card's compute capability. ``H_cc`` is
+# constant within a pool, so on its own it moves no ranking; a tree splits on it to rank the same candidates
+# differently per architecture (f16 accumulation pays on Ada and Blackwell, not on Volta). Cross-validated over the
+# repository goldens it lifted held-out top-1 from 250 to 263 of 733 pools.
+DEFAULT_FEATURES = "D_*,MMA_tier,MMA_acc_bits,H_cc"
 # The placement space's view: its ``P_*`` arm features (``ranking.placement_features``); the ``H_*`` card facts are
 # constant within a fork and cancel out of the ranking.
 PLACEMENT_FEATURES = "P_*"
@@ -114,8 +84,8 @@ def feature_view(spec: str):
     into a ``keep(name) -> bool`` predicate. The view a fit trained under is recorded in its metrics header
     and artifact provenance, so two fits are only comparable when the recorded specs match.
 
-    Exclusions exist so a view can be written as "everything, minus what this model class has no use for"
-    (:data:`DEFAULT_FEATURES`). Written as an include list instead, such a view would silently go stale the
+    Exclusions exist so a view can be written as "everything, minus what this model has no use for". Written as
+    an include list instead, such a view would silently go stale the
     moment the featurizer gained a feature — the new column would be dropped without anyone deciding to
     drop it. Excluding is the safe direction: an unforeseen feature arrives in the view, where at worst the
     model ignores it.

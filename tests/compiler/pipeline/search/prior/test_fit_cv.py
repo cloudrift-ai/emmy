@@ -26,12 +26,13 @@ from tests.compiler.pipeline.search.helpers import kernel_row
 
 
 def test_default_feature_view_keeps_the_geometry_and_atom_features():
-    """The default spec keeps the ``D_``-prefixed geometry features plus the two atom features that vary within
-    a candidate pool — ``MMA_tier`` and ``MMA_acc_bits``, the f16-vs-f32 accumulate discriminator. The
-    shape/hardware pass-throughs are left to an explicit ``--features``."""
+    """The default spec keeps the ``D_``-prefixed geometry features, the two atom features that vary within a
+    candidate pool — ``MMA_tier`` and ``MMA_acc_bits``, the f16-vs-f32 accumulate discriminator — and ``H_cc``,
+    which a tree combines with them to rank per architecture. The other shape/hardware pass-throughs are left to
+    an explicit ``--features``."""
     keep = feature_view(DEFAULT_FEATURES)
-    sample = {"D_waves": 1.0, "D_bk_gap": 2.0, "MMA_tier": 3.0, "MMA_acc_bits": 4.0, "MMA_atom_m": 5.0, "S_ext_free_prod": 6.0, "D_": 7.0}
-    assert {k for k in sample if keep(k)} == {"D_waves", "D_bk_gap", "D_", "MMA_tier", "MMA_acc_bits"}
+    sample = {"D_waves": 1, "D_": 2, "MMA_tier": 3, "MMA_acc_bits": 4, "MMA_atom_m": 5, "S_ext_free_prod": 6, "H_cc": 7, "H_opt": 8}
+    assert {k for k in sample if keep(k)} == {"D_waves", "D_", "MMA_tier", "MMA_acc_bits", "H_cc"}
 
 
 def test_feature_view_globs_and_names():
@@ -263,20 +264,6 @@ def test_no_feature_view_can_drop_the_routing_stamp():
     for spec in (DEFAULT_FEATURES, "D_waves"):
         assert feature_view(spec)("S_ext_n_symbolic_axis"), spec
     assert not feature_view("D_waves")("S_ext_free_prod")  # only the routing features are exempt
-
-
-def test_default_view_drops_only_what_a_tree_re_derives():
-    """The default view keeps the raw columns and the terms axis-aligned splits cannot reach, and drops the
-    engineered ones a tree forms for itself."""
-    keep = feature_view(DEFAULT_FEATURES)
-    derivable = ("D_l2_threads", "D_near_threads", "D_square", "D_stage_prefetch", "D_splitk_le2", "D_tma_aspect", "D_l2_cells_occ")
-    for name in derivable:
-        assert not keep(name), f"{name} is derivable from a kept column by splits"
-    # Kept: the raw columns, and the terms no split on a kept column can reach — a periodic predicate,
-    # a relation BETWEEN two columns, and the knob x state block whose state operand is not a column.
-    for name in ("D_threads", "D_cells", "D_aspect", "D_stage_depth", "D_splitk", "D_pow2_threads", "D_bn_ge_bm", "D_splitk_excess"):
-        assert keep(name), name
-    assert keep("S_ext_n_symbolic_axis"), "the routing stamp is exempt from every view, exclusions included"
 
 
 def test_feature_view_exclusions_apply_to_names_and_globs():

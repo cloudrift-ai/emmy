@@ -30,8 +30,9 @@ pool buckets onto measured summaries and guarantee empty rows, so each builder d
 
 **Every summary publishes what it was computed over.** ``groups`` is how many pools keyed into it. The measured
 metrics each add their OWN group count, because they have different minimums: regret needs a pool of at least two
-rows (a one-row pool is trivially perfect) and Spearman at least :data:`MIN_SPEARMAN_ROWS`. On the v3 freeze's 336 pools that is 297 and 216 — so an aggregate
-that quietly averaged the excluded pools in would be reporting mostly arithmetic. ``regret@10`` is the strictest:
+rows (a one-row pool is trivially perfect) and Spearman at least :data:`MIN_SPEARMAN_ROWS`. On the v3 freeze's 336
+pools that is 297 and 216 — so an aggregate that quietly averaged the excluded pools in would be reporting mostly
+arithmetic. ``regret@10`` is the strictest:
 it needs eleven rows, which 90 pools have, so at the freeze's median pool size of seven it still excludes most of
 the corpus. The rank metrics have no minimum, so they carry no count of their own.
 
