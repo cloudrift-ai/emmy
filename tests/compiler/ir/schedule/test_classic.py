@@ -51,7 +51,7 @@ from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tile import OutputSpec, TileOp
 from emmy.compiler.pipeline.fork import DeferredFork, iter_leaves, schedule_forks
 from emmy.compiler.pipeline.passes.tile._fromloop import fold_from_loop
-from tests.compiler.helpers import classic_cartesian_schedules, enumerate_classic_reference, literal_classic_context
+from tests.compiler.helpers import case_target_tile, classic_cartesian_schedules, enumerate_classic_reference, literal_classic_context
 from tests.compiler.terms import contraction, projection
 
 _K = Axis("k", 8)
@@ -313,6 +313,38 @@ def test_a_draw_derives_the_supports_it_touches_and_never_a_site() -> None:
     walked = {_schedule_signature(extension) for extension in context.extensions()}
     assert _schedule_signature(pick) in walked
     assert all("supports" in choice.__dict__ for choice in site.compatible(context._site_relation(site.id)))
+
+
+def test_a_choice_claims_only_what_every_support_of_it_claims() -> None:
+    """The tile-level filter is sound. A choice's inventory and axis claims are each of its supports' own, and its
+    seam claims are a subset of each support's — a support adds its transport's K slab at an ordinary seam and
+    nothing else — so a choice the relation refuses has no support the relation admits, and the lazy frontier at a
+    site under a prefix is the brute-force filter of every support through the full rule. Checked on attention,
+    whose carrier's chunk need and score's offer are the seam claims that matter."""
+    tile = case_target_tile("attention/sdpa-hd128-causal-mask-mma.json")
+    target = Context.from_target((12, 0))
+    offers = ClassicProblem(tile, target)
+    seams = 0
+    for site in offers.node_sites:
+        for choice in site.choices[::7]:
+            seams += bool(choice.fragments)
+            for support in choice.supports:
+                assert (support.work, support.axes) == (choice.work, choice.axes)
+                assert set(choice.fragments) <= set(support.fragments)
+    assert seams
+
+    for seed in range(16):  # a prefix that claimed an inventory, with a site still to decide
+        advanced = ClassicScheduleContext(tile, target, offers)
+        while advanced.work is None and not advanced.nodes_complete:
+            advanced = advanced.extend(advanced.random_extension(random.Random(seed)))
+        if advanced.work is not None and not advanced.nodes_complete:
+            break
+    site = offers.node_site(advanced.next_site)
+    relation = advanced._site_relation(site.id)
+    sampled = site.choices[::4]
+    brute = {id(support) for choice in sampled for support in choice.supports if site.refusal(support, relation) is None}
+    nodes = {choice.node for choice in sampled}
+    assert {id(support) for support in site.frontier(relation) if support.node in nodes} == brute
 
 
 def test_context_indexes_finite_domain_membership(monkeypatch) -> None:
