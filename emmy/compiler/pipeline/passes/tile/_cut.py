@@ -38,6 +38,7 @@ from emmy.compiler.graph import Graph, Node
 from emmy.compiler.ir.axis import Axis, Dim
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
+from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Interval, Literal, SimplifyCtx, Var
 from emmy.compiler.ir.pure.fold import (
     Fold,
@@ -48,7 +49,6 @@ from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body, Load, Write
 from emmy.compiler.ir.stmt.passes import rewrite as rewrite_stmt
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
-from emmy.compiler.ir.tile.ir import promoted_sweep
 from emmy.compiler.ir.tile.ops import (
     UnbindableProjection,
     carries_partition,
@@ -59,7 +59,8 @@ from emmy.compiler.ir.tile.ops import (
 from emmy.compiler.ir.tile.path import family_sites, sites, spell
 from emmy.compiler.pipeline import Match
 from emmy.compiler.pipeline.knob import consume_kernel_row
-from emmy.compiler.pipeline.passes.tile._row import reformed
+from emmy.compiler.pipeline.passes.loop.fusion._region import build_merged_region, live_outputs_of, wrap_multi_output_fragment
+from emmy.compiler.pipeline.passes.tile._row import lift_kernel, reformed
 from emmy.compiler.pipeline.passes.tile._split import add_output_piece, output_root
 from emmy.compiler.structural import digest
 from emmy.compiler.tensor import Tensor
@@ -251,22 +252,11 @@ def _dtype_table(tile: TileOp) -> dict[int, tuple]:
 
 
 def _output_owners(tile: TileOp) -> dict[int, tuple]:
-    """The root operands that solely produce some of this kernel's outputs AND would bind a grid
-    axis the fused kernel cannot — keyed by operand identity, each mapped to ``(tail, stores)``.
+    """Root operands that independently own outputs, keyed by operand identity.
 
-    Two conditions, both structural, both asked of rules that already exist.
-
-    OWNERSHIP is :func:`~emmy.compiler.ir.tile.ops.output_regions`: every output specification must
-    read exactly one operand, the operands' cones over the root body must be disjoint, and together
-    they must cover it. Without it the pieces would not be a partition of the kernel — one of them
-    would have to recompute what it no longer owns.
-
-    RANK is :func:`~emmy.compiler.ir.tile.ir.promoted_sweep`, asked twice: once of the fused kernel,
-    once of the candidate piece. A piece promotes a sweep the whole kernel could not exactly when
-    its stores agree on an axis the sibling's stores do not, so the intersection over ALL stores
-    came up empty — the NVFP4 encode, whose packed codes ride the feature axis and whose block
-    scales ride one sixteenth of it. Where the piece promotes nothing more than the kernel already
-    does, splitting buys a second launch and no grid, so the seam keeps its workspace reading.
+    Every output must read exactly one operand, and the operands' body cones must be disjoint and
+    cover the projection. This is the reversible cut for a fused multi-output producer, including
+    when its two pieces would use the same grid.
     """
     op = tile.op
     if len(tile.output_specs) < 2 or not isinstance(op, Fold) or op.axis is not None or len(op.operands) < 2:
@@ -275,12 +265,7 @@ def _output_owners(tile: TileOp) -> dict[int, tuple]:
         regions = output_regions(op, tile.output_specs)
     except UnbindableProjection:
         return {}
-    fused = promoted_sweep(op, tile.output_specs, free=tile.place.free)
-    return {
-        id(region): (tail, stores)
-        for region, tail, stores in regions
-        if stores and not promoted_sweep(region, stores, free=tile.place.free) <= fused
-    }
+    return {id(region): (tail, stores) for region, tail, stores in regions if stores}
 
 
 def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
@@ -1146,6 +1131,39 @@ def _producer_order(pieces) -> list:
     return ordered
 
 
+def _fuse_sibling_producers(fragment: Graph, buffers: tuple[str, ...], parent: TileOp) -> None:
+    """Fuse independent workspace producers through the ordinary Loop IR splicer.
+
+    The consumer is outside each region: its workspace reads are the cuts this decision took.
+    Producers with different workspace dependencies stay apart for the same reason. The fused
+    producer returns to Tile IR without a schedule, so an output-owning cut can separate it.
+    """
+    workspace = set(buffers)
+    by_dependencies: dict[frozenset[str], set[str]] = {}
+    for buffer in buffers:
+        node = fragment.producer(buffer)
+        assert node is not None
+        if any(tensor.dtype.logical_elems > 1 for tensor in node.outputs):
+            continue  # the Loop splicer cannot remove a packed tensor's storage relation
+        by_dependencies.setdefault(frozenset(set(node.inputs) & workspace), set()).add(node.id)
+    for members in by_dependencies.values():
+        if len(members) < 2:
+            continue
+        loop_graph = fragment.copy()
+        for nid in members:
+            tile = loop_graph.nodes[nid].op
+            loop_graph.nodes[nid].op = LoopOp(body=tile.loop_body, name=tile.name)
+        live = live_outputs_of(loop_graph, members)
+        merged = build_merged_region(loop_graph, members, live)
+        if merged is None:
+            raise ValueError(f"fusion cannot splice cut producers: {sorted(members)}")
+        replacement, output_map = wrap_multi_output_fragment(fragment, merged, live)
+        merged_node = next(node for node in replacement.nodes.values() if isinstance(node.op, LoopOp))
+        fused = lift_kernel(merged_node.op, name=f"{parent.name}__place_{digest(*live)[:10]}")
+        merged_node.op = replace(fused, split_consumed=parent.split_consumed)
+        fragment.splice(replacement, consumed=members, output=output_map)
+
+
 def realize(
     match: Match,
     root: Node,
@@ -1408,6 +1426,7 @@ def realize(
         consumer_stores = _in_source_order(tuple(store for _, _, stores in kept for store in stores), order)
         # A composed decision may hand every output away; then there is no sibling piece to emit.
         if not consumer_stores:
+            _fuse_sibling_producers(fragment, tuple(all_buffers), tile)
             return fragment
         consumer_outputs = {store.write.output for store in consumer_stores}
         consumer_fold = _region_term(
@@ -1436,6 +1455,7 @@ def realize(
         _piece_inputs(root, consumer_fold, tuple(all_buffers)),
         suffix=_PLACED,
     )
+    _fuse_sibling_producers(fragment, tuple(all_buffers), tile)
     return fragment
 
 

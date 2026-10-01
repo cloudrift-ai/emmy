@@ -423,10 +423,7 @@ def test_unpinned_place_keeps_offering_fuse_and_recursive_cuts() -> None:
 
 
 def test_composed_scoped_place_pins_cut_together_and_foreign_pins_are_skipped() -> None:
-    """Every scoped PLACE pin that resolves on one kernel joins ONE realization — a producer per
-    seam and one consumer, with a producer reading another seam's workspace when its value nests
-    inside it — while a pin whose site path exists on no kernel here is another kernel's and is
-    skipped, never an error."""
+    """Scoped cuts compose; sibling workspace producers fuse, while their consumer stays cut."""
     match, graph = _case_match("attention/rmsnorm-qk-sdpa-composed-cut.json")
     pins = {
         "PLACE@map.1/twist.1/inner.1/map": "cut",  # the normalized-Q cone
@@ -444,10 +441,12 @@ def test_composed_scoped_place_pins_cut_together_and_foreign_pins_are_skipped() 
     (fragment,) = fork.expand()
     pieces = [node for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
     producers = [node for node in pieces if "__place_" in node.id]
-    assert len(producers) == 3 and len(pieces) == 4
-    assert all(node.op.placement_decided for node in pieces)
-    workspaces = {node.id for node in producers}
-    assert any(set(node.inputs) & workspaces for node in producers), "the nested value's producer must read a sibling workspace"
+    assert len(producers) == 2 and len(pieces) == 3
+    fused = next(node for node in producers if len(node.outputs) == 2)
+    assert len([seam for seam in cuttable_seams(fused.op) if seam.owned]) == 2
+    assert not fused.op.placement_decided, "a later output cut must still be offered"
+    assert all(node.op.placement_decided for node in pieces if node is not fused)
+    assert any(set(node.inputs) & {producer.id for producer in producers} for node in producers)
 
 
 def test_bare_and_scoped_place_cuts_compose_in_one_decision() -> None:
@@ -1380,14 +1379,12 @@ def test_a_shared_epilogue_statement_refuses_the_output_owning_cut() -> None:
     assert all(seam.owned is None for seam in cuttable_seams(node.op))
 
 
-def test_an_output_owning_cut_is_declined_where_no_piece_would_gain_a_grid_axis() -> None:
-    """The same partition over a purely pointwise quantize: both branches own a store, but neither
-    holds a contraction reading it, so promotion has nothing to lift and splitting would buy a
-    second launch and no grid. The seams keep their workspace reading."""
+def test_an_output_owning_cut_is_offered_without_a_grid_gain() -> None:
+    """Independent outputs can be split again even when both pieces use the same grid."""
     tile = case_target_tile("fused/nvfp4-quantize-cut-shared-normalizer.json")
 
     assert len(tile.output_specs) == 2
-    assert all(seam.owned is None for seam in cuttable_seams(tile))
+    assert len([seam for seam in cuttable_seams(tile) if seam.owned]) == 2
 
 
 # ---- the full-projection cut --------------------------------------------------------------------- #
@@ -1444,15 +1441,20 @@ def test_a_projection_owning_more_than_it_binds_offers_one_full_projection_cut()
 
 
 def test_the_full_projection_cut_leaves_one_contraction_per_piece_on_a_grid() -> None:
-    """Taking it. Every piece holds at most one contraction, which is the committed shape: each
-    expensive contraction computed once as the sole root of its own kernel, the owned outputs read
-    back. And every piece binds at least two grid axes — the pointwise pieces included, which is
-    what the sweep-promotion rule has to supply once no contraction is left under them."""
+    """A later output cut restores one contraction per piece after producers fuse."""
     graph, node = _mimo_case(_REQUANT)
     option, knobs = _composed_arm(graph, node)
-    pieces = _piece_ops(option.materialize())
+    fragment = option.materialize()
+    for producer in tuple(node for node in fragment.nodes.values() if isinstance(node.op, TileOp)):
+        if len(_contraction_spellings(producer.op)) < 2:
+            continue
+        owned = tuple(seam for seam in cuttable_seams(producer.op) if seam.owned)
+        assert len(owned) >= 2
+        next_fragment = realize(Match(graph=fragment, root_node_id=producer.id, rule=Rule(name="test", pattern=[])), producer, owned)
+        fragment.splice(next_fragment, consumed={producer.id}, output={name: f"{name}__placed" for name in producer.buffer_names()})
+    pieces = _piece_ops(fragment)
 
-    assert len(pieces) == len(knobs), "one piece per seam; the projection hands away all of its outputs"
+    assert len(pieces) >= len(knobs) - 1
     for piece in pieces:
         assert len(_contraction_spellings(piece)) <= 1, f"{piece.name} still holds several contractions"
         assert len(piece.place.free) >= 2, f"{piece.name} kept a one-axis placement"
