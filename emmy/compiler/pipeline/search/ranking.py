@@ -341,9 +341,23 @@ def placement_features(pieces: list[dict]) -> dict[str, float]:
     return feats
 
 
-def _walk_placement(pool: GoldenPool, ctx: Context, decisions: dict[str, dict]) -> tuple[list[tuple[list[dict], list[int]]], list[str]]:
-    """One pool's placement forks, in walk order, each as its arms' feature rows beside the positive indices —
-    and the kernels whose recorded decision the fork did not offer (a stale spelling)."""
+@dataclass(frozen=True)
+class PlacementFork:
+    """One placement fork as the walk saw it: each arm's feature row and its label (``fuse``, or the seams it
+    cuts), the arms the golden took (``positives``), and the arm the walk itself took (``pick``) — ``None`` when it
+    took the composed route, which is no arm of the pool."""
+
+    feats: list[dict]
+    labels: list[str]
+    positives: list[int]
+    pick: int | None
+
+
+def walk_placement(pool: GoldenPool, ctx: Context, decisions: dict[str, dict], scorer=None) -> tuple[list[PlacementFork], list[str]]:
+    """One pool's placement forks, in walk order, and the kernels whose recorded decision the fork did not offer
+    (a stale spelling). Without ``scorer`` the walk follows the golden (``decisions``: a kernel's exact identity to
+    the ``PLACE`` arm recorded on it; fused where none is); with one — scores over the arms' feature rows, lower
+    is better — it takes the arm the scorer ranks first, which is what a deploy would do at that fork."""
     from emmy.compiler.pipeline import Pipeline  # noqa: PLC0415
     from emmy.compiler.pipeline.fork import leaf_knobs  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
@@ -351,7 +365,7 @@ def _walk_placement(pool: GoldenPool, ctx: Context, decisions: dict[str, dict]) 
     from emmy.compiler.pipeline.search.pins import composed_routes, pinned_knobs, unpinned_decisions  # noqa: PLC0415
 
     base = ctx.features()
-    forks: list[tuple[list[dict], list[int]]] = []
+    forks: list[PlacementFork] = []
     unmatched: list[str] = []
 
     def decide(fp):
@@ -381,7 +395,11 @@ def _walk_placement(pool: GoldenPool, ctx: Context, decisions: dict[str, dict]) 
                 unmatched.append(identity[:12])
         arms = [i for i in place if i != steer]
         feats = [{**base, **placement_features(_arm_stamps(leaves[i].expand()[0], root, fp.match.graph))} for i in arms]
-        forks.append((feats, [arms.index(i) for i in positives]))
+        if scorer is not None:
+            scores = scorer(feats)
+            chosen = arms[min(range(len(arms)), key=scores.__getitem__)]
+        labels = ["fuse" if i == fused else " ".join(sorted(k.removeprefix("PLACE@") for k in seams[i])) for i in arms]
+        forks.append(PlacementFork(feats, labels, [arms.index(i) for i in positives], arms.index(chosen) if chosen in arms else None))
         return leaves[chosen]
 
     routes = [(None, tuple(arm)) for arm in decisions.values() if len(arm) > 1]
@@ -390,20 +408,26 @@ def _walk_placement(pool: GoldenPool, ctx: Context, decisions: dict[str, dict]) 
     return forks, unmatched
 
 
-def build_placement_groups(pools: Sequence[GoldenPool], decisions: dict[str, dict]) -> tuple[list[GoldenGroup], list[tuple[str, str, str]]]:
-    """Enumerate each pool's placement forks and pack them as :class:`GoldenGroup` records, one per fork: the
+def placement_decisions(pools: Sequence[GoldenPool]) -> dict[str, dict]:
+    """The ``PLACE`` arm each placement pool's one row records, by the kernel's exact identity."""
+    return {pool.kernel.exact_identity: pool.rows[0].knobs for pool in pools if pool.rows}
+
+
+def build_placement_groups(pools: Sequence[GoldenPool]) -> tuple[list[GoldenGroup], list[tuple[str, str, str]]]:
+    """Enumerate each placement pool's forks and pack them as :class:`GoldenGroup` records, one per fork: the
     arms the cut pass offers unpinned (keep fused, one seam each, the full-projection cut), each featurized from
     the kernels it leaves (:func:`placement_features`), with the arms the golden took marked. The second return
     is the pools that produced no group, as ``(gpu, name, reason)``.
 
-    ``decisions`` maps a kernel's exact identity to the ``PLACE`` arm a routing row records on it. The walk
-    runs the tile lift and the cut pass only (``PLACEMENT_PASSES``) and follows the golden: at a kernel with a
-    decision it takes that arm — registered as a composed route, so a several-seam decision is one arm whose
-    pieces are the routing row's own children and a nested decision is found by identity — and at a kernel
-    without one it keeps the kernel fused. The composed arm steers the walk and is not a row: unpinned, the pass
-    offers single seams, and those are what the prior ranks. A single seam the decision names is a positive,
-    as is the full-projection arm when it is exactly the decision; fused is the positive where nothing was
-    recorded."""
+    A placement pool's one row is the ``PLACE`` routing decision recorded on its kernel (none: it stayed fused).
+    The walk runs the tile lift and the cut pass only (``PLACEMENT_PASSES``) and follows the golden: at a kernel
+    with a decision it takes that arm — registered as a composed route, so a several-seam decision is one arm
+    whose pieces are the routing row's own children and a nested decision is found by identity — and at a
+    kernel without one it keeps the kernel fused. The composed arm steers the walk and is not a row: unpinned,
+    the pass offers single seams, and those are what the prior ranks. A single seam the decision names is a
+    positive, as is the full-projection arm when it is exactly the decision; fused is the positive where
+    nothing was recorded."""
+    decisions = placement_decisions(pools)
     groups: list[GoldenGroup] = []
     skipped: list[tuple[str, str, str]] = []
     ctxs: dict[tuple, Context] = {}
@@ -416,7 +440,7 @@ def build_placement_groups(pools: Sequence[GoldenPool], decisions: dict[str, dic
         if ctx is None:
             ctx = ctxs[card] = pool_context(pool)
         try:
-            forks, unmatched = _walk_placement(pool, ctx, decisions)
+            forks, unmatched = walk_placement(pool, ctx, decisions)
         except ValueError as exc:
             # The same definition the schedule enumeration does not take back (``build_golden_groups``): the
             # reduce piece of a cross-CTA split re-offers the split and mints the buffer it already holds.
@@ -429,9 +453,12 @@ def build_placement_groups(pools: Sequence[GoldenPool], decisions: dict[str, dic
             skipped.append((pool.gpu, pool.name, "no placement fork"))
             continue
         shape = _shape_group(ShapeKey.from_s_features(pool.kernel.stamps))
-        for n, (feats, positives) in enumerate(forks, 1):
+        for n, fork in enumerate(forks, 1):
             key = f"{pool.gpu}/{pool.name}" + (f"@{n}" if n > 1 else "")
-            groups.append(GoldenGroup.over(key, pool.name, "place", pool.gpu, shape, pack_features(feats), positives, len(feats)))
+            packed = pack_features(fork.feats)
+            groups.append(
+                GoldenGroup.over(key, pool.name, "place", pool.gpu, shape, packed, fork.positives, len(fork.feats), pools=(pool,))
+            )
     logger.info("  %d placement forks over %d pools (%d skipped)", len(groups), len(pools), len(skipped))
     return groups, skipped
 

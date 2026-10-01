@@ -17,7 +17,7 @@ import math
 import sys
 from pathlib import Path
 
-from emmy import storage
+from emmy import config, storage
 from emmy.commands.eval_args import add_dataset_args, resolve_offline_arg
 from emmy.commands.table import GREEN as _GREEN
 from emmy.commands.table import RED as _RED
@@ -76,20 +76,23 @@ def register_eval_command(subparsers) -> None:
     pg.set_defaults(func=handle_eval_golden)
 
 
-def _check_offline_artifact() -> None:
-    """Fail the command up front on an unloadable offline weights artifact
-    (missing / feat_ver-mismatched override) — the per-shape eval harness catches
-    exceptions into ERR rows, which would let a broken A/B exit 0."""
+def _prior_halves(space: str):
+    """The priors the report labels — one today, the offline model of the dataset's ``space``: the
+    ``--offline-file`` override, else the shipped weights of that space. Fails the command up front on an
+    unloadable artifact or one fit for the other space — the per-shape eval harness catches exceptions into
+    ERR rows, which would let a broken A/B exit 0."""
     from emmy.compiler.pipeline.search.prior import OfflinePrior  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.prior.offline import default_file  # noqa: PLC0415
 
-    OfflinePrior()
-
-
-def _prior_halves():
-    """The priors the report labels — one today, the offline model."""
-    from emmy.compiler.pipeline.search.prior import OfflinePrior  # noqa: PLC0415
-
-    return [("offline", OfflinePrior())]
+    try:
+        prior = OfflinePrior(path=None if config.offline_path() else str(default_file(space)))
+    except RuntimeError as exc:
+        logger.error("%s", exc)
+        sys.exit(2)
+    if prior.space != space:
+        logger.error("the weights rank the %s space; the dataset is the %s space", prior.space, space)
+        sys.exit(2)
+    return [("offline", prior)]
 
 
 def _measured_report(args, halves, dataset, source: str):
@@ -159,21 +162,52 @@ def handle_eval_prior(args) -> None:
     from emmy.compiler.pipeline.search.dataset import Dataset  # noqa: PLC0415
 
     resolve_offline_arg(args)
-    _check_offline_artifact()
-    halves = _prior_halves()
     try:
         dataset = Dataset.load(args.dataset)
     except (OSError, ValueError) as exc:
         logger.error("%s", exc)
         sys.exit(2)
+    space = dataset.provenance.get("space", "schedule")
+    halves = _prior_halves(space)
     golden = args.pools == "golden"
     report = (_golden_report if golden else _measured_report)(args, halves, dataset, str(args.dataset))
     _emit_report(report)
     if args.json_out:
         storage.write_json(Path(args.json_out), report.to_json(), indent=2)
         logger.info("wrote %s", args.json_out)
-    if golden:
+    if golden and space == "placement":
+        _emit_placement_deploy_check(args, dataset, halves[0][1])
+    elif golden:
         _emit_golden_deploy_check(args, [pool for group in dataset.golden for pool in group.pools])
+
+
+def _emit_placement_deploy_check(args, dataset, prior) -> None:
+    """The deploy-faithful half of ``eval prior`` over a placement dataset: each pool's kernel walked through
+    the lift and the cut pass again with the prior deciding every placement fork, and the arm it takes at the
+    kernel's first fork printed beside the golden's — ``fuse``, or the seams cut. The rank says where the
+    golden's arm sat in the offer; this says which arm the prior would actually hand the cut pass."""
+    from emmy.compiler.pipeline.search.ranking import placement_decisions, pool_context, walk_placement  # noqa: PLC0415
+
+    pools = list({(pool.gpu, pool.regime, pool.name): pool for group in dataset.golden for pool in group.pools}.values())
+    pools = [pool for pool in pools if not args.kernel or args.kernel in pool.kernel.name]
+    decisions = placement_decisions(pools)
+    rows: list[tuple[str, str, str, bool]] = []
+    for pool in pools:
+        try:
+            forks, _ = walk_placement(pool, pool_context(pool), decisions, scorer=prior.mean_scores_features)
+        except ValueError:
+            continue
+        if not forks or forks[0].pick is None:
+            continue
+        root = forks[0]
+        golden = " | ".join(root.labels[i] for i in root.positives)
+        rows.append((pool.name, root.labels[root.pick], golden, root.pick in root.positives))
+    logger.info("Golden reproduction — the prior's pick at each kernel's first placement fork vs the golden's arm:")
+    width = max((len(name) for name, *_ in rows), default=6)
+    logger.info("  %-*s  %-4s  %s", width, "kernel", "ok", "pick -> golden")
+    for name, pick, golden, ok in rows:
+        logger.info("  %-*s  %-4s  %s -> %s", width, name, "ok" if ok else "MISS", pick, golden)
+    logger.info("  TOTAL %d/%d", sum(ok for *_, ok in rows), len(rows))
 
 
 def _metric(block: dict, key: str, fmt: str) -> str:

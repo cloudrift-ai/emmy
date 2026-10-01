@@ -283,7 +283,7 @@ class LinearModel:
             atomic_free_split_threshold=float(params.get("atomic_free_split_threshold", 0.0)),
         )
 
-    def to_artifact(self, *, provenance: dict, model_file: str | None = None) -> dict:  # noqa: ARG002 — see below
+    def to_artifact(self, *, provenance: dict, model_file: str | None = None, space: str = "schedule") -> dict:  # noqa: ARG002 — see below
         """This model as the weights artifact dict, in its checked-in shape. ``provenance`` is caller-supplied
         whole (fitted date, script, args, case counts, notes) so the assembly stays pure and deterministic.
 
@@ -294,6 +294,7 @@ class LinearModel:
             raise ValueError("no dynamic weight set — substitute a fallback set before assembling the artifact")
         return {
             "feat_ver": FEATURIZER_VERSION,
+            "space": space,
             "kind": "linear",
             "weights": self.weights,
             "weights_dynamic": self.weights_dynamic,

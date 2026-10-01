@@ -10,7 +10,7 @@ import numpy as np
 from emmy.compiler.context import Context
 from emmy.compiler.pipeline.search.dataset import Dataset
 from emmy.compiler.pipeline.search.db import SearchDB
-from emmy.compiler.pipeline.search.db.export import export_dataset, golden_pools
+from emmy.compiler.pipeline.search.db.export import export_dataset, golden_pools, placement_pools
 from emmy.compiler.pipeline.search.features import tile_signature
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from emmy.compiler.pipeline.search.ranking import build_golden_groups, enumerate_graph, enumerate_pool, pool_context
@@ -19,6 +19,7 @@ from tests.compiler.realization import helpers as corpus
 
 _MATMUL = "matmul/f16-mma-m128n128k128-f32.json"
 _SPLIT = "matmul/f16-mma-splitk-deferred.json"
+_CUT = "fused/linear-add-place-cut-sm70.json"
 
 
 def test_a_kernel_pool_opens_the_candidates_its_golden_program_opens(tmp_path):
@@ -54,6 +55,28 @@ def test_a_kernel_pool_opens_the_candidates_its_golden_program_opens(tmp_path):
     assert (loaded.golden_ids, loaded.feat_names, loaded.total) == (group.golden_ids, group.feat_names, group.total)
     assert np.array_equal(loaded.feats, group.feats, equal_nan=True) and loaded.pools == (pool,)
     assert dataset.provenance["sources"] == {"golden:case": 1} and back.provenance == dataset.provenance
+
+
+def test_the_placement_space_is_one_pool_per_fork_with_the_golden_arm_marked(tmp_path):
+    """A golden that cut its kernel is, in the placement space, the parent's placement fork: the arms the cut
+    pass offers unpinned — keep fused, one kernel; the cut, two — featurized from the kernels each leaves, the
+    cut arm marked and the fused one not. The parent's pool holds the routing decision as its one row; the pieces,
+    pools of their own, offer no fork and are skipped by name. The dataset round-trips with its space."""
+    db = tuned_db(None, (_CUT,), source="golden:case")
+    pools, dropped = placement_pools(db, golden_pools(db)[0])
+    [parent] = [pool for pool in pools if pool.rows]
+    assert dropped == {} and len(pools) == 3 and [row.knobs for row in parent.rows] == [{"PLACE": "cut"}]
+
+    dataset = export_dataset(db, source="test", pool_sample=0, seed=0, space="placement")
+    [group] = dataset.golden
+    assert (group.key, group.tier, group.total, group.golden_ids) == (f"{parent.gpu}/{parent.name}", "place", 2, (1,))
+    assert list(group.feats[:, group.feat_names.index("P_n_pieces")]) == [1.0, 2.0]
+    assert {reason for *_, reason in dataset.skipped} == {"no placement fork"} and dataset.measured == []
+
+    back = Dataset.load(dataset.dump(tmp_path / "placement"))
+    [loaded] = back.golden
+    assert back.provenance["space"] == "placement" and loaded.golden_ids == (1,) and np.array_equal(loaded.feats, group.feats)
+    assert [pool.kernel.exact_identity for pool in loaded.pools] == [parent.kernel.exact_identity]
 
 
 def test_a_golden_over_a_kernel_set_is_one_pool_per_piece():
