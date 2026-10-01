@@ -724,7 +724,7 @@ class ClassicProblem(ScheduleProblem[ClassicSchedule]):
 
     def _exact(self, key: str) -> bool:
         """Whether strict replay supplied this exact row key."""
-        return key in self._strict_row_keys
+        return key in self._strict_row_keys and key in self._followed_row_keys
 
     def with_row(self, row: Mapping[str, str], *, strict: bool = False) -> ClassicProblem:
         supplied = {str(key): str(value) for key, value in row.items()}
@@ -823,7 +823,7 @@ class ClassicProblem(ScheduleProblem[ClassicSchedule]):
         for family, value in self.bare_pins.items():
             if not value or value in self._spelled(schedule, family).values():
                 continue
-            if self.validate_pins or self._exact(family) or any(self._site_offers(site, family, value) for site in self.node_sites):
+            if self.validate_pins or family in self._strict_row_keys or any(self._site_offers(site, family, value) for site in self.node_sites):
                 return f"bare {family} pin {value} is realized by no site of this kernel"
         return None
 
