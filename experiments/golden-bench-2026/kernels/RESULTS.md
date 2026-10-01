@@ -2,8 +2,8 @@
 
 ## Shared K/V decode producers (2026-10-01)
 
-Sharing the K/V producer lowers whole-layer decode latency on A100, V100 and RTX 4090. The selected route keeps Q separate
-and replaces the four K/V kernels with two, reducing the layer from 16 launches to 14. V100 still trails the
+Sharing the K/V producer lowers whole-layer decode latency on A100, V100 and RTX 4090. The selected route keeps Q
+separate and replaces the four K/V kernels with two, reducing the layer from 16 launches to 14. V100 still trails the
 same-input `torch.compile` reference. The equivalent RTX 5090 trial saves only 0.02–0.04 µs per pair, so that card
 keeps its existing selection.
 
@@ -53,8 +53,8 @@ full-layer parent. Global pins that changed unrelated decisions were likewise re
 
 `tuning_a100x1_2026-10-01.tar.gz`, `tuning_v100x1_2026-10-01.tar.gz`, `tuning_rtx4090x1_2026-10-01.tar.gz` and
 `tuning_rtx5090x1_2026-10-01.tar.gz` retain the paired JSON, logs, task databases, working goldens, source audits,
-failed probes and exact command protocols under `2026-10-01-a100/`, `2026-10-01-v100/` and
-`2026-10-01-rtx4090/`, `2026-10-01-rtx5090/`, respectively. The V100 work used the single SXM2 card throughout.
+failed probes and exact command protocols under `2026-10-01-a100/`, `2026-10-01-v100/`, `2026-10-01-rtx4090/` and
+`2026-10-01-rtx5090/`, respectively. The V100 work used the single SXM2 card throughout.
 
 ## Five-card baseline before the next optimization round (2026-10-01)
 
@@ -201,6 +201,13 @@ Every control reproduced the validated baseline kernels. `tuning_h100x1_2026-10-
 probes, copy-removal patch and system snapshots. A tile-only pin initially hit the partial-pin bug, another probe
 lacked nvcc on its SSH path, and a separate work/staging probe failed strict accuracy before timing. Those failed
 probes supply no performance result and do not change the headline tolerance.
+
+The prefill K/V producers need a different coordinate alignment from decode: V sweeps `(1024, 512)`, while K
+sweeps `(8, 512, 128)`. Their shared row coordinate appears in different positions. Flattening both in stored
+order would mix row and channel coordinates, so the decode reform does not apply. A future shared-producer trial
+must preserve that correspondence explicitly and beat the complete layer, including attention and MLP costs.
+Persistent kernels remain outside this experiment's scope. The current evidence does not close the H100 prefill
+gap or bring V100 decode to parity.
 
 ## Post-cut producer fusion compatibility (#1003)
 
