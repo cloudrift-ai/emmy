@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from emmy.compiler.graph import Graph
     from emmy.compiler.ir.base import Op
 
-from emmy.compiler.ir.schedule import Schedule, ScheduleContext, ScheduleRefused, schedule
+from emmy.compiler.ir.schedule import Schedule, ScheduleContext, ScheduleRefused
 from emmy.compiler.pipeline.knob import EVIDENCE_PREFIXES, METADATA_PREFIXES, evidence_row_vouches, values_equal
 
 
@@ -113,6 +113,11 @@ class DeferredFork(Fork):
         return [self.materialize()]
 
 
+#: How many extensions a sampled child draws before giving the branch up as dead: a pick the composition
+#: refuses is rare (the frontier was filtered for it), so a run of them means the prefix has nothing to offer.
+_REFUSED_PICK_DRAWS = 4
+
+
 @dataclass(frozen=True)
 class _ScheduleTree:
     """Shared callbacks and identity for one generic lazy schedule tree."""
@@ -125,13 +130,20 @@ class _ScheduleTree:
     exact_keys: frozenset[str] | None = None
 
     def step(self, context: ScheduleContext, row: Mapping) -> list[Fork]:
-        forks = []
-        for child in schedule(context, recursive=False):
-            if isinstance(child, Schedule):
-                forks.append(self.leaf(child))
-            else:
-                forks.append(_ScheduleFork(self, child, {**row, **self.row_delta(context, child)}))
-        return forks
+        """Every extension of ``context`` composed as a child of the prefix spelling ``row``."""
+        return [fork for pick in context.extensions() if (fork := self.child(context, row, pick)) is not None]
+
+    def child(self, context: ScheduleContext, row: Mapping, pick: Schedule) -> Fork | None:
+        """One extension ``pick`` composed onto ``context``: a complete schedule becomes a leaf, a partial one the
+        next prefix carrying ``row`` plus what the step decided; ``None`` when the composition refuses the pick.
+        The one place a child is built, for the walk (:meth:`step`) and the draw (``_ScheduleFork.sample_child``)."""
+        try:
+            child = context.extend(pick)
+        except ScheduleRefused:
+            return None
+        if child.schedule.kernel is not None:
+            return self.leaf(child.schedule)
+        return _ScheduleFork(self, child, {**row, **self.row_delta(context, child)})
 
 
 @dataclass(frozen=True)
@@ -163,20 +175,15 @@ class _ScheduleFork(Fork):
 
     def sample_child(self, rng: random.Random) -> Fork | None:
         """One child drawn without expanding: the context draws one compatible extension
-        (:meth:`ScheduleContext.random_extension`), composed the way :meth:`_ScheduleTree.step` composes every
-        extension. A pick the composition refuses is retried a few times, as the walk skips such a pick;
-        ``None`` is a dead end the descent restarts from."""
-        for _ in range(4):
+        (:meth:`ScheduleContext.random_extension`), composed by :meth:`_ScheduleTree.child` as the walk composes
+        every extension. A pick the composition refuses is drawn again, as the walk skips such a pick; ``None``
+        is a dead end the descent restarts from."""
+        for _ in range(_REFUSED_PICK_DRAWS):
             pick = self.context.random_extension(rng)
             if pick is None:
                 return None
-            try:
-                child = self.context.extend(pick)
-            except ScheduleRefused:
-                continue
-            if child.schedule.kernel is not None:
-                return self.tree.leaf(child.schedule)
-            return _ScheduleFork(self.tree, child, {**self.row, **self.tree.row_delta(self.context, child)})
+            if (fork := self.tree.child(self.context, self.row, pick)) is not None:
+                return fork
         return None
 
     def narrow(self, row: Mapping) -> Fork:
