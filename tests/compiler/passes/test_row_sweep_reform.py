@@ -83,8 +83,7 @@ def test_reform_preserves_both_output_values(rectangular) -> None:
     tile = _siblings(rectangular=rectangular)
     rng = np.random.default_rng(1)
     inputs = {
-        name: rng.standard_normal(tuple(dim.as_static() for dim in tensor.shape)).astype(np.float32)
-        for name, tensor in tile.inputs.items()
+        name: rng.standard_normal(tuple(dim.as_static() for dim in tensor.shape)).astype(np.float32) for name, tensor in tile.inputs.items()
     }
     expected = {
         "out0": inputs["x"] @ inputs["w0"],
