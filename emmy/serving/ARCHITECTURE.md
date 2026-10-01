@@ -257,12 +257,13 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   named inputs. Program count is 2/layer + one expert program per SHAPE GROUP (see below) — not `E`/layer. MoE
   layers are
   device-resident only (`forward_layer_post` raises on the host path) and are excluded from post→pre chaining (two
-  outputs; the layer output is a fresh torch tensor). The ROUTED dispatch host-syncs (`indices.unique().tolist()`),
-  which a whole-step decode capture cannot record — but single-token decode is capture-legal through the fixed-slot
-  tier below, so `_is_moe_model` in `emmy/commands/serve.py` (local-config probe, UX only) has `_gen_graph_args`
-  emit a FULL_DECODE_ONLY compilation-config with the capture ladder capped at size 1 instead of forcing
-  `--enforce-eager`, and `EmmyGenModel.__init__` validates authoritatively against the runner: an MoE capture boot
-  is rejected loudly when the fixed-slot tier is unavailable or any capture size exceeds 1 (serve with
+  outputs; the layer output is a fresh torch tensor). The ROUTED dispatch host-syncs (`indices.unique().tolist()`; a
+  single row instead reads its `k` picks once and runs each owned expert on the row itself, no `unique`, `where` or
+  gather), which a whole-step decode capture cannot record — but single-token decode is capture-legal through the
+  fixed-slot tier below, so `_is_moe_model` in `emmy/commands/serve.py` (local-config probe, UX only) has
+  `_gen_graph_args` emit a FULL_DECODE_ONLY compilation-config with the capture ladder capped at size 1 instead of
+  forcing `--enforce-eager`, and `EmmyGenModel.__init__` validates authoritatively against the runner: an MoE capture
+  boot is rejected loudly when the fixed-slot tier is unavailable or any capture size exceeds 1 (serve with
   `--enforce-eager` then).
   When the model declares `routed_scaling_factor`, the expert program ordinarily applies it to each routed expert
   result; an always-on dense shared expert remains unscaled and folds into `h` before the routed combine. Laguna
@@ -284,11 +285,12 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   path), so `_moe_combine` hoists the GPU lock around the whole per-expert loop and
   `_launch_expert` issues bare `upload_prefix_device` + `run_once` calls on torch's stream; the per-expert weight
   views are minted once at `_ensure_device`. A tier whose schedule stages no operand through a TMA descriptor
-  (descriptors bake pointers at build) takes the weight slices by POINTER SWAP (`alias_buffer`) — no D2D weight copy;
-  descriptor-bearing tiers upload the slices normally. The M=256 twin instead replays its captured whole-program
-  graph per expert (`capture_program_graph` — one host call instead of per-kernel Python framing; prefill FFN was
-  launch-bound at ~3×), which bakes the twin's own buffer pointers — so its weights always arrive by UPLOAD, never
-  by pointer swap (a swap would freeze the first expert's slices into every later replay).
+  (descriptors bake pointers at build) takes the weight slices by POINTER SWAP (`alias_buffer(..., wait=False)`) — no
+  D2D weight copy, and no stream drain per swap: the slices are resident, so launches already queued may keep reading
+  the previous expert's; descriptor-bearing tiers upload the slices normally. The M=256 twin instead replays its
+  captured whole-program graph per expert (`capture_program_graph` — one host call instead of per-kernel Python
+  framing; prefill FFN was launch-bound at ~3×), which bakes the twin's own buffer pointers — so its weights always
+  arrive by UPLOAD, never by pointer swap (a swap would freeze the first expert's slices into every later replay).
   **Fixed-slot decode tier (T=1, capture-legal):** k slot INSTANCES of the INDIRECT M=1 expert twin
   (`moe.expert.one.ind`) are built at boot — the same expert graph compiled with `w_gate_up`/`w_down` marked as
   **indirect operands** (`_compile_split(indirect_inputs=...)` → the `cuda.indirect_inputs` graph hint; the ABI

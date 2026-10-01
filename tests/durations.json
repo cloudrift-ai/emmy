@@ -58,6 +58,7 @@
  "tests/compiler/backend/test_graph_capture.py::test_emmy_capture_failure_falls_back_uncaptured@cuda": 1.22,
  "tests/compiler/backend/test_graph_capture.py::test_torch_capture_failure_disables_emmy_capture@cuda": 0.87,
  "tests/compiler/backend/test_hung_kernel_watchdog.py::test_timed_launch_raises_hungkernelerror_promptly@cuda": 7.0,
+ "tests/compiler/backend/test_native_gpu.py::test_a_lent_operand_swaps_without_waiting_for_queued_launches@cuda": 0.58,
  "tests/compiler/backend/test_native_gpu.py::test_native_gpu_failure_restarts_cleanly[cuda_error]@cuda": 0.53,
  "tests/compiler/backend/test_native_gpu.py::test_native_gpu_failure_restarts_cleanly[deadline]@cuda": 0.57,
  "tests/compiler/backend/test_pack_gpu.py::test_pack_missing_cubin_falls_back@cuda": 0.83,

@@ -135,8 +135,10 @@ checkpoint stays impractical here.
      ranks reach each all-reduce at different times) and the width-16 pre program's mixing piece, which ran as one
      thread block (1.47 ms per layer). PR #995 gives that piece a cooperative reduce (1,164 -> 4.7 us), but a boot
      shows the step is host-bound: pre drops from 32.5 to 0.35 ms per stage and the step time does not move, the
-     freed time becoming all-reduce wait and idle. Next: capture decode (the fixed-slot single-row expert tier, whose
-     expert program still has no measured row) and a routed dispatch with no host sync.
+     freed time becoming all-reduce wait and idle. #1002 removes two of the host waits (a stream drain before every
+     expert weight swap, and the device queries that routed one row): 303 -> 279 ms per token for one request, same
+     output, batched decode unchanged. Next: capture decode (the fixed-slot single-row expert tier, whose expert
+     program still has no measured row) and a routed dispatch with no host sync.
    - Prefill: 5.7 s per stage against 1.9. The symbolic expert program takes 2.7 s against the fork's 1.0 (its main
      kernel reaches ~0.1 TFLOP/s on large experts, not on tensor cores), and ranks holding whole experts finish
      unevenly, so the others wait ~1.3 s per stage in all-reduces the fork does not wait in.
