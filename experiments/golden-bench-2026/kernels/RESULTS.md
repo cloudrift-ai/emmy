@@ -69,6 +69,60 @@ failed probes and exact command protocols under `2026-10-01-a100/`, `2026-10-01-
 H100's corresponding evidence is under `2026-10-01-h100/shared-kv/` in
 `tuning_h100x1_2026-10-01.tar.gz`, alongside the prefill profiling and rejected trials described below.
 
+## Final five-card recipe after route selection (2026-10-01)
+
+All ten model comparisons and all 50 strict golden replays pass after selecting the four shared K/V routes and
+merging main through `754d1afa6`. Each model comparison uses the explicitly pinned revision above, the same inputs
+for all three backends, O3, fast math disabled, 10 warmups and 100 iterations. Each of the five following replays
+uses a fresh tune database, strict correctness and strict evidence, without recording new measurements.
+
+Captured whole-forward latency is in microseconds. These final checks validate the selected routes; the interleaved
+pairs above establish the improvement over the previous selections.
+
+| Card | s1 Emmy | s1 `torch.compile` | s512 Emmy | s512 `torch.compile` | Launches s1 / s512 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| A100 40GB | 51.086 | 56.247 | 177.664 | 181.541 | 14 / 12 |
+| H100 80GB | 27.352 | 31.730 | 87.547 | 82.092 | 14 / 12 |
+| V100 SXM2 16GB | 68.335 | 62.498 | 500.224 | 641.360 | 14 / 21 |
+| RTX 4090 | 24.626 | 29.096 | 156.160 | 162.816 | 14 / 12 |
+| RTX 5090 | 20.549 | 24.591 | 129.572 | 146.398 | 16 / 12 |
+
+The separate strict golden replays give these medians and full ranges, also in microseconds. Their input and timing
+path differs from the model comparison, so they are not the numbers to compare with `torch.compile`.
+
+| Card | s1 median [range] | s512 median [range] |
+| --- | ---: | ---: |
+| A100 40GB | 50.603 [50.214–50.935] | 178.688 [177.835–179.541] |
+| H100 80GB | 24.333 [24.184–26.246] | 88.451 [87.819–88.616] |
+| V100 SXM2 16GB | 67.644 [67.644–68.066] | 496.640 [491.520–498.688] |
+| RTX 4090 | 24.755 [24.676–24.773] | 156.160 [155.989–156.501] |
+| RTX 5090 | 20.543 [20.532–20.559] | 129.916 [129.800–130.892] |
+
+Within each row, all six processes keep identical ordered CUDA sources, schedules and shared-memory sizes. Each
+selected decode row matches its accepted candidate; RTX 5090 matches its unchanged baseline. Prefill sources match
+the baseline on four cards. V100's one differing prefill source only renames local coordinates: its addresses,
+arguments, launch geometry and shared memory remain equivalent. Compiling the old source with only the coordinate
+reform reproduces that change, so it is attributable to this work rather than the intervening main merge. Its other
+20 prefill sources remain byte-identical. The exact old, reform-only and final sources are in the V100 tuning archive.
+
+The canonical result archives now contain the final runs below. Each has two succeeded system-only experiment
+records, the raw artifact bundles and logs. The earlier baseline runs remain in the baseline archive described
+below. No benchmark timing was copied into an existing reference row to hide a regression.
+
+| Card | Archive | Root member | Executed source |
+| --- | --- | --- | --- |
+| A100 | `results_a100x1.tar.gz` | `2026-10-01_20-14-59/` | `c902cfbb4` |
+| H100 | `results_h100x1.tar.gz` | `2026-10-01_20-56-48/` | `aea150c5c` |
+| V100 | `results_v100x1.tar.gz` | `2026-10-01_20-17-08/` | `ab9647672` |
+| RTX 4090 | `results_rtx4090x1.tar.gz` | `2026-10-01_20-21-25/` | `e56914c03` |
+| RTX 5090 | `results_rtx5090x1.tar.gz` | `2026-10-01_20-15-51/` | `c902cfbb4` |
+
+H100's package freeze renders the task clone's inherited local Git origin in its editable requirement. The raw
+provenance audit verifies that the neutral-directory import, installed editable path and executable shebangs all
+resolve the intended task checkout at the recorded commit. The misleading origin URL did not select different
+benchmark code. The RTX 4090 tuning archive also retains an initial staging failure from a dirty copied golden;
+that attempt ran no GPU benchmark. The canonical run began from the clean committed source.
+
 ## Five-card baseline before the next optimization round (2026-10-01)
 
 The current pinned kernels still pass correctness on all five exact cards. Eight of the ten same-input Hugging Face
