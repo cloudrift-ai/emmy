@@ -1,5 +1,58 @@
 # Golden-bench kernel corpus
 
+## Shared K/V decode producers (2026-10-01)
+
+Sharing the K/V producer lowers whole-layer decode latency on A100 and V100. The selected route keeps Q separate
+and replaces the four K/V kernels with two, reducing the layer from 16 launches to 14. V100 still trails the
+same-input `torch.compile` reference. The equivalent RTX 5090 trial saves only 0.02–0.04 µs per pair, so that card
+keeps its existing selection.
+
+These are contemporaneous baseline and candidate processes on the same card, using Qwen3-0.6B revision
+`c1899de289a04d12100db370d81485cdf75e47ca`, layer 0, sequence length 1, deployable O3, `EMMY_FAST_MATH=0`,
+10 warmups and 100 iterations. Each process
+starts with a fresh tune database, requires measured evidence and disables new timing evidence. All eager-referenced
+Emmy and `torch.compile` checks pass. A100 and RTX 5090 use strict correctness throughout; V100's first pair uses
+the scaled check and its remaining two pairs also pass strict correctness. No tolerance changed.
+
+Whole-layer Emmy times below are microseconds. Each array contains the three processes for that arm, in execution
+order. The reduction compares the two medians; it is not a comparison with the earlier baseline table.
+
+| Card | Baseline | Candidate | Baseline median | Candidate median | Lower latency | Selection |
+| --- | --- | --- | ---: | ---: | ---: | --- |
+| A100 40GB | [53.895, 54.272, 53.821] | [51.769, 52.273, 51.444] | 53.895 | 51.769 | 3.95% | shared K/V |
+| V100 SXM2 16GB | [72.431, 71.748, 72.499] | [67.704, 68.224, 67.704] | 72.431 | 67.704 | 6.53% | shared K/V |
+| RTX 5090 | [20.474, 20.490, 20.558] | [20.455, 20.456, 20.518] | 20.490 | 20.456 | 0.16% | unchanged |
+
+All ten unrelated kernel sources remain byte-identical. The two Q kernels retain identical bodies, arguments,
+launch geometry and shared memory; only their generated function names change. Every arm keeps the same sources,
+schedules and shared-memory sizes across repeats. A100's reference stays between 57.6 and 58.3 µs. V100's reference
+medians are 59.231 µs for baseline processes and 58.500 µs for candidate processes; that drift is smaller than the
+4.726 µs separation between Emmy medians. RTX 5090's tiny reduction does not establish a useful layer improvement.
+
+The compiler can now give independent outputs with equal iteration domains a common coordinate. A rectangular
+domain maps to the flat coordinate by quotient and remainder. Existing normalization then combines the two producer
+reductions. This applies only where output ownership and binding make the substitution legal; ordinary cuts still
+offer separate producers. No fusion gate, grouped cut, new schedule family or benchmark implementation was added.
+The deployed K/V route uses the existing split reduction and cooperative partial schedule.
+
+Each selected experiment golden adds three kernel identities, two routing decisions and two measured schedule rows.
+Every previous program, kernel, route and row is retained unchanged. Measurements come from the exact named card.
+Fresh unpinned strict replay selects the route through those rows. A100's paired source is `55ea5c75e`, equivalent
+to parent compiler integration `9989b6b37`; V100 used `4fd360ef0` and `bd3132c35` over the baseline repairs. After
+merging main `754d1afa6`, fresh strict compiles retained all 14 ordered CUDA sources and launch signatures. RTX 5090's
+pairs ran on that merged source at `c902cfbb4`.
+
+Several rejected probes remain in the evidence. V100's eight-output-lane K and V schedules lost in full-layer runs.
+A smaller 128-thread K/V partial also lost to the selected 256-thread partial, 4.6 versus 4.3 µs in the bounded
+isolated comparison, so it was not promoted. A standalone normalized child initially had a different parent identity
+and output order; its timings were never used as full-layer evidence. The accepted route is derived from the actual
+full-layer parent. Global pins that changed unrelated decisions were likewise rejected before acceptance.
+
+`tuning_a100x1_2026-10-01.tar.gz`, `tuning_v100x1_2026-10-01.tar.gz` and
+`tuning_rtx5090x1_2026-10-01.tar.gz` retain the paired JSON, logs, task databases, working goldens, source audits,
+failed probes and exact command protocols under `2026-10-01-a100/`, `2026-10-01-v100/` and
+`2026-10-01-rtx5090/`, respectively. The V100 work used the single SXM2 card throughout.
+
 ## Five-card baseline before the next optimization round (2026-10-01)
 
 The current pinned kernels still pass correctness on all five exact cards. Eight of the ten same-input Hugging Face
@@ -73,17 +126,18 @@ they need not use the same CUDA libraries.
 | H100 80GB | 2.14.0 | 3.8.0 | 12.9.41 | 580.178.04 |
 | V100 SXM2 16GB | 2.13.0+cu126 | 3.7.1 | 12.9.86 | 580.178.04 |
 
-Raw snapshots are Git LFS archives in this experiment directory. Each root below contains its two system-only
+Baseline snapshots are retained in the Git LFS archive `tuning_baseline_2026-10-01.tar.gz`. Each root below contains
+its two system-only
 `<variant>.experiment.yaml` records, `<variant>/torch-compile/model.json`, five
 `<variant>/verification/repeat-N` JSON files and their status files, the working golden, package freeze and logs.
 
-| Archive | Root member | Run ID |
+| Card | Root member within the baseline archive | Run ID |
 | --- | --- | --- |
-| `results_rtx5090x1.tar.gz` | `2026-10-01_17-14-41/` | `20261001T171441Z` |
-| `results_rtx4090x1.tar.gz` | `2026-10-01_17-24-20/` | `20261001T172420Z` |
-| `results_a100x1.tar.gz` | `2026-10-01_17-28-34/` | `20261001T172834Z` |
-| `results_h100x1.tar.gz` | `2026-10-01_17-17-59/` | `20261001T171759Z` |
-| `results_v100x1.tar.gz` | `2026-10-01_17-12-12/` | `20261001T171212Z` |
+| RTX 5090 | `2026-10-01/baseline/rtx5090/2026-10-01_17-14-41/` | `20261001T171441Z` |
+| RTX 4090 | `2026-10-01/baseline/rtx4090/2026-10-01_17-24-20/` | `20261001T172420Z` |
+| A100 | `2026-10-01/baseline/a100/2026-10-01_17-28-34/` | `20261001T172834Z` |
+| H100 | `2026-10-01/baseline/h100/2026-10-01_17-17-59/` | `20261001T171759Z` |
+| V100 | `2026-10-01/baseline/v100/2026-10-01_17-12-12/` | `20261001T171212Z` |
 
 `tuning_baseline_2026-10-01.tar.gz` retains these baseline runs, the initial terminal failed runs, and the environment
 audits under `2026-10-01/{baseline,initial,provenance}/`. `tuning_migration_2026-10-01.tar.gz` retains the original
@@ -93,7 +147,7 @@ goldens and the import audit. No user-owned GPU instance was stopped or deleted.
 
 Three schedule trials did not improve the whole layer. A fourth trial removed unused asynchronous copies and
 measured a small gain, but the gain depended on measurement order and did not justify the shared codegen change.
-The current H100 selections remain unchanged. All comparisons use the same pinned model revision and existing
+The H100 prefill selections remain unchanged. All comparisons use the same pinned model revision and existing
 correctness tolerance as the baseline above.
 
 The K-tile and gate/up trials each alternated three baseline and three candidate processes, with 10 warmups and
