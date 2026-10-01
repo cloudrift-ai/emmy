@@ -415,7 +415,14 @@ def build_placement_groups(pools: Sequence[GoldenPool], decisions: dict[str, dic
         ctx = ctxs.get(card)
         if ctx is None:
             ctx = ctxs[card] = pool_context(pool)
-        forks, unmatched = _walk_placement(pool, ctx, decisions)
+        try:
+            forks, unmatched = _walk_placement(pool, ctx, decisions)
+        except ValueError as exc:
+            # The same definition the schedule enumeration does not take back (``build_golden_groups``): the
+            # reduce piece of a cross-CTA split re-offers the split and mints the buffer it already holds.
+            logger.warning("  !! %s: did not lower — %s", pool.name, exc)
+            skipped.append((pool.gpu, pool.name, "did not lower"))
+            continue
         if unmatched:
             skipped.append((pool.gpu, pool.name, f"decision not offered on {', '.join(unmatched)}"))
         if not forks:
