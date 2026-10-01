@@ -823,7 +823,11 @@ class ClassicProblem(ScheduleProblem[ClassicSchedule]):
         for family, value in self.bare_pins.items():
             if not value or value in self._spelled(schedule, family).values():
                 continue
-            if self.validate_pins or family in self._strict_row_keys or any(self._site_offers(site, family, value) for site in self.node_sites):
+            if (
+                self.validate_pins
+                or family in self._strict_row_keys
+                or any(self._site_offers(site, family, value) for site in self.node_sites)
+            ):
                 return f"bare {family} pin {value} is realized by no site of this kernel"
         return None
 
