@@ -41,6 +41,13 @@ def test_expression_substitution_replaces_free_coordinate_params() -> None:
     assert _chain(rewritten.lower(frozenset(), axes=(M_AXIS, Axis("n", 8), K_AXIS))) == ["m", "n", "k"]
 
 
+def test_expression_substitution_keeps_a_self_referenced_coordinate_in_place() -> None:
+    term = slab("v", "x", "a1", "a2", "a3")
+    rewritten = rewrite(term, lambda name: name, Sigma({"a1": BinaryExpr("*", Var("a1"), Literal(8, "int"))}))
+    assert rewritten.lift.params == term.lift.params == ("a1", "a2", "a3")
+    assert rewritten.free_axes == term.free_axes
+
+
 def test_expression_substitution_stops_at_reduce_binder() -> None:
     term = reduction(Axis("p", 8), (slab("v", "x", "p"),), (Assign(name="acc__v", op="copy", args=("v",)),), ("acc",))
     rewritten = rewrite(term, lambda name: name, Sigma({"p": BinaryExpr("%", Var("n"), Literal(8, "int"))}))
