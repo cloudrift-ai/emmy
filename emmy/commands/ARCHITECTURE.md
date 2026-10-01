@@ -626,10 +626,10 @@ defaults to **whole-step CUDA graphs for decode AND chunk/mixed steps** (a `--co
 `--max-model-len` — the rider-top rung — are made safe by the plugin's dummy-run seq-lens clamp
 (`serving/vllm_patches.py`); see
 `serving/ARCHITECTURE.md`); pass vLLM's own `--enforce-eager` to opt out (forced automatically when
-`EMMY_GEN_DECODE_BUCKET=0`, and for MoE models — the routed expert dispatch host-syncs, which a whole-step capture
+`EMMY_GEN_DECODE_BUCKET=0`). An MoE model's ladder is capped at capture size 1: single-token decode rides the
+fixed-slot expert tier, while wider steps ride the routed expert dispatch, which host-syncs and a whole-step capture
 cannot record; `_is_moe_model` probes the LOCAL config cache as UX, a caller-supplied `--compilation-config` on an
-MoE model is rejected with the reason, and `EmmyGenModel.__init__` carries the authoritative boot guard for probe
-misses). Under `--speculative-config` the ladder is derived from the resulting
+MoE model is checked at boot, and `EmmyGenModel.__init__` carries the authoritative guard for probe misses). Under `--speculative-config` the ladder is derived from the resulting
 `query_len = num_speculative_tokens + 1`: dense candidates, each floored to a multiple of `query_len`, so that vLLM's
 round-up to that multiple cannot push a step's padded width past the decode bucket and off the static decode twin
 (`serving/ARCHITECTURE.md` carries the rule and its invariant). The emmy generative arm also defaults

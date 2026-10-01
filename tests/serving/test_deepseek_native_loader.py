@@ -6,7 +6,7 @@ the trunk is fp8-e4m3 with ``.scale`` siblings holding E8M0 block exponents, and
 projection is native MXFP4 (``I8 [out, in/2]`` nibble pairs plus ``F8_E8M0 [out, in/32]`` exponents).
 These tests build that dialect synthetically and pin what the loader must produce: a twin whose dense
 trunk carries real values, and an expert store whose routed weights stay COMPRESSED (blocks + scales
-as program inputs), optionally cut to one tensor-parallel rank's slice of every expert.
+as program inputs), optionally sliced to one tensor-parallel rank's slice of every expert.
 """
 
 from __future__ import annotations
@@ -178,8 +178,8 @@ def test_a_float16_twin_keeps_the_routing_bias_float32(tmp_path):
 
 
 def test_expert_slice_keeps_one_ranks_cut_of_every_expert(tmp_path):
-    """A tensor-parallel rank holds every expert, cut along the intermediate axis: gate and up keep
-    the same rows, down the matching block columns, and the twin declares the cut shapes."""
+    """A tensor-parallel rank holds every expert, sliced along the intermediate axis: gate and up keep
+    the same rows, down the matching block columns, and the twin declares the sliced shapes."""
     torch = pytest.importorskip("torch")
     pytest.importorskip("transformers")
 
@@ -190,15 +190,15 @@ def test_expert_slice_keeps_one_ranks_cut_of_every_expert(tmp_path):
     _config, references = _native_checkpoint(tmp_path, torch, hidden, inter, experts)
     model, store = load_quantized_split(tmp_path, torch.float16, expert_slice=(1, 2))
 
-    layer, cut = store["layers"][0], slice(32, 64)
+    layer, kept = store["layers"][0], slice(32, 64)
     assert tuple(layer["w_gate_up"].shape) == (experts, 64, hidden // 32, 16)
     assert tuple(layer["w_down"].shape) == (experts, hidden, 1, 16)
     for e in range(experts):
         gate_up = decode_mxfp4(layer["w_gate_up"][e].numpy(), layer["w_gate_up_scale"][e].numpy()).T
-        np.testing.assert_array_equal(gate_up[:32], references[(e, "w1")][cut])
-        np.testing.assert_array_equal(gate_up[32:], references[(e, "w3")][cut])
+        np.testing.assert_array_equal(gate_up[:32], references[(e, "w1")][kept])
+        np.testing.assert_array_equal(gate_up[32:], references[(e, "w3")][kept])
         down = decode_mxfp4(layer["w_down"][e].numpy(), layer["w_down_scale"][e].numpy()).T
-        np.testing.assert_array_equal(down, references[(e, "w2")][:, cut])
+        np.testing.assert_array_equal(down, references[(e, "w2")][:, kept])
     twin = model.model.layers[0].mlp.experts
     assert tuple(twin.gate_up_proj.shape) == (experts, 64, hidden) and tuple(twin.down_proj.shape) == (experts, hidden, 32)
 

@@ -240,13 +240,13 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   `expert(x, w_gate_up, w_down[, b_gate_up, b_down])` with the weights — and gpt-oss's per-expert biases — as
   forward args → graph INPUTS, fed per-expert dim-0 slices of the E-stacked tensors, which live on device beside
   the routers via `_ensure_device` under the per-layer `inputs` map), and the partials weighted-`index_add_` into
-  `h`. **Under tensor parallelism every rank holds a cut of EVERY expert** (`slice_routed_experts`, the cut vLLM's
-  fused MoE makes without expert parallelism): gate and up keep the same 1/world of the intermediate rows, down the
+  `h`. **Under tensor parallelism every rank holds a slice of EVERY expert** (`slice_routed_experts`, the slicing vLLM's
+  fused MoE does without expert parallelism): gate and up keep the same 1/world of the intermediate rows, down the
   matching columns, so a rank's expert output is a partial sum the caller's all-reduce completes. The router is
   replicated, so every rank runs the same picks and the same launches — the ranks stay in step, and the fixed-slot
   tier below serves them. This is what makes a 256-expert model fit at all: one DeepSeek V4 pipeline stage's experts
-  are ~9.4 GB against a 32 GB card that also carries attention, arenas and the KV cache, ~1.2 GB per rank once cut
-  eight ways. The cut reaches the checkpoint read (`load_quantized_split`'s `expert_slice`), the twin's declared
+  are ~9.4 GB against a 32 GB card that also carries attention, arenas and the KV cache, ~1.2 GB per rank once sliced
+  eight ways. The slicing reaches the checkpoint read (`load_quantized_split`'s `expert_slice`), the twin's declared
   expert shapes, the serving-twin capture (the config's `--tensor-parallel-size`) and the pack key. The router the
   combine calls is the runner's own copy (`serving_router`), cast to the activation dtype except for the
   expert-selection bias (`e_score_correction_bias`),
@@ -311,7 +311,7 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   launch sequence, mirroring `run_device`). A schedule that stages an indirect operand through a TMA descriptor
   fails the compile loudly (descriptors bake the base address at encode) and single-token decode keeps the routed
   path (eager); a stale pre-indirect pack plan fails the `_indirect_covered` check and recompiles — no half-hit.
-  On a cut-expert rank a decode batch up to the bucket width rides the slots too, row by row through the one
+  On a sliced-expert rank a decode batch up to the bucket width rides the slots too, row by row through the one
   selector and partials pair (k launches per row): its picks reach nearly as many distinct experts as there are
   picks, so the routed dispatch would launch about as often and add the per-layer host read. Wider steps, prefill
   and whole-expert ranks ride the routed dispatch; `combine_routed_experts` stays the parity
@@ -359,7 +359,7 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   — a module held beside the norm, not a mean. The `post` program returns THREE tensors of three
   different widths (`mixed[T, hc·H]`, `xn[T, H]`, `mix[T, hc]`), so the rider path sizes each
   destination on its own width; the routed combine runs on `xn` (the fixed-slot tier for a decode
-  step, the routed dispatch otherwise), is reduced across the ranks' expert cuts, and lands on the
+  step, the routed dispatch otherwise), is reduced across the ranks' expert slices, and lands on the
   streams through `place_routed_streams`. Verified on an sm_70 V100: the compiled seam reproduces the
   eager `DeepseekV4DecoderLayer` (`tests/serving/generation/test_gen_runner_deepseek_gpu.py`).
 
@@ -378,8 +378,8 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   ids: a hash-routed MoE layer selects its experts by them (the frozen `tid2eid` table; the learned
   gate only weights the selection), and the runner refuses to route such a layer without them.
 
-  Under tensor parallelism the plugin hands the runner the rank's cut (`expert_slice=(rank, world)`): the quantized
-  loader keeps that cut of every per-expert checkpoint tensor, the unquantized lane cuts the twin's own expert tables,
+  Under tensor parallelism the plugin hands the runner the rank's slice (`expert_slice=(rank, world)`): the quantized
+  loader keeps that slice of every per-expert checkpoint tensor, the unquantized lane slices the twin's own expert tables,
   and the group all-reduce sums the ranks' partial outputs. The distributed gate is a REAL-engine parity test: the
   same tiny checkpoint served single-rank and TP2×PP2 must produce identical greedy token ids
   (`tests/serving/generation/test_vllm_engine_deepseek_gpu.py`). Two seam contracts the engine enforces that
@@ -700,8 +700,8 @@ Recorded follow-ups, in impact order:
   flag wins).
 - **DeepSeek V4 (`deepseek-ai/DeepSeek-V4-Flash-0731`) serves the published checkpoint at TP8 × PP2.**
   The pieces above — the fork's attention hosted per layer, the native-naming loader lane with its `.scale` ue8m0
-  block scales and compressed MXFP4 routed experts, every routed expert cut across the tensor-parallel ranks with the
-  group all-reduce summing the cuts, the carrier-width pipeline transport — are implemented and gated (see the
+  block scales and compressed MXFP4 routed experts, every routed expert sliced across the tensor-parallel ranks with the
+  group all-reduce summing the slices, the carrier-width pipeline transport — are implemented and gated (see the
   hyper-connection section), including a real-engine TP2×PP2 greedy-parity test on a small config. Single-token
   decode is captured (capture size 1): with every rank running the same picks, the fixed-slot expert tier serves the
   hyper-connection seam too. The 16× V100 boot serving mixed prefill/decode, its memory and KV numbers, and greedy

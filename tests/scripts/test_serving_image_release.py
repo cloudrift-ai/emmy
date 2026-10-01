@@ -595,7 +595,7 @@ def test_release_config_uses_capacity_as_default_prefill_bucket(tmp_path):
 
 
 def test_release_config_reads_the_tensor_parallel_width(tmp_path):
-    """The expert twins are traced at the cut each tensor-parallel rank holds, so the config's own
+    """The expert twins are traced at the slice each tensor-parallel rank holds, so the config's own
     serving flags are where that width comes from."""
     assert load_serving_config(SERVE_DIR / "models" / "deepseek-v4-flash-0731.env").tensor_parallel_size == 8
     config = tmp_path / "model.env"

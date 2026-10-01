@@ -223,7 +223,7 @@ def combine_routed_experts(xn, gated, run_expert, *, accumulate_float32=False):
     sums the ranks' partials into the whole expert output.
 
     The general path reads the routing to the host ONCE per layer (the per-expert row counts) and
-    takes each expert's rows from one stable sort; on a cut-expert rank a step reaches most of the
+    takes each expert's rows from one stable sort; on a sliced-expert rank a step reaches most of the
     experts, so one device wait per expert would pace the whole layer. A single row (every decode
     step of one request) reads its ``k`` picks instead and runs each picked expert on the row
     itself, in the same ascending expert order, with no sort or gathers at all."""
@@ -698,7 +698,7 @@ class EmmyGenRunner:
         self._pre_m1 = pre_m1  # list[_Program] — static M=1 gemv-class twins (or None → bucket twins take T=1)
         self._post_m1 = post_m1
         self._decode_bucket = decode_bucket
-        # The tensor-parallel width the routed experts are cut across (``slice_routed_experts``).
+        # The tensor-parallel width the routed experts are sliced across (``slice_routed_experts``).
         self._expert_slices = 1
         self._prefill_capacity = prefill_capacity  # symbolic programs' device-buffer token capacity (None -> host rebind only)
         self._pre_prefill = pre_prefill  # list[_Program] — static M=prefill_bucket chunk twins (or None → symbolic prefill)
@@ -892,6 +892,7 @@ class EmmyGenRunner:
         from emmy.compiler.trace.huggingface import _auto_config_from_pretrained, quantized_checkpoint_dir, slice_routed_experts
 
         warn_if_unpinned(model_id)  # covers both lanes below, including the plain from_pretrained one
+        expert_slices = expert_slice[1] if expert_slice else 1
         # A quantized checkpoint cannot go through ``from_pretrained`` (transformers would
         # engage its own quantizer machinery); build the twin from config and stream the shards —
         # dense trunk loaded as real values (fp8 and NVFP4 decoded on read), expert tensors
@@ -946,7 +947,7 @@ class EmmyGenRunner:
                     layer_range=layer_range,
                     include_embed=include_embed,
                     include_norm=include_norm,
-                    expert_slices=expert_slice[1] if expert_slice else 1,
+                    expert_slices=expert_slices,
                     plan_cache=plan_cache,
                 )
         logger.info("[gen_runner] loading %s (%s, CPU trace)...", model_id, dtype_str)
@@ -968,7 +969,7 @@ class EmmyGenRunner:
                 layer_range=layer_range,
                 include_embed=include_embed,
                 include_norm=include_norm,
-                expert_slices=expert_slice[1] if expert_slice else 1,
+                expert_slices=expert_slices,
                 plan_cache=plan_cache,
             )
 
@@ -996,8 +997,8 @@ class EmmyGenRunner:
         algebra spelled in-graph (``spell_quantized_inputs`` via ``_compile_split``), one program
         set per distinct expert SHAPE. A store whose ``trunk`` is ``"codes"`` (AWQ/EXL3) also puts
         the TRUNK on the checkpoint-sourced lane, so its coded linears stay compressed on the card.
-        ``expert_slices`` is the tensor-parallel width the routed experts arrive cut across
-        (``slice_routed_experts``); it keys the pack, since the cut changes every expert program."""
+        ``expert_slices`` is the tensor-parallel width the routed experts arrive sliced across
+        (``slice_routed_experts``); it keys the pack, since the slicing changes every expert program."""
         import numpy as np
         import torch
 
@@ -2217,13 +2218,13 @@ class EmmyGenRunner:
             )
 
     def _moe_combine_slots(self, moe, xn, token_ids=None):
-        """Fixed-slot combine for single-token decode (``T == 1``) — the capture-legal twin of
+        """Fixed-slot combine for a decode step, one row at a time — the capture-legal twin of
         :meth:`_moe_combine`. The routing stays data-dependent in VALUES only: one fixed-shape
-        write puts the router's top-k indices (plus this layer's table offset, cast to the
+        write per row puts its top-k indices (plus this layer's table offset, cast to the
         kernel's int32) into the persistent selector — no ``unique()``, no ``.tolist()``, no
         host sync — and the k slot instances of the indirect M=1 expert program resolve their
         weight base pointers in-kernel from the device tables (``table[sel[slot]]``), reading
-        the 3-D expert tensors directly; the partials combine through one score matmul. Every
+        the 3-D expert tensors directly; each row's partials combine through one score matmul. Every
         op is fixed-shape with a fixed launch set, so a whole-step decode CUDA graph records
         it; under an outer capture each slot issues its raw launch sequence, mirroring
         :meth:`_Program.run_device` (nested graph machinery is illegal in a capturing stream).

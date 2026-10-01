@@ -228,7 +228,7 @@ def load_serving_config(path: str | Path) -> ServingConfig:
 
 
 def _tensor_parallel_size(extra_args: str, source: Path) -> int:
-    """The tensor-parallel width ``SERVE_EXTRA_ARGS`` serves at: each rank holds that cut of every
+    """The tensor-parallel width ``SERVE_EXTRA_ARGS`` serves at: each rank holds that slice of every
     routed expert, so the expert twins are traced at it."""
     args = shlex.split(extra_args)
     for i, arg in enumerate(args):

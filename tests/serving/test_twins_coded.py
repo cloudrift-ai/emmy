@@ -301,8 +301,8 @@ def test_deepseek_expert_twin_records_the_native_mxfp4_program_serving_binds(tmp
     to follow the experts, not the trunk declaration, or the golden records a program serving never
     runs. ``w_down``'s packed shape also pins the layout the caller passes down: these experts are
     ``F.linear`` parameters, so the blocks lead with ``out``; the ``x @ W`` reading would produce
-    (16, 2, 16) here instead. Served across tensor-parallel ranks, each rank holds a cut of every
-    expert, so the twin is the cut program: intermediate 64 over two ranks records the 32 one."""
+    (16, 2, 16) here instead. Served across tensor-parallel ranks, each rank holds a slice of every
+    expert, so the twin is the sliced program: intermediate 64 over two ranks records the 32 one."""
     pytest.importorskip("torch")
     transformers = pytest.importorskip("transformers")
 

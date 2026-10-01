@@ -353,7 +353,7 @@ def test_compile_split_spells_static_fp4_activations_on_a_symbolic_width_split(t
 
 
 def test_create_passes_the_expert_slice_through_to_the_loader(tmp_path, monkeypatch):
-    """A tensor-parallel rank's expert cut must reach the checkpoint read, not just the programs:
+    """A tensor-parallel rank's expert slice must reach the checkpoint read, not just the programs:
     holding every whole expert is what does not fit the card in the first place."""
     import json
 
@@ -375,5 +375,5 @@ def test_create_passes_the_expert_slice_through_to_the_loader(tmp_path, monkeypa
 
     built = EmmyGenRunner.create(model_id=str(tmp_path), expert_slice=(3, 8))
 
-    assert seen["expert_slice"] == (3, 8), "the cut never reached the checkpoint read"
-    assert built["expert_slices"] == 8, "the cut never reached the pack key"
+    assert seen["expert_slice"] == (3, 8), "the slice never reached the checkpoint read"
+    assert built["expert_slices"] == 8, "the slice never reached the pack key"

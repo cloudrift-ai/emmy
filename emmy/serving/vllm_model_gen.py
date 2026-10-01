@@ -451,7 +451,7 @@ class EmmyGenModel(nn.Module, SupportsPP):
         prefill_bucket = emmy_config.gen_prefill_bucket()
         if prefill_bucket < 0:
             prefill_bucket = capacity or 0
-        # Routed experts are cut across the tensor-parallel group along their intermediate axis:
+        # Routed experts are sliced across the tensor-parallel group along their intermediate axis:
         # every rank holds 1/world of EVERY expert (a rank cannot hold whole experts of the models
         # this exists for — one DeepSeek V4 stage's experts alone outweigh a 32 GB card), runs the
         # same picks, and the group all-reduce (installed below) sums the slices. Every rank doing

@@ -2,10 +2,10 @@
 
 A DeepSeek V4 rank cannot hold all 256 routed experts whole: one pipeline stage's experts are ~9.4 GB
 at MXFP4 against a 32 GB card that also carries attention, arenas and the KV cache. So each rank holds
-1/world of EVERY expert, cut along the intermediate axis (``slice_routed_experts``), runs the same
+1/world of EVERY expert, sliced along the intermediate axis (``slice_routed_experts``), runs the same
 picks, and the group all-reduce sums the ranks' outputs.
 
-These tests pin that the cut is exact — the slices of one expert sum to the whole expert — and the
+These tests pin that the slicing is exact — the slices of one expert sum to the whole expert — and the
 routing math serving runs, ``combine_routed_experts``.
 """
 
@@ -59,17 +59,17 @@ def test_the_ranks_slices_of_an_expert_sum_to_the_whole_expert():
     for rank in range(world):
         model = _one_moe_layer(torch, experts, hidden, inter)
         slice_routed_experts(model, rank, world)
-        cut = model.model.layers[0].mlp.experts
-        assert tuple(cut.gate_up_proj.shape) == (experts, 2 * inter // world, hidden)
-        assert tuple(cut.down_proj.shape) == (experts, hidden, inter // world)
+        sliced = model.model.layers[0].mlp.experts
+        assert tuple(sliced.gate_up_proj.shape) == (experts, 2 * inter // world, hidden)
+        assert tuple(sliced.down_proj.shape) == (experts, hidden, inter // world)
         for e in range(experts):
-            total[e] += _expert(torch, cut, e, x.float()).double()
+            total[e] += _expert(torch, sliced, e, x.float()).double()
     for got, want in zip(total, reference, strict=True):
         torch.testing.assert_close(got, want, rtol=1e-5, atol=1e-5)
 
 
 def test_a_meta_twin_is_cut_to_the_declared_shapes():
-    """The serving-twin capture cuts a weightless (meta) twin: only the declared shapes change."""
+    """The serving-twin capture slices a weightless (meta) twin: only the declared shapes change."""
     torch = pytest.importorskip("torch")
 
     from emmy.compiler.trace.huggingface import slice_routed_experts
@@ -119,7 +119,7 @@ def test_a_single_row_routes_without_waiting_on_the_device(monkeypatch):
 
 
 def test_a_batch_reads_its_routing_once(monkeypatch):
-    """A cut-expert rank routes a step to most of the experts, so the batch path must not wait on
+    """A sliced-expert rank routes a step to most of the experts, so the batch path must not wait on
     the device per expert: one host read of the counts per layer, and the same sum as routing each
     expert's rows found by ``where``, in the same order."""
     torch = pytest.importorskip("torch")
@@ -152,7 +152,7 @@ def test_a_batch_reads_its_routing_once(monkeypatch):
     ("rows", "slices", "path"), [(1, 1, "slots"), (4, 1, "routed"), (4, 8, "slots"), (16, 8, "slots"), (17, 8, "routed")]
 )
 def test_decode_batches_of_cut_experts_ride_the_fixed_slots(rows, slices, path):
-    """A single token always takes the fixed slots. With experts cut across ranks a decode batch
+    """A single token always takes the fixed slots. With experts sliced across ranks a decode batch
     reaches nearly as many experts as it has picks, so up to the decode bucket its rows take the
     slots too; wider steps, and whole-expert ranks, keep the routed dispatch."""
     from types import SimpleNamespace

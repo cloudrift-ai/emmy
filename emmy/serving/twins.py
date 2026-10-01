@@ -107,9 +107,9 @@ def capture_twin_graphs(
     profile includes unconverted experts. Native MXFP4 expert twins carry the corresponding
     ``@mxfp4`` suffix and the exact packed block/scale inputs. ``static_only`` is the deliberate exception: it accepts
     only the proven decode-1/prefill-0 envelope and emits M=1 without any standard or symbolic twins.
-    ``expert_slices`` is the serving tensor-parallel width: each rank holds that cut of every routed
+    ``expert_slices`` is the serving tensor-parallel width: each rank holds that slice of every routed
     expert (:func:`~emmy.compiler.trace.huggingface.slice_routed_experts`), so the expert twins are
-    the cut programs serving compiles."""
+    the sliced programs serving compiles."""
     import torch  # noqa: PLC0415
     from transformers import AutoConfig, AutoModel  # noqa: PLC0415
 
