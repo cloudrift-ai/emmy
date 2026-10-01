@@ -410,7 +410,6 @@
  "tests/compiler/pipeline/search/prior/test_catboost_model.py::test_fit_recovers_the_planted_signal": 0.28,
  "tests/compiler/pipeline/search/prior/test_catboost_model.py::test_the_tree_prices_the_two_regimes_from_the_routing_column": 1.55,
  "tests/compiler/pipeline/search/prior/test_report.py::test_a_pool_too_small_for_a_metric_is_excluded_and_the_count_says_so": 0.28,
- "tests/compiler/pipeline/search/prior/test_reproduction.py::test_the_shipped_priors_reproduce_the_goldens[hardware/placement]": 14.8,
  "tests/compiler/pipeline/search/test_evidence.py::test_a_compile_imports_its_scope_once_and_lets_a_re_recorded_files_rows_go": 1.13,
  "tests/compiler/pipeline/search/test_evidence.py::test_a_measurement_taken_here_is_never_replaced_by_an_import": 1.03,
  "tests/compiler/pipeline/search/test_evidence.py::test_the_rtx_5090_hardware_golden_deploys_from_the_db@golden_evidence_rtx5090": 2.77,

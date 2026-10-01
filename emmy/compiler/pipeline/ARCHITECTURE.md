@@ -1100,7 +1100,7 @@ over a dataset `emmy db export` wrote — its golden pools or its measured pools
 prior of the dataset's space, or with the artifact `--offline-file` names. Beside the ranks it re-decides every pool
 with no measurement in scope (`prior/reproduce.py`: the greedy tile lowering against the closest golden row; the cut
 pass with the placement prior deciding against the golden's arm) — the deploy-faithful check the reproduction gate in
-`make test` asserts a rate on, per repository golden (README, "Fit the priors").
+`make test` asserts a rate on, per slice of a repository golden's pools (README, "Fit the priors").
 
 **Two datasets, two questions, one report.** `search/prior/report.py` assembles both into one serialisable schema
 (`--json`), so comparing two models is a `diff`. `emmy fit` writes the same summaries into its `metrics.json`, through
