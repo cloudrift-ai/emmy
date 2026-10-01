@@ -242,7 +242,11 @@ def capture_twin_graphs(
                     graphs[twin_name] = trace_split(wrapper, example_args, argnames)
                     layer_scopes[twin_name] = members
 
-            if expert_w is not None:
+        if expert_w is not None:
+            # Every MoE boot compiles the M=1 expert program — the fixed-slot tier runs it — whatever
+            # widths the trunk serves, so the expert twins carry width 1 too.
+            expert_buckets = buckets if any(m == 1 for _name, m in buckets) else [*buckets, ("1", 1)]
+            for name, m in expert_buckets:
                 rows = 8 if m is None else m
                 examples = _expert_examples(parts[1], rows, hidden, td, split_gate_up=bool(storage))
                 argnames = ["x"] if m is None else None

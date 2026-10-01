@@ -47,11 +47,16 @@ class ServingConfig:
     def static_widths(self) -> tuple[int, ...]:
         return tuple(sorted({dict(row.bindings)["num_tokens"] for row in self.realizations if row.bindings}))
 
-    def realizations_for(self, width: int | None) -> tuple[ServingRealization, ...]:
+    def realizations_for(self, width: int | None, *, expert: bool = False) -> tuple[ServingRealization, ...]:
         """The rows a twin at ``width`` reaches: a static twin is compiled at its own width only,
         so its target carries that width's rows; a symbolic twin (``None``) carries the dynamic
-        rows, the any-width compile."""
-        return tuple(row for row in self.realizations if (dict(row.bindings).get("num_tokens") if row.bindings else None) == width)
+        rows, the any-width compile. An ``expert`` twin at width 1 carries the standard M=1 row even
+        when the config serves no M=1 trunk: every MoE boot compiles that expert program for the
+        fixed-slot tier."""
+        rows = tuple(row for row in self.realizations if (dict(row.bindings).get("num_tokens") if row.bindings else None) == width)
+        if expert and width == 1 and not rows:
+            return (ServingRealization(name="m1", bindings=(("num_tokens", 1),), pins=(("FAST_MATH", False),)),)
+        return rows
 
 
 def _read_env(path: Path) -> dict[str, str]:

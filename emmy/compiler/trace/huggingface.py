@@ -823,6 +823,8 @@ def expert_intermediate_slice(name: str, tensor, rank: int, world: int, *, stack
     axis = (1 if name.startswith("w_down") else 0) + int(stacked)
     halves = 2 if name.startswith("w_gate_up") else 1
     extent = tensor.shape[axis] // halves
+    if extent == 1:
+        return tensor  # a scale broadcast along the intermediate axis: every rank keeps it whole
     if extent % world:
         raise ValueError(f"expert input {name!r} has {extent} intermediate entries on axis {axis}, not divisible by {world} ranks")
     width = extent // world

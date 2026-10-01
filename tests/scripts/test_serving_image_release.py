@@ -597,7 +597,11 @@ def test_release_config_uses_capacity_as_default_prefill_bucket(tmp_path):
 def test_release_config_reads_the_tensor_parallel_width(tmp_path):
     """The expert twins are traced at the slice each tensor-parallel rank holds, so the config's own
     serving flags are where that width comes from."""
-    assert load_serving_config(SERVE_DIR / "models" / "deepseek-v4-flash-0731.env").tensor_parallel_size == 8
+    deepseek = load_serving_config(SERVE_DIR / "models" / "deepseek-v4-flash-0731.env")
+    assert deepseek.tensor_parallel_size == 8
+    # No M=1 trunk is served, yet the M=1 expert program is: the fixed-slot tier compiles it on every MoE boot.
+    assert deepseek.realizations_for(1) == ()
+    assert [row.name for row in deepseek.realizations_for(1, expert=True)] == ["m1"]
     config = tmp_path / "model.env"
     config.write_text(
         f"SERVE_MODEL=org/model\nSERVE_GPU=NVIDIA-Test\nSERVE_GOLDEN_FILE={tmp_path / 'golden.json'}\n"

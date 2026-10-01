@@ -165,6 +165,7 @@ def test_trace_serving_twins_static_only_release_forwards_exact_scope(monkeypatc
         "prefill_bucket": 0,
         "symbolic": False,
         "static_only": True,
+        "expert_slices": 1,
     }
     assert {(bindings, pins) for _twin, bindings, pins in _coverage(GoldenFile.load(output))} == {
         ((("num_tokens", 1),), (("FAST_MATH", False),))

@@ -107,7 +107,14 @@ def handle_trace(args):
         # The release audit's graph set (``emmy eval golden``): the symbolic programs plus the
         # config's static widths — a golden traced from fewer graphs leaves the audit with gaps.
         if serving.static_only:
-            graphs = capture_twin_graphs(args.input, decode_bucket=1, prefill_bucket=0, symbolic=False, static_only=True)
+            graphs = capture_twin_graphs(
+                args.input,
+                decode_bucket=1,
+                prefill_bucket=0,
+                symbolic=False,
+                static_only=True,
+                expert_slices=serving.tensor_parallel_size,
+            )
         else:
             graphs = capture_twin_graphs(
                 args.input,
@@ -133,7 +140,10 @@ def handle_trace(args):
             graphs,
             destination,
             model=serving.model_provenance,
-            realizations={name: [row.to_golden() for row in serving.realizations_for(twin_width(name))] for name in graphs},
+            realizations={
+                name: [row.to_golden() for row in serving.realizations_for(twin_width(name), expert=name.startswith("expert"))]
+                for name in graphs
+            },
         )
         logger.info(
             "Saved serving-twin golden file: %s (%d graph(s), %d distinct kernel(s))",

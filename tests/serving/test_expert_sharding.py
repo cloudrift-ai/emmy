@@ -68,7 +68,20 @@ def test_the_ranks_slices_of_an_expert_sum_to_the_whole_expert():
         torch.testing.assert_close(got, want, rtol=1e-5, atol=1e-5)
 
 
-def test_a_meta_twin_is_cut_to_the_declared_shapes():
+def test_a_scale_broadcast_along_the_intermediate_axis_stays_whole():
+    """A per-row (or per-tensor) scale has extent 1 on the sliced axis: it covers every
+    intermediate entry, so every rank keeps it whole."""
+    torch = pytest.importorskip("torch")
+
+    from emmy.compiler.trace.huggingface import expert_intermediate_slice
+
+    down_scale, gate_up_scale = torch.rand(8, 1), torch.rand(2, 1)
+    assert expert_intermediate_slice("w_down_scale", down_scale, 1, 2) is down_scale
+    assert expert_intermediate_slice("w_gate_up_scale", gate_up_scale, 1, 2) is gate_up_scale
+    assert tuple(expert_intermediate_slice("w_down_scale", torch.rand(8, 4), 1, 2).shape) == (8, 2)
+
+
+def test_a_meta_twin_is_sliced_to_the_declared_shapes():
     """The serving-twin capture slices a weightless (meta) twin: only the declared shapes change."""
     torch = pytest.importorskip("torch")
 
@@ -100,7 +113,7 @@ def test_a_single_row_routes_without_waiting_on_the_device(monkeypatch):
     def run_expert(e, rows):
         return rows @ weights[e]
 
-    batch = combine_routed_experts(xn, gated, run_expert)
+    batch = combine_routed_experts(xn, gated, run_expert, num_experts=experts)
     launched: list[int] = []
 
     def run_recorded(e, rows):
@@ -112,7 +125,7 @@ def test_a_single_row_routes_without_waiting_on_the_device(monkeypatch):
 
     monkeypatch.setattr(torch.Tensor, "unique", refuse)
     monkeypatch.setattr(torch, "where", refuse)
-    row = combine_routed_experts(xn[:1], tuple(g[:1] for g in gated), run_recorded)
+    row = combine_routed_experts(xn[:1], tuple(g[:1] for g in gated), run_recorded, num_experts=experts)
 
     assert torch.equal(row, batch[:1])
     assert launched == sorted(gated[1][0].tolist())
@@ -142,7 +155,9 @@ def test_a_batch_reads_its_routing_once(monkeypatch):
     monkeypatch.setattr(torch.Tensor, "tolist", lambda t: reads.append(t.shape) or real_tolist(t))
     monkeypatch.setattr(torch.Tensor, "unique", lambda *a, **k: pytest.fail("a batch asked the device for its experts"))
     monkeypatch.setattr(torch, "where", lambda *a, **k: pytest.fail("a batch asked the device for one expert's rows"))
-    got = combine_routed_experts(xn, (scores, indices), lambda e, rows: rows @ weights[e])
+    # CUDA bincount reads its input's min and max to the host before counting.
+    monkeypatch.setattr(torch, "bincount", lambda *a, **k: pytest.fail("a batch counted its rows with bincount"))
+    got = combine_routed_experts(xn, (scores, indices), lambda e, rows: rows @ weights[e], num_experts=experts)
 
     assert torch.equal(got, reference)
     assert len(reads) == 1
@@ -151,7 +166,7 @@ def test_a_batch_reads_its_routing_once(monkeypatch):
 @pytest.mark.parametrize(
     ("rows", "slices", "path"), [(1, 1, "slots"), (4, 1, "routed"), (4, 8, "slots"), (16, 8, "slots"), (17, 8, "routed")]
 )
-def test_decode_batches_of_cut_experts_ride_the_fixed_slots(rows, slices, path):
+def test_decode_batches_of_sliced_experts_ride_the_fixed_slots(rows, slices, path):
     """A single token always takes the fixed slots. With experts sliced across ranks a decode batch
     reaches nearly as many experts as it has picks, so up to the decode bucket its rows take the
     slots too; wider steps, and whole-expert ranks, keep the routed dispatch."""

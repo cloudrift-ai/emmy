@@ -94,7 +94,12 @@ def test_hyper_connection_split_matches_eager_layer(layer_idx):
         mixed, xn, mix = post(attn_out.squeeze(0), carrier)
         assert mixed.shape == (t, hc * h) and xn.shape == (t, h) and mix.shape == (t, hc)
         gated = gate(xn, ids.reshape(-1)) if block.mlp.is_hash else gate(xn)
-        routed = combine_routed_experts(xn, gated, lambda e, rows: expert(rows, experts.gate_up_proj[e], experts.down_proj[e]))
+        routed = combine_routed_experts(
+            xn,
+            gated,
+            lambda e, rows: expert(rows, experts.gate_up_proj[e], experts.down_proj[e]),
+            num_experts=experts.gate_up_proj.shape[0],
+        )
         got = place_routed_streams(mixed, routed, mix)
     assert torch.allclose(ref, got, atol=1e-5)
 

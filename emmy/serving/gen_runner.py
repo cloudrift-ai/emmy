@@ -207,7 +207,7 @@ class _Program:
             return [outs[n].clone() for n in self.output_names]
 
 
-def combine_routed_experts(xn, gated, run_expert, *, accumulate_float32=False):
+def combine_routed_experts(xn, gated, run_expert, *, num_experts, accumulate_float32=False):
     """Route + combine for one MoE layer — shared by :meth:`EmmyGenRunner._moe_combine` and its
     parity tests so both always exercise the same math. ``gated`` is the HF router module's
     return, whose LAST two entries are ``scores[T, k]`` / ``indices[T, k]``; each HIT expert
@@ -249,7 +249,8 @@ def combine_routed_experts(xn, gated, run_expert, *, accumulate_float32=False):
     gathered = xn[order // k]
     outputs = torch.empty((rows * k, xn.shape[1]), dtype=accumulate_dtype, device=xn.device)
     start = 0
-    for e, count in enumerate(torch.bincount(flat).tolist()):
+    counts = torch.zeros(num_experts, dtype=torch.long, device=flat.device).scatter_add_(0, flat, torch.ones_like(flat))
+    for e, count in enumerate(counts.tolist()):
         if count:
             outputs[start : start + count] = run_expert(e, gathered[start : start + count])
         start += count
@@ -2214,6 +2215,7 @@ class EmmyGenRunner:
                 xn,
                 gated,
                 lambda e, rows: self._launch_expert(moe, e, rows),
+                num_experts=moe["num_experts"],
                 accumulate_float32=moe.get("accumulate_float32", False),
             )
 
