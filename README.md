@@ -291,19 +291,20 @@ emmy serve Qwen/Qwen3-Embedding-0.6B --bench --random-input-len 32 --stock
 For the pinned 27B ModelOpt NVFP4 checkpoint on one RTX 5090, `--compile-scope mlp` keeps vLLM 0.23's Qwen3.5
 hybrid model, attention, GDN state, scheduling, and non-MLP quantized loader. Emmy compiles the 64 dense text MLPs
 in BF16. Decode uses a padded M=16 static program and prefill uses a padded M=64 program, each with scoped native
-FP4 MMA pins. This lane is still being qualified; draft implementation PR #993 records its limits.
+FP4 MMA pins. [Implementation PR #993](https://github.com/cloudrift-ai/emmy/pull/993) records its qualification
+and limits.
 
 ```bash
 scripts/serve_qwen38_nvfp4_mixed_5090.sh
 ```
 
-The recipe pins the checkpoint, vLLM envelope, compiler precision, shared cuts, and static-only native schedule.
-On five warm 5-input/16-output requests, the pinned M=16/M=64 route measured 271 ms mean TTFT and 9.88 decode
-tokens/s, versus stock 288 ms and 9.08 tokens/s. The earlier scalar route measured 617 ms and 2.25 tokens/s.
-An earlier native precision pin took 11.55 s for one 4,005-input/16-output request versus stock 12.45 s, while
-symbolic scalar prefill took 224 s. The current precision pin also completes the 4K shape. Four other deterministic
-64-token prompts diverged from stock, so numerical quality qualification remains open. The adapter rejects an
-unpinned Emmy compile.
+The recipe pins the checkpoint, vLLM envelope, compiler precision, shared cuts, and native schedules for both
+static shapes. On the RTX 5090 with driver 580.178.04, five warm 5-input/16-output requests measured 277 ms
+mean TTFT and 9.59 decode tokens/s, versus stock 303 ms and 8.77 tokens/s. One identical 4,005-input/16-output
+request took 11.16 s mixed and 12.25 s stock. Both arms answered five fixed tasks correctly, including a
+3,530-token needle prompt. Selected-token logprobs still differ, and four longer greedy continuations diverged
+before the main merge; these small checks do not establish broad model-quality equivalence. The adapter rejects
+an unpinned Emmy compile.
 
 ## Experimental native generation
 

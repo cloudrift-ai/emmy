@@ -1,9 +1,11 @@
 # Qwen3.8 NVFP4 mixed serving: implementation and qualification
 
 Status: implementation in draft PR #993, October 1, 2026. The exact 27B endpoint booted with pinned native
-M=16 decode and M=64 prefill programs on the RTX 5090. Selected deterministic short and 4K completions matched
-stock; four other 64-token prompts diverged. The independent quantized MLP oracle measured the residual below;
-bounded task-quality and post-main-merge GPU qualification remain open.
+M=16 decode and M=64 prefill programs on the RTX 5090 before the October 1 main merge. Selected deterministic
+short and 4K completions matched stock; four other 64-token prompts diverged. Post-merge graph fusion changed
+the pin sites. New explicit cuts yield three kernels emitting native FP4 instructions per shape on the 5090.
+Post-merge numerical, endpoint, bounded answer-quality, and paired warm latency checks passed; the broader
+quality limits and historical divergent continuations are recorded below.
 
 ## Boundary and target
 
@@ -22,9 +24,15 @@ is BF16, text only, TP1/PP1, one active request, 4,096 context tokens, at most 6
 caching, speculation and outer CUDA graphs disabled. The earlier proposed FP16 boundary was rejected; no FP16
 fallback is part of this lane.
 
-## Evidence and current status
+## Pre-merge evidence and current post-merge status
 
-| Gate | Evidence | Status |
+The warm endpoint and numerical measurements in the table below were taken before merging main and are historical.
+The merged branch's portable GitHub CI passed all native, lint, package, and full-test jobs at `65b9591c` and
+again at code commit `4b71026c` after the nested pin fix and refreshed recipe (full test job 24m11s).
+Locally, the new child-site placement tests pass; the broader local Nix test run has environment failures, including
+two exact CPU expert-sharding failures reproduced on clean `origin/main`.
+
+| Gate | Pre-merge evidence | Status at that revision |
 | --- | --- | --- |
 | Stock baseline | Pinned vLLM 0.23 container loaded the exact checkpoint in BF16 with stock ModelOpt NVFP4 and FLA GDN. `/health` returned 200; deterministic text and the paired streaming benchmark succeeded. | Functional and small warm latency baseline passed; peak-load memory pending. |
 | Capture and inventory | Exact checkpoint header inspection found `model.language_model.layers.*`; all 64 MLPs form one structural profile. The shared trace path captures BF16 W4A4 `mlp16@nvfp4` and `mlp64@nvfp4`; the symbolic option remains available in the helper. A pinned exact-checkpoint trace saved 2 graphs of 148 nodes each and 6 distinct kernels. | Focused CPU tests and trace passed; a measured golden release audit is not part of this environment-pinned recipe. |
@@ -38,6 +46,71 @@ fallback is part of this lane.
 | Teacher-forced prompt | Stock and the earlier `FAST_MATH=false` native mixed route returned the same 14 token IDs and expected Tokyo continuation for one fixed 13-token prompt. Selected-token logprob differences across 13 positions had mean absolute 0.0700, RMS 0.0980, maximum 0.2431; earlier scalar maximum was 0.281. | Token smoke passed; numerical logit parity remains open. |
 | 4K context | The same 4,005 prompt tokens plus 16 generated tokens completed with identical stock and `FAST_MATH=false` mixed text, 4,021 total tokens, HTTP 200, and no OOM. After a short first-use request, stock took 12.451 s, mixed symbolic scalar prefill took 224.22 s, and mixed native M=64 prefill took 11.547 s wall. The final `FAST_MATH=true` route completed a second 4,005+16 request in 12.348 s with no OOM; its prompt differed, so that is a shape check rather than a paired stock comparison. | Full requested length envelope passed; matched false-pin native long latency passed. |
 | End-to-end correctness | Selected short and 4K text requests, four additional 64-token prompts, one teacher-forced prompt, and real hybrid topology/state were compared. The four additional prompts each diverged from stock. Cache cancellation and broader quality were not tested. | Functional serving passed on this envelope; exact numerical parity failed and quality acceptance remains open. |
+
+### Post-merge cut and pin findings
+
+Main's producer fusion changed the layer-0 cut inventory: the first M=16 or M=64 gate/up piece now owns both
+contractions and their output branches. The pre-merge `@place_...` schedule identities no longer select those
+contractions. A post-merge boot with those stale pins compiled scalar gate/up code and stalled during warmup, so
+that boot is not a post-merge serving pass. The current recipe first pins five parent workspace cuts and then pins
+`PLACE@place_<parent>/map.1/inner=cut` and `/map.2/inner=cut` in each shape's own knob context. This preserves
+the parent workspace cuts and maximal fusion; the other children settle to fuse. Parent-only pins retain their
+former terminal behavior. New focused regressions check the parent/child sequence, sibling isolation, termination,
+and rejection of stale child keys.
+
+| Shape | Exact post-merge child cut scopes | Final contraction pins | Compile-only result |
+| --- | --- | --- | --- |
+| M=16 | `place_643aecc968/map.1/inner`, `place_643aecc968/map.2/inner` | `place_532c520dc2` with `WORK=w1x2`; `place_4b5e95ec28` with `WORK=w1x1`; down `node_linear_2` with `WORK=w1x2` | Seven kernels; two gate/up-derived output pieces and down emit native FP4 MMA. |
+| M=64 | `place_f688369f74/map.1/inner`, `place_f688369f74/map.2/inner` | `place_c0904cfc6e` and `place_8f9ed3f314` with `WORK=w1x1`; down `node_linear_2` with `WORK=w1x2` | Seven kernels; two gate/up-derived output pieces and down emit native FP4 MMA. |
+
+For each contraction pin the exact `TILE` is `mma_m16n8k64_e2m1_f32/f1x2/k4` and `STAGE` is
+`d2/smem-async`; the global fallback pins remain explicit. The M=64 first child refused `WORK=w1x2` with “its
+kernel pins leave no schedule row”; `w1x1` compiled and emitted native FP4. Two output cuts leave two
+gate/up-derived kernels with native instructions plus one native down kernel, rather than the pre-merge four native
+kernels; the other four handle activation quantization or block scales. The gate/up child IR includes a
+tuple-valued contraction, so these are kernel counts, not one kernel per logical projection. Instruction counts
+in emitted M=64 CUDA were 5 and 9 in the two gate/up-derived pieces and 3 in down. These are
+emitted-instruction checks, not a measured post-merge endpoint latency.
+
+The first post-merge same-checkpoint numerical run used layer 0, BF16 inputs, stock
+`FlashInferCutlassNvFp4LinearKernel`, and these pinned Emmy M=16/M=64 programs. M=16 with one active row had
+0.466133% relative RMS error, mean absolute error 0.006127, and maximum absolute error 0.03125. M=64 had
+0.546888% relative RMS, mean absolute error 0.006545, p99 absolute error 0.02295, and maximum absolute error
+1.0 against a reference maximum of 140. Both had zero elements outside the existing `atol=0.05, rtol=0.05`
+diagnostic threshold. These fresh values are close to pre-merge results but do not imply bit parity or full-model
+quality equivalence. The full post-merge 27B endpoint then bound all 64 MLPs, loaded 23.43 GiB of model memory,
+and returned `/health` 200 on host port 8080. The first response took 145.705 s with vLLM Triton first-use JIT;
+subsequent short fixed tasks took 0.38–0.81 s. The mixed endpoint answered all five predeclared expected-answer
+tasks correctly: arithmetic, Japan's capital, list extraction, exact output format, and a 3,530-token needle.
+It served fixed-text echo/logprob requests and token-width 63/64/65/131 probes without errors. One deterministic
+4,005-input/16-output request completed in 11.163 s, 4,021 total tokens, without OOM. A warm standard
+`vllm bench serve` run of five measured 5-input/16-output requests, one warmup, seed 42, concurrency one, and
+ignore-EOS returned five successes: mean TTFT 276.50 ms, mean TPOT 104.23 ms (9.59 decode tokens/s).
+The matched stock vLLM 0.23 server used the same checkpoint, BF16, eager execution, no prefix cache, and
+single-request envelope on the same rebooted driver 580.178.04. It returned the identical expected text on all
+five tasks. Its first-use JIT request took 146.468 s; subsequent task times were 0.42–0.91 s and its 3,530-token
+needle took 10.356 s. The same 4,005+16 request took 12.247 s and returned the identical 16-token output,
+`KKKKKKKKKKKKKKKK`, with 4,021 total tokens. In the same standard warm five-request benchmark, stock TTFT was
+303.14 ms and TPOT 114.08 ms (8.77 decode tokens/s), against mixed 276.50/104.23 ms (9.59). Thus mixed was
+8.8% lower in TTFT and 8.6% lower in TPOT in this small measured run. No higher-concurrency or broader throughput
+claim follows from five single-request samples.
+
+Three predeclared fixed texts had 48 aligned selected-token echo logprobs. Stock versus mixed mean absolute
+logprob difference was 0.3525, RMS 0.7341, and maximum 3.8014. The maximum was a space token with stock
+probability about 0.0046; among 29 positions whose stock selected token had probability above 0.135, mean
+absolute difference was 0.1011. The top logged candidate agreed at 41/48 positions. These differences remain a
+material numerical limitation even though the five bounded expected-answer tasks and the paired long output
+matched. They do not by themselves prove a broader task-quality regression or equivalence.
+
+After the stock run, the mixed endpoint was restarted on host port 8080 and returned `/health` 200. A streaming
+request was disconnected after a non-whitespace generated text token (`1`); the next deterministic request returned
+`Assistant: Tokyo.`, and health remained 200. This checks cancellation and fresh state for one active request.
+
+During this qualification the host's unattended upgrade installed NVIDIA userspace 580.178 over loaded kernel
+580.95.05, preventing GPU containers from starting. A reboot loaded 580.178.04 and restored `nvidia-smi`.
+With the user's explicit authorization, `unattended-upgrades.service`, `apt-daily.timer`, and
+`apt-daily-upgrade.timer` were disabled on this dedicated test box; the interrupted `initramfs-tools` configuration
+was completed and `dpkg --audit` is empty. The post-reboot driver version is part of subsequent measurements.
 
 The stalled kernel source has grid 1 and block 256, but only one thread enters the body. It performs full-K scalar
 gate/up reductions for output codes and again for per-block scales, with no native FP4 MMA. At the actual layer width,
@@ -81,34 +154,21 @@ must not be used for the current model graph:
 WORK@place_35acacc227=w1x1,TILE@place_35acacc227=mma_m16n8k64_e2m1_f32/f1x2/k4,STAGE@place_35acacc227=d2/smem-async,WORK@place_4f08570ba8=w1x1,TILE@place_4f08570ba8=mma_m16n8k64_e2m1_f32/f1x2/k4,STAGE@place_4f08570ba8=d2/smem-async,WORK@place_159d5b6179=w1x2,TILE@place_159d5b6179=mma_m16n8k64_e2m1_f32/f1x2/k4,STAGE@place_159d5b6179=d2/smem-async,WORK@node_linear_2=w1x2,TILE@node_linear_2=mma_m16n8k64_e2m1_f32/f1x2/k4,STAGE@node_linear_2=d2/smem-async
 ```
 
-The current M=16 and M=64 native overrides are in
-[`scripts/serve_qwen38_nvfp4_mixed_5090.sh`](../scripts/serve_qwen38_nvfp4_mixed_5090.sh):
-
-```text
-WORK@place_6b4be893d5=w1x2,TILE@place_6b4be893d5=mma_m16n8k64_e2m1_f32/f1x2/k4,STAGE@place_6b4be893d5=d2/smem-async
-WORK@place_743937bec0=w1x1,TILE@place_743937bec0=mma_m16n8k64_e2m1_f32/f1x2/k4,STAGE@place_743937bec0=d2/smem-async
-WORK@place_b5f468b49f=w1x1,TILE@place_b5f468b49f=mma_m16n8k64_e2m1_f32/f1x2/k4,STAGE@place_b5f468b49f=d2/smem-async
-WORK@node_linear_2=w1x2,TILE@node_linear_2=mma_m16n8k64_e2m1_f32/f1x2/k4,STAGE@node_linear_2=d2/smem-async
-```
-
-The M=64 prefill pins use the same base cuts and the following
-`EMMY_MLP_PREFILL_KNOBS` values; each is scoped to this program's compile:
-
-```text
-WORK@place_66b5682eed=w1x2,TILE@place_66b5682eed=mma_m16n8k64_e2m1_f32/f1x2/k4,STAGE@place_66b5682eed=d2/smem-async
-WORK@place_2cedf62283=w1x1,TILE@place_2cedf62283=mma_m16n8k64_e2m1_f32/f1x2/k4,STAGE@place_2cedf62283=d2/smem-async
-WORK@place_2c71f28601=w1x1,TILE@place_2c71f28601=mma_m16n8k64_e2m1_f32/f1x2/k4,STAGE@place_2c71f28601=d2/smem-async
-WORK@node_linear_2=w1x2,TILE@node_linear_2=mma_m16n8k64_e2m1_f32/f1x2/k4,STAGE@node_linear_2=d2/smem-async
-```
+The post-merge exact `EMMY_MLP_STATIC_KNOBS` and `EMMY_MLP_PREFILL_KNOBS` are in
+[`scripts/serve_qwen38_nvfp4_mixed_5090.sh`](../scripts/serve_qwen38_nvfp4_mixed_5090.sh). The first table in
+“Post-merge cut and pin findings” spells every child cut and contraction scope. Each shape's overrides apply only
+around its own compile; the five parent cuts, `FAST_MATH=true`, and all baseline schedule families remain pinned
+in the shared `EMMY_KNOBS` value. The pre-merge identities in the earlier experiment rows are retained as historical
+evidence and must not be copied into a current serving command.
 
 The five projection-cut candidates came from the earlier `fp4-encode-recomputes-producer.md` report. Its native
 FP4 and async-stage suggestions are historical starting points, not measured 5090 wins. The current compiler
 supports `@place_<token>` pins for an individual cut piece; that selector was not demonstrated by the older report's
 `@n0` and full-name experiments. The M=1 refusal above is structural for these cuts, not an ignored pin. An
-identity-keyed golden may route a parent M=1 cut followed by a child cut that retains the unit row; existing cut-fork
-tests cover the mechanism, but exact MLP replay remains untested. An environment first-cut pin marks placement
-decided and cannot express this sequence. The scalar route has repeated endpoint probes; numerical qualification
-remains pending.
+identity-keyed golden may route a parent M=1 cut followed by a child cut that retains the unit row; exact MLP replay
+remains untested. The new explicit child-site pins solve the post-merge M=16/M=64 output cut sequence without a
+golden route. The M=1 unit-row problem remains separate because that shape drops the tensor-core M axis. The scalar
+route has repeated endpoint probes; the current padded native route has the fresh layer-0 numerical result above.
 
 An independent layer-0 stock vLLM `Qwen3NextMLP`/ModelOpt NVFP4 oracle compared the same packed checkpoint
 tensors and BF16 inputs at M=1, 2 and 64. Before the quant spelling correction, relative RMS output errors were
@@ -147,18 +207,23 @@ completed, so the cause is unestablished. It remains a cold-build stability risk
 trace resolve it. The synthetic NumPy graph and GPU outputs are finite after the BF16 fix but differ at some
 BF16/W4A4 boundaries; that graph interpretation alone is not the independent stock quantized MLP oracle.
 
-## Next qualification work
+## Remaining qualification and limits
 
-1. After merging main's golden and prior refactor, rerun the full repository gate and the exact 5090 native compile,
-   boot, and paired performance check. The environment-pinned recipe has an exact checkpoint trace and runtime
-   check; it has no measured golden file for the separate golden release gate.
-2. Compare a fixed teacher-forced prompt corpus and expected-answer tasks against stock. The 0.47–0.55%
-   same-checkpoint layer-0 MLP relative RMS residual can affect token choice, but four divergent greedy continuations
-   alone do not establish a task-quality loss. Keep the stock quantized MLP as the independent numerical oracle;
-   do not relax tolerance merely to pass a test.
-3. Preserve the final precision pin and source graph identity if later tuning changes the piece schedule. The
-   exact RTX 5090 memory and major latency probes above describe the pre-merge compiler and remain historical
-   until the native instruction check and endpoint comparison are repeated.
+The post-merge exact 5090 native instruction check, same-checkpoint stock MLP oracle, full 27B boot, bounded
+answer-quality corpus, long-context request, and paired warm benchmark are complete. The environment-pinned
+recipe has an exact checkpoint trace and runtime check; it has no measured golden file for the separate golden
+release gate. GitHub's full repository test, native, lint, and package jobs passed on code commit `4b71026c`.
+The final streaming cancellation and restored-endpoint checks also passed as described above. This report and
+README update follow that tested code commit without implementation changes; their own documentation-only CI
+run may have a different status until it completes.
+
+The 0.47–0.55% same-checkpoint layer-0 relative RMS residual and the fixed-text logprob differences can affect
+token choice. Four longer greedy continuations diverged before this main merge. The bounded five-task rubric
+passed on stock and mixed after the merge, but it does not establish general model-quality equivalence. Preserve
+the stock quantized MLP as the independent numerical oracle, the explicit `FAST_MATH=true` pin, and the emitted
+native-instruction checks when changing the source graph or piece schedule. A larger task suite, cancellations
+under concurrent traffic, prefix caching, speculation, and broader throughput remain future work outside the
+initial one-active-request envelope.
 
 ## Relation to the earlier investigation
 
