@@ -6,7 +6,6 @@ are explicit at each call site and test modules never import implementation from
 
 from __future__ import annotations
 
-import asyncio
 import dataclasses
 import functools
 from collections.abc import Mapping
@@ -117,16 +116,21 @@ def literal_classic_context(tile, target, *, kernel, nodes, edges, row=None, ord
 
 
 def case_target_tile(case: str):
-    """Lift the target of a realization corpus case, named by its path under ``realization/cases``.
+    """Lift the target of a realization corpus case, named by its path under ``realization/cases``: the one kernel
+    its traced program lowers to, as the cut pass is offered it."""
+    from dataclasses import replace
 
-    A case records one entry per kernel of the set it realizes and every entry decorates the same
-    target, so the first entry names it."""
+    from emmy.compiler.context import Context
+    from emmy.compiler.ir.tile import TileOp
+    from emmy.compiler.pipeline import Pipeline
     from emmy.compiler.pipeline.search.golden import GoldenFile
-    from emmy.compiler.pipeline.search.golden.record import _lifted_target
 
-    path = Path(__file__).parent / "realization/cases" / case
-    record, *_ = GoldenFile.load(path).records()
-    return _lifted_target(record)
+    document = GoldenFile.load(Path(__file__).parent / "realization/cases" / case)
+    [target] = document.targets()
+    lifted = Pipeline.build(["tile/lift"]).run(target.program({}), ctx=Context.from_target(tuple(document.compute_cap)), db=None)
+    [node] = [node for node in lifted.nodes.values() if isinstance(node.op, TileOp)]
+    tile = node.op.with_io(lifted, node)
+    return replace(tile, name=next(iter(tile.outputs)))  # addressed by its primary output, as a graph node is
 
 
 def has_cuda_gpu() -> bool:
@@ -251,66 +255,6 @@ def inject_constants(input_data: dict[str, np.ndarray], graph) -> dict[str, np.n
     return input_data
 
 
-def drain_tune(pipeline, graph, *, on=None, **kwargs):
-    """Synchronously collect :meth:`Pipeline.tune_async` terminals for tests."""
-
-    async def _collect():
-        out = []
-        try:
-            async for candidate in pipeline.tune_async(graph, **kwargs):
-                out.append(candidate)
-                if on is not None and on(candidate):
-                    break
-        finally:
-            backend = kwargs.get("backend")
-            if backend is not None and hasattr(backend, "aclose_async_worker"):
-                await backend.aclose_async_worker()
-        return out
-
-    return asyncio.run(_collect())
-
-
-def run_inner_reward(
-    fused_graph,
-    *,
-    ctx,
-    db,
-    backend=None,
-    backends=None,
-    patience,
-    ucb_c=None,
-    explore_eps=0.0,
-    seed=0,
-    progress=None,
-    prior=None,
-):
-    """Synchronously run the two-level strategy's separable terminal scoring for tests."""
-    from emmy.compiler.pipeline import TuningSearch
-    from emmy.compiler.pipeline.search.strategy import TwoLevelStrategy
-
-    if ucb_c is None:
-        ucb_c = TuningSearch.DEFAULT_UCB_C
-    strategy = TwoLevelStrategy(
-        db=db,
-        patience=patience,
-        backend=backend,
-        backends=backends,
-        ucb_c=ucb_c,
-        explore_eps=explore_eps,
-        progress=progress,
-        prior_seed=seed,
-        prior=prior,
-    )
-    return asyncio.run(strategy._evaluate_terminal(fused_graph, ctx))
-
-
-def run_two_level(graph, *, ctx, **kwargs):
-    """Synchronously run :class:`two_level.TwoLevelStrategy` for tests."""
-    from emmy.compiler.pipeline.search.strategy import TwoLevelStrategy
-
-    return asyncio.run(TwoLevelStrategy(**kwargs).run(graph, ctx))
-
-
 def dyn_M(mode: str, M: int):
     """Return ``Dim('seq_len')`` for dynamic mode and the integer ``M`` otherwise."""
     if mode == "dynamic":
@@ -329,31 +273,13 @@ def from_pretrained_or_skip(loader, *args, **kwargs):
         pytest.skip(f"HuggingFace Hub unavailable for {model} (likely rate-limited): {exc}")
 
 
-def loop_target(graph, origins, loops: list[dict], compute_cap=(12, 0)) -> dict:
-    """The golden target for the kernel ``origins`` fuse into in ``graph``: that kernel's Loop IR,
-    interned into ``loops``, with ``origins`` beside it as provenance — what the recorder writes."""
-    from emmy.compiler import provenance  # noqa: PLC0415
+def inventory_document(graph, compute_cap=(12, 0), gpu_name: str | None = None, **kwargs):
+    """The golden a trace inventory of ``graph`` writes for a card — every kernel it lowers to and an unmeasured row
+    per kernel — as a document, for tests that author rows onto it."""
     from emmy.compiler.context import Context  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.working_golden import lowered_kernels  # noqa: PLC0415
-    from emmy.compiler.wire import intern  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import inventory  # noqa: PLC0415
 
-    lowered = graph.copy()
-    provenance.seed(lowered)
-    fused, kernels = lowered_kernels(lowered, ctx=Context.from_target(tuple(compute_cap)))
-    wanted = set(origins)
-    (program,) = (
-        program
-        for node_id, program in kernels
-        if {origin for origin in provenance.get(fused.nodes[node_id]) if origin in graph.nodes} == wanted
-    )
-    return {"loop": intern(loops, program), "origins": list(origins)}
-
-
-def loop_record_fields(graph, origins, compute_cap=(12, 0)) -> dict:
-    """The ``GoldenRecord`` target fields for the kernel ``origins`` fuse into (:func:`loop_target`)."""
-    loops: list[dict] = []
-    target = loop_target(graph, origins, loops, compute_cap)
-    return {"origins": tuple(origins), "loop_index": target["loop"], "loop_wire": loops[target["loop"]]}
+    return inventory(graph.copy(), Context.from_target(tuple(compute_cap), gpu_name=gpu_name), **kwargs)
 
 
 QWEN3_EMBEDDING = "Qwen/Qwen3-Embedding-0.6B"

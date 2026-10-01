@@ -97,6 +97,9 @@ test: setup
 # after a kernel-identity or schedule-codec change. `make test` DETECTS staleness on any machine,
 # GPU or not; this applies the fix. It refuses to write a case whose verdict also changed — that
 # is a realization regression to review, not a mechanical restamp.
+test-priors: setup
+	EMMY_GOLDEN_FILE= ./venv/bin/pytest tests/compiler/pipeline/search/prior/test_reproduction.py -m priors -n auto --dist=loadgroup -v
+
 test-corpus-regen: setup
 	./venv/bin/python -m tests.compiler.realization.regen $(if $(COMPLETE),--complete,)
 
@@ -114,16 +117,6 @@ bench-kernels: bench-kernels-clean
 bench-kernels-clean: setup
 	@rm -f /tmp/emmy-gpu.lock
 	./venv/bin/pytest tests/perf/ -m perf -n 4 --dist=loadgroup -v -p no:randomly --no-header
-
-bench-kernels-tuned: setup
-	@rm -f /tmp/emmy-gpu.lock
-	@test -f ~/.cache/emmy/tune-kernels.db || (echo "The kernel tuning DB not foud; run make tune-kernels"; exit 1)
-	EMMY_TUNE_DB=~/.cache/emmy/tune-kernels.db ./venv/bin/pytest tests/perf/ -m perf -n 4 --dist=loadgroup -v -p no:randomly --no-header
-
-tune-kernels: setup
-	@rm -f /tmp/emmy-gpu.lock
-	@rm -f ~/.cache/emmy/tune-kernels.db
-	EMMY_TUNE=1 EMMY_TUNE_DB=~/.cache/emmy/tune-kernels.db ./venv/bin/pytest tests/perf/ -m perf -n 4 --dist=loadgroup -v -p no:randomly --no-header
 
 # --- vLLM + emmy serving image (emmy/serving, docker/vllm-emmy) ---
 VLLM_VERSION ?= v0.23.0

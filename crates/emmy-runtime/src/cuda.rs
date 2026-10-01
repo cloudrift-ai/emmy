@@ -939,7 +939,12 @@ impl Executor {
     }
 
     /// Point one region at memory the host lends (a buffer chained onto another program's).
-    pub fn set_region(&mut self, name: &str, ptr: u64, len: usize) -> Result<()> {
+    /// `wait` drains the stream first, so the memory the region pointed at is free for the host to
+    /// reuse the moment this returns. Without it, launches already queued keep reading that memory,
+    /// and the host keeps it alive until they finish (a resident weight slice swapped per launch).
+    /// The stream is drained anyway when that memory is the runtime's own, which it frees here, or
+    /// when a descriptor baked its address.
+    pub fn set_region(&mut self, name: &str, ptr: u64, len: usize, wait: bool) -> Result<()> {
         self.context.bind_to_thread()?;
         let size = *self
             .layout
@@ -950,7 +955,10 @@ impl Executor {
             len >= size,
             "region {name} needs {size} bytes, host lent {len}"
         );
-        self.synchronize()?;
+        let owned = self.regions.get(name).is_some_and(|region| region.owned);
+        if wait || owned || !self.descriptors.is_empty() {
+            self.synchronize()?;
+        }
         self.graphs.clear();
         self.launch_graphs = None;
         self.descriptors.clear();

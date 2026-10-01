@@ -5,8 +5,7 @@ Used in two places:
 
 - the **dump** sink writes one ``<kname>.json`` reproducer per kernel
   (``CompilerDump._dump_kernel_subgraphs``), and
-- the **two-level tuner** (`search.strategy.two_level`) slices each post-fusion kernel
-  into its own graph so the inner per-op search explores only that op's forks.
+- the **structural pricing** probe (``policy/greedy``) prices each kernel of a cut arm in its own graph.
 
 The slice keeps the root kernel node plus its transitive ``ConstantOp`` /
 ``InputOp`` producers (so scalar-constant inlining and load-op replay behave

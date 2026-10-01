@@ -1,12 +1,15 @@
 """Tests for ``emmy eval golden`` — the release audit of one canonical golden against its serving
-configuration — and the offer audit the golden views share."""
+configuration — and ``eval prior`` over an exported dataset."""
 
 from __future__ import annotations
 
+import argparse
+import json
+import logging
+from dataclasses import replace
 from pathlib import Path
 
-from emmy.compiler.pipeline.search.golden import GoldenFile
-from tests.compiler.helpers import loop_target
+from emmy.compiler.pipeline.search.golden import GoldenFile, Measurements, write_trace_inventories
 
 
 def test_eval_golden_requires_exact_file_and_serving_config(run_cli, tmp_path):
@@ -145,7 +148,6 @@ def test_eval_golden_requires_every_mlp_profile_graph(monkeypatch, tmp_path, cap
     )
     ctx = Context.from_target((8, 9), gpu_name="NVIDIA GeForce RTX 4090")
     monkeypatch.setattr(Context, "probe", staticmethod(lambda: ctx))
-    monkeypatch.setattr(eval_cmd, "_emit_offer_audit", lambda _records: False)
     monkeypatch.setattr(
         twins, "capture_serving_graphs", lambda source, serving: {"mlp16@nvfp4": object(), "mlp64-profile1@nvfp4": object()}
     )
@@ -156,22 +158,53 @@ def test_eval_golden_requires_every_mlp_profile_graph(monkeypatch, tmp_path, cap
     assert "mlp64-profile1@nvfp4" in caplog.text
 
 
-def _write_release_golden(path: Path, realizations: list[dict]) -> None:
+def _release_golden(path: Path, twins: dict[str, tuple[int, list[tuple[str, dict, bool]]]]) -> None:
+    """A release golden for ``twins``: each twin a relu of its own size, traced into the file under its name, with a
+    measured row per ``(template, bindings, fast math)`` the config reaches it at."""
     from emmy.commands.trace import trace_inline_code
+    from emmy.compiler.context import Context
 
-    graph = trace_inline_code("torch.relu(torch.randn(8))")["graph"]
-    terminal = graph.producer(graph.outputs[0])
-    loops: list[dict] = []
-    GoldenFile.from_wire(
-        {
-            "gpu_name": "NVIDIA GeForce RTX 4090",
-            "compute_cap": [8, 9],
-            "model": "org/model",
-            "programs": [graph.to_wire()],
-            "configs": [{"program": 0, "target": loop_target(graph, [terminal.id], loops, (8, 9)), "realizations": realizations}],
-            "loops": loops,
-        }
-    ).dump(path, repository=True)
+    graphs = {twin: trace_inline_code(f"torch.relu(torch.randn({size}))")["graph"] for twin, (size, _rows) in twins.items()}
+    templates = {
+        twin: [{"name": name, "bindings": bindings, "pins": {"FAST_MATH": fast}} for name, bindings, fast in rows]
+        for twin, (_size, rows) in twins.items()
+    }
+    ctx = Context.from_target((8, 9), gpu_name="NVIDIA GeForce RTX 4090")
+    write_trace_inventories(graphs, path, model="org/model", ctx=ctx, realizations=templates)
+    document = GoldenFile.load(path)
+    measured = Measurements(emmy_us=1.0, reference_us=1.0, reference_backend="torch")
+    replace(document, rows=[replace(row, knobs={}, measurements=measured) for row in document.rows]).dump(
+        path, overwrite=True, repository=True
+    )
+
+
+def _write_release_golden(path: Path, rows: list[dict]) -> None:
+    """Write measured release rows using the current kernel/row golden format."""
+    from emmy.commands.trace import trace_inline_code
+    from emmy.compiler.context import Context
+
+    names = {row["name"].split(".", 1)[0] for row in rows}
+    graphs = {name: trace_inline_code("torch.relu(torch.randn(8))")["graph"] for name in names}
+    templates = {
+        name: [
+            {"name": row["name"].split(".", 1)[1], "bindings": row["bindings"], "pins": row["pins"]}
+            for row in rows
+            if row["name"].split(".", 1)[0] == name
+        ]
+        for name in names
+    }
+    ctx = Context.from_target((8, 9), gpu_name="NVIDIA GeForce RTX 4090")
+    write_trace_inventories(graphs, path, model="org/model", ctx=ctx, realizations=templates)
+    document = GoldenFile.load(path)
+    measured = Measurements(emmy_us=1.0, reference_us=1.0, reference_backend="torch")
+    replace(document, rows=[replace(row, knobs={}, measurements=measured) for row in document.rows]).dump(
+        path, overwrite=True, repository=True
+    )
+
+
+def _scoped(scope) -> set[tuple]:
+    """What the gate's compile sees as its golden evidence: each row's sizes and regime."""
+    return {(tuple(sorted(doc.kernel(row.kernel).bindings.items())), tuple(sorted(row.pins.items()))) for doc in scope for row in doc.rows}
 
 
 def test_eval_golden_audits_file_scoped_static_release(monkeypatch, tmp_path):
@@ -185,18 +218,7 @@ def test_eval_golden_audits_file_scoped_static_release(monkeypatch, tmp_path):
     from emmy.compiler.pipeline.search import golden as golden_mod
 
     golden = tmp_path / "golden.json"
-    _write_release_golden(
-        golden,
-        [
-            {
-                "name": "relu.m1",
-                "bindings": {"num_tokens": 1},
-                "pins": {"FAST_MATH": False},
-                "knobs": {},
-                "measurements": {"emmy_us": 1.0, "reference_us": 1.0, "reference_backend": "torch"},
-            }
-        ],
-    )
+    _release_golden(golden, {"pre1": (8, [("m1", {"num_tokens": 1}, False)])})
     config = tmp_path / "release.env"
     config.write_text(
         f'SERVE_MODEL=org/model\nSERVE_GPU="NVIDIA GeForce RTX 4090"\nSERVE_GOLDEN_FILE={golden}\n'
@@ -205,7 +227,6 @@ def test_eval_golden_audits_file_scoped_static_release(monkeypatch, tmp_path):
     )
     ctx = Context.from_target((8, 9), gpu_name="NVIDIA GeForce RTX 4090")
     monkeypatch.setattr(Context, "probe", staticmethod(lambda: ctx))
-    monkeypatch.setattr(eval_cmd, "_emit_offer_audit", lambda _records: False)
     captured = {"compiles": []}
     twin = object()
 
@@ -216,8 +237,7 @@ def test_eval_golden_audits_file_scoped_static_release(monkeypatch, tmp_path):
     def fake_run(self, graph, *, ctx=None, **_kwargs):
         # What the gate's compile sees: the lane's rows as the only golden scope, strict on, the
         # live card's context.
-        scope = {(record.bindings, record.pins) for record in golden_mod.repository.RECORDS_OVERRIDE}
-        captured["compiles"].append((graph, ctx, emmy_config.strict_evidence(), scope))
+        captured["compiles"].append((graph, ctx, emmy_config.strict_evidence(), _scoped(golden_mod.repository.SCOPE)))
         return graph
 
     monkeypatch.setattr(twins, "capture_twin_graphs", fake_capture)
@@ -227,7 +247,7 @@ def test_eval_golden_audits_file_scoped_static_release(monkeypatch, tmp_path):
 
     assert captured["capture"] == ("org/model", {"decode_bucket": 1, "prefill_bucket": 0, "symbolic": False, "static_only": True})
     assert captured["compiles"] == [(twin, ctx, True, {((("num_tokens", 1),), (("FAST_MATH", False),))})]
-    assert golden_mod.repository.RECORDS_OVERRIDE is None and not emmy_config.strict_evidence()
+    assert golden_mod.repository.SCOPE is None and not emmy_config.strict_evidence()
 
 
 def test_eval_golden_rejects_a_missing_config_realization(monkeypatch, tmp_path):
@@ -239,18 +259,7 @@ def test_eval_golden_rejects_a_missing_config_realization(monkeypatch, tmp_path)
     from emmy.compiler.context import Context
 
     golden = tmp_path / "golden.json"
-    _write_release_golden(
-        golden,
-        [
-            {
-                "name": "relu.m8",
-                "bindings": {"num_tokens": 8},
-                "pins": {"FAST_MATH": False},
-                "knobs": {},
-                "measurements": {"emmy_us": 1.0, "reference_us": 1.0, "reference_backend": "torch"},
-            }
-        ],
-    )
+    _release_golden(golden, {"pre8": (8, [("m8.fm", {"num_tokens": 8}, True)])})  # the row is in the other lane
     config = tmp_path / "release.env"
     config.write_text(
         f'SERVE_MODEL=org/model\nSERVE_GPU="NVIDIA GeForce RTX 4090"\nSERVE_GOLDEN_FILE={golden}\n'
@@ -280,18 +289,7 @@ def test_eval_golden_fails_when_a_twin_is_not_decided_by_the_golden_rows(monkeyp
     from emmy.compiler.pipeline.search.policy.greedy import EvidenceError
 
     golden = tmp_path / "golden.json"
-    _write_release_golden(
-        golden,
-        [
-            {
-                "name": "relu.m1",
-                "bindings": {"num_tokens": 1},
-                "pins": {"FAST_MATH": False},
-                "knobs": {},
-                "measurements": {"emmy_us": 1.0, "reference_us": 1.0, "reference_backend": "torch"},
-            }
-        ],
-    )
+    _release_golden(golden, {"pre1": (8, [("m1", {"num_tokens": 1}, False)])})
     config = tmp_path / "release.env"
     config.write_text(
         f'SERVE_MODEL=org/model\nSERVE_GPU="NVIDIA GeForce RTX 4090"\nSERVE_GOLDEN_FILE={golden}\n'
@@ -300,8 +298,6 @@ def test_eval_golden_fails_when_a_twin_is_not_decided_by_the_golden_rows(monkeyp
     )
     ctx = Context.from_target((8, 9), gpu_name="NVIDIA GeForce RTX 4090")
     monkeypatch.setattr(Context, "probe", staticmethod(lambda: ctx))
-    monkeypatch.setattr(eval_cmd, "_emit_prior_golden_check", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(eval_cmd, "_emit_offer_audit", lambda _records: False)
     undecided = object()
     monkeypatch.setattr(twins, "capture_twin_graphs", lambda source, **kwargs: {"pre1": object(), "post1": undecided})
 
@@ -326,41 +322,18 @@ def test_eval_golden_compiles_a_static_twin_only_in_the_lanes_that_warm_its_widt
 
     import emmy.commands.eval as eval_cmd
     import emmy.serving.twins as twins
-    from emmy.commands.trace import trace_inline_code
     from emmy.compiler.context import Context
     from emmy.compiler.pipeline import Pipeline
 
-    graph = trace_inline_code("torch.relu(torch.randn(8))")["graph"]
-    loops: list[dict] = []
-    target = loop_target(graph, [graph.producer(graph.outputs[0]).id], loops, (8, 9))
-
-    def rows(*names_and_bindings):
-        return [
-            {
-                "name": name,
-                "bindings": bindings,
-                "pins": {"FAST_MATH": name.endswith(".fm")},
-                "knobs": {},
-                "measurements": {"emmy_us": 1.0, "reference_us": 1.0, "reference_backend": "torch"},
-            }
-            for name, bindings in names_and_bindings
-        ]
-
     golden = tmp_path / "golden.json"
-    GoldenFile.from_wire(
+    _release_golden(
+        golden,
         {
-            "gpu_name": "NVIDIA GeForce RTX 4090",
-            "compute_cap": [8, 9],
-            "model": "org/model",
-            "programs": [graph.to_wire()],
-            "configs": [
-                {"program": 0, "target": target, "realizations": rows(("pre8.m8", {"num_tokens": 8}))},
-                {"program": 0, "target": target, "realizations": rows(("pre64.m64.fm", {"num_tokens": 64}))},
-                {"program": 0, "target": target, "realizations": rows(("pre-sym.dynamic", {}), ("pre-sym.dynamic.fm", {}))},
-            ],
-            "loops": loops,
-        }
-    ).dump(golden, repository=True)
+            "pre8": (8, [("m8", {"num_tokens": 8}, False)]),
+            "pre64": (64, [("m64.fm", {"num_tokens": 64}, True)]),
+            "pre-sym": (16, [("dynamic", {}, False), ("dynamic.fm", {}, True)]),
+        },
+    )
     config = tmp_path / "release.env"
     config.write_text(
         f'SERVE_MODEL=org/model\nSERVE_GPU="NVIDIA GeForce RTX 4090"\nSERVE_GOLDEN_FILE={golden}\n'
@@ -369,8 +342,6 @@ def test_eval_golden_compiles_a_static_twin_only_in_the_lanes_that_warm_its_widt
     )
     ctx = Context.from_target((8, 9), gpu_name="NVIDIA GeForce RTX 4090")
     monkeypatch.setattr(Context, "probe", staticmethod(lambda: ctx))
-    monkeypatch.setattr(eval_cmd, "_emit_prior_golden_check", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(eval_cmd, "_emit_offer_audit", lambda _records: False)
     graphs = {"pre8": object(), "pre64": object(), "pre-sym": object()}
     monkeypatch.setattr(twins, "capture_twin_graphs", lambda source, **kwargs: dict(graphs))
     compiled = []
@@ -388,109 +359,23 @@ def test_eval_golden_compiles_a_static_twin_only_in_the_lanes_that_warm_its_widt
     assert sorted(compiled) == [("pre-sym", "False"), ("pre-sym", "True"), ("pre64", "True"), ("pre8", "False")]
 
 
-def test_offer_audit_flags_unrealized_entries(monkeypatch, caplog):
-    """``eval golden``'s offer audit is the strict decode per entry: an entry whose spelled row
-    equals no enumerated leaf of its own target is UNREALIZED and fails the gate — it is no
-    evidence a deploy can use (the 4090 ``attention.hd512.s4096`` class, caught at record time
-    instead of in production benches) — while a set of entries that all decode passes. The
-    guaranteed-unrealizable row here is a fabricated ``TILE`` fragment: no enumeration offers it,
-    so no leaf can equal the row."""
-    import logging
+def test_eval_prior_golden_ranks_an_exported_datasets_golden_pools(tmp_path, caplog):
+    """``eval prior`` reads the golden pools of a dataset ``emmy db export`` wrote — the positional argument names the
+    directory — and its header names the dataset and the golden files its rows came from. The deploy-faithful check
+    runs over the same pools, re-lowering each kernel from the definition the dataset carries."""
+    from emmy.commands.eval import register_eval_command
+    from emmy.compiler.pipeline.search.db.export import export_dataset
+    from tests.compiler.pipeline.search.helpers import tuned_db
 
-    import pytest
-
-    pytest.importorskip("torch")
-    import emmy.commands.eval as eval_cmd
-    from emmy import config
-    from emmy.commands.trace import trace_inline_code
-    from emmy.compiler.context import Context
-    from emmy.compiler.ir.base import InputOp
-    from emmy.compiler.ir.schedule import Tile, Work
-    from emmy.compiler.ir.schedule.classic import refusals as classic
-    from emmy.compiler.ir.schedule.classic import sites as classic_sites
-    from emmy.compiler.pipeline.knob import complete_kernel_row
-    from emmy.compiler.pipeline.search.ranking import enumerate_graph
-
-    gpu, cap = "NVIDIA GeForce RTX 5090", (12, 0)
-    with config.nvcc_flags_override(""):  # the deployable -O3 regime the tier is gated on
-        ctx = Context.from_target(cap, gpu_name=gpu)
-
-    # This test owns the audit verdicts, not catalog breadth. Keep Algorithm 1 intact over a
-    # bounded independent product so every audit compile remains a fast unit test.
-    warp = Tile.parse("mma_m16n8k16_f16_f32/f2x2/k2", Work.parse("w2x1"))
-    monkeypatch.setattr(classic, "scalar_tile_moves", lambda: [Tile()])
-    monkeypatch.setattr(classic, "warp_tile_moves", lambda atoms: [warp] if warp.atom.name in atoms else [])
-    monkeypatch.setattr(classic, "coop_reduce_moves", lambda: [])
-    monkeypatch.setattr(classic, "stage_moves", lambda *, warp, ctx=None: [])
-    monkeypatch.setattr(classic_sites, "raster_moves", lambda: [""])
-
-    def enumerated_row(graph):
-        rows = enumerate_graph(graph.copy(), ctx).rows
-        return complete_kernel_row(next(r for r in rows if str(r.get("WORK", "")).startswith("w")))
-
-    def drifted_tile(row):
-        row = dict(row)
-        tile_key = next(key for key in row if key.split("@", 1)[0] == "TILE")
-        row[tile_key] = "mma_m16n8k16_f16_f32/f9x9"
-        return row
-
-    def records(graph, name, entries):
-
-        origins = [nid for nid, node in graph.nodes.items() if not isinstance(node.op, InputOp)]
-        loops: list[dict] = []
-        return GoldenFile.from_wire(
-            {
-                "gpu_name": gpu,
-                "compute_cap": list(cap),
-                "model": "org/model",
-                "programs": [graph.to_wire()],
-                "loops": loops,
-                "configs": [
-                    {
-                        "program": 0,
-                        "target": loop_target(graph, origins, loops, cap),
-                        "realizations": [
-                            {
-                                "name": name,
-                                "bindings": {},
-                                "pins": {"FAST_MATH": False},
-                                "knobs": knobs,
-                                "measurements": {"emmy_us": us, "reference_us": 30.0, "reference_backend": "cublas"},
-                            }
-                            for knobs, us in entries
-                        ],
-                    }
-                ],
-            }
-        ).records()
-
-    def matmul(m):
-        code = f"torch.matmul(torch.randn({m},128, dtype=torch.float16), torch.randn(128,{m}, dtype=torch.float16))"
-        return trace_inline_code(code)["graph"]
-
-    # Two DIFFERENT extents, so the two targets carry different structural identities and the
-    # floored target's offered row cannot decide the orphan's fork.
-    small, big = matmul(64), matmul(256)
-    small_row, big_row = enumerated_row(small), enumerated_row(big)
-    drifted = drifted_tile(small_row)  # a fragment nothing offers
-    floored = records(small, "audit.floored", [(drifted, 10.0), (small_row, 20.0)])
-    orphan = records(big, "audit.orphan", [(drifted_tile(big_row), 10.0)])
-
-    with caplog.at_level(logging.INFO, logger="emmy.commands.eval"):
-        failed = eval_cmd._emit_offer_audit(floored + orphan)
-
-    assert failed is True
-    msgs = [r.getMessage() for r in caplog.records]
-    assert any("UNREALIZED" in m and "audit.floored" in m for m in msgs)
-    assert any("UNREALIZED" in m and "audit.orphan" in m for m in msgs)
-    assert sum("UNREALIZED" in m for m in msgs) == 2, "the offered sibling of the floored target decodes"
-    assert eval_cmd._emit_offer_audit(records(small, "audit.good", [(small_row, 20.0)])) is False
-
-    # A set whose every entry equals an enumerated leaf is clean.
-    caplog.clear()
-    with caplog.at_level(logging.INFO, logger="emmy.commands.eval"):
-        fell = eval_cmd._emit_offer_audit([floored[1]])
-    assert fell is False
-    msgs = [r.getMessage() for r in caplog.records]
-    assert any("equal an enumerated leaf" in m for m in msgs)
-    assert not any("UNREALIZED" in m or "FALL-THROUGH" in m for m in msgs)
+    db = tuned_db(None, ("matmul/f16-mma-m128n128k128-f32.json",), source="golden:case")
+    export_dataset(db, source="test", pool_sample=0, seed=0).dump(tmp_path / "dataset")
+    parser = argparse.ArgumentParser()
+    register_eval_command(parser.add_subparsers())
+    dataset, out = str(tmp_path / "dataset"), str(tmp_path / "r.json")
+    args = parser.parse_args(["eval", "prior", dataset, "--json", out])
+    with caplog.at_level(logging.INFO):
+        args.func(args)
+    header = json.loads((tmp_path / "r.json").read_text())["header"]
+    assert (header["dataset"], header["source"], header["sources"]) == ("golden", dataset, {"golden:case": 1})
+    assert (header["groups"], header["positives"], header["skipped"]) == (1, 1, 0)
+    assert "Golden reproduction" in caplog.text and "k_matmul_" in caplog.text

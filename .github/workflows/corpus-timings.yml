@@ -259,7 +259,7 @@ jobs:
             name=$(./venv/bin/python -c "
           import sys, json
           d = json.load(open(sys.argv[1]))
-          print(d['configs'][0]['realizations'][0]['name'])" "$case")
+          print(d['rows'][0]['name'])" "$case")
             EMMY_NVCC_FLAGS= ./venv/bin/emmy run --golden "$case" --realization "$name" \
               --bench --bench-backends eager,tcompile,emmy --record \
               || echo "FAILED $case"

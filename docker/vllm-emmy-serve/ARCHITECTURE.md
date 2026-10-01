@@ -150,8 +150,8 @@ the same cubins and the standard-lane pack never exists.
   serving tag carries the runtime's version. The runner shape fields map immutably to their `EMMY_GEN_*` variables in
   initial warm, every shape fixpoint, the baked image, and verify; an extra warm shape's prefill field overrides the
   pinned bucket. A test rejects any other key, because a misspelled one reads as a value nothing consumes.
-  `SERVE_GOLDEN_FILE` names the recipe-local canonical golden file that trace, tune handoff, release audit, and image gate
-  share: `recipes/<model>/golden/<gpu-slug>_<compute-cap>.json`, one file per exact GPU.
+  `SERVE_GOLDEN_FILE` names the recipe-local canonical golden file that trace, record handoff, release audit and
+  image gate share: `recipes/<model>/golden/<gpu-slug>_<compute-cap>.json`, one file per exact GPU.
   `SERVE_STATIC_ONLY=1` narrows the realization matrix and is fail-closed: it requires runner capacity, decode bucket,
   and scheduler maximum all equal to one, prefill disabled, the M1 tier enabled, capture sizes exactly `[1]`, and no
   warm-shape override outside that same envelope. Without it the audit derives every warm width plus symbolic.
@@ -263,8 +263,9 @@ The full release session on a rented card (each step from the repo checkout; hos
    command above is `emmy serve --generate`, which derives the same three from the checkpoint itself — pass
    `--revision <sha>` there so it derives them from the right one. Then `make serve-config MODEL=<id>` prints the
    whole resolved config, revision included; read it back before starting a multi-hour warm. For a new release whose
-   `SERVE_GOLDEN_FILE` does not exist yet, use this finalized config with the `tune-kernels` skill to create, tune,
-   verify, and promote the complete canonical file first; then rerun `make serve-config` and continue.
+   `SERVE_GOLDEN_FILE` does not exist yet, create it first with this finalized config: trace the serving twins,
+   record them (`emmy run --golden PATH --bench --record` / `--record-greedy`), verify, and promote the complete
+   canonical file; then rerun `make serve-config` and continue.
 2. **Golden realization audit** — on the target GPU, after finalizing the config and before the expensive warm, assert
    that the pinned canonical file exactly covers the serving configuration:
 
@@ -299,7 +300,7 @@ The full release session on a rented card (each step from the repo checkout; hos
    for a card that plainly has some. Revisions compare as exact strings (an abbreviated hex sha matches the full one
    it prefixes); a branch name and a commit sha never match, because nothing offline can resolve one to the other.
 
-   On failure, regenerate the symbolic inventory from this config, tune every realization on this GPU, perform the
+   On failure, regenerate the symbolic inventory from this config, record every realization on this GPU, perform the
    deployable verification, and promote the complete file. Do not bypass a missing width or substitute a different
    card/revision: those values define different deployed programs.
 

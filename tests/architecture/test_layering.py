@@ -206,8 +206,8 @@ def test_lowering_kernel_calls_no_schedule_classifier() -> None:
     )
 
 
-def test_search_data_does_not_import_the_prior() -> None:
-    """``search/data/*.py`` may not import from ``search.prior``.
+def test_search_dataset_does_not_import_the_prior() -> None:
+    """``search/dataset/*.py`` may not import from ``search.prior``.
 
     The data layer describes candidates and their labels — a :class:`Group` is a packed pool plus what
     is known about its rows, and that is the same object whether a trainer, a fold harness or an
@@ -220,8 +220,8 @@ def test_search_data_does_not_import_the_prior() -> None:
     If this fires, the fact you reached for is either feature SPELLING (``search/features.py``, imported
     by both layers) or a model DECISION that belongs to its caller — pass it in.
     """
-    data_dir = _REPO_ROOT / "emmy" / "compiler" / "pipeline" / "search" / "data"
-    assert data_dir.is_dir(), f"search/data/ not found at {data_dir}"
+    data_dir = _REPO_ROOT / "emmy" / "compiler" / "pipeline" / "search" / "dataset"
+    assert data_dir.is_dir(), f"search/dataset/ not found at {data_dir}"
     # Both spellings, because the repo uses both: the dotted path (``from ….search.prior.linear_model import X``)
     # and the package-import idiom (``from ….search import prior``) that ``commands/fit.py`` already writes for
     # ``features``. A guard that caught only the first would wave through the form a future violation is most
@@ -233,7 +233,7 @@ def test_search_data_does_not_import_the_prior() -> None:
             if forbidden.match(line):
                 offenders.append(f"{py.relative_to(_REPO_ROOT)}:{lineno}: {line.strip()}")
     assert not offenders, (
-        "search/data/*.py must not import search.prior — the data layer carries columns and labels; "
+        "search/dataset/*.py must not import search.prior — the data layer carries columns and labels; "
         "each model class decides for itself which columns it wants.\n" + "\n".join(offenders)
     )
 
@@ -295,19 +295,19 @@ def test_kernel_identity_is_not_redefined_outside_its_home() -> None:
 def test_a_new_fingerprint_fact_moves_the_corpus() -> None:
     """Every fact ``deploy_identity`` folds is stamped into a realization-corpus case.
 
-    The corpus stores each case's ``deploy_identity`` and fails when the stored value stops
-    matching. That is only a tripwire for identity drift if the corpus actually carries the stamp,
-    so this pins the connection: a fact newly folded into ``Op.deploy_identity`` — a loop-body
+    The corpus stores each kernel's exact identity and fails when a fresh lowering stops matching
+    it. That is only a tripwire for identity drift if the corpus actually carries the stamp, so
+    this pins the connection: a fact newly folded into ``Op.deploy_identity`` — a loop-body
     modeling fix, an io fact — must show up as a corpus diff rather than silently re-keying every
     checked-in reproducer.
     """
     cases = sorted((_REPO_ROOT / "tests/compiler/realization/cases").rglob("*.json"))
     assert cases, "the realization corpus is empty, so nothing would notice an identity change"
     unstamped = [
-        path.relative_to(_REPO_ROOT).as_posix() for path in cases if not re.search(r'"identity": "[0-9a-f]{64}"', path.read_text())
+        path.relative_to(_REPO_ROOT).as_posix() for path in cases if not re.search(r'"exact_identity":\s*"[0-9a-f]{64}"', path.read_text())
     ]
     assert not unstamped, (
-        "every corpus case must carry an `identity:` stamp, or a new fingerprint fact re-keys it "
+        "every corpus case must carry an `exact_identity:` stamp, or a new fingerprint fact re-keys it "
         "with nothing to notice. Run `make test-corpus-regen`.\n" + "\n".join(unstamped)
     )
 
@@ -420,3 +420,19 @@ def test_the_op_identity_surface_is_exactly_identity_key() -> None:
         and name != "identity_key"
     }
     assert not offenders, "the public Op identity surface is identity_key alone:\n" + "\n".join(sorted(offenders))
+
+
+def test_search_dataset_does_not_import_search_db() -> None:
+    """``search/dataset/*.py`` may not import ``search.db``: the dataset describes candidates and their labels and
+    travels as a directory; reading a DB is the export's job (``search/db/export.py``), the one place the two
+    packages meet, and the one direction they do."""
+    dataset_dir = _REPO_ROOT / "emmy" / "compiler" / "pipeline" / "search" / "dataset"
+    forbidden = re.compile(r"^\s*(?:from|import)\s+emmy\.compiler\.pipeline\.search\.db\b")
+    offenders = []
+    for py in sorted(dataset_dir.rglob("*.py")):
+        for lineno, line in enumerate(py.read_text().splitlines(), start=1):
+            if forbidden.search(line):
+                offenders.append(f"{py.relative_to(_REPO_ROOT)}:{lineno}: {line.strip()}")
+    assert not offenders, "search/dataset/*.py must not import search.db — the export reads the DB, the dataset never does:\n" + "\n".join(
+        offenders
+    )

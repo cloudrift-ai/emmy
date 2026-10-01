@@ -6,22 +6,25 @@ determinism, the golden group builder's pool merge, and the trainer-callable sea
 
 import argparse
 import json
-from dataclasses import dataclass
-from types import SimpleNamespace
+from dataclasses import dataclass, replace
 
 import numpy as np
 import pytest
 
-from emmy.commands import fit as fit_cmd
-from emmy.commands.fit import TRAINERS, build_golden_groups, register_fit_command
-from emmy.compiler.pipeline.search import features
-from emmy.compiler.pipeline.search.data.group import DEFAULT_FEATURES, MATMUL_FEATURES, GoldenGroup, feature_view
+from emmy.commands.fit import TRAINERS, register_fit_command
+from emmy.compiler.context import FAST_MATH_FLAG
+from emmy.compiler.pipeline.search import features, ranking
+from emmy.compiler.pipeline.search.dataset import Dataset, GoldenPool, GoldenRow
+from emmy.compiler.pipeline.search.dataset.group import DEFAULT_FEATURES, MATMUL_FEATURES, GoldenGroup, feature_view
+from emmy.compiler.pipeline.search.dataset.shape import ShapeKey
 from emmy.compiler.pipeline.search.pool import Candidates
 from emmy.compiler.pipeline.search.prior.fit import LinearFit, LinearTrainer
 from emmy.compiler.pipeline.search.prior.fit import cv as fit_cv
 from emmy.compiler.pipeline.search.prior.fit.catboost import TREE_FEATURES
 from emmy.compiler.pipeline.search.prior.fit.run import run_fit
 from emmy.compiler.pipeline.search.prior.linear_model import LinearModel, descent_cols
+from emmy.compiler.pipeline.search.ranking import build_golden_groups
+from tests.compiler.pipeline.search.helpers import kernel_row
 
 # --- feature view ------------------------------------------------------------------
 
@@ -78,23 +81,14 @@ def test_a_merged_case_reports_its_positive_count():
 # --- the golden group builder's pool merge ------------------------------------------
 
 
-class _StubRecord:
-    """The slice of a ``GoldenRecord`` the group builder reads, with the candidate pool handed in directly
-    instead of traced. ``knobs`` / the pool rows are single-token dicts the stub signature below reads.
-
-    The builder groups on ``GoldenRecord.pool_group``, so a stub that hands its pool in must answer that
-    question consistently with the pool it hands in, or it is describing a world that cannot happen.
-    ``program`` therefore defaults to the pool's own content, and is passed explicitly only to build the two
-    shapes that matter: the FAST_MATH one (one program, two pin sets, two enumerations) and the re-recorded
-    one (two programs, one pool, which only the packed matrix can see)."""
-
-    def __init__(self, name, knobs, rows, *, pins=(), program=None):
-        self.name, self.knobs, self.target_program = name, knobs, rows
-        self.gpu_name, self.compute_cap = "gpuA", (12, 0)
-        self.pool_group = (repr(rows if program is None else program), tuple(pins))
-        self.pin_key, self.pin_map = tuple(pins), dict(pins)
-        self.structural_features, self.dynamic = {}, False
-        self.shape_key = SimpleNamespace(kind="", is_warp=True)
+def _pool(name, rows, goldens, *, regime="", kernel="k"):
+    """A :class:`GoldenPool` with its candidate pool handed in directly instead of enumerated — it rides on the
+    kernel row's wire, where the stub enumerator below reads it. ``rows`` are single-token dicts the stub
+    signature reads; ``goldens`` the tokens the pool's golden rows recorded. ``kernel`` is the kernel row's
+    identity, so two pools can be two kernels; the pool is labelled ``<name>.<kernel>``."""
+    row = replace(kernel_row(kernel, name=name), loop_ir={"rows": rows})
+    rows_ = tuple(GoldenRow({"TILE": tag}, 1.0, "golden:test") for tag in goldens)
+    return GoldenPool("gpuA", (12, 0), regime, row, {}, rows_)
 
 
 @dataclass(frozen=True)
@@ -104,57 +98,49 @@ class _StubContext:
 
     pool_sample: object = None
 
-    @classmethod
-    def from_target(cls, cap, gpu_name=None):  # noqa: ARG003 — the stub needs no card facts
-        return cls()
-
     def features(self):
         return {}
 
 
-def _build(records, monkeypatch, **kwargs):
-    """``build_golden_groups`` over stub records: the pool arrives as the record's ``target_program``, a row
-    is ``{"TILE": tag}``, and its one feature is the tag's position in the alphabet — enough for two pools to
-    featurize differently whenever their rows differ. The stub enumerator honours ``ctx.pool_sample``: a list
-    IS a candidate stream as far as the reservoir draw is concerned."""
+def _build(pools, monkeypatch, **kwargs):
+    """``build_golden_groups`` over stub pools: a row is ``{"TILE": tag}``, and its one feature is the tag's
+    position in the alphabet — enough for two pools to featurize differently whenever their rows differ. The
+    stub enumerator honours ``ctx.pool_sample`` the way the tree draw does: the kept rows first, then a draw —
+    here the pool's prefix."""
 
-    def enumerate_stub(rows, ctx):
+    def enumerate_stub(pool, ctx):
+        rows = pool.kernel.loop_ir["rows"]
+        if rows == "broken":
+            raise ValueError("a definition the lowering cannot take back")
         sample = ctx.pool_sample
-        return Candidates(list(rows), len(rows)) if sample is None else sample.take(rows)
+        if sample is None:
+            return Candidates(list(rows), len(rows))
+        kept = [row for row in rows if tuple(sorted(row.items())) in sample.keep]
+        drawn = kept + [row for row in rows[: sample.rows] if row not in kept]
+        return Candidates(drawn, len(drawn))
 
-    monkeypatch.setattr(fit_cmd, "golden_records", lambda: records)
-    monkeypatch.setattr(fit_cmd, "Context", _StubContext)
-    monkeypatch.setattr(fit_cmd, "enumerate_graph", enumerate_stub)
-    monkeypatch.setattr(fit_cmd, "_shape_group", lambda g: "S(free=512,red=512)")  # noqa: ARG005
-    monkeypatch.setattr(fit_cmd.features, "tile_signature", lambda knobs: knobs["TILE"])
-    monkeypatch.setattr(fit_cmd.features, "knob_features", lambda row: {"D_a": float(ord(row["TILE"][0]))})
-    return build_golden_groups(**kwargs)
+    monkeypatch.setattr(ranking, "pool_context", lambda pool: _StubContext())  # noqa: ARG005
+    monkeypatch.setattr(ranking, "enumerate_pool", enumerate_stub)
+    monkeypatch.setattr(ranking.ShapeKey, "from_s_features", classmethod(lambda cls, s: ShapeKey(512, 512, True)))  # noqa: ARG005
+    monkeypatch.setattr(ranking.features, "tile_signature", lambda knobs: knobs["TILE"])
+    monkeypatch.setattr(ranking.features, "knob_features", lambda row: {"D_a": float(ord(row["TILE"][0]))})
+    return build_golden_groups(pools, **kwargs)
 
 
-def test_builder_merges_goldens_that_share_a_recorded_program_and_only_those(monkeypatch):
-    """Membership is decided by what the RECORD says the enumeration will read — the program, the target,
-    the bindings and the pins — never by the name and never by a derived summary of the shape.
-
-    The name is the obvious wrong answer: most same-name duplicates are ``FAST_MATH`` siblings, one program
-    under two pin sets, and the fast-math enumeration offers an atom the standard one never emits — so
-    merging on the name would pin row indices that do not exist in the other pool. Here ``m.512`` is recorded
-    twice against ONE program with different pins, and only the two goldens whose provenance really does
-    agree merge."""
+def test_builder_pins_every_golden_row_of_a_pool_and_keys_regimes_apart(monkeypatch):
+    """A pool is one kernel on one card in one regime, and every golden row measured on it pins a row of ONE
+    group. The kernel's fast-math rows are another pool — the fast-math enumeration offers an atom the standard
+    one never emits, so pinning row indices across the two would name rows that do not exist — and a row whose
+    signature no candidate carries is skipped on its own; the pool still stands for the rows that hit."""
     std = [{"TILE": "a"}, {"TILE": "b"}, {"TILE": "c"}]
     fastmath = [*std, {"TILE": "f"}]  # the extra atom row the standard enumeration never emits
     groups, skipped = _build(
-        [
-            _StubRecord("m.512", {"TILE": "b"}, std),
-            _StubRecord("m.512.alias", {"TILE": "c"}, std),  # a different name, same provenance: merges
-            # Same name AND same program, but pinned differently — so a different enumeration, its own group.
-            _StubRecord("m.512", {"TILE": "f"}, fastmath, program=std, pins=(("FAST_MATH", True),)),
-            _StubRecord("m.512.absent", {"TILE": "zz"}, std),  # matches no row: skipped, as before
-        ],
+        [_pool("m.512", std, ["b", "c", "zz"]), _pool("m.512", fastmath, ["f"], regime=FAST_MATH_FLAG)],
         monkeypatch,
     )
-    assert [(c.key, c.golden_ids, len(c.feats)) for c in groups] == [("gpuA/m.512", (1, 2), 3), ("gpuA/m.512#2", (3,), 4)]
-    assert skipped == [("gpuA", "m.512.absent", "golden not in 3 candidates")]
-    # The ``#N`` suffix is spent only where a key would otherwise collide, so the merged group keeps the plain
+    assert [(c.key, c.golden_ids, len(c.feats)) for c in groups] == [("gpuA/m.512.k", (1, 2), 3), ("gpuA/m.512.k#2", (3,), 4)]
+    assert skipped == [("gpuA", "m.512.k", "golden not in 3 candidates")]
+    # The ``#N`` suffix is spent only where a key would otherwise collide, so the first group keeps the plain
     # key that ``cv.run_folds`` accumulates train ranks under.
     assert len({c.key for c in groups}) == len(groups)
 
@@ -163,25 +149,17 @@ def test_two_goldens_on_one_pool_still_merge_under_sampling(monkeypatch):
     """Sampling must not break the merge, and the merge is what makes two verified answers to one
     question one training group instead of two.
 
-    The two are one group before the draw happens — they share a program, so they share an enumeration and
-    the builder runs it once. What sampling must not break is the PINS: both recorded rows have to survive
-    the draw, which they do because it is a pure function of the stream and ``(sample, seed)`` and both
-    goldens bucket onto the same keep-set. Neither was picked by the draw itself: the pool's first and last
-    rows are exactly the positions a 4-of-26 draw is least likely to reach."""
+    The two are one group before the draw happens — they are rows of one pool, so the builder enumerates it
+    once. What sampling must not break is the PINS: both recorded rows have to survive the draw, which they do
+    because it is a pure function of the tree and ``(sample, seed)`` and every golden row of the pool's card
+    and regime is in the keep-set. The last row is one a 4-of-26 prefix draw never reaches."""
     pool = [{"TILE": chr(ord("a") + i)} for i in range(26)]
-    groups, skipped = _build(
-        [
-            _StubRecord("m.512", {"TILE": "a"}, list(pool)),  # the FIRST row
-            _StubRecord("m.512.alias", {"TILE": "z"}, list(pool)),  # and the LAST
-        ],
-        monkeypatch,
-        sample=4,
-    )
+    groups, skipped = _build([_pool("m.512", pool, ["a", "z"])], monkeypatch, sample=4)  # the FIRST and the LAST row
     assert skipped == []
     assert len(groups) == 1, "one pool, one group - the draw must not fracture it into two"
     (group,) = groups
     assert len(group.golden_ids) == 2, "both recorded rows survive the draw and land in the group"
-    assert group.total == 26 and len(group.feats) < 26, "the true pool size travels beside the sample"
+    assert group.total == len(group.feats) < 26, "the draw's size travels beside the sample"
     kept = {chr(int(v)) for v in group.feats[:, 0]}
     assert {"a", "z"} <= kept
 
@@ -191,40 +169,28 @@ def test_builder_folds_away_a_golden_recorded_twice_at_one_config(monkeypatch):
     label set does not grow — where the ``#2`` group they used to become counted that one fact twice in every
     metric."""
     std = [{"TILE": "a"}, {"TILE": "b"}]
-    groups, _ = _build([_StubRecord("m.512", {"TILE": "b"}, std), _StubRecord("m.512", {"TILE": "b"}, std)], monkeypatch)
-    assert [(c.key, c.golden_ids) for c in groups] == [("gpuA/m.512", (1,))]
+    groups, _ = _build([_pool("m.512", std, ["b", "b"])], monkeypatch)
+    assert [(c.key, c.golden_ids) for c in groups] == [("gpuA/m.512.k", (1,))]
 
 
-def test_builder_folds_two_recordings_of_one_program_that_key_apart(monkeypatch):
-    """The reason the packed pool decides membership and the recorded key only groups the work.
-
-    A program recorded in two sessions carries two different wires — different node ids, same graph — so it
-    reads as two enumerations and is enumerated twice. The pools they produce are identical, and the second
-    stage folds them. Without it the V100 corpus, where the same shapes are recorded many times over, reports
-    306 groups where there are 108 pools, each one counting a single fact on its own."""
+def test_builder_folds_two_pools_that_pack_identically(monkeypatch):
+    """The reason the packed pool decides membership and the DB key only groups the work: two kernels the
+    featurizer cannot tell apart enumerate twice and produce identical pools, and the second stage folds them,
+    so a pool is one group however many times it was recorded."""
     std = [{"TILE": "a"}, {"TILE": "b"}, {"TILE": "c"}]
-    groups, _ = _build(
-        [
-            _StubRecord("m.512", {"TILE": "b"}, std),
-            # Same pool, but recorded as a different program — the recorded key cannot see they are one.
-            _StubRecord("m.512.resession", {"TILE": "c"}, std, program=[{"same-graph": "other-ids"}]),
-        ],
-        monkeypatch,
-    )
-    assert [(c.key, c.golden_ids) for c in groups] == [("gpuA/m.512", (1, 2))]
+    groups, _ = _build([_pool("m.512", std, ["b"]), _pool("m.512", std, ["c"], kernel="other")], monkeypatch)
+    assert [(c.key, c.golden_ids) for c in groups] == [("gpuA/m.512.k", (1, 2))]
 
 
-def test_a_pool_is_named_after_a_golden_that_is_actually_in_it(monkeypatch):
-    """A record can be grouped onto a pool and then fail to find its own row in it. Naming the group after
-    that record would put a rank in ``metrics.json`` under a name the same run reports as skipped — and the
-    golden whose row IS pinned would appear nowhere."""
+def test_a_pool_none_of_whose_goldens_is_found_is_no_group(monkeypatch):
+    """A pool whose every golden row misses its candidates is skipped whole — a group with no positive would
+    put a rank in ``metrics.json`` under a name the same run reports as skipped — and so is one whose definition
+    the enumeration cannot lower: its rows are counted under its name, and the run goes on."""
     std = [{"TILE": "a"}, {"TILE": "b"}]
-    groups, skipped = _build(
-        [_StubRecord("m.512.absent", {"TILE": "zz"}, std), _StubRecord("m.512", {"TILE": "b"}, std)],
-        monkeypatch,
-    )
-    assert [(c.key, c.name) for c in groups] == [("gpuA/m.512", "m.512")]
-    assert [s[1] for s in skipped] == ["m.512.absent"]
+    pools = [_pool("m.512.absent", std, ["zz"]), _pool("m.512.broken", "broken", ["b"]), _pool("m.512", std, ["b"])]
+    groups, skipped = _build(pools, monkeypatch)
+    assert [(c.key, c.name) for c in groups] == [("gpuA/m.512.k", "m.512.k")]
+    assert skipped == [("gpuA", "m.512.absent.k", "golden not in 2 candidates"), ("gpuA", "m.512.broken.k", "did not lower")]
 
 
 # --- synthetic groups ---------------------------------------------------------------
@@ -571,15 +537,21 @@ def test_run_fit_stub_trainer_deterministic():
 # --- CLI surface -------------------------------------------------------------------
 
 
-def test_fit_command_defaults_and_unsupported_cells():
+def test_fit_command_defaults():
     parser = argparse.ArgumentParser()
     register_fit_command(parser.add_subparsers())
-    args = parser.parse_args(["fit"])
-    assert (args.trainer, args.data, args.samples, args.seed, args.folds) == ("linear", "golden", 0, 0, 5)
-    # --artifact: absent = no extra write, bare = "" (the shipped offline_weights.json), a value = that path.
-    assert args.artifact is None
-    assert parser.parse_args(["fit", "--artifact"]).artifact == ""
-    assert parser.parse_args(["fit", "--artifact", "/tmp/cand.json"]).artifact == "/tmp/cand.json"
+    args = parser.parse_args(["fit", "_data/dataset", "_tune/offline.json"])
+    assert (args.trainer, args.dataset, args.weights, args.samples, args.seed, args.folds) == (
+        "linear",
+        "_data/dataset",
+        "_tune/offline.json",
+        0,
+        0,
+        5,
+    )
+    # Both paths are explicit: a fit never writes anywhere it was not told to, the shipped weights included.
+    with pytest.raises(SystemExit):
+        parser.parse_args(["fit", "_data/dataset"])
 
     # --features defaults to the TRAINER's view, resolved in the handler rather than by argparse:
     # the linear model needs the engineered step / fold / interaction features, the tree re-derives them.
@@ -587,19 +559,18 @@ def test_fit_command_defaults_and_unsupported_cells():
     assert TRAINERS["linear"][1] == DEFAULT_FEATURES
     assert TRAINERS["catboost"][1] == TREE_FEATURES
 
-    bad = parser.parse_args(["fit", "--data", "freeze:/tmp/x.jsonl"])
-    with pytest.raises(SystemExit, match="not yet supported"):
-        bad.func(bad)
 
-
-def test_handle_fit_writes_metrics_and_a_loadable_artifact(tmp_path, monkeypatch):
+def test_handle_fit_writes_metrics_and_a_loadable_artifact(tmp_path):
     """The command layer end to end on a synthetic dataset — trainer wiring, artifact assembly and
-    both output files — without tracing a single golden. ``--artifact`` is absent, so the run writes
-    only into its own directory and never touches the shipped weights."""
-    monkeypatch.setattr("emmy.commands.fit.build_golden_groups", lambda spec, **_kw: (_cases(), []))  # noqa: ARG005
+    both output files — without enumerating a single pool. The weights path is the test's own, so the run never
+    touches the shipped weights."""
+    provenance = {"source": "stub", "sources": {}, "pool_sample": 0, "seed": 0, "feat_ver": features.FEATURIZER_VERSION, "compiler": "test"}
+    Dataset(_cases(), [], [], {"golden": {}, "measured": {}}, provenance).dump(tmp_path / "dataset")
     parser = argparse.ArgumentParser()
     register_fit_command(parser.add_subparsers())
-    args = parser.parse_args(["fit", "--folds", "3", "--out", str(tmp_path / "run")])
+    args = parser.parse_args(
+        ["fit", str(tmp_path / "dataset"), str(tmp_path / "weights.json"), "--folds", "3", "--out", str(tmp_path / "run")]
+    )
     args.func(args)
 
     metrics = json.loads((tmp_path / "run" / "metrics.json").read_text())
@@ -611,7 +582,7 @@ def test_handle_fit_writes_metrics_and_a_loadable_artifact(tmp_path, monkeypatch
     # otherwise a group count that fell because two goldens shared a pool reads as lost data.
     assert metrics["header"]["groups"] == {"total": 8, "positives": 8, "merged": 0}
 
-    artifact = json.loads((tmp_path / "run" / "weights.json").read_text())
+    artifact = json.loads((tmp_path / "weights.json").read_text())
     assert artifact["kind"] == "linear" and artifact["weights"] and artifact["weights_dynamic"]
     assert artifact["provenance"]["groups"] == {"static": 6, "dynamic": 2} and artifact["provenance"]["positives"] == 8
     assert "static top1=" in artifact["provenance"]["notes"]

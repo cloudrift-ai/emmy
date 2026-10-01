@@ -1,44 +1,29 @@
-"""Autotune search infrastructure: candidates, search policies, the
-on-disk kernel + perf store, and the in-memory MCTS tree.
+"""Search infrastructure: the candidate, the greedy pick, the on-disk kernel + perf store, and the
+prior that ranks where nothing measured decides.
 
-- :mod:`.candidate` — :class:`Candidate` / :class:`LazyCandidate` /
-  :class:`Cursor` data classes.
-- :mod:`.policy` — :class:`Search` ABC (``base``), :class:`TuningSearch`
-  (``mcts``, PUCT — the exploration policy), and :func:`greedy_decide`
-  (``greedy``, the deterministic ``Run.resolve`` pick for single-shot
-  compiles — not a ``Search``).
-- :mod:`.db` — :class:`SearchDB` SQLite store (the kernels, the decisions that
-  minted them and their measurements).
-- :mod:`.policy.mcts` — :class:`TuningSearch` + the in-memory
-  :class:`SearchTree` / :class:`SearchNode` (MCTS-only — no other policy
-  reads or writes the tree).
+- :mod:`.candidate` — :class:`Candidate` / :class:`Cursor` data classes.
+- :mod:`.policy` — :func:`greedy_decide` (``greedy``, the deterministic ``Run.resolve`` pick).
+- :mod:`.db` — :class:`SearchDB` SQLite store (the kernels, the decisions that minted them and their
+  measurements).
+- :mod:`.bench_record` — the ONE writer for a kernel measurement and for a failed bench.
+- :mod:`.inventory` — the splice watcher that hears which kernels a lowering minted and which
+  kernel-set decisions it took, and the routing-row writer.
+- :mod:`.prior` — the :class:`Prior` a compile ranks with.
 
 Op identity and the rewrite-chain walk live on the ops themselves —
 :meth:`~emmy.compiler.ir.base.Op.identity_key`, :attr:`~emmy.compiler.ir.base.Op.dialect`,
-:meth:`~emmy.compiler.ir.base.Op.source_chain` (the retired ``keys`` module).
-
-The bench + DB write orchestration lives in
-:func:`emmy.compiler.pipeline.search.policy.terminal_bench.bench_terminal_async`;
-``Pipeline.tune`` calls it per yielded terminal and passes the
-aggregate :class:`PerfStats` to :meth:`Search.observe` for the policy
-to consume.
+:meth:`~emmy.compiler.ir.base.Op.source_chain`.
 """
 
-from emmy.compiler.pipeline.search.candidate import Candidate, Cursor, LazyCandidate
+from emmy.compiler.pipeline.search.candidate import Candidate, Cursor
 from emmy.compiler.pipeline.search.db import PerfRow, PerfStats, SearchDB
-from emmy.compiler.pipeline.search.policy import Search, TuningSearch, greedy_decide
-from emmy.compiler.pipeline.search.policy.mcts import SearchNode, SearchTree
+from emmy.compiler.pipeline.search.policy import greedy_decide
 
 __all__ = [
     "Candidate",
     "Cursor",
-    "LazyCandidate",
-    "SearchNode",
     "PerfRow",
     "PerfStats",
-    "Search",
     "SearchDB",
-    "SearchTree",
-    "TuningSearch",
     "greedy_decide",
 ]

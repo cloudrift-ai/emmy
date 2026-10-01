@@ -337,7 +337,7 @@ def kernel_tile(op):
     tile, which is the kernel unless its schedule realized it through another term (a carried state's
     serial form): the stamp still names the tile the schedule fork was offered. Every kernel the tuner and
     ``run --bench`` measure has one, the kernel-cache replay included (a cached kernel keeps its chain);
-    the deploy identity a golden receipt names and the definition a ``kernel`` row stores are both read
+    the deploy identity a golden row names and the definition a ``kernel`` row stores are both read
     off it."""
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import KERNEL_IDENTITY  # noqa: PLC0415

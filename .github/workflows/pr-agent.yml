@@ -17,47 +17,37 @@ jobs:
       contents: read
       issues: write
       pull-requests: write
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      OPENAI_KEY: ${{ secrets.CLOUDRIFT_API_KEY }}
+      OPENAI__API_BASE: ${{ vars.CLOUDRIFT_INFERENCE_URL || 'https://inference.cloudrift.ai/v1' }}
+      CONFIG__MODEL: ${{ format('openai/{0}', vars.ONBOARD_AGENT_MODEL || 'Qwen/Qwen3.8-27B-FP8') }}
+      CONFIG__FALLBACK_MODELS: '[]'
+      CONFIG__CUSTOM_MODEL_MAX_TOKENS: '128000'
+      CONFIG__MAX_MODEL_TOKENS: '128000'
+      CONFIG__PATCH_EXTRA_LINES_BEFORE: '10'
+      CONFIG__PROPAGATE_TOOL_ERRORS: 'true'
+      CONFIG__RESTRICTED_MODE: 'true'
+      IGNORE__GLOB: '["**/golden/*.json"]'
+      PR_REVIEWER__PUBLISH_OUTPUT_NO_SUGGESTIONS: 'false'
+      PR_REVIEWER__EXTRA_INSTRUCTIONS: >-
+        Report only actionable defects introduced by this change. Every finding needs a concrete failing path.
+        For a missing import or undefined name, check the surrounding unchanged lines before posting; if that
+        context is unavailable, omit the finding. Do not publish a concern that your own analysis resolves.
+        Keep each finding to two short sentences. Return valid YAML: make relevant_file and issue_header quoted,
+        single-line strings; use a block scalar only for issue_content.
+      GITHUB__IGNORE_BOT_PR: 'false'
+      GITHUB_ACTION_CONFIG__AUTO_REVIEW: 'true'
+      GITHUB_ACTION_CONFIG__AUTO_DESCRIBE: 'false'
+      GITHUB_ACTION_CONFIG__AUTO_IMPROVE: 'false'
+      GITHUB_ACTION_CONFIG__PR_ACTIONS: '["opened", "reopened", "ready_for_review", "synchronize"]'
     steps:
-      - name: Record existing reviews
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          set -euo pipefail
-          gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" |
-            jq -s '
-              [.[][] | select(.user.login == "github-actions[bot]"
-                and (.body | contains("<!-- pr-agent:review:full -->")))
-                | {key: (.id | tostring), value: .updated_at}] | from_entries
-            ' > "$RUNNER_TEMP/pr-agent-reviews.json"
-
       - name: Review pull request
+        id: review
+        continue-on-error: true
         # PR Agent v0.46.0 GitHub Action image.
         uses: docker://pragent/pr-agent@sha256:65e5b196e38cecd7df8a71fe29942052e081a0c6645132c2ac874df60b1760c7
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          OPENAI_KEY: ${{ secrets.CLOUDRIFT_API_KEY }}
-          OPENAI__API_BASE: ${{ vars.CLOUDRIFT_INFERENCE_URL || 'https://inference.cloudrift.ai/v1' }}
-          CONFIG__MODEL: ${{ format('openai/{0}', vars.ONBOARD_AGENT_MODEL || 'Qwen/Qwen3.8-27B-FP8') }}
-          CONFIG__FALLBACK_MODELS: '[]'
-          CONFIG__CUSTOM_MODEL_MAX_TOKENS: '128000'
-          CONFIG__MAX_MODEL_TOKENS: '128000'
-          CONFIG__RESTRICTED_MODE: 'true'
-          GITHUB__IGNORE_BOT_PR: 'false'
-          GITHUB_ACTION_CONFIG__AUTO_REVIEW: 'true'
-          GITHUB_ACTION_CONFIG__AUTO_DESCRIBE: 'false'
-          GITHUB_ACTION_CONFIG__AUTO_IMPROVE: 'false'
-          GITHUB_ACTION_CONFIG__PR_ACTIONS: '["opened", "reopened", "ready_for_review", "synchronize"]'
 
-      - name: Verify review was posted
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          set -euo pipefail
-          gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" |
-            jq -se --slurpfile before "$RUNNER_TEMP/pr-agent-reviews.json" '
-              any(.[][]; .user.login == "github-actions[bot]"
-                and (.body | contains("<!-- pr-agent:review:full -->"))
-                and .updated_at > ($before[0][(.id | tostring)] // ""))
-            '
+      - name: Retry failed review
+        if: steps.review.outcome == 'failure'
+        uses: docker://pragent/pr-agent@sha256:65e5b196e38cecd7df8a71fe29942052e081a0c6645132c2ac874df60b1760c7

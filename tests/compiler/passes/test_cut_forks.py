@@ -14,6 +14,7 @@ from emmy.compiler.dtype import F16
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.base import InputOp
+from emmy.compiler.ir.cuda.ir import CudaOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.frontend.ir import SdpaOp, SoftmaxOp
@@ -33,11 +34,10 @@ from emmy.compiler.pipeline.passes.tile._cut import (
     realize,
 )
 from emmy.compiler.pipeline.pipeline import RuleSkipped, Run, _is_structural_option
-from emmy.compiler.pipeline.search.golden import GoldenFile, GoldenRecord, Measurements, decode_record
-from emmy.compiler.pipeline.search.golden.decode import _replay
-from emmy.compiler.pipeline.search.golden.record import _lifted_target, _target_kernel_nodes
-from emmy.compiler.pipeline.search.pins import pinned_knobs
-from tests.compiler.helpers import case_target_tile, direct_classic_leaf, loop_record_fields, loop_target, requires_cuda
+from emmy.compiler.pipeline.search.db import RoutingRow, SearchDB
+from emmy.compiler.pipeline.search.golden import Measurements, Row, evidence_scope, import_rows, mint, restamp
+from emmy.compiler.pipeline.search.pins import pinned_knobs, spelled_arm
+from tests.compiler.helpers import case_target_tile, direct_classic_leaf, inventory_document, requires_cuda
 from tests.compiler.terms import contraction, projection, reduction, slab
 
 _CTX = Context.from_target((12, 0))
@@ -55,22 +55,29 @@ def test_cut_and_schedule_passes_share_the_generic_schedule_driver() -> None:
     assert import_module("emmy.compiler.pipeline.fork").schedule is schedule
 
 
-def test_placement_cut_preserves_a_cross_cta_split_receipt() -> None:
+@pytest.mark.parametrize("siblings", [False, True])
+def test_placement_cut_preserves_a_cross_cta_split_receipt(siblings: bool) -> None:
     """A split piece can re-enter placement; cutting it must not make REDUCE pending again."""
     from emmy.compiler.pipeline.passes.tile._split import split_pending
 
-    graph = _computed_operand_graph("a")
-    tile = graph.nodes["out"].op
+    if siblings:
+        graph, root = _mimo_case(_REQUANT)
+    else:
+        graph = _computed_operand_graph("a")
+        root = graph.nodes["out"]
+    tile = root.op
     # The partition receipt is the reduce axis's window in the kernel's axis table; the term names it only.
-    axes = tuple(replace(axis, window=Window(parent=axis, partition=True)) if axis.name == tile.op.axis else axis for axis in tile.axes)
-    graph.nodes["out"].op = replace(tile, axes=axes)
+    axes = tuple(replace(axis, window=Window(parent=axis, partition=True)) for axis in tile.axes)
+    root.op = replace(tile, axes=axes)
     pipeline = Pipeline.build(["tile/cut"])
     match = pipeline.match(graph, pipeline.passes[0].rules[0])[0]
     seams = cuttable_seams(match.root.op)
 
-    fragment = realize(match, match.root, (seams[0],))
+    fragment = _composed_arm(graph, root)[0].materialize() if siblings else realize(match, match.root, (seams[0],))
 
     pieces = [node.op for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
+    if siblings:
+        assert any(len(piece.output_specs) > 1 for piece in pieces)
     assert pieces and all(piece.split_consumed for piece in pieces)
     assert not any(split_pending(piece) for piece in pieces)
 
@@ -329,32 +336,51 @@ def test_sdpa_score_cut_is_offered_and_pinned_cut_lowers() -> None:
     assert workspace.dtype.name == "f32"
 
 
-def test_recorded_sdpa_cut_decodes_exactly_and_stale_path_fails_loudly() -> None:
-    wire = _sdpa_graph().to_wire()
-    fields = {
-        "name": "sdpa.route",
-        "gpu_name": "",
-        "compute_cap": (12, 0),
-        "model": None,
-        "program_index": 0,
-        "program_wire": wire,
-        **loop_record_fields(_sdpa_graph(), ["out"]),
-        "bindings": (),
-        "pins": (),
-        "measurements": None,
-        "ranking": None,
-    }
-    assert decode_record(GoldenRecord(knobs={"PLACE@map.1/twist.1/inner": "cut"}, **fields)) is None
-    reason = decode_record(GoldenRecord(knobs={"PLACE@missing": "cut"}, **fields))
-    assert reason is not None and "does not resolve" in reason
-    # A route that resolves SOME of its seams is refused the same way. Evidence import is
-    # best-effort per record — it keeps the arms the replay did resolve — so the strict decode is
-    # the one place a record that would deploy a shorter kernel set than the measured one is loud.
-    # The stale seam here is well formed and stands on no site of this tree: one hop past the score
-    # contraction, where the operand is a gmem slab and takes no hop of its own.
-    partial_route = {"PLACE@map.1/twist.1/inner": "cut", "PLACE@map.1/twist.1/inner.1/map": "cut"}
-    partial = decode_record(GoldenRecord(knobs=partial_route, **fields))
-    assert partial is not None and "does not resolve" in partial
+def _sdpa_document(gpu_name: str | None = None):
+    """The sdpa program's inventory on a 12.0 card: one target kernel, one traced-only row."""
+    return inventory_document(_sdpa_graph(), (12, 0), gpu_name=gpu_name)
+
+
+def _routed(document, arm: dict, *, measured: bool = True):
+    """``document`` with the decision ``arm`` taken on its target and recorded as the DB holds it: the routing row, the
+    pieces it minted, and a row per piece (measured at one microsecond when ``measured``)."""
+    [target] = document.targets()
+    probe = RoutingRow(target.exact_identity, arm, ("0" * 64,))
+    ctx = Context.from_target((12, 0), gpu_name=document.gpu_name or None)
+    taken = [kernels for route, _new, kernels in mint(target, [probe], ctx) if route is probe]
+    if not taken:
+        return document, None
+    pieces = taken[0]
+    for piece in pieces:
+        document.add_kernel(piece)
+    route = RoutingRow(target.exact_identity, dict(arm), tuple(piece.exact_identity for piece in pieces))
+    document.add_routing(route)
+    stand_in = Measurements(emmy_us=1.0, reference_us=2.0, reference_backend="torch") if measured else None
+    for piece in pieces:
+        document.rows.append(Row(name=f"sdpa.{piece.exact_identity[:12]}", kernel=piece.exact_identity, knobs={}, measurements=stand_in))
+    return document, route
+
+
+def test_a_recorded_cut_is_taken_again_and_a_stale_route_mints_nothing() -> None:
+    """A routing row's arm is taken again on the fresh parent by the restamp's mint: a seam the parent offers mints
+    the pieces; a key the parent has no site for decides nothing, and a route naming one beside a real seam is not
+    the decision the fresh parent takes (it takes the one seam), so the restamp drops it."""
+    document, route = _routed(_sdpa_document(), {"PLACE@map.1/twist.1/inner": "cut"})
+    assert route is not None and len(route.children) >= 2
+    fresh, report = restamp(document)
+    assert fresh == document and not report.changed
+
+    document, route = _routed(_sdpa_document(), {"PLACE@missing": "cut"})
+    assert route is None, "a key that names no site of the tree decides nothing"
+    # The stale seam here is well formed and stands on no site of this tree: one hop past the score contraction,
+    # where the operand is a gmem slab and takes no hop of its own.
+    partial = {"PLACE@map.1/twist.1/inner": "cut", "PLACE@map.1/twist.1/inner.1/map": "cut"}
+    document, route = _routed(_sdpa_document(), partial)
+    assert route is not None, "the fresh parent takes the one seam it offers"
+    stale = replace(document, routing=[replace(route, arm=partial)])
+    fresh, report = restamp(stale)
+    assert fresh.routing == [] and report.dropped_routes
+    assert all(row.kernel not in route.children for row in fresh.rows), "the pieces' rows go with the decision"
 
 
 @requires_cuda
@@ -424,10 +450,7 @@ def test_unpinned_place_keeps_offering_fuse_and_recursive_cuts() -> None:
 
 
 def test_composed_scoped_place_pins_cut_together_and_foreign_pins_are_skipped() -> None:
-    """Every scoped PLACE pin that resolves on one kernel joins ONE realization — a producer per
-    seam and one consumer, with a producer reading another seam's workspace when its value nests
-    inside it — while a pin whose site path exists on no kernel here is another kernel's and is
-    skipped, never an error."""
+    """Scoped cuts compose; sibling workspace producers fuse, while their consumer stays cut."""
     match, graph = _case_match("attention/rmsnorm-qk-sdpa-composed-cut.json")
     pins = {
         "PLACE@map.1/twist.1/inner.1/map": "cut",  # the normalized-Q cone
@@ -445,10 +468,12 @@ def test_composed_scoped_place_pins_cut_together_and_foreign_pins_are_skipped() 
     (fragment,) = fork.expand()
     pieces = [node for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
     producers = [node for node in pieces if "__place_" in node.id]
-    assert len(producers) == 3 and len(pieces) == 4
-    assert all(node.op.placement_decided for node in pieces)
-    workspaces = {node.id for node in producers}
-    assert any(set(node.inputs) & workspaces for node in producers), "the nested value's producer must read a sibling workspace"
+    assert len(producers) == 2 and len(pieces) == 3
+    fused = next(node for node in producers if len(node.outputs) == 2)
+    assert len([seam for seam in cuttable_seams(fused.op) if seam.owned]) == 2
+    assert not fused.op.placement_decided, "a later output cut must still be offered"
+    assert all(node.op.placement_decided for node in pieces if node is not fused)
+    assert any(set(node.inputs) & {producer.id for producer in producers} for node in producers)
 
 
 def test_bare_and_scoped_place_cuts_compose_in_one_decision() -> None:
@@ -494,264 +519,37 @@ def test_a_composed_route_skips_a_bare_key_and_still_fails_on_a_broken_one() -> 
         _CUT.rewrite(match, root, _CTX)
 
 
-def _receipt_fields() -> dict:
-    return {
-        "name": "sdpa.child",
-        "gpu_name": "",
-        "compute_cap": (12, 0),
-        "model": None,
-        "program_index": 0,
-        "program_wire": _sdpa_graph().to_wire(),
-        **loop_record_fields(_sdpa_graph(), ["out"]),
-        "bindings": (),
-        "pins": (("PLACE@map.1/twist.1/inner", "cut"),),
-        "measurements": None,
-        "ranking": None,
-    }
-
-
-def test_child_identity_receipts_decode_per_child_and_join_by_stored_identity() -> None:
-    """Conflicting per-child schedules behind one pinned cut persist as sibling receipts: each
-    stored child identity selects its own kernel's rows, a sibling child's row does not vouch for
-    it, and the strict decode joins by the stored identity instead of the pre-cut lift."""
-    fields = _receipt_fields()
-    parent = GoldenRecord(knobs={}, **fields)
-    lift_identity = _lifted_target(parent).identity_key(with_io=True)
-    children = {i: rows for i, rows in _replay(parent, exhaustive=True).rows.items() if i is not None and i != lift_identity}
-    assert len(children) == 2, "the pinned cut must resolve to two distinctly identified child kernels"
-    # One child's rows are a subset of the other's, and which identity digest sorts first is not a
-    # fact about the kernels — take the child that HAS a row its sibling does not offer.
-    (id_a, rows_a), (id_b, rows_b) = sorted(children.items(), key=lambda child: len(child[1]), reverse=True)
-    row_a = next(iter(rows_a - rows_b), None)
-    assert row_a is not None, "the children must offer at least one distinguishing schedule row"
-
-    receipt = GoldenRecord(knobs=dict(row_a), identity=id_a, **fields)
-    assert decode_record(receipt) is None
-    assert receipt.kernel_identity == id_a
-
-    sibling = GoldenRecord(knobs=dict(row_a), identity=id_b, **fields)
-    reason = decode_record(sibling)
-    assert reason is not None and "no enumerated row of the identified kernel" in reason
-
-    stale = GoldenRecord(knobs=dict(row_a), identity="0" * 64, **fields)
-    reason = decode_record(stale)
-    assert reason is not None and "equals none" in reason
-
-
-def test_child_decode_verdict_changes_with_sibling_route_owner() -> None:
-    """A cached child miss must not survive a sibling route-owner repair.
-
-    The child row itself is unchanged. Only the route sibling's identity changes from stale to the
-    current pre-cut owner, which makes the replay take the cut and expose the child's schedule.
-    """
-    fields = {**_receipt_fields(), "pins": ()}
-    common = {key: value for key, value in fields.items() if key != "name"}
-    route = {"PLACE@map.1/twist.1/inner": "cut"}
-    parent = GoldenRecord(name="cache.parent", knobs={}, **common)
-    owner = _lifted_target(parent).identity_key(with_io=True)
-    current_route = GoldenRecord(name="cache.route", knobs=route, identity=owner, **common)
-    children = {
-        identity: rows
-        for identity, rows in _replay(current_route, exhaustive=True).rows.items()
-        if identity is not None and identity != owner
-    }
-    child_identity, child_rows = max(children.items(), key=lambda child: len(child[1]))
-    child = GoldenRecord(name="cache.child", knobs=dict(next(row for row in child_rows if row)), identity=child_identity, **common)
-
-    stale_route = replace(current_route, identity="0" * 64)
-    reason = decode_record(child, (stale_route,))
-    assert reason is not None and "stored identity equals none of the kernel identities" in reason
-    assert decode_record(child, (current_route,)) is None
-
-    # An explicit kernel set supplies its route even after the pre-cut identity changes.
-    lead = replace(parent, kernel_set=(stale_route.name,))
-    assert decode_record(child, (lead, stale_route)) is None
-    assert decode_record(stale_route, (lead, child)) is None
-
-
-def test_post_schedule_receipt_does_not_steer_an_unowned_peer(monkeypatch) -> None:
-    """A receipt identity that appears after scheduling selects only that materialized kernel.
-
-    Another cut child accepts the same schedule row, but must retain the lead's distinct row and
-    must not realize the receipt's.
-    """
-    from emmy.compiler.pipeline.knob import evidence_row_vouches
-
-    fields = _receipt_fields()
-    parent = GoldenRecord(knobs={}, **fields)
-    children = {identity: rows for identity, rows in _replay(parent, exhaustive=True).rows.items() if identity is not None}
-    (target_identity, target_rows), (peer_identity, peer_rows) = sorted(children.items(), key=lambda item: len(item[1]), reverse=True)
-    target_row = next(iter(target_rows & peer_rows), None)
-    peer_row = next(iter(peer_rows - {target_row}), None)
-    assert target_row is not None and peer_row is not None, "the two children need one shared and one distinct schedule row"
-
-    post_identity = "f" * 64
-    original_identity_key = TileOp.identity_key
-
-    def identity_after_schedule(self, *, structural=True, with_io=False, with_knobs=False):
-        identity = original_identity_key(self, structural=structural, with_io=with_io, with_knobs=with_knobs)
-        if self.schedule is not None and with_io and not with_knobs and identity == target_identity:
-            return post_identity
-        return identity
-
-    monkeypatch.setattr(TileOp, "identity_key", identity_after_schedule)
-    lead = GoldenRecord(name="sdpa.lead", knobs=dict(peer_row), **{key: value for key, value in fields.items() if key != "name"})
-    receipt = GoldenRecord(
-        name="sdpa.receipt",
-        knobs=dict(target_row),
-        identity=post_identity,
-        **{key: value for key, value in fields.items() if key != "name"},
-    )
-
-    replay = _replay(receipt, siblings=(lead,), lead=lead)
-
-    assert evidence_row_vouches(replay.realized[post_identity], dict(target_row))
-    assert evidence_row_vouches(replay.realized[peer_identity], dict(peer_row))
-    assert not evidence_row_vouches(replay.realized[peer_identity], dict(target_row))
-
-
-def test_child_identity_receipt_selects_one_kernel_from_multi_kernel_loop_target() -> None:
-    """A stored child identity is the selector when a regenerated target now lowers to several
-    kernels; strict decoding must consult that identity's rows before requiring a one-kernel lift."""
-    graph = _sdpa_graph()
-    _input(graph, "x", (4, 32))
-    graph.add_node(SoftmaxOp(axis=-1), ["x"], Tensor("softmax", (4, 32), "f16"), node_id="softmax")
-    graph.inputs.append("x")
-    graph.outputs.append("softmax")
-    loop = Pipeline.build(LOOP_PASSES).run(graph.copy(), ctx=_CTX)
-    fields = {
-        **_receipt_fields(),
-        "program_wire": graph.to_wire(),
-        "origins": (),
-        "loop_index": 0,
-        "loop_wire": loop.to_wire(),
-    }
-    parent = GoldenRecord(knobs={}, **fields)
-    with pytest.raises(ValueError, match="target lowers to 2 kernels"):
-        _lifted_target(parent)
-    identity, rows = next((identity, rows) for identity, rows in _replay(parent, exhaustive=True).rows.items() if identity is not None)
-    receipt = GoldenRecord(knobs=dict(next(iter(rows))), identity=identity, **fields)
-    assert decode_record(receipt) is None
-
-
 def test_import_files_each_row_under_the_kernel_it_decides(monkeypatch) -> None:
-    """Golden evidence is per kernel, in the DB as in the file. A target's entries walk one path: the
-    leading entry (the routing record here) decides the parent's placement fork and is its routing
-    row — the parent's exact identity, the arm, the pieces — and the child-identity receipt decides
-    only the forks of the kernel it names and is that child's perf row, its schedule row as
-    recorded, captured, under the golden's source. The parent ran as no kernel and has no row; a
-    piece inherits nothing from the kernel it replaced."""
+    """Golden evidence is per kernel, in the DB as in the file: the decision is a routing row on the parent, and
+    each piece's row is that piece's perf row, under the golden's source. The parent ran as no kernel and has none."""
     monkeypatch.setenv("EMMY_FAST_MATH", "0")
-    from emmy.compiler.pipeline.search.db import SearchDB
-    from emmy.compiler.pipeline.search.golden.evidence import import_goldens
-
-    fields = {**_receipt_fields(), "measurements": Measurements(emmy_us=1.0, reference_us=2.0, reference_backend="torch")}
-    route = {"PLACE@map.1/twist.1/inner": "cut"}
-    routing = GoldenRecord(knobs=route, **{**fields, "pins": ()})
-    parent = GoldenRecord(knobs={}, **fields)
-    lift_identity = _lifted_target(parent).identity_key(with_io=True)
-    replay = _replay(parent, exhaustive=True)
-    child, rows = next((identity, rows) for identity, rows in replay.rows.items() if identity is not None and identity != lift_identity)
-    receipt = GoldenRecord(knobs=dict(next(iter(rows))), identity=child, **fields)
-
+    document, route = _routed(_sdpa_document(), {"PLACE@map.1/twist.1/inner": "cut"})
     db = SearchDB()
-    counts = import_goldens(db, Context.from_target((12, 0)), [routing, receipt], source="golden:test")
-
-    assert counts == {"routing rows": 1, "perf rows": 1}
-    [decision] = db.iter_routing()
-    assert decision.arm == route and len(decision.children) >= 2
-    [row] = db.iter_perf_rows()
-    assert row.kernel in decision.children and row.kernel != decision.parent
-    schedule = {k: str(v) for k, v in row.knobs.items() if not k.startswith(("S_", "I_"))}
-    assert schedule == {k: str(v) for k, v in receipt.schedule_row.items()}
-    assert (row.stats.median, row.captured, row.source) == (1.0, True, "golden:test")
-    assert next(kernel for kernel in db.iter_kernels() if kernel.exact_identity == row.kernel).structural_identity == child
+    assert import_rows(db, Context.from_target((12, 0)), document, document.rows, source="golden:test") == len(route.children)
+    assert [stored.arm for stored in db.iter_routing()] == [route.arm]
+    rows = list(db.iter_perf_rows())
+    assert {row.kernel for row in rows} == set(route.children)
+    assert all((row.stats.median, row.captured, row.source) == (1.0, True, "golden:test") for row in rows)
 
 
-def test_multi_output_kernel_record_derives_the_identity_its_live_fork_carries() -> None:
-    """A record whose one target kernel writes SEVERAL output buffers must derive the identity its
-    live fork carries. Every evidence row a golden contributes is keyed by that identity, so a
-    derivation that kept only output slot 0 keys the record's rows off a fingerprint no fork can
-    produce and the deploy reads none of them. The derivation lifts the persisted kernel and the
-    fork root op is whatever the matcher's ``with_io`` produced — a map holding every output slot,
-    which is why the lift goes through the same call."""
+def test_a_multi_output_kernels_entry_carries_the_identity_its_live_fork_carries() -> None:
+    """A kernel that writes SEVERAL output buffers is stored under the identity its live fork carries. Every evidence
+    row a golden contributes is keyed by that identity, so an entry derived from one output slot alone would key the
+    rows off a fingerprint no fork can produce and the deploy would read none of them."""
+    from emmy.compiler.wire import kernel_tile
+
     graph = Graph()
     _input(graph, "x", (8,))
     graph.add_node(ElementwiseOp("relu"), ["x"], Tensor("hot", (8,), "f16"), node_id="hot")
     graph.add_node(ElementwiseOp("negative"), ["hot"], Tensor("cold", (8,), "f16"), node_id="cold")
     graph.inputs, graph.outputs = ["x"], ["hot", "cold"]
-    loop = Pipeline.build(LOOP_PASSES).run(graph.copy(), ctx=_CTX)
-    fields = {
-        **_receipt_fields(),
-        "name": "fused.multi_output",
-        "pins": (),
-        "program_wire": graph.to_wire(),
-        "origins": (),
-        "loop_index": 0,
-        "loop_wire": loop.to_wire(),
-    }
-    record = GoldenRecord(knobs={}, **fields)
-    _lowered, nodes = _target_kernel_nodes(record)
-    assert len(nodes) == 1 and len(nodes[0].outputs) == 2, "the fused target must be ONE kernel writing two buffers"
-
-    identity = record.kernel_identity
-    rows = _replay(record, exhaustive=True).rows
-    assert identity in rows, "the derived identity names no kernel the live resolve offers"
-    # The join is the subject; spelling one of that kernel's own rows shows the record decodes
-    # strictly through it too.
-    assert decode_record(GoldenRecord(knobs=dict(next(iter(rows[identity]))), **fields)) is None
-
-
-def test_receipt_validation_requires_child_identity_and_place_pins_stay_live(monkeypatch) -> None:
-    monkeypatch.setenv("EMMY_FAST_MATH", "0")
-    from types import SimpleNamespace
-
-    from emmy.compiler.pipeline.search.pins import regime_live
-
-    fields = _receipt_fields()
-    loops: list[dict] = []
-    document = {
-        "compute_cap": [12, 0],
-        "programs": [fields["program_wire"]],
-        "loops": loops,
-        "configs": [
-            {
-                "program": 0,
-                "target": loop_target(_sdpa_graph(), ["out"], loops),
-                "realizations": [
-                    {"name": "sdpa.child", "bindings": {}, "pins": {"PLACE@map.1/twist.1/inner": "cut"}, "knobs": {"WORK": "w4x2"}}
-                ],
-            }
-        ],
-    }
-    with pytest.raises(ValueError, match="child-identity schedule receipt"):
-        GoldenFile.from_wire(document).check()
-    document["configs"][0]["realizations"][0]["identity"] = "0" * 64
-    GoldenFile.from_wire(document).check()
-    receipt = SimpleNamespace(pin_map={"PLACE@map.1/twist.1/inner": "cut"})
-    assert regime_live(receipt), "a receipt's routing pins are its route, never a dead env regime"
-
-
-def test_pool_group_fuses_node_id_respellings_and_keys_on_pins() -> None:
-    """``pool_group`` composes the target kernels' identity keys, so two recordings of ONE
-    program whose node ids differ (separate recording sessions) fuse into one enumeration
-    group — the wire digest this replaced split them — while a different pin regime still
-    keys apart."""
-    fields = _receipt_fields()
-    respelled = _sdpa_graph()
-    for nid in [n for n in respelled.nodes if n not in respelled.inputs]:
-        respelled.rename_node(nid, f"session2_{nid}")
-    twin_fields = {
-        **fields,
-        "program_wire": respelled.to_wire(),
-        **loop_record_fields(respelled, [f"session2_{o}" for o in fields["origins"]]),
-    }
-    a = GoldenRecord(knobs={}, **fields)
-    b = GoldenRecord(knobs={}, **twin_fields)
-    assert a.pool_group == b.pool_group, "node-id spelling must not split an enumeration group"
-
-    unpinned = GoldenRecord(knobs={}, **{**fields, "pins": ()})
-    assert unpinned.pool_group != a.pool_group, "the pin regime is a group-key term"
+    document = inventory_document(graph, (12, 0))
+    [kernel] = document.kernels
+    assert set(kernel.loop_ir["outputs"]) == {"hot", "cold"}, "the fused target is ONE kernel writing two buffers"
+    with evidence_scope([]):
+        lowered = Pipeline.build(CUDA_PASSES).run(kernel.program({}), ctx=_CTX, db=None)
+    [op] = [node.op for node in lowered.nodes.values() if isinstance(node.op, CudaOp)]
+    assert kernel_tile(op).identity_key(structural=False, with_io=True) == kernel.exact_identity
 
 
 # ---------------------------------------------------------------------------
@@ -762,63 +560,17 @@ def test_pool_group_fuses_node_id_respellings_and_keys_on_pins() -> None:
 _ROUTING_CARD = "NVIDIA GeForce RTX 5090"
 
 
-def _sdpa_kernel_identity() -> str:
-    """The deploy identity carried by the sdpa program's PLACEMENT fork — the PRE-CUT kernel, which
-    is the kernel a routing row names: the route it records is the one decision taken on that
-    kernel, before any piece of it exists. Probed off a resolve rather than restated here, so these
-    tests pin the routing lane and not a second copy of the identity derivation."""
-    from emmy.compiler.pipeline.fork import flatten_leaves
-
-    ctx = Context.from_target((12, 0), gpu_name=_ROUTING_CARD)
-    lowered = Pipeline.build(LOOP_PASSES).run(_sdpa_graph(), ctx=ctx)
-    seen: list[str] = []
-
-    def decide(fp):
-        if not seen and isinstance(fp.root_op, TileOp) and fp.match.rule.name == _CUT.__name__.rsplit(".", 1)[-1]:
-            seen.append(fp.root_op.identity_key(with_io=True))
-        return flatten_leaves(fp.options)[0]
-
-    Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(lowered, decide)
-    assert seen, "the sdpa program must offer a placement fork"
-    return seen[0]
-
-
-def _routing_record(knobs: dict, *, name: str = "sdpa.route") -> GoldenRecord:
-    """A measured ROUTING row over the sdpa kernel — nothing but ``PLACE`` keys, which is what
-    makes it a recorded placement rather than a recorded schedule. The identity is stored so this
-    exercises the routing LANE and not the record-side identity derivation, which has its own
-    tests."""
-    return GoldenRecord(
-        name=name,
-        gpu_name=_ROUTING_CARD,
-        compute_cap=(12, 0),
-        model=None,
-        program_index=0,
-        program_wire=_sdpa_graph().to_wire(),
-        **loop_record_fields(_sdpa_graph(), ["out"]),
-        bindings=(),
-        pins=(),
-        knobs=knobs,
-        identity=_sdpa_kernel_identity(),
-        measurements=Measurements(emmy_us=1.0, reference_us=2.0, reference_backend="torch"),
-        ranking=None,
-    )
-
-
-def _deploy_kernels(records: list) -> list[str]:
-    """Resolve the sdpa program through the deploy policy with ``records`` as the card's corpus —
-    imported into the compile's DB, as every compile imports its golden scope — and return the
-    resolved kernel set. ``prior=None`` pins the non-recorded forks to emission
-    order, so the recorded evidence is the only thing that can move the answer. The records are
-    evidence in any nvcc regime: a golden row is scoped by the card and by its own input pins
-    (``regime_live``), never by the optimization level the suite compiles at."""
-    from emmy.compiler.pipeline.search.golden import records_override
+def _deploy_kernels(document) -> list[str]:
+    """Resolve the sdpa program through the deploy policy with ``document`` as the card's golden scope — imported into
+    the compile's DB, as every compile imports its golden scope — and return the resolved kernel set. ``prior=None``
+    pins the non-recorded forks to emission order, so the recorded evidence is the only thing that can move the
+    answer."""
     from emmy.compiler.pipeline.search.golden.evidence import evidence_db
     from emmy.compiler.pipeline.search.policy.greedy import greedy_decide
 
     ctx = Context.from_target((12, 0), gpu_name=_ROUTING_CARD)
     lowered = Pipeline.build(LOOP_PASSES).run(_sdpa_graph(), ctx=ctx)
-    with records_override(records):
+    with evidence_scope([document] if document is not None else []):
         db = evidence_db(None, ctx)
         terminal, _trace = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(lowered, greedy_decide(prior=None, db=db))
     return sorted(node.id for node in terminal.nodes.values() if isinstance(node.op, TileOp))
@@ -829,37 +581,20 @@ def _deploy_kernels(records: list) -> list[str]:
 _SDPA_ROUTE = "PLACE@map.1/twist"
 
 
-def test_a_recorded_kernel_set_deploys_the_cut_every_entry_spells(monkeypatch) -> None:
-    """A cut mints brand-new kernels, so a kernel set cut twice over is recorded per kernel and not
-    as one row spelling both seams: the leading entry spells the seam offered on the target's own
-    kernel, and an entry naming a piece by its stored identity spells the seam that piece offers on
-    its own tree. Each entry's decision is a routing row on the kernel whose fork it decided, priced
-    from the receipts of the kernels the set finally ran as, so the deploy composes the whole
-    recorded set — and a decision whose pieces carry no receipt prices nothing."""
+def test_a_recorded_kernel_set_deploys_the_cut_its_routing_row_records(monkeypatch) -> None:
+    """A routing row on the target's kernel, priced from the rows of the pieces it minted, is what makes the deploy
+    take the cut: with no rows the fork falls to emission order (fuse), a routing row whose pieces carry no row prices
+    nothing, and the routing row beside its pieces' rows deploys the one seam it records."""
     monkeypatch.setenv("EMMY_FAST_MATH", "0")
-    fused = _deploy_kernels([])
+    fused = _deploy_kernels(None)
     assert len(fused) == 1, f"with no recorded route the fork falls to emission order (fuse): {fused}"
 
-    parent = _routing_record({_SDPA_ROUTE: "cut"})
-    assert _deploy_kernels([parent]) == fused, "a routing row alone prices nothing: its pieces have no receipt"
-    pieces = sorted(_replay(parent).kernels)
-    receipts = [replace(parent, name=f"sdpa.receipt{i}", knobs={}, identity=identity) for i, identity in enumerate(pieces)]
-    routed = _deploy_kernels([parent, *receipts])
-    assert sum(1 for name in routed if "__place_" in name) == 1, f"the parent's entry deploys its one seam: {routed}"
+    unpriced, route = _routed(_sdpa_document(_ROUTING_CARD), {_SDPA_ROUTE: "cut"}, measured=False)
+    assert route is not None and _deploy_kernels(unpriced) == fused, "a routing row alone prices nothing: its pieces have no row"
 
-    cuts = [replace(parent, name=f"sdpa.piece{i}", knobs={"PLACE": "cut"}, identity=identity) for i, identity in enumerate(pieces)]
-    leaves = sorted(_replay(parent, siblings=tuple(cuts), lead=parent).kernels)
-    leaf_receipts = [replace(parent, name=f"sdpa.leaf{i}", knobs={}, identity=identity) for i, identity in enumerate(leaves)]
-    composed = _deploy_kernels([parent, *cuts, *leaf_receipts])
-    assert sum(1 for name in composed if "__place_" in name) >= 2, f"every recorded seam must be cut: {composed}"
-
-
-def test_a_recorded_schedule_row_never_routes() -> None:
-    """The lanes do not cross: a schedule row carries no ``PLACE`` key, so it is not a route and
-    the placement fork stays with pricing even though the row joins the same kernel identity."""
-    schedule_row = _routing_record({"WORK": "w4x1", "TILE": ""}, name="sdpa.schedule")
-    assert not schedule_row.is_routing
-    assert _deploy_kernels([schedule_row]) == _deploy_kernels([])
+    routed, _route = _routed(_sdpa_document(_ROUTING_CARD), {_SDPA_ROUTE: "cut"})
+    deployed = _deploy_kernels(routed)
+    assert sum(1 for name in deployed if "__place_" in name) == 1, f"the routing row deploys its one seam: {deployed}"
 
 
 def _cone_seam() -> CutSite:
@@ -1097,11 +832,13 @@ def test_a_twin_channel_read_at_shifted_columns_reads_the_plain_channels_workspa
         body = node.op.op.lower(frozenset(), node.op.output_specs, node.op.axes)
         return [(stmt.input, stmt.index[-1].pretty()) for stmt in body.iter() if isinstance(stmt, Load)]
 
-    *producers, consumer = (node for node in cut.nodes.values() if isinstance(node.op, TileOp))
-    assert sorted(tuple(d.as_static() for d in node.outputs[0].shape) for node in producers) == [(2, 8), (4, 8)], "k keeps its two heads"
+    *producers, consumer = (cut.nodes[nid] for nid in cut.topological_order() if isinstance(cut.nodes[nid].op, TileOp))
+    workspaces = [tensor for node in producers for tensor in node.outputs]
+    assert sorted(tuple(d.as_static() for d in tensor.shape) for tensor in workspaces) == [(2, 8), (4, 8)], "k keeps its two heads"
     assert sorted(name for node in producers for name, _ in loads(node) if name in ("x1", "x2")) == ["x1", "x2"], "each weight is read once"
     for node in producers:
-        assert len({column for name, column in loads(consumer) if name == node.id}) == 3, "the reader loads a workspace at three columns"
+        for buffer in node.buffer_names():
+            assert len({column for name, column in loads(consumer) if name == buffer}) == 3, "the reader loads a workspace at three columns"
 
 
 @requires_cuda
@@ -1406,14 +1143,12 @@ def test_a_shared_epilogue_statement_refuses_the_output_owning_cut() -> None:
     assert all(seam.owned is None for seam in cuttable_seams(node.op))
 
 
-def test_an_output_owning_cut_is_declined_where_no_piece_would_gain_a_grid_axis() -> None:
-    """The same partition over a purely pointwise quantize: both branches own a store, but neither
-    holds a contraction reading it, so promotion has nothing to lift and splitting would buy a
-    second launch and no grid. The seams keep their workspace reading."""
+def test_an_output_owning_cut_is_offered_without_a_grid_gain() -> None:
+    """Independent outputs can be split again even when both pieces use the same grid."""
     tile = case_target_tile("fused/nvfp4-quantize-cut-shared-normalizer.json")
 
     assert len(tile.output_specs) == 2
-    assert all(seam.owned is None for seam in cuttable_seams(tile))
+    assert len([seam for seam in cuttable_seams(tile) if seam.owned]) == 2
 
 
 # ---- the full-projection cut --------------------------------------------------------------------- #
@@ -1470,15 +1205,27 @@ def test_a_projection_owning_more_than_it_binds_offers_one_full_projection_cut()
 
 
 def test_the_full_projection_cut_leaves_one_contraction_per_piece_on_a_grid() -> None:
-    """Taking it. Every piece holds at most one contraction, which is the committed shape: each
-    expensive contraction computed once as the sole root of its own kernel, the owned outputs read
-    back. And every piece binds at least two grid axes — the pointwise pieces included, which is
-    what the sweep-promotion rule has to supply once no contraction is left under them."""
+    """The cut fixpoint terminates after output cuts separate the fused producers again."""
     graph, node = _mimo_case(_REQUANT)
-    option, knobs = _composed_arm(graph, node)
-    pieces = _piece_ops(option.materialize())
+    graph.inputs, graph.outputs = list(node.inputs), list(node.buffer_names())
+    _, knobs = _composed_arm(graph, node)
+    parent = node.op.identity_key(with_io=True)
+    decisions = 0
 
-    assert len(pieces) == len(knobs), "one piece per seam; the projection hands away all of its outputs"
+    def decide(fork):
+        nonlocal decisions
+        decisions += 1
+        assert decisions < 30, "cut/fuse did not reach a fixpoint"
+        owned = [seam for seam in cuttable_seams(fork.root_op) if seam.owned]
+        row = knobs if fork.root_op.identity_key(with_io=True) == parent else {owned[0].spelling: "cut"} if owned else {}
+        arm = spelled_arm(fork.options, row)
+        assert arm is not None
+        return arm[0]
+
+    fragment, _ = Run(Pipeline.build(["tile/cut"]), _CTX).resolve(graph, decide)
+    pieces = _piece_ops(fragment)
+
+    assert len(pieces) >= len(knobs) - 1
     for piece in pieces:
         assert len(_contraction_spellings(piece)) <= 1, f"{piece.name} still holds several contractions"
         assert len(piece.place.free) >= 2, f"{piece.name} kept a one-axis placement"
@@ -1650,19 +1397,13 @@ def test_storage_frontier_recomputes_the_encode_scale_in_the_consumer(computed_s
         node.op.op.lower(bound=frozenset(), stores=node.op.output_specs, axes=node.op.axes)
 
 
-def test_a_decision_consumes_the_key_that_spelled_it_on_import(monkeypatch) -> None:
-    """A bare ``PLACE=cut`` spells one cut — the root-most seam of the kernel the entry decides — and is
-    spent by it: the pieces are read against what the entry has left to say, so the import writes the
-    one decision the recording took, not a cut at every piece that offers a seam."""
+def test_a_bare_cut_is_one_decision_at_the_root_most_seam(monkeypatch) -> None:
+    """A bare ``PLACE=cut`` spells one cut — the root-most seam of the kernel it is recorded on — and is spent by it:
+    the pieces are read against their own rows, so the mint takes the one decision the recording took, not a cut at
+    every piece that offers a seam."""
     monkeypatch.setenv("EMMY_FAST_MATH", "0")
-    from emmy.compiler.pipeline.search.db import SearchDB
-    from emmy.compiler.pipeline.search.golden.evidence import import_goldens
-
-    db = SearchDB()
-    counts = import_goldens(
-        db, Context.from_target((12, 0), gpu_name=_ROUTING_CARD), [_routing_record({"PLACE": "cut"})], source="golden:t"
-    )
-    assert counts["routing rows"] == 1 and len(list(db.iter_routing())) == 1
+    document, route = _routed(_sdpa_document(_ROUTING_CARD), {"PLACE": "cut"})
+    assert route is not None and len(document.routing) == 1 and len(route.children) >= 2
 
 
 def _row_statistic_graph() -> Graph:

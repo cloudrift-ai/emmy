@@ -1,10 +1,9 @@
-"""Golden records become tune DB rows before a compile picks (``golden.evidence``).
+"""Golden rows become tune DB rows before a compile picks (``golden.evidence``).
 
-Every kind of entry a golden file holds lands where the deploy reads it: a plain entry as its one
-kernel's perf row, a receipt as the row of the kernel its identity names, a cut as routing rows with
-the pieces' receipts pricing it, a split timed as a whole as routing rows only. The realization corpus
-stands in for a card's file: its cases are authored without a GPU, so nothing here needs one. The
-compile's seam imports a scope once per golden digest and lets a re-recorded file's rows go."""
+A golden file is the DB's shape, so the import is a copy: every kernel a ``kernel`` row, every decision a ``routing``
+row, every measured row a ``perf`` row in its own regime. The realization corpus stands in for a card's file: its
+cases are authored without a GPU, so nothing here needs one. The compile's seam imports a scope once per digest and
+lets a re-recorded file's rows go."""
 
 from __future__ import annotations
 
@@ -13,251 +12,169 @@ from dataclasses import replace
 
 import pytest
 
-from emmy.compiler.pipeline.knob import KERNEL_DECISION_FAMILIES, family_of
 from emmy.compiler.pipeline.search.db import SearchDB
-from emmy.compiler.pipeline.search.golden import GoldenFile, Measurements, records_override
-from emmy.compiler.pipeline.search.golden.evidence import evidence_db, import_goldens
+from emmy.compiler.pipeline.search.golden import evidence_scope, import_rows, regime_live
+from emmy.compiler.pipeline.search.golden.evidence import evidence_db
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from tests.compiler.realization import helpers as corpus
 
-_MEASURED = Measurements(emmy_us=1.0, reference_us=1.0, reference_backend="corpus")
 
-
-def _records(case):
-    """The case's entries as measured rows — the corpus authors schedules, so a stand-in µs makes them evidence."""
-    return [replace(record, measurements=_MEASURED) if record.measurements is None else record for record in case.records]
-
-
-def _regime(record) -> dict:
-    return {str(name): value for name, value in record.pin_map.items() if family_of(str(name)) not in KERNEL_DECISION_FAMILIES}
-
-
-def _imported(case_path: str, records=None):
-    case = corpus.load_case(corpus.CASES_DIR / case_path)
-    records = _records(case) if records is None else records
-    db, ctx = SearchDB(), case.context()
-    with pinned_knobs(_regime(case.record)):
-        counts = import_goldens(db, ctx, records, source="golden:test")
-    return db, ctx, records, counts
+def _case(path: str):
+    case = corpus.load_case(corpus.CASES_DIR / path)
+    return case, corpus._measured(case.document)
 
 
 def _schedule(row) -> dict:
     return {key: str(value) for key, value in row.knobs.items() if not key.startswith(("S_", "I_"))}
 
 
-def test_a_plain_entry_is_its_kernels_row() -> None:
-    """One target, one kernel, one entry: the row is the entry's schedule row as recorded, keyed on the
-    kernel the target lowers to, captured, under the golden's source."""
-    db, ctx, [record], counts = _imported("fused/norm-linear-f16-scalar-reduce.json")
-
-    assert counts == {"perf rows": 1}
+def test_a_plain_row_is_its_kernels_row() -> None:
+    """One target, one kernel, one row: the perf row is the row's schedule as recorded, keyed on the kernel, captured,
+    under the source given."""
+    case, document = _case("fused/norm-linear-f16-scalar-reduce.json")
+    db, ctx = SearchDB(), case.context()
+    assert import_rows(db, ctx, document, document.rows, source="golden:test") == 1
     [row] = db.iter_perf_rows()
-    assert _schedule(row) == {key: str(value) for key, value in record.schedule_row.items()}
-    assert (row.stats.median, row.captured, row.source, row.gpu) == (1.0, True, "golden:test", ctx.hardware_id())
+    [stored] = document.rows
+    assert _schedule(row) == {key: str(value) for key, value in stored.knobs.items()}
+    assert (row.kernel, row.stats.median, row.captured, row.source, row.gpu) == (stored.kernel, 1.0, True, "golden:test", ctx.hardware_id())
     assert db.perf_sources(ctx) == {"golden:test": 1}
-    assert next(iter(db.iter_kernels())).structural_identity == record.identity
+    [kernel] = db.iter_kernels()
+    assert kernel.exact_identity == case.target.exact_identity and kernel.stamps == case.target.stamps
 
 
-def test_a_cut_is_routing_rows_priced_by_the_receipts_of_its_pieces() -> None:
-    """The leading entry pins the cut and names the parent, which ran as no kernel and gets no row; each
-    piece's receipt is that piece's row. At the parent's fork the decision is priced as the sum of the
-    pieces' rows, the read the deploy pick uses."""
-    db, ctx, records, counts = _imported("fused/linear-add-place-cut-sm70.json")
-    receipts = [record for record in records if record.identity != records[0].identity]
-
-    assert counts["routing rows"] >= 1 and counts["kernels a decision replaced"] == 1
-    assert counts["perf rows"] == len(receipts) >= 2
-    decisions = list(db.iter_routing())
-    parent = next(decision for decision in decisions if decision.arm == records[0].route)
-    assert {row.kernel for row in db.iter_perf_rows()} <= {child for decision in decisions for child in decision.children}
-    [(arm, us)] = db.priced_arms(ctx, parent.parent, bindings={})
-    assert arm == records[0].route and us == pytest.approx(float(len(parent.children)))
-    deploy = {kernel.exact_identity: kernel.structural_identity for kernel in db.iter_kernels()}
-    assert {deploy[row.kernel] for row in db.iter_perf_rows()} <= {record.identity for record in receipts}
-
-
-def test_a_split_timed_as_a_whole_is_routing_rows_only() -> None:
-    """A split entry is a routing row: its time is the set's, which is no piece's, so nothing lands in
-    perf for it and the arm is priced only by receipts of the pieces (none here: the case's receipts
-    name kernels the current compiler no longer mints, and a stale identity writes nothing)."""
-    db, _ctx, records, counts = _imported("reduce/cross-cta-matmul-kernel.json")
-
-    assert records[0].is_routing and counts["routing rows"] >= 1
-    assert counts["perf rows"] + counts.get("identities no kernel carries", 0) == len(records) - 1
-    assert all(row.kernel != next(iter(db.iter_routing())).parent for row in db.iter_perf_rows())
+def test_a_cut_is_a_routing_row_priced_by_its_pieces_rows() -> None:
+    """A decision is a routing row and each piece's row is that piece's perf row; at the parent's fork the decision
+    is priced as the sum of the pieces' rows, the read the deploy pick uses. The parent ran as no kernel and has no
+    row."""
+    case, document = _case("fused/linear-add-place-cut-sm70.json")
+    db, ctx = SearchDB(), case.context()
+    [route] = document.routing
+    assert route.parent == case.target.exact_identity and len(route.children) >= 2
+    assert {row.kernel for row in document.rows} == set(route.children)
+    import_rows(db, ctx, document, document.rows, source="golden:test")
+    [stored] = db.iter_routing()
+    assert stored == route
+    assert {row.kernel for row in db.iter_perf_rows()} == set(route.children)
+    [(arm, us)] = db.priced_arms(ctx, route.parent, bindings={})
+    assert arm == route.arm and us == pytest.approx(float(len(route.children)))
 
 
-def test_an_unmeasured_or_foreign_regime_entry_writes_nothing() -> None:
+def test_an_unmeasured_row_writes_nothing() -> None:
     case = corpus.load_case(corpus.CASES_DIR / "fused/norm-linear-f16-scalar-reduce.json")
-    db, ctx = SearchDB(), case.context()
-    [record] = _records(case)
-
-    with pinned_knobs(_regime(record)):
-        assert import_goldens(db, ctx, case.records, source="golden:test") == {"unmeasured or in another regime": 1}
-    with pinned_knobs({**_regime(record), "FAST_MATH": True}):
-        assert import_goldens(db, ctx, [record], source="golden:test") == {"unmeasured or in another regime": 1}
-    assert not list(db.iter_perf_rows())
+    db = SearchDB()
+    assert import_rows(db, case.context(), case.document, case.document.rows, source="golden:test") == 0
+    assert not list(db.iter_perf_rows()) and len(list(db.iter_kernels())) == 1
 
 
-def test_an_entry_naming_a_kernel_the_compiler_no_longer_mints_writes_nothing() -> None:
-    """A stored identity the compiler has re-keyed is a golden to fix, not a row to guess a kernel
-    for: on a one-kernel target as behind a cut, the entry writes nothing and is counted, so no
-    time is ever filed under a kernel the entry did not measure."""
-    case = corpus.load_case(corpus.CASES_DIR / "fused/norm-linear-f16-scalar-reduce.json")
-    db, ctx = SearchDB(), case.context()
-    [record] = _records(case)
-    with pinned_knobs(_regime(record)):
-        counts = import_goldens(db, ctx, [replace(record, identity="0" * 64)], source="golden:test")
-    assert counts == {"identities no kernel carries": 1} and not list(db.iter_perf_rows())
-    cut = corpus.load_case(corpus.CASES_DIR / "fused/linear-add-place-cut-sm70.json")
-    lead, first, *rest = _records(cut)
-    _db, _ctx, _records_, counts = _imported("fused/linear-add-place-cut-sm70.json", [lead, replace(first, identity="0" * 64), *rest])
-    assert counts["identities no kernel carries"] == 1 and counts["perf rows"] == len(rest)
-
-
-def test_a_row_its_kernel_does_not_offer_writes_nothing(caplog) -> None:
-    """A row that equals no leaf of its kernel's schedule fork (a ring deeper than the catalog, spelled by
-    hand into a working golden) is no evidence: the import used to file it under the kernel, where no leaf
-    reads it, and the deploy fell to the prior with the file apparently loaded. It is counted and named."""
-    case = corpus.load_case(corpus.CASES_DIR / "fused/gate-up-staged-async.json")
-    [record] = _records(case)
-    deep = replace(record, knobs={**record.knobs, "STAGE": "d5/smem-async"})
-    db, ctx = SearchDB(), case.context()
-    with pinned_knobs(_regime(record)), caplog.at_level("WARNING"):
-        counts = import_goldens(db, ctx, [deep], source="golden:test")
-    assert counts == {"rows no schedule of their kernel equals": 1} and not list(db.iter_perf_rows())
-    assert record.name in caplog.text and "d5/smem-async" in caplog.text
+def test_a_row_is_evidence_in_its_own_regime_only() -> None:
+    """A row measured under one precision regime is no evidence for a compile in the other, both ways."""
+    with pinned_knobs({"FAST_MATH": False}):
+        assert regime_live({"FAST_MATH": False}) and not regime_live({"FAST_MATH": True})
+    with pinned_knobs({"FAST_MATH": True}):
+        assert regime_live({"FAST_MATH": True}) and not regime_live({"FAST_MATH": False})
 
 
 def test_a_compile_imports_its_scope_once_and_lets_a_re_recorded_files_rows_go(tmp_path) -> None:
-    """The tune DB imports a golden scope once per digest; a scope the DB has not seen replaces the
-    earlier golden rows of that card and regime (keep-best would keep a stale faster row), and an
-    empty scope deletes nothing."""
-    case = corpus.load_case(corpus.CASES_DIR / "fused/norm-linear-f16-scalar-reduce.json")
-    [record] = _records(case)
+    """The tune DB imports a golden scope once per digest; a scope the DB has not seen replaces the earlier golden
+    rows of that card and regime (keep-best would keep a stale faster row), and an empty scope deletes nothing."""
+    case, document = _case("fused/norm-linear-f16-scalar-reduce.json")
     ctx = case.context()
     db = SearchDB(tmp_path / "tune.db")
-    with pinned_knobs(_regime(record)):
-        with records_override([record]):
+    [row] = document.rows
+    slower = replace(document, rows=[replace(row, measurements=replace(row.measurements, emmy_us=2.0))])
+    with pinned_knobs(case.regime):
+        with evidence_scope([document]):
             assert evidence_db(db, ctx) is db
-            [row] = db.iter_perf_rows()
-            assert row.stats.median == 1.0
+            [stored] = db.iter_perf_rows()
+            assert stored.stats.median == 1.0
             first = db.perf_sources()
             assert evidence_db(db, ctx) is db and db.perf_sources() == first
-        slower = replace(record, measurements=replace(_MEASURED, emmy_us=2.0))
-        with records_override([slower]):
+        with evidence_scope([slower]):
             assert evidence_db(db, ctx) is db
-            [row] = db.iter_perf_rows()
-            assert row.stats.median == 2.0 and db.perf_sources() != first
-        with records_override([]):
+            [stored] = db.iter_perf_rows()
+            assert stored.stats.median == 2.0 and db.perf_sources() != first
+        with evidence_scope([]):
             assert evidence_db(db, ctx) is db
-            assert [row.stats.median for row in db.iter_perf_rows()] == [2.0]
-        # Back to the first scope: its rows were let go by the second's import, so it imports again
-        # whatever this process remembers having imported.
-        with records_override([record]):
+            assert [stored.stats.median for stored in db.iter_perf_rows()] == [2.0]
+        with evidence_scope([document]):
             assert evidence_db(db, ctx) is db
-            assert [row.stats.median for row in db.iter_perf_rows()] == [1.0]
+            assert [stored.stats.median for stored in db.iter_perf_rows()] == [1.0]
 
 
 def test_a_compile_without_a_db_picks_from_an_instance_holding_its_scope() -> None:
-    """A scope is its records' content, target included: a case and its symbolic twin spell the same names,
-    pins and knobs over different programs, and each compile picks from its own rows."""
-    case = corpus.load_case(corpus.CASES_DIR / "fused/norm-linear-f16-scalar-reduce.json")
-    [record] = _records(case)
+    """A scope is its files' content: a case and its symbolic twin spell the same names, pins and knobs over
+    different kernels, and each compile picks from its own rows."""
+    case, document = _case("fused/norm-linear-f16-scalar-reduce.json")
     ctx = case.context()
-    with pinned_knobs(_regime(record)):
-        with records_override([record]):
+    with pinned_knobs(case.regime):
+        with evidence_scope([document]):
             assert len(list(evidence_db(None, ctx).iter_perf_rows())) == 1
-        with records_override([replace(record, measurements=replace(_MEASURED, emmy_us=2.0))]):
-            assert [row.stats.mean for row in evidence_db(None, ctx).iter_perf_rows()] == [2.0]
-        with records_override([]):
+        with evidence_scope([]):
             assert not list(evidence_db(None, ctx).iter_perf_rows())
-    twins = [corpus.load_case(corpus.CASES_DIR / f"reduce/combine-amax-ilp-coop{suffix}.json") for suffix in ("", "-symbolic")]
-    assert [record.name for record in twins[0].records] == [record.name for record in twins[1].records]
+    twins = [_case(f"reduce/combine-amax-ilp-coop{suffix}.json") for suffix in ("", "-symbolic")]
+    assert [row.name for row in twins[0][1].rows] == [row.name for row in twins[1][1].rows]
     kernels = []
-    for twin in twins:
-        with pinned_knobs(_regime(twin.record)), records_override(_records(twin)):
+    for twin, measured in twins:
+        with pinned_knobs(twin.regime), evidence_scope([measured]):
             kernels.append({row.kernel for row in evidence_db(None, twin.context()).iter_perf_rows()})
     assert kernels[0] and kernels[1] and kernels[0].isdisjoint(kernels[1])
 
 
 @pytest.mark.xdist_group("golden_evidence_rtx5090")
-def test_the_rtx_5090_hardware_golden_deploys_from_the_db(tmp_path) -> None:
-    """The card's repository golden, imported into a fresh DB: every measured record in the standard regime
-    is rows — a single-kernel record its kernel's row (an attention record whose stored identity the
-    compiler has since re-keyed the same), a cross-CTA split winner its routing rows and nothing in perf —
-    the tables agree with themselves, and a compile of each single-kernel record's target with that DB as
-    its only evidence deploys a measured row of its kernel: the recorded variant, or a faster one the same
-    file holds. The split winners are off the measured ballot until their pieces are benched."""
-    from emmy import config
+def test_the_rtx_5090_hardware_golden_deploys_from_the_db() -> None:
+    """The card's repository golden, imported into a fresh DB, is what a compile of each of its targets deploys from:
+    with that DB as the only evidence, every target whose kernel has a measured row in the standard regime deploys a
+    measured row of its kernel — the recorded variant, or a faster one the same file holds. A split winner is a
+    routing row until its pieces are benched, so its target stays with the prior."""
     from emmy.compiler.context import Context
     from emmy.compiler.ir.cuda.ir import CudaOp
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
     from emmy.compiler.pipeline.knob import schedule_row_key
-    from emmy.compiler.pipeline.search.db import is_placement_knob
+    from emmy.compiler.pipeline.search.golden import GoldenFile
     from emmy.compiler.pipeline.search.golden.repository import _RECORDS_DIR
-    from emmy.compiler.pipeline.search.pins import regime_live
     from emmy.compiler.wire import kernel_tile
     from tests.compiler.pipeline.search.helpers import GPU_5090
 
-    def splits(record) -> bool:
-        return not record.is_routing and any(is_placement_knob(key, value) for key, value in record.schedule_row.items())
-
-    records = GoldenFile.load(_RECORDS_DIR / "rtx5090_sm120.json").records()
+    document = GoldenFile.load(_RECORDS_DIR / "rtx5090_sm120.json")
     ctx = Context.from_target((12, 0), gpu_name=GPU_5090)
     db = SearchDB()
     with pinned_knobs({"FAST_MATH": False}):
-        counts = import_goldens(db, ctx, records, source="golden:rtx5090")
-        live = [record for record in records if record.measurements is not None and regime_live(record)]
-        # A routing entry is its decision (routing rows, no perf row); a split winner is a schedule row
-        # that spells a split, timed as a whole; every other live record is one kernel's row.
-        routing = [record for record in live if record.is_routing]
-        whole = [record for record in live if splits(record)]
-        single = [record for record in live if record not in routing and record not in whole]
-        assert len(single) >= 30 and len(whole) >= 5
-        assert counts["perf rows"] == len(single) and counts["kernel sets timed as a whole"] == len(whole)
-        assert counts["routing rows"] >= len(whole) + len(routing)
-        assert counts["routing rows"] >= 1 and not counts["did not lower"] and not counts["identities no kernel carries"]
+        live = [row for row in document.rows if row.measured and regime_live(row.pins)]
+        assert import_rows(db, ctx, document, live, source="golden:rtx5090") == len(live) >= 30
         assert not any(db.drift().values())
         measured: dict[str, list[dict]] = {}
         for row in db.iter_perf(ctx, backend="cuda"):
             measured.setdefault(row.kernel, []).append({k: str(v) for k, v in dict(schedule_row_key(dict(row.knobs))).items()})
-        with records_override([]), config.online_file_override(tmp_path / "absent-online.json"):
-            for record in single:
-                graph = Pipeline.build(CUDA_PASSES).run(record.target_program.copy(), ctx=ctx, db=db)
-                ops = [node.op for node in graph.nodes.values() if isinstance(node.op, CudaOp)]
-                # A receipt names its kernel inside the set the target compiles to; any other record's target is one kernel.
-                by_deploy = {kernel_tile(op).identity_key(with_io=True): op for op in ops}
-                assert record.identity is not None or len(ops) == 1, record.name
-                op = by_deploy[record.identity] if record.identity is not None else ops[0]
+        with evidence_scope([]):
+            for target in document.targets():
+                if target.exact_identity not in measured:
+                    continue
+                graph = Pipeline.build(CUDA_PASSES).run(target.program({}), ctx=ctx, db=db)
+                [op] = [node.op for node in graph.nodes.values() if isinstance(node.op, CudaOp)]
                 picked = {k: str(v) for k, v in dict(schedule_row_key(dict(op.knobs or {}))).items()}
-                assert picked in measured[kernel_tile(op).identity_key(structural=False, with_io=True)], record.name
+                assert picked in measured[kernel_tile(op).identity_key(structural=False, with_io=True)], target.name
 
 
 def test_a_measurement_taken_here_is_never_replaced_by_an_import(tmp_path) -> None:
-    """The tune DB is a cache the import fills, and a row this machine measured is the one copy of that
-    measurement: a golden row of the same kernel and schedule, captured or faster, leaves it alone, and a
-    scope change lets golden rows go, never a local one."""
+    """The tune DB is a cache the import fills, and a row this machine measured is the one copy of that measurement: a
+    golden row of the same kernel and schedule, captured or faster, leaves it alone, and a scope change lets golden
+    rows go, never a local one."""
+    from emmy.compiler.pipeline.search.bench_record import point_stats
     from emmy.compiler.pipeline.search.db import PerfStats
-    from emmy.compiler.pipeline.search.policy.terminal_bench import point_stats
 
-    case = corpus.load_case(corpus.CASES_DIR / "fused/norm-linear-f16-scalar-reduce.json")
-    [record] = _records(case)
+    case, document = _case("fused/norm-linear-f16-scalar-reduce.json")
     ctx = case.context()
-    scratch, db = SearchDB(), SearchDB(tmp_path / "tune.db")
-    with pinned_knobs(_regime(record)):
-        # The kernel and its row as the import would file them, measured here first at a slower time.
-        import_goldens(scratch, ctx, [record], source="golden:probe")
-        [key] = scratch.iter_perf_rows()
-        [kernel] = scratch.iter_kernels()
-        db.record_kernel(kernel)
+    [row] = document.rows
+    db = SearchDB(tmp_path / "tune.db")
+    with pinned_knobs(case.regime):
+        db.record_kernel(case.target)
         local = PerfStats(median=9.0, min=9.0, max=9.0, mean=9.0, variance=0.0, n_samples=30)
-        db.record_perf(ctx, key.kernel, bindings=key.bindings, knobs=key.knobs, backend="cuda", status="ok", stats=local)
-        with records_override([record]):
+        db.record_perf(ctx, row.kernel, bindings=row.bindings, knobs=row.knobs, backend="cuda", status="ok", stats=local)
+        with evidence_scope([document]):
             evidence_db(db, ctx)
-        [row] = db.iter_perf_rows()
-        assert (row.stats.median, row.source) == (9.0, "measured")
-        faster = point_stats(1.0)
+        [stored] = db.iter_perf_rows()
+        assert (stored.stats.median, stored.source) == (9.0, "measured")
         db.record_perf(
             ctx,
             row.kernel,
@@ -265,30 +182,28 @@ def test_a_measurement_taken_here_is_never_replaced_by_an_import(tmp_path) -> No
             knobs=row.knobs,
             backend="cuda",
             status="ok",
-            stats=faster,
+            stats=point_stats(1.0),
             captured=True,
             source="golden:x",
         )
-        with records_override([replace(record, measurements=replace(_MEASURED, emmy_us=0.5))]):
+        with evidence_scope([replace(document, rows=[replace(row, measurements=replace(row.measurements, emmy_us=0.5))])]):
             evidence_db(db, ctx)
-        [row] = db.iter_perf_rows()
-        assert (row.stats.median, row.source) == (9.0, "measured")
+        [stored] = db.iter_perf_rows()
+        assert (stored.stats.median, stored.source) == (9.0, "measured")
 
 
 def _import_in_a_worker(path, barrier) -> None:
     """One serving worker's first compile: open the shared tune DB and import the golden scope."""
-    cut = corpus.load_case(corpus.CASES_DIR / "fused/linear-add-place-cut-sm70.json")
-    with pinned_knobs(_regime(cut.record)), records_override(_records(cut)):
+    cut, document = _case("fused/linear-add-place-cut-sm70.json")
+    with pinned_knobs(cut.regime), evidence_scope([document]):
         db = SearchDB(path)
         barrier.wait()
         evidence_db(db, cut.context())
 
 
 def test_workers_sharing_a_tune_db_import_the_scope_once(tmp_path) -> None:
-    """A tensor- and pipeline-parallel boot starts one process per card, and every one of them imports the
-    golden scope into the same fresh tune DB at its first compile. The check, the forget and the import
-    must be one step: two processes that both see the scope missing collide on the rows' unique keys, and
-    one that checks while another is mid-import reads a partial scope as imported."""
+    """A tensor- and pipeline-parallel boot starts one process per card, and every one of them imports the golden
+    scope into the same fresh tune DB at its first compile. The check, the forget and the import must be one step."""
     ctx = multiprocessing.get_context("spawn")
     workers = 6
     barrier = ctx.Barrier(workers)
@@ -299,5 +214,3 @@ def test_workers_sharing_a_tune_db_import_the_scope_once(tmp_path) -> None:
     for proc in procs:
         proc.join(120)
     assert [proc.exitcode for proc in procs] == [0] * workers, "a worker raised (its traceback is on stderr)"
-    _db, _ctx, _records_, counts = _imported("fused/linear-add-place-cut-sm70.json")
-    assert len(list(SearchDB(path).iter_perf_rows())) == counts["perf rows"]

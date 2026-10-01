@@ -13,7 +13,7 @@ permission:
   websearch: allow
   external_directory:
     "*": deny
-    "/tmp/emmy-discovery-task-*": allow
+    "/tmp/emmy-discovery-source-*/**": allow
   task:
     "*": deny
     "discover-fit": allow

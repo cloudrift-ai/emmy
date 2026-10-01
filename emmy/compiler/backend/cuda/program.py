@@ -719,14 +719,20 @@ class CompiledProgram:
         exactly like :meth:`outputs`; without it the whole buffer view is returned."""
         return {name: self.buffer_view(name, sym_values) for name in self.plan.outputs}
 
-    def alias_buffer(self, name: str, tensor) -> None:
+    def alias_buffer(self, name: str, tensor, *, wait: bool = True) -> None:
         """Point one operand at ``tensor``'s memory: a buffer chained onto another program's (a
         producer's output onto a consumer's input, so the consumer's device upload becomes a
         self-copy skip), or an operand the plan never declares as a buffer — an indirect
         operand's pointer table or selector, or a paged buffer's page table (``<name>__pages``,
         the device addresses of its pages), which only the caller can supply. A buffer's
         tensor must be contiguous and at least as large as its region; the runtime drops any
-        captured graph, since it baked the old address."""
+        captured graph, since it baked the old address.
+
+        By default the swap waits for the program's queued work, so the memory the buffer
+        pointed at is free to reuse on return. ``wait=False`` skips that host wait: launches
+        already queued keep reading the old memory, so the caller must keep it alive and
+        unwritten until they finish — as with resident weight slices, which is what makes
+        swapping them before every expert launch cheap."""
         if not _is_device_tensor(tensor) or not tensor.is_contiguous():
             raise TypeError(f"operand {name!r}: expected a contiguous CUDA tensor")
         flat = _flat_bytes(tensor)
@@ -735,7 +741,7 @@ class CompiledProgram:
             self.executor.set_external(name, flat.data_ptr(), flat.numel())
             self._tensors[f"external:{name}"] = flat
         else:
-            self.executor.set_region(placement["region"], flat.data_ptr(), flat.numel())
+            self.executor.set_region(placement["region"], flat.data_ptr(), flat.numel(), wait)
             self._tensors[placement["region"]] = flat
 
     def release_buffer(self, name: str) -> None:
@@ -1083,20 +1089,9 @@ class _AsyncBenchWorker:
 
     Drives the ``_bench_worker`` protocol (``<8-byte LE length><pickle>``, both
     directions) over asyncio streams, so one event loop can keep N device-pinned
-    workers benching concurrently — the per-kernel multi-GPU autotune path
-    (``two_level.TwoLevelStrategy``). The deployable ``--bench`` comparison awaits
+    workers benching concurrently. The deployable ``--bench`` comparison awaits
     ``benchmark_compare_isolated_async`` over a one-shot instance (via
-    ``_run_job_oneshot``); the autotune sweep awaits a persistent instance per GPU
-    directly via ``benchmark_program_isolated_async``.
-
-    Pin a worker to a physical GPU with ``device_id``: the spawn env gets
-    ``CUDA_VISIBLE_DEVICES=<id>`` (so the child's logical device 0 *is* that
-    GPU — every argumentless ``cp.cuda.Device()`` in the child resolves
-    correctly with no other call-site change) and, when a base
-    ``EMMY_GPU_LOCK`` is set, a per-device lock path so workers on
-    different GPUs take distinct ``FileLock``s instead of serialising. The
-    env overlay rides the child only — the parent's ``os.environ`` is never
-    mutated (it's shared by every slot on the one event-loop thread).
+    ``_run_job_oneshot``); the pinned-row jobs share one persistent instance per run.
 
     The wall-clock cap is :func:`asyncio.wait_for`; on overrun the child is
     SIGKILLed and respawned on the next bench."""
@@ -1118,9 +1113,8 @@ class _AsyncBenchWorker:
     def _decode(body: bytes) -> dict:
         return pickle.loads(body)
 
-    def __init__(self, *, device_id: int | None = None) -> None:
+    def __init__(self) -> None:
         self._proc: asyncio.subprocess.Process | None = None
-        self._device_id = device_id
         # Bounded tail of the CURRENT child's stderr, fed by a background drain task. A
         # chatty child (HF shard-download progress, nvcc warnings) would otherwise fill
         # the ~64 KB stderr pipe and block mid-job — which the parent misreads as a
@@ -1132,17 +1126,7 @@ class _AsyncBenchWorker:
         self.cached_input_keys: set[str] = set()
 
     def _child_env(self) -> dict:
-        env = dict(_os.environ)
-        if self._device_id is not None:
-            env["CUDA_VISIBLE_DEVICES"] = str(self._device_id)
-            from emmy import config  # noqa: PLC0415
-
-            base = config.gpu_lock_path()
-            if base:
-                # Per-device lock so concurrent device-pinned workers don't
-                # serialise on one FileLock (the lock is taken inside the child).
-                env["EMMY_GPU_LOCK"] = f"{base}-{self._device_id}"
-        return env
+        return dict(_os.environ)
 
     async def _spawn(self) -> None:
         self._proc = await asyncio.create_subprocess_exec(
@@ -1155,7 +1139,7 @@ class _AsyncBenchWorker:
         self._stderr_tail = ""
         self._stderr_task = asyncio.ensure_future(self._drain_stderr(self._proc))
         self.cached_input_keys.clear()
-        logger.info("[bench-worker] spawned (async) pid=%s device=%s", self._proc.pid, self._device_id)
+        logger.info("[bench-worker] spawned (async) pid=%s", self._proc.pid)
 
     async def _drain_stderr(self, proc: asyncio.subprocess.Process) -> None:
         """Continuously drain the child's stderr into the bounded tail. Runs for the
@@ -1353,42 +1337,6 @@ class _AsyncBenchWorker:
         return f"; child stderr tail:\n{self._stderr_tail}" if self._stderr_tail.strip() else ""
 
 
-async def benchmark_program_isolated_async(
-    graph: Graph,
-    *,
-    worker: _AsyncBenchWorker,
-    wall_timeout_s: float,
-    warmup: int = 5,
-    num_iters: int | str = 20,
-    compile_timeout_s: float | None = None,
-    run_timeout_s: float | None = None,
-    nvcc_flags: str | None = None,
-    capture_graphs: bool = True,
-) -> BenchmarkResult:
-    """Wall-time-bounded ``benchmark_program`` in a subprocess, benching through a
-    caller-supplied device-pinned ``worker`` so one event loop can drive N GPUs
-    concurrently — the autotune sweep's transport. The in-worker
-    ``compile_timeout_s`` / ``run_timeout_s`` budgets apply, and ``wall_timeout_s`` is
-    the SIGKILL backstop for a kernel that keeps the GPU busy past them. No ``on_iter``
-    (interleaved ``run --bench`` benches in-process via ``benchmark_program``)."""
-    resp = await worker.run_job(
-        {
-            "graph": graph,
-            "nvcc_flags": nvcc_flags,
-            "torch_spec": None,  # no torch comparison — pure emmy bench
-            "kwargs": {
-                "warmup": warmup,
-                "num_iters": num_iters,
-                "compile_timeout_s": compile_timeout_s,
-                "run_timeout_s": run_timeout_s,
-                "capture_graphs": capture_graphs,
-            },
-        },
-        wall_timeout_s=wall_timeout_s,
-    )
-    return resp["result"]
-
-
 async def benchmark_pinned_isolated_async(
     graph: Graph,
     *,
@@ -1491,14 +1439,13 @@ async def benchmark_compare_worker_async(
     }
 
 
-async def _run_job_oneshot(request_obj: dict, *, wall_timeout_s: float, device_id: int | None = None) -> dict:
+async def _run_job_oneshot(request_obj: dict, *, wall_timeout_s: float) -> dict:
     """Spawn a fresh ``_AsyncBenchWorker``, run one job, tear it down.
     The transport for the synchronous one-shot bridges below — they each wrap this
     in ``asyncio.run`` (the worker's streams bind to the loop, so it can't persist
     across ``asyncio.run`` calls; the per-call ~0.2 s spawn is negligible against a
-    deployable ``--bench``). ``device_id`` keeps the comparison on the selected
-    tune GPU instead of silently falling back to ordinal 0."""
-    worker = _AsyncBenchWorker(device_id=device_id)
+    deployable ``--bench``)."""
+    worker = _AsyncBenchWorker()
     try:
         return await worker.run_job(request_obj, wall_timeout_s=wall_timeout_s)
     finally:
@@ -1515,7 +1462,6 @@ async def benchmark_compare_isolated_async(
     iters: int,
     seed: int,
     nvcc_flags: str | None = None,
-    device_id: int | None = None,
 ) -> tuple:
     """Run the deployable eager / torch.compile / emmy comparison in the
     SIGKILL-able worker, awaiting a fresh one-shot :class:`_AsyncBenchWorker`
@@ -1549,6 +1495,5 @@ async def benchmark_compare_isolated_async(
             "seed": seed,
         },
         wall_timeout_s=wall_timeout_s,
-        device_id=device_id,
     )
     return resp["results"], resp["result"], resp["torch_available"], resp.get("captured", False), resp.get("accuracy_error")

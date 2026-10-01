@@ -5,7 +5,7 @@ import logging
 import sys
 from pathlib import Path
 
-from emmy.compiler.pipeline.search.working_golden import (
+from emmy.compiler.pipeline.search.golden import (
     append_trace_inventory,
     preflight_trace_inventory,
     write_trace_inventories,

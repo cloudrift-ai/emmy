@@ -16,6 +16,7 @@ import shlex
 
 import click
 
+from emmy.provisioning.proxy import proxy_exports
 from emmy.provisioning.ssh_transport import ssh_base_args
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,7 @@ class Host:
 
     name: str
     is_local: bool
+    proxy: str | None = None  # the HTTP proxy the host reaches the internet through, when it needs one
 
     async def run(
         self,
@@ -85,7 +87,11 @@ class LocalHost(Host):
 
 
 class RemoteHost(Host):
-    """Run commands on a remote server over SSH."""
+    """Run commands on a remote server over SSH.
+
+    With ``proxy``, every command runs with the proxy exported, so a host with no route to the
+    internet still reaches it from apt-get and curl (sudo resets the environment, hence per command).
+    """
 
     is_local = False
 
@@ -95,11 +101,13 @@ class RemoteHost(Host):
         ssh_key: str | None,
         ssh_port: int | None,
         dry_run: bool = False,
+        proxy: str | None = None,
     ):
         self.server = server
         self.ssh_key = ssh_key
         self.ssh_port = ssh_port
         self.dry_run = dry_run
+        self.proxy = proxy
         self.name = server
 
     def _build_args(self, cmd: str, connect_timeout: int | None = None) -> list[str]:
@@ -119,6 +127,8 @@ class RemoteHost(Host):
         timeout: int = 600,
         connect_timeout: int | None = None,
     ) -> tuple[int, str]:
+        if self.proxy:
+            cmd = f"{proxy_exports(self.proxy)} {cmd}"
         full = f"sudo bash -c {shlex.quote(cmd)}" if sudo else cmd
         if self.dry_run:
             prefix = "sudo " if sudo else ""

@@ -261,7 +261,7 @@ impl Generator {
             for name in shared {
                 let view = executor.buffer(&name)?;
                 let region = prefill.layout().buffers[&name].region.clone();
-                prefill.set_region(&region, view.ptr, view.bytes)?;
+                prefill.set_region(&region, view.ptr, view.bytes, true)?;
             }
             for name in shared_tables {
                 let (ptr, len) = executor.page_table(&name)?;

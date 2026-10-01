@@ -688,8 +688,8 @@ def test_nvfp4_serving_twins_carry_the_declared_w4a4_program(tmp_path):
         packed_activations = [n for n in graph.nodes.values() if n.output.dtype.name == "f4e2m1x2" and not isinstance(n.op, ConstantOp)]
         assert encodes, f"{name}: no to_f4e2m1 encode — the twin still runs 16-bit activations over packed weights"
         assert packed_activations, f"{name}: no packed f4e2m1x2 activation buffer"
-        # The capture's delivery form: `scripts/capture_gen_twins.py` writes one JSON per twin and
-        # `emmy tune` reads that file, so a packed twin that cannot round-trip is not tunable.
+        # The capture's delivery form is one JSON per twin, so a packed twin that cannot round-trip
+        # cannot be recorded.
         assert _structure(Graph.from_dict(json.loads(json.dumps(graph.to_dict())))) == _structure(graph)
 
 

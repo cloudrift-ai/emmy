@@ -1,5 +1,123 @@
 # Golden-bench kernel corpus
 
+## Post-cut producer fusion compatibility (#1003)
+
+All ten golden files have been updated for producer fusion after a cut. Twenty ordinary output-cut routing rows
+recover the previous kernel sets. Every retained row strictly decodes, and each complete CUDA kernel set matches
+its pre-feature source, argument order and launch geometry; the comparison ignores only generated function names.
+All 185 measurements are retained. These are source comparisons, with no new GPU timing or correctness run.
+
+The paired whole-layer results below remain the baseline. They do not measure the new fused producer alternative.
+The next V100 s1 experiment should compare fused K/V producers with their ordinary cut alternatives, then compare
+the whole layer against the 16-launch baseline and the same-input Hugging Face `torch.compile` layer. H100 s512
+needs profiling before another schedule sweep: the earlier gate/up and staging trials below lost.
+
+## Five-card whole-layer check after #988 (2026-09-30)
+
+The target is Qwen3-0.6B layer 0 at sequence lengths 1 and 512 on the five named GPUs. Every comparison times the
+Hugging Face layer with eager PyTorch, `torch.compile`, and Emmy in one process and on the same inputs. The source is
+main after #973 plus the golden replay fix in this PR. Each card used its exact GPU, a fresh tune DB, deployable O3,
+and `EMMY_FAST_MATH=0`. A cold compile sometimes exceeded the repository's two-minute development limit; the table
+distinguishes a current paired result from an earlier paired result whose compiled Emmy kernel sources still match
+the current strict replay. The warmup and iteration counts are given per cell.
+
+Exact GPU UUIDs: RTX 5090 `GPU-bb78f2c5-11d6-02d6-f124-08b719623110`, RTX 4090
+`GPU-33b961c9-1af0-1175-6135-a3f5f3f94940`, A100 `GPU-dc5ba098-1a7a-08ea-d5be-fc71f0046c7f`, H100
+`GPU-c8195d4e-59c4-29d9-ed2f-0cd0b54bba73`, V100 `GPU-fb047284-9557-a127-0787-70f97e92826a`.
+
+Captured whole-forward latency in microseconds. All s1 rows used 10 warmups and 100 iterations. A ratio above 1
+means Emmy is faster. The s512 protocol is listed because cold compilation forced shorter bounded runs on two cards.
+
+| Card | s1 Emmy | s1 `torch.compile` | s1 ratio | s512 Emmy | s512 `torch.compile` | s512 ratio | s512 protocol |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| RTX 5090 | 20.474 | 36.859 | 1.80× | 129.388 | 136.882 | 1.06× | 10/100, greedy |
+| RTX 4090 | 26.388 | 30.522 | 1.16× | 158.005 | 163.215 | 1.03× | 10/100 before #973; same kernel sources after |
+| A100 40GB | 53.571 | 54.675 | 1.02× | 179.541 | 181.008 | 1.01× | 10/100, 11 stored cuts pinned |
+| H100 | 29.026 | 31.383 | 1.08× | 87.173 | 83.485 | 0.96× | 5/20, 11 stored cuts pinned |
+| V100 SXM2 | 71.753 | 60.957 | 0.85× | 502.784 | 641.653 | 1.28× | 5/20, 20 stored cuts pinned |
+
+The 4090 s512 paired run predates #973. A strict golden replay on the rebased source passed at 156.672 us, and all
+12 CUDA source hashes matched that earlier paired run. Rebased model-form attempts exceeded the two-minute cold
+compile limit, so no post-rebase same-process `torch.compile` number is claimed for that cell. The current A100 s512
+5/20 repeat was 179.405 versus 181.098 us. Two current H100 s512 5/20 runs measured Emmy at 87.456 and 87.173 us
+against `torch.compile` at 83.335 and 83.485 us. The V100 s512 model run used the stored route pins; two unpinned
+attempts exceeded the development limit before producing JSON.
+
+Across the pre-rebase and rebased checks, strict whole-golden replay passed on all five cards at s1 and s512. Some
+named stored rows now differ substantially from the greedy pick, as detailed for V100 below. Model-form s512 uses
+the normal scaled correctness check. A strict repeat can differ from eager by a few one-step f16 outputs, including
+six of 524,288 on RTX 5090 and H100. The golden-form strict checks passed, and no numerical tolerance was changed.
+Selected CUDA source hashes matched pre-rebase records on all five cards; the rebase did not change those kernels.
+
+Bare `run --golden FILE --bench` used to name the fastest child routing row when an inventory row was absent. That
+row cannot replay the whole layer without its parent's cuts. The command now selects the fastest root routing row
+first. The focused CLI test and exact-card strict replays cover this change.
+
+The remaining losses survived targeted schedule and cut trials. On H100 s512, a wider gate/up warp group increased
+the whole layer from 88.4 to 169.2 us. An A-only `cp.async` cache-policy change increased it from 88.229 to 89.525
+us. A smaller gate/up schedule increased it from 88.283 to 95.851 us. The retained 12-kernel route passes strict
+correctness. None of these changes closes its gap to `torch.compile`. The smaller gate/up trial is in the raw archive
+below. Other H100 schedule trials and raw records are in [#992](https://github.com/cloudrift-ai/emmy/pull/992).
+
+On V100 s1, removing projection cuts repeats too much work. A consumer-summed Q split saved one launch and tied at
+about 72 us; adding the V split slowed the layer. A task-local two-output K/V cut saved two launches. Its paired
+partial and final kernels took about 8.3 us in isolation, but the full 14-launch graph measured 73.2–73.5 us versus
+the 16-launch baseline's 74.4–78.3 us in two short runs with clock variation. It passed a same-input strict output
+comparison, yet remained about 13 us behind the model-form `torch.compile` result. No compiler or golden schedule
+from that experiment was retained. The full CUDA graphs and timing records are in the raw archive.
+
+The stored V100 s1 route also changed under #973. Its strict replay can realize an extra gate/up partial at about
+208 us, making a correct 17-launch layer take about 271 us. The fresh model-form greedy result remains 16 launches
+near 72 us. Strict evidence rejects the new partial because it has no measured schedule row. This is a separate
+stored-route coverage problem; it does not make the model-form loss disappear. The current golden targets all pass
+`emmy golden check`, which checks their Loop IR identity, not the completeness of child schedule evidence.
+
+The task has eight favorable cells and two remaining losses. The A100 s512 lead is small and should be treated as
+timing-sensitive. The V100 needs a faster way to combine the K/V projections or execute the short chain; the tested
+two-launch combined schedule is insufficient. The H100 needs a reliable whole-layer gain beyond the tested gate/up
+and staging schedules. Both require more compiler work before claiming universal parity.
+
+The raw model comparisons, strict replays, timeout logs, candidate CUDA graphs, and trial findings are in
+`tuning_universal_2026-09-30.tar.gz` (Git LFS). This archive omits tune DBs, cubins, and temporary prototype code.
+
+## H100 s512 schedule check after #988 (2026-09-30)
+
+The remaining H100 prefill gap was tested on Qwen3-0.6B layer 0 at sequence length 512. The exact H100 was an
+80GB HBM3 card (sm_90, driver 580.178.04, CUDA 12.9). The compiler was main at `5193d2e0` (#988), with deployable
+`-O3` and `EMMY_FAST_MATH=0`. The checked-in H100 golden supplied the route and measured schedules. Each changed
+schedule was compared with that route in the same strict, whole-layer golden replay. All timed trials passed
+correctness against eager. No tested schedule won reliably, so the golden is unchanged.
+
+| Current model-form baseline, one layer | eager | torch.compile | Emmy | Emmy / torch.compile |
+| --- | ---: | ---: | ---: | ---: |
+| H100, s512, warmup 10, 100 iterations | 199.55 µs | 84.74 µs | 86.52 µs | 1.02× |
+
+Both compiled model-form paths passed the scaled accuracy check. A separate strict golden-form replay passed at
+88.50 µs; it has different timing semantics from the model-form comparison. The current model-form gap is 1.78 µs.
+The #967 model-form row was Emmy 87.3 µs against `torch.compile` 79.0 µs. Most of the apparent gap change is the
+slower `torch.compile` baseline in this current run, not a demonstrated Emmy improvement.
+
+| Changed schedule | Touched kernel, before → after | Paired layer, before → after |
+| --- | ---: | ---: |
+| Gate/up producer band `+p4` | 19.31 → 97.98 µs | 88.43 → 169.17 µs |
+| Attention stages `d4/smem-async/p2` | 12.67 → 13.18 µs | 88.08 → 88.71 µs |
+| Attention value tile `m64n64` | 12.80 → 14.43 µs | 88.23 → 89.56 µs |
+| Down stage `d4/smem-async/p2` | 10.88 → 10.89 µs | 87.97 → 92.77 µs |
+| Q tile `m64n128` | 6.77 → 6.81 µs | 89.20 → 88.85 µs |
+| Attention TMA value stage, `d1/smem-async/p2` score stage | 12.28 → 12.82 µs | 83.53 → 84.80 µs |
+
+These are single paired runs, not repeat distributions. The 0.35 µs layer advantage of the Q tile came with a
+slower Q kernel and is within observed run variation. The score tile `m64n128` was refused before timing because its
+width disagreed with the 64-wide carrier chunk. A constrained 24-candidate attention staging search measured 20
+configurations; its best isolated result was 12.8 µs, close to the recorded row near 12.7 µs. Its top distinct
+candidate is the TMA trial above and lost in the layer. The temporary `+p4` compiler offer was reverted after its
+loss. No compiler, route, or canonical golden change survived the pass.
+
+The raw JSON, logs, working golden, search DB snapshot, and fuller findings are in
+`tuning_h100x1_2026-09-30.tar.gz`. The #967 pass identified the projections and attention as contributors to its
+larger gap. This pass did not localize the current 1.78 µs gap further. Hardware-counter profiling did not finish
+within the development time limit, so this pass makes no new counter claim.
+
 ## CSE re-record on exact cards
 
 The CSE change shifted kernel identities. All ten Qwen3-0.6B layer goldens have been restamped and measured

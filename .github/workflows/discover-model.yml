@@ -29,7 +29,7 @@ jobs:
       OPENCODE_DISABLE_AUTOUPDATE: "true"
       WORKFLOW_SOURCE: /tmp/emmy-discovery-source-${{ github.run_id }}-${{ github.run_attempt }}
       OPENCODE_CONFIG_DIR: /tmp/emmy-discovery-source-${{ github.run_id }}-${{ github.run_attempt }}/.opencode
-      AGENT_TASK: /tmp/emmy-discovery-task-${{ github.run_id }}-${{ github.run_attempt }}.json
+      AGENT_TASK: ${{ github.workspace }}/.emmy-discovery-task-${{ github.run_id }}-${{ github.run_attempt }}.json
       AGENT_EVENTS: /tmp/emmy-discovery-events-${{ github.run_id }}-${{ github.run_attempt }}.jsonl
       AGENT_SELECTION: /tmp/emmy-discovery-selection-${{ github.run_id }}-${{ github.run_attempt }}.json
       AGENT_MANIFEST: /tmp/emmy-discovery-manifest-${{ github.run_id }}-${{ github.run_attempt }}.json
@@ -103,12 +103,13 @@ jobs:
         env:
           CLOUDRIFT_API_KEY: ${{ secrets.CLOUDRIFT_API_KEY }}
         run: |
+          trap 'rm -f -- "$AGENT_TASK"' EXIT
           ./venv/bin/emmy recipe query \
             --root recipes \
             --sort 'model_id asc' \
             --sort 'deployment.index asc' \
             --json \
-            | jq \
+            | jq -c \
                 --argjson maintained_count "$MAINTAINED_MODEL_COUNT" \
                 --argjson batch_size 6 \
                 -f "$WORKFLOW_SOURCE/.github/workflows/scripts/discovery_task.jq" \

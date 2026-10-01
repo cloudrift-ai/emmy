@@ -69,6 +69,8 @@ def _pin(monkeypatch, atom: str, *, tile: str = "f1x1", stage: str = "") -> None
 
 
 def _pin_sdpa(monkeypatch) -> None:
+    # One fused kernel is what these tests read the source of; the placement prior would otherwise decide the cut.
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
     monkeypatch.setenv("EMMY_WORK", "w1x1")
     monkeypatch.setenv("EMMY_TILE@map.1/twist.1/inner", f"{VOLTA}/f1x1/k4")
     monkeypatch.setenv("EMMY_TILE@map.1/twist", f"{VOLTA}/f1x1/k4")
@@ -437,6 +439,7 @@ def test_sm70_attention_rings_its_key_and_value_through_registers(monkeypatch) -
     and value load into packed registers past the barrier, the softmax and expectation of this
     chunk run, and the unpack and deposit land them in the free slot. The loads stay behind the
     barrier — a load moved above it would refill the vectors the unpack has not read yet."""
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
     monkeypatch.setenv("EMMY_WORK", "w4x1")
     monkeypatch.setenv("EMMY_TILE@map.1/twist.1/inner", f"{VOLTA}/f1x2/k2")
     monkeypatch.setenv("EMMY_TILE@map.1/twist", f"{VOLTA}/f1x8/k8")

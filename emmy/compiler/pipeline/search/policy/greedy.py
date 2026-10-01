@@ -1,6 +1,5 @@
 """The greedy compile pick — :func:`greedy_decide`, a ``Run.resolve`` decide
-factory choosing one **complete** leaf via direct evidence or the global online
-prior, else option-0.
+factory choosing one **complete** leaf via direct evidence or the prior, else option-0.
 
 This is the deterministic pick for ``compile`` / ``run``, the structural
 pricing probes, and the assembled-graph lowering. It is NOT a search and not
@@ -8,8 +7,6 @@ a ``Search`` policy: there is no frontier to rank, no tree, no benching — a
 deterministic resolution is a fold over the pipeline (at each fork, a pure
 function of ``(options, op, prior)``, argmin, continue), so its process state
 is :meth:`Run.resolve`'s returned trace, never accumulated policy attributes.
-It can only *use* a prior trained earlier by ``tune``, never train one.
-Exploration stays in :class:`~.mcts.TuningSearch` (``Pipeline.tune``).
 
 **Evaluate complete rows.** A branch carries only a partial schedule, so a prior cannot score it as
 though it were a complete row. Measured rows descend to their exact spelling;
@@ -22,9 +19,9 @@ instead of walked at full length. Sampling complete rows is not branch substitut
 ever scored as a stand-in for the schedules it contains — and the argmin is global again the moment
 evidence exists, because measured rows descend directly whatever the pool size.
 
-**Greedy is ranked by evidence and by nothing else.** Measured rows first —
-the reservoir, then the tune DB's rows, the golden rows in scope imported among them
-(``golden.evidence``), compared on µs alone — then the fitted prior; every measured row is a
+**Greedy is ranked by evidence and by nothing else.** Measured rows first — the tune DB's rows,
+the golden rows in scope imported among them (``golden.evidence``), compared on µs alone — then
+the fitted prior; every measured row is a
 recording of something that ran. There is no hand-written step: no leaf is
 promoted, demoted, withheld or given a head start here, and no fallback
 default is chosen for being safe. Where nothing measured and no prior speaks
@@ -70,7 +67,7 @@ from functools import lru_cache
 from typing import TYPE_CHECKING, NamedTuple
 
 from emmy.compiler.graph import Graph
-from emmy.compiler.pipeline.fork import Fork, flatten_leaves, fork_signature, iter_leaves, leaf_for, leaf_knobs, stamp_signature
+from emmy.compiler.pipeline.fork import Fork, descent_sample, fork_signature, iter_leaves, leaf_knobs, stamp_signature
 from emmy.compiler.pipeline.knob import EVIDENCE_PREFIXES, METADATA_PREFIXES, schedule_pin_fingerprint
 
 logger = logging.getLogger(__name__)
@@ -122,12 +119,10 @@ _LOAD_PRIOR = object()
 
 
 @lru_cache(maxsize=1)
-def _load_prior_cached(path_str: str, mtime: int):  # noqa: ARG001 — args are the cache key
-    """The rehydrated global prior for one ``(online-file path, mtime)`` — the
-    process-wide memo behind :func:`_load_prior_safe`. ``maxsize=1`` evicts on any
-    key change, so a rewritten checkpoint (new mtime) reloads and a stale one is
-    dropped. The deploy path only *reads* this prior (``mean_scores`` / ``pick`` /
-    ``evidence_pick``), never trains it, so one shared instance is safe across the
+def _load_prior_cached(path_str: str):  # noqa: ARG001 — the arg is the cache key
+    """The prior for one weights artifact path — the process-wide memo behind
+    :func:`_load_prior_safe`. ``maxsize=1`` evicts on any key change. The deploy path only
+    *reads* this prior (``mean_scores`` / ``pick``), so one shared instance is safe across the
     ~96 program compiles of a serve boot."""
     from emmy.compiler.pipeline.search.prior import load_prior  # noqa: PLC0415
 
@@ -135,31 +130,64 @@ def _load_prior_cached(path_str: str, mtime: int):  # noqa: ARG001 — args are 
 
 
 def _load_prior_safe():
-    """Load the one global prior (``OnlinePrior`` behind the
-    ``OfflinePrior`` cold-start fallback), memoized per process on the online
-    file's ``(path, mtime)`` — a serve boot compiles ~96 programs and each would
-    otherwise ``json.loads`` the 56 MB checkpoint again (the dominant boot-time
-    resolution cost). Best-effort: any load failure → ``None`` → emission order
-    (option-0) — a bad/missing prior must never break compile."""
+    """Load the one prior, memoized per process on the offline weights path. Best-effort: any
+    load failure → ``None`` → emission order (option-0) — a bad/missing prior must never break
+    compile."""
     try:
         from emmy import config  # noqa: PLC0415
 
-        path = config.online_path()
-        try:
-            mtime = path.stat().st_mtime_ns
-        except OSError:
-            mtime = -1  # missing file → stable key; a fresh prior is loaded once
-        return _load_prior_cached(str(path), mtime)
+        return _load_prior_cached(str(config.offline_path() or ""))
     except Exception:  # noqa: BLE001
         return None
 
 
-def _find_decided_leaf(options: list, want: dict) -> object | None:
+@lru_cache(maxsize=1)
+def _load_placement_prior():
+    """The placement prior the shipped ``weights/placement.json`` names, memoized per process; ``None``
+    when the file is absent or does not load, and then a placement fork is priced by nested resolution
+    as before."""
+    from emmy.compiler.pipeline.search.prior import OfflinePrior  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.prior.offline import default_file  # noqa: PLC0415
+
+    try:
+        prior = OfflinePrior(path=str(default_file("placement")))
+    except Exception:  # noqa: BLE001
+        return None
+    return prior if prior.space == "placement" else None
+
+
+def _placement_pick(fp: ForkPoint, prior) -> object | None:
+    """The placement prior's argmin over a placement fork's arms — keep fused and every cut the pass
+    offers — each featurized from the kernels it leaves (``ranking.arm_features``), exactly as the
+    arms of the placement dataset the prior was fit on. The first of equally scored arms wins. ``None``
+    when some arm cannot be featurized (a kernel with no body to stamp), and the fork is priced as before."""
+    from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.ranking import arm_features  # noqa: PLC0415
+
+    leaves = fp.flat()
+    root = fp.root_op.with_io(fp.match.graph, fp.match.root)
+    rows = [arm_features(_leaf_graph(o) if _is_structural_option(o) else _leaf_op(o), root, fp.match.graph) for o in leaves]
+    if any(row is None for row in rows):
+        return None
+    base = fp.ctx.features()
+    scores = prior.mean_scores_features([{**base, **row} for row in rows])
+    return leaves[min(range(len(leaves)), key=scores.__getitem__)]
+
+
+def _placement_fork(fp: ForkPoint) -> bool:
+    """Whether the fork's kernel-set arms are placement cuts (``PLACE`` keys) — the one structural fork
+    the placement prior ranks; a cross-CTA split is the other kind and stays priced."""
+    from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
+
+    return all(family_of(k) == "PLACE" for o in fp.splices for k in leaf_knobs(o))
+
+
+def _find_decided_leaf(fp, want: dict) -> object | None:
     """The leaf carrying exactly the memoized row ``want`` — the row-directed descent
-    (:func:`~emmy.compiler.pipeline.fork.leaf_for`: the schedule root re-sourced to the row, so
-    the walk is one path), held to an exact match at the leaf. ``None`` when no leaf matches —
-    emission drift between two offers of one key — and the caller re-decides."""
-    hit = leaf_for(options, want)
+    (``ForkPoint.find``: the schedule root re-sourced to the row, so the walk is one path), held
+    to an exact match at the leaf. ``None`` when no leaf matches — emission drift between two
+    offers of one key — and the caller re-decides."""
+    hit = fp.find(want)
     return hit[0] if hit is not None and hit[1] == want else None
 
 
@@ -288,7 +316,7 @@ def _price_kernel(
     nothing and cost real CPU), summed over the kernels that resolution ends
     with (:func:`_resolved_price`). ``db`` rides into the
     nested decide, so each fork's pick follows the same deploy evidence
-    hierarchy as a top-level knob pick (reservoir rows, then the tune DB's
+    hierarchy as a top-level knob pick (the tune DB's
     measured rows, model prediction only where nothing was measured) — the
     priced µs is a measurement wherever the tune benched this kernel. Memoized
     per exact variant key (``Op.identity_key(structural=False, with_io=True,
@@ -517,11 +545,32 @@ def _db_measured_index_build(db, ctx) -> _Measured:
 
 
 def _sig_groups(index: dict[frozenset, list[tuple[dict, float]]], sig: frozenset) -> list[list[tuple[dict, float]]]:
-    """Drift-tolerant signature match — see :meth:`Prior.sig_groups` (one
-    contract for the reservoir and the evidence index)."""
-    from emmy.compiler.pipeline.search.prior.base import Prior  # noqa: PLC0415
+    """The index groups compatible with a candidate's ``S_*`` signature: the exact hit when present,
+    else every group whose EVERY key the candidate carries with the same value. A key the candidate
+    has and the row lacks is a feature the featurizer gained since the recording — the deploy
+    candidate's base can carry scheduler stamps persisted perf rows do not have (#311's
+    ``S_warp_eligible`` appears in no perf row), and a strict-equality join lets one added feature
+    silently disable an entire evidence tier. A key the ROW has and the candidate lacks is a
+    different kernel: the op histogram is stamped only where it is non-zero (``S_pw_*``,
+    ``S_reduce_*``), so an absent key is a zero, not an unknown — a piece a cut mints agrees with
+    its parent on every key it shares and must not read the parent's rows. The same rule the
+    disqualification tier keeps (:func:`_resolved_price`); an empty row matches nothing."""
+    from emmy.compiler.pipeline.knob import KERNEL_IDENTITY  # noqa: PLC0415
 
-    return Prior.sig_groups(index, sig)
+    if sig in index:
+        return [index[sig]]
+    cand = dict(sig)
+    groups = []
+    for row_sig, measured in index.items():
+        row = dict(row_sig)
+        if (
+            row
+            and row.get(KERNEL_IDENTITY) == cand.get(KERNEL_IDENTITY)
+            and row.keys() <= cand.keys()
+            and all(cand[key] == value for key, value in row.items())
+        ):
+            groups.append(measured)
+    return groups
 
 
 def _db_measured_pick(
@@ -531,7 +580,7 @@ def _db_measured_pick(
     exact_families: frozenset[str] = frozenset(),
 ) -> tuple[int, float] | None:
     """Measured-evidence argmin over candidate knob rows against the DB index —
-    the same prefix-consistency contract as ``Prior.evidence_pick`` (every
+    the prefix-consistency contract of :func:`~emmy.compiler.pipeline.knob.evidence_row_vouches` (every
     tunable knob the candidate specifies must match the measured row; undecided
     knobs are free). Signature matching tolerates stamps a row predates (:func:`_sig_groups`).
     Every indexed row was measured in this compile's regime, so the argmin over matching rows is
@@ -622,7 +671,7 @@ def _fork_signature(fp: ForkPoint) -> frozenset:
 
 class EvidenceError(RuntimeError):
     """Raised under strict evidence (``config.strict_evidence``) when a fork must be decided and
-    no measured row — reservoir, tune DB or golden — vouches for any of its candidates."""
+    no measured row — tune DB or golden — vouches for any of its candidates."""
 
 
 def _require_evidence(fp: ForkPoint, why: str) -> None:
@@ -727,7 +776,7 @@ def _direct_measured_pick(fp: ForkPoint, blocked, db_index: dict) -> tuple[objec
         ordered = sorted(records, key=lambda item: (item[1], canonical_row_key(item[0])))
         skip = (lambda knobs: _tile_blocked(knobs, node_blocked)) if node_blocked is not None else None
         for record, price in ordered:
-            if (hit := leaf_for(fp.options, record, skip=skip)) is not None:
+            if (hit := fp.find(record, skip=skip)) is not None:
                 return hit[0], hit[1], float(price)
         return None
 
@@ -765,37 +814,12 @@ _POOL_DESCENT_WORK = 262_144
 
 
 def _descent_sample(options, pool_id: str, node_blocked) -> list:
-    """Up to :data:`_POOL_DRAW` complete leaves drawn by seeded uniform descents. Dead ends (a
-    branch whose expansion is empty — legality killed the subtree) and blocklisted rows retry, up
-    to a bounded attempt count. When one descent is wider than the work budget, make exactly one
-    attempt: completing a legal row is indivisible through the Fork interface. Duplicates are kept
-    (a repeat costs a scoring slot, never a wrong pick). Structural options never appear here —
-    the caller samples only the variant side."""
-    import random  # noqa: PLC0415
-
-    rng = random.Random(pool_id)
-    sample: list = []
-    descent_bound = max((getattr(option, "pool_descent_bound", None) or 1 for option in options), default=1)
-    one_descent_exceeds_budget = descent_bound > _POOL_DESCENT_WORK
-    attempt_budget = max(1, _POOL_DESCENT_WORK // descent_bound)
-    draw = 1 if one_descent_exceeds_budget else min(_POOL_DRAW, max(1, attempt_budget // 4))
-    attempts = 1 if one_descent_exceeds_budget else min(4 * draw, attempt_budget)
-    while len(sample) < draw and attempts > 0:
-        attempts -= 1
-        option = options[rng.randrange(len(options))]
-        dead = False
-        while isinstance(option, Fork) and not option.is_leaf:
-            kids = option.expand()
-            if not kids:
-                dead = True
-                break
-            option = kids[rng.randrange(len(kids))]
-        if dead:
-            continue
-        if node_blocked is not None and _tile_blocked(leaf_knobs(option), node_blocked):
-            continue
-        sample.append(option)
-    return sample
+    """Up to :data:`_POOL_DRAW` complete leaves of a cold pool, drawn by :func:`~emmy.compiler.pipeline.fork.descent_sample`
+    seeded on the pool identity under the :data:`_POOL_DESCENT_WORK` budget, blocklisted rows retried. Duplicates
+    are kept (a repeat costs a scoring slot, never a wrong pick). Structural options never appear here — the
+    caller samples only the variant side."""
+    skip = None if node_blocked is None else (lambda leaf: _tile_blocked(leaf_knobs(leaf), node_blocked))
+    return descent_sample(options, draw=_POOL_DRAW, seed=pool_id, work_budget=_POOL_DESCENT_WORK, skip=skip)
 
 
 def _stream_tiers(
@@ -806,10 +830,9 @@ def _stream_tiers(
     The lazy walk is not free — each branch expansion re-spells its schedule step, and on the
     research-class pools (a 486k-row explicit-mask softmax term) the walk itself costs minutes —
     so this scan walks exactly once, like the flatten it replaces, and evaluates every source
-    chunk-wise as the leaves go by: measured reservoir evidence, the evidence index's measured
-    best (tune DB rows and golden rows), and the model score, each folded into its own running
-    best. The PRIORITY is applied after the stream ends (reservoir > index > model, the same
-    hierarchy as before); the one behavioral trade is that the model's ``mean_scores`` runs even
+    chunk-wise as the leaves go by: the evidence index's measured best (tune DB rows and golden
+    rows) and the model score, each folded into its own running best. The PRIORITY is applied
+    after the stream ends (index > model); the one behavioral trade is that the model's ``mean_scores`` runs even
     when a later chunk turns up evidence — acceptable because measured forks are normally decided
     upstream by the direct measured descent, never here. The pick is EXACTLY the flattened argmin: every source
     breaks ties by candidate content (``canonical_row_key``), never enumeration order, so
@@ -832,10 +855,8 @@ def _stream_tiers(
 
     base = {**fp.ctx.features(), **dict(fp.root_op.knobs)}
     picker = getattr(the_prior, "pick", None)
-    ev = getattr(the_prior, "evidence_pick", None) if picker is not None else None
-    use_db = picker is not None and bool(db_idx)
+    use_db = bool(db_idx)
     # Per-source running bests: (price, canonical_row_key, leaf, knobs).
-    best_ev: tuple | None = None
     best_db: tuple | None = None
     best_model: tuple | None = None
 
@@ -849,10 +870,8 @@ def _stream_tiers(
         return best
 
     def scan(chunk: list) -> None:
-        nonlocal best_ev, best_db, best_model
+        nonlocal best_db, best_model
         rows = [row for _, _, row in chunk]
-        if ev is not None:
-            best_ev = fold(best_ev, chunk, ev(rows))
         if use_db:
             best_db = fold(best_db, chunk, _db_measured_pick(db_idx, rows))
         scorer = getattr(the_prior, "mean_scores", None)
@@ -913,8 +932,6 @@ def _stream_tiers(
         return first, None, None, None
     if chunk:
         scan(chunk)
-    if best_ev is not None:
-        return best_ev[2], best_ev[3], best_ev[0], "evidence"
     if best_db is not None:
         return best_db[2], best_db[3], best_db[0], "evidence"
     if use_db:
@@ -926,6 +943,7 @@ def greedy_decide(
     blocked: dict[str, set[frozenset]] | None = None,
     *,
     prior: object = _LOAD_PRIOR,
+    placement_prior: object = _LOAD_PRIOR,
     price_structural: bool = True,
     db: object | None = None,
     decisions: dict | None = None,
@@ -934,10 +952,8 @@ def greedy_decide(
     """The greedy compile pick as a :meth:`Run.resolve` ``decide`` callback:
     descend directly to exact evidence when available, otherwise stream the complete rows in
     bounded chunks (:func:`_stream_tiers`), skip ``blocked`` tile identities, and take the
-    prior's global argmin. The prior is the
-    ``OnlinePrior`` once trained and the ``OfflinePrior``
-    cold-start heuristic otherwise (both behind ``load_prior``'s
-    ``FallbackPrior``). With no prior at all (a failed load, or the explicit
+    prior's global argmin. The prior is the ``OfflinePrior`` ``load_prior``
+    builds. With no prior at all (a failed load, or the explicit
     ``prior=None`` emission-order resolve) every fork falls to emission order
     (option-0, first leaf). Stamps the pick's predicted µs on
     ``fp.score``, so the resolve trace carries the per-fork price (the
@@ -951,8 +967,10 @@ def greedy_decide(
     the withdrawn splice (the analogue of how ``tune`` benches-and-skips an unviable tile;
     greedy benches nothing, so the validity signal must come from the retry).
 
-    Structural (``Graph``-splicing) options are priced against the fused side
-    with the same evidence — :func:`_priced_pick` — because a ``Graph`` leaf
+    A placement fork no measured row decides goes to the ``placement_prior`` — the shipped
+    placement weights, loaded lazily — which ranks its arms directly (:func:`_placement_pick`).
+    Without one, and at every other structural fork, the (``Graph``-splicing) options are priced
+    against the fused side with the same evidence — :func:`_priced_pick` — because a ``Graph`` leaf
     carries no knob row the ordinary ranking could score; when a leaf cannot
     be priced, all of them go on to that ranking anyway. Nothing withholds a
     structural leaf to keep a kernel set unchanged.
@@ -979,6 +997,7 @@ def greedy_decide(
         deadline = time.monotonic() + budget
     loaded = prior is not _LOAD_PRIOR
     the_prior = prior if loaded else None
+    placement = placement_prior if placement_prior is not _LOAD_PRIOR else _load_placement_prior()
     # Lazily-built per-compile measured-evidence index (needs a fork point's ctx for the
     # context keys): the tune DB's rows and the golden rows in scope, one index.
     # ``None`` sentinel = not built yet.
@@ -1015,7 +1034,7 @@ def greedy_decide(
         dkey = _decision_key(fp, blocked)
         if dkey is not None and dkey in decisions:
             want, price = decisions[dkey]
-            found = _find_decided_leaf(fp.options, want)
+            found = _find_decided_leaf(fp, want)
             if found is not None:
                 fp.score = price
                 return found
@@ -1034,7 +1053,13 @@ def greedy_decide(
             # (``prior=None``): emission order (option-0, first leaf).
             if len(fp.options) > 1:
                 _require_evidence(fp, "no prior loaded; emission order would decide")
-            return next(iter_leaves(fp.options))
+            return next(fp.leaves())
+        if placement is not None and price_structural and fp.splices and len(fp.options) > 1 and _placement_fork(fp):
+            # No measured row spelled an arm here (those return above): the placement prior ranks the
+            # arms, which strict evidence refuses the same way it refuses a priced comparison.
+            _require_evidence(fp, "no measured row spells a kernel-set arm")
+            if (picked := _placement_pick(fp, placement)) is not None:
+                return picked
         if dkey is not None and _schedule_fork(fp):
             picked = _direct_measured_pick(fp, blocked, db_index())
             if picked is not None:
@@ -1105,7 +1130,7 @@ def greedy_decide(
         # Reached on: an unpriceable splice, an all-splice fork, a degenerate op side beside
         # splices, or a structural leaf that surfaced mid-stream (outside the top-level
         # construction) — all small-pool corners; the flatten path handles them as before.
-        leaves = flatten_leaves(fp.options if price_structural else (plain or fp.options))
+        leaves = fp.flat() if price_structural or not plain else list(iter_leaves(plain))
         base = {**fp.ctx.features(), **dict(fp.root_op.knobs)}
         # Structural options (Graph splices that change the kernel set): the
         # per-op prior prices ONE kernel's knob row, so its score for a
@@ -1136,7 +1161,7 @@ def greedy_decide(
             return NO_OPTION
         # The constant base under this fork's deltas: the offer op's knobs
         # (its ``S_*`` structural identity) plus the ``H_*`` host/hardware
-        # regime — the feature base tune trained on (``two_level.inner_reward``).
+        # regime — the feature base the prior was fit on.
         # Tiles this node already failed to lower on an earlier attempt — skip
         # the matching leaf so greedy falls back to the next prior-ranked one.
         live = [(o, leaf_knobs(o)) for o in leaves]
@@ -1145,18 +1170,16 @@ def greedy_decide(
         if not live:  # every leaf blocklisted → no valid alternative left
             return leaves[0]
         rows = [{**base, **k} for _, k in live]
-        # The deploy evidence hierarchy, top first: (1) measured reservoir
-        # evidence (``Prior.evidence_pick`` — deployable-regime truth); (2) the
-        # tune DB's measured best on an exact ``S_*`` match (a config the tune
-        # measured must not lose the deploy to an unmeasured extrapolation —
-        # eighth-sweep finding 2); (3) the model argmin only when no candidate
-        # has evidence at all. An env pin overrides everything upstream of the
-        # fork (a pinned family never reaches a decide).
+        # The deploy evidence hierarchy, top first: (1) the tune DB's measured
+        # best on an exact ``S_*`` match (a config a record run measured must not
+        # lose the deploy to an unmeasured extrapolation — eighth-sweep finding
+        # 2); (2) the model argmin only when no candidate has evidence at all.
+        # An env pin overrides everything upstream of the fork (a pinned family
+        # never reaches a decide).
         picker = getattr(the_prior, "pick", None)
         if picker is not None:
-            ev = getattr(the_prior, "evidence_pick", None)
-            got = ev(rows) if ev is not None else None
-            if got is None and db_index():
+            got = None
+            if db_index():
                 got = _db_measured_pick(db_index(), rows)
                 if got is None:
                     _warn_disjoint_evidence(db_index(), rows, fp.node_id)

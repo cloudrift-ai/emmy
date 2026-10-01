@@ -3,7 +3,7 @@
 The ``S_*`` row is an extent-aware histogram used by the learned prior. ``I_kernel`` is the exact
 schedule-free typed identity measured evidence is keyed by: the loop op's at birth, and the tile
 kernel's once the lift has given it a body of its own — the identity the tune DB keys a kernel on
-(``policy.terminal_bench.kernel_key``), so a kernel's rows and its forks name it alike. Both are
+(``search.bench_record.kernel_key``), so a kernel's rows and its forks name it alike. Both are
 materialized into ``op.knobs`` once per kernel, at birth:
 
 - **fusion settled** — the end of the pipeline's last non-lowering pass (``on_pass_end`` at the
@@ -124,7 +124,7 @@ class IdentityStrategy(PipelineStrategy):
         op = op.with_io(graph, node)
         knobs = dict(op.knobs)
         if not any(k.startswith(STRUCT_PREFIX) for k in knobs):
-            knobs.update(structure_features(_identity_body(op), graph))
+            knobs.update(op_stamps(op, graph) or {})
         if exact or KERNEL_IDENTITY not in knobs:
             knobs[KERNEL_IDENTITY] = op.identity_key(structural=False, with_io=True)
         node.op = replace(op, knobs=knobs)
@@ -152,6 +152,15 @@ class IdentityStrategy(PipelineStrategy):
 # ---------------------------------------------------------------------------
 # The feature function — the identity's content
 # ---------------------------------------------------------------------------
+
+
+def op_stamps(op, graph: Graph | None = None) -> dict[str, float] | None:
+    """The ``S_*`` stamps of one loop or tile op — :func:`structure_features` of the body its kernel row stores
+    (:func:`_identity_body`), ``graph`` supplying the operand dtypes — or ``None`` for an op with no such body (a
+    test's bare tile). What the strategy writes onto a kernel at a stamp boundary, and what a reader that has no
+    boundary (a placement arm's fresh pieces) computes itself."""
+    body = _identity_body(op)
+    return None if body is None else structure_features(body, graph)
 
 
 def _identity_body(op) -> Body | None:

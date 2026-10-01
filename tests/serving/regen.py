@@ -1,8 +1,8 @@
 """Regenerate the serving-generation lane's golden — ``python -m tests.serving.regen``.
 
 Builds every runner in :data:`helpers.RUNNERS` once, capturing the graph handed to each plan
-compile, and writes them as one inventory completed to **one entry per kernel of the set** — the
-same ``helpers.complete`` the realization corpus authors its cases with, reading the replay's
+compile, and writes them as one inventory completed to **one row per kernel of the set** — the
+same ``helpers.complete`` the realization corpus authors its cases with, reading the compile's
 realized row per kernel.
 
 Run it when a runner shape changes, when a new one joins the table, or when strict evidence starts
@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import logging
 import sys
-from dataclasses import replace
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -58,11 +57,9 @@ def _captured_graphs() -> dict:
 
 
 def main(argv: list[str] | None = None) -> int:
-    from emmy.compiler.pipeline.search.golden import GoldenFile  # noqa: PLC0415
-
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     from emmy.compiler.context import Context
-    from emmy.compiler.pipeline.search.working_golden import write_trace_inventories
+    from emmy.compiler.pipeline.search.golden import GoldenFile, write_trace_inventories
     from tests.compiler.realization import helpers as corpus
     from tests.serving import helpers
 
@@ -75,10 +72,8 @@ def main(argv: list[str] | None = None) -> int:
     write_trace_inventories(graphs, scratch, ctx=Context.probe())
     document = GoldenFile.load(scratch)
     scratch.unlink(missing_ok=True)
-
-    for index, entry in enumerate(document.configs):
-        document.configs[index] = corpus.complete(replace(document, configs=[entry])).configs[0]
-        logger.info("[regen]   target %d: %d realization(s)", index, len(document.configs[index].realizations))
+    document = corpus.complete(document)
+    logger.info("[regen]   %d kernel(s), %d row(s), %d decision(s)", len(document.kernels), len(document.rows), len(document.routing))
     document.dump(destination, overwrite=True)
     logger.info("[regen] wrote %s", destination)
     return 0

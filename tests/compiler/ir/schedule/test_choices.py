@@ -132,3 +132,14 @@ def test_a_transposed_band_spells_its_lane_columns() -> None:
     assert Reduce.parse("coop-t", work).coop_columns == 1
     with pytest.raises(ValueError, match="follows 'coop-t'"):
         Reduce.parse("coop/v4", work)
+
+
+def test_a_transposed_band_spells_eight_output_lanes_without_changing_the_default() -> None:
+    work = Work.parse("t512")
+    assert Reduce.parse("coop-t", work).coop_output_lanes == 32
+    assert Reduce.parse("coop-t/n8", work) == Reduce.of(coop=512, coop_transposed=True, output_lanes=8)
+    assert Reduce.parse("coop-t/n8/v2", work).spell() == "coop-t/n8/v2"
+    with pytest.raises(ValueError, match="follows 'coop-t'"):
+        Reduce.parse("coop/n8", work)
+    with pytest.raises(ValueError, match="not canonical"):
+        Reduce.parse("coop-t/n32", work)

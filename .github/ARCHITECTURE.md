@@ -53,8 +53,11 @@ reviews ready PRs from both repository branches and forks, including bot-authore
 the GitHub API without checking out PR code, and its token can read contents and write PR comments but cannot push.
 Only `/review` runs; PR descriptions and code suggestions are left to the author. New commits replace an in-progress
 review for the same PR. The model, endpoint, and credential are shared with the nightly agent workflows. PR Agent can
-use up to 128,000 tokens of model context. The job compares PR Agent review comments before and after the action, so
-a green check requires a newly posted or updated review even when PR Agent logs a model failure and exits successfully.
+use up to 128,000 tokens of model context. Recorded golden JSON is excluded from the review input; the repository's
+golden checks validate those files. A failed review gets one fresh attempt, and a second failure fails the job. A
+review with no actionable finding posts no empty review card. The check is advisory: completion does not establish
+that the model found every issue, and no comment is the expected result when it reports none. The patch includes ten
+unchanged lines before each change, the maximum PR Agent accepts, so it can check nearby imports and definitions.
 
 ## Package publication
 
@@ -104,7 +107,9 @@ and fail the run two steps later on a parse error. The rejection names the offen
 because the agent assembles its answer from subagent reports with the batch rows long out of context; for the same
 reason the task states the selectable set once as `maintainable_model_ids` rather than only as a per-row flag. The
 step prints one line per agent event: a run in progress is visible only through the job log, and a rejected decision
-has to stay readable afterwards.
+has to stay readable afterwards. The task is compact JSON inside the checkout so the agent can read it again after
+the initial attachment; the workflow removes it before checking that discovery made no repository edits. The exact
+workflow source stays readable through a narrow external-directory permission.
 
 The workflow checks that the agent did not modify the checkout, then validates and applies its lifecycle manifest. Its
 artifact worktree remains on the rolling lifecycle branch, while the catalog, workflow scripts, OpenCode agent and
@@ -138,11 +143,11 @@ expose the same packages through OpenCode's native skill tool.
 exact workflow SHA. Manual dispatch supplies one exact external candidate; scheduled dispatch queries declared
 deployments. A filtered-out manual candidate is an error, while no scheduled match is a successful no-op.
 The query's filters and sorts read CloudRift VM variant availability without filtering on public-IP supply and consider
-only declared deployments with an available exact CloudRift GPU count. It tries five queries in order and takes the
-first match: `onboarding` shells with heat 70 or more; `maintained` or `best-effort` recipes with heat 70 or more and
-no Emmy serving variant (`emmy_serving`); other shells; recipes tagged `onboarding-failed`, oldest report first; and
-`maintained` recipes, oldest report first. The first three skip `onboarding-failed` recipes. Ties fall to heat, then
-model ID and deployment declaration order. No eligible deployment is a successful no-op.
+only declared deployments with an available exact CloudRift GPU count. Nightly work excludes every recipe tagged
+`onboarding-failed`; an explicit manual dispatch can retry one after a fix. It tries four queries in order and takes
+the first match: `onboarding` shells with heat 70 or more; `maintained` or `best-effort` recipes with heat 70 or more
+and no Emmy serving variant (`emmy_serving`); other shells; and `maintained` recipes, oldest report first. Ties fall
+to heat, then model ID and deployment declaration order. No eligible deployment is a successful no-op.
 
 The workflow requires the repository's `CLOUDRIFT_TEAM_ID` variable to contain the exact Robots team UUID. Before it
 checks capacity, it validates that `CLOUDRIFT_API_KEY` can act for that UUID through a team-scoped account request;
@@ -168,9 +173,11 @@ budget. It has no step cap: a capped agent can only answer in text once it reach
 summary. An agent that ends without a summary fails its step, and the failure notice says so. A failed run adds the
 `onboarding-failed` tag to its recipe (and nothing else there) and a dated failure entry to its `RESULTS.md`, and
 keeps any complete golden, corpus case, or bounded compiler fix; the workflow validates and commits those, then fails
-the job. A successful run must remove the tag. For the selected
-recipe and GPU, the same nightly qualification validates the recipe-local golden schema, strictly decodes every stored
-row, and replays it on the exact card; pull-request tests do not load checked-in golden files. The shared serving
+the job. Before validation of a failed run, the workflow restores tracked experiment and serving-image files, removes
+new files in those areas, and drops their paths from the summary. This keeps incomplete serving results from blocking
+the failure report. A successful run must remove the tag. For the selected
+recipe and GPU, the same nightly qualification validates the recipe-local golden file and replays it on the exact
+card; pull-request tests hold every golden to the fresh lowering of its programs and load nothing more of it. The shared serving
 experiment retains one LFS archive per exact GPU platform plus one cumulative `RESULTS.md`; each archive includes its
 system-only row records, and a run replaces only its platform snapshot. Ignored dated run directories, loose benchmark
 output, top-level row-record copies, and qualification summaries are not repository artifacts. An Emmy-tuned prebuilt
@@ -182,7 +189,7 @@ The artifact worktree stays on the rolling lifecycle branch, while Python contro
 manual dispatch test a workflow PR without leaking that PR's implementation commits into the model-artifact branch.
 The selector runs the exact-SHA catalog logic against the rolling worktree's `recipes/` directory so lifecycle mode
 and priority always reflect the branch that the agent will update.
-The workflow also attaches the exact-SHA README related-project map, the `onboard-model`, `tune-kernels`, and
+The workflow also attaches the exact-SHA README related-project map, the `onboard-model` and
 `run-experiment` skills, and the `prompts/onboard-model/` qualification, benchmarking, and investigation prompts as
 authoritative agent inputs. It loads the OpenCode agent and plugin directory from that same commit; older copies on the
 rolling branch cannot silently override a proposed artifact contract. As in discovery, the workflow renders only a

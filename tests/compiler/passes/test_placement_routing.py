@@ -5,8 +5,6 @@ A scoped pin that names no cuttable seam fails rather than restoring the unpinne
 
 from __future__ import annotations
 
-from dataclasses import replace
-
 import pytest
 
 from emmy.compiler.context import Context
@@ -18,7 +16,6 @@ from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.frontend.ir import MatmulOp, RmsNormOp
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 from emmy.compiler.pipeline.pipeline import Run
-from emmy.compiler.pipeline.search.golden import GoldenRecord, Measurements
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from tests.compiler.helpers import direct_classic_leaf
 
@@ -71,27 +68,19 @@ def _norm_linear_graph(*, keep_norm: bool = False) -> Graph:
     return graph
 
 
-def test_place_only_golden_rows_are_routing_rows() -> None:
-    base = GoldenRecord(
-        name="test",
-        gpu_name="TESTGPU",
-        compute_cap=(12, 0),
-        model=None,
-        program_index=0,
-        program_wire={"inputs": [], "outputs": [], "nodes": []},
-        origins=(),
-        bindings=(),
-        pins=(("FAST_MATH", False),),
-        knobs={},
-        measurements=Measurements(emmy_us=1.0, reference_us=1.0, reference_backend="test"),
-        ranking=None,
-    )
-    assert replace(base, knobs={"PLACE@inner.1/map": "cut"}).is_routing
-    assert replace(base, knobs={"REDUCE@map.1/twist": "g8k"}).is_routing, "a cross-CTA split arm mints pieces like a cut"
-    assert not replace(base, knobs={"REDUCE@map.1/twist": "g8k", "WORK": "w4x1"}).is_routing
-    assert not replace(base, knobs={"REDUCE": "coop-t"}).is_routing
-    assert not replace(base, knobs={"TILE": "f4x8", "WORK": "t16x8"}).is_routing
-    assert not replace(base, knobs={}).is_routing
+def test_place_only_rows_are_kernel_set_decisions() -> None:
+    """A row of nothing but placement knobs is a kernel-set decision — a routing row, never a schedule row."""
+    from emmy.compiler.pipeline.search.db import is_placement_knob
+
+    def routing(knobs: dict) -> bool:
+        return bool(knobs) and all(is_placement_knob(key, value) for key, value in knobs.items())
+
+    assert routing({"PLACE@inner.1/map": "cut"})
+    assert routing({"REDUCE@map.1/twist": "g8k"}), "a cross-CTA split arm mints pieces like a cut"
+    assert not routing({"REDUCE@map.1/twist": "g8k", "WORK": "w4x1"})
+    assert not routing({"REDUCE": "coop-t"})
+    assert not routing({"TILE": "f4x8", "WORK": "t16x8"})
+    assert not routing({})
 
 
 def test_rms_norm_fused_pin_lowers_one_kernel() -> None:

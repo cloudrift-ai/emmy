@@ -247,9 +247,17 @@ impl Executor {
             .map_err(translate)
     }
 
-    /// Point one region at memory the host lends.
-    fn set_region(&mut self, py: Python<'_>, name: &str, ptr: u64, len: usize) -> PyResult<()> {
-        py.detach(|| self.0.set_region(name, ptr, len))
+    /// Point one region at memory the host lends; `wait=False` leaves queued work on the old memory.
+    #[pyo3(signature = (name, ptr, len, wait=true))]
+    fn set_region(
+        &mut self,
+        py: Python<'_>,
+        name: &str,
+        ptr: u64,
+        len: usize,
+        wait: bool,
+    ) -> PyResult<()> {
+        py.detach(|| self.0.set_region(name, ptr, len, wait))
             .map_err(translate)
     }
 

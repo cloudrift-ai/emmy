@@ -37,7 +37,7 @@ from emmy.compiler.ir.tile import OutputSpec, Placement
 from emmy.compiler.ir.tile.ir import TileOp
 from emmy.compiler.ir.tile.ops import sched_of
 from emmy.compiler.pipeline import CUDA_PASSES, TILE_PASSES, Pipeline
-from emmy.compiler.pipeline.fork import iter_leaves, leaf_knobs
+from emmy.compiler.pipeline.fork import leaf_knobs
 from emmy.compiler.pipeline.knob import STRUCT_PREFIX, decision_view, family_of
 from emmy.compiler.pipeline.pipeline import Run
 from tests.compiler.terms import contraction
@@ -75,7 +75,7 @@ def _multi_output_matmul() -> Graph:
 def _resolve(passes, graph=None):
     """Option-0 resolution — the no-evidence emission-order pick, so the assertions are about what
     the pipeline BUILDS rather than about what a prior happens to rank first."""
-    return Run(pipeline=Pipeline.build(passes), ctx=_CTX).resolve(graph or _matmul(), lambda fp: next(iter_leaves(fp.options)))
+    return Run(pipeline=Pipeline.build(passes), ctx=_CTX).resolve(graph or _matmul(), lambda fp: next(fp.leaves()))
 
 
 def _kernels(out) -> dict[str, dict]:
@@ -89,7 +89,7 @@ def _tile_pieces(graph=None) -> list[TileOp]:
     )
     tiled, _ = Run(pipeline=Pipeline.build(["tile/lift", "tile/cut", "tile/schedule"]), ctx=_CTX).resolve(
         loop,
-        lambda fp: next(iter_leaves(fp.options)),
+        lambda fp: next(fp.leaves()),
     )
     return [node.op for node in tiled.nodes.values() if isinstance(node.op, TileOp)]
 
@@ -179,7 +179,7 @@ def test_the_split_offer_has_an_atomic_arm_only_into_f32(dtype, atomic) -> None:
     def decide(fp):
         for option in fp.options:
             offered.update(value for key, value in leaf_knobs(option).items() if family_of(key) == "REDUCE" and value.startswith("g"))
-        return next(iter_leaves(fp.options))
+        return next(fp.leaves())
 
     Run(pipeline=Pipeline.build(TILE_PASSES), ctx=_CTX).resolve(_matmul(out_dtype=dtype), decide)
     assert any(value.endswith("k") for value in offered), offered

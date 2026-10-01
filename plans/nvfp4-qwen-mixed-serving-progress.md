@@ -1,8 +1,9 @@
 # Qwen3.8 NVFP4 mixed serving: implementation and qualification
 
-Status: implementation in draft PR #993, September 30, 2026. The exact 27B endpoint booted with pinned native
+Status: implementation in draft PR #993, October 1, 2026. The exact 27B endpoint booted with pinned native
 M=16 decode and M=64 prefill programs on the RTX 5090. Selected deterministic short and 4K completions matched
-stock; four other 64-token prompts diverged. The independent quantized MLP and broader numerical gates remain open.
+stock; four other 64-token prompts diverged. The independent quantized MLP oracle measured the residual below;
+bounded task-quality and post-main-merge GPU qualification remain open.
 
 ## Boundary and target
 
@@ -27,7 +28,7 @@ fallback is part of this lane.
 | --- | --- | --- |
 | Stock baseline | Pinned vLLM 0.23 container loaded the exact checkpoint in BF16 with stock ModelOpt NVFP4 and FLA GDN. `/health` returned 200; deterministic text and the paired streaming benchmark succeeded. | Functional and small warm latency baseline passed; peak-load memory pending. |
 | Capture and inventory | Exact checkpoint header inspection found `model.language_model.layers.*`; all 64 MLPs form one structural profile. The shared trace path captures BF16 W4A4 `mlp16@nvfp4` and `mlp64@nvfp4`; the symbolic option remains available in the helper. A pinned exact-checkpoint trace saved 2 graphs of 148 nodes each and 6 distinct kernels. | Focused CPU tests and trace passed; a measured golden release audit is not part of this environment-pinned recipe. |
-| Shared BF16 boundaries | The input carrier, constant binding/cache, device output view, and NumPy graph interpreter had independent BF16 carrier bugs. Shared fixes and focused tests encode numerical BF16 as bits, decode it for arithmetic, and preserve raw bitcasts. | Focused CPU tests passed; broader regression gates pending. |
+| Shared BF16 boundaries | The input carrier, constant binding/cache, device output view, and NumPy graph interpreter had independent BF16 carrier bugs. Shared fixes and focused tests encode numerical BF16 as bits, decode it for arithmetic, and preserve raw bitcasts. | Pre-merge repository CI passed. Post-merge focused suite: 245 passed, 2 skipped; lint passed. Full post-merge gate pending. |
 | Synthetic GPU MLP | Two tiny layers compiled with plan reuse. Widths 1, 2, 15, 16, 17, 63 and 64 returned finite, distinct BF16 outputs; a nondefault stream passed. | Execution smoke passed. Exact stock quantized MLP comparison currently fails. |
 | Mixed full model | The stock constructor replaced all 64 MLP modules; all seven checkpoint shards loaded, then Emmy bound all 128 programs. Both M=16 with symbolic prefill and M=16 with M=64 native prefill booted and returned `/health` 200. The M=64 boot reported 23.43 GiB model memory and about 31.57 GiB resident GPU memory. | Pinned endpoint boots passed. |
 | Real hybrid preservation | A two-layer actual vLLM 0.23 Qwen3.5 model with GDN and full-attention layers retained non-MLP module and parameter identities and hybrid state interfaces after Emmy replaced its MLPs. | Pinned-container constructor regression passed. |
@@ -148,13 +149,16 @@ BF16/W4A4 boundaries; that graph interpretation alone is not the independent sto
 
 ## Next qualification work
 
-1. Complete the final repository test gate and review any failures. The environment-pinned recipe has an exact
-   checkpoint trace and runtime check; it has no measured golden file for the separate golden release gate.
-2. Decide whether the 0.47–0.55% same-checkpoint layer-0 MLP relative RMS residual is acceptable for end-to-end
-   quality. Four deterministic prompts prove it can affect token choice; no quality acceptance bound was established.
-   The stock quantized MLP remains the independent numerical oracle; do not relax tolerance to pass a test.
+1. After merging main's golden and prior refactor, rerun the full repository gate and the exact 5090 native compile,
+   boot, and paired performance check. The environment-pinned recipe has an exact checkpoint trace and runtime
+   check; it has no measured golden file for the separate golden release gate.
+2. Compare a fixed teacher-forced prompt corpus and expected-answer tasks against stock. The 0.47–0.55%
+   same-checkpoint layer-0 MLP relative RMS residual can affect token choice, but four divergent greedy continuations
+   alone do not establish a task-quality loss. Keep the stock quantized MLP as the independent numerical oracle;
+   do not relax tolerance merely to pass a test.
 3. Preserve the final precision pin and source graph identity if later tuning changes the piece schedule. The
-   exact RTX 5090 memory and major latency probes are recorded above; the draft PR carries their limits.
+   exact RTX 5090 memory and major latency probes above describe the pre-merge compiler and remain historical
+   until the native instruction check and endpoint comparison are repeated.
 
 ## Relation to the earlier investigation
 

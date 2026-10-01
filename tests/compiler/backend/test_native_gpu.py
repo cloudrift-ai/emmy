@@ -202,3 +202,36 @@ def test_shared_memory_uses_cubin_static_and_plan_dynamic_storage(tmp_path, stat
                 await worker.aclose()
 
         asyncio.run(check())
+
+
+def test_a_lent_operand_swaps_without_waiting_for_queued_launches():
+    """``alias_buffer(..., wait=False)`` leaves launches already queued on the old memory and points
+    later ones at the new, with no host wait in between: three swaps and three runs are all queued
+    before one synchronize, and each run reads the weights it was launched with."""
+    import torch
+
+    kernel = 'extern "C" __global__ void mul(float* y, const float* x, const float* w) { int i=threadIdx.x; y[i] = x[i]*w[i]; }'
+    plan = ExecutionPlan(
+        "cuda",
+        ["x", "w"],
+        ["y"],
+        [BufferSpec("x", (Dim(32),), F32, "input"), BufferSpec("w", (Dim(32),), F32, "input"), BufferSpec("y", (Dim(32),), F32, "output")],
+        {},
+        {},
+        [LaunchSpec("mul", "mul", ("y", "x", "w"), ((1,), (1,), (1,)), ((32,), (1,), (1,)), 0, ())],
+        {"mul": KernelSpec(source=kernel)},
+    )
+    x = np.arange(32, dtype=np.float32)
+    weights = [torch.full((32,), float(k + 2), device="cuda") for k in range(3)]
+    with gpu_lock():
+        program = CompiledProgram.build_from_plan(plan, {"x": x, "w": np.ones(32, dtype=np.float32)})
+        torch.cuda.synchronize()
+        outputs = []
+        with program.on_stream(torch.cuda.current_stream()):
+            for w in weights:
+                program.alias_buffer("w", w, wait=False)
+                program.run_once()
+                outputs.append(program.output_prefix_device()["y"].clone())
+        torch.cuda.synchronize()
+    for w, y in zip(weights, outputs, strict=True):
+        np.testing.assert_array_equal(y.cpu().numpy(), x * w.cpu().numpy())

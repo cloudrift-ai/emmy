@@ -28,7 +28,7 @@ helpers (`lane` / `warp`), and nothing else — every other name is bound by a s
 what `free_names` subtracts. What survives is a value some emission referred to under a spelling nothing defines: a
 per-cell rename whose shared coordinates missed an axis, a staged fill whose σ left a tile axis free, a workspace read
 a boundary store was not re-spelled for. Each of those reached nvcc as *identifier "x" is undefined*, a hundred
-errors deep in a generated source and charged to whichever candidate the tuner happened to be benching. Asserting it
+errors deep in a generated source and charged to whichever candidate the bench happened to be running. Asserting it
 here names the kernel and the value instead, in the pass that built them.
 
 For a register materialization, `factorize` emits the same Fold tree as C fragments through `_register`.
@@ -69,6 +69,10 @@ it seals through the one `grid_tile` finalizer (the article's "schedule separate
 - **Degenerate** — nothing tiled: one thread per output cell (`op.lower()` + an output-store glue).
 
 ### One emitter: the term's lowering
+
+A transposed cooperative reduction derives its output grid and reduction partition from the schedule's output lane
+count. `coop-t` uses 32 output lanes; `coop-t/n8` uses eight. The shared-memory combine groups by that same count, and
+the last output block clamps reads and guards stores when the extent does not divide into complete output groups.
 
 One recursion binds, and nothing walks the tree for statements. The **root** recursion `_factorize(op, ctx, tail,
 out_val)` binds a node to the grid: a zero-axis `Fold` recurses through its operand roots (projection → `tail`), and

@@ -13,8 +13,8 @@ class NativeWorker(_AsyncBenchWorker):
 
     _ATTEMPTS = 1
 
-    def __init__(self, *, executable: str | None = None, device_id: int | None = None):
-        super().__init__(device_id=device_id)
+    def __init__(self, *, executable: str | None = None):
+        super().__init__()
         self.executable = executable or shutil.which("emmy-runtime-worker")
         if not self.executable:
             raise FileNotFoundError("emmy-runtime-worker is not installed on PATH; build and install the matching Cargo binary")

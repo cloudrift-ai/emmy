@@ -1,4 +1,4 @@
-"""The online-prior featurizers — every knob-dict → feature-vector encoding, in one file.
+"""The prior featurizers — every knob-dict → feature-vector encoding, in one file.
 
 :func:`knob_features` is the single featurizer over a whole knob dict (the ``D_*`` engineered
 geometry / occupancy family, the ``MMA_*`` atom expansion, the ``S_*`` / ``H_*`` pass-throughs);
@@ -578,9 +578,8 @@ def _geom_feats(
     hand-coded matmul heuristic scored (occupancy waves, tile-area / thread /
     aspect targets, the geometry "bands", K-chunk depth), so a fixed linear model
     over these features (:class:`~emmy.compiler.pipeline.search.prior.OfflinePrior`)
-    reproduces that heuristic and the ``OnlinePrior`` sees the same
-    derived signal a tree can't cheaply reconstruct from raw knobs + the *coarse*
-    ``S_ext_*`` extents.
+    reproduces that heuristic, and a tree model sees the same derived signal it can't
+    cheaply reconstruct from raw knobs + the *coarse* ``S_ext_*`` extents.
 
     Tier-aware: the "ideal" tile / thread targets differ between the scalar thread
     tile (256 threads, 8192-elem area) and the warp tile (128 threads = 4 warps,

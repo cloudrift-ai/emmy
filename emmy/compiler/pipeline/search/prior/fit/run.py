@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 
-from emmy.compiler.pipeline.search.data.group import GoldenGroup
+from emmy.compiler.pipeline.search.dataset.group import GoldenGroup
 from emmy.compiler.pipeline.search.prior.fit.cv import build_metrics, run_folds
 
 

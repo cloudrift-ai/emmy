@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from emmy.compiler.pipeline.search.data.group import GoldenGroup, MeasuredGroup
+from emmy.compiler.pipeline.search.dataset.group import GoldenGroup, MeasuredGroup
 from emmy.compiler.pipeline.search.prior.report import EvalReport, golden_summaries, measured_summaries, pool_bucket
 
 

@@ -152,16 +152,64 @@ are unrecorded on #930. Trace, sweep, record, and measure on the FP8-capable car
 3. **Golden-bench goldens are not in `make test`'s decode set** (only recipe and hardware goldens are); a compiler
    change can leave them stale unseen. The close-out replayed and decoded them by hand on each card.
 
-4. **Golden-bench rows need a record run after #976.** Its Loop IR normalization changed how the Qwen3-0.6B pieces
-   render on every card but the V100 s512 file: the restamp kept every route and schedule and demoted the piece
-   timings to proposals, so until `emmy run --golden FILE --bench --record` re-measures them on each card, those
-   cells compile from the prior. The AWQ V100 intra-chunk row (820 µs) is in the same state. Then re-run the lane.
+4. **The benchmark re-record after #976 is complete.** The exact-card runs and the paired whole-layer comparisons
+   are recorded in the experiment's September 30 `RESULTS.md` update after #988. This does not qualify unrelated
+   recipe proposals; the changed recipe kernels from #1003 still need the measurements listed below.
 
 Resolved in #967's close-out: the s1 goldens are re-traced after #871 (`is_causal` at one token) and re-recorded on
 every card; the lane measures `torch.compile` on the HF layer and stages the Rust runtime; the root-sweep fix is merged
 (its first version dropped 36 Gemma and DeepSeek rows through a fold misclassification, fixed and restored).
 
+## Post-cut producer fusion (#1003)
+
+The extra FP16/BF16 pointwise rounding proposed in #997 and carried into #994 is dropped by user decision. Matching
+PyTorch's intermediate rounding exactly is not a goal. #1003 excludes that change; its record repairs cover post-cut
+fusion only. Whole-layer accuracy checks keep their existing tolerances.
+
+The feature lowers sibling workspace producers to Loop IR, runs the existing fusion splicer, then lifts them back
+to Tile IR. They re-enter the cut pass and can separate through ordinary output cuts. No new schedule codec is
+needed. The selected consumer workspace edge stays materialized. Focused tests cover termination, split receipts,
+workspace shapes and RoPE correctness. The branch is rebased on main at #1002.
+
+The last paired whole-layer measurements are the September 30 results in the experiment's `RESULTS.md`. They
+precede this feature. Ratios below are `torch.compile` / Emmy; they are the baseline for the next experiment.
+
+| Card | s1 ratio | s512 ratio |
+| --- | ---: | ---: |
+| RTX 5090 | 1.80× | 1.06× |
+| RTX 4090 | 1.16× | 1.03× |
+| A100 40GB | 1.02× | 1.01× |
+| H100 | 1.08× | 0.96× |
+| V100 SXM2 | 0.85× | 1.28× |
+
+Record repair is complete for the six affected recipe files: every retained row decodes and every target passes
+freshness. AWQ, GPTQ, EXL3 and FP8 keep their previous kernels and timings. DeepSeek loses seven obsolete schedule
+rows and seven changed timings; Gemma loses four obsolete rows and thirteen changed timings. Their remaining
+proposals need exact-card measurement. All ten benchmark goldens now reproduce their previous CUDA kernel sets:
+twenty ordinary output-cut routes were added and all 185 measurements retained. Source, argument order and launch
+geometry agree. This preserves evidence for the recorded routes without measuring the new fused alternative.
+
+Next steps:
+
+1. Measure the changed DeepSeek and Gemma kernels on their exact cards before claiming complete serving evidence.
+2. Measure the fused K/V producers and their ordinary cut alternatives on V100 s1. Compare the whole layer against
+   the 16-launch baseline and the Hugging Face `torch.compile` layer on the same inputs.
+3. On H100 s512, profile the resulting layer before another schedule sweep. The existing gate/up and staging trials
+   lost; fewer launches alone do not establish a gain.
+4. Re-run the five-card comparison after recording the selected kernels. No speedup is claimed for #1003 yet.
+
 ## Future improvements
+
+### Remaining work in #994 after #1003
+
+#1003 is merged. #994 is rebased onto it and retains the Volta eight-output-lane reduction schedule, direct decoding
+of complete schedule pins, golden refresh validation fixes and the earlier H100 schedule evidence. The special grouped
+cut implementation is removed in favor of the Loop IR fusion now on main. The extra pointwise rounding remains dropped.
+Repository goldens match main, so this rebase adds no measurement or prior-refit work.
+
+The historical A100 and H100 trials with the removed rounding change do not qualify the final compiler. Next, measure
+the Volta layout with the ordinary cut routes and repeat whole-layer accuracy and paired timings. The eight-of-ten
+baseline above remains the performance claim; neither the new layout nor fewer launches establishes a new win.
 
 - **A100 GEMMs**: q is at 1.08× of `torch.mm` (best 96x128 row 16.3 vs 15 µs); down at 1.08×, and split-K on it was
   neutral in the layer; the 96x64 tiles win k/v/o/down alone and lose 1-4 µs each in the layer.

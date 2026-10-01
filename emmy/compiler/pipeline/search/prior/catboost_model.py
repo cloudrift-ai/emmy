@@ -16,12 +16,11 @@ everything the linear model needed *because* it is additive:
   columns, so nothing here corresponds to it.
 **Absent features are ``NaN``**, CatBoost's own missing-value bucket (``nan_mode="Min"``), matching the online
 prior. "This knob is not decided / not stamped on this row" is a different fact from a knob that is present and
-legitimately zero (``WM=0``, ``STAGE="00"`` → popcount 0.0), and only a tree can act on the difference. It matters
-most on the MCTS selection path, which scores *partial* fork prefixes: filling 0.0 there would fabricate a decided
-value. The training rows carry the same semantics — see ``Group.matrix``'s ``fill``.
+legitimately zero (``WM=0``, ``STAGE="00"`` → popcount 0.0), and only a tree can act on the difference. The
+training rows carry the same semantics — see ``Group.matrix``'s ``fill``.
 
 ``quality`` (the raw ranker output, HIGHER = predicted faster) is the polarity :meth:`LinearModel.quality` uses, so
-both model classes feed the shared score and policy wrappers unchanged.
+both model classes feed the shared score wrapper unchanged.
 """
 
 from __future__ import annotations
@@ -41,12 +40,11 @@ from emmy.compiler.pipeline.search.prior.base import latency_proxy
 if TYPE_CHECKING:
     # Annotation only: importing ``search.data`` for real would pull it (and, through ``freeze.py``, the golden format and
     # subprocess) onto the deploy path, which loads none of it today.
-    from emmy.compiler.pipeline.search.data.group import Group
+    from emmy.compiler.pipeline.search.dataset.group import Group
 
 # The artifact's ``params`` block for this model class, in written order — the twin of the linear model's
 # ``PARAM_ORDER``. ``offline._load_artifact`` demands exactly the keys the writer emits, so a new scalar param is
-# added once, here. ``scale`` is rank-neutral for the greedy argmin (a monotone transform of the quality) but NOT
-# for PUCT: it sets how sharply ``Prior.policy`` separates one fork's siblings.
+# added once, here. ``scale`` is rank-neutral for the greedy argmin (a monotone transform of the quality).
 PARAM_ORDER = ("scale",)
 
 # Raw QuerySoftMax outputs sit around O(1), so the exp wrapper needs no shrinking to stay in a sane range. (The
@@ -120,7 +118,7 @@ class CatBoostModel:
 
     def mean_score_features(self, feats: dict) -> float:
         """Latency proxy (``exp(-scale · quality)``), lower is better — the linear model's polarity and wrapper,
-        so both model classes plug into the same greedy argmin and the same policy normalization."""
+        so both model classes plug into the same greedy argmin."""
         return self.mean_scores_features([feats])[0]
 
     def mean_scores_features(self, feats_list: list[dict]) -> list[float]:
@@ -184,7 +182,7 @@ class CatBoostModel:
             booster = from_b64(obj["model"], new_ranker())
         return cls(booster=booster, cols=tuple(obj["cols"]), scale=float(obj.get("params", {}).get("scale", DEFAULT_SCALE)))
 
-    def to_artifact(self, *, provenance: dict, model_file: str = "weights.cbm") -> dict:
+    def to_artifact(self, *, provenance: dict, model_file: str = "weights.cbm", space: str = "schedule") -> dict:
         """This model as a weights artifact dict. Same envelope as the linear model's (``feat_ver`` / ``kind`` /
         ``params`` / ``provenance``, with ``provenance`` caller-supplied whole so the assembly stays pure);
         ``kind`` is what tells the loader which class to rebuild.
@@ -197,6 +195,7 @@ class CatBoostModel:
         rsynced to a box with a different scratch directory."""
         return {
             "feat_ver": FEATURIZER_VERSION,
+            "space": space,
             "kind": "catboost",
             "cols": list(self.cols),
             "model_file": model_file,

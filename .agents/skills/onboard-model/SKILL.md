@@ -3,7 +3,7 @@ name: onboard-model
 description: >-
   Onboard or periodically reverify and benchmark a Hugging Face model on an exact target GPU platform. Use when asked
   to add a model recipe, refresh a maintained recipe on a supplied GPU server, benchmark serving, create reproducible
-  experiments and a durable results report, fully qualify and tune the model's Emmy compiler inventory even when
+  experiments and a durable results report, fully qualify and record the model's Emmy compiler inventory even when
   serving is blocked, or publish a prebuilt CloudRiftAI serving image.
 ---
 
@@ -128,10 +128,11 @@ operation to claim coverage. Coverage is **complete** when every manifest path e
 target reconstructs and lowers for the exact compute capability; otherwise it is **partial**. Fix tractable gaps with
 a bounded fix and retrace. The layer-to-program mapping goes in the summary; the report gets only counts and gaps.
 
-**Tuning.** Run the `tune-kernels` skill's equal-budget model-proposal-versus-MCTS search over every target, then its
-repeated O3 correctness and finalist checks. Every retained target needs a deployable O3 measurement, a positive
-reference-backend measurement, and a `torch.compile` measurement. When search finds no acceptable winner, measure a
-correct greedy fallback rather than dropping the target.
+**Recording.** Record every target with `emmy run --golden <working.json> --bench --record`, and the kernel set the
+greedy pick took with `--record-greedy`, then repeat the deployable O3 correctness check on the recorded rows. Every
+retained target needs a deployable O3 measurement, a positive reference-backend measurement, and a `torch.compile`
+measurement. When no recorded row beats the greedy pick, record the correct greedy pick rather than dropping the
+target.
 
 **The bar: every target on par with `torch.compile` or faster.** Bench the working golden at deployable optimization:
 
@@ -141,9 +142,9 @@ emmy run --golden <working.json> --bench --bench-backends eager,tcompile,emmy --
 
 Read the `--json` record (`record_knobs`, `status`, `flags`, `lane` per row), never the terminal table; the clean rows
 it benches land in the tune DB as measured evidence. Rank targets by `tcompile_us / emmy_us`, losers first, and
-classify each loss with the `tune-kernels` taxonomy:
+classify each loss:
 
-- a **search shortfall** is fixed by measuring more — search that target again or pin the schedule a sibling uses;
+- a **missing measurement** is fixed by measuring more — bench the schedule a sibling uses with `--ab` and record it;
 - an **eligibility or optimization lockout**, a pin that refuses or fails to lower, or a pin that runs wrong gets a
   bounded fix when one is tractable, and otherwise becomes a realization-corpus case (below);
 - a **code generation quality** loss is reported, not recorded;
@@ -274,8 +275,8 @@ the tables that help, drawing from:
 **When no engine produces a valid recipe**, add a dated failure entry to that file instead — create it beside the
 shell if absent, and keep earlier entries. Give the platform, the first failed gate, the evidence, what would unblock
 it (for example, the engine release that adds support), and the golden's path when section 2 committed one. Add the
-`onboarding-failed` tag to the recipe and change nothing else in it: the tag holds the recipe back until the nightly
-queue has nothing else to run.
+`onboarding-failed` tag to the recipe and change nothing else in it: nightly selection skips the recipe until an
+explicit manual retry succeeds.
 
 ## 7. Verify and hand off
 
@@ -288,7 +289,7 @@ emmy deploy ssh --dry-run --recipe recipes/<model> --ssh <target>
 
 Also check:
 
-- the coverage manifest accounts for every layer and seam; a complete trace has a committed golden whose every entry
+- the coverage manifest accounts for every layer and seam; a complete trace has a committed golden whose every row
   has paired positive O3 and reference timings and lowers on the requested compute capability, and a partial trace
   has nothing under `golden/`;
 - only repeated O3 rows are called deployable, and each tuning winner names its O1 ranking lane;

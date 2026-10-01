@@ -102,18 +102,9 @@ def pytest_runtest_setup(item):
 
 
 @pytest.fixture(autouse=True)
-def _isolate_prior_file(tmp_path, monkeypatch):
-    """Point the online-prior checkpoint at a per-test temp path so the
-    greedy compile driver (which loads the global prior) never picks up a
-    dev machine's ``~/.cache/emmy/online.json`` — tests stay deterministic
-    (empty prior → option-0), and a test that tunes writes only its own file."""
-    monkeypatch.setenv("EMMY_ONLINE_FILE", str(tmp_path / "prior.json"))
-
-
-@pytest.fixture(autouse=True)
 def _isolate_offline_file(monkeypatch):
     """Drop any dev-machine ``EMMY_OFFLINE_FILE`` override so tests always score
-    through the repo-checked ``offline_weights.json``. Unlike the prior file, the
+    through the repo-checked ``weights/schedule.json``. Unlike the prior file, the
     default here must NOT be a tmp path — a missing offline artifact is a hard
     error by design (no silent fallback), and the shipped one is what tests
     exercise."""
@@ -190,7 +181,7 @@ _GATE_SECONDS = 5.0
 #: so they are exempt from the staleness gate and from the written baseline — otherwise every
 #: `make bench-kernels` would fail demanding entries that `make test`, which skips it,
 #: can never record.
-_OFF_LANE_MARKERS = ("perf",)
+_OFF_LANE_MARKERS = ("perf", "priors")
 #: Node ids seen carrying an off-lane marker this session (filled during collection).
 _OFF_LANE_ITEMS: set[str] = set()
 

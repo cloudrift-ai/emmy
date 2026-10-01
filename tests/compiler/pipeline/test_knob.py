@@ -14,7 +14,6 @@ from emmy.compiler.pipeline.knob import (
     axis_of,
     family_of,
     family_value,
-    format_tuning_knobs,
     is_off_value,
     pin_key_matches,
     scoped_knob_spec,
@@ -423,19 +422,6 @@ def test_knob_features_differs_by_one_knob():
     assert a["S_n_write"] == b["S_n_write"]
 
 
-def test_format_tuning_knobs_skips_struct():
-    out = format_tuning_knobs({"BN": 64, "S_n_load": 3.0, "S_ext_free_prod": 512.0})
-    assert "S_n_load" not in out and "S_ext_free_prod" not in out
-    assert "BN=64" in out
-
-
-def test_format_tuning_knobs_canonical_order():
-    """The codec knobs render in canonical order (``KNOB_ORDER`` = ``TILE``, ``REDUCE``,
-    ``STAGE``), not alphabetical — shared with the ``emmy eval`` golden tables."""
-    out = format_tuning_knobs({"STAGE": "d2/smem-async", "REDUCE": "coop", "TILE": "mma_m16n8k16_f16_f32/f1x1"})
-    assert out == "TILE=mma_m16n8k16_f16_f32/f1x1, REDUCE=coop, STAGE=d2/smem-async"
-
-
 def test_apply_knobs_env_no_raw_falls_back_to_env(monkeypatch):
     """With no ``raw`` argument, the function reads ``EMMY_KNOBS``."""
     monkeypatch.delenv("EMMY_BK", raising=False)
@@ -458,6 +444,11 @@ def test_family_value_reads_bare_or_suffixed():
     assert family_value({"TILE@d": "x"}, "TILE") == "x"
     assert family_value({"TILE": "x"}, "TILE") == "x"
     assert family_value({"REDUCE": "coop"}, "TILE") is None
+
+
+def test_reduce_family_validation_accepts_output_lanes_without_an_inventory() -> None:
+    assert knob_mod.validate_family_value("REDUCE", "coop-t") == "coop-t"
+    assert knob_mod.validate_family_value("REDUCE", "coop-t/n8") == "coop-t/n8"
 
 
 def test_pin_key_matches():

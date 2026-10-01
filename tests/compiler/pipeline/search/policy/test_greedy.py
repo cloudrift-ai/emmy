@@ -1,14 +1,15 @@
 """Focused tests for greedy schedule-space traversal."""
 
 import math
+from dataclasses import dataclass
 from types import SimpleNamespace
 
 import pytest
 
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.pipeline.fork import DeferredFork, Level, build_fork_tree, flatten_leaves, leaf_knobs
+from emmy.compiler.pipeline.fork import DeferredFork, Fork, iter_leaves, leaf_knobs
 from emmy.compiler.pipeline.knob import canonical_row_key
-from emmy.compiler.pipeline.pipeline import NO_OPTION
+from emmy.compiler.pipeline.pipeline import NO_OPTION, ForkPoint
 from emmy.compiler.pipeline.search.policy import greedy
 from emmy.compiler.pipeline.search.policy.greedy import (
     EvidenceError,
@@ -118,18 +119,39 @@ def test_an_empty_recorded_signature_condemns_nothing() -> None:
     assert greedy._resolved_price(terminal, trace, ctx, None, failed={frozenset(): [2_000_000.0]}) == 5.0
 
 
+@dataclass(frozen=True)
+class _Branch(Fork):
+    """A synthetic branch: the knobs it pins and the options below it."""
+
+    knobs: dict
+    children: tuple
+
+    def expand(self):
+        return list(self.children)
+
+
+def _tree(rows, materialize) -> _Branch:
+    """A two-level tree over ``rows``: one branch per ``TILE`` value, one deferred leaf per row below it."""
+    by_tile: dict[str, list[dict]] = {}
+    for row in rows:
+        by_tile.setdefault(row["TILE"], []).append(row)
+    return _Branch(
+        {},
+        tuple(
+            _Branch({"TILE": tile}, tuple(DeferredFork(lambda row=row: materialize(row), dict(row)) for row in group))
+            for tile, group in by_tile.items()
+        ),
+    )
+
+
 def test_schedule_pick_descends_directly_to_complete_measured_row() -> None:
     materialized = []
     rows = [{"TILE": str(tile), "STAGE": str(stage)} for tile in range(100) for stage in range(100)]
-    tree = build_fork_tree(
-        params=rows,
-        levels=(Level(("TILE",), lambda row: (row["TILE"],)), Level(("STAGE",), lambda row: (row["STAGE"],))),
-        materialize=lambda row: materialized.append(row),
-    )
+    tree = _tree(rows, lambda row: materialized.append(row))
 
-    point = SimpleNamespace(
+    point = ForkPoint(
+        match=SimpleNamespace(root_node_id="node"),
         options=[tree],
-        node_id="node",
         root_op=SimpleNamespace(knobs={"S_shape": 128}),
         ctx=SimpleNamespace(features=lambda: {"H_opt": 3.0}),
     )
@@ -207,35 +229,18 @@ class _BarePrior:
         return [_score(r) for r in rows]
 
 
-class _EvidencePrior(_BarePrior):
-    """Adds the ``pick`` + ``evidence_pick`` surface; ``pick`` must never run streamed."""
-
-    def __init__(self, measured: dict[tuple[str, str], float]):
-        self.measured = measured
+class _PickPrior(_BarePrior):
+    """Adds the ``pick`` surface; ``pick`` must never run streamed."""
 
     def pick(self, rows):
-        raise AssertionError("the streamed scan must consult evidence_pick/mean_scores, never pick")
-
-    def evidence_pick(self, rows):
-        best = None
-        for i, r in enumerate(rows):
-            us = self.measured.get((r.get("TILE"), r.get("STAGE")))
-            if us is None:
-                continue
-            if best is None or us < best[1] or (us == best[1] and canonical_row_key(r) < canonical_row_key(rows[best[0]])):
-                best = (i, us)
-        return best
+        raise AssertionError("the streamed scan must consult mean_scores, never pick")
 
 
 def _point(rows):
-    tree = build_fork_tree(
-        params=rows,
-        levels=(Level(("TILE",), lambda row: (row["TILE"],)), Level(("STAGE",), lambda row: (row["STAGE"],))),
-        materialize=lambda row: (_ for _ in ()).throw(AssertionError("no leaf may materialize during ranking")),
-    )
-    return SimpleNamespace(
+    tree = _tree(rows, lambda row: (_ for _ in ()).throw(AssertionError("no leaf may materialize during ranking")))
+    return ForkPoint(
+        match=SimpleNamespace(root_node_id="node"),
         options=[tree],
-        node_id="node",
         root_op=SimpleNamespace(knobs={"S_shape": 128}),
         ctx=SimpleNamespace(features=lambda: {"H_opt": 3.0}),
     )
@@ -253,7 +258,7 @@ def test_streamed_model_pick_equals_flattened_argmin(monkeypatch) -> None:
     leaf, knobs, price, _tier = got
 
     base = {"H_opt": 3.0, "S_shape": 128}
-    flat = [(o, leaf_knobs(o)) for o in flatten_leaves(point.options)]
+    flat = [(o, leaf_knobs(o)) for o in list(iter_leaves(point.options))]
     rows = [{**base, **k} for _, k in flat]
     scores = _BarePrior().mean_scores(rows)
     best_i = min(range(len(rows)), key=lambda i: (scores[i], canonical_row_key(rows[i])))
@@ -263,28 +268,12 @@ def test_streamed_model_pick_equals_flattened_argmin(monkeypatch) -> None:
     assert price == scores[best_i]
 
 
-def test_streamed_evidence_beats_model_and_crosses_chunks(monkeypatch) -> None:
-    monkeypatch.setattr(greedy, "_CHUNK", 10)
-    # Two measured rows in different chunks; the faster one (later in emission order) must win.
-    prior = _EvidencePrior({("1", "2"): 9.0, ("15", "4"): 2.5})
-    got = _stream_tiers(_point(_rows()), prior, None, {})
-    assert got is not None
-    leaf, knobs, price, _tier = got
-    assert knobs == {"TILE": "15", "STAGE": "4"}
-    assert price == 2.5
-
-
 def test_streamed_db_tier_outranks_the_model(monkeypatch) -> None:
     monkeypatch.setattr(greedy, "_CHUNK", 10)
-
-    class _NoEvidence(_EvidencePrior):
-        def evidence_pick(self, rows):
-            return None
-
     # The measured DB row must win the deploy even though the model scores other rows better
     # (every row with _score == 0.0 beats the measured row's model score).
     db_idx = {frozenset({("S_shape", "128")}): [({"TILE": "7", "STAGE": "3"}, 2.0)]}
-    got = _stream_tiers(_point(_rows()), _NoEvidence({}), None, db_idx)
+    got = _stream_tiers(_point(_rows()), _PickPrior(), None, db_idx)
     assert got is not None
     leaf, knobs, price, _tier = got
     assert knobs == {"TILE": "7", "STAGE": "3"}
@@ -408,6 +397,9 @@ def test_price_memo_keys_on_exact_identity_not_the_term_hash(monkeypatch) -> Non
         return out
 
     monkeypatch.setattr(greedy, "_price_kernel", spy)
+    # The memo is a property of the nested pricing path, so the placement forks must take it: with the shipped
+    # placement weights loaded they would be decided by the placement prior and price nothing.
+    monkeypatch.setattr(greedy, "_load_placement_prior", lambda: None)
     g = Graph()
     g.add_node(InputOp(), [], Tensor("x", (16, 32), "f16"), node_id="x")
     prev = "x"
@@ -474,8 +466,8 @@ def test_a_measured_split_is_priced_from_its_pieces_with_no_routing_row() -> Non
     from emmy.compiler.ir.frontend.ir import MatmulOp
     from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
     from emmy.compiler.pipeline.pipeline import Run
+    from emmy.compiler.pipeline.search.bench_record import kernel_row
     from emmy.compiler.pipeline.search.db import PerfStats, SearchDB
-    from emmy.compiler.pipeline.search.policy.terminal_bench import kernel_row
     from tests.compiler.pipeline.search.helpers import GPU_5090
 
     ctx = Context.from_target((12, 0), gpu_name=GPU_5090)
@@ -537,3 +529,46 @@ def test_a_stored_composed_cut_is_offered_to_the_cut_pass() -> None:
 
     assert _measured_composed_routes(db) == [(frozenset({("S_x", "1.0"), ("I_kernel", "p")}), ("PLACE@a", "PLACE@b"))]
     assert _measured_composed_routes(SearchDB()) == []
+
+
+# ---------------------------------------------------------------------------
+# The placement prior decides a placement fork no measurement decides.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(("weight", "kernels"), [(1.0, 2), (-1.0, 1)])
+def test_the_placement_prior_decides_an_unmeasured_placement_fork(weight: float, kernels: int) -> None:
+    """A placement fork with no routing row goes to the placement prior, which ranks the arms the cut pass
+    offers by their ``P_*`` rows: a prior rewarding pieces cuts the corpus case's kernel in two, one penalizing
+    them keeps it fused — and neither pays a nested resolution for the answer."""
+    from emmy.compiler.context import Context
+    from emmy.compiler.ir.tile.ir import TileOp as _TileOp
+    from emmy.compiler.pipeline import Pipeline
+    from emmy.compiler.pipeline.pipeline import Run
+    from emmy.compiler.pipeline.search.pins import pinned_knobs, unpinned_decisions
+    from emmy.compiler.pipeline.search.policy.greedy import greedy_decide
+    from emmy.compiler.pipeline.search.prior import OfflinePrior
+    from emmy.compiler.pipeline.search.prior.linear_model import LinearModel
+    from tests.compiler.pipeline.search.helpers import CARDS
+    from tests.compiler.realization import helpers as corpus
+
+    case = corpus.load_case(corpus.CASES_DIR / "fused/linear-add-place-cut-sm70.json")
+    ctx = Context.from_target(case.compute_cap, gpu_name=CARDS[case.compute_cap], compile_flags="")
+    scalars = {"scale": 1.0, "atomic_free_weight": 0.0, "atomic_free_split_threshold": 0.0}
+    placement = OfflinePrior(model=LinearModel(weights={"P_n_pieces": weight}, weights_dynamic={}, **scalars))
+    regime = case.regime
+
+    priced_pick = greedy._priced_pick
+
+    def priced(fp, *args, **kwargs):
+        # The cross-CTA split fork that follows a placement decision is still priced; the placement fork is not.
+        assert not greedy._placement_fork(fp), "a placement fork the placement prior decides must not be priced by nested resolution"
+        return priced_pick(fp, *args, **kwargs)
+
+    # The split fork's nested pricing scores whole schedule rows, which the TILE-keyed bare prior cannot.
+    decide = greedy_decide(prior=SimpleNamespace(mean_scores=lambda rows: [0.0] * len(rows)), placement_prior=placement)
+    with pinned_knobs(regime), unpinned_decisions(), pytest.MonkeyPatch.context() as patch:
+        patch.setattr(greedy, "_priced_pick", priced)
+        run = Run(pipeline=Pipeline.build(["tile/lift", "tile/cut"]), ctx=ctx)
+        terminal, _trace = run.resolve(case.program(), decide)
+    assert sum(isinstance(node.op, _TileOp) for node in terminal.nodes.values()) == kernels

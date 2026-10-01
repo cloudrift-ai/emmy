@@ -50,10 +50,8 @@ A hackable PyTorch → Graph IR → CUDA compiler. Trace any `nn.Module`, fuse i
 emmy compile -c "nn.RMSNorm(2048)(torch.randn(1,32,2048))"
 # Benchmark kernel on a local GPU
 emmy run --bench --profile -c "torch.nn.Softmax(dim=-1)(torch.randn(1, 28, 2048, 2048))"
-# Trace a dynamic model layer into an unmeasured working golden for remote tuning
+# Trace a dynamic model layer into an unmeasured working golden
 emmy trace Qwen/Qwen3-0.6B --layer 0 --dynamic seq_len@x:1 -o _tune/qwen3/working.json
-# Measure proposed rows, then spend the remaining per-kernel budget on MCTS
-emmy tune --golden _tune/qwen3/working.json --devices 0,1 --max-candidates 64
 # Bench every realization and record the measurements as deploy evidence (add --realization NAME to select one)
 emmy run --golden _tune/qwen3/working.json --bench --strict --json _tune/qwen3/results
 # Record the kernel set the greedy pick took for one realization as measured rows a strict compile picks again
@@ -178,6 +176,39 @@ __launch_bounds__(256) void k_rms_norm_reduce(const float* x, const float* p_wei
     }
 }
 ```
+
+## Fit the priors
+
+Two priors ship in the repo, both fit GPU-free on the repository goldens and consulted by a compile only where nothing
+was measured: the **schedule prior** (`emmy/compiler/pipeline/search/prior/weights/schedule.json`) ranks a kernel's
+schedule rows, and the **placement prior** (`weights/placement.json` beside it) ranks the arms of a placement fork —
+keep the kernel fused, or cut one of its seams.
+
+```bash
+# 1. Load every repository golden — the hardware goldens and each maintained recipe's — into a DB of its own
+emmy db import --db _data/dataset.db --fresh --repository
+# 2. Export one dataset per space: every golden pool enumerated and featurized, or every placement fork's arms
+emmy db export --db _data/dataset.db _data/schedule --space schedule
+emmy db export --db _data/dataset.db _data/placement --space placement
+# 3. Fit each prior from its dataset, rewriting the checked-in weights file
+emmy fit _data/schedule emmy/compiler/pipeline/search/prior/weights/schedule.json
+emmy fit _data/placement emmy/compiler/pipeline/search/prior/weights/placement.json
+# 4. Where each golden decision ranks under the shipped weights, and what the greedy would pick with no measurement
+emmy eval prior _data/schedule
+emmy eval prior _data/placement
+```
+
+`emmy fit` also writes a metrics file under `_tune/fits/<timestamp>-linear/`; two fits are compared by diffing their
+metrics files.
+
+**The reproduction gate.** `tests/compiler/pipeline/search/prior/test_reproduction.py` holds the shipped priors to
+every repository golden, with no measurement in scope, at one tolerance over each corpus and space: a placement fork's
+recorded arm is the prior's pick, and a recorded schedule row sits within the better half of a draw of its pool as
+the prior orders it — a baseline that tightens as the schedule prior improves (the median golden sits at 4 percent).
+The hardware goldens' placement forks run in `make test`; a model golden's walk and the schedule half take minutes per
+file and run under `make test-priors`, which a change to a prior or a golden runs at finalization. A red node names
+the rows the prior cannot reproduce. The fix is a refit on the repository goldens, after any change to one of them,
+or a better prior — never a lower tolerance.
 
 ## Benchmark
 
@@ -387,10 +418,11 @@ three proposed deployment matrix entries. Disabled recipes are not deployable or
 
 Canonical model goldens live beside their recipe at `recipes/<model>/golden/<gpu-slug>_<compute-cap>.json`, with one
 file per exact GPU. A model with complete compiler evidence but no serving recipe receives an `onboarding`/`untested`
-recipe shell before its golden is committed. The maintained golden records, model-agnostic rows for the offline prior and the tests, live under
-`emmy/compiler/pipeline/search/golden/records/`. `make test` strictly decodes both kinds row by row, with no GPU
-needed, so a
-compiler change that strands a recorded row fails the suite.
+recipe shell before its golden is committed. The maintained golden records, model-agnostic rows for the offline prior
+and the tests, live under `emmy/compiler/pipeline/search/golden/records/`. A golden holds the tune DB's tables for one
+card — the kernels, the kernel-set decisions taken on them and the measured rows — beside the traced programs they came
+from; a compile imports one by copying its rows. `make test` holds both kinds to the fresh lowering of their programs,
+with no GPU needed, so a compiler change that re-keys a recorded kernel fails the suite.
 
 Generic workload (run any tool on the VM, pull back result files):
 
