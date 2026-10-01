@@ -234,6 +234,58 @@ def exact_schedule_leaf(
     return keys, root.tree.exact({key: str(value) for key, value in row.items() if key in keys})
 
 
+def descent_sample(
+    options: Sequence[Op | Graph | Fork], *, draw: int, seed: object, work_budget: int | None = None, skip: Callable | None = None
+) -> list:
+    """Up to ``draw`` complete leaves drawn by seeded uniform descents through the lazy tree — a child at
+    random at every branch, which reaches every level's values the way an emission-order prefix never does.
+    Dead ends (a branch whose expansion is empty — legality killed the subtree) and leaves ``skip`` refuses
+    retry, up to a bounded attempt count. With a ``work_budget`` (option checks, the deploy's cold-pool
+    budget) a tree whose declared ``pool_descent_bound`` exceeds it gets exactly one attempt: completing a
+    legal row is indivisible through the Fork interface. Without one, every descent is afforded. Duplicates
+    are kept; the caller decides whether a repeat matters. The draw is a pure function of the tree, ``draw``
+    and ``seed``."""
+    import random  # noqa: PLC0415
+
+    rng = random.Random(str(seed))
+    sample: list = []
+    # A lazy branch recomputes its children on every ``expand`` — the whole frontier at that site — and the
+    # descents share their upper levels, so each node visited is expanded once and its children kept for the
+    # next descent through it: the draw then costs the distinct nodes it visits, not depth times descents.
+    expanded: dict[int, list] = {}
+
+    def kids_of(branch) -> list:
+        kids = expanded.get(id(branch))
+        if kids is None:
+            kids = expanded[id(branch)] = branch.expand()
+        return kids
+
+    if work_budget is None:
+        attempts = 4 * draw
+    else:
+        descent_bound = max((getattr(option, "pool_descent_bound", None) or 1 for option in options), default=1)
+        if descent_bound > work_budget:
+            draw, attempts = 1, 1
+        else:
+            attempt_budget = max(1, work_budget // descent_bound)
+            draw = min(draw, max(1, attempt_budget // 4))
+            attempts = min(4 * draw, attempt_budget)
+    while len(sample) < draw and attempts > 0:
+        attempts -= 1
+        option = options[rng.randrange(len(options))]
+        dead = False
+        while isinstance(option, Fork) and not option.is_leaf:
+            kids = kids_of(option)
+            if not kids:
+                dead = True
+                break
+            option = kids[rng.randrange(len(kids))]
+        if dead or (skip is not None and skip(option)):
+            continue
+        sample.append(option)
+    return sample
+
+
 def iter_leaves(options: Iterable[Op | Graph | Fork]) -> Iterator[Op | Graph | Fork]:
     """Yield complete leaves depth-first without retaining the expanded tree or Python stack."""
     stack = [iter(options)]

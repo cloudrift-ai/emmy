@@ -397,6 +397,9 @@ def test_price_memo_keys_on_exact_identity_not_the_term_hash(monkeypatch) -> Non
         return out
 
     monkeypatch.setattr(greedy, "_price_kernel", spy)
+    # The memo is a property of the nested pricing path, so the placement forks must take it: with the shipped
+    # placement weights loaded they would be decided by the placement prior and price nothing.
+    monkeypatch.setattr(greedy, "_load_placement_prior", lambda: None)
     g = Graph()
     g.add_node(InputOp(), [], Tensor("x", (16, 32), "f16"), node_id="x")
     prev = "x"
@@ -526,3 +529,47 @@ def test_a_stored_composed_cut_is_offered_to_the_cut_pass() -> None:
 
     assert _measured_composed_routes(db) == [(frozenset({("S_x", "1.0"), ("I_kernel", "p")}), ("PLACE@a", "PLACE@b"))]
     assert _measured_composed_routes(SearchDB()) == []
+
+
+# ---------------------------------------------------------------------------
+# The placement prior decides a placement fork no measurement decides.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(("weight", "kernels"), [(1.0, 2), (-1.0, 1)])
+def test_the_placement_prior_decides_an_unmeasured_placement_fork(weight: float, kernels: int) -> None:
+    """A placement fork with no routing row goes to the placement prior, which ranks the arms the cut pass
+    offers by their ``P_*`` rows: a prior rewarding pieces cuts the corpus case's kernel in two, one penalizing
+    them keeps it fused — and neither pays a nested resolution for the answer."""
+    from emmy.compiler.context import Context
+    from emmy.compiler.ir.tile.ir import TileOp as _TileOp
+    from emmy.compiler.pipeline import Pipeline
+    from emmy.compiler.pipeline.knob import family_of
+    from emmy.compiler.pipeline.pipeline import Run
+    from emmy.compiler.pipeline.search.pins import pinned_knobs, unpinned_decisions
+    from emmy.compiler.pipeline.search.policy.greedy import greedy_decide
+    from emmy.compiler.pipeline.search.prior import OfflinePrior
+    from emmy.compiler.pipeline.search.prior.linear_model import LinearModel
+    from tests.compiler.pipeline.search.helpers import CARDS
+    from tests.compiler.realization import helpers as corpus
+
+    case = corpus.load_case(corpus.CASES_DIR / "fused/linear-add-place-cut-sm70.json")
+    ctx = Context.from_target(case.compute_cap, gpu_name=CARDS[case.compute_cap], compile_flags="")
+    scalars = {"scale": 1.0, "atomic_free_weight": 0.0, "atomic_free_split_threshold": 0.0}
+    placement = OfflinePrior(model=LinearModel(weights={"P_n_pieces": weight}, weights_dynamic={}, **scalars))
+    regime = {key: value for key, value in case.record.pin_map.items() if family_of(str(key)) != "PLACE"}
+
+    priced_pick = greedy._priced_pick
+
+    def priced(fp, *args, **kwargs):
+        # The cross-CTA split fork that follows a placement decision is still priced; the placement fork is not.
+        assert not greedy._placement_fork(fp), "a placement fork the placement prior decides must not be priced by nested resolution"
+        return priced_pick(fp, *args, **kwargs)
+
+    # The split fork's nested pricing scores whole schedule rows, which the TILE-keyed bare prior cannot.
+    decide = greedy_decide(prior=SimpleNamespace(mean_scores=lambda rows: [0.0] * len(rows)), placement_prior=placement)
+    with pinned_knobs(regime), unpinned_decisions(), pytest.MonkeyPatch.context() as patch:
+        patch.setattr(greedy, "_priced_pick", priced)
+        run = Run(pipeline=Pipeline.build(["tile/lift", "tile/cut"]), ctx=ctx)
+        terminal, _trace = run.resolve(case.record.target_program.copy(), decide)
+    assert sum(isinstance(node.op, _TileOp) for node in terminal.nodes.values()) == kernels

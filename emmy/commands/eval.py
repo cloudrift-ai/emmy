@@ -17,13 +17,14 @@ import math
 import sys
 from pathlib import Path
 
-from emmy import storage
+from emmy import config, storage
 from emmy.commands.eval_args import add_dataset_args, resolve_offline_arg
 from emmy.commands.table import GREEN as _GREEN
 from emmy.commands.table import RED as _RED
 from emmy.commands.table import YELLOW as _YELLOW
 from emmy.commands.table import Col, col_widths, knob_columns, render_table
 from emmy.compiler.pipeline.search.prior import report as report_mod
+from emmy.compiler.pipeline.search.prior.reproduce import knob_eq
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +57,7 @@ def register_eval_command(subparsers) -> None:
         "--analytic-file",  # pre-rename spelling
         dest="offline_file",
         help="Offline weights artifact (JSON) to score with, for A/Bing candidate fits. "
-        "Default: EMMY_OFFLINE_FILE or the repo-checked prior/weights/offline.json.",
+        "Default: EMMY_OFFLINE_FILE or the repo-checked prior/weights/schedule.json.",
     )
     add_dataset_args(pp)
     pp.add_argument("--json", dest="json_out", metavar="PATH", help="Also write the report as JSON, for diffing two runs.")
@@ -76,20 +77,23 @@ def register_eval_command(subparsers) -> None:
     pg.set_defaults(func=handle_eval_golden)
 
 
-def _check_offline_artifact() -> None:
-    """Fail the command up front on an unloadable offline weights artifact
-    (missing / feat_ver-mismatched override) — the per-shape eval harness catches
-    exceptions into ERR rows, which would let a broken A/B exit 0."""
+def _prior_halves(space: str):
+    """The priors the report labels — one today, the offline model of the dataset's ``space``: the
+    ``--offline-file`` override, else the shipped weights of that space. Fails the command up front on an
+    unloadable artifact or one fit for the other space — the per-shape eval harness catches exceptions into
+    ERR rows, which would let a broken A/B exit 0."""
     from emmy.compiler.pipeline.search.prior import OfflinePrior  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.prior.offline import default_file  # noqa: PLC0415
 
-    OfflinePrior()
-
-
-def _prior_halves():
-    """The priors the report labels — one today, the offline model."""
-    from emmy.compiler.pipeline.search.prior import OfflinePrior  # noqa: PLC0415
-
-    return [("offline", OfflinePrior())]
+    try:
+        prior = OfflinePrior(path=None if config.offline_path() else str(default_file(space)))
+    except RuntimeError as exc:
+        logger.error("%s", exc)
+        sys.exit(2)
+    if prior.space != space:
+        logger.error("the weights rank the %s space; the dataset is the %s space", prior.space, space)
+        sys.exit(2)
+    return [("offline", prior)]
 
 
 def _measured_report(args, halves, dataset, source: str):
@@ -159,21 +163,38 @@ def handle_eval_prior(args) -> None:
     from emmy.compiler.pipeline.search.dataset import Dataset  # noqa: PLC0415
 
     resolve_offline_arg(args)
-    _check_offline_artifact()
-    halves = _prior_halves()
     try:
         dataset = Dataset.load(args.dataset)
     except (OSError, ValueError) as exc:
         logger.error("%s", exc)
         sys.exit(2)
+    space = dataset.provenance.get("space", "schedule")
+    halves = _prior_halves(space)
     golden = args.pools == "golden"
     report = (_golden_report if golden else _measured_report)(args, halves, dataset, str(args.dataset))
     _emit_report(report)
     if args.json_out:
         storage.write_json(Path(args.json_out), report.to_json(), indent=2)
         logger.info("wrote %s", args.json_out)
-    if golden:
+    if golden and space == "placement":
+        _emit_placement_deploy_check(args, dataset, halves[0][1])
+    elif golden:
         _emit_golden_deploy_check(args, [pool for group in dataset.golden for pool in group.pools])
+
+
+def _emit_placement_deploy_check(args, dataset, prior) -> None:
+    """The deploy-faithful half of ``eval prior`` over a placement dataset (``prior.reproduce``): the arm the
+    placement prior takes at each placement fork beside the golden's — ``fuse``, or the seams cut."""
+    from emmy.compiler.pipeline.search.prior.reproduce import reproduce_placement  # noqa: PLC0415
+
+    pools = list({(pool.gpu, pool.regime, pool.name): pool for group in dataset.golden for pool in group.pools}.values())
+    verdicts = reproduce_placement(pools, prior.mean_scores_features, kernel=args.kernel)
+    logger.info("Golden reproduction — the placement prior's pick at each placement fork vs the golden's arm:")
+    width = max((len(v.pool.name) for v in verdicts), default=6)
+    logger.info("  %-*s  %-4s  %s", width, "kernel", "ok", "pick -> golden")
+    for v in verdicts:
+        logger.info("  %-*s  %-4s  %s", width, v.pool.name, "ok" if v.ok else "MISS", v.error or f"{v.found} -> {v.golden}")
+    logger.info("  TOTAL %d/%d", sum(v.ok for v in verdicts), len(verdicts))
 
 
 def _metric(block: dict, key: str, fmt: str) -> str:
@@ -260,76 +281,48 @@ def _emit_report(report) -> None:
 
 
 def _emit_golden_deploy_check(args, pools: list) -> None:
-    """The deploy-faithful half of ``eval prior --pools golden``: the greedy tile-lowering pick vs the golden
-    rows, per matmul pool of the **live** card (every card's when none is visible). This is what the golden RANK
-    is only a screen for — a rank says where the verified row sat in the enumeration, this says what actually
-    gets compiled. Scoping to the live GPU keeps the view about the card in hand: two cards' pools of one shape
-    would otherwise mix (RTX 5090 / RTX PRO 6000 even share ``compute_cap``).
+    """The deploy-faithful half of ``eval prior --pools golden`` (``prior.reproduce``): the greedy tile-lowering
+    pick vs the golden rows, per matmul pool of the **live** card (every card's when none is visible). This is
+    what the golden RANK is only a screen for — a rank says where the verified row sat in the enumeration, this
+    says what actually gets compiled. Scoping to the live GPU keeps the view about the card in hand: two cards'
+    pools of one shape would otherwise mix (RTX 5090 / RTX PRO 6000 even share ``compute_cap``).
 
-    Stops at the tile dialect (every knob fork resolves there: no codegen /
-    nvcc). One row per pool — the kernel's definition at the pool's sizes, under the regime's pins alone: the
-    pick is scored against the pool's *closest* golden row (most knobs reproduced), so several goldens on one
-    pool don't duplicate rows. A trailing ``TOTAL`` row carries per-knob match counts over the rows + the
+    One row per pool, the pick scored against the pool's *closest* golden row, so several goldens on one pool
+    don't duplicate rows. A trailing ``TOTAL`` row carries per-knob match counts over the rows + the
     exactly-reproduced row count. Rows print with column-aligned ``found/golden`` knobs (canonical order)."""
     import logging as _logging  # noqa: PLC0415
 
-    from emmy.compiler.pipeline import TILE_LOWERING, Pipeline  # noqa: PLC0415
-    from emmy.compiler.pipeline.knob import METADATA_PREFIXES  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.dataset import is_matmul  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden.repository import live_gpu_key  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.pins import pinned_knobs, unpinned_decisions  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.prior.reproduce import knob_eq, reproduce_schedule  # noqa: PLC0415
 
-    pools = [p for p in pools if p.kernel.formed and is_matmul(p.kernel.stamps) and (not args.kernel or args.kernel in p.kernel.name)]
     if (live := live_gpu_key()) is not None:
         # The live card's pools, or every card's when none are recorded for it — as ``goldens_for_live_gpu`` scopes.
         pools = [p for p in pools if (p.gpu, p.cap) == live] or pools
-
-    def tunable(knobs: dict) -> dict:
-        return {k: v for k, v in knobs.items() if not k.startswith(METADATA_PREFIXES)}
-
-    def picked(pool) -> dict:
-        with pinned_knobs(pool.pins), unpinned_decisions():
-            compiled = Pipeline.build(TILE_LOWERING).run(pool.kernel.program(pool.bindings))  # tile dialect only
-        knobs: dict = {}
-        for node in compiled.nodes.values():
-            k = getattr(node.op, "knobs", None)
-            if k:
-                knobs.update(k)
-        return _bare_families(tunable(knobs))
-
     logger.info("")
     logger.info("Golden reproduction — greedy pipeline pick vs the golden rows:")
     # Silence the compile chatter so this function's own ``logger`` can stream one clean result line per pool.
     quiet = _logging.getLogger("emmy.compiler")
     prev = quiet.level
     quiet.setLevel(_logging.WARNING)
-    n_match = n_rows = 0
+    try:
+        verdicts = reproduce_schedule(pools, kernel=args.kernel)
+    finally:
+        quiet.setLevel(prev)
     knob_match: dict[str, int] = {}  # rows where the pick matched this knob
     knob_total: dict[str, int] = {}  # rows whose golden carries this knob
     entries: list[tuple] = []  # ("row", lead_cells, gold, got) | ("err", name, message)
-    try:
-        for pool in pools:
-            label = _realization_label(pool.name, pool.pins.items())
-            try:
-                got = picked(pool)
-            except Exception as e:  # noqa: BLE001 — one pool's error shouldn't abort the report
-                entries.append(("err", label, " ".join(f"{type(e).__name__}: {e}".split())[:100]))
-                continue
-            # Closest golden: most knobs reproduced (registry-canonical values_equal, via _knob_eq — a legacy
-            # spelling vs the site-form pick), tie-broken by match fraction.
-            scored = [(sum(1 for k in gd if _knob_eq(k, gd[k], got)), gd) for gd in pool.schedule_rows()]
-            matched, gold = max(scored, key=lambda t: (t[0], t[0] / len(t[1]) if t[1] else 1.0))
-            n_match += matched == len(gold)
-            n_rows += 1
-            for k in gold:
-                knob_total[k] = knob_total.get(k, 0) + 1
-                knob_match[k] = knob_match.get(k, 0) + _knob_eq(k, gold[k], got)
-            lead = [label, (f"{matched}/{len(gold)}", _ratio_color(matched, len(gold)))]
-            entries.append(("row", lead, gold, got))
-    finally:
-        quiet.setLevel(prev)
+    for v in verdicts:
+        label = _realization_label(v.pool.name, v.pool.pins.items())
+        if v.error is not None:
+            entries.append(("err", label, v.error))
+            continue
+        for k in v.golden:
+            knob_total[k] = knob_total.get(k, 0) + 1
+            knob_match[k] = knob_match.get(k, 0) + knob_eq(k, v.golden[k], v.found)
+        entries.append(("row", [label, (f"{v.matched}/{v.total}", _ratio_color(v.matched, v.total))], v.golden, v.found))
     # Totals row (replaces a trailing summary line): per-knob match counts over the rows, plus the
     # exactly-reproduced row count in the m/t column.
+    n_match, n_rows = sum(v.ok for v in verdicts), sum(v.error is None for v in verdicts)
     total_cells = {k: (f"{knob_match[k]}/{knob_total[k]}", knob_match[k] != knob_total[k]) for k in knob_total}
     total_lead = ["TOTAL", (f"{n_match}/{n_rows}", _ratio_color(n_match, n_rows))]
     entries.append(("total", total_lead, total_cells))
@@ -458,16 +451,7 @@ def _knob_cells(entry: tuple) -> dict[str, tuple[str, bool]]:
     if entry[0] == "total":
         return entry[2]
     _, _, gold, got = entry
-    return {k: (f"{got.get(k, '-')}/{gold[k]}", not _knob_eq(k, gold[k], got)) for k in gold}
-
-
-def _knob_eq(k: str, gv, got: dict) -> bool:
-    """Whether the picked knob dict ``got`` reproduces the golden's ``k=gv`` — value equality
-    through the registry-canonical :func:`~emmy.compiler.pipeline.knob.values_equal`, so the
-    legacy golden corpus keeps matching the site-form picks during the step-7 window."""
-    from emmy.compiler.pipeline.knob import values_equal  # noqa: PLC0415
-
-    return k in got and values_equal(k, gv, got[k])
+    return {k: (f"{got.get(k, '-')}/{gold[k]}", not knob_eq(k, gold[k], got)) for k in gold}
 
 
 def _emit_golden_table(lead_cols: list[Col], entries: list[tuple], caption: str) -> None:
@@ -489,20 +473,6 @@ def _emit_golden_table(lead_cols: list[Col], entries: list[tuple], caption: str)
     logger.info(next(lines))  # header row (column names, knobs included)
     for e in entries:
         logger.info("  " + e[1].ljust(kernel_w) + "  ERR  " + e[2] if e[0] == "err" else next(lines))
-
-
-def _bare_families(knobs: dict) -> dict:
-    """Aggregate exact-site tuning knobs by family for the single-site summary table.
-
-    The table compares one resolved choice per family rather than schedule identities. First key
-    wins on a family collision; a multi-node kernel has no single family value to summarize.
-    """
-    from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
-
-    out: dict = {}
-    for k, v in knobs.items():
-        out.setdefault(family_of(k), v)
-    return out
 
 
 def _emit_offer_audit(configs: list) -> bool:

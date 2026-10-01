@@ -65,6 +65,9 @@ from emmy.compiler.pipeline.search.features import ROUTING_FEATURES, is_dynamic_
 # matmul goldens had a tied candidate ahead of them in emission order — unrankable at top-1 by construction.
 # The remaining ``MMA_*`` (``MMA_atom_m/n/k``, ``MMA_a_bits``) measured exactly neutral, so they stay out.
 DEFAULT_FEATURES = "D_*,MMA_tier,MMA_acc_bits"
+# The placement space's view: its ``P_*`` arm features (``ranking.placement_features``); the ``H_*`` card facts are
+# constant within a fork and cancel out of the ranking.
+PLACEMENT_FEATURES = "P_*"
 
 # The matmul view: every feature that can actually move a matmul candidate's rank, and no other. An
 # ordinary spec for :func:`feature_view` — pass it as ``--features``; nothing else filters.
