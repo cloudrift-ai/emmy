@@ -273,3 +273,12 @@ The review claim that symbolic prefill is fixed at eight rows is incorrect: eigh
 count and returns the actual prefix. The deployed vLLM adapter currently chooses the static M=64 bucket; the
 symbolic path remains available for future integration. A strengthened CPU trace test checks the symbolic axis.
 No >8-row symbolic GPU execution is claimed by that test.
+
+The later review claim that removing stock MLP modules makes the pinned vLLM weight load silently lose MLP
+tensors is also incorrect for this startup path. `EmmyQwen35MlpModel.load_weights` consumes the lazy vLLM
+iterator, intercepts the exact 12 expected checkpoint leaves per layer (three projections times four leaves),
+rejects duplicate, missing, and unclaimed MLP keys, and passes every remaining tensor to the stock Qwen
+loader. `MLPPrograms` then binds those packed tensors independently from the same local checkpoint.
+The actual 64-layer pinned engine boot and deterministic requests passed with this loader. MLP parameters are
+intentionally absent from the replacement modules' `named_parameters`; a future hot weight-sync path is not
+qualified by the startup test and would need its own explicit ownership contract.
