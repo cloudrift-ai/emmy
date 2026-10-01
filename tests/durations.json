@@ -1239,6 +1239,7 @@
  "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[Qwen3.8-27B-AWQ-INT4/v100_sm70.json/k_slice_unsqueeze_reduce_90cd88.56f1398afd1b.a3cf9876c217]": 1.47,
  "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[Qwen3.8-27B-EXL3/v100_sm70.json/k_copy_65_base_steps0_reduce.7459c01c4773]": 5.8,
  "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[Qwen3.8-27B-EXL3/v100_sm70.json/k_matmul_reduce_50f206.00c4feb824c1]": 6.1,
+ "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[Qwen3.8-27B-EXL3/v100_sm70.json/k_matmul_reduce_50f206.362487c352c8.65b76a84a4c7]": 0.52,
  "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[Qwen3.8-27B-EXL3/v100_sm70.json/k_matmul_reduce_50f206.362487c352c8]": 6.0,
  "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[Qwen3.8-27B-EXL3/v100_sm70.json/k_matmul_reduce_50f206.4100c19ea1d9]": 5.2,
  "tests/compiler/pipeline/search/test_golden.py::test_recorded_row_decodes[Qwen3.8-27B-EXL3/v100_sm70.json/k_matmul_reduce_50f206.5f16496e27a8]": 7.9,
