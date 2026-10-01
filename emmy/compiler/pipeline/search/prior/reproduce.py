@@ -76,11 +76,11 @@ def bare_families(knobs: dict) -> dict:
 def _schedule_pick(pool: GoldenPool) -> dict:
     from emmy.compiler.pipeline import TILE_LOWERING, Pipeline  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import METADATA_PREFIXES  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden.repository import records_override  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden.repository import evidence_scope  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import pinned_knobs, unpinned_decisions  # noqa: PLC0415
     from emmy.compiler.pipeline.search.ranking import pool_context  # noqa: PLC0415
 
-    with pinned_knobs(pool.pins), unpinned_decisions(), records_override(()):
+    with pinned_knobs(pool.pins), unpinned_decisions(), evidence_scope([]):
         compiled = Pipeline.build(TILE_LOWERING).run(pool.kernel.program(pool.bindings), ctx=pool_context(pool))
     knobs: dict = {}
     for node in compiled.nodes.values():

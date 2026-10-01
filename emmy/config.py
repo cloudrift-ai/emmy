@@ -176,7 +176,7 @@ def golden_scope() -> str | None:
     because the correctness lane never asks how fast a pick is and importing a card's goldens is
     work every worker process would repeat. Set by ``emmy serve --golden PATH`` for the vLLM child
     it spawns; ``run`` / ``compile`` scope the same evidence in-process through
-    ``search.golden.records_override``, which takes precedence."""
+    ``search.golden.evidence_scope``, which takes precedence."""
     return os.environ.get(GOLDEN_FILE)
 
 

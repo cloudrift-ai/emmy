@@ -59,11 +59,11 @@ disagrees with is re-benched or re-imported. The freeze is what travels between 
 
 **A frozen snapshot makes a fit reproducible.** The tuning database is a live store — benches keep writing into it
 — so a model fitted straight from it cannot be reproduced later. A freeze is a snapshot written as a golden file per
-card: every kernel's definition — the loop body the compiler formed it from — and its measured schedule rows, each
-with the setting it was measured under and its median. Nothing the compiler computed is stored: no identity, no
-features. Importing a freeze re-lowers every kernel from its definition, so the dataset holds the current compiler's
-identities and features whatever compiler wrote the snapshot, and a compiler change is a re-import. Freezing the same
-database twice produces byte-identical files. A freeze is named on the `emmy db import` command line like any
+card, a copy of the database's tables: every measured kernel — its identity, its stamps, the loop body the compiler
+formed it from — the kernel-set decisions that reach it, and its measured schedule rows, each with the setting it was
+measured under and its median. Importing a freeze copies those tables back, row for row. A freeze keeps no traced
+program, so a compiler change that re-keys a kernel leaves its frozen rows behind; the repository goldens, which do,
+are restamped instead. Freezing the same database twice produces byte-identical files. A freeze is named on the `emmy db import` command line like any
 other source — a golden configuration file, or a tuning database from this machine or a rented card — and that
 database is what every evaluation and the offline fit read; nothing is loaded into it by default, and no freeze is
 checked in at the moment.

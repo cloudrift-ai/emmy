@@ -544,7 +544,6 @@ def test_the_placement_prior_decides_an_unmeasured_placement_fork(weight: float,
     from emmy.compiler.context import Context
     from emmy.compiler.ir.tile.ir import TileOp as _TileOp
     from emmy.compiler.pipeline import Pipeline
-    from emmy.compiler.pipeline.knob import family_of
     from emmy.compiler.pipeline.pipeline import Run
     from emmy.compiler.pipeline.search.pins import pinned_knobs, unpinned_decisions
     from emmy.compiler.pipeline.search.policy.greedy import greedy_decide
@@ -557,7 +556,7 @@ def test_the_placement_prior_decides_an_unmeasured_placement_fork(weight: float,
     ctx = Context.from_target(case.compute_cap, gpu_name=CARDS[case.compute_cap], compile_flags="")
     scalars = {"scale": 1.0, "atomic_free_weight": 0.0, "atomic_free_split_threshold": 0.0}
     placement = OfflinePrior(model=LinearModel(weights={"P_n_pieces": weight}, weights_dynamic={}, **scalars))
-    regime = {key: value for key, value in case.record.pin_map.items() if family_of(str(key)) != "PLACE"}
+    regime = case.regime
 
     priced_pick = greedy._priced_pick
 
@@ -571,5 +570,5 @@ def test_the_placement_prior_decides_an_unmeasured_placement_fork(weight: float,
     with pinned_knobs(regime), unpinned_decisions(), pytest.MonkeyPatch.context() as patch:
         patch.setattr(greedy, "_priced_pick", priced)
         run = Run(pipeline=Pipeline.build(["tile/lift", "tile/cut"]), ctx=ctx)
-        terminal, _trace = run.resolve(case.record.target_program.copy(), decide)
+        terminal, _trace = run.resolve(case.program(), decide)
     assert sum(isinstance(node.op, _TileOp) for node in terminal.nodes.values()) == kernels

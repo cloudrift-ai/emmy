@@ -223,32 +223,19 @@ def wrapper_graph(case_id: str):
     return trace_module(wrapper, tuple(args), dynamic_shapes=build_torch_dynamic_shapes(parse_position_specs(specs)))
 
 
-def golden_records() -> list:
-    """The golden's rows, each standing in as a measured row.
-
-    A golden authored by replay carries schedules, not measurements, and a proposal is no
-    evidence — so each row gets microseconds that only have to exist, never to rank: one document
-    is in scope, so there is nothing to rank against. Same reading as the realization corpus.
-    """
+def golden_document():
+    """The lane's golden as the compile's evidence: every row standing in as a measured one — these authored scalar
+    schedules carry no device measurements — and the file scoped to the live card, so strict replay can validate
+    them there whatever card traced them."""
     from dataclasses import replace
 
     from emmy.compiler.context import Context
     from emmy.compiler.pipeline.search.golden import GoldenFile, Measurements
 
-    if not GOLDEN.exists():
-        raise FileNotFoundError(f"{GOLDEN} is missing; regenerate with `python -m tests.serving.regen`")
-    # These authored scalar schedules carry no device measurements. The header names the card
-    # that traced them; scope them to the live card so strict replay can validate them there.
-    cap = Context.probe().compute_capability
-    return [
-        replace(
-            record,
-            compute_cap=cap,
-            gpu_name="",
-            measurements=record.measurements or Measurements(emmy_us=1.0, reference_us=1.0, reference_backend="serving-lane"),
-        )
-        for record in GoldenFile.load(GOLDEN).records()
-    ]
+    document = GoldenFile.load(GOLDEN)
+    stand_in = Measurements(emmy_us=1.0, reference_us=1.0, reference_backend="serving-lane")
+    rows = [replace(row, measurements=row.measurements or stand_in) for row in document.rows]
+    return replace(document, compute_cap=tuple(Context.probe().compute_capability), gpu_name=None, rows=rows)
 
 
 def build(runner_id: str, *, model=None, plan_cache=None, **overrides):
@@ -269,9 +256,9 @@ def build(runner_id: str, *, model=None, plan_cache=None, **overrides):
 @contextmanager
 def evidence_scope():
     """The lane's golden as the compile's only evidence, strictly (:func:`golden.sole_evidence`)."""
-    from emmy.compiler.pipeline.search.golden import GoldenRecords, sole_evidence
+    from emmy.compiler.pipeline.search.golden import sole_evidence
     from emmy.compiler.pipeline.search.pins import pinned_knobs
 
-    records = GoldenRecords(golden_records())
-    with pinned_knobs(records.shared_regime_pins()), sole_evidence(records):
+    document = golden_document()
+    with pinned_knobs(document.shared_regime()), sole_evidence([document]):
         yield

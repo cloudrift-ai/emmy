@@ -289,7 +289,7 @@ emmy deploy ssh --dry-run --recipe recipes/<model> --ssh <target>
 
 Also check:
 
-- the coverage manifest accounts for every layer and seam; a complete trace has a committed golden whose every entry
+- the coverage manifest accounts for every layer and seam; a complete trace has a committed golden whose every row
   has paired positive O3 and reference timings and lowers on the requested compute capability, and a partial trace
   has nothing under `golden/`;
 - only repeated O3 rows are called deployable, and each tuning winner names its O1 ranking lane;

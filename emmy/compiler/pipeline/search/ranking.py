@@ -1,6 +1,6 @@
 """Enumerate and rank candidates for the goldens: the DB's golden pools (``db/export.golden_pools``)
 as training groups (:func:`build_golden_groups`), and one program-backed record's own enumeration
-(:func:`evaluate_record`).
+
 
 A golden pool is one kernel's schedule space on one card, in one precision regime, at one set of sizes,
 together with the verified rows the golden files record in it. The dataset DB holds everything the pool needs
@@ -16,7 +16,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from collections import defaultdict
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 
 from emmy.compiler.context import Context
@@ -24,25 +24,9 @@ from emmy.compiler.pipeline.search import features
 from emmy.compiler.pipeline.search.dataset.group import DEFAULT_FEATURES, GoldenGroup, feature_view, pack_features
 from emmy.compiler.pipeline.search.dataset.pool import GoldenPool
 from emmy.compiler.pipeline.search.dataset.shape import ShapeKey
-from emmy.compiler.pipeline.search.metrics import dual_rank
 from emmy.compiler.pipeline.search.pool import Candidates, PoolSample
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class Ranked:
-    """Where one record's recorded config landed in its own candidate enumeration.
-
-    ``rank`` / ``rank_optimistic`` are ``None`` when the recorded knobs are not in the enumeration
-    at all — a pin or dtype mismatch, which is a real defect class and must stay distinguishable
-    from "ranked last". ``pool`` is the size of the enumeration the rank is against, and travels
-    with it because a rank alone says nothing."""
-
-    best: dict
-    rank: int | None
-    pool: int
-    rank_optimistic: int | None
 
 
 def pool_context(pool: GoldenPool) -> Context:
@@ -470,28 +454,3 @@ def build_placement_groups(pools: Sequence[GoldenPool]) -> tuple[list[GoldenGrou
             )
     logger.info("  %d placement forks over %d pools (%d skipped)", len(groups), len(pools), len(skipped))
     return groups, skipped
-
-
-def evaluate_record(record, ctx: Context, scorer: Callable[[dict], float] | None = None) -> Ranked:
-    """Rank a generic program-backed record in its current candidate enumeration."""
-    from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.prior import OfflinePrior  # noqa: PLC0415
-
-    with pinned_knobs(record.pin_map):
-        candidates = enumerate_graph(record.target_program.copy(), ctx)
-    rows = candidates.rows
-    if not rows:
-        return Ranked({}, None, 0, None)
-    if scorer is None:
-        prior = OfflinePrior()
-        base = {**ctx.features(), **record.structural_features}
-
-        def scorer(row):
-            return -prior.mean_score({**base, **row})
-
-    want = features.tile_signature(record.knobs) if record.knobs else None
-    golden_index = next((i for i, row in enumerate(rows) if features.tile_signature(row) == want), None) if want else None
-    scores = [scorer(row) for row in rows]
-    best = max(range(len(rows)), key=scores.__getitem__)
-    rank, rank_opt = dual_rank(scores, golden_index) if golden_index is not None else (None, None)
-    return Ranked(rows[best], rank, candidates.total, rank_opt)

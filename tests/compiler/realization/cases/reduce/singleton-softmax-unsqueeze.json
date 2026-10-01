@@ -3,11 +3,9 @@
  "programs": [
   {"inputs":["x"],"outputs":["softmax"],"nodes":[{"id":"softmax_c1","op":"constant","attrs":{"name":"softmax_c1","value":-1.0},"outputs":[["softmax_c1","f32",[1]]]},{"id":"unsqueeze_c1","op":"constant","attrs":{"name":"unsqueeze_c1","value":-1.0},"outputs":[["unsqueeze_c1","f32",[1]]]},{"id":"x","op":"input","outputs":[["x","f32",[4]]]},{"id":"unsqueeze","op":"torch.unsqueeze","attrs":{"dim":-1},"inputs":["x"],"outputs":[["unsqueeze","f32",[4,1]]]},{"id":"softmax","op":"torch.softmax","inputs":["unsqueeze"],"outputs":[["softmax","f32",[4,1]]]}]}
  ],
- "configs": [
-  {"program": 0, "target": {"loop": 0, "origins": ["softmax", "unsqueeze"]}, "realizations": [
-   {"name": "k_softmax_834f63", "pins": {"FAST_MATH": false}, "knobs": {}, "identity": "74f9e75edec568edbdcea2d15f6230a61e18b296823ea92f2d2fc6ac2d2cd3b3"}
-  ]}
+ "kernels": [
+  {"exact_identity":"928dbe99ad10d73a3e6369fc93c5a6c9924d646072e53092189120f124498e10","structural_identity":"74f9e75edec568edbdcea2d15f6230a61e18b296823ea92f2d2fc6ac2d2cd3b3","loop_ir":{"inputs":["x"],"outputs":["softmax"],"nodes":[{"id":"x","op":"input","outputs":[["x","f32",[4]]]},{"id":"softmax","op":"loop","attrs":{"body":[{"Loop":{"axis":{"name":"a0","extent":4},"body":[{"Load":{"names":["in0"],"input":"x","index":["a0"]}},{"Assign":{"name":"v0","op":"subtract","args":["in0","in0"]}},{"Assign":{"name":"v1","op":"exp","args":["v0"]}},{"Assign":{"name":"v2","op":"divide","args":["v1","v1"]}},{"Write":{"output":"softmax","index":["a0","0"],"values":["v2"]}}]}}],"name":"k_softmax_834f63"},"inputs":["x"],"outputs":[["softmax","f32",[4,1]]]}]},"name":"k_softmax_834f63","stamps":{"S_n_load":1.0,"S_n_distinct_input":1.0,"S_n_write":1.0,"S_n_accum":0.0,"S_n_cond":0.0,"S_n_assign":3.0,"S_pw_subtract":1.0,"S_pw_exp":1.0,"S_pw_divide":1.0,"S_n_loop":1.0,"S_n_reduce_loop":0.0,"S_n_free_loop":1.0,"S_loop_depth":1.0,"S_dtype_f32":1.0,"S_ext_n_free_axis":1.0,"S_ext_free_prod":4.0,"S_ext_free_max":4.0,"S_ext_n_reduce_axis":0.0,"S_ext_reduce_prod":1.0,"S_ext_reduce_max":0.0,"S_ext_n_symbolic_axis":0.0,"S_ext_serial_cell_work":1.0},"formed":true,"traced":0,"origins":["softmax","unsqueeze"]}
  ],
- "loops": [
-  {"inputs":["x"],"outputs":["softmax"],"nodes":[{"id":"x","op":"input","outputs":[["x","f32",[4]]]},{"id":"softmax","op":"loop","attrs":{"body":[{"Loop":{"axis":{"name":"a0","extent":4},"body":[{"Load":{"names":["in0"],"input":"x","index":["a0"]}},{"Assign":{"name":"v0","op":"subtract","args":["in0","in0"]}},{"Assign":{"name":"v1","op":"exp","args":["v0"]}},{"Assign":{"name":"v2","op":"divide","args":["v1","v1"]}},{"Write":{"output":"softmax","index":["a0","0"],"values":["v2"]}}]}}],"name":"k_softmax_834f63"},"inputs":["x"],"outputs":[["softmax","f32",[4,1]]]}]}
+ "rows": [
+  {"name":"k_softmax_834f63","kernel":"928dbe99ad10d73a3e6369fc93c5a6c9924d646072e53092189120f124498e10","pins":{"FAST_MATH":false},"knobs":{}}
  ]}

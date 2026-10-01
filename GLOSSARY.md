@@ -273,7 +273,7 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   unambiguous is the one golden files, the tuning database and hand-set pins all
   use. A plain name PINNED on a kernel that has several such steps asks for one of them: one step carries the value
   and every other declines the choice. That is what a row measured under a plain pin recorded, so it is what the
-  enumeration, the golden decode and the evidence pick all read it as. (In the code, these names are produced by
+  enumeration, the restamp and the evidence pick all read it as. (In the code, these names are produced by
   walking the kernel's stored Fold tree, which is why the source calls the machinery the tree-path codec.)
 - **Realize** — A recorded configuration *realizes* when the compiler, at the point where it makes that choice, offers
   a candidate matching the recording. A configuration that realizes nowhere cannot be deployed, however good the
@@ -300,45 +300,37 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   pool — the model puts one pool's candidates in order, and the question is where a good one landed. Candidates
   from two different pools are not comparable, because they are different kernels. A pool may hold more than one
   verified answer: a shape recorded twice, or under two names, contributes several.
-- **Golden configuration** — One persisted symbolic program target. Its `realizations` array holds the concrete
-  dimension bindings and input pin regimes that were tuned for that target. `--golden PATH` names the file such
-  targets live in; `--realization NAME` selects one realization inside it.
-- **Realization** — One statically bound or symbolic instance of a golden configuration: named dimension bindings,
-  input knob pins, the selected schedule knobs, and paired measurements once a bench has taken them. A measured
-  realization is a row of evidence; an unmeasured one becomes evidence once `emmy run --golden PATH --bench` measures
-  it, or once it lists the kernel set a recording measured for it.
-- **Child-identity schedule receipt** — A realization that records one kernel of a set: its schedule row in the knobs,
-  and that kernel's deploy identity stored as its identity. The stored identity says which kernel the row decorates —
-  one flat knobs map decorates exactly one kernel, so conflicting per-child schedules persist as sibling receipts —
-  and it is the strict decode's kernel selector. `run --record-greedy` writes receipts under the seed's input regime
-  alone, because a seam spelling is local to the kernel it was read off and a cut key copied onto every receipt would
-  re-cut any piece offering a same-spelled seam; such a receipt is one row of evidence, its schedule row for its own
-  kernel. A realization corpus case instead freezes the route in a receipt's input pins, and that receipt is two rows:
-  its route for the kernel the cut was offered on, its schedule row for the child.
-- **Kernel set listing** — The `kernel_set` field: the names of the routing rows one realization's kernel set holds,
-  in the order the compile took the decisions, one row per decision — a placement cut or a cross-CTA split. `run
-  --record-greedy` writes the list when it records a kernel set, beside a receipt per kernel. The listing realization
-  usually holds no measurement itself, so `Realization.kernel_set_state` counts it verified only when every row it lists carries
-  measurements and so does every schedule-carrying row of the same target, and a bench of it publishes the listed
-  rows' knobs as its pin. A realization that also holds a measured row of its own verifies on that row; the list still
-  says what its kernel set held.
+- **Golden file** (*golden*) — A card's measurements in the tune DB's shape: the kernels it measured (``kernels``:
+  a ``kernel`` row each, plus, for a target, the traced program it was lowered from and the sizes that specialized
+  it), the kernel-set decisions taken on them (``routing``) and the measured rows (``rows``), beside the traced
+  programs. A compile imports one by copying its rows; `--golden PATH` names the file a command reads instead of the
+  repository's.
+- **Row** — One ``perf`` row of a golden: the kernel (by exact identity), the sizes its symbolic dims were benched at,
+  the input regime (``pins``), the schedule row (``knobs``) and the measurement. Its ``name`` is a label a command
+  selects it by (`--realization NAME`). A row with no measurement is a proposal, not evidence; one with no schedule is
+  a target that has only been traced.
 - **Wire** — The JSON-safe data an object is stored as, in a golden file or a tune DB row: a program, a kernel, an
   expression, a dim. Every IR class writes and reads its own wire through one mixin and one walker
   (`emmy/compiler/wire.py`), and a golden file is the wire of the classes that declare it.
-- **Working golden file** — A mutable local JSON inventory used to exchange program targets, unmeasured
-  realizations and proposed knob rows, and to hold what `run --bench --record` / `--record-greedy` measured. Only
-  its measured rows are evidence, and only when a command names the file with `--golden PATH`.
+- **Working golden file** — A mutable local golden used to exchange traced targets, unmeasured rows and proposed
+  knob rows, and to hold what `run --bench --record` / `--record-greedy` measured. Its measured rows are evidence
+  when a command names the file with `--golden PATH`.
 - **Canonical golden file** — A reviewed per-GPU golden file. Model goldens live at
   `recipes/<model>/golden/<gpu-slug>_<compute-cap>.json`; the maintained model-agnostic golden records live under
-  `emmy/compiler/pipeline/search/golden/records/`. Measured rows supply deploy evidence; a compiler refresh can leave
+  `emmy/compiler/pipeline/search/golden/records/`. Measured rows supply deploy evidence; a restamp can leave
   unmeasured proposals awaiting a record run. The record writers refuse a canonical path, so a re-record works on
   a copy. An ordinary compile reads the files for its live card.
+- **Restamp** — The rewrite of a golden onto the fresh lowering of its own programs (`emmy golden restamp`): every
+  kernel takes the identity, stamps and body a fresh lowering gives it, every decision is taken again on the fresh
+  parent, a row whose kernel was re-keyed keeps its schedule and loses its measurement, a kernel no fresh kernel
+  writes is dropped with its rows. A golden the restamp leaves unchanged is current; `emmy golden check` and the suite
+  ask exactly that.
 - **Evidence** — A compatible recorded measurement used to select between candidates: a tune database row — a
-  `run --bench` writes its rows there, and a measured golden row is imported there before a compile picks. All are
+  `run --bench` writes its rows there, and a golden file's rows are copied there before a compile picks. All are
   read by one rule.
 - **Routing row** (*route row*, in older text) — The tune database's record of one kernel-set decision: the kernel
   it was offered on, the arm — a `PLACE` key, or a `REDUCE` value carrying a cross-CTA `g<n>` half — and the pieces
-  it minted, one row per piece. A golden row that spells such a decision imports as routing rows. At that kernel's
+  it minted, one row per piece. A golden stores the same rows, copied on import. At that kernel's
   fork the decision is priced as the sum of its pieces' measured rows, which outranks any arm priced by prediction; a
   decision no piece's row prices is off the measured ballot, and the pieces the arm mints are decided from rows of
   their own (see *Routing table*).
@@ -359,10 +351,10 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   eval prior` read it and nothing else.
 - **Measurement freeze** — A fixed snapshot of collected measurements, written as a golden file per GPU: each
   kernel's definition and its measured schedule rows, with the regime each was measured under and its median, and
-  nothing the compiler computed. The tuning database is local to one machine and is rewritten as benches continue,
+  no traced program. The tuning database is local to one machine and is rewritten as benches continue,
   so a number computed over it cannot be checked by anyone else. A freeze is identical wherever
   it is read, which is what makes two models' scores a fair comparison and a reported score something a reader can
-  reproduce, and `emmy db import` re-lowers every kernel from its definition, so a compiler change is a re-import.
+  reproduce.
   One kept with the repository is named on the import command line like any other source; none is at the moment.
 - **Deploy evidence hierarchy** — The fixed order in which an ordinary compile answers a tuning choice: measured
   evidence first — the tune database's rows, the golden rows in scope imported among them, the fastest compatible

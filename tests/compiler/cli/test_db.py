@@ -1,6 +1,6 @@
-"""``emmy db import`` — a DB instance filled from a measurement freeze, golden files and tune DBs, every kernel
-re-lowered by the current compiler; ``emmy db export``, the instance's rows as a dataset; the readers' refusal of a
-missing instance; and ``emmy db check``, the checks that an instance's tables agree with themselves."""
+"""``emmy db import`` — a DB instance filled from a measurement freeze, golden files and tune DBs, each a copy of the
+file's tables; ``emmy db export``, the instance's rows as a dataset; the readers' refusal of a missing instance; and
+``emmy db check``, the checks that an instance's tables agree with themselves."""
 
 from __future__ import annotations
 
@@ -87,9 +87,9 @@ def test_export_writes_a_dataset_the_readers_load(tmp_path):
     assert (tmp_path / "dataset" / "manifest.json").read_bytes() == first
 
 
-def test_a_tune_db_is_frozen_and_re_lowered_on_import(tmp_path):
-    """A tune DB's rows reach the dataset the way a freeze of it would: re-lowered from each kernel's
-    definition and sourced by the frozen file's digest. A golden row a compile imported into the tune DB
+def test_a_tune_db_is_frozen_on_import(tmp_path):
+    """A tune DB's rows reach the dataset the way a freeze of it would: as the frozen file's rows, sourced by its
+    digest. A golden row a compile imported into the tune DB
     stays behind — the golden file holds it — and a file the instance already holds is not imported twice."""
     tune = tuned_db(tmp_path / "autotune.db", (_CASE, "fused/linear-add-place-cut-sm70.json"))
     [plain] = [row for row in tune.iter_perf_rows() if row.cc == 120]

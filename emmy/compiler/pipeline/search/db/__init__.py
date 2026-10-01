@@ -67,6 +67,7 @@ from typing import TYPE_CHECKING
 from emmy.compiler.pipeline.knob import KERNEL_IDENTITY, METADATA_PREFIXES, family_of
 from emmy.compiler.pipeline.search.dataset.kernel import KernelDef
 from emmy.compiler.structural import digest
+from emmy.compiler.wire import Wire
 
 if TYPE_CHECKING:
     from emmy.compiler.context import Context
@@ -137,9 +138,10 @@ class PerfRow:
 
 
 @dataclass(frozen=True)
-class RoutingRow:
+class RoutingRow(Wire):
     """One kernel-set decision on one parent: the arm's knobs (``PLACE@seam: cut`` keys, or a cross-CTA
-    ``REDUCE`` half) and the exact identities of the pieces it minted, in the fragment's order."""
+    ``REDUCE`` half) and the exact identities of the pieces it minted, in the fragment's order. A golden file
+    stores it as written."""
 
     parent: str
     arm: dict
