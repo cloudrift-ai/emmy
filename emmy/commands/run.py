@@ -20,7 +20,12 @@ from pathlib import Path
 
 from emmy import config
 from emmy.commands.compile import add_golden_arg
-from emmy.compiler.pipeline.search.pins import PLACEMENT_DECISIONS_HINT, pinned_knobs, unreproducible_pin_flag
+from emmy.compiler.pipeline.search.pins import (
+    PLACEMENT_APPLIED_PINS_HINT,
+    PLACEMENT_DECISIONS_HINT,
+    pinned_knobs,
+    unreproducible_pin_flag,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -965,7 +970,10 @@ def _wrong_answer_flag(outputs: dict, ref_outputs: dict) -> str | None:
 
 
 def env_pin_refusal(
-    kernel_knobs: list[dict], placement_knobs: list[dict] | None = None, kernel_names: list[tuple[str, ...]] | None = None
+    kernel_knobs: list[dict],
+    placement_knobs: list[dict] | None = None,
+    kernel_names: list[tuple[str, ...]] | None = None,
+    applied_place_pins: dict[str, str] | None = None,
 ) -> str | None:
     """The live ``EMMY_<KNOB>`` pins a compiled graph did not realize, or ``None``.
 
@@ -985,7 +993,17 @@ def env_pin_refusal(
     from emmy.compiler.pipeline.knob import KERNEL_DECISION_FAMILIES, family_pins  # noqa: PLC0415
 
     pins = {name: value for family in KERNEL_DECISION_FAMILIES for name, value in family_pins(family, kernels=True)}
-    return unreproducible_pin_flag(pins, kernel_knobs, placement_knobs=placement_knobs, kernel_names=kernel_names) if pins else None
+    return (
+        unreproducible_pin_flag(
+            pins,
+            kernel_knobs,
+            placement_knobs=placement_knobs,
+            kernel_names=kernel_names,
+            applied_place_pins=applied_place_pins,
+        )
+        if pins
+        else None
+    )
 
 
 def greedy_record_refusal(
@@ -1168,6 +1186,11 @@ def _placement_knob_dicts(graph) -> list[dict]:
     return list(graph.hints.get(PLACEMENT_DECISIONS_HINT, []))
 
 
+def _applied_place_pins(graph) -> dict[str, str]:
+    """Piece-qualified PLACE source receipts from the final cut resolution."""
+    return dict(graph.hints.get(PLACEMENT_APPLIED_PINS_HINT, {}))
+
+
 def _ab_samples(specs, dynamic=None, route=None):
     """One shapeless pseudo-sample per ``--ab "K1=V1,K2=V2"`` spec: ``.knobs`` holds
     schedule pins, ``.pins`` Boolean input pins, ``.name`` the table label, and ``.shape None`` —
@@ -1316,7 +1339,8 @@ async def _bench_golden_variants(
                 _cuda_knob_dicts(g_compiled),
                 placement_knobs=_placement_knob_dicts(g_compiled),
                 kernel_names=names,
-            ) or env_pin_refusal(_cuda_knob_dicts(g_compiled), _placement_knob_dicts(g_compiled), names)
+                applied_place_pins=_applied_place_pins(g_compiled),
+            ) or env_pin_refusal(_cuda_knob_dicts(g_compiled), _placement_knob_dicts(g_compiled), names, _applied_place_pins(g_compiled))
         if flag:
             flags.append(f"{flag} — row NOT benched")
             logger.error(
@@ -1746,7 +1770,7 @@ def _write_ab_json(
         "kernels": _kernel_rows(graph, bench),
     }
     # An env pin gates THIS graph, so an unrealized one misrepresents the greedy row itself.
-    env_miss = env_pin_refusal(_cuda_knob_dicts(graph), _placement_knob_dicts(graph), _cuda_kernel_names(graph))
+    env_miss = env_pin_refusal(_cuda_knob_dicts(graph), _placement_knob_dicts(graph), _cuda_kernel_names(graph), _applied_place_pins(graph))
     if env_miss:
         greedy["flags"] = [f"{env_miss} — the env pin did not realize, so this row is the planner's own pick"]
         logger.error(
@@ -2931,7 +2955,13 @@ async def _bench_ab_variants_ir(backend, ir_path, tail, specs, *, warmup, iters,
             logger.warning("[ab] %s: compile of the pinned config failed (%s) — row kept as bench_fail", sample.name, exc)
             out.append(_GoldenBench(sample, None, None, [f"compile failed: {exc}"], "bench_fail"))
             continue
-        flag = unreproducible_pin_flag(replay_knobs, _cuda_knob_dicts(g), placement_knobs=_placement_knob_dicts(g))
+        flag = unreproducible_pin_flag(
+            replay_knobs,
+            _cuda_knob_dicts(g),
+            placement_knobs=_placement_knob_dicts(g),
+            kernel_names=_cuda_kernel_names(g),
+            applied_place_pins=_applied_place_pins(g),
+        )
         if flag:
             logger.error("[ab] %s: %s — the pinned config did not realize; fix the pin spelling (row kept unbenched)", sample.name, flag)
             out.append(_GoldenBench(sample, g, None, [f"{flag} — row NOT benched"], "pin_unmatched"))

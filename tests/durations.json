@@ -1277,6 +1277,7 @@
  "tests/serving/test_twins_coded.py::test_gdn_serving_capture_has_explicit_state_inputs_and_outputs[False]": 2.31,
  "tests/serving/test_twins_coded.py::test_gdn_serving_capture_has_explicit_state_inputs_and_outputs[True]": 1.75,
  "tests/serving/test_twins_coded.py::test_laguna_serving_twin_capture_includes_symbolic_coded_expert": 0.22,
+ "tests/serving/test_twins_coded.py::test_nvfp4_mlp_capture_accepts_rank_zero_stored_scales": 1.5,
  "tests/serving/test_twins_coded.py::test_nvfp4_serving_twins_carry_the_declared_w4a4_program": 0.08,
  "tests/serving/test_twins_coded.py::test_nvfp4_twin_is_the_graph_serving_stamps": 0.1,
  "tests/serving/test_vllm_qwen_mlp_hybrid.py::test_real_qwen35_hybrid_modules_survive_mlp_replacement": 26.1,

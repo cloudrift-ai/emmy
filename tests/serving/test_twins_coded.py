@@ -797,7 +797,13 @@ def test_nvfp4_mlp_capture_accepts_rank_zero_stored_scales(tmp_path):
     _nvfp4_checkpoint(tmp_path, scalar_scales=True)
     assert len(layer_profiles(tmp_path, 2)) == 1
     assert set(capture_mlp_graphs(tmp_path, 64, 128, 2)) == {"mlp16@nvfp4", "mlp64@nvfp4"}
-    assert set(capture_mlp_graphs(tmp_path, 64, 128, 2, prefill_rows=None)) == {"mlp16@nvfp4", "mlp-sym@nvfp4"}
+    twins = capture_mlp_graphs(tmp_path, 64, 128, 2, prefill_rows=None)
+    assert set(twins) == {"mlp16@nvfp4", "mlp-sym@nvfp4"}
+    symbolic = twins["mlp-sym@nvfp4"]
+    symbolic.validate()
+    token_dim = symbolic.buffer(symbolic.inputs[0]).shape[0]
+    assert not token_dim.is_static and token_dim.as_atom_name() == "num_tokens"
+    assert symbolic.buffer(symbolic.outputs[0]).shape[0] == token_dim
 
 
 def _structure(graph: Graph):
