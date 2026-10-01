@@ -140,6 +140,7 @@ def _build_elementwise_table() -> dict[str, Callable]:
         "multiply": lambda a: a[0] * a[1],
         "prod": lambda a: a[0] * a[1],
         "divide": lambda a: a[0] / a[1],
+        "divide_rn_f32": lambda a: a[0].float() / a[1].float(),
         "true_divide": lambda a: a[0] / a[1],
         "floor_divide": lambda a: torch.floor_divide(a[0], a[1]),
         "remainder": lambda a: torch.remainder(a[0], a[1]),

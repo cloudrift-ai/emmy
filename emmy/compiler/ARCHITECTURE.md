@@ -224,8 +224,9 @@ activations and stores per-linear `input_scale` tensors (modelopt's calibrated a
 calibration amax / (6 · 448)) marks its linears for W4A4. `loader.quant.spell_static_fp4_activations` runs after
 `spell_quantized_constants`, whose spelled weight cones are the marker it reads, and writes the quantize→dequantize
 round trip in front of each marked linear, in the same
-shared-vocabulary algebra: per 16-element K block, the e4m3 scale round trip (`to_f8e4m3(amax / (6·s2))`), ONE
-f32→f16 rounding of the fused scale (`fuse_nvfp4_scales` parity), the e2m1 encode over the rounded scale, the pair
+shared-vocabulary algebra: per 16-element K block, the e4m3 scale round trip (`to_f8e4m3((amax · 1/6) · 1/s2)`),
+the e2m1 encode over the fused f32 scale with round-to-nearest division even under fast math, the f32→f16 rounding
+of the scale during reconstruction (`fuse_nvfp4_scales` parity), the pair
 pack into an `f4e2m1x2` buffer, and the same pair-table-gather decode chain the weight side spells. Both matmul
 operands then read as one decode-chain shape, the graph's own meaning becomes Σ x̂·ŵ for the marked matmuls, and the
 numpy backend stays the parity oracle for every lowering of it. Two halves spell the round trip, and the split

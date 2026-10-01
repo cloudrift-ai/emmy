@@ -1796,8 +1796,9 @@ def _spell_static_fp4_quantize(
     (1/input_scale)``, with the per-layer global inverse derived while binding the
     checkpoint constant. Stock vLLM's CUDA kernel uses approximate reciprocals, so
     exact scale/code byte parity is checked separately. The activation divisor stays
-    f32; a zero block keeps it finite via the existing floor. Only the subsequent
-    reconstruction rounds the fused scale to f16.
+    f32, and its division rounds to nearest even under fast math: an approximate quotient
+    can cross an e2m1 code boundary. A zero block keeps it finite via the existing floor.
+    Only the subsequent reconstruction rounds the fused scale to f16.
 
     What the consumers share is the CODES and their raw block scales, never a reconstructed
     value: the reconstruction is spelled per consumer (:func:`_spell_static_fp4_decode`). Loop
@@ -1879,7 +1880,7 @@ def _spell_static_fp4_quantize(
     floor = const_bc(graph, name=f"{stem}_floor", value=1.0e-12, target_shape=bshape, dtype="f32")
     safe = graph.add_node(op=ElementwiseOp(op="maximum"), inputs=[fused32, floor], output=Tensor(f"{stem}_safe", bshape, "f32"))
     safe_bc = broadcast_to(graph, safe, blocked)
-    quot = graph.add_node(op=ElementwiseOp(op="divide"), inputs=[blk, safe_bc], output=Tensor(f"{stem}_norm", blocked, "f32"))
+    quot = graph.add_node(op=ElementwiseOp(op="divide_rn_f32"), inputs=[blk, safe_bc], output=Tensor(f"{stem}_norm", blocked, "f32"))
     codes = graph.add_node(op=ElementwiseOp(op="to_f4e2m1"), inputs=[quot], output=Tensor(f"{stem}_codes", blocked, "i32"))
     codes_f = graph.add_node(op=ReshapeOp(shape=flat), inputs=[codes], output=Tensor(f"{stem}_codes_flat", flat, "i32"))
     d = len(flat) - 1

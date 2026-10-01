@@ -43,6 +43,7 @@ logger = logging.getLogger(__name__)
 
 
 _INTRINSICS_CPP: dict[str, str] = {
+    "divide_rn_f32": "emmy_divide_rn_f32",
     "exp": "expf",
     "exp_fast": "expf",  # host reference stays libm-accurate; only the CUDA render takes __expf
     "rsqrt": "rsqrtf_",  # libm has no rsqrtf; PRELUDE provides one
@@ -62,6 +63,7 @@ PRELUDE = """\
 #include <algorithm>
 #include <vector>
 static inline float rsqrtf_(float x) { return 1.0f / sqrtf(x); }
+static inline float emmy_divide_rn_f32(float x, float y) { return x / y; }
 template <typename To, typename From>
 static inline To emmy_bitcast(From value) {
     static_assert(sizeof(To) == sizeof(From), "emmy_bitcast requires equal widths");

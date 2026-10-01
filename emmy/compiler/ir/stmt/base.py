@@ -295,6 +295,8 @@ def op_to_expr(fn: str, inputs: list[Expr], *, dtype: str | None = None) -> Expr
         return FuncCallExpr("bitwise_count", tuple(inputs))
     if fn in _BINARY_OP:
         return BinaryExpr(_BINARY_OP[fn], inputs[0], inputs[1])
+    if fn == "divide_rn_f32":
+        return FuncCallExpr(fn, tuple(inputs))
     if fn == "maximum":
         return FuncCallExpr("fmax", tuple(inputs))
     if fn == "minimum":

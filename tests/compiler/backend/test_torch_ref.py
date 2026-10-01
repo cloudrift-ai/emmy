@@ -75,6 +75,15 @@ def test_linear_and_elementwise():
     _assert_matches_numpy(g, {"x": r.standard_normal((4, 8)), "w": r.standard_normal((16, 8))})
 
 
+def test_round_to_nearest_f32_division_reference():
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("x", (4,), "f32"), node_id="x")
+    g.add_node(InputOp(), [], Tensor("scale", (4,), "f32"), node_id="scale")
+    g.add_node(ElementwiseOp(op="divide_rn_f32"), ["x", "scale"], Tensor("out", (4,), "f32"), node_id="out")
+    g.inputs, g.outputs = ["x", "scale"], ["out"]
+    _assert_matches_numpy(g, {"x": np.array([0.75, -1.25, 3, -4], dtype=np.float32), "scale": np.array([1, 2, 3, 4], dtype=np.float32)})
+
+
 def test_multi_output_preserves_declared_order_and_single_output_tensor_contract():
     g = Graph()
     g.add_node(InputOp(), [], Tensor("x", (2, 3)), node_id="x")

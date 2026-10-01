@@ -52,6 +52,7 @@ def _arange(x):
 
 _NAME_TO_FN: dict[str, object] = {
     "exp_fast": np.exp,  # the FAST_EXP-lowered exp — host semantics identical, CUDA renders __expf
+    "divide_rn_f32": np.divide,  # f32 reference division; CUDA keeps round-to-nearest under fast math
     "arange": _arange,
     "rsqrt": lambda x: 1.0 / np.sqrt(x),
     "relu": lambda x: np.maximum(0.0, x),
@@ -379,6 +380,7 @@ _OP_CLUSTERS: dict[str, str] = {
     "sign": "maximum",
     # sfu_div
     "divide": "divide",
+    "divide_rn_f32": "divide",
     "true_divide": "divide",
     "floor_divide": "divide",
     "remainder": "divide",
