@@ -775,6 +775,7 @@ def test_capture_replay_device_io_matches_eager():
                 ref = torch.nn.functional.rms_norm(torch.from_numpy(x), (1024,), m.weight, eps=m.eps).numpy()
             assert out.shape == (1, s, 1024)
             np.testing.assert_allclose(out, ref, rtol=1e-4, atol=1e-4)
+        assert sorted(prog._layouts) == [(("seq_len", s),) for s in (7, 32, 48)]  # one layout per seq_len, reused
 
 
 @requires_cuda

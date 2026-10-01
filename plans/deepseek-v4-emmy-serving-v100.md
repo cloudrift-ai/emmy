@@ -143,9 +143,14 @@ checkpoint stays impractical here.
      the sliced programs (split-K gate/up for widths 16 and dynamic): width 1 28 us, 16 47 us, 4096 1.2 ms, dynamic
      at 512 0.24 ms (whole experts 760 us / 667 us / 21.5 ms / 13.4 ms). Boot73: 118.5 ms per token for one request
      (the fork 148), 7.83 s to first token (main 7.64), 11.75 tokens/s at 8 concurrent (main 8.5); GSM8K 0.97 / 0.745.
-     Decode is now GPU-bound (~57 ms busy per stage, 31 of them the fork's attention kernel). Next: prefill is host-
-     bound (~0.6 ms of host work per expert launch, 256 experts a layer), and decode batches of 2-16 could be captured
-     too (they already ride the fixed slots row by row).
+     Decode is now GPU-bound (~57 ms busy per stage, 31 of them the fork's attention kernel). Prefill was host-bound
+     (~0.6 ms of host work per expert launch, 256 experts a layer); py-spy on two workers put 52% of it in rebuilding
+     the program's layout dict on every weight swap and output view. Keeping one layout per environment took boot78
+     to 4.16 s to first token (7.75 on main at #1009, the fork 3.77) and 16.1 tokens/s at 8 concurrent (12.0, the
+     fork 21.0), 119 ms per token unchanged. The greedy probe text moved with it, but the probe's log-probabilities
+     differ between two boots of one tree too: the first difference is the fork's layer-0 attention output, one fp16
+     step, on bit-identical input, stable within a boot. Next: decode batches of 2-16 could be captured too (they
+     already ride the fixed slots row by row).
    - Prefill: 5.7 s per stage against 1.9. The symbolic expert program takes 2.7 s against the fork's 1.0 (its main
      kernel reaches ~0.1 TFLOP/s on large experts, not on tensor cores), and ranks holding whole experts finish
      unevenly, so the others wait ~1.3 s per stage in all-reduces the fork does not wait in.
