@@ -6,7 +6,7 @@ the trunk is fp8-e4m3 with ``.scale`` siblings holding E8M0 block exponents, and
 projection is native MXFP4 (``I8 [out, in/2]`` nibble pairs plus ``F8_E8M0 [out, in/32]`` exponents).
 These tests build that dialect synthetically and pin what the loader must produce: a twin whose dense
 trunk carries real values, and an expert store whose routed weights stay COMPRESSED (blocks + scales
-as program inputs), optionally narrowed to one tensor-parallel rank's expert shard.
+as program inputs), optionally cut to one tensor-parallel rank's slice of every expert.
 """
 
 from __future__ import annotations
@@ -177,23 +177,30 @@ def test_a_float16_twin_keeps_the_routing_bias_float32(tmp_path):
     torch.testing.assert_close(loaded, references["gate_bias"], rtol=0, atol=0)
 
 
-def test_expert_range_narrows_the_load_to_one_shard(tmp_path):
-    """A tensor-parallel rank reads only its own experts: the others are never touched."""
+def test_expert_slice_keeps_one_ranks_cut_of_every_expert(tmp_path):
+    """A tensor-parallel rank holds every expert, cut along the intermediate axis: gate and up keep
+    the same rows, down the matching block columns, and the twin declares the cut shapes."""
     torch = pytest.importorskip("torch")
     pytest.importorskip("transformers")
 
     from emmy.compiler.loader.quant import decode_mxfp4
     from emmy.compiler.trace.huggingface import load_quantized_split
 
-    hidden, inter, experts = 64, 32, 4
+    hidden, inter, experts = 64, 64, 4
     _config, references = _native_checkpoint(tmp_path, torch, hidden, inter, experts)
-    _model, store = load_quantized_split(tmp_path, torch.float16, expert_range=(2, 4))
+    model, store = load_quantized_split(tmp_path, torch.float16, expert_slice=(1, 2))
 
-    layer = store["layers"][0]
-    assert tuple(layer["w_gate_up"].shape) == (2, 2 * inter, hidden // 32, 16)
-    # Shard-local index 0 is global expert 2 — the shard keeps the checkpoint's own order.
-    gate_up = decode_mxfp4(layer["w_gate_up"][0].numpy(), layer["w_gate_up_scale"][0].numpy()).T
-    np.testing.assert_array_equal(gate_up[:inter], references[(2, "w1")])
+    layer, cut = store["layers"][0], slice(32, 64)
+    assert tuple(layer["w_gate_up"].shape) == (experts, 64, hidden // 32, 16)
+    assert tuple(layer["w_down"].shape) == (experts, hidden, 1, 16)
+    for e in range(experts):
+        gate_up = decode_mxfp4(layer["w_gate_up"][e].numpy(), layer["w_gate_up_scale"][e].numpy()).T
+        np.testing.assert_array_equal(gate_up[:32], references[(e, "w1")][cut])
+        np.testing.assert_array_equal(gate_up[32:], references[(e, "w3")][cut])
+        down = decode_mxfp4(layer["w_down"][e].numpy(), layer["w_down_scale"][e].numpy()).T
+        np.testing.assert_array_equal(down, references[(e, "w2")][:, cut])
+    twin = model.model.layers[0].mlp.experts
+    assert tuple(twin.gate_up_proj.shape) == (experts, 64, hidden) and tuple(twin.down_proj.shape) == (experts, hidden, 32)
 
 
 def test_multi_token_prediction_head_is_never_read(tmp_path):

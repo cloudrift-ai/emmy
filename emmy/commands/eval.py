@@ -410,6 +410,7 @@ def handle_eval_golden(args) -> None:
                 prefill_bucket=0,
                 extra_widths=serving.static_widths,
                 symbolic=True,
+                expert_slices=serving.tensor_parallel_size,
             )
     except (NotImplementedError, ValueError) as exc:
         logger.error("in-model audit cannot represent %s: %s", source, exc)

@@ -7,8 +7,8 @@ attention sublayer standing in for the paged MLA attention the fork owns in prod
 `DeepseekV4DecoderLayer` is the oracle.
 
 Also pins the two invariants the plugin depends on: the carrier crossing the seam is the FLATTENED
-stream stack (`hc_mult * hidden`, not `hidden`), and a tensor-parallel expert shard's partials sum
-to the unsharded result.
+stream stack (`hc_mult * hidden`, not `hidden`), and the tensor-parallel ranks' expert slices sum
+to the whole experts' result.
 """
 
 from __future__ import annotations
@@ -110,32 +110,32 @@ def test_deepseek_seam_matches_eager_on_gpu():
 
 
 @pytest.mark.skip(reason="large fused schedule composition is not yet lazy")
-def test_sharded_expert_partials_sum_to_the_unsharded_combine_on_gpu():
-    """The compiled expert programs, run per shard, sum to the single-rank result the all-reduce
-    is standing in for — the invariant tensor-parallel serving rests on."""
+def test_sliced_expert_partials_sum_to_the_whole_combine_on_gpu():
+    """The compiled expert programs of each rank's intermediate slice sum to the whole-expert
+    result the all-reduce is standing in for — the invariant tensor-parallel serving rests on."""
+    import copy
+
     torch = pytest.importorskip("torch")
     transformers = pytest.importorskip("transformers")
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
 
+    from emmy.compiler.trace.huggingface import slice_routed_experts
     from emmy.serving.gen_runner import EmmyGenRunner
 
     config, model = _model(transformers, torch)
-    runner = EmmyGenRunner.from_model(model, dtype_str="float16", decode_bucket=4, max_tokens=None)
+    runner = EmmyGenRunner.from_model(copy.deepcopy(model), dtype_str="float16", decode_bucket=4, max_tokens=None)
     moe = next(m for m in runner._moe if m is not None)
 
     xn = (torch.randn(4, config.hidden_size) * 0.1).to(torch.float16).cuda()
     whole = runner._moe_combine(moe, xn)
 
-    experts = config.n_routed_experts
     total = torch.zeros_like(whole)
-    for lo in range(0, experts, experts // 2):
-        shard = dict(moe, expert_range=(lo, lo + experts // 2))
-        shard["inputs"] = {
-            name: (tensor[lo : lo + experts // 2].contiguous() if name.startswith(("w_", "b_")) else tensor)
-            for name, tensor in moe["inputs"].items()
-        }
-        total += runner._moe_combine(shard, xn)
+    for rank in range(2):
+        sliced = copy.deepcopy(model)
+        slice_routed_experts(sliced, rank, 2)
+        part = EmmyGenRunner.from_model(sliced, dtype_str="float16", decode_bucket=4, max_tokens=None, expert_slices=2)
+        total += part._moe_combine(next(m for m in part._moe if m is not None), xn)
 
     torch.testing.assert_close(total.float(), whole.float(), rtol=2e-2, atol=2e-2)
 

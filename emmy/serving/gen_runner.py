@@ -207,19 +207,7 @@ class _Program:
             return [outs[n].clone() for n in self.output_names]
 
 
-def local_expert_slice(expert: int, expert_range):
-    """This rank's own index for a GLOBAL expert id, or ``None`` when another rank owns it.
-
-    A tensor-parallel rank loads one contiguous expert shard (``load_quantized_split``'s
-    ``expert_range``) and stacks it from index 0, so the router's global selection has to be
-    translated before it can index the rank's own expert table."""
-    if expert_range is None:
-        return expert
-    lo, hi = expert_range
-    return expert - lo if lo <= expert < hi else None
-
-
-def combine_routed_experts(xn, gated, run_expert, *, accumulate_float32=False, expert_range=None):
+def combine_routed_experts(xn, gated, run_expert, *, accumulate_float32=False):
     """Route + combine for one MoE layer — shared by :meth:`EmmyGenRunner._moe_combine` and its
     parity tests so both always exercise the same math. ``gated`` is the HF router module's
     return, whose LAST two entries are ``scores[T, k]`` / ``indices[T, k]``; each HIT expert
@@ -230,15 +218,12 @@ def combine_routed_experts(xn, gated, run_expert, *, accumulate_float32=False, e
     returns the float32 weighted sum so its caller can combine every marked MoE contribution
     before one final model-dtype cast. Ordinary routers keep the fp16 hot path.
 
-    ``expert_range`` is one tensor-parallel rank's expert shard. Every rank runs the SAME router
-    over the whole expert space (the router is replicated, so its selection is identical) and
-    contributes only the hits it owns, indexed rank-locally; summing the ranks' partials — the
-    all-reduce the caller issues — reproduces the unsharded result exactly, because each routed
-    contribution belongs to exactly one shard. A rank that wins no token returns zeros, which is
-    why the reduction stays correct without any special case.
+    On a tensor-parallel rank ``run_expert`` runs that rank's intermediate slice of the expert
+    (``slice_routed_experts``): every rank runs the same picks, and the all-reduce the caller issues
+    sums the ranks' partials into the whole expert output.
 
     A single row (every decode step of one request) reads its ``k`` picks to the host once and
-    runs each owned expert on the row itself, in the same ascending expert order: the general
+    runs each picked expert on the row itself, in the same ascending expert order: the general
     path's ``unique``, per-expert ``where`` and row gathers each wait on the device, and one
     row needs none of them."""
     import torch
@@ -250,16 +235,11 @@ def combine_routed_experts(xn, gated, run_expert, *, accumulate_float32=False, e
     if indices.shape[0] == 1:
         picks = indices[0].tolist()
         for pos in sorted(range(len(picks)), key=picks.__getitem__):
-            local = local_expert_slice(picks[pos], expert_range)
-            if local is not None:
-                out += run_expert(local, xn).to(accumulate_dtype) * scores[:, pos, None]
+            out += run_expert(picks[pos], xn).to(accumulate_dtype) * scores[:, pos, None]
         return out
     for e in indices.unique().tolist():
-        local = local_expert_slice(e, expert_range)
-        if local is None:
-            continue  # another rank owns this expert and adds its contribution to the same sum
         tok, pos = torch.where(indices == e)
-        partial = run_expert(local, xn[tok]).to(accumulate_dtype)
+        partial = run_expert(e, xn[tok]).to(accumulate_dtype)
         out.index_add_(0, tok, partial * scores[tok, pos, None])
     return out
 
@@ -874,7 +854,7 @@ class EmmyGenRunner:
         layer_range=None,
         include_embed=True,
         include_norm=True,
-        expert_range=None,
+        expert_slice=None,
         plan_cache=None,
     ):
         """``model_id`` is a local checkpoint directory or an HF repo id, the latter optionally
@@ -886,7 +866,7 @@ class EmmyGenRunner:
         from transformers import AutoModelForCausalLM
 
         from emmy.compiler.loader.safetensors import split_revision, warn_if_unpinned
-        from emmy.compiler.trace.huggingface import _auto_config_from_pretrained, quantized_checkpoint_dir
+        from emmy.compiler.trace.huggingface import _auto_config_from_pretrained, quantized_checkpoint_dir, slice_routed_experts
 
         warn_if_unpinned(model_id)  # covers both lanes below, including the plain from_pretrained one
         # A quantized checkpoint cannot go through ``from_pretrained`` (transformers would
@@ -930,7 +910,7 @@ class EmmyGenRunner:
                 layer_range=layer_range,
                 include_embed=include_embed,
                 include_norm=include_norm,
-                expert_range=expert_range,
+                expert_slice=expert_slice,
             )
             with torch.device("cpu"):
                 return cls.from_model(
@@ -943,7 +923,7 @@ class EmmyGenRunner:
                     layer_range=layer_range,
                     include_embed=include_embed,
                     include_norm=include_norm,
-                    expert_range=expert_range,
+                    expert_slices=expert_slice[1] if expert_slice else 1,
                     plan_cache=plan_cache,
                 )
         logger.info("[gen_runner] loading %s (%s, CPU trace)...", model_id, dtype_str)
@@ -954,6 +934,8 @@ class EmmyGenRunner:
             # ``layer_types``), and the helper reloads with Transformers' native class in that case.
             config = _auto_config_from_pretrained(repo, revision=revision)
             model = AutoModelForCausalLM.from_pretrained(repo, revision=revision, dtype=getattr(torch, dtype_str), config=config).eval()
+            if expert_slice is not None:
+                slice_routed_experts(model, *expert_slice)
             return cls.from_model(
                 model,
                 dtype_str=dtype_str,
@@ -963,6 +945,7 @@ class EmmyGenRunner:
                 layer_range=layer_range,
                 include_embed=include_embed,
                 include_norm=include_norm,
+                expert_slices=expert_slice[1] if expert_slice else 1,
                 plan_cache=plan_cache,
             )
 
@@ -979,7 +962,7 @@ class EmmyGenRunner:
         layer_range=None,
         include_embed=True,
         include_norm=True,
-        expert_range=None,
+        expert_slices=1,
         plan_cache=None,
     ):
         """Build from an already-loaded CausalLM module (the network-free path). ``model``
@@ -989,7 +972,9 @@ class EmmyGenRunner:
         on the quantized path); the expert programs are then compiled with the decode + scale
         algebra spelled in-graph (``spell_quantized_inputs`` via ``_compile_split``), one program
         set per distinct expert SHAPE. A store whose ``trunk`` is ``"codes"`` (AWQ/EXL3) also puts
-        the TRUNK on the checkpoint-sourced lane, so its coded linears stay compressed on the card."""
+        the TRUNK on the checkpoint-sourced lane, so its coded linears stay compressed on the card.
+        ``expert_slices`` is the tensor-parallel width the routed experts arrive cut across
+        (``slice_routed_experts``); it keys the pack, since the cut changes every expert program."""
         import numpy as np
         import torch
 
@@ -1080,6 +1065,8 @@ class EmmyGenRunner:
             "layer_start": int(start),
             "layer_end": int(end),
         }
+        if expert_slices > 1:
+            pack_key["expert_slices"] = int(expert_slices)
         if precision_contract is not None:
             pack_key["precision_contract"] = precision_contract
         # The config hash alone does NOT identify a compressed checkpoint: the twin is built from a
@@ -1401,12 +1388,6 @@ class EmmyGenRunner:
                     if has_bias:
                         einputs["b_gate_up"] = experts.gate_up_proj_bias.detach().to(dtype)
                         einputs["b_down"] = experts.down_proj_bias.detach().to(dtype)
-                    if expert_range is not None:
-                        # The quantized store arrives pre-narrowed by the loader; the twin's own
-                        # tables carry every expert, so a shard keeps only its slice (every expert
-                        # tensor is E-leading) — the combine indexes them rank-locally.
-                        lo, hi = expert_range
-                        einputs = {nm: tensor[lo:hi].contiguous() for nm, tensor in einputs.items()}
                     if interleaved:
                         for nm in ("w_gate_up", "b_gate_up"):
                             if nm in einputs:
@@ -1427,9 +1408,6 @@ class EmmyGenRunner:
                         "num_experts": int(next(iter(einputs.values())).shape[0]),
                         # k routed experts per token — the fixed-slot tier's slot count.
                         "top_k": int(getattr(text_config, "num_experts_per_tok", 0) or 0),
-                        # This rank's expert shard, if any: the router selects over the GLOBAL expert
-                        # space on every rank, so the combine translates and filters against it.
-                        "expert_range": expert_range,
                         "accumulate_float32": bool(getattr(gate, "_emmy_routed_accumulate_float32", False)),
                     }
                 )
@@ -2094,8 +2072,8 @@ class EmmyGenRunner:
         if len(outs) == 3 and self.hc_mult > 1:
             # Hyper-connection seam: the post program already mixed the attention output onto the
             # streams and placed the shared expert, and returns the per-stream weights the ROUTED
-            # result still needs. Under expert sharding the combine yields THIS rank's partial, so
-            # the reduction runs before the placement closes the layer.
+            # result still needs. The routed result is reduced across the ranks' expert slices
+            # before the placement closes the layer.
             from emmy.compiler.trace.huggingface import place_routed_streams
 
             mixed, xn, mix = outs
@@ -2106,29 +2084,29 @@ class EmmyGenRunner:
             # layer's pre uploads the carrier at the residual dtype.
             mixed = mixed.to(self.residual_dtype)
             xn = xn.to(self._activation_dtype)
-            routed = self._moe_combine(moe, xn, token_ids)
-            if (reduce_routed := getattr(self, "_reduce_routed", None)) is not None:
-                routed = reduce_routed(routed)
-            return place_routed_streams(mixed, routed, mix)
+            return place_routed_streams(mixed, self._moe_routed(moe, xn, token_ids), mix)
         if len(outs) == 3:
             h, xn, shared = outs
         else:
             h, xn = outs
             shared = None
-        # Single-token decode rides the FIXED-SLOT combine (capture-legal — no host sync, a
-        # fixed launch set); every wider step keeps the routed dispatch, whose launch set
-        # varies with the routing (eager only). NEVER on an expert shard: the slot selector
-        # writes GLOBAL expert ids into tables that hold only this rank's experts.
-        if self._slots_ok and xn.shape[0] == 1 and moe.get("expert_range") is None:
-            combined = self._moe_combine_slots(moe, xn, token_ids)
-        else:
-            combined = self._moe_combine(moe, xn, token_ids)
-        if (reduce_routed := getattr(self, "_reduce_routed", None)) is not None:
-            combined = reduce_routed(combined)  # tensor-parallel expert shard: sum the ranks' partials
         if shared is not None:
             if not moe.get("accumulate_float32", False):
                 raise RuntimeError("a separate float32 shared-expert output requires float32 routed accumulation")
-        return _combine_moe_output(h, combined, shared)
+        return _combine_moe_output(h, self._moe_routed(moe, xn, token_ids), shared)
+
+    def _moe_routed(self, moe, xn, token_ids):
+        """The routed experts' output for one MoE layer. Single-token decode rides the FIXED-SLOT
+        combine (capture-legal — no host sync, a fixed launch set); every wider step keeps the routed
+        dispatch, whose launch set varies with the routing (eager only). On a tensor-parallel group
+        each rank computes its slice of every pick, and the group reduction sums the slices."""
+        if self._slots_ok and xn.shape[0] == 1:
+            routed = self._moe_combine_slots(moe, xn, token_ids)
+        else:
+            routed = self._moe_combine(moe, xn, token_ids)
+        if (reduce_routed := getattr(self, "_reduce_routed", None)) is not None:
+            routed = reduce_routed(routed)
+        return routed
 
     def _route_post_device(self, layer, attn_out, residual):
         """Tier-route one post program launch; returns the full output list (1 output for a
@@ -2209,7 +2187,6 @@ class EmmyGenRunner:
                 gated,
                 lambda e, rows: self._launch_expert(moe, e, rows),
                 accumulate_float32=moe.get("accumulate_float32", False),
-                expert_range=moe.get("expert_range"),
             )
 
     def _moe_combine_slots(self, moe, xn, token_ids=None):

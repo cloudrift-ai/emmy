@@ -592,6 +592,21 @@ def test_release_config_uses_capacity_as_default_prefill_bucket(tmp_path):
     assert serving.static_widths == (1, 32, 96)
 
 
+def test_release_config_reads_the_tensor_parallel_width(tmp_path):
+    """The expert twins are traced at the cut each tensor-parallel rank holds, so the config's own
+    serving flags are where that width comes from."""
+    assert load_serving_config(SERVE_DIR / "models" / "deepseek-v4-flash-0731.env").tensor_parallel_size == 8
+    config = tmp_path / "model.env"
+    config.write_text(
+        f"SERVE_MODEL=org/model\nSERVE_GPU=NVIDIA-Test\nSERVE_GOLDEN_FILE={tmp_path / 'golden.json'}\n"
+        "SERVE_MAX_NUM_BATCHED_TOKENS=96\nSERVE_DECODE_BUCKET=32\nSERVE_PREFILL_CAPACITY=96\n"
+    )
+    assert load_serving_config(config).tensor_parallel_size == 1
+    config.write_text(config.read_text() + 'SERVE_EXTRA_ARGS="--enforce-eager --tensor-parallel-size=x"\n')
+    with pytest.raises(ValueError, match="positive integer"):
+        load_serving_config(config)
+
+
 def test_release_config_rejects_zero_prefill_capacity(tmp_path):
     config = tmp_path / "model.env"
     config.write_text(

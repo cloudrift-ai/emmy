@@ -109,7 +109,14 @@ def handle_trace(args):
         if serving.static_only:
             graphs = capture_twin_graphs(args.input, decode_bucket=1, prefill_bucket=0, symbolic=False, static_only=True)
         else:
-            graphs = capture_twin_graphs(args.input, decode_bucket=0, prefill_bucket=0, extra_widths=serving.static_widths, symbolic=True)
+            graphs = capture_twin_graphs(
+                args.input,
+                decode_bucket=0,
+                prefill_bucket=0,
+                extra_widths=serving.static_widths,
+                symbolic=True,
+                expert_slices=serving.tensor_parallel_size,
+            )
         source_name = args.input.rstrip("/").rsplit("/", 1)[-1].partition("@")[0]
         destination = args.output or f"{source_name}.serving-twins.golden.json"
         try:

@@ -294,13 +294,15 @@ def test_deepseek_serving_twins_capture_the_hyper_connection_seam_weight_free(tm
     assert not token_dim.is_static and token_dim.as_atom_name() == "num_tokens"
 
 
-def test_deepseek_expert_twin_records_the_native_mxfp4_program_serving_binds(tmp_path):
+@pytest.mark.parametrize(("inter", "slices"), [(32, 1), (64, 2)])
+def test_deepseek_expert_twin_records_the_native_mxfp4_program_serving_binds(tmp_path, inter, slices):
     """The pinned checkpoint declares an fp8 TRUNK while storing its routed experts as native MXFP4
     (``expert_dtype: fp4``), and the serving loader keeps those experts packed. The expert twin has
     to follow the experts, not the trunk declaration, or the golden records a program serving never
     runs. ``w_down``'s packed shape also pins the layout the caller passes down: these experts are
     ``F.linear`` parameters, so the blocks lead with ``out``; the ``x @ W`` reading would produce
-    (16, 2, 16) here instead."""
+    (16, 2, 16) here instead. Served across tensor-parallel ranks, each rank holds a cut of every
+    expert, so the twin is the cut program: intermediate 64 over two ranks records the 32 one."""
     pytest.importorskip("torch")
     transformers = pytest.importorskip("transformers")
 
@@ -309,7 +311,7 @@ def test_deepseek_expert_twin_records_the_native_mxfp4_program_serving_binds(tmp
     config = transformers.DeepseekV4Config(
         vocab_size=64,
         hidden_size=64,
-        moe_intermediate_size=32,
+        moe_intermediate_size=inter,
         num_hidden_layers=2,
         num_attention_heads=4,
         head_dim=8,
@@ -340,7 +342,7 @@ def test_deepseek_expert_twin_records_the_native_mxfp4_program_serving_binds(tmp
     }
     config.expert_dtype = "fp4"
     config.save_pretrained(tmp_path)
-    graphs = capture_twin_graphs(str(tmp_path), decode_bucket=4, prefill_bucket=0)
+    graphs = capture_twin_graphs(str(tmp_path), decode_bucket=4, prefill_bucket=0, expert_slices=slices)
     assert set(graphs) == {"pre4", "pre-sym", "post4", "post-sym", "expert4@mxfp4", "expert-sym@mxfp4"}
     expert = graphs["expert4@mxfp4"]
     assert set(expert.inputs) >= {"w_gate_up", "w_gate_up_scale", "w_down", "w_down_scale"}
@@ -348,6 +350,7 @@ def test_deepseek_expert_twin_records_the_native_mxfp4_program_serving_binds(tmp
     assert {out.dtype.name for i, out in by_id.items() if i.startswith("w_")} == {"u8"}
     shape = tuple(d.as_static() for d in by_id["w_down"].shape)
     assert shape == (64, 1, 16), f"expected (out, in/32, 16) for an F.linear expert, got {shape}"
+    assert tuple(d.as_static() for d in by_id["w_gate_up"].shape) == (64, 2, 16)
 
 
 @pytest.mark.skip(reason="global greedy ranking still traverses the full coded-expert schedule space")

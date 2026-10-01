@@ -811,6 +811,52 @@ def moe_expert_layout(experts):
     )
 
 
+def expert_intermediate_slice(name: str, tensor, rank: int, world: int, *, stacked: bool = False):
+    """Tensor-parallel rank ``rank``'s cut of one expert tensor along the intermediate axis.
+
+    ``name`` is an expert program input name in its stored ``(out, in, …)`` layout, behind a leading
+    expert axis when ``stacked``: gate and up (``w_gate*``, ``w_up*``, ``w_gate_up*``) keep rows, down
+    (``w_down*``) keeps columns — for a block-coded tensor that axis counts blocks, so the cut stays
+    block-aligned. A concatenated ``w_gate_up`` keeps the same rows of each half."""
+    import torch  # noqa: PLC0415
+
+    axis = (1 if name.startswith("w_down") else 0) + int(stacked)
+    halves = 2 if name.startswith("w_gate_up") else 1
+    extent = tensor.shape[axis] // halves
+    if extent % world:
+        raise ValueError(f"expert input {name!r} has {extent} intermediate entries on axis {axis}, not divisible by {world} ranks")
+    width = extent // world
+    parts = [tensor.narrow(axis, half * extent + rank * width, width) for half in range(halves)]
+    return torch.cat(parts, dim=axis).contiguous()
+
+
+def slice_routed_experts(model, rank: int, world: int) -> None:
+    """Cut every routed expert of ``model`` to tensor-parallel rank ``rank``'s 1/``world`` of its
+    intermediate axis, in place.
+
+    Each rank then holds a slice of EVERY expert instead of a subset of whole experts: gate and up
+    keep the same intermediate rows, down the matching columns, so a rank's expert output is a partial
+    sum the group all-reduce completes and every rank runs the same picks. A meta parameter is
+    re-declared at the cut shape; a real one keeps its cut values. Only the concatenated, biasless
+    ``F.linear`` layout (DeepSeek, OLMoE) is cut."""
+    from torch import nn  # noqa: PLC0415
+
+    trunk = getattr(model, "model", model)
+    trunk = getattr(trunk, "language_model", trunk)
+    for block in trunk.layers:
+        parts = moe_block_parts(block.mlp) if hasattr(block, "mlp") else None
+        if parts is None:
+            continue
+        experts = parts[1]
+        if moe_expert_layout(experts) != (False, False, False):
+            raise NotImplementedError(
+                f"cutting routed experts across ranks needs the (out, in), concatenated, biasless layout; got {moe_expert_layout(experts)}"
+            )
+        for attr, name in (("gate_up_proj", "w_gate_up"), ("down_proj", "w_down")):
+            cut = expert_intermediate_slice(name, getattr(experts, attr), rank, world, stacked=True)
+            setattr(experts, attr, nn.Parameter(cut, requires_grad=False))
+
+
 def replace_moe_with_traceable_expert(block) -> bool:
     """Replace token routing with one representative expert for trace inventory.
 
@@ -1823,7 +1869,7 @@ def load_quantized_split(
     layer_range=None,
     include_embed=True,
     include_norm=True,
-    expert_range=None,
+    expert_slice=None,
 ):
     """Architecture twin + expert store for a quantized (MoE) checkpoint — SHARD-STREAMED.
 
@@ -1870,6 +1916,11 @@ def load_quantized_split(
     ``layer_range=(start, end)`` restricts checkpoint reads to one pipeline stage's absolute
     decoder interval. ``include_embed`` and ``include_norm`` assign the two boundary tensors;
     all unowned parameters remain meta and must never be read by that stage.
+
+    ``expert_slice=(rank, world)`` keeps tensor-parallel rank ``rank``'s cut of every per-expert
+    tensor along the intermediate axis (:func:`expert_intermediate_slice`) and re-declares the twin's
+    experts at the cut shapes (:func:`slice_routed_experts`), so the store and the twin agree. Only
+    per-expert-module checkpoints are cut; an E-stacked or EXL3 expert table is refused.
 
     Returns ``(model, expert_store)`` with ``expert_store = {"fmt": "mxfp4" | "f8e4m3" | "exl3" | None,
     "layers": {layer_index: {input_name: tensor}}}`` (``fmt`` None = experts unquantized), plus
@@ -2005,12 +2056,8 @@ def load_quantized_split(
                 slot = _expert_slot(rename(k))
                 if slot is not None:
                     layer, name, expert = slot
-                    if expert is not None and expert_range is not None:
-                        if not expert_range[0] <= expert < expert_range[1]:
-                            continue  # another tensor-parallel rank owns this expert; never read its bytes
-                        # The store's expert axis is RANK-LOCAL: a shard stacks its own experts from
-                        # index 0, and the router maps global selections onto that axis at dispatch.
-                        expert -= expert_range[0]
+                    if expert_slice is not None and expert is None:
+                        raise NotImplementedError(f"cutting an E-stacked expert table across ranks is not supported: {k!r}")
                     t = f.get_tensor(k)
                     if native_experts:
                         # The published MXFP4 dialect: ``I8 [out, in/2]`` nibble pairs beside
@@ -2045,6 +2092,10 @@ def load_quantized_split(
                     else:
                         if t.dtype == torch.int16 or name.endswith(("_suh", "_svh")):
                             fmt = "exl3"
+                            if expert_slice is not None:
+                                raise NotImplementedError(f"cutting EXL3 trellis experts across ranks is not supported: {k!r}")
+                        if expert_slice is not None:
+                            t = expert_intermediate_slice(name, t, *expert_slice)
                         per_expert.setdefault(layer, {}).setdefault(name, {})[expert] = t
                         if t.dtype == torch.int16:
                             codebooks.setdefault(layer, {})[name] = _exl3_codebook(index, k[: -len(".trellis")])
@@ -2146,6 +2197,8 @@ def load_quantized_split(
             if param is not None:
                 state[key] = torch.empty(param.shape, dtype=dtype, device="cpu")
 
+    if expert_slice is not None:
+        slice_routed_experts(model, *expert_slice)
     _trim_padded_weights(model, state)  # EXL3 pads both dims of every coded linear to 128
     missing, unexpected = model.load_state_dict(state, strict=False, assign=True)
     if unexpected:

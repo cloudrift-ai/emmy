@@ -37,6 +37,7 @@ class ServingConfig:
     golden_file: Path
     realizations: tuple[ServingRealization, ...]
     static_only: bool
+    tensor_parallel_size: int = 1
 
     @property
     def model_provenance(self) -> str:
@@ -222,7 +223,22 @@ def load_serving_config(path: str | Path) -> ServingConfig:
         golden_file=golden_path.resolve(),
         realizations=realizations,
         static_only=static_only,
+        tensor_parallel_size=_tensor_parallel_size(values.get("SERVE_EXTRA_ARGS", ""), source),
     )
+
+
+def _tensor_parallel_size(extra_args: str, source: Path) -> int:
+    """The tensor-parallel width ``SERVE_EXTRA_ARGS`` serves at: each rank holds that cut of every
+    routed expert, so the expert twins are traced at it."""
+    args = shlex.split(extra_args)
+    for i, arg in enumerate(args):
+        flag, eq, value = arg.partition("=")
+        if flag in ("--tensor-parallel-size", "-tp"):
+            value = value if eq else (args[i + 1] if i + 1 < len(args) else "")
+            if not value.isdigit() or int(value) < 1:
+                raise ValueError(f"{source}: {flag} must be a positive integer, got {value!r}")
+            return int(value)
+    return 1
 
 
 def revision_matches(golden_revision: str | None, serving_revision: str | None) -> bool:
