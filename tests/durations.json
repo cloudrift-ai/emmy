@@ -1277,6 +1277,7 @@
  "tests/serving/test_moe_split.py::test_serving_trunk_constants_retarget_to_checkpoint_keys": 0.06,
  "tests/serving/test_moe_split.py::test_the_serving_router_keeps_its_selection_bias_float32": 1.29,
  "tests/serving/test_twins_coded.py::test_coded_twin_spells_the_deployed_contraction": 0.37,
+ "tests/serving/test_twins_coded.py::test_deepseek_expert_twin_records_the_native_mxfp4_program_serving_binds[64-2]": 7.0,
  "tests/serving/test_twins_coded.py::test_deepseek_serving_twins_capture_the_hyper_connection_seam_weight_free": 0.49,
  "tests/serving/test_twins_coded.py::test_gdn_serving_capture_has_explicit_state_inputs_and_outputs[False]": 2.31,
  "tests/serving/test_twins_coded.py::test_gdn_serving_capture_has_explicit_state_inputs_and_outputs[True]": 1.75,
