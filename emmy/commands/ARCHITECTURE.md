@@ -371,7 +371,8 @@ and a `[timing] <name>: 12.3s` line is logged. Phase-name constants live in `tim
 
 **Measured phases:** provisioning `vm_provision`, `remote_provision`; deploy `image_pull` (budget
 `IMAGE_PULL_TIMEOUT`, 7200 s: a two-engine plan pulls two vLLM images, and through a forward proxy such as FCBK's
-Squid that takes most of an hour), `model_download` (7200 s per model),
+Squid that takes most of an hour), `model_download` (`MODEL_DOWNLOAD_TIMEOUT`, 14400 s per model: a 30B BF16
+checkpoint is ~60 GB, ~95 minutes at that speed),
 `model_load_and_warmup` (detached `compose up -d` until `/health` answers — weight load into GPU + CUDA graph capture +
 warmup; polled with short SSH calls, so a reset connection costs one probe, and a service that exits fails at once),
 `smoke_test`; plus `benchmark`, `teardown`, and `command` (command recipes). After `model_load_and_warmup`,

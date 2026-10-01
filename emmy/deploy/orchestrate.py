@@ -34,6 +34,11 @@ SMOKE_INTERVAL = 10
 #: proxy (FCBK's Squid moves about 10 MB/s) that is close to an hour, and the old 1800 s
 #: killed the pull with the layers almost in. Same budget as one weight download below.
 IMAGE_PULL_TIMEOUT = 7200
+#: Budget for one model's weight download, in seconds. A 30B BF16 checkpoint is ~60 GB,
+#: ~95 minutes at the ~10 MB/s a forward proxy delivers; the previous 7200 s left too
+#: little margin for a proxy that slows down, and a timed-out download on a fresh VM is
+#: the whole download lost.
+MODEL_DOWNLOAD_TIMEOUT = 14400
 
 
 async def baked_hf_cache(run_cmd, image):
@@ -241,7 +246,7 @@ async def run_deploy(
                 f" {image}"
                 f" -c 'HF_HUB_ENABLE_HF_TRANSFER=1 hf download {model_name}{revision_arg}'"
             )
-            rc, _, _ = await run_cmd(dl_cmd, timeout=7200, log_output=True)
+            rc, _, _ = await run_cmd(dl_cmd, timeout=MODEL_DOWNLOAD_TIMEOUT, log_output=True)
             if rc != 0:
                 logger.error(f"Failed to download model {model_name}")
                 return False

@@ -15,7 +15,7 @@ def _recipe() -> Recipe:
     )
 
 
-async def test_image_pull_gets_the_two_hour_budget():
+async def test_image_pull_and_weight_download_budgets_fit_a_slow_proxy():
     timeouts: dict[str, int] = {}
 
     async def run_cmd(command, stream=True, timeout=600, log_output=False):
@@ -34,3 +34,6 @@ async def test_image_pull_gets_the_two_hour_budget():
     assert ok
     # Two vLLM images are 20-30 GB; through FCBK's Squid (~10 MB/s) the old 1800 s cut the pull off.
     assert timeouts["docker compose pull --ignore-pull-failures"] == orchestrate.IMAGE_PULL_TIMEOUT == 7200
+    # One 30B BF16 checkpoint is ~60 GB, ~95 min at ~10 MB/s: two hours per model was too thin a margin.
+    download_timeouts = {t for cmd, t in timeouts.items() if "hf download" in cmd}
+    assert download_timeouts == {orchestrate.MODEL_DOWNLOAD_TIMEOUT} and orchestrate.MODEL_DOWNLOAD_TIMEOUT == 14400
