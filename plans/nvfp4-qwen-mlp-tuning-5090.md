@@ -195,6 +195,14 @@ rows that strict evidence legitimately permits, so the launcher isolates the DB 
 reproducible. The first full boot imported exactly these 16 rows, compiled both programs, and reached health
 200 on host port 8080. The final golden-only server compiled all 64 layers, used seven kernels per shape with
 three native FP4 contraction kernels, and admitted no inherited hand pins or preexisting tune DB evidence.
+The live M=64 log shortens the first cut child's symbol to `...place_f688369f74`, whereas the recorded row is
+`...place_f688369f74__place_c0904cfc6e`. The live symbol's only cached cubin was created during the first
+golden-only boot and has 66 registers and 31,744 bytes of static shared memory, matching the measured `w4x1`
+first-piece resource (about 30 KiB, 66 registers). The older `...place_c0904cfc6e` cubin predates golden-only
+boot and has 74 registers/16,384 bytes, matching the original `w1x1` resource. The second gate/up and down
+live names match the `w4x2` and `w2x2` golden rows. This is a strict-row and cached-resource inference, not a
+direct dump of the running executor's schedule objects. It resolves the apparent name mismatch without claiming
+a measured end-to-end tuning gain.
 
 ## Paired serving measurements and qualification
 
@@ -251,6 +259,9 @@ runtime used the same external client as stock. The hand-tuned M=64 golden has a
 MLP timing win, but **no clear end-to-end improvement over the original pinned mixed route** in these small
 samples; the long extraction repeat is slightly slower. Both mixed routes outperform matched eager stock in
 these measurements, which does not imply they beat other stock deployment configurations.
+The next useful performance measurement is actual-checkpoint MLP time inside serving (or a replay with
+representative packed weights and working set) to locate where the isolated synthetic gain disappears before
+expanding another knob sweep; the current results do not establish its cause.
 
 The summary responses from all arms satisfied the four-bullet numeric summary request. For extraction,
 the 128-token budget clipped every arm; a separate natural-EOS max-256 run ended at stock 131 tokens and
@@ -263,8 +274,16 @@ above bounds numerical error on sampled inputs, not whole-model equivalence.
 The final golden server also completed a 4,005-input/16-output near-4K request (TTFT 9303.57 ms, TPOT
 95.36 ms, 10.73 s total, zero failures). A chat stream was cancelled **after actual text `1`**, then a fresh
 deterministic request answered `Tokyo` and `/health` returned HTTP 200. The server remains reachable on host
-port 8080. Remaining release work is repository prior refit, `make test-priors`, final CI, and review of the
+port 8080. Remaining release work is `make test-priors`, final CI, and review of the
 documented comparator/TMA limitations; no further GPU tuning is required for this bounded round.
+
+Adding a repository model golden requires refitting both offline priors even though this serving launcher uses
+strict measured evidence. The repository import included this golden's 16 performance rows and six routes.
+Default schedule export completed successfully after roughly 90–93 minutes of active CPU enumeration, producing
+750 golden and 828 measured groups; 61 golden rows were skipped by the exporter. Two logged producer-identity
+skips were in older Qwen3.8 V100 golden families, outside the new NVFP4 file; no causal compiler regression is
+established from those logs. Placement and schedule refits both wrote new weight artifacts. The required
+`make test-priors` schedule reproduction nodes are still running; their result belongs in the final gate report.
 
 ## Automated review disposition
 
