@@ -379,9 +379,9 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   gate only weights the selection), and the runner refuses to route such a layer without them.
 
   Under tensor parallelism the plugin hands the runner the rank's slice (`expert_slice=(rank, world)`): the quantized
-  loader keeps that slice of every per-expert checkpoint tensor, the unquantized lane slices the twin's own expert tables,
-  and the group all-reduce sums the ranks' partial outputs. The distributed gate is a REAL-engine parity test: the
-  same tiny checkpoint served single-rank and TP2×PP2 must produce identical greedy token ids
+  loader keeps that slice of every per-expert checkpoint tensor, the unquantized lane slices the twin's own expert
+  tables, and the group all-reduce sums the ranks' partial outputs. The distributed gate is a REAL-engine parity test:
+  the same tiny checkpoint served single-rank and TP2×PP2 must produce identical greedy token ids
   (`tests/serving/generation/test_vllm_engine_deepseek_gpu.py`). Two seam contracts the engine enforces that
   in-process gates cannot: compiled twins may hand outputs back in their ACCUMULATION dtype, so the runner normalizes
   the carrier to the residual dtype and the routed input / final-norm output to the activation dtype at the seam; and

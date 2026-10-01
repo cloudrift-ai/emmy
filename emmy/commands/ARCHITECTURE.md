@@ -601,7 +601,8 @@ defaults to **whole-step CUDA graphs for decode AND chunk/mixed steps** (a `--co
 `EMMY_GEN_DECODE_BUCKET=0`). An MoE model's ladder is capped at capture size 1: single-token decode rides the
 fixed-slot expert tier, while wider steps ride the routed expert dispatch, which host-syncs and a whole-step capture
 cannot record; `_is_moe_model` probes the LOCAL config cache as UX, a caller-supplied `--compilation-config` on an
-MoE model is checked at boot, and `EmmyGenModel.__init__` carries the authoritative guard for probe misses). Under `--speculative-config` the ladder is derived from the resulting
+MoE model is checked at boot, and `EmmyGenModel.__init__` carries the authoritative guard for probe misses).
+Under `--speculative-config` the ladder is derived from the resulting
 `query_len = num_speculative_tokens + 1`: dense candidates, each floored to a multiple of `query_len`, so that vLLM's
 round-up to that multiple cannot push a step's padded width past the decode bucket and off the static decode twin
 (`serving/ARCHITECTURE.md` carries the rule and its invariant). The emmy generative arm also defaults
