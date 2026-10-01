@@ -204,7 +204,8 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   M=1; falls back to symbolic above the bucket or if a static compile fails. So
   up to 4 capacity programs/layer — a real memory-budget risk for the activation buffers, though the twin's
   **weights are shared**: `_compile_split` binds constants through a per-wrapper device cache
-  (`_bind_device_constants` — one upload per `(source_path, load_ops)`, the same device tensor lent to both builds), so
+  (`_bind_plan_constants` — one upload per `(source_path, load_ops, plan dtype)`, the same device tensor lent to both
+  builds when their logical dtypes agree), so
   the decode twin adds no weight copy. **`EMMY_GEN_DECODE_BUCKET=0`** (`config.gen_decode_bucket`) still disables the
   twin entirely at the cost of decode speed. A further static **M=1** twin pair (`EMMY_GEN_M1_TIER`, default on)
   routes true single-token decode onto gemv-class matvec programs, and `EMMY_GEN_ALIAS_ATTN` lets
@@ -322,7 +323,10 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   reinterprets via `.view`), a scale input keeps its traced f32. This is what lets input-sourced fp8 expert weights
   (`loader.quant.spell_quantized_inputs`, see the compiler ARCHITECTURE's quantized-checkpoints section) feed the
   expert programs. Native MXFP4 blocks and scales bind as plain `u8`; indirect operands compose across every stored
-  input slice.
+  input slice. A logical BF16 plan input uses encoded BF16 bits in the host carrier, and a BF16 device output is
+  exposed as `torch.bfloat16`. The constant cache materializes each destination's plan dtype before upload, so one
+  source can serve BF16 and F32 buffers without aliasing their physical storage. This boundary does not change the
+  runner's model-dtype selection described above.
   **Quantized-checkpoint serving load (FP8 and MXFP4):** `EmmyGenRunner.create` detects a quantized checkpoint
   (`quantized_checkpoint_dir`) and takes `load_quantized_split` (trace ARCHITECTURE): config-built META twin,
   dense trunk shard-streamed in as real values, expert tensors kept compressed in a per-layer store keyed by program

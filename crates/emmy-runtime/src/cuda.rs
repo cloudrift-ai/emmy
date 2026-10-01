@@ -1278,6 +1278,9 @@ impl Executor {
             self.graphs.push(entry);
             return Ok(());
         }
+        // Encoding TMA descriptors uploads bytes and synchronizes the stream. Finish that
+        // before capture begins, including the first capture at a new symbolic environment.
+        self.ensure_descriptors()?;
         let graph = self.capture(|executor| executor.submit())?;
         self.graphs.push((key, graph));
         if self.graphs.len() > GRAPH_CACHE_MAX {

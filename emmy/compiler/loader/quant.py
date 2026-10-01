@@ -1792,13 +1792,12 @@ def _spell_static_fp4_quantize(
     ``input_scale``)``, or ``None`` when the activation's shape cannot carry it (symbolic or
     non-16-multiple K, a non-scalar ``input_scale``).
 
-    The algebra is :func:`quantize_nvfp4` with the checkpoint's static per-linear ``input_scale``
-    standing in for the tensor-derived ``scale_2``: per 16-element K block, the e4m3 block-scale
-    round trip (``to_f8e4m3(amax / (6·s2))``), ONE f32→f16 rounding of the fused scale
-    (:func:`fuse_nvfp4_scales` parity), the e2m1 encode of the block over the rounded fused
-    scale, and the pair pack into an ``f4e2m1x2`` buffer. The quantize's divisor is floored at
-    1e-12 so an all-zero block divides by the floor instead of by zero; its codes are zeros
-    either way, and the decode multiplies by the unfloored scale.
+    Compute the e4m3 block scale in stock's f32 order, ``(amax * (1/6)) *
+    (1/input_scale)``, with the per-layer global inverse derived while binding the
+    checkpoint constant. Stock vLLM's CUDA kernel uses approximate reciprocals, so
+    exact scale/code byte parity is checked separately. The activation divisor stays
+    f32; a zero block keeps it finite via the existing floor. Only the subsequent
+    reconstruction rounds the fused scale to f16.
 
     What the consumers share is the CODES and their raw block scales, never a reconstructed
     value: the reconstruction is spelled per consumer (:func:`_spell_static_fp4_decode`). Loop
@@ -1849,16 +1848,36 @@ def _spell_static_fp4_quantize(
         output=Tensor(f"{stem}_scale_2", (1,) * len(bshape), "f32"),
     )
     s2_bc = broadcast_to(graph, s2, bshape)
-    fmax = const_bc(graph, name=f"{stem}_f4_max", value=_F4_MAX, target_shape=bshape, dtype="f32")
-    denom = graph.add_node(op=ElementwiseOp(op="multiply"), inputs=[fmax, s2_bc], output=Tensor(f"{stem}_denom", bshape, "f32"))
-    ratio = graph.add_node(op=ElementwiseOp(op="divide"), inputs=[amax, denom], output=Tensor(f"{stem}_ratio", bshape, "f32"))
+    # The global inverse is a per-layer checkpoint constant. Derive it in the
+    # generic load-op chain, so all layers still share one compiled plan and
+    # no reciprocal of an invariant scalar enters the CUDA fusion graph.
+    inv = graph.add_node(
+        op=ConstantOp(
+            name=f"{stem}_scale_inv",
+            source_path=scale_key,
+            source_shape=tuple(s2_shape),
+            source_dtype="f32",
+            load_ops=(ElementwiseOp(op="reciprocal"),)
+            + (() if tuple(s2_shape) == (1,) * len(bshape) else (ReshapeOp(shape=(1,) * len(bshape)),)),
+        ),
+        inputs=[],
+        output=Tensor(f"{stem}_scale_inv", (1,) * len(bshape), "f32"),
+    )
+    inv_bc = broadcast_to(graph, inv, bshape)
+    sixth = const_bc(
+        graph,
+        name=f"{stem}_sixth",
+        value=float(np.float32(1.0) / np.float32(_F4_MAX)),
+        target_shape=bshape,
+        dtype="f32",
+    )
+    by_six = graph.add_node(op=ElementwiseOp(op="multiply"), inputs=[amax, sixth], output=Tensor(f"{stem}_by_six", bshape, "f32"))
+    ratio = graph.add_node(op=ElementwiseOp(op="multiply"), inputs=[by_six, inv_bc], output=Tensor(f"{stem}_ratio", bshape, "f32"))
     sbits = graph.add_node(op=ElementwiseOp(op="to_f8e4m3"), inputs=[ratio], output=Tensor(f"{stem}_scale_bits", bshape, F8E4M3.name))
     sdec = graph.add_node(op=ElementwiseOp(op=f"from_{F8E4M3.name}"), inputs=[sbits], output=Tensor(f"{stem}_scale_vals", bshape, "f32"))
     fused32 = graph.add_node(op=ElementwiseOp(op="multiply"), inputs=[sdec, s2_bc], output=Tensor(f"{stem}_fused32", bshape, "f32"))
-    fused = graph.add_node(op=ElementwiseOp(op="copy"), inputs=[fused32], output=Tensor(f"{stem}_fused", bshape, "f16"))
-    div32 = graph.add_node(op=ElementwiseOp(op="copy"), inputs=[fused], output=Tensor(f"{stem}_div32", bshape, "f32"))
     floor = const_bc(graph, name=f"{stem}_floor", value=1.0e-12, target_shape=bshape, dtype="f32")
-    safe = graph.add_node(op=ElementwiseOp(op="maximum"), inputs=[div32, floor], output=Tensor(f"{stem}_safe", bshape, "f32"))
+    safe = graph.add_node(op=ElementwiseOp(op="maximum"), inputs=[fused32, floor], output=Tensor(f"{stem}_safe", bshape, "f32"))
     safe_bc = broadcast_to(graph, safe, blocked)
     quot = graph.add_node(op=ElementwiseOp(op="divide"), inputs=[blk, safe_bc], output=Tensor(f"{stem}_norm", blocked, "f32"))
     codes = graph.add_node(op=ElementwiseOp(op="to_f4e2m1"), inputs=[quot], output=Tensor(f"{stem}_codes", blocked, "i32"))

@@ -33,10 +33,10 @@ from emmy.compiler.pipeline.passes.tile._cut import (
     output_map,
     realize,
 )
-from emmy.compiler.pipeline.pipeline import RuleSkipped, Run, _is_structural_option
+from emmy.compiler.pipeline.pipeline import RuleSkipped, Run, _is_structural_option, _structural_domain
 from emmy.compiler.pipeline.search.db import RoutingRow, SearchDB
 from emmy.compiler.pipeline.search.golden import Measurements, Row, evidence_scope, import_rows, mint, restamp
-from emmy.compiler.pipeline.search.pins import pinned_knobs, spelled_arm
+from emmy.compiler.pipeline.search.pins import pinned_knobs, spelled_arm, tracking_place_keys, unmatched_place_pins
 from tests.compiler.helpers import case_target_tile, direct_classic_leaf, inventory_document, requires_cuda
 from tests.compiler.terms import contraction, projection, reduction, slab
 
@@ -1188,6 +1188,70 @@ def _contraction_spellings(tile: TileOp) -> list[str]:
 
 def _piece_ops(fragment: Graph) -> list[TileOp]:
     return [node.op for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
+
+
+def _pinned_requant_cut(pins: dict[str, str]):
+    graph, root = _mimo_case(_REQUANT)
+    graph.inputs, graph.outputs = list(root.inputs), list(root.buffer_names())
+
+    def decide(fork):
+        if _structural_domain(fork.options) == ("PLACE",):
+            assert len(fork.options) == 1, f"{fork.node_id} still offers an unpinned placement choice"
+        return fork.options[0]
+
+    with pinned_knobs(pins), tracking_place_keys() as resolved:
+        result, trace = Run(Pipeline.build(["tile/cut"]), _CTX).resolve(graph, decide)
+        unmatched = unmatched_place_pins(resolved)
+    pieces = [node.op for node in result.nodes.values() if isinstance(node.op, TileOp)]
+    return pieces, trace, unmatched
+
+
+def test_parent_and_child_site_pins_cut_only_the_named_piece() -> None:
+    """A named child can take both output cuts after a pinned parent cut; sibling pieces stay put."""
+    graph, root = _mimo_case(_REQUANT)
+    _, parent = _composed_arm(graph, root)
+    before, parent_trace, unmatched = _pinned_requant_cut(parent)
+    fused = next(piece for piece in before if len(_contraction_spellings(piece)) > 1)
+    token = fused.name.rsplit("__place_", 1)[1]
+    child = {
+        f"PLACE@place_{token}/map.1/inner": "cut",
+        f"PLACE@place_{token}/map.2/inner": "cut",
+    }
+
+    after, trace, unmatched_with_child = _pinned_requant_cut({**parent, **child})
+
+    assert not unmatched and not unmatched_with_child
+    assert len(before) == 3 and fused.placement_decided, "parent-only pins retain the terminal fused child"
+    assert len(after) == 4 and all(piece.placement_decided for piece in after)
+    assert len(trace) < 20, "the two levels of cuts must reach a fixpoint"
+    assert [decision.knob_delta for decision in trace if "cut" in decision.knob_delta.values()] == [
+        parent,
+        {"PLACE@map.1/inner": "cut", "PLACE@map.2/inner": "cut"},
+    ]
+    assert sum(decision.knob_delta == {"PLACE": "fuse"} for decision in trace) >= 2
+    assert len([decision for decision in parent_trace if "cut" in decision.knob_delta.values()]) == 1
+    assert all(len(_contraction_spellings(piece)) <= 1 for piece in after)
+    assert all(len(piece.place.free) >= 2 for piece in after if _contraction_spellings(piece))
+    siblings = {piece.name: piece for piece in before if piece is not fused}
+    assert {piece.name for piece in after if piece.name in siblings} == set(siblings)
+    assert all(
+        next(piece for piece in after if piece.name == name).output_specs == sibling.output_specs for name, sibling in siblings.items()
+    )
+
+
+def test_stale_child_site_pin_is_reported_unmatched() -> None:
+    from emmy.compiler.pipeline.search.pins import unreproducible_pin_flag
+
+    graph, root = _mimo_case(_REQUANT)
+    _, parent = _composed_arm(graph, root)
+    stale = "PLACE@place_deadbeef00/map.1/inner"
+
+    pieces, trace, unmatched = _pinned_requant_cut({**parent, stale: "cut"})
+
+    assert unmatched == [stale]
+    assert unreproducible_pin_flag({stale: "cut"}, [{}], placement_knobs=[decision.knob_delta for decision in trace])
+    assert len([decision for decision in trace if "cut" in decision.knob_delta.values()]) == 1
+    assert len(pieces) == 3 and any(len(_contraction_spellings(piece)) > 1 for piece in pieces)
 
 
 def test_a_projection_owning_more_than_it_binds_offers_one_full_projection_cut() -> None:

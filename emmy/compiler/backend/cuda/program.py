@@ -707,7 +707,10 @@ class CompiledProgram:
         shape = self._shape(name, sym_values)
         n = math.prod(shape) if shape else 1
         start = placement["offset"]
-        flat = backing[start : start + placement["bytes"]].view(_torch_dtype(buf.dtype.np))
+        import torch
+
+        logical_dtype = torch.bfloat16 if buf.dtype.name == "bf16" else _torch_dtype(buf.dtype.np)
+        flat = backing[start : start + placement["bytes"]].view(logical_dtype)
         return flat[:n].reshape(shape)
 
     def output_prefix_device(self, sym_values: dict[str, int] | None = None) -> dict:
