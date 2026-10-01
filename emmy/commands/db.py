@@ -66,7 +66,8 @@ def register_db_command(subparsers) -> None:
         "--pool-sample",
         type=int,
         default=DEFAULT_SAMPLE,
-        help=f"Candidates drawn per golden pool during enumeration (default {DEFAULT_SAMPLE}; 0 enumerates every row). "
+        help=f"Complete rows drawn per golden pool by seeded descents through its schedule tree (default {DEFAULT_SAMPLE}; "
+        "0 walks every row). "
         "Recorded in the dataset's provenance — two datasets are comparable only when it matches.",
     )
     pe.add_argument("--seed", type=int, default=0, help="Seed of the per-pool draw (default: 0).")

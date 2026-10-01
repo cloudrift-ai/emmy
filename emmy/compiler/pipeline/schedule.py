@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from frozendict import frozendict
 
 from emmy.compiler.ir.schedule import Schedule, ScheduleContext
-from emmy.compiler.pipeline.fork import Fork, iter_leaves, schedule_forks
+from emmy.compiler.pipeline.fork import Fork, schedule_forks
 
 
 @dataclass(frozen=True)
@@ -28,14 +28,6 @@ class ScheduleLeaf(Fork):
 
     def expand(self) -> list:
         return [self.materialize(self.schedule, self.knobs)]
-
-
-class _SampleRow(dict):
-    __slots__ = ("schedule",)
-
-    def __init__(self, schedule: Schedule, row: Mapping) -> None:
-        super().__init__(row)
-        self.schedule = schedule
 
 
 def fork_schedule(
@@ -76,9 +68,9 @@ def fork_schedule(
     )
     if sample is None:
         return roots
-    drawn = sample.take(_SampleRow(option.schedule, option.row) for option in iter_leaves(roots) if isinstance(option, ScheduleLeaf))
-    sample.totals[pool_id] = drawn.total
-    return [ScheduleLeaf(row.schedule, frozendict(row), dict(inherited_knobs), materialize, pool_id) for row in drawn.rows]
+    leaves = sample.draw(roots)
+    sample.totals[pool_id] = len(leaves)
+    return leaves
 
 
 __all__ = ["ScheduleLeaf", "fork_schedule"]

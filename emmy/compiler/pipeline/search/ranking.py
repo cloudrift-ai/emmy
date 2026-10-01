@@ -62,12 +62,11 @@ def enumerate_graph(graph, ctx: Context, *, family: str = "", passes: Sequence[s
     knob (a reduce's ``REDUCE`` fork). The one live-fork capture the matmul
     offline fitter and record evaluator share.
 
-    Returns :class:`~.pool.Candidates` — the rows beside the size of the pools they came from.
-    Under ``ctx.pool_sample`` the rows are a DRAW and ``total`` is the exact size, and BOTH count
-    the same population: distinct schedule-space stamps. Equal problems produce the same stamp,
-    so their identical draw and total are collected once — a rank against ``total`` is a rank
-    within the space the fit actually ranks. With no sample the rows are every kernel's fork rows
-    and ``total`` is ``len(rows)``, so a caller that reports both prints today's numbers unchanged."""
+    Returns :class:`~.pool.Candidates` — the rows beside what they were ranked among. Under
+    ``ctx.pool_sample`` the rows are a DRAW (seeded descents through each schedule tree, the golden rows
+    kept — ``PoolSample.draw``) and ``total`` is the draw's size; BOTH count the same population: distinct
+    schedule-space stamps. Equal problems produce the same stamp, so their identical draw and total are
+    collected once. With no sample the rows are every kernel's fork rows and ``total`` is ``len(rows)``."""
     from emmy.compiler.pipeline import TILE_PASSES, Pipeline  # noqa: PLC0415
     from emmy.compiler.pipeline.fork import leaf_knobs  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
@@ -201,10 +200,10 @@ def build_golden_groups(
     card's regime for the rank objective to match the deployed per-card featurization. The base features are
     the context's and the kernel's stamps as the DB holds them — nothing is lowered.
 
-    ``sample`` draws that many candidates per pool DURING enumeration (0 enumerates every row). The draw is a
-    reservoir over the schedule walk's leaf stream — a pure function of that stream and ``(sample, seed)`` —
-    and every golden signature recorded on the pool's card and regime survives it whatever the draw picks, so
-    a golden that misses its pool still means what it always meant: a pin or dtype mismatch.
+    ``sample`` draws that many complete rows per pool DURING enumeration (0 enumerates every row) by seeded
+    descents through the pool's schedule tree — a pure function of the tree and ``(sample, seed)`` — and every
+    golden row recorded on the pool's card and regime is reached by its own descent whatever the draw picks,
+    so a golden that misses its pool still means what it always meant: a pin or dtype mismatch.
 
     ``kernel`` keeps only pools whose kernel's C name contains it — a narrowing VIEW, for iterating on one kernel
     without paying for the rest. Each retained pool's rank is unchanged by it: the keep-set is computed over every
@@ -216,11 +215,11 @@ def build_golden_groups(
     key_counts: dict[str, int] = {}
     matched = 0
     # The keep-set spans every pool of a card and regime: the rows a sample may not drop are every golden
-    # signature recorded there, so two pools that turn out to be one retain identical rows and merge.
+    # row recorded there, so two pools that turn out to be one retain identical rows and merge.
     keeps: dict[tuple, set] = defaultdict(set)
     if sample > 0:
         for pool in pools:
-            keeps[(pool.gpu, pool.regime)].update(features.tile_signature(row) for row in pool.schedule_rows())
+            keeps[(pool.gpu, pool.regime)].update(tuple(sorted(row.items())) for row in pool.schedule_rows())
     ctxs: dict[tuple, Context] = {}  # ONE Context per card and regime: the facts are identical across its pools
     packed_pools: dict[tuple, _Packed] = {}
     for pool in pools:
@@ -236,8 +235,8 @@ def build_golden_groups(
         base = {**ctx.features(), **pool.kernel.stamps}
         # The sample rides a REPLACED Context; the pool stamp keys on the sample too, so a sampled
         # enumeration can never be mistaken for a live one.
-        keep_set = frozenset(keeps.get((pool.gpu, pool.regime), ()))
-        enum_ctx = ctx if sample <= 0 else replace(ctx, pool_sample=PoolSample(sample, seed, keep_set))
+        keep_rows = tuple(sorted(keeps.get((pool.gpu, pool.regime), ())))
+        enum_ctx = ctx if sample <= 0 else replace(ctx, pool_sample=PoolSample(sample, seed, keep_rows))
         try:
             candidates = enumerate_pool(pool, enum_ctx)
         except ValueError as exc:

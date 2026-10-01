@@ -860,12 +860,11 @@ instead of looking like lost data. A golden row whose signature matches no candi
 counted per card as `unranked`; a kernel formed from no loop op (a piece carved from a twisted tree, which only its
 parent's program reaches) is skipped the same way.
 
-**Pools are SAMPLED during enumeration.** `--pool-sample N` (default 2000; `0` enumerates every row) draws
-that many candidates per pool by single-pass reservoir sampling over the schedule walk's leaf stream — each
-candidate dict exists only for the moment it passes the draw — because the corpus is millions of rows and tens
-of gigabytes otherwise, and one golden's pool alone is past the scheduler's materialization budget, so an
-unsampled fit does not finish. The draw is a pure function of the stream and `(N, --seed)` and
-never reads a row, so a refit of the same corpus is byte-identical
+**Pools are SAMPLED during enumeration.** `--pool-sample N` (default 2000; `0` walks every row) draws that
+many complete rows per pool by seeded random descents through the pool's lazy schedule tree, a child at random
+at every branch, with every golden row reached by its own directed descent — because the corpus is millions of
+rows and tens of gigabytes otherwise, and a walk that visits every leaf takes an hour over the hardware goldens
+alone. The draw is a pure function of the tree and `(N, --seed)`, so a refit of the same corpus is byte-identical
 and two goldens over one pool still retain identical rows and still merge into one group. Every recorded
 config survives the draw wherever it sits in its pool, so a golden that misses its pool still means what it
 always meant — a pin or dtype mismatch — rather than an unlucky draw. Reported ranks are RAW ranks within the

@@ -105,15 +105,19 @@ class _StubContext:
 def _build(pools, monkeypatch, **kwargs):
     """``build_golden_groups`` over stub pools: a row is ``{"TILE": tag}``, and its one feature is the tag's
     position in the alphabet — enough for two pools to featurize differently whenever their rows differ. The
-    stub enumerator honours ``ctx.pool_sample``: a list IS a candidate stream as far as the reservoir draw is
-    concerned."""
+    stub enumerator honours ``ctx.pool_sample`` the way the tree draw does: the kept rows first, then a draw —
+    here the pool's prefix."""
 
     def enumerate_stub(pool, ctx):
         rows = pool.kernel.loop_ir["rows"]
         if rows == "broken":
             raise ValueError("a definition the lowering cannot take back")
         sample = ctx.pool_sample
-        return Candidates(list(rows), len(rows)) if sample is None else sample.take(rows)
+        if sample is None:
+            return Candidates(list(rows), len(rows))
+        kept = [row for row in rows if tuple(sorted(row.items())) in sample.keep]
+        drawn = kept + [row for row in rows[: sample.rows] if row not in kept]
+        return Candidates(drawn, len(drawn))
 
     monkeypatch.setattr(ranking, "pool_context", lambda pool: _StubContext())  # noqa: ARG005
     monkeypatch.setattr(ranking, "enumerate_pool", enumerate_stub)
@@ -147,16 +151,15 @@ def test_two_goldens_on_one_pool_still_merge_under_sampling(monkeypatch):
 
     The two are one group before the draw happens — they are rows of one pool, so the builder enumerates it
     once. What sampling must not break is the PINS: both recorded rows have to survive the draw, which they do
-    because it is a pure function of the stream and ``(sample, seed)`` and every golden signature of the pool's
-    card and regime is in the keep-set. Neither was picked by the draw itself: the pool's first and last rows
-    are exactly the positions a 4-of-26 draw is least likely to reach."""
+    because it is a pure function of the tree and ``(sample, seed)`` and every golden row of the pool's card
+    and regime is in the keep-set. The last row is one a 4-of-26 prefix draw never reaches."""
     pool = [{"TILE": chr(ord("a") + i)} for i in range(26)]
     groups, skipped = _build([_pool("m.512", pool, ["a", "z"])], monkeypatch, sample=4)  # the FIRST and the LAST row
     assert skipped == []
     assert len(groups) == 1, "one pool, one group - the draw must not fracture it into two"
     (group,) = groups
     assert len(group.golden_ids) == 2, "both recorded rows survive the draw and land in the group"
-    assert group.total == 26 and len(group.feats) < 26, "the true pool size travels beside the sample"
+    assert group.total == len(group.feats) < 26, "the draw's size travels beside the sample"
     kept = {chr(int(v)) for v in group.feats[:, 0]}
     assert {"a", "z"} <= kept
 

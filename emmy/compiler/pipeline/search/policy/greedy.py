@@ -67,7 +67,7 @@ from functools import lru_cache
 from typing import TYPE_CHECKING, NamedTuple
 
 from emmy.compiler.graph import Graph
-from emmy.compiler.pipeline.fork import Fork, fork_signature, iter_leaves, leaf_knobs, stamp_signature
+from emmy.compiler.pipeline.fork import Fork, descent_sample, fork_signature, iter_leaves, leaf_knobs, stamp_signature
 from emmy.compiler.pipeline.knob import EVIDENCE_PREFIXES, METADATA_PREFIXES, schedule_pin_fingerprint
 
 logger = logging.getLogger(__name__)
@@ -814,37 +814,12 @@ _POOL_DESCENT_WORK = 262_144
 
 
 def _descent_sample(options, pool_id: str, node_blocked) -> list:
-    """Up to :data:`_POOL_DRAW` complete leaves drawn by seeded uniform descents. Dead ends (a
-    branch whose expansion is empty — legality killed the subtree) and blocklisted rows retry, up
-    to a bounded attempt count. When one descent is wider than the work budget, make exactly one
-    attempt: completing a legal row is indivisible through the Fork interface. Duplicates are kept
-    (a repeat costs a scoring slot, never a wrong pick). Structural options never appear here —
-    the caller samples only the variant side."""
-    import random  # noqa: PLC0415
-
-    rng = random.Random(pool_id)
-    sample: list = []
-    descent_bound = max((getattr(option, "pool_descent_bound", None) or 1 for option in options), default=1)
-    one_descent_exceeds_budget = descent_bound > _POOL_DESCENT_WORK
-    attempt_budget = max(1, _POOL_DESCENT_WORK // descent_bound)
-    draw = 1 if one_descent_exceeds_budget else min(_POOL_DRAW, max(1, attempt_budget // 4))
-    attempts = 1 if one_descent_exceeds_budget else min(4 * draw, attempt_budget)
-    while len(sample) < draw and attempts > 0:
-        attempts -= 1
-        option = options[rng.randrange(len(options))]
-        dead = False
-        while isinstance(option, Fork) and not option.is_leaf:
-            kids = option.expand()
-            if not kids:
-                dead = True
-                break
-            option = kids[rng.randrange(len(kids))]
-        if dead:
-            continue
-        if node_blocked is not None and _tile_blocked(leaf_knobs(option), node_blocked):
-            continue
-        sample.append(option)
-    return sample
+    """Up to :data:`_POOL_DRAW` complete leaves of a cold pool, drawn by :func:`~emmy.compiler.pipeline.fork.descent_sample`
+    seeded on the pool identity under the :data:`_POOL_DESCENT_WORK` budget, blocklisted rows retried. Duplicates
+    are kept (a repeat costs a scoring slot, never a wrong pick). Structural options never appear here — the
+    caller samples only the variant side."""
+    skip = None if node_blocked is None else (lambda leaf: _tile_blocked(leaf_knobs(leaf), node_blocked))
+    return descent_sample(options, draw=_POOL_DRAW, seed=pool_id, work_budget=_POOL_DESCENT_WORK, skip=skip)
 
 
 def _stream_tiers(
