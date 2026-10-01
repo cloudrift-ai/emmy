@@ -160,9 +160,11 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             yield Schedule(None, {site.id: support.node}, support.edges)
 
     def random_extension(self, rng: random.Random) -> ClassicSchedule | None:
-        """One compatible extension: a kernel pick past the last node, tried in random order; else a node choice
-        drawn among those the site admits under this prefix's relation, then one of its admitted supports — a
-        choice with none is dropped and the draw repeats, so a descent never derives a site's frontier."""
+        """One compatible extension drawn uniformly over the site's frontier: a kernel pick past the last node, tried in
+        random order; else a node choice among those the site admits under this prefix's relation, accepted as often
+        as it has admitted supports, then one of those — so the draw is uniform over admitted (choice, transport)
+        pairs, the frontier a walk reads, while deriving supports only for the choices it touches. A choice with
+        none is dead under this prefix and leaves the draw."""
         if self.schedule.kernel is not None:
             return None
         if self.problem is None:
@@ -175,14 +177,16 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         site = self.problem.node_site(self.next_site)
         relation = self._site_relation(site.id)
         choices = list(site.compatible(relation))
+        width = len(site.edge_picks)
         while choices:
             index = rng.randrange(len(choices))
             admitted = site.admitted(choices[index], relation)
-            if admitted:
+            if not admitted:  # dead under this prefix: out of the draw
+                choices[index] = choices[-1]
+                choices.pop()
+            elif rng.randrange(width) < len(admitted):  # a choice is taken as often as it has admitted supports
                 support = rng.choice(admitted)
                 return Schedule(None, {site.id: support.node}, support.edges)
-            choices[index] = choices[-1]
-            choices.pop()
         return None
 
     def extend(self, pick: ClassicSchedule) -> ClassicScheduleContext:

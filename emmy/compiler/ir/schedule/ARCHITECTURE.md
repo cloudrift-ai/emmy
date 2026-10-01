@@ -110,9 +110,9 @@ stage resolver, the plan and budget refusals). A prefix filters the site's choic
 filter per relation kept on the site, so prefixes that decided different nodes but agree on the facts read one
 answer; on the kernels measured that filter alone finds every dead prefix. The supports of the choices it admits
 are then filtered by the one claim a support completes, its transport's K slab at an ordinary seam. `extensions`
-reads that whole frontier; `random_extension` never does — it draws an admitted choice and then one of that choice's
-admitted supports, dropping a choice with none, so a descent derives supports for the choices it touched and no
-site pays for its product. A hand-pinned transport no choice resolves raises with the rule's message the first time
+reads that whole frontier; `random_extension` never does — it draws an admitted choice, keeps it as often as it has
+admitted supports and takes one of those, so the draw is uniform over the frontier's (choice, transport) pairs while a
+descent derives supports only for the choices it touched; a choice with none leaves the draw. A hand-pinned transport no choice resolves raises with the rule's message the first time
 a prefix reads the site. Kernel picks form the final frontier: the kernel site's catalog is what the node sites'
 choices imply, so it is the last site. The fragment-seam relation has no pipeline-side copy.
 
