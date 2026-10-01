@@ -329,6 +329,12 @@ def _arm_stamps(option, fused, graph) -> list[dict]:
     return [op_stamps(fused, graph)]
 
 
+def arm_features(option, fused, graph) -> dict[str, float]:
+    """One placement arm's ``P_*`` row from the option that realizes it — the dataset's and the deploy's one
+    featurizer (:func:`placement_features` over :func:`_arm_stamps`)."""
+    return placement_features(_arm_stamps(option, fused, graph))
+
+
 def placement_features(pieces: list[dict]) -> dict[str, float]:
     """One placement arm as ``P_*`` features: how many kernels it leaves, and each ``S_*`` stamp summed and
     maxed over them. The fused arm is its one kernel; a cut's arm is its pieces, so the sums say what the cut
@@ -394,7 +400,7 @@ def walk_placement(pool: GoldenPool, ctx: Context, decisions: dict[str, dict], s
             else:
                 unmatched.append(identity[:12])
         arms = [i for i in place if i != steer]
-        feats = [{**base, **placement_features(_arm_stamps(leaves[i].expand()[0], root, fp.match.graph))} for i in arms]
+        feats = [{**base, **arm_features(leaves[i].expand()[0], root, fp.match.graph)} for i in arms]
         if scorer is not None:
             scores = scorer(feats)
             chosen = arms[min(range(len(arms)), key=scores.__getitem__)]

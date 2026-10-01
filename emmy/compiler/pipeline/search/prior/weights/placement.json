@@ -1,0 +1,63 @@
+{
+  "feat_ver": 4,
+  "space": "placement",
+  "kind": "linear",
+  "weights": {
+    "P_max_dtype_i32": -0.32320258319167156,
+    "P_max_ext_free_max": -0.00011637699152115587,
+    "P_max_loop_depth": -0.9389772781458846,
+    "P_max_n_load": 0.020494195049384704,
+    "P_max_n_write": -0.282242869590758,
+    "P_n_pieces": -0.8088945039340328,
+    "P_sum_ext_free_max": 0.00016714689748655774,
+    "P_sum_ext_n_free_axis": -0.34308026614289144,
+    "P_sum_pw_square": 1.454178582655161
+  },
+  "weights_dynamic": {
+    "P_max_dtype_i32": -0.32320258319167156,
+    "P_max_ext_free_max": -0.00011637699152115587,
+    "P_max_loop_depth": -0.9389772781458846,
+    "P_max_n_load": 0.020494195049384704,
+    "P_max_n_write": -0.282242869590758,
+    "P_n_pieces": -0.8088945039340328,
+    "P_sum_ext_free_max": 0.00016714689748655774,
+    "P_sum_ext_n_free_axis": -0.34308026614289144,
+    "P_sum_pw_square": 1.454178582655161
+  },
+  "params": {
+    "scale": 0.1,
+    "atomic_free_weight": 0.0,
+    "atomic_free_split_threshold": 4.0
+  },
+  "provenance": {
+    "fitted": "2026-09-30",
+    "script": "emmy fit",
+    "args": {
+      "trainer": "linear",
+      "seed": 0,
+      "samples": 0,
+      "l2": 1e-06,
+      "objective": "mean_log_rank",
+      "full_train_seed_weights": "incumbent",
+      "fold_seed_weights": "zeros"
+    },
+    "space": "placement",
+    "features": "P_*",
+    "sources": {
+      "golden:31689c395ff3": 103,
+      "golden:59e856c4bb26": 48,
+      "golden:6b9a330eadf0": 9,
+      "golden:7d2d88f16345": 9,
+      "golden:9ee2d45ce6d1": 53,
+      "golden:bd1d6a8b07ef": 40,
+      "golden:c1065907157c": 42
+    },
+    "pool_sample": 2000,
+    "groups": {
+      "static": 170,
+      "dynamic": 0
+    },
+    "positives": 246,
+    "notes": "static top1=169/170  top5=170/170  top10=170/170  top25=170/170  top50=170/170  top100=170/170   median=0  mean_log2=0.01; no dynamic groups; params atomic_free_split_threshold=4, atomic_free_weight=0; dynamic set carried from the static fit"
+  }
+}
