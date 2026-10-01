@@ -71,8 +71,8 @@ H100's corresponding evidence is under `2026-10-01-h100/shared-kv/` in
 
 ## Final five-card recipe after route selection (2026-10-01)
 
-All ten model comparisons and all 50 strict golden replays pass after selecting the four shared K/V routes and
-merging main through `754d1afa6`. Each model comparison uses the explicitly pinned revision above, the same inputs
+All ten model comparisons and all 50 strict golden replays pass after selecting the four shared K/V routes.
+Each model comparison uses the explicitly pinned revision above, the same inputs
 for all three backends, O3, fast math disabled, 10 warmups and 100 iterations. Each of the five following replays
 uses a fresh tune database, strict correctness and strict evidence, without recording new measurements.
 
@@ -82,7 +82,7 @@ pairs above establish the improvement over the previous selections.
 | Card | s1 Emmy | s1 `torch.compile` | s512 Emmy | s512 `torch.compile` | Launches s1 / s512 |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | A100 40GB | 51.086 | 56.247 | 177.664 | 181.541 | 14 / 12 |
-| H100 80GB | 27.352 | 31.730 | 87.547 | 82.092 | 14 / 12 |
+| H100 80GB | 27.255 | 31.710 | 87.347 | 81.992 | 14 / 12 |
 | V100 SXM2 16GB | 68.335 | 62.498 | 500.224 | 641.360 | 14 / 21 |
 | RTX 4090 | 24.626 | 29.096 | 156.160 | 162.816 | 14 / 12 |
 | RTX 5090 | 20.549 | 24.591 | 129.572 | 146.398 | 16 / 12 |
@@ -93,7 +93,7 @@ path differs from the model comparison, so they are not the numbers to compare w
 | Card | s1 median [range] | s512 median [range] |
 | --- | ---: | ---: |
 | A100 40GB | 50.603 [50.214–50.935] | 178.688 [177.835–179.541] |
-| H100 80GB | 24.333 [24.184–26.246] | 88.451 [87.819–88.616] |
+| H100 80GB | 24.190 [23.873–24.614] | 88.448 [88.221–88.637] |
 | V100 SXM2 16GB | 67.644 [67.644–68.066] | 496.640 [491.520–498.688] |
 | RTX 4090 | 24.755 [24.676–24.773] | 156.160 [155.989–156.501] |
 | RTX 5090 | 20.543 [20.532–20.559] | 129.916 [129.800–130.892] |
@@ -112,7 +112,7 @@ below. No benchmark timing was copied into an existing reference row to hide a r
 | Card | Archive | Root member | Executed source |
 | --- | --- | --- | --- |
 | A100 | `results_a100x1.tar.gz` | `2026-10-01_20-14-59/` | `c902cfbb4` |
-| H100 | `results_h100x1.tar.gz` | `2026-10-01_20-56-48/` | `aea150c5c` |
+| H100 | `results_h100x1.tar.gz` | `2026-10-01_22-17-55/` | `0c7a36e8a` |
 | V100 | `results_v100x1.tar.gz` | `2026-10-01_20-17-08/` | `ab9647672` |
 | RTX 4090 | `results_rtx4090x1.tar.gz` | `2026-10-01_20-21-25/` | `e56914c03` |
 | RTX 5090 | `results_rtx5090x1.tar.gz` | `2026-10-01_20-15-51/` | `c902cfbb4` |
@@ -136,6 +136,17 @@ is this coordinate rename back to the baseline. Both V100 shapes also pass one a
 warmup and one iteration. These short checks establish correctness, not new performance evidence. The three-card
 records are under `post-fold-validation/` in their tuning archives; H100's are under `fold-source-check/`, and V100's
 archive retains the exact pre-fix and fixed CUDA graphs, source diff and strict replay records.
+
+Main's BF16/FP4 and runtime changes were subsequently merged through `c536afe4e`. Rebuilt task-owned runtimes at
+`0c7a36e8a` pass all ten workloads. A100, RTX 4090 and RTX 5090 repeat the actual model comparisons with scaled
+correctness, strict evidence, 10 warmups and 100 iterations; every source hash, schedule and shared-memory size
+matches the canonical results. V100 repeats both strict 1/1 correctness checks, with its complete lowered CUDA
+graphs unchanged from the fixed compiler. H100 reruns the whole two-row recipe, including all ten strict repeats;
+its sources, schedules and observed launch geometry remain unchanged. The H100 tables and canonical archive above
+now use that latest run. Its preceding `2026-10-01_20-56-48` archive is retained byte-for-byte under
+`prior-final-replay/prior-canonical-results.tar.gz` in the H100 tuning archive. The new qualification records are
+under `post-main-validation/` for the three-card checks, `2026-10-01-upstream-qualification/` for V100, and
+`merged-runtime/` for H100. These checks preserve the accepted comparison; they do not select another candidate.
 
 ## Five-card baseline before the next optimization round (2026-10-01)
 
