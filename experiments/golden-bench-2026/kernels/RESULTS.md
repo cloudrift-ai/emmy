@@ -89,6 +89,62 @@ Raw snapshots are Git LFS archives in this experiment directory. Each root below
 audits under `2026-10-01/{baseline,initial,provenance}/`. `tuning_migration_2026-10-01.tar.gz` retains the original
 goldens and the import audit. No user-owned GPU instance was stopped or deleted.
 
+## H100 prefill profiling and bounded trials (2026-10-01)
+
+Three schedule trials did not improve the whole layer. A fourth trial removed unused asynchronous copies and
+measured a small gain, but the gain depended on measurement order and did not justify the shared codegen change.
+The current H100 selections remain unchanged. All comparisons use the same pinned model revision and existing
+correctness tolerance as the baseline above.
+
+The K-tile and gate/up trials each alternated three baseline and three candidate processes, with 10 warmups and
+100 iterations. Every process passed scaled eager correctness and launched 12 kernels. Ordered source hashes,
+schedules and shared-memory sizes prove that only the intended kernel changed. Each process used a fresh tune
+database and disabled new timing evidence. Whole-layer Emmy times below are microseconds; brackets contain all
+three measurements in execution order.
+
+| Change | Baseline | Candidate | Baseline median | Candidate median |
+| --- | --- | --- | ---: | ---: |
+| K tile width 128 to 64 | [87.048, 86.803, 87.160] | [87.061, 87.773, 87.125] | 87.048 | 87.125 |
+| Gate/up plain TMA staging | [86.891, 86.288, 87.568] | [87.749, 88.221, 87.658] | 86.891 | 87.749 |
+
+The K trial doubled its launch from 64 to 128 blocks, holding work, staging and rasterization fixed. It produced
+no reliable gain. Gate/up changed from the recorded asynchronous staging to plain two-stage TMA while keeping
+its tile, work and rasterization choices. Its isolated kernel became faster, but the layer became slower in all
+three pairs. A separate Q-projection TMA probe changed only Q, passed scaled correctness, and measured Emmy at
+89.795 µs against `torch.compile` at 82.274 µs with 5 warmups and 20 iterations. Its isolated Q kernel also became
+slower, so this candidate stopped before repeated pairs. No schedule candidate was recorded into a golden.
+
+The paired Nsight Systems trace locates costs across several parts of the layer. Q/K/V kernel durations total
+about 19.9 µs for Emmy and 16.3 µs for the vendor path. Attention contributes another roughly 2.4 µs difference.
+The remaining projections, normalization, MLP and output work account for about 5 µs. Vendor gate/up spans two
+kernels, about 7.3 and 10.5 µs; comparing Emmy's roughly 19.3 µs fused kernel with only the latter would overstate
+the gap. Launch gaps favor Emmy by about 8 µs in this trace. These diagnostic timings include profiler overhead;
+the unprofiled, same-input whole-layer results remain the performance comparison.
+
+An exact-source Nsight Compute diagnostic matched all 12 baseline source hashes and schedules. Its Q kernel
+launches 256 blocks of 128 threads, with 64 registers per thread and 64 KiB of shared memory. The counters report
+244,736 LSU instructions and 65,536 tensor-pipe instructions, about 29% SM throughput and 16% DRAM throughput,
+and no shared-memory bank conflicts. The source issues 24 asynchronous copies per thread during the final three
+loop iterations whose results are never consumed. Older counter captures lack exact source proof and are retained
+as unattributed diagnostics. Counter-run durations around 10 µs, including a repeat without cache flushing, must
+not be substituted for the roughly 7 µs warm Q duration in the Systems trace.
+
+The copy-removal prototype guarded those unused transfers while preserving every commit and wait. Six paired
+whole-layer comparisons passed scaled correctness, kept all 12 schedules and changed only the seven eligible
+kernel sources. Five pairs favored the candidate; one differed by only 0.024 µs in the other direction. Pooled
+medians were 86.981 µs for baseline and 86.697 µs for the candidate, a 0.284 µs improvement (0.33%). The first
+three baseline-first pairs showed a 0.717 µs median difference; three additional candidate-first pairs showed
+0.149 µs. Those reversed runs recorded an idle GPU before each process, the same 1980/2619 MHz clocks, 35–37°C,
+and 124–127 W. Both experiment goldens remained fresh. This small, order-sensitive gain is preserved as a finding;
+the code change was reverted.
+
+The K trial used source `5694af721`; later trials used `2daed32f`, the H100 cherry-pick of the partial-pin repair.
+Every control reproduced the validated baseline kernels. `tuning_h100x1_2026-10-01.tar.gz`, rooted at
+`2026-10-01-h100/`, preserves the profiles, exact commands, source proofs, trial JSON/log/database files, failed
+probes, copy-removal patch and system snapshots. A tile-only pin initially hit the partial-pin bug, another probe
+lacked nvcc on its SSH path, and a separate work/staging probe failed strict accuracy before timing. Those failed
+probes supply no performance result and do not change the headline tolerance.
+
 ## Post-cut producer fusion compatibility (#1003)
 
 All ten golden files have been updated for producer fusion after a cut. Twenty ordinary output-cut routing rows
