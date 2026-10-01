@@ -215,26 +215,19 @@ deferred deliberately, because dying mid-test leaves the controller re-queueing 
 and poisoning that one too. Under xdist the controller respawns the worker on a clean context and reschedules only
 what it had not reached, so the run still finishes and reports exactly one failure, named.
 
-Those costs come from `tests/durations.json` — a checked-in nodeid → seconds map — with the box's own pytest cache
-overlaid on top. The committed file exists because CI starts every job with an empty cache: without a baseline the
-bucketing never fired there and the long poles landed wherever chance put them. It records only entries at or above
-0.05 s (a few hundred lines rather than the full ~2600, and 99% of the suite's wall time); anything unlisted is
-assumed to cost 0.05 s. Regenerate it with `make test-durations` — which REPLACES the file with that run's timings, so
-renamed and deleted tests drop out instead of lingering as ghost slots the bucketer plans around. The refresh runs on
-one xdist loadgroup worker: execution stays serial, while CUDA node IDs keep the canonical ``@cuda`` / ``@cuda-cli``
-suffixes the parallel suite uses for lookup. Point it at the whole suite, never a subset.
+Those costs come from `tests/durations_cpu.json` and `tests/durations_gpu.json` — checked-in nodeid → seconds maps —
+with the box's own pytest cache overlaid on top. The files exist because CI starts every job with an empty cache:
+without a baseline the bucketing never fired there and the long poles landed wherever chance put them. They record
+only entries at or above 0.05 s; anything unlisted is assumed to cost 0.05 s. The nightly **CI optimization** workflow
+runs `make test-durations` on the CPU runner, replaces the CPU file with that run's timings, and commits a change
+directly to `main`. GPU rows remain in their own file. The refresh runs on one xdist loadgroup worker so execution
+stays serial. Point it at the whole suite, never a subset.
 
-Keep the JSON entries alphabetized by full node ID, one entry per line, so unrelated additions do not accumulate at
-the end of the file. `make format` restores this order without changing timings; `make lint` checks it. The duration
-writer uses the same format. Sorting reduces avoidable merge conflicts; edits to the same timing still need resolving.
+Keep the JSON entries alphabetized by full node ID, one entry per line. `make format` restores this order without
+changing timings; `make lint` checks it. The duration writer uses the same format.
 
-Two things keep it honest. `make test` passes `--durations=0 --durations-min=1`, so every run (CI included) prints every
-test that takes at least 1 s instead of only a fixed-size tail. And the session-end gate in `conftest.py` fails any run
-where a test took **5 s or more without being in the baseline**, naming the offenders and asking for
-`make test-durations`. Keeping the failure bar above the 0.05 s recording threshold lets the report expose differences
-between a development machine and CI without making worker-specific cold imports gate the run. It is a session hook
-rather than a test case because only the controller, and only after the last report, has every test's duration; an
-xdist worker sees just its own slice.
+`make test` passes `--durations=0 --durations-min=1`, so every run (CI included) prints every test that takes at least
+1 s instead of only a fixed-size tail. Missing baseline rows do not fail the suite; the nightly run updates CPU rows.
 
 The `perf` marker gates **suite-wide**, not just `tests/perf/`: the root `tests/conftest.py` hook skips every
 perf-marked item unless `-m perf` was passed, and since the root conftest loads for any `tests/` collection the gate

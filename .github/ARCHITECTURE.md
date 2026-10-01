@@ -11,6 +11,7 @@ skills and CloudRift inference endpoint.
 | Workflow | Trigger | Runner | Result |
 | --- | --- | --- | --- |
 | **Tests** | Pull request to `main` | GitHub-hosted + `ubuntu-runners` | Runs Ruff, the complete test suite, and a PyPI package dry run. |
+| **CI optimization** | Nightly schedule or manual dispatch | `ubuntu-runners` | Measures CPU test durations and pushes changed timings directly to `main`. |
 | **Review pull requests** | Ready PR or new commit | GitHub-hosted | Posts a PR Agent review using the nightly CloudRift model. |
 | **Publish to PyPI** | Manual dispatch or published GitHub release | GitHub-hosted | Verifies the source and distribution, publishes to PyPI, and optionally creates the release. |
 | **Verify or onboard model** | Nightly schedule or manual dispatch | `agent-runners` / `agents` | Qualifies one available exact model/GPU deployment and updates the rolling lifecycle PR. |
@@ -47,6 +48,11 @@ installation and cache setup.
 
 The native-runtime job runs Rustfmt, Clippy with warnings denied, and locked Cargo tests on a GitHub-hosted runner.
 These checks require no GPU. Native GPU parity and failure recovery run through `make test-native` on supplied hardware.
+
+**CI optimization** runs the same CPU test lane on `ubuntu-runners` through one xdist worker. It rewrites only the CPU
+duration file, leaving GPU timings intact. A successful run with changed timings commits and pushes directly to `main`
+with the repository's GitHub App token, then posts the run link to #emmy-robots. An unchanged run posts nothing.
+The repository's pull-request ruleset grants that App a bypass; the separate rule still rejects force pushes.
 
 **Review pull requests** runs the pinned PR Agent image when a PR is opened, reopened, marked ready, or updated. It
 reviews ready PRs from both repository branches and forks, including bot-authored PRs. The action reads the diff through
