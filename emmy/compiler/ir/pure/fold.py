@@ -1557,8 +1557,15 @@ def _(s: Fold, rename, sigma, axis_fn):
         mapped = sigma.get(name) if sigma is not None else None
         return mapped.name if isinstance(mapped, Var) else rename(name)
 
-    lift = Lambda(
-        params=(*lead, *(_param(p) for p in s.lift.params[len(lead) :])),
+    bound_count = len(lead) + len(s.bindings)
+    # A coordinate substituted by an expression is no longer a parameter; close over the
+    # expression's free coordinates after preserving the operand-binding prefix.
+    params = (*lead, *(_param(p) for p in s.lift.params[len(lead) : bound_count]))
+    params += tuple(
+        _param(p) for p in s.lift.params[bound_count:] if sigma is None or (mapped := sigma.get(p)) is None or isinstance(mapped, Var)
+    )
+    lift = Lambda.closing(
+        params=params,
         body=Body(tuple(_rewrite(st, rename, sigma, axis_fn) for st in s.lift.body)),
         results=tuple(rename(r) for r in s.lift.results),
     )
