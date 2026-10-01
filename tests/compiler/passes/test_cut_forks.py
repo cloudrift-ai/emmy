@@ -36,7 +36,7 @@ from emmy.compiler.pipeline.pipeline import RuleSkipped, Run, _is_structural_opt
 from emmy.compiler.pipeline.search.golden import GoldenFile, GoldenRecord, Measurements, decode_record
 from emmy.compiler.pipeline.search.golden.decode import _replay
 from emmy.compiler.pipeline.search.golden.record import _lifted_target, _target_kernel_nodes
-from emmy.compiler.pipeline.search.pins import pinned_knobs
+from emmy.compiler.pipeline.search.pins import pinned_knobs, spelled_arm
 from tests.compiler.helpers import case_target_tile, direct_classic_leaf, loop_record_fields, loop_target, requires_cuda
 from tests.compiler.terms import contraction, projection, reduction, slab
 
@@ -55,22 +55,29 @@ def test_cut_and_schedule_passes_share_the_generic_schedule_driver() -> None:
     assert import_module("emmy.compiler.pipeline.fork").schedule is schedule
 
 
-def test_placement_cut_preserves_a_cross_cta_split_receipt() -> None:
+@pytest.mark.parametrize("siblings", [False, True])
+def test_placement_cut_preserves_a_cross_cta_split_receipt(siblings: bool) -> None:
     """A split piece can re-enter placement; cutting it must not make REDUCE pending again."""
     from emmy.compiler.pipeline.passes.tile._split import split_pending
 
-    graph = _computed_operand_graph("a")
-    tile = graph.nodes["out"].op
+    if siblings:
+        graph, root = _mimo_case(_REQUANT)
+    else:
+        graph = _computed_operand_graph("a")
+        root = graph.nodes["out"]
+    tile = root.op
     # The partition receipt is the reduce axis's window in the kernel's axis table; the term names it only.
-    axes = tuple(replace(axis, window=Window(parent=axis, partition=True)) if axis.name == tile.op.axis else axis for axis in tile.axes)
-    graph.nodes["out"].op = replace(tile, axes=axes)
+    axes = tuple(replace(axis, window=Window(parent=axis, partition=True)) for axis in tile.axes)
+    root.op = replace(tile, axes=axes)
     pipeline = Pipeline.build(["tile/cut"])
     match = pipeline.match(graph, pipeline.passes[0].rules[0])[0]
     seams = cuttable_seams(match.root.op)
 
-    fragment = realize(match, match.root, (seams[0],))
+    fragment = _composed_arm(graph, root)[0].materialize() if siblings else realize(match, match.root, (seams[0],))
 
     pieces = [node.op for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
+    if siblings:
+        assert any(len(piece.output_specs) > 1 for piece in pieces)
     assert pieces and all(piece.split_consumed for piece in pieces)
     assert not any(split_pending(piece) for piece in pieces)
 
@@ -1441,17 +1448,24 @@ def test_a_projection_owning_more_than_it_binds_offers_one_full_projection_cut()
 
 
 def test_the_full_projection_cut_leaves_one_contraction_per_piece_on_a_grid() -> None:
-    """A later output cut restores one contraction per piece after producers fuse."""
+    """The cut fixpoint terminates after output cuts separate the fused producers again."""
     graph, node = _mimo_case(_REQUANT)
-    option, knobs = _composed_arm(graph, node)
-    fragment = option.materialize()
-    for producer in tuple(node for node in fragment.nodes.values() if isinstance(node.op, TileOp)):
-        if len(_contraction_spellings(producer.op)) < 2:
-            continue
-        owned = tuple(seam for seam in cuttable_seams(producer.op) if seam.owned)
-        assert len(owned) >= 2
-        next_fragment = realize(Match(graph=fragment, root_node_id=producer.id, rule=Rule(name="test", pattern=[])), producer, owned)
-        fragment.splice(next_fragment, consumed={producer.id}, output={name: f"{name}__placed" for name in producer.buffer_names()})
+    graph.inputs, graph.outputs = list(node.inputs), list(node.buffer_names())
+    _, knobs = _composed_arm(graph, node)
+    parent = node.op.identity_key(with_io=True)
+    decisions = 0
+
+    def decide(fork):
+        nonlocal decisions
+        decisions += 1
+        assert decisions < 30, "cut/fuse did not reach a fixpoint"
+        owned = [seam for seam in cuttable_seams(fork.root_op) if seam.owned]
+        row = knobs if fork.root_op.identity_key(with_io=True) == parent else {owned[0].spelling: "cut"} if owned else {}
+        arm = spelled_arm(fork.options, row)
+        assert arm is not None
+        return arm[0]
+
+    fragment, _ = Run(Pipeline.build(["tile/cut"]), _CTX).resolve(graph, decide)
     pieces = _piece_ops(fragment)
 
     assert len(pieces) >= len(knobs) - 1

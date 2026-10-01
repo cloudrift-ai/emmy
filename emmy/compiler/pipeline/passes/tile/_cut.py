@@ -38,8 +38,8 @@ from emmy.compiler.graph import Graph, Node
 from emmy.compiler.ir.axis import Axis, Dim
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Interval, Literal, SimplifyCtx, Var
+from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure.fold import (
     Fold,
 )
@@ -1157,10 +1157,13 @@ def _fuse_sibling_producers(fragment: Graph, buffers: tuple[str, ...], parent: T
         merged = build_merged_region(loop_graph, members, live)
         if merged is None:
             raise ValueError(f"fusion cannot splice cut producers: {sorted(members)}")
+        # Re-cut pieces retain the parent's input ABI, independent of sibling traversal order.
+        inputs = (*buffers, *parent.inputs)
+        merged = replace(merged, inputs={name: merged.inputs[name] for name in inputs if name in merged.inputs})
         replacement, output_map = wrap_multi_output_fragment(fragment, merged, live)
         merged_node = next(node for node in replacement.nodes.values() if isinstance(node.op, LoopOp))
         fused = lift_kernel(merged_node.op, name=f"{parent.name}__place_{digest(*live)[:10]}")
-        merged_node.op = replace(fused, split_consumed=parent.split_consumed)
+        merged_node.op = replace(fused, split_consumed=any(fragment.nodes[nid].op.split_consumed for nid in members))
         fragment.splice(replacement, consumed=members, output=output_map)
 
 
