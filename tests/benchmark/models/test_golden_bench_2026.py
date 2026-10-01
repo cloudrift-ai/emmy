@@ -3,11 +3,27 @@
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from emmy.benchmark.command_workload import build_substitution_map, render_command
 from emmy.benchmark.tasks import enumerate_tasks
 from emmy.recipe import load_recipe
 
 EXP = Path("experiments/golden-bench-2026")
+
+
+@pytest.mark.parametrize(
+    "path",
+    sorted((Path(__file__).resolve().parents[3] / EXP / "kernels" / "golden").glob("*.golden.json")),
+    ids=lambda path: path.name,
+)
+def test_kernel_golden_matches_fresh_lowering(path) -> None:
+    from emmy.compiler.pipeline.search.golden import GoldenFile, restamp
+
+    document = GoldenFile.load(path)
+    assert document.targets() and any(row.measured for row in document.rows)
+    fresh, report = restamp(document)
+    assert fresh == document, "\n".join(report.lines())
 
 
 def _experiment(project_root: str, name: str) -> str:
