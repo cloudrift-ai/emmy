@@ -235,13 +235,25 @@ def combine_routed_experts(xn, gated, run_expert, *, accumulate_float32=False, e
     contributes only the hits it owns, indexed rank-locally; summing the ranks' partials — the
     all-reduce the caller issues — reproduces the unsharded result exactly, because each routed
     contribution belongs to exactly one shard. A rank that wins no token returns zeros, which is
-    why the reduction stays correct without any special case."""
+    why the reduction stays correct without any special case.
+
+    A single row (every decode step of one request) reads its ``k`` picks to the host once and
+    runs each owned expert on the row itself, in the same ascending expert order: the general
+    path's ``unique``, per-expert ``where`` and row gathers each wait on the device, and one
+    row needs none of them."""
     import torch
 
     scores, indices = gated[-2], gated[-1]
     accumulate_dtype = torch.float32 if accumulate_float32 else xn.dtype
     scores = scores.to(accumulate_dtype)
     out = torch.zeros_like(xn, dtype=accumulate_dtype)
+    if indices.shape[0] == 1:
+        picks = indices[0].tolist()
+        for pos in sorted(range(len(picks)), key=picks.__getitem__):
+            local = local_expert_slice(picks[pos], expert_range)
+            if local is not None:
+                out += run_expert(local, xn).to(accumulate_dtype) * scores[:, pos, None]
+        return out
     for e in indices.unique().tolist():
         local = local_expert_slice(e, expert_range)
         if local is None:
@@ -2358,7 +2370,8 @@ class EmmyGenRunner:
         with p.on_stream(stream):
             if self._expert_swap_safe[id(prog)]:
                 for name, view in per_e.items():
-                    p.alias_buffer(name, view)
+                    # Resident slices outlive every launch queued on them: no host wait per swap.
+                    p.alias_buffer(name, view, wait=False)
             else:
                 feed.update(per_e)
             if sym:

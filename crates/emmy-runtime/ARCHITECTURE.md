@@ -99,10 +99,13 @@ allocator that tracked lent memory against it may still record events on it whil
 owns its modules, the regions it allocated, its timing events, its descriptors and its captured graphs — one per
 launch position holding that launch's batch, and one whole-program graph per symbol environment, least recently used
 out. Inputs update existing addresses, so a graph stays valid across input updates; a rebind, a lent region or a
-released one drops every graph and descriptor. A host may adopt its own stream for a call (`set_stream`): launches,
-device copies and memsets then go there, so a stream that is recording a graph records them, while host uploads and
-descriptor encodes always use the device's stream and complete before returning. Graph capture always happens on the
-device's stream. A load replaces the previous program; release drops it.
+released one drops every graph and descriptor. Lending a region drains the stream first, so the memory it pointed at
+is free once the call returns; a host that keeps that memory alive itself can skip the drain (`set_region` with `wait`
+off), because each launch reads its addresses when it is queued. The runtime drains anyway when the old memory is its
+own, which it frees, or a descriptor baked the address. A host may adopt its own stream for a call (`set_stream`):
+launches, device copies and memsets then go there, so a stream that is recording a graph records them, while host
+uploads and descriptor encodes always use the device's stream and complete before returning. Graph capture always
+happens on the device's stream. A load replaces the previous program; release drops it.
 
 All unsafe CUDA submission stays in `cuda`. Buffer pointers and the context are private. Executors have disjoint
 storage and synchronize before releasing it, so cudarc's cross-stream event tracking is disabled. Copies and launches
