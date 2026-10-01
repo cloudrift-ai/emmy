@@ -397,6 +397,9 @@ def test_price_memo_keys_on_exact_identity_not_the_term_hash(monkeypatch) -> Non
         return out
 
     monkeypatch.setattr(greedy, "_price_kernel", spy)
+    # The memo is a property of the nested pricing path, so the placement forks must take it: with the shipped
+    # placement weights loaded they would be decided by the placement prior and price nothing.
+    monkeypatch.setattr(greedy, "_load_placement_prior", lambda: None)
     g = Graph()
     g.add_node(InputOp(), [], Tensor("x", (16, 32), "f16"), node_id="x")
     prev = "x"
