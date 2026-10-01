@@ -147,10 +147,13 @@ checkpoint stays impractical here.
      (~0.6 ms of host work per expert launch, 256 experts a layer); py-spy on two workers put 52% of it in rebuilding
      the program's layout dict on every weight swap and output view. Keeping one layout per environment took boot78
      to 4.16 s to first token (7.75 on main at #1009, the fork 3.77) and 16.1 tokens/s at 8 concurrent (12.0, the
-     fork 21.0), 119 ms per token unchanged. The greedy probe text moved with it, but the probe's log-probabilities
-     differ between two boots of one tree too: the first difference is the fork's layer-0 attention output, one fp16
-     step, on bit-identical input, stable within a boot. Next: decode batches of 2-16 could be captured too (they
-     already ride the fixed slots row by row).
+     fork 21.0), 119 ms per token unchanged. The greedy probe text moved with it and the memo is not why: flipped
+     inside one boot it changes no log-probability, at 5 or 1,905 prompt tokens. Two boots of `main` differ instead,
+     from the fork's layer-0 attention on (one fp16 step, on bit-identical input, stable within a boot): the fork
+     times its fp8 GEMM kernels for small shapes at warm-up and keeps the winner. With
+     `VLLM_SM70_FP8_TUNE_SMALL_SHAPES=0` two boots of `main` and one of the memo agree to the last bit. The release
+     config leaves that tuning on; whether to pin it off is open (its cost per token is not measured). Next: decode
+     batches of 2-16 could be captured too (they already ride the fixed slots row by row).
    - Prefill: 5.7 s per stage against 1.9. The symbolic expert program takes 2.7 s against the fork's 1.0 (its main
      kernel reaches ~0.1 TFLOP/s on large experts, not on tensor cores), and ranks holding whole experts finish
      unevenly, so the others wait ~1.3 s per stage in all-reduces the fork does not wait in.
