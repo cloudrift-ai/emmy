@@ -162,6 +162,10 @@ every card; the lane measures `torch.compile` on the HF layer and stages the Rus
 
 ## Post-cut producer fusion (#1003)
 
+The extra FP16/BF16 pointwise rounding proposed in #997 and carried into #994 is dropped by user decision. Matching
+PyTorch's intermediate rounding exactly is not a goal. #1003 excludes that change; its record repairs cover post-cut
+fusion only. Whole-layer accuracy checks keep their existing tolerances.
+
 The feature lowers sibling workspace producers to Loop IR, runs the existing fusion splicer, then lifts them back
 to Tile IR. They re-enter the cut pass and can separate through ordinary output cuts. No new schedule codec is
 needed. The selected consumer workspace edge stays materialized. Focused tests cover termination, split receipts,
