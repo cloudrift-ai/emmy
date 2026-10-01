@@ -144,6 +144,7 @@ def _sources(code: str, window: int | None = None) -> list[str]:
             if isinstance(node.op, SdpaOp):
                 node.op = replace(node.op, sliding_window=window)
     pins = {
+        "PLACE": "fuse",  # one fused kernel's chunk loop is what these tests read; the placement prior would decide the cut
         "TILE@map.1/twist": "mma_m16n8k16_f16_f32/f1x4/k2",
         "TILE@map.1/twist.1/inner": "mma_m16n8k16_f16_f32/f1x4/k2",
         "STAGE@map.1/twist": "d2/smem-async",
