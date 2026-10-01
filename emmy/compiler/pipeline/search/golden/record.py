@@ -1,10 +1,12 @@
-"""One row of a golden as the evidence consumers read it — the flattened record — with the pin helpers that
-read a row's regime, and the record's compiler-facing derivations: its stored kernel through the current loop
-passes, its lift to Tile IR, its structural features."""
+"""One row of a golden as the evidence consumers read it — the flattened record — what a row says about itself
+(read the same off the file's realization), the records a consumer reads together and what they say as a set, and
+the record's compiler-facing derivations: its stored kernel through the current loop passes, its lift to Tile IR,
+its structural features."""
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import logging
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, replace
 from functools import cached_property
 from typing import TYPE_CHECKING
@@ -25,9 +27,59 @@ from emmy.compiler.specialize import specialize_program
 if TYPE_CHECKING:
     from .format import Latency, Measurements
 
+logger = logging.getLogger("emmy.compiler.pipeline")
+
+
+class Row:
+    """What a row of a golden says about itself, read the same off the file's :class:`Realization` and the
+    flattened :class:`GoldenRecord` — both carry ``pins`` (a mapping, or its pairs), ``knobs`` (a mapping, or
+    ``None``) and ``identity``."""
+
+    @property
+    def regime(self) -> dict:
+        """The row's INPUT pin regime — its pins minus the route: the precision knobs (``FAST_MATH``
+        and friends) a replay publishes to the environment so the row reads as live evidence
+        (:func:`regime_live`). The schedule row and the route never travel this way; they are
+        measured rows the evidence pick joins to the kernel they were recorded for."""
+        return {str(key): value for key, value in dict(self.pins).items() if family_of(str(key)) != "PLACE"}
+
+    @property
+    def is_routing(self) -> bool:
+        """Whether this row records a kernel-set decision — a placement cut, or a cross-CTA split's
+        ``g<n>`` arm, which mints its pieces the same way — rather than a kernel schedule."""
+
+        def arm(key: str, value) -> bool:
+            family = family_of(str(key))
+            return family == "PLACE" or (family == "REDUCE" and stampable_reduce(str(value)) == "")
+
+        return bool(self.knobs) and all(arm(key, value) for key, value in self.knobs.items())
+
+    @property
+    def is_receipt(self) -> bool:
+        """Whether this row is a child-identity schedule receipt: a schedule row recorded behind
+        pinned cut(s), whose stored ``identity`` names the child kernel the row decorates."""
+        return self.identity is not None and not self.is_routing and pins_freeze_cut(dict(self.pins))
+
+    @property
+    def route(self) -> dict[str, str]:
+        """The placement this row carries — every ``PLACE`` key of its pins and knobs, spelled
+        as recorded. A routing row keeps it in ``knobs``; a receipt, a corpus case or an ``--ab``
+        row freezes it in ``pins``. Empty for a plain schedule row, which says the kernel it
+        decorates ran fused."""
+        route = {str(key): str(value) for key, value in dict(self.pins).items() if family_of(str(key)) == "PLACE"}
+        route.update((str(key), str(value)) for key, value in (self.knobs or {}).items() if family_of(str(key)) == "PLACE")
+        return route
+
+    @property
+    def schedule_row(self) -> dict[str, str]:
+        """The schedule half of the row — its decided tuning knobs minus the route, as the evidence
+        index carries them (an OFF ``''`` is a decided value and stays)."""
+
+        return {key: value for key, value in tuning_knob_items(self.knobs or {}) if family_of(key) != "PLACE"}
+
 
 @dataclass(frozen=True)
-class GoldenRecord:
+class GoldenRecord(Row):
     name: str
     gpu_name: str
     compute_cap: tuple[int, int]
@@ -59,7 +111,7 @@ class GoldenRecord:
     #: usually carries no measurement of its own: those rows and the target's schedule-carrying
     #: rows hold the measurements, so they decide whether it verifies (:meth:`Realization.kernel_set_state`),
     #: what its replay spells (:func:`_replay`) and what a bench of it pins
-    #: (:func:`kernel_set_pins`). Empty where the compile took no kernel-set decision, leaving a
+    #: (:meth:`GoldenRecords.kernel_set_pins`). Empty where the compile took no kernel-set decision, leaving a
     #: realization that carries its own measured row and needs no listing.
     kernel_set: tuple[str, ...] = ()
     #: Measured microseconds per ``Context.hardware_id``: ``{card: Latency}``. A model golden is one
@@ -87,40 +139,6 @@ class GoldenRecord:
             return _lifted_target(self).identity_key(with_io=True)
         except Exception:  # noqa: BLE001 — see above; the decode tripwire re-derives loudly
             return None
-
-    @property
-    def is_routing(self) -> bool:
-        """Whether this row records a kernel-set decision — a placement cut, or a cross-CTA split's
-        ``g<n>`` arm, which mints its pieces the same way — rather than a kernel schedule."""
-
-        def arm(key: str, value) -> bool:
-            family = family_of(str(key))
-            return family == "PLACE" or (family == "REDUCE" and stampable_reduce(str(value)) == "")
-
-        return bool(self.knobs) and all(arm(key, value) for key, value in self.knobs.items())
-
-    @property
-    def is_receipt(self) -> bool:
-        """Whether this row is a child-identity schedule receipt: a schedule row recorded behind
-        pinned cut(s), whose stored ``identity`` names the child kernel the row decorates."""
-        return self.identity is not None and not self.is_routing and pins_freeze_cut(dict(self.pins))
-
-    @property
-    def route(self) -> dict[str, str]:
-        """The placement this record carries — every ``PLACE`` key of its pins and knobs, spelled
-        as recorded. A routing row keeps it in ``knobs``; a receipt, a corpus case or an ``--ab``
-        row freezes it in ``pins``. Empty for a plain schedule row, which says the kernel it
-        decorates ran fused."""
-        route = {str(key): str(value) for key, value in self.pins if family_of(str(key)) == "PLACE"}
-        route.update((str(key), str(value)) for key, value in self.knobs.items() if family_of(str(key)) == "PLACE")
-        return route
-
-    @property
-    def schedule_row(self) -> dict[str, str]:
-        """The schedule half of the record — its decided tuning knobs minus the route, as the evidence
-        index carries them (an OFF ``''`` is a decided value and stays)."""
-
-        return {key: value for key, value in tuning_knob_items(self.knobs) if family_of(key) != "PLACE"}
 
     @cached_property
     def pin_key(self) -> tuple:
@@ -246,54 +264,124 @@ class GoldenRecord:
         return spec.sm_count if spec else None
 
 
-def regime_pins(record: GoldenRecord) -> dict:
-    """The record's INPUT pin regime — its pins minus the route: the precision knobs (``FAST_MATH``
-    and friends) a replay publishes to the environment so the record reads as live evidence
-    (:func:`regime_live`). The schedule row and the route never travel this way; they are
-    measured rows the evidence pick joins to the kernel they were recorded for."""
-    return {str(key): value for key, value in record.pins if family_of(str(key)) != "PLACE"}
+def _set_key(record: GoldenRecord) -> tuple:
+    """What a record's kernel set is keyed by: its target (the stored Loop IR object, so two documents' targets never
+    collide), its config entry, its bindings and its input regime."""
+    regime = tuple(sorted((str(key), str(value)) for key, value in record.regime.items()))
+    return (id(record.loop_wire), record.target_key, record.compute_cap, record.bindings, record.config_index, regime)
 
 
-def kernel_set_pins(record: GoldenRecord, records: Sequence[GoldenRecord]) -> dict:
-    """The arms of the routing rows ``record``'s ``kernel_set`` lists, as one hand pin — what a
-    bench of that realization publishes so the compile reaches the kernel set the recording
-    measured.
+class GoldenRecords(Sequence):
+    """The records a consumer reads together — a file's rows, the scope a compile installs, a hand-built set — and
+    what they say as a set. A record's KERNEL SET is the records of its target in its input regime (same config
+    entry, bindings and regime, :func:`_set_key`): the entries that walk one kernel set together — a case's
+    per-kernel entries, a golden config's receipts. The first of them in order is the set's lead, the target's own
+    entry, which decides every fork no entry names by identity. A record need not be among the records to have a
+    set here: a hand-built record finds its siblings by key."""
 
-    A routing row's knobs ARE its arm — a placement cut's ``PLACE@seam: cut`` or a cross-CTA
-    split's ``REDUCE`` value — so both kinds travel. A cascade's later decisions are taken on the
-    pieces the earlier ones mint, and a scoped ``PLACE`` pin that resolves on no kernel addresses
-    another kernel of the graph (``030_cut._placement_restriction``), so publishing every routing
-    row's keys at once reproduces the whole cascade rather than only its first step. Empty for a
-    record that names no route, which is the ordinary row whose own knobs are its pin.
+    def __init__(self, records: Iterable[GoldenRecord] = ()) -> None:
+        self._records: tuple[GoldenRecord, ...] = tuple(records)
 
-    Both precision lanes record their rows under one name, so a listed name resolves inside the
-    record's own regime first: the standard lane's split is not the fast-math lane's.
+    @classmethod
+    def of(cls, records: Iterable[GoldenRecord]) -> GoldenRecords:
+        """``records`` as a set — itself when it already is one, so its indexes are kept."""
+        return records if isinstance(records, cls) else cls(records)
 
-    A row naming a piece a cut minted publishes only its ``PLACE`` keys. Its other knobs address
-    that piece by identity, not by seam: published as a hand pin they would reach every kernel of
-    the graph (two pieces' splits collapsing onto the last value, a piece that cannot split
-    refusing). Its row decides that piece by identity instead, as evidence."""
-    regime = regime_pins(record)
-    by_name: dict[str, GoldenRecord] = {}
-    for other in records:
-        if other.name not in by_name or regime_pins(other) == regime:
-            by_name[other.name] = other
-    pins: dict[str, str] = {}
-    for name in record.kernel_set:
-        referenced = by_name.get(name)
-        if referenced is None:
-            continue
-        own_kernel = referenced.identity in (None, record.identity)
-        pins.update({str(key): str(value) for key, value in referenced.knobs.items() if own_kernel or family_of(str(key)) == "PLACE"})
-    return pins
+    def __len__(self) -> int:
+        return len(self._records)
 
+    def __iter__(self) -> Iterator[GoldenRecord]:
+        return iter(self._records)
 
-def shared_regime_pins(records: Sequence[GoldenRecord]) -> dict:
-    """The one input regime every record shares, or ``{}`` when they disagree — a compile publishes
-    a regime only when the records it replays agree on it, because choosing one would silently
-    change which realization was requested."""
-    regimes = {tuple(sorted(regime_pins(record).items())) for record in records}
-    return dict(regimes.pop()) if len(regimes) == 1 else {}
+    def __getitem__(self, index):
+        return GoldenRecords(self._records[index]) if isinstance(index, slice) else self._records[index]
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, Sequence) and tuple(other) == self._records
+
+    __hash__ = None
+
+    def __add__(self, other: Iterable[GoldenRecord]) -> GoldenRecords:
+        return GoldenRecords((*self._records, *other))
+
+    @cached_property
+    def _sets(self) -> dict[tuple, tuple[GoldenRecord, ...]]:
+        sets: dict[tuple, list[GoldenRecord]] = {}
+        for record in self._records:
+            sets.setdefault(_set_key(record), []).append(record)
+        return {key: tuple(entries) for key, entries in sets.items()}
+
+    def sets(self) -> list[GoldenRecords]:
+        """Every kernel set among the records, each as its own set, lead first, in order of first appearance."""
+        return [GoldenRecords(entries) for entries in self._sets.values()]
+
+    def siblings(self, record: GoldenRecord) -> tuple[GoldenRecord, ...]:
+        """The other records of ``record``'s kernel set, in order."""
+        return tuple(other for other in self._sets.get(_set_key(record), ()) if other is not record)
+
+    def lead(self, record: GoldenRecord) -> GoldenRecord:
+        """The lead of ``record``'s kernel set — its first record in order, or the record itself when none is here."""
+        return next(iter(self._sets.get(_set_key(record), ())), record)
+
+    def for_card(self, gpu_name: str, compute_cap: tuple[int, int]) -> GoldenRecords:
+        """The records that are evidence on one card: the capability must agree; a record that names no card (a
+        working golden traced off-GPU) applies to whichever card compiles it. Rows another card of the same
+        capability measured are no evidence here, and the compile says so: silently dropped, they left a recorded
+        route unread and its replay built the fused kernel."""
+        same_cap = [r for r in self._records if tuple(r.compute_cap) == tuple(compute_cap)]
+        kept = [r for r in same_cap if not r.gpu_name or r.gpu_name == gpu_name]
+        if gpu_name and (others := sorted({r.gpu_name for r in same_cap if r.gpu_name and r.gpu_name != gpu_name})):
+            logger.warning(
+                "golden scope: %d row(s) measured on %s are no evidence on %s", len(same_cap) - len(kept), ", ".join(others), gpu_name
+            )
+        return GoldenRecords(kept)
+
+    def kernel_set_pins(self, record: GoldenRecord) -> dict:
+        """The arms of the routing rows ``record``'s ``kernel_set`` lists, as one hand pin — what a
+        bench of that realization publishes so the compile reaches the kernel set the recording
+        measured.
+
+        A routing row's knobs ARE its arm — a placement cut's ``PLACE@seam: cut`` or a cross-CTA
+        split's ``REDUCE`` value — so both kinds travel. A cascade's later decisions are taken on the
+        pieces the earlier ones mint, and a scoped ``PLACE`` pin that resolves on no kernel addresses
+        another kernel of the graph (``030_cut._placement_restriction``), so publishing every routing
+        row's keys at once reproduces the whole cascade rather than only its first step. Empty for a
+        record that names no route, which is the ordinary row whose own knobs are its pin.
+
+        Both precision lanes record their rows under one name, so a listed name resolves inside the
+        record's own regime first: the standard lane's split is not the fast-math lane's.
+
+        A row naming a piece a cut minted publishes only its ``PLACE`` keys. Its other knobs address
+        that piece by identity, not by seam: published as a hand pin they would reach every kernel of
+        the graph (two pieces' splits collapsing onto the last value, a piece that cannot split
+        refusing). Its row decides that piece by identity instead, as evidence."""
+        regime = record.regime
+        by_name: dict[str, GoldenRecord] = {}
+        for other in self._records:
+            if other.name not in by_name or other.regime == regime:
+                by_name[other.name] = other
+        pins: dict[str, str] = {}
+        for name in record.kernel_set:
+            referenced = by_name.get(name)
+            if referenced is None:
+                continue
+            own_kernel = referenced.identity in (None, record.identity)
+            pins.update({str(key): str(value) for key, value in referenced.knobs.items() if own_kernel or family_of(str(key)) == "PLACE"})
+        return pins
+
+    def spelling(self, record: GoldenRecord) -> dict[str, str]:
+        """The row ``record`` spells at the forks of a replay: the arms of the routing rows it lists, its route and
+        its knobs. A routed realization measures nothing itself and carries no row, so read alone it would say
+        "this kernel ran whole" — the fuse reading, which is right for a row that genuinely took no kernel-set
+        decision and wrong for this one. It spells the route it names instead."""
+        return {**self.kernel_set_pins(record), **record.route, **{str(key): str(value) for key, value in record.knobs.items()}}
+
+    def shared_regime_pins(self) -> dict:
+        """The one input regime every record shares, or ``{}`` when they disagree — a compile publishes
+        a regime only when the records it replays agree on it, because choosing one would silently
+        change which realization was requested."""
+        regimes = {tuple(sorted(record.regime.items())) for record in self._records}
+        return dict(regimes.pop()) if len(regimes) == 1 else {}
 
 
 def _target_kernel_nodes(record: GoldenRecord):

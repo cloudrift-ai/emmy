@@ -62,7 +62,7 @@ def main(argv: list[str] | None = None) -> int:
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     from emmy.compiler.context import Context
-    from emmy.compiler.pipeline.search.working_golden import write_trace_inventories
+    from emmy.compiler.pipeline.search.golden import write_trace_inventories
     from tests.compiler.realization import helpers as corpus
     from tests.serving import helpers
 
