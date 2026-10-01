@@ -104,7 +104,7 @@ def _route_keys(record: GoldenRecord) -> frozenset[str]:
 
 
 def unresolved_route_keys(record: GoldenRecord, keys: frozenset[str], records: Sequence[GoldenRecord] = ()) -> list[str]:
-    """The cut keys this record cannot take when its kernel set replays through ``tile/cut``.
+    """The cut keys no decision consumes when this record's kernel set replays through ``tile/cut``.
     Parent routes must run first: a child's seam belongs to the kernel its parent cut creates,
     and publishing all keys as global pins can consume it on the wrong kernel."""
     records = GoldenRecords.of(records)
@@ -121,7 +121,7 @@ def unresolved_route_keys(record: GoldenRecord, keys: frozenset[str], records: S
 
     with unpinned_decisions(), pinned_knobs(record.regime), composed_routes(spelling.composed()):
         Run(Pipeline.build([*LOOP_PASSES, "tile/lift", "tile/cut"]), ctx).resolve(record.target_program.copy(), decide)
-    return sorted(keys & spelling.cut_keys(record))
+    return sorted(keys - spelling.consumed)
 
 
 def _stale_route_reasons(document: GoldenFile, entry: Config) -> list[str]:
