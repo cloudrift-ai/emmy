@@ -114,6 +114,11 @@ numpy backends in three places:
 
 ### Tile lowering (`passes/tile/`)
 
+Independent equal-domain output sweeps have structural and numerical reform checks. Flat and rectangular output
+views become one shared-input contraction, and both results are compared with NumPy. Unequal domains or windows,
+cross-coordinate dependencies, variable capture, scalar coordinate uses, and repeated output buffers retain their
+existing form. Separate Fold tests hold expression substitution to its parameter-binding and closure contracts.
+
 `test_twisted_rewrite.py` traces softmax, SDPA, and causal SDPA through total lift and the same `020_twisted` rule,
 then checks the resulting carrier arity, the derived contraction sites, and that plain and causal SDPA reach both MMA
 sites through the CUDA pipeline. The direct projection boundary exhaustively compares its production rows with the
