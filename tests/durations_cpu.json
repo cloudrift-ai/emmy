@@ -99,6 +99,7 @@
  "tests/compiler/cli/test_golden_command.py::test_check_passes_a_current_golden_and_names_what_a_restamp_changes": 0.59,
  "tests/compiler/cli/test_golden_command.py::test_restamp_rewrites_the_golden_onto_the_fresh_lowering": 0.72,
  "tests/compiler/cli/test_golden_command.py::test_restamp_takes_a_decision_again_on_the_re_keyed_parent": 9.3,
+ "tests/compiler/cli/test_golden_file_replay.py::test_a_file_walk_does_not_pin_a_pieces_schedule_across_its_target": 10.3,
  "tests/compiler/cli/test_golden_file_replay.py::test_a_pieces_row_carries_the_decisions_that_mint_it": 9.09,
  "tests/compiler/cli/test_golden_file_replay.py::test_a_recorded_kernel_set_is_the_evidence_a_compile_cuts_by": 9.3,
  "tests/compiler/cli/test_golden_file_replay.py::test_compile_working_file_uses_exact_loop_target": 0.33,

@@ -181,8 +181,8 @@ def resolve_golden_arg(args) -> None:
     ``_golden_reference`` (its Torch twin), ``_golden_scope`` (the file, the golden evidence the compile imports)
     and ``golden_configs`` (the rows ``run`` benches as pinned rows: a realization the operator NAMED is always
     benched; a whole-file walk (``run --golden PATH`` alone, ``_explicit_realization`` false) benches a target's
-    measured rows and leaves proposals unbenched). Nothing here installs a pin: a measured row reaches its kernel
-    through the evidence pick — except the kernel-set decisions a named row's kernel was minted by, which the compile
+    measured rows and leaves proposals and descendant rows to the evidence pick). Nothing here installs a pin: a
+    measured row reaches its kernel through the evidence pick — except the kernel-set decisions that minted it, which the compile
     pins under ``--pin-route`` (:func:`selected_decisions`).
 
     ``NAME`` matches an exact row name first, else a name **substring**. Because compile/run build a single graph,
@@ -264,9 +264,9 @@ def resolve_golden_arg(args) -> None:
     args._golden_graph = document.executable(target, row.bindings)
     args._golden_reference = document.reference_program(target)
     args._golden_document, args._golden_scope = document, list({id(other): other for other, _ in matches}.values())
-    pinned = [row for _, row in matches]
+    args._golden_rows = pinned = [row for _, row in matches]
     if not getattr(args, "_explicit_realization", True):
-        pinned = [row for row in pinned if row.measured]
+        pinned = [row for row in pinned if row.measured and row.kernel == target.exact_identity]
     args.golden_configs = [golden_row(document, row) for row in pinned]
     logger.info(
         "[golden] %s%s → kernel %s (%d matching row%s, %d automatic pin%s)",
@@ -606,12 +606,12 @@ def wire_stage(graph, stage: str) -> str:
 
 
 def golden_regime(args) -> dict:
-    """The input regime the selected golden rows share — the pinned rows', else the file's — published so they read
+    """The input regime the selected golden rows share, or the file's for a whole traced program, so they read
     as live measurements; ``{}`` when they disagree or no golden is selected."""
     document = getattr(args, "_golden_document", None)
     if document is None:
         return {}
-    return document.shared_regime([sample.record for sample in getattr(args, "golden_configs", None) or []] or None)
+    return document.shared_regime(getattr(args, "_golden_rows", None))
 
 
 def _quantize_traced(graph: Graph, bundle, args) -> str:

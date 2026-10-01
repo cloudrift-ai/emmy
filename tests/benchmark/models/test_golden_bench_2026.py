@@ -83,7 +83,8 @@ def test_common_kernel_corpus_is_small_and_identical(project_root) -> None:
     assert "./venv/bin/emmy run" in run
     assert "for repeat in 0 1 2 3 4" in run
     assert "--golden $task_dir/working.json --bench --strict" in run
-    assert 'if [ -n "$golden" ]; then\n  evidence_args=(--strict-evidence)' in run
+    assert 'if [ -n "$golden" ]; then\n  evidence_args=(--strict-evidence --no-record-evidence)' in run
+    assert "export EMMY_TUNE_DB=$task_dir/verification/repeat-$$repeat.db" in run
     assert run.count('"$${evidence_args[@]}"') == 2
     assert '"$model_ref" --layer "$layer" --seq-len "$seq_len" --bench' in run
     assert "EMMY_GOLDEN_FILE=$task_dir/working.json" in run

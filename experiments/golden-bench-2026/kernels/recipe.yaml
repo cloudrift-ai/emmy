@@ -63,7 +63,7 @@ command:
 
     evidence_args=()
     if [ -n "$golden" ]; then
-      evidence_args=(--strict-evidence)
+      evidence_args=(--strict-evidence --no-record-evidence)
       cp $repo_dir/experiments/golden-bench-2026/kernels/golden/$golden.golden.json $task_dir/working.json
       echo "replaying committed golden $golden" | tee $task_dir/trace.log
       echo "search owned by the tune-kernels skill; this row only re-measures" | tee $task_dir/tune.log
@@ -99,6 +99,9 @@ command:
     # fails, so an Emmy failure is reported rather than hidden. torch.compile availability is non-gating above.
     verification_status=0
     for repeat in 0 1 2 3 4; do
+      if [ -n "$golden" ]; then
+        export EMMY_TUNE_DB=$task_dir/verification/repeat-$$repeat.db
+      fi
       if EMMY_NVCC_FLAGS= CUDA_VISIBLE_DEVICES="$$first_device" ./venv/bin/emmy run \
         --golden $task_dir/working.json --bench --strict "$${evidence_args[@]}" \
         --json $task_dir/verification/repeat-$$repeat --warmup 10 --iters 100 \
