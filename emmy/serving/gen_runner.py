@@ -240,17 +240,28 @@ def combine_routed_experts(xn, gated, run_expert, *, accumulate_float32=False):
         return out
     # Every hit expert's rows in one sort and ONE host read of the per-expert counts: a stable
     # sort of the flattened picks lists each expert's (row, slot) pairs in row order, exactly the
-    # rows a per-expert ``where`` would find — without one device wait per expert.
-    k = indices.shape[1]
-    order = torch.argsort(indices.reshape(-1), stable=True)
-    tok_all, pos_all = order // k, order % k
+    # rows a per-expert ``where`` would find — without one device wait per expert. The rows are
+    # gathered once and each expert's output lands in one buffer, so an expert costs its launch
+    # and one copy; the weighting and the sum run once per layer.
+    rows, k = indices.shape
+    flat = indices.reshape(-1)
+    order = torch.argsort(flat, stable=True)
+    gathered = xn[order // k]
+    outputs = torch.empty((rows * k, xn.shape[1]), dtype=accumulate_dtype, device=xn.device)
     start = 0
-    for e, count in enumerate(torch.bincount(indices.reshape(-1)).tolist()):
+    for e, count in enumerate(torch.bincount(flat).tolist()):
         if count:
-            tok, pos = tok_all[start : start + count], pos_all[start : start + count]
-            partial = run_expert(e, xn[tok]).to(accumulate_dtype)
-            out.index_add_(0, tok, partial * scores[tok, pos, None])
+            outputs[start : start + count] = run_expert(e, gathered[start : start + count])
         start += count
+    # Back to (row, pick) order, weighted, then each row's picks summed in ascending expert order:
+    # the order the single-row path adds them in, and a fixed one (one scattered index_add would
+    # leave the order to float atomics).
+    per_pick = torch.empty_like(outputs)
+    per_pick[order] = outputs
+    per_pick = per_pick.view(rows, k, -1) * scores[..., None]
+    by_expert = per_pick.gather(1, indices.argsort(dim=1, stable=True)[..., None].expand_as(per_pick))
+    for pick in range(k):
+        out += by_expert[:, pick]
     return out
 
 
