@@ -46,6 +46,9 @@ directory. The whole plan grammar is read: an `int` literal, a `"name"` variable
   shape (a prefix-packed symbolic source has the resolved strides, not the allocation's) and passed as a pointer to
   its 128 bytes. `zero_outputs` clears a buffer before its launch; `zero_prologues` records zeroing performed inside
   the kernel and adds no extra memset.
+- Whole-program CUDA graph capture prepares any TMA descriptors before entering capture, as per-launch capture
+  already does. Descriptor encoding and its stream synchronization cannot occur inside an active capture;
+  rebinding an environment invalidates descriptors and captured graphs together.
 - On sm_90 and later, a whole-program submission launches a kernel whose plan entry sets `dependent_launch` as a
   programmatic dependent launch: the kernel waits on the grid ahead of it (`griddepcontrol.wait`) before any memory
   access, so its launch overlaps that grid's drain. A launch behind a memset, and every launch of a single-launch
