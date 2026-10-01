@@ -76,7 +76,7 @@ class Fork(ABC):
         descent (:func:`descent_sample`). The default expands the branch and draws; a branch that can draw
         without expanding (a schedule prefix, whose context draws one extension) overrides it."""
         kids = self.expand()
-        return kids[rng.randrange(len(kids))] if kids else None
+        return rng.choice(kids) if kids else None
 
     def narrow(self, row: Mapping) -> Fork:
         """This branch with its enumeration re-sourced to ``row`` where it can be: a schedule
@@ -293,7 +293,7 @@ def descent_sample(
             attempts = min(4 * draw, attempt_budget)
     while len(sample) < draw and attempts > 0:
         attempts -= 1
-        option = options[rng.randrange(len(options))]
+        option = rng.choice(options)
         dead = False
         while isinstance(option, Fork) and not option.is_leaf:
             option = option.sample_child(rng)

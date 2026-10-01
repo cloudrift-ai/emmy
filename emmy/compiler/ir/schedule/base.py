@@ -151,7 +151,7 @@ class ScheduleContext[KernelT, NodeT, EdgeT](ABC):
         try the catalog in random order and stop at the first option that composes, so a descent costs the
         options it tries rather than every option the site has."""
         options = list(self.extensions())
-        return options[rng.randrange(len(options))] if options else None
+        return rng.choice(options) if options else None
 
     def narrowed(self, row: Mapping[str, str], *, strict: bool = False) -> Self:
         """This prefix over the problem with ``row`` installed. Only an empty prefix can be

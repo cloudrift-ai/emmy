@@ -288,7 +288,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         frontier = self._compatible_frontier(site)
         if not frontier:
             return None
-        support = frontier[rng.randrange(len(frontier))]
+        support = rng.choice(frontier)
         return Schedule(None, {site.id: support.node}, support.edges)
 
     def extend(self, pick: ClassicSchedule) -> ClassicScheduleContext:
