@@ -1,9 +1,11 @@
 # RTX 5090 Qwen3.8 NVFP4 MLP tuning log
 
-Status: bounded hand sweep and strict golden serving qualified on October 1, 2026; repository prior refit and CI
-are in progress. This log belongs to the experimental mixed serving lane in
-PR #993. It records measured choices separately from ideas borrowed from earlier plans and golden files. The exact
-implementation and qualification boundary is in [the mixed serving progress report](nvfp4-qwen-mixed-serving-progress.md).
+Status: **paused by user on October 2, 2026**. The bounded hand sweep and strict golden serving were
+qualified on October 1; the October 2 main merge preserved the Qwen MLP code path and measured golden.
+The `--compile-scope mlp` serving route and further tuning are shelved. This log belongs to the experimental
+mixed serving lane in PR #993. It records measured choices separately from ideas borrowed from earlier plans
+and golden files. The exact implementation and qualification boundary is in
+[the mixed serving progress report](nvfp4-qwen-mixed-serving-progress.md).
 
 ## Fixed target and method
 
@@ -274,16 +276,32 @@ above bounds numerical error on sampled inputs, not whole-model equivalence.
 The final golden server also completed a 4,005-input/16-output near-4K request (TTFT 9303.57 ms, TPOT
 95.36 ms, 10.73 s total, zero failures). A chat stream was cancelled **after actual text `1`**, then a fresh
 deterministic request answered `Tokyo` and `/health` returned HTTP 200. The server remains reachable on host
-port 8080. Remaining release work is `make test-priors`, final CI, and review of the
-documented comparator/TMA limitations; no further GPU tuning is required for this bounded round.
+port 8080 at the last health check. At the user's pause, repository schedule prior reproduction and full CI
+remain unverified, along with review of the documented comparator/TMA limitations. No further GPU tuning is
+planned on this branch.
 
 Adding a repository model golden requires refitting both offline priors even though this serving launcher uses
 strict measured evidence. The repository import included this golden's 16 performance rows and six routes.
-Default schedule export completed successfully after roughly 90–93 minutes of active CPU enumeration, producing
+The initial schedule export completed successfully after roughly 90–93 minutes of active CPU enumeration, producing
 750 golden and 828 measured groups; 61 golden rows were skipped by the exporter. Two logged producer-identity
 skips were in older Qwen3.8 V100 golden families, outside the new NVFP4 file; no causal compiler regression is
-established from those logs. Placement and schedule refits both wrote new weight artifacts. The required
-`make test-priors` schedule reproduction nodes are still running; their result belongs in the final gate report.
+established from those logs. Placement and schedule refits both wrote weight artifacts for that earlier corpus.
+A later `origin/main` merge (`882d3772`) added the current DeepSeek V100 golden while preserving the Qwen MLP
+capture and runtime path. Fresh repository import and full export were required: no supported resume or
+dataset-merge command exists. The merged schedule export ran 1 hour 29 minutes, yielding 749 golden and 838
+measured groups with 70 skipped rows. The placement export yielded 331 golden groups. Both merged-corpus priors
+were refitted and committed at `f960e2e5`; the launcher still uses strict model-golden evidence, not these
+offline priors. The unchanged `make test-priors` gate passed repository placement and hardware schedule
+reproduction. Repository schedule reproduction was **interrupted before verdict** when the user paused this PR;
+the overall gate did not complete. Sampled-golden misses and older duplicate-producer skips were logged during
+export, which exited successfully. Their counts do not establish a Qwen MLP serving regression.
+
+The merged branch's full GitHub CI passed native, lint, package, and all tests on `fca185c2` before the new
+prior weights. Subsequent full-test runs exposed two tests that had implicitly accepted a prior-selected split:
+the FP8 block statistic test and the rolled recurrence lowering test. Their intended unsplit paths are now
+explicitly pinned (`REDUCE=off`) and focused tests passed. The full CI run for the latest code head `d603e7ed`
+was cancelled on the user's pause, so that head has **no full-test verdict**. PR #993 remains draft; these
+artifacts and measurements are retained for future review, not an active deployment or further tuning claim.
 
 ## Automated review disposition
 

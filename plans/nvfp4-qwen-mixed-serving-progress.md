@@ -1,7 +1,8 @@
 # Qwen3.8 NVFP4 mixed serving: implementation and qualification
 
-Status: implementation in draft PR #993, October 1, 2026. The exact 27B endpoint booted with pinned native
-M=16 decode and M=64 prefill programs on the RTX 5090 before the October 1 main merge. Selected deterministic
+Status: **paused by user on October 2, 2026**; implementation and evidence remain in draft PR #993.
+The `--compile-scope mlp` serving route and further tuning are shelved. The exact 27B endpoint booted with
+pinned native M=16 decode and M=64 prefill programs on the RTX 5090 before the October 1 main merge. Selected deterministic
 short and 4K completions matched stock; four other 64-token prompts diverged. Post-merge graph fusion changed
 the pin sites. New explicit cuts yield three kernels emitting native FP4 instructions per shape on the 5090.
 Post-merge numerical, endpoint, bounded answer-quality, and paired warm latency checks passed; the broader
