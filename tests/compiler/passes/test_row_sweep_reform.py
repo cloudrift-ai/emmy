@@ -2,9 +2,13 @@
 
 from dataclasses import replace
 
+import numpy as np
+import pytest
+
 from emmy.compiler.graph import Tensor
 from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.stmt import Assign, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.pipeline.passes.tile._row import reformed
@@ -72,6 +76,25 @@ def test_rectangular_and_flat_sweeps_form_one_contraction() -> None:
     assert tuple(axis.extent.as_static() for axis in formed.place.free) == (1, 8)
     assert all(not spec.sweep for spec in formed.output_specs)
     assert len(next(spec.write.index for spec in formed.output_specs if spec.write.output == "out1")) == 3
+
+
+@pytest.mark.parametrize("rectangular", [False, True], ids=["flat", "rectangular"])
+def test_reform_preserves_both_output_values(rectangular) -> None:
+    tile = _siblings(rectangular=rectangular)
+    rng = np.random.default_rng(1)
+    inputs = {
+        name: rng.standard_normal(tuple(dim.as_static() for dim in tensor.shape)).astype(np.float32)
+        for name, tensor in tile.inputs.items()
+    }
+    expected = {
+        "out0": inputs["x"] @ inputs["w0"],
+        "out1": np.tensordot(inputs["x"], inputs["w1"], axes=([1], [0])),
+    }
+    for piece in (tile, reformed(tile)):
+        loop = LoopOp(body=piece.loop_body, inputs=piece.inputs, outputs=piece.outputs)
+        actual = loop.forward(*(inputs[name] for name in piece.inputs))
+        for name, value in zip(piece.outputs, actual, strict=True):
+            np.testing.assert_allclose(value, expected[name], rtol=1e-6, atol=1e-6)
 
 
 def test_unequal_sweeps_and_windows_remain_independent() -> None:
