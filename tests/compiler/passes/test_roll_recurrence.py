@@ -22,6 +22,7 @@ from emmy.compiler.ir.loop.runner import execute_loop_op_cpp
 from emmy.compiler.ir.stmt import Loop
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, Pipeline
+from emmy.compiler.pipeline.search.pins import pinned_knobs
 from tests.compiler.helpers import requires_cuda
 
 _DELTA = """
@@ -232,7 +233,9 @@ def test_the_rolled_kernel_lowers_to_one_launch_per_step() -> None:
     """The serial axis reaches the CUDA op as a runtime ``int`` and a launch count; the body holds
     no loop over it and reads the previous step behind the guard."""
     graph, _, _ = graph_from_code(_delta())
-    lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((9, 0)))
+    # This checks the serial recurrence body, not a prior-selected reduction split.
+    with pinned_knobs({"REDUCE": ""}):
+        lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((9, 0)))
 
     (step,) = (node.op for node in lowered.nodes.values() if isinstance(node.op, CudaOp) and node.op.serial)
     ((axis, launches),) = step.serial
