@@ -605,13 +605,15 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
             else:
                 state, fold, close, bt = [], with_store(body, ctx.output, grid, out_val), [], None
         elif plan.coop_transposed:
-            # The ``coop-t`` k-major matvec partition: the innermost output axis splits into a
-            # shrunk ``<out>_blk`` grid axis (×32) + the 32-wide ``n_lane`` thread axis (with
-            # ``k_co`` between them), so B loads coalesce across lanes. The emitted body's
-            # output-var references were σ-substituted to ``blk·32 + n_lane`` inside (clamped,
-            # and the store guarded, when 32 does not tile the swept extent).
+            # The ``coop-t`` k-major matvec partition: the output axis splits into a shrunk
+            # ``<out>_blk`` grid axis and ``n_lane`` output threads, with ``k_co`` between them.
+            # B loads coalesce across lanes; a partial last block clamps reads and guards stores.
             state, fold, close, lanes_axes, out_ax = _tile_reduce_axis_transposed(op, plan, ctx, tail, out_val)
-            blk = Axis(name=f"{out_ax.name}_blk", extent=out_ax.extent.ceil_div(32 * plan.coop_columns), window=Window(parent=out_ax))
+            blk = Axis(
+                name=f"{out_ax.name}_blk",
+                extent=out_ax.extent.ceil_div(plan.coop_output_lanes * plan.coop_columns),
+                window=Window(parent=out_ax),
+            )
             lead = tuple(blk if a.name == out_ax.name else a for a in grid)
             t = replace(t, axes=lanes_axes)
             bt = plan.coop
@@ -853,11 +855,11 @@ def combine_tail(fold: Fold, *, reg: int, coop: int, lane) -> list[Stmt]:
 def _tile_reduce_axis_transposed(
     op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str
 ) -> tuple[list[Stmt], list[Stmt], list[Stmt], tuple[Axis, ...], Axis]:
-    """The ``coop-t`` (transposed) cooperative reduce — the k-major-B matvec partition: 32
+    """The ``coop-t`` (transposed) cooperative reduce — the k-major-B matvec partition:
     ``n_lane`` threads (innermost) sweep the OUTPUT axis so B loads coalesce across lanes at
-    every k step, and ``coop/32`` ``k_co`` slices ride the upper thread bits. The emitted body
+    every k step, and ``coop/output_lanes`` ``k_co`` slices ride the upper thread bits. The emitted body
     keeps referencing the original output axis var — one σ substitutes it with
-    ``blk·32 + n_lane`` (the caller rebinds the shrunk ``ceil(E/32)`` ``<out>_blk`` grid axis; an
+    ``blk·output_lanes + n_lane`` (the caller rebinds the shrunk output ``<out>_blk`` grid axis; an
     overhanging last block clamp-reads and guards its store). The combine is
     the segment-indexed smem tree (``emit_combine(inner=…)`` — never a shuffle: adjacent lanes
     hold different outputs); the projection stores guard on ``k_co == 0``, each lane writing its
@@ -865,14 +867,14 @@ def _tile_reduce_axis_transposed(
     ``smem`` shared-row staging, distributed full-row projections (a ``Loop`` in the tail).
 
     With ``columns > 1`` (``coop-t/v<n>``) each lane owns ``n`` adjacent cells
-    ``blk·32n + n_lane·n + j``: the loop body, its prologue and the projection are copied once
+    ``blk·output_lanes·n + n_lane·n + j``: the loop body, its prologue and the projection are copied once
     per column (SSA suffix ``__v<j>``, column 0 verbatim), so at each k step a lane's reads of B
     are one contiguous run the load vectorizer merges, and every column's state rides the one
     combine as extra components."""
     grid = ctx.grid
     coop, reg, columns = plan.coop, plan.reg, plan.coop_columns
     assert columns == 1 or reg == 1, "a coop-t band splits its lane over columns or over ILP chains, not both"
-    lanes_n = 32
+    lanes_n = plan.coop_output_lanes
     k_ways = coop // lanes_n
     assert coop % lanes_n == 0 and k_ways >= 1, f"b{coop}t needs a multiple of {lanes_n}"
     stage = ctx.sched.get("STAGE", op)
@@ -888,8 +890,8 @@ def _tile_reduce_axis_transposed(
     k_co = Axis(name=f"{axis.name}_co", extent=k_ways) if k_ways > 1 else None
     start = Var(k_co.name) if k_co is not None else Literal(0, "int")
     blk_name = f"{out_ax.name}_blk"
-    # The swept cell this lane owns. The grid is ``ceil(E / 32)`` blocks, so a swept axis 32 does
-    # not tile leaves the last block's upper lanes OVERHANGING: they clamp-read the last valid
+    # The swept cell this lane owns. An extent not divisible by the output span leaves
+    # the last block's upper lanes OVERHANGING: they clamp-read the last valid
     # column (a duplicate sweep, in-bounds) and their store is discarded by the guard below — the
     # same masked-overhang contract the tiled contraction's ``clamp_last`` / ``Cond`` pair states.
     span = lanes_n * columns

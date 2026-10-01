@@ -311,7 +311,7 @@ def test_offer_audit_flags_unrealized_entries(monkeypatch, caplog):
     warp = Tile.parse("mma_m16n8k16_f16_f32/f2x2/k2", Work.parse("w2x1"))
     monkeypatch.setattr(classic, "scalar_tile_moves", lambda: [Tile()])
     monkeypatch.setattr(classic, "warp_tile_moves", lambda atoms: [warp] if warp.atom.name in atoms else [])
-    monkeypatch.setattr(classic, "coop_reduce_moves", lambda: [])
+    monkeypatch.setattr(classic, "coop_reduce_moves", lambda **_: [])
     monkeypatch.setattr(classic, "stage_moves", lambda *, warp, ctx=None: [])
     monkeypatch.setattr(classic_sites, "raster_moves", lambda: [""])
 

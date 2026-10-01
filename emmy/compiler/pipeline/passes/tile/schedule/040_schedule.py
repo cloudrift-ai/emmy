@@ -29,7 +29,7 @@ from emmy.compiler.ir.schedule.classic import ClassicProblem, ClassicScheduleCod
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.ops import carries_partition, merges_partition
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
-from emmy.compiler.pipeline.fork import SCHEDULE_FORK_STAMPS, Fork, iter_leaves
+from emmy.compiler.pipeline.fork import SCHEDULE_FORK_STAMPS, Fork, exact_schedule_leaf, iter_leaves
 
 # NOTE: no ``Knob`` objects (``TILE`` / ``REDUCE`` / ``STAGE``) may be imported here — ``Pass.load``
 # scans rule modules for ``Knob`` attrs and OFF-fills any it finds bare onto every variant of the
@@ -158,7 +158,7 @@ def classic_forks(
         *catalog,
     )
     prefix = dict.fromkeys(SCHEDULE_FORK_STAMPS, 1.0) if problem.warp_eligible else {}
-    forks = register + fork_schedule(
+    classic = fork_schedule(
         context,
         codec=codec,
         inherited_knobs=knobs,
@@ -173,6 +173,12 @@ def classic_forks(
         pool_id=pool_id,
         sample=getattr(ctx, "pool_sample", None),
     )
+    if set(codec.keys()) <= set(row) and getattr(ctx, "pool_sample", None) is None:
+        # A complete hand pin has one candidate; a refused pin keeps the usual peer fallback.
+        exact = exact_schedule_leaf(classic, row, frozenset(codec.keys()))
+        if exact is not None and exact[1] is not None:
+            classic = [exact[1]]
+    forks = register + classic
     if kernel_set and published and any(family_pins(family) for family in _FAMILIES) and next(iter_leaves(forks), None) is None:
         # Pins published to every piece of a cut take where they fit, but values that fit a site one at a time
         # can still leave a piece no complete row (an f32 GDN piece under a GEMM sweep's ``STAGE=d1/smem``,

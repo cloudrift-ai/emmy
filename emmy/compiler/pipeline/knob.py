@@ -370,7 +370,7 @@ def _validate_family_cached(fam: str, v: str) -> str:
         work = Work(kind="thread", units=(2, 1)) if v.startswith("f") else Work(kind="warp", units=(1, 1))
         return Tile.parse(v, work).spell()
     if fam == "REDUCE":
-        return Reduce.parse(v, Work(kind="thread", units=(2, 1))).spell()
+        return Reduce.parse(v, Work(kind="thread", units=(32, 1))).spell()
     if fam == "STAGE":
         return Stage.parse(v).spell()
     if fam == "RASTER":

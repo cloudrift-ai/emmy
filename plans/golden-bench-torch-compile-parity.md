@@ -200,6 +200,17 @@ Next steps:
 
 ## Future improvements
 
+### Remaining work in #994 after #1003
+
+#1003 is merged. #994 is rebased onto it and retains the Volta eight-output-lane reduction schedule, direct decoding
+of complete schedule pins, golden refresh validation fixes and the earlier H100 schedule evidence. The special grouped
+cut implementation is removed in favor of the Loop IR fusion now on main. The extra pointwise rounding remains dropped.
+Repository goldens match main, so this rebase adds no measurement or prior-refit work.
+
+The historical A100 and H100 trials with the removed rounding change do not qualify the final compiler. Next, measure
+the Volta layout with the ordinary cut routes and repeat whole-layer accuracy and paired timings. The eight-of-ten
+baseline above remains the performance claim; neither the new layout nor fewer launches establishes a new win.
+
 - **A100 GEMMs**: q is at 1.08× of `torch.mm` (best 96x128 row 16.3 vs 15 µs); down at 1.08×, and split-K on it was
   neutral in the layer; the 96x64 tiles win k/v/o/down alone and lose 1-4 µs each in the layer.
 - **4090 q** at 1.04-1.06× of `F.linear`; `w4x2 f2x4/k2 d4` with a staged store reached 0.95× alone but not in the layer

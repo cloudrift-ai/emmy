@@ -70,6 +70,10 @@ it seals through the one `grid_tile` finalizer (the article's "schedule separate
 
 ### One emitter: the term's lowering
 
+A transposed cooperative reduction derives its output grid and reduction partition from the schedule's output lane
+count. `coop-t` uses 32 output lanes; `coop-t/n8` uses eight. The shared-memory combine groups by that same count, and
+the last output block clamps reads and guards stores when the extent does not divide into complete output groups.
+
 One recursion binds, and nothing walks the tree for statements. The **root** recursion `_factorize(op, ctx, tail,
 out_val)` binds a node to the grid: a zero-axis `Fold` recurses through its operand roots (projection → `tail`), and
 each leaf binds via the one `_bind` pipeline. The per-cell Loop IR of any node — the degenerate fold's whole body, the

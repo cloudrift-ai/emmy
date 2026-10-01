@@ -134,6 +134,34 @@ def _matmul(m: Axis, n: Axis, k: Axis, a=None, **fields) -> TileOp:
     return TileOp(op=root, place=Placement(free=(m, n)), axes=(m, n, k), **fields)
 
 
+def test_eight_output_lanes_are_offered_on_volta_and_lower_with_their_own_grid() -> None:
+    from emmy.compiler.ir.kernel.ir import TreeHalve  # noqa: PLC0415
+    from emmy.compiler.ir.schedule.classic import materialize_classic  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.lowering.kernel._factor import factorize  # noqa: PLC0415
+
+    target = Context.from_target((7, 0))
+    for spec, work, extent, expected in (
+        ("coop-t/n8", "t512", 1024, (128, 64, 8)),
+        ("coop-t/n8/v2", "t256", 512, (32, 32, 8)),
+        ("coop-t", "t512", 1024, (32, 16, 32)),
+    ):
+        tile = _matmul(Axis("m", 1), Axis("n", extent), Axis("k", 2048))
+        row = {"WORK": work, "REDUCE": spec}
+        problem = ClassicProblem(tile, target, row=row, validate_pins=True)
+        choices = list(advance_schedule(ClassicScheduleContext(tile, target, problem)))
+        assert len(choices) == 1, (spec, choices)
+        realized = materialize_classic(tile, name="matmul", knobs=row, target=target, schedule=choices[0])
+        bound = factorize(realized, root=None)
+        assert tuple(axis.extent.as_static() for axis in bound.axes[1:]) == expected
+        (tree,) = [stmt for stmt in bound.body.iter() if isinstance(stmt, TreeHalve)]
+        assert tree.inner == ("n_ln", expected[-1])
+
+    tile = _matmul(Axis("m", 1), Axis("n", 1024), Axis("k", 2048))
+    for cap in ((8, 0), (12, 0)):
+        assert not any(choice.coop_output_lanes == 8 for choice in classic._reduction_domain(tile, tile.op, Context.from_target(cap)))
+    assert any(choice.coop_output_lanes == 8 for choice in classic._reduction_domain(tile, tile.op, target))
+
+
 def test_production_enumeration_is_the_compatible_independent_product() -> None:
     tile = _pointwise()
     target = Context.from_target((12, 0))
@@ -249,7 +277,7 @@ def test_overwide_reduction_is_in_the_domain_before_c_restricts_it(monkeypatch) 
     tile = _row_sum(Axis("k", 8), Axis("n", 8))
     target = Context.from_target((12, 0))
     overwide = Reduce.of(coop=128)
-    monkeypatch.setattr(classic, "coop_reduce_moves", lambda: [overwide])
+    monkeypatch.setattr(classic, "coop_reduce_moves", lambda **_: [overwide])
     offers = _offers(tile, target)
     c = _context(
         tile,
@@ -679,7 +707,7 @@ def _cooperative_root_sets(tile: TileOp, target, monkeypatch) -> set[tuple[int, 
     cooperative = Reduce.of(coop=4)
     monkeypatch.setattr(classic, "scalar_tile_moves", lambda: [Tile()])
     monkeypatch.setattr(classic, "warp_tile_moves", lambda atoms: [])
-    monkeypatch.setattr(classic, "coop_reduce_moves", lambda: [cooperative])
+    monkeypatch.setattr(classic, "coop_reduce_moves", lambda **_: [cooperative])
     roots = tuple(tile.node_id(edge) for edge in tile.op.operands)
     leaves = _schedule_leaves(tile, "gate_up", target)
     assert leaves

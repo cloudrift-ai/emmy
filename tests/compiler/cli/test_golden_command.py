@@ -151,9 +151,7 @@ def test_restamp_drops_a_piece_row_the_fresh_set_no_longer_mints_under_a_current
     document = json.loads((_RECORDS_DIR / "rtx5090_sm120.json").read_text())
     entry = next(entry for entry in document["configs"] if entry["realizations"][0]["name"] == "attention.hd128.gqa.decode.split")
     piece = next(row for row in entry["realizations"][1:] if row.get("identity"))
-    piece["name"] += ".stale"
     piece["identity"] = "0" * len(piece["identity"])
-    entry["realizations"][0]["kernel_set"] = [row["name"] for row in entry["realizations"][1:]]
     document.update(programs=[document["programs"][entry["program"]]], loops=[document["loops"][entry["target"]["loop"]]])
     document["configs"] = [{**entry, "program": 0, "target": {**entry["target"], "loop": 0}}]
     path = tmp_path / "golden.json"
@@ -162,9 +160,26 @@ def test_restamp_drops_a_piece_row_the_fresh_set_no_longer_mints_under_a_current
     with caplog.at_level("INFO"):
         handle_golden_restamp(Namespace(paths=[str(path)]))
     assert f"dropped row {piece['name']}: stored identity equals none" in caplog.text
-    rows = GoldenFile.load(path).configs[0].realizations
-    assert piece["identity"] not in [row.identity for row in rows]
-    assert rows[0].kernel_set == tuple(row.name for row in rows[1:])
+    assert piece["identity"] not in [row.identity for row in GoldenFile.load(path).configs[0].realizations]
+
+
+def test_restamp_drops_rows_dependent_on_a_lost_piece(tmp_path, caplog):
+    document = json.loads((_RECORDS_DIR / "rtx5090_sm120.json").read_text())
+    entry = next(entry for entry in document["configs"] if entry["realizations"][0]["name"] == "attention.hd128.gqa.decode.split")
+    piece = next(row for row in entry["realizations"][1:] if row["name"] != entry["realizations"][0]["name"])
+    entry["realizations"][0]["kernel_set"] = [piece["name"]]
+    piece["identity"] = "0" * len(piece["identity"])
+    document.update(programs=[document["programs"][entry["program"]]], loops=[document["loops"][entry["target"]["loop"]]])
+    document["configs"] = [{**entry, "program": 0, "target": {**entry["target"], "loop": 0}}]
+    path = tmp_path / "golden.json"
+    path.write_text(json.dumps(document))
+    before = path.read_bytes()
+    with caplog.at_level("INFO"), pytest.raises(SystemExit):
+        handle_golden_restamp(Namespace(paths=[str(path)]))
+    assert f"dropped row {piece['name']}: stored identity equals none" in caplog.text
+    assert "its kernel set lost its measurements" in caplog.text
+    assert "no target survives" in caplog.text
+    assert path.read_bytes() == before
 
 
 def test_restamp_refuses_to_write_a_golden_nothing_survives_in(golden, caplog):
