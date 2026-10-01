@@ -29,7 +29,6 @@ from emmy.compiler.pipeline.search.golden import (
     Measurements,
     Realization,
     decode_record,
-    siblings_of,
     sole_evidence,
 )
 from emmy.compiler.pipeline.search.pins import parse_reduce, pinned_knobs, unreproducible_pin_flag
@@ -155,7 +154,7 @@ def regenerate(document: GoldenFile) -> GoldenFile:
     result is machine-independent, so this check fires and its fix works on any box.
     """
     from emmy.compiler.graph import Graph  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.working_golden import write_trace_inventory  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import write_trace_inventory  # noqa: PLC0415
 
     entry = document.configs[0]
     ctx = Context.from_target(tuple(document.compute_cap))
@@ -200,13 +199,13 @@ def complete(document: GoldenFile) -> GoldenFile:
     Authoring, not derivation — the added rows are enumerable schedules of those kernels, and the
     case pins them from then on."""
     from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden import lead_of, siblings_of  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import GoldenRecords  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden.decode import _replay  # noqa: PLC0415
 
     entry = document.configs[0]
-    records = [document.record(entry, realization) for realization in entry.realizations]
+    records = GoldenRecords(document.record(entry, realization) for realization in entry.realizations)
     primary = records[0]
-    replay = _replay(primary, siblings=siblings_of(primary, records), lead=lead_of(primary, records))
+    replay = _replay(primary, records, lead=records.lead(primary))
     kernels = set(replay.kernels)
     # The target's entry names the kernel the set was cut from; a routing entry names the kernel its
     # decision replaced. Neither is a kernel the set ran as, and both stay.
@@ -324,7 +323,7 @@ def offered(case: Case) -> str | None:
     decided beside the case's other entries exactly as a deploy reads the set.
     """
     for record in case.records:
-        if (reason := decode_record(record, siblings_of(record, case.records))) is not None:
+        if (reason := decode_record(record, case.records)) is not None:
             return f"{record.name}: {reason}"
     return None
 

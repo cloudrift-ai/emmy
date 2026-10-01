@@ -23,37 +23,12 @@ import pytest
 from tests.compiler.helpers import requires_cuda
 
 
-def test_oneshot_compare_worker_uses_selected_device(monkeypatch) -> None:
-    from emmy.compiler.backend.cuda import program
-
-    seen = []
-
-    class Worker:
-        def __init__(self, *, device_id=None):
-            seen.append(("init", device_id))
-
-        async def run_job(self, request, *, wall_timeout_s):
-            seen.append(("run", request, wall_timeout_s))
-            return {"ok": True}
-
-        async def aclose(self):
-            seen.append(("close",))
-
-    monkeypatch.setattr(program, "_AsyncBenchWorker", Worker)
-
-    result = asyncio.run(program._run_job_oneshot({"job": "compare"}, wall_timeout_s=5.0, device_id=3))
-
-    assert result == {"ok": True}
-    assert seen == [("init", 3), ("run", {"job": "compare"}, 5.0), ("close",)]
-
-
 def test_oneshot_compare_wrapper_returns_accuracy_error(monkeypatch) -> None:
     from emmy.compiler.backend.cuda import program
 
-    async def _fake_oneshot(request, *, wall_timeout_s, device_id=None):
+    async def _fake_oneshot(request, *, wall_timeout_s):
         assert request["torch_spec"] == ("frontend_graph", "FE")
         assert wall_timeout_s == 5.0
-        assert device_id == 2
         return {
             "results": {"Emmy": 2.0},
             "result": "BENCH",
@@ -72,7 +47,6 @@ def test_oneshot_compare_wrapper_returns_accuracy_error(monkeypatch) -> None:
             warmup=1,
             iters=1,
             seed=0,
-            device_id=2,
         )
     )
 

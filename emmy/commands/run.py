@@ -252,8 +252,10 @@ def handle_run(args):
         # A row is evidence only on the card its file names (``golden.records_for_card``): measurements
         # written under another card's header are what no replay on this card ever reads.
         from emmy.compiler.context import Context  # noqa: PLC0415
-        from emmy.compiler.pipeline.search.golden import GoldenFile  # noqa: PLC0415
-        from emmy.compiler.pipeline.search.working_golden import validate_working_gpu  # noqa: PLC0415
+        from emmy.compiler.pipeline.search.golden import (
+            GoldenFile,  # noqa: PLC0415
+            validate_working_gpu,  # noqa: PLC0415
+        )
 
         try:
             validate_working_gpu(GoldenFile.load(args.golden), Context.probe())
@@ -324,11 +326,13 @@ def _handle_run_once(args):
         sys.exit(1)
 
     if ir_path is not None or hasattr(args, "_golden_graph"):
-        from emmy.compiler.pipeline.search.golden import shared_regime_pins
+        from emmy.compiler.pipeline.search.golden import GoldenRecords
 
         if ir_path is not None:
             args.ir = ir_path
-        with pinned_knobs(shared_regime_pins([s.record for s in args.golden_configs] or getattr(args, "_golden_records", None) or [])):
+        with pinned_knobs(
+            GoldenRecords([s.record for s in args.golden_configs] or getattr(args, "_golden_records", None) or []).shared_regime_pins()
+        ):
             _handle_run_ir(args, CudaBackend, CompilerDump)
         return
 
@@ -577,7 +581,7 @@ def _record_golden_latency(args, results: dict, golden_benches) -> None:
     timing for a different kernel than the one the file describes.
     """
     from emmy.compiler.context import Context  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.working_golden import record_latency  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import record_latency  # noqa: PLC0415
 
     # Only a row of the NAMED realization can carry that realization's latency. A child receipt
     # of the same target is benched beside it and holds ONE kernel of the program, so neither its
@@ -635,7 +639,7 @@ def _record_greedy_pick(args, graph, bench, greedy_iso, taken) -> None:
     reference: the pair checks measurement parity, not framework correctness, and
     ``reference_backend`` says so.
     """
-    from emmy.compiler.pipeline.search.working_golden import greedy_pick_rows, kernel_set_prices, record_greedy_pick  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import greedy_pick_rows, kernel_set_prices, record_greedy_pick  # noqa: PLC0415
 
     isolated = greedy_iso.bench if greedy_iso is not None and greedy_iso.status == "ok" else None
     rows = greedy_pick_rows(graph)
@@ -670,19 +674,19 @@ def _run_golden_targets(args) -> None:
 
     Reached only by a bare ``--golden PATH``; naming one realization with ``--realization NAME``
     goes straight down the single-run path, which already thinks in the (file, name) pair. The
-    walk benches each name's verified rows or tune winner (``_explicit_realization`` false), so a
-    tuner's proposals are not benched as if they were recorded truths.
+    walk benches each name's verified rows (``_explicit_realization`` false), so proposals are not
+    benched as if they were recorded truths.
     """
     from copy import copy  # noqa: PLC0415
 
-    from emmy.compiler.pipeline.search.golden import GoldenFile, lead_of  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import GoldenFile, GoldenRecords  # noqa: PLC0415
 
     if args.input or args.code or args.ir:
         logger.error("--golden is mutually exclusive with positional input / --code / --ir")
         sys.exit(2)
     try:
         document = GoldenFile.load(args.golden)
-        records = document.records()
+        records = GoldenRecords.of(document.records())
     except (OSError, ValueError) as exc:
         logger.error("cannot load --golden %s: %s", args.golden, exc)
         sys.exit(2)
@@ -694,7 +698,7 @@ def _run_golden_targets(args) -> None:
     # without it, a root routing row carries the parent cuts needed by child receipts.
     targets: dict[int, list] = {}
     for record in records:
-        targets.setdefault(id(lead_of(record, records)), []).append(record)
+        targets.setdefault(id(records.lead(record)), []).append(record)
 
     def target_name(rows):
         inventory = next((row for row in rows if row.identity is None), None)
@@ -1460,7 +1464,7 @@ def _print_kernel_stats(graph, bench, golden_benches=None, greedy_fail=None, gre
     from emmy.compiler.ir.cuda.ir import CudaOp, resolve_dim
     from emmy.compiler.ir.expr import Var  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import tuning_knob_items  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.data import ShapeKey  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.dataset import ShapeKey  # noqa: PLC0415
 
     cuda_nodes = _launch_order_cuda_nodes(graph)
     if not cuda_nodes:
@@ -2643,7 +2647,7 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
 
         db = SearchDB.for_compile(backend.tune_db)
         logger.info("Using tuning DB: %s", backend.tune_db)
-    from emmy.compiler.pipeline.search.strategy.two_level import KernelInventory  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.inventory import KernelInventory  # noqa: PLC0415
 
     # Every kernel-set decision the greedy compile takes, as the splice watcher reports it: the tile
     # kernel the fork was offered on, the arm, and the graph ids the splice consumed and minted.

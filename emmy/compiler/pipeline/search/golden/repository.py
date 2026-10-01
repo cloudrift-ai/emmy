@@ -6,8 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import tempfile
-from collections.abc import Sequence
+from collections.abc import Iterable
 from contextlib import contextmanager
 from functools import cache
 from pathlib import Path
@@ -16,7 +15,7 @@ from emmy import config, gpu
 from emmy.recipe.bundled import default_recipe_root
 
 from .format import GoldenFile
-from .record import GoldenRecord
+from .record import GoldenRecord, GoldenRecords
 
 logger = logging.getLogger("emmy.compiler.pipeline")
 
@@ -42,7 +41,7 @@ def is_repository_golden_path(path: str | Path) -> bool:
 
 
 @contextmanager
-def _repository_golden_paths():
+def repository_golden_paths():
     """Yield model-agnostic hardware goldens plus recipe-local model goldens."""
     with default_recipe_root() as recipe_root:
         paths = list(_RECORDS_DIR.glob("*.json"))
@@ -71,25 +70,23 @@ def _file_gpu_name(path: Path) -> str | None:
 #: records through :func:`sole_evidence`, and ``serve --golden`` reaches the same loader through
 #: the env var because the vLLM child is another process. Set it through :func:`records_override`,
 #: never by hand.
-RECORDS_OVERRIDE: list[GoldenRecord] | None = None
+RECORDS_OVERRIDE: GoldenRecords | None = None
 
 
 @contextmanager
-def records_override(records: list[GoldenRecord] | None):
+def records_override(records: Iterable[GoldenRecord] | None):
     """Scope the golden rows :func:`records_for_card` supplies to the evidence index, restoring
     the previous scope after. ``[]`` hides every record — how a caller that must measure without
-    golden evidence (the tuner) says so; ``None`` is a no-op, leaving whatever scope is already
-    installed.
+    golden evidence says so; ``None`` is a no-op, leaving whatever scope is already installed.
 
     **The body must not ``await``.** This swaps a module global, so it is only atomic with respect
-    to other coroutines while the block stays synchronous — and it is used inside concurrently
-    gathered tune targets, which share one event loop."""
+    to other coroutines while the block stays synchronous."""
     global RECORDS_OVERRIDE  # noqa: PLW0603 — the documented scope seam, one owner
     if records is None:
         yield
         return
     prev = RECORDS_OVERRIDE
-    RECORDS_OVERRIDE = records
+    RECORDS_OVERRIDE = GoldenRecords.of(records)
     try:
         yield
     finally:
@@ -97,21 +94,15 @@ def records_override(records: list[GoldenRecord] | None):
 
 
 @contextmanager
-def sole_evidence(records: list[GoldenRecord]):
+def sole_evidence(records: Iterable[GoldenRecord]):
     """``records`` as a compile's ONLY evidence, strictly: the golden scope is these rows
-    (:func:`records_override`), the machine-local online prior and its reservoir are out of the
-    way (``EMMY_ONLINE_FILE`` at a nonexistent path) and strict evidence is on, so a fork none of
-    the rows decides is an ``EvidenceError`` naming the kernel instead of a prediction; a
-    ``Pipeline.run`` given no ``db`` consults no tune DB either. The release gate (``eval golden
-    --serving-config``) and the realization corpus ask their question inside this, which is what
-    makes the answer the same on every machine that holds the same rows."""
-    with tempfile.TemporaryDirectory(prefix="emmy-evidence-") as tmp:
-        with (
-            records_override(records),
-            config.online_file_override(Path(tmp) / "absent-online.json"),
-            config.strict_evidence_override(True),
-        ):
-            yield
+    (:func:`records_override`) and strict evidence is on, so a fork none of the rows decides is an
+    ``EvidenceError`` naming the kernel instead of a prediction; a ``Pipeline.run`` given no ``db``
+    consults no tune DB either. The release gate (``eval golden --serving-config``) and the
+    realization corpus ask their question inside this, which is what makes the answer the same on
+    every machine that holds the same rows."""
+    with records_override(records), config.strict_evidence_override(True):
+        yield
 
 
 def scope_explicit() -> bool:
@@ -120,77 +111,75 @@ def scope_explicit() -> bool:
     return RECORDS_OVERRIDE is not None or config.golden_scope() is not None
 
 
-def _scoped(records: Sequence[GoldenRecord], gpu_name: str, compute_cap: tuple[int, int]) -> list[GoldenRecord]:
-    """An explicit scope's records for one card: the capability must agree; a record that names
-    no card (a working golden traced off-GPU) applies to whichever card compiles it. Rows another
-    card of the same capability measured are no evidence here, and the compile says so: silently
-    dropped, they left a recorded route unread and its replay built the fused kernel."""
-    same_cap = [r for r in records if tuple(r.compute_cap) == tuple(compute_cap)]
-    kept = [r for r in same_cap if not r.gpu_name or r.gpu_name == gpu_name]
-    if gpu_name and (others := sorted({r.gpu_name for r in same_cap if r.gpu_name and r.gpu_name != gpu_name})):
-        logger.warning(
-            "golden scope: %d row(s) measured on %s are no evidence on %s", len(same_cap) - len(kept), ", ".join(others), gpu_name
-        )
-    return kept
-
-
-def records_for_card(gpu_name: str, compute_cap: tuple[int, int]) -> list[GoldenRecord]:
-    """The golden records the evidence index loads for ONE card: the installed scope when one is set
-    (:data:`RECORDS_OVERRIDE`, else ``EMMY_GOLDEN_FILE`` — a file, or none when set empty), otherwise
-    the repository files, loading only that card's (header sniff). ``golden_records()`` stays the full corpus for the eval / fit
-    consumers."""
-    gpu_name = gpu.canonical_name(gpu_name)
+@contextmanager
+def _scope(gpu_name: str):
+    """Yield where the golden rows a compile on ``gpu_name`` reads come from, ``(records, files)``: the installed scope
+    (:data:`RECORDS_OVERRIDE`) and no file, else the ``EMMY_GOLDEN_FILE`` file — none when set empty, which is no
+    golden evidence — else the card's repository files, sniffed by header (a wheel's live only inside this block)."""
     if RECORDS_OVERRIDE is not None:
-        return _scoped(RECORDS_OVERRIDE, gpu_name, compute_cap)
-    if (scope := config.golden_scope()) is not None:
-        # A path scopes the evidence to that file; the empty form (``EMMY_GOLDEN_FILE=``) is no golden evidence.
-        return _scoped(_records_of(Path(scope)), gpu_name, compute_cap) if scope else []
-    records: list[GoldenRecord] = []
-    with _card_golden_paths(gpu_name) as paths:
-        for path in paths:
-            records.extend(r for r in _records_of(path) if r.gpu_name == gpu_name and tuple(r.compute_cap) == tuple(compute_cap))
-    return records
+        yield RECORDS_OVERRIDE, []
+    elif (scope := config.golden_scope()) is not None:
+        yield None, [Path(scope)] if scope else []
+    else:
+        with _card_golden_paths(gpu_name) as paths:
+            yield None, paths
+
+
+def records_for_card(gpu_name: str, compute_cap: tuple[int, int]) -> GoldenRecords:
+    """The golden records the evidence index loads for ONE card (:func:`_scope`, then the card's rows among them).
+    ``golden_records()`` stays the full corpus for the eval consumers."""
+    gpu_name = gpu.canonical_name(gpu_name)
+    with _scope(gpu_name) as (records, paths):
+        if records is None:
+            records = GoldenRecords(record for path in paths for record in _records_of(path))
+    return records.for_card(gpu_name, compute_cap)
 
 
 @contextmanager
 def _card_golden_paths(gpu_name: str):
     """The repository golden files that can hold ``gpu_name``'s rows: a file whose header names another card is skipped
     unparsed, one whose header names none is kept for the parse to decide."""
-    with _repository_golden_paths() as paths:
+    with repository_golden_paths() as paths:
         yield [path for path in paths if (head := _file_gpu_name(path)) is None or head == gpu_name]
 
 
 def scope_digest(gpu_name: str) -> str:
-    """A digest of the golden rows :func:`records_for_card` would load for ``gpu_name`` — the installed override's, the
-    ``EMMY_GOLDEN_FILE`` file's, or the card's repository files' — taken over file bytes, so it costs no parse. A
-    serving pack keys on it: plans compiled from other rows are not what this compile would deploy."""
+    """A digest of the golden rows :func:`records_for_card` would load for ``gpu_name`` (:func:`_scope`) — taken over
+    file bytes where they come from files, so it costs no parse. A serving pack keys on it: plans compiled from other
+    rows are not what this compile would deploy."""
     sha = hashlib.sha256()
-    if RECORDS_OVERRIDE is not None:
-        # The target and its bindings too: a case and its symbolic twin spell the same names, pins and knobs
-        # over different programs, and a compile of one must not pick from the other's rows.
-        rows = (
-            json.dumps(
-                [r.name, r.gpu_name, r.target_key, r.bindings, r.identity, r.pins, r.knobs, r.measurements and r.measurements.to_wire()],
-                sort_keys=True,
-                default=str,
+    with _scope(gpu_name) as (records, paths):
+        if records is not None:
+            # The target and its bindings too: a case and its symbolic twin spell the same names, pins and knobs
+            # over different programs, and a compile of one must not pick from the other's rows.
+            rows = (
+                json.dumps(
+                    [
+                        r.name,
+                        r.gpu_name,
+                        r.target_key,
+                        r.bindings,
+                        r.identity,
+                        r.pins,
+                        r.knobs,
+                        r.measurements and r.measurements.to_wire(),
+                    ],
+                    sort_keys=True,
+                    default=str,
+                )
+                for r in records
             )
-            for r in RECORDS_OVERRIDE
-        )
-        sha.update("\n".join(sorted(rows)).encode())
-    elif (scope := config.golden_scope()) is not None:
-        sha.update(Path(scope).read_bytes() if scope else b"no golden evidence")
-    else:
-        with _card_golden_paths(gpu_name) as paths:
-            for path in paths:
-                data = path.read_bytes()
-                sha.update(f"{path.name}:{len(data)}:".encode() + data)
+            sha.update("\n".join(sorted(rows)).encode())
+        for path in paths:
+            data = path.read_bytes()
+            sha.update(f"{path.name}:{len(data)}:".encode() + data)
     return sha.hexdigest()[:16]
 
 
-_DOCUMENT_MEMO: dict[Path, tuple[GoldenFile, list[GoldenRecord]]] = {}
+_DOCUMENT_MEMO: dict[Path, tuple[GoldenFile, GoldenRecords]] = {}
 
 
-def _document_of(path: Path) -> tuple[GoldenFile, list[GoldenRecord]]:
+def _document_of(path: Path) -> tuple[GoldenFile, GoldenRecords]:
     """A golden parsed once per process: ``(document, records)``. The parse is the whole cost of a load — the
     36 MB FP8 golden takes 16 s — and the test collection reads every file three times, every row test once
     more; nothing derived is kept here, so nothing here can go stale within a process."""
@@ -202,27 +191,27 @@ def _document_of(path: Path) -> tuple[GoldenFile, list[GoldenRecord]]:
     return cached
 
 
-def _records_of(path: Path) -> list[GoldenRecord]:
+def _records_of(path: Path) -> GoldenRecords:
     return _document_of(path)[1]
 
 
 @cache
-def golden_records() -> tuple[GoldenRecord, ...]:
-    """Every row of every repository golden, loaded on first use — the corpus the eval and fit consumers read."""
-    with _repository_golden_paths() as paths:
-        return tuple(record for path in paths for record in _records_of(path))
+def golden_records() -> GoldenRecords:
+    """Every row of every repository golden, loaded on first use — the corpus the eval consumers read."""
+    with repository_golden_paths() as paths:
+        return GoldenRecords(record for path in paths for record in _records_of(path))
 
 
-def goldens_for_live_gpu() -> list[GoldenRecord]:
+def goldens_for_live_gpu() -> GoldenRecords:
     """The live card's own rows, or every row when no CUDA card is visible or none are recorded for it."""
-    key = _live_gpu_key()
-    records = list(golden_records())
+    key = live_gpu_key()
+    records = golden_records()
     if key is None:
         return records
-    return [record for record in records if record.gpu_name == key[0] and record.compute_cap == key[1]] or records
+    return GoldenRecords(record for record in records if record.gpu_name == key[0] and record.compute_cap == key[1]) or records
 
 
-def _live_gpu_key() -> tuple[str, tuple[int, int]] | None:
+def live_gpu_key() -> tuple[str, tuple[int, int]] | None:
     try:
         import torch  # noqa: PLC0415 — heavy, and only the live-card path needs it
 

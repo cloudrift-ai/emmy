@@ -172,8 +172,9 @@ the Makefile and `source`d by `warm.sh`/`verify.sh` — so its syntax is the int
 
 After writing it, run `make serve-config MODEL=<id>` and confirm every line reads back as intended — that is the
 cheap check that both readers agree before a multi-hour warm depends on it. For a new release whose canonical file
-does not exist yet, use the `tune-kernels` skill with this sealed config to create, tune, verify, and promote it first;
-then rerun `make serve-config` and continue to Step 4.
+does not exist yet, create it first with this sealed config: trace the serving twins (`emmy trace --serving-twins
+--serving-config PATH`), record them (`emmy run --golden PATH --bench --record` / `--record-greedy`), verify, and
+promote; then rerun `make serve-config` and continue to Step 4.
 
 **The config is sealed from here on** — any later change invalidates its realizations and the warm. For a new or
 changed config, this is also the point to commit the config and canonical recipe reference, update the pinned release
@@ -198,9 +199,9 @@ evidence in the same index the tune DB feeds, not a separate tier. The served im
 fails the boot rather than let a prediction decide any program's fork.
 
 **Gate: zero missing realizations, FALL-THROUGH, DRIFT, GAP, or compile failures.** Any failure means the image would
-freeze an incomplete or stale evidence set. Stop and use the `tune-kernels` skill to regenerate a symbolic serving
-inventory from the same config, tune all realizations on this GPU, perform deployable verification, and promote the
-complete canonical file. There is no release-without-coverage path.
+freeze an incomplete or stale evidence set. Stop and regenerate a symbolic serving inventory from the same config,
+record all realizations on this GPU (`emmy run --golden PATH --bench --record` / `--record-greedy`), perform
+deployable verification, and promote the complete canonical file. There is no release-without-coverage path.
 
 ## Step 5 — Correctness gate (GATE + human pause)
 

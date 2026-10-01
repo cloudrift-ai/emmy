@@ -1,14 +1,11 @@
 """Offline prior — a stateless, fit-offline :class:`Prior` over ``features.knob_features``.
 
-This is the *untrained* prior: the cold-start ranking the search uses before any tuning data exists. There is a
-SINGLE ranking path — a config is scored by a ``Prior`` (this one cold, ``OnlinePrior`` once trained), composed
-behind :class:`~emmy.compiler.pipeline.search.prior.fallback.FallbackPrior`.
+The ONE ranking model a compile consults where nothing measured decides a fork, fit by ``emmy fit`` from the
+dataset's golden groups and shipped with the repo.
 
-``mean_score`` returns a positive latency *proxy* (``exp(-scale · quality)``), **lower is better** — matching
-``OnlinePrior``'s polarity. The proxy is not calibrated µs; only its ordering matters (greedy argmin, and the
-sibling-relative ``Prior.policy`` PUCT consumes). Its magnitude may span ``e**±700``, so a consumer needing a
-bounded quantity derives one — which is why ``policy`` normalizes within a sibling set rather than using the raw
-value.
+``mean_score`` returns a positive latency *proxy* (``exp(-scale · quality)``), **lower is better**. The proxy is
+not calibrated µs; only its ordering matters (the greedy argmin). Its magnitude may span ``e**±700``, so a
+consumer needing a bounded quantity derives one.
 
 **Two model classes, one adapter.** The scoring itself lives in a model value object: :mod:`.linear_model` (fixed
 weights over the ``D_*`` geometry/occupancy features, plus one fitted non-linear interaction and a second weight
@@ -16,9 +13,9 @@ set selected on the ``S_ext_n_symbolic_axis`` stamp) or :mod:`.catboost_model` (
 neither — a tree splits on the routing stamp and forms the interaction from its two columns). This class is the
 adapter that turns a knob dict into features and satisfies the ``Prior`` contract around whichever one it holds.
 
-The model lives in the repo-checked artifact ``offline_weights.json`` next to this module (override with
-``EMMY_OFFLINE_FILE`` / ``emmy eval … --offline-file`` to A/B a candidate fit), written by ``emmy fit
---artifact`` jointly over EVERY kernel regime — fp32-scalar / fp16-warp matmul, cooperative reduce, and pointwise
+The model lives in the repo-checked artifact ``weights/offline.json`` beside this module (override with
+``EMMY_OFFLINE_FILE`` / ``emmy eval … --offline-file`` to A/B a candidate fit), written by ``emmy fit DATASET
+WEIGHTS`` jointly over EVERY kernel regime — fp32-scalar / fp16-warp matmul, cooperative reduce, and pointwise
 goldens — so one model ranks them all. Its ``kind`` field names the model class and :func:`_load_artifact`
 dispatches on it; per-refit history rides the artifact's ``provenance`` block and the findings reports, not this
 docstring. The artifact is version-gated on ``feat_ver`` — its feature names are that featurizer version's, so a
@@ -39,7 +36,7 @@ from emmy.compiler.pipeline.search.prior.base import Prior
 from emmy.compiler.pipeline.search.prior.catboost_model import CatBoostModel
 from emmy.compiler.pipeline.search.prior.linear_model import LinearModel
 
-_DEFAULT_FILE = Path(__file__).parent / "offline_weights.json"
+_DEFAULT_FILE = Path(__file__).parent / "weights" / "offline.json"
 
 # The model classes an artifact's ``kind`` field can name, each with the top-level keys its
 # ``from_artifact`` reads and the scalar ``params`` keys its ``to_artifact`` emits. Both key sets are
@@ -72,20 +69,20 @@ def _load_artifact(path_str: str) -> dict:
         raise RuntimeError(
             f"offline prior weights artifact missing or unreadable: {path_str} "
             f"(set EMMY_OFFLINE_FILE to a fitted artifact or regenerate the default "
-            f"with 'emmy fit --artifact')"
+            f"with 'emmy fit DATASET WEIGHTS' — README, 'Fit the offline prior')"
         )
     found = obj.get("feat_ver")
     if not isinstance(found, int) or found != FEATURIZER_VERSION:
         raise RuntimeError(
             f"offline prior weights artifact {path_str} has feat_ver={found!r}, "
             f"expected {FEATURIZER_VERSION} — its features are spelled in a different "
-            f"featurizer vocabulary. Refit it: emmy fit --artifact"
+            f"featurizer vocabulary. Refit it: emmy fit DATASET WEIGHTS (README, 'Fit the offline prior')"
         )
     kind = obj.get("kind")
     if kind not in _KINDS:
         raise RuntimeError(
             f"offline prior weights artifact {path_str} has kind={kind!r}, expected one of {sorted(_KINDS)} — "
-            f"refit it with 'emmy fit --trainer <kind> --artifact'"
+            f"refit it with 'emmy fit --trainer <kind> DATASET WEIGHTS'"
         )
     _, top_keys, param_keys = _KINDS[kind]
     missing = [k for k in top_keys if k not in obj]
@@ -102,9 +99,8 @@ class OfflinePrior(Prior):
 
     An adapter, not a model: the scoring is a :class:`LinearModel` or a
     :class:`~emmy.compiler.pipeline.search.prior.catboost_model.CatBoostModel` (whichever the artifact's ``kind``
-    names — the same definition the fitter optimizes), and this class adds what ``Prior`` needs around it —
-    knob-dict featurization plus the training surface (``fit`` / ``add_rows`` / ``maybe_refit`` / ``to_json``),
-    which are no-ops here (it has nothing to learn) so it composes cleanly under :class:`FallbackPrior`.
+    names — the same definition the fitter optimizes), and this class adds what ``Prior`` needs around it:
+    knob-dict featurization.
     Two ways to construct, and they do not mix: pass a ready ``model``, or let it resolve from the weights
     artifact (``config.offline_path()`` override → the repo-checked default). The per-field kwargs are
     LINEAR-ONLY and win over the file field by field; passing one against a non-linear artifact raises, exactly
@@ -121,7 +117,6 @@ class OfflinePrior(Prior):
         atomic_free_split_threshold: float | None = None,
         atomic_free_weight: float | None = None,
     ) -> None:
-        super().__init__()
         # Keyed by LinearModel's own field names, which is what lets the merge below be a ``replace``.
         overrides = {
             "weights": weights,
@@ -164,18 +159,6 @@ class OfflinePrior(Prior):
     def fitted(self) -> bool:
         return True
 
-    def fit(self) -> None:  # nothing to learn
-        return None
-
-    def add_rows(self, rows) -> None:  # noqa: ARG002 — stateless, ignores observations
-        return None
-
-    def maybe_refit(self, *, force: bool = False) -> bool:  # noqa: ARG002
-        return False
-
-    def to_json(self) -> dict | None:  # not persisted
-        return None
-
     def mean_score(self, knobs: dict) -> float:
         """Latency proxy (``exp(-scale · quality)``), lower is better. Under the linear model a config the
         weights have no opinion on (no ``D_*`` features — e.g. a non-tiled kernel) scores the neutral ``1.0``,
@@ -213,3 +196,8 @@ class OfflinePrior(Prior):
         in, so a golden's rank under a fitted artifact and under this deployed prior are the same number by
         construction rather than by two paths agreeing."""
         return self._model.score_rows(group)
+
+
+def load_prior() -> OfflinePrior:
+    """The one prior a compile ranks with — the offline model the weights artifact names."""
+    return OfflinePrior()

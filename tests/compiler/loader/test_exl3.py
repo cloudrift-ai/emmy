@@ -686,7 +686,6 @@ def test_computed_b_lane_offers_the_cross_cta_split(monkeypatch):
     ``test_computed_b_split_partial_reindexes_the_cone``."""
     from emmy.compiler.context import Context
     from emmy.compiler.pipeline import TILE_PASSES, Pipeline
-    from emmy.compiler.pipeline.fork import iter_leaves
     from emmy.compiler.pipeline.passes.tile._split import split_forks
     from emmy.compiler.pipeline.pipeline import Run
 
@@ -701,7 +700,7 @@ def test_computed_b_lane_offers_the_cross_cta_split(monkeypatch):
         if fp.structural:
             captured.append((fp.match, fp.match.graph.nodes[fp.node_id]))
             raise _Captured
-        return next(iter_leaves(fp.options))
+        return next(fp.leaves())
 
     with pytest.raises(_Captured):
         Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target((12, 0))).resolve(_trellis_linear_graph(), decide)

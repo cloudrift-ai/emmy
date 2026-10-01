@@ -48,17 +48,17 @@ def register_golden_command(subparsers) -> None:
 
 
 def _goldens(paths: list[str]) -> list[Path]:
-    from emmy.compiler.pipeline.search.golden.repository import _repository_golden_paths  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden.repository import repository_golden_paths  # noqa: PLC0415
 
     if paths:
         return [Path(path).expanduser() for path in paths]
-    with _repository_golden_paths() as repository:
+    with repository_golden_paths() as repository:
         return list(repository)
 
 
 def handle_golden_check(args) -> None:
     from emmy.compiler.pipeline.search.golden import GoldenFile  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.restamp import stale_targets  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden.restamp import stale_targets  # noqa: PLC0415
 
     failed = False
     for path in _goldens(args.paths):
@@ -79,7 +79,7 @@ def handle_golden_check(args) -> None:
 
 def handle_golden_restamp(args) -> None:
     from emmy.compiler.pipeline.search.golden import GoldenFile  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.restamp import restamp  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden.restamp import restamp  # noqa: PLC0415
 
     failed = False
     for path in _goldens(args.paths):

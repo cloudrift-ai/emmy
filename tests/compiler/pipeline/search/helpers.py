@@ -9,7 +9,7 @@ or the freeze suite silently stops exercising the real filter.
 from __future__ import annotations
 
 from emmy.compiler.pipeline.knob import KERNEL_IDENTITY
-from emmy.compiler.pipeline.search.db import KernelRow, PerfRow, PerfStats, SearchDB
+from emmy.compiler.pipeline.search.db import KernelDef, PerfRow, PerfStats, SearchDB
 
 GPU_5090 = "NVIDIA GeForce RTX 5090"  # registry records fp32/fp16 peaks -> the plausibility gate is active
 
@@ -49,19 +49,21 @@ def impossible_staged_feats() -> dict:
     }
 
 
-def kernel_row(identity: str, *, stamps: dict | None = None, name: str | None = None, symbolic: tuple[str, ...] = ()) -> KernelRow:
+def kernel_row(
+    identity: str, *, stamps: dict | None = None, name: str | None = None, symbolic: tuple[str, ...] = (), formed: bool = True
+) -> KernelDef:
     """A ``kernel`` row named ``identity`` with a minimal wire — one loop node whose output carries the
     ``symbolic`` dims — and the f16 matmul stamps unless ``stamps`` says otherwise. Every ``perf`` row
     names a kernel row, so tests seed one of these before recording measurements of it."""
     dims: list = [{"sym": var, "hint": 512} for var in symbolic] + [4]
     wire = {"inputs": [], "outputs": ["y"], "nodes": [{"id": "y", "op": "loop", "attrs": {"body": []}, "outputs": [["y", "f32", dims]]}]}
-    return KernelRow(
+    return KernelDef(
         exact_identity=identity,
         structural_identity=f"deploy:{identity}",
         loop_ir=wire,
         name=name or f"k_{identity}",
         stamps=dict(F16_MATMUL_STAMPS if stamps is None else stamps),
-        formed=True,
+        formed=formed,
     )
 
 

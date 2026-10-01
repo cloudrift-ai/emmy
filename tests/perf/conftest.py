@@ -33,7 +33,6 @@ import json
 import os
 import shutil
 import subprocess
-import sys
 import tempfile
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -123,11 +122,6 @@ def bench_pair(request):
     """
 
     def _run(case: Case) -> PerfRow | None:
-        if _tune_enabled():
-            # Tune-only path: populate the autotune DB, measure nothing. Run
-            # ``make bench-kernels-tuned`` afterwards to measure with the tuned knobs.
-            _tune_via_subprocess(case)
-            return None
         row = _bench_corpus_case(case, profile=_ncu_enabled())
         _collector(request.config).append(row)
         return row
@@ -135,23 +129,8 @@ def bench_pair(request):
     return _run
 
 
-def _tune_enabled() -> bool:
-    return os.environ.get("EMMY_TUNE", "") in ("1", "true", "True")
-
-
-def _tune_via_subprocess(case: Case) -> None:
-    """Search this case's kernel and record the winners into the autotune DB."""
-    subprocess.run(
-        [sys.executable, "-m", "emmy.emmy", "tune", "--golden", str(case.path), "--realization", case.record.name],
-        check=False,
-        env={**os.environ, "EMMY_TUNE": "1"},
-        timeout=3600,
-    )
-
-
 # The lane's own tune DB, fresh per session, unless the caller points ``EMMY_TUNE_DB`` at one
-# (``make bench-kernels-tuned``). The root conftest already keeps the machine-local online prior
-# out of every test; the box's ``~/.cache/emmy/autotune.db`` is the other machine-local, mutable
+# (``make bench-kernels-tuned``). The box's ``~/.cache/emmy/autotune.db`` is machine-local, mutable
 # evidence, and a grown one also makes every compile in the lane slower. The case's own rows stay
 # the compile's evidence, which is what makes a stored latency comparable across machines.
 _LANE_TUNE_DB = os.environ.get("EMMY_TUNE_DB") or str(Path(tempfile.mkdtemp(prefix="emmy_perf_tune_db_")) / "autotune.db")

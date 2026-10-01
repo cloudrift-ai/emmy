@@ -16,8 +16,7 @@ from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.frontend.ir import MatmulOp, ReshapeOp, RmsNormOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
-from emmy.compiler.pipeline.search.golden import GoldenFile, Measurements, Realization, Target
-from emmy.compiler.pipeline.search.working_golden import write_trace_inventory
+from emmy.compiler.pipeline.search.golden import GoldenFile, Measurements, Realization, Target, write_trace_inventory
 from emmy.compiler.wire import kernel_bindings, kernel_tile
 from tests.compiler.helpers import loop_target
 
@@ -39,15 +38,8 @@ def _working_loop(path, *, state="inventory", pins=None):
     realization.name = "working.relu"
     if pins is not None:
         realization.pins = pins
-    if state in {"proposal", "tuned", "verified"}:
+    if state in {"proposal", "verified"}:
         realization.knobs = {"WORK": "w1x1"}
-    if state == "tuned":
-        realization.ranking = {
-            "source": "tune",
-            "status": "ok",
-            "tune_winner": True,
-            "measured_knobs": {"WORK": "w1x1"},
-        }
     if state == "verified":
         realization.measurements = Measurements(emmy_us=1.0, reference_us=2.0, reference_backend="torch")
     loop = Graph.from_wire(document.loops[entry.target.loop])
@@ -244,10 +236,10 @@ def test_duplicate_name_requires_target_scoped_working_file(tmp_path, caplog):
     assert args._golden_graph.nodes["y"].op.name == "working_second_loop"
 
 
-def test_named_proposal_is_pinned_and_a_file_walk_leaves_it_to_the_tuner(tmp_path):
+def test_named_proposal_is_pinned_and_a_file_walk_leaves_it_unbenched(tmp_path):
     """Naming a realization asks for that row: it benches as a pinned row whatever its measurement
     state (the corpus and perf lanes replay unmeasured cases this way). A bare ``--golden PATH``
-    walk names nothing, so a proposal there stays the tuner's and only verified rows bench."""
+    walk names nothing, so a proposal there stays unbenched and only verified rows bench."""
     from emmy.commands.compile import resolve_golden_arg
     from emmy.commands.run import _pinned_samples_for_ir
 
@@ -428,18 +420,18 @@ def test_a_kernel_set_name_resolves_inside_the_realization_own_precision_lane(tm
 def test_a_kernel_set_publishes_a_piece_split_only_through_the_piece_row():
     """A split of a piece the cut minted names that piece; as a hand pin it would reach every kernel —
     two pieces' splits would collapse onto one value, and a piece that cannot split would refuse."""
-    from emmy.compiler.pipeline.search.golden import kernel_set_pins
+    from emmy.compiler.pipeline.search.golden import GoldenRecords
 
     def row(name, identity, knobs):
-        return SimpleNamespace(name=name, identity=identity, knobs=knobs, pins=(("FAST_MATH", True),), kernel_set=())
+        return SimpleNamespace(name=name, identity=identity, knobs=knobs, regime={"FAST_MATH": True}, kernel_set=())
 
     route = row("set.route", "target", {"PLACE@map.2/inner": "cut"})
     pieces = [row("set.a", "piece-a", {"REDUCE": "g64a"}), row("set.b", "piece-b", {"REDUCE": "g16a"})]
     whole = row("set.whole", "target", {"REDUCE": "g4k"})
     cut_set = SimpleNamespace(**{**vars(route), "name": "set", "kernel_set": ("set.route", "set.a", "set.b")})
-    assert kernel_set_pins(cut_set, [route, *pieces]) == {"PLACE@map.2/inner": "cut"}
+    assert GoldenRecords([route, *pieces]).kernel_set_pins(cut_set) == {"PLACE@map.2/inner": "cut"}
     split_set = SimpleNamespace(**{**vars(route), "name": "set", "kernel_set": ("set.whole",)})
-    assert kernel_set_pins(split_set, [whole]) == {"REDUCE": "g4k"}, "a split of the record's own kernel still travels"
+    assert GoldenRecords([whole]).kernel_set_pins(split_set) == {"REDUCE": "g4k"}, "a split of the record's own kernel still travels"
 
 
 def test_selected_records_scope_the_tier_and_a_split_regime_publishes_nothing(monkeypatch, tmp_path):
@@ -447,7 +439,6 @@ def test_selected_records_scope_the_tier_and_a_split_regime_publishes_nothing(mo
     (the precision pins) reaches the environment only when every record agrees on it."""
     from emmy.commands.compile import resolve_golden_arg
     from emmy.compiler.pipeline.search import golden
-    from emmy.compiler.pipeline.search.golden import shared_regime_pins
 
     path = tmp_path / "working.json"
     document = _working_loop(path, pins={"FAST_MATH": False, "PLACE@inner.1/map": "cut"})
@@ -464,8 +455,8 @@ def test_selected_records_scope_the_tier_and_a_split_regime_publishes_nothing(mo
         {"FAST_MATH": False, "PLACE@inner.1/map": "cut"},
         {"FAST_MATH": True, "PLACE@inner.1/map": "cut"},
     ]
-    assert shared_regime_pins(args._golden_records) == {}
-    assert shared_regime_pins(args._golden_records[:1]) == {"FAST_MATH": False}
+    assert args._golden_records.shared_regime_pins() == {}
+    assert args._golden_records[:1].shared_regime_pins() == {"FAST_MATH": False}
 
     # Without --golden PATH the live card's repository corpus is searched, and its matches scope the tier the same way.
     records = document.records()
@@ -482,8 +473,8 @@ def test_named_run_records_only_the_selected_precision_regime(monkeypatch, tmp_p
 
     from emmy.commands import compile as compile_module
     from emmy.commands import run as run_module
+    from emmy.compiler.pipeline.search.golden import record_greedy_pick
     from emmy.compiler.pipeline.search.pins import measured_precision_pins
-    from emmy.compiler.pipeline.search.working_golden import record_greedy_pick
 
     path = tmp_path / "working.json"
     document = _working_loop(path, pins={"FAST_MATH": False})
@@ -533,31 +524,6 @@ def test_working_verified_row_is_automatically_pinned(tmp_path):
     assert args.golden_configs[0].knobs == {"WORK": "w1x1"}
     assert args.golden_configs[0].pins == {"FAST_MATH": True}
     assert _sample_replay_knobs(args.golden_configs[0]) == {"FAST_MATH": True, "WORK": "w1x1"}
-
-
-def test_working_direct_tune_winner_is_automatically_pinned(tmp_path):
-    from emmy.commands.compile import resolve_golden_arg
-
-    path = tmp_path / "working.json"
-    _working_loop(path, state="tuned")
-    args = _args(path)
-
-    resolve_golden_arg(args)
-
-    assert len(args.golden_configs) == 1
-    assert args.golden_configs[0].knobs == {"WORK": "w1x1"}
-
-
-def test_working_invalid_direct_tune_winner_is_rejected(tmp_path):
-    from emmy.commands.compile import resolve_golden_arg
-
-    path = tmp_path / "working.json"
-    document = _working_loop(path, state="tuned")
-    document.configs[0].realizations[0].ranking["measured_knobs"] = {"WORK": "w2x2"}
-    document.dump(path, overwrite=True)
-
-    with pytest.raises(SystemExit, match="2"):
-        resolve_golden_arg(_args(path))
 
 
 def test_run_replays_embedded_loop_golden_through_structural_stamps(tmp_path):
@@ -917,14 +883,14 @@ def test_replay_keys_its_cache_by_the_entry_identity(tmp_path):
     owner = replace(routing, identity=routing.kernel_identity)
     other = replace(owner, name="working.other", identity="f" * 64)
 
-    assert len(_replay(owner, siblings=(other,), lead=owner).arms) == 1
-    assert _replay(other, siblings=(owner,), lead=owner).arms == ()
+    assert len(_replay(owner, (other,), lead=owner).arms) == 1
+    assert _replay(other, (owner,), lead=owner).arms == ()
 
 
 def _decision_watcher():
     """The kernel-set decisions a compile takes, captured as ``run --record-greedy`` captures them:
     the splice watcher, reporting ``(deploy identity of the kernel the fork was offered on, arm)``."""
-    from emmy.compiler.pipeline.search.strategy.two_level import KernelInventory, _identity
+    from emmy.compiler.pipeline.search.inventory import KernelInventory, _identity
 
     taken: list[tuple[str, dict[str, str]]] = []
     watcher = KernelInventory(
@@ -945,9 +911,8 @@ def test_recorded_greedy_pick_is_picked_again_under_strict_evidence(tmp_path, ca
     monkeypatch.setenv("EMMY_FAST_MATH", "0")
     from emmy import config
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
-    from emmy.compiler.pipeline.search.golden import GoldenEntryState, records_override, sole_evidence
+    from emmy.compiler.pipeline.search.golden import GoldenEntryState, greedy_pick_rows, record_greedy_pick, records_override, sole_evidence
     from emmy.compiler.pipeline.search.pins import pinned_knobs
-    from emmy.compiler.pipeline.search.working_golden import greedy_pick_rows, record_greedy_pick
 
     path = tmp_path / "working-route.json"
     document = _working_placement_route(path)
@@ -994,9 +959,8 @@ def test_recorded_composed_pick_is_picked_again_under_strict_evidence(tmp_path, 
     monkeypatch.setenv("EMMY_FAST_MATH", "0")
     from emmy import config
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
-    from emmy.compiler.pipeline.search.golden import records_override, sole_evidence
+    from emmy.compiler.pipeline.search.golden import greedy_pick_rows, record_greedy_pick, records_override, sole_evidence
     from emmy.compiler.pipeline.search.pins import pinned_knobs
-    from emmy.compiler.pipeline.search.working_golden import greedy_pick_rows, record_greedy_pick
 
     path = tmp_path / "working-route.json"
     document = _working_placement_route(path)
@@ -1145,7 +1109,7 @@ def test_kernel_set_prices_sum_the_kernels_a_decision_produced():
     """A decision is priced at the launches of the kernels it produced, a later decision that
     consumed one of them standing in with its own kernels; a kernel without a launch leaves the
     price undecided (``None``) rather than inventing one."""
-    from emmy.compiler.pipeline.search.working_golden import kernel_set_prices
+    from emmy.compiler.pipeline.search.golden import kernel_set_prices
 
     sets = [("root", ("piece", "root")), ("root", ("partial", "root")), ("piece", ("piece_a", "piece_b"))]
     launches = {"partial": 2.0, "root": 3.0, "piece_a": 5.0, "piece_b": 7.0}

@@ -20,7 +20,6 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import MatmulOp, RmsNormOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
-from emmy.compiler.pipeline.fork import iter_leaves
 from emmy.compiler.pipeline.knob import STRUCT_PREFIX
 from emmy.compiler.pipeline.passes.identity import IdentityStrategy, structure_features
 from emmy.compiler.pipeline.passes.provenance import ProvenanceStrategy
@@ -52,7 +51,7 @@ def _norm_linear(m: int = 2, h: int = 16) -> Graph:
 
 def _resolve(passes, graph):
     """Option-0 resolution over a freshly built pipeline (strategies discovered)."""
-    return Run(pipeline=Pipeline.build(passes), ctx=_CTX).resolve(graph, lambda fp: next(iter_leaves(fp.options)))
+    return Run(pipeline=Pipeline.build(passes), ctx=_CTX).resolve(graph, lambda fp: next(fp.leaves()))
 
 
 # --- discovery --------------------------------------------------------------------------------
@@ -120,7 +119,7 @@ def test_a_pipeline_without_the_provenance_strategy_has_no_provenance() -> None:
         passes=pipeline.passes,
         strategies=tuple(s for s in pipeline.strategies if not isinstance(s, ProvenanceStrategy)),
     )
-    out, _ = Run(pipeline=stripped, ctx=_CTX).resolve(_matmul(), lambda fp: next(iter_leaves(fp.options)))
+    out, _ = Run(pipeline=stripped, ctx=_CTX).resolve(_matmul(), lambda fp: next(fp.leaves()))
     assert all(not provenance.get(n) for n in out.nodes.values()), "no strategy → no provenance anywhere"
 
 
@@ -145,7 +144,7 @@ def test_a_kernel_given_a_body_of_its_own_is_restamped_with_its_exact_identity()
     """The lift and the twist rewrite a kernel's body in place, so its exact identity changes while
     the ``S_*`` row, deliberately the fused body's, does not. The ``I_kernel`` stamp follows the
     body: the tile a compile forks over carries the identity the tune DB keys its rows by
-    (``terminal_bench.kernel_key``), which is what lets those rows decide its forks. An online
+    (``bench_record.kernel_key``), which is what lets those rows decide its forks. An online
     softmax is a twisted kernel, where the two identities differ."""
     from emmy.compiler.ir.tile import TileOp
     from emmy.compiler.pipeline import TILE_PASSES
@@ -155,7 +154,7 @@ def test_a_kernel_given_a_body_of_its_own_is_restamped_with_its_exact_identity()
     lowered = Pipeline.build(LOOP_PASSES).run(case.record.target_program.copy(), ctx=case.context())
     [loop] = [node.op for node in lowered.nodes.values() if isinstance(node.op, LoopOp)]
     assert loop.knobs["I_kernel"] == loop.identity_key(structural=False, with_io=True)
-    out, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=case.context()).resolve(lowered, lambda fp: next(iter_leaves(fp.options)))
+    out, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=case.context()).resolve(lowered, lambda fp: next(fp.leaves()))
     [tile] = [node.op for node in out.nodes.values() if isinstance(node.op, TileOp)]
     assert tile.knobs["I_kernel"] == tile.identity_key(structural=False, with_io=True) != loop.knobs["I_kernel"]
     stamps = {k: v for k, v in tile.knobs.items() if k.startswith(STRUCT_PREFIX)}
@@ -202,7 +201,7 @@ def test_events_fire_in_loop_order() -> None:
 
     rec = Recorder()
     run = Run(pipeline=Pipeline.build(LOOP_PASSES).with_strategies(rec), ctx=_CTX)
-    run.resolve(_matmul(), lambda fp: next(iter_leaves(fp.options)))
+    run.resolve(_matmul(), lambda fp: next(fp.leaves()))
     assert rec.events[0] == "run_start"
     assert any(ev.startswith("splice:frontend/decomposition") for ev in rec.events)
     # Every pre-splice event has its post-splice receipt event.

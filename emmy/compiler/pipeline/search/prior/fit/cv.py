@@ -48,7 +48,7 @@ from __future__ import annotations
 
 import statistics
 
-from emmy.compiler.pipeline.search.data.group import GoldenGroup
+from emmy.compiler.pipeline.search.dataset.group import GoldenGroup
 from emmy.compiler.pipeline.search.metrics import best_dual_rank
 from emmy.compiler.pipeline.search.prior.report import Summary, rank_metrics
 

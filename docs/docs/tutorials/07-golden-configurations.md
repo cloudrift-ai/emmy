@@ -16,7 +16,7 @@ deploying on a guess.
 They do three jobs at once:
 
 1. **Measured evidence for the deploy.** Every measured realization is one more row in the measured-evidence index
-   the greedy pick reads — keyed by the recorded kernel's structural signature, beside the rows a tune measured on
+   the greedy pick reads — keyed by the recorded kernel's structural signature, beside the rows a bench measured on
    this machine; see [the hierarchy page](./06-deploy-evidence-hierarchy.md). A golden is a preference among
    measured rows, never a forced pin. The same row also replays under a hand pin for a measurement
    (`run --golden PATH --realization NAME --bench`) — the schedule codec fully encodes how it replays.
@@ -69,7 +69,7 @@ emmy run --realization matmul.square.512 --bench --ab "WORK=w2x2,TILE=f2x8,STAGE
 ```
 
 To verify a realization still living in a working golden file—including an exact Loop IR fallback—select both the file and
-the row. The same two flags spell it on every command (`run`, `compile`, `tune`, `serve`):
+the row. The same two flags spell it on every command (`run`, `compile`, `serve`):
 
 ```bash
 emmy compile --golden _tune/model/working.json --realization target.name --ir cuda
@@ -78,12 +78,12 @@ emmy run --golden _tune/model/working.json --realization target.name --bench
 
 The realization supplies the graph regardless of state. A realization named explicitly is always benched as a pinned
 row, measurement state notwithstanding; `run --golden PATH` alone walks every name and benches only the rows with
-verified paired timings or a valid tune winner, leaving proposals to the tuner. `--ab` is a hand pin for one extra
+verified paired timings, skipping proposals (unmeasured rows). `--ab` is a hand pin for one extra
 bench row — a way to try a row, not a way to replay a golden.
 
 That compiles the shape the way the compiler would on its own, then compiles it again with the given knob values
 pinned, and prints both. Whatever it measured cleanly is written into the tuning database by default — per-kernel
-rows the next compile deploys from, plus the training rows of the offline prior — which is how a replayed golden or
+rows the next compile deploys from — which is how a replayed golden or
 a hand-pinned row becomes what the compiler chooses. Two rules about which number to copy:
 
 - **Record from a pinned row, never from the ordinary comparison row.** The ordinary row is measured interleaved with
@@ -184,10 +184,8 @@ to every repository golden. The `refresh-golden` skill is the whole flow, includ
 than the best ordinary sibling — a slower one documents a configuration nobody should replay, so such rows are
 dropped.
 
-**The two halves of the prior treat goldens differently.** The online prior never trains on them: a recorded
-configuration enters no training data anywhere, which leaves the goldens as a clean acceptance set — data the model is
-judged against but never learns from. The offline prior *is* fitted on them. That distinction is the subject of the
-next page.
+**The goldens are the prior's training data.** The offline prior is fitted on them, and the next page explains
+how.
 
 ## See it yourself
 

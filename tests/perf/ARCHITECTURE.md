@@ -6,7 +6,6 @@ root `tests/conftest.py` deselects for any `tests/` collection unless `-m perf` 
 
 ```bash
 make bench-kernels                 # the stock lane (a fresh tune DB, no machine-local evidence)
-make bench-kernels-tuned           # the same cases with EMMY_TUNE_DB pointed at a tuned DB
 pytest tests/perf/ -m perf -v      # directly
 ```
 

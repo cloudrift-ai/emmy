@@ -56,7 +56,7 @@ def _records(names):
             target_key=name,
             compute_cap=(7, 0),
             bindings=(),
-            pin_map={},
+            regime={},
             is_routing=False,
             emmy_us=0.0,
             config_index=0,
@@ -155,7 +155,7 @@ def test_golden_walk_keeps_dotted_names_bindings_and_pin_regimes(monkeypatch, tm
     rows[2].target_key = rows[3].target_key = "dynamic"
     rows[2].bindings, rows[3].bindings = (("m", 16),), (("m", 32),)
     rows[4].target_key = rows[5].target_key = "precision"
-    rows[4].pin_map, rows[5].pin_map = {"FAST_MATH": False}, {"FAST_MATH": True}
+    rows[4].regime, rows[5].regime = {"FAST_MATH": False}, {"FAST_MATH": True}
     calls = []
     monkeypatch.setattr(run_mod, "_handle_run_once", calls.append)
 
@@ -345,7 +345,7 @@ def test_record_latency_ignores_a_child_receipt_of_the_same_target():
     )
     args = SimpleNamespace(golden="working.json", realization="linear.layer0")
     with mock.patch.object(run_mod, "_bench_total_us", side_effect=AssertionError("a receipt's timing is not the program's")):
-        with mock.patch("emmy.compiler.pipeline.search.working_golden.record_latency", lambda *a, **kw: seen.update(kw)):
+        with mock.patch("emmy.compiler.pipeline.search.golden.record_latency", lambda *a, **kw: seen.update(kw)):
             run_mod._record_golden_latency(args, {"Emmy": 12.5, "Eager PyTorch": 30.0}, [receipt])
 
     assert seen["emmy_us"] == 12.5

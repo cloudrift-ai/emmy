@@ -7,9 +7,9 @@ reach it the way a tune's do — through the writers the tuner uses — so the g
 (``routing``), priced from the pieces' own rows.
 
 :func:`import_goldens` lowers each set of entries — one target's entries in one input regime, the ones that
-walk one kernel set together (``golden.siblings_of``) — once, every entry deciding the forks of the kernel it
-names the way the deploy reads a row (``pins.spelled_arm`` at a kernel-set fork, its schedule row at a schedule
-fork) and the set's leading entry every other, and files each measured entry's row under the kernel it
+walk one kernel set together (``GoldenRecords.sets``) — once, every entry deciding the forks of the kernel it
+names the way the deploy reads a row (``golden.decode.Spelling``: ``pins.spelled_arm`` at a kernel-set fork, its
+schedule row at a schedule fork) and the set's leading entry every other, and files each measured entry's row under the kernel it
 decorates: a plain entry under the target's one kernel, a child-identity receipt under the kernel its stored
 identity names, as the schedule row it recorded. A routing entry is its decision, which the lowering's splice
 records as a routing row. An entry whose row spells a cross-CTA split over a kernel set it timed as a whole is
@@ -23,39 +23,30 @@ file's earlier rows are let go first — or into a fresh in-memory instance when
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from collections import Counter
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from emmy.compiler.context import FAST_MATH_FLAG, Context
 from emmy.compiler.ir.cuda.ir import CudaOp
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline import CUDA_PASSES, LOWERING_PASSES, Pipeline
-from emmy.compiler.pipeline.fork import iter_leaves, leaf_for
-from emmy.compiler.pipeline.knob import family_of
-from emmy.compiler.pipeline.pipeline import Run, _is_structural_option
-from emmy.compiler.pipeline.search.data.freeze import freeze_source, is_lfs_pointer
+from emmy.compiler.pipeline.pipeline import Run
+from emmy.compiler.pipeline.search.bench_record import persist_kernel_perf, point_stats
 from emmy.compiler.pipeline.search.db import SearchDB, is_placement_knob
-from emmy.compiler.pipeline.search.pins import (
-    composed_routes,
-    note_place_key,
-    pinned_knobs,
-    regime_live,
-    spelled_arm,
-    tracking_place_keys,
-    unpinned_decisions,
-)
-from emmy.compiler.pipeline.search.policy.terminal_bench import persist_kernel_perf, point_stats
+from emmy.compiler.pipeline.search.db.freeze import is_lfs_pointer
+from emmy.compiler.pipeline.search.pins import composed_routes, pinned_knobs, regime_live, tracking_place_keys, unpinned_decisions
 from emmy.compiler.wire import kernel_tile
 
-from .decode import _set_key, piece_row
+from .decode import Spelling, piece_row
 from .format import GoldenFile
-from .record import kernel_set_pins, regime_pins
+from .record import GoldenRecords
 from .repository import records_for_card, scope_digest, scope_explicit
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
-    from pathlib import Path
+    from collections.abc import Iterable
 
     from emmy.compiler.context import Context
     from emmy.compiler.pipeline.search.golden import GoldenRecord
@@ -64,7 +55,7 @@ logger = logging.getLogger("emmy.compiler.pipeline")
 
 
 def import_goldens(
-    db: SearchDB, ctx: Context, records: Sequence[GoldenRecord], *, source: str, passes: Sequence[str] | None = None
+    db: SearchDB, ctx: Context, records: Iterable[GoldenRecord], *, source: str, passes: Iterable[str] | None = None
 ) -> Counter:
     """Write ``records``' measurements into ``db`` under ``ctx``'s card and regime, ``source`` on every perf
     row. Only a measured entry in the live input regime (``golden.regime_live``) is evidence. Returns what
@@ -73,7 +64,7 @@ def import_goldens(
     slice (the default), the lowering passes alone for a freeze's kernel body, which the Loop passes would
     normalize into another kernel."""
     # the strategy package imports this module's evidence_db: a real cycle, so the import stays local
-    from emmy.compiler.pipeline.search.strategy.two_level import KernelInventory, record_routing  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.inventory import KernelInventory, record_routing  # noqa: PLC0415
 
     counts: Counter[str] = Counter()
     consumed: set[str] = set()  # the deploy identities of the kernels a decision replaced: they ran as no kernel
@@ -84,10 +75,7 @@ def import_goldens(
         counts["routing rows"] += 1
 
     pipeline = Pipeline.build(list(passes) if passes is not None else CUDA_PASSES).with_strategies(KernelInventory(on_routing=on_routing))
-    sets: dict[tuple, list[GoldenRecord]] = {}
-    for record in records:
-        sets.setdefault(_set_key(record), []).append(record)
-    for entries in sets.values():
+    for entries in GoldenRecords.of(records).sets():
         measured = [entry for entry in entries if entry.measurements is not None and entry.emmy_us > 0]
         if not measured or not regime_live(entries[0]):
             counts["unmeasured or in another regime"] += len(entries)
@@ -128,57 +116,37 @@ def import_goldens(
     return counts
 
 
-def _lower(pipeline, ctx: Context, entries: list[GoldenRecord]):
-    """The set's target through ``pipeline`` under ``ctx``: an entry naming a kernel by identity decides that
-    kernel's forks — of two naming one kernel, the one spelling a route decides its cut — and the leading
-    entry every other; a kernel-set fork takes the arm the decider's route spells, a schedule fork the leaf
-    its row vouches for, either the first leaf when it spells none. The live decision pins are withdrawn: the
-    rows filed hold for every pinned compile. The seams an entry marks cut together are one composed
-    decision, offered to the cut pass as the deploy offers them. Also returns the entries whose row equals no
-    leaf of their own kernel's schedule fork: a lowering took its first leaf, which the row did not measure."""
+def _lower(pipeline, ctx: Context, entries: GoldenRecords):
+    """The set's target through ``pipeline`` under ``ctx``: every entry deciding the forks of the kernel it names and
+    the leading entry every other (:class:`~emmy.compiler.pipeline.search.golden.decode.Spelling`); a kernel-set
+    fork takes the arm the decider's route spells, a schedule fork the leaf its row vouches for, either the first
+    leaf when it spells none. The live decision pins are withdrawn: the rows filed hold for every pinned compile.
+    Also returns the entries whose row equals no leaf of their own kernel's schedule fork: a lowering took its first
+    leaf, which the row did not measure."""
 
     lead = entries[0]
-    spelling = {
-        id(entry): {**kernel_set_pins(entry, entries), **entry.route, **{str(k): str(v) for k, v in entry.knobs.items()}}
-        for entry in entries
-    }
-    named = {entry.identity: entry for entry in sorted(entries, key=lambda entry: bool(entry.route)) if entry.identity is not None}
+    spelling = Spelling(entries, lead)
     asked_by: set[int] = set()
     spelled_by: set[int] = set()
-    composed: list[tuple[None, tuple[str, ...]]] = []
-    routed: set[str] = set()
-    for row in spelling.values():
-        keys = tuple(sorted(key for key, value in row.items() if family_of(key) == "PLACE" and value == "cut"))
-        routed.update(key for key in keys if key != "PLACE")
-        if len(keys) > 1 and (None, keys) not in composed:
-            composed.append((None, keys))
+    routed = spelling.cut_keys() - {"PLACE"}
 
     def decide(fp):
         identity = fp.root_op.identity_key(with_io=True) if isinstance(fp.root_op, TileOp) else None
-        decider = named.get(identity, lead)
-        row = spelling[id(decider)]
+        decider = spelling.decider(identity)
         if fp.structural:
-            arm = spelled_arm(fp.options, row)
-            if arm is not None:
-                option, knobs = arm
-                if _is_structural_option(option):
-                    # A decision consumes the keys that spelled it (a bare ``PLACE=cut`` its one root-most
-                    # cut), so the pieces are read against what the entry has left to say.
-                    for key in (*(set(knobs) & set(row)), *(("PLACE",) if row.get("PLACE") == "cut" else ())):
-                        note_place_key(key)
-                        row.pop(key, None)
-                return option
+            if (arm := spelling.structural(fp, decider)) is not None:
+                return arm[0]
         elif asked := piece_row(decider.schedule_row):
-            own = named.get(identity) is decider or (decider is lead and lead.identity is None)
+            own = spelling.named.get(identity) is decider or (decider is lead and lead.identity is None)
             if own:
                 asked_by.add(id(decider))
-            if (hit := leaf_for(fp.options, asked)) is not None:
+            if (hit := fp.find(asked)) is not None:
                 if own:
                     spelled_by.add(id(decider))
                 return hit[0]
-        return next(iter_leaves(fp.options))
+        return next(fp.leaves())
 
-    with unpinned_decisions(), composed_routes(composed), tracking_place_keys() as resolved:
+    with unpinned_decisions(), composed_routes(spelling.composed()), tracking_place_keys() as resolved:
         graph, _trace = Run(pipeline=pipeline, ctx=ctx).resolve(lead.target_program.copy(), decide)
     for key in sorted(routed - resolved):
         # The route still decides its other seams; this one addresses nothing the fresh lowering has.
@@ -186,29 +154,37 @@ def _lower(pipeline, ctx: Context, entries: list[GoldenRecord]):
     return graph, asked_by - spelled_by
 
 
-def import_file(db: SearchDB, path: Path) -> Counter:
+def file_source(kind: str, path: Path | str) -> str:
+    """The ``source`` an import files a file's rows under: what kind of file it is (``freeze`` or ``golden``) and the
+    digest of its own bytes — a re-recorded file is another source, and a dataset holds a file once."""
+    return f"{kind}:{hashlib.sha256(Path(path).read_bytes()).hexdigest()[:12]}"
+
+
+def import_file(db: SearchDB, path: Path, source: str) -> Counter:
     """Import one golden-shaped file — a freeze's card file, or a golden file — into ``db``: every kernel
     re-lowered from its definition through the lowering passes alone (a stored kernel body must not meet the
     Loop passes, which would normalize it into another kernel), once per regime the file's rows record, its rows
-    sourced by the file's digest (``freeze.freeze_source``). The rows were measured at the deployable opt level
-    under their regime's flags, whatever this machine compiles at. A file the instance already holds is skipped;
-    a git-LFS pointer in the data's place is refused by name. Returns what became of the entries, by kind."""
+    filed under ``source`` (:func:`file_source`), which the instance then holds (``SearchDB.record_source``) whatever
+    became of the rows — a file none of whose rows is a measurement is held too, so the readers' freshness check
+    can be met. The rows were measured at the deployable opt level under their regime's flags, whatever this machine
+    compiles at. A source the instance already holds is skipped; a git-LFS pointer in the data's place is refused by
+    name. Returns what became of the entries, by kind."""
 
     if is_lfs_pointer(path):
         raise ValueError(f"{path} is a git-LFS pointer, not the data: run `git lfs install && git lfs pull` (in CI, check out with lfs)")
-    source = freeze_source(path)
-    if source in db.perf_sources():
+    if source in db.sources():
         logger.info("%s is already held (%s)", path.name, source)
         return Counter()
     document = GoldenFile.load(path)
     records = document.records()
     cap, gpu_name = tuple(document.compute_cap), document.gpu_name
     counts: Counter = Counter()
-    for regime in sorted({tuple(sorted(regime_pins(record).items())) for record in records}):
+    for regime in sorted({tuple(sorted(record.regime.items())) for record in records}):
         with pinned_knobs(dict(regime)):
             ctx = Context.from_target(cap, gpu_name=gpu_name, compile_flags=FAST_MATH_FLAG if dict(regime).get("FAST_MATH") else "")
-            in_regime = [record for record in records if tuple(sorted(regime_pins(record).items())) == regime]
+            in_regime = [record for record in records if tuple(sorted(record.regime.items())) == regime]
             counts += import_goldens(db, ctx, in_regime, source=source, passes=LOWERING_PASSES)
+    db.record_source(source)
     logger.info("imported %s as %s: %s", path.name, source, ", ".join(f"{n} {what}" for what, n in sorted(counts.items())) or "nothing")
     return counts
 
@@ -237,7 +213,7 @@ def evidence_db(db: SearchDB | None, ctx: Context) -> SearchDB:
     return db
 
 
-def _import(db: SearchDB, ctx: Context, records: Sequence[GoldenRecord], source: str) -> None:
+def _import(db: SearchDB, ctx: Context, records: GoldenRecords, source: str) -> None:
 
     counts = import_goldens(db, ctx, records, source=source)
     logger.info(

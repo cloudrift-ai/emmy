@@ -321,10 +321,10 @@ shared with CausalLM traces.
 
 ## Entry points
 
-- CLI model/IR/code loading: `commands.compile.load_or_trace` is shared by `trace`, `compile`, `run`, and `tune`, so
+- CLI model/IR/code loading: `commands.compile.load_or_trace` is shared by `trace`, `compile` and `run`, so
   adapters, dynamic shapes, quantized checkpoint reconstruction, and the guarded remote-code fallback cannot drift.
 - Working-golden inventory generation is downstream compiler/search behavior, not frontend capture behavior:
-  `compiler.pipeline.search.working_golden.write_trace_inventory` lowers the captured graph through fusion, enumerates
+  `compiler.pipeline.search.golden.write_trace_inventory` lowers the captured graph through fusion, enumerates
   every fold-aware kernel occurrence, and embeds the complete stable Torch IR program once in the golden file. Each
   target stores its kernel's standalone post-fusion Loop IR, with the frontend origins it computes whole as
   provenance. Quantized model traces also embed the digest of their exact checkpoint declaration. Frontend nodes

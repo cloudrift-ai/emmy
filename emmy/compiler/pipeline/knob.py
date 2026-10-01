@@ -37,7 +37,7 @@ from emmy.compiler.ir.schedule.classic import CLASSIC_FAMILIES
 
 # Reserved prefix for the structural-feature knobs stamped by
 # the ``IdentityStrategy`` (``passes/identity.py``) — distinct from any tuning Knob
-# name, so ``format_tuning_knobs`` drops them from the tuning view and
+# name, so ``tuning_knob_items`` drops them from the tuning view and
 # ``knob_features`` passes them through as-is. Declared here (rather than with
 # the producing pass, which is loaded under a bare module stem) so every
 # consumer can import it.
@@ -266,12 +266,6 @@ def decision_view(knobs: dict) -> dict:
     This module owns the reserved prefixes, which is why the split lives here — a caller comparing
     two kernels' decisions asks for the view rather than re-deriving what counts as one."""
     return {k: v for k, v in knobs.items() if not k.startswith(METADATA_PREFIXES)}
-
-
-def context_view(knobs: dict) -> dict:
-    """The ``H_*`` host/regime features of a row (GPU compute capability, nvcc opt level) — the
-    regime a measurement was taken in, which is what lets one global prior span every card."""
-    return {k: v for k, v in knobs.items() if k.startswith(CTX_PREFIX)}
 
 
 def family_of(key: str) -> str:
@@ -627,25 +621,9 @@ def knob_sort_key(name: str) -> tuple[int, str]:
     return (len(_FAMILY_ORDER) + _KNOB_RANK.get(name, len(KNOB_ORDER)), name)
 
 
-def format_tuning_knobs(knobs: dict) -> str:
-    """Render ``knobs`` as a compact ``key=value`` string, dropping
-    pass-marker booleans. Empty after filtering → ``-``.
-
-    A registered ``Knob`` of type ``BOOL`` is treated as a marker and
-    dropped; unregistered boolean values are also dropped (forward-compat).
-    ``BINMASK`` values are already stored as binary strings in
-    ``op.knobs`` (rules stamp via ``Knob.pretty``), so ``str(v)`` here
-    round-trips correctly. ``STRUCT_PREFIX`` knobs (the structural-feature
-    stamp from the ``IdentityStrategy``) are facts about the kernel, not
-    tuning decisions, so they are dropped from this tuning-knob view.
-    """
-    items = tuning_knob_items(knobs)
-    return ", ".join(f"{k}={v}" for k, v in items) if items else "-"
-
-
 def tuning_knob_items(knobs: dict) -> list[tuple[str, str]]:
     """The filtered, canonically-ordered ``(name, str(value))`` tuning knobs —
-    the same view :func:`format_tuning_knobs` renders, but as items so callers can
+    the tuning-knob view, as items so callers can
     build aligned columns. ``STRUCT_PREFIX`` / ``CTX_PREFIX`` features and marker
     booleans are dropped; the rest is sorted by :func:`knob_sort_key`. The unified
     ``TILE`` output-fragment knob is one column for both the scalar and warp tiers
