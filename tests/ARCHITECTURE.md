@@ -223,6 +223,10 @@ runs `make test-durations` on the CPU runner, replaces the CPU file with that ru
 directly to `main`. GPU rows remain in their own file. The refresh runs on one xdist loadgroup worker so execution
 stays serial. Point it at the whole suite, never a subset.
 
+An existing CPU timing changes only when the difference reaches both 0.5 s and 50% of its recorded value. New test
+rows are added and rows for tests no longer measured are removed. This keeps small timing variation out of nightly
+commits while allowing changes large enough to affect bucketing through.
+
 Keep the JSON entries alphabetized by full node ID, one entry per line. `make format` restores this order without
 changing timings; `make lint` checks it. The duration writer uses the same format.
 

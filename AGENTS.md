@@ -349,7 +349,8 @@ Then run the gates, in this order, after every edit above is in:
     do **not** re-record them to make it green, which enshrines the regression as the new reference.
 24. **Let the nightly CI optimization run refresh CPU test durations.** Missing duration rows do not fail `make test`.
     The nightly run re-measures the whole CPU suite and commits `tests/durations_cpu.json` directly to `main` when it
-    changes. GPU timings stay in `tests/durations_gpu.json` and are not rewritten on the CPU runner.
+    changes. Existing entries update only when they differ by at least 0.5 s and 50% of the recorded time. GPU
+    timings stay in `tests/durations_gpu.json` and are not rewritten on the CPU runner.
 25. **Run the linter**: `make lint` — if it fails, run `make format` and re-check
 26. **Write the PR body** in an untracked temporary file outside the repository, using
     `.github/PULL_REQUEST_TEMPLATE.md` as a guide. Never replace the tracked template with a PR's content. The title
