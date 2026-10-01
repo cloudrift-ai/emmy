@@ -209,7 +209,7 @@ def test_create_keeps_storage_coded_trunks_packed(tmp_path, monkeypatch, quant_m
     monkeypatch.setattr(safetensors, "warn_if_unpinned", lambda _model_id: None)
     monkeypatch.setattr(huggingface, "quantized_checkpoint_dir", lambda _model_id: tmp_path)
 
-    def fake_load(path, dtype, *, compress_trunk=False, layer_range=None, include_embed=True, include_norm=True, expert_range=None):
+    def fake_load(path, dtype, *, compress_trunk=False, layer_range=None, include_embed=True, include_norm=True, expert_slice=None):
         seen.update(
             path=path,
             dtype=dtype,
@@ -217,7 +217,7 @@ def test_create_keeps_storage_coded_trunks_packed(tmp_path, monkeypatch, quant_m
             layer_range=layer_range,
             include_embed=include_embed,
             include_norm=include_norm,
-            expert_range=expert_range,
+            expert_slice=expert_slice,
         )
         return fake_model, fake_store
 
@@ -352,9 +352,9 @@ def test_compile_split_spells_static_fp4_activations_on_a_symbolic_width_split(t
     )
 
 
-def test_create_passes_the_expert_shard_through_to_the_loader(tmp_path, monkeypatch):
-    """A tensor-parallel rank's expert shard must reach the checkpoint read, not just the routing:
-    holding every expert is what does not fit the card in the first place."""
+def test_create_passes_the_expert_slice_through_to_the_loader(tmp_path, monkeypatch):
+    """A tensor-parallel rank's expert slice must reach the checkpoint read, not just the programs:
+    holding every whole expert is what does not fit the card in the first place."""
     import json
 
     from emmy.compiler.loader import safetensors
@@ -373,7 +373,7 @@ def test_create_passes_the_expert_shard_through_to_the_loader(tmp_path, monkeypa
     monkeypatch.setattr(huggingface, "load_quantized_split", fake_load)
     monkeypatch.setattr(EmmyGenRunner, "from_model", classmethod(lambda cls, model, **kwargs: kwargs))
 
-    built = EmmyGenRunner.create(model_id=str(tmp_path), expert_range=(64, 96))
+    built = EmmyGenRunner.create(model_id=str(tmp_path), expert_slice=(3, 8))
 
-    assert seen["expert_range"] == (64, 96), "the shard never reached the checkpoint read"
-    assert built["expert_range"] == (64, 96), "the shard never reached the runner"
+    assert seen["expert_slice"] == (3, 8), "the slice never reached the checkpoint read"
+    assert built["expert_slices"] == 8, "the slice never reached the pack key"

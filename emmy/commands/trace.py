@@ -130,7 +130,10 @@ def handle_trace(args):
             graphs,
             destination,
             model=serving.model_provenance,
-            realizations={name: [row.to_golden() for row in serving.realizations_for(twin_width(name))] for name in graphs},
+            realizations={
+                name: [row.to_golden() for row in serving.realizations_for(twin_width(name), expert=name.startswith("expert"))]
+                for name in graphs
+            },
         )
         logger.info(
             "Saved serving-twin golden file: %s (%d graph(s), %d distinct kernel(s))",

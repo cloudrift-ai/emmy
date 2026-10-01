@@ -451,19 +451,13 @@ class EmmyGenModel(nn.Module, SupportsPP):
         prefill_bucket = emmy_config.gen_prefill_bucket()
         if prefill_bucket < 0:
             prefill_bucket = capacity or 0
-        # Routed experts are sharded across the tensor-parallel group: the runner loads only this
-        # rank's contiguous expert slice, its combine yields a PARTIAL sum over the rank's own
-        # hits, and the group all-reduce (installed below) completes it. A rank cannot hold every
-        # expert of the models this exists for — one DeepSeek V4 stage's experts alone outweigh a
-        # 32 GB card.
+        # Routed experts are sliced across the tensor-parallel group along their intermediate axis:
+        # every rank holds 1/world of EVERY expert (a rank cannot hold whole experts of the models
+        # this exists for — one DeepSeek V4 stage's experts alone outweigh a 32 GB card), runs the
+        # same picks, and the group all-reduce (installed below) sums the slices. Every rank doing
+        # the same work is what keeps the ranks in step and the fixed-slot decode tier legal.
         tp = get_tp_group()
-        expert_range = None
-        n_routed = getattr(config, "n_routed_experts", None) or getattr(config, "num_local_experts", None)
-        if tp.world_size > 1 and n_routed:
-            if n_routed % tp.world_size:
-                raise ValueError(f"{n_routed} routed experts do not divide across tensor_parallel_size={tp.world_size}")
-            per_rank = n_routed // tp.world_size
-            expert_range = (tp.rank_in_group * per_rank, (tp.rank_in_group + 1) * per_rank)
+        expert_slice = (tp.rank_in_group, tp.world_size) if tp.world_size > 1 else None
         self.runner = EmmyGenRunner.create(
             model_id=self._model_id,
             dtype_str=_trunk_dtype_str(mc.dtype),
@@ -473,7 +467,7 @@ class EmmyGenModel(nn.Module, SupportsPP):
             layer_range=(self.start_layer, self.end_layer),
             include_embed=self._is_first_rank,
             include_norm=self._is_last_rank,
-            expert_range=expert_range,
+            expert_slice=expert_slice,
         )
         if max_batched and max_batched > max(self.runner.prefill_capacity, self.runner.prefill_bucket + self.runner.rider_width):
             # The over-cap headroom was granted on the promise of the split; if the twin
@@ -502,22 +496,6 @@ class EmmyGenModel(nn.Module, SupportsPP):
         if self.runner._moe is not None and not mc.enforce_eager:
             cg_mode = getattr(vllm_config.compilation_config, "cudagraph_mode", None)
             if cg_mode is None or getattr(cg_mode, "name", str(cg_mode)) != "NONE":
-                if self.runner.hc_mult > 1:
-                    # The hyper-connection combine always rides the routed dispatch (the placement
-                    # closes the layer AFTER the shard reduction) — no fixed-slot tier serves it,
-                    # so every decode step host-syncs and capture would crash mid-record.
-                    raise ValueError(
-                        "hyper-connection MoE decode capture is not supported (the routed combine "
-                        "host-syncs on every step); serve with --enforce-eager"
-                    )
-                if expert_range is not None:
-                    # The fixed-slot selector writes the router's GLOBAL expert ids into the slot
-                    # tables, which under sharding hold only this rank's experts — capture would
-                    # record reads past (or into the wrong rows of) the shard's tables.
-                    raise ValueError(
-                        "MoE decode capture is not supported with tensor-parallel expert shards "
-                        "(the fixed-slot selector is unsharded); serve with --enforce-eager"
-                    )
                 if not self.runner.has_moe_fixed_slot:
                     raise ValueError(
                         "MoE decode capture needs the fixed-slot expert tier, which is unavailable on this "
@@ -595,8 +573,8 @@ class EmmyGenModel(nn.Module, SupportsPP):
             max_pos = _rope_cache_limit(mc, config)
             self.rotary_emb = nn.ModuleList(_build_rotaries(config, self.runner, n_layers, max_pos, mc.dtype))
 
-        # The shard's combine is a PARTIAL sum; the group reduction completes it before the
-        # placement closes the layer.
+        # A rank's routed output is its slice's PARTIAL sum; the group reduction completes it before
+        # the placement closes the layer.
         if tp.world_size > 1:
             from vllm.distributed import tensor_model_parallel_all_reduce
 

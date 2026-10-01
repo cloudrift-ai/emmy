@@ -245,7 +245,8 @@ def test_eval_golden_audits_file_scoped_static_release(monkeypatch, tmp_path):
 
     eval_cmd.handle_eval_golden(SimpleNamespace(golden=str(golden), serving_config=str(config)))
 
-    assert captured["capture"] == ("org/model", {"decode_bucket": 1, "prefill_bucket": 0, "symbolic": False, "static_only": True})
+    static = {"decode_bucket": 1, "prefill_bucket": 0, "symbolic": False, "static_only": True, "expert_slices": 1}
+    assert captured["capture"] == ("org/model", static)
     assert captured["compiles"] == [(twin, ctx, True, {((("num_tokens", 1),), (("FAST_MATH", False),))})]
     assert golden_mod.repository.SCOPE is None and not emmy_config.strict_evidence()
 

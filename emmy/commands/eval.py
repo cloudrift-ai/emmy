@@ -387,7 +387,7 @@ def handle_eval_golden(args) -> None:
                 by_twin.setdefault(twin, set()).add((tuple(sorted(kernel.bindings.items())), tuple(sorted(row.pins.items()))))
     missing = []
     for twin, actual in sorted(by_twin.items()):
-        expected = {(row.bindings, row.pins) for row in serving.realizations_for(twin_width(twin))}
+        expected = {(row.bindings, row.pins) for row in serving.realizations_for(twin_width(twin), expert=twin.startswith("expert"))}
         for bindings, pins in sorted(expected - actual, key=lambda item: (item[1], item[0])):
             missing.append((twin, dict(bindings), pins))
     if missing:

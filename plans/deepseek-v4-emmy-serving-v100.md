@@ -137,8 +137,15 @@ checkpoint stays impractical here.
      shows the step is host-bound: pre drops from 32.5 to 0.35 ms per stage and the step time does not move, the
      freed time becoming all-reduce wait and idle. #1002 removes two of the host waits (a stream drain before every
      expert weight swap, and the device queries that routed one row): 303 -> 279 ms per token for one request, same
-     output, batched decode unchanged. Next: capture decode (the fixed-slot single-row expert tier, whose expert
-     program still has no measured row) and a routed dispatch with no host sync.
+     output, batched decode unchanged. PR #1006 (option B) slices every routed expert across the 8 tensor-parallel
+     ranks along its intermediate axis instead of giving each rank 32 whole experts: every rank runs the same picks,
+     so the fixed-slot tier serves the hyper-connection seam and decode is captured at size 1. Hand-picked rows for
+     the sliced programs (split-K gate/up for widths 16 and dynamic): width 1 28 us, 16 47 us, 4096 1.2 ms, dynamic
+     at 512 0.24 ms (whole experts 760 us / 667 us / 21.5 ms / 13.4 ms). Boot73: 118.5 ms per token for one request
+     (the fork 148), 7.83 s to first token (main 7.64), 11.75 tokens/s at 8 concurrent (main 8.5); GSM8K 0.97 / 0.745.
+     Decode is now GPU-bound (~57 ms busy per stage, 31 of them the fork's attention kernel). Next: prefill is host-
+     bound (~0.6 ms of host work per expert launch, 256 experts a layer), and decode batches of 2-16 could be captured
+     too (they already ride the fixed slots row by row).
    - Prefill: 5.7 s per stage against 1.9. The symbolic expert program takes 2.7 s against the fork's 1.0 (its main
      kernel reaches ~0.1 TFLOP/s on large experts, not on tensor cores), and ranks holding whole experts finish
      unevenly, so the others wait ~1.3 s per stage in all-reduces the fork does not wait in.

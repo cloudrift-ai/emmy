@@ -3,7 +3,6 @@
 import argparse
 import json
 import shlex
-import types
 from pathlib import Path
 
 import pytest
@@ -399,16 +398,6 @@ def test_serve_cmd_generate_moe_captures_at_size_one(monkeypatch):
     cfg = cmd[cmd.index("--compilation-config") + 1]
     assert '"cudagraph_mode": "FULL_DECODE_ONLY"' in cfg
     assert '"cudagraph_capture_sizes": [1]' in cfg
-
-
-def test_serve_cmd_generate_hyper_connection_moe_serves_eager(monkeypatch):
-    """A hyper-connection MoE has no fixed-slot tier — its routed combine host-syncs every step —
-    so the serve default is eager, not the capture-size-1 ladder (the boot guard rejects capture)."""
-    _force_moe_probe(monkeypatch)
-    monkeypatch.setattr("emmy.commands.serve._hf_config", lambda model, vllm_args, local=True: types.SimpleNamespace(hc_mult=2))
-    cmd = build_serve_cmd(MODEL, stock=False, vllm_args=[], generate=True)
-    assert "--enforce-eager" in cmd
-    assert "--compilation-config" not in cmd
 
 
 def test_serve_cmd_generate_moe_enforce_eager_forwards(monkeypatch):
