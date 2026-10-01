@@ -67,7 +67,7 @@ from functools import lru_cache
 from typing import TYPE_CHECKING, NamedTuple
 
 from emmy.compiler.graph import Graph
-from emmy.compiler.pipeline.fork import Fork, fork_signature, iter_leaves, leaf_knobs, stamp_signature
+from emmy.compiler.pipeline.fork import Fork, descent_sample, fork_signature, iter_leaves, leaf_knobs, stamp_signature
 from emmy.compiler.pipeline.knob import EVIDENCE_PREFIXES, METADATA_PREFIXES, schedule_pin_fingerprint
 
 logger = logging.getLogger(__name__)
@@ -139,6 +139,47 @@ def _load_prior_safe():
         return _load_prior_cached(str(config.offline_path() or ""))
     except Exception:  # noqa: BLE001
         return None
+
+
+@lru_cache(maxsize=1)
+def _load_placement_prior():
+    """The placement prior the shipped ``weights/placement.json`` names, memoized per process; ``None``
+    when the file is absent or does not load, and then a placement fork is priced by nested resolution
+    as before."""
+    from emmy.compiler.pipeline.search.prior import OfflinePrior  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.prior.offline import default_file  # noqa: PLC0415
+
+    try:
+        prior = OfflinePrior(path=str(default_file("placement")))
+    except Exception:  # noqa: BLE001
+        return None
+    return prior if prior.space == "placement" else None
+
+
+def _placement_pick(fp: ForkPoint, prior) -> object | None:
+    """The placement prior's argmin over a placement fork's arms — keep fused and every cut the pass
+    offers — each featurized from the kernels it leaves (``ranking.arm_features``), exactly as the
+    arms of the placement dataset the prior was fit on. The first of equally scored arms wins. ``None``
+    when some arm cannot be featurized (a kernel with no body to stamp), and the fork is priced as before."""
+    from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.ranking import arm_features  # noqa: PLC0415
+
+    leaves = fp.flat()
+    root = fp.root_op.with_io(fp.match.graph, fp.match.root)
+    rows = [arm_features(_leaf_graph(o) if _is_structural_option(o) else _leaf_op(o), root, fp.match.graph) for o in leaves]
+    if any(row is None for row in rows):
+        return None
+    base = fp.ctx.features()
+    scores = prior.mean_scores_features([{**base, **row} for row in rows])
+    return leaves[min(range(len(leaves)), key=scores.__getitem__)]
+
+
+def _placement_fork(fp: ForkPoint) -> bool:
+    """Whether the fork's kernel-set arms are placement cuts (``PLACE`` keys) — the one structural fork
+    the placement prior ranks; a cross-CTA split is the other kind and stays priced."""
+    from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
+
+    return all(family_of(k) == "PLACE" for o in fp.splices for k in leaf_knobs(o))
 
 
 def _find_decided_leaf(fp, want: dict) -> object | None:
@@ -773,37 +814,12 @@ _POOL_DESCENT_WORK = 262_144
 
 
 def _descent_sample(options, pool_id: str, node_blocked) -> list:
-    """Up to :data:`_POOL_DRAW` complete leaves drawn by seeded uniform descents. Dead ends (a
-    branch whose expansion is empty — legality killed the subtree) and blocklisted rows retry, up
-    to a bounded attempt count. When one descent is wider than the work budget, make exactly one
-    attempt: completing a legal row is indivisible through the Fork interface. Duplicates are kept
-    (a repeat costs a scoring slot, never a wrong pick). Structural options never appear here —
-    the caller samples only the variant side."""
-    import random  # noqa: PLC0415
-
-    rng = random.Random(pool_id)
-    sample: list = []
-    descent_bound = max((getattr(option, "pool_descent_bound", None) or 1 for option in options), default=1)
-    one_descent_exceeds_budget = descent_bound > _POOL_DESCENT_WORK
-    attempt_budget = max(1, _POOL_DESCENT_WORK // descent_bound)
-    draw = 1 if one_descent_exceeds_budget else min(_POOL_DRAW, max(1, attempt_budget // 4))
-    attempts = 1 if one_descent_exceeds_budget else min(4 * draw, attempt_budget)
-    while len(sample) < draw and attempts > 0:
-        attempts -= 1
-        option = options[rng.randrange(len(options))]
-        dead = False
-        while isinstance(option, Fork) and not option.is_leaf:
-            kids = option.expand()
-            if not kids:
-                dead = True
-                break
-            option = kids[rng.randrange(len(kids))]
-        if dead:
-            continue
-        if node_blocked is not None and _tile_blocked(leaf_knobs(option), node_blocked):
-            continue
-        sample.append(option)
-    return sample
+    """Up to :data:`_POOL_DRAW` complete leaves of a cold pool, drawn by :func:`~emmy.compiler.pipeline.fork.descent_sample`
+    seeded on the pool identity under the :data:`_POOL_DESCENT_WORK` budget, blocklisted rows retried. Duplicates
+    are kept (a repeat costs a scoring slot, never a wrong pick). Structural options never appear here — the
+    caller samples only the variant side."""
+    skip = None if node_blocked is None else (lambda leaf: _tile_blocked(leaf_knobs(leaf), node_blocked))
+    return descent_sample(options, draw=_POOL_DRAW, seed=pool_id, work_budget=_POOL_DESCENT_WORK, skip=skip)
 
 
 def _stream_tiers(
@@ -927,6 +943,7 @@ def greedy_decide(
     blocked: dict[str, set[frozenset]] | None = None,
     *,
     prior: object = _LOAD_PRIOR,
+    placement_prior: object = _LOAD_PRIOR,
     price_structural: bool = True,
     db: object | None = None,
     decisions: dict | None = None,
@@ -950,8 +967,10 @@ def greedy_decide(
     the withdrawn splice (the analogue of how ``tune`` benches-and-skips an unviable tile;
     greedy benches nothing, so the validity signal must come from the retry).
 
-    Structural (``Graph``-splicing) options are priced against the fused side
-    with the same evidence — :func:`_priced_pick` — because a ``Graph`` leaf
+    A placement fork no measured row decides goes to the ``placement_prior`` — the shipped
+    placement weights, loaded lazily — which ranks its arms directly (:func:`_placement_pick`).
+    Without one, and at every other structural fork, the (``Graph``-splicing) options are priced
+    against the fused side with the same evidence — :func:`_priced_pick` — because a ``Graph`` leaf
     carries no knob row the ordinary ranking could score; when a leaf cannot
     be priced, all of them go on to that ranking anyway. Nothing withholds a
     structural leaf to keep a kernel set unchanged.
@@ -978,6 +997,7 @@ def greedy_decide(
         deadline = time.monotonic() + budget
     loaded = prior is not _LOAD_PRIOR
     the_prior = prior if loaded else None
+    placement = placement_prior if placement_prior is not _LOAD_PRIOR else _load_placement_prior()
     # Lazily-built per-compile measured-evidence index (needs a fork point's ctx for the
     # context keys): the tune DB's rows and the golden rows in scope, one index.
     # ``None`` sentinel = not built yet.
@@ -1034,6 +1054,12 @@ def greedy_decide(
             if len(fp.options) > 1:
                 _require_evidence(fp, "no prior loaded; emission order would decide")
             return next(fp.leaves())
+        if placement is not None and price_structural and fp.splices and len(fp.options) > 1 and _placement_fork(fp):
+            # No measured row spelled an arm here (those return above): the placement prior ranks the
+            # arms, which strict evidence refuses the same way it refuses a priced comparison.
+            _require_evidence(fp, "no measured row spells a kernel-set arm")
+            if (picked := _placement_pick(fp, placement)) is not None:
+                return picked
         if dkey is not None and _schedule_fork(fp):
             picked = _direct_measured_pick(fp, blocked, db_index())
             if picked is not None:

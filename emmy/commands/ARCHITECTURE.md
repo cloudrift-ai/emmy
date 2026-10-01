@@ -797,29 +797,36 @@ candidates from `hardware.GPU_INSTANCE_TYPES` and fans GCP entries across `GPU_G
 `SAME_CANDIDATE_RETRIES` transient attempts. `CapacityExhausted` advances; `TerminalProvisionError` aborts. Without a
 filter, fallback can cross providers in hardware-table order; `--provider` restricts the complete search.
 
-Capacity-class signals recognized today: CloudRift HTTP 503/429 on rent, CloudRift `Inactive` terminal status / readiness timeout, GCP `ZONE_RESOURCE_POOL_EXHAUSTED` / `QUOTA_EXCEEDED` / `STOCKOUT` in `gcloud` stderr, and GCP `RUNNING`-status timeout. Both providers terminate VMs they created but couldn't bring to readiness, so orchestrator fallback does not leak orphan instances.
+Capacity-class signals recognized today: CloudRift HTTP 503/429 on rent, CloudRift `Inactive` terminal status /
+readiness timeout, GCP `ZONE_RESOURCE_POOL_EXHAUSTED` / `QUOTA_EXCEEDED` / `STOCKOUT` in `gcloud` stderr, and GCP
+`RUNNING`-status timeout. Both providers terminate VMs they created but couldn't bring to readiness, so orchestrator
+fallback does not leak orphan instances.
 
-GCP project is inferred from `gcloud` config. CloudRift reads `CLOUDRIFT_API_KEY` and `CLOUDRIFT_API_URL` from the environment by default. **H200 on CloudRift** is only available on on-prem clusters — set `CLOUDRIFT_API_URL` to the on-prem endpoint (the public `api.cloudrift.ai` does not offer H200).
- ### `emmy db` The dataset DB is the tune DB's tables in a file of their own, never read by a compile: the file `--db
-PATH` names on every subcommand — never a default, so nothing here can touch the tune DB (`_data/dataset.db` in the
-examples, under the ignored `_data/`). `import SOURCES… --db PATH [--fresh]` fills it, and nothing else does: a source
-is a measurement freeze directory, a golden file, or a tune DB file, which is frozen first — for the offline prior,
-the hardware goldens `search/golden/records/*.json` under `--fresh` (README, "Fit the offline prior"); the recipe
-goldens and a tune DB are the sources to add when the fit needs more. Every kernel is re-lowered from its definition
+GCP project is inferred from `gcloud` config. CloudRift reads `CLOUDRIFT_API_KEY` and `CLOUDRIFT_API_URL` from the
+environment by default. **H200 on CloudRift** is only available on on-prem clusters — set `CLOUDRIFT_API_URL` to the
+on-prem endpoint (the public `api.cloudrift.ai` does not offer H200). ### `emmy db` The dataset DB is the tune DB's
+tables in a file of their own, never read by a compile: the file `--db PATH` names on every subcommand — never a
+default, so nothing here can touch the tune DB (`_data/dataset.db` in the examples, under the ignored `_data/`).
+`import [SOURCES…] --db PATH [--fresh] [--repository]` fills it, and nothing else does: a source is a measurement
+freeze directory, a golden file, or a tune DB file, which is frozen first; `--repository` adds every repository golden
+— the hardware goldens and each maintained recipe's, the set the priors are fit on under `--fresh` (README, "Fit the
+priors"); a tune DB is the source to add when the fit needs more. Every kernel is re-lowered from its definition
 through the lowering passes by the current compiler (`golden.evidence.import_goldens`), once per precision regime the
 file's rows record, and its rows are sourced by the file's kind and digest — `freeze:` for a freeze directory's files,
 `golden:` for a golden file; a source the instance already holds is skipped, and `--fresh` rebuilds from nothing. A
 held file is recorded in the `source` table whatever became of its rows, so naming a file again is a no-op and a
-report can list its sources. `export --db PATH OUT [--pool-sample N] [--seed N]` writes the instance's rows as the
-dataset at `OUT` (`search/dataset/document.py` owns the format): every golden pool enumerated from its kernel's
-definition and packed (`db/export.py` over `ranking.build_golden_groups`; the pipeline ARCHITECTURE's Part 8 owns the
-pool), every measured pool labelled with its microseconds, and the provenance — the DB, its sources by digest, the
-sample and seed, the featurizer version and the compiler commit. `emmy fit` and `eval prior` read that directory and
-never the DB; exporting the same instance twice writes the same bytes. `freeze --db PATH --out DIR` writes an
-instance's admitted rows (`db/freeze.freeze_reason`) as a golden file per card — the artifact that gets checked in.
-`check [--db PATH]` counts the rows of an instance whose tables disagree with themselves (`SearchDB.drift`) and exits
-non-zero when any do. Every subcommand resolves its instance through `commands/db.db_path`, which refuses a missing
-one with the command that fills it.
+report can list its sources. `export --db PATH OUT [--space {schedule,placement}] [--pool-sample N] [--seed N]` writes
+the instance's rows as the dataset of one space at `OUT` (`search/dataset/document.py` owns the format): the schedule
+space is every golden pool enumerated from its kernel's definition and packed (`db/export.py` over
+`ranking.build_golden_groups`; the pipeline ARCHITECTURE's Part 8 owns the pool) and every measured pool labelled with
+its microseconds; the placement space is every golden kernel's placement forks, each the arms the cut pass offers with
+the golden's arm marked (`ranking.build_placement_groups`); both carry the provenance — the DB, its sources by digest,
+the space, the sample and seed, the featurizer version and the compiler commit. `emmy fit` and `eval prior` read that
+directory and never the DB; exporting the same instance twice writes the same bytes. `freeze --db PATH --out DIR`
+writes an instance's admitted rows (`db/freeze.freeze_reason`) as a golden file per card — the artifact that gets
+checked in. `check [--db PATH]` counts the rows of an instance whose tables disagree with themselves
+(`SearchDB.drift`) and exits non-zero when any do. Every subcommand resolves its instance through
+`commands/db.db_path`, which refuses a missing one with the command that fills it.
 
 ### `emmy fit`
  Fit an offline-prior weights artifact and cross-validate it, GPU-free, over the golden groups of a dataset `emmy db
@@ -853,12 +860,11 @@ instead of looking like lost data. A golden row whose signature matches no candi
 counted per card as `unranked`; a kernel formed from no loop op (a piece carved from a twisted tree, which only its
 parent's program reaches) is skipped the same way.
 
-**Pools are SAMPLED during enumeration.** `--pool-sample N` (default 2000; `0` enumerates every row) draws
-that many candidates per pool by single-pass reservoir sampling over the schedule walk's leaf stream — each
-candidate dict exists only for the moment it passes the draw — because the corpus is millions of rows and tens
-of gigabytes otherwise, and one golden's pool alone is past the scheduler's materialization budget, so an
-unsampled fit does not finish. The draw is a pure function of the stream and `(N, --seed)` and
-never reads a row, so a refit of the same corpus is byte-identical
+**Pools are SAMPLED during enumeration.** `--pool-sample N` (default 2000; `0` walks every row) draws that
+many complete rows per pool by seeded random descents through the pool's lazy schedule tree, a child at random
+at every branch, with every golden row reached by its own directed descent — because the corpus is millions of
+rows and tens of gigabytes otherwise, and a walk that visits every leaf takes an hour over the hardware goldens
+alone. The draw is a pure function of the tree and `(N, --seed)`, so a refit of the same corpus is byte-identical
 and two goldens over one pool still retain identical rows and still merge into one group. Every recorded
 config survives the draw wherever it sits in its pool, so a golden that misses its pool still means what it
 always meant — a pin or dtype mismatch — rather than an unlucky draw. Reported ranks are RAW ranks within the
@@ -888,7 +894,7 @@ sit BESIDE the summaries in `full_train.skipped`, keyed by card: they have no po
 about the corpus rather than about a scored card, and keeping them out preserves the shared summary shape. The
 full-train artifact is written at `WEIGHTS`, the second positional argument, in the shipped format (a `catboost` fit
 also writes the booster as a `.cbm` sidecar beside it, named after its own JSON so several artifacts can share a
-directory): `prior/weights/offline.json` when a refit rewrites the shipped weights, any other path for a candidate to
+directory): `prior/weights/schedule.json` when a refit rewrites the shipped weights, any other path for a candidate to
 A/B through `EMMY_OFFLINE_FILE` (the flow that replaced the retired `scripts/golden_knob_heuristics.py`). The header
 names the dataset it read and the dataset's provenance — the DB, the golden files (by source digest) the pools were
 read from: two fits are comparable only when they were computed over the same rows. `emmy/commands/fit.py` owns the
@@ -905,11 +911,17 @@ says so in the provenance notes) is a shipping choice, not part of the shape of 
 both seeding policies and the ranking loss the fit ran under; two fits are only comparable when those match, the
 same way they must match on `--features`.
 
+The dataset's space selects the rest: a placement dataset fits the `P_*` view, seeds from the shipped placement
+weights (zeros before any exist) and writes `space` into the artifact, which the loader checks against the fork it
+is asked at.
+
 ```bash
 emmy db import --db _data/dataset.db --fresh emmy/compiler/pipeline/search/golden/records/*.json   # the rows
-emmy db export --db _data/dataset.db _data/dataset     # the dataset the fit reads
-emmy fit _data/dataset emmy/compiler/pipeline/search/prior/weights/offline.json   # the shipped weights, 5 shape folds
-emmy fit _data/dataset _tune/fits/ab/offline.json --folds 0 --out _tune/fits/ab     # full-train only, a candidate to A/B
+emmy db export --db _data/dataset.db _data/schedule --space schedule     # the dataset the schedule fit reads
+emmy db export --db _data/dataset.db _data/placement --space placement   # the dataset the placement fit reads
+emmy fit _data/schedule emmy/compiler/pipeline/search/prior/weights/schedule.json     # the shipped weights, 5 shape folds
+emmy fit _data/placement emmy/compiler/pipeline/search/prior/weights/placement.json
+emmy fit _data/schedule _tune/fits/ab/offline.json --folds 0 --out _tune/fits/ab     # full-train only, a candidate to A/B
 ```
 
 ## Experiments

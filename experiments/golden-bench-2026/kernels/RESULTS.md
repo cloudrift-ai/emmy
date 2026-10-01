@@ -1,5 +1,17 @@
 # Golden-bench kernel corpus
 
+## Post-cut producer fusion compatibility (#1003)
+
+All ten golden files have been updated for producer fusion after a cut. Twenty ordinary output-cut routing rows
+recover the previous kernel sets. Every retained row strictly decodes, and each complete CUDA kernel set matches
+its pre-feature source, argument order and launch geometry; the comparison ignores only generated function names.
+All 185 measurements are retained. These are source comparisons, with no new GPU timing or correctness run.
+
+The paired whole-layer results below remain the baseline. They do not measure the new fused producer alternative.
+The next V100 s1 experiment should compare fused K/V producers with their ordinary cut alternatives, then compare
+the whole layer against the 16-launch baseline and the same-input Hugging Face `torch.compile` layer. H100 s512
+needs profiling before another schedule sweep: the earlier gate/up and staging trials below lost.
+
 ## Five-card whole-layer check after #988 (2026-09-30)
 
 The target is Qwen3-0.6B layer 0 at sequence lengths 1 and 512 on the five named GPUs. Every comparison times the
@@ -67,6 +79,44 @@ and staging schedules. Both require more compiler work before claiming universal
 
 The raw model comparisons, strict replays, timeout logs, candidate CUDA graphs, and trial findings are in
 `tuning_universal_2026-09-30.tar.gz` (Git LFS). This archive omits tune DBs, cubins, and temporary prototype code.
+
+## H100 s512 schedule check after #988 (2026-09-30)
+
+The remaining H100 prefill gap was tested on Qwen3-0.6B layer 0 at sequence length 512. The exact H100 was an
+80GB HBM3 card (sm_90, driver 580.178.04, CUDA 12.9). The compiler was main at `5193d2e0` (#988), with deployable
+`-O3` and `EMMY_FAST_MATH=0`. The checked-in H100 golden supplied the route and measured schedules. Each changed
+schedule was compared with that route in the same strict, whole-layer golden replay. All timed trials passed
+correctness against eager. No tested schedule won reliably, so the golden is unchanged.
+
+| Current model-form baseline, one layer | eager | torch.compile | Emmy | Emmy / torch.compile |
+| --- | ---: | ---: | ---: | ---: |
+| H100, s512, warmup 10, 100 iterations | 199.55 µs | 84.74 µs | 86.52 µs | 1.02× |
+
+Both compiled model-form paths passed the scaled accuracy check. A separate strict golden-form replay passed at
+88.50 µs; it has different timing semantics from the model-form comparison. The current model-form gap is 1.78 µs.
+The #967 model-form row was Emmy 87.3 µs against `torch.compile` 79.0 µs. Most of the apparent gap change is the
+slower `torch.compile` baseline in this current run, not a demonstrated Emmy improvement.
+
+| Changed schedule | Touched kernel, before → after | Paired layer, before → after |
+| --- | ---: | ---: |
+| Gate/up producer band `+p4` | 19.31 → 97.98 µs | 88.43 → 169.17 µs |
+| Attention stages `d4/smem-async/p2` | 12.67 → 13.18 µs | 88.08 → 88.71 µs |
+| Attention value tile `m64n64` | 12.80 → 14.43 µs | 88.23 → 89.56 µs |
+| Down stage `d4/smem-async/p2` | 10.88 → 10.89 µs | 87.97 → 92.77 µs |
+| Q tile `m64n128` | 6.77 → 6.81 µs | 89.20 → 88.85 µs |
+| Attention TMA value stage, `d1/smem-async/p2` score stage | 12.28 → 12.82 µs | 83.53 → 84.80 µs |
+
+These are single paired runs, not repeat distributions. The 0.35 µs layer advantage of the Q tile came with a
+slower Q kernel and is within observed run variation. The score tile `m64n128` was refused before timing because its
+width disagreed with the 64-wide carrier chunk. A constrained 24-candidate attention staging search measured 20
+configurations; its best isolated result was 12.8 µs, close to the recorded row near 12.7 µs. Its top distinct
+candidate is the TMA trial above and lost in the layer. The temporary `+p4` compiler offer was reverted after its
+loss. No compiler, route, or canonical golden change survived the pass.
+
+The raw JSON, logs, working golden, search DB snapshot, and fuller findings are in
+`tuning_h100x1_2026-09-30.tar.gz`. The #967 pass identified the projections and attention as contributors to its
+larger gap. This pass did not localize the current 1.78 µs gap further. Hardware-counter profiling did not finish
+within the development time limit, so this pass makes no new counter claim.
 
 ## CSE re-record on exact cards
 

@@ -2,44 +2,35 @@
 
 Building the offline-prior dataset enumerates every golden's candidate pool and featurizes every
 row. The corpus is millions of rows and tens of gigabytes, paid again on every experiment, and one
-golden's pool alone exceeds the enumerator's materialization budget — so the fit does not finish.
-The fix is to draw the sample from the schedule walk's leaf STREAM as it is produced — reservoir
-sampling — rather than to build everything and throw most of it away: the walk stays lazy, each
-candidate dict exists only for the moment it passes the reservoir, and nothing proportional to the
-pool is ever retained. What is bounded is MEMORY, not time: the draw is one pass over every leaf,
-so a fit still pays O(pool) walk time per golden — the 19.4M-row EXL3 coded-linear pool included —
-where the deleted product space could address ``size`` members without visiting the rest. That
-old guarantee is gone by design; the walk has no index to address by.
+golden's pool alone exceeds the enumerator's materialization budget — so an unsampled fit does not
+finish, and a walk that visits every leaf to draw a few (the reservoir this replaced) still pays
+O(pool) time per golden: an hour over the hardware goldens, most of it in schedule-context extensions
+nothing retained. The draw is therefore taken at the FORK level: ``size`` seeded random descents through
+the lazy schedule tree (:func:`~emmy.compiler.pipeline.fork.descent_sample`), a child at random at every
+branch, so the cost is ``size`` paths and never the pool. What is bounded is TIME as well as memory, and
+what is given up is uniformity: a narrow subtree is over-represented, so a rank within the draw is a rank
+within the draw, not an estimate of the rank in the pool.
 
-**The draw is a pure function of the stream and** ``(size, seed)``. The walk's leaf order is
-deterministic and the reservoir never reads a row, so two byte-identical pools draw byte-identical
-samples — which is what keeps the fit reproducible and keeps two goldens over one pool mergeable
-into one training group.
+**The draw is a pure function of the tree and** ``(size, seed, keep)``. Every leaf expansion is
+deterministic and the descents are seeded on the sample's own identity, so two byte-identical pools draw
+byte-identical samples — which is what keeps the fit reproducible and keeps two goldens over one pool
+mergeable into one training group.
 
-**Membership survives the draw exactly, at ONE row per signature.** ``keep`` is the set of
-:func:`~.features.tile_signature` values the draw may not lose, and the reservoir visits every
-candidate, so a golden that is genuinely absent from its pool still reads as absent — a real defect
-class (a pin or dtype mismatch) the fit and ``eval golden`` both detect by exactly that miss. One row
-discharges that: both consumers locate a golden with ``next(... == want ...)`` and read the first
-match. The cap is load-bearing, not tidy — a signature is a coarse stamp many schedules share, so
-retaining every match scaled the keep-set with the POOL instead of the corpus: 34 signatures pulled
-77,279 rows out of a 1,950,625-row V100 ``k_linear_matmul_reduce`` pool, 99.8% of its sample, burying
-the uniform draw under the golden's own signature class.
+**Membership survives the draw exactly.** ``keep`` holds the rows the draw may not lose — the golden rows
+recorded on the pool's card and regime — and each is reached by its own directed descent
+(:func:`~emmy.compiler.pipeline.fork.leaf_for`), the row-to-leaf walk the decode and the evidence pick share,
+so a golden that is genuinely absent from its pool still reads as absent: a real defect class (a pin or
+dtype mismatch) the fit and ``eval golden`` both detect by exactly that miss.
 
-**Reported rank is the RAW sample rank with the exact total beside it, never scaled**
-(:class:`Candidates`). A sample's rank resolution floor is ``n / size``; pretending otherwise would
-report a precision the draw does not have. The exact total is the reservoir's candidate count —
-known the moment the stream ends, with no product space to pre-sum.
+**Reported rank is the rank within the draw, and the total beside it is the draw's size**
+(:class:`Candidates`): the descents never learn how big the pool is, and a rank is only interpretable next
+to what it was ranked among.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterable
 from dataclasses import dataclass, field
 
-import numpy as np
-
-from emmy.compiler.pipeline.search import features
 from emmy.compiler.structural import digest
 
 #: Candidates drawn per pool when ``emmy fit`` samples. Measured against the alternative: at this
@@ -50,10 +41,10 @@ DEFAULT_SAMPLE = 2000
 
 @dataclass(frozen=True)
 class Candidates:
-    """One graph's enumerated candidate rows beside the size of the pool they came from.
+    """One graph's enumerated candidate rows beside what they were ranked among.
 
-    ``total`` equals ``len(rows)`` when nothing was sampled, and is the exact pool size otherwise —
-    the two travel together because a rank is only interpretable next to what it was ranked among.
+    ``total`` equals ``len(rows)`` when nothing was sampled, and the draw's size otherwise — the two travel
+    together because a rank is only interpretable next to what it was ranked among.
     """
 
     rows: list[dict]
@@ -62,20 +53,20 @@ class Candidates:
 
 @dataclass(frozen=True)
 class PoolSample:
-    """How many candidates a pool contributes, which of them must survive, and where each pool
-    reports its exact size.
+    """How many candidates a pool contributes, which rows must survive, and where each pool reports its
+    size.
 
     Carried on :class:`~emmy.compiler.context.Context` and folded into the schedule-space stamp.
     That stamp distinguishes a sampled draw from the live space while keeping equal sampled
     problems reproducible. ``None`` on the Context means live, and live never samples.
     """
 
-    #: Candidates to draw. ``0`` (or a pool no larger than it) means the whole pool.
+    #: Complete rows to draw. ``0`` (or a pool whose declared bound is no larger) means the whole pool.
     rows: int
     seed: int = 0
-    #: The ``tile_signature`` values the draw may not drop. One row per value — the first carrying it.
-    keep: frozenset = frozenset()
-    #: Where each drawn pool reports its EXACT size, keyed by that pool's schedule-space stamp. The sampled
+    #: The rows the draw may not drop, each as its sorted ``(knob, value)`` items — the golden rows.
+    keep: tuple = ()
+    #: Where each drawn pool reports its size, keyed by that pool's schedule-space stamp. The sampled
     #: rows cannot carry it and the fork tree has no channel for it, so the enumerator writes here
     #: and the caller that asked for the sample reads it back. Keyed rather than appended so a
     #: equal pool overwrites instead of double-counting. EXCLUDED from the value
@@ -84,44 +75,29 @@ class PoolSample:
 
     @property
     def key(self) -> str:
-        """This sample's stable identity. The keep-set is SORTED into it: a ``frozenset``'s
-        iteration order follows string hashing, which is randomized per process, so its ``repr``
-        would key the same sample differently on two runs."""
-        return digest(self.rows, self.seed, sorted(str(s) for s in self.keep))
+        """This sample's stable identity: the size, the seed and the kept rows, sorted — the one spelling
+        of one sample on every machine."""
+        return digest(self.rows, self.seed, sorted(str(row) for row in self.keep))
 
-    def take(self, rows: Iterable[dict]) -> Candidates:
-        """Reservoir-sample the candidate stream ``rows``, returning the drawn rows in stream
-        order beside the exact count behind them.
+    def draw(self, options) -> list:
+        """The leaves this sample takes from the lazy tree ``options``: the whole pool when nothing is to be
+        sampled or its declared bound fits the draw, else ``rows`` descents seeded on the size and seed alone,
+        deduplicated by row, with every kept row's own leaf beside them — the keep-set adds to the draw and never
+        moves it. Leaves, in a stable order: the kept rows first, then the draw."""
+        from emmy.compiler.pipeline.fork import descent_sample, iter_leaves, leaf_for, leaf_knobs  # noqa: PLC0415
 
-        One pass, O(size) retained: the first ``size`` candidates fill the reservoir and each later
-        one displaces a uniformly chosen slot, so the draw is uniform without knowing the count up
-        front — the property that lets a lazy walk be sampled at all. The kept-signature rows ride
-        beside the reservoir (the keep-set ADDS to the draw, it never displaces it) at one row per
-        signature, so what they add is bounded by the keep-set rather than by the pool, and the whole
-        stream is returned when ``size`` is 0 or the stream is no larger."""
-        stream = iter(rows)
-        if self.rows <= 0:
-            out = list(stream)
-            return Candidates(out, len(out))
-        rng = np.random.default_rng(self.seed)
-        reservoir: list[tuple[int, dict]] = []
-        kept: dict[int, dict] = {}
-        found: set = set()
-        count = 0
-        for index, row in enumerate(stream):
-            count = index + 1
-            if self.keep and (sig := features.tile_signature(row)) in self.keep and sig not in found:
-                found.add(sig)
-                kept[index] = row
-            if index < self.rows:
-                reservoir.append((index, row))
-            else:
-                slot = int(rng.integers(0, index + 1))
-                if slot < self.rows:
-                    reservoir[slot] = (index, row)
-        chosen = dict(reservoir)
-        chosen.update(kept)
-        return Candidates([chosen[index] for index in sorted(chosen)], count)
+        bounds = [getattr(option, "pool_bound", None) for option in options]
+        if self.rows <= 0 or (bounds and all(bound is not None and bound <= self.rows for bound in bounds)):
+            return list(iter_leaves(options))
+        seen: set = set()
+        out: list = []
+        kept = [found[0] for row in self.keep if (found := leaf_for(options, dict(row))) is not None]
+        for leaf in [*kept, *descent_sample(options, draw=self.rows, seed=digest(self.rows, self.seed))]:
+            identity = tuple(sorted((str(k), str(v)) for k, v in leaf_knobs(leaf).items()))
+            if identity not in seen:
+                seen.add(identity)
+                out.append(leaf)
+        return out
 
 
 __all__ = ["DEFAULT_SAMPLE", "Candidates", "PoolSample"]

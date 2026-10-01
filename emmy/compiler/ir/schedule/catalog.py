@@ -313,11 +313,16 @@ def splitk_moves() -> list[Reduce]:
     return [Reduce.of(cta=width, finalize=finalize) for width in SPLITK_WIDTHS for finalize in ("kernel", "atomic")]
 
 
-def coop_reduce_moves() -> list[Reduce]:
+def coop_reduce_moves(*, transposed_lanes: tuple[int, ...] = (32,)) -> list[Reduce]:
     """Return the finite cooperative and register reduction domain."""
     return [
         *(Reduce.of(coop=coop, reg=reg) for coop in (1, 4, 8, 16, 32, 64, 128, 256, 512) for reg in (1, 2, 4) if coop > 1 or reg > 1),
-        *(Reduce.of(coop=width, coop_transposed=True, columns=columns) for width in (32, 64, 128, 256, 512) for columns in COOP_T_COLUMNS),
+        *(
+            Reduce.of(coop=width, coop_transposed=True, columns=columns, output_lanes=lanes)
+            for width in (32, 64, 128, 256, 512)
+            for lanes in transposed_lanes
+            for columns in COOP_T_COLUMNS
+        ),
     ]
 
 

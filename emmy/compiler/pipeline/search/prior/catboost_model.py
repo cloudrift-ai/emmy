@@ -182,7 +182,7 @@ class CatBoostModel:
             booster = from_b64(obj["model"], new_ranker())
         return cls(booster=booster, cols=tuple(obj["cols"]), scale=float(obj.get("params", {}).get("scale", DEFAULT_SCALE)))
 
-    def to_artifact(self, *, provenance: dict, model_file: str = "weights.cbm") -> dict:
+    def to_artifact(self, *, provenance: dict, model_file: str = "weights.cbm", space: str = "schedule") -> dict:
         """This model as a weights artifact dict. Same envelope as the linear model's (``feat_ver`` / ``kind`` /
         ``params`` / ``provenance``, with ``provenance`` caller-supplied whole so the assembly stays pure);
         ``kind`` is what tells the loader which class to rebuild.
@@ -195,6 +195,7 @@ class CatBoostModel:
         rsynced to a box with a different scratch directory."""
         return {
             "feat_ver": FEATURIZER_VERSION,
+            "space": space,
             "kind": "catboost",
             "cols": list(self.cols),
             "model_file": model_file,

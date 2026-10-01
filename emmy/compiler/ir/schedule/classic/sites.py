@@ -230,9 +230,9 @@ class ClassicNodeSite(Site[ClassicSchedule]):
         return tuple(choice for choice in choices if self._placed_ok(choice))
 
     def _reductions(self) -> tuple[Reduce, ...]:
-        tile, node = self.problem.tile, self.node
+        tile, node, target = self.problem.tile, self.node, self.problem.target
         facts = tile.contractions.get(self.id)
-        catalog = _reduction_domain(tile, node) if facts is None else _contraction_reductions(tile, node, facts)
+        catalog = _reduction_domain(tile, node, target) if facts is None else _contraction_reductions(tile, node, facts, target)
 
         def parse(spelling: str) -> Reduce | None:
             try:

@@ -49,7 +49,7 @@ def _transposed_reduction_ok(tile: TileOp) -> bool:
     return _inner_free(tile) is not None and not any(isinstance(stmt, Loop) for stmt in tail) and not has_contraction_tail(tail)
 
 
-def _reduction_domain(tile: TileOp, node) -> tuple[Reduce, ...]:
+def _reduction_domain(tile: TileOp, node, target=None) -> tuple[Reduce, ...]:
     """Project one plain reduction's legal choices from node and kernel facts only.
 
     The catalog is not capped by the axis extent: an over-wide band is legal and idles its extra
@@ -81,17 +81,22 @@ def _reduction_domain(tile: TileOp, node) -> tuple[Reduce, ...]:
         # and a band over the few partials pays a barrier per cell.
         return (Reduce(),)
     transposed_ok = _transposed_reduction_ok(tile) and is_root and not chain_form(node)
+    lanes = (32, 8) if target is not None and target.compute_capability == (7, 0) else (32,)
     return (
         Reduce(),
-        *(choice for choice in coop_reduce_moves() if not choice.coop_transposed or (choice.coop % WARP_LANES == 0 and transposed_ok)),
+        *(
+            choice
+            for choice in coop_reduce_moves(transposed_lanes=lanes)
+            if not choice.coop_transposed or (choice.coop % WARP_LANES == 0 and transposed_ok)
+        ),
     )
 
 
-def _contraction_reductions(tile: TileOp, node, facts: ContractionFacts) -> tuple[Reduce, ...]:
+def _contraction_reductions(tile: TileOp, node, facts: ContractionFacts, target=None) -> tuple[Reduce, ...]:
     """The per-cell tier's reductions of a contraction: the plain-reduction catalog, since a
     contraction is a monoid with a ⊗ lift and inherits the same serial-only exclusions with no
     carve-out of its own; the serial fold alone over a symbolic contraction extent."""
-    return _reduction_domain(tile, node) if facts.k_axis.extent.is_static else (Reduce(),)
+    return _reduction_domain(tile, node, target) if facts.k_axis.extent.is_static else (Reduce(),)
 
 
 def _fragment_projection(tile: TileOp) -> tuple[list, frozenset[str]]:

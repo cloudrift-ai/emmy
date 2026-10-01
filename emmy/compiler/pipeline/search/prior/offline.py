@@ -13,7 +13,7 @@ set selected on the ``S_ext_n_symbolic_axis`` stamp) or :mod:`.catboost_model` (
 neither — a tree splits on the routing stamp and forms the interaction from its two columns). This class is the
 adapter that turns a knob dict into features and satisfies the ``Prior`` contract around whichever one it holds.
 
-The model lives in the repo-checked artifact ``weights/offline.json`` beside this module (override with
+The model lives in the repo-checked artifact ``weights/schedule.json`` beside this module (override with
 ``EMMY_OFFLINE_FILE`` / ``emmy eval … --offline-file`` to A/B a candidate fit), written by ``emmy fit DATASET
 WEIGHTS`` jointly over EVERY kernel regime — fp32-scalar / fp16-warp matmul, cooperative reduce, and pointwise
 goldens — so one model ranks them all. Its ``kind`` field names the model class and :func:`_load_artifact`
@@ -36,7 +36,14 @@ from emmy.compiler.pipeline.search.prior.base import Prior
 from emmy.compiler.pipeline.search.prior.catboost_model import CatBoostModel
 from emmy.compiler.pipeline.search.prior.linear_model import LinearModel
 
-_DEFAULT_FILE = Path(__file__).parent / "weights" / "offline.json"
+_DEFAULT_FILE = Path(__file__).parent / "weights" / "schedule.json"
+_PLACEMENT_FILE = Path(__file__).parent / "weights" / "placement.json"
+
+
+def default_file(space: str) -> Path:
+    """The checked-in weights artifact of ``space``: the schedule prior, or the placement prior."""
+    return _PLACEMENT_FILE if space == "placement" else _DEFAULT_FILE
+
 
 # The model classes an artifact's ``kind`` field can name, each with the top-level keys its
 # ``from_artifact`` reads and the scalar ``params`` keys its ``to_artifact`` emits. Both key sets are
@@ -116,6 +123,7 @@ class OfflinePrior(Prior):
         scale: float | None = None,
         atomic_free_split_threshold: float | None = None,
         atomic_free_weight: float | None = None,
+        path: str | None = None,
     ) -> None:
         # Keyed by LinearModel's own field names, which is what lets the merge below be a ``replace``.
         overrides = {
@@ -127,17 +135,20 @@ class OfflinePrior(Prior):
         }
         if model is not None and any(v is not None for v in overrides.values()):
             raise ValueError("OfflinePrior takes either a ready model= or per-field overrides, not both")
-        self._model = model if model is not None else self._resolve(overrides)
+        #: The space the weights rank — ``schedule`` for a ready model or a full override set, else the artifact's.
+        self.space = "schedule"
+        self._model = model if model is not None else self._resolve(overrides, path)
 
-    @staticmethod
-    def _resolve(overrides: dict):
+    def _resolve(self, overrides: dict, path: str | None):
         """The model the artifact names, with the linear per-field overrides layered over it. A fully-specified
         override set skips the file read entirely (tests construct a model that way); anything less reads the
-        artifact and dispatches on its ``kind``."""
+        artifact — ``path``, else the override env var, else the shipped schedule weights — and dispatches on
+        its ``kind``."""
         if all(v is not None for v in overrides.values()):
             return LinearModel(**overrides)
-        path = str(config.offline_path() or _DEFAULT_FILE)
+        path = str(path or config.offline_path() or _DEFAULT_FILE)
         art = _load_artifact(path)
+        self.space = art.get("space", "schedule")
         cls = _KINDS[art["kind"]][0]
         if cls is not LinearModel:
             if any(v is not None for v in overrides.values()):

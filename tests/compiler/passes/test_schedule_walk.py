@@ -92,9 +92,8 @@ FIXTURES = {
 def _rows(graph, cc: tuple[int, int] = _CC) -> list[dict]:
     """The sampled candidate rows of every schedule fork ``graph`` opens.
 
-    The sample makes the walk exhaust its leaf stream once inside ``schedule`` (the reservoir
-    retains nothing proportional to the pool), so these tests observe a complete traversal without
-    flattening a live space into test memory."""
+    The sample draws eight complete rows by seeded descents through each fork's tree, so these tests
+    read legal rows of a live space without flattening it into test memory."""
     ctx = dc_replace(Context.from_target(cc), pool_sample=PoolSample(rows=8, seed=0))
     return enumerate_graph(graph, ctx).rows
 

@@ -11,7 +11,7 @@ and A/B'd against the other.
 A run writes ``<out>/metrics.json`` — the deterministic, diff-able record two fits are
 compared by (same header inputs → identical content; the run dir name, not the file,
 carries the timestamp) — and the full-train artifact at the path the second positional argument names, in the shipped
-``weights/offline.json`` format. The metrics layout (``full_train`` +
+``weights/schedule.json`` format. The metrics layout (``full_train`` +
 a ``cv`` holdout/train/gap block, both carrying ``prior/report.py`` summaries) is documented on
 :mod:`emmy.compiler.pipeline.search.prior.fit.cv`, which owns all the fold machinery;
 the run itself is :func:`~emmy.compiler.pipeline.search.prior.fit.run.run_fit`. This
@@ -29,7 +29,7 @@ from pathlib import Path
 
 from emmy import config, storage
 from emmy.compiler.pipeline.search import features
-from emmy.compiler.pipeline.search.dataset import DEFAULT_FEATURES, Dataset, feature_view, repo_commit
+from emmy.compiler.pipeline.search.dataset import DEFAULT_FEATURES, PLACEMENT_FEATURES, Dataset, feature_view, repo_commit
 from emmy.compiler.pipeline.search.prior.fit import catboost as fit_catboost
 from emmy.compiler.pipeline.search.prior.fit import cv as fit_cv
 from emmy.compiler.pipeline.search.prior.fit import linear as fit_linear
@@ -88,14 +88,14 @@ def register_fit_command(subparsers) -> None:
     )
     parser.add_argument(
         "weights",
-        help="Weights artifact to write — emmy/compiler/pipeline/search/prior/weights/offline.json is the shipped offline prior "
+        help="Weights artifact to write — emmy/compiler/pipeline/search/prior/weights/schedule.json is the shipped offline prior "
         "(README, 'Fit the offline prior'); any other path is a candidate to A/B through EMMY_OFFLINE_FILE.",
     )
     parser.add_argument("--out", default=None, help="Run dir (default: _tune/fits/<timestamp>-<trainer>/).")
     parser.set_defaults(func=handle_fit)
 
 
-def _write_artifact(path: Path, model, provenance: dict) -> None:
+def _write_artifact(path: Path, model, provenance: dict, space: str) -> None:
     """Write one weights artifact — the JSON, plus the model's binary sidecar when it has one.
 
     The sidecar is named after the JSON (``weights.json`` → ``weights.cbm``) and recorded RELATIVE in the JSON,
@@ -106,32 +106,35 @@ def _write_artifact(path: Path, model, provenance: dict) -> None:
     Which classes have a sidecar is the MODEL's business, not this function's: it asks for ``model_file`` in the
     artifact and writes ``blob`` only if the model put the key there. A linear artifact is self-contained and
     simply does not."""
-    artifact = model.to_artifact(provenance=provenance, model_file=f"{path.stem}.cbm")
+    artifact = model.to_artifact(provenance=provenance, model_file=f"{path.stem}.cbm", space=space)
     storage.write_json(path, artifact, indent=2)
     if "model_file" in artifact:
         (path.parent / artifact["model_file"]).write_bytes(model.blob)
 
 
-def _linear_trainers(args, names: list[str]):
+def _linear_trainers(args, names: list[str], space: str):
     """The linear summary's trainer pair and the hyperparameters its metrics header records.
 
     Full-train seeds from the incumbent artifact's weights; fold models seed from ZEROS
     (``warm_start=False``) — the incumbent's weights were fit on every golden, so warm-starting a fold from
     them would leak each held-out golden into its own holdout model. The scalar params seed from the incumbent
-    either way: two numbers a fold fit re-derives, not a per-golden memory."""
-    from emmy.compiler.pipeline.search.prior.offline import _DEFAULT_FILE  # noqa: PLC0415
+    either way: two numbers a fold fit re-derives, not a per-golden memory. The incumbent is the shipped
+    artifact of ``space`` (the override env var names the schedule one); a placement fit with no shipped
+    weights yet seeds its weights from zeros and its scalars from the schedule artifact."""
+    from emmy.compiler.pipeline.search.prior.offline import _DEFAULT_FILE, default_file  # noqa: PLC0415
 
-    raw = storage.read_json(config.offline_path() or _DEFAULT_FILE)
+    path = (config.offline_path() or _DEFAULT_FILE) if space == "schedule" else default_file(space)
+    seeded = Path(path).exists()
+    raw = storage.read_json(path if seeded else _DEFAULT_FILE)
     if not isinstance(raw, dict) or "scale" not in (raw.get("params") or {}):
-        raise SystemExit(
-            f"no usable incumbent weights artifact to seed from at {config.offline_path() or _DEFAULT_FILE} "
-            f"(needs a 'params' block carrying 'scale')"
-        )
+        raise SystemExit(f"no usable incumbent weights artifact to seed from at {path} (needs a 'params' block carrying 'scale')")
     # Lenient read (``LinearModel.from_artifact`` does not version-gate): a refit after a featurizer
     # change is exactly when versions mismatch, and a stale key simply seeds 0.0. A pre-2026-08-05
     # artifact whose params block still lists the retired gate weights simply loses them here — they
     # are linear terms now. ``scale`` rides along on the model, rank-neutral and never fitted.
     incumbent = LinearModel.from_artifact(raw)
+    if not seeded:
+        incumbent = replace(incumbent, weights={}, weights_dynamic=None)
     trainer = fit_linear.LinearTrainer(feature_names=tuple(names), init=incumbent, samples=args.samples, l2=args.l2, random_state=args.seed)
     fold_trainer = replace(trainer, warm_start=False)
     params = {
@@ -144,7 +147,7 @@ def _linear_trainers(args, names: list[str]):
     return trainer, fold_trainer, params, incumbent
 
 
-def _catboost_trainers(args, names: list[str]):
+def _catboost_trainers(args, names: list[str], space: str):  # noqa: ARG001 — one trainer-maker signature
     """The tree summary's trainer and its recorded hyperparameters. ONE trainer serves both the shippable model and
     every fold: a tree ensemble has no warm start, so there is no seeding policy to differ on and no way for a
     fold model to inherit anything from the held-out golden."""
@@ -206,13 +209,14 @@ def handle_fit(args) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     make_trainers, default_view = TRAINERS[args.trainer]
-    view = args.features or default_view
 
     try:
         dataset = Dataset.load(args.dataset)
     except (OSError, ValueError) as exc:
         logger.error("%s", exc)
         sys.exit(2)
+    space = dataset.provenance.get("space", "schedule")
+    view = args.features or (PLACEMENT_FEATURES if space == "placement" else default_view)
     keep = feature_view(view)
     groups, skipped = dataset.golden, dataset.skipped
     names = sorted({n for c in groups for n in c.feat_names if keep(n)})
@@ -223,7 +227,7 @@ def handle_fit(args) -> None:
     # counts a golden recorded twice at one config (it pins a row already pinned, so it adds no positive).
     positives = sum(len(c.golden_ids) for c in groups)
     logger.info(
-        "  %d static + %d dynamic golden groups (%d positives, %d merged), %d D_* features, %d skipped",
+        "  %d static + %d dynamic golden groups (%d positives, %d merged), %d features, %d skipped",
         len(groups) - n_dyn,
         n_dyn,
         positives,
@@ -232,7 +236,7 @@ def handle_fit(args) -> None:
         len(skipped),
     )
 
-    trainer, fold_trainer, trainer_params, incumbent = make_trainers(args, names)
+    trainer, fold_trainer, trainer_params, incumbent = make_trainers(args, names, space)
     header = {
         "trainer": args.trainer,
         # The rows the pools were read from: two fits are comparable only when they were computed over the
@@ -241,6 +245,7 @@ def handle_fit(args) -> None:
         "dataset": dataset.provenance,
         "dropped": dataset.dropped["golden"],
         "seed": args.seed,
+        "space": space,
         "feat_ver": features.FEATURIZER_VERSION,
         "features": view,
         "folds": args.folds,
@@ -273,6 +278,7 @@ def handle_fit(args) -> None:
         "fitted": datetime.date.today().isoformat(),
         "script": "emmy fit",
         "args": {"trainer": args.trainer, "seed": args.seed, **trainer_params},
+        "space": space,
         "features": view,
         "sources": dataset.provenance["sources"],
         "pool_sample": dataset.provenance["pool_sample"],
@@ -281,7 +287,7 @@ def handle_fit(args) -> None:
         "notes": notes,
     }
     (out_dir / "metrics.json").write_text(json.dumps(metrics, indent=2, sort_keys=True) + "\n")
-    _write_artifact(Path(args.weights), model, provenance)
+    _write_artifact(Path(args.weights), model, provenance, space)
     logger.info("wrote %s", args.weights)
 
     _log_cells(metrics)

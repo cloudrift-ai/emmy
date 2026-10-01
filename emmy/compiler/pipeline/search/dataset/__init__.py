@@ -21,6 +21,7 @@ from __future__ import annotations
 from emmy.compiler.pipeline.search.dataset.document import Dataset, repo_commit
 from emmy.compiler.pipeline.search.dataset.group import (
     DEFAULT_FEATURES,
+    PLACEMENT_FEATURES,
     GoldenGroup,
     Group,
     MeasuredGroup,
@@ -34,6 +35,7 @@ from emmy.compiler.pipeline.search.dataset.shape import ShapeKey, is_matmul, op_
 
 __all__ = [
     "DEFAULT_FEATURES",
+    "PLACEMENT_FEATURES",
     "REGIME_PINS",
     "Dataset",
     "GoldenGroup",

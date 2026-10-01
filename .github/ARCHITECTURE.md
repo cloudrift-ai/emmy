@@ -53,10 +53,11 @@ reviews ready PRs from both repository branches and forks, including bot-authore
 the GitHub API without checking out PR code, and its token can read contents and write PR comments but cannot push.
 Only `/review` runs; PR descriptions and code suggestions are left to the author. New commits replace an in-progress
 review for the same PR. The model, endpoint, and credential are shared with the nightly agent workflows. PR Agent can
-use up to 128,000 tokens of model context. A review with no actionable finding posts no empty review card; model and
-tool failures propagate to the job. The check is advisory: completion does not establish that the model found every
-issue, and no comment is the expected result when it reports none. The patch includes 30 unchanged lines before each
-change so a review can verify nearby imports and definitions before reporting a missing name.
+use up to 128,000 tokens of model context. Recorded golden JSON is excluded from the review input; the repository's
+golden checks validate those files. A failed review gets one fresh attempt, and a second failure fails the job. A
+review with no actionable finding posts no empty review card. The check is advisory: completion does not establish
+that the model found every issue, and no comment is the expected result when it reports none. The patch includes ten
+unchanged lines before each change, the maximum PR Agent accepts, so it can check nearby imports and definitions.
 
 ## Package publication
 

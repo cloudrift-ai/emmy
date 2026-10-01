@@ -17,8 +17,10 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import MatmulOp
 from emmy.compiler.ir.loop import LoopOp
+from emmy.compiler.ir.schedule.classic import ClassicProblem, ClassicScheduleCodec, ClassicScheduleContext
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import iter_leaves
+from emmy.compiler.pipeline.search.pins import pinned_knobs
 
 classic_forks = import_module("emmy.compiler.pipeline.passes.tile.schedule.040_schedule").classic_forks
 
@@ -39,6 +41,56 @@ def _unmapped_tile(m: int, n: int, k: int = 64, dtype: str = "f16"):
     node = Pipeline.build(LOOP_PASSES).run(g).nodes["o"]
     tile = lift_loop_op(node.op, name=node.op.name)
     return replace(tile, knobs=dict(node.op.knobs), inputs=dict(node.op.inputs), outputs=dict(node.op.outputs))
+
+
+def _complete_classic_row(tile, ctx) -> dict[str, str]:
+    codec = ClassicScheduleCodec(ClassicScheduleContext(tile, ctx, ClassicProblem(tile, ctx)))
+    return dict.fromkeys(codec.keys(), "")
+
+
+def test_complete_pin_decodes_without_walking_the_compatibility_frontier(monkeypatch) -> None:
+    tile, ctx = _unmapped_tile(8, 8), Context.from_target((7, 0))
+    row = _complete_classic_row(tile, ctx)
+
+    def unexpected_frontier(*_args):
+        raise AssertionError("a complete pin must use the exact classic decoder")
+
+    monkeypatch.setattr(ClassicScheduleContext, "_compatible_frontier", unexpected_frontier)
+    with pinned_knobs(row):
+        leaves = list(iter_leaves(classic_forks(tile, tile.name, tile.knobs, ctx)))
+    assert len(leaves) == 1
+    assert {key: leaves[0].knobs[key] for key in row} == row
+    assert leaves[0].schedule == ClassicScheduleCodec(ClassicScheduleContext(tile, ctx)).decode(row)
+
+
+def test_complete_pin_ignores_a_peer_kernel_site(monkeypatch) -> None:
+    tile, ctx = _unmapped_tile(8, 8), Context.from_target((7, 0))
+    row = _complete_classic_row(tile, ctx)
+
+    def unexpected_frontier(*_args):
+        raise AssertionError("a peer site must not force frontier traversal")
+
+    monkeypatch.setattr(ClassicScheduleContext, "_compatible_frontier", unexpected_frontier)
+    with pinned_knobs({**row, "REDUCE@peer": "coop"}):
+        leaves = list(iter_leaves(classic_forks(tile, tile.name, tile.knobs, ctx)))
+    assert len(leaves) == 1
+    assert {key: leaves[0].knobs[key] for key in row} == row
+
+
+def test_invalid_complete_pin_keeps_the_original_refusal() -> None:
+    tile, ctx = _unmapped_tile(8, 8), Context.from_target((7, 0))
+    row = {**_complete_classic_row(tile, ctx), "WORK": "not-a-work"}
+    with pinned_knobs(row):
+        assert not list(iter_leaves(classic_forks(tile, tile.name, tile.knobs, ctx)))
+
+
+def test_invalid_complete_published_pin_keeps_the_peer_catalog() -> None:
+    tile, ctx = replace(_unmapped_tile(8, 8), name="k_probe__place_aaaaaaaaaa"), Context.from_target((7, 0))
+    row = {**_complete_classic_row(tile, ctx), "WORK": "not-a-work"}
+    with pinned_knobs(row):
+        leaves = list(iter_leaves(classic_forks(tile, tile.name, tile.knobs, ctx, kernel_set=True)))
+    assert leaves
+    assert all(leaf.knobs["WORK"] != "not-a-work" for leaf in leaves)
 
 
 def test_a_precision_gate_pin_stamps_a_different_space() -> None:
