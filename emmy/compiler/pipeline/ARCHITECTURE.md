@@ -1149,6 +1149,10 @@ routing rows and child receipts when that target changes. It retains a measured 
 row's route and schedule renders the same CUDA sources before and after the change. A failed replay or changed source
 demotes the row to a proposal, so the next exact-card record run can measure it again.
 
+When a row is dropped, restamp rechecks the surviving rows against their remaining siblings until no further row is
+lost. A kernel set missing a member loses its verified state even if it has a stored measurement. Kept and demoted
+counts include only surviving rows; an empty result is refused instead of replacing the file with incomplete evidence.
+
 The preferred reference is the runnable Torch slice (`torch-eager`) or the applicable library kernel (`cublas`). A
 stored kernel's slice is its stored origins cut from the embedded program (`GoldenRecord.reference_program`), taken
 when the kernel writes only values those ops compute and the slice reads exactly the inputs the kernel binds; nothing is

@@ -230,6 +230,13 @@ before the `TileOp` constructor performs that same validation once. It owns cano
 encoding for `WORK`, `TILE`, `REDUCE`, `STAGE`, and `RASTER`. There is no codec base class: a second schedule family
 should demonstrate any shared codec contract before one is extracted.
 
+A complete classic hand pin is decoded through that same codec before the compatibility frontier is traversed.
+Pins addressing a peer kernel's sites do not prevent direct decoding. A refused row keeps the ordinary peer fallback.
+
+Transposed cooperative reductions use 32 output lanes by default. Volta's catalog also offers `coop-t/n8`: eight
+output lanes, with the remaining threads partitioning the reduction. `/v<n>` still names adjacent columns per lane.
+Both layouts use the same reduction choice, codec and materializer; the worker count must divide into output lanes.
+
 The structural cut phase runs before any schedule is composed. The single `030_cut` pass reaches a fixpoint over two
 ordered domains: stored-Fold-edge placement first, then cross-CTA reduction splitting. Every successful choice and
 fresh piece re-enters the same rule. `030_cut` presents its restricted structural frontier through a schedule context;
