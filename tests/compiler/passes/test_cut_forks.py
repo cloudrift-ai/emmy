@@ -1077,11 +1077,13 @@ def test_a_twin_channel_read_at_shifted_columns_reads_the_plain_channels_workspa
         body = node.op.op.lower(frozenset(), node.op.output_specs, node.op.axes)
         return [(stmt.input, stmt.index[-1].pretty()) for stmt in body.iter() if isinstance(stmt, Load)]
 
-    *producers, consumer = (node for node in cut.nodes.values() if isinstance(node.op, TileOp))
-    assert sorted(tuple(d.as_static() for d in node.outputs[0].shape) for node in producers) == [(2, 8), (4, 8)], "k keeps its two heads"
+    *producers, consumer = (cut.nodes[nid] for nid in cut.topological_order() if isinstance(cut.nodes[nid].op, TileOp))
+    workspaces = [tensor for node in producers for tensor in node.outputs]
+    assert sorted(tuple(d.as_static() for d in tensor.shape) for tensor in workspaces) == [(2, 8), (4, 8)], "k keeps its two heads"
     assert sorted(name for node in producers for name, _ in loads(node) if name in ("x1", "x2")) == ["x1", "x2"], "each weight is read once"
     for node in producers:
-        assert len({column for name, column in loads(consumer) if name == node.id}) == 3, "the reader loads a workspace at three columns"
+        for buffer in node.buffer_names():
+            assert len({column for name, column in loads(consumer) if name == buffer}) == 3, "the reader loads a workspace at three columns"
 
 
 @requires_cuda
