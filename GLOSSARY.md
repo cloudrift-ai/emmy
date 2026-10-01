@@ -291,10 +291,9 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   schedule prior ranks a kernel's schedule rows, the placement prior ranks a placement fork's arms. Either answers
   only where no measurement decides.
 - **Trainer** — The object that turns a dataset into a fitted model. It holds the settings of a fit — which features
-  to use, how strong the regularizer is, which loss to minimize — and producing a model leaves those settings
-  unchanged, so the same trainer can be used many times and answers the same way each time. Emmy has two
-  offline-prior trainers, chosen by `emmy fit --trainer`: `LinearTrainer` produces a `LinearModel` (fixed weights
-  over the features), and `CatBoostTrainer` produces a `CatBoostModel` (a ranker built from decision trees).
+  to use, how many trees of what depth, which loss to minimize — and producing a model leaves those settings
+  unchanged, so the same trainer can be used many times and answers the same way each time. Emmy's offline-prior
+  trainer is `CatBoostTrainer`, which produces a `CatBoostModel` (a ranker built from decision trees).
 - **Candidate pool** — Every way one kernel could be scheduled. The members all compute the same result and differ
   only in speed, so they are the alternatives a tuning choice picks between. Ranking is always asked *within* a
   pool — the model puts one pool's candidates in order, and the question is where a good one landed. Candidates
@@ -369,7 +368,7 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Golden rank** — Where a recorded golden configuration lands in the model's ordering of the candidates it
   competed against. A screen rather than a measure of speed: it says the model found a good configuration late,
   never how much slower the one it preferred actually runs.
-- **CatBoost** — The machine-learning library behind `CatBoostTrainer`, one of the two offline-prior trainers.
+- **CatBoost** — The machine-learning library behind `CatBoostTrainer`, the offline-prior trainer.
 - **SQLite** — A small database stored in one local file. Emmy uses it to persist tuning measurements.
 
 ## Common mathematical terms

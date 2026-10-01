@@ -198,7 +198,7 @@ emmy eval prior _data/schedule
 emmy eval prior _data/placement
 ```
 
-`emmy fit` also writes a metrics file under `_tune/fits/<timestamp>-linear/`; two fits are compared by diffing their
+`emmy fit` also writes a metrics file under `_tune/fits/<timestamp>/`; two fits are compared by diffing their
 metrics files.
 
 **The reproduction gate.** `tests/compiler/pipeline/search/prior/test_reproduction.py` holds the shipped priors to
