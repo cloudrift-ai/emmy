@@ -49,6 +49,8 @@ from emmy.compiler.pipeline.knob import (
 # ``D_stage_ring`` coefficient moved to ``D_stage_prefetch``, the identical ``depth >= 2`` signal,
 # so the scoring function did not change and no synthetic refit was needed.
 FEATURIZER_VERSION = 4
+# The placement space's own version: its ``P_*`` columns (``ranking.placement_features``) change on their own clock.
+PLACEMENT_FEATURIZER_VERSION = 1
 
 # The features that SELECT a weight set rather than describe a candidate — the ``S_ext_n_symbolic_axis`` stamp
 # a masked-tile (symbolic-axis) kernel carries. The stamp VOCABULARY belongs here with the rest of the feature

@@ -69,6 +69,13 @@ def register_db_command(subparsers) -> None:
         "Recorded in the dataset's provenance — two datasets are comparable only when it matches.",
     )
     pe.add_argument("--seed", type=int, default=0, help="Seed of the per-pool draw (default: 0).")
+    pe.add_argument(
+        "--space",
+        choices=("schedule", "placement"),
+        default="schedule",
+        help="Which forks the dataset ranks: the schedule space (default: one kernel's schedule rows, the golden and "
+        "measured pools) or the placement space (one kernel's placement arms — keep fused, cut a seam — the golden's marked).",
+    )
     pe.set_defaults(func=handle_db_export)
 
     pf = sub.add_parser("freeze", help="Write a DB instance's admitted rows as a measurement freeze: a golden file per card")
@@ -130,7 +137,7 @@ def handle_db_export(args) -> None:
     path = db_path(args.db)
     db = SearchDB.open_readonly(path)
     try:
-        dataset = export_dataset(db, source=str(path), pool_sample=args.pool_sample, seed=args.seed)
+        dataset = export_dataset(db, source=str(path), pool_sample=args.pool_sample, seed=args.seed, space=args.space)
     finally:
         db.close()
     try:

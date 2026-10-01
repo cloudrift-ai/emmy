@@ -313,6 +313,122 @@ def build_golden_groups(
     return groups, skipped
 
 
+PLACEMENT_PASSES = ("tile/lift", "tile/cut")
+
+
+def _arm_stamps(option, fused, graph) -> list[dict]:
+    """The ``S_*`` stamps of each kernel an arm's option leaves: the fused tile itself (``fused``, the fork's root
+    in ``graph``), or every tile piece of a cut's fragment — each stamped as the identity strategy stamps a kernel
+    (:func:`~..passes.identity.op_stamps`), without the identities a ``kernel`` row would also digest."""
+    from emmy.compiler.graph import Graph  # noqa: PLC0415
+    from emmy.compiler.ir.tile.ir import TileOp  # noqa: PLC0415
+    from emmy.compiler.pipeline.passes.identity import op_stamps  # noqa: PLC0415
+
+    if isinstance(option, Graph):
+        return [op_stamps(node.op.with_io(option, node), option) for node in option.nodes.values() if isinstance(node.op, TileOp)]
+    return [op_stamps(fused, graph)]
+
+
+def placement_features(pieces: list[dict]) -> dict[str, float]:
+    """One placement arm as ``P_*`` features: how many kernels it leaves, and each ``S_*`` stamp summed and
+    maxed over them. The fused arm is its one kernel; a cut's arm is its pieces, so the sums say what the cut
+    adds (another kernel's loads, stores and loop nest) and the max says what its largest piece still is."""
+    feats: dict[str, float] = {"P_n_pieces": float(len(pieces))}
+    for key in sorted({k for stamps in pieces for k in stamps}):
+        values = [float(stamps.get(key, 0.0)) for stamps in pieces]
+        feats[f"P_sum_{key[2:]}"] = sum(values)
+        feats[f"P_max_{key[2:]}"] = max(values)
+    return feats
+
+
+def _walk_placement(pool: GoldenPool, ctx: Context, decisions: dict[str, dict]) -> tuple[list[tuple[list[dict], list[int]]], list[str]]:
+    """One pool's placement forks, in walk order, each as its arms' feature rows beside the positive indices —
+    and the kernels whose recorded decision the fork did not offer (a stale spelling)."""
+    from emmy.compiler.pipeline import Pipeline  # noqa: PLC0415
+    from emmy.compiler.pipeline.fork import leaf_knobs  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import family_of  # noqa: PLC0415
+    from emmy.compiler.pipeline.pipeline import NO_OPTION, Run  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import composed_routes, pinned_knobs, unpinned_decisions  # noqa: PLC0415
+
+    base = ctx.features()
+    forks: list[tuple[list[dict], list[int]]] = []
+    unmatched: list[str] = []
+
+    def decide(fp):
+        leaves = list(fp.leaves())
+        if not leaves:
+            return NO_OPTION
+        rows = [leaf_knobs(leaf) for leaf in leaves]
+        place = [i for i, row in enumerate(rows) if any(family_of(k) == "PLACE" for k in row)]
+        if not place:
+            return leaves[0]
+        root = fp.root_op.with_io(fp.match.graph, fp.match.root)
+        identity = root.identity_key(structural=False, with_io=True)
+        taken = decisions.get(identity)
+        fused = next(i for i in place if "fuse" in rows[i].values())
+        # An arm spells every occurrence of each seam; the seams themselves are the keys its aliases map onto.
+        aliases = {alias: key for i in place for alias, key in (getattr(leaves[i], "aliases", None) or {}).items()}
+        seams = {i: {aliases.get(k, k) for k in rows[i]} for i in place}
+        chosen, steer, positives = fused, None, [fused]
+        if taken is not None:
+            keys = {aliases.get(k, k) for k in taken}
+            if matching := [i for i in place if seams[i] == keys]:
+                chosen = matching[-1]
+                # The composed arm is offered last, and only because the walk registered the route.
+                steer = chosen if len(keys) > 1 else None
+                positives = [i for i in place if i != steer and i != fused and seams[i] <= keys]
+            else:
+                unmatched.append(identity[:12])
+        arms = [i for i in place if i != steer]
+        feats = [{**base, **placement_features(_arm_stamps(leaves[i].expand()[0], root, fp.match.graph))} for i in arms]
+        forks.append((feats, [arms.index(i) for i in positives]))
+        return leaves[chosen]
+
+    routes = [(None, tuple(arm)) for arm in decisions.values() if len(arm) > 1]
+    with pinned_knobs(pool.pins), unpinned_decisions(), composed_routes(routes):
+        Run(pipeline=Pipeline.build(list(PLACEMENT_PASSES)), ctx=ctx).resolve(pool.kernel.program(pool.bindings), decide)
+    return forks, unmatched
+
+
+def build_placement_groups(pools: Sequence[GoldenPool], decisions: dict[str, dict]) -> tuple[list[GoldenGroup], list[tuple[str, str, str]]]:
+    """Enumerate each pool's placement forks and pack them as :class:`GoldenGroup` records, one per fork: the
+    arms the cut pass offers unpinned (keep fused, one seam each, the full-projection cut), each featurized from
+    the kernels it leaves (:func:`placement_features`), with the arms the golden took marked. The second return
+    is the pools that produced no group, as ``(gpu, name, reason)``.
+
+    ``decisions`` maps a kernel's exact identity to the ``PLACE`` arm a routing row records on it. The walk
+    runs the tile lift and the cut pass only (``PLACEMENT_PASSES``) and follows the golden: at a kernel with a
+    decision it takes that arm — registered as a composed route, so a several-seam decision is one arm whose
+    pieces are the routing row's own children and a nested decision is found by identity — and at a kernel
+    without one it keeps the kernel fused. The composed arm steers the walk and is not a row: unpinned, the pass
+    offers single seams, and those are what the prior ranks. A single seam the decision names is a positive,
+    as is the full-projection arm when it is exactly the decision; fused is the positive where nothing was
+    recorded."""
+    groups: list[GoldenGroup] = []
+    skipped: list[tuple[str, str, str]] = []
+    ctxs: dict[tuple, Context] = {}
+    for pool in pools:
+        if not pool.kernel.formed:
+            skipped.append((pool.gpu, pool.name, "kernel formed from no loop op"))
+            continue
+        card = (pool.cap, pool.gpu, pool.regime)
+        ctx = ctxs.get(card)
+        if ctx is None:
+            ctx = ctxs[card] = pool_context(pool)
+        forks, unmatched = _walk_placement(pool, ctx, decisions)
+        if unmatched:
+            skipped.append((pool.gpu, pool.name, f"decision not offered on {', '.join(unmatched)}"))
+        if not forks:
+            skipped.append((pool.gpu, pool.name, "no placement fork"))
+            continue
+        shape = _shape_group(ShapeKey.from_s_features(pool.kernel.stamps))
+        for n, (feats, positives) in enumerate(forks, 1):
+            key = f"{pool.gpu}/{pool.name}" + (f"@{n}" if n > 1 else "")
+            groups.append(GoldenGroup.over(key, pool.name, "place", pool.gpu, shape, pack_features(feats), positives, len(feats)))
+    logger.info("  %d placement forks over %d pools (%d skipped)", len(groups), len(pools), len(skipped))
+    return groups, skipped
+
+
 def evaluate_record(record, ctx: Context, scorer: Callable[[dict], float] | None = None) -> Ranked:
     """Rank a generic program-backed record in its current candidate enumeration."""
     from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415

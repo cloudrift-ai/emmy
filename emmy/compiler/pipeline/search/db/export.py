@@ -14,8 +14,8 @@ from collections import defaultdict
 from emmy.compiler.pipeline.search.dataset import Dataset, GoldenPool, GoldenRow, MeasuredGroup, measured_features, regime_of, repo_commit
 from emmy.compiler.pipeline.search.db import PerfRow, SearchDB, knobs_json
 from emmy.compiler.pipeline.search.db.freeze import freeze_reason, schedule_row
-from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION, knob_features
-from emmy.compiler.pipeline.search.ranking import build_golden_groups
+from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION, PLACEMENT_FEATURIZER_VERSION, knob_features
+from emmy.compiler.pipeline.search.ranking import build_golden_groups, build_placement_groups
 from emmy.compiler.structural import digest
 
 logger = logging.getLogger(__name__)
@@ -46,6 +46,38 @@ def golden_pools(db: SearchDB) -> tuple[list[GoldenPool], dict[str, int]]:
         golden = tuple(GoldenRow(schedule_row(row), row.stats.median, row.source) for row in rows)
         pools.append(GoldenPool(gpu, cap, regime, kernels[identity], dict(rows[0].bindings), golden))
     return pools, dict(dropped)
+
+
+def placement_pools(db: SearchDB, pools: list[GoldenPool]) -> tuple[list[GoldenPool], dict[str, dict], dict[str, int]]:
+    """The kernels whose placement forks the placement space ranks, beside the decisions the golden rows took:
+    every golden pool (a piece a cut minted included — it is a kernel with forks of its own, walked from its own
+    definition), and every parent of a ``PLACE`` routing row that is no pool, on the card and sizes of a measured
+    descendant (a cut parent is never measured itself, its pieces are). ``decisions`` maps each parent's exact
+    identity to its arm, nested decisions included. The third return counts the parents dropped, by reason."""
+    routing = [row for row in db.iter_routing() if all(key.startswith("PLACE") for key in row.arm)]
+    decisions = {row.parent: row.arm for row in routing}
+    children: dict[str, tuple[str, ...]] = {row.parent: row.children for row in routing}
+    by_identity: dict[str, GoldenPool] = {}
+    for pool in pools:
+        by_identity.setdefault(pool.kernel.exact_identity, pool)
+    kernels = {k.exact_identity: k for k in db.iter_kernels()}
+    dropped: dict[str, int] = defaultdict(int)
+    out = list(pools)
+
+    def measured(identity: str) -> GoldenPool | None:
+        if (pool := by_identity.get(identity)) is not None:
+            return pool
+        return next((p for child in children.get(identity, ()) if (p := measured(child)) is not None), None)
+
+    for parent in sorted(decisions):
+        if parent in by_identity:
+            continue
+        below = measured(parent)
+        if below is None:
+            dropped["no measured piece"] += 1
+            continue
+        out.append(GoldenPool(below.gpu, below.cap, below.regime, kernels[parent], dict(below.bindings), ()))
+    return out, decisions, dict(dropped)
 
 
 def kernel_sig(feats: dict) -> str:
@@ -99,20 +131,32 @@ def measured_groups(rows) -> tuple[list[MeasuredGroup], dict[str, int]]:
     return groups, dict(dropped)
 
 
-def export_dataset(db: SearchDB, *, source: str, pool_sample: int, seed: int) -> Dataset:
-    """Every row of ``db`` as a dataset: the golden pools enumerated under their own card's context and packed
-    (``sample`` candidates drawn per pool during enumeration, 0 for every row), the measured pools, and the
-    provenance — ``source`` names the instance, the rest is what the rows and this checkout say."""
+def export_dataset(db: SearchDB, *, source: str, pool_sample: int, seed: int, space: str = "schedule") -> Dataset:
+    """Every row of ``db`` as a dataset of one ``space``. The schedule space: the golden pools enumerated under
+    their own card's context and packed (``sample`` candidates drawn per pool during enumeration, 0 for every
+    row), and the measured pools. The placement space: each kernel's placement forks, the arms featurized and
+    the golden's marked (:func:`placement_pools`), and no measured pools. Both carry the provenance — ``source``
+    names the instance, the rest is what the rows and this checkout say."""
     pools, dropped_golden = golden_pools(db)
-    logger.info("Building %d golden pools (each under its own card's context) ...", len(pools))
-    golden, skipped = build_golden_groups(pools, "*", sample=pool_sample, seed=seed)
-    measured, dropped_measured = measured_groups(db.iter_perf_rows(backend="cuda"))
+    if space == "placement":
+        pools, decisions, dropped_parents = placement_pools(db, pools)
+        logger.info("Walking the placement forks of %d kernels (%d decisions) ...", len(pools), len(decisions))
+        golden, skipped = build_placement_groups(pools, decisions)
+        measured, dropped = [], {"golden": {**dropped_golden, **dropped_parents}, "measured": {}}
+        feat_ver = PLACEMENT_FEATURIZER_VERSION
+    else:
+        logger.info("Building %d golden pools (each under its own card's context) ...", len(pools))
+        golden, skipped = build_golden_groups(pools, "*", sample=pool_sample, seed=seed)
+        measured, dropped_measured = measured_groups(db.iter_perf_rows(backend="cuda"))
+        dropped = {"golden": dropped_golden, "measured": dropped_measured}
+        feat_ver = FEATURIZER_VERSION
     provenance = {
         "source": source,
+        "space": space,
         "sources": dict(sorted(db.perf_sources().items())),
         "pool_sample": pool_sample,
         "seed": seed,
-        "feat_ver": FEATURIZER_VERSION,
+        "feat_ver": feat_ver,
         "compiler": repo_commit(),
     }
-    return Dataset(golden, measured, skipped, {"golden": dropped_golden, "measured": dropped_measured}, provenance)
+    return Dataset(golden, measured, skipped, dropped, provenance)

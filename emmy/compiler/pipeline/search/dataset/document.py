@@ -25,7 +25,7 @@ import numpy as np
 
 from emmy.compiler.pipeline.search.dataset.group import GoldenGroup, Group, MeasuredGroup
 from emmy.compiler.pipeline.search.dataset.pool import GoldenPool
-from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
+from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION, PLACEMENT_FEATURIZER_VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -96,10 +96,11 @@ class Dataset:
         if manifest.get("version") != VERSION:
             raise ValueError(f"{base} is a version {manifest.get('version')!r} dataset; this code reads version {VERSION} — re-export it")
         provenance = manifest["provenance"]
-        if provenance.get("feat_ver") != FEATURIZER_VERSION:
+        expected = PLACEMENT_FEATURIZER_VERSION if provenance.get("space") == "placement" else FEATURIZER_VERSION
+        if provenance.get("feat_ver") != expected:
             raise ValueError(
                 f"{base} was exported under featurizer version {provenance.get('feat_ver')!r}; this code reads "
-                f"{FEATURIZER_VERSION} — re-export it (`emmy db export`)"
+                f"{expected} for the {provenance.get('space', 'schedule')} space — re-export it (`emmy db export`)"
             )
         if provenance.get("compiler") != (current := repo_commit()):
             logger.info("dataset %s was exported at commit %s; this checkout is %s", base, provenance.get("compiler"), current)
