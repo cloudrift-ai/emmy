@@ -801,25 +801,20 @@ _CHUNK = 4096
 #: the measured descent deploys directly regardless of pool size.
 _POOL_BUDGET = 65_536
 
-#: Maximum complete rows drawn for a budgeted pool: seeded uniform descents through the lazy tree
-#: cover every level's values, unlike an emission-order prefix. The option-check budget below may
-#: reduce this count for a wide, deep tree; each emitted row remains a legal complete schedule.
+#: Complete rows drawn for a budgeted pool: seeded uniform descents through the lazy tree cover
+#: every level's values, unlike an emission-order prefix. A descent draws one extension per step
+#: without expanding its siblings, so its cost is its depth: 2048 rows of a 40M-row lm_head pool
+#: draw in under two seconds.
 _POOL_DRAW = 2_048
-
-#: Maximum option checks spent drawing one cold pool, including the four-attempt allowance for a
-#: dead or blocklisted descent. A fixed row count is not a work bound for wide, deep terms. When
-#: one descent's declared bound already exceeds this value, exactly one complete-row attempt is
-#: the deliberate soft-cap exception; the Fork interface cannot pause one sibling expansion.
-_POOL_DESCENT_WORK = 262_144
 
 
 def _descent_sample(options, pool_id: str, node_blocked) -> list:
     """Up to :data:`_POOL_DRAW` complete leaves of a cold pool, drawn by :func:`~emmy.compiler.pipeline.fork.descent_sample`
-    seeded on the pool identity under the :data:`_POOL_DESCENT_WORK` budget, blocklisted rows retried. Duplicates
+    seeded on the pool identity, blocklisted rows retried. Duplicates
     are kept (a repeat costs a scoring slot, never a wrong pick). Structural options never appear here — the
     caller samples only the variant side."""
     skip = None if node_blocked is None else (lambda leaf: _tile_blocked(leaf_knobs(leaf), node_blocked))
-    return descent_sample(options, draw=_POOL_DRAW, seed=pool_id, work_budget=_POOL_DESCENT_WORK, skip=skip)
+    return descent_sample(options, draw=_POOL_DRAW, seed=pool_id, skip=skip)
 
 
 def _stream_tiers(

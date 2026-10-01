@@ -316,7 +316,6 @@ def test_budgeted_pool_ranks_a_deterministic_drawn_subset(monkeypatch) -> None:
         expansions: list = field(default_factory=list, compare=False)
         pool_bound = 10**9
         pool_id = "test-pool"
-        pool_descent_bound = 100
         is_leaf = False
 
         def expand(self):
@@ -345,26 +344,13 @@ def test_budgeted_pool_ranks_a_deterministic_drawn_subset(monkeypatch) -> None:
     prior2 = _CountingPrior()
     again = _stream_tiers(point, prior2, None, {})
     assert again[1] == knobs and again[2] == price  # seeded off the pool identity → reproducible
-    monkeypatch.setattr(greedy, "_POOL_DESCENT_WORK", 800)
-    bounded = _CountingPrior()
-    assert _stream_tiers(point, bounded, None, {}) is not None
-    assert bounded.scored == 2
-
-    monkeypatch.setattr(greedy, "_POOL_DESCENT_WORK", 1)
-    overwide = _CountingPrior()
-    picked = _stream_tiers(point, overwide, None, {})
-    assert picked is not None and isinstance(picked[0], Fork) and picked[0].is_leaf
-    assert set(leaf_knobs(picked[0])) == {"TILE", "STAGE"}
-    assert overwide.scored == 0  # one complete row needs no ranking
-    repeated = _stream_tiers(point, _CountingPrior(), None, {})
-    assert repeated is not None and leaf_knobs(repeated[0]) == leaf_knobs(picked[0])
 
     blocked_point = _point(rows)
     wrapper = _BoundedFork(inner=blocked_point.options[0])
     blocked_point.options = [wrapper]
     blocked = {tile_identity(dict(row)) for row in rows}
     assert _stream_tiers(blocked_point, _CountingPrior(), blocked, {}) == (NO_OPTION, None, None, None)
-    assert len(wrapper.expansions) == 1  # no retry and no exhaustive fallback
+    assert len(wrapper.expansions) == 4 * 64  # four attempts per drawn row, and no exhaustive fallback
 
 
 # ---------------------------------------------------------------------------

@@ -195,9 +195,8 @@ class RegisterProblem(ScheduleProblem):
         return (_RegisterSite(self),)
 
     @property
-    def bounds(self):
-        count = len(self.sites[0].options)
-        return count, count
+    def bound(self):
+        return len(self.sites[0].options)
 
     def accepts(self, choice: RegisterSchedule) -> bool:
         program = self.tile.register_program
