@@ -2,7 +2,9 @@
 repository goldens record — the set they are fit on — at one tolerance, in both spaces: a placement fork's arm
 exactly, a schedule row within the top ``SCHEDULE_TOP`` of its pool as the prior orders it. Every repository golden
 runs in ``make test``, its pools in slices of ``SLICE`` so the work spreads over the xdist workers: one node is one
-slice of one golden in one space, and holds the tolerance over that slice.
+slice of one golden in one space, and holds the tolerance over that slice. The schedule half draws ``SAMPLE`` rows
+per pool, the gate's own size: the fit keeps its measured 2000, and a rank fraction with the golden row kept reads
+the same on a smaller draw, only coarser per pool.
 
 A red node names the rows the prior cannot reproduce. The fix is a refit on the repository goldens (README, "Fit the
 priors"), or a better prior — never a lower tolerance.
@@ -22,9 +24,12 @@ from emmy.compiler.pipeline.search.golden.repository import _RECORDS_DIR, reposi
 #: of four to six pools failing on one miss; the prior and the gate are to be tightened together, never the number
 #: alone.
 TOLERANCE = 0.75
-#: Pools per node: enough for the tolerance to mean something, few enough that a schedule node — a 2000-row draw per
-#: pool, seconds each — stays a few minutes on a CI runner.
-SLICE = 32
+#: Pools per node: enough for the tolerance to mean something, few enough that a schedule node — a draw per pool,
+#: seconds each — stays a few minutes on a CI runner, which is several times slower than a dev box.
+SLICE = 16
+#: Rows drawn per pool for the schedule half. The gate's cost is near-linear in it; 2000 made the gate 62 percent of
+#: the CI job.
+SAMPLE = 500
 
 
 def _golden_id(path: Path) -> str:
@@ -59,7 +64,6 @@ def _parameters():
 
 @pytest.mark.parametrize(("path", "space", "start"), _parameters())
 def test_the_shipped_priors_reproduce_the_goldens(path: Path, space: str, start: int) -> None:
-    from emmy.compiler.pipeline.search.pool import DEFAULT_SAMPLE
     from emmy.compiler.pipeline.search.prior import OfflinePrior
     from emmy.compiler.pipeline.search.prior.offline import default_file
     from emmy.compiler.pipeline.search.prior.reproduce import reproduce_placement, reproduction_rate, schedule_ranks
@@ -69,7 +73,7 @@ def test_the_shipped_priors_reproduce_the_goldens(path: Path, space: str, start:
     if space == "placement":
         verdicts = reproduce_placement(pools, prior.mean_scores_features)
     else:
-        verdicts = schedule_ranks(pools, prior, sample=DEFAULT_SAMPLE)
+        verdicts = schedule_ranks(pools, prior, sample=SAMPLE)
     judged = [v for v in verdicts if v.error is None]
     if not judged:
         pytest.skip("no pool of this slice opens a fork in this space")

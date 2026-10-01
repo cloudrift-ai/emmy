@@ -205,8 +205,9 @@ metrics files.
 every repository golden, with no measurement in scope, at one tolerance over each corpus and space: a placement fork's
 recorded arm is the prior's pick, and a recorded schedule row sits within the better half of a draw of its pool as
 the prior orders it — a baseline that tightens as the schedule prior improves (the median golden sits at 4 percent).
-Every repository golden runs in `make test`, its pools in slices of 32 so the work spreads over the workers: one node
-is one slice of one golden in one space, and holds the tolerance over that slice. A red node names the rows the prior
+Every repository golden runs in `make test`, its pools in slices of 16 so the work spreads over the workers: one node
+is one slice of one golden in one space, and holds the tolerance over that slice; the schedule half draws 500 rows
+per pool, the gate's own size. A red node names the rows the prior
 cannot reproduce. The fix is a refit on the repository goldens, after any change to one of them, or a better prior —
 never a lower tolerance.
 
