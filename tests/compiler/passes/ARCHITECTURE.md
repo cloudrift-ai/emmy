@@ -173,8 +173,8 @@ regenerated
 Loop target contain several kernels and the stored identity must select one. Direct
 contraction-operand cuts remain strict xfails until Tile IR represents their materialized workspace dtype.
 The output-owning cut has its own group there: which seams own an output, that realizing one leaves single-output
-pieces whose placements gain a grid axis, that a piece takes the projection statements its own store reads, and the
-two refusals — a shared epilogue statement no piece can own, and a partition where no piece would gain an axis. The
+pieces whose placements gain a grid axis, that a piece takes the projection statements its own store reads, and that
+independent outputs remain cuttable when their grids agree. Shared epilogue statements prevent output ownership. The
 shared-epilogue shape is spelled in Python rather than taken from a case: both corpus shapes join their branches with
 an empty root body, so the body-splitting half of the ownership rule has no case to exercise it.
 This group is the ONLY coverage the output-owning cut has, and the corpus deliberately carries none. A case's

@@ -238,10 +238,10 @@ record, in one process. Measured rows whose kernel is the complete target also r
 rows remain evidence for their own pieces, even when a descendant's name selects the target. Proposals remain
 unbenched. A piece a decision minted runs with its target, not as a target of its own; the target is named by the
 shortest row name on it or on its pieces — the seed a record run wrote the set under. A failing target does not stop
-the walk: every target reports, and the command exits non-zero at the end naming the failures. It parses the document once and
-hands that object to each name's resolution step, because a whole-model inventory is large enough that re-reading it
-per target dominates the replay. Only this read-only replay path shares a document; a record write-back loads its own
-copy under the file's lock.
+the walk. Every target reports, and the command exits non-zero at the end naming the failures. It parses and validates
+the document once and hands that object to each name's resolution step, because a whole-model inventory is large
+enough that re-reading it per target dominates the replay. Only this read-only replay path shares a document; a record
+write-back loads its own copy under the file's lock.
 
 The in-model audit uses those serving twins for every architecture, DeepSeek V4 included (its layers take the
 attention-sublayer seam; see `emmy/serving/ARCHITECTURE.md`).
