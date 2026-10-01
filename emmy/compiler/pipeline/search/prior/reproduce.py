@@ -7,12 +7,13 @@ an exported pool is a screen; this asks the question the way a deploy asks it. T
   alone, the resolved knobs against the pool's *closest* golden row (most knobs reproduced). Exact when every
   golden knob is reproduced.
 - **placement** — the kernel walked through the lift and the cut pass with the placement prior deciding every
-  placement fork (``ranking.walk_placement``), the arm it takes at each fork against the arms the golden took.
-  Exact when the pick is one of them.
+  placement fork (``ranking.walk_placement``), the arm it takes at the kernel's own fork — the first, where the
+  golden's decision on this kernel lives; a nested decision is a pool of its own — against the arms the golden
+  took. Exact when the pick is one of them.
 
-Both run GPU-free, under the pool's own card. ``emmy eval prior`` prints the verdicts; the reproduction tests
-assert a rate per golden file and name what fell short, which is the signal to refit — or to extend the hardware
-goldens with the rows the prior cannot reproduce (``emmy golden extract``), then refit.
+Both run GPU-free, under the pool's own card. ``emmy eval prior`` prints the verdicts; the reproduction test holds
+every repository golden to one tolerance and names what fell short, which is the signal to refit on the repository
+goldens (README, "Fit the priors").
 """
 
 from __future__ import annotations
@@ -36,7 +37,6 @@ class Verdict:
     golden: dict | str = field(default_factory=dict)
     matched: int = 0
     total: int = 0
-    fork: int = 1
     error: str | None = None
 
     @property
@@ -100,9 +100,8 @@ def reproduce_schedule(pools: Sequence[GoldenPool], *, kernel: str | None = None
 
 
 def reproduce_placement(pools: Sequence[GoldenPool], scorer: Callable, *, kernel: str | None = None) -> list[Verdict]:
-    """The placement verdicts of every pool with a placement fork, one per fork the walk under ``scorer``
-    (the placement prior's ``mean_scores_features``) reaches. A fork the golden never recorded a decision on is
-    judged against keep-fused, which is what the golden's compile did there."""
+    """The placement verdicts of every pool with a placement fork, one per pool: its kernel's own fork under
+    ``scorer`` (the placement prior's ``mean_scores_features``)."""
     from emmy.compiler.pipeline.search.ranking import placement_decisions, pool_context, walk_placement  # noqa: PLC0415
 
     decisions = placement_decisions(pools)
@@ -115,12 +114,15 @@ def reproduce_placement(pools: Sequence[GoldenPool], scorer: Callable, *, kernel
         except Exception as exc:  # noqa: BLE001
             out.append(Verdict(pool, error=" ".join(f"{type(exc).__name__}: {exc}".split())[:100]))
             continue
-        for n, fork in enumerate(forks, 1):
+        if forks:
+            fork = forks[0]
             golden = " | ".join(fork.labels[i] for i in fork.positives)
-            out.append(Verdict(pool, fork.labels[fork.pick], golden, int(fork.pick in fork.positives), 1, fork=n))
+            out.append(Verdict(pool, fork.labels[fork.pick], golden, int(fork.pick in fork.positives), 1))
     return out
 
 
 def reproduction_rate(verdicts: Sequence[Verdict]) -> float:
-    """The fraction of verdicts reproduced exactly; 1.0 over none."""
-    return sum(v.ok for v in verdicts) / len(verdicts) if verdicts else 1.0
+    """The fraction of the verdicts that reached a pick that reproduced the golden exactly; 1.0 over none. A pool
+    whose definition the walk could not take back (the error the export skips by name) is no verdict either way."""
+    judged = [v for v in verdicts if v.error is None]
+    return sum(v.ok for v in judged) / len(judged) if judged else 1.0

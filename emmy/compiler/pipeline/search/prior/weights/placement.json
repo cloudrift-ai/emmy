@@ -3,14 +3,23 @@
   "space": "placement",
   "kind": "linear",
   "weights": {
-    "P_max_dtype_i32": -0.32320258319167156,
-    "P_max_ext_free_max": -0.00011637699152115587,
+    "P_max_dtype_f16": -0.04326010911613039,
+    "P_max_dtype_i32": -0.4810315163061994,
+    "P_max_ext_free_max": -0.00011637699152115588,
+    "P_max_ext_n_reduce_axis": -0.24924502268162277,
     "P_max_loop_depth": -0.9389772781458846,
+    "P_max_n_accum": -0.24038159802618966,
     "P_max_n_load": 0.020494195049384704,
-    "P_max_n_write": -0.282242869590758,
+    "P_max_n_write": -0.10260074110204737,
+    "P_max_pw_multiply": 0.015068078938235271,
+    "P_max_pw_square": 2.544795561763372,
+    "P_max_reduce_add": 0.1398727853195688,
     "P_n_pieces": -0.8088945039340328,
-    "P_sum_ext_free_max": 0.00016714689748655774,
-    "P_sum_ext_n_free_axis": -0.34308026614289144,
+    "P_sum_dtype_f16": -0.07132448349488439,
+    "P_sum_ext_n_free_axis": -0.24605841461851385,
+    "P_sum_pw_copy": 0.015641713513622264,
+    "P_sum_pw_exp": -0.7334323360538616,
+    "P_sum_pw_maximum": 0.949306419330543,
     "P_sum_pw_square": 1.454178582655161
   },
   "weights_dynamic": {
@@ -44,20 +53,28 @@
     "space": "placement",
     "features": "P_*",
     "sources": {
+      "golden:174b85cce182": 96,
+      "golden:2352d741ea14": 8,
       "golden:31689c395ff3": 103,
+      "golden:34d968f088a0": 20,
+      "golden:59684c9ad5b6": 5,
       "golden:59e856c4bb26": 48,
+      "golden:608b5a1530e3": 4,
       "golden:6b9a330eadf0": 9,
       "golden:7d2d88f16345": 9,
+      "golden:843cb9918d93": 5,
       "golden:9ee2d45ce6d1": 53,
       "golden:bd1d6a8b07ef": 40,
-      "golden:c1065907157c": 42
+      "golden:c1065907157c": 42,
+      "golden:f3d372db9d51": 335,
+      "golden:f6f421ca2a05": 3
     },
     "pool_sample": 2000,
     "groups": {
-      "static": 170,
+      "static": 253,
       "dynamic": 0
     },
-    "positives": 246,
-    "notes": "static top1=169/170  top5=170/170  top10=170/170  top25=170/170  top50=170/170  top100=170/170   median=0  mean_log2=0.01; no dynamic groups; params atomic_free_split_threshold=4, atomic_free_weight=0; dynamic set carried from the static fit"
+    "positives": 547,
+    "notes": "static top1=231/253  top5=253/253  top10=253/253  top25=253/253  top50=253/253  top100=253/253   median=0  mean_log2=0.09; no dynamic groups; params atomic_free_split_threshold=4, atomic_free_weight=0; dynamic set carried from incumbent"
   }
 }

@@ -1003,8 +1003,9 @@ writes — and nothing else is written that way.
   became of the file's rows), so a golden none of whose rows is a measurement — a restamped one keeps its schedules
   and loses its microseconds — is held and simply contributes no row.
 - **Importing re-lowers.** `emmy db import` reads freeze directories, golden files and tune DBs (frozen first, so one
-  path serves all) named on its command line — nothing by default; the hardware goldens `search/golden/records/*.json`
-  are the offline prior's documented set (README, "Fit the offline prior") — and hands each file's records to the
+  path serves all) named on its command line, or every repository golden (`--repository`: the hardware goldens and
+  each recipe's, the priors' training set — README, "Fit the priors"); nothing by default — and hands each file's
+  records to the
   golden importer (`golden.evidence.import_goldens`) once per regime the file holds, entering at the LOWERING passes
   as a kernel's standalone slice. Every kernel comes back with the current compiler's exact identity and stamps, and a
   definition the compiler no longer lowers is counted, not guessed at. A compiler change is therefore a re-import

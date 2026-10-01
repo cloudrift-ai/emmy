@@ -181,9 +181,9 @@ it before answering any CLI-flag question. Quickstart for the common paths:
 | `emmy compile <model_or_ir> [--layer N] [--ir STAGE] [--dynamic …] [--target sm_NN]`, `emmy compile --golden PATH --program N --ir loop -o fresh.json` | trace + run the compiler; print or save any IR stage; lower a golden's stored program and write the stage as the golden's wire |
 | `emmy run <model_or_ir_or_--code> [--bench]` | compile + execute on the CUDA backend, check accuracy, optionally bench vs eager / `torch.compile` |
 | `emmy eval {prior,golden} …` | `eval prior DATASET [--pools {golden,measured}]` scores a dataset's pools with the prior of the dataset's space and re-decides each pool with no measurement in scope; `eval golden --golden PATH --serving-config PATH` audits a golden against its serving matrix |
-| `emmy golden {check,restamp} [PATH…]`, `emmy golden kernels PATH [--program N]`, `emmy golden extract SRC DEST --kernel NAME` | name the stored targets a fresh lowering of a golden's programs no longer writes; rewrite the golden onto that lowering (every repository golden by default); print the Loop IR pool a golden stores; copy a kernel's configs from one golden into another of the same card |
-| `emmy fit DATASET WEIGHTS [--folds N]` | fit the offline prior from a dataset's golden groups and cross-validate it; the whole refit is README's "Fit the offline prior" |
-| `emmy db {import,export,freeze,check} --db PATH …` | fill a DB instance from the freeze directories, golden files and tune DBs named on the command line (nothing by default, and never the tune DB), every kernel re-lowered; export its rows as the dataset of one space (`--space {schedule,placement}`) the fit and `eval prior` read; snapshot it into a freeze; check its tables agree with themselves |
+| `emmy golden {check,restamp} [PATH…]`, `emmy golden kernels PATH [--program N]` | name the stored targets a fresh lowering of a golden's programs no longer writes; rewrite the golden onto that lowering (every repository golden by default); print the Loop IR pool a golden stores |
+| `emmy fit DATASET WEIGHTS [--folds N]` | fit the prior of a dataset's space from its golden groups and cross-validate it; the whole refit is README's "Fit the priors" |
+| `emmy db {import,export,freeze,check} --db PATH …` | fill a DB instance from the freeze directories, golden files and tune DBs named on the command line, or every repository golden (`--repository`; nothing by default, and never the tune DB), every kernel re-lowered; export its rows as the dataset of one space (`--space {schedule,placement}`) the fit and `eval prior` read; snapshot it into a freeze; check its tables agree with themselves |
 | `emmy {pull,trace,generate,inspect,compare} …` | model download, IR tracing, the naive generation oracle, IR inspection, dump diffing |
  Refitting the priors is the commands under README's "Fit the priors". Every path is explicit — the
 DB instance `emmy db import --db PATH` fills (the tune DB's tables in a file of their own, never read by a compile; a
@@ -192,9 +192,9 @@ at the moment, or a tune DB joins the goldens the same way), and the dataset `em
 `manifest.json` beside one matrix file per pool, which `emmy fit` and `emmy eval prior` read; the readers never open
 the DB) — and nothing has a default, so a refit never touches the tune DB. The examples keep both under `_data/`,
 which git ignores. `emmy fit DATASET WEIGHTS` rewrites the checked-in weights of the dataset's space. Re-export and
-refit after a featurizer version bump (a stale dataset or artifact is refused at load) and whenever a hardware golden
-changes: the reproduction gate (README, "Fit the priors") holds the shipped priors to the repository goldens, and
-`emmy golden extract` is how a model golden's rows join the hardware golden the priors are fit on.
+refit after a featurizer version bump (a stale dataset or artifact is refused at load) and whenever a repository
+golden changes: the reproduction gate (README, "Fit the priors") holds the shipped priors to every repository golden,
+the set `emmy db import --repository` collects.
 
 Quick test models / scripts (for local iteration):
 
@@ -340,11 +340,11 @@ Then update the documentation:
 
 Then run the gates, in this order, after every edit above is in:
 
-22. **Refit the priors if a hardware golden changed**: a row added, re-recorded, restamped or dropped under
-    `search/golden/records/` means both priors are refit (README, "Fit the priors") and the weights committed with
-    it — the reproduction gate holds the shipped priors to those goldens. A change to a prior or a golden also runs
-    `make test-priors`, the gate's off-lane half. A refit that lowers a reproduction floor says which change moved it
-    in the PR body.
+22. **Refit the priors if a repository golden changed**: a row added, re-recorded, restamped or dropped in a
+    hardware golden or a recipe's means both priors are refit on the repository goldens (README, "Fit the priors")
+    and the weights committed with it — the reproduction gate holds the shipped priors to those goldens at one
+    tolerance. A change to a prior or a golden also runs `make test-priors`, the gate's off-lane half, and a node it
+    leaves red is named in the PR body.
 23. **Run the full suite**: `make test` — fix any failures. If a realization case comes back stale, `make
     test-corpus-regen` applies the fix; if a golden's stored targets stop being the fresh lowering, `emmy golden
     restamp` applies that one (the `refresh-golden` skill). If golden rows go red, name the change that did it in the

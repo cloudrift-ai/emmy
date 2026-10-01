@@ -48,14 +48,15 @@ def register_db_command(subparsers) -> None:
     db_help = "DB instance file, e.g. _data/dataset.db (git ignores _data/); never the tune DB a compile reads."
 
     pi = sub.add_parser("import", help="Import golden files, measurement freezes and tune DBs into a DB instance")
-    pi.add_argument(
-        "sources",
-        nargs="+",
-        help="Freeze directories, golden files and tune DB files to import — for the offline prior, the hardware goldens "
-        "emmy/compiler/pipeline/search/golden/records/*.json (README, 'Fit the offline prior'). Nothing is imported by default.",
-    )
+    pi.add_argument("sources", nargs="*", help="Freeze directories, golden files and tune DB files to import; nothing by default.")
     pi.add_argument("--db", required=True, help=db_help)
     pi.add_argument("--fresh", action="store_true", help="Delete the DB first, so it holds exactly these sources.")
+    pi.add_argument(
+        "--repository",
+        action="store_true",
+        help="Also import every repository golden — the hardware goldens and each maintained recipe's — the set the priors are "
+        "fit on and the reproduction gate holds them to (README, 'Fit the priors').",
+    )
     pi.set_defaults(func=handle_db_import)
 
     pe = sub.add_parser("export", help="Write a DB instance's rows as a dataset directory: golden pools, measured pools, provenance")
@@ -95,6 +96,14 @@ def handle_db_import(args) -> None:
 
     path = Path(args.db).expanduser()
     sources = [Path(s).expanduser() for s in args.sources]
+    if getattr(args, "repository", False):
+        from emmy.compiler.pipeline.search.golden.repository import repository_golden_paths  # noqa: PLC0415
+
+        with repository_golden_paths() as paths:
+            sources.extend(sorted(paths))
+    if not sources:
+        logger.error("nothing to import: name a source, or --repository")
+        sys.exit(2)
     for src in sources:
         if not src.exists():
             logger.error("no freeze directory, golden file or tune DB at %s", src)

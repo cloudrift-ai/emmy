@@ -231,9 +231,7 @@ take new identities without it. A row that no longer decodes, a row whose kernel
 kernel-set row whose members all lost their measurements are dropped and named. The command never deletes a file: one nothing survives
 in is left alone and reported. The lowering behind the check, the restamp and `emmy trace`'s inventory is one function
 (`golden.lowered_kernels`), and every command that reads a golden by path loads it through
-`GoldenFile.load`, which validates a repository golden strictly and anything else as a working file. `emmy golden extract SRC DEST --kernel NAME…` copies the configs whose rows name a kernel from
-one golden into another of the same card, with the programs and targets they reference — how a model golden's rows
-join the hardware golden the priors are fit on when the reproduction gate names them.
+`GoldenFile.load`, which validates a repository golden strictly and anything else as a working file.
 
 **One golden flag pair on every command.** `--golden PATH` names a golden file (working or canonical) on `run`,
 `compile`, `serve`, `generate` and `eval golden`: its MEASURED rows are the golden evidence that command deploys from,
@@ -799,15 +797,20 @@ candidates from `hardware.GPU_INSTANCE_TYPES` and fans GCP entries across `GPU_G
 `SAME_CANDIDATE_RETRIES` transient attempts. `CapacityExhausted` advances; `TerminalProvisionError` aborts. Without a
 filter, fallback can cross providers in hardware-table order; `--provider` restricts the complete search.
 
-Capacity-class signals recognized today: CloudRift HTTP 503/429 on rent, CloudRift `Inactive` terminal status / readiness timeout, GCP `ZONE_RESOURCE_POOL_EXHAUSTED` / `QUOTA_EXCEEDED` / `STOCKOUT` in `gcloud` stderr, and GCP `RUNNING`-status timeout. Both providers terminate VMs they created but couldn't bring to readiness, so orchestrator fallback does not leak orphan instances.
+Capacity-class signals recognized today: CloudRift HTTP 503/429 on rent, CloudRift `Inactive` terminal status /
+readiness timeout, GCP `ZONE_RESOURCE_POOL_EXHAUSTED` / `QUOTA_EXCEEDED` / `STOCKOUT` in `gcloud` stderr, and GCP
+`RUNNING`-status timeout. Both providers terminate VMs they created but couldn't bring to readiness, so orchestrator
+fallback does not leak orphan instances.
 
-GCP project is inferred from `gcloud` config. CloudRift reads `CLOUDRIFT_API_KEY` and `CLOUDRIFT_API_URL` from the environment by default. **H200 on CloudRift** is only available on on-prem clusters — set `CLOUDRIFT_API_URL` to the on-prem endpoint (the public `api.cloudrift.ai` does not offer H200).
- ### `emmy db` The dataset DB is the tune DB's tables in a file of their own, never read by a compile: the file `--db
-PATH` names on every subcommand — never a default, so nothing here can touch the tune DB (`_data/dataset.db` in the
-examples, under the ignored `_data/`). `import SOURCES… --db PATH [--fresh]` fills it, and nothing else does: a source
-is a measurement freeze directory, a golden file, or a tune DB file, which is frozen first — for the offline prior,
-the hardware goldens `search/golden/records/*.json` under `--fresh` (README, "Fit the offline prior"); the recipe
-goldens and a tune DB are the sources to add when the fit needs more. Every kernel is re-lowered from its definition
+GCP project is inferred from `gcloud` config. CloudRift reads `CLOUDRIFT_API_KEY` and `CLOUDRIFT_API_URL` from the
+environment by default. **H200 on CloudRift** is only available on on-prem clusters — set `CLOUDRIFT_API_URL` to the
+on-prem endpoint (the public `api.cloudrift.ai` does not offer H200). ### `emmy db` The dataset DB is the tune DB's
+tables in a file of their own, never read by a compile: the file `--db PATH` names on every subcommand — never a
+default, so nothing here can touch the tune DB (`_data/dataset.db` in the examples, under the ignored `_data/`).
+`import [SOURCES…] --db PATH [--fresh] [--repository]` fills it, and nothing else does: a source is a measurement
+freeze directory, a golden file, or a tune DB file, which is frozen first; `--repository` adds every repository golden
+— the hardware goldens and each maintained recipe's, the set the priors are fit on under `--fresh` (README, "Fit the
+priors"); a tune DB is the source to add when the fit needs more. Every kernel is re-lowered from its definition
 through the lowering passes by the current compiler (`golden.evidence.import_goldens`), once per precision regime the
 file's rows record, and its rows are sourced by the file's kind and digest — `freeze:` for a freeze directory's files,
 `golden:` for a golden file; a source the instance already holds is skipped, and `--fresh` rebuilds from nothing. A
@@ -815,15 +818,15 @@ held file is recorded in the `source` table whatever became of its rows, so nami
 report can list its sources. `export --db PATH OUT [--space {schedule,placement}] [--pool-sample N] [--seed N]` writes
 the instance's rows as the dataset of one space at `OUT` (`search/dataset/document.py` owns the format): the schedule
 space is every golden pool enumerated from its kernel's definition and packed (`db/export.py` over
-`ranking.build_golden_groups`; the pipeline ARCHITECTURE's Part 8 owns the pool) and every measured pool labelled
-with its microseconds; the placement space is every golden kernel's placement forks, each the arms the cut pass
-offers with the golden's arm marked (`ranking.build_placement_groups`); both carry the provenance — the DB, its
-sources by digest, the space, the sample and seed, the featurizer version and the compiler commit. `emmy fit` and `eval prior` read that directory and
-never the DB; exporting the same instance twice writes the same bytes. `freeze --db PATH --out DIR` writes an
-instance's admitted rows (`db/freeze.freeze_reason`) as a golden file per card — the artifact that gets checked in.
-`check [--db PATH]` counts the rows of an instance whose tables disagree with themselves (`SearchDB.drift`) and exits
-non-zero when any do. Every subcommand resolves its instance through `commands/db.db_path`, which refuses a missing
-one with the command that fills it.
+`ranking.build_golden_groups`; the pipeline ARCHITECTURE's Part 8 owns the pool) and every measured pool labelled with
+its microseconds; the placement space is every golden kernel's placement forks, each the arms the cut pass offers with
+the golden's arm marked (`ranking.build_placement_groups`); both carry the provenance — the DB, its sources by digest,
+the space, the sample and seed, the featurizer version and the compiler commit. `emmy fit` and `eval prior` read that
+directory and never the DB; exporting the same instance twice writes the same bytes. `freeze --db PATH --out DIR`
+writes an instance's admitted rows (`db/freeze.freeze_reason`) as a golden file per card — the artifact that gets
+checked in. `check [--db PATH]` counts the rows of an instance whose tables disagree with themselves
+(`SearchDB.drift`) and exits non-zero when any do. Every subcommand resolves its instance through
+`commands/db.db_path`, which refuses a missing one with the command that fills it.
 
 ### `emmy fit`
  Fit an offline-prior weights artifact and cross-validate it, GPU-free, over the golden groups of a dataset `emmy db

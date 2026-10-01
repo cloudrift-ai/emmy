@@ -179,14 +179,14 @@ __launch_bounds__(256) void k_rms_norm_reduce(const float* x, const float* p_wei
 
 ## Fit the priors
 
-Two priors ship in the repo, both fit GPU-free on the golden files and consulted by a compile only where nothing was
-measured: the **schedule prior** (`emmy/compiler/pipeline/search/prior/weights/schedule.json`) ranks a kernel's
+Two priors ship in the repo, both fit GPU-free on the repository goldens and consulted by a compile only where nothing
+was measured: the **schedule prior** (`emmy/compiler/pipeline/search/prior/weights/schedule.json`) ranks a kernel's
 schedule rows, and the **placement prior** (`weights/placement.json` beside it) ranks the arms of a placement fork —
 keep the kernel fused, or cut one of its seams.
 
 ```bash
-# 1. Load the hardware goldens into a DB of their own (--fresh: it then holds exactly these files)
-emmy db import --db _data/dataset.db --fresh emmy/compiler/pipeline/search/golden/records/*.json
+# 1. Load every repository golden — the hardware goldens and each maintained recipe's — into a DB of its own
+emmy db import --db _data/dataset.db --fresh --repository
 # 2. Export one dataset per space: every golden pool enumerated and featurized, or every placement fork's arms
 emmy db export --db _data/dataset.db _data/schedule --space schedule
 emmy db export --db _data/dataset.db _data/placement --space placement
@@ -202,19 +202,11 @@ emmy eval prior _data/placement
 metrics files.
 
 **The reproduction gate.** `tests/compiler/pipeline/search/prior/test_reproduction.py` re-decides every repository
-golden with the shipped priors and no measurement in scope: the hardware goldens' placement forks exactly (the
-placement prior is fit on them), every other file at least at the rate its `FLOORS` entry records — a ratchet, raised
-when a refit improves it. The exact gate runs in `make test`; the rest re-walks every kernel's pool and runs under
-`make test-priors`, which a change to a prior or a golden runs at finalization. A red node names the rows the prior
-cannot reproduce. Refit after any change to a
-hardware golden. Where the rows are a model golden's, extend the card's hardware golden with them first, then refit:
-
-```bash
-emmy golden extract recipes/<model>/golden/<card>.json \
-    emmy/compiler/pipeline/search/golden/records/<card>.json --kernel NAME
-```
-
-Never lower a floor to make a node green without naming, in the PR body, the change that moved it.
+golden with the shipped priors and no measurement in scope, and holds every file, in either space, to one tolerance.
+The hardware goldens' placement forks run in `make test`; a model golden's walk and the schedule half take minutes per
+file and run under `make test-priors`, which a change to a prior or a golden runs at finalization. A red node names
+the rows the prior cannot reproduce. The fix is a refit on the repository goldens, after any change to one of them,
+or a better prior — never a lower tolerance.
 
 ## Benchmark
 

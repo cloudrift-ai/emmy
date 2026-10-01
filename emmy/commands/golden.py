@@ -46,18 +46,6 @@ def register_golden_command(subparsers) -> None:
     pk.add_argument("--program", type=int, metavar="N", help="Only the targets of traced program N.")
     pk.set_defaults(func=handle_golden_kernels)
 
-    px = sub.add_parser(
-        "extract",
-        help="Copy the configs whose rows name a kernel from one golden into another of the same card — the rows a "
-        "prior cannot reproduce, into the hardware golden it is fit on — with their programs and targets",
-    )
-    px.add_argument("source", help="The golden file to copy from, e.g. a recipe's.")
-    px.add_argument("destination", help="The golden file to extend, e.g. the card's hardware golden under search/golden/records/.")
-    px.add_argument(
-        "--kernel", action="append", required=True, metavar="NAME", help="A kernel name (a substring of a row's name); repeatable."
-    )
-    px.set_defaults(func=handle_golden_extract)
-
 
 def _goldens(paths: list[str]) -> list[Path]:
     from emmy.compiler.pipeline.search.golden.repository import repository_golden_paths  # noqa: PLC0415
@@ -66,19 +54,6 @@ def _goldens(paths: list[str]) -> list[Path]:
         return [Path(path).expanduser() for path in paths]
     with repository_golden_paths() as repository:
         return list(repository)
-
-
-def handle_golden_extract(args) -> None:
-    from emmy.compiler.pipeline.search.golden import GoldenFile  # noqa: PLC0415
-
-    try:
-        source = GoldenFile.load(args.source)
-        with GoldenFile.edit(args.destination) as destination:
-            added = destination.absorb(source, args.kernel)
-    except (OSError, ValueError) as exc:
-        logger.error("%s", exc)
-        sys.exit(2)
-    logger.info("%s: %d config(s) added from %s", args.destination, added, args.source)
 
 
 def handle_golden_check(args) -> None:
