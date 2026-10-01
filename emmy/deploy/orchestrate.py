@@ -29,6 +29,13 @@ SMOKE_TIMEOUT = 600
 SMOKE_INTERVAL = 10
 
 
+#: Budget for `docker compose pull`, in seconds. A plan of two engines pulls two vLLM
+#: images, 20-30 GB together; on a host that reaches the registry only through a forward
+#: proxy (FCBK's Squid moves about 10 MB/s) that is close to an hour, and the old 1800 s
+#: killed the pull with the layers almost in. Same budget as one weight download below.
+IMAGE_PULL_TIMEOUT = 7200
+
+
 async def baked_hf_cache(run_cmd, image):
     """The image's own HF cache directory, when it ships one — else None.
 
@@ -185,7 +192,7 @@ async def run_deploy(
     # that exists locally proceeds with a stale-copy warning.
     logger.info("Pulling images...")
     async with timer.ameasure(PHASE_IMAGE_PULL):
-        rc, _, _ = await run_cmd("docker compose pull --ignore-pull-failures", timeout=1800, log_output=True)
+        rc, _, _ = await run_cmd("docker compose pull --ignore-pull-failures", timeout=IMAGE_PULL_TIMEOUT, log_output=True)
     # stream=False, else run_cmd passes stdout through and returns "" — which left this
     # guard iterating an empty list, so a genuinely missing image fell through to the
     # confusing later failure the check exists to replace.
