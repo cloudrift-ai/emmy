@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from emmy.compiler.graph import Graph
     from emmy.compiler.ir.base import Op
 
-from emmy.compiler.ir.schedule import Schedule, ScheduleContext, ScheduleRefused
+from emmy.compiler.ir.schedule import Schedule, ScheduleContext, ScheduleRefused, schedule
 from emmy.compiler.pipeline.knob import EVIDENCE_PREFIXES, METADATA_PREFIXES, evidence_row_vouches, values_equal
 
 
@@ -130,20 +130,16 @@ class _ScheduleTree:
     exact_keys: frozenset[str] | None = None
 
     def step(self, context: ScheduleContext, row: Mapping) -> list[Fork]:
-        """Every extension of ``context`` composed as a child of the prefix spelling ``row``."""
-        return [fork for pick in context.extensions() if (fork := self.child(context, row, pick)) is not None]
+        """Every extension of ``context``, composed by the generic driver, as a child of the prefix spelling ``row``."""
+        return [self.child(context, row, composed) for composed in schedule(context, recursive=False)]
 
-    def child(self, context: ScheduleContext, row: Mapping, pick: Schedule) -> Fork | None:
-        """One extension ``pick`` composed onto ``context``: a complete schedule becomes a leaf, a partial one the
-        next prefix carrying ``row`` plus what the step decided; ``None`` when the composition refuses the pick.
-        The one place a child is built, for the walk (:meth:`step`) and the draw (``_ScheduleFork.sample_child``)."""
-        try:
-            child = context.extend(pick)
-        except ScheduleRefused:
-            return None
-        if child.schedule.kernel is not None:
-            return self.leaf(child.schedule)
-        return _ScheduleFork(self, child, {**row, **self.row_delta(context, child)})
+    def child(self, context: ScheduleContext, row: Mapping, composed: ScheduleContext | Schedule) -> Fork:
+        """One composed extension of ``context`` as a child: a complete schedule becomes a leaf, a context the next
+        prefix carrying ``row`` plus what the step decided. The one place a child is built, for the walk
+        (:meth:`step`) and the draw (``_ScheduleFork.sample_child``)."""
+        if isinstance(composed, Schedule):
+            return self.leaf(composed)
+        return _ScheduleFork(self, composed, {**row, **self.row_delta(context, composed)})
 
 
 @dataclass(frozen=True)
@@ -182,8 +178,11 @@ class _ScheduleFork(Fork):
             pick = self.context.random_extension(rng)
             if pick is None:
                 return None
-            if (fork := self.tree.child(self.context, self.row, pick)) is not None:
-                return fork
+            try:
+                composed = self.context.extend(pick)
+            except ScheduleRefused:
+                continue
+            return self.tree.child(self.context, self.row, composed.schedule if composed.schedule.kernel is not None else composed)
         return None
 
     def narrow(self, row: Mapping) -> Fork:
