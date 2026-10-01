@@ -227,6 +227,9 @@ vllm bench serve --backend openai --base-url http://127.0.0.1:8080 \
 The dev-image client used host networking; the server used host port 8080. For the controlled short benchmark,
 substitute `--dataset-name random --random-input-len 5 --random-output-len 16 --random-prefix-len 0`,
 `--num-prompts 5`, and `--ignore-eos`. The saved benchmark JSON records the actual input/output lengths.
+The [raw standard client results](evidence/qwen38_nvfp4_5090) retain per-request TTFTs, inter-token intervals,
+generated text, output lengths, failures, and aggregate fields for the nine table rows, the three natural-EOS
+quality checks, and the near-4K shape check. They contain no synthetic reinterpretation of client timing.
 
 | Workload / arm | Input→output tokens | TTFT ms | TPOT ms (tok/s) | Total wall / request |
 | --- | ---: | ---: | ---: | ---: |
