@@ -82,9 +82,9 @@ def register_run_command(subparsers):
         action="store_true",
         help=(
             "With --golden PATH --realization NAME --bench, write the greedy pick's kernel set back into the file as "
-            "measured realizations: one routing row per kernel-set decision it took and one child-identity schedule "
-            "receipt per kernel, timed by the isolated re-bench with the greedy comparison row as the reference. With "
-            "--pin-route the greedy row is the kernel set the named row describes; the receipts recorded are what price "
+            "measured rows: one routing row per kernel-set decision it took and one schedule row per kernel, timed by "
+            "the isolated re-bench with the greedy comparison row as the reference. With --pin-route the greedy row is "
+            "the kernel set the named row describes; the rows recorded are what price "
             "that set for a compile nothing pins, and what a strict-evidence compile picks it from. Implies "
             "--strict-evidence: every schedule must come from a measured row or a pin, and a piece the prior would "
             "decide stops the record with its name."
@@ -245,11 +245,11 @@ def handle_run(args):
             )
             sys.exit(2)
     if args.record_greedy:
-        # A receipt must price a schedule a measurement or a pin chose: a piece the prior would decide
+        # A recorded row must price a schedule a measurement or a pin chose: a piece the prior would decide
         # raises EvidenceError naming it, instead of being written into the golden as measured.
         args.strict_evidence = True
     if args.record or args.record_greedy:
-        # A row is evidence only on the card its file names (``golden.records_for_card``): measurements
+        # A row is evidence only on the card its file names (``golden.documents_for_card``): measurements
         # written under another card's header are what no replay on this card ever reads.
         from emmy.compiler.context import Context  # noqa: PLC0415
         from emmy.compiler.pipeline.search.golden import (
@@ -326,13 +326,11 @@ def _handle_run_once(args):
         sys.exit(1)
 
     if ir_path is not None or hasattr(args, "_golden_graph"):
-        from emmy.compiler.pipeline.search.golden import GoldenRecords
+        from emmy.commands.compile import golden_regime  # noqa: PLC0415
 
         if ir_path is not None:
             args.ir = ir_path
-        with pinned_knobs(
-            GoldenRecords([s.record for s in args.golden_configs] or getattr(args, "_golden_records", None) or []).shared_regime_pins()
-        ):
+        with pinned_knobs(golden_regime(args)):
             _handle_run_ir(args, CudaBackend, CompilerDump)
         return
 
@@ -583,7 +581,7 @@ def _record_golden_latency(args, results: dict, golden_benches) -> None:
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.pipeline.search.golden import record_latency  # noqa: PLC0415
 
-    # Only a row of the NAMED realization can carry that realization's latency. A child receipt
+    # Only a row of the NAMED realization can carry that realization's latency. A piece's row
     # of the same target is benched beside it and holds ONE kernel of the program, so neither its
     # timing nor its schedule knobs describe the row this writes — narrowing by them selects
     # nothing and the write is refused.
@@ -628,87 +626,65 @@ def _record_golden_latency(args, results: dict, golden_benches) -> None:
 
 
 def _record_greedy_pick(args, graph, bench, greedy_iso, taken) -> None:
-    """Write the greedy pick's kernel set back into the benched working golden as measured rows.
-
-    Each kernel-set decision the compile took becomes a routing row priced at the summed isolated
-    launch timings of the kernels it produced (``kernel_set_prices``; the whole graph's isolated
-    timing where a kernel of the set has no launch), and each kernel a child-identity schedule
-    receipt at its isolated launch timing — the pinned-comparable numbers every golden row carries,
-    and the units a kernel-set fork ranks a routing row against the replaced kernel's receipt in.
-    The greedy comparison row, the same graph timed once more beside torch, is every row's
-    reference: the pair checks measurement parity, not framework correctness, and
-    ``reference_backend`` says so.
-    """
-    from emmy.compiler.pipeline.search.golden import greedy_pick_rows, kernel_set_prices, record_greedy_pick  # noqa: PLC0415
+    """Write the greedy pick's kernel set back into the benched working golden as the DB holds it: each kernel-set
+    decision the compile took (``taken``, as the splice watcher reports them) a routing row with the kernels it
+    names, and each kernel the compile produced a measured row at its isolated launch timing — the pinned-comparable
+    number every golden row carries. The greedy comparison row, the same graph timed once more beside torch, is
+    every row's reference: the pair checks measurement parity, not framework correctness."""
+    from emmy.compiler.pipeline.search.golden import record_greedy_pick  # noqa: PLC0415
 
     isolated = greedy_iso.bench if greedy_iso is not None and greedy_iso.status == "ok" else None
-    rows = greedy_pick_rows(graph)
+    nodes = _launch_order_cuda_nodes(graph)
     launches = [list(getattr(side, "per_launch", None) or []) for side in (isolated, bench)]
-    if not rows or any(len(side) != len(rows) for side in launches):
+    if not nodes or any(len(side) != len(nodes) for side in launches):
         logger.error("--record-greedy needs the greedy row and its isolated re-bench timed per kernel for %s", args.realization)
         sys.exit(2)
 
     def us(launch) -> float:
         return (min(launch.samples) if launch.samples else launch.time_ms) * 1000
 
-    whole, whole_ref = _bench_total_us(isolated)[0], _bench_total_us(bench)[0]
-    node_ids = [node.id for node in _launch_order_cuda_nodes(graph)]
-    kernel_sets = [ids for _parent, _arm, ids in taken]
-    prices = [kernel_set_prices(kernel_sets, dict(zip(node_ids, (us(launch) for launch in side), strict=True))) for side in launches]
-    decisions = [
-        (parent.identity_key(with_io=True), arm, whole if mine is None else mine, whole_ref if theirs is None else theirs)
-        for (parent, arm, _ids), mine, theirs in zip(taken, *prices, strict=True)
-    ]
-    record_greedy_pick(
+    written = record_greedy_pick(
         args.golden,
         args.realization,
-        decisions=decisions,
-        kernels=[(identity, row, us(mine), us(theirs)) for (identity, row), mine, theirs in zip(rows, *launches, strict=True)],
+        decisions=taken,
+        kernels=[(node.op, us(mine), us(theirs)) for node, mine, theirs in zip(nodes, *launches, strict=True)],
         reference_backend="same-input-greedy",
     )
-    logger.info("recorded the greedy pick of %s: %d routing row(s), %d receipt(s)", args.realization, len(decisions), len(rows))
+    logger.info("recorded the greedy pick of %s: %d routing row(s), %d row(s)", args.realization, len(taken), len(written))
 
 
 def _run_golden_targets(args) -> None:
-    """Run every realization of a golden file sequentially in this process.
+    """Run every target of a golden file sequentially in this process.
 
-    Reached only by a bare ``--golden PATH``; naming one realization with ``--realization NAME``
-    goes straight down the single-run path, which already thinks in the (file, name) pair. The
-    walk benches each name's verified rows (``_explicit_realization`` false), so proposals are not
-    benched as if they were recorded truths.
+    Reached only by a bare ``--golden PATH``; naming one realization with ``--realization NAME`` goes straight down
+    the single-run path. Each target kernel — the kernels lowered from a traced program; a piece a decision minted
+    runs with its target — runs once per input regime its rows record, named by the shortest row name on it or on
+    its pieces, the seed a record run wrote the set under. The walk benches each target's measured rows
+    (``_explicit_realization`` false), so proposals are not benched as if they were recorded truths.
     """
     from copy import copy  # noqa: PLC0415
 
-    from emmy.compiler.pipeline.search.golden import GoldenFile, GoldenRecords  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import GoldenFile  # noqa: PLC0415
 
     if args.input or args.code or args.ir:
         logger.error("--golden is mutually exclusive with positional input / --code / --ir")
         sys.exit(2)
     try:
         document = GoldenFile.load(args.golden)
-        records = GoldenRecords.of(document.records())
     except (OSError, ValueError) as exc:
         logger.error("cannot load --golden %s: %s", args.golden, exc)
         sys.exit(2)
-    if not records:
+    if not document.rows:
         logger.error("--golden contains no realizations: %s", args.golden)
         sys.exit(2)
-    # Group by the persisted target, bindings and input regime, just as golden replay does.
-    # Dots in a name do not make one target a receipt of another. Prefer the inventory row;
-    # without it, a root routing row carries the parent cuts needed by child receipts.
-    targets: dict[int, list] = {}
-    for record in records:
-        targets.setdefault(id(records.lead(record)), []).append(record)
-
-    def target_name(rows):
-        inventory = next((row for row in rows if row.identity is None), None)
-        if inventory is not None:
-            return inventory.name
-        root_routes = [row for row in rows if row.is_routing and row.identity == rows[0].identity]
-        routes = root_routes or [row for row in rows if row.is_routing]
-        return min(routes or rows, key=lambda row: row.emmy_us).name
-
-    names = [target_name(rows) for rows in targets.values()]
+    targets = {kernel.exact_identity for kernel in document.targets()}
+    by_target: dict[tuple, list[str]] = {}
+    for row in document.rows:
+        path = document.path_to(row.kernel)
+        root = path[0].parent if path else row.kernel
+        if root in targets:
+            by_target.setdefault((root, tuple(sorted(row.pins.items()))), []).append(row.name)
+    names = [min(rows, key=lambda name: (len(name), name)) for rows in by_target.values()]
 
     output_dir = None
     if len(names) > 1 and args.json:
@@ -718,8 +694,8 @@ def _run_golden_targets(args) -> None:
             sys.exit(2)
         output_dir.mkdir(parents=True, exist_ok=True)
 
-    # One target's failure (a compile error, a wrong answer, a hung bench) must not hide the
-    # targets after it: every realization runs and reports, and the walk exits non-zero at the end.
+    # One target's failure (a compile error, a wrong answer, a hung bench) must not hide the targets after it: every
+    # target runs and reports, and the walk exits non-zero at the end.
     failed: list[str] = []
     for index, name in enumerate(names):
         target_args = copy(args)
@@ -2650,9 +2626,9 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
     from emmy.compiler.pipeline.search.inventory import KernelInventory  # noqa: PLC0415
 
     # Every kernel-set decision the greedy compile takes, as the splice watcher reports it: the tile
-    # kernel the fork was offered on, the arm, and the graph ids the splice consumed and minted.
-    taken: list[tuple[object, dict, tuple[str, tuple[str, ...]]]] = []
-    watcher = KernelInventory(on_routing=lambda parent, arm, pieces, ids: taken.append((parent, arm, ids)))
+    # kernel the fork was offered on, the arm, and the pieces it minted.
+    taken: list[tuple[object, dict, list]] = []
+    watcher = KernelInventory(on_routing=lambda parent, arm, pieces, _ids: taken.append((parent, arm, pieces)))
     if tail:
         # Finish the tail lowering — the greedy compile — with the selected golden's records as its
         # golden evidence, their shared input regime published (by the caller) and, under
@@ -2660,13 +2636,12 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
         # ``compile`` does. Recording the pick composes the capture of its kernel-set decisions into
         # the same compile.
         from emmy.commands.compile import selected_decisions  # noqa: PLC0415
-        from emmy.compiler.pipeline.search.golden import records_override  # noqa: PLC0415
+        from emmy.compiler.pipeline.search.golden import evidence_scope  # noqa: PLC0415
 
-        scope = getattr(args, "_golden_records", None) or None
         pipeline = Pipeline.build(tail)
         if getattr(args, "record_greedy", False):
             pipeline = pipeline.with_strategies(watcher)
-        with records_override(scope), pinned_knobs(selected_decisions(args)):
+        with evidence_scope(getattr(args, "_golden_scope", None)), pinned_knobs(selected_decisions(args)):
             graph = pipeline.run(graph, db=db, dump=dump)
 
     if not args.bench:
@@ -2813,11 +2788,10 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
             same_input_reference,
         )
 
-    from emmy.compiler.pipeline.search.golden import records_override  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import evidence_scope  # noqa: PLC0415
 
-    # Pinned rows compile under the golden scope the greedy row did — the target's records, not the
-    # card's whole corpus, which each pinned compile would otherwise replay row by row.
-    with records_override(getattr(args, "_golden_records", None) or None):
+    # Pinned rows compile under the golden scope the greedy row did — the file named, not the card's whole corpus.
+    with evidence_scope(getattr(args, "_golden_scope", None)):
         session = asyncio.run(_bench_session())
     (
         greedy_fail,

@@ -38,12 +38,12 @@ def test_a_kernel_pool_opens_the_candidates_its_golden_program_opens(tmp_path):
 
     case = corpus.load_case(corpus.CASES_DIR / _MATMUL)
     ctx = Context.from_target(case.compute_cap, gpu_name=CARDS[case.compute_cap], compile_flags="")
-    with pinned_knobs(case.record.pin_map):
-        file_side = enumerate_graph(case.record.target_program.copy(), ctx)
+    with pinned_knobs(case.row.pins):
+        file_side = enumerate_graph(case.program(), ctx)
     db_side = enumerate_pool(pool, pool_context(pool))
     assert group.total == file_side.total == len(group.feats) == len(db_side.rows)
     assert list(map(tile_signature, db_side.rows)) == list(map(tile_signature, file_side.rows))
-    want = tile_signature(case.record.knobs)
+    want = tile_signature(case.row.knobs)
     assert group.golden_ids == (next(i for i, row in enumerate(file_side.rows) if tile_signature(row) == want),)
 
     assert golden_pools(tuned_db(None, (_MATMUL,), source="measured")) == ([], {})

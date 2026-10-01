@@ -1,21 +1,12 @@
-"""Measurement freeze — a DB instance's admitted rows as a golden file per card, re-lowered on import.
+"""Measurement freeze — a DB instance's admitted rows as a golden file per card.
 
 A tune DB is a live store (tunes and imports write into it), so a model fit or evaluated straight from it is
 not reproducible. A *freeze* is the snapshot a reported number is computed over — identical wherever it is
-read — and the training data the priors are fit on (``eval prior --pools measured``). It is written in the
-golden file's shape: one document per card, its ``loops`` pool holding each kernel's definition, one config
-per kernel set and binding, a realization per measured row — its schedule row, the regime it was measured
-under (``FAST_MATH`` on or off, the two a golden records) and its median. Nothing the compiler computed is
-stored: no identity a reader has to trust, no stamps spelled in one featurizer's vocabulary. ``emmy db
-import`` re-lowers every kernel from its definition (``golden.evidence.import_goldens``, entering at the
-lowering passes as the tuner runs a slice), so the dataset DB's identities and stamps are the current
-compiler's, and a compiler change is a re-import, never a re-collection.
-
-A kernel's definition is its ``kernel`` row's wire: the body it was formed from, which the lowering passes
-take back to the kernel (``KernelDef.formed``). A piece carved from a twisted tree has no such body; its rows
-are written under the nearest formed ancestor the routing table reaches — a routing entry per decision on the
-path, the rows as receipts naming their kernel and listing the entries in ``kernel_set`` — the way a golden
-records a kernel set, and nothing else is written that way.
+read — and the training data the priors are fit on (``eval prior --pools measured``). It is a golden file with no
+traced program: one document per card holding the kernels the admitted rows measured (and the decisions that reach
+them), those decisions, and a row per measurement — its schedule row, the regime it was measured under
+(``FAST_MATH`` on or off, the two a golden records) and its median. ``emmy db import`` reads it back as it reads
+any golden.
 
 What freezes (:func:`freeze_reason`): every ``ok`` CUDA row measured on a card the GPU registry knows, at the
 deployable opt level, that passes the physical-plausibility predicates; the fast-math flag decides which of
@@ -39,7 +30,8 @@ import logging
 import math
 import re
 import shutil
-from collections import Counter, defaultdict, deque
+from collections import Counter, defaultdict
+from dataclasses import fields
 from pathlib import Path
 
 from emmy.compiler.pipeline.knob import METADATA_PREFIXES
@@ -47,7 +39,6 @@ from emmy.compiler.pipeline.search.dataset import KernelDef, regime_of
 from emmy.compiler.pipeline.search.dataset.pool import REGIME_PINS
 from emmy.compiler.pipeline.search.db import PerfRow, SearchDB, knobs_json
 from emmy.compiler.pipeline.search.features import DEPLOYABLE_OPT
-from emmy.compiler.wire import intern_wire
 
 logger = logging.getLogger(__name__)
 
@@ -189,87 +180,23 @@ def _gpu_filename(gpu_name: str, cap: tuple[int, int]) -> str:
     return f"{slug}_sm{cap[0]}{cap[1]}.json"
 
 
-def _path_to(kernel: str, kernels: dict[str, KernelDef], parents: dict[str, list[tuple[str, dict]]]) -> tuple | None:
-    """The decisions from the nearest formed kernel down to ``kernel``, as ``(parent, arm)`` pairs: ``()`` when the
-    kernel is formed itself, ``None`` when no formed kernel reaches it through the routing table."""
-    if kernels[kernel].formed:
-        return ()
-    seen = {kernel}
-    queue: deque[tuple[str, tuple]] = deque([(kernel, ())])
-    while queue:
-        child, path = queue.popleft()
-        for parent, arm in parents.get(child, ()):
-            if parent in seen:
-                continue
-            step = ((parent, arm), *path)
-            if kernels[parent].formed:
-                return step
-            seen.add(parent)
-            queue.append((parent, step))
-    return None
-
-
 def schedule_row(row: PerfRow) -> dict[str, str]:
     """``row``'s schedule row alone: what the tuner recorded, without the kernel's stamps and identity."""
     return {str(k): str(v) for k, v in row.knobs.items() if not str(k).startswith(METADATA_PREFIXES)}
 
 
-def _document(gpu_name: str, cap: tuple[int, int], rows: list[PerfRow], kernels: dict[str, KernelDef], parents, dropped: Counter) -> dict:
-    """One card's golden document: a config per kernel set, size and regime, in content order."""
-    sets: dict[tuple, list[PerfRow]] = defaultdict(list)
-    paths: dict[tuple, tuple] = {}
-    for row in rows:
-        path = _path_to(row.kernel, kernels, parents)
-        if path is None:
-            dropped["no formed kernel reaches it"] += 1
-            continue
-        root = path[0][0] if path else row.kernel
-        key = (root, tuple((parent, knobs_json(arm)) for parent, arm in path), knobs_json(row.bindings), regime_of(row.flags))
-        sets[key].append(row)
-        paths[key] = path
-    loops: list[dict] = []
-    configs: list[dict] = []
-    for key in sorted(sets):
-        root, _route, _bindings, regime = key
-        path, members = paths[key], sorted(sets[key], key=lambda r: (r.kernel, knobs_json(r.knobs)))
-        # The sizes the rows were benched at are the program's hints; a golden's ``bindings`` would make them static.
-        # A parent axis a piece dropped keeps the stored hint: the piece's measurement does not depend on it.
-        try:
-            program = kernels[root].program(dict(members[0].bindings)).to_wire()
-        except ValueError:
-            dropped["sizes the program cannot bind"] += len(members)
-            continue
-        pins = REGIME_PINS[regime]
-        realizations: list[dict] = []
-        for step, (parent, arm) in enumerate(path):
-            name = f"{kernels[parent].name}.{parent[:12]}.route{step}"
-            identity = kernels[parent].structural_identity
-            realizations.append({"name": name, "bindings": {}, "pins": pins, "knobs": dict(arm), "identity": identity})
-        routes = [entry["name"] for entry in realizations]
-        for n, row in enumerate(members):
-            realizations.append(
-                {
-                    "name": f"{kernels[row.kernel].name}.{row.kernel[:12]}.{n}",
-                    "bindings": {},
-                    "pins": pins,
-                    "knobs": schedule_row(row),
-                    "identity": kernels[row.kernel].structural_identity,
-                    "measurements": {"emmy_us": row.stats.median},
-                    **({"kernel_set": routes} if routes else {}),
-                }
-            )
-        configs.append({"target": {"loop": intern_wire(loops, program)}, "realizations": realizations})
-    return {"gpu_name": gpu_name, "compute_cap": list(cap), "loops": loops, "configs": configs}
+def freeze_documents(db: SearchDB) -> tuple[dict[str, object], Counter]:
+    """The DB's admitted rows as one golden document per card, keyed by the card's file name, and the count of the
+    rows left out, by reason. A document holds the kernels its rows measured, every decision that reaches one of
+    them with the kernels it names, and a row per measurement, in content order."""
+    from emmy.compiler.pipeline.search.golden import GoldenFile, Kernel, Measurements, Row  # noqa: PLC0415
 
-
-def freeze_documents(db: SearchDB) -> tuple[dict[str, dict], Counter]:
-    """The DB's admitted rows as one golden document per card, keyed by the card's file name, and the count
-    of the rows left out, by reason."""
     kernels = {k.exact_identity: k for k in db.iter_kernels()}
-    parents: dict[str, list[tuple[str, dict]]] = defaultdict(list)
-    for decision in db.iter_routing():
-        for child in decision.children:
-            parents[child].append((decision.parent, decision.arm))
+    routing = list(db.iter_routing())
+    minted: dict[str, list] = defaultdict(list)
+    for route in routing:
+        for child in route.children:
+            minted[child].append(route)
     dropped: Counter[str] = Counter()
     by_card: dict[tuple[str, tuple[int, int]], list[PerfRow]] = defaultdict(list)
     for row in db.iter_perf_rows(backend="cuda"):
@@ -283,9 +210,38 @@ def freeze_documents(db: SearchDB) -> tuple[dict[str, dict], Counter]:
         by_card[(row.gpu, divmod(row.cc, 10))].append(row)
     documents = {}
     for (gpu_name, cap), rows in sorted(by_card.items()):
-        document = _document(gpu_name, cap, rows, kernels, parents, dropped)
-        if document["configs"]:
-            documents[_gpu_filename(gpu_name, cap)] = document
+        rows.sort(key=lambda r: (r.kernel, knobs_json(r.bindings), knobs_json(r.knobs), r.flags))
+        # The decisions that reach a measured kernel, and every kernel they name: the routing closure upward.
+        wanted = {row.kernel for row in rows}
+        routes = []
+        queue = sorted(wanted)
+        while queue:
+            identity = queue.pop()
+            for route in minted.get(identity, ()):
+                if route not in routes:
+                    routes.append(route)
+                    for named in (route.parent, *route.children):
+                        if named not in wanted:
+                            wanted.add(named)
+                            queue.append(named)
+        document = GoldenFile(
+            gpu_name=gpu_name,
+            compute_cap=cap,
+            kernels=[Kernel(**{f.name: getattr(kernels[k], f.name) for f in fields(KernelDef)}) for k in sorted(wanted)],
+            routing=[route for route in routing if route in routes],
+            rows=[
+                Row(
+                    name=f"{kernels[row.kernel].name}.{row.kernel[:12]}.{n}",
+                    kernel=row.kernel,
+                    bindings=dict(row.bindings),
+                    pins=dict(REGIME_PINS[regime_of(row.flags)]),
+                    knobs=schedule_row(row),
+                    measurements=Measurements(emmy_us=row.stats.median),
+                )
+                for n, row in enumerate(rows)
+            ],
+        )
+        documents[_gpu_filename(gpu_name, cap)] = document
     return documents, dropped
 
 
@@ -295,8 +251,6 @@ def write_freeze(db_path: Path | str, out_dir: Path | str) -> dict[str, str]:
     survives the filter — a zero-row freeze means the wrong DB, not an empty dataset. An existing ``out_dir``
     is replaced only when it is itself a freeze (holds golden files and nothing else) — anything else is
     refused rather than deleted."""
-    from emmy.compiler.pipeline.search.golden import GoldenFile  # noqa: PLC0415
-
     db = SearchDB.open_readonly(db_path)
     try:
         documents, dropped = freeze_documents(db)
@@ -315,7 +269,7 @@ def write_freeze(db_path: Path | str, out_dir: Path | str) -> dict[str, str]:
     tmp.mkdir(parents=True)
     digests = {}
     for name, document in sorted(documents.items()):
-        digests[name] = hashlib.sha256(GoldenFile.from_wire(document).dump(tmp / name).read_bytes()).hexdigest()
+        digests[name] = hashlib.sha256(document.dump(tmp / name).read_bytes()).hexdigest()
     if out.exists():
         shutil.rmtree(out)
     tmp.replace(out)

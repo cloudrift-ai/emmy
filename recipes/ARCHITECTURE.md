@@ -33,8 +33,8 @@ the maintained golden records have no recipe owner and live under `emmy/compiler
 
 If complete compiler qualification produces a model golden before serving qualification produces a runnable recipe,
 create the normal `onboarding`/`untested` shell first and store the golden beneath it. The nightly `onboard-model`
-workflow owns exact-GPU replay for recipe-local goldens. The default suite strictly decodes every recorded row and
-checks that each stored target is still the fresh lowering of its program, without requiring the target GPU.
+workflow owns exact-GPU replay for recipe-local goldens. The default suite holds every stored kernel to the fresh
+lowering of its program (`emmy golden check`), without requiring the target GPU.
 
 ## Lifecycle
 

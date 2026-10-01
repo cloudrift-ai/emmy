@@ -331,12 +331,14 @@ def _emit_golden_deploy_check(args, pools: list) -> None:
 
 def handle_eval_golden(args) -> None:
     """Validate one file-scoped golden corpus against the pinned serving envelope."""
+    from dataclasses import replace  # noqa: PLC0415
+
     from emmy.compiler.context import Context  # noqa: PLC0415
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden import GoldenFile, sole_evidence
+    from emmy.compiler.pipeline.search.golden import GoldenFile, sole_evidence  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
     from emmy.serving.release import load_serving_config, model_matches  # noqa: PLC0415
-    from emmy.serving.twins import capture_twin_graphs  # noqa: PLC0415
+    from emmy.serving.twins import capture_twin_graphs, twin_width  # noqa: PLC0415
 
     try:
         serving = load_serving_config(args.serving_config)
@@ -344,7 +346,6 @@ def handle_eval_golden(args) -> None:
         if golden_path != serving.golden_file:
             raise ValueError(f"serving config names {serving.golden_file}, not {golden_path}")
         document = GoldenFile.load(golden_path)
-        records = document.records()
         ctx = Context.probe()
     except (OSError, RuntimeError, ValueError) as exc:
         logger.error("golden evaluation setup failed: %s", exc)
@@ -363,34 +364,32 @@ def handle_eval_golden(args) -> None:
             *cap,
         )
         sys.exit(1)
-    if not records or any(not model_matches(record.model, serving) for record in records):
-        recorded = sorted({record.model or "(missing)" for record in records})
-        logger.error("golden model provenance %s does not cover %s", ", ".join(recorded) or "(none)", serving.model_provenance)
+    measured = [row for row in document.rows if row.measured]
+    if not measured or not model_matches(document.model, serving):
+        logger.error("golden model provenance %s does not cover %s", document.model or "(missing)", serving.model_provenance)
         sys.exit(1)
 
-    from emmy.serving.twins import twin_width  # noqa: PLC0415
-
+    # A twin's rows are the ones it reaches: a static twin is compiled at its own width, a symbolic one for any
+    # width. The twin is the row name's first field; a target's sizes are the kernel's provenance.
+    by_twin: dict[str, set[tuple]] = {}
+    for kernel in document.targets():
+        for row in document.rows:
+            if row.kernel == kernel.exact_identity:
+                twin = row.name.split(".", 1)[0]
+                by_twin.setdefault(twin, set()).add((tuple(sorted(kernel.bindings.items())), tuple(sorted(row.pins.items()))))
     missing = []
-    for config_index, entry in enumerate(document.configs):
-        # A target's rows are the ones its twin reaches: a static twin is compiled at its own
-        # width, a symbolic one for any width. The twin is the realization name's first field.
-        twin = entry.realizations[0].name.split(".", 1)[0]
+    for twin, actual in sorted(by_twin.items()):
         expected = {(row.bindings, row.pins) for row in serving.realizations_for(twin_width(twin))}
-        actual = {
-            (tuple(sorted(realization.bindings.items())), tuple(sorted(realization.pins.items()))) for realization in entry.realizations
-        }
         for bindings, pins in sorted(expected - actual, key=lambda item: (item[1], item[0])):
-            missing.append((config_index, dict(bindings), pins))
+            missing.append((twin, dict(bindings), pins))
     if missing:
-        for config_index, bindings, pins in missing[:20]:
-            logger.error("configs[%d] missing realization bindings=%s pins=%s", config_index, bindings, dict(pins))
+        for twin, bindings, pins in missing[:20]:
+            logger.error("%s: missing row bindings=%s pins=%s", twin, bindings, dict(pins))
         if len(missing) > 20:
-            logger.error("... and %d more missing target realizations", len(missing) - 20)
+            logger.error("... and %d more missing rows", len(missing) - 20)
         sys.exit(1)
 
-    logger.info("OK: %d verified realizations cover %s on %s.", len(records), serving.model_provenance, serving.gpu_name)
-    if _emit_offer_audit(records):
-        sys.exit(1)
+    logger.info("OK: %d measured rows cover %s on %s.", len(measured), serving.model_provenance, serving.gpu_name)
 
     source = serving.model_provenance
     try:
@@ -409,17 +408,18 @@ def handle_eval_golden(args) -> None:
         logger.error("in-model audit cannot represent %s: %s", source, exc)
         sys.exit(1)
 
-    # The serving-matrix half of the gate: each lane's twins compiled with that lane's rows as
-    # the only evidence, strictly, on the live card the golden names — a fork no golden row
-    # decides is an EvidenceError naming the kernel, never a prediction the prior makes. A lane
-    # reaches the widths the config warms in it (a shape's ``:fm`` suffix names its lane), so a
-    # static twin is compiled in the lanes that list its width; a symbolic twin in every lane.
+    # The serving-matrix half of the gate: each lane's twins compiled with that lane's rows as the only evidence,
+    # strictly, on the live card the golden names — a fork no golden row decides is an EvidenceError naming the
+    # kernel, never a prediction the prior makes. A lane reaches the widths the config warms in it (a shape's
+    # ``:fm`` suffix names its lane), so a static twin is compiled in the lanes that list its width; a symbolic twin
+    # in every lane.
     failed = False
     for pins in sorted({row.pins for row in serving.realizations}, key=repr):
         lane = _format_pins(pins)
         reached = {dict(row.bindings).get("num_tokens") if row.bindings else None for row in serving.realizations if row.pins == pins}
         broken = 0
-        with pinned_knobs(dict(pins)), sole_evidence([record for record in records if record.pins == pins]):
+        in_lane = replace(document, rows=[row for row in document.rows if tuple(sorted(row.pins.items())) == tuple(sorted(pins))])
+        with pinned_knobs(dict(pins)), sole_evidence([in_lane]):
             for name, graph in graphs.items():
                 if twin_width(name) not in reached:
                     continue
@@ -474,39 +474,3 @@ def _emit_golden_table(lead_cols: list[Col], entries: list[tuple], caption: str)
     logger.info(next(lines))  # header row (column names, knobs included)
     for e in entries:
         logger.info("  " + e[1].ljust(kernel_w) + "  ERR  " + e[2] if e[0] == "err" else next(lines))
-
-
-def _emit_offer_audit(configs: list) -> bool:
-    """The offer audit — does each recorded row still equal an enumerated leaf of its own target?
-
-    The strict decode (``golden.decode_record``) asks it per entry: the persisted program replayed
-    under the entry's own input pins, with the target's other entries walking the same path, and
-    the spelled row compared with that kernel's enumerated leaves by exact schedule-row identity.
-    An entry whose row equals no leaf is ``UNREALIZED``: it is no evidence a deploy can use, so
-    the gate fails — re-record an offered row in this input regime, or close the enumeration gap.
-    This is the OWN-SNIPPET view; the serving-matrix compile in :func:`handle_eval_golden` closes
-    the other side, whether the fused serving graphs are decided by these rows. Returns True when any entry
-    is unrealized (``eval golden`` exits 1)."""
-    from emmy.compiler.pipeline.search.golden import decode_record  # noqa: PLC0415
-
-    def kstr(g) -> str:  # the entry's distinguishing knobs, empty families dropped
-        return ",".join(f"{k}={v}" for k, v in g.knobs.items() if v not in ("", None))
-
-    logger.info("")
-    logger.info("Offer audit — does each recorded row still equal an enumerated leaf (own snippet, deployable regime)?")
-    unrealized = 0
-    for g in configs:
-        try:
-            reason = decode_record(g, configs)
-        except Exception as exc:  # noqa: BLE001 — one entry's error is that entry's verdict
-            reason = f"{type(exc).__name__}: {exc}"
-        if reason is None:
-            continue
-        unrealized += 1
-        why = " ".join(reason.split())[:120]
-        logger.info("  %-44s  UNREALIZED  %.1fus  %s  (%s)", _realization_label(g.name, g.pins), g.emmy_us, kstr(g), why)
-    if unrealized:
-        logger.error("  offer audit: %d of %d entries equal no enumerated leaf in their input regime", unrealized, len(configs))
-        return True
-    logger.info("  offer audit: all %d entries equal an enumerated leaf", len(configs))
-    return False

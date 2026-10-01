@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -14,6 +15,7 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import Conv1dOp, LinearOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.tensor.ir import CastOp, ElementwiseOp, GatherOp
+from emmy.compiler.pipeline.search.dataset import ShapeKey
 from emmy.compiler.pipeline.search.golden import GoldenFile, append_trace_inventory, write_trace_inventories, write_trace_inventory
 from emmy.compiler.pipeline.search.golden.repository import _file_gpu_name
 
@@ -22,6 +24,14 @@ from emmy.compiler.pipeline.search.golden.repository import _file_gpu_name
 # fallback. Probing the live device would make these tests depend on whichever GPU the runner
 # happens to have, so pin a target context the way ``test_golden_file_replay`` does.
 _TARGET_CTX = Context.from_target((8, 9))
+
+
+def _coverage(document: GoldenFile) -> set[tuple]:
+    """Each row as ``(twin, the kernel's sizes, the row's regime)`` — what the release audit checks a golden covers."""
+    return {
+        (row.name.split(".", 1)[0], tuple(sorted(document.kernel(row.kernel).bindings.items())), tuple(sorted(row.pins.items())))
+        for row in document.rows
+    }
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -97,7 +107,6 @@ def test_trace_serving_twins_writes_one_exact_inventory_with_explicit_provenance
     )
 
     document = GoldenFile.load(output)
-    records = document.records()
     # The audit's graph set (``emmy eval golden``): the symbolic programs plus the config's static widths.
     assert captured == {
         "model": str(tmp_path / "local-checkpoint"),
@@ -108,11 +117,10 @@ def test_trace_serving_twins_writes_one_exact_inventory_with_explicit_provenance
         "expert_slices": 1,
     }
     assert document.model == "cloudriftai/model-exl3@0123456789abcdef0123456789abcdef01234567"
-    assert {record.name.split(".", 1)[0] for record in records} == {"pre1@b2", "expert512@b2"}
-    assert all(record.loop_wire is not None for record in records)
-    assert all(torch_ref.is_runnable(record.reference_program) for record in records)
-    # A static twin's target carries the rows of its own width, in every lane the config reaches it.
-    assert {(record.name.split(".", 1)[0], record.bindings, record.pins) for record in records} == {
+    assert {row.name.split(".", 1)[0] for row in document.rows} == {"pre1@b2", "expert512@b2"}
+    assert all(torch_ref.is_runnable(document.reference_program(kernel)) for kernel in document.targets())
+    # A static twin's kernel is specialized at its own width and carries a row in every lane the config reaches it.
+    assert _coverage(document) == {
         ("pre1@b2", (("num_tokens", 1),), (("FAST_MATH", False),)),
         ("pre1@b2", (("num_tokens", 1),), (("FAST_MATH", True),)),
         ("expert512@b2", (("num_tokens", 512),), (("FAST_MATH", False),)),
@@ -158,8 +166,9 @@ def test_trace_serving_twins_static_only_release_forwards_exact_scope(monkeypatc
         "symbolic": False,
         "static_only": True,
     }
-    records = GoldenFile.load(output).records()
-    assert {(record.bindings, record.pins) for record in records} == {((("num_tokens", 1),), (("FAST_MATH", False),))}
+    assert {(bindings, pins) for _twin, bindings, pins in _coverage(GoldenFile.load(output))} == {
+        ((("num_tokens", 1),), (("FAST_MATH", False),))
+    }
 
 
 def test_trace_static_only_release_rejects_unsafe_config(tmp_path) -> None:
@@ -182,8 +191,8 @@ def test_trace_command_writes_only_a_golden_file(monkeypatch, tmp_path) -> None:
     monkeypatch.chdir(tmp_path)
     output = tmp_path / "trace.json"
     handle_trace(_parser().parse_args(["trace", "some/model", "-o", str(output)]))
-    records = GoldenFile.load(output).records()
-    assert records and all(record.program.nodes for record in records)
+    document = GoldenFile.load(output)
+    assert document.rows and all(document.program(kernel.traced).nodes for kernel in document.targets())
     assert sorted(path.name for path in tmp_path.iterdir()) == ["trace.json"]
 
 
@@ -221,7 +230,7 @@ def test_trace_accepts_debug_graph_json_as_input_but_emits_a_golden_file(monkeyp
     source.write_text(json.dumps(source_graph.to_dict()))
     output = tmp_path / "working.json"
     handle_trace(_parser().parse_args(["trace", str(source), "-o", str(output)]))
-    assert GoldenFile.load(output).records()
+    assert GoldenFile.load(output).rows
     assert json.loads(source.read_text()) == source_graph.to_dict()
 
 
@@ -235,10 +244,10 @@ def test_trace_writes_deterministic_self_contained_programs(tmp_path) -> None:
     first_doc, second_doc = GoldenFile.load(first), GoldenFile.load(second)
     assert first_doc == second_doc
     assert first_doc.programs == [original_wire]
-    assert first_doc.programs and first_doc.configs
-    assert all(set(entry.to_wire()) == {"program", "target", "realizations"} for entry in first_doc.configs)
-    assert all(set(entry.realizations[0].to_wire()) == {"name", "pins"} for entry in first_doc.configs)
-    assert all(set(entry.target.to_wire()) == {"loop", "origins"} for entry in first_doc.configs)
+    assert first_doc.programs and first_doc.kernels
+    stored = {"exact_identity", "structural_identity", "loop_ir", "name", "stamps", "formed", "traced", "origins"}
+    assert all(set(kernel.to_wire()) == stored for kernel in first_doc.kernels)
+    assert all(set(row.to_wire()) == {"name", "kernel", "pins"} for row in first_doc.rows)
 
 
 def test_trace_inventory_replays_depthwise_conv1d_program(tmp_path) -> None:
@@ -257,9 +266,11 @@ def test_trace_inventory_replays_depthwise_conv1d_program(tmp_path) -> None:
     write_trace_inventory(graph, path, ctx=_TARGET_CTX)
     document = GoldenFile.load(path)
 
-    assert document.records()
+    assert document.rows
     expected = Conv1dOp(stride=1, padding=3, dilation=1, groups=8)
-    assert all(record.origins == ("conv",) and record.program.nodes["conv"].op == expected for record in document.records())
+    assert all(
+        kernel.origins == ("conv",) and document.program(kernel.traced).nodes["conv"].op == expected for kernel in document.targets()
+    )
 
 
 def test_trace_keeps_materialized_storage_outputs_and_quant_digest(tmp_path) -> None:
@@ -283,7 +294,7 @@ def test_trace_keeps_materialized_storage_outputs_and_quant_digest(tmp_path) -> 
     assert result.target_count == 1
     assert document.model_quant_digest == "0123456789abcdef"
     assert "x_bits" in document.programs[0]["outputs"]
-    assert document.configs[0].target.origins == ("out", "x_bits")
+    assert document.targets()[0].origins == ("out", "x_bits")
 
 
 def test_trace_target_resolves_in_original_multi_op_fusion_context(tmp_path) -> None:
@@ -300,11 +311,11 @@ def test_trace_target_resolves_in_original_multi_op_fusion_context(tmp_path) -> 
     path = tmp_path / "working.json"
     write_trace_inventory(graph, path, ctx=_TARGET_CTX)
     document = GoldenFile.load(path)
-    (record,) = document.records()
+    (kernel,) = document.targets()
 
     assert len(document.programs) == 1
-    assert set(record.origins) == {"gate", "up", "out"}
-    assert record.shape_key.reduce_max == 64
+    assert set(kernel.origins) == {"gate", "up", "out"}
+    assert ShapeKey.from_s_features(kernel.stamps).reduce_max == 64
 
 
 def test_trace_inventory_keeps_fused_sdpa_as_one_frontend_target(tmp_path) -> None:
@@ -319,12 +330,11 @@ def test_trace_inventory_keeps_fused_sdpa_as_one_frontend_target(tmp_path) -> No
     )["graph"]
     path = tmp_path / "working.json"
     write_trace_inventory(graph, path, ctx=_TARGET_CTX)
-    records = GoldenFile.load(path).records()
-    assert len(records) == 1
-    (record,) = records
-    assert record.loop_index is not None
-    assert record.origins == ("scaled_dot_product_attention",)
-    assert record.name.startswith("k_sdpa")
+    document = GoldenFile.load(path)
+    (kernel,) = document.kernels
+    (row,) = document.rows
+    assert kernel.origins == ("scaled_dot_product_attention",)
+    assert row.name.startswith("k_sdpa")
 
 
 def test_trace_serializes_gather_target_with_a_torch_reference_mapping(tmp_path) -> None:
@@ -338,28 +348,28 @@ def test_trace_serializes_gather_target_with_a_torch_reference_mapping(tmp_path)
 
     path = tmp_path / "working.json"
     write_trace_inventory(graph, path, ctx=_TARGET_CTX)
-    (record,) = GoldenFile.load(path).records()
-    assert record.origin_ops == ("tensor.gather",)
-    assert record.program.nodes["gather"].op == GatherOp(axis=1)
+    document = GoldenFile.load(path)
+    (kernel,) = document.targets()
+    assert kernel.origins == ("gather",)
+    assert document.program(kernel.traced).nodes["gather"].op == GatherOp(axis=1)
 
 
-def test_trace_inventory_keeps_every_kernel_even_without_cache_keys(monkeypatch, tmp_path) -> None:
-
+def test_trace_inventory_stores_identical_kernels_once(tmp_path) -> None:
+    """Two occurrences of one kernel are one kernel: the same identity, so the same rows decide both."""
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x0", (16,)), node_id="x0")
     graph.add_node(InputOp(), [], Tensor("x1", (16,)), node_id="x1")
     graph.add_node(ElementwiseOp("relu"), ["x0"], Tensor("y0", (16,)), node_id="y0")
     graph.add_node(ElementwiseOp("relu"), ["x1"], Tensor("y1", (16,)), node_id="y1")
     graph.inputs, graph.outputs = ["x0", "x1"], ["y0", "y1"]
-    monkeypatch.setattr(LoopOp, "identity_key", lambda _self, **_kw: None)
 
     path = tmp_path / "working.json"
     result = write_trace_inventory(graph, path, ctx=_TARGET_CTX)
-    records = GoldenFile.load(path).records()
+    document = GoldenFile.load(path)
 
-    assert result.target_count == 2
-    assert len(records) == 2
-    assert {record.origins for record in records} == {("y0",), ("y1",)}
+    assert result.target_count == 1
+    assert len(document.kernels) == len(document.rows) == 1
+    assert document.kernels[0].origins in {("y0",), ("y1",)}
 
 
 def test_trace_inventory_embeds_loop_ir_when_frontend_provenance_is_missing(monkeypatch, tmp_path) -> None:
@@ -373,13 +383,12 @@ def test_trace_inventory_embeds_loop_ir_when_frontend_provenance_is_missing(monk
     path = tmp_path / "working.json"
     write_trace_inventory(graph, path, ctx=_TARGET_CTX)
     document = GoldenFile.load(path)
-    (record,) = document.records()
+    (kernel,) = document.kernels
 
-    assert set(document.to_wire()) == {"compute_cap", "programs", "loops", "configs"}
-    assert document.configs[0].target.to_wire() == {"loop": 0}
-    assert record.origins == ()
-    assert isinstance(record.target_program.nodes["y"].op, LoopOp)
-    assert record.structural_features["S_pw_relu"] == 1.0
+    assert set(document.to_wire()) == {"compute_cap", "programs", "kernels", "rows"}
+    assert kernel.origins == ()
+    assert isinstance(Graph.from_wire(kernel.loop_ir).nodes["y"].op, LoopOp)
+    assert kernel.stamps["S_pw_relu"] == 1.0
 
 
 def test_trace_inventory_stamps_the_card_its_context_is_for(tmp_path) -> None:
@@ -402,14 +411,42 @@ def test_trace_inventory_stores_the_kernel_and_its_traced_ops(tmp_path) -> None:
 
     path = tmp_path / "working.json"
     write_trace_inventory(graph, path, ctx=_TARGET_CTX)
-    (record,) = GoldenFile.load(path).records()
+    document = GoldenFile.load(path)
+    (kernel,) = document.kernels
+    (row,) = document.rows
 
-    assert record.origins == ("y",)
-    assert record.pin_map == {"FAST_MATH": True}
-    assert record.loop_wire is not None
+    assert kernel.origins == ("y",)
+    assert row.pins == {"FAST_MATH": True} and row.kernel == kernel.exact_identity
     # The stored kernel stays the identity; its traced ops give the PyTorch slice it is compared against.
-    assert torch_ref.is_runnable(record.reference_program)
-    assert record.reference_program.outputs == record.target_program.outputs == ["y"]
+    reference = document.reference_program(kernel)
+    assert torch_ref.is_runnable(reference)
+    assert reference.outputs == kernel.program({}).outputs == ["y"]
+
+
+def test_the_executable_program_binds_a_weight_beside_the_twin(tmp_path) -> None:
+    """A stored body reads a checkpoint weight as a plain input; the program a compile or a bench starts from binds
+    it the way the twin's lowering does — the same source tensor, through the same transpose — so a correctness check
+    compares the kernel against its own weights, not random ones."""
+    from emmy.compiler.ir.base import ConstantOp
+
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (4, 16), "f16"), node_id="x")
+    graph.add_node(ConstantOp(name="w", source_path="proj.weight"), [], Tensor("w", (8, 16), "f16"), node_id="w")
+    graph.add_node(LinearOp(), ["x", "w"], Tensor("linear", (4, 8), "f16"), node_id="linear")
+    graph.inputs, graph.outputs = ["x"], ["linear"]
+    path = tmp_path / "working.json"
+    write_trace_inventory(graph, path, ctx=_TARGET_CTX)
+    document = GoldenFile.load(path)
+    (kernel,) = document.kernels
+
+    body = kernel.program({})
+    weights = [name for name in body.inputs if name != "x"]
+    assert len(weights) == 1, "the standalone body reads the weight as an input"
+    executable = document.executable(kernel, {})
+    assert executable.inputs == ["x"]
+    op = executable.nodes[weights[0]].op
+    assert isinstance(op, ConstantOp) and {*dict(op.source_parts or ()), op.source_path} & {"proj.weight"}
+    assert document.reference_program(kernel).nodes["w"].op.source_path == "proj.weight"
 
 
 def test_a_stored_kernel_holding_part_of_an_op_has_no_pytorch_reference(monkeypatch, tmp_path) -> None:
@@ -422,10 +459,11 @@ def test_a_stored_kernel_holding_part_of_an_op_has_no_pytorch_reference(monkeypa
     monkeypatch.setattr(provenance, "coverage", lambda prov, _totals: {origin: (1, 2, False) for origin in prov})
     write_trace_inventory(graph, path, ctx=_TARGET_CTX)
 
-    (record,) = GoldenFile.load(path).records()
+    document = GoldenFile.load(path)
+    (kernel,) = document.kernels
 
-    assert record.origins == (), "a kernel holding part of an op keeps no traced ops"
-    assert record.reference_program is None
+    assert kernel.origins == (), "a kernel holding part of an op keeps no traced ops"
+    assert document.reference_program(kernel) is None
 
 
 def test_exact_loop_targets_disambiguate_same_body_at_distinct_cast_boundaries(tmp_path) -> None:
@@ -455,7 +493,7 @@ def test_exact_loop_targets_disambiguate_same_body_at_distinct_cast_boundaries(t
 
     path = tmp_path / "working.json"
     write_trace_inventory(graph, path, ctx=_TARGET_CTX)
-    names = [record.name for record in GoldenFile.load(path).records()]
+    names = [row.name for row in GoldenFile.load(path).rows]
     assert len(names) == len(set(names))
 
 
@@ -465,11 +503,10 @@ def test_combined_trace_inventory_deduplicates_identical_loop_targets(tmp_path) 
     path = tmp_path / "combined.json"
     result = write_trace_inventories({"pre1": graph, "pre8": graph.copy()}, path, model="org/model@revision", ctx=_TARGET_CTX)
     document = GoldenFile.load(path)
-    records = document.records()
 
     assert result.target_count == 1
-    assert len(document.loops) == len(records) == 1
-    assert records[0].name.startswith("pre1.")
+    assert len(document.kernels) == len(document.rows) == 1
+    assert document.rows[0].name.startswith("pre1.")
     assert document.model == "org/model@revision"
 
 
@@ -484,8 +521,7 @@ def test_a_golden_file_holds_a_pool_entry_and_a_realization_per_line(tmp_path) -
 
     path = tmp_path / "working.json"
     write_trace_inventory(graph, path, ctx=_TARGET_CTX)
-    document = GoldenFile.load(path)
-    document.gpu_name = "NVIDIA GeForce RTX 5090"
+    document = replace(GoldenFile.load(path), gpu_name="NVIDIA GeForce RTX 5090")
     document.dump(path, overwrite=True)
     text = path.read_text()
     lines = text.splitlines()
@@ -495,10 +531,8 @@ def test_a_golden_file_holds_a_pool_entry_and_a_realization_per_line(tmp_path) -
 
     wire = json.loads(text)
     assert entry(lines[lines.index(' "programs": [') + 1]) == wire["programs"][0]
-    assert entry(lines[lines.index(' "loops": [') + 1]) == wire["loops"][0]
-    config = lines[lines.index(' "configs": [') + 1]
-    assert config == '  {"program": 0, "target": {"loop": 0, "origins": ["linear"]}, "realizations": ['
-    assert entry(lines[lines.index(config) + 1]) == wire["configs"][0]["realizations"][0]
+    assert entry(lines[lines.index(' "kernels": [') + 1]) == wire["kernels"][0]
+    assert entry(lines[lines.index(' "rows": [') + 1]) == wire["rows"][0]
     assert _file_gpu_name(path) == "NVIDIA GeForce RTX 5090"
 
 
@@ -520,13 +554,12 @@ def test_append_collects_separately_traced_paths_into_one_inventory(tmp_path) ->
     result = append_trace_inventory(sigmoid, path, ctx=_TARGET_CTX)
 
     document = GoldenFile.load(path)
-    records = document.records()
     assert result.target_count == 1
-    assert len(document.programs) == len(records) == 2
+    assert len(document.programs) == len(document.rows) == 2
     # A later path keeps the provenance the inventory was opened with.
     assert document.model == "org/model@revision"
     # Each target still resolves against the program it was traced in.
-    assert {entry.program for entry in document.configs} == {0, 1}
+    assert {kernel.traced for kernel in document.targets()} == {0, 1}
 
 
 def test_append_keeps_a_kernel_already_covered_once(tmp_path) -> None:
@@ -539,7 +572,7 @@ def test_append_keeps_a_kernel_already_covered_once(tmp_path) -> None:
 
     document = GoldenFile.load(path)
     assert result.target_count == 0
-    assert len(document.loops) == len(document.records()) == 1
+    assert len(document.kernels) == len(document.rows) == 1
 
 
 def test_append_rejects_an_inventory_traced_for_another_card(tmp_path) -> None:

@@ -128,18 +128,17 @@ the shared module already provides.
   serving-twin matrix for a named checkpoint and GPU. The serving-image release workflow owns exact
   model/revision/card qualification. Retain a small model fixture only when it proves reusable behavior that a
   synthetic input cannot.
-- **Do not load checked-in golden files in the default suite — except the realization corpus.** Unit tests use
-  synthetic records and working files, and the nightly `onboard-model` workflow owns repository schema validation,
-  strict decode, and exact-GPU replay for `recipes/*/golden/*.json`. `tests/compiler/realization/cases/` differs on
-  both counts that motivated the rule: its files are hand-minimized reproducers or a small capability baseline from a
+- **Do not load checked-in golden files in the default suite — except to hold them to the fresh lowering, and except
+  the realization corpus.** Unit tests use synthetic documents and working files, and the nightly `onboard-model`
+  workflow owns exact-GPU replay for `recipes/*/golden/*.json`. `tests/compiler/realization/cases/` differs on both
+  counts that motivated the rule: its files are hand-minimized reproducers or a small capability baseline from a
   model-agnostic hardware golden, and they carry no measurement claim, so nothing about them is card-specific. They
   also target a **declared** capability rather than the live card — `Context.from_target(compute_cap)` — so the
-  enumeration and
-  lowering stages are machine-independent and an sm_70 lockout is exercised on a box that has no sm_70. Only the
-  build and accuracy stages consult the live card, and they gate on `device_compute_capability() == compute_cap`,
-  beside `requires_sm90` in spirit but keyed on equality rather than a floor. Golden decode is machine-independent
-  the same way: every repository golden is decoded row by row on the default lane, each record replayed at its
-  declared capability, so a stale row is detectable on any machine; re-recording one is what needs the card.
+  lowering stage is machine-independent and an sm_70 lockout is exercised on a box that has no sm_70. Only the build
+  and accuracy stages consult the live card, and they gate on `device_compute_capability() == compute_cap`, beside
+  `requires_sm90` in spirit but keyed on equality rather than a floor. The restamp check is machine-independent the
+  same way: every repository golden is held to the fresh lowering of its programs on the default lane, GPU-free, so a
+  stale golden is detectable on any machine; re-recording a row is what needs the card.
 - **Keep one subprocess smoke per report path.** Filtering, join, and presentation variants use small synthetic
   records at the owning unit layer instead of launching the CLI repeatedly over the full repository corpus.
 - **Async tests** — tests for async functions are plain `async def` (no decorator needed; `asyncio_mode = "auto"` handles it). Mock async callables with `AsyncMock`.
@@ -248,25 +247,21 @@ large fraction of the card FREE at startup, plus checkpoint downloads and minute
 mark on anything else silently drops it from `make test` even on GPU machines (this hid the serving runner's GPU
 correctness pins for a while). GPU correctness tests guard themselves with `requires_cuda` / `importorskip` instead.
 
-`tests/compiler/pipeline/search/test_golden.py` strictly decodes every repository golden — the hardware goldens and
-each recipe's model golden — on the DEFAULT lane, one node per recorded row, so a failure names the row rather than a
-count. Every golden target is its kernel's stored Loop IR, so a row replays from that kernel and nothing re-lowers a
-traced program, and the replay leaves undecided every kernel of the set that cannot hold the row. Nothing is memoized
-across rows or runs: every node derives its row from the file. Collecting the rows parses every golden in each worker. The realization corpus's `offered` stage is this same decode (see
+`tests/compiler/pipeline/search/test_golden.py` holds every repository golden — the hardware goldens and each
+recipe's model golden — to the fresh lowering of its own traced programs on the DEFAULT lane: a restamp
+(`golden.restamp`, the rewrite `emmy golden restamp` writes) must leave the file unchanged, one node per traced
+program so the work scatters over the workers and a failure names the kernels, decisions and rows the compiler now
+disagrees with. Neither this nor the import check has a list of expected failures: a golden the compiler re-keys is
+red until `emmy golden restamp` rewrites the file, which needs no card (the `refresh-golden` skill is the flow; rows of
+a re-keyed kernel keep their schedule and lose their microseconds until a record run on the card measures them again).
+Never re-record a row to make a red node green: a re-keyed kernel is a change in the lowering, and re-recording
+enshrines it. The realization corpus's staleness test is the same restamp (see
 `tests/compiler/realization/ARCHITECTURE.md`).
 
-The same file is also asked whether every stored target is still what the current compiler lowers the golden's own
-programs to (`emmy golden check`); a file that is not is stale — its rows decode, yet a deploy builds kernels none
-of them describe. Neither check has a list of expected failures: a row that stops decoding, or a file whose targets
-stop being the fresh lowering, is red until `emmy golden restamp` rewrites the file, which needs no card (the
-`refresh-golden` skill is the flow; rows measured on a kernel that now renders differently keep their schedule and
-lose their microseconds until a record run on the card measures them again). Never re-record a row to make a red
-node green: a recorded row that stops decoding is a regression in the enumeration, and re-recording enshrines it.
-
 Repository golden *qualification* is intentionally outside pytest. Model goldens are GPU-specific qualification
-evidence, so the nightly `onboard-model` workflow validates the selected recipe-local file, strictly decodes every
-row, and replays it on the named GPU. This keeps expensive model/card qualification out of the default suite. The
-decode half needs no card and runs on the default lane (above); the measured replay is what the nightly's GPU is for.
+evidence, so the nightly `onboard-model` workflow validates the selected recipe-local file and replays it on the named
+GPU. This keeps expensive model/card qualification out of the default suite. The restamp half needs no card and runs on
+the default lane (above); the measured replay is what the nightly's GPU is for.
 
 Optional adapter tests use `pytest.importorskip` for their own dependency extras. The network-free tiny Diffusers DiT
 trace runs when the `image` extra is installed; the real checkpoint/CUDA comparison is additionally `perf`-marked and
@@ -296,7 +291,7 @@ anywhere: below sm_90 the pin refuses rather than selecting a different transpor
 TMA-staged flash cases carry `requires_sm90` (their `cp` siblings run on sm_80+). Golden-scoped CLI tests are the
 other environment trap: `--realization` without `--golden PATH`, and the deploy check `eval prior --pools golden` runs
 after its report, resolve against the **live card's** recordings (the report itself reads an exported dataset and has
-no such scope), so tests asserting specific golden names (or monkeypatching `GOLDEN_RECORDS` with card-less fakes)
+no such scope), so tests asserting specific golden names (or monkeypatching `repository_documents` with card-less fakes)
 must pin themselves off-GPU (`torch.cuda.is_available → False` in-process, `CUDA_VISIBLE_DEVICES=""` for `run_cli`
 subprocesses) to take the multi-card-union path — otherwise they pass or fail depending on which shapes the local card
 happens to have recorded.
