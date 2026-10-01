@@ -20,11 +20,16 @@ from dataclasses import replace
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.loop import LoopOp
+from emmy.compiler.ir.pure import Fold
+from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body, Load, Loop, Stmt, Write
+from emmy.compiler.ir.stmt.passes import rewrite
 from emmy.compiler.ir.tile import TileOp
+from emmy.compiler.ir.tile.ops import UnbindableProjection, output_regions
 from emmy.compiler.ir.tile.path import sites
 from emmy.compiler.pipeline.passes.tile._fromloop import lift_loop_op
 from emmy.compiler.pipeline.passes.tile._twist import rewrite_twisted
+from emmy.compiler.structural import form
 
 ROW_AXIS = "_row"
 
@@ -129,6 +134,59 @@ def _orients_by_nest(tile: TileOp) -> bool:
     )
 
 
+def _align_owned_sweeps(piece: TileOp) -> TileOp:
+    """Give independent, equal-domain output sweeps one coordinate before re-forming the piece."""
+    op = piece.op
+    if piece.schedule is not None or len(piece.output_specs) < 2 or not isinstance(op, Fold) or op.axis is not None:
+        return piece
+    try:
+        regions = output_regions(op, piece.output_specs)
+    except UnbindableProjection:
+        return piece
+    if len(regions) < 2 or any(tail or len(stores) != 1 or len(stores[0].sweep) != 1 for _, tail, stores in regions):
+        return piece
+    axes = tuple(stores[0].sweep[0] for _, _, stores in regions)
+    names = {axis.name for axis in axes}
+    outputs = tuple(stores[0].write.output for _, _, stores in regions)
+    anchor = axes[0]
+    if (
+        len(names) != len(axes)
+        or len(set(outputs)) != len(outputs)
+        or any(axis.extent != anchor.extent or form(axis.window) != form(anchor.window) for axis in axes)
+        or names & {axis.name for axis in piece.place.free}
+    ):
+        return piece
+    for (region, _, stores), axis in zip(regions, axes, strict=True):
+        store_axes = {name for index in stores[0].write.index for name in index.free_vars()}
+        if region.free_axes & names != {axis.name} or store_axes & names != {axis.name}:
+            return piece
+        bound = set().union(
+            *(
+                {
+                    site.node.axis,
+                    *site.node.lift.params,
+                    *site.node.exposes,
+                    *site.node.lift.body.ssa_defs,
+                    *site.node.lift.body.axis_names,
+                }
+                for site in sites(region)
+            )
+        )
+        if (bound & names) - {axis.name}:
+            return piece
+
+    operands = tuple(
+        rewrite(region, lambda name: name, Sigma({axis.name: Var(anchor.name)})) if axis != anchor else region
+        for (region, _, _), axis in zip(regions, axes, strict=True)
+    )
+    specs = tuple(
+        replace(spec, write=spec.write.substitute(Sigma({spec.sweep[0].name: Var(anchor.name)})), sweep=(anchor,))
+        for spec in piece.output_specs
+    )
+    aligned = replace(piece, op=replace(op, operands=operands), output_specs=specs)
+    return aligned if all(not spec.sweep for spec in aligned.output_specs) else piece
+
+
 def reformed(piece: TileOp) -> TileOp:
     """``piece`` formed as its own kernel: its tree lowered to the closed loop nest and lifted
     again, the way a kernel fusion had ended at a graph edge is formed.
@@ -147,6 +205,7 @@ def reformed(piece: TileOp) -> TileOp:
     axis, the rank rule promotes it, and the piece is back to folding its row statistic per output
     cell. The hoist is the form the reform is meant to preserve, so a piece that already has it is
     not re-formed."""
+    piece = _align_owned_sweeps(piece)
     if any(store.sweep for store in piece.output_specs):
         return piece
     body = piece.op.lower(bound=frozenset(), stores=piece.output_specs, axes=piece.axes)
