@@ -1,29 +1,20 @@
 """Mutable working-golden inventories and measurement write-back.
 
 This module owns the untrusted side of the golden file workflow: trace inventory generation and the
-atomic write-back of what a record run measures. CLI commands only validate argument combinations
-and report errors.
+atomic write-back of what a record run measures (:meth:`GoldenFile.edit`). CLI commands only validate
+argument combinations and report errors.
 """
 
 from __future__ import annotations
 
-import contextlib
-import fcntl
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 from emmy import gpu
-from emmy.compiler.pipeline.search.golden import (
-    Config,
-    GoldenFile,
-    Latency,
-    Measurements,
-    Realization,
-    Target,
-    is_repository_golden_path,
-    prepare_traced_graph,
-)
+
+from .format import Config, GoldenFile, Latency, Measurements, Realization, Target, prepare_traced_graph
+from .repository import is_repository_golden_path
 
 
 @dataclass(frozen=True)
@@ -53,30 +44,10 @@ def write_trace_inventory(
 ) -> TraceInventoryResult:
     """Lower a trace through fusion and write a self-contained target inventory."""
     destination = preflight_trace_inventory(path)
-    from emmy.compiler.context import Context  # noqa: PLC0415
-
-    ctx = ctx or Context.probe()
-    programs: list[dict] = []
-    loops: list[dict] = []
-    entries: list[Config] = []
-    _append_trace_inventory(
-        graph,
-        ctx=ctx,
-        programs=programs,
-        loops=loops,
-        entries=entries,
-        realizations=realizations,
-    )
-    _dump_trace_inventory(
-        destination,
-        ctx=ctx,
-        model=model,
-        model_quant_digest=model_quant_digest,
-        programs=programs,
-        loops=loops,
-        entries=entries,
-    )
-    return TraceInventoryResult(path=destination, target_count=len(entries))
+    document, ctx = _empty_inventory(ctx, model=model, model_quant_digest=model_quant_digest)
+    _append_trace_inventory(graph, ctx=ctx, document=document, realizations=realizations)
+    document.dump(destination)
+    return TraceInventoryResult(path=destination, target_count=len(document.configs))
 
 
 def append_trace_inventory(
@@ -95,34 +66,16 @@ def append_trace_inventory(
     one-file-per-path is easy to promote only partially. Interning is shared with
     :func:`write_trace_inventories`, so a kernel already covered is recorded once.
     """
-    destination = Path(path)
     from emmy.compiler.context import Context  # noqa: PLC0415
 
     ctx = ctx or Context.probe()
-    document = GoldenFile.load(destination)
-    validate_working_gpu(document, ctx)
-    programs, loops, entries = document.programs, document.loops, document.configs
-    seen_loops = {entry.target.loop for entry in entries}
-    before = len(entries)
-    _append_trace_inventory(
-        graph,
-        ctx=ctx,
-        programs=programs,
-        loops=loops,
-        entries=entries,
-        seen_loops=seen_loops,
-    )
-    _dump_trace_inventory(
-        destination,
-        ctx=ctx,
-        model=model or document.model,
-        model_quant_digest=model_quant_digest or document.model_quant_digest,
-        programs=programs,
-        loops=loops,
-        entries=entries,
-        overwrite=True,
-    )
-    return TraceInventoryResult(path=destination, target_count=len(entries) - before)
+    with GoldenFile.edit(path) as document:
+        validate_working_gpu(document, ctx)
+        document.model = model or document.model
+        document.model_quant_digest = model_quant_digest or document.model_quant_digest
+        before = len(document.configs)
+        _append_trace_inventory(graph, ctx=ctx, document=document, seen_loops={entry.target.loop for entry in document.configs})
+    return TraceInventoryResult(path=Path(path), target_count=len(document.configs) - before)
 
 
 def write_trace_inventories(
@@ -148,34 +101,35 @@ def write_trace_inventories(
     destination = preflight_trace_inventory(path)
     if not graphs:
         raise ValueError("cannot write an empty trace inventory")
-    from emmy.compiler.context import Context  # noqa: PLC0415
-
-    ctx = ctx or Context.probe()
-    programs: list[dict] = []
-    loops: list[dict] = []
-    entries: list[Config] = []
+    document, ctx = _empty_inventory(ctx, model=model, model_quant_digest=model_quant_digest)
     seen_loops: set[int] = set()
     for name in sorted(graphs):
         _append_trace_inventory(
             graphs[name],
             ctx=ctx,
-            programs=programs,
-            loops=loops,
-            entries=entries,
+            document=document,
             name_prefix=name,
             seen_loops=seen_loops,
             realizations=realizations.get(name) if isinstance(realizations, Mapping) else realizations,
         )
-    _dump_trace_inventory(
-        destination,
-        ctx=ctx,
-        model=model,
-        model_quant_digest=model_quant_digest,
-        programs=programs,
-        loops=loops,
-        entries=entries,
+    document.dump(destination)
+    return TraceInventoryResult(path=destination, target_count=len(document.configs))
+
+
+def _empty_inventory(ctx, *, model: str | None, model_quant_digest: str | None) -> tuple[GoldenFile, object]:
+    """A working inventory with no target yet, stamped with its card (``ctx``, the live card when none is given)
+    and model provenance: ``(document, ctx)``."""
+    from emmy.compiler.context import Context  # noqa: PLC0415
+
+    ctx = ctx or Context.probe()
+    document = GoldenFile(
+        gpu_name=ctx.gpu_name or None,
+        compute_cap=tuple(ctx.compute_capability),
+        model=model or None,
+        model_quant_digest=model_quant_digest or None,
+        configs=[],
     )
-    return TraceInventoryResult(path=destination, target_count=len(entries))
+    return document, ctx
 
 
 def whole_origins(coverage: Mapping, program) -> tuple[str, ...]:
@@ -209,14 +163,12 @@ def _append_trace_inventory(
     graph,
     *,
     ctx,
-    programs: list[dict],
-    loops: list[dict],
-    entries: list[Config],
+    document: GoldenFile,
     name_prefix: str | None = None,
     seen_loops: set[int] | None = None,
     realizations: list[dict] | None = None,
 ) -> None:
-    """Append one lowered graph to shared trace-inventory pools."""
+    """Append one lowered graph's targets to ``document``, interning into its pools."""
     from emmy.compiler import provenance  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import measured_precision_pins  # noqa: PLC0415
     from emmy.compiler.wire import intern  # noqa: PLC0415  # noqa: PLC0415
@@ -235,7 +187,8 @@ def _append_trace_inventory(
     for node_id, program in kernels:
         node = fused.nodes[node_id]
         inventory.append((node_id, node, program, whole_origins(provenance.coverage(provenance.get(node), totals), input_graph)))
-    used_names = {realization.name for entry in entries for realization in entry.realizations}
+    programs, loops, entries = document.programs, document.loops, document.configs
+    used_names = {realization.name for _, realization in document.rows()}
 
     for node_id, node, program, origins in inventory:
         # The entry's name is a label, never re-derived: the kernel's provenance name (the ops it
@@ -274,30 +227,6 @@ def _append_trace_inventory(
                 for template in realizations
             ]
         entries.append(Config(program=program_ref, target=target, realizations=rows))
-
-
-def _dump_trace_inventory(
-    destination: Path,
-    *,
-    ctx,
-    model: str | None,
-    model_quant_digest: str | None,
-    programs: list[dict],
-    loops: list[dict],
-    entries: list[Config],
-    overwrite: bool = False,
-) -> None:
-    """Write shared trace-inventory pools with their card and model provenance."""
-    document = GoldenFile(
-        gpu_name=ctx.gpu_name or None,
-        compute_cap=tuple(ctx.compute_capability),
-        model=model or None,
-        model_quant_digest=model_quant_digest or None,
-        programs=programs,
-        configs=entries,
-        loops=loops,
-    )
-    document.dump(destination, overwrite=overwrite)
 
 
 def validate_working_gpu(document: GoldenFile, ctx) -> None:
@@ -342,34 +271,22 @@ def record_latency(
     destination = Path(path)
     if is_repository_golden_path(destination):
         raise ValueError(f"refusing to write measurements into a canonical repository golden: {destination}")
-    with exclusive_golden(destination):
-        torch_us = {"tcompile_us": tcompile_us, "eager_us": eager_us}
-        _record_latency_row(destination, name, hardware_id=hardware_id, emmy_us=emmy_us, torch_us=torch_us, knobs=knobs, pins=pins)
-
-
-def _record_latency_row(destination: Path, name: str, *, hardware_id, emmy_us, torch_us, knobs, pins) -> None:
-    """One card's latencies written into the file as it stands NOW. Runs under the lock."""
     from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
 
-    document = GoldenFile.load(destination)
+    torch_us = {"tcompile_us": tcompile_us, "eager_us": eager_us}
     wanted_knobs = canonical_row_key(knobs) if knobs is not None else None
     wanted_pins = tuple(sorted((key, str(value)) for key, value in pins.items())) if pins is not None else None
-    matches = []
-    for entry in document.configs:
-        for realization in entry.realizations:
-            if realization.name != name:
-                continue
-            if wanted_knobs is not None and canonical_row_key(realization.knobs or {}) != wanted_knobs:
-                continue
-            got_pins = tuple(sorted((key, str(value)) for key, value in realization.pins.items()))
-            if wanted_pins is not None and got_pins != wanted_pins:
-                continue
-            matches.append(realization)
-    if len(matches) != 1:
-        raise ValueError(f"{destination} resolves {name!r} to {len(matches)} latency rows; exact knobs and pins must select one")
-    timings = Latency(emmy_us=float(emmy_us), **{field: float(us) for field, us in torch_us.items() if us})
-    matches[0].latency = {**(matches[0].latency or {}), hardware_id: timings}
-    document.dump(destination, overwrite=True)
+    with GoldenFile.edit(destination) as document:
+        matches = [
+            realization
+            for _, realization in document.rows(name)
+            if (wanted_knobs is None or canonical_row_key(realization.knobs or {}) == wanted_knobs)
+            and (wanted_pins is None or tuple(sorted((key, str(value)) for key, value in realization.pins.items())) == wanted_pins)
+        ]
+        if len(matches) != 1:
+            raise ValueError(f"{destination} resolves {name!r} to {len(matches)} latency rows; exact knobs and pins must select one")
+        timings = Latency(emmy_us=float(emmy_us), **{field: float(us) for field, us in torch_us.items() if us})
+        matches[0].latency = {**(matches[0].latency or {}), hardware_id: timings}
 
 
 def kernel_set_prices(kernel_sets: list[tuple[str, tuple[str, ...]]], launch_us: dict[str, float]) -> list[float | None]:
@@ -422,22 +339,6 @@ def greedy_pick_rows(graph) -> list[tuple[str, dict[str, str]]]:
     return rows
 
 
-@contextlib.contextmanager
-def exclusive_golden(path: Path):
-    """Hold one working golden's read-modify-write against every other process on this machine.
-
-    A recorder loads the file, adds its rows and writes the whole document back, so two runs that
-    both load before either writes each dump a document missing the other's rows — 18 of 151
-    realizations recorded in one parallel round were lost that way. The reload belongs INSIDE this
-    lock: locking a stale document would serialize the loss, not stop it. ``flock`` releases with
-    the descriptor, on a killed process too."""
-    lock = path.with_name(path.name + ".lock")
-    lock.parent.mkdir(parents=True, exist_ok=True)
-    with open(lock, "w") as handle:  # noqa: PTH123, SIM115 — flock takes a descriptor
-        fcntl.flock(handle, fcntl.LOCK_EX)
-        yield
-
-
 def record_greedy_pick(
     path: str | Path,
     name: str,
@@ -459,23 +360,22 @@ def record_greedy_pick(
     identity. A row already recorded for the same input regime, kernel, and knobs takes the new
     timings; anything else is appended, so a re-record never duplicates or aliases measurements
     from another width or pin regime. The file is read and written back inside one
-    :func:`exclusive_golden`, so the rows a concurrent recorder wrote meanwhile survive.
+    :meth:`GoldenFile.edit`, so the rows a concurrent recorder wrote meanwhile survive.
     Returns the names written, in order.
     """
     destination = Path(path)
     if is_repository_golden_path(destination):
         raise ValueError(f"refusing to write measurements into a canonical repository golden: {destination}")
-    with exclusive_golden(destination):
-        return _record_rows(destination, name, decisions=decisions, kernels=kernels, reference_backend=reference_backend)
+    with GoldenFile.edit(destination) as document:
+        return _record_rows(document, destination, name, decisions=decisions, kernels=kernels, reference_backend=reference_backend)
 
 
-def _record_rows(destination: Path, name: str, *, decisions, kernels, reference_backend: str) -> list[str]:
-    """The rows of one greedy pick, added to the file as it stands NOW. Runs under the lock."""
-    from emmy.compiler.pipeline.knob import canonical_row_key, family_of  # noqa: PLC0415
+def _record_rows(document: GoldenFile, destination: Path, name: str, *, decisions, kernels, reference_backend: str) -> list[str]:
+    """The rows of one greedy pick, added to ``document`` as it stands NOW. Runs under the lock."""
+    from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import measured_precision_pins  # noqa: PLC0415
 
-    document = GoldenFile.load(destination)
-    seeds = [(entry, realization) for entry in document.configs for realization in entry.realizations if realization.name == name]
+    seeds = list(document.rows(name))
     if not seeds:
         raise ValueError(f"{destination} has no realization named {name!r}")
 
@@ -483,7 +383,7 @@ def _record_rows(destination: Path, name: str, *, decisions, kernels, reference_
         # The seed's regime, with the precision gates the compile ACTUALLY enumerated under laid over
         # it: a row measured with the reduced-accumulate cell offered must say so, or a replay
         # republishes a regime that no longer offers it (``measured_precision_pins``).
-        return {**{key: value for key, value in seed.pins.items() if family_of(str(key)) != "PLACE"}, **measured_precision_pins()}
+        return {**seed.regime, **measured_precision_pins()}
 
     if decisions and len(seeds) > 1:
         # One name can hold several routing rows for one target. The seed is the one whose route the
@@ -545,5 +445,4 @@ def _record_rows(destination: Path, name: str, *, decisions, kernels, reference_
             )
         ]
         seed.kernel_set = tuple(written[: len(decisions)])
-    document.dump(destination, overwrite=True)
     return written

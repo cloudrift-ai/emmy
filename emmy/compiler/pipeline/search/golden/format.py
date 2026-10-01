@@ -3,11 +3,13 @@ writes, and the rules that cross objects (:meth:`GoldenFile.check`)."""
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
 import tempfile
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field, fields
 from enum import StrEnum
 from pathlib import Path
@@ -19,7 +21,7 @@ from emmy.compiler.pipeline.knob import KnobType, family_of, get, validate_famil
 from emmy.compiler.pipeline.search.pins import pins_freeze_cut
 from emmy.compiler.wire import Wire
 
-from .record import GoldenRecord
+from .record import GoldenRecord, GoldenRecords, Row
 
 
 class GoldenEntryState(StrEnum):
@@ -113,7 +115,7 @@ class Latency(Wire):
 
 
 @dataclass(kw_only=True)
-class Realization(Wire):
+class Realization(Wire, Row):
     """One row of a target: its name, the input pins and bindings it stands under, and what it
     records — a schedule (``knobs``), a measurement, a kernel-set listing, a card's latencies."""
 
@@ -205,6 +207,26 @@ class GoldenFile(Wire):
     def __post_init__(self) -> None:
         if self.model_quant_digest is not None and not _hex(self.model_quant_digest, 16):
             raise ValueError("model_quant_digest must be a 16-character lowercase hexadecimal digest")
+
+    @classmethod
+    @contextmanager
+    def edit(cls, path: str | Path) -> Iterator[GoldenFile]:
+        """The golden at ``path``, loaded to be changed and written back — one read-modify-write, held
+        against every other process on this machine.
+
+        A recorder loads the file, adds its rows and writes the whole document back, so two runs that
+        both load before either writes each dump a document missing the other's rows — 18 of 151
+        realizations recorded in one parallel round were lost that way. The load belongs INSIDE this
+        lock: locking a stale document would serialize the loss, not stop it. ``flock`` releases with
+        the descriptor, on a killed process too."""
+        destination = Path(path)
+        lock = destination.with_name(destination.name + ".lock")
+        lock.parent.mkdir(parents=True, exist_ok=True)
+        with open(lock, "w") as handle:  # noqa: PTH123, SIM115 — flock takes a descriptor
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            document = cls.load(destination)
+            yield document
+            document.dump(destination, overwrite=True)
 
     @classmethod
     def load(cls, path: str | Path, *, repository: bool | None = None) -> GoldenFile:
@@ -313,11 +335,17 @@ class GoldenFile(Wire):
                 if repository and state == GoldenEntryState.INVENTORY:
                     raise ValueError(f"{row_where} a repository row must spell a schedule (knobs)")
 
-    def records(self) -> list[GoldenRecord]:
-        """Every row of the file as the flattened record the evidence consumers read."""
-        return [self.record(entry, row, config_index=index) for index, entry in enumerate(self.configs) for row in entry.realizations]
+    def rows(self, name: str | None = None) -> Iterator[tuple[Config, Realization]]:
+        """Every row of the file with its config entry, in file order — those named ``name`` when given."""
+        return ((entry, row) for entry in self.configs for row in entry.realizations if name is None or row.name == name)
 
-    def record(self, entry: Config, realization: Realization, *, config_index: int = 0) -> GoldenRecord:
+    def records(self) -> GoldenRecords:
+        """Every row of the file as the flattened record the evidence consumers read."""
+        return GoldenRecords(self.record(entry, row) for entry, row in self.rows())
+
+    def record(self, entry: Config, realization: Realization) -> GoldenRecord:
+        """One row as the flattened record, keyed to the config entry ``entry`` is in this document (the first
+        when it is a copy the document does not hold, as a restamp's fresh entry is)."""
         return GoldenRecord(
             name=realization.name,
             gpu_name=gpu.canonical_name(self.gpu_name or ""),
@@ -325,7 +353,7 @@ class GoldenFile(Wire):
             model=self.model,
             program_index=entry.program,
             program_wire=self.programs[entry.program] if entry.program is not None else None,
-            config_index=config_index,
+            config_index=next((index for index, config in enumerate(self.configs) if config is entry), 0),
             origins=tuple(entry.target.origins),
             bindings=tuple(sorted(realization.bindings.items())),
             pins=tuple(sorted(realization.pins.items())),

@@ -14,13 +14,8 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import Conv1dOp, LinearOp
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.tensor.ir import CastOp, ElementwiseOp, GatherOp
-from emmy.compiler.pipeline.search.golden import GoldenFile
+from emmy.compiler.pipeline.search.golden import GoldenFile, append_trace_inventory, write_trace_inventories, write_trace_inventory
 from emmy.compiler.pipeline.search.golden.repository import _file_gpu_name
-from emmy.compiler.pipeline.search.working_golden import (
-    append_trace_inventory,
-    write_trace_inventories,
-    write_trace_inventory,
-)
 
 # An inventory stamps the card its context is for, and reading a record back reconstructs that
 # card from the ``emmy.gpu`` registry — where an unregistered card is a hard error, not a

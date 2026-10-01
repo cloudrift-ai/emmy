@@ -186,9 +186,10 @@ For a single-layer trace, the loader derives a missing attention `layer_type` fr
 modules with independent rotary keys (for example DeepSeek V4's `main` / `compress`) supply the complete mapping.
 
 The trace and run handlers delegate working-golden inventory construction, target reconstruction and the record
-write-back to `compiler/pipeline/search/working_golden.py`. Scoped exact knob pins shared by `run` and the golden
-replay live beside that search lifecycle in `compiler/pipeline/search/pins.py`; command handlers retain only the
-workflow's argument validation and user-facing error/reporting.
+write-back to the golden package (`compiler/pipeline/search/golden/working.py`, every write one locked
+`GoldenFile.edit`). Scoped exact knob pins shared by `run` and the golden replay live beside that search lifecycle in
+`compiler/pipeline/search/pins.py`; command handlers retain only the workflow's argument validation and user-facing
+error/reporting.
 
 `emmy trace MODEL -o PATH` lowers through post-fusion Loop IR and writes one self-contained golden file inventory.
 The file embeds stable frontend Torch IR programs and emits one target row for every post-fusion kernel occurrence;
@@ -222,15 +223,15 @@ writes the same pool lowered fresh from the stored program (a `.json` output pat
 check restricts the diff to the targets the file stores. `emmy golden restamp [PATH…]` rewrites the golden onto that
 lowering; `check` and `restamp` default to every repository golden, none of the three needs a card, and the
 `refresh-golden` skill is the flow around them. What a restamp keeps per row is decided in
-`compiler/pipeline/search/restamp.py`: a measurement survives only when the row's kernel renders the same CUDA source
-from the fresh Loop IR, otherwise the row becomes a proposal. A row naming the target takes the fresh target's
+`compiler/pipeline/search/golden/restamp.py`: a measurement survives only when the row's kernel renders the same CUDA
+source from the fresh Loop IR, otherwise the row becomes a proposal. A row naming the target takes the fresh target's
 identity; a row naming a piece of the target's cut or split set keeps its own and survives only if the fresh set
 still mints that piece; this holds for a target whose own Loop IR is unchanged too, since its cut or split pieces can
 take new identities without it. A row that no longer decodes, a row whose kernel no fresh kernel writes, and a
 kernel-set row whose members all lost their measurements are dropped and named. The command never deletes a file: one nothing survives
 in is left alone and reported. The lowering behind the check, the restamp and `emmy trace`'s inventory is one function
-(`working_golden.lowered_kernels`), and every command that reads a golden by path loads it through
-`golden.load_golden`, which validates a repository golden strictly and anything else as a working file.
+(`golden.lowered_kernels`), and every command that reads a golden by path loads it through
+`GoldenFile.load`, which validates a repository golden strictly and anything else as a working file.
 
 **One golden flag pair on every command.** `--golden PATH` names a golden file (working or canonical) on `run`,
 `compile`, `serve`, `generate` and `eval golden`: its MEASURED rows are the golden evidence that command deploys from,
@@ -301,7 +302,7 @@ and knobs; a repeated name alone is never enough to choose a row. `--record-gree
 measured realizations of the named target: one routing row per kernel-set decision the compile took, priced at the
 summed isolated launches of the kernels that decision produced, and one child-identity schedule receipt per kernel at
 its own isolated launch, both with the greedy comparison row as their `same-input-greedy` reference
-(`working_golden.record_greedy_pick`; the pipeline ARCHITECTURE's golden-record Part has the spelling and the
+(`golden.record_greedy_pick`; the pipeline ARCHITECTURE's golden-record Part has the spelling and the
 pricing). Recording a set the file describes takes `--pin-route` beside it: a routing row's own time prices nothing,
 so without the pin the greedy row is the compiler's own pick, whole, and the receipts this writes are what price the
 decision for a compile nothing pins. That is how a pick the prior made becomes rows a strict-evidence compile of

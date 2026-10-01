@@ -15,8 +15,8 @@ import pytest
 
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.search.golden import GoldenFile
+from emmy.compiler.pipeline.search.golden.restamp import restamp, stale_targets, unresolved_route_keys
 from emmy.compiler.pipeline.search.pins import pinned_knobs
-from emmy.compiler.pipeline.search.restamp import restamp, stale_targets, unresolved_route_keys
 
 _CASE = Path(__file__).parents[2] / "realization" / "cases" / "reduce" / "rms-norm-cut-sweep-work.json"
 _KEY = "PLACE@map.1/map"
@@ -92,7 +92,7 @@ def test_a_key_through_a_swapped_operand_pair_reaches_the_same_seam() -> None:
     projection) re-orders the fused tree: a route key recorded before names the seam through the pair's
     second position, now its first. The key's positions still reach that seam, which restamp re-spells."""
     from emmy.compiler.ir.tile.path import family_sites, sites
-    from emmy.compiler.pipeline.search.restamp import seam_at_positions
+    from emmy.compiler.pipeline.search.golden.restamp import seam_at_positions
     from tests.compiler.passes.test_cut_forks import _lifted_parent, _mlp_graph
 
     parent = _lifted_parent(_mlp_graph())

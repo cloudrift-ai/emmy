@@ -1,12 +1,12 @@
-"""Golden file: the evidence store — its file format, the record consumers read, its strict decode, the seam that
-files its rows into the tune DB a compile reads (``evidence``), and the repository index. One module per job; this
+"""Golden file: the evidence store — its file format, the record consumers read and the set they read together, its
+strict decode, the seam that files its rows into the tune DB a compile reads (``evidence``), the repository index,
+and the working golden's writers (``working``). The check and restamp of a golden against the fresh lowering of its
+programs is ``restamp``, imported by module: its function goes by the module's name. One module per job; this
 package is the public surface."""
 
 from .decode import (
     decode_record,
-    lead_of,
     piece_row,
-    siblings_of,
     unmatched_reason,
 )
 from .format import (
@@ -23,9 +23,7 @@ from .format import (
 )
 from .record import (
     GoldenRecord,
-    kernel_set_pins,
-    regime_pins,
-    shared_regime_pins,
+    GoldenRecords,
 )
 from .repository import (
     golden_records,
@@ -37,12 +35,24 @@ from .repository import (
     scope_explicit,
     sole_evidence,
 )
+from .working import (
+    TraceInventoryResult,
+    append_trace_inventory,
+    greedy_pick_rows,
+    kernel_programs,
+    kernel_set_prices,
+    lowered_kernels,
+    preflight_trace_inventory,
+    record_greedy_pick,
+    record_latency,
+    validate_working_gpu,
+    write_trace_inventories,
+    write_trace_inventory,
+)
 
 __all__ = [
     "GoldenRecord",
-    "kernel_set_pins",
-    "regime_pins",
-    "shared_regime_pins",
+    "GoldenRecords",
     "Config",
     "GoldenEntryState",
     "GoldenFile",
@@ -54,9 +64,7 @@ __all__ = [
     "prepare_traced_graph",
     "program_text",
     "decode_record",
-    "lead_of",
     "piece_row",
-    "siblings_of",
     "unmatched_reason",
     "golden_records",
     "goldens_for_live_gpu",
@@ -66,4 +74,16 @@ __all__ = [
     "scope_digest",
     "scope_explicit",
     "sole_evidence",
+    "TraceInventoryResult",
+    "append_trace_inventory",
+    "greedy_pick_rows",
+    "kernel_programs",
+    "kernel_set_prices",
+    "lowered_kernels",
+    "preflight_trace_inventory",
+    "record_greedy_pick",
+    "record_latency",
+    "validate_working_gpu",
+    "write_trace_inventories",
+    "write_trace_inventory",
 ]

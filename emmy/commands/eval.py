@@ -516,7 +516,7 @@ def _emit_offer_audit(configs: list) -> bool:
     This is the OWN-SNIPPET view; the serving-matrix compile in :func:`handle_eval_golden` closes
     the other side, whether the fused serving graphs are decided by these rows. Returns True when any entry
     is unrealized (``eval golden`` exits 1)."""
-    from emmy.compiler.pipeline.search.golden import decode_record, siblings_of  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import decode_record  # noqa: PLC0415
 
     def kstr(g) -> str:  # the entry's distinguishing knobs, empty families dropped
         return ",".join(f"{k}={v}" for k, v in g.knobs.items() if v not in ("", None))
@@ -526,7 +526,7 @@ def _emit_offer_audit(configs: list) -> bool:
     unrealized = 0
     for g in configs:
         try:
-            reason = decode_record(g, siblings_of(g, configs))
+            reason = decode_record(g, configs)
         except Exception as exc:  # noqa: BLE001 — one entry's error is that entry's verdict
             reason = f"{type(exc).__name__}: {exc}"
         if reason is None:

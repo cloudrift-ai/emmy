@@ -17,7 +17,7 @@ import pytest
 
 from emmy.compiler.graph import Graph
 from emmy.compiler.ir.cuda.ir import CudaOp
-from emmy.compiler.pipeline.search.golden import lead_of, siblings_of
+from emmy.compiler.pipeline.search.golden import GoldenRecords
 from emmy.compiler.pipeline.search.golden.decode import _replay
 from emmy.compiler.wire import formed_from, kernel_bindings, kernel_tile, kernel_wire, symbolic_vars
 from tests.compiler.realization import helpers as corpus
@@ -77,8 +77,8 @@ def test_every_kernel_of_a_set_re_lowers_from_its_wire_to_itself(case_path):
     # The clustered flavour read off the same tile is the deploy identity the golden side mints for
     # the same kernels when it replays the case (what a receipt names, what an import computes). The
     # replay may know more kernels — the arms it looked into and did not take.
-    primary = case.record
-    replay = _replay(primary, siblings=siblings_of(primary, case.records), lead=lead_of(primary, case.records))
+    primary, records = case.record, GoldenRecords.of(case.records)
+    replay = _replay(primary, records, lead=records.lead(primary))
     assert deploy <= set(replay.kernels)
     if not any(taken):
         assert primary.kernel_identity in deploy

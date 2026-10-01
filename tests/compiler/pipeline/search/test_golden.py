@@ -16,14 +16,14 @@ from pathlib import Path
 import pytest
 
 from emmy.compiler.pipeline.search import golden
-from emmy.compiler.pipeline.search.golden import decode_record, scope_digest, siblings_of
+from emmy.compiler.pipeline.search.golden import decode_record, scope_digest
 from emmy.compiler.pipeline.search.golden.repository import _RECORDS_DIR, _records_of, repository_golden_paths
 
 
 def _decode(record, records) -> str | None:
     """The strict verdict for one row — ``None`` when it still decodes, else the reason."""
     try:
-        return decode_record(record, siblings_of(record, records))
+        return decode_record(record, records)
     except Exception as exc:  # noqa: BLE001 — the reason IS the product here
         return f"{type(exc).__name__}: {exc}"
 
@@ -173,10 +173,9 @@ def test_a_pool_that_holds_the_recorded_row_is_not_walked_whole(monkeypatch) -> 
     # The same smallest target the anchor test stands on: every assertion here replays it.
     records = _records_of(_RECORDS_DIR / "rtx5090_sm120.json")
     record = next(r for r in records if r.name == "matmul.square.512" and _decode(r, records) is None)
-    siblings = siblings_of(record, records)
 
     def rows(entry, wanted=None):
-        return frozenset().union(*_replay(entry, siblings=siblings, exhaustive=True, wanted=wanted).rows.values())
+        return frozenset().union(*_replay(entry, records, exhaustive=True, wanted=wanted).rows.values())
 
     wanted = schedule_match_key(piece_row(record.knobs))
     assert wanted in rows(record), "the whole pool holds the recorded row"
@@ -199,7 +198,7 @@ def test_a_pool_that_holds_the_recorded_row_is_not_walked_whole(monkeypatch) -> 
     absent = schedule_match_key(piece_row(missing.knobs))
     assert absent not in rows(missing), "a row no leaf spells equals nothing in the pool"
     full = rows(missing)
-    miss = _replay(missing, siblings=siblings, exhaustive=True, wanted=absent, explain=True)
+    miss = _replay(missing, records, exhaustive=True, wanted=absent, explain=True)
     keys = set().union(*(summary[0] for summary in miss.offered.values()))
     pairs = set().union(*(summary[1] for summary in miss.offered.values()))
     assert not miss.rows, "a miss retains no candidate rows"
@@ -224,7 +223,7 @@ def test_a_row_with_only_an_invalid_offered_value_reports_a_semantic_miss() -> N
     decided = next(key for key, value in record.knobs.items() if value not in ("", "0"))
     invalid = replace(record, knobs={decided: "not-a-real-value"})
 
-    reason = decode_record(invalid, siblings_of(invalid, records))
+    reason = decode_record(invalid, records)
     assert reason is not None and "NARROWING" in reason and decided in reason
 
 
@@ -274,12 +273,12 @@ def test_a_sibling_sharing_the_target_identity_cannot_silence_the_lead_cut() -> 
 
     def decodes(record, siblings) -> bool:  # the replay itself: the decode's verdict is memoized per record
         wanted = schedule_match_key(piece_row(record.knobs))
-        return any(_replay(record, siblings=siblings, exhaustive=True, wanted=wanted).rows.values())
+        return any(_replay(record, siblings, exhaustive=True, wanted=wanted).rows.values())
 
     golden = Path(__file__).parents[4] / "recipes" / "DeepSeek-V4-Flash-0731" / "golden" / "v100_sm70.json"
     records = _records_of(golden)
     lead = next(r for r in records if r.name == "pre16.k_linear_mean_reduce_03c479.8caa25e24052.m16.dc6db94ec8ea.dc6db94ec8ea")
-    siblings = siblings_of(lead, records)
+    siblings = records.siblings(lead)
     receipt = next(m for m in siblings if m.name.endswith(".5d9b14249e94"))
     assert decodes(receipt, [lead, *(m for m in siblings if m is not receipt)]), "the receipt decodes behind its lead's cut"
 
@@ -384,7 +383,7 @@ def test_stored_targets_are_the_fresh_lowering(path: Path, program: int) -> None
     """
     from emmy.compiler.pipeline.search.golden import kernel_pool_text
     from emmy.compiler.pipeline.search.golden.repository import _document_of
-    from emmy.compiler.pipeline.search.restamp import fresh_kernel_digests, fresh_kernels, stale_reasons
+    from emmy.compiler.pipeline.search.golden.restamp import fresh_kernel_digests, fresh_kernels, stale_reasons
 
     document, _ = _document_of(path)
     stale = stale_reasons(document, program, fresh_kernel_digests(document, program))

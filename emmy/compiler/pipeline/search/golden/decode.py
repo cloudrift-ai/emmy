@@ -3,7 +3,7 @@ under its pins, the match of its spelled row against what the replay offers, and
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import NamedTuple
 
 from emmy.compiler.context import Context
@@ -13,9 +13,16 @@ from emmy.compiler.pipeline import TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import exact_schedule_leaf, fork_signature, leaf_knobs
 from emmy.compiler.pipeline.knob import family_of, schedule_match_key, schedule_row_key, validate_family_value
 from emmy.compiler.pipeline.pipeline import NO_OPTION, Run, _is_structural_option
-from emmy.compiler.pipeline.search.pins import composed_routes, pinned_knobs, spelled_arm, stampable_reduce, unpinned_decisions
+from emmy.compiler.pipeline.search.pins import (
+    composed_routes,
+    note_place_key,
+    pinned_knobs,
+    spelled_arm,
+    stampable_reduce,
+    unpinned_decisions,
+)
 
-from .record import GoldenRecord, _lifted_target, kernel_set_pins
+from .record import GoldenRecord, GoldenRecords, _lifted_target
 
 
 def unmatched_reason(row: Sequence[tuple[str, str]], candidates) -> str:
@@ -52,8 +59,9 @@ def _unmatched_reason(
     return "every key and value is offered, no one candidate carries them together"
 
 
-def decode_record(record: GoldenRecord, siblings: Sequence[GoldenRecord] = ()) -> str | None:
-    """STRICTLY decode one record against the current compiler — ``None`` on success, else the
+def decode_record(record: GoldenRecord, records: Iterable[GoldenRecord] = ()) -> str | None:
+    """STRICTLY decode one record against the current compiler, beside the other entries of its kernel set among
+    ``records`` — ``None`` on success, else the
     failure reason. This is the replayability contract the nightly onboarding job gates: the persisted
     program selects exactly one kernel, except that a child-identity schedule receipt may select its
     kernel from a multi-kernel target by stored identity; a routing record's every cut key names a
@@ -66,6 +74,7 @@ def decode_record(record: GoldenRecord, siblings: Sequence[GoldenRecord] = ()) -
     equal one of THAT kernel's rows — a sibling child's row must not vouch for it; a compiler change
     that re-keys the kernel turns the row red until the file is re-keyed."""
 
+    records = GoldenRecords.of(records)
     tile = None
     try:
         tile = _lifted_target(record)
@@ -80,8 +89,8 @@ def decode_record(record: GoldenRecord, siblings: Sequence[GoldenRecord] = ()) -
     # and it decides every fork no entry names, a residual's further cut or split included; a
     # receipt replayed as its own lead would read those forks as fused and never mint its kernel.
     own = tile.identity_key(with_io=True) if tile is not None else None
-    lead = next((entry for entry in (record, *siblings) if own is not None and entry.identity == own), None)
-    replay = _replay(record, siblings=siblings, lead=lead, exhaustive=True, wanted=row)
+    lead = next((entry for entry in (record, *records.siblings(record)) if own is not None and entry.identity == own), None)
+    replay = _replay(record, records, lead=lead, exhaustive=True, wanted=row)
     if record.is_routing:
         if replay.unresolved:
             return f"routing key {replay.unresolved[0]!r} does not resolve to an offered cut seam"
@@ -105,7 +114,7 @@ def decode_record(record: GoldenRecord, siblings: Sequence[GoldenRecord] = ()) -
     reason = verdict(replay)
     if reason is not None:
         # A miss: replay again walking every fork, so the reason names what the kernels offer.
-        reason = verdict(_replay(record, siblings=siblings, lead=lead, exhaustive=True, wanted=row, explain=True))
+        reason = verdict(_replay(record, records, lead=lead, exhaustive=True, wanted=row, explain=True))
     return reason
 
 
@@ -173,35 +182,62 @@ def piece_row(row: Mapping[str, str]) -> dict[str, str]:
     return out
 
 
-def siblings_of(record: GoldenRecord, records: Sequence[GoldenRecord]) -> tuple[GoldenRecord, ...]:
-    """The other records of ``record``'s target among ``records`` — same config entry, bindings and
-    input regime: the entries that walk one kernel set together (a case's per-kernel entries, a
-    golden config's receipts). The first of them in ``records`` order is the set's lead."""
-    key = _set_key(record)
-    return tuple(other for other in records if other is not record and _set_key(other) == key)
+class Spelling:
+    """What a kernel set's entries say at the forks of one replay, and which entry says it.
 
+    Each entry spells one row (:meth:`GoldenRecords.spelling`): the arms of the routing rows its kernel set
+    lists, its route and its knobs. A fork offered on a kernel an entry names by ``identity`` is decided by THAT
+    entry — of two naming one kernel, the one spelling a route, since a row spelling none would read the kernel
+    as fused; the entry under decode, ``own``, decides its own kernel whatever it spells — and every other fork by
+    the lead, never by an entry that does not own it, whose row would say "fused" or "unsplit" of a kernel it
+    never described. A kernel-set decision consumes the keys that spelled it (a bare ``PLACE=cut`` its one
+    root-most cut), so the pieces it mints are read against what the entry has left to say. The seams an entry
+    marks cut together are one composed decision, offered to the cut pass as the deploy offers them
+    (:func:`~emmy.compiler.pipeline.search.pins.composed_routes`)."""
 
-def lead_of(record: GoldenRecord, records: Sequence[GoldenRecord]) -> GoldenRecord:
-    """The set's leading entry — the first record of ``record``'s target in ``records`` order, the
-    target's own entry: it decides every fork no entry names by identity."""
-    key = _set_key(record)
-    return next(other for other in records if _set_key(other) == key)
+    def __init__(self, entries: GoldenRecords, lead: GoldenRecord, *, own: GoldenRecord | None = None) -> None:
+        self.lead = lead
+        self.rows = {id(entry): entries.spelling(entry) for entry in entries}
+        self.named = {entry.identity: entry for entry in sorted(entries, key=lambda entry: bool(entry.route)) if entry.identity is not None}
+        if own is not None and own.identity is not None:
+            self.named[own.identity] = own
+        self.consumed: set[str] = set()
 
+    def decider(self, identity: str | None) -> GoldenRecord:
+        """The entry that decides the forks of the kernel ``identity`` names."""
+        return self.named.get(identity, self.lead) if identity is not None else self.lead
 
-def _record_cache_key(record: GoldenRecord) -> tuple:
-    return (id(record.loop_wire), record.target_key, record.compute_cap, record.bindings)
+    def structural(self, fp, decider: GoldenRecord) -> tuple[object, dict[str, str]] | None:
+        """The arm ``decider`` spells at the kernel-set fork ``fp`` (:func:`~emmy.compiler.pipeline.search.pins.spelled_arm`),
+        its keys consumed when the arm is a decision — or ``None`` when it decides nothing there."""
+        row = self.rows[id(decider)]
+        arm = spelled_arm(fp.options, row)
+        if arm is not None and _is_structural_option(arm[0]):
+            for key in (*(set(arm[1]) & set(row)), *(("PLACE",) if row.get("PLACE") == "cut" else ())):
+                note_place_key(key)
+                self.consumed.add(key)
+                row.pop(key, None)
+        return arm
 
+    def cut_keys(self, entry: GoldenRecord | None = None) -> set[str]:
+        """The ``PLACE`` keys ``entry`` marks cut — every entry's when none is named — as they stand now."""
+        rows = [self.rows[id(entry)]] if entry is not None else list(self.rows.values())
+        return {key for row in rows for key, value in row.items() if family_of(key) == "PLACE" and value == "cut"}
 
-def _set_key(record: GoldenRecord) -> tuple:
-
-    regime = tuple(sorted((str(k), str(v)) for k, v in record.pin_map.items() if family_of(str(k)) != "PLACE"))
-    return (_record_cache_key(record), record.config_index, regime)
+    def composed(self) -> list[tuple[None, tuple[str, ...]]]:
+        """The composed routes the entries spell: each row's several cut seams as one decision, once each."""
+        out: list[tuple[None, tuple[str, ...]]] = []
+        for row in self.rows.values():
+            keys = tuple(sorted(key for key, value in row.items() if family_of(key) == "PLACE" and value == "cut"))
+            if len(keys) > 1 and (None, keys) not in out:
+                out.append((None, keys))
+        return out
 
 
 def _replay(
     record: GoldenRecord,
+    records: Iterable[GoldenRecord] = (),
     *,
-    siblings: Sequence[GoldenRecord] = (),
     lead: GoldenRecord | None = None,
     exhaustive: bool = False,
     wanted: tuple[tuple[str, str], ...] | None = None,
@@ -214,13 +250,11 @@ def _replay(
     record's remaining keys are read against its own offers, exactly as the deploy reads a row of
     its signature.
 
-    ``siblings`` are the other entries of the same target (:func:`siblings_of`) and ``lead`` the
-    set's leading entry (:func:`lead_of`; its explicit kernel-set entry, or the record itself, when absent). A fork offered on a kernel
-    one entry names by ``identity`` is decided by THAT entry's spelling; every other fork by the
-    lead's — never by an entry that does not own it, whose row would say "fused" or "unsplit" of a
-    kernel it never described. So a set of per-kernel entries — the parent's cut, each piece's
-    row — walks one path together, and the record's own rows are what this replay reports.
-    ``exhaustive`` streams every schedule pool for ``rows``; a plain replay descends to each
+    The other entries of the record's kernel set among ``records`` (:meth:`GoldenRecords.siblings`) walk the
+    replay with it, each deciding the forks of the kernel it names and ``lead`` (its explicit kernel-set entry,
+    or the record itself, when absent) every other (:class:`Spelling`). So a set of per-kernel entries — the
+    parent's cut, each piece's row — walks one path together, and the record's own rows are what this replay
+    reports. ``exhaustive`` streams every schedule pool for ``rows``; a plain replay descends to each
     kernel's realized row. ``wanted`` names the ONE match key the caller will ask ``rows`` about.
     An unsampled schedule answers by decoding that complete row through its codec and compatibility
     context, without enumerating candidates. Other forks use lazy descent and keep only the wanted
@@ -229,25 +263,12 @@ def _replay(
     giving it a schedule anyway walks its fork to a first leaf, the bulk of a cold decode. ``explain``
     walks such forks instead, to name what they offer when the row is found nowhere."""
 
-    def _spelling(entry: GoldenRecord) -> dict[str, str]:
-        # A routed realization measures nothing itself and carries no row, so read alone it would
-        # say "this kernel ran whole" — the fuse reading, which is right for a row that genuinely
-        # took no kernel-set decision and wrong for this one. It spells the route it names instead.
-        referenced = kernel_set_pins(entry, (record, *siblings))
-        return {**referenced, **entry.route, **{str(key): str(value) for key, value in entry.knobs.items()}}
-
+    entries = GoldenRecords((record, *GoldenRecords.of(records).siblings(record)))
     if lead is None:
-        lead = record if record.is_routing else next((entry for entry in (record, *siblings) if entry.kernel_set), record)
-    # Entries can share an identity — a routing row and a plain row of one target. The one that
-    # spells a route decides the cut fork (it sorts last, and last wins); a row spelling none would
-    # read the kernel as fused.
-    named = {entry.identity: entry for entry in sorted(siblings, key=lambda entry: bool(entry.route)) if entry.identity is not None}
-    if record.identity is not None:
-        named[record.identity] = record
+        lead = record if record.is_routing else next((entry for entry in entries if entry.kernel_set), record)
+    spelling = Spelling(entries, lead, own=record)
     ctx = Context.from_target(record.compute_cap, gpu_name=record.gpu_name or None)
-    spelled = _spelling(record)
-    regime = {key: value for key, value in record.pin_map.items() if family_of(str(key)) != "PLACE"}
-    pending = {key for key, value in spelled.items() if family_of(key) == "PLACE" and value == "cut"}
+    pending = spelling.cut_keys(record)
     piece = piece_row(record.schedule_row)
     buckets: dict[str | None, set] = {}
     offered_keys: dict[str | None, set[str]] = {}
@@ -271,19 +292,14 @@ def _replay(
         # fork is keyed below, off its own stamp.
         signature = fork_signature(fp.root_op, fp.options, ctx)
         identity = _identity_of(fp.root_op)
-        owner = named.get(identity) if identity is not None else None
+        owner = spelling.named.get(identity) if identity is not None else None
         decider = owner if owner is not None else lead
         if fp.structural:
-            arm = spelled_arm(fp.options, spelled if decider is record else _spelling(decider))
+            arm = spelling.structural(fp, decider)
             if arm is not None:
                 option, knobs = arm
                 if _is_structural_option(option) and decider is record:
-                    # A cut consumes the key that spelled it (a bare ``PLACE=cut`` its one root-most
-                    # cut), so the pieces are read against what the record has left to say.
                     arms.append((signature, dict(knobs)))
-                    for key in (*(pending & set(knobs)), *(("PLACE",) if spelled.get("PLACE") == "cut" else ())):
-                        pending.discard(key)
-                        spelled.pop(key, None)
                 return option
         if identity is not None:
             kernels.add(identity)
@@ -362,16 +378,7 @@ def _replay(
         assert first_leaf is not None
         return first_op if first_op is not None else first_leaf
 
-    # The seams an entry marks cut together are one composed decision where they resolve on one
-    # kernel (a pinned compile consumed them so, and ``run --record-greedy`` wrote them so); the cut
-    # pass offers that arm on this replay's kernels so whichever entry decides a fork — the record,
-    # the lead, a sibling naming the kernel — can spell it.
-    composed: list[tuple[frozenset | None, tuple[str, ...]]] = []
-    for entry in (record, lead, *named.values()):
-        keys = tuple(sorted(key for key, value in _spelling(entry).items() if family_of(key) == "PLACE" and value == "cut"))
-        if len(keys) > 1 and (None, keys) not in composed:
-            composed.append((None, keys))
-    with unpinned_decisions(), pinned_knobs(regime), composed_routes(composed):
+    with unpinned_decisions(), pinned_knobs(record.regime), composed_routes(spelling.composed()):
         out, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(record.target_program.copy(), decide)
     for node_id, node in out.nodes.items():
         if isinstance(node.op, TileOp):
@@ -391,7 +398,7 @@ def _replay(
         {identity: frozenset(rows) for identity, rows in buckets.items()},
         frozenset(kernels),
         tuple(arms),
-        tuple(sorted(pending)),
+        tuple(sorted(pending - spelling.consumed)),
         realized,
         {identity: (frozenset(keys), frozenset(offered_pairs.get(identity, ()))) for identity, keys in offered_keys.items()},
         out,

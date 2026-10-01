@@ -40,21 +40,14 @@ from emmy.compiler.ir.cuda.ir import CudaOp
 from emmy.compiler.ir.tile.path import family_sites, parse_key, sites
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.knob import KERNEL_DECISION_FAMILIES, family_of
-from emmy.compiler.pipeline.search.golden import (
-    Config,
-    GoldenEntryState,
-    GoldenFile,
-    GoldenRecord,
-    Realization,
-    decode_record,
-    records_override,
-    siblings_of,
-)
-from emmy.compiler.pipeline.search.golden.decode import _replay
-from emmy.compiler.pipeline.search.golden.record import _lifted_target
 from emmy.compiler.pipeline.search.pins import pinned_knobs, tracking_place_keys, unpinned_decisions
-from emmy.compiler.pipeline.search.working_golden import lowered_kernels
 from emmy.compiler.structural import digest
+
+from .decode import _replay, decode_record
+from .format import Config, GoldenEntryState, GoldenFile, Realization
+from .record import GoldenRecord, GoldenRecords, _lifted_target
+from .repository import records_override
+from .working import lowered_kernels
 
 
 def fresh_kernels(document: GoldenFile, programs: Sequence[int] | None = None) -> dict[int, dict[frozenset, dict]]:
@@ -236,14 +229,14 @@ def _rekeyed_rows(document: GoldenFile, entry: Config, wire: dict, report: Resta
     new_key = replace(new_records[0], identity=None).kernel_identity
     target_identity = old_records[0].identity if old_records[0].is_routing or len({old.identity for old in old_records}) == 1 else old_key
     report.rows_rekeyed.extend(old.name for old in old_records if old.identity == target_identity and target_identity != old_key)
-    survivors = [
+    survivors = GoldenRecords(
         replace(new, identity=new_key) if old.identity in (old_key, target_identity) else new
         for old, new in zip(old_records, new_records, strict=True)
-    ]
+    )
 
     rows = []
     for realization, old, new in zip(entry.realizations, old_records, survivors, strict=True):
-        reason = decode_record(new, siblings_of(new, survivors))
+        reason = decode_record(new, survivors)
         if reason is not None:
             report.rows_dropped.append(f"{old.name}: {reason}")
             continue
@@ -322,10 +315,10 @@ def _kernel_sources(record: GoldenRecord, records: Sequence[GoldenRecord]) -> tu
     golden replay selects those rows before lowering, so source comparison does not search an
     unrelated schedule pool. ``None`` when replay or lowering refuses."""
 
-    siblings = [other for other in siblings_of(record, records) if other.is_routing or other.identity != record.identity]
+    siblings = [other for other in GoldenRecords.of(records).siblings(record) if other.is_routing or other.identity != record.identity]
     ctx = Context.from_target(record.compute_cap, gpu_name=record.gpu_name or None)
     try:
-        replay = _replay(record, siblings=siblings)
+        replay = _replay(record, siblings)
         graph = Pipeline.build(CUDA_PASSES[len(TILE_PASSES) :]).run(replay.graph.copy(), ctx=ctx, db=None)
     except Exception:  # noqa: BLE001 — a compile the row cannot steer is not the kernel it measured
         return None
