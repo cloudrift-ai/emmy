@@ -13,7 +13,8 @@ from emmy.compiler.backend.pack import save_executable
 from emmy.compiler.backend.plan import BufferSpec, ExecutionPlan, KernelSpec, LaunchSpec
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import F32
-from tests.compiler.helpers import requires_cuda
+from emmy.compiler.ir.cuda import TmaDescMeta
+from tests.compiler.helpers import requires_cuda, requires_sm
 
 pytestmark = [requires_cuda, pytest.mark.xdist_group("cuda")]
 
@@ -45,6 +46,62 @@ def _plan():
 
 def _bindings(x):
     return {"x": x.tobytes(), "w": np.float32(2).tobytes()}
+
+
+@requires_sm(9, 0)
+def test_first_program_graph_capture_prepares_tma_descriptors():
+    source = r"""struct __align__(64) CUtensorMap { unsigned long long opaque[16]; };
+extern "C" __global__ void tma_copy(float* y, const CUtensorMap* x_desc) {
+    __shared__ __align__(128) float tile[16][16];
+    __shared__ unsigned long long bar;
+    if (threadIdx.x == 0) {
+        unsigned int tile_addr = __cvta_generic_to_shared(tile);
+        unsigned int bar_addr = __cvta_generic_to_shared(&bar);
+        unsigned long long state;
+        asm volatile("mbarrier.init.shared.b64 [%0], 1;" :: "r"(bar_addr) : "memory");
+        asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
+        asm volatile("mbarrier.arrive.expect_tx.shared.b64 %0, [%1], 1024;"
+                     : "=l"(state) : "r"(bar_addr) : "memory");
+        asm volatile("cp.async.bulk.tensor.2d.shared::cta.global.mbarrier::complete_tx::bytes "
+                     "[%0], [%1, {%2, %3}], [%4];"
+                     :: "r"(tile_addr), "l"(x_desc), "r"(0), "r"(0), "r"(bar_addr) : "memory");
+        asm volatile("{.reg .pred p; wait: mbarrier.try_wait.parity.shared.b64 p, [%0], 0; @!p bra wait;}"
+                     :: "r"(bar_addr) : "memory");
+    }
+    __syncthreads();
+    y[threadIdx.x] = tile[threadIdx.x / 16][threadIdx.x % 16] + 1.0f;
+}
+"""
+    plan = ExecutionPlan(
+        "cuda",
+        ["x"],
+        ["y"],
+        [BufferSpec("x", (Dim(16), Dim(16)), F32, "input"), BufferSpec("y", (Dim(16), Dim(16)), F32, "output")],
+        {},
+        {},
+        [
+            LaunchSpec(
+                "y",
+                "tma_copy",
+                ("y", "x_desc"),
+                ((1,), (1,), (1,)),
+                ((256,), (1,), (1,)),
+                0,
+                (),
+                tma_descriptors=(TmaDescMeta("x_desc", "x", (16, 16)),),
+            )
+        ],
+        {"tma_copy": KernelSpec(source=source, arch_specific=True)},
+    )
+    x = np.arange(256, dtype=np.float32).reshape(16, 16)
+    with gpu_lock():
+        program = CompiledProgram.build_from_plan(plan, {"x": x})
+        # Capture before run_once, timing, or any other descriptor-preparing launch.
+        program.capture_program_graph()
+        for values in (x, x + 10):
+            program.upload_prefix({"x": values})
+            program.replay_program_graph()
+            np.testing.assert_array_equal(program.outputs()["y"], values + 1)
 
 
 def test_native_pack_parity_rebind_graph_and_retirement(tmp_path, monkeypatch):

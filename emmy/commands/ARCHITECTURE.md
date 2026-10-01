@@ -581,8 +581,9 @@ Serves an embedding model (or a generative chat model via `EmmyGenModel` with `-
 fp16) through vLLM with the emmy plugin flags baked in (`serving/` plugin; needs the `serving` extra). The opt-in
 `--compile-scope mlp` route instead subclasses vLLM 0.23's Qwen3.5 hybrid model, keeps its stock attention, GDN,
 state, scheduler and non-MLP ModelOpt NVFP4 loader, and compiles only its 64 dense text MLPs in checkpoint BF16.
-This route requires explicit Emmy schedule pins or a golden and an explicit `FAST_MATH` setting. The RTX 5090
-recipe pins `FAST_MATH=true` and scoped native FP4 schedules. The initial qualification covered BF16 execution,
+This route requires explicit Emmy schedule pins or a measured golden and an explicit `FAST_MATH` setting. The
+RTX 5090 launcher uses a measured golden, strict evidence, and a fresh private tune DB; the golden records
+`FAST_MATH=true` and scoped native FP4 schedules. The initial qualification covered BF16 execution,
 the 4K context envelope, and one-request streaming latency; broader output-quality checks remain necessary.
 Without `--runner` the
 runner is resolved the way vLLM resolves `--runner auto`, from the checkpoint's config and a Sentence Transformers

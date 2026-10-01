@@ -1,0 +1,18 @@
+# Compiler evidence is qualified on one RTX 5090. The current mixed serving
+# image is local to the qualification host, so this is not a deployable recipe.
+# scripts/serve_qwen38_nvfp4_mixed_5090.sh replays the measured golden with
+# strict evidence from a source checkout on that hardware.
+tags:
+  - onboarding
+  - untested
+
+model:
+  huggingface: Inferact/Qwen3.8-27B-NVFP4
+  revision: 6128240ebaf4eaa7bad2b3d1c72c37d677c5f462
+  rationale: Experimental BF16 mixed vLLM/Emmy MLP serving on one RTX 5090.
+  heat: 90
+  task: generate
+
+matrices:
+  deploy.gpu: NVIDIA GeForce RTX 5090
+  deploy.gpu_count: 1

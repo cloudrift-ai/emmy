@@ -298,13 +298,18 @@ and limits.
 scripts/serve_qwen38_nvfp4_mixed_5090.sh
 ```
 
-The recipe pins the checkpoint, vLLM envelope, compiler precision, shared cuts, and native schedules for both
-static shapes. On the RTX 5090 with driver 580.178.04, five warm 5-input/16-output requests measured 277 ms
-mean TTFT and 9.59 decode tokens/s, versus stock 303 ms and 8.77 tokens/s. One identical 4,005-input/16-output
-request took 11.16 s mixed and 12.25 s stock. Both arms answered five fixed tasks correctly, including a
-3,530-token needle prompt. Selected-token logprobs still differ, and four longer greedy continuations diverged
-before the main merge; these small checks do not establish broad model-quality equivalence. The adapter rejects
-an unpinned Emmy compile.
+The launcher fixes the checkpoint and vLLM envelope, then uses the model-specific measured RTX 5090 golden,
+strict evidence, and a fresh tune DB. The golden records `FAST_MATH=true`, shared cuts, and native FP4 schedules
+for both static shapes. A separate knobs helper supports explicit hand-pinned experiments. On driver 580.178.04,
+five warm 5-input/16-output requests measured 262 ms TTFT and 10.44 decode tokens/s for the golden server,
+versus 305 ms and 8.55 tokens/s for stock vLLM under matched eager settings and the same external client.
+The original pinned mixed route measured 257 ms and 10.52 tokens/s on an in-container client run. On fixed
+818-token summary and 3,082-token extraction requests, the golden and original mixed routes both beat matched
+eager stock, but the hand-tuned M=64 schedule showed no clear end-to-end gain over the original mixed pins.
+Both arms answered five earlier fixed tasks,
+including a 3,530-token needle; selected-token logprobs still differ. These small checks do not establish broad
+model-quality equivalence. [Implementation PR #993](https://github.com/cloudrift-ai/emmy/pull/993) has the full
+benchmark protocol, repeat results, and remaining limits.
 
 ## Experimental native generation
 

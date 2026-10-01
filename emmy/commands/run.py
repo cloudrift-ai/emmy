@@ -1056,7 +1056,7 @@ def _comparison_outputs(outputs: dict, graph) -> dict:
     """Decode physical carriers before command-layer correctness checks."""
     import numpy as np  # noqa: PLC0415
 
-    from emmy.compiler.dtype import decode_bf16  # noqa: PLC0415
+    from emmy.compiler.dtype import decode_bf16, decode_f4x2  # noqa: PLC0415
 
     if not hasattr(graph, "buffer"):
         return outputs
@@ -1068,6 +1068,10 @@ def _comparison_outputs(outputs: dict, graph) -> dict:
             if decoded is outputs:
                 decoded = dict(outputs)
             decoded[name] = decode_bf16(arr)
+        elif dtype.name == "f4e2m1x2" and arr.dtype == np.uint8:
+            if decoded is outputs:
+                decoded = dict(outputs)
+            decoded[name] = decode_f4x2(arr)
     return decoded
 
 
@@ -1162,12 +1166,25 @@ def _strict_correctness_proof(outputs: dict, reference_out, *, reference="eager"
     return proof
 
 
-def _eager_outputs_by_name(outputs: dict, eager_out) -> dict:
-    """Map positional eager outputs to the lowered graph's stable output names."""
+def _eager_outputs_by_name(outputs: dict, eager_out, graph=None) -> dict:
+    """Map eager outputs to lowered names, preserving packed carriers for decoding."""
     refs = list(eager_out) if isinstance(eager_out, (tuple, list)) else [eager_out]
     if len(refs) != len(outputs):
         return {}
-    return {name: ref.detach().float().cpu().numpy() if hasattr(ref, "detach") else ref for name, ref in zip(outputs, refs, strict=True)}
+    mapped = {}
+    for name, ref in zip(outputs, refs, strict=True):
+        if hasattr(ref, "detach"):
+            tensor = ref.detach()
+            if graph is not None and graph.buffer(name).dtype.name == "f4e2m1x2":
+                import torch  # noqa: PLC0415
+
+                tensor = tensor.contiguous().view(torch.uint8)
+            try:
+                ref = tensor.cpu().numpy()
+            except TypeError:
+                ref = tensor.float().cpu().numpy()
+        mapped[name] = ref
+    return _comparison_outputs(mapped, graph) if graph is not None else mapped
 
 
 def _cuda_knob_dicts(graph) -> list[dict]:
@@ -2387,13 +2404,14 @@ async def bench_lowered_vs_torch(
             torch_fn, torch_inputs = torch_ref.build_callable(frontend, input_tensors)
             with torch.no_grad(), correctness_oracle():
                 eager_out = torch_fn(*torch_inputs)
+            eager_values = _eager_outputs_by_name(result_outputs, eager_out, lowered)
             if strict_accuracy:
-                correctness = _strict_correctness_proof(result_outputs, eager_out)
+                correctness = _strict_correctness_proof(result_outputs, eager_values)
                 if correctness["status"] != "pass":
                     accuracy_error = f"strict eager correctness failed: {correctness.get('error', 'tolerance exceeded')}"
             else:
-                accuracy_error = _check_accuracy(result_outputs, eager_out)
-            reference = (input_data, _eager_outputs_by_name(result_outputs, eager_out))
+                accuracy_error = _check_accuracy(result_outputs, eager_values)
+            reference = (input_data, eager_values)
             if ref_out is not None:
                 ref_out.append(reference)
             if accuracy_error is not None:
@@ -3256,7 +3274,9 @@ def _check_accuracy(outputs, eager_out) -> str | None:
         eager_refs = list(eager_out) if isinstance(eager_out, (tuple, list)) else [eager_out]
     # Arrays, never Python lists: a list holds one float object per element. Measured at 2M cells the lists
     # peaked at 13.3 f64 copies of the output against 4.3 here, which at an LM-head output (134M cells) is 14 GB.
-    eager_flats = [t.detach().cpu().double().flatten().numpy() for t in eager_refs]
+    eager_flats = [
+        t.detach().cpu().double().flatten().numpy() if hasattr(t, "detach") else np.asarray(t, dtype=np.float64).ravel() for t in eager_refs
+    ]
     if any(np.isnan(flat).any() for flat in eager_flats):
         return "eager reference contains NaN (reproducer inputs out of domain)"
     failures: list[str] = []

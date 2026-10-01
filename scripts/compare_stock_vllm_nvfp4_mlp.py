@@ -11,6 +11,7 @@ Only the chosen layer's twelve MLP tensors are read. No attention or GDN runs.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.metadata
 import json
 import sys
@@ -457,6 +458,9 @@ def main() -> None:
                         if args.projection_probe
                         else error_metrics(actual, expected, atol=args.atol, rtol=args.rtol)
                     )
+                    if not args.projection_probe:
+                        bits = actual.detach().contiguous().view(torch.uint8).cpu().numpy().tobytes()
+                        report["rows"][rows]["emmy_sha256"] = hashlib.sha256(bits).hexdigest()
                     if args.projection_probe:
                         for name, value, ref in zip(("gate", "up"), actual, expected, strict=True):
                             if not torch.isfinite(value).all() or not torch.isfinite(ref).all():

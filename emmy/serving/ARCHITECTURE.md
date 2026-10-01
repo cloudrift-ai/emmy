@@ -33,9 +33,11 @@ packed ModelOpt NVFP4 keys. All other parameters and state interfaces remain sto
 The initial RTX 5090 route pads decode to static M=16 and prefill to static M=64, returns only active output rows,
 and shares plans, constant uploads, and the buffer arena across the 64 layers. Symbolic prefill remains available
 through the lower-level program interface. Checkpoint values stay layer-specific even when plans share a profile.
-The serving recipe explicitly pins `FAST_MATH` and scoped placement, work, tile, and stage knobs for both shapes;
-their identities must be rechecked after compiler graph changes. Shared BF16 input, constant, NumPy reference, and
-device-output handling also serves the existing generation paths.
+The RTX 5090 serving launcher deploys a model-specific measured golden with strict evidence and a fresh tune DB.
+That golden records `FAST_MATH=true`, parent and child placement cuts, and native FP4 schedules for both shapes.
+The separate knobs helper preserves explicit hand pins for reproducible experiments; final piece identities must
+be rechecked after compiler graph changes. Shared BF16 input, constant, NumPy reference, and device-output
+handling also serves the existing generation paths.
 
 ## Module map
 
