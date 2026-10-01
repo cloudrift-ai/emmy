@@ -1,7 +1,8 @@
-"""The reproduction gate on the shipped priors: with no measurement in scope, the greedy must reproduce what the
-repository goldens record — the set the priors are fit on — at one tolerance, per golden file and space. The hardware
-goldens' placement forks run in ``make test``; a model golden's walk and the schedule half take minutes per file and
-run under ``make test-priors``.
+"""The reproduction gate on the shipped priors: with no measurement in scope, the priors must reproduce what the
+repository goldens record — the set they are fit on — at one tolerance over each corpus and space: a placement fork's
+arm exactly, a schedule row within the top ``SCHEDULE_TOP`` of its pool as the prior orders it. The hardware goldens'
+placement forks run in ``make test``; a model golden's walk and the schedule half take minutes per file and run under
+``make test-priors``.
 
 A red node names the rows the prior cannot reproduce. The fix is a refit on the repository goldens (README, "Fit the
 priors"), or a better prior — never a lower tolerance.
@@ -55,15 +56,19 @@ def _pools(path: Path):
 
 @pytest.mark.parametrize(("corpus", "space"), _parameters())
 def test_the_shipped_priors_reproduce_the_goldens(corpus: str, space: str) -> None:
+    from emmy.compiler.pipeline.search.pool import DEFAULT_SAMPLE
     from emmy.compiler.pipeline.search.prior import OfflinePrior
     from emmy.compiler.pipeline.search.prior.offline import default_file
-    from emmy.compiler.pipeline.search.prior.reproduce import reproduce_placement, reproduce_schedule, reproduction_rate
+    from emmy.compiler.pipeline.search.prior.reproduce import reproduce_placement, reproduction_rate, schedule_ranks
 
-    scorer = OfflinePrior(path=str(default_file("placement"))).mean_scores_features if space == "placement" else None
+    prior = OfflinePrior(path=str(default_file(space)))
     verdicts = []
     for path in _paths(corpus):
         pools, placement = _pools(path)
-        found = reproduce_placement(placement, scorer) if space == "placement" else reproduce_schedule(pools)
+        if space == "placement":
+            found = reproduce_placement(placement, prior.mean_scores_features)
+        else:
+            found = schedule_ranks(pools, prior, sample=DEFAULT_SAMPLE)
         verdicts.extend((path, v) for v in found)
     rate = reproduction_rate([v for _, v in verdicts])
     judged = [v for _, v in verdicts if v.error is None]

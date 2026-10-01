@@ -5,7 +5,10 @@ an exported pool is a screen; this asks the question the way a deploy asks it. T
 
 - **schedule** — the kernel's definition at the pool's sizes through the tile lowering under the regime's pins
   alone, the resolved knobs against the pool's *closest* golden row (most knobs reproduced). Exact when every
-  golden knob is reproduced.
+  golden knob is reproduced — what ``emmy eval prior`` prints. The gate asks the approximate form instead
+  (:func:`schedule_ranks`): where the golden row sits in the pool as the prior orders it, reproduced when it is
+  within the top ``SCHEDULE_TOP`` of the pool. A pool holds tens of thousands of rows within noise of each other,
+  so the exact form is a bar no ranker clears, while the rank is a baseline a better prior tightens.
 - **placement** — the kernel walked through the lift and the cut pass with the placement prior deciding every
   placement fork (``ranking.walk_placement``), the arm it takes at the kernel's own fork — the first, where the
   golden's decision on this kernel lives; a nested decision is a pool of its own — against the arms the golden
@@ -25,6 +28,10 @@ from dataclasses import dataclass, field
 from emmy.compiler.pipeline.search.dataset import GoldenPool
 
 logger = logging.getLogger(__name__)
+
+#: The fraction of a schedule pool the golden row must sit within, as the schedule prior orders it, to count as
+#: reproduced — the baseline the gate holds the shipped weights to, tightened as the prior improves.
+SCHEDULE_TOP = 0.05
 
 
 @dataclass(frozen=True)
@@ -118,6 +125,23 @@ def reproduce_placement(pools: Sequence[GoldenPool], scorer: Callable, *, kernel
             fork = forks[0]
             golden = " | ".join(fork.labels[i] for i in fork.positives)
             out.append(Verdict(pool, fork.labels[fork.pick], golden, int(fork.pick in fork.positives), 1))
+    return out
+
+
+def schedule_ranks(pools: Sequence[GoldenPool], prior, *, sample: int, kernel: str | None = None) -> list[Verdict]:
+    """The schedule verdicts of every golden pool: the golden row's rank in the pool as ``prior`` orders it — the
+    pool enumerated as the dataset builds it (``ranking.build_golden_groups``, ``sample`` rows drawn, the golden
+    kept), tie-pessimistic like a greedy argmin — reproduced when within the top :data:`SCHEDULE_TOP` of the rows."""
+    from emmy.compiler.pipeline.search.metrics import best_dual_rank  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.ranking import build_golden_groups  # noqa: PLC0415
+
+    groups, _skipped = build_golden_groups(pools, "*", sample=sample, seed=0, kernel=kernel)
+    out: list[Verdict] = []
+    for group in groups:
+        quality = prior.score_rows(group)
+        rank, _optimistic = best_dual_rank(quality, group.golden_ids)
+        rows = len(group.feats)
+        out.append(Verdict(group.pools[0], f"rank {rank} of {rows}", f"top {SCHEDULE_TOP:.0%}", int(rank <= SCHEDULE_TOP * rows), 1))
     return out
 
 

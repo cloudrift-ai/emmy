@@ -201,8 +201,10 @@ emmy eval prior _data/placement
 `emmy fit` also writes a metrics file under `_tune/fits/<timestamp>-linear/`; two fits are compared by diffing their
 metrics files.
 
-**The reproduction gate.** `tests/compiler/pipeline/search/prior/test_reproduction.py` re-decides every repository
-golden with the shipped priors and no measurement in scope, and holds every file, in either space, to one tolerance.
+**The reproduction gate.** `tests/compiler/pipeline/search/prior/test_reproduction.py` holds the shipped priors to
+every repository golden, with no measurement in scope, at one tolerance over each corpus and space: a placement fork's
+recorded arm is the prior's pick, and a recorded schedule row sits within the top few percent of its pool as the
+prior orders it — a baseline that tightens as the schedule prior improves.
 The hardware goldens' placement forks run in `make test`; a model golden's walk and the schedule half take minutes per
 file and run under `make test-priors`, which a change to a prior or a golden runs at finalization. A red node names
 the rows the prior cannot reproduce. The fix is a refit on the repository goldens, after any change to one of them,
