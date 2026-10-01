@@ -75,8 +75,9 @@ move before its definition. The narrower `Body.ssa_uses` query follows statement
 expression read.
 
 Coordinate substitution through a `Fold` preserves its iteration and operand-binding parameter prefix. An environment
-parameter replaced by an expression leaves that tail, and `Lambda.closing` binds the expression's remaining free
-coordinates. A nested reduction keeps its own binder; substitution cannot capture or replace it.
+parameter replaced by an expression leaves that tail only if the replacements no longer read it. Existing coordinates
+keep their order; `Lambda.closing` adds newly introduced free coordinates only for expression substitutions. Pure
+renaming preserves the established tail. A nested reduction keeps its own binder; substitution cannot capture it.
 
 ## Classic schedule model
 
