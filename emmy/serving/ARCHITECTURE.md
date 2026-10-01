@@ -247,8 +247,9 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   tier below serves them. This is what makes a 256-expert model fit at all: one DeepSeek V4 pipeline stage's experts
   are ~9.4 GB against a 32 GB card that also carries attention, arenas and the KV cache, ~1.2 GB per rank once cut
   eight ways. The cut reaches the checkpoint read (`load_quantized_split`'s `expert_slice`), the twin's declared
-  expert shapes, the serving-twin capture (the config's `--tensor-parallel-size`) and the pack key. The router the combine calls is the runner's own copy
-  (`serving_router`), cast to the activation dtype except for the expert-selection bias (`e_score_correction_bias`),
+  expert shapes, the serving-twin capture (the config's `--tensor-parallel-size`) and the pack key. The router the
+  combine calls is the runner's own copy (`serving_router`), cast to the activation dtype except for the
+  expert-selection bias (`e_score_correction_bias`),
   which stays float32 as Transformers keeps it: DeepSeek V4's bias reaches ~27, where float16 rounding flipped a top-6
   pick in 9 of 27 layers for a probed token. DeepSeek V4's router runs wholly in float32, as its reference runtime
   does. The expert layout (orientation / interleave / bias —
@@ -377,16 +378,15 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   ids: a hash-routed MoE layer selects its experts by them (the frozen `tid2eid` table; the learned
   gate only weights the selection), and the runner refuses to route such a layer without them.
 
-  Under tensor parallelism the plugin hands the runner the rank's cut (`expert_slice=(rank, world)`):
-  the quantized loader keeps that cut of every per-expert checkpoint tensor, the unquantized lane cuts
-  the twin's own expert tables, and the group all-reduce sums the ranks' partial outputs. The distributed gate is a REAL-engine
-  parity test: the same tiny checkpoint served single-rank and TP2×PP2 must produce identical greedy
-  token ids (`tests/serving/generation/test_vllm_engine_deepseek_gpu.py`). Two seam contracts the
-  engine enforces that in-process gates cannot: compiled twins may hand outputs back in their
-  ACCUMULATION dtype, so the runner normalizes the carrier to the residual dtype and the routed
-  input / final-norm output to the activation dtype at the seam; and the cross-process GPU lock is
-  scoped per physical device — serving ranks each own a card, and one machine-wide lock deadlocks
-  a rank inside its combine against the peer its pending collective is waiting for.
+  Under tensor parallelism the plugin hands the runner the rank's cut (`expert_slice=(rank, world)`): the quantized
+  loader keeps that cut of every per-expert checkpoint tensor, the unquantized lane cuts the twin's own expert tables,
+  and the group all-reduce sums the ranks' partial outputs. The distributed gate is a REAL-engine parity test: the
+  same tiny checkpoint served single-rank and TP2×PP2 must produce identical greedy token ids
+  (`tests/serving/generation/test_vllm_engine_deepseek_gpu.py`). Two seam contracts the engine enforces that
+  in-process gates cannot: compiled twins may hand outputs back in their ACCUMULATION dtype, so the runner normalizes
+  the carrier to the residual dtype and the routed input / final-norm output to the activation dtype at the seam; and
+  the cross-process GPU lock is scoped per physical device — serving ranks each own a card, and one machine-wide lock
+  deadlocks a rank inside its combine against the peer its pending collective is waiting for.
 
   **Expert shape groups.** One expert program set per DISTINCT per-expert weight shape, not one per model.
   `shape_key` covers every per-expert tensor's shape, the codebook ids, the activation and the layout flags;
