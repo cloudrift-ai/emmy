@@ -70,7 +70,9 @@ def _combine(gate, experts, expert, xn):
     the routing math itself is the SHARED ``combine_routed_experts`` serving runs."""
     from emmy.serving.gen_runner import combine_routed_experts
 
-    return combine_routed_experts(xn, gate(xn), lambda e, rows: expert(rows, experts.gate_up_proj[e], experts.down_proj[e]))
+    return combine_routed_experts(
+        xn, gate(xn), lambda e, rows: expert(rows, experts.gate_up_proj[e], experts.down_proj[e]), num_experts=experts.gate_up_proj.shape[0]
+    )
 
 
 def test_moe_split_matches_eager_block_tail():
@@ -282,6 +284,7 @@ def test_exl3_laguna_routed_scale_matches_reference_architecture():
         hidden,
         routed,
         lambda e, rows: original_expert(rows, *experts.gate_up_proj[e].chunk(2, dim=0), experts.down_proj[e]),
+        num_experts=experts.gate_up_proj.shape[0],
     )
     assert moe_block_parts(dense) is None
     assert sparse.routed_scaling_factor == 2.5
@@ -307,6 +310,7 @@ def test_exl3_laguna_routed_scale_matches_reference_architecture():
         hidden,
         scaled_gate(hidden),
         lambda e, rows: expert(rows, *experts.gate_up_proj[e].chunk(2, dim=0), experts.down_proj[e]),
+        num_experts=experts.gate_up_proj.shape[0],
     )
     assert torch.isfinite(combined).all()
     torch.testing.assert_close(combined, reference * 128.0, rtol=1e-5, atol=1e-5)
@@ -626,7 +630,7 @@ def test_combine_casts_fp32_router_scores():
     xn = torch.randn(5, 8, dtype=torch.float16)
     scores = torch.rand(5, 2, dtype=torch.float32)
     indices = torch.randint(0, 4, (5, 2))
-    out = combine_routed_experts(xn, (None, scores, indices), lambda e, rows: rows * (e + 1))
+    out = combine_routed_experts(xn, (None, scores, indices), lambda e, rows: rows * (e + 1), num_experts=4)
     assert out.dtype == torch.float16
     ref = torch.zeros_like(xn)
     for t in range(5):
@@ -650,8 +654,8 @@ def test_marked_moe_contributions_preserve_the_float32_residual():
     def run_expert(expert, rows):
         return partials[expert].expand_as(rows)
 
-    assert not torch.isfinite(combine_routed_experts(xn, gated, run_expert)).all()
-    routed = combine_routed_experts(xn, gated, run_expert, accumulate_float32=True)
+    assert not torch.isfinite(combine_routed_experts(xn, gated, run_expert, num_experts=2)).all()
+    routed = combine_routed_experts(xn, gated, run_expert, num_experts=2, accumulate_float32=True)
     slots = _combine_slot_partials(scores, partials, xn.dtype, accumulate_float32=True)
 
     torch.testing.assert_close(routed, torch.zeros_like(xn, dtype=torch.float32), rtol=0, atol=0)

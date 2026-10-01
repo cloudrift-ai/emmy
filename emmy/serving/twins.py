@@ -91,6 +91,7 @@ def capture_twin_graphs(
     symbolic: bool = True,
     dtype: str = "float16",
     static_only: bool = False,
+    expert_slices: int = 1,
 ) -> dict[str, Graph]:
     """Trace every serving twin of ``model`` from its config alone (no weights).
 
@@ -105,7 +106,10 @@ def capture_twin_graphs(
     config-declared storage form (``…@f8e4m3``), retaining a plain form only when its layer
     profile includes unconverted experts. Native MXFP4 expert twins carry the corresponding
     ``@mxfp4`` suffix and the exact packed block/scale inputs. ``static_only`` is the deliberate exception: it accepts
-    only the proven decode-1/prefill-0 envelope and emits M=1 without any standard or symbolic twins."""
+    only the proven decode-1/prefill-0 envelope and emits M=1 without any standard or symbolic twins.
+    ``expert_slices`` is the serving tensor-parallel width: each rank holds that slice of every routed
+    expert (:func:`~emmy.compiler.trace.huggingface.slice_routed_experts`), so the expert twins are
+    the sliced programs serving compiles."""
     import torch  # noqa: PLC0415
     from transformers import AutoConfig, AutoModel  # noqa: PLC0415
 
@@ -125,6 +129,7 @@ def capture_twin_graphs(
         moe_block_parts,
         moe_expert_layout,
         retarget_constants_to_model,
+        slice_routed_experts,
     )
     from emmy.serving.gen_runner import trace_split  # noqa: PLC0415
 
@@ -152,6 +157,8 @@ def capture_twin_graphs(
             if "trust_remote_code" not in str(exc):
                 raise
             trunk = AutoModel.from_config(text, dtype=td, trust_remote_code=True).eval()
+        if expert_slices > 1:
+            slice_routed_experts(trunk, 0, expert_slices)
     hidden = text.hidden_size
 
     # Every static width a serving mode deploys gets a twin, so the in-model golden audit
@@ -235,7 +242,11 @@ def capture_twin_graphs(
                     graphs[twin_name] = trace_split(wrapper, example_args, argnames)
                     layer_scopes[twin_name] = members
 
-            if expert_w is not None:
+        if expert_w is not None:
+            # Every MoE boot compiles the M=1 expert program — the fixed-slot tier runs it — whatever
+            # widths the trunk serves, so the expert twins carry width 1 too.
+            expert_buckets = buckets if any(m == 1 for _name, m in buckets) else [*buckets, ("1", 1)]
+            for name, m in expert_buckets:
                 rows = 8 if m is None else m
                 examples = _expert_examples(parts[1], rows, hidden, td, split_gate_up=bool(storage))
                 argnames = ["x"] if m is None else None

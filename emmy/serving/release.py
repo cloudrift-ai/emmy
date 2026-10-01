@@ -37,6 +37,7 @@ class ServingConfig:
     golden_file: Path
     realizations: tuple[ServingRealization, ...]
     static_only: bool
+    tensor_parallel_size: int = 1
 
     @property
     def model_provenance(self) -> str:
@@ -46,11 +47,16 @@ class ServingConfig:
     def static_widths(self) -> tuple[int, ...]:
         return tuple(sorted({dict(row.bindings)["num_tokens"] for row in self.realizations if row.bindings}))
 
-    def realizations_for(self, width: int | None) -> tuple[ServingRealization, ...]:
+    def realizations_for(self, width: int | None, *, expert: bool = False) -> tuple[ServingRealization, ...]:
         """The rows a twin at ``width`` reaches: a static twin is compiled at its own width only,
         so its target carries that width's rows; a symbolic twin (``None``) carries the dynamic
-        rows, the any-width compile."""
-        return tuple(row for row in self.realizations if (dict(row.bindings).get("num_tokens") if row.bindings else None) == width)
+        rows, the any-width compile. An ``expert`` twin at width 1 carries the standard M=1 row even
+        when the config serves no M=1 trunk: every MoE boot compiles that expert program for the
+        fixed-slot tier."""
+        rows = tuple(row for row in self.realizations if (dict(row.bindings).get("num_tokens") if row.bindings else None) == width)
+        if expert and width == 1 and not rows:
+            return (ServingRealization(name="m1", bindings=(("num_tokens", 1),), pins=(("FAST_MATH", False),)),)
+        return rows
 
 
 def _read_env(path: Path) -> dict[str, str]:
@@ -222,7 +228,22 @@ def load_serving_config(path: str | Path) -> ServingConfig:
         golden_file=golden_path.resolve(),
         realizations=realizations,
         static_only=static_only,
+        tensor_parallel_size=_tensor_parallel_size(values.get("SERVE_EXTRA_ARGS", ""), source),
     )
+
+
+def _tensor_parallel_size(extra_args: str, source: Path) -> int:
+    """The tensor-parallel width ``SERVE_EXTRA_ARGS`` serves at: each rank holds that slice of every
+    routed expert, so the expert twins are traced at it."""
+    args = shlex.split(extra_args)
+    for i, arg in enumerate(args):
+        flag, eq, value = arg.partition("=")
+        if flag in ("--tensor-parallel-size", "-tp"):
+            value = value if eq else (args[i + 1] if i + 1 < len(args) else "")
+            if not value.isdigit() or int(value) < 1:
+                raise ValueError(f"{source}: {flag} must be a positive integer, got {value!r}")
+            return int(value)
+    return 1
 
 
 def revision_matches(golden_revision: str | None, serving_revision: str | None) -> bool:

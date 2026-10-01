@@ -240,15 +240,16 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   `expert(x, w_gate_up, w_down[, b_gate_up, b_down])` with the weights — and gpt-oss's per-expert biases — as
   forward args → graph INPUTS, fed per-expert dim-0 slices of the E-stacked tensors, which live on device beside
   the routers via `_ensure_device` under the per-layer `inputs` map), and the partials weighted-`index_add_` into
-  `h`. **Tensor-parallel expert sharding** rides that same combine: one rank loads a contiguous expert shard
-  (`load_quantized_split`'s `expert_range`, stacked rank-locally) and `combine_routed_experts` filters the router's
-  GLOBAL selection against it via `local_expert_slice`, translating each owned hit to the rank's own index and
-  skipping the rest. The router is replicated so every rank selects identically; each routed contribution therefore
-  belongs to exactly one shard, and summing the ranks' partials — the caller's all-reduce — reproduces the unsharded
-  result exactly. A rank that wins no token returns zeros, so the reduction needs no special case. This is what makes
-  a 256-expert model fit at all: one DeepSeek V4 pipeline stage's experts are ~9.4 GB sharded eight ways against a 32
-  GB card that also carries attention, arenas and the KV cache. The router the combine calls is the runner's own copy
-  (`serving_router`), cast to the activation dtype except for the expert-selection bias (`e_score_correction_bias`),
+  `h`. **Under tensor parallelism every rank holds a slice of EVERY expert** (`slice_routed_experts`, the slicing vLLM's
+  fused MoE does without expert parallelism): gate and up keep the same 1/world of the intermediate rows, down the
+  matching columns, so a rank's expert output is a partial sum the caller's all-reduce completes. The router is
+  replicated, so every rank runs the same picks and the same launches — the ranks stay in step, and the fixed-slot
+  tier below serves them. This is what makes a 256-expert model fit at all: one DeepSeek V4 pipeline stage's experts
+  are ~9.4 GB against a 32 GB card that also carries attention, arenas and the KV cache, ~1.2 GB per rank once sliced
+  eight ways. The slicing reaches the checkpoint read (`load_quantized_split`'s `expert_slice`), the twin's declared
+  expert shapes, the serving-twin capture (the config's `--tensor-parallel-size`) and the pack key. The router the
+  combine calls is the runner's own copy (`serving_router`), cast to the activation dtype except for the
+  expert-selection bias (`e_score_correction_bias`),
   which stays float32 as Transformers keeps it: DeepSeek V4's bias reaches ~27, where float16 rounding flipped a top-6
   pick in 9 of 27 layers for a probed token. DeepSeek V4's router runs wholly in float32, as its reference runtime
   does. The expert layout (orientation / interleave / bias —
@@ -257,9 +258,10 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   named inputs. Program count is 2/layer + one expert program per SHAPE GROUP (see below) — not `E`/layer. MoE
   layers are
   device-resident only (`forward_layer_post` raises on the host path) and are excluded from post→pre chaining (two
-  outputs; the layer output is a fresh torch tensor). The ROUTED dispatch host-syncs (`indices.unique().tolist()`; a
-  single row instead reads its `k` picks once and runs each owned expert on the row itself, no `unique`, `where` or
-  gather), which a whole-step decode capture cannot record — but single-token decode is capture-legal through the
+  outputs; the layer output is a fresh torch tensor). The ROUTED dispatch host-syncs once per layer (the per-expert
+  row counts; each expert's rows come from one stable sort of the picks — a single row reads its `k` picks instead
+  and runs each expert on the row itself), which a whole-step decode capture cannot record — but single-token decode
+  is capture-legal through the
   fixed-slot tier below, so `_is_moe_model` in `emmy/commands/serve.py` (local-config probe, UX only) has
   `_gen_graph_args` emit a FULL_DECODE_ONLY compilation-config with the capture ladder capped at size 1 instead of
   forcing `--enforce-eager`, and `EmmyGenModel.__init__` validates authoritatively against the runner: an MoE capture
@@ -309,7 +311,10 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   launch sequence, mirroring `run_device`). A schedule that stages an indirect operand through a TMA descriptor
   fails the compile loudly (descriptors bake the base address at encode) and single-token decode keeps the routed
   path (eager); a stale pre-indirect pack plan fails the `_indirect_covered` check and recompiles — no half-hit.
-  Wider decode steps and prefill always ride the routed dispatch; `combine_routed_experts` stays the parity
+  On a sliced-expert rank a decode batch up to the bucket width rides the slots too, row by row through the one
+  selector and partials pair (k launches per row): its picks reach nearly as many distinct experts as there are
+  picks, so the routed dispatch would launch about as often and add the per-layer host read. Wider steps, prefill
+  and whole-expert ranks ride the routed dispatch; `combine_routed_experts` stays the parity
   oracle (`test_gen_runner_gpu` fixed-slot-vs-routed + the direct-vs-indirect bit-exactness pin,
   `test_gen_capture_gpu` captured-step live-replay).
   **Per-input feed dtypes:** `_compile_split` binds every plan input at its own traced dtype rather than one blanket
@@ -353,10 +358,10 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   `final_norm_device` closes it through the model's learned `hc_head` collapse before the final norm
   — a module held beside the norm, not a mean. The `post` program returns THREE tensors of three
   different widths (`mixed[T, hc·H]`, `xn[T, H]`, `mix[T, hc]`), so the rider path sizes each
-  destination on its own width; the routed combine runs on `xn`, is reduced across the expert shards,
-  and lands on the streams through `place_routed_streams`. Verified on an sm_70 V100: the compiled
-  seam reproduces the eager `DeepseekV4DecoderLayer`, and per-shard expert partials sum to the
-  unsharded combine (`tests/serving/generation/test_gen_runner_deepseek_gpu.py`).
+  destination on its own width; the routed combine runs on `xn` (the fixed-slot tier for a decode
+  step, the routed dispatch otherwise), is reduced across the ranks' expert slices, and lands on the
+  streams through `place_routed_streams`. Verified on an sm_70 V100: the compiled seam reproduces the
+  eager `DeepseekV4DecoderLayer` (`tests/serving/generation/test_gen_runner_deepseek_gpu.py`).
 
   Inside the plugin, the whole attention sublayer is the FORK's: `EmmyGenModel` constructs one of the
   fork's own attention modules per local layer (shared top-k indexer buffer, shared aux streams,
@@ -373,17 +378,15 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   ids: a hash-routed MoE layer selects its experts by them (the frozen `tid2eid` table; the learned
   gate only weights the selection), and the runner refuses to route such a layer without them.
 
-  Under tensor parallelism the plugin derives each rank's CONTIGUOUS expert slice from the config's
-  routed-expert count and hands it to the runner (`expert_range`): the quantized loader narrows its
-  checkpoint read to the shard, the unquantized lane slices the twin's own expert tables, and the
-  rank's partial combine is completed by the group all-reduce. The distributed gate is a REAL-engine
-  parity test: the same tiny checkpoint served single-rank and TP2×PP2 must produce identical greedy
-  token ids (`tests/serving/generation/test_vllm_engine_deepseek_gpu.py`). Two seam contracts the
-  engine enforces that in-process gates cannot: compiled twins may hand outputs back in their
-  ACCUMULATION dtype, so the runner normalizes the carrier to the residual dtype and the routed
-  input / final-norm output to the activation dtype at the seam; and the cross-process GPU lock is
-  scoped per physical device — serving ranks each own a card, and one machine-wide lock deadlocks
-  a rank inside its combine against the peer its pending collective is waiting for.
+  Under tensor parallelism the plugin hands the runner the rank's slice (`expert_slice=(rank, world)`): the quantized
+  loader keeps that slice of every per-expert checkpoint tensor, the unquantized lane slices the twin's own expert
+  tables, and the group all-reduce sums the ranks' partial outputs. The distributed gate is a REAL-engine parity test:
+  the same tiny checkpoint served single-rank and TP2×PP2 must produce identical greedy token ids
+  (`tests/serving/generation/test_vllm_engine_deepseek_gpu.py`). Two seam contracts the engine enforces that
+  in-process gates cannot: compiled twins may hand outputs back in their ACCUMULATION dtype, so the runner normalizes
+  the carrier to the residual dtype and the routed input / final-norm output to the activation dtype at the seam; and
+  the cross-process GPU lock is scoped per physical device — serving ranks each own a card, and one machine-wide lock
+  deadlocks a rank inside its combine against the peer its pending collective is waiting for.
 
   **Expert shape groups.** One expert program set per DISTINCT per-expert weight shape, not one per model.
   `shape_key` covers every per-expert tensor's shape, the codebook ids, the activation and the layout flags;
@@ -697,13 +700,13 @@ Recorded follow-ups, in impact order:
   flag wins).
 - **DeepSeek V4 (`deepseek-ai/DeepSeek-V4-Flash-0731`) serves the published checkpoint at TP8 × PP2.**
   The pieces above — the fork's attention hosted per layer, the native-naming loader lane with its `.scale` ue8m0
-  block scales and compressed MXFP4 routed experts, tensor-parallel expert sharding with the group all-reduce, the
-  carrier-width pipeline transport — are implemented and gated (see the hyper-connection section), including a
-  real-engine TP2×PP2 greedy-parity test on a small config. Decode capture is unsupported for this architecture
-  (the routed combine host-syncs every step; the fixed-slot selector is unsharded) — the boot guard and
-  `emmy serve` both force eager. The 16× V100 boot serving mixed prefill/decode, its memory and KV numbers, and
-  greedy agreement against the fork's own implementation are recorded in the recipe's `RESULTS.md`. Still ahead:
-  a prebuilt serving image with a warmed pack, and the equal-envelope A/B.
+  block scales and compressed MXFP4 routed experts, every routed expert sliced across the tensor-parallel ranks with the
+  group all-reduce summing the slices, the carrier-width pipeline transport — are implemented and gated (see the
+  hyper-connection section), including a real-engine TP2×PP2 greedy-parity test on a small config. Single-token
+  decode is captured (capture size 1): with every rank running the same picks, the fixed-slot expert tier serves the
+  hyper-connection seam too. The 16× V100 boot serving mixed prefill/decode, its memory and KV numbers, and greedy
+  agreement against the fork's own implementation are recorded in the recipe's `RESULTS.md`. Still ahead: a prebuilt
+  serving image with a warmed pack, and the equal-envelope A/B.
 
 ## Quantized KV — `--kv-cache-dtype fp8_e4m3` (generative)
 
