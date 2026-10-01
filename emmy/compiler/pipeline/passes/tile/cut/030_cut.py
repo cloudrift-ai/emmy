@@ -15,7 +15,7 @@ from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.path import MissingSiteError, parse_key, resolve, sites
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.fork import SCHEDULE_FORK_STAMPS, DeferredFork, fork_signature
-from emmy.compiler.pipeline.knob import family_of, family_pins
+from emmy.compiler.pipeline.knob import axis_of, family_of, family_pins
 from emmy.compiler.pipeline.passes.tile._cut import cuttable_seams, full_projection_seams, output_map, realize
 from emmy.compiler.pipeline.passes.tile._split import split_forks
 from emmy.compiler.pipeline.search.pins import composed_cuts_for, note_place_key
@@ -68,6 +68,39 @@ def _rootmost(seams, all_sites, refuse: frozenset[str] = frozenset()):
     return min(kept, key=lambda candidate: depth[id(candidate.node)])
 
 
+def _child_site_pins() -> tuple[tuple[str, str, str], ...]:
+    """``(original, local site key, value)`` for PLACE pins addressed to a cut piece.
+
+    The ``place_<token>/`` prefix identifies the piece; the remainder uses the ordinary
+    site spelling relative to that piece. This is distinct from a kernel schedule pin such
+    as ``TILE@place_<token>``. ``EMMY_KNOBS`` is the shell-friendly way to set a name
+    with ``/`` in it.
+    """
+    return tuple(
+        (name, f"PLACE@{scope.split('/', 1)[1]}", value)
+        for name, value in family_pins("PLACE", kernels=True)
+        if (scope := axis_of(name)) is not None and scope.startswith("place_") and "/" in scope
+    )
+
+
+def _placement_pins(tile: TileOp) -> tuple[tuple[tuple[str, str], ...], dict[str, str]]:
+    """Resolve child-site scope before the ordinary site parser sees a key."""
+    targeted = _child_site_pins()
+    if targeted and "__place_" in tile.name:
+        # A nested cut keeps its ancestor's token in its name. Address only the most recent
+        # piece, so an ancestor's output-cut pin cannot cut the grandchild again.
+        token = tile.name.rsplit("__place_", 1)[1].split("__", 1)[0]
+        matched = [
+            (original, local, value)
+            for original, local, value in targeted
+            if original.split("@", 1)[1].split("/", 1)[0] == f"place_{token}"
+        ]
+        if not matched:
+            return (("PLACE", "fuse"),), {}
+        return tuple((local, value) for _, local, value in matched), {local: original for original, local, _ in matched}
+    return family_pins("PLACE"), {}
+
+
 def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str] | None:
     """The authoritative placement spelled by live PLACE pins, or ``None``.
 
@@ -81,7 +114,8 @@ def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str] | None:
     ``PLACE@site=fuse`` excludes that seam from the composed cut (alone, it decides fuse under
     that spelling). A bare cut supplies the primary root-most seam and composes with scoped cuts;
     a bare fuse applies only when no scoped pin addressed this kernel."""
-    pins = [(name, value) for name, value in family_pins("PLACE") if family_of(name) == "PLACE"]
+    scoped_pins, source_keys = _placement_pins(tile)
+    pins = [(name, value) for name, value in scoped_pins if family_of(name) == "PLACE"]
     if not pins:
         return None
     for _, value in pins:
@@ -100,7 +134,7 @@ def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str] | None:
         except MissingSiteError:
             missing = True  # the key addresses a seam of another kernel in the graph
             continue
-        note_place_key(name)
+        note_place_key(source_keys.get(name, name))
         if id(site.node) not in by_node:
             raise ValueError(f"PLACE pin {name!r} does not address a cuttable Fold edge in this kernel")
         seam = by_node[id(site.node)]
@@ -191,7 +225,9 @@ def _placement_forks(match: Match, root: Node, tile: TileOp, ctx=None):
         if value == "fuse":
             (spelling,) = chosen
             return DeferredFork(lambda: replace(tile, placement_decided=True), {spelling: "fuse"})
-        return _cut_arm(lambda: realize(match, root, chosen, placement_decided=True), chosen)
+        # A later, explicitly targeted cut of a newly minted piece is still a pinned
+        # decision. Other children settle to fuse; parent-only pins stay terminal.
+        return _cut_arm(lambda: realize(match, root, chosen, placement_decided=not _child_site_pins()), chosen)
 
     options = [DeferredFork(lambda: replace(tile, placement_decided=True), {"PLACE": "fuse"})]
     options.extend(_cut_arm(lambda seam=seam: realize(match, root, (seam,)), (seam,)) for seam in seams)
