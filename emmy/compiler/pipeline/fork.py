@@ -249,6 +249,17 @@ def descent_sample(
 
     rng = random.Random(str(seed))
     sample: list = []
+    # A lazy branch recomputes its children on every ``expand`` — the whole frontier at that site — and the
+    # descents share their upper levels, so each node visited is expanded once and its children kept for the
+    # next descent through it: the draw then costs the distinct nodes it visits, not depth times descents.
+    expanded: dict[int, list] = {}
+
+    def kids_of(branch) -> list:
+        kids = expanded.get(id(branch))
+        if kids is None:
+            kids = expanded[id(branch)] = branch.expand()
+        return kids
+
     if work_budget is None:
         attempts = 4 * draw
     else:
@@ -264,7 +275,7 @@ def descent_sample(
         option = options[rng.randrange(len(options))]
         dead = False
         while isinstance(option, Fork) and not option.is_leaf:
-            kids = option.expand()
+            kids = kids_of(option)
             if not kids:
                 dead = True
                 break
