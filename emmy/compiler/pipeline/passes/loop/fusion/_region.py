@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from emmy.compiler.graph import Graph
+from dataclasses import replace
+
+from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.loop import LoopOp, splice_graph
 
@@ -47,3 +49,30 @@ def build_merged_region(graph: Graph, region: set[str], live_outputs: tuple[str,
 
     result = splice_graph(sub)
     return result[0] if result is not None else None
+
+
+def wrap_multi_output_fragment(graph: Graph, merged: LoopOp, live_outputs: tuple[str, ...]) -> tuple[Graph, dict[str, str]]:
+    """Wrap one merged LoopOp and map every old live buffer to its new port."""
+    owner = graph.producer(live_outputs[0])
+    assert owner is not None
+    node_id = f"merged_{owner.id}"
+    new_buffers = (node_id, *(f"{node_id}__out{i}" for i in range(1, len(live_outputs))))
+    rename = dict(zip(live_outputs, new_buffers, strict=True))
+
+    tensors: list[Tensor] = []
+    for i, (old, new) in enumerate(zip(live_outputs, new_buffers, strict=True)):
+        tensor = graph.buffer(old)
+        assert tensor is not None
+        tensors.append(Tensor(tensor.name if i == 0 else new, tensor.shape, tensor.dtype))
+    merged = merged.rename_buffers(rename)
+    # Root insertion may reorder sibling loop nests. Kernel ABI order follows
+    # graph liveness, not incidental body order.
+    merged = replace(merged, outputs=dict(zip(new_buffers, tensors, strict=True)))
+    frag = Graph()
+    for inp_id in merged.inputs:
+        ext_t = graph.buffer(inp_id)
+        assert ext_t is not None
+        frag.add_node(InputOp(), [], ext_t, node_id=inp_id)
+    frag.add_node(merged, list(merged.inputs), outputs=tensors, node_id=node_id)
+    frag.outputs = list(new_buffers)
+    return frag, rename

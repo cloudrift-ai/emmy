@@ -1,5 +1,17 @@
 # Golden-bench kernel corpus
 
+## Post-cut producer fusion compatibility (#1003)
+
+All ten golden files have been updated for producer fusion after a cut. Twenty ordinary output-cut routing rows
+recover the previous kernel sets. Every retained row strictly decodes, and each complete CUDA kernel set matches
+its pre-feature source, argument order and launch geometry; the comparison ignores only generated function names.
+All 185 measurements are retained. These are source comparisons, with no new GPU timing or correctness run.
+
+The paired whole-layer results below remain the baseline. They do not measure the new fused producer alternative.
+The next V100 s1 experiment should compare fused K/V producers with their ordinary cut alternatives, then compare
+the whole layer against the 16-launch baseline and the same-input Hugging Face `torch.compile` layer. H100 s512
+needs profiling before another schedule sweep: the earlier gate/up and staging trials below lost.
+
 ## Five-card whole-layer check after #988 (2026-09-30)
 
 The target is Qwen3-0.6B layer 0 at sequence lengths 1 and 512 on the five named GPUs. Every comparison times the

@@ -57,12 +57,13 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Multi-output node (MIMO)** — One graph node or kernel that writes several output buffers. Independent terminal
   branches may fuse into one MIMO kernel while retaining one output port per observable value.
 - **Output-owning cut** — A placement cut whose piece writes one of the kernel's OWN output buffers rather than a
-  workspace. Offered where the branch it cuts is that output's only producer and the piece would bind a grid axis the
-  fused kernel cannot: it leaves single-output kernels, each free to bind its store's sweep axis when no axis rides
-  every store.
-- **Full-projection cut** — A placement cut that hands every part of one kernel its own kernel in a single decision:
-  each contraction, each reduce evaluated once ahead of an output sweep (the row's statistic), and each output —
-  taking only seams the placement fork already offers. Offered where every output has one producing branch and some
+  workspace. Offered where independent branches own the outputs, including when the pieces use the same grid.
+  It can separate fused sibling producers again; each piece may also bind a store's sweep axis that the fused
+  kernel could not bind across all its stores.
+- **Full-projection cut** — A composed placement decision selecting each contraction, each reduce evaluated once
+  ahead of an output sweep (the row's statistic), and each output, using seams the placement fork already offers.
+  Its workspace producers can fuse again and separate through output-owning cuts.
+  Offered where every output has one producing branch and some
   branch is not about a single reduce: the compiler then builds the kernel around one reduce and runs the rest
   serially inside it, where none reaches a tensor-core tier, while no axis rides every store's sweep path, so the
   launch has nothing to spread over either.
@@ -329,9 +330,9 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   its measured rows are evidence, and only when a command names the file with `--golden PATH`.
 - **Canonical golden file** — A reviewed per-GPU golden file. Model goldens live at
   `recipes/<model>/golden/<gpu-slug>_<compute-cap>.json`; the maintained model-agnostic golden records live under
-  `emmy/compiler/pipeline/search/golden/records/`. Every realization contains verified deployable measurements; the
-  record writers refuse a canonical path, so a re-record works on a copy. The files for the live card are the golden
-  evidence an ordinary compile reads.
+  `emmy/compiler/pipeline/search/golden/records/`. Measured rows supply deploy evidence; a compiler refresh can leave
+  unmeasured proposals awaiting a record run. The record writers refuse a canonical path, so a re-record works on
+  a copy. An ordinary compile reads the files for its live card.
 - **Evidence** — A compatible recorded measurement used to select between candidates: a tune database row — a
   `run --bench` writes its rows there, and a measured golden row is imported there before a compile picks. All are
   read by one rule.

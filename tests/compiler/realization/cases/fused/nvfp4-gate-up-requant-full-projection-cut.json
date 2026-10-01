@@ -9,7 +9,8 @@
    {"name": "k_linear_reduce.45c667574cd9", "pins": {"FAST_MATH": false}, "knobs": {"WORK": "", "REDUCE": "", "RASTER": ""}, "identity": "69f548b4781c44c087581286b32f902028921080a974fd424b6dea0e1da61b1b"},
    {"name": "k_linear_reduce.530f577c6ee3", "pins": {"FAST_MATH": false}, "knobs": {"WORK": "", "TILE": "", "REDUCE": "", "STAGE": "", "RASTER": ""}, "identity": "4350a37c80ccaf9f620869539e2609f6f16f6c9977c8c774cc6c596ae460992b"},
    {"name": "k_linear_reduce.99bf6d0e9132", "pins": {"FAST_MATH": false}, "knobs": {"WORK": "", "REDUCE": "", "RASTER": ""}, "identity": "efcbb0011a1bbfcfbb2d69cddd85fbf583363c32ab660dc620dc42996c02e493"},
-   {"name": "k_linear_reduce.f62e9fb1a8ef", "pins": {"FAST_MATH": false}, "knobs": {"WORK": "", "TILE": "", "REDUCE": "", "STAGE": "", "RASTER": ""}, "identity": "81fddc872ad8233629952497a953a09d0301cd3fe9b8a9b678ca9f742123cb31"}
+   {"name": "k_linear_reduce.331d08f38d27", "pins": {"FAST_MATH": false}, "knobs": {"PLACE@map.1/inner": "cut"}, "identity": "331d08f38d2720a9453da08c269156d90e1d9405a4be3eb645e710b205a7b9e2"},
+   {"name": "k_linear_reduce.9bd1ea60798c", "pins": {"FAST_MATH": false}, "knobs": {"WORK": "", "TILE": "", "REDUCE": "", "STAGE": "", "RASTER": ""}, "identity": "9bd1ea60798c514d9c037d4a8720d072a8185ab01f0332098129a2c95379df8b"}
   ]}
  ],
  "loops": [

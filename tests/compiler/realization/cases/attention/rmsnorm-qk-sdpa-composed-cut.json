@@ -9,7 +9,8 @@
    {"name": "k_sdpa_rms_norm_reduce_64db54.4c3336ca44eb", "pins": {"FAST_MATH": false}, "knobs": {"WORK": "", "RASTER": ""}, "identity": "b093a0fe51050b684c56a41c18872dc28c37ed907e7fda067b09d11e2279467c"},
    {"name": "k_sdpa_rms_norm_reduce_64db54.3e178fcc53b1", "pins": {"FAST_MATH": false}, "knobs": {"WORK": "", "REDUCE": "", "RASTER": ""}, "identity": "5f06a4ce3cc6364bc4eb943b9995ef89ef6aaef343271890fcfdb775db2d9c4b"},
    {"name": "k_sdpa_rms_norm_reduce_64db54.8e594aa10297", "pins": {"FAST_MATH": false}, "knobs": {"TILE@map.1/twist": "", "TILE@map.1/twist.1/inner": "", "REDUCE@map.1/twist": "coop", "REDUCE@map.1/twist.1/inner": "", "STAGE@map.1/twist": "", "STAGE@map.1/twist.1/inner": "", "WORK": "t16", "RASTER": ""}, "identity": "20b1af392d5f66955f2e37cb1f514572e6fbc24d842ac5b0c98f2e79e74c81d2"},
-   {"name": "k_sdpa_rms_norm_reduce_64db54.bc0f44081901", "pins": {"FAST_MATH": false}, "knobs": {"WORK": "t16", "REDUCE": "coop", "RASTER": ""}, "identity": "bc0f44081901dc584cbdab45c9415f66784efa510789227ec72b45128f1dd51d"}
+   {"name": "k_sdpa_rms_norm_reduce_64db54.bc0f44081901", "pins": {"FAST_MATH": false}, "knobs": {"WORK": "t16", "REDUCE": "coop", "RASTER": ""}, "identity": "bc0f44081901dc584cbdab45c9415f66784efa510789227ec72b45128f1dd51d"},
+   {"name": "k_sdpa_rms_norm_reduce_64db54.5ae393ca12f6", "pins": {"FAST_MATH": false}, "knobs": {"PLACE@map.1/reduce": "cut"}, "identity": "5ae393ca12f64cff3d850d6fa71f42778703b8ace4245e01c9c7836f96ba4ebe"}
   ]}
  ],
  "loops": [

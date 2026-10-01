@@ -36,7 +36,7 @@ from emmy.compiler.pipeline.pipeline import RuleSkipped, Run, _is_structural_opt
 from emmy.compiler.pipeline.search.golden import GoldenFile, GoldenRecord, Measurements, decode_record
 from emmy.compiler.pipeline.search.golden.decode import _replay
 from emmy.compiler.pipeline.search.golden.record import _lifted_target, _target_kernel_nodes
-from emmy.compiler.pipeline.search.pins import pinned_knobs
+from emmy.compiler.pipeline.search.pins import pinned_knobs, spelled_arm
 from tests.compiler.helpers import case_target_tile, direct_classic_leaf, loop_record_fields, loop_target, requires_cuda
 from tests.compiler.terms import contraction, projection, reduction, slab
 
@@ -55,22 +55,29 @@ def test_cut_and_schedule_passes_share_the_generic_schedule_driver() -> None:
     assert import_module("emmy.compiler.pipeline.fork").schedule is schedule
 
 
-def test_placement_cut_preserves_a_cross_cta_split_receipt() -> None:
+@pytest.mark.parametrize("siblings", [False, True])
+def test_placement_cut_preserves_a_cross_cta_split_receipt(siblings: bool) -> None:
     """A split piece can re-enter placement; cutting it must not make REDUCE pending again."""
     from emmy.compiler.pipeline.passes.tile._split import split_pending
 
-    graph = _computed_operand_graph("a")
-    tile = graph.nodes["out"].op
+    if siblings:
+        graph, root = _mimo_case(_REQUANT)
+    else:
+        graph = _computed_operand_graph("a")
+        root = graph.nodes["out"]
+    tile = root.op
     # The partition receipt is the reduce axis's window in the kernel's axis table; the term names it only.
-    axes = tuple(replace(axis, window=Window(parent=axis, partition=True)) if axis.name == tile.op.axis else axis for axis in tile.axes)
-    graph.nodes["out"].op = replace(tile, axes=axes)
+    axes = tuple(replace(axis, window=Window(parent=axis, partition=True)) for axis in tile.axes)
+    root.op = replace(tile, axes=axes)
     pipeline = Pipeline.build(["tile/cut"])
     match = pipeline.match(graph, pipeline.passes[0].rules[0])[0]
     seams = cuttable_seams(match.root.op)
 
-    fragment = realize(match, match.root, (seams[0],))
+    fragment = _composed_arm(graph, root)[0].materialize() if siblings else realize(match, match.root, (seams[0],))
 
     pieces = [node.op for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
+    if siblings:
+        assert any(len(piece.output_specs) > 1 for piece in pieces)
     assert pieces and all(piece.split_consumed for piece in pieces)
     assert not any(split_pending(piece) for piece in pieces)
 
@@ -423,10 +430,7 @@ def test_unpinned_place_keeps_offering_fuse_and_recursive_cuts() -> None:
 
 
 def test_composed_scoped_place_pins_cut_together_and_foreign_pins_are_skipped() -> None:
-    """Every scoped PLACE pin that resolves on one kernel joins ONE realization — a producer per
-    seam and one consumer, with a producer reading another seam's workspace when its value nests
-    inside it — while a pin whose site path exists on no kernel here is another kernel's and is
-    skipped, never an error."""
+    """Scoped cuts compose; sibling workspace producers fuse, while their consumer stays cut."""
     match, graph = _case_match("attention/rmsnorm-qk-sdpa-composed-cut.json")
     pins = {
         "PLACE@map.1/twist.1/inner.1/map": "cut",  # the normalized-Q cone
@@ -444,10 +448,12 @@ def test_composed_scoped_place_pins_cut_together_and_foreign_pins_are_skipped() 
     (fragment,) = fork.expand()
     pieces = [node for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
     producers = [node for node in pieces if "__place_" in node.id]
-    assert len(producers) == 3 and len(pieces) == 4
-    assert all(node.op.placement_decided for node in pieces)
-    workspaces = {node.id for node in producers}
-    assert any(set(node.inputs) & workspaces for node in producers), "the nested value's producer must read a sibling workspace"
+    assert len(producers) == 2 and len(pieces) == 3
+    fused = next(node for node in producers if len(node.outputs) == 2)
+    assert len([seam for seam in cuttable_seams(fused.op) if seam.owned]) == 2
+    assert not fused.op.placement_decided, "a later output cut must still be offered"
+    assert all(node.op.placement_decided for node in pieces if node is not fused)
+    assert any(set(node.inputs) & {producer.id for producer in producers} for node in producers)
 
 
 def test_bare_and_scoped_place_cuts_compose_in_one_decision() -> None:
@@ -1071,11 +1077,13 @@ def test_a_twin_channel_read_at_shifted_columns_reads_the_plain_channels_workspa
         body = node.op.op.lower(frozenset(), node.op.output_specs, node.op.axes)
         return [(stmt.input, stmt.index[-1].pretty()) for stmt in body.iter() if isinstance(stmt, Load)]
 
-    *producers, consumer = (node for node in cut.nodes.values() if isinstance(node.op, TileOp))
-    assert sorted(tuple(d.as_static() for d in node.outputs[0].shape) for node in producers) == [(2, 8), (4, 8)], "k keeps its two heads"
+    *producers, consumer = (cut.nodes[nid] for nid in cut.topological_order() if isinstance(cut.nodes[nid].op, TileOp))
+    workspaces = [tensor for node in producers for tensor in node.outputs]
+    assert sorted(tuple(d.as_static() for d in tensor.shape) for tensor in workspaces) == [(2, 8), (4, 8)], "k keeps its two heads"
     assert sorted(name for node in producers for name, _ in loads(node) if name in ("x1", "x2")) == ["x1", "x2"], "each weight is read once"
     for node in producers:
-        assert len({column for name, column in loads(consumer) if name == node.id}) == 3, "the reader loads a workspace at three columns"
+        for buffer in node.buffer_names():
+            assert len({column for name, column in loads(consumer) if name == buffer}) == 3, "the reader loads a workspace at three columns"
 
 
 @requires_cuda
@@ -1380,14 +1388,12 @@ def test_a_shared_epilogue_statement_refuses_the_output_owning_cut() -> None:
     assert all(seam.owned is None for seam in cuttable_seams(node.op))
 
 
-def test_an_output_owning_cut_is_declined_where_no_piece_would_gain_a_grid_axis() -> None:
-    """The same partition over a purely pointwise quantize: both branches own a store, but neither
-    holds a contraction reading it, so promotion has nothing to lift and splitting would buy a
-    second launch and no grid. The seams keep their workspace reading."""
+def test_an_output_owning_cut_is_offered_without_a_grid_gain() -> None:
+    """Independent outputs can be split again even when both pieces use the same grid."""
     tile = case_target_tile("fused/nvfp4-quantize-cut-shared-normalizer.json")
 
     assert len(tile.output_specs) == 2
-    assert all(seam.owned is None for seam in cuttable_seams(tile))
+    assert len([seam for seam in cuttable_seams(tile) if seam.owned]) == 2
 
 
 # ---- the full-projection cut --------------------------------------------------------------------- #
@@ -1444,15 +1450,27 @@ def test_a_projection_owning_more_than_it_binds_offers_one_full_projection_cut()
 
 
 def test_the_full_projection_cut_leaves_one_contraction_per_piece_on_a_grid() -> None:
-    """Taking it. Every piece holds at most one contraction, which is the committed shape: each
-    expensive contraction computed once as the sole root of its own kernel, the owned outputs read
-    back. And every piece binds at least two grid axes — the pointwise pieces included, which is
-    what the sweep-promotion rule has to supply once no contraction is left under them."""
+    """The cut fixpoint terminates after output cuts separate the fused producers again."""
     graph, node = _mimo_case(_REQUANT)
-    option, knobs = _composed_arm(graph, node)
-    pieces = _piece_ops(option.materialize())
+    graph.inputs, graph.outputs = list(node.inputs), list(node.buffer_names())
+    _, knobs = _composed_arm(graph, node)
+    parent = node.op.identity_key(with_io=True)
+    decisions = 0
 
-    assert len(pieces) == len(knobs), "one piece per seam; the projection hands away all of its outputs"
+    def decide(fork):
+        nonlocal decisions
+        decisions += 1
+        assert decisions < 30, "cut/fuse did not reach a fixpoint"
+        owned = [seam for seam in cuttable_seams(fork.root_op) if seam.owned]
+        row = knobs if fork.root_op.identity_key(with_io=True) == parent else {owned[0].spelling: "cut"} if owned else {}
+        arm = spelled_arm(fork.options, row)
+        assert arm is not None
+        return arm[0]
+
+    fragment, _ = Run(Pipeline.build(["tile/cut"]), _CTX).resolve(graph, decide)
+    pieces = _piece_ops(fragment)
+
+    assert len(pieces) >= len(knobs) - 1
     for piece in pieces:
         assert len(_contraction_spellings(piece)) <= 1, f"{piece.name} still holds several contractions"
         assert len(piece.place.free) >= 2, f"{piece.name} kept a one-axis placement"

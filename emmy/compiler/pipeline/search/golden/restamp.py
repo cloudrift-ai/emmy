@@ -39,14 +39,14 @@ from emmy.compiler.context import Context
 from emmy.compiler.ir.cuda.ir import CudaOp
 from emmy.compiler.ir.tile.path import family_sites, parse_key, sites
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, TILE_PASSES, Pipeline
-from emmy.compiler.pipeline.knob import KERNEL_DECISION_FAMILIES, family_of
-from emmy.compiler.pipeline.search.pins import pinned_knobs, tracking_place_keys, unpinned_decisions
+from emmy.compiler.pipeline.knob import family_of
+from emmy.compiler.pipeline.pipeline import Run
+from emmy.compiler.pipeline.search.pins import composed_routes, pinned_knobs, unpinned_decisions
 from emmy.compiler.structural import digest
 
-from .decode import _replay, decode_record
+from .decode import Spelling, _replay, decode_record
 from .format import Config, GoldenEntryState, GoldenFile, Realization
 from .record import GoldenRecord, GoldenRecords, _lifted_target
-from .repository import records_override
 from .working import lowered_kernels
 
 
@@ -103,31 +103,40 @@ def _route_keys(record: GoldenRecord) -> frozenset[str]:
     return frozenset(key for key, value in record.route.items() if family_of(key) == "PLACE" and key != "PLACE" and value == "cut")
 
 
-def unresolved_route_keys(record: GoldenRecord, keys: frozenset[str]) -> list[str]:
-    """The ``keys`` of ``record``'s route that no kernel of its target resolves to a seam: its target
-    lowered through ``tile/cut`` with the keys pinned, as a pinned compile takes them. A key that names
-    nothing is a structural change the Loop IR check cannot see — a seam re-spelled while every
-    stored target kept its body — and a deploy would drop it without a word."""
-    regime = {key: value for key, value in record.pin_map.items() if family_of(str(key)) not in KERNEL_DECISION_FAMILIES}
+def unresolved_route_keys(record: GoldenRecord, keys: frozenset[str], records: Sequence[GoldenRecord] = ()) -> list[str]:
+    """The cut keys no decision consumes when this record's kernel set replays through ``tile/cut``.
+    Parent routes must run first: a child's seam belongs to the kernel its parent cut creates,
+    and publishing all keys as global pins can consume it on the wrong kernel."""
+    records = GoldenRecords.of(records)
+    entries = GoldenRecords((record, *records.siblings(record)))
+    own = _lifted_target(record).identity_key(with_io=True)
+    lead = next((entry for entry in entries if entry.identity == own), records.lead(record))
+    spelling = Spelling(entries, lead, own=record)
     ctx = Context.from_target(record.compute_cap, gpu_name=record.gpu_name or None)
-    pins = {**regime, **dict.fromkeys(keys, "cut")}
-    # No golden evidence: a cut the keys pin is decided by the pin alone, and importing the scope is
-    # the whole cost of the run.
-    with records_override([]), unpinned_decisions(), pinned_knobs(pins), tracking_place_keys() as resolved:
-        Pipeline.build([*LOOP_PASSES, "tile/lift", "tile/cut"]).run(record.target_program.copy(), ctx=ctx, db=None)
-    return sorted(keys - resolved)
+
+    def decide(fp):
+        identity = fp.root_op.identity_key(with_io=True)
+        arm = spelling.structural(fp, spelling.decider(identity))
+        return arm[0] if arm is not None else next(fp.leaves())
+
+    with unpinned_decisions(), pinned_knobs(record.regime), composed_routes(spelling.composed()):
+        Run(Pipeline.build([*LOOP_PASSES, "tile/lift", "tile/cut"]), ctx).resolve(record.target_program.copy(), decide)
+    return sorted(keys - spelling.consumed)
 
 
 def _stale_route_reasons(document: GoldenFile, entry: Config) -> list[str]:
-    checked: set[frozenset[str]] = set()
+    checked = set()
     reasons = []
-    for realization in entry.realizations:
-        record = document.record(entry, realization)
+    records = GoldenRecords(document.record(entry, row) for row in entry.realizations)
+    for record in records:
         keys = _route_keys(record)
-        if not keys or keys in checked:
+        identity = (record.identity, record.pins, keys)
+        if not keys or identity in checked:
             continue
-        checked.add(keys)
-        reasons += [f"{record.name}: route key {key!r} names no seam of the fresh lowering" for key in unresolved_route_keys(record, keys)]
+        checked.add(identity)
+        reasons += [
+            f"{record.name}: route key {key!r} names no seam of the fresh lowering" for key in unresolved_route_keys(record, keys, records)
+        ]
     return reasons
 
 
@@ -259,7 +268,8 @@ def _rekeyed_rows(document: GoldenFile, entry: Config, wire: dict, report: Resta
     for row in [row for row in rows if row.kernel_set_state(rows) is GoldenEntryState.INVENTORY]:
         rows.remove(row)
         report.rows_dropped.append(f"{row.name}: its kernel set lost its measurements")
-    return rows
+    names = {row.name for row in rows}
+    return [replace(row, kernel_set=tuple(name for name in row.kernel_set if name in names)) for row in rows]
 
 
 def _respelled_route(document: GoldenFile, entry: Config, row: Realization, report: RestampReport) -> Realization | None:
@@ -270,7 +280,8 @@ def _respelled_route(document: GoldenFile, entry: Config, row: Realization, repo
     route decides nothing would replay as another kernel set under its name."""
     record = document.record(entry, row)
     keys = _route_keys(record)
-    stale = unresolved_route_keys(record, keys) if keys else []
+    records = GoldenRecords(document.record(entry, row) for row in entry.realizations)
+    stale = unresolved_route_keys(record, keys, records) if keys else []
     if not stale:
         return row
     tile = _lifted_target(record)
@@ -286,7 +297,7 @@ def _respelled_route(document: GoldenFile, entry: Config, row: Realization, repo
         pins={renamed.get(key, key): value for key, value in row.pins.items()},
         knobs=None if row.knobs is None else {renamed.get(key, key): value for key, value in row.knobs.items()},
     )
-    if still := unresolved_route_keys(document.record(entry, respelled), frozenset(renamed.get(key, key) for key in keys)):
+    if still := unresolved_route_keys(document.record(entry, respelled), frozenset(renamed.get(key, key) for key in keys), records):
         report.rows_dropped.append(f"{row.name}: route key {still[0]!r} names no seam of the fresh lowering, re-spelled or not")
         return None
     report.rows_respelled.append(f"{row.name}: " + ", ".join(f"{old} -> {new}" for old, new in renamed.items()))
