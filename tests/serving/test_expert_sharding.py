@@ -118,6 +118,61 @@ def test_a_single_row_routes_without_waiting_on_the_device(monkeypatch):
     assert launched == sorted(gated[1][0].tolist())
 
 
+def test_a_batch_reads_its_routing_once(monkeypatch):
+    """A cut-expert rank routes a step to most of the experts, so the batch path must not wait on
+    the device per expert: one host read of the counts per layer, and the same sum as routing each
+    expert's rows found by ``where``, in the same order."""
+    torch = pytest.importorskip("torch")
+
+    from emmy.serving.gen_runner import combine_routed_experts
+
+    tokens, hidden, experts, top_k = 9, 8, 6, 3
+    generator = torch.Generator().manual_seed(7)
+    xn = torch.randn(tokens, hidden, generator=generator)
+    weights = [torch.randn(hidden, hidden, generator=generator) for _ in range(experts)]
+    scores, indices = _router_return(torch, tokens, experts, top_k, seed=8)
+
+    reference = torch.zeros_like(xn)
+    for e in range(experts):
+        tok, pos = torch.where(indices == e)
+        reference.index_add_(0, tok, (xn[tok] @ weights[e]) * scores[tok, pos, None])
+
+    reads = []
+    real_tolist = torch.Tensor.tolist
+    monkeypatch.setattr(torch.Tensor, "tolist", lambda t: reads.append(t.shape) or real_tolist(t))
+    monkeypatch.setattr(torch.Tensor, "unique", lambda *a, **k: pytest.fail("a batch asked the device for its experts"))
+    monkeypatch.setattr(torch, "where", lambda *a, **k: pytest.fail("a batch asked the device for one expert's rows"))
+    got = combine_routed_experts(xn, (scores, indices), lambda e, rows: rows @ weights[e])
+
+    assert torch.equal(got, reference)
+    assert len(reads) == 1
+
+
+@pytest.mark.parametrize(
+    ("rows", "slices", "path"), [(1, 1, "slots"), (4, 1, "routed"), (4, 8, "slots"), (16, 8, "slots"), (17, 8, "routed")]
+)
+def test_decode_batches_of_cut_experts_ride_the_fixed_slots(rows, slices, path):
+    """A single token always takes the fixed slots. With experts cut across ranks a decode batch
+    reaches nearly as many experts as it has picks, so up to the decode bucket its rows take the
+    slots too; wider steps, and whole-expert ranks, keep the routed dispatch."""
+    from types import SimpleNamespace
+
+    torch = pytest.importorskip("torch")
+
+    from emmy.serving.gen_runner import EmmyGenRunner
+
+    taken = []
+    runner = SimpleNamespace(
+        _slots_ok=True,
+        _expert_slices=slices,
+        _decode_bucket=16,
+        _moe_combine_slots=lambda moe, xn, ids: taken.append("slots") or xn,
+        _moe_combine=lambda moe, xn, ids: taken.append("routed") or xn,
+    )
+    EmmyGenRunner._moe_routed(runner, {}, torch.zeros(rows, 4), None)
+    assert taken == [path]
+
+
 def test_hash_routing_needs_the_steps_token_ids():
     """A hash router selects experts by token id; the router call must pass the ids through and
     refuse to route without them (silently routing on garbage would serve noise)."""

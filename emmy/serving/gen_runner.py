@@ -222,10 +222,11 @@ def combine_routed_experts(xn, gated, run_expert, *, accumulate_float32=False):
     (``slice_routed_experts``): every rank runs the same picks, and the all-reduce the caller issues
     sums the ranks' partials into the whole expert output.
 
-    A single row (every decode step of one request) reads its ``k`` picks to the host once and
-    runs each picked expert on the row itself, in the same ascending expert order: the general
-    path's ``unique``, per-expert ``where`` and row gathers each wait on the device, and one
-    row needs none of them."""
+    The general path reads the routing to the host ONCE per layer (the per-expert row counts) and
+    takes each expert's rows from one stable sort; on a cut-expert rank a step reaches most of the
+    experts, so one device wait per expert would pace the whole layer. A single row (every decode
+    step of one request) reads its ``k`` picks instead and runs each picked expert on the row
+    itself, in the same ascending expert order, with no sort or gathers at all."""
     import torch
 
     scores, indices = gated[-2], gated[-1]
@@ -237,10 +238,19 @@ def combine_routed_experts(xn, gated, run_expert, *, accumulate_float32=False):
         for pos in sorted(range(len(picks)), key=picks.__getitem__):
             out += run_expert(picks[pos], xn).to(accumulate_dtype) * scores[:, pos, None]
         return out
-    for e in indices.unique().tolist():
-        tok, pos = torch.where(indices == e)
-        partial = run_expert(e, xn[tok]).to(accumulate_dtype)
-        out.index_add_(0, tok, partial * scores[tok, pos, None])
+    # Every hit expert's rows in one sort and ONE host read of the per-expert counts: a stable
+    # sort of the flattened picks lists each expert's (row, slot) pairs in row order, exactly the
+    # rows a per-expert ``where`` would find — without one device wait per expert.
+    k = indices.shape[1]
+    order = torch.argsort(indices.reshape(-1), stable=True)
+    tok_all, pos_all = order // k, order % k
+    start = 0
+    for e, count in enumerate(torch.bincount(indices.reshape(-1)).tolist()):
+        if count:
+            tok, pos = tok_all[start : start + count], pos_all[start : start + count]
+            partial = run_expert(e, xn[tok]).to(accumulate_dtype)
+            out.index_add_(0, tok, partial * scores[tok, pos, None])
+        start += count
     return out
 
 
@@ -677,6 +687,8 @@ class EmmyGenRunner:
         self._pre_m1 = pre_m1  # list[_Program] — static M=1 gemv-class twins (or None → bucket twins take T=1)
         self._post_m1 = post_m1
         self._decode_bucket = decode_bucket
+        # The tensor-parallel width the routed experts are cut across (``slice_routed_experts``).
+        self._expert_slices = 1
         self._prefill_capacity = prefill_capacity  # symbolic programs' device-buffer token capacity (None -> host rebind only)
         self._pre_prefill = pre_prefill  # list[_Program] — static M=prefill_bucket chunk twins (or None → symbolic prefill)
         self._post_prefill = post_prefill
@@ -1696,6 +1708,7 @@ class EmmyGenRunner:
         # pipeline transport on it, so it must not be re-derived from the config there.
         runner._carrier_size = carrier
         runner._hc_mult = carrier // hidden
+        runner._expert_slices = expert_slices
         if runner.has_device_decode or (max_tokens is not None and runner._moe is not None):
             # EAGER, not lazy: vLLM sizes its KV cache from a profiling pass that runs
             # after model construction — anything allocated later (the embed table is
@@ -2099,8 +2112,11 @@ class EmmyGenRunner:
         """The routed experts' output for one MoE layer. Single-token decode rides the FIXED-SLOT
         combine (capture-legal — no host sync, a fixed launch set); every wider step keeps the routed
         dispatch, whose launch set varies with the routing (eager only). On a tensor-parallel group
-        each rank computes its slice of every pick, and the group reduction sums the slices."""
-        if self._slots_ok and xn.shape[0] == 1:
+        each rank computes its slice of every pick, and the group reduction sums the slices — so a
+        decode batch reaches nearly as many distinct experts as it has picks, and its rows ride the
+        fixed slots too: k launches per row cost less than one host-synced dispatch per expert."""
+        rows = xn.shape[0]
+        if self._slots_ok and (rows == 1 or (self._expert_slices > 1 and rows <= self._decode_bucket)):
             routed = self._moe_combine_slots(moe, xn, token_ids)
         else:
             routed = self._moe_combine(moe, xn, token_ids)
@@ -2207,29 +2223,36 @@ class EmmyGenRunner:
 
         self._ensure_device()
         gated = self._route(moe, xn, token_ids)
-        scores, indices = gated[-2], gated[-1]  # [1, k] each
+        scores, indices = gated[-2], gated[-1]  # [T, k] each
         self._record_routing(moe, indices)
         capturing = torch.cuda.is_current_stream_capturing()
         stream = torch.cuda.current_stream()
+        combined = []
         with gpu_lock():
-            self._slot_sel.copy_(indices.reshape(-1) + moe["sel_off"])
-            x_dev = xn.detach().contiguous()
-            for slot in self._expert_tiers[moe["group"]]["slots"]:
-                p = slot.program
-                with p.on_stream(stream):
-                    p.upload_prefix_device({"x": x_dev})
-                    if capturing:
-                        p.run_once()
-                    else:
-                        p.capture_program_graph()  # static program → one cached graph per slot
-                        p.replay_program_graph()
-        # [1, k] @ [k, H] — the fixed-shape weighted combine.
-        return _combine_slot_partials(
-            scores,
-            self._slot_partials,
-            xn.dtype,
-            accumulate_float32=moe.get("accumulate_float32", False),
-        )
+            # Row by row through the one selector and partials pair: a row's combine is queued on
+            # this stream before the next row's slot launches overwrite them.
+            for row in range(xn.shape[0]):
+                self._slot_sel.copy_(indices[row] + moe["sel_off"])
+                x_dev = xn[row : row + 1].detach().contiguous()
+                for slot in self._expert_tiers[moe["group"]]["slots"]:
+                    p = slot.program
+                    with p.on_stream(stream):
+                        p.upload_prefix_device({"x": x_dev})
+                        if capturing:
+                            p.run_once()
+                        else:
+                            p.capture_program_graph()  # static program → one cached graph per slot
+                            p.replay_program_graph()
+                # [1, k] @ [k, H] — the fixed-shape weighted combine.
+                combined.append(
+                    _combine_slot_partials(
+                        scores[row : row + 1],
+                        self._slot_partials,
+                        xn.dtype,
+                        accumulate_float32=moe.get("accumulate_float32", False),
+                    )
+                )
+        return combined[0] if len(combined) == 1 else torch.cat(combined)
 
     def _record_routing(self, moe, indices) -> None:
         """Count routed rows per persistent E-leading input slice on the current device.
