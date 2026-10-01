@@ -526,7 +526,7 @@ def _golden_regime_env(golden: str, env: dict) -> dict:
     from emmy.compiler.pipeline.search.golden import GoldenFile  # noqa: PLC0415
 
     out = {}
-    for name, value in GoldenFile.load(golden).records().shared_regime_pins().items():
+    for name, value in GoldenFile.load(golden).shared_regime().items():
         key = emmy_config.knob_var(name)
         if key in env and get(name.split("@", 1)[0]).parse(env[key]) != value:
             logger.error("%s: its rows were measured under %s=%s, but the environment pins %s=%r", golden, name, value, key, env[key])

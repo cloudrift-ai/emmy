@@ -10,9 +10,9 @@ commit away from the repository. No compile ever reads it, so what is imported i
 - ``import SOURCES…`` loads golden-shaped sources: measurement freeze directories, golden files, and tune DB files,
   which are frozen first (the way a card's measurements from a rented GPU reach the dataset). Nothing is loaded by
   default: the sources are named on the command line — for the offline prior, the hardware goldens
-  (``search/golden/records/*.json``) under ``--fresh``, the README's "Fit the offline prior" workflow. Every kernel is
-  re-lowered from its definition by the current compiler (``golden.evidence.import_goldens``), so the instance holds
-  today's identities and stamps whatever compiler wrote the source. A file's rows are sourced by its kind and digest
+  (``search/golden/records/*.json``) under ``--fresh``, the README's "Fit the offline prior" workflow. A golden file is
+  the DB's shape, so the import is a copy (``golden.evidence.import_file``); a stale file is what ``emmy golden
+  check`` names. A file's rows are sourced by its kind and digest
   (``freeze:`` for a freeze directory's files, ``golden:`` for a golden file), and a file the instance already holds
   is skipped: ``--fresh`` rebuilds from nothing.
 - ``export OUT`` writes the instance's rows as a dataset directory (``search/dataset``): every golden pool

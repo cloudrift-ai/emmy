@@ -295,19 +295,19 @@ def test_kernel_identity_is_not_redefined_outside_its_home() -> None:
 def test_a_new_fingerprint_fact_moves_the_corpus() -> None:
     """Every fact ``deploy_identity`` folds is stamped into a realization-corpus case.
 
-    The corpus stores each case's ``deploy_identity`` and fails when the stored value stops
-    matching. That is only a tripwire for identity drift if the corpus actually carries the stamp,
-    so this pins the connection: a fact newly folded into ``Op.deploy_identity`` — a loop-body
+    The corpus stores each kernel's exact identity and fails when a fresh lowering stops matching
+    it. That is only a tripwire for identity drift if the corpus actually carries the stamp, so
+    this pins the connection: a fact newly folded into ``Op.deploy_identity`` — a loop-body
     modeling fix, an io fact — must show up as a corpus diff rather than silently re-keying every
     checked-in reproducer.
     """
     cases = sorted((_REPO_ROOT / "tests/compiler/realization/cases").rglob("*.json"))
     assert cases, "the realization corpus is empty, so nothing would notice an identity change"
     unstamped = [
-        path.relative_to(_REPO_ROOT).as_posix() for path in cases if not re.search(r'"identity": "[0-9a-f]{64}"', path.read_text())
+        path.relative_to(_REPO_ROOT).as_posix() for path in cases if not re.search(r'"exact_identity":\s*"[0-9a-f]{64}"', path.read_text())
     ]
     assert not unstamped, (
-        "every corpus case must carry an `identity:` stamp, or a new fingerprint fact re-keys it "
+        "every corpus case must carry an `exact_identity:` stamp, or a new fingerprint fact re-keys it "
         "with nothing to notice. Run `make test-corpus-regen`.\n" + "\n".join(unstamped)
     )
 

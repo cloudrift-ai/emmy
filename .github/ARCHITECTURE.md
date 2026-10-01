@@ -176,8 +176,8 @@ keeps any complete golden, corpus case, or bounded compiler fix; the workflow va
 the job. Before validation of a failed run, the workflow restores tracked experiment and serving-image files, removes
 new files in those areas, and drops their paths from the summary. This keeps incomplete serving results from blocking
 the failure report. A successful run must remove the tag. For the selected
-recipe and GPU, the same nightly qualification validates the recipe-local golden schema, strictly decodes every stored
-row, and replays it on the exact card; pull-request tests do not load checked-in golden files. The shared serving
+recipe and GPU, the same nightly qualification validates the recipe-local golden file and replays it on the exact
+card; pull-request tests hold every golden to the fresh lowering of its programs and load nothing more of it. The shared serving
 experiment retains one LFS archive per exact GPU platform plus one cumulative `RESULTS.md`; each archive includes its
 system-only row records, and a run replaces only its platform snapshot. Ignored dated run directories, loose benchmark
 output, top-level row-record copies, and qualification summaries are not repository artifacts. An Emmy-tuned prebuilt

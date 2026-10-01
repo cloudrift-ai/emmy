@@ -10,10 +10,7 @@ featurizer (:func:`features.knob_features`) on that merge, so a ``Sample`` repro
 the feature vector each source built inline today.
 
 Featurization fidelity (the load-bearing invariant): the prior scores the full ``S_*``
-histogram stamped by the ``IdentityStrategy``. DB rows carry that histogram inline;
-golden rows derive it by lowering their embedded frontend program and selecting
-the target through provenance. Neither the histogram nor ``ShapeKey`` is part of
-the stable golden format.
+histogram stamped by the ``IdentityStrategy``, which every row carries inline.
 """
 
 from __future__ import annotations
@@ -29,7 +26,7 @@ from emmy.compiler.pipeline.search.features import knob_features
 @functools.cache
 def _card_features(gpu_name: str, cc: int) -> dict[str, float]:
     """The ``H_*`` features of ``gpu_name`` at compute capability ``cc`` (``H_cc`` encoding), from the
-    registry's memorized specs — the recipe :meth:`Sample.from_golden` uses for a golden's own card."""
+    registry's memorized specs — a row's own card's, never the live device's."""
     from emmy.compiler.context import Context  # noqa: PLC0415
 
     return Context.from_target(divmod(cc, 10), gpu_name=gpu_name).features()
@@ -99,30 +96,3 @@ class Sample:
         the inline construction the eval / prior code used (knobs win on collision,
         though the prefixes are disjoint)."""
         return knob_features(self.all_knobs())
-
-    @classmethod
-    def from_golden(cls, cfg, *, compile_s_feats: bool = False) -> Sample:
-        """A program-backed golden record as a normalized measurement sample.
-
-        ``compile_s_feats`` remains an accepted no-op for callers that used to
-        request snippet compilation. Structural features are lazily derived from the
-        embedded program and provenance target.
-        """
-        from emmy.compiler.context import Context  # noqa: PLC0415
-
-        tunable, _ctx, _s = _split_by_prefix(cfg.knobs)
-        return cls(
-            knobs=tunable,
-            latency_us=cfg.emmy_us,
-            shape=cfg.shape_key,
-            name=cfg.name,
-            dtype=cfg.dtype,
-            ref_us=cfg.reference_us,
-            pins=cfg.pin_map,
-            # gpu_name pins the device-physical features (H_sm_count / smem / …) to
-            # the golden's OWN card's memorized specs, not the live device's — so a
-            # PRO 6000 golden ranked on a 5090 (both cc 12.0) gets 188 SMs, not 170.
-            context=Context.from_target(cfg.compute_cap, gpu_name=cfg.gpu_name).features(),
-            source="golden",
-            s_full=dict(cfg.structural_features),
-        )
