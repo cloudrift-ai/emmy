@@ -2,6 +2,7 @@
 
 import json
 import pickle
+import random
 from dataclasses import FrozenInstanceError
 from itertools import permutations
 
@@ -293,6 +294,27 @@ def test_site_factors_do_not_depend_on_the_prefix() -> None:
     assert advanced.problem.node_site(last).nodes == before
 
 
+def test_a_draw_derives_the_supports_it_touches_and_never_a_site() -> None:
+    """A random descent costs the picks it tries: the step draws a node choice among those the site admits
+    under the prefix's relation, then a transport among that choice's supports, so supports are derived for the
+    choices the draw touched and for no other. The walk reads the same per-choice supports, so the two agree."""
+    problem = _problem(_contraction())
+    offers = ClassicProblem(*problem)
+    site = max(offers.node_sites, key=lambda candidate: len(candidate.nodes))
+    order = (site.id, *(other for other in offers.tile.node_sites if other != site.id))
+    context = ClassicScheduleContext(*problem, offers, order=order)
+    assert len(site.choices) > 4
+
+    pick = context.random_extension(random.Random(0))
+
+    assert pick is not None and pick.nodes[site.id] in site.node_set
+    derived = [choice for choice in site.choices if "supports" in choice.__dict__]
+    assert 0 < len(derived) < len(site.choices)
+    walked = {_schedule_signature(extension) for extension in context.extensions()}
+    assert _schedule_signature(pick) in walked
+    assert all("supports" in choice.__dict__ for choice in site.compatible(context._site_relation(site.id)))
+
+
 def test_context_indexes_finite_domain_membership(monkeypatch) -> None:
     problem = _problem(_contraction())
     factors = _finite_factors(problem)
@@ -434,9 +456,9 @@ def test_strict_row_does_not_make_inherited_peer_pins_strict() -> None:
     problem = ClassicProblem(*_problem(_contraction()), validate_pins=False)
     tolerated = problem.with_row({"WORK": "not-a-work"})
 
-    assert tolerated.kernel_site.options
-    assert not problem.with_row({"WORK": "not-a-work"}, strict=True).kernel_site.options
-    assert tolerated.with_row({"RASTER": ""}, strict=True).kernel_site.options
+    assert tolerated.kernel_site.kernels
+    assert not problem.with_row({"WORK": "not-a-work"}, strict=True).kernel_site.kernels
+    assert tolerated.with_row({"RASTER": ""}, strict=True).kernel_site.kernels
 
 
 def test_narrowing_row_cannot_override_existing_hand_pins() -> None:

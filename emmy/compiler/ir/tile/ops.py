@@ -574,8 +574,8 @@ def refused_roots(op, output_specs: tuple) -> tuple[Fold, ...]:
     reach no tensor-core tier where they are. A single-root kernel has nothing shared: the question
     only arises from :func:`kernel_roots` holding two or more.
 
-    It lives here rather than in the scheduler that reads it (``ir/schedule/classic._shared_roots``
-    refuses a prefix that output-tiles a second of these) because it is a fact about the term, read
+    It lives here rather than in the scheduler that reads it (``TileOp.shared_roots``, among which the
+    classic compatibility refuses a second output-tiled root) because it is a fact about the term, read
     off the same two rules the binder itself applies. :func:`owns_outputs_it_cannot_bind` asks the
     neighbouring question the placement lane's full-projection cut is offered on; the two differ,
     and both are needed: a projection whose outputs do not partition at ALL still refuses roots

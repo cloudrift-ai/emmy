@@ -3,11 +3,11 @@
 Two terms make a schedule enumeration, and the interface names both:
 
 * A :class:`ScheduleProblem` is the problem and the target, factored into :class:`Site`\\ s: one
-  per node in composition order and the kernel site last. A site answers ``options`` — the values
-  it may take on its own, with no other site in view. That is the SOURCE of every candidate. A
-  problem may carry a knob row; a site the row names offers the row's value alone, parsed and
-  checked, so nothing is generated to be filtered away later. A site the row leaves free offers
-  its catalog.
+  per node in composition order and the kernel site last. A site offers the values it may take on
+  its own, with no other site in view, as its own factors — the interface names no option
+  product. That is the SOURCE of every candidate. A problem may carry a knob row; a site the row
+  names offers the row's value alone, parsed and checked, so nothing is generated to be filtered
+  away later. A site the row leaves free offers its catalog.
 * A :class:`ScheduleContext` is the immutable prefix ``c``: what earlier sites decided. It owns the
   compatibility between sites and nothing else — no catalog, no restriction. ``extensions`` yields
   the next site's options that compose with the prefix; ``extend`` composes one, or refuses.
@@ -25,6 +25,9 @@ Three invariants make those different granularities one enumeration:
   incompatible, but must retain a route to every accepted complete schedule.
 * ``extend`` is the authority. It accepts a frontier pick or a complete schedule supplied by a
   caller, returns a new context, and raises :class:`ScheduleRefused` without mutating the prefix.
+* ``random_extension`` costs what it touches. A draw through a family whose frontier is a product
+  of factors derives the picks it tries and never a site's product; only a frontier that is small
+  by construction may answer by materializing itself.
 
 The generic driver knows only those operations. Repeatedly calling it on the returned contexts is
 the lazy enumeration; no schedule-family visitor or product materialization exists beside it.
@@ -77,20 +80,18 @@ class ScheduleRefused(ValueError):
 class Site[Pick](ABC):
     """One independent factor of a schedule problem: what this site may take on its own.
 
-    ``keys`` are the row keys the site spells. ``options`` is the site's whole candidate set — a
-    memoized tuple, so its identity keys the caches a context keeps over it. A site built from a
-    problem whose row names its keys offers the row's value alone (parsed, then checked exactly as
-    a catalog value would be); otherwise it offers its catalog. Either way the site is the source:
-    nothing downstream generates a candidate.
+    ``keys`` are the row keys the site spells. What the site offers is its family's business — the
+    classic node site its node choices and the transports of its incident edges, the kernel site its
+    kernels — and the interface deliberately names no option product: the sites ARE the factors, a
+    context composes them lazily, and a product object is the one thing every eager table is built
+    from. A site built from a problem whose row names its keys offers the row's value alone (parsed,
+    then checked exactly as a catalog value would be); otherwise it offers its catalog. Either way
+    the site is the source: nothing downstream generates a candidate.
     """
 
     @property
     @abstractmethod
     def keys(self) -> tuple[str, ...]: ...
-
-    @property
-    @abstractmethod
-    def options(self) -> tuple[Pick, ...]: ...
 
 
 class ScheduleProblem[Pick](ABC):
@@ -145,11 +146,12 @@ class ScheduleContext[KernelT, NodeT, EdgeT](ABC):
         """Compose a partial or complete pick, or raise when it is incompatible."""
 
     def random_extension(self, rng: random.Random) -> Schedule[KernelT, NodeT, EdgeT] | None:
-        """One of the next site's options that compose with this prefix, drawn uniformly, or ``None`` when
-        none does — the step of a random descent through the enumeration. The default draws from the
-        frontier materialized whole; a family whose frontier is a filter over a fixed catalog overrides it to
-        try the catalog in random order and stop at the first option that composes, so a descent costs the
-        options it tries rather than every option the site has."""
+        """One of the next site's options that compose with this prefix, or ``None`` when none does — the
+        step of a random descent through the enumeration. The default draws from the frontier materialized
+        whole, which is right only where the frontier is small by construction (the cut pass's structural
+        choices, the register tier's one kernel choice). A family whose frontier is a product of factors
+        overrides it to draw factor by factor, deriving only what the draw touches, so a descent costs the
+        picks it tries and never a site."""
         options = list(self.extensions())
         return rng.choice(options) if options else None
 

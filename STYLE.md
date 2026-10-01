@@ -139,7 +139,7 @@ own — takes `slots=True` as well. It drops the per-instance `__dict__`, which 
 access, and that is worth having on the leaf choice objects an enumeration builds in the millions (`Tile`, `Work`,
 `Reduce`, `Stage`, `Raster`).
 
-A BIGGER type — one that owns derived reads the rest of the compiler depends on (`Fold`, `TileOp`, `ClassicDomains`,
+A BIGGER type — one that owns derived reads the rest of the compiler depends on (`Fold`, `TileOp`, `ClassicNodeSite`,
 `ClassicScheduleContext`) — stays unslotted and declares those reads with `cached_property` or `cached_method`, per
 the next section. The two are mutually exclusive: both cache through the very `__dict__` that `slots=True` removes,
 so a slotted class raises `TypeError: No '__dict__' attribute on 'X' instance to cache 'y' property` on the first

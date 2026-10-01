@@ -1,6 +1,9 @@
 """The source of every classic candidate: ``ClassicProblem`` — the tile, the target and the knob row — factored
 into ``ClassicNodeSite``s and one ``ClassicKernelSite``. A site the row names offers the row's value alone,
-parsed and checked with the catalog's own rules; a site the row leaves free offers its catalog."""
+parsed and checked with the catalog's own rules; a site the row leaves free offers its catalog. A node site
+holds one record per node choice (``_Choice``) with the ``p + t`` facts that are the tile's alone and, derived
+only when asked, its supports over the site's transports — so a prefix filters choices and a draw derives the
+supports it touches, never a site's product."""
 
 from __future__ import annotations
 
@@ -13,24 +16,35 @@ from frozendict import frozendict
 
 from emmy.compiler.ir.atom import ATOM_REGISTRY
 from emmy.compiler.ir.pure.fold import Fold
-from emmy.compiler.ir.schedule.base import Schedule, ScheduleProblem, Site, note_pin_refusal
+from emmy.compiler.ir.schedule.base import ScheduleProblem, ScheduleRefused, Site, note_pin_refusal
 from emmy.compiler.ir.schedule.catalog import map_tile_moves, producer_band_moves, raster_moves
 from emmy.compiler.ir.schedule.choices import PlacedTile, Raster, Reduce, Stage, Tile, Work, derive_inventory, resolve_site_tile
 from emmy.compiler.ir.schedule.staging import stage_target
-from emmy.compiler.ir.schedule.views import NodeId
+from emmy.compiler.ir.schedule.views import EdgeSite, NodeId
 from emmy.utils import cached_method
 
 from .refusals import (
     _atom_policy_ok,
+    _AxisAgreement,
     _contraction_plan_refusal,
     _contraction_plans,
     _contraction_reductions,
+    _fragment_agreements,
+    _FragmentAgreement,
+    _multi_fold_direct_refusal,
+    _needs_fill,
+    _paired_budget_refusal,
     _plan_node_refusal,
     _reduction_domain,
+    _Relation,
+    _relation_refusal,
+    _resolve_stage,
     _stage_candidates,
     _warp_atoms,
     _warp_plans,
     _wgmma_refusal,
+    fill_stage_moves,
+    fill_tma_moves,
 )
 from .schedule import (
     ClassicSchedule,
@@ -41,6 +55,7 @@ from .schedule import (
     ReductionSchedule,
     classic_node_key,
     classic_stage_key,
+    node_id_spelling,
     output_sweep_works,
     packed_works,
 )
@@ -110,11 +125,184 @@ def _select_values[T](
     return values if bare is None else tuple(choice for choice in values if spell(choice) in ("", bare))
 
 
+@dataclass(frozen=True)
+class _LocalSupport:
+    """One node choice with its incident edge choices, resolved: the compatibility evidence a prefix reads
+    (the inventory it claims, its axis and seam claims) beside the choices themselves. Not a schedule — placed
+    geometry and fragment facts never enter a :class:`Schedule` value."""
+
+    node: NodeSchedule
+    edges: Mapping[EdgeSite, EdgeSchedule]
+    work: Work | None = None
+    axes: tuple[_AxisAgreement, ...] = ()
+    fragments: tuple[_FragmentAgreement, ...] = ()
+    raster_eligible: bool = False
+    producer_eligible: bool = True
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "edges", frozendict(self.edges))
+
+
+def _producers(tile_op) -> frozenset[NodeId]:
+    return frozenset(facts.need for facts in tile_op.contractions.values() if facts.need is not None)
+
+
+def local_support(
+    tile_op, target, site: NodeId, node: NodeSchedule, edges: Mapping[EdgeSite, EdgeSchedule], *, geometry=None
+) -> _LocalSupport | None:
+    """The ``p + t`` support of one node choice with its incident edge choices, or ``None`` where the pair
+    resolves to nothing — the one statement of that derivation: a site's choice derives its supports through
+    it, and a context without a problem (the codec validating a complete row) asks it directly. With no
+    target, the kernel's own materialization stands in for the resolver."""
+    facts = tile_op.contractions.get(site)
+    if facts is None:
+        return _intrinsic_support(tile_op, target, site, node, edges)
+    materialization = getattr(tile_op, "materialization", None)
+    if target is None and (
+        materialization is None
+        or (node.tile.is_tiled and site not in materialization.tiles)
+        or any(not choice.stage.is_direct and edge not in materialization.stages for edge, choice in edges.items())
+    ):
+        return None
+    fold = tile_op.sites[site].node
+    view = tile_op.views[site]
+    if set(edges) != set(tile_op.incident_edges[site]):
+        return None
+    if len(set(edges.values())) > 1:
+        raise ScheduleRefused(f"{node_id_spelling(site)}: one contraction currently requires one transport choice across its operands")
+    if geometry is None:
+        geometry = tile_op.grid_sched.placed(fold, node.tile)
+    if node.tile.is_tiled and not isinstance(geometry, PlacedTile):
+        return None
+    if isinstance(geometry, PlacedTile) and _plan_node_refusal(tile_op, fold, node.tile, geometry, facts) is not None:
+        return None
+    stage = next(iter(edges.values())).stage if edges else Stage.direct()
+    resolved_stage = None
+    if _wgmma_refusal(node.tile, stage) is not None or _multi_fold_direct_refusal(fold, node.tile, stage) is not None:
+        return None
+    if view.as_contraction() is None or not node.tile.is_tiled:
+        if not stage.is_direct:
+            return None
+    elif target is None:
+        resolved = {materialization.stages.get(edge) for edge in edges} if materialization is not None else set()
+        resolved.discard(None)
+        resolved_stage = next(iter(resolved)) if len(resolved) == 1 else None
+    elif _needs_fill(tile_op, fold, node.tile):
+        packed_copy = tile_op.packed_reading(fold)[0] is not None and stage.transport in ("smem-async", "smem-tma")
+        if not packed_copy and stage not in (*fill_stage_moves(), *fill_tma_moves(target)):
+            return None
+        resolved_stage = _resolve_stage(tile_op, target, fold, node.tile, geometry, stage, facts)
+    elif not stage.is_direct:
+        resolved_stage = _resolve_stage(tile_op, target, fold, node.tile, geometry, stage, facts)
+    if not stage.is_direct and (resolved_stage is None or resolved_stage.choice != stage):
+        return None
+    if isinstance(geometry, PlacedTile) and _paired_budget_refusal(fold, facts.producer, geometry, resolved_stage) is not None:
+        return None
+    return _LocalSupport(
+        node,
+        edges,
+        work=derive_inventory((node.tile,), coop=node.reduce.coop if isinstance(node, ReductionSchedule) else 1),
+        axes=(
+            tuple(_AxisAgreement(side.axis.name, side.tile, side.units) for side in geometry.mn)
+            if node.tile.is_tiled and isinstance(geometry, PlacedTile)
+            else ()
+        ),
+        fragments=(
+            _fragment_agreements(site, fold, node.tile, geometry, resolved_stage, facts, _producers(tile_op))
+            if isinstance(geometry, PlacedTile)
+            else ()
+        ),
+        raster_eligible=node.tile.is_tiled and view.as_contraction() is not None,
+        # A producer band splits the staged K-loop's phases across warp bands, which only the
+        # contraction tier's skeleton drives; the chunk tier runs every warp through one uniform
+        # ring, where an aux band decoding onto warp 0 would re-issue its elected TMA arrive.
+        # TMA copies beside a compute fill (a packed weight's scales, a computed activation)
+        # run as two groups of one uniform loop, which has no band split either.
+        producer_eligible=not fold.chunked() and not (stage.transport == "smem-tma" and _needs_fill(tile_op, fold, node.tile)),
+    )
+
+
+def _intrinsic_support(tile_op, target, site: NodeId, node: NodeSchedule, edges: Mapping[EdgeSite, EdgeSchedule]) -> _LocalSupport | None:
+    """The target-independent local relation of a site that contracts nothing."""
+    if site not in tile_op.family_sites["TILE"] and node.tile != Tile():
+        return None
+    if node.tile.is_warp and hasattr(target, node.tile.atom.target_feature) and not node.tile.atom.available_on(target):
+        return None
+    if len({choice.stage for choice in edges.values()}) > 1:
+        raise ScheduleRefused(f"{node_id_spelling(site)}: one contraction currently requires one transport choice across its operands")
+    if any(edge not in tile_op.stage_edges and not choice.stage.is_direct for edge, choice in edges.items()):
+        return None
+    if any(not choice.stage.is_direct and not node.tile.is_tiled for choice in edges.values()):
+        return None
+    if any(
+        not choice.stage.is_direct and hasattr(target, "has_cp_async") and not choice.stage.available_on(target)
+        for choice in edges.values()
+    ):
+        return None
+    try:
+        work = derive_inventory((node.tile,), coop=node.reduce.coop if isinstance(node, ReductionSchedule) else 1)
+    except ValueError:
+        return None
+    return _LocalSupport(node, edges, work=work, raster_eligible=node.tile.is_tiled and tile_op.views[site].as_contraction() is not None)
+
+
+@dataclass(frozen=True, eq=False)
+class _Choice:
+    """One node choice at a site: the ``p + t`` facts that are the tile's alone — the inventory it claims,
+    its placed geometry and axis agreements, the seam claims that read no transport — and, derived only when
+    asked, its supports, the choice paired with each transport of the site's edge catalog that resolves."""
+
+    site: ClassicNodeSite
+    node: NodeSchedule
+
+    @property
+    def edges(self) -> Mapping[EdgeSite, EdgeSchedule]:
+        """A choice names no transport; a support does."""
+        return frozendict()
+
+    @cached_property
+    def geometry(self):
+        return self.site.problem.tile.grid_sched.placed(self.site.node, self.node.tile)
+
+    @cached_property
+    def work(self) -> Work | None:
+        try:
+            return derive_inventory((self.node.tile,), coop=self.node.reduce.coop if isinstance(self.node, ReductionSchedule) else 1)
+        except ValueError:
+            return None
+
+    @cached_property
+    def axes(self) -> tuple[_AxisAgreement, ...]:
+        if not (self.node.tile.is_tiled and isinstance(self.geometry, PlacedTile)):
+            return ()
+        return tuple(_AxisAgreement(side.axis.name, side.tile, side.units) for side in self.geometry.mn)
+
+    @cached_property
+    def fragments(self) -> tuple[_FragmentAgreement, ...]:
+        """The seam claims the tile decides: its offer, and a chunked carrier's need. The ordinary need reads
+        its transport's K slab, so it is a support's claim, checked where the support is."""
+        tile = self.site.problem.tile
+        facts = tile.contractions.get(self.site.id)
+        if facts is None or not isinstance(self.geometry, PlacedTile):
+            return ()
+        claims = _fragment_agreements(self.site.id, self.site.node, self.node.tile, self.geometry, None, facts, _producers(tile))
+        return tuple(claim for claim in claims if claim.role == "offer" or claim.value[0] == "chunk")
+
+    @cached_method
+    def support(self, edges: Mapping[EdgeSite, EdgeSchedule]) -> _LocalSupport | None:
+        """This choice with one transport on every incident edge, resolved — once per edge pick."""
+        return local_support(self.site.problem.tile, self.site.problem.target, self.site.id, self.node, edges, geometry=self.geometry)
+
+    @cached_property
+    def supports(self) -> tuple[_LocalSupport, ...]:
+        return tuple(support for edges in self.site.edge_picks if (support := self.support(edges)) is not None)
+
+
 @dataclass(frozen=True, eq=False)
 class ClassicNodeSite(Site[ClassicSchedule]):
-    """One node site's independent factor: its node choices, the transport catalog of its incident
-    edges, and their product as picks. Every derived read is memoized on the site, so a site's
-    tuples keep one identity for the context's caches."""
+    """One node site's independent factor: its node choices and the transport catalog of its incident
+    edges, each node choice a :class:`_Choice` whose supports are derived when a prefix reaches it. Every
+    derived read is memoized on the site, including the choices a relation admits."""
 
     problem: ClassicProblem
     id: NodeId
@@ -325,11 +513,76 @@ class ClassicNodeSite(Site[ClassicSchedule]):
         return frozenset(self.edges)
 
     @cached_property
-    def options(self) -> tuple[ClassicSchedule, ...]:
-        """The site's picks: each node choice with each transport on every incident edge."""
+    def edge_picks(self) -> tuple[Mapping[EdgeSite, EdgeSchedule], ...]:
+        """Each transport of the catalog on every incident edge — the edge half of a support."""
         incident = self.problem.tile.incident_edges[self.id]
-        edge_picks = tuple(frozendict({edge: choice for edge in incident}) for choice in self.edges) if incident else (frozendict(),)
-        return tuple(Schedule(None, {self.id: node}, edges) for node in self.nodes for edges in edge_picks)
+        return tuple(frozendict({edge: choice for edge in incident}) for choice in self.edges) if incident else (frozendict(),)
+
+    @cached_method
+    def choice(self, node: NodeSchedule) -> _Choice:
+        return _Choice(self, node)
+
+    @cached_property
+    def choices(self) -> tuple[_Choice, ...]:
+        return tuple(self.choice(node) for node in self.nodes)
+
+    def refusal(self, pick: _Choice | _LocalSupport, relation: _Relation) -> str | None:
+        """Why ``pick`` cannot extend a prefix with these compatibility facts, or ``None`` — recorded against
+        any pinned value the pick spells (:func:`note_pin_refusal`), so the pin check can name the rule."""
+        tile = self.problem.tile
+        why = _relation_refusal(
+            self.id, pick, relation, roots=tile.shared_roots, pairs=tile.chain_pairs, allowed_works=self.problem.allowed_works
+        )
+        if why is None or not any(key in self.problem.row for key in self.keys):
+            return why
+        families = tile.family_sites
+        spelled = {classic_node_key(tile, "TILE", self.id): pick.node.tile.spell()} if self.id in families["TILE"] else {}
+        if isinstance(pick.node, ReductionSchedule) and self.id in families["REDUCE"]:
+            spelled[classic_node_key(tile, "REDUCE", self.id)] = pick.node.reduce.spell()
+        if self.stage_key is not None:
+            for edge in pick.edges.values():
+                spelled[self.stage_key] = edge.stage.spell()
+        for key, value in spelled.items():
+            if self.problem.row.get(key) == value:
+                note_pin_refusal(key, value, why)
+        return why
+
+    @cached_property
+    def _choices_by_work(self) -> Mapping[Work | None, tuple[_Choice, ...]]:
+        """The choices by the inventory they claim — what a prefix that claimed one reads, beside the choices
+        claiming none, instead of refusing every other inventory one choice at a time."""
+        by_work: dict[Work | None, list[_Choice]] = {}
+        for choice in self.choices:
+            by_work.setdefault(choice.work, []).append(choice)
+        return {work: tuple(choices) for work, choices in by_work.items()}
+
+    @cached_method
+    def compatible(self, relation: _Relation) -> tuple[_Choice, ...]:
+        """The choices whose tile-level facts extend a prefix with these compatibility facts — one filter per
+        relation, kept, so every prefix that agrees on the facts reads the same answer."""
+        self._check_stage_pin()
+        if relation.work is None:
+            candidates = self.choices
+        else:
+            candidates = (*self._choices_by_work.get(None, ()), *self._choices_by_work.get(relation.work, ()))
+        return tuple(choice for choice in candidates if self.refusal(choice, relation) is None)
+
+    def admitted(self, choice: _Choice, relation: _Relation) -> tuple[_LocalSupport, ...]:
+        """``choice``'s supports that extend the prefix: the claim only a support carries, checked here."""
+        return tuple(support for support in choice.supports if self.refusal(support, relation) is None)
+
+    @cached_method
+    def frontier(self, relation: _Relation) -> tuple[_LocalSupport, ...]:
+        """Every support that extends the prefix — what a walk reads; a draw never asks for it."""
+        return tuple(support for choice in self.compatible(relation) for support in self.admitted(choice, relation))
+
+    def _check_stage_pin(self) -> None:
+        """A hand-pinned non-direct transport no support resolves is a wrong spelling, not an empty pool:
+        raised with the rule's own message the first time a prefix reads this site."""
+        problem = self.problem
+        pinned = None if self.stage_key is None else problem.row.get(self.stage_key)
+        if pinned and problem.loud_pins and problem.validate_pins and not any(choice.supports for choice in self.choices):
+            raise ValueError(f"STAGE pin {pinned!r} does not resolve for this contraction")
 
 
 @dataclass(frozen=True, eq=False)
@@ -427,10 +680,6 @@ class ClassicKernelSite(Site[ClassicSchedule]):
     @cached_property
     def kernel_set(self) -> frozenset[KernelSchedule]:
         return frozenset(self.kernels)
-
-    @cached_property
-    def options(self) -> tuple[ClassicSchedule, ...]:
-        return tuple(Schedule(kernel, {}, {}) for kernel in self.kernels)
 
 
 @dataclass(frozen=True, eq=False)
