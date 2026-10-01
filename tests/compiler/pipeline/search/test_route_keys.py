@@ -41,6 +41,16 @@ def test_a_current_route_resolves_every_key() -> None:
     assert list(stale_targets(document)) == []
 
 
+def test_check_replays_parent_routes_before_a_fused_producers_output_cut() -> None:
+    document = GoldenFile.load(_CASE.parents[1] / "attention" / "rmsnorm-qk-sdpa-composed-cut.json")
+    records = document.records()
+    child = records[-1]
+    keys = frozenset(child.route)
+    assert unresolved_route_keys(child, keys) == sorted(keys)
+    assert unresolved_route_keys(child, keys, records) == []
+    assert list(stale_targets(document)) == []
+
+
 def test_check_names_a_route_key_that_resolves_nowhere(stale: GoldenFile) -> None:
     reasons = list(stale_targets(stale))
     assert reasons == [f"k_rms_norm_3fbe25: route key {_STALE!r} names no seam of the fresh lowering"]

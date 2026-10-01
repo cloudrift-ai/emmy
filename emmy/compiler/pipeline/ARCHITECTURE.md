@@ -1142,7 +1142,9 @@ same row on different kernels. Recorded this way, a strict-evidence compile of t
 again from the file's rows alone (no tune DB, no prior): that 10-kernel twin, whose unseeded pick spends minutes
 pricing, resolves from its 19 recorded rows in seconds.
 
-`golden check` compares each stored target with a fresh lowering of its embedded program. `golden restamp` re-keys
+`golden check` compares each stored target with a fresh lowering of its embedded program. It checks route keys by
+replaying the kernel set's parent and child decisions in order, using the same spelling as strict decode; a child
+route belongs to the kernel its parent cut creates. `golden restamp` re-keys
 routing rows and child receipts when that target changes. It retains a measured time only when strict replay of the
 row's route and schedule renders the same CUDA sources before and after the change. A failed replay or changed source
 demotes the row to a proposal, so the next exact-card record run can measure it again.
