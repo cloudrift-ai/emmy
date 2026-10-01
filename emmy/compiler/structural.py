@@ -79,11 +79,9 @@ def instance_memo(obj, slot: str) -> dict:
     STYLE.md's "Derived values are first-class members" rule forbids: it is invisible to readers of
     the class, dodges the pickling rules, and smears one type's functionality across whichever
     module caches for it. A derived read belongs on the type that owns it — a ``cached_property``
-    returning the whole keyed family, or a field computed in ``__post_init__``. The remaining
-    callers (the classic domains' membership indexes, the per-target support tables, the codec
-    spelling tables, the normalize fixpoint stamp) are to be converted; ``_target_memo`` is the
-    hard one, since it keys a table by ``id(target)`` and stores it on ``tile_op`` — a fact about a
-    PAIR, stashed on one member of it."""
+    returning the whole keyed family, a ``cached_method`` for one keyed by an argument, or a field
+    computed in ``__post_init__``. The remaining callers (the path spelling tables, the normalize
+    fixpoint stamp) are to be converted."""
     table = obj.__dict__.get(slot)
     if table is None:
         table = {}

@@ -97,9 +97,6 @@ test: setup
 # after a kernel-identity or schedule-codec change. `make test` DETECTS staleness on any machine,
 # GPU or not; this applies the fix. It refuses to write a case whose verdict also changed — that
 # is a realization regression to review, not a mechanical restamp.
-test-priors: setup
-	EMMY_GOLDEN_FILE= ./venv/bin/pytest tests/compiler/pipeline/search/prior/test_reproduction.py -m priors -n auto --dist=loadgroup -v
-
 test-corpus-regen: setup
 	./venv/bin/python -m tests.compiler.realization.regen $(if $(COMPLETE),--complete,)
 

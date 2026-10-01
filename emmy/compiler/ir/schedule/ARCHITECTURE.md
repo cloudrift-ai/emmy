@@ -6,10 +6,11 @@ lowering facts. A concrete schedule family may carry derived lowering facts in a
 
 A schedule enumeration has two terms, and the interface names both. A `ScheduleProblem` is the problem and the
 target factored into `Site`s — one per node in composition order, the kernel site last — beside the knob row it was
-built with. A site answers `options`: the values it may take on its own, with no other site in view. That is the
-SOURCE of every candidate. A site the row names offers the row's value alone, parsed and checked with the same
-per-choice rules a catalog value passes through; a site the row leaves free offers its catalog. Nothing downstream
-generates a candidate, so nothing has to filter one away.
+built with. A site offers the values it may take on its own, with no other site in view, as its own factors; the
+interface names no option product, because a product object is the one thing every eager table is built from. That
+is the SOURCE of every candidate. A site the row names offers the row's value alone, parsed and checked with the
+same per-choice rules a catalog value passes through; a site the row leaves free offers its catalog. Nothing
+downstream generates a candidate, so nothing has to filter one away.
 
 `ScheduleContext` is the immutable compatibility prefix `c`: what earlier sites decided. It owns the compatibility
 between sites and nothing else. Its defining operations are a lazy frontier and composition:
@@ -20,8 +21,10 @@ between sites and nothing else. Its defining operations are a lazy frontier and 
 Every context prefix and extension is a `Schedule[KernelT, NodeT, EdgeT]`; a non-`None` kernel marks completion.
 `extensions` yields the next site's options that compose with the prefix; `extend` composes one and returns a context
 containing the composed facts, leaving the original unchanged, or raises `ScheduleRefused`. `random_extension(rng)` is
-the third operation, one option drawn uniformly among those `extensions` would yield, or `None`: the step of a random
-descent, which the default answers by materializing the frontier and a family with a cheaper answer overrides.
+the third operation, one option `extensions` would yield, or `None`: the step of a random descent. It costs what it
+touches: the default materializes the frontier, which is right only where the frontier is small by construction (the
+cut pass's structural choices, the register tier's one kernel choice), and a family whose frontier is a product of
+factors draws factor by factor, deriving only what the draw reaches and never a site's product.
 `extend` is also the validation boundary for a complete classic schedule supplied directly by a pinned golden, even
 when that assignment was not emitted by `extensions`. The generic `schedule(context)` recursively composes those lazy
 frontiers and yields only complete schedules. Recursion is the generic Algorithm 1 traversal; consumers do not write a
@@ -93,20 +96,25 @@ the choice types and key spellings through the package.
 whose values its sites offer where it names them. `ClassicScheduleContext` is the immutable `c + p + t` prefix over
 that problem. Everything a schedule choice cannot change is derived from the tile and the target and memoized on the
 term it derives from — a contraction's `ContractionFacts` on the Fold root (`TileOp.contractions`), the packed operand
-readings and the placement on the TileOp, and the per-target support tables on the TileOp beside their target. The
-context owns all classic compatibility: worker inventory, physical-axis agreement, fragment seams, raster eligibility,
-resource limits, producer-band/TMA agreement, target availability. A site's tuples hold choices only; an expensive
-local support record is derived lazily, once per site object, after the context has selected one node and its
-incident edge values. This node-plus-incident-edges frontier is granular enough to reject mixed transport and
-fragment-seam combinations before they create subtrees, without materializing the full node × edge product.
-`extensions` emits partial schedules at that granularity; `extend` derives and composes their support. The supports
-a prefix admits are filtered once per RELATION the compatibility check reads — the worker inventory, the axis and
-fragment agreements, the allowed works, and the decided nodes only where a shared root or a chain pair makes them
-matter — and kept on the per-target tables, so prefixes that decided different nodes but agree on those facts share
-one filter; `random_extension` draws from that memoized set, which is what makes a descent cheap after the first
-prefix through a site. The site's local frontier itself, support derived for every option of the product, is the
-fixed cost a site pays once per target. Kernel picks form the final frontier: the kernel site's catalog is what the
-node sites' choices imply, so it is the last site. The fragment-seam relation has no pipeline-side copy.
+readings, the placement and the two site relations the binder dictates (`shared_roots`, `chain_pairs`) on the
+TileOp, and a node choice's supports on the site that offers it. The compatibility rules — worker inventory,
+physical-axis agreement, fragment seams, the shared-root and chain rules — are stated in `refusals` beside the
+per-choice ones, as one function of a pick and a RELATION: what a prefix has decided that those rules read (the
+inventory it claimed, its axis and fragment agreements, and the decided nodes only where a rule reads them — every
+one while no inventory is claimed, all of them at a shared root or a chain member). The context carries that
+relation and composes it; the kernel-level rules (raster eligibility, resource limits, the producer band) stay with
+it. A node site holds one record per node choice with the facts that are the tile's alone — the inventory it
+claims, its placed geometry and axis agreements, the seam claims that read no transport — and, derived only when
+asked, the choice's supports: the choice paired with each transport of the site's edge catalog that resolves (the
+stage resolver, the plan and budget refusals). A prefix filters the site's choices by those tile-level facts, one
+filter per relation kept on the site, so prefixes that decided different nodes but agree on the facts read one
+answer; on the kernels measured that filter alone finds every dead prefix. The supports of the choices it admits
+are then filtered by the one claim a support completes, its transport's K slab at an ordinary seam. `extensions`
+reads that whole frontier; `random_extension` never does — it draws an admitted choice, keeps it as often as it has
+admitted supports and takes one of those, so the draw is uniform over the frontier's (choice, transport) pairs while a
+descent derives supports only for the choices it touched; a choice with none leaves the draw. A hand-pinned transport no choice resolves raises with the rule's message the first time
+a prefix reads the site. Kernel picks form the final frontier: the kernel site's catalog is what the node sites'
+choices imply, so it is the last site. The fragment-seam relation has no pipeline-side copy.
 
 A pointwise map's site reads a catalog of its own (`map_tile_moves`): the per-cell form and the register strips that
 hand one thread 2, 3, 4 or 8 contiguous inner-axis elements, each offered when it divides a static inner extent. It

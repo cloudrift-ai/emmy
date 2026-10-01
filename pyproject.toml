@@ -110,7 +110,6 @@ emmy_serving = "emmy.serving:register"
 asyncio_mode = "auto"
 markers = [
     "perf: GPU performance comparison vs PyTorch (deselected by default; run with `pytest -m perf`)",
-    "priors: the schedule half of the prior reproduction gate, a greedy walk per golden pool (deselected by default; `make test-priors`)",
 ]
 
 [tool.ruff]

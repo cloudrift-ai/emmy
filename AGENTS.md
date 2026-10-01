@@ -219,8 +219,6 @@ Quick test models / scripts (for local iteration):
 - `make test` — run `pytest` using the venv (skips the off-lane `perf` / `goldens` tests). Compiles
   kernels at `-Xcicc -O1` (correctness lane, ~12% faster than `-O3` on a cold cache; perf tests use `-O3` via
   `make bench-kernels`)
-- `make test-priors` — the schedule half of the prior reproduction gate (`tests/compiler/pipeline/search/prior/`),
-  a greedy walk per golden pool, off the default lane like `perf`
 - `make test-corpus-regen` — restamp the realization corpus's derived half after a kernel-identity or schedule-codec
   change (`make test` detects the staleness on any machine; this applies the fix)
 - `make test-durations` — re-measure `tests/durations_cpu.json`, the checked-in CPU test timings the suite balances its
@@ -342,9 +340,9 @@ Then run the gates, in this order, after every edit above is in:
 
 22. **Refit the priors if a repository golden changed**: a row added, re-recorded, restamped or dropped in a
     hardware golden or a recipe's means both priors are refit on the repository goldens (README, "Fit the priors")
-    and the weights committed with it — the reproduction gate holds the shipped priors to those goldens at one
-    tolerance. A change to a prior or a golden also runs `make test-priors`, the gate's off-lane half, and a node it
-    leaves red is named in the PR body.
+    and the weights committed with it — the reproduction gate in `make test` holds the shipped priors to those
+    goldens at one tolerance, one node per slice of a golden's pools and space, and a node it leaves red is named
+    in the PR body.
 23. **Run the full suite**: `make test` — fix any failures. If a realization case comes back stale, `make
     test-corpus-regen` applies the fix; if a repository golden stops being the fresh lowering, `emmy golden restamp`
     applies that one (the `refresh-golden` skill). If golden rows go red, name the change that did it in the PR body —
