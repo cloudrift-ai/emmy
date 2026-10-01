@@ -25,10 +25,8 @@ from emmy.compiler.pipeline.pipeline import Run, _remember_structural_decision, 
 
 
 @pytest.fixture(autouse=True)
-def _isolated_prior(monkeypatch, tmp_path):
-    """Untrained prior file so any lazy prior load is deterministic; target
-    reset after each test."""
-    monkeypatch.setenv("EMMY_ONLINE_FILE", str(tmp_path / "prior.json"))
+def _reset_target():
+    """Target reset after each test."""
     yield
     target_mod.set_target(None)
 
@@ -139,7 +137,8 @@ def test_structural_replay_is_scoped_to_the_cut_domain() -> None:
     decisions = []
     _remember_structural_decision(decisions, root, ("PLACE",), {"PLACE": "cut"})
 
-    assert _replay_structural_decision(decisions, root, placement) is placement_cut
+    # The replay hands back the OFFERED fork, so its alias map reaches the splice event with the option.
+    assert _replay_structural_decision(decisions, root, placement) is placement[1]
     assert _replay_structural_decision(decisions, root, reduction) is None
 
 

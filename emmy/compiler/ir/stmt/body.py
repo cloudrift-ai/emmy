@@ -14,7 +14,8 @@ Phase 1 surface (this file): the protocol that lets every
 as method-shaped wrappers around the existing free functions.
 
 Phase 2 surface: def-use queries (``definitions``, ``axis_dependencies``,
-``deps_closure``, ``depends_on`` / ``independent``, ``deps_of``), type-filtered lookups
+``deps_closure``, ``depends_on`` / ``independent``, ``deps_of``), Kahn
+``topological_order``, type-filtered lookups
 (``loads``, ``writes``, ``accums``, …), and dependence cones
 (:class:`Cone`, :meth:`Body.backward_cone`
 / :meth:`Body.defs_die_at`) — the shared substrate behind the rules
@@ -24,11 +25,14 @@ that slice computed-operand cones. Region transforms (``replace_at``,
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Iterator
-from dataclasses import dataclass
-from functools import cached_property, lru_cache
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from dataclasses import dataclass, replace
+from functools import cached_property
+from heapq import heappop, heappush
 
 from emmy.compiler.ir.stmt.base import Stmt
+from emmy.compiler.wire import Wire, decode, encode
+from emmy.utils import cached_method
 
 
 @dataclass(frozen=True)
@@ -76,23 +80,6 @@ def _exposed_defines(s: Stmt) -> set[str]:
     return out
 
 
-def dedup_recomputes(stmts: Iterable[Stmt]) -> tuple[Stmt, ...]:
-    """``stmts`` with every defining statement equal to an earlier one dropped.
-
-    A cone that reads one traced value through two edges — attention's output normalized by its
-    own row sum — lowers the fold behind it once per edge, and a fill that replicates the cone per
-    cell then declares the fold's states twice in one scope, which nvcc refuses. Two equal
-    statements over the same inputs bind the same names to the same values, so the second binds
-    nothing new. Only a statement that defines something is a candidate: a repeated store is a
-    repeated effect and stays."""
-    kept: list[Stmt] = []
-    for stmt in stmts:
-        if _exposed_defines(stmt) and any(stmt == earlier for earlier in kept):
-            continue
-        kept.append(stmt)
-    return tuple(kept)
-
-
 def free_names(s: Stmt) -> frozenset[str]:
     """Every name ``s`` (whole subtree) reads from its enclosing scope — SSA reads AND index
     coordinates, less what the subtree defines or binds.
@@ -100,9 +87,9 @@ def free_names(s: Stmt) -> frozenset[str]:
     The WIDE reading, for callers that must resolve a statement against everything around it: a
     dependence cone needs the axis vars as much as the value names, since both have to be
     available where the cone lands. Callers asking a narrower question — is this VALUE read? —
-    want :attr:`Body.ssa_uses`, which never reports a coordinate. Mixing the two is what let an
-    index ``Var`` be mistaken for a value read; keeping both spellings is what lets each caller
-    say which it meant.
+    want :attr:`Body.ssa_uses`, which follows ``deps()`` without adding expression reads or
+    subtracting local bindings. Load indices can occur in both: a coordinate and a gathered
+    value use the same ``Var`` representation.
     """
     reads: set[str] = set()
     defs: set[str] = set()
@@ -125,7 +112,7 @@ def free_names(s: Stmt) -> frozenset[str]:
     return frozenset(reads - defs)
 
 
-class Body(tuple[Stmt, ...]):
+class Body(tuple[Stmt, ...], Wire):
     """Immutable Stmt sequence. Tuple-subclass so existing tuple-shaped
     APIs accept Body for free; preserves its own type through
     :meth:`__getitem__` slicing and :meth:`__add__` concatenation so
@@ -141,6 +128,21 @@ class Body(tuple[Stmt, ...]):
     but Body counts are bounded by the number of kernel bodies in a
     pipeline run (tens to hundreds), so it's not a concern.
     """
+
+    wire_tag = "body"
+
+    def to_wire(self) -> list:
+        """The statements, each tagged by its class."""
+        return [encode(stmt) for stmt in self]
+
+    @classmethod
+    def from_wire(cls, value: object, where: str = "body") -> Body:
+        if not isinstance(value, list):
+            raise ValueError(f"{where} must be a list of statements")
+        try:
+            return cls(decode(item) for item in value)
+        except TypeError as exc:
+            raise ValueError(f"{where}: {exc}") from exc
 
     def __new__(cls, stmts: Iterable[Stmt] = ()) -> Body:
         members = tuple(stmts)
@@ -198,8 +200,16 @@ class Body(tuple[Stmt, ...]):
     def rename_buffers(self, rename) -> Body:  # noqa: ANN001 — any str->str mapping
         """This body with every external-buffer reference renamed through ``rename`` — the
         body-level face of :meth:`Stmt.rename_buffers` (the recursive :meth:`map` reaches every
-        nested leaf, so wrapper stmts need no handling)."""
-        return self.map(lambda s: s.rename_buffers(rename))
+        nested leaf, so wrapper stmts need no handling). An injective spelling-only rename retains
+        this body's declared normal-form fixed points, while an aliasing rename must recompute
+        ordering because it changes memory dependencies."""
+        result = self.map(lambda s: s.rename_buffers(rename))
+        if result == self:
+            return self
+        resources = tuple(dict.fromkeys(name for stmt in self.iter() for name in (*stmt.external_reads(), *stmt.external_writes())))
+        if len({rename.get(name, name) for name in resources}) == len(resources) and self.__dict__.get("_normalized") is self:
+            result.__dict__["_normalized"] = result
+        return result
 
     def map(self, fn: Callable[[Stmt], Stmt | None | Iterable[Stmt]]) -> Body:
         """Recursive 1:N body transformer. Post-order: each block stmt's
@@ -242,7 +252,118 @@ class Body(tuple[Stmt, ...]):
                 out.extend(r)
         return Body(out)
 
+    def topological_order(
+        self,
+        incoming: Sequence[set[int] | frozenset[int]],
+        tie_break: Callable[[int, Stmt], object] | None = None,
+    ) -> Body:
+        """This body in :meth:`topological_permutation` order."""
+        return Body(self[index] for index in self.topological_permutation(incoming, tie_break))
+
+    def topological_permutation(
+        self,
+        incoming: Sequence[set[int] | frozenset[int]],
+        tie_break: Callable[[int, Stmt], object] | None = None,
+    ) -> tuple[int, ...]:
+        """Kahn topological order over indexed predecessor sets, as source indices.
+
+        Source order breaks ties by default. ``tie_break`` may supply a canonical priority while
+        the source index remains the final deterministic tie-break. A cycle leaves the order
+        unchanged so callers can preserve the validator's error path.
+        """
+        successors: list[list[int]] = [[] for _ in self]
+        degree = [len(sources) for sources in incoming]
+        for target, sources in enumerate(incoming):
+            for source in sources:
+                successors[source].append(target)
+
+        def priority(index: int) -> tuple[object, int]:
+            return (index if tie_break is None else tie_break(index, self[index])), index
+
+        ready = [priority(index) for index, count in enumerate(degree) if not count]
+        ready.sort()
+        ordered: list[int] = []
+        while ready:
+            _, selected = heappop(ready)
+            ordered.append(selected)
+            for target in successors[selected]:
+                degree[target] -= 1
+                if not degree[target]:
+                    heappush(ready, priority(target))
+        return tuple(ordered) if len(ordered) == len(self) else tuple(range(len(self)))
+
+    @cached_property
+    def _normalized(self) -> Body:
+        """Executable normal form, cached on this immutable body and its fixed point."""
+        from emmy.compiler.ir.stmt.normalize import _normalize_body  # noqa: PLC0415
+
+        result = _normalize_body(self)
+        result.__dict__["_normalized"] = result
+        return result
+
+    @cached_property
+    def _ordering(self):
+        """This body's colored relation graph, built once. Normalization stamps the graph it
+        ordered by onto its result, so identity labels that graph again instead of rebuilding it."""
+        from emmy.compiler.ir.stmt.order import relation_graph  # noqa: PLC0415
+
+        return relation_graph(self)
+
     # -- generic backward dataflow --------------------------------------
+
+    def dependency_depths(self, *types: type[Stmt], inputs: Mapping[str, int] | None = None) -> dict[str, int]:
+        """Longest def-use path to each SSA name, counting only statements of ``types``.
+
+        The body must be in SSA dependency order, as for :meth:`fold`. ``inputs`` supplies depths
+        for external buffers, so a caller composing bodies can continue a producer's path through
+        its consumer's loads. Missing inputs start at zero. Equal depths of counted statements
+        prove independence; different depths need not prove dependence.
+        """
+        inputs = inputs or {}
+        memo = self.fold(
+            lambda stmt, children, _: (
+                max(
+                    (*(depth for depth in children if depth is not None), *(inputs.get(name, 0) for name in stmt.external_reads())),
+                    default=0,
+                )
+                + isinstance(stmt, types)
+            )
+        )
+        return {name: memo[id(stmt)] for name, stmt in self.definitions.items()}
+
+    def coalesce(self) -> Body:
+        """Assemble shared SSA definitions once and merge adjacent independent reduction loops.
+
+        Used when lowering shared value cones: repeated definitions represent the SAME value,
+        not repeated accumulator updates. Equal definitions keep their first occurrence; effects
+        are retained. Loops with identical iteration headers can share a pass unless the later
+        loop reads a finalized result from the earlier one.
+        """
+        from emmy.compiler.ir.stmt.blocks import Loop, StridedLoop  # noqa: PLC0415
+
+        out: list[Stmt] = []
+        seen: set[Stmt] = set()
+        for stmt in self:
+            if stmt.has_side_effects:
+                seen.clear()
+            elif _exposed_defines(stmt):
+                if stmt in seen:
+                    continue
+                seen.add(stmt)
+            prior = out[-1] if out else None
+            if (
+                isinstance(stmt, (Loop, StridedLoop))
+                and isinstance(prior, (Loop, StridedLoop))
+                and prior.is_reduce
+                and stmt.is_reduce
+                and not (prior.has_side_effects or stmt.has_side_effects)
+                and replace(prior, body=stmt.body) == stmt
+                and not (free_names(stmt) & prior.body.ssa_defs)
+            ):
+                stmt = replace(prior, body=(prior.body + stmt.body).coalesce())
+                out.pop()
+            out.append(stmt)
+        return Body(out)
 
     def fold[T](
         self,
@@ -263,9 +384,8 @@ class Body(tuple[Stmt, ...]):
           ``Stmt.binds_axes()``. ``Cond`` doesn't bind axes. Callbacks
           that don't care about scope can ignore this.
 
-        Returns the per-stmt memo keyed by ``id(stmt)`` — ``Tile`` is a
-        non-frozen dataclass and not hashable, so id-keying is the
-        lowest-friction choice. Callers that want a name-keyed view do
+        Returns the per-stmt memo keyed by ``id(stmt)`` without recursively hashing nested bodies.
+        Callers that want a name-keyed view do
         ``{n: memo[id(s)] for s in body.iter() for n in s.defines()}``.
 
         Recursion order: nested bodies are processed *before* the wrapper
@@ -298,6 +418,27 @@ class Body(tuple[Stmt, ...]):
     # -- def-use analysis ------------------------------------------------
 
     @cached_property
+    def carried_names(self) -> tuple[str, ...]:
+        """Accumulator and carried-state names, deduplicated in structural order."""
+        from emmy.compiler.ir.stmt.leaves import Accum, Carry  # noqa: PLC0415
+
+        return tuple(dict.fromkeys(name for stmt in self.iter_of_type(Accum, Carry) for name in stmt.carried_names()))
+
+    @cached_property
+    def local_defs(self) -> frozenset[str]:
+        """Bindings at this scope, including states exported by nested statements."""
+        from emmy.compiler.ir.stmt.order import _ordered_sibling_defs  # noqa: PLC0415
+
+        return frozenset(name for stmt in self for name in _ordered_sibling_defs(stmt))
+
+    @cached_property
+    def free_ssa(self) -> frozenset[str]:
+        """SSA reads from the enclosing scope, excluding this scope's definitions and exported states."""
+        from emmy.compiler.ir.stmt.order import _free_ssa  # noqa: PLC0415
+
+        return frozenset().union(*(_free_ssa(stmt) for stmt in self)) - self.local_defs
+
+    @cached_property
     def definitions(self) -> dict[str, Stmt]:
         """Map every SSA name produced anywhere inside this body
         (recursive) to its defining ``Stmt``.
@@ -322,19 +463,6 @@ class Body(tuple[Stmt, ...]):
         return frozenset(ax for s in self.iter() for ax in s.binds_axes())
 
     @cached_property
-    def _exported_accums(self) -> frozenset[str]:
-        """Accumulator names exposed by this immutable subtree."""
-        from emmy.compiler.ir.stmt.leaves import Accum  # noqa: PLC0415
-
-        out: set[str] = set()
-        for stmt in self:
-            if isinstance(stmt, Accum):
-                out.add(stmt.name)
-            for child in stmt.nested():
-                out.update(child._exported_accums)
-        return frozenset(out)
-
-    @cached_property
     def ssa_defs(self) -> frozenset[str]:
         """Every SSA definition in this immutable subtree."""
         out: set[str] = set()
@@ -348,8 +476,8 @@ class Body(tuple[Stmt, ...]):
     def ssa_uses(self) -> frozenset[str]:
         """Every name a statement of this immutable subtree reads — a ``Load`` index's ``Var`` names
         among them, since a coordinate is the same ``Var`` a gathered value read would be. The
-        immediate reads only (:attr:`deps_closure` reports the transitive ones); what
-        :meth:`Lambda.closing` binds as params, coordinates included.
+        immediate ``deps()`` reads only (:attr:`deps_closure` reports the transitive ones).
+        Expression-only reads, such as a Select predicate, require :func:`free_names` instead.
         """
         out: set[str] = set()
         for stmt in self:
@@ -644,11 +772,18 @@ class Body(tuple[Stmt, ...]):
         inside nested wrappers")."""
         return tuple(s for s in self if isinstance(s, types))
 
+    @cached_method
     def iter_of_type(self, *types: type) -> tuple[Stmt, ...]:
-        """All stmts (recursive — via :meth:`iter`) matching any of the
-        given types. The base primitive the named helpers
-        (:meth:`loads`, :meth:`writes`, ...) wrap."""
-        return tuple(s for s in self.iter() if isinstance(s, types))
+        """Matching statements in preorder, reusing each child's cached query.
+
+        The named helpers (:meth:`loads`, :meth:`writes`, ...) share this lookup."""
+        found = []
+        for stmt in self:
+            if isinstance(stmt, types):
+                found.append(stmt)
+            for child in stmt.nested():
+                found.extend(child.iter_of_type(*types))
+        return tuple(found)
 
     @cached_property
     def loads(self) -> tuple[Stmt, ...]:
@@ -665,6 +800,13 @@ class Body(tuple[Stmt, ...]):
         from emmy.compiler.ir.stmt.leaves import Write  # noqa: PLC0415
 
         return self.iter_of_type(Write)
+
+    @cached_property
+    def carries(self) -> tuple[Stmt, ...]:
+        """All ``Carry`` stmts in the body (recursive): the carried states it defines."""
+        from emmy.compiler.ir.stmt.leaves import Carry  # noqa: PLC0415
+
+        return self.iter_of_type(Carry)
 
     @cached_property
     def accums(self) -> tuple[Stmt, ...]:
@@ -687,7 +829,21 @@ class Body(tuple[Stmt, ...]):
 
     # -- structural identity --------------------------------------------
 
-    def structural_key(self, *, structural: bool = True) -> str:
+    def identity(self, *, structural: bool = True, types: Mapping[str, object] | None = None):
+        """This body's identity material (:func:`~emmy.compiler.ir.stmt.identity.canonicalize_identity`):
+        the canonical body over ``b0, b1, …``, which external buffer fills each role, and the
+        role's type. Every flavor is cached on the instance — Body is immutable, and an op rebuilt
+        over this body (a lift, a cut, a schedule row) reads the identity its predecessor computed
+        instead of canonicalizing the same statements again."""
+        return self._identity(structural, None if types is None else tuple(sorted(types.items())))
+
+    @cached_method
+    def _identity(self, cluster: bool, types: tuple[tuple[str, object], ...] | None):
+        from emmy.compiler.ir.stmt.identity import canonicalize_identity  # noqa: PLC0415 — identity imports this module
+
+        return canonicalize_identity(self, cluster=cluster, types=None if types is None else dict(types))
+
+    def structural_key(self, *, structural: bool = True, types: Mapping[str, object] | None = None) -> str:
         """Implements :class:`emmy.compiler.structural.Structural`.
 
         Canonical digest used for structural-equivalence queries. Two
@@ -701,60 +857,81 @@ class Body(tuple[Stmt, ...]):
         for consumers to whom ``relu`` and ``gelu`` are different
         kernels (their latency differs even under one schedule).
 
-        Built by re-running :func:`normalize_body` with ``hoist=False``
-        (safe for both Loop-IR and Tile-IR bodies — hoisting can move
-        Loads above Stage decls in Tile bodies) and
-        ``canonical_buffers=True`` (renames ``Load.input`` /
-        ``Write.output`` to ``b0, b1, ...``). Cached on the
-        instance — Body is immutable."""
-        return self._structural_key_clustered if structural else self._structural_key_exact
+        ``types`` maps external buffer names to what a deployed kernel is bound to (dtype and
+        shape); they color the buffers in the identity graph, so two bodies that read the same
+        structure through differently typed roles key apart, whatever order the buffers were
+        declared in. Structural, not the pretty text it used to join: ``pretty()`` is the human
+        rendering, and a cosmetic change to how a statement prints must not re-key every kernel
+        that contains it. Clustered identity collapses semantically distinct ops to one cluster
+        representative, so this path is only for structural identity, never executable IR."""
+        return self.identity(structural=structural, types=types).key
 
     @cached_property
-    def _structural_key_clustered(self) -> str:
-        # Both flavors delegate to a module-level lru_cache keyed by Body
-        # content (Body is ``tuple[Stmt, ...]`` and every Stmt subclass is
-        # a frozen dataclass, so the cache key is structural). Two
-        # different Body instances with identical stmts share the one
-        # ``normalize_body`` call — matters in tune mode where
-        # ``_record_op_inventory`` walks the source chain of every
-        # CudaOp in every terminal and hammers ``identity_key(with_io=True, with_knobs=True)`` ->
-        # ``Body.structural_key()`` on bodies that frequently recur
-        # structurally across variants.
-        return _shared_structural_key(self, True)
+    def census(self) -> tuple[tuple[str, int], ...]:
+        """How many statements of each kind this body holds, nested ones included — a linear-time
+        necessary condition for two bodies to be one computation, to ask before an exact key."""
+        counts: dict[str, int] = {}
+        for stmt in self.iter():
+            kind = type(stmt).__name__
+            counts[kind] = counts.get(kind, 0) + 1
+        return tuple(sorted(counts.items()))
 
     @cached_property
-    def _structural_key_exact(self) -> str:
-        return _shared_structural_key(self, False)
+    def literals_abstracted(self) -> tuple[Body, tuple[int, ...]]:
+        """This body with every integer literal of its expressions replaced by a positional
+        variable ``__lit<i>``, and the literals it held, in that order. The copies of one computation
+        an unrolled loop leaves read at successive offsets and mask at successive bounds: they share
+        the abstracted body and differ in the literals, affinely in the step."""
+        from emmy.compiler.ir.expr import BinaryExpr, Literal, Var, affine_form  # noqa: PLC0415
+        from emmy.compiler.ir.stmt.passes import map_exprs  # noqa: PLC0415
 
+        literals: list[int] = []
 
-@lru_cache(maxsize=4096)
-def _shared_structural_key(body: Body, cluster: bool) -> str:
-    """Module-level memoization for :meth:`Body.structural_key`.
+        def held(value: int) -> Var:
+            literals.append(value)
+            return Var(f"__lit{len(literals) - 1}")
 
-    The formula is fixed per flavor: ``normalize_body(body, hoist=False,
-    canonical_buffers=True, cluster_ops=cluster)`` rendered through
-    :func:`~emmy.compiler.structural.form`. Structural, not the
-    pretty text it used to join: ``pretty()`` is the human rendering, and
-    a cosmetic change to how a statement prints must not re-key every
-    kernel that contains it. With every concrete ``Stmt`` subclass a frozen
-    dataclass and ``Body`` a ``tuple[Stmt, ...]`` subclass, equal-content
-    bodies hash equal — so two structurally identical Body instances
-    share one normalize+pretty walk through this cache. Tune mode hits
-    this hard from ``_record_op_inventory`` (one ``identity_key(with_io=True, with_knobs=True)`` call
-    per ancestor in every CudaOp's source chain, per terminal candidate).
+        def abstract(expr):
+            if isinstance(expr, Literal) and expr.dtype == "int" and type(expr.value) is int:
+                return held(expr.value)
+            return expr
 
-    Generic :func:`normalize_body` callers with other flags don't share
-    this cache — ``cluster_ops=True`` collapses semantically distinct ops
-    to a single cluster representative (``add``↔``sub``, ``div``↔``mod``,
-    …), which is the right canonicalization for structural-equivalence
-    queries but would be a *correctness bug* for any callsite running
-    the normalized body.
-    """
-    from emmy.compiler.ir.stmt.normalize import normalize_body  # noqa: PLC0415
-    from emmy.compiler.structural import digest, form  # noqa: PLC0415
+        def lift(expr):
+            # An affine index carries its anchor whole, a zero one included: ``a`` and ``a + 4`` are
+            # one shape read at two offsets, and normalization spells the first without the ``+ 0``.
+            if isinstance(expr, Literal):
+                return abstract(expr)
+            form = affine_form(expr, expr.free_vars())
+            try:
+                anchor = int(form[0].eval({})) if form is not None else None
+            except (KeyError, TypeError, ValueError):
+                anchor = None
+            if anchor is None:
+                return expr.rebuild(abstract)
+            rest = None
+            for name, coeff in sorted(form[1].items()):
+                term = Var(name) if coeff == 1 else BinaryExpr("*", Var(name), Literal(coeff, "int"))
+                rest = term if rest is None else BinaryExpr("+", rest, term)
+            return held(anchor) if rest is None else BinaryExpr("+", rest, held(anchor))
 
-    normalized = normalize_body(body, hoist=False, canonical_buffers=True, cluster_ops=cluster)
-    return digest(form(normalized))
+        def abstracted(stmt):
+            from emmy.compiler.dim import Dim  # noqa: PLC0415
+            from emmy.compiler.ir.stmt.blocks import Loop  # noqa: PLC0415
+
+            # A loop's static extent is a literal too: a step whose reduction covers one more
+            # element than the last is still the same step.
+            if isinstance(stmt, Loop) and isinstance(stmt.axis.extent.expr, Literal) and type(stmt.axis.extent.expr.value) is int:
+                return replace(stmt, axis=replace(stmt.axis, extent=Dim(held(stmt.axis.extent.expr.value))))
+            return map_exprs(stmt, lift)
+
+        body = self.map(abstracted)
+        return body, tuple(literals)
+
+    @cached_property
+    def literal_free_key(self) -> str:
+        """The exact identity of this body blind to its integer literals — what the copies of one
+        computation at successive offsets and bounds share (:attr:`literals_abstracted`)."""
+        return self.literals_abstracted[0].structural_key(structural=False)
 
 
 def refs_axis(s: Stmt, name: str) -> bool:

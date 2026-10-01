@@ -18,7 +18,7 @@ Two binding scopes share the protocol:
   two-level tuner's minted-kernel watcher), composed into the run's own pipeline instance after
   the discovered set. A pipeline composed with stateful strategies serves one run.
 
-Events fire at the engine's own moments — ``Run.drive`` / ``Run.resolve`` entry,
+Events fire at the engine's own moments — ``Run.resolve`` entry,
 ``Candidate.apply``'s Graph splice (before and after), and ``Cursor.advance``'s pass completion —
 and carry payload objects so signatures never churn. Events are FROZEN records of a moment: a
 handler never mutates the event (nor could a mutation mean anything — nobody reads it after the
@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from emmy.compiler.context import Context
-    from emmy.compiler.graph import Graph, SpliceReceipt
+    from emmy.compiler.graph import Graph, Node, SpliceReceipt
     from emmy.compiler.ir.base import Op
     from emmy.compiler.pipeline.pipeline import Match
 
@@ -51,7 +51,7 @@ class PipelineStrategy(ABC):  # noqa: B024 — deliberately no abstract methods:
     ``search.policy.Search`` (the frontier policy inside one loop)."""
 
     def on_run_start(self, e: RunStartEvent) -> None:  # noqa: B027 — optional hook, no-op default
-        """A loop (``Run.drive`` / ``Run.resolve``) starts driving a graph."""
+        """A loop (``Run.resolve``) starts driving a graph."""
 
     def on_splice(self, e: SpliceEvent) -> None:  # noqa: B027 — optional hook, no-op default
         """Before a ``Graph`` fragment splices in (op identities stable, pre-id-promotion).
@@ -60,13 +60,17 @@ class PipelineStrategy(ABC):  # noqa: B024 — deliberately no abstract methods:
     def on_spliced(self, e: SplicedEvent) -> None:  # noqa: B027 — optional hook, no-op default
         """After the splice, with its :class:`~emmy.compiler.graph.SpliceReceipt`."""
 
+    def on_rebind(self, e: RebindEvent) -> None:  # noqa: B027 — optional hook, no-op default
+        """After an ``Op`` option rebinds a node in place. Handlers may replace ``node.op`` — never
+        the graph or the cursor."""
+
     def on_pass_end(self, e: PassEndEvent) -> None:  # noqa: B027 — optional hook, no-op default
         """A named pass completed (quiescent scan)."""
 
 
 @dataclass(frozen=True)
 class RunStartEvent:
-    """A loop (``Run.drive`` / ``Run.resolve``) starts driving ``graph``. ``passes`` names the
+    """A loop (``Run.resolve``) starts driving ``graph``. ``passes`` names the
     pipeline's pass list — a strategy keyed to a pass boundary reads it to handle partial
     pipelines that enter after its boundary (e.g. a loop-stage IR resume never runs
     ``loop/stamp``, so identity stamps at entry instead)."""
@@ -82,8 +86,9 @@ class SpliceEvent:
     identities are stable (pre-splice, pre-id-promotion); ``graph`` is the candidate's graph,
     still holding the consumed nodes. ``knobs`` is the selected fork's delta, which cannot ride
     the fragment because Graph splices deliberately do not inherit the consumed op's knobs.
-    Strategies may mutate fragment OPS (stamp identity, thread attribution) — never the graph or
-    the cursor."""
+    ``aliases`` maps each other spelling of a key of ``knobs`` to the key it names, so a strategy
+    that stores the decision keeps one key per seam cut. Strategies may mutate fragment OPS (stamp
+    identity, thread attribution) — never the graph or the cursor."""
 
     match: Match
     fragment: Graph
@@ -91,6 +96,7 @@ class SpliceEvent:
     pass_name: str
     graph: Graph
     knobs: dict = field(default_factory=dict)
+    aliases: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -101,6 +107,19 @@ class SplicedEvent:
     graph: Graph
     pass_name: str
     receipt: SpliceReceipt
+
+
+@dataclass(frozen=True)
+class RebindEvent:
+    """Emitted by ``Candidate.apply`` AFTER an ``Op`` option rebinds ``node.op`` in place — the
+    replaced op's knobs merged forward and stamped as its ``source``. ``node`` is the live node,
+    already holding the new op; ``replaced`` is the op it held."""
+
+    match: Match
+    node: Node
+    replaced: Op
+    pass_name: str
+    graph: Graph
 
 
 @dataclass(frozen=True)

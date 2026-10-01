@@ -1,8 +1,8 @@
-"""The online-prior featurizers — every knob-dict → feature-vector encoding, in one file.
+"""The prior featurizers — every knob-dict → feature-vector encoding, in one file.
 
 :func:`knob_features` is the single featurizer over a whole knob dict (the ``D_*`` engineered
 geometry / occupancy family, the ``MMA_*`` atom expansion, the ``S_*`` / ``H_*`` pass-throughs);
-:func:`tile_signature` is the schema-agnostic structural identity used to join golden YAML rows
+:func:`tile_signature` is the schema-agnostic structural identity used to join golden file rows
 against enumerated candidates; :data:`ROUTING_FEATURES` and :func:`is_dynamic_row` are the routing stamp's
 spelling and its one reader. Lives in the same package as :mod:`.space` so the whole search space
 (dimensions × values × encoding) is analyzable in one place; the ``Knob`` descriptor / registry /
@@ -20,6 +20,7 @@ from types import MappingProxyType
 from emmy.compiler.pipeline.knob import (
     _SITE_FAMILIES,
     CTX_PREFIX,
+    IDENTITY_PREFIX,
     STRUCT_PREFIX,
     KnobType,
     axis_of,
@@ -157,6 +158,8 @@ def _stage_features(knobs: dict) -> dict[str, float]:
     st = _parsed_stage(str(spec))
     if st is None:
         return {}
+    if st.transport == "reg":
+        return {"D_stage_reg": 1.0}  # register storage has no shared-memory pipeline
     return {
         "D_stage_depth": float(st.depth),
         # Does the gmem→smem pipeline prefetch at all — depth 1 is a single buffer, ≥ 2 is a ring.
@@ -398,6 +401,8 @@ def knob_features(knobs: dict) -> dict[str, float]:
     node's block. Per-node attribution remains outside this whole-kernel feature contract."""
     feats: dict[str, float] = {}
     for name, val in knobs.items():
+        if name.startswith(IDENTITY_PREFIX):
+            continue
         if name.startswith(STRUCT_PREFIX) or name.startswith(CTX_PREFIX):
             feats[name] = float(val)
             continue
@@ -487,7 +492,7 @@ class _Decomp:
     finalize: str = "atomic"
     # The ``coop-t`` transposed cooperative band (k-major matvec lane mapping) — a different
     # kernel from the interleaved ``coop`` at the same width, so it must reach both the features
-    # and the ``tile_signature`` identity (``coop-t`` goldens are recorded in the per-GPU YAMLs).
+    # and the ``tile_signature`` identity (``coop-t`` goldens are recorded in the per-GPU golden files).
     coop_transposed: bool = False
 
 
@@ -521,8 +526,8 @@ def tile_signature(knobs: dict) -> tuple:
     K-chunk, the primary reduce decomposition, and the atom kind — read from the native codec
     knobs (``TILE`` / ``REDUCE`` / ``STAGE``, either exact-site or bare analytical values). Two configs
     with equal signatures are the same kernel variant whichever key form spelled them, so this
-    is the bridge for matching a recorded golden YAML row against the native enumeration's
-    candidate rows (``emmy fit``'s golden group builder / ``search/golden_eval.evaluate_record``).
+    is the bridge for matching a recorded golden file row against the native enumeration's
+    candidate rows (``emmy fit``'s golden group builder / ``search/ranking.evaluate_record``).
     The K-chunk (``Tile.bk``) is part of the identity — without it every ``k<n>`` sibling in
     a warp pool joined ambiguously (a golden recorded at ``k4`` matched the ``k1`` candidate).
     Operand staging (the ``STAGE`` codec) is part of the identity — a staged and a gmem-direct
@@ -573,9 +578,8 @@ def _geom_feats(
     hand-coded matmul heuristic scored (occupancy waves, tile-area / thread /
     aspect targets, the geometry "bands", K-chunk depth), so a fixed linear model
     over these features (:class:`~emmy.compiler.pipeline.search.prior.OfflinePrior`)
-    reproduces that heuristic and the ``OnlinePrior`` sees the same
-    derived signal a tree can't cheaply reconstruct from raw knobs + the *coarse*
-    ``S_ext_*`` extents.
+    reproduces that heuristic, and a tree model sees the same derived signal it can't
+    cheaply reconstruct from raw knobs + the *coarse* ``S_ext_*`` extents.
 
     Tier-aware: the "ideal" tile / thread targets differ between the scalar thread
     tile (256 threads, 8192-elem area) and the warp tile (128 threads = 4 warps,
@@ -741,7 +745,7 @@ def _reduce_features(knobs: dict) -> dict[str, float]:
     keeps the :data:`_REDUCE_FEATURE_KEYS` slice; the ILP register fold (``r<n>``) rides its own
     ``D_reduce_ilp`` — serial and ``r4`` differ in neither threads nor split-K. Empty when the row
     carries no ``REDUCE`` family key, so pointwise rows stay feature-free as before. Additive
-    encoding: raw knob dicts re-featurize at read time, so existing node rows / reservoirs gain
+    encoding: raw knob dicts re-featurize at read time, so existing perf rows / reservoirs gain
     these keys on the next fit — no ``FEATURIZER_VERSION`` bump."""
     if not any(family_of(k) == "REDUCE" for k in knobs):
         return {}

@@ -104,7 +104,7 @@ import torch
 import torch.nn.functional as F
 
 from emmy.compiler.pipeline.search.pins import pinned_knobs
-from tests.compiler.helpers import direct_classic_leaf, from_pretrained_or_skip, requires_cuda
+from tests.compiler.helpers import direct_classic_leaf, from_pretrained_or_skip, requires_cuda, requires_sm
 
 
 class _Sdpa(torch.nn.Module):
@@ -118,12 +118,13 @@ class _Causal(torch.nn.Module):
 
 
 class _Gqa(torch.nn.Module):
-    """GQA SDPA. ``enable_gqa=True`` is a bool kwarg the tracer's is_causal scan grabs (the default
-    ``is_causal=False`` is dropped by dynamo), so this traces as GQA **and** causal — the only GQA
-    form reachable through the public torch API here, and the Qwen3-Embedding layer-0 shape."""
+    """Causal GQA SDPA at the Qwen3-Embedding layer-0 shape. The flag used to be spelled
+    ``is_causal=False`` and still traced as causal, because the tracer read ``enable_gqa=True`` —
+    the signature's other bool — as the causal flag; it now reads ``is_causal`` from its own slot,
+    so the fixture says what it means."""
 
     def forward(self, q, k, v):
-        return torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=False, enable_gqa=True)
+        return torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=True, enable_gqa=True)
 
 
 class _Masked(torch.nn.Module):
@@ -407,6 +408,7 @@ def _sdpa_ref(cuda: dict):
 
 @requires_cuda
 @pytest.mark.parametrize("keys", [128, 100])
+@requires_sm(8)
 def test_chunk_tier_folds_the_carrier_on_tensor_cores(keys):
     """An f16 SDPA pinned to the chunk tier is ONE mma kernel and matches torch.
 
@@ -422,7 +424,36 @@ def test_chunk_tier_folds_the_carrier_on_tensor_cores(keys):
     assert _max_diff(backend, compiled, feed, _sdpa_ref(cuda)) < 1e-2
 
 
+class _SeqMajorQuery(torch.nn.Module):
+    """The query arrives [batch, seq, head, dim], as a projection writes it: its rows stride over
+    every head, not one head dim."""
+
+    def forward(self, q, k, v):
+        return torch.nn.functional.scaled_dot_product_attention(q.transpose(1, 2), k, v)
+
+
 @requires_cuda
+@requires_sm(8)
+def test_chunk_tier_reads_a_query_whose_rows_stride_over_every_head():
+    """The hoisted query fragments take the row stride off the address. Read at the head dim, a
+    fragment's rows came from the wrong queries: the Qwen3-0.6B s512 flash piece disagreed with
+    eager on 487k of 524k outputs."""
+    torch.manual_seed(0)
+    q = torch.randn(1, 64, 2, 64, dtype=torch.float16)
+    k, v = (torch.randn(1, 2, 128, 64, dtype=torch.float16) for _ in range(2))
+    feed = {"q": q.numpy(), "k": k.numpy(), "v": v.numpy()}
+    cuda = {name: torch.from_numpy(array).cuda() for name, array in feed.items()}
+    backend, compiled = _chunk_kernel(_SeqMajorQuery(), (q, k, v))
+
+    def ref():
+        with torch.no_grad():
+            return F.scaled_dot_product_attention(cuda["q"].transpose(1, 2), cuda["k"], cuda["v"]).cpu().flatten().numpy()
+
+    assert _max_diff(backend, compiled, feed, ref) < 1e-2
+
+
+@requires_cuda
+@requires_sm(8)
 def test_chunk_tier_takes_a_symbolic_key_extent():
     """Nothing in the tier sizes itself against the key extent, so a dynamic stream reaches it."""
     torch.manual_seed(0)
@@ -437,6 +468,7 @@ def test_chunk_tier_takes_a_symbolic_key_extent():
 
 @requires_cuda
 @pytest.mark.parametrize("transport", ["smem-async", "smem-tma"])
+@requires_sm(8)
 def test_chunk_tier_stages_a_symbolic_key_extent(transport):
     """The streamed value stages against a key extent known only at runtime — the serving shape.
 
@@ -473,6 +505,7 @@ def test_chunk_tier_stages_a_symbolic_key_extent(transport):
 
 @requires_cuda
 @pytest.mark.parametrize("stage", ["", "d2/smem-async"])
+@requires_sm(8)
 def test_chunk_tier_skips_the_chunks_a_causal_band_masks(stage):
     """A causal sliding-window SDPA on the chunk tier runs ONE loop bounded at both ends — it starts
     on the chunk holding the CTA's first row's near edge and stops at its diagonal — and matches torch
@@ -580,7 +613,8 @@ __device__ __forceinline__ void load_b_native(unsigned* r, const __half* sm, int
   r[0]=*reinterpret_cast<unsigned*>(&h0); r[1]=*reinterpret_cast<unsigned*>(&h1);
 }
 
-extern "C" __global__ void fa2(const __half* Q,const __half* K,const __half* V,float* O,int S,float scale){
+extern "C" __global__ void fa2(const __half* Q,const __half* K,const __half* V,float* O,const float* scale_p,int S){
+  float scale = *scale_p;
   int qb = blockIdx.x; int lane=threadIdx.x&31; const int D=16;
   __shared__ __half qs[16*16], ks[16*16], vs[16*16], ps[16*16];
   for(int i=lane;i<16*D;i+=32){ qs[i]=Q[(qb*16)*D + i]; }
@@ -638,22 +672,41 @@ extern "C" __global__ void fa2(const __half* Q,const __half* K,const __half* V,f
 
 @requires_cuda
 @pytest.mark.parametrize("S", [16, 32, 64, 128])
+@requires_sm(8)
 def test_fused_tensorcore_flash_reference_matches_torch(S):
     """The hand-written fused tensor-core flash matches torch SDPA across the KV stream (1–8 tiles).
     The validated spec for the warp-chain codegen — every lane layout (A/B fragments, the
     C-fragment row reduction, the C→A handoff) is exercised here."""
-    import cupy as cp  # noqa: PLC0415
+    from emmy.compiler.backend.cuda.program import CompiledProgram  # noqa: PLC0415
+    from emmy.compiler.backend.gpu_lock import gpu_lock  # noqa: PLC0415
+    from emmy.compiler.backend.plan import BufferSpec, ExecutionPlan, KernelSpec, LaunchSpec  # noqa: PLC0415
+    from emmy.compiler.dim import Dim  # noqa: PLC0415
+    from emmy.compiler.dtype import F16, F32  # noqa: PLC0415
 
-    from emmy.compiler.backend.cuda import nvcc  # noqa: PLC0415
-
-    fn = nvcc.load_function(_KERNEL, "fa2", "", arch_specific=False)
     torch.manual_seed(S)
     D = 16
     q, k, v = (torch.randn(S, D, dtype=torch.float16) for _ in range(3))
-    dq, dk, dv = (cp.asarray(t.numpy()) for t in (q, k, v))
-    d_out = cp.zeros((S, D), cp.float32)
-    fn((S // 16,), (32,), (dq, dk, dv, d_out, np.int32(S), np.float32(1.0 / np.sqrt(D))))
-    got = torch.from_numpy(cp.asnumpy(d_out))
+    # The reference kernel takes its sequence length by value: a runtime argument bound from
+    # the plan's symbol hints.
+    plan = ExecutionPlan(
+        "cuda",
+        ["Q", "K", "V"],
+        ["O"],
+        [
+            *(BufferSpec(name, (Dim(S), Dim(D)), F16, "input") for name in ("Q", "K", "V")),
+            BufferSpec("scale", (Dim(1),), F32, "constant"),
+            BufferSpec("O", (Dim(S), Dim(D)), F32, "output"),
+        ],
+        {"scale": float(1.0 / np.sqrt(D))},
+        {},
+        [LaunchSpec("O", "fa2", ("Q", "K", "V", "O", "scale"), ((S // 16,), (1,), (1,)), ((32,), (1,), (1,)), 0, (), runtime_args=("S",))],
+        {"fa2": KernelSpec(source=_KERNEL)},
+        symbolic_hints={"S": S},
+    )
+    with gpu_lock():
+        prog = CompiledProgram.build_from_plan(plan, {name: t.numpy() for name, t in zip("QKV", (q, k, v), strict=True)})
+        prog.run_once()
+        got = torch.from_numpy(prog.outputs()["O"])
     ref = torch.nn.functional.scaled_dot_product_attention(q.cuda().float(), k.cuda().float(), v.cuda().float()).cpu()
     max_diff = float((got - ref).abs().max())
     assert max_diff < 2e-3, f"fused TC flash S={S} max_diff={max_diff:.2e}"
@@ -780,10 +833,6 @@ class _StackedLinears(torch.nn.Module):
 
 
 @requires_cuda
-@pytest.mark.xfail(
-    run=False,
-    reason="pre-existing on clean main: the wide-product form faults and poisons the CUDA context",
-)
 def test_two_linears_tinyllama_shape(_chain_tile_pins):
     """Two chained 2048×2048 Linears at TinyLlama hidden size and seq=32. Confirms basic
     matmul-chain accuracy — if this fails, every matmul is broken."""

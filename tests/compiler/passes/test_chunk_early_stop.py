@@ -82,6 +82,29 @@ def test_a_causal_band_bounds_both_ends_whichever_mask_comes_first() -> None:
     assert tuple(map(_pretty, (first, end))) == tuple(map(_pretty, _bounds(_masked_score(BAND, CAUSAL))))
 
 
+def test_a_comparison_canonicalized_by_swapping_operands_still_bounds_the_stream() -> None:
+    causal = Select(
+        name="v1",
+        branches=(
+            SelectBranch(select=BinaryExpr("<=", Var("a2"), Var("a1")), value="zero"),
+            SelectBranch(select=BinaryExpr("<", Var("a1"), Var("a2")), value="fill"),
+        ),
+    )
+    first, end = _bounds(_masked_score(causal))
+    assert first is None and end is not None
+
+    edge = BinaryExpr("-", Var("a1"), Literal(32, "int"))
+    band = Select(
+        name="v1",
+        branches=(
+            SelectBranch(select=BinaryExpr("<", edge, Var("a2")), value="zero"),
+            SelectBranch(select=BinaryExpr("<=", Var("a2"), edge), value="fill"),
+        ),
+    )
+    first, end = _bounds(_masked_score(band))
+    assert first is not None and end is None
+
+
 def test_a_lead_on_the_row_side_pushes_the_stop_out_and_a_strict_mask_pulls_it_in() -> None:
     _, lagged = _bounds(_masked_score(_mask("v1", "<=", ">", row_lead=32)))
     assert _pretty(lagged.if_true) == _pretty(BinaryExpr("+", ROW_BLOCK.block_end(), Literal(32, "int")))

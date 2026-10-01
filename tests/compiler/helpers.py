@@ -6,8 +6,9 @@ are explicit at each call site and test modules never import implementation from
 
 from __future__ import annotations
 
-import asyncio
+import dataclasses
 import functools
+from collections.abc import Mapping
 from itertools import product
 from pathlib import Path
 
@@ -15,32 +16,103 @@ import numpy as np
 import pytest
 
 
-def classic_cartesian_assignments(context):
+def classic_cartesian_schedules(context):
     """Enumerate a classic context's literal kernel × node × edge test oracle."""
     from emmy.compiler.ir.schedule import Schedule, ScheduleRefused
 
-    nodes = tuple(context.node_choices(site) for site in context.tile_op.node_sites)
-    edges = tuple(context.edge_choices(site) for site in context.tile_op.edge_sites)
-    for kernel, node_values, edge_values in product(context.kernels, product(*nodes), product(*edges)):
-        assignment = Schedule(
+    problem = context.problem
+    nodes = tuple(problem.node_site(site).nodes for site in context.tile_op.node_sites)
+    edges = tuple(problem.node_site(edge[0]).edges for edge in context.tile_op.edge_sites)
+    for kernel, node_values, edge_values in product(problem.kernel_site.kernels, product(*nodes), product(*edges)):
+        schedule = Schedule(
             kernel,
             dict(zip(context.tile_op.node_sites, node_values, strict=True)),
             dict(zip(context.tile_op.edge_sites, edge_values, strict=True)),
         )
         try:
-            context.extend(assignment)
+            context.extend(schedule)
         except (ScheduleRefused, TypeError):
             accepted = False
         else:
             accepted = True
-        yield assignment, accepted
+        yield schedule, accepted
 
 
 def enumerate_classic_reference(context):
-    """Yield the accepted subset of the literal classic assignment product."""
-    for assignment, accepted in classic_cartesian_assignments(context):
+    """Yield the accepted subset of the literal classic schedule product."""
+    for schedule, accepted in classic_cartesian_schedules(context):
         if accepted:
-            yield assignment
+            yield schedule
+
+
+@functools.cache
+def _literal_classic_problem_type():
+    """The classic site classes with their catalogs replaced by hand-written factors.
+
+    The compiler knows nothing of this: a site is the source of its own candidates, and the only way to hand it
+    others is to be a different site. Built once, since each class definition binds its own descriptors.
+    """
+    from emmy.compiler.ir.schedule.classic.sites import ClassicKernelSite, ClassicNodeSite, ClassicProblem
+
+    class _LiteralNodeSite(ClassicNodeSite):
+        @functools.cached_property
+        def nodes(self):
+            return self.problem.literal_nodes[self.id]
+
+        @functools.cached_property
+        def edges(self):
+            incident = self.problem.tile.incident_edges[self.id]
+            return self.problem.literal_edges[incident[0]] if incident else ()
+
+        @functools.cached_property
+        def warp_eligible(self) -> bool:
+            return any(choice.tile.is_warp for choice in self.nodes)
+
+    class _LiteralKernelSite(ClassicKernelSite):
+        @functools.cached_property
+        def kernels(self):
+            return self.problem.literal_kernels
+
+    @dataclasses.dataclass(frozen=True, eq=False)
+    class _LiteralProblem(ClassicProblem):
+        literal_kernels: tuple = ()
+        literal_nodes: Mapping = dataclasses.field(default_factory=dict)
+        literal_edges: Mapping = dataclasses.field(default_factory=dict)
+
+        @functools.cached_property
+        def node_sites(self):
+            return tuple(_LiteralNodeSite(self, site) for site in self.tile.node_sites)
+
+        @functools.cached_property
+        def kernel_site(self):
+            return _LiteralKernelSite(self)
+
+    return _LiteralProblem
+
+
+def literal_classic_context(tile, target, *, kernel, nodes, edges, row=None, order=None):
+    """A classic context whose sites offer exactly the factors named here — the bounded space a test can answer
+    by hand, against which the lazy traversal is checked.
+
+    ``kernel`` is the kernel factor, ``nodes`` maps a node site to its choices and ``edges`` an edge site to its
+    transports. ``row`` narrows the kernel factor by its bare ``WORK`` / ``RASTER`` spellings, which is all a
+    bounded test asks of a row; the sites of a real problem narrow their own catalogs.
+    """
+    from emmy.compiler.ir.schedule.classic import ClassicScheduleContext
+
+    row = dict(row or {})
+    for key, spell in (("WORK", lambda choice: choice.work.spell()), ("RASTER", lambda choice: choice.raster.spell())):
+        if key in row:
+            kernel = tuple(choice for choice in kernel if spell(choice) == row[key])
+    problem = _literal_classic_problem_type()(
+        tile,
+        target,
+        row=row,
+        literal_kernels=tuple(kernel),
+        literal_nodes={site: tuple(choices) for site, choices in nodes.items()},
+        literal_edges={edge: tuple(choices) for edge, choices in edges.items()},
+    )
+    return ClassicScheduleContext(tile, target, problem, order=order)
 
 
 def case_target_tile(case: str):
@@ -48,21 +120,19 @@ def case_target_tile(case: str):
 
     A case records one entry per kernel of the set it realizes and every entry decorates the same
     target, so the first entry names it."""
-    from emmy.compiler.pipeline.search.golden import _lifted_target, load_golden_file, load_golden_records
+    from emmy.compiler.pipeline.search.golden import GoldenFile
+    from emmy.compiler.pipeline.search.golden.record import _lifted_target
 
     path = Path(__file__).parent / "realization/cases" / case
-    record, *_ = load_golden_records(load_golden_file(path))
+    record, *_ = GoldenFile.load(path).records()
     return _lifted_target(record)
 
 
 def has_cuda_gpu() -> bool:
-    """Check if cupy is importable and sees at least one CUDA device."""
-    try:
-        import cupy as cp
+    """Check that the runtime extension loads and sees a CUDA device."""
+    from emmy.compiler.backend.cuda.device import compute_capability
 
-        return cp.cuda.runtime.getDeviceCount() > 0
-    except Exception:
-        return False
+    return compute_capability() is not None
 
 
 def has_cuda_toolchain() -> bool:
@@ -76,19 +146,24 @@ def has_cuda_toolchain() -> bool:
 
 requires_cuda = pytest.mark.skipif(
     not has_cuda_toolchain(),
-    reason="CUDA not available (need cupy + GPU + nvcc)",
+    reason="CUDA not available (need the emmy.emmy_runtime extension + GPU + nvcc)",
 )
 
 
 @functools.cache
 def device_compute_capability() -> tuple[int, int] | None:
     """Return the live CUDA device compute capability, or ``None`` when no GPU is visible."""
-    if not has_cuda_gpu():
-        return None
-    import cupy as cp
+    from emmy.compiler.backend.cuda.device import compute_capability
 
-    cap = str(cp.cuda.Device().compute_capability)
-    return (int(cap[:-1]), int(cap[-1]))
+    return compute_capability()
+
+
+def requires_sm(major: int, minor: int = 0):
+    """Skip an instruction-specific CUDA test below its minimum compute capability."""
+    return pytest.mark.skipif(
+        (device_compute_capability() or (0, 0)) < (major, minor),
+        reason=f"requires sm_{major}{minor} or newer",
+    )
 
 
 # Skip the mma.sync warp-tier tests below sm_90. On sm_80-89 the pin-only path is currently non-functional because
@@ -136,7 +211,7 @@ def dtype_input_scale(dtype) -> float:
 def skip_if_no_cuda() -> None:
     """Skip the current test when Emmy cannot compile CUDA kernels."""
     if not has_cuda_toolchain():
-        pytest.skip("CUDA not available (need cupy + GPU + nvcc)")
+        pytest.skip("CUDA not available (need the emmy.emmy_runtime extension + GPU + nvcc)")
 
 
 def matmul_graph(m: int, k: int, n: int):
@@ -175,68 +250,6 @@ def inject_constants(input_data: dict[str, np.ndarray], graph) -> dict[str, np.n
     return input_data
 
 
-def drain_tune(pipeline, graph, *, on=None, **kwargs):
-    """Synchronously collect :meth:`Pipeline.tune_async` terminals for tests."""
-
-    async def _collect():
-        out = []
-        try:
-            async for candidate in pipeline.tune_async(graph, **kwargs):
-                out.append(candidate)
-                if on is not None and on(candidate):
-                    break
-        finally:
-            backend = kwargs.get("backend")
-            if backend is not None and hasattr(backend, "aclose_async_worker"):
-                await backend.aclose_async_worker()
-        return out
-
-    return asyncio.run(_collect())
-
-
-def run_inner_reward(
-    fused_graph,
-    *,
-    ctx,
-    db,
-    backend=None,
-    backends=None,
-    patience,
-    ucb_c=None,
-    explore_eps=0.0,
-    seed=0,
-    progress=None,
-    prior=None,
-    run_id="",
-):
-    """Synchronously run the two-level strategy's separable terminal scoring for tests."""
-    from emmy.compiler.pipeline import TuningSearch
-    from emmy.compiler.pipeline.search.strategy import TwoLevelStrategy
-
-    if ucb_c is None:
-        ucb_c = TuningSearch.DEFAULT_UCB_C
-    strategy = TwoLevelStrategy(
-        db=db,
-        patience=patience,
-        backend=backend,
-        backends=backends,
-        ucb_c=ucb_c,
-        explore_eps=explore_eps,
-        progress=progress,
-        prior_seed=seed,
-        run_id=run_id,
-        prior=prior,
-    )
-    return asyncio.run(strategy._evaluate_terminal(fused_graph, ctx))
-
-
-def run_two_level(graph, *, ctx, **kwargs):
-    """Synchronously run :class:`two_level.TwoLevelStrategy` for tests."""
-    from emmy.compiler.pipeline.search.strategy import TwoLevelStrategy
-
-    return asyncio.run(TwoLevelStrategy(**kwargs).run(graph, ctx))
-
-
 def dyn_M(mode: str, M: int):
     """Return ``Dim('seq_len')`` for dynamic mode and the integer ``M`` otherwise."""
     if mode == "dynamic":
@@ -253,3 +266,56 @@ def from_pretrained_or_skip(loader, *args, **kwargs):
     except OSError as exc:
         model = args[0] if args else kwargs.get("pretrained_model_name_or_path", "?")
         pytest.skip(f"HuggingFace Hub unavailable for {model} (likely rate-limited): {exc}")
+
+
+def loop_target(graph, origins, loops: list[dict], compute_cap=(12, 0)) -> dict:
+    """The golden target for the kernel ``origins`` fuse into in ``graph``: that kernel's Loop IR,
+    interned into ``loops``, with ``origins`` beside it as provenance — what the recorder writes."""
+    from emmy.compiler import provenance  # noqa: PLC0415
+    from emmy.compiler.context import Context  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.working_golden import lowered_kernels  # noqa: PLC0415
+    from emmy.compiler.wire import intern  # noqa: PLC0415
+
+    lowered = graph.copy()
+    provenance.seed(lowered)
+    fused, kernels = lowered_kernels(lowered, ctx=Context.from_target(tuple(compute_cap)))
+    wanted = set(origins)
+    (program,) = (
+        program
+        for node_id, program in kernels
+        if {origin for origin in provenance.get(fused.nodes[node_id]) if origin in graph.nodes} == wanted
+    )
+    return {"loop": intern(loops, program), "origins": list(origins)}
+
+
+def loop_record_fields(graph, origins, compute_cap=(12, 0)) -> dict:
+    """The ``GoldenRecord`` target fields for the kernel ``origins`` fuse into (:func:`loop_target`)."""
+    loops: list[dict] = []
+    target = loop_target(graph, origins, loops, compute_cap)
+    return {"origins": tuple(origins), "loop_index": target["loop"], "loop_wire": loops[target["loop"]]}
+
+
+QWEN3_EMBEDDING = "Qwen/Qwen3-Embedding-0.6B"
+
+
+def qwen3_embedding_config():
+    """The Qwen3-Embedding-0.6B config, trimmed to one layer.
+
+    Config only — no checkpoint — so the head geometry (16 query heads over 8 KV heads, head_dim 128) is
+    readable without downloading weights."""
+    from transformers import AutoConfig  # noqa: PLC0415
+
+    config = from_pretrained_or_skip(AutoConfig.from_pretrained, QWEN3_EMBEDDING)
+    config.num_hidden_layers = 1
+    return config
+
+
+def qwen3_embedding_model(config=None, auto_class=None):
+    """A random-weight fp32 model built from :func:`qwen3_embedding_config` — the shared trunk of the
+    dynamic-shape tests. Seeded, so two calls build the same weights. ``auto_class`` picks the head:
+    the bare trunk by default, or a causal LM for the whole-model trace."""
+    import torch  # noqa: PLC0415
+    from transformers import AutoModel  # noqa: PLC0415
+
+    torch.manual_seed(0)
+    return (auto_class or AutoModel).from_config(config if config is not None else qwen3_embedding_config()).float().eval()

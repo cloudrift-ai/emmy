@@ -33,7 +33,6 @@ import json
 import os
 import shutil
 import subprocess
-import sys
 import tempfile
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -123,11 +122,6 @@ def bench_pair(request):
     """
 
     def _run(case: Case) -> PerfRow | None:
-        if _tune_enabled():
-            # Tune-only path: populate the autotune DB, measure nothing. Run
-            # ``make bench-kernels-tuned`` afterwards to measure with the tuned knobs.
-            _tune_via_subprocess(case)
-            return None
         row = _bench_corpus_case(case, profile=_ncu_enabled())
         _collector(request.config).append(row)
         return row
@@ -135,18 +129,11 @@ def bench_pair(request):
     return _run
 
 
-def _tune_enabled() -> bool:
-    return os.environ.get("EMMY_TUNE", "") in ("1", "true", "True")
-
-
-def _tune_via_subprocess(case: Case) -> None:
-    """Search this case's kernel and record the winners into the autotune DB."""
-    subprocess.run(
-        [sys.executable, "-m", "emmy.emmy", "tune", "--golden", str(case.path), "--realization", case.record.name],
-        check=False,
-        env={**os.environ, "EMMY_TUNE": "1"},
-        timeout=3600,
-    )
+# The lane's own tune DB, fresh per session, unless the caller points ``EMMY_TUNE_DB`` at one
+# (``make bench-kernels-tuned``). The box's ``~/.cache/emmy/autotune.db`` is machine-local, mutable
+# evidence, and a grown one also makes every compile in the lane slower. The case's own rows stay
+# the compile's evidence, which is what makes a stored latency comparable across machines.
+_LANE_TUNE_DB = os.environ.get("EMMY_TUNE_DB") or str(Path(tempfile.mkdtemp(prefix="emmy_perf_tune_db_")) / "autotune.db")
 
 
 def _bench_corpus_case(case: Case, *, profile: bool) -> PerfRow:
@@ -158,7 +145,7 @@ def _bench_corpus_case(case: Case, *, profile: bool) -> PerfRow:
     """
     facts = helpers.describe(case)
     recorded = helpers.recorded_latency(case, helpers.live_hardware_id())
-    stored = float(recorded["emmy_us"]) if recorded else None
+    stored = float(recorded.emmy_us) if recorded else None
     with tempfile.TemporaryDirectory(prefix=f"emmy_perf_{case.path.stem}_") as tmp:
         record = None
         samples: list[float] = []
@@ -171,7 +158,7 @@ def _bench_corpus_case(case: Case, *, profile: bool) -> PerfRow:
                 command,
                 capture_output=True,
                 text=True,
-                env={**os.environ, "EMMY_NVCC_FLAGS": "", "EMMY_DUMP_DIR": tmp},
+                env={**os.environ, "EMMY_NVCC_FLAGS": "", "EMMY_DUMP_DIR": tmp, "EMMY_TUNE_DB": _LANE_TUNE_DB},
                 timeout=1800,
             )
             if result.returncode != 0 or not output.exists():

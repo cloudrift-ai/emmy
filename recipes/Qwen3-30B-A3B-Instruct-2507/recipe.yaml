@@ -1,0 +1,44 @@
+# Stock-vLLM serving configuration qualified on one H200 141GB.
+#
+# The checkpoint fits without quantization. The full native context starts successfully and
+# was exercised with retrieval prompts up to 237,815 tokens. See RESULTS.md for the measured
+# workload and the restricted-network artifact-delivery limitation.
+tags:
+  - maintained
+
+model:
+  huggingface: "Qwen/Qwen3-30B-A3B-Instruct-2507"
+  rationale: "Rides strong Qwen MoE momentum; steady mid-size interest supported by serving."
+  heat: 58
+  revision: 0d7cf23991f47feeb3a57ecb4c9cee8ea4a17bfe
+  task: generate
+
+engine:
+  llm:
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    gpu_memory_utilization: 0.9
+    context_length: 262144
+    max_concurrent_requests: 1
+    vllm:
+      image: "vllm/vllm-openai:v0.17.0"
+      # This instruct checkpoint emits Hermes-style JSON tool calls and does not expose a
+      # separate reasoning channel. A 4,096-token prefill chunk leaves ample KV headroom while
+      # bounding activation memory for long prompts.
+      extra_args: >-
+        --max-num-batched-tokens 4096
+        --enable-auto-tool-choice
+        --tool-call-parser hermes
+
+matrices:
+  - deploy.gpu: "NVIDIA H200 141GB"
+    deploy.gpu_count: 1
+
+  # Reduced-fraction entry so this model can share an H200 with a ~35 GB FP8 model at 0.35.
+  # 0.55 x 141 GB leaves ~16 GB after the ~61 GB of BF16 weights; at ~96 KB of KV per token
+  # (48 layers x 4 KV heads x 128) that holds one 131,072-token request at the same
+  # single-request concurrency. Unverified until a record run on an H200.
+  - deploy.gpu: "NVIDIA H200 141GB"
+    deploy.gpu_count: 1
+    engine.llm.gpu_memory_utilization: 0.55
+    engine.llm.context_length: 131072

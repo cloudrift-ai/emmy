@@ -40,7 +40,6 @@ class Built:
 
 @pytest.fixture(scope="session")
 def _gen_session():
-    pytest.importorskip("cupy")
     import torch
 
     if not torch.cuda.is_available():

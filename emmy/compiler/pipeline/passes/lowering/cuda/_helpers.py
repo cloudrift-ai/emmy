@@ -2,7 +2,7 @@
 
 Lives in a ``_``-prefixed module so the pass loader skips it (only ``NNN_<name>.py`` files load
 as rules); ``005_delegate_zero_init`` and ``010_lower_kernelop`` both need the atomic-output
-walk, so it is defined once here.
+walk and the launch name, so they are defined once here.
 """
 
 from __future__ import annotations
@@ -10,6 +10,12 @@ from __future__ import annotations
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.kernel.ir import RegStore
 from emmy.compiler.ir.stmt import Write
+
+
+def launch_name(kernel: KernelOp, node_id: str) -> str:
+    """The kernel's launch name: its stamped name, else ``k_<node id>`` (a split piece is
+    unnamed). Launches resolve kernels by name, so two kernels must never share one."""
+    return kernel.name or f"k_{node_id}"
 
 
 def atomic_outputs(kernel: KernelOp) -> tuple[str, ...]:

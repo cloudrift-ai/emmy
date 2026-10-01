@@ -4,7 +4,25 @@ evidence pick and the golden replay."""
 from __future__ import annotations
 
 from emmy.compiler.pipeline.fork import DeferredFork
-from emmy.compiler.pipeline.search.pins import spelled_arm
+from emmy.compiler.pipeline.search.pins import spelled_arm, unreproducible_pin_flag
+
+
+def test_recorded_precision_pins_preserve_the_default_and_overrides(monkeypatch):
+    from types import SimpleNamespace
+
+    from emmy.compiler.pipeline.search.pins import measured_precision_pins, regime_live
+
+    for name in ("FAST_MATH", "FAST_EXP", "F16_MMA_F32_ACC", "FP8_MMA"):
+        monkeypatch.delenv(f"EMMY_{name}", raising=False)
+    assert measured_precision_pins() == {"FAST_MATH": True}
+    assert regime_live(SimpleNamespace(pin_map={"FAST_MATH": True}))
+    assert not regime_live(SimpleNamespace(pin_map={"FAST_MATH": False}))
+    monkeypatch.setenv("EMMY_FAST_MATH", "0")
+    monkeypatch.setenv("EMMY_F16_MMA_F32_ACC", "1")
+    recorded = measured_precision_pins()
+    assert recorded == {"FAST_MATH": False, "F16_MMA_F32_ACC": True}
+    assert regime_live(SimpleNamespace(pin_map=recorded))
+    assert not regime_live(SimpleNamespace(pin_map={"FAST_MATH": False}))
 
 
 def _arm(knobs: dict, *, structural: bool = False) -> DeferredFork:
@@ -23,6 +41,7 @@ def test_a_placement_fork_reads_cut_fuse_and_stale_rows() -> None:
     assert spelled_arm(options, {"PLACE": "cut"}) == (cut_a, {"PLACE@map.1/map": "cut"}), "a bare cut is the root-most offered seam"
     assert spelled_arm(options, {"WORK": "t8", "TILE": "f2"}) == (fuse, {"PLACE": "fuse"}), "a schedule row says the kernel ran fused"
     assert spelled_arm(options, {"PLACE@map.1/map": "fuse"}) == (fuse, {"PLACE": "fuse"})
+    assert spelled_arm(options, {}) == (fuse, {"PLACE": "fuse"}), "an empty receipt row says the same"
     assert spelled_arm(options, {"PLACE@map.9/twist": "cut"}) is None, "a cut this kernel does not offer decides nothing"
 
 
@@ -91,3 +110,19 @@ def test_unpinned_decisions_withdraws_live_decision_pins_and_restores_them(monke
     assert os.environ[config.knob_var("WORK")] == "w4x1"
     assert os.environ[config.knob_var("PLACE")] == "cut"
     assert os.environ[config.KNOBS] == "STAGE@map.1/twist=d2/smem-tma,FAST_MATH=1,LOOPIFY=1"
+
+
+def test_a_family_pinned_off_is_realized_by_a_kernel_that_never_stamps_it() -> None:
+    """A recorded row spells a family it declined as ``''``, and a per-cell kernel stamps no ``TILE`` or ``STAGE``
+    at all. That is the same schedule, not a miss: replaying such a row of the Gemma 4 inventory (an RMS norm, a
+    QK norm) reported ``TILE= realized (unset)`` and left the row unbenched. A kernel that DECIDED the family
+    still contradicts the OFF pin."""
+    per_cell = [{"WORK": "", "REDUCE": "coop", "LOOPIFY": "0"}]
+    assert unreproducible_pin_flag({"TILE": "", "STAGE": "", "REDUCE": "coop"}, per_cell) is None
+
+    tiled = [{"WORK": "w2x2", "TILE": "mma_m16n8k16_f16_f32/f2x2/k2", "STAGE": "d2/smem-tma"}]
+    flag = unreproducible_pin_flag({"TILE": ""}, tiled)
+    assert flag is not None and "f2x2" in flag
+
+    # A non-OFF pin the kernel never stamps is still a miss.
+    assert unreproducible_pin_flag({"TILE": "f4"}, per_cell) is not None

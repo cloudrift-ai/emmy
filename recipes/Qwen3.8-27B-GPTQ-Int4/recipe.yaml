@@ -6,10 +6,12 @@
 # block. The workload grid that justifies these values lives in
 # experiments/Qwen3.8-27B-GPTQ-Int4/serving/.
 #
-# There is no Emmy lane here: this run qualified serving only, so Emmy eligibility is unevaluated
-# rather than established. See RESULTS.md.
+# There is no Emmy serving lane here — the serving numbers are the stock fork. The golden under
+# golden/ is separate: compiler evidence for decoder layer 0 on one V100 SXM3, not a measurement of
+# the SXM2 pair this recipe deploys to. See RESULTS.md.
 tags:
-  - best-effort
+  - maintained
+  - compiler-qualified
 
 model:
   # The 4-bit builds of Qwen3.8-27B are mostly `compressed-tensors`, whose kernels gate at
@@ -17,8 +19,8 @@ model:
   # (quant_method="gptq", 4-bit, group_size=128, desc_act=false, sym=true) and was prepared and
   # tested by its author on a V100, which is why it is the 4-bit checkpoint this recipe serves.
   huggingface: "Max73333/Qwen3.8-27B-GPTQ-Int4-V100"
-  rationale: "Only Volta-capable 4-bit build of the Qwen3.8 wave; community quant, not a vendor release."
-  heat: 0
+  rationale: "Derivative of dominant Qwen3.8 family; useful low-VRAM coverage."
+  heat: 75
   revision: d5a18cc1477e301e50d3fe4167fbf76db9337edc
   task: generate
 

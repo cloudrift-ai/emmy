@@ -1,4 +1,4 @@
-"""Device-resident SYMBOLIC prefill path (``_Program.run_device_sym``). Needs CUDA + cupy
+"""Device-resident SYMBOLIC prefill path (``_Program.run_device_sym``). Needs CUDA
 (skips itself off-GPU).
 
 Builds a tiny random-weight Llama layer through the gen runner with a prefill ``capacity``
@@ -22,7 +22,6 @@ pytestmark = [pytest.mark.xdist_group("cuda")]
     "enumeration and the kernel binder disagree about legality — fix the seam, then un-skip; repro is this test"
 )
 def test_run_device_sym_matches_host_path():
-    pytest.importorskip("cupy")
     import torch
 
     if not torch.cuda.is_available():
@@ -54,7 +53,7 @@ def test_run_device_sym_matches_host_path():
     # call — the host ``rebind`` re-takes arena views at the call's shape, which unwinds the
     # rewire for that program (correct, just copies again; serving never runs the host path).
     def _ptr(prog, name):
-        return prog.program.arrays[name].data.ptr
+        return prog.program.executor.buffer(name)[0]
 
     assert _ptr(runner._post[0], runner._post[0].output_names[0]) == _ptr(runner._pre[0], runner._pre[0].input_names[0])
     assert _ptr(runner._post_prefill[0], runner._post_prefill[0].output_names[0]) == _ptr(
@@ -68,7 +67,7 @@ def test_run_device_sym_matches_host_path():
     # SAME program ``forward_layer_post_device`` routes each width to; rider widths (no single
     # contiguous backing) and over-capacity widths return None.
     def _attn_ptr(plist):
-        return plist[0].program.arrays["attn_out"].data.ptr
+        return plist[0].program.executor.buffer("attn_out")[0]
 
     m1_expect = runner._post_m1 if runner._post_m1 is not None and runner._post_m1[0] is not None else runner._post_decode
     assert runner.post_attn_backing(0, 1).data_ptr() == _attn_ptr(m1_expect)

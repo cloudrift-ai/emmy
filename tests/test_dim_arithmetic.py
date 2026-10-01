@@ -51,7 +51,7 @@ def test_ceil_div_static_folds_to_int_ceil():
 
 def test_ceil_div_symbolic_builds_composite_expr():
     # ``(seq + (b - 1)) // b`` — the launch resolver evals it from sym_values.
-    assert Dim("seq").ceil_div(16).expr == BinaryExpr("//", BinaryExpr("+", Var("seq"), Literal(15, "int")), Literal(16, "int"))
+    assert Dim("seq").ceil_div(16).expr == BinaryExpr("/", BinaryExpr("+", Var("seq"), Literal(15, "int")), Literal(16, "int"))
     # Degenerate divisor 1 collapses to the bare axis (matches the symbolic-serial passthrough).
     assert Dim("seq").ceil_div(1).expr == Var("seq")
 

@@ -77,7 +77,7 @@ For an existing release, run `make serve-config MODEL=<id>`. The config must nam
 They are one contract: do not accept separate model, GPU, revision, or width arguments later in the workflow.
 
 For a new release with no config yet, resolve the model and GPU from the singleton recipe, record the intended config
-path and recipe-local canonical path `recipes/<model>/golden/<gpu-slug>_<compute-cap>.yaml`, and let the headroom sweep
+path and recipe-local canonical path `recipes/<model>/golden/<gpu-slug>_<compute-cap>.json`, and let the headroom sweep
 in Step 3 create the config. The realization contract is not sealed until then; do not invent interim widths or run
 the golden audit against them.
 
@@ -103,7 +103,7 @@ degrades; `make` now guards this).
 mutable state: a branch switch in another session mid-release yields a hybrid tree whose wheel fails in confusing,
 distant ways. Pin the selected release branch's commit SHA up front, get the tree onto the host (fresh clone, or
 rsync of the `git ls-files` list plus `.git`), then `git checkout -f <sha>` there — and re-verify
-`git rev-parse HEAD` before any rebuild. Then run `make setup`, install `.[serving]` editable, and install cupy; the
+`git rev-parse HEAD` before any rebuild. Then run `make setup`, and install `.[serving]` editable; the
 venv supports the headroom sweep and validation script. Host toolchain: a CUDA version whose nvcc supports the
 target arch (**>= 12.9** for sm_120 — FlashInfer refuses it below that, and the misleading error is "requires sm75
 or higher"); on non-CloudRift
@@ -125,7 +125,9 @@ xtrace prints the expanded secret into the log; wrap secret reads in `set +x` �
 ## Step 2 — Base image
 
 `make wheel && make vllm-emmy-image` (~20 min, detached). A pulled `cloudriftai/vllm-emmy:TAG` is acceptable only if
-pushed from the same commit (the wheel is part of the cubin cache key) — when in doubt, build.
+pushed from the same commit (the wheel is part of the cubin cache key) — when in doubt, build. A config that names
+`SERVE_BASE_IMAGE` serves on a fork runtime (DeepSeek V4 on the 1Cat Volta fork): pass `MODEL=<id>`, so the plain
+image builds FROM that digest under the model's `-base` tag.
 
 ## Step 3 — Headroom sweep → pin the model config
 
@@ -133,7 +135,7 @@ For a **new model** this step *creates* `docker/vllm-emmy-serve/models/<slug>.en
 re-validates it. Policy (decode bucket stays at the model's tuned default): try
 `--max-model-len`/`--max-num-batched-tokens` at 256 → 512 → 1024 → 2048 → 4096 (stop at 4096 — the dynamic-dim
 cap), `--gpu-memory-utilization 0.97`, each via a detached
-`./venv/bin/emmy serve --generate <model> --bench --max-model-len N --max-num-batched-tokens N`. A config **passes**
+`./venv/bin/emmy serve --runner generate <model> --bench --max-model-len N --max-num-batched-tokens N`. A config **passes**
 when the server reaches `/health`, the bench completes, AND the serve log has no `EngineCore encountered a fatal
 error` (the exit code alone hides tail crashes — a drained bench can die after its metrics print; grep the log). It
 **fails** on CUDA OOM, death before health, or a logged engine fatal. Keep the largest passing N. If even 256 fails
@@ -162,14 +164,17 @@ the Makefile and `source`d by `warm.sh`/`verify.sh` — so its syntax is the int
   them in full): `SERVE_REVISION` the commit sha to serve — `warm.sh` REFUSES an unpinned revision on any repo with
   more than one branch, because the default branch may be a different variant entirely; `SERVE_QUANT=exl3` for a
   checkpoint whose quantization method vLLM does not have; `SERVE_CAPTURE_SIZES` for the cudagraph ladder, which an
-  MoE model must cap at `[1]`; `SERVE_EXTRA_ARGS` for further pinned flags (e.g. `--kv-cache-dtype fp8_e4m3`).
+  MoE model must cap at `[1]`; `SERVE_EXTRA_ARGS` for further pinned flags (e.g. `--kv-cache-dtype fp8_e4m3`);
+  `SERVE_ENV` for the server's own environment (a fork's switches, `EMMY_STRICT_EVIDENCE=1`); `SERVE_BASE_IMAGE` and
+  `SERVE_RUNTIME_VERSION` for a runtime other than stock vLLM, pinned by digest.
   Set these BEFORE the headroom sweep — they change what the sweep measures — and sweep with the same
   `--revision <sha>` so `emmy serve` derives the same arms from the same checkpoint.
 
 After writing it, run `make serve-config MODEL=<id>` and confirm every line reads back as intended — that is the
 cheap check that both readers agree before a multi-hour warm depends on it. For a new release whose canonical file
-does not exist yet, use the `tune-kernels` skill with this sealed config to create, tune, verify, and promote it first;
-then rerun `make serve-config` and continue to Step 4.
+does not exist yet, create it first with this sealed config: trace the serving twins (`emmy trace --serving-twins
+--serving-config PATH`), record them (`emmy run --golden PATH --bench --record` / `--record-greedy`), verify, and
+promote; then rerun `make serve-config` and continue to Step 4.
 
 **The config is sealed from here on** — any later change invalidates its realizations and the warm. For a new or
 changed config, this is also the point to commit the config and canonical recipe reference, update the pinned release
@@ -194,9 +199,9 @@ evidence in the same index the tune DB feeds, not a separate tier. The served im
 fails the boot rather than let a prediction decide any program's fork.
 
 **Gate: zero missing realizations, FALL-THROUGH, DRIFT, GAP, or compile failures.** Any failure means the image would
-freeze an incomplete or stale evidence set. Stop and use the `tune-kernels` skill to regenerate a symbolic serving
-inventory from the same config, tune all realizations on this GPU, perform deployable verification, and promote the
-complete canonical file. There is no release-without-coverage path.
+freeze an incomplete or stale evidence set. Stop and regenerate a symbolic serving inventory from the same config,
+record all realizations on this GPU (`emmy run --golden PATH --bench --record` / `--record-greedy`), perform
+deployable verification, and promote the complete canonical file. There is no release-without-coverage path.
 
 ## Step 5 — Correctness gate (GATE + human pause)
 

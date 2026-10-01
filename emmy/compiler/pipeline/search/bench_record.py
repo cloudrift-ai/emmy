@@ -1,78 +1,40 @@
-"""Bench-to-node recording — ``run --bench`` A/B measurements become node-store leaves.
+"""Bench-to-DB recording — ``run --bench`` measurements become ``perf`` rows in the tune DB.
 
-The tune engine was the node table's only writer, so the manual golden/``--ab`` sweeps
-that found optima the search missed (the fm-lane story) never became training data — the
-region around each golden stayed censored in every freeze. This module closes that loop:
-a ``run --bench`` invocation that benched pinned rows records each clean measurement as a
-parentless leaf ``NodeRow`` in the canonical tune DB, where the measurement freeze and
-the offline-prior fit pick it up like any tune leaf.
+A ``run --bench`` invocation that benched pinned rows (a golden, an ``--ab`` row) or the greedy
+pick records each clean measurement as per-kernel ``perf`` rows through the tuner's own writer, so a
+replayed golden or a hand-pinned row becomes what the next ``compile`` / ``run`` / ``serve`` deploys,
+and — once the tune DB is imported into a dataset instance — a training row like any tune
+measurement. A greedy pick whose bench failed records the kernel the failure blames as a
+``bench_fail`` row, exactly as the tuner files a hung terminal.
+Recording is **default-on behind a quality bar** (:func:`meets_quality_bar`; ``run --no-record-evidence``
+opts out). The caller (``emmy/commands/run.py``) owns which rows are honest enough to record — never a
+``pin_unmatched`` row (the claimed config never ran) or one carrying an integrity flag (wrong answer,
+intensity floor); this module records what it is given.
 
-Recording is **default-on behind a quality bar** (:func:`meets_quality_bar` — the tuner's
-own pinned-bench standard; ``run --no-record-nodes`` opts out). What records:
-
-- every cleanly-benched pinned golden / ``--ab`` row as an ``ok`` leaf;
-- a realized config whose bench failed as a ``bench_fail`` negative (its ``value_us`` is
-  :data:`FAIL_SENTINEL_US`, not a measurement — consumers read ``status``);
-- the greedy pick, from its ``greedy (isolated)`` re-bench — pinned-comparable by
-  construction, so every benched pool self-anchors the prior's argmax.
-
-Never recorded: ``pin_unmatched`` rows (the claimed config never ran — and "not offered"
-is not "doesn't launch"), rows carrying an integrity flag (wrong-answer / intensity
-floor: the measurement is untrue), and anything from the ``--ir`` path (serialization
-drops ``op.knobs``, so there is no honest feature dict). The caller
-(``emmy/commands/run.py``) owns those exclusions; this module records what it is given.
-
-Pool fidelity: the tune keys a pool by ``op_sig`` — a digest over the **pre-descent**
-offer op's ``S_*`` stamps, NOT the terminal kernel's (descent stamps further ``S_*``
-deltas, so the two differ for most ops). :func:`bench_leaves` recovers the offer site
-from each compiled kernel via ``source_chain`` (the ``two_level`` decomposition idiom:
-deepest loop-dialect ancestor carrying ``S_*`` knobs, tile-dialect fallback for the mma
-path) and groups a variant's kernels under one
-site — an auxiliary kernel with no provenance at all attributes to its nearest sited
-producer through the graph edges — one leaf per (variant, op), valued at the group's
-summed per-launch time, exactly the tune's whole-variant leaf semantics.
-Rows are keyed with the tune's own recipes (same ``node_key`` / ``op_sig`` /
-``context_key``), parentless with ``depth=0`` — the no-tree-schema marker the fork
-diagnostics skip — and stamped with a ``bench-…`` ``run_id`` so freeze headers show the
-provenance.
+The row writers live here too: :func:`persist_kernel_perf` is the ONE writer for a kernel measurement and
+:func:`persist_bench_failure` the one for a failed bench, so ``run --bench``'s pinned rows and the golden
+import are indistinguishable to the evidence pick.
 """
 
 from __future__ import annotations
 
-import logging
+import re
 import statistics
-from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
-from uuid import uuid4
+
+from emmy.compiler.pipeline.passes.identity import kernel_stamps
+from emmy.compiler.pipeline.search.db import KernelDef, PerfStats
+from emmy.compiler.wire import formed_from, kernel_bindings, kernel_tile, kernel_wire
 
 if TYPE_CHECKING:
     from emmy.compiler.context import Context
 
-logger = logging.getLogger(__name__)
-
-# The tuner's pinned-bench measurement standard (``CudaBackend.bench_pinned_async``
-# defaults). A run benched below it is a quick look, not a measurement — recording it
-# would let newest-wins replace tune-grade leaves with drive-by numbers.
+# The pinned-bench measurement standard (``CudaBackend.bench_pinned_async`` defaults). A run benched
+# below it is a quick look, not a measurement — recording it would let a noisy drive-by median
+# displace a recorded row (the upsert keeps the lowest).
 MIN_RECORD_WARMUP = 5
 MIN_RECORD_ITERS = 20
-
-# A ``bench_fail`` leaf's ``value_us`` — NOT a measurement (the tune stores the bench
-# watchdog's sentinel there; consumers read ``status`` and every metric excludes fails).
-FAIL_SENTINEL_US = 1e9
-
-
-@dataclass(frozen=True)
-class BenchLeaf:
-    """One (variant, op) measurement extracted from a benched compiled graph."""
-
-    op_sig: str  # the tune's pool key — pre-descent offer-site S_* digest
-    knobs: dict  # realized knob dict (S_* stamps + tunables) of the group's main kernel
-    value_us: float  # whole-variant latency for this op (summed launches); sentinel on fail
-    variance: float | None
-    n_samples: int | None
-    status: str  # 'ok' | 'bench_fail'
 
 
 def meets_quality_bar(warmup: int, iters: int) -> bool:
@@ -80,176 +42,13 @@ def meets_quality_bar(warmup: int, iters: int) -> bool:
     return warmup >= MIN_RECORD_WARMUP and iters >= MIN_RECORD_ITERS
 
 
-def mint_bench_run_id() -> str:
-    """A sortable, unique bench-session id — the ``bench-`` prefix distinguishes
-    recorded-bench provenance from tune sessions in freeze headers / row audits."""
-    return f"bench-{datetime.now(UTC):%Y%m%dT%H%M%SZ}-{uuid4().hex[:8]}"
-
-
-def _offer_site(op) -> object | None:
-    """The pre-descent offer op a compiled kernel lowered from. Preferred: the deepest
-    loop-dialect ancestor carrying ``S_*`` stamps (the ``two_level`` decomposition-row
-    idiom). The tensor-core (mma) tile-lowering does NOT preserve a ``LoopOp`` in the
-    ``.source`` chain — it bottoms at a ``TileOp`` — so with no loop ancestor the
-    deepest tile-dialect ``S_*``-carrying ancestor stands in: it holds the
-    recognize-time ``S_*`` set unchanged (descent's extra ``S_*`` stamps land on
-    kernel/cuda-dialect ops), so its digest equals the tune-written ``op_sig``
-    (verified against real tune rows on an RTX 4090 — without the fallback, every
-    mma-path kernel was silently unrecordable, i.e. exactly the fast tensor-core
-    variants this module exists to capture). ``None`` when neither exists."""
-    site = fallback = None
-    for anc in op.source_chain():
-        if not any(k.startswith("S_") for k in getattr(anc, "knobs", {}) or {}):
-            continue
-        dialect = anc.dialect
-        if dialect == "loop":
-            site = anc
-        elif dialect == "tile":
-            fallback = anc
-    return site or fallback
-
-
-def bench_leaves(compiled, bench, *, status: str = "ok") -> list[BenchLeaf]:
-    """Extract one :class:`BenchLeaf` per (variant, op) from a benched compiled graph.
-
-    Kernels are paired with ``bench.per_launch`` by topological order (the launch
-    order) and grouped by their offer site: kernels sharing one site contribute ONE
-    leaf valued at the group's summed launch time, so a fragment kernel's own tiny
-    latency never becomes that site's row (the pre-#330 poison class). Kernels a
-    structural fork minted are NOT such a group — each is a brand-new kernel carrying its own
-    structural stamp, re-derived from its own body, so each records its own row against its own site. Bench stats (variance / n_samples)
-    carry only for single-kernel groups — per-launch windows replay each kernel
-    back-to-back, so cross-kernel samples don't align iter-wise and a summed variance
-    would be fiction. ``status="bench_fail"`` (with ``bench=None``) emits sentinel
-    leaves for a realized config that failed to bench. A kernel with no recoverable
-    offer site is skipped with a debug note."""
-    from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
-    from emmy.compiler.structural import digest  # noqa: PLC0415
-
-    nids = [nid for nid in compiled.topological_order() if isinstance(compiled.nodes[nid].op, CudaOp)]
-    per_launch = list(getattr(bench, "per_launch", None) or []) if bench is not None else []
-    entries = []  # (nid, op, launch, sig-or-None) in launch order
-    sig_by_nid: dict[str, str] = {}
-    for idx, nid in enumerate(nids):
-        op = compiled.nodes[nid].op
-        site = _offer_site(op)
-        sig = digest(*sorted((k, v) for k, v in site.knobs.items() if k.startswith("S_"))) if site is not None else None
-        if sig is not None:
-            sig_by_nid[nid] = sig
-        entries.append((nid, op, per_launch[idx] if idx < len(per_launch) else None, sig))
-
-    def attributed(nid: str, hops: int = 4) -> str | None:
-        """The site group of an orphan kernel's nearest sited PRODUCER — the graph edge
-        standing in for an attribution the source chain lost. A kernel with no ``S_*``
-        anywhere in its chain would otherwise be dropped silently, and its group's value
-        would then be a partial one: systematically fast-biased against the tune's
-        whole-slice leaves in the same pool (found by the 2026-07-16 4090 verification)."""
-        frontier = [nid]
-        for _ in range(hops):
-            nxt: list[str] = []
-            for cur in frontier:
-                node = compiled.producer(cur)
-                for pid in getattr(node, "inputs", None) or []:
-                    if pid in sig_by_nid:
-                        return sig_by_nid[pid]
-                    nxt.append(pid)
-            frontier = nxt
-        return None
-
-    groups: dict[str, dict] = {}
-    skipped = 0
-    for nid, op, launch, sig in entries:
-        sig = sig or attributed(nid)
-        if sig is None:
-            skipped += 1
-            logger.debug("[record-nodes] kernel %s has no recoverable offer site and no sited producer — skipped", nid)
-            continue
-        g = groups.setdefault(sig, {"ops": [], "launches": []})
-        g["ops"].append(op)
-        g["launches"].append(launch)
-    if skipped and not groups:
-        # Silence must never read as success: a graph whose EVERY kernel lost its offer
-        # site means a provenance gap in some lowering path, not "nothing to record".
-        logger.warning(
-            "[record-nodes] none of the %d kernel(s) has a recoverable offer site — nothing recorded "
-            "(a lowering path is not preserving op provenance; please report)",
-            skipped,
-        )
-    leaves = []
-    for sig, g in groups.items():
-        # The main kernel carries the group's descent stamps; an auxiliary carries a subset — the
-        # most-tunables op is the group's knob identity.
-        main = max(g["ops"], key=lambda o: sum(1 for k in (o.knobs or {}) if not k.startswith(("S_", "H_"))))
-        knobs = dict(main.knobs or {})
-        if status != "ok":
-            leaves.append(BenchLeaf(op_sig=sig, knobs=knobs, value_us=FAIL_SENTINEL_US, variance=None, n_samples=None, status=status))
-            continue
-        if any(launch is None for launch in g["launches"]):
-            logger.debug("[record-nodes] op %s missing per-launch timings — skipped", sig[:12])
-            continue
-        value_us = sum(launch.time_ms for launch in g["launches"]) * 1000.0
-        variance = n_samples = None
-        if len(g["launches"]) == 1 and g["launches"][0].samples:
-            samples_us = [s * 1000.0 for s in g["launches"][0].samples]
-            n_samples = len(samples_us)
-            variance = statistics.pvariance(samples_us) if n_samples >= 2 else None
-        leaves.append(BenchLeaf(op_sig=sig, knobs=knobs, value_us=value_us, variance=variance, n_samples=n_samples, status="ok"))
-    return leaves
-
-
-def record_bench_leaves(db_path: Path | str, ctx: Context, leaves: list[BenchLeaf], *, run_id: str | None = None) -> int:
-    """Key ``leaves`` with the tune's own recipes and upsert them into the node store
-    at ``db_path`` — parentless ``depth=0`` leaf rows under the live context's regime
-    (``run --bench`` compiles at the deployable flags, so these land in the -O3 lane
-    the store is censored in). Returns the number of rows offered to
-    :meth:`SearchDB.record_nodes` (its plausibility gate and quality-aware leaf
-    replacement still apply per row)."""
-    from emmy.compiler.pipeline.search.db import NodeRow, SearchDB  # noqa: PLC0415
-    from emmy.compiler.structural import digest  # noqa: PLC0415
-
-    if not leaves:
-        return 0
-    run_id = run_id or mint_bench_run_id()
-    ctx_key, gpu, h_feats = ctx.structural_key(), ctx.hardware_id(), ctx.features()
-    rows = []
-    for leaf in leaves:
-        features = {**h_feats, **leaf.knobs}
-        tun = tuple(sorted((k, str(v)) for k, v in features.items() if not k.startswith(("S_", "H_"))))
-        rows.append(
-            NodeRow(
-                node_key=digest(ctx_key, gpu, leaf.op_sig, tun),
-                parent_key=None,
-                context_key=ctx_key,
-                op_sig=leaf.op_sig,
-                features=features,
-                value_us=leaf.value_us,
-                depth=0,  # a bench leaf has no search tree above it
-                gpu=gpu,
-                visits=1,
-                is_leaf=True,
-                variance=leaf.variance,
-                n_samples=leaf.n_samples,
-                status=leaf.status,
-                run_id=run_id,
-            )
-        )
-    db = SearchDB(Path(db_path))
-    try:
-        db.record_nodes(rows)
-    finally:
-        db.close()
-    return len(rows)
-
-
 def record_bench_perf(db_path: Path | str, ctx: Context, compiled, bench) -> int:
     """Persist a benched compiled graph's per-kernel measurements as ``perf`` rows under the live
-    context — the deploy evidence the greedy pick reads — through the tuner's own writer
-    (:func:`~emmy.compiler.pipeline.search.policy.terminal_bench.persist_kernel_perf`). Kernels
-    pair with ``bench.per_launch`` by launch order; a bench without per-launch windows records
-    nothing (a whole-graph time is not a kernel's). Returns the rows written."""
+    context — the deploy evidence the greedy pick reads. Kernels pair with ``bench.per_launch`` by
+    launch order; a bench without per-launch windows records nothing (a whole-graph time is not a
+    kernel's). Returns the rows written."""
     from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
     from emmy.compiler.pipeline.search.db import SearchDB  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.policy.terminal_bench import persist_kernel_perf, stats_from_launch  # noqa: PLC0415
 
     nodes = [compiled.nodes[nid] for nid in compiled.topological_order() if isinstance(compiled.nodes[nid].op, CudaOp)]
     per_launch = list(getattr(bench, "per_launch", None) or [])
@@ -261,7 +60,7 @@ def record_bench_perf(db_path: Path | str, ctx: Context, compiled, bench) -> int
         for node, launch in zip(nodes, per_launch, strict=True):
             written += persist_kernel_perf(
                 db,
-                ctx.structural_key(),
+                ctx,
                 "cuda",
                 node.op,
                 stats=stats_from_launch(launch),
@@ -275,21 +74,148 @@ def record_bench_perf(db_path: Path | str, ctx: Context, compiled, bench) -> int
 
 def record_bench_failure(db_path: Path | str, ctx: Context, compiled, exc, fail_us: float) -> list[str]:
     """Persist a compiled graph's failed bench as ``bench_fail`` perf rows for the kernels the
-    failure blames — the kernel a watchdog named, or a one-kernel graph's only kernel — through the
-    tuner's own writer (:func:`~emmy.compiler.pipeline.search.policy.terminal_bench.persist_bench_failure`),
-    so the next compile's evidence pick disqualifies the arm that hung instead of electing it again.
-    A compile-budget overrun measured nothing and records nothing. Returns the blamed kernel names."""
+    failure blames — the kernel a watchdog named, or a one-kernel graph's only kernel — so the next
+    compile's evidence pick disqualifies the arm that hung instead of electing it again. A
+    compile-budget overrun measured nothing and records nothing. Returns the blamed kernel names."""
     from emmy.compiler.backend.cuda.program import compile_budget_overrun  # noqa: PLC0415
     from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
     from emmy.compiler.pipeline.search.db import SearchDB  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.policy.terminal_bench import persist_bench_failure  # noqa: PLC0415
 
     if compile_budget_overrun(exc):
         return []
     nodes = [compiled.nodes[nid] for nid in compiled.topological_order() if isinstance(compiled.nodes[nid].op, CudaOp)]
     db = SearchDB(Path(db_path))
     try:
-        blamed = persist_bench_failure(db, ctx.structural_key(), "cuda", nodes, exc, fail_us)
+        blamed = persist_bench_failure(db, ctx, "cuda", nodes, exc, fail_us)
     finally:
         db.close()
     return [node.op.kernel_name for node in blamed]
+
+
+def point_stats(us: float) -> PerfStats:
+    """A single-sample ``PerfStats`` — the shape a whole-graph time takes when no per-launch samples exist."""
+    return PerfStats(median=us, min=us, max=us, mean=us, variance=0.0, n_samples=0)
+
+
+def stats_from_launch(lt) -> PerfStats:
+    """``PerfStats`` for one benched launch: over its samples when it carries them, else the point time."""
+    if lt.samples and len(lt.samples) >= 1:
+        us = [s * 1000.0 for s in lt.samples]
+        return PerfStats(
+            median=statistics.median(us),
+            min=min(us),
+            max=max(us),
+            mean=statistics.fmean(us),
+            variance=statistics.pvariance(us) if len(us) > 1 else 0.0,
+            n_samples=len(us),
+        )
+    return point_stats(lt.time_ms * 1000.0)
+
+
+def kernel_key(cuda_op) -> tuple | None:
+    """The kernel half of a measured ``cuda_op``'s ``perf`` key: ``(tile, exact identity, bindings)``
+    of the tile kernel it was rendered from — the kernel row's identity and the sizes the bench
+    bound its symbolic dims to (its knobs are the other half). ``None`` for a kernel no tile stands
+    behind, which is no kernel the tune DB can name."""
+    tile = kernel_tile(cuda_op)
+    identity = tile.identity_key(structural=False, with_io=True) if tile is not None else None
+    return None if identity is None else (tile, identity, kernel_bindings(tile))
+
+
+def kernel_row(tile, name: str) -> KernelDef:
+    """The ``kernel`` row of a tile kernel: both identities, its wire, the C name it was rendered
+    under, whether the wire is the body it was formed from, and its ``S_*`` stamps — the ones the
+    identity strategy wrote onto it, which every reader joins evidence on (the deploy's fork signature,
+    the golden replay's kernel signature). They are features of the body the kernel was formed from, the
+    one the wire holds, so re-lowering the wire stamps the kernel the same. A tile nothing stamped (a
+    test's lifted target) gets the features of its wire instead (:func:`kernel_stamps`)."""
+    wire = kernel_wire(tile)
+    stamped = {str(k): float(v) for k, v in (tile.knobs or {}).items() if str(k).startswith("S_")}
+    return KernelDef(
+        exact_identity=tile.identity_key(structural=False, with_io=True),
+        structural_identity=tile.identity_key(with_io=True),
+        loop_ir=wire,
+        name=name,
+        stamps=stamped or kernel_stamps(wire),
+        formed=formed_from(tile) is not None,
+    )
+
+
+def persist_kernel_perf(
+    db,
+    ctx,
+    backend_name: str,
+    cuda_op,
+    *,
+    stats,
+    status: str,
+    captured: bool = False,
+    error: str | None = None,
+    knobs: dict | None = None,
+    source: str = "measured",
+) -> bool:
+    """Persist one measured kernel as deploy evidence: its ``kernel`` row (the definition the
+    measurement is of) and its ``perf`` row under ``ctx``'s card and regime (keep-best policy, see
+    :meth:`SearchDB.record_perf`). The ONE writer for a kernel measurement — ``run --bench``'s
+    pinned rows and the golden import both come here, so a replayed golden and a recorded pick are
+    indistinguishable to the evidence pick. The row is the op's knobs
+    unless ``knobs`` says otherwise — a golden's recorded schedule row, stored as written rather
+    than as the import's lowering realized it; ``source`` names where the measurement came from.
+    Returns whether a row was written (a kernel no tile stands behind persists nothing)."""
+    key = kernel_key(cuda_op)
+    if key is None:
+        return False
+    tile, identity, bindings = key
+    db.record_kernel(kernel_row(tile, cuda_op.kernel_name))
+    if knobs is None:
+        knobs = getattr(cuda_op, "knobs", None) or {}
+    db.record_perf(
+        ctx,
+        identity,
+        bindings=bindings,
+        knobs=knobs,
+        backend=backend_name,
+        status=status,
+        stats=stats,
+        captured=captured,
+        error=error,
+        source=source,
+    )
+    return True
+
+
+#: The kernel a failure message NAMES — ``kernel 'k_foo (iter 0)' did not complete …`` from the
+#: watchdog, ``nvcc compile failed for kernel 'k_foo': …`` from the compiler. The exception class
+#: does not survive the bench worker's pipe (it arrives wrapped in a ``BenchWorkerJobError``
+#: carrying the child exception's ``repr``), so the label is recovered from the text — and
+#: ``repr`` escapes the name's quote as ``\'`` when the message also holds a ``"`` (nvcc quotes
+#: identifiers that way), so the quote is matched with or without its backslash.
+_NAMED_KERNEL = re.compile(r"kernel \\?'([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def persist_bench_failure(db, ctx, backend_name: str, cuda_nodes, exc, fail_us: float) -> list:
+    """Persist a failed bench as the per-kernel evidence it is: a ``bench_fail`` perf row at the
+    ``fail_us`` sentinel for every node the failure is EVIDENCE ABOUT — usually not every kernel
+    benched — and return those nodes. The ONE writer for a bench failure, as
+    :func:`persist_kernel_perf` is for a measurement, so a hang blames the same kernel whichever
+    command measured it.
+
+    A bench runs many kernels together and one of them hanging fails the whole run, so blaming all
+    of them records a failure for kernels that were never shown to fail. That is not a cosmetic
+    mislabel: those rows are read as deploy evidence, and on DeepSeek-V4's post block 70 recorded
+    failures carried only 7 distinct errors — 20 kernels condemned by one hang, and 21 by a
+    bench-worker startup timeout that is not a property of any kernel. So blame is recorded only
+    where it is unambiguous: the kernel the watchdog named, or the single kernel of a one-kernel
+    graph. Otherwise no kernel earns a row — the run failed, but which kernel failed is unknown,
+    and unknown is not the same as failed. The DB holds measurements of kernels and nothing else,
+    so such a slice is spent for this session and benched again, at the run budget, by the next."""
+    named = _NAMED_KERNEL.search(str(exc))
+    if named is not None:
+        blamed = [n for n in cuda_nodes if getattr(n.op, "kernel_name", "") == named.group(1)]
+    else:
+        blamed = list(cuda_nodes) if len(cuda_nodes) == 1 else []
+    stats = point_stats(fail_us)
+    error = f"{type(exc).__name__}: {exc}"
+    for node in blamed:
+        persist_kernel_perf(db, ctx, backend_name, node.op, stats=stats, status="bench_fail", error=error)
+    return blamed

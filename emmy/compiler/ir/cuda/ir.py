@@ -69,6 +69,9 @@ class CudaOp(Op):
     comment: str = ""
     tma_descriptors: tuple[TmaDescMeta, ...] = field(default_factory=tuple)
     runtime_args: tuple[str, ...] = ()
+    #: Serial launch axes ``(name, extent)``: the launcher runs the kernel once per coordinate in
+    #: order, passing the coordinate through the ``runtime_args`` slot of the same name.
+    serial: tuple[tuple[str, int], ...] = ()
     # Indirect operands: ``(arg_name, table_arg, sel_arg, slot)`` per marked input. The kernel
     # signature replaces ``const T* <arg>`` with ``const T* const* <table>, const int* <sel>,
     # int <slot>`` and resolves the base pointer in a body preamble; ``arg_order`` keeps the

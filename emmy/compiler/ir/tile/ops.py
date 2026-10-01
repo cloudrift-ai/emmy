@@ -19,6 +19,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from emmy.compiler.dtype import get as get_dtype
+from emmy.compiler.ir.address import gmem_axis_step
 from emmy.compiler.ir.pure.fold import (
     Fold,
 )
@@ -31,7 +32,7 @@ from emmy.compiler.ir.schedule.classic import (
 )
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Load, Loop, Select, refs_axis, stmt_axis_names
 from emmy.compiler.ir.stmt.base import Stmt, dtype_promote
-from emmy.compiler.ir.tile.ir import TileOp, apply_output_specs
+from emmy.compiler.ir.tile.ir import apply_output_specs
 from emmy.compiler.ir.tile.path import UnknownSiteError, sites
 
 
@@ -238,13 +239,13 @@ class Sched:
         if self.schedule is None:
             return None
         site = self.tile.node_id(node)
-        assignment = self.schedule.nodes[site]
+        choice = self.schedule.nodes[site]
         if family == "TILE":
-            return assignment.tile if assignment.tile.is_tiled else None
+            return choice.tile if choice.tile.is_tiled else None
         if family == "REDUCE":
-            if not isinstance(assignment, ReductionSchedule) or not assignment.reduce.stages:
+            if not isinstance(choice, ReductionSchedule) or not choice.reduce.stages:
                 return None
-            return assignment.reduce
+            return choice.reduce
         if family == "STAGE":
             if self.materialization is None:
                 return None
@@ -307,15 +308,26 @@ class Sched:
         def orient(mn):
             # The pair is each side's own free axis, the first operand's leading — the placement
             # binds both, and a sibling output's sweep promoted beside them (the fused q/k/v
-            # projections, N 64 beside N 32) never stands in for either. With several own axes a
-            # side the trailing one is the role and the rest ride the grid; a side without one
-            # (the unit-row matvec) leaves the trailing pair to the placement.
+            # projections, N 64 beside N 32) never stands in for either. With several own axes,
+            # tile the smallest output stride, so a reordered grid still tiles channels rather
+            # than heads. Undetermined layouts retain the trailing-grid choice.
             view = node.as_contraction()
             if mn is None or view is None:
                 return mn
             order = {axis.name: (position, axis) for position, axis in enumerate((*self.place.free, *self.place.grid))}
-            left = max((order[name] for name in view.left_axes if name in order), default=None)
-            right = max((order[name] for name in view.right_axes if name in order), default=None)
+
+            def rank(item):
+                position, axis = item
+                steps = (
+                    gmem_axis_step(Load("", spec.write.output, spec.write.index), axis.name, self.tile.outputs)
+                    for spec in self.tile.output_specs
+                )
+                return min((abs(step[0]) for step in steps if step is not None and step[0]), default=float("inf")), -position
+
+            left = min((order[name] for name in view.left_axes if name in order), key=rank, default=None)
+            right = min((order[name] for name in view.right_axes if name in order), key=rank, default=None)
+            if left is None and not view.left_axes:
+                left = next((pair for name, pair in order.items() if name not in node.free_axes and pair[1].extent == 1), None)
             if left is not None and right is not None:
                 return (left[1], right[1])
             first, second = mn
@@ -358,21 +370,19 @@ def sched_of(tile) -> Sched:
 
 
 def scheduled(
-    op,
+    tile,
     *,
     name: str,
     place,
     knobs: dict,
-    output_specs: tuple = (),
     schedule=None,
     materialization=None,
     workers=None,
-    axes: tuple = (),
 ):
-    """Build a scheduled ``TileOp`` from one accepted semantic assignment.
+    """Build a scheduled ``TileOp`` from one accepted semantic schedule.
 
     The one constructor every row materializer shares (a split piece is not built here — it leaves
-    ``030_cut`` unscheduled and reaches this through its own row). The accepted assignment
+    ``030_cut`` unscheduled and reaches this through its own row). The accepted schedule
     is the sole worker-inventory source; the encoded row must agree with it."""
     if schedule is None:
         raise ValueError("cannot construct a scheduled TileOp without a Schedule")
@@ -381,15 +391,13 @@ def scheduled(
     if work.producer != producer:
         raise ValueError(f"WORK producer band {work.producer} disagrees with WarpSpec producer band {producer}")
     if knobs.get("WORK") != work.spell():
-        raise ValueError("encoded WORK does not agree with the accepted classic assignment")
-    return TileOp(
-        op=op,
+        raise ValueError("encoded WORK does not agree with the accepted classic schedule")
+    return replace(
+        tile,
         name=name,
         place=place,
         workers=workers,
         knobs=knobs,
-        output_specs=tuple(output_specs),
-        axes=axes,
         schedule=schedule,
         materialization=materialization,
     )
@@ -420,9 +428,9 @@ def axis_names(root) -> set[str]:
 def projection_tail(tile) -> list[Stmt]:
     """The kernel's EFFECTFUL projection stmt stream — the root zero-axis fold's (pure) body with the
     kernel-boundary ``TileOp.output_specs`` reconstituted (:func:`~emmy.compiler.ir.tile.ir.apply_output_specs`).
-    The ONE read every scheduler gate that inspects "the tail" goes through, so the
-    ``coop-t`` band's no-sweep-``Loop`` condition keeps excluding rms/softmax rows after their
-    sweep moved to an ``OutputSpec`` decoration."""
+    This reads the outer projection, not work nested in its operands. The ``coop-t`` band's
+    no-sweep-``Loop`` condition keeps excluding rms/softmax rows after their sweep moved to an
+    ``OutputSpec`` decoration; fragment legality additionally checks nested projection work."""
     op = tile.op
     body = list(op.lift.body) if isinstance(op, Fold) and op.axis is None else []
     return apply_output_specs(body, tile.output_specs)
@@ -534,10 +542,9 @@ def head(op):
     node-level fact the scheduler dispatches on — the views, the
     reduce ``Axis``, the operand edges — is a STORED param on what this returns."""
     node = op
-    # A term composes through operands, so a projection's node is its first edge — through every
-    # zero-axis wrapper on the way (an output sweep's projection over its reduce).
+    # Skip slab providers just as the kernel binder does: a captured scalar can precede the reduce.
     while isinstance(node, Fold) and node.axis is None and node.operands:
-        node = node.operands[0]
+        node = next((edge for edge in node.operands if edge.as_slab() is None), None)
     return node if isinstance(node, Fold) and node.axis is not None else None
 
 
@@ -545,7 +552,7 @@ def kernel_roots(op) -> tuple[Fold, ...]:
     """The reduce nodes the kernel binder builds the kernel AROUND — the ones whose ``REDUCE``
     partition it realizes. The binder peels each zero-axis projection to one operand: the
     contraction root of a tiled edge (every such root at once for a multi-output kernel), else the
-    first operand; every other reduce in the tree lowers serially inside its reader, so a partition
+    first non-slab operand; every other reduce in the tree lowers serially inside its reader, so a partition
     offered on it would price a kernel the binder never builds. This is that peel, read off the
     term alone, so the schedule projection offers the partition catalog only where it is realized."""
     node = op
@@ -553,7 +560,7 @@ def kernel_roots(op) -> tuple[Fold, ...]:
         tiled = tuple(projection_root(edge) for edge in tiled_edges(node.operands))
         if len(tiled) > 1:
             return tiled
-        node = tiled[0] if tiled else node.operands[0]
+        node = tiled[0] if tiled else next((edge for edge in node.operands if edge.as_slab() is None), None)
     return (node,) if isinstance(node, Fold) else ()
 
 
@@ -595,7 +602,7 @@ def owns_outputs_it_cannot_bind(op, output_specs: tuple) -> bool:
     kernel around and lowers every reduce but one serially inside the projection.
 
     That combination is what the placement lane's full-projection cut is offered on
-    (``pipeline/passes/lowering/tile/_cut.full_projection_seams``): the ownership half says the
+    (``pipeline/passes/tile/_cut.full_projection_seams``): the ownership half says the
     pieces exist, the root half says the fused kernel cannot reach a tensor-core tier for more than
     one of its contractions. Where the outputs do not partition at all — one output over a whole
     tree, the ordinary fused kernel — there is no piece to hand anything to and the answer is
@@ -613,12 +620,15 @@ def chain_members(root: Fold) -> tuple[Fold, ...]:
     operand edges and the axis-invariant (hoisted) reduce operands of members, deepest first, so a
     member another member's cone reads comes ahead of it. This is the CHAIN the binder emits in
     body order around one shared lane axis. A reduce read per step of another (the score inside
-    the twist) lowers inside that reduce's loop and is no member, and a root a tile folds WHOLE has
-    no chain: its cone's statistic is the tiled fill's business, not a fold beside the root's. A
-    carrier the tiers cannot fold whole (:meth:`Fold.tiles_whole`) keeps its chain — no fill takes
-    its cone over, so the members are still folds beside it."""
+    the twist) lowers inside that reduce's loop and is no member.
+
+    Whether a FILL takes the cone over is the schedule's answer, not the term's: the binder asks
+    this only from its untiled arm, where no fill exists and the root's own statistic is a fold
+    beside it, so the chain is read off the term alone. The pairing a fill DOES take over — an
+    output-tiled root beside a partitioned member — is refused where the two choices meet
+    (``classic.context``), not pre-empted here by a term-level guess at the tier."""
     out: list[Fold] = []
-    if not isinstance(root, Fold) or root.axis is None or root.tiles_whole():
+    if not isinstance(root, Fold) or root.axis is None:
         return ()
 
     def visit(node: Fold, hoisted_from: str | None) -> None:
@@ -637,14 +647,16 @@ def chain_members(root: Fold) -> tuple[Fold, ...]:
 
 
 def chain_form(root: Fold) -> bool:
-    """Whether a reduce root binds as a CHAIN — its members, or a computed provider cone hoisted
-    ahead of its loop (a workspace row and its rsqrt), sit beside its own fold. The transposed
-    band's σ-substitution and guarded close assume the fold stands alone at the kernel root, so a
-    chain root takes no transposed band."""
+    """Whether a computed provider cone — a workspace row and its rsqrt — is hoisted ahead of this
+    root's loop, beside its own fold. The transposed band's σ-substitution and guarded close assume
+    the fold stands alone at the kernel root, so such a root takes no band.
+
+    A MEMBER is not what decides that. The band absorbs one that folds serially, hoisted ahead of
+    its loop, which is what every recorded transposed row of a fused reduce does; only a member the
+    schedule PARTITIONS makes the root a chain, and that is a relation between two picks rather
+    than a fact about the term (``classic.context`` refuses the pair)."""
     if not isinstance(root, Fold) or root.axis is None:
         return False
-    if chain_members(root):
-        return True
     return any(
         edge.axis is None
         and root.axis not in edge.free_axes
@@ -653,24 +665,29 @@ def chain_form(root: Fold) -> bool:
     )
 
 
-def cone_stat(cone, axes: tuple) -> Fold | None:
-    """The per-row STATISTIC fold of a computed-A cone — the reduce its prologue (the cone's first
-    operand, the row-invariant edge) materializes first: the fold whose carried state the first
-    reduce ``Loop`` of the prologue's lowering folds. ``None`` for a cone without one — the
-    caller's serial fallback."""
-    prologue = cone.operands[0] if isinstance(cone, Fold) and cone.axis is None and cone.operands else None
-    if prologue is None:
+def cone_stat(cone, k_name: str, axes: tuple) -> Fold | None:
+    """The per-row STATISTIC fold of a computed-A cone — the fold whose carried state the first reduce
+    ``Loop`` of the cone's prologue folds. The prologue is every row-invariant edge, lowered in operand
+    order (:func:`~emmy.compiler.ir.schedule.views.cone_seam`), and formation does not promise the
+    statistic comes first: a fused norm→linear cone is two gmem reads and then the norm. An edge that
+    varies with the contraction axis ``k_name`` is the cell's, reduce or not. ``None`` for a cone without
+    a statistic — the caller's serial fallback."""
+    if not isinstance(cone, Fold) or cone.axis is not None:
         return None
-    first = next((stmt for stmt in prologue.lower(axes=axes) if isinstance(stmt, Loop) and stmt.is_reduce), None)
-    if first is None:
+    for edge in cone.operands:
+        if k_name in edge.free_axes:
+            continue
+        first = next((stmt for stmt in edge.lower(axes=axes) if isinstance(stmt, Loop) and stmt.is_reduce), None)
+        if first is None:
+            continue
+        carried = {stmt.name for stmt in first.body if isinstance(stmt, Accum)}
+        pending = [edge]
+        while pending:
+            term = pending.pop()
+            if term.axis is not None and set(term.combine.results) <= carried:
+                return term
+            pending.extend(reversed(term.operands))
         return None
-    carried = {stmt.name for stmt in first.body if isinstance(stmt, Accum)}
-    pending = [prologue]
-    while pending:
-        term = pending.pop()
-        if term.axis is not None and set(term.combine.results) <= carried:
-            return term
-        pending.extend(reversed(term.operands))
     return None
 
 

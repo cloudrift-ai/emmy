@@ -32,7 +32,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from emmy.compiler.ir.pure.lam import Lambda
-from emmy.compiler.ir.stmt import Assign, Body, Const, Stmt
+from emmy.compiler.ir.stmt import Assign, Body, Let, Stmt
 
 
 @dataclass(frozen=True)
@@ -174,7 +174,7 @@ def _lam(params: tuple[str, ...], body: tuple[Stmt, ...], *results: str) -> Lamb
 
 
 def _const(name: str, value: float) -> Lambda:
-    return _lam(("s",), (Const(name=name, value=value),), name)
+    return _lam(("s",), (Let(name=name, value=value),), name)
 
 
 SOFTMAX = Recipe(
@@ -205,7 +205,7 @@ SOFTMAX = Recipe(
         # the score, so the channel injects ``1``.
         Channel(
             pattern=_lam(("s", "g"), (Assign("d", "subtract", ("s", "g")), Assign("w", "exp", ("d",))), "w"),
-            injection=_lam(("s",), (Const(name="one", value=1.0),), "one"),
+            injection=_lam(("s",), (Let(name="one", value=1.0),), "one"),
         ),
         # An expectation: the weight times a streamed value; it injects the value itself.
         Channel(
@@ -242,7 +242,7 @@ SOFTMAX = Recipe(
 WELFORD = Recipe(
     name="welford",
     base=("add", "add", "add", "add"),
-    lift=_lam(("s", "c"), (Const(name="one", value=1.0), Assign("sq", "multiply", ("s", "s"))), "s", "one", "s", "sq"),
+    lift=_lam(("s", "c"), (Let(name="one", value=1.0), Assign("sq", "multiply", ("s", "s"))), "s", "one", "s", "sq"),
     psi=_lam(
         ("S", "n", "T", "W"),
         (Assign("mu", "divide", ("T", "n")), Assign("Tmu", "multiply", ("T", "mu")), Assign("M2", "subtract", ("W", "Tmu"))),

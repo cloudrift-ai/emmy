@@ -1,6 +1,6 @@
 """GPU dynamic-compile test for the Phase-1 attention-split wrappers (the compiler enabler).
 
-Needs CUDA + cupy (skips itself otherwise). Traces the ``pre`` and ``post`` wrappers over the
+Needs CUDA (skips itself otherwise). Traces the ``pre`` and ``post`` wrappers over the
 flattened ``[num_tokens, H]`` layout with ``num_tokens`` **symbolic**, compiles each, and
 runs at two different token counts — matching the eager wrapper output. This proves the
 carved subgraphs actually lower + run dynamically (the core of Phase 2's gen_runner), and
@@ -60,7 +60,6 @@ def _run(program, input_names, output_names, arrays):
 
 
 def test_pre_wrapper_compiles_and_runs_dynamic():
-    pytest.importorskip("cupy")
     import torch
 
     if not torch.cuda.is_available():
@@ -81,7 +80,6 @@ def test_pre_wrapper_compiles_and_runs_dynamic():
 
 
 def test_post_wrapper_compiles_with_shared_dim():
-    pytest.importorskip("cupy")
     import torch
 
     if not torch.cuda.is_available():
@@ -104,7 +102,6 @@ def test_gemma_post_wrapper_compiles_and_runs_dynamic():
     """Gemma-3/4's 4-norm ``post`` (extra pre/post-feedforward norms) lowers + runs through the
     CUDA backend — the compiler side of the Gemma serving carve. ``pre`` is the shared q/k-norm
     path already covered by ``test_pre_wrapper_compiles_and_runs_dynamic``."""
-    pytest.importorskip("cupy")
     import torch
 
     if not torch.cuda.is_available():

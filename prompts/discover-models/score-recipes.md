@@ -16,7 +16,9 @@ technical novelty, serving value, and the recipe's useful hardware coverage are 
 evidence says little about a recipe, use its existing heat and rationale as context rather than inventing demand.
 
 Return exactly one JSON array without prose or a Markdown fence. Preserve batch order and include every supplied row
-once:
+once. Copy each `model_id` from the supplied batch letter for letter: never spell one from memory, never add a row the
+batch does not contain, and never drop one it does. Compare your array against the batch before returning; a
+mismatched ID makes the whole selection unusable, because the parent cannot tell your typo from a real recipe:
 
 ```json
 [

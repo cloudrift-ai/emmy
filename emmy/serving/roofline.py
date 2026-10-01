@@ -35,30 +35,49 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Programs whose floor is below this are skipped: launch overhead and timer noise dominate
-# µs-class programs, and a mispick there costs little in absolute terms.
+# Programs whose floor is below this get no ratio: launch overhead and timer noise dominate
+# µs-class programs. They are still judged on ABSOLUTE cost (:data:`MAX_ABS_US`) — a small floor
+# bounds what a healthy program costs, not what a mispicked one does.
 MIN_FLOOR_US = 20.0
+
+# A static twin costing more than this is reported even when no floor can be formed. No per-layer
+# serving program is healthy at 100 ms: at 44 layers that alone is 4.4 s per forward. This is the
+# 2026-09-12 DeepSeek-V4 V100 incident — an M=1 decode program elected at 29.7 s per forward sat
+# under MIN_FLOOR_US, so it was exempt from the audit, and every request died on the engine's RPC
+# deadline with a clean boot log. Well above any warmup-inflated µs-class measurement.
+MAX_ABS_US = 100_000.0
 # Warn threshold on measured/floor. Healthy tuned programs measure ~1-3x their floor (seam
 # copies, pointwise glue, sub-peak streaming); the incident class sits at >100x.
 WARN_RATIO = 10.0
 
 
-def measure_copy_bw() -> float:
-    """Device-to-device copy bandwidth in bytes/s (read + write both count)."""
-    import cupy as cp
+def _time_ms(work) -> float:
+    """Milliseconds between two CUDA events around ``work()`` on torch's current stream."""
+    import torch
 
-    n = 64 * 1024 * 1024
-    a = cp.zeros(n, dtype=cp.uint8)
-    b = cp.zeros(n, dtype=cp.uint8)
-    cp.copyto(b, a)  # warm: allocator + module load out of the window
-    start, stop = cp.cuda.Event(), cp.cuda.Event()
-    reps = 4
+    start, stop = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
     start.record()
-    for _ in range(reps):
-        cp.copyto(b, a)
+    work()
     stop.record()
     stop.synchronize()
-    ms = cp.cuda.get_elapsed_time(start, stop)
+    return start.elapsed_time(stop)
+
+
+def measure_copy_bw() -> float:
+    """Device-to-device copy bandwidth in bytes/s (read + write both count)."""
+    import torch
+
+    n = 64 * 1024 * 1024
+    a = torch.zeros(n, dtype=torch.uint8, device="cuda")
+    b = torch.zeros(n, dtype=torch.uint8, device="cuda")
+    b.copy_(a)  # warm: allocator + module load out of the window
+    reps = 4
+
+    def copies():
+        for _ in range(reps):
+            b.copy_(a)
+
+    ms = _time_ms(copies)
     return (2.0 * n * reps) / (ms / 1e3)
 
 
@@ -66,7 +85,7 @@ def measure_matmul_flops() -> float:
     """Achieved dense-matmul throughput in FLOP/s — the compute-floor twin of :func:`measure_copy_bw`.
 
     Times a square f16 cublas GEMM through torch: torch bundles its own cublas and is always present
-    at serving boot, while emmy's nvrtc-compiled kernels never need a cupy-visible cublas — so a
+    at serving boot, while emmy's own kernels never need a cublas — so a
     working deployment may not have one. Measures the f32-accumulate dense lane (see the module
     docstring for the FAST_MATH caveat)."""
     import torch
@@ -99,30 +118,23 @@ def time_program_us(program, *, reps: int = 3, budget_us: float | None = None) -
     A warmup carries one-time cost (module load, allocator growth) the timed runs do not, so a
     program near the budget can bail on an inflated number. That is the deliberate direction: the
     threshold is 10x a conservative floor, the warning is advisory and says to tune the twins, and
-    a boot that never finishes tells the operator nothing at all."""
-    import cupy as cp
+    a boot that never finishes tells the operator nothing at all.
 
-    start, stop = cp.cuda.Event(), cp.cuda.Event()
-    start.record()
-    program.run_once()
-    stop.record()
-    stop.synchronize()
-    warmup_us = cp.cuda.get_elapsed_time(start, stop) * 1e3
-    if budget_us is not None and warmup_us > budget_us:
-        return warmup_us
-    times = []
-    for _ in range(reps):
-        start.record()
-        program.run_once()
-        stop.record()
-        stop.synchronize()
-        times.append(cp.cuda.get_elapsed_time(start, stop) * 1e3)
+    The launches go on torch's current stream, where the events record: un-adopted, they would
+    land on the runtime's own stream, unmeasured, and stay in flight there after the audit
+    returns — the first request's launches then raced them on the buffers the programs share."""
+    with program.on_torch_stream():
+        warmup_us = _time_ms(program.run_once) * 1e3
+        if budget_us is not None and warmup_us > budget_us:
+            return warmup_us
+        times = [_time_ms(program.run_once) * 1e3 for _ in range(reps)]
     return sorted(times)[len(times) // 2]
 
 
 def roofline_floor_us(weight_bytes: int, bw_bytes_per_s: float, flops: float = 0.0, flops_per_s: float = 0.0) -> float | None:
     """The floor one program is judged against — ``max(weight-streaming, compute)`` in µs — or
-    ``None`` when it cannot be formed or sits under :data:`MIN_FLOOR_US`. Split out from
+    ``None`` when it cannot be formed or sits under :data:`MIN_FLOOR_US` — a ``None`` floor means
+    :func:`flag_ratio` judges the program on absolute cost instead, never that it is exempt. Split out from
     :func:`flag_ratio` because the audit needs the floor BEFORE it measures, to bound the
     measurement (:func:`time_program_us`)."""
     if weight_bytes <= 0 or bw_bytes_per_s <= 0:
@@ -142,30 +154,39 @@ def flag_ratio(
     unit-testable without CUDA."""
     floor_us = roofline_floor_us(weight_bytes, bw_bytes_per_s, flops, flops_per_s)
     if floor_us is None:
-        return None
+        # No usable floor — judge on absolute cost. The ratio is reported against the noise
+        # threshold, which UNDERSTATES it (the real floor is smaller), matching the rest of this
+        # audit's conservative direction.
+        if measured_us <= MAX_ABS_US:
+            return None
+        return MIN_FLOOR_US, measured_us / MIN_FLOOR_US
     ratio = measured_us / floor_us
     if ratio <= WARN_RATIO:
         return None
     return floor_us, ratio
 
 
-def audit_boot_programs(named_programs, dtype_bytes: int = 2) -> None:
+def audit_boot_programs(named_programs, dtype_bytes: int = 2) -> dict[str, float]:
     """Time each ``(label, _Program, m_tokens)`` against ``max(weight-streaming, compute)`` floor and
     warn on outliers. ``_Program`` here is the serving wrapper (``gen_runner._Program``): ``.program``
     is the ``CompiledProgram`` and ``.weight_bytes`` the per-forward weight footprint — bound constants
     plus the weight INPUTS an expert program takes per launch. ``m_tokens`` is the program's static
     token width, ``dtype_bytes`` the weight itemsize — together they turn ``weight_bytes`` into the
-    matmul FLOP estimate ``2 * weight_elems * m_tokens``. Never raises."""
+    matmul FLOP estimate ``2 * weight_elems * m_tokens``. Never raises.
+
+    Returns the measured µs per label — empty when the audit could not run. A caller that must
+    choose between two tiers of the same program reads it rather than timing them again."""
     from emmy import config
     from emmy.compiler.backend.gpu_lock import gpu_lock
 
+    measured: dict[str, float] = {}
     with contextlib.ExitStack() as stack:
         try:
             stack.enter_context(gpu_lock())
         except Exception:  # noqa: BLE001 — taking the lock is setup, not measurement: an unusable
             # lock path is an environment fault and must not read as a clean audit at debug level.
             logger.warning("[roofline] boot audit skipped: GPU lock %r unusable", config.gpu_lock_path(), exc_info=True)
-            return
+            return measured
         try:
             bw = measure_copy_bw()
             try:
@@ -176,25 +197,30 @@ def audit_boot_programs(named_programs, dtype_bytes: int = 2) -> None:
             for label, prog, m_tokens in named_programs:
                 flops = 2.0 * (prog.weight_bytes / dtype_bytes) * m_tokens
                 floor_us = roofline_floor_us(prog.weight_bytes, bw, flops, flops_per_s)
-                budget_us = None if floor_us is None else WARN_RATIO * floor_us
+                # A program with no usable floor still needs a measurement bound, or the audit
+                # pays 4x a mispick's full cost to learn what one run already showed.
+                budget_us = MAX_ABS_US if floor_us is None else WARN_RATIO * floor_us
                 measured_us = time_program_us(prog.program, budget_us=budget_us)
+                measured[label] = measured_us
                 verdict = flag_ratio(measured_us, prog.weight_bytes, bw, flops, flops_per_s)
                 if verdict is not None:
                     floor_us, ratio = verdict
-                    flagged.append((label, floor_us, ratio))
+                    flagged.append((label, floor_us, ratio, measured_us))
         except Exception:  # noqa: BLE001 — advisory only, never a boot blocker
             logger.debug("[roofline] boot audit skipped", exc_info=True)
-            return
-    for label, floor_us, ratio in flagged:
+            return measured
+    for label, floor_us, ratio, measured_us in flagged:
         logger.warning(
-            "[roofline] %s runs %.0fx over its roofline floor (~%.0f us) — a deployed kernel pick "
-            "is far off the weight-streaming/compute floor for this model/GPU. Capture and tune the "
-            "serving twins (`emmy tune`; see emmy/serving/ARCHITECTURE.md → 'Tuning what serving "
-            "actually runs').",
+            "[roofline] %s runs %.0fx over its roofline floor (~%.0f us), measured %.3f ms — a "
+            "deployed kernel pick is far off the weight-streaming/compute floor for this model/GPU. "
+            "Capture and tune the serving twins (`emmy tune`; see emmy/serving/ARCHITECTURE.md → "
+            "'Tuning what serving actually runs').",
             label,
             ratio,
             floor_us,
+            measured_us / 1e3,
         )
     if named_programs and not flagged:
         n = len(named_programs)
         logger.info("[roofline] boot audit clean: %d static program(s) within %sx of the roofline floor", n, int(WARN_RATIO))
+    return measured

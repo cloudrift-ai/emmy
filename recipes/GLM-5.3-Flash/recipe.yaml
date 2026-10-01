@@ -1,0 +1,31 @@
+tags:
+  - maintained
+
+model:
+  huggingface: "zai-org/GLM-5.3-Flash"
+  rationale: "Top OpenRouter open-weight model with strong growth and verified serving capacity."
+  heat: 85
+  task: generate
+
+engine:
+  llm:
+    tensor_parallel_size: 2
+    pipeline_parallel_size: 1
+    gpu_memory_utilization: 0.9
+    context_length: 65536
+    max_concurrent_requests: 32
+    docker_options:
+      privileged: true
+    vllm:
+      image: "vllm/vllm-openai-rocm@sha256:d5da8f963f0571a171f6817cc108bc2371a39528a11aeba5a00cb78177fcb4e5"
+      extra_env:
+        VLLM_ROCM_USE_AITER: "1"
+      extra_args: >-
+        --enable-auto-tool-choice --tool-call-parser glm47 --reasoning-parser glm47
+        --chat-template-content-format=string
+
+matrices:
+  - deploy.gpu: "AMD Instinct MI350X"
+    deploy.gpu_count: 2
+  - deploy.gpu: "NVIDIA B200"
+    deploy.gpu_count: 4

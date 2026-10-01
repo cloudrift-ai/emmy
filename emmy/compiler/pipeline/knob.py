@@ -37,7 +37,7 @@ from emmy.compiler.ir.schedule.classic import CLASSIC_FAMILIES
 
 # Reserved prefix for the structural-feature knobs stamped by
 # the ``IdentityStrategy`` (``passes/identity.py``) — distinct from any tuning Knob
-# name, so ``format_tuning_knobs`` drops them from the tuning view and
+# name, so ``tuning_knob_items`` drops them from the tuning view and
 # ``knob_features`` passes them through as-is. Declared here (rather than with
 # the producing pass, which is loaded under a bare module stem) so every
 # consumer can import it.
@@ -49,6 +49,12 @@ STRUCT_PREFIX = "S_"
 # through ``knob_features`` as floats — they describe the regime a row was
 # measured in, letting one global prior span every GPU / opt level.
 CTX_PREFIX = "H_"
+
+# Exact kernel identity travels with measurements, but is neither a tuning decision nor a numeric feature.
+IDENTITY_PREFIX = "I_"
+KERNEL_IDENTITY = "I_kernel"
+METADATA_PREFIXES = (STRUCT_PREFIX, CTX_PREFIX, IDENTITY_PREFIX)
+EVIDENCE_PREFIXES = (STRUCT_PREFIX, IDENTITY_PREFIX)
 
 
 class _Unset:
@@ -113,7 +119,11 @@ class Knob:
     def __post_init__(self) -> None:
         # Construction IS registration: a module-level ``Knob`` declaration lands in the registry
         # the moment it executes, wherever it lives. First-seen wins, matching the old module-scan
-        # collapse rule (duplicate declarations should agree on type / hints anyway).
+        # collapse rule (duplicate declarations should agree on type / hints anyway). The canonical
+        # declarations in ``search/space.py`` load first, so a throwaway knob built before anything
+        # asked the registry (a test's stand-in) can never claim a canonical name.
+        from emmy.compiler.pipeline.search import space  # noqa: F401, PLC0415 — deferred: space imports knob
+
         _REGISTRY.setdefault(self.name, self)
 
     @property
@@ -255,13 +265,7 @@ def decision_view(knobs: dict) -> dict:
 
     This module owns the reserved prefixes, which is why the split lives here — a caller comparing
     two kernels' decisions asks for the view rather than re-deriving what counts as one."""
-    return {k: v for k, v in knobs.items() if not k.startswith((STRUCT_PREFIX, CTX_PREFIX))}
-
-
-def context_view(knobs: dict) -> dict:
-    """The ``H_*`` host/regime features of a row (GPU compute capability, nvcc opt level) — the
-    regime a measurement was taken in, which is what lets one global prior span every card."""
-    return {k: v for k, v in knobs.items() if k.startswith(CTX_PREFIX)}
+    return {k: v for k, v in knobs.items() if not k.startswith(METADATA_PREFIXES)}
 
 
 def family_of(key: str) -> str:
@@ -449,8 +453,62 @@ def apply_knobs_env(raw: str | None = None) -> dict[str, str]:
     return applied
 
 
-def family_pins(family: str) -> tuple[tuple[str, str], ...]:
-    """Live pins for one knob family, bare first and scoped pins in key order."""
+#: The scope prefix of a KERNEL pin, ``FAMILY@place_<token>``: the family's bare pin for the one cut piece
+#: named ``…__place_<token>`` (and the ``…__partial`` and finalize a split of it mints under that name, so a
+#: piece's ordinal — ``<token>_1`` — survives its split), where a bare pin reaches
+#: every kernel of the set. A cut child spells its sites relative to itself, so two pieces of one shape
+#: share every site key; the token in the piece's kernel name is what tells them apart.
+KERNEL_SCOPE = "place_"
+
+#: The scope prefix of a NODE pin, ``FAMILY@node_<id>``: the kernel pin of the kernel whose graph node is
+#: ``<id>`` — the uncut remainder of a route, which carries no ``__place_`` token — and of its split's
+#: partial (``<id>__partial``) and finalize. A cut piece's own node never matches, so the root's pin stays
+#: off every piece.
+NODE_SCOPE = "node_"
+
+
+def kernel_scoped(key: str) -> bool:
+    """Whether ``key`` is a kernel pin (:data:`KERNEL_SCOPE`, :data:`NODE_SCOPE`) rather than a site-scoped
+    or bare one."""
+    return (axis_of(key) or "").startswith((KERNEL_SCOPE, NODE_SCOPE))
+
+
+def kernel_pin(family: str, *names: str) -> str | None:
+    """The kernel pin of ``family`` that reaches a kernel known by any of ``names`` — its kernel name
+    and its graph node id, which a ``node_`` pin names. Where several pins reach the kernel the most
+    specific wins: a pin naming a split's partial (``place_<token>__partial``) beats the pin naming the
+    piece it was split from (``place_<token>``), which also reaches the partial."""
+    reached = [
+        (len(axis_of(key) or ""), value)
+        for key, value in _environ_pins(family)
+        if kernel_scoped(key) and any(reaches(key, name) for name in names)
+    ]
+    return max(reached, key=lambda pair: pair[0])[1] if reached else None
+
+
+def reaches(key: str, kernel: str) -> bool:
+    """Whether the kernel pin ``key`` names the kernel (or graph node) called ``kernel``."""
+    import re  # noqa: PLC0415
+
+    scope = axis_of(key) or ""
+    if scope.startswith(NODE_SCOPE):
+        # A graph node id, or the kernel name ``k_<id>`` lowering gives it; its split partial too.
+        node = scope[len(NODE_SCOPE) :]
+        name = kernel.lower().removeprefix("k_")
+        return name in (node, f"{node}__partial")
+    # A whole name segment: ``place_<token>`` reaches ``…__place_<token>`` and what a split or a nested
+    # cut appends after ``__``, never the sibling piece ``…__place_<token>_1``.
+    return re.search(rf"__{re.escape(scope)}(__|$)", kernel) is not None
+
+
+def family_pins(family: str, *, kernels: bool = False) -> tuple[tuple[str, str], ...]:
+    """Live pins for one knob family, bare first and scoped pins in key order. Kernel pins
+    (:data:`KERNEL_SCOPE`) name no site, so a site reader skips them and reads its kernel's through
+    :func:`kernel_pin`; ``kernels`` keeps them, for a check over every pin that was set."""
+    return tuple((key, value) for key, value in _environ_pins(family) if kernels or not kernel_scoped(key))
+
+
+def _environ_pins(family: str) -> tuple[tuple[str, str], ...]:
     import os  # noqa: PLC0415 — knob.py owns the ``EMMY_<KNOB>`` environment namespace
 
     family = family.upper()
@@ -520,21 +578,19 @@ def consume_kernel_row(knobs: dict) -> dict:
     neither — it is stamped and scheduled on its own, from its own body.
 
     It leaves any knob outside those families that the rewrite computed for the piece itself."""
-    return {
-        k: v for k, v in knobs.items() if family_of(k) not in KERNEL_DECISION_FAMILIES and not k.startswith((STRUCT_PREFIX, CTX_PREFIX))
-    }
+    return {k: v for k, v in knobs.items() if family_of(k) not in KERNEL_DECISION_FAMILIES and not k.startswith(METADATA_PREFIXES)}
 
 
-def schedule_pin_fingerprint() -> tuple[tuple[str, str], ...]:
+def schedule_pin_fingerprint(*kernel: str) -> tuple[tuple[str, str], ...]:
     """Every live env pin the schedule enumeration can read, as sorted ``(env var, value)`` pairs spelled as
     the scheduler's catalog arm reads them: the :data:`SCHEDULE_FAMILIES` pins (bare and ``@``-keyed) as
     set, each restricting a domain, and the precision gates by effect — one ``"1"`` entry per gate
     ``space.precision_pin`` resolves ON (``F16_MMA_F32_ACC`` / ``FP8_MMA``, under their ``FAST_MATH``
-    umbrella), nothing for a gate OFF or unset, since neither offers the f16-accumulate / native-fp8 rows.
-    The scheduler folds this into its schedule-space stamp, which also seeds a budgeted pool's draw: a pin
-    that changes which rows enumerate must change the stamp, and one that does not must not — an OFF gate
-    spelled out (a standard-lane golden's ``FAST_MATH: false``, what ``pinned_knobs`` publishes for a replay
-    or the release gate) would otherwise re-seed every budgeted draw away from the unpinned deploy's cold pick.
+    umbrella), nothing for a gate OFF. Unset precision gates follow the enabled FAST_MATH default.
+    The scheduler folds this into its schedule-space stamp, which also seeds a budgeted pool's draw:
+    equivalent effective gates share a stamp regardless of how the pins spell them.
+    Given the names ``kernel`` of the one kernel being stamped, a kernel pin that reaches no such name is left
+    out: that kernel never reads it, so it must not re-seed that kernel's draw and move an unpinned pick.
     The environ scan is this module's to make — the ``EMMY_<KNOB>`` namespace is knob.py-owned (the one
     exception to ``config.py``'s env ownership), and the ``@``-keyed pins land there via the ``EMMY_KNOBS`` splat."""
     import os  # noqa: PLC0415 — the one environ read outside ``config``, per the ownership note above
@@ -543,8 +599,17 @@ def schedule_pin_fingerprint() -> tuple[tuple[str, str], ...]:
 
     prefixes = tuple(config.knob_var(name) for name in SCHEDULE_FAMILIES)
     pins = [(var, val) for var, val in os.environ.items() if any(var == p or var.startswith(p + "@") for p in prefixes)]
+    if kernel:
+        pins = [(var, val) for var, val in pins if not _foreign_kernel_pin(var, kernel)]
     pins.extend((gate.env, "1") for gate in (F16_MMA_F32_ACC, FP8_MMA) if precision_pin(gate) is True)
     return tuple(sorted(pins))
+
+
+def _foreign_kernel_pin(var: str, kernel: tuple[str, ...]) -> bool:
+    """Whether the env var ``var`` holds a kernel pin that reaches none of the names ``kernel``."""
+    family, _, element = var[len(config.knob_var("")) :].partition("@")
+    key = f"{family}@{element.lower()}"
+    return kernel_scoped(key) and not any(reaches(key, name) for name in kernel if name)
 
 
 def knob_sort_key(name: str) -> tuple[int, str]:
@@ -556,25 +621,9 @@ def knob_sort_key(name: str) -> tuple[int, str]:
     return (len(_FAMILY_ORDER) + _KNOB_RANK.get(name, len(KNOB_ORDER)), name)
 
 
-def format_tuning_knobs(knobs: dict) -> str:
-    """Render ``knobs`` as a compact ``key=value`` string, dropping
-    pass-marker booleans. Empty after filtering → ``-``.
-
-    A registered ``Knob`` of type ``BOOL`` is treated as a marker and
-    dropped; unregistered boolean values are also dropped (forward-compat).
-    ``BINMASK`` values are already stored as binary strings in
-    ``op.knobs`` (rules stamp via ``Knob.pretty``), so ``str(v)`` here
-    round-trips correctly. ``STRUCT_PREFIX`` knobs (the structural-feature
-    stamp from the ``IdentityStrategy``) are facts about the kernel, not
-    tuning decisions, so they are dropped from this tuning-knob view.
-    """
-    items = tuning_knob_items(knobs)
-    return ", ".join(f"{k}={v}" for k, v in items) if items else "-"
-
-
 def tuning_knob_items(knobs: dict) -> list[tuple[str, str]]:
     """The filtered, canonically-ordered ``(name, str(value))`` tuning knobs —
-    the same view :func:`format_tuning_knobs` renders, but as items so callers can
+    the tuning-knob view, as items so callers can
     build aligned columns. ``STRUCT_PREFIX`` / ``CTX_PREFIX`` features and marker
     booleans are dropped; the rest is sorted by :func:`knob_sort_key`. The unified
     ``TILE`` output-fragment knob is one column for both the scalar and warp tiers
@@ -584,7 +633,7 @@ def tuning_knob_items(knobs: dict) -> list[tuple[str, str]]:
     suffix, so this view performs no aliasing or scope collapse."""
     rendered: list[tuple[str, str]] = []
     for k, v in knobs.items():
-        if k.startswith(STRUCT_PREFIX) or k.startswith(CTX_PREFIX):
+        if k.startswith(METADATA_PREFIXES):
             continue
         knob = get(k)
         if knob is not None and knob.type is KnobType.BOOL:
@@ -631,8 +680,8 @@ def schedule_match_key(knobs: dict) -> tuple[tuple[str, str], ...]:
     anchor carries no schedule content either way — it records a pass that declined. Comparing the
     spellings exactly is what left two thirds of the recorded golden rows matching nothing.
 
-    Recording keeps the anchors: a forkless kernel's row IS its OFF anchors, and dropping them
-    there writes an empty row that spells no decision at all."""
+    Recording keeps the anchors: a forkless kernel's row IS its OFF anchors; a kernel that never
+    carried one records an empty row, read as the fused, unsplit arm of the kernel it names."""
     return tuple((key, value) for key, value in schedule_row_key(knobs) if not is_off_value(family_of(key), value))
 
 
@@ -675,7 +724,7 @@ def complete_kernel_row(knobs: dict) -> dict[str, str]:
     so a kernel with neither — the copy-shaped piece a placement cut splits off, or the leftover
     root that cut leaves behind — encodes canonically as ``WORK`` and ``RASTER`` alone. This
     recording boundary enforces the context-free half: kernel families are bare, node families may
-    be bare or carry their site's route, and a ``STAGE`` assignment comes with the node assignment
+    be bare or carry their site's route, and a ``STAGE`` choice comes with the node choice
     it stages into (its consumer is a contraction, which always carries one).
     """
     out = dict(tuning_knob_items(knobs))
@@ -688,7 +737,7 @@ def complete_kernel_row(knobs: dict) -> dict[str, str]:
             )
         from emmy.compiler.ir.tile.path import parse_key  # noqa: PLC0415
 
-        assigned = staged = False
+        chosen = staged = False
         for key in out:
             family, separator, site = key.partition("@")
             if family not in SCHEDULE_FAMILIES:
@@ -703,11 +752,11 @@ def complete_kernel_row(knobs: dict) -> dict[str, str]:
                 except ValueError:
                     raise ValueError(f"classic schedule key {key!r} is not canonical; expected {family}@<route>") from None
             if family in {"TILE", "REDUCE"}:
-                assigned = True
+                chosen = True
             else:
                 staged = True
-        if staged and not assigned:
-            raise ValueError("complete classic schedule row stages a transport but has no node assignment")
+        if staged and not chosen:
+            raise ValueError("complete classic schedule row stages a transport but has no node choice")
         for key, value in out.items():
             if family_of(key) in SCHEDULE_FAMILIES:
                 validate_family_value(key, value)

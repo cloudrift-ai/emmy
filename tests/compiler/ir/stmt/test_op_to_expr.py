@@ -4,9 +4,10 @@ import numpy as np
 import pytest
 
 from emmy.compiler.dtype import F32
+from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import BinaryExpr, FuncCallExpr, Literal, TernaryExpr
-from emmy.compiler.ir.stmt import Assign, Body
+from emmy.compiler.ir.expr import BinaryExpr, FuncCallExpr, Literal, TernaryExpr, Var
+from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.stmt.base import dtype_promote, op_to_expr
 from emmy.compiler.ir.stmt.normalize import eliminate_copy_aliases
 
@@ -45,6 +46,33 @@ def test_zero_width_pad_is_an_exact_typed_identity(dtype):
 def test_typed_copy_is_a_cast_not_an_alias():
     cast = Assign(name="wide", op="copy", args=("narrow",), dtype=F32)
     assert eliminate_copy_aliases(Body((cast,))) == Body((cast,))
+
+
+def test_copy_aliases_do_not_leak_between_sibling_scopes():
+    body = Body(
+        (
+            Loop(
+                axis=Axis("i", 4),
+                body=(
+                    Load(name="x", input="A", index=(Var("i"),)),
+                    Assign(name="y", op="copy", args=("x",)),
+                    Write(output="OA", index=(Var("i"),), value="y"),
+                ),
+            ),
+            Loop(
+                axis=Axis("i", 4),
+                body=(
+                    Load(name="x", input="B", index=(Var("i"),)),
+                    Assign(name="y", op="exp", args=("x",)),
+                    Write(output="OB", index=(Var("i"),), value="y"),
+                ),
+            ),
+        )
+    )
+
+    out = eliminate_copy_aliases(body)
+
+    assert out[1].body[1] == Assign(name="y", op="exp", args=("x",))
 
 
 def test_sin_cos_render_as_intrinsics():

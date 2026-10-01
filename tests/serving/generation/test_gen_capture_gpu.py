@@ -1,5 +1,5 @@
 """``_Program.run_device`` under an OUTER torch CUDA-graph capture (the vLLM whole-step
-decode-capture path). Needs CUDA + cupy (skips itself off-GPU).
+decode-capture path). Needs CUDA (skips itself off-GPU).
 
 Builds one tiny static program (the decode-bucket twin shape class), then captures a
 ``run_device`` call inside ``torch.cuda.graph`` — the capture-aware branch must issue the
@@ -17,7 +17,6 @@ pytestmark = [pytest.mark.xdist_group("cuda")]
 
 
 def test_run_device_inside_outer_capture_replays_live():
-    pytest.importorskip("cupy")
     import torch
 
     if not torch.cuda.is_available():
@@ -56,7 +55,6 @@ def test_run_device_sym_inside_outer_capture_replays_live():
     the per-sym-key TMA descriptor overlay — descriptor encoding is an H2D copy and must
     never happen inside a capture), then captures at its exact width. Two sizes get two
     independent graphs over the same capacity buffers; each must replay LIVE."""
-    pytest.importorskip("cupy")
     import torch
 
     if not torch.cuda.is_available():
@@ -72,7 +70,7 @@ def test_run_device_sym_inside_outer_capture_replays_live():
     graphs = {}
     ins = {}
     outs = {}
-    out_backing_ptr = prog.program.arrays[prog.output_names[0]].data.ptr
+    out_backing_ptr = prog.program.executor.buffer(prog.output_names[0])[0]
     for t in (24, 40):
         x = torch.randn(t, 16, dtype=torch.float16, device="cuda")
         warm = prog.run_device_sym([x])[0]  # uncaptured warmup at this exact width
@@ -97,7 +95,6 @@ def test_run_device_aliased_input_backing_replays_live():
     """The EMMY_GEN_ALIAS_ATTN path: the caller writes INTO the program's own input backing (a
     ``torch.from_dlpack`` view), so ``upload_prefix_device`` self-copy-skips — and the captured
     graph must still replay LIVE (new values written into the backing flow through)."""
-    pytest.importorskip("cupy")
     import torch
 
     if not torch.cuda.is_available():
@@ -110,7 +107,7 @@ def test_run_device_aliased_input_backing_replays_live():
     prog, _ = _compile_split(wrapper, [torch.zeros(4, 16, dtype=torch.float16)], None, np.dtype("float16"))
 
     # The alias: a torch view of the program's OWN input buffer (the post twin's attn_out class).
-    x = torch.from_dlpack(prog.program.arrays[prog.input_names[0]])
+    x = prog.program.buffer_view(prog.input_names[0])
     assert x.shape[0] == 4
     x.copy_(torch.randn(4, 16, dtype=torch.float16, device="cuda"))
     ref0 = prog.run_device([x])[0].clone()  # upload self-copy-skips (pointer equality)
@@ -283,7 +280,6 @@ def test_run_device_sym_aliased_input_backing_replays_live():
     program's own input backing (what the previous layer's chained post output is, after A2),
     so ``upload_prefix_device`` self-copy-skips — and a captured graph over ``run_device_sym``
     must still replay LIVE through the aliased backing."""
-    pytest.importorskip("cupy")
     import torch
 
     if not torch.cuda.is_available():
@@ -298,7 +294,7 @@ def test_run_device_sym_aliased_input_backing_replays_live():
     ref_mod = wrapper.cuda()
     t = 24
     # The alias: a torch prefix view of the sym program's OWN capacity input buffer.
-    x = torch.from_dlpack(prog.program.arrays[prog.input_names[0]])[:t]
+    x = prog.program.buffer_view(prog.input_names[0])[:t]
     x.copy_(torch.randn(t, 16, dtype=torch.float16, device="cuda"))
     warm = prog.run_device_sym([x])[0]  # uncaptured warmup at this width (self-copy-skips)
     assert torch.allclose(warm, ref_mod(x), rtol=1e-2, atol=1e-2)

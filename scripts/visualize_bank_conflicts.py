@@ -17,8 +17,8 @@ want, then feed the dumped JSONs in::
     EMMY_DISABLE_CHUNK_REDUCE=1 \\
         EMMY_DUMP_DIR=/tmp/dump_b emmy compile MODEL --layer 0
     python scripts/visualize_bank_conflicts.py \\
-        -i /tmp/dump_a/14_lowering_tile.json:baseline \\
-        -i /tmp/dump_b/14_lowering_tile.json:no_chunk_reduce \\
+        -i /tmp/dump_a/09_tile_schedule.json:baseline \\
+        -i /tmp/dump_b/09_tile_schedule.json:no_chunk_reduce \\
         --out /tmp/diff.html
 
 Any post-tile-pass dump works; pick the one whose Stages you want to

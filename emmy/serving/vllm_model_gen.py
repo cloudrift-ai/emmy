@@ -8,7 +8,7 @@ sliding/global attention rides vLLM's `per_layer_sliding_window` + a per-layer-t
       --dtype float16 --hf-overrides '{"architectures":["EmmyGenModel"]}' \\
       --compilation-config '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1, 2, 4, 8, 16]}'
 
-(the whole-step decode-capture default `emmy serve --generate` assembles; add `--enforce-eager`
+(the whole-step decode-capture default `emmy serve --runner generate` assembles; add `--enforce-eager`
 instead to serve eager — the runner's `run_device` is capture-aware either way).
 
 NOT ``IsAttentionFree``: it constructs real vLLM ``Attention`` layers (one per decoder
@@ -39,6 +39,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from vllm.distributed import get_pp_group, get_tp_group
 from vllm.distributed.utils import get_pp_indices
+from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.attention import (
     _encode_layer_name,
@@ -109,16 +110,31 @@ class _BoundedYaRNScalingRotaryEmbedding(YaRNScalingRotaryEmbedding):
         return torch.cat((cos, sin), dim=-1)
 
 
+def _eager_dispatch(rope):
+    """Dispatch ``rope`` the way vLLM does when nothing compiles the model, whatever
+    ``--compilation-config`` says. The plugin runs its forward eagerly inside the cudagraph, but
+    under vLLM's default inductor mode ``custom_ops`` is ``none``, so CustomOp hands out
+    ``forward_native`` for inductor to fuse — and nothing ever does: on Gemma 4 decode that is 17
+    small kernels per layer, 0.8 ms per step. ``enforce_enable`` is vLLM's own per-instance
+    override; re-running the dispatch with it set selects the fused in-place kernel."""
+    if isinstance(rope, CustomOp):
+        rope._enforce_enable = True
+        rope._forward_method = rope.dispatch_forward(compile_native=False)
+    return rope
+
+
 def _get_rope(head_dim, max_position, rope_parameters, dtype):
     """Build one dtype-correct RoPE whose cache is bounded by the served context length."""
     rope_parameters = rope_parameters or {}
     if rope_parameters.get("rope_type", "default") != "yarn" or "mrope_section" in rope_parameters:
-        return get_rope(
-            head_dim,
-            max_position=max_position,
-            rope_parameters=rope_parameters,
-            is_neox_style=True,
-            dtype=dtype,
+        return _eager_dispatch(
+            get_rope(
+                head_dim,
+                max_position=max_position,
+                rope_parameters=rope_parameters,
+                is_neox_style=True,
+                dtype=dtype,
+            )
         )
 
     partial_rotary_factor = rope_parameters.get("partial_rotary_factor", 1.0)
@@ -130,16 +146,18 @@ def _get_rope(head_dim, max_position, rope_parameters, dtype):
         for key, value in rope_parameters.items()
         if key in ("extrapolation_factor", "attn_factor", "beta_fast", "beta_slow", "apply_yarn_scaling", "truncate")
     }
-    return _BoundedYaRNScalingRotaryEmbedding(
-        head_dim,
-        rotary_dim,
-        rope_parameters["original_max_position_embeddings"],
-        rope_parameters.get("rope_theta", 10000),
-        True,
-        rope_parameters["factor"],
-        dtype,
-        cache_max_position=max_position,
-        **extra_kwargs,
+    return _eager_dispatch(
+        _BoundedYaRNScalingRotaryEmbedding(
+            head_dim,
+            rotary_dim,
+            rope_parameters["original_max_position_embeddings"],
+            rope_parameters.get("rope_theta", 10000),
+            True,
+            rope_parameters["factor"],
+            dtype,
+            cache_max_position=max_position,
+            **extra_kwargs,
+        )
     )
 
 
@@ -513,7 +531,7 @@ class EmmyGenModel(nn.Module, SupportsPP):
                         f"MoE decode capture is limited to capture size 1 (the fixed-slot tier covers "
                         f"single-token steps only; wider decode steps run the routed dispatch eager) — "
                         f"capture sizes {over} exceed that; use cudagraph_capture_sizes [1] (the "
-                        f"emmy serve --generate default for MoE) or --enforce-eager"
+                        f"emmy serve --runner generate default for MoE) or --enforce-eager"
                     )
 
         sliding_window = getattr(config, "sliding_window", None)
@@ -905,7 +923,7 @@ class EmmyGenModel(nn.Module, SupportsPP):
         # shared table stays raw (the head must read it unscaled).
         if tied and param.data.is_cuda:
             self.runner.adopt_embed_table(param.data, scale=getattr(self.runner, "_embed_scale", 1.0))
-        # RECLAIM, unconditionally: empty_cache + the cupy pool trim RELEASE freed blocks back to
+        # RECLAIM, unconditionally: empty_cache RELEASES freed blocks back to
         # the driver, and vLLM's KV-cache sizing (which runs right after load) budgets
         # ``util x total - currently-used`` off the driver's own accounting — it cannot see that a
         # cached block is free. Everything this boot churned through counts: the adopted table's
@@ -921,17 +939,13 @@ class EmmyGenModel(nn.Module, SupportsPP):
 
     @staticmethod
     def reclaim_device_memory() -> None:
-        """Return both allocators' free blocks to the driver (torch's caching allocator and
-        cupy's memory pool). Idempotent and cheap; call it before anything sizes itself off the
-        driver's free-memory reading.
+        """Return the caching allocator's free blocks to the driver. Idempotent and cheap; call it
+        before anything sizes itself off the driver's free-memory reading.
 
         Logged in the driver's own units, because that is the accounting vLLM's KV sizing reads
         and the reclaim is otherwise invisible — which is how the untied path went without one."""
-        import cupy as cp
-
         before = torch.cuda.mem_get_info()[0]
         torch.cuda.empty_cache()
-        cp.get_default_memory_pool().free_all_blocks()
         free, total = torch.cuda.mem_get_info()
         logger.info(
             "[EmmyGenModel] reclaimed %.3f GiB of allocator free blocks; %.3f of %.3f GiB now free for the KV cache",

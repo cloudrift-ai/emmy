@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 import torch  # used by test_bind_inputs_preserves_int_dtype
 
-from tests.compiler.helpers import requires_cuda
+from tests.compiler.helpers import requires_cuda, requires_sm
 
 
 def _classic_row(*, work: str = "", tile: str = "", reduce: str = "", stage: str = "", raster: str = "") -> dict[str, str]:
@@ -37,6 +37,33 @@ def _randn(shape: str, dtype, scale: float | None = None) -> str:
         s = 0.1 if scale is None else scale
         return f"(torch.randn({shape}, dtype=torch.float16) * {s})"
     return f"torch.randn({shape})"
+
+
+def test_random_input_values_bound_u8_scale_codes_without_changing_adjacent_inputs():
+    """MXFP4 boundary scales use biased E8M0 bytes, so arbitrary signed-looking values overflow.
+
+    The input name distinguishes those scale codes from ordinary u8 storage. Plain u8 inputs retain
+    the existing random values, while native fp8 carriers still filter non-finite encodings.
+    """
+    import numpy as np
+
+    from emmy.commands.run import _random_input_values
+    from emmy.compiler.dtype import decode_f8
+
+    scales = _random_input_values(np.random.default_rng(7), (1024,), "u8", name="w_gate_up_scale")
+    assert scales.dtype == np.uint8
+    assert 120 <= int(scales.min()) <= int(scales.max()) <= 122
+    decoded_scales = np.exp2(scales.astype(np.int16) - 127)
+    assert np.isfinite(decoded_scales).all() and float(decoded_scales.max()) <= 1 / 32
+
+    plain_rng = np.random.default_rng(11)
+    expected_rng = np.random.default_rng(11)
+    plain = _random_input_values(plain_rng, (32,), "u8", name="w_gate_up")
+    expected = expected_rng.standard_normal((32,), dtype=np.float32)
+    assert np.array_equal(plain, expected), "ordinary u8 input generation must not change"
+
+    fp8 = _random_input_values(np.random.default_rng(13), (256,), "f8e4m3", name="activation_scale")
+    assert fp8.dtype == np.uint8 and np.isfinite(decode_f8(fp8, "f8e4m3")).all()
 
 
 def test_run_no_code_errors(run_cli):
@@ -225,10 +252,13 @@ def test_build_torch_fns_resets_dynamo_before_compile(monkeypatch):
     assert "Eager PyTorch" in fns
 
 
-def test_build_torch_fns_rejects_wrong_inductor_output(monkeypatch):
+def test_build_torch_fns_reports_a_wrong_inductor_output_as_a_failed_backend(monkeypatch, capsys):
+    """A torch.compile that answers wrong is not a baseline, and it is not dropped either: the
+    builder runs in the bench worker, whose log the parent never shows, so the failure travels
+    in the closure dict and stands in the table and the record where the latency would."""
     import torch._dynamo
 
-    from emmy.commands.run import _build_torch_fns
+    from emmy.commands.run import BackendFailure, _build_torch_fns, _print_table
 
     monkeypatch.setattr(torch._dynamo, "reset", lambda: None)
 
@@ -241,13 +271,61 @@ def test_build_torch_fns_rejects_wrong_inductor_output(monkeypatch):
 
     fns = _build_torch_fns(lambda: torch.tensor([1.0]), (), {}, warmup=0, backends={"tcompile"})
 
-    assert "torch.compile" not in fns
+    assert isinstance(fns["torch.compile"], BackendFailure) and "accuracy check failed" in fns["torch.compile"]
+    _print_table({"Eager PyTorch": 10.0, "torch.compile": fns["torch.compile"], "Emmy": 5.0})
+    out = capsys.readouterr().out
+    assert "failed" in out and "accuracy check failed" in out and "2.00x" in out
+
+
+def test_build_torch_fns_accepts_inductor_rounding_drift(monkeypatch):
+    """Inductor's own FP16 GEMM differs from cuBLAS by output rounding at large K; the gate is the
+    scaled check the Emmy output gets, not a flat 1e-3 that rejected it on three of six shapes."""
+    import torch._dynamo
+
+    from emmy.commands.run import _build_torch_fns
+
+    monkeypatch.setattr(torch._dynamo, "reset", lambda: None)
+    reference = torch.full((8,), 60.0, dtype=torch.float16)
+    monkeypatch.setattr(torch, "compile", lambda _module, *, fullgraph, mode: lambda: reference + 0.0625)
+
+    fns = _build_torch_fns(lambda: reference, (), {}, warmup=0, backends={"tcompile"})
+
+    assert callable(fns["torch.compile"])
 
 
 def test_run_ab_requires_bench(run_cli):
     rc, stdout, stderr = run_cli("run", "--code", "torch.zeros(4)", "--ab", "BM=8")
     assert rc == 2
     assert "--ab requires --bench" in (stdout + stderr)
+
+
+def test_run_ab_sweep_below_the_bench_standard_fails_before_any_work(run_cli):
+    """A sweep exists to leave its rows in the tune DB; below the bench standard it records none, and a
+    record run that copies that DB then falls to the prior without a word. So the run refuses up front,
+    naming the standard, unless ``--no-record-evidence`` says the sweep only measures."""
+    rc, stdout, stderr = run_cli("run", "--code", "torch.zeros(4)", "--bench", "--ab", "BM=8", "--warmup", "3", "--iters", "10")
+    assert rc == 2
+    assert "below the tune bench standard (--warmup >= 5, --iters >= 20)" in (stdout + stderr)
+
+
+def test_run_json_rejects_a_directory_for_one_target(run_cli, tmp_path):
+    """One target writes one FILE, and it writes it last.
+
+    A directory used to reach ``Path(args.json).write_text`` and raise ``IsADirectoryError`` after
+    the bench had run and the recording had been skipped, so a ``--record-greedy`` batch reported
+    success per target and recorded nothing. The check has to fire before any work, which is what
+    ``rc == 2`` with no compile output shows."""
+    rc, stdout, stderr = run_cli("run", "--code", "torch.zeros(4)", "--bench", "--json", str(tmp_path))
+    assert rc == 2
+    assert "is a directory" in (stdout + stderr)
+
+
+def test_run_json_rejects_a_trailing_separator_for_one_target(run_cli, tmp_path):
+    """A path that NAMES a directory is refused even before it exists — otherwise a trailing slash
+    silently writes a file beside the intended directory."""
+    rc, stdout, stderr = run_cli("run", "--code", "torch.zeros(4)", "--bench", "--json", f"{tmp_path}/nope/")
+    assert rc == 2
+    assert "is a directory" in (stdout + stderr)
 
 
 def test_run_ab_requires_relowerable_input(run_cli):
@@ -321,28 +399,33 @@ def test_ir_ab_replay_retains_boolean_input_pins(tmp_path, monkeypatch):
 
     from emmy.commands import run as run_mod
     from emmy.compiler.graph import Graph
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+    from emmy.compiler.pipeline.search.space import FAST_MATH, precision_pin
 
     seen = []
 
     @contextlib.contextmanager
     def capture_pins(knobs):
         seen.append(knobs)
-        yield
+        with pinned_knobs(knobs):
+            yield
 
     class Backend:
-        async def bench_pinned_async(self, _graph, *, warmup, num_iters):
+        async def bench_pinned_async(self, _graph, *, run_inputs=None, run_inputs_key=None, warmup, num_iters):
             assert (warmup, num_iters) == (1, 2)
+            assert precision_pin(FAST_MATH) is False
             return SimpleNamespace(min_ms=0.1, time_ms=0.1), None
 
     source = tmp_path / "loop.json"
     source.write_text("{}")
     monkeypatch.setattr(run_mod, "pinned_knobs", capture_pins)
     monkeypatch.setattr(run_mod, "_cuda_knob_dicts", lambda _graph: [{"TILE": "f2x4"}])
+    monkeypatch.setattr(run_mod, "_placement_knob_dicts", lambda _graph: [])
     monkeypatch.setattr(Graph, "from_dict", staticmethod(lambda _document: object()))
 
     rows = asyncio.run(run_mod._bench_ab_variants_ir(Backend(), source, (), ["FAST_MATH=False,TILE=f2x4"], warmup=1, iters=2))
 
-    assert seen == [{"FAST_MATH": "False", "TILE": "f2x4"}]
+    assert seen == [{"FAST_MATH": "False", "TILE": "f2x4"}] * 2
     assert len(rows) == 1 and rows[0].status == "ok"
 
 
@@ -498,6 +581,19 @@ def test_strict_correctness_proof_uses_compiler_baseline_tolerance():
     assert greedy["max_rel_error"] > 0
 
 
+def test_strict_correctness_proof_accepts_a_mask_that_matches_its_reference():
+    """An attention mask holds -inf by design: it passes where the reference has the same -inf, and
+    fails where the two disagree."""
+    import numpy as np
+
+    from emmy.commands.run import _strict_correctness_proof
+
+    mask = {"o": np.array([0.0, -np.inf], dtype=np.float32)}
+    assert _strict_correctness_proof({"o": np.array([0.0005, -np.inf], dtype=np.float32)}, mask)["status"] == "pass"
+    for wrong in ([0.0, np.inf], [-np.inf, 0.0], [0.0, np.nan]):
+        assert _strict_correctness_proof({"o": np.array(wrong, dtype=np.float32)}, mask)["status"] == "fail"
+
+
 def test_unreproducible_pin_flag(monkeypatch):
     """The realized-vs-pinned gate: a pin the compile silently dropped (the fallback
     substituted the planner's own pick — the retired ``w2x1`` hd128 flash form) flags
@@ -511,6 +607,8 @@ def test_unreproducible_pin_flag(monkeypatch):
     from emmy.compiler.pipeline import knob as knob_mod
     from emmy.compiler.pipeline.knob import Knob, KnobType
     from emmy.compiler.pipeline.search.pins import unreproducible_pin_flag
+
+    knob_mod.registry()  # declare space.py's Knobs into the REAL registry — one constructed under the swap is lost with it
 
     monkeypatch.setattr(
         knob_mod,
@@ -528,7 +626,7 @@ def test_unreproducible_pin_flag(monkeypatch):
     flag = unreproducible_pin_flag({"TILE": "mma_m16n8k16_f16_f32/f1x8"}, [{"TILE": "mma_m16n8k16_f16_f32/f2x4"}])
     assert "unreproducible pin" in flag and "TILE=mma_m16n8k16_f16_f32/f1x8" in flag and "mma_m16n8k16_f16_f32/f2x4" in flag
     # A classic schedule family with no site stamp is a miss. Typed schedule serialization may
-    # not silently discard an assignment.
+    # not silently discard a choice.
     assert "unreproducible pin" in unreproducible_pin_flag({"STAGE": "k8"}, [{"TILE": "w2x1"}])
     # An UNREGISTERED family with no stamp is a typo in the pin — flagged.
     assert "(unset)" in unreproducible_pin_flag({"TIEL": "w2x1"}, [{"TILE": "w2x1"}])
@@ -552,9 +650,18 @@ def test_unreproducible_pin_flag(monkeypatch):
     assert unreproducible_pin_flag({"TILE": "w2x1"}, []) is None
     assert unreproducible_pin_flag({"TILE": "w2x1"}, [{}]) is None
     assert unreproducible_pin_flag({"TILE": "w2x1"}, [{}, {}]) is None
+    # A pinned cut the resolution trace does not carry was not taken: the compile kept the fused kernel.
+    untaken = unreproducible_pin_flag({"PLACE@map.1/inner": "cut"}, [{"TILE": "f2"}], placement_knobs=[])
+    assert "PLACE@map.1/inner=cut realized (unset)" in untaken
+    assert unreproducible_pin_flag({"PLACE@map.1/inner": "cut"}, [{"TILE": "f2"}]) is None, "no trace, no gate"
+    # Global fuse prohibits cuts even when the kernel offers no placement choice. A scoped pin still names a site.
+    assert unreproducible_pin_flag({"PLACE": "fuse"}, [{"TILE": "f2"}], placement_knobs=[]) is None
+    assert unreproducible_pin_flag({"PLACE@map.1/inner": "fuse"}, [{"TILE": "f2"}], placement_knobs=[])
+    assert unreproducible_pin_flag({"PLACE": "fuse"}, [{"TILE": "f2"}], placement_knobs=[{"PLACE@map.1/inner": "cut"}])
 
 
-def test_bench_golden_variants_unmatched_pin_fails_row_without_benching(monkeypatch):
+@pytest.mark.parametrize("ambient_tile", (None, "mma_m16n8k16_f16_f32/f2x4"))
+def test_bench_golden_variants_unmatched_pin_fails_row_without_benching(monkeypatch, ambient_tile):
     """End-to-end through ``_bench_golden_variants``: a pinned config whose compiled
     kernels realized different knobs FAILS its row loudly before any bench — status
     ``pin_unmatched``, no bench (benching the fallback realization would measure the
@@ -591,6 +698,80 @@ def test_bench_golden_variants_unmatched_pin_fails_row_without_benching(monkeypa
     assert any("unreproducible pin" in f and "NOT benched" in f for f in benches[0].flags)
     assert len(benched) == 1  # only the honored row spent GPU time
     assert benches[1].status == "ok" and benches[1].flags == [] and benches[1].bench is not None
+
+
+def test_bench_golden_variants_unmatched_place_pin_fails_row_without_benching(monkeypatch):
+    """A structural PLACE pin is checked against the greedy resolution trace, not CUDA
+    knob stamps: the splice consumes placement before either resulting kernel exists."""
+    from types import SimpleNamespace
+
+    from emmy.commands import trace as tmod
+    from emmy.commands.run import _bench_golden_variants
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.cuda.ir import CudaOp
+    from emmy.compiler.pipeline.search.pins import PLACEMENT_DECISIONS_HINT
+
+    monkeypatch.setattr(tmod, "graph_from_code", lambda code, dynamic_shapes=None: (object(), "slug", (None, (), {})))
+
+    def graph_with(route):
+        graph = Graph()
+        graph.add_node(op=CudaOp(kernel_name="k"), inputs=[], output=Tensor("o", (4,)), node_id="n0")
+        graph.hints.set(PLACEMENT_DECISIONS_HINT, [route])
+        return graph
+
+    compiled = iter(
+        [
+            graph_with({"PLACE": "fuse"}),
+            graph_with({"PLACE@map.1/inner.2/map": "cut"}),
+        ]
+    )
+    benched: list = []
+
+    async def fake_bench_pinned_async(graph, *, run_inputs=None, run_inputs_key=None, warmup, num_iters):
+        benched.append(graph)
+        return SimpleNamespace(min_ms=1.0, time_ms=1.0, per_launch=[]), None
+
+    backend = SimpleNamespace(compile=lambda graph: next(compiled), bench_pinned_async=fake_bench_pinned_async)
+    pin = {"PLACE@map.1/inner.2/map": "cut"}
+    missed = SimpleNamespace(name="g.missed", knobs=pin, shape=None, dynamic=None)
+    realized = SimpleNamespace(name="g.realized", knobs=pin, shape=None, dynamic=None)
+
+    benches = asyncio.run(_bench_golden_variants(backend, "torch.exp(a)", [missed, realized], warmup=1, iters=1))
+
+    assert benches[0].status == "pin_unmatched" and benches[0].bench is None
+    assert any("PLACE@map.1/inner.2/map=cut" in flag for flag in benches[0].flags)
+    assert benches[1].status == "ok" and benches[1].flags == []
+    assert len(benched) == 1
+
+
+def test_bench_golden_variants_gates_the_live_env_route_too(monkeypatch):
+    """A sweep publishes its route through EMMY_KNOBS and varies schedules per --ab row: a row
+    whose compile dropped that route must not bench as a clean result under the row's name."""
+    from types import SimpleNamespace
+
+    from emmy.commands import trace as tmod
+    from emmy.commands.run import _bench_golden_variants
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.cuda.ir import CudaOp
+    from emmy.compiler.pipeline.search.pins import PLACEMENT_DECISIONS_HINT
+
+    monkeypatch.setattr(tmod, "graph_from_code", lambda code, dynamic_shapes=None: (object(), "slug", (None, (), {})))
+    monkeypatch.setenv("EMMY_PLACE@MAP.1/INNER", "cut")
+
+    graph = Graph()
+    graph.add_node(op=CudaOp(kernel_name="k", knobs={"WORK": "t128"}), inputs=[], output=Tensor("o", (4,)), node_id="n0")
+    graph.hints.set(PLACEMENT_DECISIONS_HINT, [])
+
+    async def fake_bench_pinned_async(g, *, run_inputs=None, run_inputs_key=None, warmup, num_iters):
+        raise AssertionError("a row whose env route did not realize must not be benched")
+
+    backend = SimpleNamespace(compile=lambda g: graph, bench_pinned_async=fake_bench_pinned_async)
+    row = SimpleNamespace(name="g.row", knobs={"WORK": "t128"}, shape=None, dynamic=None)
+
+    (bench,) = asyncio.run(_bench_golden_variants(backend, "torch.exp(a)", [row], warmup=1, iters=1))
+
+    assert bench.status == "pin_unmatched" and bench.bench is None
+    assert any("PLACE@map.1/inner=cut" in flag for flag in bench.flags)
 
 
 @pytest.mark.parametrize(
@@ -698,7 +879,7 @@ def test_bench_greedy_isolated_ok_and_bench_fail():
     compiled = object()
     benched: list = []
 
-    async def ok_bench(g, *, warmup, num_iters):
+    async def ok_bench(g, *, run_inputs=None, run_inputs_key=None, warmup, num_iters):
         benched.append(g)
         return SimpleNamespace(min_ms=1.0, time_ms=1.0, per_launch=[]), None
 
@@ -707,7 +888,20 @@ def test_bench_greedy_isolated_ok_and_bench_fail():
     assert gb.status == "ok" and gb.bench is not None and gb.flags == []
     assert gb.sample.name == "greedy (isolated)" and gb.sample.shape is None
 
-    async def hung_bench(g, *, warmup, num_iters):
+    # With the run's reference, the greedy row is timed on its inputs under the pinned rows' key.
+    timed_on: list = []
+
+    async def ref_bench(g, *, run_inputs=None, run_inputs_key=None, warmup, num_iters):
+        timed_on.append((run_inputs, run_inputs_key))
+        return SimpleNamespace(min_ms=1.0, time_ms=1.0, per_launch=[]), None
+
+    inputs = {"x": [1.0]}
+    asyncio.run(
+        _bench_greedy_isolated(SimpleNamespace(bench_pinned_async=ref_bench), compiled, warmup=1, iters=1, ref=(inputs, {}), ref_key="k")
+    )
+    assert timed_on == [(inputs, "k")]
+
+    async def hung_bench(g, *, run_inputs=None, run_inputs_key=None, warmup, num_iters):
         raise RuntimeError("bench worker exceeded 100.0s wall budget — SIGKILL'd, stream cleaned")
 
     gb = asyncio.run(_bench_greedy_isolated(SimpleNamespace(bench_pinned_async=hung_bench), compiled, warmup=1, iters=1))
@@ -763,7 +957,7 @@ def test_pinned_lane_uses_realized_boolean_policy(monkeypatch):
         ({"FP8_MMA": True}, "fm"),
         (
             {"FAST_MATH": True, "FAST_EXP": False, "F16_MMA_F32_ACC": False, "FP8_MMA": False},
-            "std",
+            "fm",
         ),
     ],
 )
@@ -788,12 +982,12 @@ def test_ab_json_labels_each_row_with_its_lane(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
     from emmy.commands import run as run_mod
-    from emmy.compiler.pipeline.search.data import Sample
+    from emmy.compiler.pipeline.search.dataset import Sample
 
-    _FakeNode = namedtuple("_FakeNode", "op")
+    _FakeNode = namedtuple("_FakeNode", "op id")
 
     def _node(knobs):
-        return _FakeNode(SimpleNamespace(kernel_name="k_matmul", smem_bytes=0, knobs=knobs))
+        return _FakeNode(SimpleNamespace(kernel_name="k_matmul", smem_bytes=0, knobs=knobs), "k_matmul")
 
     greedy_graph, fm_graph, std_graph = object(), object(), object()
 
@@ -802,6 +996,7 @@ def test_ab_json_labels_each_row_with_its_lane(tmp_path, monkeypatch):
         return [_node(knobs)]
 
     monkeypatch.setattr(run_mod, "_launch_order_cuda_nodes", _nodes)
+    monkeypatch.setattr(run_mod, "_placement_knob_dicts", lambda _graph: [])
 
     fm = Sample(
         knobs={"TILE": "mma_m16n8k16_f16_f16/f2x2/k4"},
@@ -930,6 +1125,7 @@ def test_run_code_matmul_accuracy(run_cli, dtype):
 
 
 @requires_cuda
+@requires_sm(8)
 def test_run_code_target_override(run_cli):
     """``--gpu-arch sm_80`` gates lowering to the cp.async path (no TMA); the kernel still runs
     on the live device and must match eager, so ``rc == 0`` is the accuracy assertion."""
@@ -1108,7 +1304,7 @@ def test_run_ir_loop_stage(run_cli, project_root, tmp_path):
     assert rc == 0, f"stderr: {stderr}"
     log = stdout + stderr
     assert "Loaded loop IR" in log
-    assert "lowering/tile" in log
+    assert "tile/lift" in log
 
 
 @requires_cuda
@@ -1129,7 +1325,7 @@ def test_run_ir_tile_stage(run_cli, project_root, tmp_path):
     log = stdout + stderr
     assert "Loaded tile IR" in log
     assert "lowering/kernel" in log
-    # tile-stage already ran lowering/tile, so it should NOT be in the tail list.
+    # tile-stage already ran the tile passes, so none of them should be in the tail list.
     assert "running tail passes: ['lowering/kernel'" in log
 
 
@@ -1519,6 +1715,27 @@ def test_accuracy_check_heavy_tailed_fp16_outputs():
     assert fails(rng.permutation(base)), "a permuted heavy-tailed output must fail the mean gate"
 
 
+def test_accuracy_check_holds_a_large_output_in_arrays_not_lists():
+    """The check once walked Python lists, one float object per cell: measured at 2M cells it peaked at 13.3 f64
+    copies of the output and took 6.6 s, which for an LM-head output at sequence 512 (134M cells) is 14 GB. In
+    arrays the same verdict costs 4.3 copies and well under a second."""
+    import tracemalloc
+
+    import numpy as np
+    import torch
+
+    from emmy.commands.run import _check_accuracy
+
+    cells = 1 << 21
+    eager = torch.from_numpy(np.random.default_rng(0).standard_normal(cells).astype(np.float16))
+    tracemalloc.start()
+    assert _check_accuracy({"o": eager.numpy().copy()}, eager) is None
+    _, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    # Measured: 4.3 f64 copies of the output in arrays, 13.3 in lists.
+    assert peak < 8 * 8 * cells
+
+
 def test_write_ab_json_greedy_bench_fail_and_record_knobs(tmp_path):
     """The ``--json`` record survives a failed greedy row: the greedy block carries
     ``status: bench_fail`` + ``error`` with null timings, pinned rows carry their own
@@ -1562,13 +1779,52 @@ def test_write_ab_json_greedy_bench_fail_and_record_knobs(tmp_path):
     assert any("NOT benched" in f for f in row["flags"])
 
 
+def test_the_bench_record_always_says_whether_the_emmy_row_was_checked(tmp_path):
+    """A latency is not evidence until something says the output was right, so the record carries
+    that verdict in every state — including the two that used to be an absence.
+
+    Without ``--strict`` the bench still compares against eager, on dtype-scaled tolerances wide
+    enough to pass fp16 accumulation drift, and that verdict reached the log and nothing else. So
+    a failed check and a target with no eager reference at all both landed in the file as a
+    latency with no ``correctness`` key, indistinguishable from a row that passed. A survey pass
+    ranks on this file: one kernel here passed the scaled check, failed the strict one on 198 of
+    3.1M elements, and was ranked on a number nothing had verified."""
+    import json
+    from types import SimpleNamespace
+
+    from emmy.commands.run import _write_ab_json
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.cuda.ir import CudaOp
+
+    graph = Graph()
+    graph.add_node(op=CudaOp(kernel_name="k", knobs=_classic_row()), inputs=[], output=Tensor("o", (4,)), node_id="n0")
+
+    def record(results, **kwargs):
+        args = SimpleNamespace(
+            json=str(tmp_path / "ab.json"), code="torch.matmul(a, b)", input=None, ir=None, golden=None, dynamic=None, warmup=1, iters=1
+        )
+        _write_ab_json(args, results, graph, None, [], **kwargs)
+        return json.loads((tmp_path / "ab.json").read_text())["backends"]["Emmy"]["correctness"]
+
+    both = {"Emmy": 10.0, "Eager PyTorch": 20.0}
+    assert record(both) == {"status": "pass", "reference": "eager", "tolerance": "scaled"}
+
+    failed = record(both, accuracy_error="CORRECTNESS FAIL: output o contains NaN")
+    assert failed["status"] == "fail" and "NaN" in failed["error"]
+
+    proof = {"status": "pass", "reference": "eager", "rtol": 1e-3, "atol": 1e-3}
+    assert record(both, correctness=proof, accuracy_error=None) == proof, "a strict proof stands as written"
+
+    assert record({"Emmy": 10.0}) == {"status": "unchecked"}, "no eager reference is its own state, not a pass"
+
+
 def test_write_ab_json_records_a_forkless_kernel_row(tmp_path):
-    """A forkless kernel's schedule space collapsed to its OFF anchors — no node assignment — and
+    """A forkless kernel's schedule space collapsed to its OFF anchors — no node choice — and
     its ``record_knobs`` is that row as-is: the one enumerated row a golden entry for it spells.
     The residual of a placement cut is one such kernel, and it must not sink the whole record.
 
     ``complete_kernel_row`` accepts the row rather than refusing it: ``TILE`` and ``REDUCE`` key off
-    the tile's contraction and reduction sites, so a kernel with neither has nothing to assign and
+    the tile's contraction and reduction sites, so a kernel with neither has nothing to choose and
     is complete without one. The policy stamp rides along exactly as it does on a kernel that DOES
     carry forks — ``schedule_row_key`` projects it out when the row is matched against a leaf, so it
     is recorded, not identity."""
@@ -1592,6 +1848,27 @@ def test_write_ab_json_records_a_forkless_kernel_row(tmp_path):
     rec = json.loads((tmp_path / "ab.json").read_text())
     assert rec["greedy"]["kernels"][0]["record_knobs"] == {"WORK": "", "RASTER": "", "LOOPIFY": "0"}
     assert schedule_row_key(rec["greedy"]["kernels"][0]["record_knobs"]) == (("WORK", ""), ("RASTER", ""))
+
+
+def test_kernel_stats_reuse_runtime_loader(monkeypatch):
+
+    from emmy.commands.run import _collect_kernel_attrs
+    from emmy.compiler.backend.cuda import program
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.cuda import CudaOp
+
+    graph = Graph()
+    source = "emmy_wgmma_"
+    graph.add_node(op=CudaOp(kernel_name="k", kernel_source=source), inputs=[], output=Tensor("out", (4,)), node_id="out")
+    seen = []
+
+    def attributes(name, spec):
+        seen.append((name, spec.source, spec.arch_specific))
+        return {"num_regs": 128, "local_size_bytes": 0, "shared_size_bytes": 256}
+
+    monkeypatch.setattr(program, "kernel_attributes", attributes)
+    assert _collect_kernel_attrs(graph) == {"k": {"num_regs": 128, "local_size_bytes": 0, "shared_size_bytes": 256}}
+    assert seen == [("k", source, True)]
 
 
 def test_print_kernel_stats_greedy_bench_fail_row(capsys):
@@ -1783,6 +2060,8 @@ def test_unreproducible_pin_flag_reads_a_cross_cta_split_structurally(monkeypatc
     from emmy.compiler.pipeline import knob as knob_mod
     from emmy.compiler.pipeline.knob import Knob, KnobType
     from emmy.compiler.pipeline.search.pins import unreproducible_pin_flag
+
+    knob_mod.registry()  # declare space.py's Knobs into the REAL registry — one constructed under the swap is lost with it
 
     monkeypatch.setattr(
         knob_mod,

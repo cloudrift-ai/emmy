@@ -32,37 +32,47 @@ relevant `ARCHITECTURE.md` before answering.
 ## Prerequisites
 
 - Python 3.12+ with `venv`
+- A Rust toolchain (`cargo`): compiled programs execute through the Rust runtime, which `make setup` builds into the
+  package as the `emmy.emmy_runtime` extension; use the README architecture index for the runtime's design.
 - `make setup` to create the virtual environment and install dependencies
 - Docker and Docker Compose for local deployments
 - `HF_TOKEN` environment variable for HuggingFace model downloads
 - `EMMY_DUMP_DIR` environment variable (optional) — when set, compiler stages dump intermediate debug artifacts
-  (graphs, CUDA kernels, execution plans) to this directory. Frontend provenance slices used by `tune --bench` stay
-  in memory; stable Torch IR is persisted only inside golden YAML. Kernels are named after the operations they realize
+  (graphs, CUDA kernels, execution plans) to this directory. Frontend provenance slices used by `run --bench` stay
+  in memory; stable Torch IR is persisted only inside golden files. Kernels are named after the operations they realize
   (`k_rms_norm`, `k_sdpa_reduce`).
-- `EMMY_FREEZE_DIR` environment variable (optional) — overrides the measurement freeze the prior is evaluated
-  against (`emmy eval prior --dataset nodes`, and `emmy fit`'s measured cells). Defaults to the repo-checked
-  `emmy/compiler/pipeline/search/freezes/` — a digest-pinned, version-stamped snapshot that is identical on every
-  machine, which is what makes a reported prior number reproducible. The tune DB and the online reservoir are
-  machine-local and mutable; reach them with `--db` when you want one machine's data, not as the default.
-  The freeze's payload YAML is tracked in **git LFS**; its manifest is plain git so provenance stays diffable.
-  Re-freeze with `scripts/freeze_node_store.py`.
 - `EMMY_TUNE_DB` environment variable (optional) — overrides the default tuning SQLite cache path
-  (`~/.cache/emmy/autotune.db`). `emmy tune` reads from / writes to this path. NOTE: greedy `compile` / `run` /
-  `serve` resolve forks through ONE measured-evidence pick — the reservoir, this DB's `perf` rows and the golden rows
-  in scope (the live card's repository goldens, or the file `--golden PATH` names) rank fastest-first, a row spelling
-  a placement or a cross-CTA split prices that kernel-set decision, and the global `Prior` (the online prior with its
-  offline cold-start fallback) decides only where nothing was measured; `--strict-evidence` turns that fall-through
-  into an error. `run --golden PATH --bench` writes what it measures back into this DB, which is how a golden row
-  becomes what the next compile picks. The online prior
-  is a separate JSON checkpoint (`EMMY_ONLINE_FILE` → `~/.cache/emmy/online.json`; legacy `EMMY_PRIOR_FILE` still
-  accepted) that `tune` writes and `compile` / `run` read. Use the README architecture index for the prior and
-  two-level autotune design.
+  (`~/.cache/emmy/autotune.db`), the store of measured kernel rows. `emmy run --bench` writes to it, and a greedy
+  `compile` / `run` / `serve` creates it on first use: the golden rows in scope (the live card's repository goldens,
+  or the file `--golden PATH` names) are imported into it before the compile picks, once per golden digest. NOTE:
+  those commands resolve forks through ONE measured-evidence pick — this DB's `perf` rows and the golden rows among
+  them, ranked fastest-first; a kernel-set decision (a routing row, a golden's cut or split) is priced as the sum of
+  its pieces' rows; and the offline prior (`OfflinePrior`, fit by `emmy fit`, shipped as `weights/offline.json`)
+  decides only where nothing was measured; `--strict-evidence` turns that fall-through into an error. `run --golden
+  PATH --bench` writes what it measures back into this DB (`--record` / `--record-greedy` write the golden file too),
+  which is how a golden row becomes what the next compile picks. Use the README architecture index for the prior
+  and the evidence design.
 
 All `EMMY_*` config env vars are read and written through one module — `emmy/config.py`, the sole owner of
 `os.environ` for these vars (the `EMMY_<KNOB>` namespace is the one exception, owned by
 `compiler/pipeline/knob.py`; provider/secret vars stay with `emmy/redact.py`). CLI `--flag` overrides (e.g.
 `--nvcc-flags`) resolve through `config.py` inside the library, not the command layer, so programmatic callers and tests
 get the same precedence. `config.py` is the source of truth for the full var list — do not maintain a copy here.
+
+## Compiler Invariant: Loop Fusion Is Maximal
+
+Loop fusion merges every structurally legal region, to fixpoint, and nothing else. Kernel boundaries come later, from
+cuts (`030_cut`), picked by evidence. No one can know before measuring that a merge is a bad decision, and the maximal
+region is what keeps every kernel variant open to try.
+
+- **Never add a fusion gate.** No size, cost, recompute, schedulability, recognizer or speed bound on a merge; no
+  retained early boundary; no "fusion should not merge X" rule. This holds for code, plans, reviews and proposals to
+  the user.
+- **A slow or unschedulable fused kernel is a cut or lowering problem.** Fix it with a cut that removes the duplicated
+  work, a schedule, or lowering coverage.
+- **A region the splicer cannot build is a compiler bug to raise,** never a smaller region.
+
+The passes `ARCHITECTURE.md` owns the design; `tests/compiler/passes/test_maximal_fusion.py` guards it.
 
 ## Running Tests
 
@@ -90,16 +100,17 @@ removed the cicc unroll blowup it rested on. The cold/warm gap also puts kernel 
 suite's wall time, so it is not the dominant cost either. Keeping `-O1` here buys ~12% cold; dropping it would leave
 one compile regime everywhere in the repo.
 
-The default suite decodes the model-agnostic hardware goldens row by row: one test node per recorded row, so the
-work scatters over the xdist workers and a failure names the row. Rows that no longer decode are listed as strict
-xfails in `tests/compiler/pipeline/search/golden_xfails.yaml`, which only ever shrinks — closing a row turns its
-node red until the line is deleted. Never add a line to make a red row green.
-
-Checked-in MODEL goldens are not exercised by the default suite. The nightly `onboard-model` workflow owns their
-repository validation, strict decode, and exact-GPU replay so model qualification stays with its GPU evidence. The
-decode half alone is also reachable off the default lane, on any machine: `make test-goldens` strictly decodes every
-checked-in model golden (one case per file) against the current compiler, which is how you see a card's rows go
-green again after a tuning round re-records them.
+The default suite strictly decodes every repository golden row by row — the model-agnostic hardware goldens and each
+recipe's model golden: one test node per recorded row, so the work scatters over the xdist workers and a failure names
+the row. Decoding replays each row at its declared capability, so a stale row is detectable on any machine. The suite
+also asks every golden whether its stored targets are still what the current compiler lowers the golden's own programs
+to (`emmy golden check`); a file that is not is stale: its rows decode, yet a deploy builds kernels none of them
+describe. Neither check has a list of expected failures. The fix for both is `emmy golden restamp PATH`, GPU-free:
+targets take the fresh Loop IR, rows are re-keyed, a row measured on a kernel that now renders differently keeps its
+schedule and loses its microseconds (a proposal, no evidence until a record run on the card measures it again), a row
+that no longer decodes is dropped. The `refresh-golden` skill owns the whole flow, including the record run and the
+delete-or-re-record decision. Never re-record a row to make a red node green. The nightly `onboard-model` workflow
+still owns a model golden's exact-GPU replay.
 
 When running a large subset (e.g. `tests/compiler/`), pass the same `-n auto --dist=loadgroup` flags `make test` uses to
 parallelize (add `-p no:randomly` for a stable order):
@@ -165,12 +176,23 @@ it before answering any CLI-flag question. Quickstart for the common paths:
 | `emmy deploy {local,ssh,cloud} <model> …` | deploy via docker compose locally, over SSH, or on a freshly provisioned cloud VM |
 | `emmy bench recipes/* [--filter KEY=PATTERN] [--no-teardown]` | deploy + benchmark + teardown across cloud VMs; `teardown <run_dir>` cleans up afterwards |
 | `emmy vm create gpu --gpu NAME --gpu-count N` | provision a GPU VM by name (also `vm create/delete {gcp,cloudrift}`) |
-| `emmy serve <model> [--generate] [--bench] [vllm flags…]` | serve an embedding (or `--generate` chat) model via vLLM with the emmy plugin |
-| `emmy compile <model_or_ir> [--layer N] [--ir STAGE] [--dynamic …] [--target sm_NN]` | trace + run the compiler; print or save any IR stage |
+| `emmy serve <model> [--runner generate] [--bench] [vllm flags…]` | serve via vLLM, or opt into native text serving with `--runner generate --native` |
+| `emmy compile <model_or_ir> [--layer N] [--ir STAGE] [--dynamic …] [--target sm_NN]`, `emmy compile --golden PATH --program N --ir loop -o fresh.json` | trace + run the compiler; print or save any IR stage; lower a golden's stored program and write the stage as the golden's wire |
 | `emmy run <model_or_ir_or_--code> [--bench]` | compile + execute on the CUDA backend, check accuracy, optionally bench vs eager / `torch.compile` |
-| `emmy tune <target> [--bench] [--gpus N]` | two-level autotune; writes the online prior + tune DB |
-| `emmy eval {knobs,prior,golden,variants,failures} [--dataset {golden,db,nodes}]` | inspect the priors / tune DB |
+| `emmy eval {prior,golden} …` | `eval prior DATASET [--pools {golden,measured}]` scores a dataset's pools with the offline prior; `eval golden --golden PATH --serving-config PATH` audits a golden against its serving matrix |
+| `emmy golden {check,restamp} [PATH…]`, `emmy golden kernels PATH [--program N]` | name the stored targets a fresh lowering of a golden's programs no longer writes; rewrite the golden onto that lowering (every repository golden by default); print the Loop IR pool a golden stores |
+| `emmy fit DATASET WEIGHTS [--folds N]` | fit the offline prior from a dataset's golden groups and cross-validate it; the whole refit is README's "Fit the offline prior" |
+| `emmy db {import,export,freeze,check} --db PATH …` | fill a DB instance from the freeze directories, golden files and tune DBs named on the command line (nothing by default, and never the tune DB), every kernel re-lowered; export its rows as the dataset the fit and `eval prior` read; snapshot it into a freeze; check its tables agree with themselves |
 | `emmy {pull,trace,generate,inspect,compare} …` | model download, IR tracing, the naive generation oracle, IR inspection, dump diffing |
+ Refitting the offline prior is the four commands under README's "Fit the offline prior". Every path is explicit — the
+DB instance `emmy db import --db PATH` fills (the tune DB's tables in a file of their own, never read by a compile; a
+measurement freeze directory under `emmy/compiler/pipeline/search/freezes/`, tracked in **git LFS**, none checked in
+at the moment, or a tune DB joins the goldens the same way), and the dataset `emmy db export` writes from it (a
+`manifest.json` beside one matrix file per pool, which `emmy fit` and `emmy eval prior` read; the readers never open
+the DB) — and nothing has a default, so a refit never touches the tune DB. The examples keep both under `_data/`,
+which git ignores. `emmy fit DATASET emmy/compiler/pipeline/search/prior/weights/offline.json` rewrites the checked-in
+weights. Re-export and refit after a featurizer version bump (a stale dataset or artifact is refused at load) and when
+the hardware goldens change; the recipe goldens are not in the documented set yet.
 
 Quick test models / scripts (for local iteration):
 
@@ -179,7 +201,7 @@ Quick test models / scripts (for local iteration):
   in chat probes for terse outputs). `TinyLlama/TinyLlama-1.1B-Chat-v1.0` stays as the ungated **Llama-arch**
   smoke model. GPU embedding model (0.6B): `Qwen/Qwen3-Embedding-0.6B`
 - Benchmark/profiling helpers live under `scripts/` (`bench_block.py`, `profile_gen_decode.py`,
-  `capture_gen_twins.py`, `new_models.py`, `merge_node_db.py`, `digest_kernels.py` — the kernel-source byte-identity
+  `new_models.py`, `digest_kernels.py` — the kernel-source byte-identity
   gate for tile-IR storage migrations, each case also asserting its pins reached a kernel) — run with `--help` for
   usage;
   the skills that drive them document the flows.
@@ -197,13 +219,10 @@ Quick test models / scripts (for local iteration):
   `make bench-kernels`)
 - `make test-corpus-regen` — restamp the realization corpus's derived half after a kernel-identity or schedule-codec
   change (`make test` detects the staleness on any machine; this applies the fix)
-- `make test-goldens` — strict-decode the checked-in model goldens against the current compiler (off the default
-  lane, no GPU needed; a stale row is detectable anywhere, re-recording it is what needs the card). The hardware
-  goldens are decoded row by row by `make test`
 - `make test-durations` — re-measure `tests/durations.json`, the checked-in per-test timings the suite balances its
   xdist workers on; commit the result when the balance has drifted
-- `make lint` — run `ruff check` and `ruff format --check`
-- `make format` — auto-format code and fix lint violations
+- `make lint` — run `ruff check`, `ruff format --check`, and check test-duration formatting
+- `make format` — auto-format code, fix lint violations, and sort test durations without re-measuring
 - `make bench` — run benchmarks (`emmy bench recipes/*`)
 - `make bench-kernels` — run per-kernel perf comparison vs PyTorch (`tests/perf/`, requires CUDA)
 - `make wheel` — build the wheel into `dist/` (stages the bundled recipes first; see the Release section of
@@ -318,7 +337,9 @@ Then update the documentation:
 Then run the gates, in this order, after every edit above is in:
 
 22. **Run the full suite**: `make test` — fix any failures. If a realization case comes back stale, `make
-    test-corpus-regen` applies the fix.
+    test-corpus-regen` applies the fix; if a golden's stored targets stop being the fresh lowering, `emmy golden
+    restamp` applies that one (the `refresh-golden` skill). If golden rows go red, name the change that did it in the
+    PR body — do **not** re-record them to make it green, which enshrines the regression as the new reference.
 23. **Record the durations of every test this change ADDS that takes over half a second.** `make test` fails at
     session end when a test at or over 5 s is missing from `tests/durations.json`, because CI buckets its xdist
     workers on that file and plans around a hole. Record well BELOW that bar: the gate reads the runner's clock,
@@ -332,24 +353,18 @@ Then run the gates, in this order, after every edit above is in:
     has drifted, not to land a handful of new tests. If one still slips through, the gate names it and prints the
     id in the form to paste — that is the backstop, not the plan.
 24. **Run the linter**: `make lint` — if it fails, run `make format` and re-check
-25. **Decode the model goldens** whenever the change touches the compiler (anything under `emmy/compiler/`, and
-    always for a schedule-codec, enumeration or knob-spelling change): `make test-goldens`. Off the default lane and
-    needs no GPU. `make test` guards the realization corpus and the hardware goldens against exactly this class of
-    change; nothing guards the checked-in model goldens, so a rebuild of the schedule space can invalidate every
-    recorded row of one in silence. If rows go red, name the change that did it in the PR body — do **not** re-record
-    them to make it green, which enshrines the regression as the new reference.
-26. **Write the PR body** in an untracked temporary file outside the repository, using
+25. **Write the PR body** in an untracked temporary file outside the repository, using
     `.github/PULL_REQUEST_TEMPLATE.md` as a guide. Never replace the tracked template with a PR's content. The title
     is a functional description readable with no context. The abstract is one short plain-English paragraph — no
     bullets, no code references. One optional artifact may follow it — a small table, a diagram, a few lines of
     output — when it carries the claim better than the paragraph. Then a horizontal rule, then everything else —
     decisions, measurements, what broke, what got slower, what was removed — under headings that fit the story.
     `Abstract` is the only fixed heading.
-27. **Revise the PR body at least twice before posting.** Write it, then reread it as a reviewer with no
+26. **Revise the PR body at least twice before posting.** Write it, then reread it as a reviewer with no
     context, check it against the template and against the design philosophy below, cut, and repeat. A first
     draft is always too long: it lists what was done instead of saying what the change is, and it keeps
     sentences that no reviewer would miss. Stop when nothing else can come out without losing the point.
-28. **Mark the PR ready for review.** This is the last step. A draft PR that has not been through finalization
+27. **Mark the PR ready for review.** This is the last step. A draft PR that has not been through finalization
     is not ready, whatever else is green.
 
 # Behavioral Guidelines:

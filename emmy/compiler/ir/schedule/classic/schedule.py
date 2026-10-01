@@ -1,0 +1,163 @@
+"""What a classic schedule is written in: the kernel, node and edge choice types, the sites' wire spellings and
+keys, and ``ClassicSchedule`` — this family's filling of the generic :class:`~emmy.compiler.ir.schedule.base.Schedule`.
+
+Which of these values a site may actually take is the sites' business (``classic.sites``); this module only says
+what they are and how each one is spelled."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from emmy.compiler.ir.schedule.base import Schedule
+from emmy.compiler.ir.schedule.catalog import coop_reduce_moves
+from emmy.compiler.ir.schedule.choices import Raster, Reduce, Stage, Tile, Work
+from emmy.compiler.ir.schedule.views import EdgeSite, NodeId
+
+CLASSIC_FAMILIES = ("TILE", "REDUCE", "STAGE")
+
+
+def node_id_spelling(node_id: NodeId) -> str:
+    """Return one node identity's canonical wire spelling."""
+    if type(node_id) is not int or node_id < 0:
+        raise ValueError(f"node id must be a non-negative integer, got {node_id!r}")
+    return f"n{node_id}"
+
+
+def parse_node_id(value: str) -> NodeId:
+    """Parse one canonical node identity."""
+    if not value.startswith("n") or not value[1:].isdigit() or str(int(value[1:])) != value[1:]:
+        raise ValueError(f"node id must be n<ordinal>, got {value!r}")
+    return int(value[1:])
+
+
+def edge_site_spelling(edge: EdgeSite) -> str:
+    """Return one consumer operand position's canonical wire spelling."""
+    if not _is_edge_site(edge):
+        raise ValueError(f"edge site must be a (node id, operand) pair, got {edge!r}")
+    return f"{node_id_spelling(edge[0])}.e{edge[1]}"
+
+
+def parse_edge_site(value: str) -> EdgeSite:
+    """Parse one canonical consumer operand position."""
+    node, separator, operand = value.partition(".e")
+    if separator != ".e" or not operand.isdigit() or str(int(operand)) != operand:
+        raise ValueError(f"edge site must be n<ordinal>.e<operand>, got {value!r}")
+    return parse_node_id(node), int(operand)
+
+
+def _is_node_id(node_id: NodeId) -> bool:
+    return type(node_id) is int and node_id >= 0
+
+
+def _is_edge_site(edge: EdgeSite) -> bool:
+    return isinstance(edge, tuple) and len(edge) == 2 and _is_node_id(edge[0]) and type(edge[1]) is int and edge[1] >= 0
+
+
+@dataclass(frozen=True)
+class KernelSchedule:
+    """Kernel-scoped choices."""
+
+    work: Work
+    raster: Raster
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.work, Work) or not isinstance(self.raster, Raster):
+            raise TypeError("classic kernel choices must be Work and Raster values")
+
+
+@dataclass(frozen=True)
+class ProjectionSchedule:
+    """The choices of a projection node."""
+
+    tile: Tile
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.tile, Tile):
+            raise TypeError("classic projection TILE must be an unplaced Tile choice")
+
+
+@dataclass(frozen=True)
+class ReductionSchedule:
+    """The choices of a reduction node, including a contraction-capable reduction."""
+
+    tile: Tile
+    reduce: Reduce
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.tile, Tile):
+            raise TypeError("classic reduction TILE must be an unplaced Tile choice")
+        if not isinstance(self.reduce, Reduce):
+            raise TypeError("classic reduction REDUCE must be a Reduce choice")
+
+
+NodeSchedule = ProjectionSchedule | ReductionSchedule
+
+
+@dataclass(frozen=True)
+class EdgeSchedule:
+    """The transport choice of one operand use."""
+
+    stage: Stage
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.stage, Stage):
+            raise TypeError("classic edge STAGE must be a Stage choice")
+
+
+type ClassicSchedule = Schedule[KernelSchedule, NodeSchedule, EdgeSchedule]
+
+
+def classic_node_key(sites, family: str, site: NodeId) -> str:
+    """Return the canonical key for one node-scoped classic family: bare when the family has one
+    applicable site on this kernel, else ``FAMILY@<route>`` — the site's route from the root in the
+    tree-path grammar (``TILE@map.1/twist.1/inner``), the spelling placement keys use too."""
+    family_sites = sites.family_sites.get(family)
+    if family_sites is None:
+        raise ValueError(f"{family} is not a classic node family")
+    if site not in family_sites:
+        raise ValueError(f"{sites.sites[site].path} is not a {family} site")
+    return family if len(family_sites) == 1 else f"{family}@{sites.sites[site].path}"
+
+
+def classic_stage_key(sites, edge: EdgeSite) -> str:
+    """Return the canonical key for one staged consumer: bare for one consumer, else its route."""
+    if edge not in sites.stage_edges:
+        raise ValueError(f"{edge_site_spelling(edge)} is not a STAGE edge")
+    consumers = tuple(dict.fromkeys(candidate[0] for candidate in sites.stage_edges))
+    return "STAGE" if len(consumers) == 1 else f"STAGE@{sites.sites[edge[0]].path}"
+
+
+def binds_root(choice: ProjectionSchedule | ReductionSchedule) -> bool:
+    """Whether the kernel binder builds around this node: an output tile, or a reduce that claims
+    a worker inventory. ``TILE`` and ``REDUCE`` both select the root the binder builds around, so
+    the offer and the binder read one predicate."""
+    return choice.tile.is_tiled or (isinstance(choice, ReductionSchedule) and (choice.reduce.coop > 1 or choice.reduce.reg > 1))
+
+
+#: Threads in a CTA that packs cells of a warp-wide cooperative reduce (``WORK=t<coop>x<cells>``).
+PACKED_CTA_THREADS = 128
+
+
+def packed_works(work: Work | None) -> frozenset[Work]:
+    """The inventory that packs several cells of a cooperative reduce into one CTA.
+
+    A cooperative reduce launches one CTA per output cell, ``coop`` threads each. When ``coop`` is
+    at most a warp, its combine is a lane butterfly that never leaves the cell's lanes, so the
+    launch can stack cells in one CTA (``t<coop>x<cells>``, ``PACKED_CTA_THREADS`` threads): the
+    flat thread decode already hands consecutive cells to consecutive lane groups. At a 128-wide
+    row the one-cell CTA is 32 or 64 threads, and the launch pays per CTA."""
+    if work is None or work.kind != "thread" or work.units[1] != 1 or not 1 < work.units[0] <= 32:
+        return frozenset()
+    return frozenset({Work(kind="thread", units=(work.units[0], PACKED_CTA_THREADS // work.units[0]))})
+
+
+def output_sweep_works(tile_op, claimed_work: Work | None) -> frozenset[Work]:
+    """The ``WORK`` values that may stripe every output sweep of a kernel whose nodes stay serial.
+
+    Each output must own a sweep, because a scalar sibling would be repeated by every lane. A tiled
+    or cooperative node choice that already claims an inventory must agree through the ordinary
+    compatibility relation instead.
+    """
+    if claimed_work is not None or not tile_op.output_specs or not all(spec.sweep for spec in tile_op.output_specs):
+        return frozenset()
+    return frozenset(Work(kind="thread", units=(move.coop, 1)) for move in coop_reduce_moves() if move.coop > 1)

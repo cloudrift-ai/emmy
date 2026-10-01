@@ -1,0 +1,36 @@
+# Serving qualification of the FP8 Ornith-1.5-35B-A3B checkpoint on one datacenter card, at a fraction of it.
+# gpu_memory_utilization 0.75 on an 80 GB H100 is ~60 GiB: ~35 GiB of weights, ~23 GiB of KV cache
+# (1.17M tokens, 4.45 full-context sequences), the remaining ~20 GiB of the card left free.
+# Text-only serving: the checkpoint is a vision-language wrapper; --language-model-only drops the tower.
+# Rows are the datacenter workload matrix (prompts/onboard-model/benchmark.md); the server's admission
+# limit follows the client concurrency of each row.
+model:
+  huggingface: "ornith-ai/Ornith-1.5-35B-A3B-FP8"
+  revision: fab11c26e2325a42f4b32da0249c819a0bade1b1
+  task: generate
+
+engine:
+  llm:
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    gpu_memory_utilization: 0.75
+    context_length: 262144
+    vllm:
+      image: "vllm/vllm-openai:v0.30.0"
+      extra_args: "--enable-auto-tool-choice --tool-call-parser qwen3_xml --reasoning-parser qwen3 --language-model-only"
+
+benchmark:
+  seed: 0
+  temperature: 0
+  ignore_eos: true
+  num_warmups: 2
+
+matrices:
+  - deploy.gpu: "NVIDIA H100 80GB"
+    deploy.gpu_count: 1
+    engine.llm.max_concurrent_requests: [32, 16, 32, 16, 64, 256]
+    benchmark.max_concurrency: [1, 16, 32, 16, 64, 256]
+    benchmark.num_prompts: [8, 128, 256, 80, 320, 1280]
+    benchmark.random_input_len: [4096, 4096, 4096, 8192, 1024, 256]
+    benchmark.random_output_len: [4096, 4096, 4096, 256, 1024, 256]
+    benchmark.repeats: [3, 1, 1, 1, 1, 1]

@@ -1059,6 +1059,65 @@ def test_trace_passthrough_ops_no_extra_nodes():
     assert len(g.outputs) >= 1
 
 
+def test_trace_zero_width_pad_is_an_alias():
+    """A statically empty pad preserves the input tensor and storage without a copy node."""
+    import torch
+    import torch.nn.functional as F  # noqa: N812
+    from torch import nn
+
+    from emmy.compiler.trace.torch import trace_module
+
+    class EmptyPad(nn.Module):
+        def forward(self, x):
+            return F.pad(x, (0, 0))
+
+    graph = trace_module(EmptyPad(), (torch.randn(2, 3),))
+    assert graph.outputs == graph.inputs
+    assert len(graph.nodes) == 1
+
+
+@pytest.mark.parametrize("length", [1, 16, 63, 64, 65])
+def test_trace_chunk_padding_matches_torch(run_graph, dtype, length):
+    """Chunk padding preserves every input row and fills only the tail with zero."""
+    import numpy as np
+    import torch
+    from torch import nn
+    from torch.nn import functional as F  # noqa: N812
+
+    from emmy.compiler.trace.torch import trace_module
+
+    class Pad(nn.Module):
+        def forward(self, x):
+            return F.pad(x + 1, (0, 0, 0, (-x.shape[-2]) % 64))
+
+    x = np.arange(length * 3, dtype=np.float32).reshape(1, length, 3).astype(dtype.np)
+    module = Pad()
+    graph = trace_module(module, (torch.from_numpy(x),))
+    actual = run_graph(graph, {graph.inputs[0]: x})[graph.outputs[0]]
+    np.testing.assert_array_equal(actual, module(torch.from_numpy(x)).numpy())
+
+
+@pytest.mark.parametrize("shape,padding", [((2, 3), (2, 1, 1, 2)), ((0, 3), (0, 0, 1, 2)), ((2, 7), (-3, 0)), ((3, 7), (-2, 1, 1, -1))])
+def test_trace_padding_guards_source_coordinates(run_graph, shape, padding):
+    """Padding, cropping and empty inputs must never produce an out-of-bounds read."""
+    import numpy as np
+    import torch
+    from torch import nn
+    from torch.nn import functional as F  # noqa: N812
+
+    from emmy.compiler.trace.torch import trace_module
+
+    class Pad(nn.Module):
+        def forward(self, x):
+            return F.pad(x, padding)
+
+    x = np.arange(np.prod(shape), dtype=np.float32).reshape(shape)
+    module = Pad()
+    graph = trace_module(module, (torch.from_numpy(x),))
+    actual = run_graph(graph, {graph.inputs[0]: x})[graph.outputs[0]]
+    np.testing.assert_array_equal(actual, module(torch.from_numpy(x)).numpy())
+
+
 # ---------------------------------------------------------------------------
 # Edge cases
 # ---------------------------------------------------------------------------
@@ -1568,6 +1627,33 @@ def test_sdpa_scale_kwarg_captured():
     g = trace_module(Default().eval(), qkv)
     (sdpa,) = [n.op for n in g.nodes.values() if isinstance(n.op, SdpaOp)]
     assert sdpa.scale is None
+
+
+def test_sdpa_is_causal_read_by_position_not_by_bool_scan():
+    """``is_causal`` must be read from its own slot. ``enable_gqa`` is the signature's other bool,
+    so scanning for the first bool anywhere read ``enable_gqa=True`` as causal and masked a full
+    GQA attention. Export positionalizes a non-default ``is_causal`` (slot 5) and leaves the
+    default off the node entirely, which is what makes the two spellings distinguishable."""
+    import torch
+    import torch.nn.functional as F
+    from torch import nn
+
+    from emmy.compiler.ir.frontend.ir import SdpaOp
+    from emmy.compiler.trace.torch import trace_module
+
+    class Gqa(nn.Module):
+        def forward(self, q, k, v):
+            return F.scaled_dot_product_attention(q, k, v, enable_gqa=True)
+
+    class GqaCausal(nn.Module):
+        def forward(self, q, k, v):
+            return F.scaled_dot_product_attention(q, k, v, is_causal=True, enable_gqa=True)
+
+    qkv = (torch.randn(1, 4, 8, 4), torch.randn(1, 2, 8, 4), torch.randn(1, 2, 8, 4))
+    for module, expected in ((Gqa(), False), (GqaCausal(), True)):
+        g = trace_module(module.eval(), qkv)
+        (sdpa,) = [n.op for n in g.nodes.values() if isinstance(n.op, SdpaOp)]
+        assert sdpa.is_causal is expected, f"{type(module).__name__}: is_causal={sdpa.is_causal}"
 
 
 def test_sdpa_forward_honors_scale():

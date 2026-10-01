@@ -7,10 +7,10 @@ tags:
   - untested
 model:
   huggingface: openai/gpt-oss-120b
-  rationale: "Strong HF downloads and likes drive breakout attention."
-  heat: 92
+  rationale: "Recent batch variant trending >999% week-over-week on OpenRouter provides a strong fresh volume signal, reinforcing the model's stable serving value on a single H200."
+  heat: 75
   revision: b5c939de8f754692c1647ca79fbf85e8c1e70f8a
   task: generate
 matrices:
-- deploy.gpu: NVIDIA Tesla V100 SXM3 32GB
-  deploy.gpu_count: 4
+- deploy.gpu: NVIDIA H200 141GB
+  deploy.gpu_count: 1

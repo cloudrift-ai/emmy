@@ -5,9 +5,9 @@ from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expr import BinaryExpr, CastExpr, Literal, Var
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
-from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
+from emmy.compiler.pipeline.passes.tile._fromloop import fold_from_loop, scan_from_loop
 from tests.compiler.terms import contraction, projection, slab
 
 
@@ -31,6 +31,16 @@ def test_a_contraction_is_the_lifted_matmul_loop() -> None:
     assert (view.axis, view.left, view.right, view.product.name, view.plus.name) == ("k", "m", "n", "multiply", "add")
 
 
+def test_several_own_axes_on_both_sides_still_orient_a_pair() -> None:
+    """A chunked row (``64*m1 + m2``) against a packed channel group (``8*n1 + n2``) is an ordinary
+    contraction: each side's own axes stay its role, and the tile picks one of them per side. The
+    Qwen3.8 AWQ down projection has this shape; refusing it left the piece off the tensor cores."""
+    a = Load(name="a", input="x", index=(BinaryExpr("+", BinaryExpr("*", Literal(64, "int"), Var("m1")), Var("m2")), Var("k")))
+    b = Load(name="b", input="w", index=(Var("k"), BinaryExpr("+", BinaryExpr("*", Literal(8, "int"), Var("n1")), Var("n2"))))
+    view = contraction("k", a, (b, "acc")).as_contraction()
+    assert view is not None and (view.left_axes, view.right_axes) == ({"m1", "m2"}, {"n1", "n2"})
+
+
 def test_two_channels_over_one_a_are_one_contraction() -> None:
     a = slab("a", "x", "m", "k")
     fused = contraction(Axis("k", 16), a, (slab("g", "Wg", "k", "n"), "acc_g"), (slab("u", "Wu", "k", "n"), "acc_u"))
@@ -44,3 +54,22 @@ def test_a_projection_exposes_its_last_definition_or_passes_its_operand_through(
     cell = projection((stat,), (Assign(name="r", op="rsqrt", args=("acc",)), Assign(name="o", op="multiply", args=("r", "r"))))
     assert cell.axis is None and cell.exposes == ("o",) and cell.free_axes == {"m", "n"}
     assert projection((stat,)).exposes == ("acc",)
+
+
+def test_a_load_indexed_by_a_loaded_value_is_a_gather_not_a_slab() -> None:
+    # The index reads ``i``, a value the step loads — not a coordinate. A slab would declare it as
+    # one, and the closed program would then ask the kernel for an extent no axis table can hold.
+    loop = Loop(
+        axis=Axis("k", 16),
+        body=Body(
+            (
+                Load(name="a", input="x", index=(Var("m"), Var("k"))),
+                Load(name="i", input="idx", index=(Var("k"),)),
+                Load(name="b", input="w", index=(CastExpr("int", Var("i")), Var("n"))),
+                Assign(name="acc__v", op=ElementwiseImpl("multiply"), args=("a", "b")),
+                Accum(name="acc", value="acc__v", op=ElementwiseImpl("add"), axes=("k",)),
+            )
+        ),
+    )
+    fold, _ = scan_from_loop(loop, axes=(Axis("m", 8), Axis("n", 32)))
+    assert fold.free_axes == {"m", "n"}

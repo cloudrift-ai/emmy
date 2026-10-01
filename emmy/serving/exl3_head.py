@@ -99,7 +99,6 @@ class Exl3CodedHead:
         self.spec = spec
 
     def __call__(self, hidden_states):
-        import cupy as cp
         import torch
 
         from emmy.compiler.backend.gpu_lock import gpu_lock
@@ -110,10 +109,10 @@ class Exl3CodedHead:
         if torch.cuda.is_current_stream_capturing() and rows.shape[0] != 1:
             raise ValueError("captured EXL3 coded lm_head requires exactly one sampled row")
         output = []
-        with gpu_lock(), cp.cuda.Stream.from_external(torch.cuda.current_stream()):
+        with gpu_lock(), self.program.on_stream(torch.cuda.current_stream()):
             for row in rows:
-                self.program.upload_prefix_device({"x": cp.from_dlpack(row[None].contiguous())})
+                self.program.upload_prefix_device({"x": row[None].contiguous()})
                 self.program.run_once()
-                logits = torch.from_dlpack(self.program.output_prefix_device()["logits"])[:, : self.spec.vocab_size]
+                logits = self.program.output_prefix_device()["logits"][:, : self.spec.vocab_size]
                 output.append(logits if torch.cuda.is_current_stream_capturing() else logits.clone())
         return output[0] if len(output) == 1 else torch.cat(output, dim=0)

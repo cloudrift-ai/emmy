@@ -3,9 +3,11 @@ tags:
   - untested
 model:
   huggingface: Qwen/Qwen2.5-72B-Instruct
-  rationale: "Top HF downloads but overshadowed by Qwen3.5 and Qwen3.8 families."
-  heat: 65
+  rationale: "Older dense Qwen line cooling; superseded by current Qwen3 generations."
+  heat: 12
   task: generate
 matrices:
 - deploy.gpu: NVIDIA H200 141GB
+  deploy.gpu_count: 2
+- deploy.gpu: NVIDIA B200
   deploy.gpu_count: 2

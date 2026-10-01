@@ -8,6 +8,7 @@ multi-output fused kernels without a GPU.
 """
 
 import numpy as np
+import pytest
 
 from emmy.compiler.backend.numpy import NumpyBackend
 from emmy.compiler.graph import Graph, Tensor
@@ -15,7 +16,7 @@ from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.expr import Literal, placeholder
 from emmy.compiler.ir.frontend.ir import LinearOp, RmsNormOp
 from emmy.compiler.ir.loop import Accum, Assign, Load, LoopOp, Select, Write
-from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp, IndexMapOp, IndexSource, ReduceOp
+from emmy.compiler.ir.tensor.ir import ElementwiseOp, GatherOp, IndexMapOp, IndexSource, ReduceOp, ScanOp
 from emmy.compiler.pipeline import Pipeline
 
 rng = np.random.default_rng(0)
@@ -78,7 +79,7 @@ def test_multisource_indexmap_lifts_unconditional_branch_as_bool():
     """The fallback predicate remains boolean through rendering and Loop IR persistence."""
     import json
 
-    from emmy.compiler.loop_wire import loop_graph_from_wire, loop_graph_to_wire
+    from emmy.compiler.graph import Graph
 
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("left", (2, 2)), node_id="left")
@@ -110,7 +111,7 @@ def test_multisource_indexmap_lifts_unconditional_branch_as_bool():
     assert select.branches[-1].select.render(None) == "1"
     _assert_close(_run(graph, inputs), _run(lifted, inputs))
 
-    restored = loop_graph_from_wire(json.loads(json.dumps(loop_graph_to_wire(lifted))))
+    restored = Graph.from_wire(json.loads(json.dumps(lifted.to_wire())))
     restored_select = next(stmt for stmt in _kernel_nodes(restored)[0].op.body.iter() if isinstance(stmt, Select))
     assert restored_select.branches[-1].select == Literal(True, "bool")
 
@@ -471,6 +472,41 @@ def test_contraction_epilogue_body_has_add():
 
 
 # ===================================================================
+# A scan downstream: the ordered loop leaves, the region keeps fusing
+# ===================================================================
+
+
+def _make_contraction_then_scan():
+    g = Graph()
+    g.add_node(InputOp(), [], Tensor("a", (4, 8)), node_id="a")
+    g.add_node(InputOp(), [], Tensor("b", (4, 8)), node_id="b")
+    g.add_node(ElementwiseOp("multiply"), ["a", "b"], Tensor("m", (4, 8)), node_id="m")
+    g.add_node(ReduceOp("sum", -1), ["m"], Tensor("s", (4, 1)), node_id="s")
+    g.add_node(ElementwiseOp("exp"), ["s"], Tensor("e", (4, 1)), node_id="e")
+    g.add_node(ScanOp("sum", 0), ["e"], Tensor("y", (4, 1)), node_id="y")
+    g.inputs, g.outputs = ["a", "b"], ["y"]
+    return g
+
+
+def test_scan_leaves_the_region_it_cannot_join():
+    """A scan writes its running accumulator, so no merged body preserves its order and the
+    splicer refuses it. The refusal names that one loop: everything upstream still fuses, and
+    only the scan stands alone. Abandoning the whole region instead shatters every op before it
+    into its own kernel — a contraction then materializes its broadcast operands to memory."""
+    kernels = _kernel_nodes(_fuse(_make_contraction_then_scan()))
+    assert len(kernels) == 2, [n.id for n in kernels]
+    contraction = next(k for k in kernels if _has_update(k.op.body) and "multiply" in _assign_fns(k.op.body))
+    assert "exp" in _assign_fns(contraction.op.body)
+
+
+def test_contraction_then_scan_correctness():
+    _assert_correctness(
+        _make_contraction_then_scan,
+        {"a": rng.standard_normal((4, 8)).astype(np.float32), "b": rng.standard_normal((4, 8)).astype(np.float32)},
+    )
+
+
+# ===================================================================
 # Softmax: reduce_max → sub → exp → reduce_sum → div
 # ===================================================================
 
@@ -499,12 +535,7 @@ def test_softmax_body_covers_all_ops():
     for k in _kernel_nodes(result):
         all_fns |= set(_assign_fns(k.op.body))
         all_fns |= _local_combine_fns(k.op.body.accums)
-    # Expect elementwise sub/exp and reduce combine add/max from the
-    # max and sum accumulators. ``divide(x, acc_sum)`` is split by
-    # ``split_invariant_divides`` (in ``ir/stmt/normalize.py``) into
-    # ``reciprocal(acc_sum) + multiply(x, recip)`` so the rcp can hoist
-    # out of the inner reduce — divide no longer appears as a body op.
-    assert {"subtract", "exp", "reciprocal", "multiply"} <= all_fns
+    assert {"subtract", "exp", "divide"} <= all_fns
     assert {"add", "maximum"} <= all_fns
 
 
@@ -723,7 +754,7 @@ def test_shared_const_broadcast_lowers_as_one_mimo_cuda_kernel():
     (kernel,) = [node for node in result.nodes.values() if isinstance(node.op, CudaOp)]
     assert kernel.buffer_names() == ("c1", "c2")
     assert kernel.op.arg_order[-2:] == ("c1", "c2")
-    assert "float* c1" in kernel.op.kernel_source and "float* c2" in kernel.op.kernel_source
+    assert "float* __restrict__ c1" in kernel.op.kernel_source and "float* __restrict__ c2" in kernel.op.kernel_source
 
 
 def _make_shared_transpose():
@@ -913,11 +944,15 @@ def test_shared_broadcast_chain_correctness():
     _assert_correctness(_make_shared_broadcast_chain, {"mq": mq, "mk": mk})
 
 
-def test_output_reshape_folds_into_reduce_producer():
+@pytest.mark.parametrize("rows", [4, "num_tokens"])
+def test_output_reshape_folds_into_reduce_producer(rows):
     """A graph-output flat-address identity joins its producer's output equivalence cluster.
 
     The splicer retargets the producer's ``Write`` to the output shape with clean affine indices
-    instead of reconstructing its reduction at the flatten's div/mod-indexed loads.
+    instead of reconstructing its reduction at the flatten's div/mod-indexed loads. A symbolic
+    leading dimension — a serving twin's token axis — rides through as itself: the layout the
+    proof is about is the static rest, and declining it left every per-head statistic of a
+    projection inlined once per output column.
     """
     from emmy.compiler.dim import Dim
     from emmy.compiler.ir.axis import Axis
@@ -953,7 +988,7 @@ def test_output_reshape_folds_into_reduce_producer():
             body=Body(
                 (
                     Loop(
-                        axis=Axis(name="a0", extent=Dim(4)),
+                        axis=Axis(name="a0", extent=Dim(rows)),
                         body=Body((Loop(axis=Axis(name="a1", extent=Dim(H)), body=Body((red, sweep))),)),
                     ),
                 )
@@ -965,7 +1000,7 @@ def test_output_reshape_folds_into_reduce_producer():
             body=Body(
                 (
                     Loop(
-                        axis=Axis(name="b0", extent=Dim(4)),
+                        axis=Axis(name="b0", extent=Dim(rows)),
                         body=Body(
                             (
                                 Loop(
@@ -988,9 +1023,9 @@ def test_output_reshape_folds_into_reduce_producer():
             )
         )
         g = Graph()
-        g.add_node(InputOp(), [], Tensor("x", (4, H, D)), node_id="x")
-        g.add_node(producer, ["x"], Tensor("y", (4, H, D)), node_id="y")
-        g.add_node(copy, ["y"], Tensor("out", (4, H * D)), node_id="out")
+        g.add_node(InputOp(), [], Tensor("x", (rows, H, D)), node_id="x")
+        g.add_node(producer, ["x"], Tensor("y", (rows, H, D)), node_id="y")
+        g.add_node(copy, ["y"], Tensor("out", (rows, H * D)), node_id="out")
         g.inputs, g.outputs = ["x"], ["out"]
         return g
 
@@ -1002,7 +1037,12 @@ def test_output_reshape_folds_into_reduce_producer():
     idx = writes[0].index
     assert len(idx) == 2, "the retargeted Write indexes the flat output shape"
     assert "/" not in idx[1].pretty() and "%" not in idx[1].pretty(), f"clean affine index expected: {idx[1].pretty()}"
+    # The producer's loops carry the kernel: no loop over the flat width, under which the reduce
+    # would run once per output column.
+    assert not any(loop.axis.extent == Dim(H * D) for loop in kernels[0].op.body.loops), "the reduce runs per column"
 
+    if rows == "num_tokens":
+        return  # the loop runner binds no symbolic extent; the static row exercises the values
     x = rng.standard_normal((4, H, D)).astype(np.float32)
     before = _run(make_graph(), {"x": x})
     after = _run(fused, {"x": x})

@@ -1,1 +1,1 @@
-"""CUDA backend: cupy/NVRTC dispatch."""
+"""CUDA backend: nvcc compiles, the runtime launches."""

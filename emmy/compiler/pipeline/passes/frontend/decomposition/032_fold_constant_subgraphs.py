@@ -199,7 +199,13 @@ def rewrite(match: Match, root: Node, out: Tensor) -> Graph:
             continue
         raise RuleSkipped(f"cone-interior node {nid!r} has consumers outside the cone")
     consumers = match.graph.users(root.id)
-    if len(consumers) == 1:
+    if isinstance(root.op, RangeOp):
+        # A generated sequence folds where it stands. Nothing lowers a range: deferring it to a
+        # maximal root that then keeps its scalar computation lazy (a broadcast) leaves the range
+        # as runtime work no kernel can spell, and the plan refuses the program. A larger cone that
+        # does fold absorbs this record as a leaf.
+        pass
+    elif len(consumers) == 1:
         cid = next(iter(consumers))
         if _extends_cone(match.graph, cid, cone):
             raise RuleSkipped(f"consumer {cid!r} extends the constant cone — fold fires at the maximal root")

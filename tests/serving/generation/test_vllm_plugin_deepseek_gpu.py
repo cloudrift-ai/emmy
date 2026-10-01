@@ -162,7 +162,6 @@ def _build_model(tmp_path, torch, transformers, vllm):
 def _requires_fork(torch):
     pytest.importorskip("transformers")
     pytest.importorskip("vllm")
-    pytest.importorskip("cupy")
     pytest.importorskip("vllm.models.deepseek_v4.nvidia.model")
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")

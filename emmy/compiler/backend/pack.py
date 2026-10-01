@@ -16,11 +16,13 @@ Validity: a pack loads only when its manifest matches the caller's ``key`` (mode
 serving shape — composed by the runner; "identity" has to include whatever the compiled programs
 read off the CHECKPOINT, not just the architecture config — see the serving runners' keys) AND
 the current environment (backend, device arch,
-nvcc toolkit tag + flags — the same tags the cubin cache keys on) AND every referenced cubin
+nvcc toolkit tag + flags — the same tags the cubin cache keys on — the precision pins, and a
+digest of the card's golden rows) AND every referenced cubin
 still exists. **Any mismatch or error returns ``None`` and the caller falls back to the full
 compile path** — a stale or damaged pack costs a recompile, never a wrong result. Compiler
 version is deliberately NOT part of validity (a pack keeps serving its frozen snapshot);
-``PLAN_FORMAT_VERSION`` gates the runtime contract instead.
+``PLAN_FORMAT_VERSION`` gates the runtime contract instead. The golden rows are, because a
+re-recorded golden exists precisely to change what the compile deploys.
 """
 
 from __future__ import annotations
@@ -30,6 +32,8 @@ import hashlib
 import json
 import logging
 import re
+import shutil
+import tempfile
 from pathlib import Path
 
 from emmy.compiler.backend.plan import (
@@ -55,8 +59,13 @@ def _environment() -> dict:
     pack-hit the std plans and silently served std kernels — the fm lane's numbers were
     the std lane's. A pack whose manifest predates the field mismatches and falls back
     to the full compile, which is the conservative reading (its lane is unrecorded).
+    And the golden rows in scope for this card (``golden.scope_digest``): they decide
+    every fork the compile takes, so plans compiled from other rows are not this compile's.
+    Found live (2026-09-19): a re-recorded Gemma 4 decode golden booted the previous
+    image's plans from a shared ``EMMY_PACK_DIR`` and measured the old kernels.
     Probes the live GPU."""
     from emmy.compiler.backend.cuda import nvcc  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.golden import scope_digest  # noqa: PLC0415
     from emmy.compiler.pipeline.search.space import (
         # noqa: PLC0415,
         F16_MMA_F32_ACC,
@@ -64,6 +73,7 @@ def _environment() -> dict:
         FP8_MMA,
         precision_pin,
     )
+    from emmy.gpu import live_name  # noqa: PLC0415
 
     return {
         "backend": "cuda",
@@ -71,6 +81,7 @@ def _environment() -> dict:
         "toolkit": nvcc._toolkit_tag(),
         "nvcc_flags": nvcc.effective_flags(),
         "precision": {k.name: precision_pin(k) for k in (FAST_EXP, F16_MMA_F32_ACC, FP8_MMA)},
+        "golden": scope_digest(live_name() or ""),
     }
 
 
@@ -118,7 +129,9 @@ def save_pack(pack_dir: Path | str, plans: dict[str, ExecutionPlan], *, key: dic
             if spec.source is None:
                 raise ValueError(f"pack: kernel {kname!r} of program {program!r} carries no source — cannot resolve a cubin key")
             cubin = nvcc.compile_to_cubin(spec.source, kname, arch=nvcc.device_arch(spec.arch_specific))
-            kernels[kname] = KernelSpec(source=None, binary_key=cubin.stem, arch_specific=spec.arch_specific)
+            kernels[kname] = KernelSpec(
+                source=None, binary_key=cubin.stem, arch_specific=spec.arch_specific, dependent_launch=spec.dependent_launch
+            )
         stored = dataclasses.replace(plan, kernels=kernels)
         rel = f"plan/{names[program]}.json"
         (root / rel).write_text(json.dumps(plan_to_dict(stored)))
@@ -174,3 +187,67 @@ def load_pack(pack_dir: Path | str, *, key: dict) -> dict[str, ExecutionPlan] | 
         return None
     logger.info("[pack] loaded %d program plan(s) from %s", len(plans), root)
     return plans
+
+
+def save_executable(
+    pack_dir: Path | str,
+    plans: dict[str, ExecutionPlan],
+    *,
+    bindings: dict[str, dict[str, bytes]],
+    key: dict,
+    provenance: dict | None = None,
+) -> Path:
+    """Bundle a pack with cubins and resolved constant/input bytes for independent execution.
+
+    Bindings are contiguous little-endian storage bytes in each buffer's declared dtype;
+    bf16 uses its uint16 bit carrier. Every constant must be supplied, including scalars and
+    generated weights. Input bindings are optional. No checkpoint or cache is needed at runtime.
+    The destination must not exist; a failed export never publishes a partial artifact.
+    """
+    from emmy import config  # noqa: PLC0415
+
+    root = Path(pack_dir)
+    if root.exists():
+        raise FileExistsError(root)
+    if set(bindings) != set(plans):
+        raise ValueError("executable bindings must name every program exactly once")
+    for name, plan in plans.items():
+        buffers = {b.name: b for b in plan.buffers}
+        required = {b.name for b in plan.buffers if b.role == "constant"}
+        if not required <= bindings[name].keys():
+            raise ValueError(f"missing constant bindings for {name}: {sorted(required - bindings[name].keys())}")
+        for buffer_name, data in bindings[name].items():
+            buffer = buffers.get(buffer_name)
+            if buffer is None or buffer.role not in ("input", "constant"):
+                raise ValueError(f"invalid binding: {name}/{buffer_name}")
+            if buffer.is_symbolic:
+                raise ValueError("standalone bindings require static shapes")
+            size = buffer.dtype.nbytes
+            for dim in buffer.resolve_shape({}):
+                size *= dim
+            if not isinstance(data, bytes) or len(data) != size:
+                raise ValueError(f"binding size mismatch: {name}/{buffer_name}")
+    root.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".emmy-pack-", dir=root.parent) as temporary:
+        stage = Path(temporary) / "bundle"
+        save_pack(stage, plans, key=key, provenance=provenance)
+        manifest = json.loads((stage / _MANIFEST).read_text())
+        (stage / "cubin").mkdir()
+        (stage / "bindings").mkdir()
+        manifest["standalone"] = 1
+        manifest["bindings"] = {}
+        for index, (program, rel) in enumerate(manifest["programs"].items()):
+            stored = json.loads((stage / rel).read_text())
+            for kernel in stored["kernels"].values():
+                filename = f"{kernel['binary_key']}.cubin"
+                destination = stage / "cubin" / filename
+                if not destination.exists():
+                    shutil.copyfile(config.cubin_cache_dir() / filename, destination)
+            manifest["bindings"][program] = {}
+            for slot, (name, data) in enumerate(bindings[program].items()):
+                rel = f"bindings/{index}-{slot}.bin"
+                (stage / rel).write_bytes(data)
+                manifest["bindings"][program][name] = rel
+        (stage / _MANIFEST).write_text(json.dumps(manifest, indent=2))
+        stage.rename(root)
+    return root

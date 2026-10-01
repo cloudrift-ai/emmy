@@ -23,14 +23,15 @@ def _record(model_id, tags, deployments, path=None, heat=None):
         "tags": tags,
         "task": "generate",
         "runnable": "onboarding" not in tags,
+        "emmy_serving": False,
         "deployments": deployments,
         "rationale": f"Qualify {model_id}.",
         "heat": heat,
     }
 
 
-def _deployment(gpu, count=1):
-    return {"gpu": gpu, "gpu_count": count, "context_length": 8192}
+def _deployment(gpu, count=1, fraction=0.9):
+    return {"gpu": gpu, "gpu_count": count, "gpu_memory_utilization": fraction, "context_length": 8192}
 
 
 def test_query_expands_deployments_and_preserves_declaration_order():
@@ -38,14 +39,15 @@ def test_query_expands_deployments_and_preserves_declaration_order():
         _record(
             "org/model",
             ["onboarding", "untested"],
-            [_deployment("GPU B", 2), _deployment("GPU A")],
+            [_deployment("GPU B", 2), _deployment("GPU A"), _deployment("GPU A", fraction=0.3)],
         )
     ]
 
     rows = build_query_rows(inventory, expand_deployments=True)
 
-    assert [row["deployment"]["index"] for row in rows] == [0, 1]
-    assert [row["deployment"]["gpu"] for row in rows] == ["GPU B", "GPU A"]
+    assert [row["deployment"]["index"] for row in rows] == [0, 1, 2]
+    assert [row["deployment"]["gpu"] for row in rows] == ["GPU B", "GPU A", "GPU A"]
+    assert [row["deployment"]["gpu_memory_utilization"] for row in rows] == [0.9, 0.9, 0.3]
     assert all(row["operation"] == "onboarding" for row in rows)
     assert all(row["expected_lifecycle"] == "best-effort" for row in rows)
 
@@ -247,3 +249,19 @@ async def test_query_resolves_team_access_before_cloudrift_availability(monkeypa
 
 def test_query_document_has_independent_versioned_schema():
     assert query_document([]) == {"schema_version": 1, "rows": []}
+
+
+def test_query_not_contains_excludes_tagged_recipes():
+    inventory = [
+        _record("org/failed", ["best-effort", "onboarding-failed"], []),
+        _record("org/healthy", ["best-effort"], []),
+    ]
+
+    rows = query_rows(
+        build_query_rows(inventory),
+        filters=[parse_predicate('tags not contains "onboarding-failed"')],
+        sorts=[],
+        limit=None,
+    )
+
+    assert [row["model_id"] for row in rows] == ["org/healthy"]

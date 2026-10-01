@@ -13,28 +13,33 @@ pip install emmy-ml          # the CLI, with the recommended recipes bundled
 emmy --version
 ```
 
-The compiler needs its own extra (`pip install "emmy-ml[compile]"` — torch, transformers, cppyy). To hack on emmy
-itself, clone instead:
+The compiler needs its own extra (`pip install "emmy-ml[compile]"` — torch, transformers, cppyy). The wheel carries
+the runtime extension that launches its kernels (`emmy.emmy_runtime`, built from `crates/emmy-runtime-py`) for Linux
+x86_64; on another platform the sdist builds it when a Rust toolchain is present and installs pure without one,
+which keeps every command that needs no GPU working. To hack on emmy itself, clone instead:
 
 ```bash
 git clone https://github.com/cloudrift-ai/emmy.git
 cd emmy && make setup
 ```
 
-On a pre-Turing GPU (V100 `sm_70`, P100 `sm_60`) that install lands an NVRTC that cannot compile for the card: torch
-depends on `nvidia-cuda-nvrtc` 13.x, cupy resolves NVRTC to it in preference to any CUDA 12 build, and CUDA 13 dropped
-every architecture below `sm_75`. Installing `nvidia-cuda-nvrtc-cu12` does not change the resolution; preloading a
-CUDA 12 NVRTC does:
+Kernels compile with the CUDA toolkit's `nvcc` and launch through the Rust runtime (`make setup` builds it into the
+venv, so a Rust toolchain is a prerequisite). On a pre-Turing GPU (V100 `sm_70`, P100 `sm_60`) the toolkit must be a
+CUDA 12 release: CUDA 13 dropped every architecture below `sm_75`.
+
+The torch wheel is a separate pre-Turing trap: the default `+cu130` build carries no `sm_70` kernels at
+all, so the reference side of every accuracy check and every `--bench-backends eager,tcompile` comparison dies with
+`no kernel image is available for execution on the device`. The `2.13.0+cu126` build includes Volta kernels:
 
 ```bash
-LD_PRELOAD=/usr/local/cuda-12.9/lib64/libnvrtc.so.12 emmy tune ...
+pip install --force-reinstall "torch==2.13.0+cu126" --index-url https://download.pytorch.org/whl/cu126
 ```
 
-Commands that compile or launch kernels locally check this at startup and abort with that remedy rather than letting
-it surface as a wall of failed benchmarks. Commands that only drive remote hardware (`deploy`, `bench`, `vm`,
-`teardown`, …) are unaffected and keep working on such a host. `make test` prints the same diagnosis in its session
-header and skips the CUDA tests naming that cause; a handful of CLI argument-validation tests still fail there, because
-the startup check aborts before argparse reaches them.
+Ask for the `+cu126` local version explicitly — a bare `torch==2.13.0` matches the already-installed `+cu130` wheel and
+pip reports the requirement satisfied without changing anything.
+
+Commands that only drive remote hardware (`deploy`, `bench`, `vm`, `teardown`, …) never touch the local toolchain and
+keep working on such a host.
 
 ## Compile
 
@@ -45,20 +50,22 @@ A hackable PyTorch → Graph IR → CUDA compiler. Trace any `nn.Module`, fuse i
 emmy compile -c "nn.RMSNorm(2048)(torch.randn(1,32,2048))"
 # Benchmark kernel on a local GPU
 emmy run --bench --profile -c "torch.nn.Softmax(dim=-1)(torch.randn(1, 28, 2048, 2048))"
-# Trace a dynamic model layer into an unmeasured working golden for remote tuning
-emmy trace Qwen/Qwen3-0.6B --layer 0 --dynamic seq_len@x:1 -o _tune/qwen3/working.yaml
-# Measure proposed rows, then spend the remaining per-kernel budget on MCTS
-emmy tune --golden _tune/qwen3/working.yaml --devices 0,1 --max-candidates 64
+# Trace a dynamic model layer into an unmeasured working golden
+emmy trace Qwen/Qwen3-0.6B --layer 0 --dynamic seq_len@x:1 -o _tune/qwen3/working.json
 # Bench every realization and record the measurements as deploy evidence (add --realization NAME to select one)
-emmy run --golden _tune/qwen3/working.yaml --bench --strict --json _tune/qwen3/results
+emmy run --golden _tune/qwen3/working.json --bench --strict --json _tune/qwen3/results
 # Record the kernel set the greedy pick took for one realization as measured rows a strict compile picks again
-emmy run --golden _tune/qwen3/working.yaml --realization mlp.layer0 --bench --record-greedy
+emmy run --golden _tune/qwen3/working.json --realization mlp.layer0 --bench --record-greedy
 # Capture one symbolic serving inventory with every release realization, then validate it on the pinned GPU
 emmy trace /models/gemma --serving-twins --serving-config docker/vllm-emmy-serve/models/gemma-4-12b-it.env \
-  -o _tune/gemma/working.yaml
-emmy eval golden --golden recipes/gemma-4-12B-it/golden/rtx5090_sm120.yaml \
+  -o _tune/gemma/working.json
+emmy eval golden --golden recipes/gemma-4-12B-it/golden/rtx5090_sm120.json \
   --serving-config docker/vllm-emmy-serve/models/gemma-4-12b-it.env
 ```
+
+Fast math is enabled by default. `EMMY_FAST_MATH=0` disables NVCC fast math and the compiler's precision-trading
+optimizations; individual precision pins override that umbrella. For a separate-rounding accuracy diagnostic, add
+`--nvcc-flags=--fmad=false`. That custom flag disables multiply-add contraction without changing the other policies.
 
 Layer-norm-style reduction (two reductions, broadcast subtract, elementwise chain) fused into single kernel:
 
@@ -170,6 +177,25 @@ __launch_bounds__(256) void k_rms_norm_reduce(const float* x, const float* p_wei
 }
 ```
 
+## Fit the offline prior
+
+The offline prior is the cold-start ranker a compile falls back on where nothing was measured. It is fitted on the
+golden files, GPU-free, and ships in the repo as `emmy/compiler/pipeline/search/prior/weights/offline.json`.
+
+```bash
+# 1. Load the hardware goldens into a DB of their own (--fresh: it then holds exactly these files)
+emmy db import --db _data/dataset.db --fresh emmy/compiler/pipeline/search/golden/records/*.json
+# 2. Export its rows as the dataset: every golden pool enumerated and featurized, every measured pool
+emmy db export --db _data/dataset.db _data/dataset
+# 3. Fit the offline prior from it, rewriting the checked-in weights file
+emmy fit _data/dataset emmy/compiler/pipeline/search/prior/weights/offline.json
+# 4. Where each golden row now ranks among the candidates its kernel offers, under the shipped weights
+emmy eval prior _data/dataset
+```
+
+Additionally, `emmy fit` writes a metrics file under `_tune/fits/<timestamp>-linear/`; two fits
+are compared by diffing their metrics files.
+
 ## Benchmark
 
 ```bash
@@ -195,17 +221,28 @@ or byte-checked against the raw files.
 # Remote server via SSH
 emmy deploy ssh --recipe recipes/gemma-4-12B-it --ssh user@host
 
+# Remote server via SSH, several models on its GPUs (a plan file instead of --recipe)
+emmy deploy ssh --plan plan.json --ssh user@host
+
 # Local Docker Compose
 emmy deploy local --recipe recipes/gemma-4-12B-it
 
 # Cloud (auto-provisions a VM)
 emmy deploy cloud --recipe recipes/gemma-4-12B-it --gpu "NVIDIA H200 141GB" --gpu-count 8
+
+# Cloud, several models on one VM (a plan file instead of --recipe)
+emmy deploy cloud --plan plan.json --result-json out.json --lease lease.json --owner relay/deployment-42
 ```
 
 `--recipe` also takes a bare recipe name (`--recipe gemma-4-12B-it`). An editable install resolves it from the live
 checkout; a wheel install resolves it from the packaged catalog. Emmy copies the recipe into the current directory
 first because `deploy` writes its compose file next to it and `bench` its timestamped run directory. A path that
 exists always wins, so an edited working copy is never overwritten.
+
+A plan names the VM to rent (`gpu`, `gpu_count`) and an ordered list of `models`, each with a `recipe`, its
+`gpu_memory_utilization` and the `gpu_device_ids` it is pinned to. Model *i* runs as its own container on host port
+`8000 + i`; models sharing a GPU start one after another. `--result-json` writes one endpoint per model on success,
+and `--lease` persists the instance id the moment the VM is rented. The deploy command reference has the details.
 
 ## Publish a serving image
 
@@ -235,6 +272,23 @@ emmy serve Qwen/Qwen3-Embedding-0.6B --bench --random-input-len 32
 emmy serve Qwen/Qwen3-Embedding-0.6B --bench --random-input-len 32 --stock
 ```
 
+## Experimental native generation
+
+Dense FP16 Qwen3 can be prepared as a standalone artifact and run through the Rust cached-generation loop. This
+single-request path and experimental native HTTP adapter support greedy or seeded temperature/top-p sampling and
+optional CUDA graphs. Output logits, residuals, and attention/rotary intermediates use FP32.
+Prefill uses fixed-width chunks;
+vLLM remains the serving default.
+See the [native generation contract](emmy/serving/native/ARCHITECTURE.md)
+for preparation, commands, limitations, and qualification.
+
+```bash
+make native-dist  # install the archive's matching binaries on PATH
+emmy serve Qwen/Qwen3-0.6B --runner generate --native --revision REVISION
+```
+
+Native serving exposes text and chat completions with streaming, stop strings, usage, and one active request.
+
 ## Recipe
 
 ```bash
@@ -245,21 +299,24 @@ emmy recipe list --json
 # Count one lifecycle group in automation.
 emmy recipe query --filter 'tags contains "maintained"' --json
 
-# Select the hottest available onboarding deployment. Referencing deployment.* expands each recipe into deployment
-# rows; CloudRift availability is resolved only because this query uses it.
+# Select the hottest available onboarding shell that has not failed. Referencing deployment.* expands each recipe into
+# deployment rows; CloudRift availability is resolved only because this query uses it.
 emmy recipe query \
   --filter 'lifecycle == "onboarding"' \
+  --filter 'tags not contains "onboarding-failed"' \
   --filter 'deployment.availability.cloudrift == true' \
   --sort 'heat desc nulls-last' \
   --sort 'model_id asc' \
   --limit 1 --json
 
-# When no onboarding deployment is available, select the maintained recipe with the oldest results.
+# Select a hot runnable recipe that has no Emmy serving variant yet.
 emmy recipe query \
-  --filter 'lifecycle == "maintained"' \
-  --filter 'deployment.availability.cloudrift == true' \
-  --sort 'results.last_run_at asc nulls-first' \
-  --limit 1 --json
+  --filter 'lifecycle in ["maintained", "best-effort"]' \
+  --filter 'runnable == true' \
+  --filter 'heat >= 70' \
+  --filter 'emmy_serving == false' \
+  --sort 'heat desc' \
+  --json
 
 # Check one exact external candidate, including a model without a recipe yet.
 emmy recipe query --candidate org/model-name "NVIDIA H200 141GB" 1 \
@@ -270,10 +327,12 @@ emmy recipe create org/model-name --rationale "Why this model should be onboarde
   --deployment "NVIDIA H200 141GB" 1 --deployment "NVIDIA B200" 1
 ```
 
-`recipe list --json` is a versioned machine interface. It returns an object with `schema_version` and `recipes`;
-each recipe carries its directory `name`, model ID, task, lifecycle-aware `runnable` state, heat score, and
-matrix-expanded deployments with effective context lengths. Consumers must reject unknown schema versions. Fields
-may be added to a schema version, but existing fields are not removed or redefined. Emmy always detects its
+`recipe list --json` is a versioned machine interface (schema version 2). It returns an object with `schema_version`
+and `recipes`; each recipe carries its directory `name`, model ID, task, lifecycle-aware `runnable` state, heat score,
+and matrix-expanded deployments, each with its GPU, GPU count, GPU memory fraction and effective context length. Two
+entries that differ only by fraction are both listed: that is how a recipe declares it may share its GPU. Consumers
+must reject unknown schema versions. Fields may be added to a schema version, but existing fields are not removed or
+redefined. Emmy always detects its
 installation: an editable checkout uses its live top-level `recipes/`, while a regular wheel uses its packaged
 runnable recipe bundle.
 `recipe query --json` returns a separate versioned `rows` interface for generic predicates and stable sort keys. Its
@@ -324,12 +383,12 @@ every recipe's `model` block. Useful lower-priority recipes stay runnable as `be
 unusable models become `obsolete`. Every promising new model becomes an `onboarding` plus `untested` shell with up to
 three proposed deployment matrix entries. Disabled recipes are not deployable or bundled.
 
-Canonical model goldens live beside their recipe at `recipes/<model>/golden/<gpu-slug>_<compute-cap>.yaml`, with one
+Canonical model goldens live beside their recipe at `recipes/<model>/golden/<gpu-slug>_<compute-cap>.json`, with one
 file per exact GPU. A model with complete compiler evidence but no serving recipe receives an `onboarding`/`untested`
-recipe shell before its golden is committed. Model-agnostic hardware goldens remain under
-`emmy/compiler/pipeline/search/goldens/`, and `make test` strictly decodes those row by row. `make test-goldens`
-does the same for the model goldens — off the default test lane and needing no GPU, it is how you see which cards a
-tuning round has brought back in line.
+recipe shell before its golden is committed. The maintained golden records, model-agnostic rows for the offline prior and the tests, live under
+`emmy/compiler/pipeline/search/golden/records/`. `make test` strictly decodes both kinds row by row, with no GPU
+needed, so a
+compiler change that strands a recorded row fails the suite.
 
 Generic workload (run any tool on the VM, pull back result files):
 
@@ -367,21 +426,24 @@ emmy vm delete cloudrift --instance-id <id>
 
 ```bash
 make test      # run the whole pytest suite — takes many minutes, run it once when finishing a PR
-make lint      # ruff check + format check
-make format    # auto-fix
-make wheel     # build the wheel into dist/
+make lint      # check code and test-duration formatting
+make format    # auto-fix code and sort test durations
+make wheel     # build the sdist and this host's wheel into dist/
 make pypi-dist # dry-run the exact PyPI sdist + wheel build into dist/
 ```
 
 ### Release
 
 Bump `version` in `pyproject.toml` on `main`, then run the **Publish to PyPI** workflow — it takes the version from
-there, and refuses to run if that version is already tagged. It lints, tests, builds, uploads to PyPI via trusted
-publishing, and only then creates the tag and GitHub release, so a failed upload leaves nothing behind. Publishing
-a GitHub release by hand works too; the tag must agree with `pyproject.toml`.
+there, and refuses to run if that version is already tagged. Direct commits on `main` are accepted. It builds and
+smoke-tests the distribution, uploads to PyPI via trusted publishing, and only then creates the tag and GitHub release,
+so a failed upload leaves nothing behind. Publishing a GitHub release by hand works too; the tag must agree with
+`pyproject.toml`. Lint and the full test suite run in pull-request checks, independently of publication.
 
 Pull requests run `make pypi-dist` in a bare Python 3.13 job. The same target installs the minimal release-build
-dependencies, stages the distribution tree, and builds both artifacts used by the publishing workflow.
+dependencies, stages the distribution tree, and builds both artifacts the publishing workflow uploads: the sdist and
+one wheel for the runner's platform, retagged by `auditwheel` to the manylinux baseline its symbols allow, since the
+wheel carries the runtime extension and a compiled extension makes a wheel platform-specific.
 
 `scripts/prepare_dist.py` stages the tree for a distribution build: `--recipes` copies runnable recipe YAML plus all
 recipe-local model goldens into the package (`make wheel` runs this), and `--readme` rewrites this file's repo-relative
@@ -410,7 +472,7 @@ require CloudRift organization access.
 - [.agents/skills/](.agents/skills/) — canonical repository skills; [.claude/skills/](.claude/skills/) exposes them
   through compatibility symlinks
 - [prompts/](prompts/) — reusable agent prompts shared by repository skills and non-interactive workflows
-- [opencode.json](opencode.json) and [.opencode/](.opencode/) — API-agent provider, permissions, and workflow profiles
+- [.opencode/](.opencode/) — API-agent provider, permissions, and workflow profiles
 - [.github/](.github/) — Pull-request checks, releases, cloud experiments, and model discovery/onboarding workflows
   (see [ARCHITECTURE.md](.github/ARCHITECTURE.md))
 - [emmy/](emmy/) — Python package
@@ -454,6 +516,12 @@ require CloudRift organization access.
 - [experiments/](experiments/) — Benchmark parameter sweeps, self-contained recipe + committed results —
   what `emmy bench` runs (see [ARCHITECTURE.md](experiments/ARCHITECTURE.md))
 - [kernels/](kernels/) — Standalone CUDA kernel sources
+- [crates/emmy-runtime/](crates/emmy-runtime/) — The Rust runtime: the executor behind every launch, the standalone
+  pack loader and cached generation (design, hosts, and qualification in
+  [ARCHITECTURE.md](crates/emmy-runtime/ARCHITECTURE.md)); [crates/emmy-runtime-py/](crates/emmy-runtime-py/) is
+  its in-process host, the `emmy.emmy_runtime` extension setuptools-rust builds into the package
+- [crates/emmy-server/](crates/emmy-server/) — Native text and HTTP adapter
+  (see [ARCHITECTURE.md](crates/emmy-server/ARCHITECTURE.md))
 - [docs/](docs/) — Docusaurus user-docs site (getting started, benchmarking, custom configurations, deployment)
 - [tests/](tests/) — pytest tests (see [ARCHITECTURE.md](tests/ARCHITECTURE.md))
   - [compiler/passes/](tests/compiler/passes/) — compiler pass tests (see [ARCHITECTURE.md](tests/compiler/passes/ARCHITECTURE.md))

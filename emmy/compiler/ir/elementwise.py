@@ -24,6 +24,7 @@ from typing import NamedTuple
 import numpy as np
 
 from emmy.compiler.dtype import decode_f4, decode_f8, encode_f4, encode_f8
+from emmy.compiler.wire import Wire
 
 
 # Names whose callable isn't a plain ``getattr(np, name)`` — non-numpy
@@ -61,6 +62,10 @@ _NAME_TO_FN: dict[str, object] = {
     "gelu": lambda x: 0.5 * x * (1.0 + _erf(x / np.sqrt(2.0))),
     "gelu_tanh": lambda x: 0.5 * x * (1.0 + np.tanh(np.sqrt(2.0 / np.pi) * (x + 0.044715 * x**3))),
     "copy": lambda x: x,
+    # The ACTION of a carried state's step: the state becomes what the step computed. A fold whose
+    # ⊕ is this folds the free monoid of step maps under composition, so it has no identity and no
+    # partition arm; every gate that asks ``has_identity`` refuses it by that alone.
+    "next": lambda x, y: y,
     # ``aten.pad`` reaches the generic elementwise spelling only when every pad width is zero.
     # The tracer rejects every non-empty pad before this point, so the stored unary op is an
     # identity (kept distinct from ``copy`` for frontend provenance).
@@ -92,13 +97,31 @@ _NAME_TO_FN: dict[str, object] = {
     "to_f4e2m1": encode_f4,
 }
 
+# Spellings that mean an op the renderers already know under another name. Normalized at
+# construction, so the op carries the canonical name and every downstream table -- the CUDA and
+# loop render targets, the torch reference, the statement renderer -- keeps working unchanged.
+#
+# ``right_shift`` is the canonical name the whole stack uses and the name the quantized-weight
+# spellers emit directly. Two other spellings reach the tracer for the same operation and neither
+# resolved: ``a >> b`` traces to ``__rshift__``, which is in neither numpy nor ``_NAME_TO_FN`` and
+# failed at construction, and ``torch.bitwise_right_shift`` traces under its own name, which numpy
+# happens to alias so it constructed and then died in the renderer. Until this existed, no packed
+# int4 or trellis decode cone could be written as a traced expression at all -- which meant a
+# miscompilation reachable only through such a cone could not be minimized outside a real
+# checkpoint.
+_ALIASES: dict[str, str] = {
+    "__rshift__": "right_shift",
+    "bitwise_right_shift": "right_shift",
+}
+
 _ARITY: dict[str, int] = {
     # ``np.where`` is a regular function rather than a ufunc, so it has no ``nin`` metadata.
     "where": 3,
+    "next": 2,
 }
 
 
-class ElementwiseImpl:
+class ElementwiseImpl(Wire):
     """Named scalar op — name + numpy callable + arity + reducer metadata.
 
     Construction resolves the callable from ``_NAME_TO_FN`` (non-numpy
@@ -110,6 +133,17 @@ class ElementwiseImpl:
     gates (split-K, cooperative tree-combine) query instead of matching op
     names.
     """
+
+    wire_tag = "elementwise"
+
+    def to_wire(self) -> str:
+        return self.name
+
+    @classmethod
+    def from_wire(cls, value: object, where: str = "elementwise") -> ElementwiseImpl:
+        if not isinstance(value, str):
+            raise ValueError(f"{where} must be an op name")
+        return cls(value)
 
     # Commutative ops — binary combines where ``op(a, b) == op(b, a)``.
     _COMMUTATIVE: frozenset[str] = frozenset({"add", "multiply", "maximum", "minimum", "amax", "sum", "prod"})
@@ -148,6 +182,7 @@ class ElementwiseImpl:
     _DECODES: dict[str, str] = {"from_f8e4m3": "f8e4m3", "from_f8e5m2": "f8e5m2"}
 
     def __init__(self, name: str) -> None:
+        name = _ALIASES.get(name, name)
         fn = _NAME_TO_FN.get(name)
         if fn is None:
             fn = getattr(np, name, None)

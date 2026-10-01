@@ -16,7 +16,7 @@ deploying on a guess.
 They do three jobs at once:
 
 1. **Measured evidence for the deploy.** Every measured realization is one more row in the measured-evidence index
-   the greedy pick reads — keyed by the recorded kernel's structural signature, beside the rows a tune measured on
+   the greedy pick reads — keyed by the recorded kernel's structural signature, beside the rows a bench measured on
    this machine; see [the hierarchy page](./06-deploy-evidence-hierarchy.md). A golden is a preference among
    measured rows, never a forced pin. The same row also replays under a hand pin for a measurement
    (`run --golden PATH --realization NAME --bench`) — the schedule codec fully encodes how it replays.
@@ -27,29 +27,29 @@ They do three jobs at once:
 ## What one looks like
 
 Model golden configurations live under `recipes/<model>/golden/`, in one file per exact GPU model and compute
-capability. Model-agnostic hardware goldens remain under `emmy/compiler/pipeline/search/goldens/`. A file embeds its
-program pool, then lists structural targets whose realization arrays hold bindings, regimes, schedules, and paired
-measurements:
+capability. The maintained model-agnostic golden records live under `emmy/compiler/pipeline/search/golden/records/`. A file is
+JSON. It embeds its program pool and its pool of Loop IR kernels, one entry per line, then lists structural targets
+whose realizations — one per line — hold bindings, regimes, schedules, and paired measurements:
 
-```yaml
-gpu_name: NVIDIA GeForce RTX 5090
-compute_cap: [12, 0]
-model: google/gemma-4-12B-it
-programs:
-  - {inputs: [...], outputs: [...], nodes: [...]}
-configs:
-  - program: 0
-    target: {origins: [linear_7]}
-    realizations:
-      - name: gemma4_12b.norm_q_proj.m32
-        bindings: {num_tokens: 32}
-        pins: {FAST_MATH: false}
-        knobs: {WORK: w1x16, TILE: mma_m16n8k16_f16_f32/f2x2/k2, REDUCE: g8k, RASTER: '', STAGE: d2/smem}
-        measurements: {emmy_us: 26.7, reference_us: 19.8, reference_backend: cublas}
+```json
+{"gpu_name": "NVIDIA GeForce RTX 5090",
+ "compute_cap": [12, 0],
+ "model": "google/gemma-4-12B-it",
+ "programs": [
+  {"inputs":[...],"outputs":[...],"nodes":[...]}
+ ],
+ "configs": [
+  {"program": 0, "target": {"loop": 0, "origins": ["linear_7"]}, "realizations": [
+   {"name": "gemma4_12b.norm_q_proj.m32", "bindings": {"num_tokens": 32}, "pins": {"FAST_MATH": false}, "knobs": {"WORK": "w1x16", "TILE": "mma_m16n8k16_f16_f32/f2x2/k2", "REDUCE": "g8k", "RASTER": "", "STAGE": "d2/smem"}, "measurements": {"emmy_us": 26.7, "reference_us": 19.8, "reference_backend": "cublas"}}
+  ]}
+ ],
+ "loops": [
+  {"inputs":[...],"outputs":[...],"nodes":[...]}
+ ]}
 ```
 
-The program and target identify the structural kernel. Empty `bindings` keep the program symbolic; a mapping such as
-`num_tokens: 32` specializes that symbolic dimension before lowering. `pins` applies registered knob values before
+The program and target identify the structural kernel. A row with no `bindings` keeps the program symbolic; a mapping
+such as `{"num_tokens": 32}` specializes that symbolic dimension before lowering. `pins` applies registered knob values before
 enumeration; `knobs` records the configuration selected and measured inside that regime. The knobs use the exact
 spelling from [the forks page](./03-forks-and-knobs.md), and `measurements` records the candidate beside a named
 reference. `FAST_MATH` follows this same rule and appears under `pins`; it has no dedicated realization field. Keeping
@@ -68,22 +68,22 @@ A golden is recorded from a side-by-side comparison run:
 emmy run --realization matmul.square.512 --bench --ab "WORK=w2x2,TILE=f2x8,STAGE=d2/smem-async"
 ```
 
-To verify a realization still living in a working YAML—including an exact Loop IR fallback—select both the file and
-the row. The same two flags spell it on every command (`run`, `compile`, `tune`, `serve`):
+To verify a realization still living in a working golden file—including an exact Loop IR fallback—select both the file and
+the row. The same two flags spell it on every command (`run`, `compile`, `serve`):
 
 ```bash
-emmy compile --golden _tune/model/working.yaml --realization target.name --ir cuda
-emmy run --golden _tune/model/working.yaml --realization target.name --bench
+emmy compile --golden _tune/model/working.json --realization target.name --ir cuda
+emmy run --golden _tune/model/working.json --realization target.name --bench
 ```
 
 The realization supplies the graph regardless of state. A realization named explicitly is always benched as a pinned
 row, measurement state notwithstanding; `run --golden PATH` alone walks every name and benches only the rows with
-verified paired timings or a valid tune winner, leaving proposals to the tuner. `--ab` is a hand pin for one extra
+verified paired timings, skipping proposals (unmeasured rows). `--ab` is a hand pin for one extra
 bench row — a way to try a row, not a way to replay a golden.
 
 That compiles the shape the way the compiler would on its own, then compiles it again with the given knob values
 pinned, and prints both. Whatever it measured cleanly is written into the tuning database by default — per-kernel
-rows the next compile deploys from, plus the training rows of the offline prior — which is how a replayed golden or
+rows the next compile deploys from — which is how a replayed golden or
 a hand-pinned row becomes what the compiler chooses. Two rules about which number to copy:
 
 - **Record from a pinned row, never from the ordinary comparison row.** The ordinary row is measured interleaved with
@@ -118,12 +118,8 @@ own process, is reported as a failure, and the remaining rows continue.
   same shape as the fused example above (the standalone inventory it comes from predates the current serving-twin
   gemma-4 file, which carries no cut routings):
 
-  ```yaml
-  - name: gemma4_12b.norm_q_proj.m32.cut
-    bindings: {num_tokens: 32}
-    pins: {FAST_MATH: false}
-    knobs: {PLACE@inner.1/map: cut}
-    measurements: {emmy_us: 16.0, reference_us: 19.0, reference_backend: cublas}
+  ```json
+  {"name": "gemma4_12b.norm_q_proj.m32.cut", "bindings": {"num_tokens": 32}, "pins": {"FAST_MATH": false}, "knobs": {"PLACE@inner.1/map": "cut"}, "measurements": {"emmy_us": 16.0, "reference_us": 19.0, "reference_backend": "cublas"}}
   ```
 
   It stores the split and nothing else. As evidence it is the measured price of that kernel set: at the placement
@@ -143,7 +139,7 @@ own process, is reported as a failure, and the remaining rows continue.
 One command checks a corpus against its pinned serving envelope:
 
 ```bash
-emmy eval golden --golden <canonical-golden.yaml> --serving-config <models/slug.env>
+emmy eval golden --golden <canonical-golden.json> --serving-config <models/slug.env>
 ```
 
 The serving config names that exact file and supplies the model, revision, GPU, and reachable realization matrix.
@@ -155,31 +151,56 @@ the compiler offers (drift), or whether no row covers it at all (a gap). Drift, 
 release. Beyond that, a recorded row's health is its pinned replay — `run --golden PATH --realization NAME --bench`
 reproduces it under the A/B integrity gates above.
 
+### Against a fresh lowering
+
+A row is evidence for the kernel its stored Loop IR names, and a deploy keys rows by the kernels it lowers fresh from
+the model. When a compiler change moves that lowering the file goes stale: every row still decodes, and serving builds
+kernels none of them describe. Two commands cover it, and neither needs a card:
+
+```bash
+emmy golden check [PATH…]      # the stored targets a fresh lowering of the golden's own programs no longer writes
+emmy golden restamp [PATH…]    # rewrite the golden onto that lowering
+```
+
+The check is a diff you can run yourself, per traced program: the pool of Loop IR kernels the golden stores against
+the same pool lowered fresh from the program the golden stores (a `.json` output path makes `compile` write the
+stage as the golden's wire instead of the readable listing):
+
+```bash
+emmy golden kernels recipes/gemma-4-12B-it/golden/rtx5090_sm120.json --program 3 > stored.json
+emmy compile --golden recipes/gemma-4-12B-it/golden/rtx5090_sm120.json --program 3 --ir loop -o fresh.json
+diff stored.json fresh.json
+```
+
+`restamp` replaces each stored target with the fresh Loop IR and re-keys its rows. A row keeps its measurement only
+when its kernel renders the same CUDA source from the fresh Loop IR; otherwise it keeps its schedule and loses its
+microseconds — a proposal, no evidence until a record run on the card measures it again. Rows that no longer decode,
+and targets no fresh kernel writes, are dropped and named; a file nothing survives in is left untouched. Both default
+to every repository golden. The `refresh-golden` skill is the whole flow, including what needs a card.
+
 ## Two smaller rules
 
 **Fast math never loses.** Entries recorded with faster, less precise arithmetic are only kept when they are faster
 than the best ordinary sibling — a slower one documents a configuration nobody should replay, so such rows are
 dropped.
 
-**The two halves of the prior treat goldens differently.** The online prior never trains on them: a recorded
-configuration enters no training data anywhere, which leaves the goldens as a clean acceptance set — data the model is
-judged against but never learns from. The offline prior *is* fitted on them. That distinction is the subject of the
-next page.
+**The goldens are the prior's training data.** The offline prior is fitted on them, and the next page explains
+how.
 
 ## See it yourself
 
-Read a real file — they are plain YAML, and the comments in them are the record of why each entry is what it is:
+Read a real file — a realization is one line, and its name says which target and shape it records:
 
 ```bash
-find recipes -path '*/golden/*.yaml' -print
-grep -n -A9 "name: post-sym.k_linear_mean_reduce" recipes/gemma-4-12B-it/golden/rtx5090_sm120.yaml | head -30
+find recipes -path '*/golden/*.json' -print
+grep -n '"name": "post-sym.k_linear_mean_reduce' recipes/gemma-4-12B-it/golden/rtx5090_sm120.json | cut -c1-300
 ```
 
 Then run the file-scoped validation on the GPU named by the serving config. It needs model configuration and
 allocation metadata, but no weight payload:
 
 ```bash
-emmy eval golden --golden recipes/gemma-4-12B-it/golden/rtx5090_sm120.yaml \
+emmy eval golden --golden recipes/gemma-4-12B-it/golden/rtx5090_sm120.json \
   --serving-config docker/vllm-emmy-serve/models/gemma-4-12b-it.env
 ```
 

@@ -1,0 +1,43 @@
+# Conservative stock-vLLM qualification lane for Qwen3-30B-A3B-Instruct-2507 on one H200.
+#
+# The checkpoint has 30.5B total BF16 parameters, so weights need about 61.1 GB and the
+# 1.3x minimum-serving estimate is about 79.4 GB. Native 262,144-token KV storage is about
+# 25.8 GB (48 layers x 4 KV heads x 128 head size x BF16 K/V), leaving additional runtime
+# headroom within 90% of a 141 GB H200.
+#
+# This Instruct checkpoint supports only non-thinking mode. Its tokenizer uses Hermes-style
+# JSON tool calls inside <tool_call> tags, so it intentionally has no reasoning parser and
+# uses vLLM's Hermes tool parser rather than the Qwen3-Coder parser.
+model:
+  huggingface: "Qwen/Qwen3-30B-A3B-Instruct-2507"
+  revision: 0d7cf23991f47feeb3a57ecb4c9cee8ea4a17bfe
+  task: generate
+
+engine:
+  llm:
+    tensor_parallel_size: 1
+    pipeline_parallel_size: 1
+    gpu_memory_utilization: 0.9
+    context_length: 262144
+    max_concurrent_requests: 1
+    vllm:
+      image: "vllm/vllm-openai:v0.17.0"
+      extra_args: >-
+        --max-num-batched-tokens 4096
+        --enable-auto-tool-choice
+        --tool-call-parser hermes
+
+benchmark:
+  max_concurrency: 1
+  num_prompts: 8
+  random_input_len: 4096
+  random_output_len: 4096
+  num_warmups: 2
+  repeats: 3
+  seed: 0
+  temperature: 0.0
+  ignore_eos: true
+
+matrices:
+  deploy.gpu: "NVIDIA H200 141GB"
+  deploy.gpu_count: 1

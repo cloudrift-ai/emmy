@@ -16,6 +16,7 @@ from emmy.compiler.backend.cuda.render_target import CudaRenderTarget
 from emmy.compiler.dtype import F4_VALUES, F32
 from emmy.compiler.ir.kernel.ir import (
     CpAsyncCopy,
+    FragmentRepack,
     KernelOp,
     LdmatrixLoad,
     RegStore,
@@ -27,7 +28,7 @@ from emmy.compiler.ir.kernel.ir import (
     swizzle_fn,
     swizzle_xor,
 )
-from emmy.compiler.ir.stmt import RenderCtx, render_body
+from emmy.compiler.ir.stmt import Paged, RenderCtx, render_body
 from emmy.compiler.ir.stmt.leaves import Assign, Write
 from emmy.compiler.tensor import Tensor
 
@@ -38,6 +39,26 @@ from emmy.compiler.tensor import Tensor
 # total Smem footprint exceeds this, ``render_kernelop`` switches to a
 # single dynamic pool with per-buffer offsets.
 STATIC_SMEM_CAP = 48 * 1024
+
+# E4M3's finite values are half bit patterns shifted seven places, times 2**8.
+# This also normalizes subnormals without the SDK emulation's data-dependent loop.
+_F8_DECODE_PRELUDE = """\
+static __device__ __forceinline__ __half emmy_from_f8e4m3(__nv_fp8_e4m3 value) {
+#if __CUDA_ARCH__ >= 890
+    return __half(value);
+#else
+    unsigned int bits = value.__x;
+    unsigned short half_bits = ((bits & 0x7fu) << 7) | ((bits & 0x80u) << 8);
+    __half scaled = __hmul(__ushort_as_half(half_bits), __ushort_as_half(0x5c00u));
+    return (bits & 0x7fu) == 0x7fu ? __ushort_as_half(0x7fffu) : scaled;
+#endif
+}
+
+static __device__ __forceinline__ float emmy_from_f8e4m3_f32(__nv_fp8_e4m3 value) {
+    return __half2float(emmy_from_f8e4m3(value));
+}
+
+"""
 
 # e2m1 encode. The fp8 encodes construct a <cuda_fp8.h> type and inherit its rounding; there is no
 # fp4 type to construct, and the result here is an ordinary integer carrier, so leaving the cast to
@@ -86,8 +107,10 @@ static __device__ __forceinline__ void mbarrier_init(unsigned long long* mbar, i
 }
 
 static __device__ __forceinline__ void mbarrier_arrive_expect_tx(unsigned long long* mbar, int bytes) {
+    // Publish barrier initialization and order prior shared-memory accesses before the TMA fill.
     unsigned int addr = __cvta_generic_to_shared(mbar);
     unsigned long long state;
+    asm volatile("fence.proxy.async.shared::cta;\\n" ::: "memory");
     asm volatile("mbarrier.arrive.expect_tx.shared.b64 %0, [%1], %2;\\n"
                  : "=l"(state) : "r"(addr), "r"(bytes) : "memory");
 }
@@ -117,12 +140,8 @@ static __device__ __forceinline__ void mbarrier_wait_parity(unsigned long long* 
     // hot-spinning across all 256 CTA threads (~3-4× kernel speedup on
     // small matmuls where the wait-vs-compute ratio is high).
     //
-    // The ``"memory"`` clobber prevents the compiler from reordering
-    // smem loads across this asm. The primary correctness anchor is
-    // the trailing ``__syncthreads()`` materialize emits after each
-    // MbarrierWait (see ``100_materialize_tile.py``); the clobber is
-    // defensive belt-and-braces so the asm itself reads as a fence
-    // even if a future caller forgets the surrounding Sync.
+    // Completion makes the TMA writes visible to this thread's shared-memory reads.
+    // The memory clobber also prevents the compiler from moving those reads before the wait.
     unsigned int addr = __cvta_generic_to_shared(mbar);
     asm volatile("{.reg .pred P; bw: mbarrier.try_wait.parity.shared.b64 P, [%0], %1; @!P bra bw;}\\n"
                  :: "r"(addr), "r"(phase) : "memory");
@@ -173,11 +192,17 @@ static __device__ __forceinline__ void cp_async_bulk_tensor_5d(
 # same helper style the mma / mbarrier preludes use; same SASS. ``cg`` =
 # cache-global / bypass-L1 (16 B, the streaming form); ``ca`` = cache-all (4/8 B).
 # ``commit`` closes a batch of issued copies; ``wait<N>`` blocks until ≤ N of
-# those batches are still in flight.
+# those batches are still in flight. ``_z`` copies only when ``ok`` and writes zeros
+# otherwise, reading nothing: a tile row past a masked edge.
 _CP_ASYNC_PRELUDE = """\
 static __device__ __forceinline__ void emmy_cp_async_cg(void* smem, const void* gmem) {
     unsigned addr = __cvta_generic_to_shared(smem);
     asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\\n" :: "r"(addr), "l"(gmem) : "memory");
+}
+
+static __device__ __forceinline__ void emmy_cp_async_cg_z(void* smem, const void* gmem, bool ok) {
+    unsigned addr = __cvta_generic_to_shared(smem);
+    asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\\n" :: "r"(addr), "l"(gmem), "r"(ok ? 16 : 0) : "memory");
 }
 
 template <int Bytes>
@@ -226,6 +251,37 @@ static __device__ __forceinline__ int emmy_volta_b_congruous(int row, int col, i
     return physical_row * ldm + physical_col;
 }
 
+// One aligned run, shared by the global and shared-memory fragment loaders.
+template <typename T>
+static __device__ __forceinline__ void emmy_mma884_load4(unsigned* r, const T* g) {
+    if constexpr (sizeof(T) == 4) {
+        // Pack each loaded pair before exposing it to the surrounding code. Four live
+        // FP32 values at once can push a register-resident matrix loop into spills.
+        #pragma unroll
+        for (int p = 0; p < 2; ++p) {
+            asm volatile("{.reg .f32 x, y; .reg .b16 lo, hi;\\n\\t"
+                         "ld.v2.f32 {x, y}, [%1];\\n\\t"
+                         "cvt.rn.f16.f32 lo, x; cvt.rn.f16.f32 hi, y;\\n\\t"
+                         "mov.b32 %0, {lo, hi};}\\n"
+                         : "=r"(r[p]) : "l"(g + p * 2) : "memory");
+        }
+    } else {
+        uint2 v = *reinterpret_cast<const uint2*>(g);
+        r[0] = v.x; r[1] = v.y;
+    }
+}
+
+// The caller proves four-element alignment and a complete K slice.
+template <typename T, bool A>
+static __device__ __forceinline__ void emmy_mma884_load_gmem4(unsigned* r, const T* g, int ldm, int left) {
+    int lane = threadIdx.x & 31;
+    int comp = (lane & 15) >> 2;
+    int row = ((A ? comp >> 1 : comp & 1) << 3) + (lane & 3) + ((lane >> 4) << 2);
+    row = min(row, max(left - 1, 0));
+    r[0] = r[1] = 0u;
+    if (left > 0) emmy_mma884_load4(r, g + row * ldm);  // wholly past the bound: read nothing
+}
+
 template <typename T, typename F = T>
 static __device__ __forceinline__ void emmy_mma884_load_a_impl(
     unsigned* r, const T* g, int ldm, int rows_left, int k_left) {
@@ -237,8 +293,8 @@ static __device__ __forceinline__ void emmy_mma884_load_a_impl(
     for (int p = 0; p < 2; ++p) {
         int k = p << 1;
         unsigned packed = 0;
-        if (k < k_left) ((F*)&packed)[0] = F(g[row * ldm + k]);
-        if (k + 1 < k_left) ((F*)&packed)[1] = F(g[row * ldm + k + 1]);
+        if (rows_left > 0 && k < k_left) ((F*)&packed)[0] = F(g[row * ldm + k]);
+        if (rows_left > 0 && k + 1 < k_left) ((F*)&packed)[1] = F(g[row * ldm + k + 1]);
         r[p] = packed;
     }
 }
@@ -254,8 +310,8 @@ static __device__ __forceinline__ void emmy_mma884_load_b_impl(
     for (int p = 0; p < 2; ++p) {
         int k = p << 1;
         unsigned packed = 0;
-        if (k < k_left) ((F*)&packed)[0] = F(trans ? g[col * ldm + k] : g[k * ldm + col]);
-        if (k + 1 < k_left) ((F*)&packed)[1] = F(trans ? g[col * ldm + k + 1] : g[(k + 1) * ldm + col]);
+        if (cols_left > 0 && k < k_left) ((F*)&packed)[0] = F(trans ? g[col * ldm + k] : g[k * ldm + col]);
+        if (cols_left > 0 && k + 1 < k_left) ((F*)&packed)[1] = F(trans ? g[col * ldm + k + 1] : g[(k + 1) * ldm + col]);
         r[p] = packed;
     }
 }
@@ -318,19 +374,12 @@ static __device__ __forceinline__ void emmy_mma884_load_b_gmem_trans_nclamp_kzer
 // the staged slab. Load that run as one 64-bit vector; the canonical B layout
 // still needs the strided gather below. Volta has no warp matrix-load
 // instruction.
-template <typename T>
-static __device__ __forceinline__ void emmy_mma884_load_smem4(unsigned* r, const T* s) {
-    uint2 packed = *reinterpret_cast<const uint2*>(s);
-    r[0] = packed.x;
-    r[1] = packed.y;
-}
-
 template <typename T, typename F = T>
 static __device__ __forceinline__ void emmy_mma884_load_a_smem(unsigned* r, const T* s, int ldm) {
     int lane = threadIdx.x & 31;
     int comp = (lane & 15) >> 2;
     int row = ((comp >> 1) << 3) + (lane & 3) + ((lane >> 4) << 2);
-    emmy_mma884_load_smem4(r, s + row * ldm);
+    emmy_mma884_load4(r, s + row * ldm);
 }
 template <typename T, typename F = T>
 static __device__ __forceinline__ void emmy_mma884_load_b_smem(unsigned* r, const T* s, int ldm) {
@@ -341,16 +390,15 @@ static __device__ __forceinline__ void emmy_mma884_load_b_smem_trans(unsigned* r
     int lane = threadIdx.x & 31;
     int comp = (lane & 15) >> 2;
     int col = ((comp & 1) << 3) + (lane & 3) + ((lane >> 4) << 2);
-    emmy_mma884_load_smem4(r, s + col * ldm);
+    emmy_mma884_load4(r, s + col * ldm);
 }
 
 // CUTLASS's Volta layouts turn two logical 16-row/column fragments into one
 // conflict-free LDS.128. A's k-group 2 bit swaps the loaded 64-bit halves;
 // B's congruous layout feeds the row-major-B mma form directly.
 template <typename T>
-static __device__ __forceinline__ void emmy_mma884_load_a_crosswise_pair(
-    unsigned* r0, unsigned* r1, const T* s, int row, int k, int rows) {
-    int lane = threadIdx.x & 31;
+static __device__ __forceinline__ void emmy_mma884_crosswise_pair(
+    unsigned* r0, unsigned* r1, const T* s, int lane, int row, int k, int rows) {
     int quad = lane >> 2;
     int lane_in_quad = lane & 3;
     int access = ((quad & 4) << 1) + (lane_in_quad << 1) + ((quad & 1) ^ ((quad & 4) >> 2));
@@ -371,6 +419,24 @@ static __device__ __forceinline__ void emmy_mma884_load_a_crosswise_pair(
 }
 
 template <typename T>
+static __device__ __forceinline__ void emmy_mma884_load_a_crosswise_pair(
+    unsigned* r0, unsigned* r1, const T* s, int row, int k, int rows) {
+    emmy_mma884_crosswise_pair(r0, r1, s, threadIdx.x & 31, row, k, rows);
+}
+
+// A transposed B slab is K-contiguous like A's, so it takes the same crosswise
+// storage and the same conflict-free LDS.128. Only the lane map differs: A's
+// fragment half comes from lane bit 2, a transposed B's column half from lane
+// bit 3 -- which is the column role the interleaved accumulator map already
+// assumes. Swapping those two lane bits is the whole difference.
+template <typename T>
+static __device__ __forceinline__ void emmy_mma884_load_b_crosswise_pair(
+    unsigned* r0, unsigned* r1, const T* s, int col, int k, int cols) {
+    int lane = threadIdx.x & 31;
+    emmy_mma884_crosswise_pair(r0, r1, s, (lane & ~0xC) | ((lane & 4) << 1) | ((lane & 8) >> 1), col, k, cols);
+}
+
+template <typename T>
 static __device__ __forceinline__ void emmy_mma884_load_b_congruous_pair(
     unsigned* r0, unsigned* r1, const T* s, int row, int col, int ldm) {
     int lane = threadIdx.x & 31;
@@ -381,6 +447,16 @@ static __device__ __forceinline__ void emmy_mma884_load_b_congruous_pair(
     r0[1] = packed.y;
     r1[0] = packed.z;
     r1[1] = packed.w;
+}
+
+static __device__ __forceinline__ unsigned emmy_pack_f16(float x, float y) {
+    unsigned packed;
+    asm("{.reg .b16 lo, hi;\\n\\t"
+        "cvt.rn.f16.f32 lo, %1;\\n\\t"
+        "cvt.rn.f16.f32 hi, %2;\\n\\t"
+        "mov.b32 %0, {lo, hi};}\\n"
+        : "=r"(packed) : "f"(x), "f"(y));
+    return packed;
 }
 
 // Volta C->A register repack. One logical m8n8k4 C fragment covers 16x16 through
@@ -394,29 +470,37 @@ static __device__ __forceinline__ void emmy_c_to_a_f16_m8n8k4(unsigned* a, const
     int src0 = (lane & 16) | (src_comp << 2) | (lane & 1);
     int src1 = src0 + 2;
     constexpr int col_half = (Part & 1) << 2;
-    float x00 = __shfl_sync(0xffffffffu, c[col_half], src0);
-    float x01 = __shfl_sync(0xffffffffu, c[col_half + 1], src0);
-    float x10 = __shfl_sync(0xffffffffu, c[col_half + 2], src0);
-    float x11 = __shfl_sync(0xffffffffu, c[col_half + 3], src0);
-    float y00 = __shfl_sync(0xffffffffu, c[col_half], src1);
-    float y01 = __shfl_sync(0xffffffffu, c[col_half + 1], src1);
-    float y10 = __shfl_sync(0xffffffffu, c[col_half + 2], src1);
-    float y11 = __shfl_sync(0xffffffffu, c[col_half + 3], src1);
+    unsigned low = emmy_pack_f16(c[col_half], c[col_half + 1]);
+    unsigned high = emmy_pack_f16(c[col_half + 2], c[col_half + 3]);
+    unsigned x0 = __shfl_sync(0xffffffffu, low, src0);
+    unsigned x1 = __shfl_sync(0xffffffffu, high, src0);
+    unsigned y0 = __shfl_sync(0xffffffffu, low, src1);
+    unsigned y1 = __shfl_sync(0xffffffffu, high, src1);
     bool high_row = (lane & 2) != 0;
-    float x0 = high_row ? x10 : x00;
-    float x1 = high_row ? x11 : x01;
-    float y0 = high_row ? y10 : y00;
-    float y1 = high_row ? y11 : y01;
-    asm("{.reg .b16 lo, hi;\\n\\t"
-        "cvt.rn.f16.f32 lo, %1;\\n\\t"
-        "cvt.rn.f16.f32 hi, %2;\\n\\t"
-        "mov.b32 %0, {lo, hi};}\\n"
-        : "=r"(a[0]) : "f"(x0), "f"(x1));
-    asm("{.reg .b16 lo, hi;\\n\\t"
-        "cvt.rn.f16.f32 lo, %1;\\n\\t"
-        "cvt.rn.f16.f32 hi, %2;\\n\\t"
-        "mov.b32 %0, {lo, hi};}\\n"
-        : "=r"(a[1]) : "f"(y0), "f"(y1));
+    a[0] = high_row ? x1 : x0;
+    a[1] = high_row ? y1 : y0;
+}
+
+// Select four rows of a logical 16x16 C fragment for a column-major B operand.
+// Shuffle packed column pairs, then select the column owned by the receiving lane.
+template <int Part>
+static __device__ __forceinline__ void emmy_c_to_b_f16_m8n8k4(unsigned* b, const float* c) {
+    int lane = threadIdx.x & 31;
+    int comp = (lane & 15) >> 2;
+    int src = ((Part & 1) << 4) | (((Part >> 1) * 2 + (comp & 1)) << 2) | (lane & 2);
+    #pragma unroll
+    for (int p = 0; p < 2; ++p) {
+        unsigned low = emmy_pack_f16(c[2 * p], c[2 * p + 1]);
+        unsigned high = emmy_pack_f16(c[2 * p + 4], c[2 * p + 5]);
+        unsigned xlo = __shfl_sync(0xffffffffu, low, src);
+        unsigned xhi = __shfl_sync(0xffffffffu, high, src);
+        unsigned ylo = __shfl_sync(0xffffffffu, low, src + 1);
+        unsigned yhi = __shfl_sync(0xffffffffu, high, src + 1);
+        unsigned x = (lane & 16) ? xhi : xlo;
+        unsigned y = (lane & 16) ? yhi : ylo;
+        int shift = (lane & 1) * 16;
+        b[p] = ((x >> shift) & 0xffffu) | ((y >> shift) << 16);
+    }
 }
 
 static __device__ __forceinline__ void emmy_mma_m8n8k4_f16_f32(
@@ -442,6 +526,47 @@ static __device__ __forceinline__ void emmy_mma_m8n8k4_f16_f32_brow(
                  : "r"(a[0]), "r"(a[1]), "r"(b[0]), "r"(b[1]),
                    "f"(c[0]), "f"(c[1]), "f"(c[2]), "f"(c[3]),
                    "f"(c[4]), "f"(c[5]), "f"(c[6]), "f"(c[7]));
+}
+
+static __device__ __forceinline__ void emmy_mma_m8n8k4_f16_f16(
+    unsigned* d, const unsigned* a, const unsigned* b, const unsigned* c) {
+    asm volatile("mma.sync.aligned.m8n8k4.row.col.f16.f16.f16.f16 "
+                 "{%0, %1, %2, %3}, {%4, %5}, {%6, %7}, {%8, %9, %10, %11};\\n"
+                 : "=r"(d[0]), "=r"(d[1]), "=r"(d[2]), "=r"(d[3])
+                 : "r"(a[0]), "r"(a[1]), "r"(b[0]), "r"(b[1]),
+                   "r"(c[0]), "r"(c[1]), "r"(c[2]), "r"(c[3]));
+}
+
+static __device__ __forceinline__ void emmy_mma_m8n8k4_f16_f16_brow(
+    unsigned* d, const unsigned* a, const unsigned* b, const unsigned* c) {
+    asm volatile("mma.sync.aligned.m8n8k4.row.row.f16.f16.f16.f16 "
+                 "{%0, %1, %2, %3}, {%4, %5}, {%6, %7}, {%8, %9, %10, %11};\\n"
+                 : "=r"(d[0]), "=r"(d[1]), "=r"(d[2]), "=r"(d[3])
+                 : "r"(a[0]), "r"(a[1]), "r"(b[0]), "r"(b[1]),
+                   "r"(c[0]), "r"(c[1]), "r"(c[2]), "r"(c[3]));
+}
+
+// Volta's f16 C fragment owns one row; its f32 counterpart owns two rows.
+// Exchange row pairs before promotion, keeping the shadow in the ordinary f32 layout.
+static __device__ __forceinline__ void emmy_mma_promote_f16acc_m8n8k4(float* c, unsigned* h) {
+    int lane = threadIdx.x & 31;
+    #pragma unroll
+    for (int p = 0; p < 4; ++p) {
+        int src = (lane & ~2) | ((p & 1) << 1);
+        unsigned low = __shfl_sync(0xffffffffu, h[p & 2], src);
+        unsigned high = __shfl_sync(0xffffffffu, h[(p & 2) + 1], src);
+        unsigned packed = (lane & 2) ? high : low;
+        float x, y;
+        asm("{.reg .b16 lo, hi;\\n\\t"
+            "mov.b32 {lo, hi}, %2;\\n\\t"
+            "cvt.f32.f16 %0, lo;\\n\\t"
+            "cvt.f32.f16 %1, hi;}\\n"
+            : "=f"(x), "=f"(y) : "r"(packed));
+        c[2 * p] += x;
+        c[2 * p + 1] += y;
+    }
+    #pragma unroll
+    for (int p = 0; p < 4; ++p) h[p] = 0;
 }
 """
 
@@ -512,6 +637,21 @@ static __device__ __forceinline__ void emmy_c_to_a_bf16(unsigned* a, const float
     asm("cvt.rn.bf16x2.f32 %0, %1, %2;\\n" : "=r"(a[3]) : "f"(c1[3]), "f"(c1[2]));
 }
 
+// A 16x8 C tile becomes a B operand through warp-local exchange of packed column pairs.
+static __device__ __forceinline__ void emmy_c_to_b_f16(unsigned* b, const float* c) {
+    unsigned lo, hi;
+    asm("cvt.rn.f16x2.f32 %0, %1, %2;\\n" : "=r"(lo) : "f"(c[1]), "f"(c[0]));
+    asm("cvt.rn.f16x2.f32 %0, %1, %2;\\n" : "=r"(hi) : "f"(c[3]), "f"(c[2]));
+    const int lane = threadIdx.x & 31, g = lane >> 2, t = lane & 3;
+    const int src = (2 * t) * 4 + (g >> 1), shift = (g & 1) * 16;
+    const unsigned l0 = (__shfl_sync(0xffffffff, lo, src) >> shift) & 0xffff;
+    const unsigned l1 = (__shfl_sync(0xffffffff, lo, src + 4) >> shift) & 0xffff;
+    const unsigned h0 = (__shfl_sync(0xffffffff, hi, src) >> shift) & 0xffff;
+    const unsigned h1 = (__shfl_sync(0xffffffff, hi, src + 4) >> shift) & 0xffff;
+    b[0] = l0 | (l1 << 16);
+    b[1] = h0 | (h1 << 16);
+}
+
 // gmem-direct fragment loads — the fallback when an mma.sync operand was NOT
 // staged into shared memory (ldmatrix is smem-only, so we read the fragment
 // straight from gmem instead, replicating the PTX m16n8k16 lane→element map).
@@ -551,11 +691,13 @@ static __device__ __forceinline__ void emmy_mma_load_b_gmem(unsigned* r, const T
 // Masked-tile (M9) variants of the gmem-direct fragment loads: a tile straddling a masked axis's
 // bound would read rows / cols past the runtime-sized buffer, so the lane coordinate on the gated
 // axis clamps INTO the live range — ``left - 1`` (``left`` = in-range elements from the tile base)
-// where the fragment straddles the bound, the tile base where it OVERHANGS it entirely. The latter
-// is a tile wider than its axis (M=1 under a 128-row tile): ``left`` goes <= 0, and a bare
-// ``left - 1`` addresses tens of KB BELOW the buffer — an out-of-bounds read that faults the context
-// wherever that memory is unmapped. Clamped lanes read a duplicate in-bounds value — harmless,
-// their stores are masked by the RegStore guard (the tile path's ``clamp_last``, same contract).
+// where the fragment straddles the bound. A fragment that OVERHANGS the bound entirely (``left <= 0``:
+// a tile wider than its axis, M=1 under a 128-row tile, or 512 rows under eight 128-row warps) reads
+// nothing and zero-fills: no address is in range there. Clamping to ``left - 1`` read tens of KB below
+// the buffer, and clamping to the fragment base read past its end (an intermittent
+// CUDA_ERROR_ILLEGAL_ADDRESS, wherever that memory was unmapped). Clamped lanes read a duplicate
+// in-bounds value; zero-filled and clamped lanes alike have their stores masked by the RegStore
+// guard (the tile path's ``clamp_last``, same contract).
 template <typename T, typename F = T>
 static __device__ __forceinline__ void emmy_mma_load_a_gmem_mclamp(unsigned* r, const T* g, int ldm, int rows_left) {
     int lane = threadIdx.x & 31, grp = lane >> 2, tig = lane & 3;
@@ -565,9 +707,11 @@ static __device__ __forceinline__ void emmy_mma_load_a_gmem_mclamp(unsigned* r, 
         if (row >= rows_left) row = max(rows_left - 1, 0);   // M: clamp to the runtime extent
         int col = (tig << 1) + ((i & 2) ? 8 : 0);
         const T* p = g + row * ldm + col;
-        unsigned packed;
-        ((F*)&packed)[0] = F(p[0]);
-        ((F*)&packed)[1] = F(p[1]);
+        unsigned packed = 0u;
+        if (rows_left > 0) {  // wholly past the bound: read nothing
+            ((F*)&packed)[0] = F(p[0]);
+            ((F*)&packed)[1] = F(p[1]);
+        }
         r[i] = packed;
     }
 }
@@ -580,9 +724,11 @@ static __device__ __forceinline__ void emmy_mma_load_b_gmem_nclamp(unsigned* r, 
         int n = grp;
         if (n >= cols_left) n = max(cols_left - 1, 0);       // N: clamp to the runtime extent
         int k = (tig << 1) + (i ? 8 : 0);
-        unsigned packed;
-        ((F*)&packed)[0] = F(g[k * ldm + n]);
-        ((F*)&packed)[1] = F(g[(k + 1) * ldm + n]);
+        unsigned packed = 0u;
+        if (cols_left > 0) {  // wholly past the bound: read nothing
+            ((F*)&packed)[0] = F(g[k * ldm + n]);
+            ((F*)&packed)[1] = F(g[(k + 1) * ldm + n]);
+        }
         r[i] = packed;
     }
 }
@@ -619,9 +765,11 @@ static __device__ __forceinline__ void emmy_mma_load_b_gmem_trans_nclamp(unsigne
         int n = grp;
         if (n >= cols_left) n = max(cols_left - 1, 0);       // N: clamp to the runtime extent
         int k = (tig << 1) + (i ? 8 : 0);
-        unsigned packed;
-        ((F*)&packed)[0] = F(g[n * ldm + k]);
-        ((F*)&packed)[1] = F(g[n * ldm + k + 1]);
+        unsigned packed = 0u;
+        if (cols_left > 0) {  // wholly past the bound: read nothing
+            ((F*)&packed)[0] = F(g[n * ldm + k]);
+            ((F*)&packed)[1] = F(g[n * ldm + k + 1]);
+        }
         r[i] = packed;
     }
 }
@@ -659,8 +807,8 @@ static __device__ __forceinline__ void emmy_mma_load_a_gmem_mclamp_kzero(unsigne
         int col = (tig << 1) + ((i & 2) ? 8 : 0);
         const T* p = g + row * ldm + col;
         unsigned packed = 0;
-        if (col < k_left) ((F*)&packed)[0] = F(p[0]);
-        if (col + 1 < k_left) ((F*)&packed)[1] = F(p[1]);
+        if (rows_left > 0 && col < k_left) ((F*)&packed)[0] = F(p[0]);
+        if (rows_left > 0 && col + 1 < k_left) ((F*)&packed)[1] = F(p[1]);
         r[i] = packed;
     }
 }
@@ -690,8 +838,8 @@ static __device__ __forceinline__ void emmy_mma_load_b_gmem_nclamp_kzero(unsigne
         if (n >= cols_left) n = max(cols_left - 1, 0);
         int k = (tig << 1) + (i ? 8 : 0);
         unsigned packed = 0;
-        if (k < k_left) ((F*)&packed)[0] = F(g[k * ldm + n]);
-        if (k + 1 < k_left) ((F*)&packed)[1] = F(g[(k + 1) * ldm + n]);
+        if (cols_left > 0 && k < k_left) ((F*)&packed)[0] = F(g[k * ldm + n]);
+        if (cols_left > 0 && k + 1 < k_left) ((F*)&packed)[1] = F(g[(k + 1) * ldm + n]);
         r[i] = packed;
     }
 }
@@ -725,8 +873,8 @@ static __device__ __forceinline__ void emmy_mma_load_b_gmem_trans_nclamp_kzero(
         if (n >= cols_left) n = max(cols_left - 1, 0);       // N: clamp to the runtime extent
         int k = (tig << 1) + (i ? 8 : 0);
         unsigned packed = 0;
-        if (k < k_left) ((F*)&packed)[0] = F(g[n * ldm + k]);
-        if (k + 1 < k_left) ((F*)&packed)[1] = F(g[n * ldm + k + 1]);
+        if (cols_left > 0 && k < k_left) ((F*)&packed)[0] = F(g[n * ldm + k]);
+        if (cols_left > 0 && k + 1 < k_left) ((F*)&packed)[1] = F(g[n * ldm + k + 1]);
         r[i] = packed;
     }
 }
@@ -857,9 +1005,9 @@ static __device__ __forceinline__ void emmy_mma_load_a_gmem_mclamp_b8(unsigned* 
         int row = grp + ((i & 1) ? 8 : 0);
         if (row >= rows_left) row = max(rows_left - 1, 0);   // M: clamp to the runtime extent
         int col = (tig << 2) + ((i & 2) ? 16 : 0);
-        unsigned packed;
+        unsigned packed = 0u;
         #pragma unroll
-        for (int j = 0; j < 4; ++j) ((unsigned char*)&packed)[j] = p[row * ldm + col + j];
+        for (int j = 0; j < 4; ++j) if (rows_left > 0) ((unsigned char*)&packed)[j] = p[row * ldm + col + j];
         r[i] = packed;
     }
 }
@@ -873,9 +1021,9 @@ static __device__ __forceinline__ void emmy_mma_load_b_gmem_nclamp_b8(unsigned* 
         int n = grp;
         if (n >= cols_left) n = max(cols_left - 1, 0);       // N: clamp to the runtime extent
         int k = (tig << 2) + (i ? 16 : 0);
-        unsigned packed;
+        unsigned packed = 0u;
         #pragma unroll
-        for (int j = 0; j < 4; ++j) ((unsigned char*)&packed)[j] = p[(k + j) * ldm + n];
+        for (int j = 0; j < 4; ++j) if (cols_left > 0) ((unsigned char*)&packed)[j] = p[(k + j) * ldm + n];
         r[i] = packed;
     }
 }
@@ -889,9 +1037,9 @@ static __device__ __forceinline__ void emmy_mma_load_b_gmem_trans_nclamp_b8(unsi
         int n = grp;
         if (n >= cols_left) n = max(cols_left - 1, 0);       // N: clamp to the runtime extent
         int k = (tig << 2) + (i ? 16 : 0);
-        unsigned packed;
+        unsigned packed = 0u;
         #pragma unroll
-        for (int j = 0; j < 4; ++j) ((unsigned char*)&packed)[j] = p[n * ldm + k + j];
+        for (int j = 0; j < 4; ++j) if (cols_left > 0) ((unsigned char*)&packed)[j] = p[n * ldm + k + j];
         r[i] = packed;
     }
 }
@@ -1259,6 +1407,9 @@ _BUILTIN_TO_CUDA: dict[str, str] = {
 _BLOCK_SIZE = 256
 
 
+_GRID_DEPENDENCY = '#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900\n    asm volatile("griddepcontrol.wait;" ::: "memory");\n#endif\n'
+
+
 def render_kernelop(
     kernel_op: KernelOp,
     tensors: dict[str, Tensor] | None = None,
@@ -1266,6 +1417,8 @@ def render_kernelop(
     literal_constants: dict[str, float] | None = None,
     runtime_args: tuple[str, ...] = (),
     indirect_inputs: tuple[str, ...] = (),
+    paged_buffers: tuple[tuple[str, int, int, str | None], ...] = (),
+    starts: tuple[str, ...] = (),
 ) -> str:
     """Render a complete ``extern "C" __global__`` CUDA function for a ``KernelOp``.
 
@@ -1297,6 +1450,21 @@ def render_kernelop(
     ``kernel_op.inputs`` are ignored. Empty (the default) renders exactly
     the historical signature — non-indirect kernel sources stay
     byte-identical.
+
+    ``paged_buffers`` names buffers virtualized along one axis, as
+    ``(name, axis, page_size, start)``: instead of a plain pointer the signature
+    takes ``<n>__pages``, a table of equal-sized pages, and every read or
+    write resolves its page before its offset (see ``render_paged_access``)
+    — the KV cache, whose pages are allocated per request and are not one
+    contiguous block. Shapes are untouched, so the paged axis stays
+    ``kv_len`` everywhere above the load. ``start`` names an i64 scalar in
+    device memory, listed in ``starts``: the signature takes its pointer
+    (after the outputs, unless the body already loads it), the preamble
+    reads ``<start>__at`` from it once, and that is added to the paged
+    index before the split — the absolute position a cache write lands
+    at, with the step still one replayable graph whatever the position.
+    ``None`` addresses from page 0. Empty (the default) renders every
+    buffer flat.
 
     Kernel signature is derived from the body: ``kernel_op.inputs``
     (distinct ``Load.input`` names) become input params,
@@ -1337,20 +1505,39 @@ def render_kernelop(
             )
 
     indirect = tuple(n for n in kernel_op.inputs if n in indirect_inputs and n not in literals)
+    paged = {
+        n: Paged(n, axis, page, None if start is None else f"{start}__at")
+        for n, axis, page, start in paged_buffers
+        if n not in literals and (n in kernel_op.inputs or n in kernel_op.outputs)
+    }
+    ctx.memory = dict(paged)
     sig_parts = [
         f"const {cuda_name(_dtype_for(n))}* const* {n}__table, const int* {n}__sel, int {n}__slot"
         if n in indirect
-        else f"const {cuda_name(_dtype_for(n))}* {n}"
+        else f"const {cuda_name(_dtype_for(n))}* const* {n}__pages"
+        if n in paged
+        else f"const {cuda_name(_dtype_for(n))}* __restrict__ {n}"
         for n in kernel_op.inputs
         if n not in literals
     ]
-    sig_parts.extend(f"{cuda_name(_dtype_for(n))}* {n}" for n in kernel_op.outputs)
+
+    def _out_param(n: str) -> str:
+        """A paged output takes its page table; every other output stays a plain pointer."""
+        elem = cuda_name(_dtype_for(n))
+        return f"{elem}* const* {n}__pages" if n in paged else f"{elem}* __restrict__ {n}"
+
+    # Every plain buffer parameter is ``__restrict__``: a launch's output never shares memory with its
+    # inputs (the arena's live intervals end one launch past the last read, and a chained buffer
+    # joins two programs, never one launch's read and write), so the compiler may keep a read-only
+    # operand in registers across the kernel's stores and read it through the non-coherent path.
+    sig_parts.extend(_out_param(n) for n in kernel_op.outputs)
+    sig_parts.extend(f"const long long* {n}" for n in starts if n not in kernel_op.inputs)
     # TMA descriptors are passed as ``__grid_constant__`` value parameters.
     # The kernel only takes their address (``&desc``) for inline asm, so
     # the opaque ``CUtensorMap`` forward decl above suffices.
     desc_names = tuple(dict.fromkeys(s.name for s in kernel_op.body.iter_of_type(TmaDescriptor)))
     # Descriptors are passed by pointer (placed in global memory by the
-    # host) rather than ``__grid_constant__`` value parameters: cupy's
+    # host) rather than ``__grid_constant__`` value parameters: the runtime's
     # arg-packing path doesn't preserve the 64-byte alignment that
     # by-value ``CUtensorMap`` parameters require, so this avoids a
     # CUDA_ERROR_MISALIGNED_ADDRESS at launch.
@@ -1388,11 +1575,24 @@ def render_kernelop(
         # Indirect-operand preamble: resolve each marked input's base pointer from its device
         # table before any body statement runs; downstream loads use the plain name unchanged.
         body_text = "".join(f"    const {cuda_name(_dtype_for(n))}* {n} = {n}__table[{n}__sel[{n}__slot]];\n" for n in indirect) + body_text
+    if starts:
+        # A paged write's start read off the device: the position a step lands its rows at.
+        body_text = "".join(f"    const int {n}__at = (int){n}[0];\n" for n in starts) + body_text
+    # Programmatic dependent launch (sm_90+): wait for the grid ahead before any memory access (the
+    # preambles above already read device memory it may write). A no-op without the launch attribute.
+    # No kernel releases its dependent early (``griddepcontrol.launch_dependents``): a dependent
+    # launched while its predecessor still runs places its blocks on the few SMs free at that moment,
+    # and a 128-block GEMM stacked that way ran 3-4x slower once released (s512 layer 133 -> 192 us).
+    # Released at the predecessor's exit, it still overlaps the launch with the predecessor's drain.
+    body_text = _GRID_DEPENDENCY + body_text
     prelude = _TMA_PRELUDE if desc_names else ""
     sig_dtypes = [_dtype_for(n) for n in kernel_op.inputs if n not in literals]
     sig_dtypes.extend(_dtype_for(n) for n in kernel_op.outputs)
     sig_dtypes.extend(s.dtype for s in kernel_op.body.iter_of_type(Assign) if s.dtype is not None)
+    sig_dtypes.extend(frag_dtype(ctx, s.frag) for s in kernel_op.body.iter_of_type(LdmatrixLoad) if frag_dtype(ctx, s.frag))
     includes = "".join(f"#include {h}\n" for h in cuda_includes(sig_dtypes))
+    if any(str(dtype) == "f8e4m3" for dtype in sig_dtypes):
+        includes += _F8_DECODE_PRELUDE
     # The mma.sync (s16816) tensor-core path is pure inline PTX — its
     # ldmatrix / mma.sync wrappers are emitted in ``_MMA_SYNC_PRELUDE``, so
     # NVRTC needs no ``<mma.h>`` (the legacy ``nvcuda::wmma`` family is gone).
@@ -1400,7 +1600,11 @@ def render_kernelop(
 
     mma_stmts = tuple(s for s in kernel_op.body.iter() if isinstance(s, MmaSyncPtx))
     uses_m8n8k4 = any(s.shape == (8, 8, 4) for s in mma_stmts)
-    uses_modern_mma = any(s.shape != (8, 8, 4) for s in mma_stmts)
+    # A register-form ``wgmma`` cell reads the ``m16n8k16`` A fragment, loaded and repacked by the same
+    # wrappers, so a kernel whose every cell is warp-group still needs them.
+    uses_modern_mma = any(s.shape != (8, 8, 4) for s in mma_stmts) or any(
+        isinstance(s, (LdmatrixLoad, FragmentRepack)) and s.fragment_layout != "m8n8k4" for s in kernel_op.body.iter()
+    )
     mma_sync_prelude = (_MMA_M8N8K4_PRELUDE if uses_m8n8k4 else "") + (_MMA_SYNC_PRELUDE if uses_modern_mma else "")
     # The fp8 wrappers + byte-gather loaders join only when an fp8 mma is present, so every
     # 16-bit mma kernel's source stays byte-identical (the kernel-source digest gate). The

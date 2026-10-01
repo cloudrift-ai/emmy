@@ -23,37 +23,12 @@ import pytest
 from tests.compiler.helpers import requires_cuda
 
 
-def test_oneshot_compare_worker_uses_selected_device(monkeypatch) -> None:
-    from emmy.compiler.backend.cuda import program
-
-    seen = []
-
-    class Worker:
-        def __init__(self, *, device_id=None):
-            seen.append(("init", device_id))
-
-        async def run_job(self, request, *, wall_timeout_s):
-            seen.append(("run", request, wall_timeout_s))
-            return {"ok": True}
-
-        async def aclose(self):
-            seen.append(("close",))
-
-    monkeypatch.setattr(program, "_AsyncBenchWorker", Worker)
-
-    result = asyncio.run(program._run_job_oneshot({"job": "compare"}, wall_timeout_s=5.0, device_id=3))
-
-    assert result == {"ok": True}
-    assert seen == [("init", 3), ("run", {"job": "compare"}, 5.0), ("close",)]
-
-
 def test_oneshot_compare_wrapper_returns_accuracy_error(monkeypatch) -> None:
     from emmy.compiler.backend.cuda import program
 
-    async def _fake_oneshot(request, *, wall_timeout_s, device_id=None):
+    async def _fake_oneshot(request, *, wall_timeout_s):
         assert request["torch_spec"] == ("frontend_graph", "FE")
         assert wall_timeout_s == 5.0
-        assert device_id == 2
         return {
             "results": {"Emmy": 2.0},
             "result": "BENCH",
@@ -72,7 +47,6 @@ def test_oneshot_compare_wrapper_returns_accuracy_error(monkeypatch) -> None:
             warmup=1,
             iters=1,
             seed=0,
-            device_id=2,
         )
     )
 
@@ -243,12 +217,10 @@ class _HangWorker:
     _CHILD = textwrap.dedent(
         """
         import emmy.compiler.backend.cuda._bench_worker as w
-        import cupy
+        import torch
         def _hang(req):
-            spin = cupy.RawKernel(r'extern "C" __global__ void spin(volatile int* f){ while(f[0]==0){} }', 'spin')
-            flag = cupy.zeros(1, dtype=cupy.int32)   # never set → infinite loop
-            spin((1,), (1,), (flag,))
-            cupy.cuda.runtime.deviceSynchronize()    # blocks forever on the hung kernel
+            torch.cuda._sleep(2**62)   # a spin kernel that outlives any wall budget
+            torch.cuda.synchronize()   # blocks on the hung kernel
             return {}
         w._run_job = _hang
         w.main()
@@ -471,7 +443,7 @@ def test_run_job_trace_args_accuracy_gates_the_bench(monkeypatch) -> None:
 
     benched: list = []
 
-    async def _fake_full_model(module, args_t, kwargs, graph, backend, *, warmup, iters, bench_backends):
+    async def _fake_full_model(module, args_t, kwargs, graph, backend, *, warmup, iters, bench_backends, input_data=None):
         benched.append(graph)
         return {"Emmy": 1.0}, SimpleNamespace(captured=True), True
 
@@ -518,7 +490,7 @@ def test_run_job_trace_args_want_ref_without_eager_accuracy(monkeypatch) -> None
         def run(self, graph, *, input_data=None):
             return SimpleNamespace(outputs={"n0": [2.0]}), None
 
-    async def _fake_full_model(module, args_t, kwargs, graph, backend, *, warmup, iters, bench_backends):
+    async def _fake_full_model(module, args_t, kwargs, graph, backend, *, warmup, iters, bench_backends, input_data=None):
         return {"Emmy": 1.0}, SimpleNamespace(captured=True), True
 
     monkeypatch.setattr(compile_mod, "load_or_trace", lambda ns: (None, None, (object(), (), {})))
@@ -641,6 +613,56 @@ def test_embedded_reference_survives_later_greedy_timing_failure(monkeypatch) ->
     assert response["result"] is None and response["results"] is None
 
 
+@pytest.mark.parametrize("strict", [False, True])
+@pytest.mark.parametrize("fails", [False, True])
+@pytest.mark.parametrize("initial", [(True, True), (False, False)])
+def test_strict_reference_precision_is_scoped_to_worker_job(monkeypatch, request, strict, fails, initial) -> None:
+    import torch
+
+    from emmy.commands import run as run_mod
+    from emmy.compiler.backend.cuda import _bench_worker
+    from emmy.compiler.backend.cuda import backend as backend_mod
+
+    matmul = torch.backends.cuda.matmul
+    fp16 = torch._C._get_cublas_allow_fp16_reduced_precision_reduction()
+    bf16 = torch._C._get_cublas_allow_bf16_reduced_precision_reduction()
+    request.addfinalizer(lambda: setattr(matmul, "allow_fp16_reduced_precision_reduction", fp16))
+    request.addfinalizer(lambda: setattr(matmul, "allow_bf16_reduced_precision_reduction", bf16))
+    setting = initial if hasattr(matmul, "allow_fp16_reduced_precision_reduction_split_k") else initial[0]
+    matmul.allow_fp16_reduced_precision_reduction = setting
+    matmul.allow_bf16_reduced_precision_reduction = setting
+
+    async def compare(*_args, **_kwargs):
+        assert matmul.allow_fp16_reduced_precision_reduction == (initial[0] and not strict)
+        assert matmul.allow_bf16_reduced_precision_reduction == (initial[0] and not strict)
+        assert getattr(matmul, "allow_fp16_reduced_precision_reduction_split_k", initial[1]) == initial[1]
+        assert getattr(matmul, "allow_bf16_reduced_precision_reduction_split_k", initial[1]) == initial[1]
+        if fails:
+            raise RuntimeError("comparison failed")
+        return {}, None, True, True, None, None, None
+
+    monkeypatch.setattr(backend_mod, "CudaBackend", lambda **_kwargs: object())
+    monkeypatch.setattr(run_mod, "bench_lowered_vs_torch", compare)
+    request = {
+        "graph": "LOWERED",
+        "torch_spec": ("frontend_graph", "FRONTEND"),
+        "bench_backends": "eager,emmy",
+        "warmup": 1,
+        "iters": 1,
+        "seed": 0,
+        "strict_accuracy": strict,
+    }
+    if fails:
+        with pytest.raises(RuntimeError, match="comparison failed"):
+            asyncio.run(_bench_worker._run_job(request))
+    else:
+        asyncio.run(_bench_worker._run_job(request))
+    assert matmul.allow_fp16_reduced_precision_reduction == initial[0]
+    assert matmul.allow_bf16_reduced_precision_reduction == initial[0]
+    assert getattr(matmul, "allow_fp16_reduced_precision_reduction_split_k", initial[1]) == initial[1]
+    assert getattr(matmul, "allow_bf16_reduced_precision_reduction_split_k", initial[1]) == initial[1]
+
+
 def test_frontend_graph_worker_returns_execution_symbolic_environment(monkeypatch) -> None:
     from types import SimpleNamespace
 
@@ -690,3 +712,44 @@ def test_worker_hang_is_sigkilled_not_wedged() -> None:
     elapsed = time.time() - t0
     assert elapsed < 30.0, f"run_job took {elapsed:.1f}s — the wall-timeout SIGKILL did not fire promptly"
     assert worker.proc is None, "the hung worker must be killed and its handle released"
+
+
+async def test_worker_applies_each_requested_fast_math_policy(monkeypatch):
+    from emmy.compiler.backend import BenchmarkResult
+    from emmy.compiler.backend.cuda import _bench_worker, nvcc, program
+
+    monkeypatch.setenv("EMMY_FAST_MATH", "1")
+    monkeypatch.setenv("EMMY_NVCC_FLAGS", "--fmad=false")
+    seen = []
+
+    def benchmark(*args, **kwargs):
+        seen.append(nvcc.effective_flags())
+        return BenchmarkResult(time_ms=1, min_ms=1, num_launches=1, per_launch=[])
+
+    monkeypatch.setattr(program, "benchmark_program", benchmark)
+    for enabled in (False, True, False):
+        await _bench_worker._run_job({"graph": None, "kwargs": {}, "fast_math": enabled})
+        assert nvcc.effective_flags() == ["--use_fast_math", "--fmad=false"]
+    assert seen == [["--fmad=false"], ["--use_fast_math", "--fmad=false"], ["--fmad=false"]]
+
+
+def test_unsupplied_inputs_fill_with_seeded_normal_values() -> None:
+    """A bench with no inputs times seeded normal values, not a short periodic ramp: a kernel's
+    cost can depend on its values, and the ramp drove a layer's softmax rows into the IEEE
+    division's slow path. Each buffer draws its own stream, deterministically."""
+    import numpy as np
+
+    from emmy.compiler.backend.cuda.program import _host_bytes
+    from emmy.compiler.backend.plan import BufferSpec
+    from emmy.compiler.dim import Dim
+    from emmy.compiler.dtype import F16
+
+    def fill(name: str) -> np.ndarray:
+        buf = BufferSpec(name=name, shape=(Dim(4096),), dtype=F16, role="input")
+        return np.frombuffer(_host_bytes(buf, (4096,), None, {}), dtype=np.float16)
+
+    x = fill("x")
+    assert np.array_equal(x, fill("x")), "the fill is deterministic"
+    assert not np.array_equal(x, fill("w")), "each buffer draws its own stream"
+    assert np.isfinite(x).all() and 0.8 < float(x.astype(np.float32).std()) < 1.2
+    assert not np.array_equal(x[:101], x[101:202]), "no short period"

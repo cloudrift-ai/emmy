@@ -363,3 +363,22 @@ CASES = [
 def test_op(case: Case, run_graph):
     graph, inputs, expected = case.build()
     np.testing.assert_allclose(_run(run_graph, graph, inputs), expected, rtol=case.rtol, atol=case.atol)
+
+
+@pytest.mark.parametrize("shape,index_shape,axis", [((4, 8), (4, 3), 1), ((16, 4), (1, 5), 0), ((2, 8), (), -1)])
+def test_negative_gather(shape, index_shape, axis, run_graph):
+    data = _normal(*shape)
+    indices = rng.integers(-shape[axis], 0, size=index_shape)
+    normalized = torch.as_tensor(indices + shape[axis]).long()
+    tensor = torch.from_numpy(data)
+    if len(shape) == len(index_shape) and all(index_shape[k] == shape[k] for k in range(len(shape)) if k != axis):
+        expected = tensor.gather(axis, normalized)
+    else:
+        output_shape = (*shape[: axis % len(shape)], *index_shape, *shape[axis % len(shape) + 1 :])
+        expected = tensor.index_select(axis, normalized.reshape(-1)).reshape(output_shape)
+    graph = _graph(
+        [_in("data", shape), _in("indices", index_shape), (GatherOp(axis=axis), ["data", "indices"], "out", expected.shape)],
+        ["data", "indices"],
+        ["out"],
+    )
+    np.testing.assert_array_equal(_run(run_graph, graph, {"data": data, "indices": indices}), expected.numpy())

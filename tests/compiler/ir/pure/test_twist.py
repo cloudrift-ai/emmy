@@ -11,14 +11,14 @@ import pytest
 
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.pure.twist import RECIPES, SOFTMAX, WELFORD, Recipe
-from emmy.compiler.ir.stmt import Const
+from emmy.compiler.ir.stmt import Let
 
 
 def _eval(lam, args: tuple) -> tuple:
-    """Evaluate a pure lambda on floats — the ANF chain of ``Assign``s and ``Const`` defs."""
+    """Evaluate a pure lambda on floats — the ANF chain of ``Assign``s and ``Let`` defs."""
     env = dict(zip(lam.params, args, strict=True))
     for stmt in lam.body:
-        env[stmt.name] = stmt.value if isinstance(stmt, Const) else stmt.op(*(env[arg] for arg in stmt.args))
+        env[stmt.name] = stmt.value.value if isinstance(stmt, Let) else stmt.op(*(env[arg] for arg in stmt.args))
     return tuple(env[result] for result in lam.results)
 
 

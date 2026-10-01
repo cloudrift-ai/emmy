@@ -20,11 +20,11 @@ from dataclasses import replace
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.pure.twist import SOFTMAX, Twist
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Const, Loop, OutputSpec, Write
-from tests.compiler.terms import contraction, reduction, slab
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Let, Load, Loop, OutputSpec, Write
+from tests.compiler.terms import contraction, projection, reduction, slab
 
 M_AXIS, N_AXIS, K_AXIS = Axis("m", Dim(8)), Axis("n", Dim(4)), Axis("k", Dim(16))
 SCOPE = (M_AXIS, N_AXIS, K_AXIS)
@@ -97,6 +97,29 @@ def test_a_multi_channel_term_puts_the_shared_operand_first_at_formation() -> No
     fold = Fold(operands=(g, u, x), lift=lift, init=init, base=combine)
     assert fold.operands == (x, g, u) and fold.lift.params == ("k", "l", "g", "u")
     assert fold.as_contraction() is not None
+
+
+# --- what a term is evaluated over ---------------------------------------------------------------- #
+
+
+def test_a_value_a_sibling_operand_produces_is_not_a_free_coordinate() -> None:
+    """``free_axes`` rolls up its operands' free coordinates, and one operand can READ a value a
+    sibling exposes — a mask fill's triple feeding both the score and the expectation. The reader
+    has nothing below it defining that name, so it surfaces in the reader's own ``free_axes``; it
+    is still not a coordinate, because this term binds it and the sibling computes it.
+
+    Counting it as one made ``lower`` demand a loop extent for a value — ``no extent for
+    coordinates ['in5']`` — and refuse an otherwise well-formed cut. On Qwen3.8-27B's layer-3
+    attention that took every cheap cut set off the ballot and left only a 24-kernel over-cut."""
+    fills = projection(body=(Let(name="fill", value=-1e30), Let(name="zero", value=0.0)), results=("fill", "zero"))
+    reader = projection(
+        operands=(slab("s", "x", "m", "k"),),
+        body=(Assign(name="masked", op="add", args=("s", "fill")),),
+        results=("masked",),
+    )
+    whole = projection(operands=(fills, reader), body=(Assign(name="out", op="add", args=("fill", "masked")),))
+    assert "fill" in reader.free_axes, "the reader alone cannot see what defines the name"
+    assert whole.free_axes == frozenset({"m", "k"})
 
 
 # --- the binding contract ------------------------------------------------------------------------ #
@@ -180,6 +203,14 @@ def test_sweeps_no_term_shares_are_sibling_loops_and_a_reader_makes_them_a_chain
     assert [loop.axis.name for loop in m_loop.body] == ["q", "n"]
     assert all(_chain(loop.body) == ["k"] for loop in m_loop.body)
 
+    # A multi-output root's constant result reads none of its parameters: still a wrapper, placed
+    # ahead of the loops, which stay siblings rather than nesting every sweep inside every other.
+    constant = Body((Load(name="z", input="zero", index=(Literal(0, "int"),), dtype="float32"),))
+    rooted = Fold(operands=(over_q, over_n), lift=Lambda.closing(("sq", "sn"), constant, ("z",)))
+    stores = tuple(OutputSpec(write=Write(output=f"o{v}", index=(Var("m"), Var(v)), value=f"s{v}")) for v in ("q", "n"))
+    ahead, m_loop = rooted.lower(frozenset(), stores, axes=scope)
+    assert isinstance(ahead, Load) and [loop.axis.name for loop in m_loop.body] == ["q", "n"]
+
     total = Body((Assign(name="t", op="add", args=("sq", "sn")),))
     reader = Fold(operands=(over_q, over_n), lift=Lambda.closing(("sq", "sn"), total, ("t",)))
     (m_loop,) = reader.lower(frozenset(), axes=scope)
@@ -200,6 +231,15 @@ def test_a_store_follows_the_term_defining_its_value_at_that_terms_scope() -> No
     (n_loop,) = m_loop.body
     assert [type(stmt).__name__ for stmt in n_loop.body] == ["Loop", "Write"] and n_loop.body[-1] == store.write
     assert mm.lower(mm.free_axes, (store,), axes=SCOPE) == Body((*mm.lower(axes=SCOPE), store.write))
+
+
+def test_a_shared_term_and_its_boundary_store_are_emitted_once() -> None:
+    total, swept = _normalized_sum()
+    root = projection(operands=(total, swept), body=(Assign(name="out", op="add", args=("tot", "acc")),), results=("out",))
+    store = OutputSpec(write=Write(output="stats", index=(Var("m"),), value="tot", atomic=True))
+    body = root.lower(root.free_axes, (store,), axes=SCOPE)
+    assert len(body.writes) == 1
+    assert [stmt.name for stmt in body.accums].count("tot") == 1
 
 
 def test_a_sweep_store_rides_the_loop_the_term_opened() -> None:
@@ -244,6 +284,7 @@ def test_an_observed_store_rides_the_reduce_loop_after_the_observer() -> None:
     observe = Lambda(params=("k", "acc"), body=Body((Assign(name="acc__obs", op="copy", args=("acc",)),)), results=("acc__obs",))
     lift = Lambda.closing(("k", "y"), Body((Assign(name="acc__v", op="copy", args=("y",)),)), ("acc__v",))
     scan = Fold(operands=(slab("y", "y", "m", "k"),), lift=lift, init=init, base=combine, observe=observe)
+    assert scan.exposing(("acc__obs",)) is scan
     store = OutputSpec(write=Write(output="o", index=(Var("m"), Var("k")), value="acc__obs"))
     (loop,) = scan.lower(scan.free_axes, (store,), axes=SCOPE)
     assert [type(stmt).__name__ for stmt in loop.body] == ["Load", "Assign", "Accum", "Assign", "Write"]
@@ -256,11 +297,33 @@ def _twisted(states: tuple[str, str] = ("m", "l")) -> Fold:
     """The exp-family ``(m, l)`` carrier in STABLE coordinates: the lift contributes the singleton
     ``(score, 1)`` the carrier's own ⊕ folds, and naming the softmax recipe is what derives both
     that ⊕ and the base reading ``(score, exp score)`` a matcher asks for."""
-    body = Body((Assign(name="s", op="copy", args=("y",)), Const(name="one", value=1.0)))
+    body = Body((Assign(name="s", op="copy", args=("y",)), Let(name="one", value=1.0)))
     lift = Lambda.closing(("k", "y"), body, ("s", "one"))
     base = Lambda.componentwise(SOFTMAX.base[:2], states)
     twist = Twist(recipe=SOFTMAX, channels=(0,))
     return Fold(operands=(slab("y", "y", "m", "k"),), lift=lift, init=(-1e30, 0.0), base=base, twist=twist)
+
+
+def test_twisted_components_cannot_be_pruned_independently() -> None:
+    fold = _twisted()
+    assert fold.exposing(("l",)) is fold
+
+
+def test_shared_channels_are_lowered_once_across_partial_readers() -> None:
+    shared = contraction(
+        K_AXIS,
+        slab("x", "x", "m", "k"),
+        *((slab(name, name, "k", "n"), f"acc_{name}") for name in ("a", "b", "c", "unused")),
+    )
+    left = projection((shared,), (Assign(name="left", op="add", args=("acc_a", "acc_b")),))
+    right = projection((shared,), (Assign(name="right", op="multiply", args=("acc_b", "acc_c")),))
+    dead = _reduce((slab("dead_value", "unused", "m", "k"),), (Assign(name="dead__v", op="copy", args=("dead_value",)),), "dead")
+    root = projection((left, right, dead), results=("left", "right"))
+
+    body = root.lower(axes=SCOPE)
+    accumulators = [stmt.name for stmt in body.iter() if isinstance(stmt, Accum)]
+    assert sorted(accumulators) == ["acc_a", "acc_b", "acc_c"]
+    assert "unused" not in {stmt.input for stmt in body.iter() if isinstance(stmt, Load)}
 
 
 def test_a_twisted_state_spelling_never_reaches_the_canonical_form() -> None:
@@ -382,3 +445,19 @@ def test_exposing_restricts_a_projection_whose_results_are_its_bound_params() ->
     restricted = wrapper.exposing(("acc_r__ws",))
     assert restricted.exposes == ("acc_r__ws",)
     assert restricted.lift.results == ("acc_r",), "the lift keeps its own spelling of the result it now exposes"
+
+
+def test_per_state_keeps_operands_passed_directly_to_the_combine():
+    """A sum over a loaded value has no lift statements; its result still reads the operand."""
+    left, right = slab("left", "x", "m", "k"), slab("right", "y", "n", "k")
+    fold = Fold(
+        operands=(left, right),
+        lift=Lambda.closing(("k", "in0", "in1"), Body(()), ("in0", "in1")),
+        init=(0.0, 0.0),
+        base=Lambda.componentwise(("add", "add"), ("row", "column")),
+    )
+    split = fold.per_state()
+    assert split is not None
+    assert tuple(child.free_axes for child in split.operands) == (frozenset({"m"}), frozenset({"n"}))
+    assert split.free_axes == fold.free_axes
+    split.lower(frozenset(), axes=SCOPE)

@@ -24,7 +24,8 @@ from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.tensor.ir import ReduceOp
 from emmy.compiler.pipeline import TILE_PASSES, Pipeline
-from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams
+from emmy.compiler.pipeline.passes.tile._cut import cuttable_seams
+from emmy.compiler.pipeline.passes.tile._fromloop import lift_loop_op
 from tests.compiler.terms import contraction
 
 
@@ -45,7 +46,7 @@ def _tile(body: Body):
     graph = Graph()
     graph.add_node(LoopOp(body=body), [], Tensor("out", (1,)), node_id="out")
     graph.outputs = ["out"]
-    return Pipeline.build(["lowering/tile"], select=["lift"]).run(graph).nodes["out"].op
+    return Pipeline.build(["tile/lift"], select=["lift"]).run(graph).nodes["out"].op
 
 
 def _matmul_body(epilogue=(), k_extent: int = 128) -> Body:
@@ -245,9 +246,9 @@ def test_sibling_q_and_kv_regions_total_lift_with_separate_outputs() -> None:
     # store does not ride kv, nor the k/v stores q — so post-init leaves both as sweeps: promoting
     # one would evaluate the other region once per cell of it. The row alone is on the grid.
     assert tile.op.axis is None and not tile.op.lift.body
-    assert [(edge.as_contraction() is not None, len(edge.exposes)) for edge in tile.op.operands] == [(True, 1), (True, 2)]
+    assert sorted((edge.as_contraction() is not None, len(edge.exposes)) for edge in tile.op.operands) == [(True, 1), (True, 2)]
     assert [axis.extent for axis in tile.place.free] == [Dim(3)]
-    assert [tuple(axis.extent for axis in spec.sweep) for spec in tile.output_specs] == [(Dim(4),), (Dim(2),), (Dim(2),)]
+    assert [tuple(axis.extent for axis in spec.sweep) for spec in tile.output_specs] == [(Dim(2),), (Dim(2),), (Dim(4),)]
     # The closed program opens the two sweeps as SIBLING loops under the row: no term is evaluated
     # over both, so neither nests in the other.
     (m_loop,) = tile.loop_body
@@ -295,6 +296,63 @@ def test_an_output_sweeps_epilogue_lifts_to_a_term_declaring_the_sweep_axis() ->
     (spec,) = tile.output_specs
     assert spec.write.values == epilogue.exposes and spec.sweep == ()
     assert [type(stmt).__name__ for stmt in tile.op.lower(_grid(tile), tile.output_specs, tile.axes)] == ["Loop", "Load", "Assign", "Write"]
+
+
+def test_nested_output_sweep_preserves_an_intermediate_value() -> None:
+    """A cell stores both its transformed result and an intermediate broadcast by a nested sweep."""
+    cell = Body(
+        (
+            Load(name="xv", input="x", index=(Var("m"), Var("k"))),
+            Assign(name="v", op="multiply", args=("scale", "xv")),
+            Assign(name="q", op="exp", args=("v",)),
+            Write(output="coded", index=(Var("m"), Var("k")), value="q"),
+            Loop(
+                axis=Axis("n", 4),
+                body=Body((Write(output="broadcast", index=(Var("m"), Var("k"), Var("n")), value="v"),)),
+            ),
+        )
+    )
+    body = Body(
+        (
+            Loop(
+                axis=Axis("m", 2),
+                body=Body(
+                    (
+                        Load(name="scale", input="s", index=(Var("m"),)),
+                        Loop(axis=Axis("k", 3), body=cell),
+                    )
+                ),
+            ),
+            Loop(
+                axis=Axis("r", 5),
+                body=Body(
+                    (
+                        Load(name="zv", input="z", index=(Var("r"),)),
+                        Write(output="tail", index=(Var("r"),), value="zv"),
+                    )
+                ),
+            ),
+        )
+    )
+    graph = Graph()
+    for name, shape in {"s": (2,), "x": (2, 3), "z": (5,)}.items():
+        graph.add_node(InputOp(), [], Tensor(name, shape), node_id=name)
+    outputs = [Tensor("coded", (2, 3)), Tensor("broadcast", (2, 3, 4)), Tensor("tail", (5,))]
+    loop = LoopOp(body=body, inputs={name: graph.buffer(name) for name in ["s", "x", "z"]}, outputs={t.name: t for t in outputs})
+    tile = lift_loop_op(loop)
+    graph.add_node(LoopOp(body=tile.loop_body, inputs=loop.inputs, outputs=loop.outputs), ["s", "x", "z"], outputs=outputs, node_id="coded")
+    graph.inputs, graph.outputs = ["s", "x", "z"], ["coded", "broadcast", "tail"]
+    values = {
+        "s": np.array([0.5, -0.25], dtype=np.float32),
+        "x": np.arange(6, dtype=np.float32).reshape(2, 3),
+        "z": np.arange(5, dtype=np.float32),
+    }
+    backend = NumpyBackend()
+    got = backend.run(backend.compile(graph), input_data=values)[0].outputs
+    intermediate = values["s"][:, None] * values["x"]
+    np.testing.assert_allclose(got["coded"], np.exp(intermediate), rtol=1e-6)
+    np.testing.assert_array_equal(got["broadcast"], np.broadcast_to(intermediate[..., None], (2, 3, 4)))
+    np.testing.assert_array_equal(got["tail"], values["z"])
 
 
 # ===================================================================
@@ -358,7 +416,7 @@ def test_multi_pass_cell_defines_every_name_before_it_is_read() -> None:
         "torch.randn(1, 1, 8, 4, dtype=torch.float16))"
     )
     graph = Pipeline.build(LOOP_PASSES).run(graph)
-    graph = Pipeline.build(["lowering/tile"], select=["lift"]).run(graph)
+    graph = Pipeline.build(["tile/lift"], select=["lift"]).run(graph)
     tiles = [node.op for node in graph.nodes.values() if isinstance(node.op, TileOp)]
     assert tiles, "SDPA produced no Tile IR"
 
@@ -383,7 +441,7 @@ def _tile_with_shapes(body: Body, out_shape: tuple, inputs: dict) -> object:
         graph.add_node(InputOp(), [], Tensor(name, shape), node_id=name)
     graph.add_node(LoopOp(body=body), list(inputs), Tensor("out", out_shape), node_id="out")
     graph.outputs = ["out"]
-    return Pipeline.build(["lowering/tile"], select=["lift"]).run(graph).nodes["out"].op
+    return Pipeline.build(["tile/lift"], select=["lift"]).run(graph).nodes["out"].op
 
 
 def _decode_body() -> Body:
@@ -410,8 +468,8 @@ def test_a_contraction_with_no_row_binds_the_size_one_output_coordinate() -> Non
     and the lift binds it back — into the OPERAND's index too, since a row an operand never reads
     leaves ``left_axes`` empty and is refused just the same.
 
-    ``_implicit_unit_row`` cannot serve this shape: it proves a row only from a leading zero prefix
-    and a dense column, which the head coordinate between the zeros denies.
+    ``_implicit_unit_row`` cannot serve this shape: A reads the shared head coordinate, so the
+    missing row must be bound into its index rather than merely announced in the placement.
     """
     tile = _tile_with_shapes(_decode_body(), (1, 8, 1, 16), {"q": (1, 8, 1, 32), "v": (1, 8, 32, 16)})
     bound = [axis for axis in tile.place.free if axis.extent == Dim(1)]

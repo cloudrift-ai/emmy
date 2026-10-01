@@ -1,4 +1,4 @@
-.PHONY: help setup setup-agent clean bench bench-force bench-kernels bench-kernels-tune test-compose test-durations test-corpus-regen test-goldens lint format git-sha-guard pypi-dist \
+.PHONY: help setup setup-agent clean bench bench-force bench-kernels bench-kernels-tune test-compose test-durations test-corpus-regen lint format git-sha-guard pypi-dist \
 	serve-models serve-config serve-config-guard serve-goldens serve-warm serve-image serve-verify serve-push
 
 help:
@@ -23,7 +23,6 @@ help:
 	@echo "  serve-models    - List the models with a pinned release config"
 	@echo "  test-durations - Re-measure tests/durations.json (the CI test-balancing baseline)"
 	@echo "  test-corpus-regen - Restamp the realization corpus after an identity / codec change (COMPLETE=1 adds entries)"
-	@echo "  test-goldens   - Strict-decode the checked-in model goldens (off the default lane, no GPU needed)"
 	@echo "  clean          - Remove virtual environment and generated files"
 	@echo "  test-compose   - Test docker-compose generation with sample config"
 
@@ -31,13 +30,15 @@ setup: venv/.setup-complete
 
 setup-agent: venv/.setup-agent-complete
 
-venv/.setup-agent-complete: pyproject.toml
+# The agent workflows install the exact workflow commit (AGENT_SOURCE), not the checked-out branch.
+AGENT_SOURCE ?= .
+venv/.setup-agent-complete: $(AGENT_SOURCE)/pyproject.toml
 	@if [ ! -x "venv/bin/python" ]; then \
 		echo "Creating virtual environment..."; \
 		python3.12 -m venv venv --prompt "emmy"; \
 	fi
 	@echo "Installing API-agent workflow dependencies..."
-	./venv/bin/pip install -e .
+	./venv/bin/pip install -e "$(AGENT_SOURCE)"
 	@touch $@
 
 # Keep the completion marker inside the venv so an interrupted dependency install
@@ -48,7 +49,7 @@ venv/.setup-complete: pyproject.toml
 		echo "Creating virtual environment..."; \
 		python3.12 -m venv venv --prompt "emmy"; \
 	fi
-	@echo "Installing Python dependencies..."
+	@echo "Installing Python dependencies (builds the runtime extension with cargo)..."
 	./venv/bin/pip install -e ".[dev]"
 	@touch $@
 
@@ -61,10 +62,22 @@ setup-ci:
 lint: setup
 	./venv/bin/ruff check
 	./venv/bin/ruff format --check
+	./venv/bin/python -m json.tool --sort-keys --indent 1 tests/durations.json | diff -u tests/durations.json -
+
+.PHONY: test-native lint-native
+test-native:
+	cargo test --workspace --locked
+	cargo build --release --locked --workspace
+	PATH="$(CURDIR)/target/release:$$PATH" ./venv/bin/pytest -n 2 --dist=loadgroup tests/compiler/backend/test_native.py tests/compiler/backend/test_native_gpu.py tests/serving/native/test_prepare.py tests/serving/native/test_generation_gpu.py tests/serving/native/test_launch.py tests/serving/native/test_text.py tests/serving/native/test_server_gpu.py
+
+lint-native:
+	cargo fmt --all --check
+	cargo clippy --workspace --all-targets --locked -- -D warnings
 
 format: setup
 	./venv/bin/ruff format
 	./venv/bin/ruff check --fix
+	./venv/bin/python -m json.tool --sort-keys --indent 1 tests/durations.json tests/durations.json
 
 # Compile CUDA kernels at -Xcicc -O1: the CORRECTNESS lane — -O1 changes runtime perf,
 # not numerics, and the deployable perf tests (tests/perf, -m perf) run at -O3 via
@@ -87,15 +100,6 @@ test: setup
 test-corpus-regen: setup
 	./venv/bin/python -m tests.compiler.realization.regen $(if $(COMPLETE),--complete,)
 
-# Strict-decode the checked-in MODEL goldens. Off the default lane: a model inventory is hundreds
-# of rows and the widest file is a multi-megabyte parse. Run it after a tuning round has
-# re-recorded a card's rows, to see which files the compiler can replay again. Needs no GPU —
-# decoding targets each record's DECLARED capability, so a stale row is detectable anywhere;
-# re-recording it is what needs the card. The hardware goldens are decoded row by row by
-# `make test`.
-test-goldens: setup
-	./venv/bin/pytest tests/compiler/pipeline/search/test_golden.py -m goldens -n auto --dist=loadgroup -v -p no:randomly --no-header
-
 # Regenerate tests/durations.json — the checked-in per-test timings the conftest
 # LPT-buckets on, so CI's first (cache-less) run is balanced. Runs through one xdist
 # worker: loadgroup stamps the canonical @cuda group suffixes the parallel suite
@@ -111,35 +115,32 @@ bench-kernels-clean: setup
 	@rm -f /tmp/emmy-gpu.lock
 	./venv/bin/pytest tests/perf/ -m perf -n 4 --dist=loadgroup -v -p no:randomly --no-header
 
-bench-kernels-tuned: setup
-	@rm -f /tmp/emmy-gpu.lock
-	@test -f ~/.cache/emmy/tune-kernels.db || (echo "The kernel tuning DB not foud; run make tune-kernels"; exit 1)
-	EMMY_TUNE_DB=~/.cache/emmy/tune-kernels.db ./venv/bin/pytest tests/perf/ -m perf -n 4 --dist=loadgroup -v -p no:randomly --no-header
-
-tune-kernels: setup
-	@rm -f /tmp/emmy-gpu.lock
-	@rm -f ~/.cache/emmy/tune-kernels.db
-	EMMY_TUNE=1 EMMY_TUNE_DB=~/.cache/emmy/tune-kernels.db ./venv/bin/pytest tests/perf/ -m perf -n 4 --dist=loadgroup -v -p no:randomly --no-header
-
 # --- vLLM + emmy serving image (emmy/serving, docker/vllm-emmy) ---
 VLLM_VERSION ?= v0.23.0
 VLLM_BASE_IMAGE ?= vllm/vllm-openai:$(VLLM_VERSION)
-VLLM_EMMY_CUPY_PACKAGE ?= cupy-cuda13x
 VLLM_EMMY_TAG ?= cloudriftai/vllm-emmy:$(patsubst v%,%,$(VLLM_VERSION))-$(shell git rev-parse --short HEAD)
 
+# Both artifacts: the wheel carries this host's build of the runtime extension, the sdist is what
+# the serving images build from, against their own Python and libc.
 wheel: setup
 	./venv/bin/pip install --quiet build
 	./venv/bin/python scripts/prepare_dist.py --recipes
-	rm -rf dist build && ./venv/bin/python -m build --wheel -o dist/ .
+	rm -rf dist build && ./venv/bin/python -m build -o dist/ .
 
 # The release runner starts with a bare Python. Keep its complete build contract in one
 # target so pull-request CI can exercise the exact same dependency install and staging path.
 EMMY_PYPI_PYTHON ?= python3
 pypi-dist:
-	$(EMMY_PYPI_PYTHON) -m pip install --disable-pip-version-check build PyYAML
+	$(EMMY_PYPI_PYTHON) -m pip install --disable-pip-version-check build PyYAML auditwheel patchelf
 	$(EMMY_PYPI_PYTHON) scripts/prepare_dist.py --recipes --readme
 	rm -rf dist build
 	$(EMMY_PYPI_PYTHON) -m build
+	# The wheel embeds the runtime extension, so it is platform-specific: retag it for the manylinux
+	# baseline its symbols allow (PyPI rejects a bare linux tag), keeping only the repaired wheel.
+	# auditwheel finds patchelf on PATH, and pip put it beside the interpreter.
+	PATH="$$($(EMMY_PYPI_PYTHON) -c 'import os, sys; print(os.path.dirname(sys.executable))'):$$PATH" \
+	  $(EMMY_PYPI_PYTHON) -m auditwheel repair -w dist/ dist/emmy_ml-*-linux_x86_64.whl
+	rm dist/emmy_ml-*-linux_x86_64.whl
 
 # Image tags embed the short sha; an empty rev-parse (e.g. root over a synced tree without
 # git safe.directory) would silently tag "...:0.23.0-" — fail loudly instead.
@@ -150,7 +151,6 @@ git-sha-guard:
 
 vllm-emmy-image: wheel git-sha-guard
 	docker build -f docker/vllm-emmy/Dockerfile --build-arg VLLM_VERSION=$(VLLM_VERSION) --build-arg BASE_IMAGE=$(VLLM_BASE_IMAGE) \
-		--build-arg CUPY_PACKAGE=$(VLLM_EMMY_CUPY_PACKAGE) \
 		-t $(VLLM_EMMY_TAG) .
 
 vllm-emmy-push: vllm-emmy-image
@@ -183,6 +183,16 @@ SERVE_GPU_NAME := $(subst ",,$(SERVE_GPU))
 # them): the cudagraph capture ladder and any further pinned vLLM flags.
 SERVE_CAPTURE_SIZES_VALUE := $(subst ",,$(SERVE_CAPTURE_SIZES))
 SERVE_EXTRA_ARGS_VALUE := $(subst ",,$(SERVE_EXTRA_ARGS))
+SERVE_ENV_VALUE := $(subst ",,$(SERVE_ENV))
+# A model served on a runtime other than stock vLLM (DeepSeek V4 on the 1Cat Volta fork) names that
+# runtime's image by digest and its version in the config. The plain image then builds FROM it under a
+# model-scoped tag, not the stock `vllm-emmy:<vllm version>` it is not, and the serving tag carries the
+# runtime's version.
+ifneq ($(SERVE_BASE_IMAGE),)
+VLLM_BASE_IMAGE := $(SERVE_BASE_IMAGE)
+VLLM_VERSION := v$(SERVE_RUNTIME_VERSION)
+VLLM_EMMY_TAG := cloudriftai/vllm-emmy-$(MODEL_SLUG)-base:$(SERVE_RUNTIME_VERSION)-$(shell git rev-parse --short HEAD)
+endif
 
 # What a `make serve-* MODEL=<id>` would act on. The release workflow prints this first, so
 # the model / card / tag under test are on the record before any multi-hour step starts.
@@ -191,7 +201,7 @@ serve-config: serve-config-guard
 	@echo "slug       = $(MODEL_SLUG)"
 	@echo "config     = $(SERVE_CONFIG)"
 	@echo "image tag  = $(SERVE_TAG)"
-	@echo "base image = $(VLLM_EMMY_TAG)"
+	@echo "base image = $(VLLM_EMMY_TAG) (FROM $(VLLM_BASE_IMAGE))"
 	@echo "target GPU = $(SERVE_GPU_NAME)"
 	@echo "goldens    = $(SERVE_GOLDEN_FILE)"
 	@echo "revision   = $(if $(SERVE_REVISION),$(SERVE_REVISION),unpinned - the repo default branch)"
@@ -201,6 +211,7 @@ serve-config: serve-config-guard
 	@echo "runner mem = embed-host $(if $(SERVE_EMBED_HOST),$(SERVE_EMBED_HOST),default), prefill capacity $(if $(SERVE_PREFILL_CAPACITY),$(SERVE_PREFILL_CAPACITY),default), prefill bucket $(if $(SERVE_PREFILL_BUCKET),$(SERVE_PREFILL_BUCKET),default), M1 tier $(if $(SERVE_M1_TIER),$(SERVE_M1_TIER),default)"
 	@echo "golden gate= $(if $(filter 1,$(SERVE_STATIC_ONLY)),static-only M=1,standard widths + symbolic)"
 	@echo "extra args = $(SERVE_EXTRA_ARGS_VALUE)"
+	@echo "server env = $(SERVE_ENV_VALUE)"
 
 serve-models:
 	@echo "Models with a pinned release config ($(SERVE_DIR)/models/):"
@@ -218,7 +229,7 @@ serve-config-guard:
 		echo "  Fill every measured checkpoint, serving, and revision value before warming or baking."; \
 		exit 1)
 	@test -n "$(SERVE_GOLDEN_FILE)" -a -f "$(SERVE_GOLDEN_FILE)" || ( \
-		echo "ERROR: $(SERVE_CONFIG) must set SERVE_GOLDEN_FILE to an existing canonical golden YAML."; \
+		echo "ERROR: $(SERVE_CONFIG) must set SERVE_GOLDEN_FILE to an existing canonical golden file."; \
 		exit 1)
 
 # The goldens are the top tier of the fork-resolution evidence hierarchy. Validate the exact
@@ -253,6 +264,9 @@ serve-image: git-sha-guard serve-config-guard
 		--build-arg QUANT=$(SERVE_QUANT) \
 		--build-arg 'CAPTURE_SIZES=$(SERVE_CAPTURE_SIZES_VALUE)' \
 		--build-arg 'EXTRA_ARGS=$(SERVE_EXTRA_ARGS_VALUE)' \
+		--build-arg 'RUNTIME_ENV=$(SERVE_ENV_VALUE)' \
+		--build-arg RUNTIME_BASE=$(VLLM_BASE_IMAGE) \
+		--build-arg NVCC_VERSION="$$(docker run --rm --entrypoint nvcc $(VLLM_EMMY_TAG) --version | sed -n 's/.*, V\([0-9.]*\).*/\1/p')" \
 		--build-arg EMBED_HOST=$(SERVE_EMBED_HOST) \
 		--build-arg PREFILL_CAPACITY=$(SERVE_PREFILL_CAPACITY) \
 		--build-arg PREFILL_BUCKET=$(SERVE_PREFILL_BUCKET) \
@@ -301,3 +315,9 @@ test-compose:
 	@echo "✅ Generated: /tmp/test-compose.yml"
 	@echo ""
 	@cat /tmp/test-compose.yml
+
+.PHONY: native-dist
+native-dist:
+	cargo build --release --locked --workspace
+	mkdir -p dist
+	tar -czf dist/emmy-native-$$(git rev-parse --short HEAD)-$$(uname -s)-$$(uname -m).tar.gz -C target/release emmy-server emmy-runtime-worker

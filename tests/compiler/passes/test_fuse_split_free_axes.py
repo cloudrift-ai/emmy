@@ -10,12 +10,13 @@ of the canonical nest, and the warp tier's split-store addressability.
 
 The operand ROLE-PURITY section at the end was deleted with ``_classify.bind_bilinear`` and is
 RESTORED against the canonical Fold tree. Its contracts are about correctness, not coverage: a
-composite index that binds as a direct slab load emits code referencing an undefined iteration
-variable, a grouped B address that varies with the output row is not one slab per tile, and trying
+grouped B address that varies with the output row is not one slab per tile, and trying
 the opposite operand orientation is licensed only for a COMMUTATIVE product — reordering a
 noncommutative one computes a different value."""
 
 from __future__ import annotations
+
+import importlib
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Tensor
@@ -77,11 +78,69 @@ def _run(g: Graph) -> LoopOp:
     return Pipeline.build(["loop/canonicalize"]).run(g).nodes["out"].op
 
 
+def _mixed_row_head_graph(extent: int) -> Graph:
+    row = BinaryExpr("//", Var("i"), Literal(H, "int"))
+    head = BinaryExpr("%", Var("i"), Literal(H, "int"))
+    reduction = Loop(
+        Axis("k", K),
+        Body(
+            (
+                Load(name="xv", input="x", index=(Literal(0, "int"), row, Var("k"))),
+                Load(name="wv", input="w", index=(head * Literal(D, "int") + Var("d"), Var("k"))),
+                Assign(name="prod", op="multiply", args=("xv", "wv")),
+                Accum(name="acc", value="prod", op="add", axes=("k",)),
+            )
+        ),
+    )
+    body = Body(
+        (
+            Loop(
+                Axis("i", extent),
+                Body(
+                    (
+                        Loop(
+                            Axis("d", D),
+                            Body(
+                                (
+                                    reduction,
+                                    Write(output="out", index=(Var("i"), Var("d")), value="acc"),
+                                )
+                            ),
+                        ),
+                    )
+                ),
+            ),
+        )
+    )
+    return _graph(body, (extent, D))
+
+
+def test_flattened_row_head_restores_separate_operand_axes():
+    graph = _mixed_row_head_graph(M * H)
+    op = _run(graph)
+    loads = {load.input: load for load in op.loads}
+    assert not any(
+        isinstance(expr, BinaryExpr) and expr.op in ("/", "//", "%")
+        for load in op.loads
+        for index in load.index
+        for expr in index.subterms()
+    )
+    assert len(loads["x"].index[1].free_vars()) == 1
+    assert not loads["x"].index[1].free_vars() & loads["w"].index[0].free_vars()
+    assert _run(graph).body == op.body
+
+
+def test_flattened_row_head_with_partial_last_head_stays_flat():
+    graph = _mixed_row_head_graph(M * H - 1)
+    before = graph.nodes["out"].op
+    assert _run(graph).body == before.body
+
+
 def _lift(op: LoopOp, shape=(1,)) -> TileOp:
     graph = Graph()
     graph.add_node(op, [], Tensor("out", shape), node_id="out")
     graph.outputs = ["out"]
-    return Pipeline.build(["lowering/tile"], select=["lift"]).run(graph).nodes["out"].op
+    return Pipeline.build(["tile/lift"], select=["lift"]).run(graph).nodes["out"].op
 
 
 def _reduce_name(op: LoopOp) -> str:
@@ -96,7 +155,7 @@ def test_split_n_pair_fuses():
     wv = next(s for s in op.body.iter() if isinstance(s, Load) and s.input == "w")
     assert wv.index == (Var(n), Var(_reduce_name(op))), "the composite operand index must collapse to the bare fused axis"
     wr = next(s for s in op.body.iter() if isinstance(s, Write))
-    assert wr.index[2] == BinaryExpr("//", Var(n), Literal(D, "int"))
+    assert wr.index[2] == BinaryExpr("/", Var(n), Literal(D, "int"))
     assert wr.index[3] == BinaryExpr("%", Var(n), Literal(D, "int"))
 
 
@@ -264,7 +323,7 @@ def test_split_pair_fuses_across_an_intervening_free_loop():
     s_name = chain[0].axis.name
     assert wr.index == (
         Literal(0, "int"),
-        BinaryExpr("//", Var(n), Literal(D, "int")),
+        BinaryExpr("/", Var(n), Literal(D, "int")),
         Var(s_name),
         BinaryExpr("%", Var(n), Literal(D, "int")),
     )
@@ -325,7 +384,7 @@ def _split_store_ok(index: tuple, shape: tuple, free_names=("m", "n"), atom=(16,
     """Whether an mma fragment store with output ``atom`` cells can address ``index`` — the
     scheduler's own gate (``_split_store_refusal``), so the roles mapping under test is the
     production one."""
-    from emmy.compiler.ir.schedule.classic_projection import _split_store_refusal
+    from emmy.compiler.ir.schedule.classic.refusals import _split_store_refusal
 
     free = tuple(Axis(nm, Dim(4)) for nm in free_names)
     shapes = {"out": Tensor("out", shape)}
@@ -373,7 +432,7 @@ def test_warp_roles_move_only_the_innermost_carrier():
 
 def _bilinear_fold(w_index: tuple, x_index: tuple, product: str = "multiply", swapped: bool = False):
     """The lifted ``Σ_k w ⊗ x`` cell; ``swapped`` spells the loads and the product's arguments the other way round."""
-    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
+    from emmy.compiler.pipeline.passes.tile._fromloop import fold_from_loop
 
     loads = (Load(name="wv", input="w", index=w_index), Load(name="xv", input="x", index=x_index))
     args = ("wv", "xv")
@@ -414,16 +473,16 @@ def test_bilinear_batched_operand_still_binds():
     assert con.operands[0].as_slab().load.input == "x"
 
 
-def test_bilinear_declines_composite_role_expr():
+def test_bilinear_binds_a_composite_role_expr():
     """A third free axis composed into the SAME index expr as the role axis (the split-axis
-    composite) must not bind as the direct B load — the mma slab template cannot address it.
-    Before the per-expr purity check this bound and emitted code referencing an undefined
-    iteration variable."""
+    composite ``4*a1 + n``) binds as the direct B load: each side's own axes stay its role, the
+    tile orients the trailing one and the rest ride the grid, which defines them. The Qwen3.8 AWQ
+    down projection has this shape; refusing it left the piece off the tensor cores."""
     comp = BinaryExpr("+", BinaryExpr("*", Var("a1"), Literal(D, "int")), Var("n"))
     con = _bind(_bilinear_fold((comp, Var("k")), (Var("b"), Var("a0"), Var("k"))), ("b", "a1", "a0", "n"))
-    if con is not None:
-        for edge in con.operands[1:]:
-            assert edge.as_slab() is None, "the impure composite must not become a direct slab load"
+    assert con is not None, "the composite demoted to PLANAR"
+    assert con.as_contraction().right_axes == {"a1", "n"}
+    assert con.operands[1].as_slab().load.input == "w"
 
 
 def test_bilinear_binding_is_independent_of_the_product_argument_order():
@@ -470,3 +529,48 @@ def test_bilinear_does_not_reorder_a_noncommutative_product():
     )
 
     assert _bind(fold, ("h", "m", "n")) is None
+
+
+# The quotient split: a free coordinate read through ``/ Q`` and ``% Q`` splits into its two factors,
+# unless every reduction that reads those factors also reads the coordinate whole — a packed int4
+# weight reads its channel whole beside the zero-point's ``n / 8`` and the shift's ``n % 8``.
+
+_SPLIT = importlib.import_module("emmy.compiler.pipeline.passes.loop.canonicalize.010_fuse_split_free_axes")
+
+
+def _reduce(*loads: Load, axis: str = "k") -> Loop:
+    accum = Accum(name=f"acc_{axis}", value=loads[0].name, op=ElementwiseImpl("add"), axes=(axis,))
+    return Loop(axis=Axis(axis, Dim(16)), body=Body((*loads, accum)))
+
+
+def _n_nest(*stmts) -> Body:
+    return Body((Loop(axis=Axis("n", Dim(64)), body=Body(stmts)),))
+
+
+def _n(op: str | None = None):
+    return Var("n") if op is None else BinaryExpr(op, Var("n"), Literal(8, "int"))
+
+
+def _split(body: Body) -> bool:
+    return _SPLIT._split_once(body, frozenset({"n", "k", "j"})) is not None
+
+
+def test_a_coordinate_read_only_through_its_factors_splits():
+    zeros, shift = Load(name="z", input="zeros", index=(_n("/"),)), Load(name="s", input="shift", index=(_n("%"),))
+    assert _split(_n_nest(_reduce(zeros, shift)))
+    # A whole read after the reduction (an epilogue gate) owns nothing the contraction reads.
+    assert _split(_n_nest(_reduce(zeros, shift), Load(name="g", input="gate", index=(_n(),))))
+
+
+def test_a_packed_channel_read_whole_by_its_weight_stays_one_axis():
+    weight = Load(name="w", input="weights", index=(_n(),))
+    zeros, shift = Load(name="z", input="zeros", index=(_n("/"),)), Load(name="s", input="shift", index=(_n("%"),))
+    assert not _split(_n_nest(_reduce(weight, zeros, shift)))
+
+
+def test_a_head_pair_splits_when_another_reduction_reads_only_its_factors():
+    """One contraction reads the flattened head coordinate whole beside its head; another reads the
+    head and dim apart. Only the split lets the second bind its operands, so it still happens."""
+    first = _reduce(Load(name="q", input="q", index=(_n(),)), Load(name="h", input="h", index=(_n("/"),)))
+    second = _reduce(Load(name="a", input="a", index=(_n("/"),)), Load(name="b", input="b", index=(_n("%"),)), axis="j")
+    assert _split(_n_nest(first, second))

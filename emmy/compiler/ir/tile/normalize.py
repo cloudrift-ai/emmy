@@ -7,9 +7,10 @@ re-exposes (a closing rewrite can leave one behind, and it is what makes two occ
 same computation compare unequal), a carrier the fusion left holding two independent contractions
 becomes one term per state, and same-value cones become ONE shared object.
 
-INVARIANT — normalization ends with no operand result component that no reader reads
-(:func:`_prune_unread`), and with same-value cones (alpha-equal, identical captures and
-interface names) as ONE shared object (:func:`_share_common_cones`). Object identity is how the
+INVARIANT — normalization ends with no result component that no reader reads, the ROOT's own
+included and the boundary stores counting as its readers (:func:`_prune_unread`), and with
+same-value cones (alpha-equal, identical captures and interface names) as ONE shared object
+(:func:`_share_common_cones`). Object identity is how the
 placement machinery recognizes that two consumption sites read one value, so a rewrite that
 copies a cone (the close rewrites do, by design) is only sound because this final pass restores
 the sharing. Recompute elimination is a
@@ -28,29 +29,27 @@ from emmy.compiler.ir.stmt import Body
 from emmy.compiler.structural import instance_memo
 
 
-def _passthrough(node: Fold) -> Fold | None:
-    """The single operand an identity projection merely re-exposes, or ``None``.
+def _passthrough(node: Fold) -> tuple[Fold, ...] | None:
+    """The operands an identity projection merely re-exposes, or ``None``.
 
     A pass-through is shape noise — a closing rewrite can leave one behind — and it is what makes
     two occurrences of the same computation compare unequal, so normalization dissolves it
     wherever a projection is formed or revisited."""
-    if node.axis is not None or node.lift.body or len(node.operands) != 1:
+    if node.axis is not None or node.lift.body:
         return None
-    (operand,) = node.operands
-    if isinstance(operand, Fold) and node.lift.results == tuple(param for param, _, _ in node.bindings):
-        return operand
+    if node.lift.results == tuple(param for param, _, _ in node.bindings):
+        return node.operands
     return None
 
 
 def _normalize_fold(fold: Fold) -> Fold:
-    operands = tuple(_normalize_fold(edge) for edge in fold.operands)
+    children = tuple(_normalize_fold(edge) for edge in fold.operands)
+    operands = tuple(part for edge in children for part in (_passthrough(edge) or (edge,)))
     node = replace(fold, operands=operands) if operands != fold.operands else fold
-    if node.axis is None and (collapsed := _passthrough(node)) is not None:
-        return collapsed
-    # A carrier no tier folds whole because its channels multiply different pairs is two
-    # contractions in one nest: it says so as one term per state (:meth:`Fold.per_state`), and
-    # the projection that replaces it exposes what it exposed. Bottom-up like everything here,
-    # and idempotent — the terms it hands back fold whole, so nothing comes apart twice.
+    if (collapsed := _passthrough(node)) is not None and len(collapsed) == 1:
+        return collapsed[0]
+    # Independent contractions or statistics over different coordinates each get their own term.
+    # The projection retains the original interface, and single-state terms cannot split again.
     return apart if (apart := node.per_state()) is not None else node
 
 
@@ -90,10 +89,10 @@ def _prune_unread(root: Fold, stored: frozenset[str] = frozenset()) -> Fold:
     consumer that spells the interface (the dump's operand brackets, a reader's signature) spelled
     the dead half beside the live one.
 
-    Only a ZERO-AXIS operand is restricted (:meth:`Fold.exposing` cuts its body to what the kept
-    results need). A reducing operand's components ARE its carried states, and dropping one changes
-    the monoid, so a fold keeps every channel it folds however little its reader binds — which is
-    what leaves attention's running maximum spelled as the ``_unread`` it honestly is.
+    Zero-axis results and independent planar reduction states restrict to what readers need.
+    Twisted and observed carriers keep every state: a retained component can depend on another.
+    Removing an unused planar state also releases its operand coordinates on the next pass, so a
+    shared pair of row statistics does not make either reader depend on both rows.
 
     Tree-wide, and a UNION over readers: normalization ends with same-value cones as one shared
     object, so restricting per occurrence would sever exactly the sharing
@@ -122,11 +121,15 @@ def _prune_unread(root: Fold, stored: frozenset[str] = frozenset()) -> Fold:
         if id(node) in done:
             return done[id(node)]
         lead, slot_table, trailing = _binds(node)
+        read = _reads(node)
         operands, params, same = [], [], True
         for slots, edge in zip(slot_table, node.operands, strict=True):
+            if read is not None and not (set(slots) & read or set(edge.exposes) & stored):
+                same = False
+                continue
             new, want = visit(edge), kept.get(id(edge), set())
             same = same and new is edge
-            if edge.axis is not None or id(edge) in opaque or len(want) == len(slots):
+            if edge.twist is not None or edge.observe is not None or edge.carries or id(edge) in opaque or len(want) == len(slots):
                 operands.append(new)
                 params.extend(slots)
                 continue
@@ -139,7 +142,20 @@ def _prune_unread(root: Fold, stored: frozenset[str] = frozenset()) -> Fold:
         return rebuilt
 
     collect(root)
-    return visit(root)
+    pruned = visit(root)
+    # The ROOT answers to the stores the same way: they are its only readers. A zero-axis root none
+    # of whose own components a store writes computes nothing the kernel keeps -- the boundary reads
+    # the value off an operand -- so it collapses onto the operand carrying them, and the operands
+    # only its dead lift bound leave with it. An invariant reduce among those is what keeps
+    # ``promoted_sweep`` from promoting the stores' sweep, and the kernel then launches one block.
+    while pruned.axis is None and stored and not stored & set(pruned.exposes):
+        carriers = [edge for edge in pruned.operands if stored <= set(edge.exposes)]
+        if len(carriers) != 1:
+            if not stored & pruned.step().ssa_defs:
+                pruned = replace(pruned, lift=replace(pruned.lift, body=Body(), results=()))
+            break
+        pruned = carriers[0]
+    return pruned
 
 
 def _share_common_cones(root: Fold) -> Fold:
@@ -216,7 +232,9 @@ def normalize_fold_tree(root, stores: tuple = ()):
     stored = frozenset(name for spec in stores for name in spec.write.values)
     if stored in instance_memo(root, "_memo_normal"):
         return root
-    normalized = root
+    # Reader unions must see the same sharing before and after serialization, which recreates
+    # equal operands as separate objects. Otherwise a replay prunes a different set of states.
+    normalized = _share_common_cones(root)
     while True:
         # One pass is not always the fixpoint (a collapse can expose the next pass's move, and a
         # restricted cone's own operands go dead one level down), and the stamp must mean the

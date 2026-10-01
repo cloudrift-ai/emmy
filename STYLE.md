@@ -89,6 +89,9 @@ Group imports in this order, separated by blank lines:
 
 Style rules are enforced by [Ruff](https://docs.astral.sh/ruff/), configured in `pyproject.toml`. Run `make lint` to check and `make format` to auto-fix. Enabled rule sets: `E` (pycodestyle), `F` (pyflakes), `W` (warnings), `I` (isort), `UP` (pyupgrade), `B` (bugbear).
 
+The test-duration baseline keeps one JSON entry per line, alphabetized by full node ID. `make format` normalizes
+its formatting without re-measuring tests, and `make lint` checks it.
+
 ### IR statements must be frozen dataclasses
 
 Every concrete `Stmt` subclass — Loop-IR (`Loop`, `StridedLoop`, `Cond`, leaves), Tile-IR (`GridTile`, `ThreadTile`,
@@ -96,9 +99,9 @@ Every concrete `Stmt` subclass — Loop-IR (`Loop`, `StridedLoop`, `Cond`, leave
 `CpAsyncCopy`, `TmaDescriptor`, `TmaLoad`, `MbarrierInit`, …) — must be declared `@dataclass(frozen=True)`. `Body` is
 already a `tuple[Stmt, ...]` subclass, so freezing every Stmt makes the entire body tree hashable end-to-end.
 
-Why: structural caches (`Body.structural_key()` and any future bodies-as-cache-keys work) traverse the body and hash
-every Stmt. A single mutable Stmt anywhere in the tree poisons every cache that keys on the surrounding Body — and
-the surrounding code can't degrade gracefully without losing the optimization.
+Why: an immutable body can safely own cached structural keys and executable normal forms. It can also be used as a
+cache key when a position-independent structural lookup genuinely needs one. A single mutable Stmt anywhere in the
+tree breaks both guarantees, and the surrounding code cannot degrade gracefully without losing the optimization.
 
 If you need to "edit" a frozen Stmt, return a new instance via `dataclasses.replace(stmt, field=value)`. If a
 `__post_init__` needs to coerce a field (e.g. `tuple → Body`), use `object.__setattr__(self, "field", coerced)` —
@@ -110,8 +113,9 @@ Every `Op` dataclass is `frozen=True` as well (an architecture test ratchets it)
 `inputs`, `outputs`, a `TileOp`'s `schedule`) land as `frozendict` via `Op.__post_init__` — a rewrite is always a
 `dataclasses.replace` + graph-node rebind, never an edit. The one sanctioned bypass is the spelling-preserving
 clone in `LoopOp.rename_buffers` (field-level `object.__setattr__`, no `__init__`): a buffer rename must not
-renormalize, since commutative-arg order sorts by buffer name. Ops stay UNHASHABLE (`__hash__ = None`) — semantic
-comparison is `identity_key`, never `hash`. Also make sure no Op ends up as a *field value* of a Stmt —
+renormalize, since canonical sibling order can depend on external-buffer spelling. Ops stay UNHASHABLE
+(`__hash__ = None`) — semantic comparison is `identity_key`, never `hash`. Also make sure no Op ends up as a *field
+value* of a Stmt —
 `Assign.op` / `Accum.op` / `Select.op` take an `ElementwiseImpl` (the lightweight value object, already hashable),
 never an `ElementwiseOp` wrapper.
 
@@ -208,6 +212,15 @@ async def run_cmd(command, stream=True, timeout=600):
 ```
 
 On `TimeoutError`: kill the process, await termination, log, return `(1, "", "")`.
+
+## Rust
+
+Use the checked-in Cargo lockfile and standard Rustfmt formatting. Keep unsafe CUDA calls inside the runtime's CUDA
+module and document the ownership and synchronization that make each call valid. Validate artifact metadata before
+submission, and keep HTTP dependencies out of the execution runtime. Run Cargo tests and Clippy for native changes.
+
+Define protocol versions, resource limits, defaults, and unit conversions as named `const` values near the top of
+their owning Rust file, after imports. Ordinary indices, zero initialization, and explicit test data may stay inline.
 
 ## Commit Messages
 

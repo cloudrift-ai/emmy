@@ -27,6 +27,7 @@ from typing import Any
 
 from emmy.compiler.ir.base import ConstantOp, InputOp, Op
 from emmy.compiler.tensor import Tensor
+from emmy.compiler.wire import Wire, tag_of, wire_class
 
 # ---------------------------------------------------------------------------
 # Hints
@@ -200,9 +201,7 @@ def _serialize_field(v):
     if isinstance(v, ElementwiseImpl):
         return v.name
     if isinstance(v, Dim):
-        from emmy.compiler.torch_wire import dim_to_wire
-
-        return {"__dim__": dim_to_wire(v)}
+        return {"__dim__": v.to_wire()}
     if isinstance(v, Body):
         # Body is a ``tuple`` subclass; downcast to plain tuple so
         # JSON encodes element-by-element rather than via ``__repr__``
@@ -230,9 +229,9 @@ def _deserialize_field(k, v):
     from emmy.compiler.ir.elementwise import ElementwiseImpl
 
     if isinstance(v, dict) and set(v) == {"__dim__"}:
-        from emmy.compiler.torch_wire import dim_from_wire
+        from emmy.compiler.dim import Dim
 
-        return dim_from_wire(v["__dim__"])
+        return Dim.from_wire(v["__dim__"])
 
     if k == "op" and isinstance(v, str):
         # A bare name (``"add"``) is an ``ElementwiseImpl``; a constructor repr
@@ -332,15 +331,13 @@ def _stmt_eval_scope() -> dict:
         Accum,
         Assign,
         Cond,
-        Const,
         Init,
+        Let,
         Load,
         Loop,
-        Pack,
         Select,
         SelectBranch,
         StridedLoop,
-        Unpack,
         Write,
     )
     from emmy.compiler.ir.tensor.ir import IndexSource
@@ -356,12 +353,10 @@ def _stmt_eval_scope() -> dict:
         "TernaryExpr": TernaryExpr,
         "CastExpr": CastExpr,
         "Load": Load,
-        "Pack": Pack,
-        "Unpack": Unpack,
         "Assign": Assign,
         "Accum": Accum,
         "Init": Init,
-        "Const": Const,
+        "Let": Let,
         "Write": Write,
         "Select": Select,
         "SelectBranch": SelectBranch,
@@ -391,7 +386,7 @@ def _stmt_eval_scope() -> dict:
         "__builtins__": {},
     }
     # The stored Fold term and ordinary IR descriptors round-trip through repr-string fields. The
-    # classic assignment is deliberately excluded: ``_serialize_op_fields`` and
+    # classic schedule is deliberately excluded: ``_serialize_op_fields`` and
     # ``_deserialize_op`` route it through the strict site codec instead. Auto-populate every
     # public class from these modules (``setdefault`` so explicit stmt/expr entries win on a name
     # clash); a new ordinary IR field needs no edit here.
@@ -400,13 +395,14 @@ def _stmt_eval_scope() -> dict:
     import emmy.compiler.ir.cuda.ir as _cuda_mod  # noqa: PLC0415
     import emmy.compiler.ir.kernel.ir as _kernel_mod  # noqa: PLC0415
     import emmy.compiler.ir.pure.fold as _fold_mod  # noqa: PLC0415
+    import emmy.compiler.ir.pure.twist as _twist_mod  # noqa: PLC0415
     import emmy.compiler.ir.schedule as _sched_mod  # noqa: PLC0415
     import emmy.compiler.ir.tile.ir as _tile_mod  # noqa: PLC0415
 
     # Kernel IR owns the bare ``Tile(...)`` repr used in body fields. The classic ``Tile`` choice
     # never enters this eval path (it uses ``ClassicScheduleCodec``), so kernel must precede the
     # schedule module when their class names collide.
-    for _mod in (_atom_mod, _axis_mod, _kernel_mod, _sched_mod, _fold_mod, _tile_mod, _cuda_mod):
+    for _mod in (_atom_mod, _axis_mod, _kernel_mod, _sched_mod, _fold_mod, _twist_mod, _tile_mod, _cuda_mod):
         for _nm in dir(_mod):
             _obj = getattr(_mod, _nm)
             if isinstance(_obj, type):
@@ -418,7 +414,7 @@ def _stmt_eval_scope() -> dict:
 # don't carry a ``Body``. ``name`` is an instance label; ``source`` is the
 # rewrite-chain predecessor on the base ``Op`` (attribution metadata only,
 # stamped automatically by the engine — see ``Op.source``).
-_STRUCTURAL_SKIP_FIELDS = frozenset({"name", "source", "meta"})
+_STRUCTURAL_SKIP_FIELDS = frozenset({"name", "source", "meta", "inputs", "outputs"})
 
 # Op dataclass fields excluded from JSON serialization in :meth:`Graph.to_dict`:
 # pure runtime state (``source`` / ``knobs`` chain metadata, ``inputs`` /
@@ -435,6 +431,12 @@ def _serialize_op_fields(op: Op) -> dict:
     from emmy.compiler.ir.tile.ir import TileOp  # noqa: PLC0415
 
     if not isinstance(op, TileOp) or op.schedule is None:
+        return fields
+    from emmy.compiler.ir.schedule.register import RegisterCodec, RegisterMaterialization  # noqa: PLC0415
+
+    if isinstance(op.materialization, RegisterMaterialization):
+        fields["schedule"] = RegisterCodec(None)._encode(op.schedule)
+        fields["materialization"] = {"register": True}
         return fields
     from emmy.compiler.ir.schedule.classic import (
         # noqa: PLC0415,
@@ -460,12 +462,14 @@ def _serialize_op_fields(op: Op) -> dict:
     return fields
 
 
-def _deserialize_op(op_cls: type[Op], raw_fields: dict) -> Op:
+def _deserialize_op(op_cls: type[Op], raw_fields: dict, *, inputs=None, outputs=None) -> Op:
     """Deserialize one op and reconstruct typed schedule values before construction."""
     raw = dict(raw_fields)
     schedule_row = raw.pop("schedule", None)
     materialization_row = raw.pop("materialization", None)
     fields = {key: _deserialize_field(key, value) for key, value in raw.items()}
+    if inputs is not None:
+        fields.update(inputs=inputs, outputs=outputs)
     from emmy.compiler.ir.tile.ir import TileOp  # noqa: PLC0415
 
     if not issubclass(op_cls, TileOp):
@@ -485,6 +489,18 @@ def _deserialize_op(op_cls: type[Op], raw_fields: dict) -> Op:
     )
 
     source = op_cls(**fields)
+    if materialization_row == {"register": True}:
+        from emmy.compiler.ir.schedule.register import (  # noqa: PLC0415
+            RegisterCodec,
+            RegisterContext,
+            RegisterMaterialization,
+            RegisterProblem,
+        )
+
+        codec = RegisterCodec(RegisterContext(RegisterProblem(source, None, allow_f16=True)))
+        fields["schedule"] = codec.decode(_wire_mapping(schedule_row, "register schedule"))
+        fields["materialization"] = RegisterMaterialization()
+        return op_cls(**fields)
     codec = ClassicScheduleCodec(ClassicScheduleContext(source))
     schedule_wire = _wire_mapping(schedule_row, "classic schedule")
     schedule = codec._parse(schedule_wire)
@@ -557,7 +573,7 @@ class SpliceReceipt:
     consumed_hints: dict[str, Hints]
 
 
-class Graph:
+class Graph(Wire):
     """Directed acyclic compute graph of tensor operations.
 
     Stores both directions of each edge: every ``Node`` carries its
@@ -566,6 +582,62 @@ class Graph:
     Mutation methods keep both sides consistent, so forward walks
     (``users`` / ``consumers``) are O(1) per hop.
     """
+
+    wire_tag = "program"
+
+    def to_wire(self) -> dict:
+        """The graph as a golden stores it: nodes in topological order, each ``{id, op, attrs, inputs, outputs}``."""
+        nodes = []
+        for node_id in self.topological_order():
+            node = self.nodes[node_id]
+            item: dict = {"id": node_id, "op": tag_of(type(node.op))}
+            if attrs := node.op.to_wire():
+                item["attrs"] = attrs
+            if node.inputs:
+                item["inputs"] = list(node.inputs)
+            item["outputs"] = [tensor.to_wire() for tensor in node.outputs]
+            nodes.append(item)
+        return {"inputs": list(self.inputs), "outputs": list(self.outputs), "nodes": nodes}
+
+    @classmethod
+    def from_wire(cls, value: object, where: str = "program") -> Graph:
+        if not isinstance(value, dict):
+            raise ValueError(f"{where} must be a mapping")
+        if unknown := set(value) - {"inputs", "outputs", "nodes"}:
+            raise ValueError(f"{where}: unknown field(s): {', '.join(sorted(unknown))}")
+        nodes = value.get("nodes")
+        if not isinstance(nodes, list):
+            raise ValueError(f"{where} nodes must be a list")
+        graph = cls()
+        for index, item in enumerate(nodes):
+            node_where = f"{where}.nodes[{index}]"
+            if not isinstance(item, dict):
+                raise ValueError(f"{node_where} must be a mapping")
+            if unknown := set(item) - {"id", "op", "attrs", "inputs", "outputs"}:
+                raise ValueError(f"{node_where}: unknown field(s): {', '.join(sorted(unknown))}")
+            node_id, inputs, outputs = item.get("id"), item.get("inputs", []), item.get("outputs")
+            if not isinstance(node_id, str) or not node_id:
+                raise ValueError(f"{node_where} requires a non-empty id")
+            if not isinstance(inputs, list) or not all(isinstance(name, str) for name in inputs):
+                raise ValueError(f"{node_where} inputs must be string names")
+            if not isinstance(outputs, list) or not outputs:
+                raise ValueError(f"{node_where} outputs must be a non-empty list")
+            op_cls = wire_class(item.get("op"))
+            if op_cls is None or not issubclass(op_cls, Op):
+                raise ValueError(f"{node_where} has unknown op {item.get('op')!r}")
+            op = op_cls.from_wire(item.get("attrs", {}), f"{node_where} {item['op']}")
+            tensors = tuple(Tensor.from_wire(output, node_where) for output in outputs)
+            try:
+                graph.add_node(op, list(inputs), outputs=tensors, node_id=node_id)
+            except ValueError as exc:
+                raise ValueError(f"{node_where} is invalid: {exc}") from exc
+        graph.inputs = list(value.get("inputs", []))
+        graph.outputs = list(value.get("outputs", []))
+        for name in (*graph.inputs, *graph.outputs):
+            if graph.buffer(name) is None:
+                raise ValueError(f"{where} references unknown boundary buffer {name!r}")
+        graph.topological_order()  # validate acyclicity
+        return graph
 
     def __init__(self) -> None:
         self.nodes: dict[str, Node] = {}
@@ -679,6 +751,8 @@ class Graph:
             raise ValueError(f"Node id {new_id!r} already exists")
         node = self.nodes.pop(old_id)
         node.id = new_id
+        # The primary tensor travels under the node id, so its name follows.
+        node.outputs = (replace(node.outputs[0], name=new_id), *node.outputs[1:])
         self.nodes[new_id] = node
         consumers = self._users.pop(old_id, set())
         self._users[new_id] = consumers
@@ -1318,21 +1392,16 @@ class Graph:
         """Deserialize a graph from a JSON-compatible dict (inverse of to_dict)."""
         g = Graph()
         g.hints = Hints.from_dict(data.get("hints", {}))
-        # First pass: create all nodes (inputs first, then in order).
+        # Restore every buffer before constructing ops: schedule validation reads their layouts,
+        # including a later node's buffer when the dump is not topologically ordered.
         for nid, ndata in data["nodes"].items():
-            op_cls_name = ndata["op"]
-            op_cls = _lookup_op_class(op_cls_name)
-            if op_cls is None:
-                raise ValueError(f"Unknown op class: {op_cls_name}")
-
-            op = _deserialize_op(op_cls, ndata.get("op_fields", {}))
             # Dual-read: the historic single-``output`` dict and the plural
             # ``outputs`` list (slot order). Old dumps stay loadable.
             outs_data = ndata["outputs"] if "outputs" in ndata else [ndata["output"]]
             tensors = tuple(Tensor(name=out["name"], shape=tuple(out["shape"]), dtype=out.get("dtype", "f32")) for out in outs_data)
             node_hints = Hints.from_dict(ndata.get("hints", {}))
             # Add directly to bypass input validation (nodes may reference later nodes).
-            g.nodes[nid] = Node(id=nid, op=op, inputs=list(ndata["inputs"]), outputs=tensors, hints=node_hints)
+            g.nodes[nid] = Node(id=nid, op=Op(), inputs=list(ndata["inputs"]), outputs=tensors, hints=node_hints)
 
         # Rebuild the producer / forward-edge indexes now that every node is present.
         for nid, node in g.nodes.items():
@@ -1343,6 +1412,18 @@ class Graph:
             for inp in node.inputs:
                 if inp in g._users:
                     g._users[inp].add(nid)
+
+        for nid, node in g.nodes.items():
+            ndata = data["nodes"][nid]
+            op_cls = _lookup_op_class(ndata["op"])
+            if op_cls is None:
+                raise ValueError(f"Unknown op class: {ndata['op']}")
+            node.op = _deserialize_op(
+                op_cls,
+                ndata.get("op_fields", {}),
+                inputs={name: g.buffer(name) for name in node.inputs if name in g._producers},
+                outputs=dict(zip(node.buffer_names(), node.outputs, strict=True)),
+            )
 
         g.inputs = list(data["inputs"])
         g.outputs = list(data["outputs"])
@@ -1423,12 +1504,13 @@ def _rename_buf_in_op(op, old: str, new: str):
     the decomposition attribution link (``Candidate.apply`` stamps the
     pre-split op as each fragment kernel's ``source``; the two-level tuner's
     composed Σ rows group by it)."""
+    from emmy.compiler.ir.kernel import KernelOp
     from emmy.compiler.ir.loop import Load, LoopOp, Write
     from emmy.compiler.ir.pure.fold import Fold
     from emmy.compiler.ir.stmt import Body
     from emmy.compiler.ir.tile import TileOp
 
-    if not isinstance(op, (LoopOp, TileOp)):
+    if not isinstance(op, (LoopOp, TileOp, KernelOp)):
         return op
 
     def fn(s):
@@ -1451,10 +1533,12 @@ def _rename_buf_in_op(op, old: str, new: str):
             for buf, tensor in io.items()
         }
 
+    if isinstance(op, KernelOp):
+        return replace(op, body=op.body.rename_buffers({old: new}), inputs=renamed_io(op.inputs), outputs=renamed_io(op.outputs))
     if isinstance(op, LoopOp):
         # ``LoopOp.rename_buffers`` is the spelling-preserving clone: fields carried whole
         # (name / knobs / source identity preserved), io renamed, and NO ``__post_init__`` — a
-        # rename must never renormalize (``sort_commutative_args`` orders by buffer name).
+        # rename must never rerun canonical sibling ordering under the new buffer spelling.
         return op.rename_buffers({old: new})
     else:
 

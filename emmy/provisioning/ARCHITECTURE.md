@@ -21,7 +21,8 @@ provisioning/
   gcp.py          # gcloud-compute wrapper
   ssh.py          # generic wait_for_ssh
   host.py         # RemoteHost abstraction over an existing SSH target
-  remote.py       # bare-VM bootstrap (driver/CUDA install)
+  remote.py       # bare-VM bootstrap (driver/CUDA install, Docker daemon proxy)
+  proxy.py        # the HTTP proxy a host reaches the internet through: URL validation, its env, the Docker drop-in
   staging.py      # tar-and-scp helpers used by the deploy layer
   shell.py        # async shell-out helper
   types.py        # VMConnectionInfo dataclass
@@ -38,8 +39,10 @@ provisioning/
 
 A GPU missing from `GPU_INSTANCE_TYPES`, or mapped only to base types the provider no longer stocks, is
 unreachable: `iter_candidates()` raises or yields instance types with no nodes, and the recipe-query availability
-annotation quietly reports the deployment as unavailable rather than failing. Every GPU a recipe declares must
-therefore have a current entry, and the entries stay ordered with the stocked base type first.
+annotation quietly reports the deployment as unavailable rather than failing. Every GPU a provider rents must
+therefore have a current entry, and the entries stay ordered with the stocked base type first. A recipe may still
+name a GPU nobody rents, such as a local card: it is never selected for a rented run. Tests check only that a
+recipe's GPU is a known card, so a rented GPU missing its entry is not caught offline.
 
 The orchestrator tries candidates in this order until one succeeds or all are exhausted. Without a provider filter,
 fallback follows the hardware table across providers. An explicit `--provider` restricts the entire candidate list,
@@ -49,6 +52,14 @@ CloudRift rentals can also be pinned to one node (`vm create cloudrift --node <i
 then uses the `ByNodeId` selector instead of `ByInstanceTypeAndLocation`, and `resolve_node_id()` turns a hostname
 into the node UUID via `/api/v1/nodes/list` (an operator-only endpoint — customers pass the UUID). A pinned node has
 no placement fallback, so the pin lives on the single-shot provider command, not the candidate orchestrator.
+
+A CloudRift rental opens the ports the caller names (`provision_cloud_vm(ports=…)`): SSH, one host port per engine
+service, and the load balancer's when there is one; the default is `[22, 8000, 8080]`. GCP has no per-VM port list.
+
+A CloudRift rental has `provision_cloud_vm(vm_active_timeout=…)` seconds to become Active (default
+`DEFAULT_VM_ACTIVE_TIMEOUT`, 1800; `deploy cloud --vm-active-timeout` sets it). One that misses the deadline is
+terminated inside `create_instance` and surfaces as `CapacityExhausted`, so the orchestrator advances to the next
+candidate. GCP's wait comes from the `create_timeout_flex_start` / `create_timeout_spot` provider keys instead.
 
 Every CloudRift rental carries free-form tags for later filtering on listings. `create_instance` resolves them
 through `emmy.config.rental_tags()` — repeatable `--tag` flags win, else the comma-separated `EMMY_RENTAL_TAGS` env
@@ -82,7 +93,9 @@ readiness or SSH polling; once ready, the orchestrator adds connection details a
 explicit lifecycle replaces interception of provider internals and preserves the handle if the process is interrupted
 after allocation.
 
-`emmy vm create gpu --lease PATH --owner ID` enables the observer. `emmy vm delete lease` validates the exact owner,
+`emmy vm create gpu --lease PATH --owner ID` and `emmy deploy cloud --lease PATH --owner ID` enable the observer
+(`add_lease_arguments` / `lease_observer` are the shared flag registration and construction; a dry run rents nothing
+and writes no lease). `emmy vm delete lease` validates the exact owner,
 deletes only the recorded handle, retries and polls provider state, then marks the lease deleted. `emmy vm audit
 lease` independently fails while that handle remains active. A missing lease is an idempotent no-op; an owner mismatch
 is always a hard refusal. CloudRift's `Deactivating` state acknowledges that termination is scheduled, so cleanup and
@@ -99,6 +112,10 @@ so every task's result reflects its host's stand-up cost. `vm_provision` is omit
 (no VM created). See `emmy/commands/ARCHITECTURE.md` → Timing metrics.
 
 ## Command source staging
+
+An explicitly local command host bypasses remote provisioning and SSH. Its transport runs a local shell in an owned
+process group and terminates descendants on timeout, cancellation, or shell exit. Local staging validates the declared
+paths and records provenance while leaving execution in the live checkout; callers must keep that source stable.
 
 Command recipes stage only the Git-visible files under their declared paths: tracked and untracked files are included,
 while ignored files are excluded. `command.strict` rejects dirty selected paths before any transfer. Staging returns
@@ -154,14 +171,38 @@ running. Fabric Manager refuses to run against a mismatched driver, so the packa
 exact version, resolved out of `apt-cache madison` rather than guessed — Ubuntu's archive and NVIDIA's CUDA repo
 publish different revision suffixes (`-1`, `-1ubuntu1`, `-0ubuntu0.24.04.1`) for the same driver.
 
+## Hosts behind an HTTP proxy
+
+`deploy ssh --vm-proxy URL` and `deploy cloud --vm-proxy URL` describe a host that reaches the internet only through
+an HTTP proxy: an on-prem VLAN with no default route and, typically, no working DNS — so name the proxy by IP; a
+hostname draws a warning, since only the host itself could resolve it. `proxy.py` owns the pieces. `proxy_url`
+validates the flag (`http://` or `https://`, a host and a port; credentials are allowed and registered with
+`redact.py`, so no log line shows them). `proxy_env` spells the six variables — `HTTP_PROXY`, `HTTPS_PROXY`,
+`NO_PROXY` and their lower-case twins, because Go and Docker read the upper case and curl only the lower.
+`docker_proxy_dropin` renders the systemd drop-in.
+
+`RemoteHost(proxy=…)` prefixes every command with an `export` of those variables. sudo resets the environment, so
+this is what carries the proxy into the provisioning steps that fetch: the Docker install script, the NVIDIA
+container-toolkit keyring and apt repo, the CUDA apt repo with its driver and toolkit packages, and Fabric Manager.
+`provision_remote` then, once Docker is known to be installed and before anything is pulled, writes
+`/etc/systemd/system/docker.service.d/http-proxy.conf` and restarts the daemon — only when the file's content differs,
+so a redeploy onto the same host does not bounce Docker — and runs `curl -x URL https://registry-1.docker.io/v2/` on
+the host. Any HTTP status back (401 without registry credentials) proves the proxy forwards to it; a connect failure or
+raises `RuntimeError` naming the proxy, minutes before `docker compose pull` would have failed. The deploy layer
+carries the same URL in `DeployParams.proxy` into the compose environment and the weight-download container.
+
+`NO_PROXY` is fixed at `localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16`: the host itself and the
+private ranges the VLAN and Docker's networks live in.
+
 ## CloudRift API protocol version
 
 Every CloudRift request carries an envelope `{"version": API_VERSION, "data": {...}}`. The server versions its public
 types by calendar date and decodes each request against the newest declared schema whose date is `<= API_VERSION` (an
 unknown in-between date silently resolves *down* to the nearest older schema). `API_VERSION` (`cloudrift.py`) is pinned
-to `2026-08-05`, the current public generation for the instance endpoints used here. Pin to a date rather than
-`~upcoming` (CloudRift's own client default) so a future server
-release can't change request/response shapes under us.
+to `2026-09-08`: `instances/rent` rejects any older date with `unsupported version`, while `instances/list` and
+`instances/terminate` still resolve it down to `2026-08-05`. Pin to a date rather than `~upcoming` (CloudRift's own
+client default) so a future server release can't change request/response shapes under us. When the server stops
+accepting the pinned date, move the pin to the oldest date every endpoint used here accepts.
 
 CloudRift API behaviours the client relies on:
 

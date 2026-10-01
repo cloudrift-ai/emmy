@@ -23,9 +23,9 @@ config as well as the image repository:
 
 | HF model id | slug | config | image repository |
 | --- | --- | --- | --- |
-| `google/gemma-4-12B` | `gemma-4-12b` | `models/gemma-4-12b.env` | `cloudriftai/vllm-emmy-gemma-4-12b` |
 | `google/gemma-4-12B-it` | `gemma-4-12b-it` | `models/gemma-4-12b-it.env` | `cloudriftai/vllm-emmy-gemma-4-12b-it` |
 | `Qwen/Qwen3-Embedding-0.6B` | `qwen3-embedding-0.6b` | `models/qwen3-embedding-0.6b.env` | `cloudriftai/vllm-emmy-qwen3-embedding-0.6b` |
+| `deepseek-ai/DeepSeek-V4-Flash-0731` | `deepseek-v4-flash-0731` | `models/deepseek-v4-flash-0731.env` | `cloudriftai/vllm-emmy-deepseek-v4-flash-0731` |
 
 `emmy.publish.model_slug` is the one implementation of the HF-id mapping — organization dropped, lowercased,
 and junk collapsed to `-`. `model_slug.sh` is only a compatibility wrapper for Make and container scripts. A slug
@@ -127,8 +127,10 @@ in the 2026-08-01 article reproduction 24 of 28 emmy benchmark cells missed the 
 about 4.5 hours of the session — and every customer following the documented per-workload knobs pays the same on
 every boot. An extra shape that will not converge normally does **not** fail the release: the pinned shape is the
 contract, and the degraded outcome for other exploratory shapes is a cold boot, not a broken image. The exception is
-an `:fm` shape selected by the final recipe. FAST_MATH is the default Emmy deployment lane when its accuracy gate does
-not regress, so that selected shape must converge and pass pack-HIT plus zero-recompile verification before release.
+an `:fm` shape selected by the final recipe: a lane a recipe deploys must converge and pass pack-HIT plus
+zero-recompile verification before release. `serve.sh` pins `EMMY_FAST_MATH=0` unless the caller sets it, so a shape
+without the suffix is the standard lane whatever the compiler's own default is — without that pin the two lanes bake
+the same cubins and the standard-lane pack never exists.
 
 ## Files
 
@@ -141,18 +143,21 @@ not regress, so that selected shape must converge and pass pack-HIT plus zero-re
   unquantized, default-branch release exactly — `SERVE_WARM_SHAPES`, `SERVE_REVISION`, `SERVE_QUANT`,
   `SERVE_CAPTURE_SIZES`, `SERVE_EXTRA_ARGS`, plus the runner memory/shape lane
   (`SERVE_EMBED_HOST`, `SERVE_PREFILL_CAPACITY`, `SERVE_PREFILL_BUCKET`, `SERVE_M1_TIER`), the qualified vLLM runner
-  opt-in `SERVE_V2_MODEL_RUNNER`, and the release-gate scope opt-in `SERVE_STATIC_ONLY`. The runner shape fields map
-  immutably to their `EMMY_GEN_*` variables in initial warm, every shape fixpoint, the baked image, and verify;
-  an extra warm shape's prefill field overrides the pinned bucket. A test rejects any other key, because a
-  misspelled one reads as a value nothing consumes.
-  `SERVE_GOLDEN_FILE` names the recipe-local canonical YAML that trace, tune handoff, release audit, and image gate
-  share: `recipes/<model>/golden/<gpu-slug>_<compute-cap>.yaml`, one file per exact GPU.
+  opt-in `SERVE_V2_MODEL_RUNNER`, the release-gate scope opt-in `SERVE_STATIC_ONLY`, `SERVE_ENV` (word-split
+  `NAME=value` pairs `serve.sh` exports before the exec: a fork's own switches, `EMMY_STRICT_EVIDENCE=1`), and
+  `SERVE_BASE_IMAGE` / `SERVE_RUNTIME_VERSION` for a model served on a runtime other than stock vLLM (DeepSeek V4 on
+  the 1Cat Volta fork, by digest): the plain image then builds FROM it under a model-scoped `-base` tag, and the
+  serving tag carries the runtime's version. The runner shape fields map immutably to their `EMMY_GEN_*` variables in
+  initial warm, every shape fixpoint, the baked image, and verify; an extra warm shape's prefill field overrides the
+  pinned bucket. A test rejects any other key, because a misspelled one reads as a value nothing consumes.
+  `SERVE_GOLDEN_FILE` names the recipe-local canonical golden file that trace, record handoff, release audit and
+  image gate share: `recipes/<model>/golden/<gpu-slug>_<compute-cap>.json`, one file per exact GPU.
   `SERVE_STATIC_ONLY=1` narrows the realization matrix and is fail-closed: it requires runner capacity, decode bucket,
   and scheduler maximum all equal to one, prefill disabled, the M1 tier enabled, capture sizes exactly `[1]`, and no
   warm-shape override outside that same envelope. Without it the audit derives every warm width plus symbolic.
 - `serve.sh` — the frozen generative serve invocation (the arg set `emmy serve --generate` builds: `--runner
   generate --dtype float16 --hf-overrides EmmyGenModel`, the `FULL_DECODE_ONLY` whole-step decode-cudagraph
-  compilation-config with the forced fused `rotary_embedding` CustomOp, `--no-enable-prefix-caching`, + the
+  compilation-config (its fused `rotary_embedding` CustomOp is now redundant), `--no-enable-prefix-caching`, + the
   `SERVE_*` config; keep in sync with `_gen_graph_args` / `build_serve_cmd` in `emmy/commands/serve.py`). What the
   CLI decides by probing the checkpoint, this script reads from the config, because the config is what the bake
   seals: `SERVE_QUANT=exl3` adds `"quantization_config": null` beside the architectures override (vLLM has no EXL3
@@ -161,7 +166,8 @@ not regress, so that selected shape must converge and pass pack-HIT plus zero-re
   cap at `[1]`**: single-token steps ride the runner's fixed-slot expert dispatch (fixed launch set, capture-legal)
   while wider decode steps keep the routed dispatch, which host-syncs and stays eager. `SERVE_V2_MODEL_RUNNER=1`
   opts a qualified dense model into vLLM's V2 runner; it executes real prefill/decode warmups before enabling vLLM's
-  request-time JIT monitor.
+  request-time JIT monitor. An `--enforce-eager` in `SERVE_EXTRA_ARGS` drops the capture config, as a caller's does in
+  `emmy serve`: a hyper-connection MoE (DeepSeek V4) host-syncs every decode step and serves eager.
 - `warm.sh` — runs the **plain** `vllm-emmy` image on the target GPU with `./warm` mounted at `/opt/emmy`, waits for
   `/health`, issues one completion (covers prefill + decode kernels), stops. Result: `warm/hf` (the model snapshot —
   the download happens here, once), `warm/cubin` (every compiled kernel), and `warm/pack`
@@ -176,19 +182,26 @@ not regress, so that selected shape must converge and pass pack-HIT plus zero-re
   the config env, `EMMY_PACK_DIR` and `HF_HUB_OFFLINE=1`, entrypoint `serve.sh`. The caches live at **`/opt/emmy`**
   on purpose: compose/recipes bind-mount the host HF cache over `/root/.cache/huggingface`, which would shadow
   anything baked there. The baked `HF_HOME` + `HF_HUB_OFFLINE=1` pair is also the signal `emmy deploy` reads
-  (`orchestrate._baked_hf_cache`): an image that declares itself self-contained keeps its own `HF_HOME` in the
+  (`orchestrate.baked_hf_cache`): an image that declares itself self-contained keeps its own `HF_HOME` in the
   generated compose and skips the download step entirely. Deploy used to override `HF_HOME` unconditionally, which
   hid the baked snapshot while offline mode stayed on — the download then failed outright and no deploy from a
-  prebuilt image was possible.
+  prebuilt image was possible. `emmy bench` runs its client in the same image and, for a recipe that pins a revision,
+  names that snapshot as the client's tokenizer: the baked cache holds no branch ref, so a lookup by repo id finds
+  nothing offline.
 - `verify.sh` — compares the image's baked `SERVE_REVISION` against the config's (a tag built from an older config
   serves different weights and still passes every check below), then cold-starts the **baked** image with no token,
   issues one completion, and diffs the cubin file set before/after: an empty diff proves 100% Emmy cache hit. It
-  also rejects any new vLLM Triton JIT warning emitted by that request; the offline boot proves zero downloads.
-  When a pack is baked, it also asserts the boot **hit** it (a silent fallback to the full compile would still pass
-  the cubin check while re-paying the frontend on every customer boot). The hit signal is the runner's "pack hit"
-  line grepped from `docker logs` — reachable because `emmy.serving.register()` self-attaches a log handler under
-  the bare vLLM entrypoint (2026-07-23: without it emmy INFO logs never surfaced and the gate false-FAILed a boot
-  that demonstrably hit the pack). The container is removed by an EXIT trap on every path, pass or fail.
+  also fails when the boot or the request writes a new entry into the baked Triton cache, which every Triton compile
+  does. It does not read vLLM's JIT-monitor warning: that one also fires on a kernel's first launch in a process when
+  the binary loads straight from the cache, which the 1Cat fork's first request does for its attention kernels with
+  nothing compiled. The offline boot proves zero downloads. When a pack is baked, it also asserts that the boot
+  **hit** it on every worker (a silent fallback to the full compile would still pass the cubin check while re-paying
+  the frontend on every customer boot): a tensor- and pipeline-parallel boot (the TP × PP it reads from
+  `SERVE_EXTRA_ARGS`) logs one hit per worker, since each loads its pipeline stage's pack. The hit signal is the
+  runner's "pack hit" line grepped from `docker logs` — reachable because `emmy.serving.register()` self-attaches a
+  log handler under the bare vLLM entrypoint (2026-07-23: without it emmy INFO logs never surfaced and the gate
+  false-FAILed a boot that demonstrably hit the pack). The container is removed by an EXIT trap on every path, pass
+  or fail.
 - `warm/` — gitignored; the warm output that the bake copies in.
 
 ## Workflow
@@ -214,7 +227,7 @@ The `release-serving-image` skill (`.agents/skills/release-serving-image/`) auto
 local mode, abort gates per step, a human approval pause before the push, guaranteed teardown. The manual steps:
 
 The full release session on a rented card (each step from the repo checkout; host prereqs for steps 0–4:
-`make setup` + `pip install -e ".[serving]"` + cupy + `export HF_TOKEN=…`):
+`make setup` + `pip install -e ".[serving]"` + `export HF_TOKEN=…`):
 
 0. Build the base image the warm will compile inside of:
 
@@ -239,8 +252,9 @@ The full release session on a rented card (each step from the repo checkout; hos
    command above is `emmy serve --generate`, which derives the same three from the checkpoint itself — pass
    `--revision <sha>` there so it derives them from the right one. Then `make serve-config MODEL=<id>` prints the
    whole resolved config, revision included; read it back before starting a multi-hour warm. For a new release whose
-   `SERVE_GOLDEN_FILE` does not exist yet, use this finalized config with the `tune-kernels` skill to create, tune,
-   verify, and promote the complete canonical file first; then rerun `make serve-config` and continue.
+   `SERVE_GOLDEN_FILE` does not exist yet, create it first with this finalized config: trace the serving twins,
+   record them (`emmy run --golden PATH --bench --record` / `--record-greedy`), verify, and promote the complete
+   canonical file; then rerun `make serve-config` and continue.
 2. **Golden realization audit** — on the target GPU, after finalizing the config and before the expensive warm, assert
    that the pinned canonical file exactly covers the serving configuration:
 
@@ -275,7 +289,7 @@ The full release session on a rented card (each step from the repo checkout; hos
    for a card that plainly has some. Revisions compare as exact strings (an abbreviated hex sha matches the full one
    it prefixes); a branch name and a commit sha never match, because nothing offline can resolve one to the other.
 
-   On failure, regenerate the symbolic inventory from this config, tune every realization on this GPU, perform the
+   On failure, regenerate the symbolic inventory from this config, record every realization on this GPU, perform the
    deployable verification, and promote the complete file. Do not bypass a missing width or substitute a different
    card/revision: those values define different deployed programs.
 
@@ -336,13 +350,14 @@ rental/teardown. The local-only deltas:
 - **The push is the slow part.** `emmy publish <recipe> --yes` uploads ~35 GB over your uplink — hours on a
   residential
   connection vs minutes from a datacenter. It's the main reason the rental flow exists; locally, just let it run.
-- **The snapshot ships re-sharded, as four image layers.** Docker Hub rejects blobs past ~10 GB (upload initiation
+- **The snapshot ships re-sharded, as 24 image layers.** Docker Hub rejects blobs past ~10 GB (upload initiation
   503s forever), and gemma-4-12B ships ONE consolidated 23 GB `model.safetensors` — a single file cannot be split
   across layers by COPY. `make serve-image MODEL=<id>` therefore first runs `reshard_snapshot.py` (inside the base
   image), rewriting the consolidated file as standard HF shards + `model.safetensors.index.json` — per-tensor
-  bytes identical, loader-transparent — then `split_hf.sh` balances the tree into four hardlinked sub-10 GB parts
-  that the Dockerfile COPYs back into `/opt/emmy/hf` (the split asserts completeness — every source file lands in
-  exactly one part — and that each part stays under the ~10 GB blob cap). Kernel cache-key parity is unaffected
+  bytes identical, loader-transparent — then `split_hf.sh` balances the tree into 24 hardlinked sub-10 GB parts that
+  the Dockerfile COPYs back into `/opt/emmy/hf`: enough for DeepSeek V4 Flash's 156 GB, while a small model leaves
+  most of them empty. The split asserts completeness — every source file lands in exactly one part — and that each
+  part stays under the ~10 GB blob cap. Kernel cache-key parity is unaffected
   (weights are runtime constants, not source). The reshard verifies every tensor byte-identical against the
   consolidated source BEFORE deleting it — the post-bake verify gate only proves the shards load and the cubin set
   is closed, not that the weights survived.

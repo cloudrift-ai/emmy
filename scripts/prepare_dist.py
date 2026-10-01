@@ -5,7 +5,7 @@ Two independent steps, each behind its own flag, both run from the repo root:
 
 ``--recipes``
     Copy every runnable ``recipes/<model>/recipe.yaml`` and every
-    ``recipes/<model>/golden/*.yaml`` into ``emmy/recipes/`` so the wheel ships
+    ``recipes/<model>/golden/*.json`` into ``emmy/recipes/`` so the wheel ships
     the recommended serving configs and canonical model goldens (``recipes/``
     sits outside the ``emmy`` package, so setuptools cannot pick them up in place).
     Local benchmark output and ``RESULTS.md`` are not copied.
@@ -53,7 +53,7 @@ def stage_recipes() -> int:
         staged += 1
 
     golden_count = 0
-    for golden in sorted((REPO_ROOT / "recipes").glob("*/golden/*.yaml")):
+    for golden in sorted((REPO_ROOT / "recipes").glob("*/golden/*.json")):
         target = BUNDLED_RECIPES / golden.relative_to(REPO_ROOT / "recipes")
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(golden, target)

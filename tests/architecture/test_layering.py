@@ -47,7 +47,7 @@ def test_checkpoint_format_names_stop_at_frontend_decomposition() -> None:
 
 
 def test_lowering_tile_does_not_import_kernel_ir() -> None:
-    """``lowering/tile/*.py`` may not import from ``ir.kernel.ir``.
+    """``tile/**/*.py`` may not import from ``ir.kernel.ir``.
 
     The Tile-IR / Kernel-IR boundary is: Tile passes encode scheduling
     *decisions* (``StagePolicy``, ``AsyncWait``, ``WarpSpecialize``);
@@ -64,20 +64,20 @@ def test_lowering_tile_does_not_import_kernel_ir() -> None:
     2. you're in the wrong directory — Kernel-IR-emitting passes live
        under ``lowering/kernel/``.
     """
-    tile_dir = _REPO_ROOT / "emmy" / "compiler" / "pipeline" / "passes" / "lowering" / "tile"
-    assert tile_dir.is_dir(), f"lowering/tile/ not found at {tile_dir}"
+    tile_dir = _REPO_ROOT / "emmy" / "compiler" / "pipeline" / "passes" / "tile"
+    assert tile_dir.is_dir(), f"tile/ not found at {tile_dir}"
     forbidden = "from emmy.compiler.ir.kernel"
     offenders: list[str] = []
-    for py in sorted(tile_dir.glob("*.py")):
+    for py in sorted(tile_dir.rglob("*.py")):
         text = py.read_text()
         for lineno, line in enumerate(text.splitlines(), start=1):
             if forbidden in line:
                 offenders.append(f"{py.relative_to(_REPO_ROOT)}:{lineno}: {line.strip()}")
-    assert not offenders, "lowering/tile/*.py must not import from ir.kernel — layering violation.\n" + "\n".join(offenders)
+    assert not offenders, "tile/**/*.py must not import from ir.kernel — layering violation.\n" + "\n".join(offenders)
 
 
 def test_lowering_tile_does_not_import_kernel_passes() -> None:
-    """``lowering/tile/**/*.py`` may not import from the ``lowering/kernel`` pass layer.
+    """``tile/**/*.py`` may not import from the ``lowering/kernel`` pass layer.
 
     The tile layer (``enumeration`` + ``assembly`` + ``split``) runs ABOVE the
     kernel pass layer; a tile pass importing ``lowering.kernel`` is a back-edge in
@@ -89,8 +89,8 @@ def test_lowering_tile_does_not_import_kernel_passes() -> None:
     If this fires: move the shared helper into a ``lowering/`` root module and import
     it there from both layers, rather than reaching down into ``lowering/kernel``.
     """
-    tile_dir = _REPO_ROOT / "emmy" / "compiler" / "pipeline" / "passes" / "lowering" / "tile"
-    assert tile_dir.is_dir(), f"lowering/tile/ not found at {tile_dir}"
+    tile_dir = _REPO_ROOT / "emmy" / "compiler" / "pipeline" / "passes" / "tile"
+    assert tile_dir.is_dir(), f"tile/ not found at {tile_dir}"
     forbidden = "emmy.compiler.pipeline.passes.lowering.kernel"
     offenders: list[str] = []
     for py in sorted(tile_dir.rglob("*.py")):
@@ -98,7 +98,7 @@ def test_lowering_tile_does_not_import_kernel_passes() -> None:
             if forbidden in line and "import" in line:
                 offenders.append(f"{py.relative_to(_REPO_ROOT)}:{lineno}: {line.strip()}")
     assert not offenders, (
-        "lowering/tile/**/*.py must not import from lowering/kernel — back-edge in the pass DAG.\n"
+        "tile/**/*.py must not import from lowering/kernel — back-edge in the pass DAG.\n"
         "Shared structural predicates live in lowering/_predicates.\n" + "\n".join(offenders)
     )
 
@@ -133,8 +133,8 @@ _KERNEL_DIR = _REPO_ROOT / "emmy" / "compiler" / "pipeline" / "passes" / "loweri
 # kernel pass importing any of these is reaching above assemble to (re-)make a
 # scheduling decision instead of reading a stamped fact off the ``TileOp``.
 _FORBIDDEN_IMPORTS = (
-    "lowering.tile.enumeration",
-    "lowering.tile.split",
+    "passes.tile.enumeration",
+    "passes.tile.split",
 )
 
 # Schedule-decision functions (offer enumeration / algebra classifiers). A
@@ -206,8 +206,8 @@ def test_lowering_kernel_calls_no_schedule_classifier() -> None:
     )
 
 
-def test_search_data_does_not_import_the_prior() -> None:
-    """``search/data/*.py`` may not import from ``search.prior``.
+def test_search_dataset_does_not_import_the_prior() -> None:
+    """``search/dataset/*.py`` may not import from ``search.prior``.
 
     The data layer describes candidates and their labels — a :class:`Group` is a packed pool plus what
     is known about its rows, and that is the same object whether a trainer, a fold harness or an
@@ -220,8 +220,8 @@ def test_search_data_does_not_import_the_prior() -> None:
     If this fires, the fact you reached for is either feature SPELLING (``search/features.py``, imported
     by both layers) or a model DECISION that belongs to its caller — pass it in.
     """
-    data_dir = _REPO_ROOT / "emmy" / "compiler" / "pipeline" / "search" / "data"
-    assert data_dir.is_dir(), f"search/data/ not found at {data_dir}"
+    data_dir = _REPO_ROOT / "emmy" / "compiler" / "pipeline" / "search" / "dataset"
+    assert data_dir.is_dir(), f"search/dataset/ not found at {data_dir}"
     # Both spellings, because the repo uses both: the dotted path (``from ….search.prior.linear_model import X``)
     # and the package-import idiom (``from ….search import prior``) that ``commands/fit.py`` already writes for
     # ``features``. A guard that caught only the first would wave through the form a future violation is most
@@ -233,7 +233,7 @@ def test_search_data_does_not_import_the_prior() -> None:
             if forbidden.match(line):
                 offenders.append(f"{py.relative_to(_REPO_ROOT)}:{lineno}: {line.strip()}")
     assert not offenders, (
-        "search/data/*.py must not import search.prior — the data layer carries columns and labels; "
+        "search/dataset/*.py must not import search.prior — the data layer carries columns and labels; "
         "each model class decides for itself which columns it wants.\n" + "\n".join(offenders)
     )
 
@@ -301,12 +301,10 @@ def test_a_new_fingerprint_fact_moves_the_corpus() -> None:
     modeling fix, an io fact — must show up as a corpus diff rather than silently re-keying every
     checked-in reproducer.
     """
-    cases = sorted((_REPO_ROOT / "tests/compiler/realization/cases").rglob("*.yaml"))
+    cases = sorted((_REPO_ROOT / "tests/compiler/realization/cases").rglob("*.json"))
     assert cases, "the realization corpus is empty, so nothing would notice an identity change"
     unstamped = [
-        path.relative_to(_REPO_ROOT).as_posix()
-        for path in cases
-        if not re.search(r"^\s+identity: [0-9a-f]{64}$", path.read_text(), re.MULTILINE)
+        path.relative_to(_REPO_ROOT).as_posix() for path in cases if not re.search(r'"identity": "[0-9a-f]{64}"', path.read_text())
     ]
     assert not unstamped, (
         "every corpus case must carry an `identity:` stamp, or a new fingerprint fact re-keys it "
@@ -335,8 +333,8 @@ def test_nothing_reaches_into_the_scheduler_for_identity() -> None:
 def test_every_buffer_bearing_stmt_can_rename_its_buffers() -> None:
     """``Stmt.rename_buffers`` is the setter counterpart of ``external_reads`` /
     ``external_writes``: a stmt kind that DECLARES external buffers without knowing how to
-    rename them silently breaks every buffer rebind (``canonicalize_buffer_names``, the session
-    kernel cache) the day it first appears inside a body those walk. Wrapper stmts whose
+    rename them silently breaks every buffer rebind (structural identity, the session kernel
+    cache) the day it first appears inside a body those walk. Wrapper stmts whose
     declarations aggregate a nested body are exempt — ``Body.rename_buffers`` reaches their
     leaves through the recursive map."""
     import importlib
@@ -422,3 +420,19 @@ def test_the_op_identity_surface_is_exactly_identity_key() -> None:
         and name != "identity_key"
     }
     assert not offenders, "the public Op identity surface is identity_key alone:\n" + "\n".join(sorted(offenders))
+
+
+def test_search_dataset_does_not_import_search_db() -> None:
+    """``search/dataset/*.py`` may not import ``search.db``: the dataset describes candidates and their labels and
+    travels as a directory; reading a DB is the export's job (``search/db/export.py``), the one place the two
+    packages meet, and the one direction they do."""
+    dataset_dir = _REPO_ROOT / "emmy" / "compiler" / "pipeline" / "search" / "dataset"
+    forbidden = re.compile(r"^\s*(?:from|import)\s+emmy\.compiler\.pipeline\.search\.db\b")
+    offenders = []
+    for py in sorted(dataset_dir.rglob("*.py")):
+        for lineno, line in enumerate(py.read_text().splitlines(), start=1):
+            if forbidden.search(line):
+                offenders.append(f"{py.relative_to(_REPO_ROOT)}:{lineno}: {line.strip()}")
+    assert not offenders, "search/dataset/*.py must not import search.db — the export reads the DB, the dataset never does:\n" + "\n".join(
+        offenders
+    )

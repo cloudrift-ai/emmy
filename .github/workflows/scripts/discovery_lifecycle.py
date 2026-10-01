@@ -9,8 +9,6 @@ import os
 import sys
 from pathlib import Path
 
-import yaml
-
 from emmy.recipe.catalog import (
     HF_ID,
     create_recipe_stub,
@@ -31,6 +29,9 @@ MANIFEST_FIELDS = frozenset({"maintained_models", "best_effort_models", "obsolet
 DECISION_FIELDS = frozenset({"model_id", "rationale", "heat"})
 OBSOLETE_FIELDS = frozenset({"model_id", "replacement_model_id", "rationale", "heat"})
 ONBOARDING_FIELDS = frozenset({"model_id", "task", "rationale", "heat", "deployments"})
+# Every run scores every recipe afresh: the rationale is reworded and the heat drifts by a few points even when nothing
+# about the model changed. A recipe keeps its recorded rationale and heat until the heat moves at least this far.
+HEAT_HYSTERESIS = 10
 
 
 def _extract_object(text: str) -> dict:
@@ -161,6 +162,19 @@ def _retain_best_effort(decision: dict, records: dict[str, dict]) -> dict:
     return {"model_id": model_id, "rationale": _existing_rationale(records[model_id]), "heat": decision["heat"]}
 
 
+def _settled(decision: dict, record: dict | None, lifecycle: str) -> dict:
+    """Keep a recipe's recorded rationale and heat unless its lifecycle changes or its heat moves materially."""
+    if record is None or lifecycle not in record["tags"]:
+        return decision
+    model = record["config"].get("model") or {}
+    heat = model.get("heat")
+    if not model.get("rationale") or not isinstance(heat, int) or abs(decision["heat"] - heat) >= HEAT_HYSTERESIS:
+        return decision
+    if decision.get("replacement_model_id", "") not in model["rationale"]:
+        return decision
+    return {**decision, "rationale": model["rationale"], "heat": heat}
+
+
 def _serving_capacity(config: dict) -> tuple[object, object]:
     llm = (config.get("engine") or {}).get("llm") or {}
     return llm.get("context_length"), llm.get("max_concurrent_requests")
@@ -269,11 +283,15 @@ def validate_manifest(path: Path, workspace: Path) -> dict:
         accepted_obsolete.append(decision)
     obsolete_decisions = accepted_obsolete
 
+    lifecycles = (
+        ("maintained_models", maintained, MAINTAINED_TAG),
+        ("best_effort_models", best_effort, BEST_EFFORT_TAG),
+        ("obsolete_models", obsolete_decisions, OBSOLETE_TAG),
+        ("onboarding_models", normalized_candidates, ONBOARDING_TAG),
+    )
     return {
-        "maintained_models": maintained,
-        "best_effort_models": best_effort,
-        "obsolete_models": obsolete_decisions,
-        "onboarding_models": normalized_candidates,
+        field: [_settled(decision, records.get(decision["model_id"]), lifecycle) for decision in decisions]
+        for field, decisions, lifecycle in lifecycles
     }
 
 
@@ -329,25 +347,16 @@ def _replace_model_metadata(text: str, rationale: str, heat: int) -> str:
     return "".join(lines)
 
 
-def _replace_matrices(text: str, deployments: list[dict[str, object]]) -> str:
-    lines = text.splitlines(keepends=True)
-    start = next((index for index, line in enumerate(lines) if line.startswith("matrices:")), None)
-    if start is None:
-        raise ValueError("Onboarding shell is missing its matrices block")
-    end = start + 1
-    while end < len(lines) and (not lines[end].strip() or lines[end].startswith((" ", "\t", "-"))):
-        end += 1
-    lines[start:end] = [yaml.safe_dump({"matrices": deployments}, sort_keys=False, width=116)]
-    return "".join(lines)
-
-
-def _set_lifecycle(record: dict, lifecycle: str, rationale: str, heat: int, deployments: list | None = None) -> bool:
+def _set_lifecycle(record: dict, lifecycle: str, rationale: str, heat: int) -> bool:
     path = record["path"]
     before = path.read_text()
-    after = _replace_tag_block(before, _tags_with_lifecycle(record["tags"], lifecycle))
-    after = _replace_model_metadata(after, rationale, heat)
-    if deployments is not None:
-        after = _replace_matrices(after, deployments)
+    after = before
+    tags = _tags_with_lifecycle(record["tags"], lifecycle)
+    if tags != list(record["tags"]):
+        after = _replace_tag_block(after, tags)
+    model = record["config"].get("model") or {}
+    if (model.get("rationale"), model.get("heat")) != (rationale, heat):
+        after = _replace_model_metadata(after, rationale, heat)
     if before == after:
         return False
     path.write_text(after)
@@ -428,16 +437,7 @@ def apply_manifest(manifest: dict, workspace: Path, summary_path: Path) -> dict:
         changed = _set_lifecycle(records[decision["model_id"]], OBSOLETE_TAG, decision["rationale"], decision["heat"]) or changed
     for candidate in manifest["onboarding_models"]:
         if candidate["model_id"] in records:
-            changed = (
-                _set_lifecycle(
-                    records[candidate["model_id"]],
-                    ONBOARDING_TAG,
-                    candidate["rationale"],
-                    candidate["heat"],
-                    candidate["deployments"],
-                )
-                or changed
-            )
+            changed = _set_lifecycle(records[candidate["model_id"]], ONBOARDING_TAG, candidate["rationale"], candidate["heat"]) or changed
         else:
             create_recipe_stub(
                 workspace / "recipes",

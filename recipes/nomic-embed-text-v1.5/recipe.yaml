@@ -1,0 +1,11 @@
+tags:
+  - onboarding
+  - untested
+model:
+  huggingface: nomic-ai/nomic-embed-text-v1.5
+  rationale: "Excluded from trending; established utility, no fresh momentum."
+  heat: 45
+  task: embed
+matrices:
+- deploy.gpu: NVIDIA A100 40GB
+  deploy.gpu_count: 1

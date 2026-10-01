@@ -20,7 +20,7 @@ between the eager forward and the emmy comparison.
 
 Individual backends may do different internal lowerings: the CUDA backend
 calls ``run_pipeline`` through the full chain (decomposition →
-optimization → fusion → lowering/tile → lowering/cuda), the Loop
+optimization → fusion → tile → lowering/cuda), the Loop
 backend stops after fusion, and the numpy backend walks the graph
 directly. From the caller's perspective the interface is identical.
 """
@@ -37,6 +37,7 @@ import numpy as np
 
 from emmy import config
 from emmy.compiler.ir.base import ConstantOp, InputOp
+from emmy.compiler.ir.tensor.ir import ElementwiseOp
 
 if TYPE_CHECKING:
     from emmy.compiler.graph import Graph
@@ -55,9 +56,9 @@ class LaunchTime:
     """Per-launch GPU-event timing inside a benchmark run.
 
     ``time_ms`` is the median over ``samples`` (the canonical selection
-    statistic — robust to single-iter outliers from cupy framing
+    statistic — robust to single-iter outliers from host framing
     jitter). ``samples`` carries every measured per-iter latency in
-    ms so callers downstream (e.g. ``search.policy.terminal_bench``) can
+    ms so callers downstream (e.g. ``search.bench_record``) can
     compute min/max/mean/variance without re-running the bench."""
 
     idx: int
@@ -121,18 +122,9 @@ class Backend(ABC):
     # event-measured ms. Catches the case where every iter is just
     # under the per-launch ``_KERNEL_TIMEOUT_MS`` watchdog (e.g. 999 ms
     # × 20 iters = 20 s of GPU time) which the watchdog by design lets
-    # through. Distinct from a wall-clock cap so Python/cupy framing
+    # through. Distinct from a wall-clock cap so host framing
     # overhead doesn't artificially shrink the budget for tiny ops.
     _bench_run_timeout_s: float = 10.0
-    # Optional hard wall-clock cap on a single ``benchmark()`` call.
-    # When set, the call runs in a subprocess-isolated worker so the
-    # parent can SIGKILL the GPU process if a kernel keeps the device
-    # busy past the in-process per-launch / per-iter budgets (those
-    # budgets rely on ``cupy.cuda.Event.done`` which never trips on
-    # some hangs). Set this for autotune sweeps; leave ``None`` for
-    # interactive ``emmy run`` so on-iter callbacks and the
-    # parent's torch instance can be shared in-process.
-    _bench_wall_timeout_s: float | None = None
 
     @property
     def bench_compile_timeout_s(self) -> float:
@@ -141,10 +133,6 @@ class Backend(ABC):
     @property
     def bench_run_timeout_s(self) -> float:
         return config.bench_run_timeout_s(self._bench_run_timeout_s)
-
-    @property
-    def bench_wall_timeout_s(self) -> float | None:
-        return config.bench_wall_timeout_s(self._bench_wall_timeout_s)
 
     @abstractmethod
     def compile(self, graph: Graph) -> Any:
@@ -216,6 +204,8 @@ class Backend(ABC):
                 continue
 
             args = [values[inp] for inp in node.inputs]
+            if isinstance(node.op, ElementwiseOp) and dtype_np.kind == "f":
+                args = [a.astype(np.promote_types(a.dtype, dtype_np), copy=False) if a.dtype.kind == "f" else a for a in args]
             result = node.op.forward(*args)
             # A multi-output node's ``forward`` returns a tuple matched
             # positionally to ``node.outputs``; values store per BUFFER.

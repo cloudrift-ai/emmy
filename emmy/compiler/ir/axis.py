@@ -17,10 +17,12 @@ carry bare ``Axis`` tuples and encode the binding in the flavor's type.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 
 from emmy.compiler.dim import DEFAULT_SEQ_HINT, Dim, to_dim
 from emmy.compiler.ir.expr import Expr, Interval, Literal, SimplifyCtx
+from emmy.compiler.wire import Wire
 
 # Sentinel upper bound for a symbolic loop axis ``[0, hi]``. Only its ``lo = 0``
 # matters (gives the non-negativity the ``(i*c + …)//c → i`` div fold needs);
@@ -30,7 +32,7 @@ _SYMBOLIC_AXIS_HI = 1 << 30
 
 
 @dataclass(frozen=True)
-class Window:
+class Window(Wire):
     """The slice of a PARENT axis an axis walks — the ONE windowing vocabulary.
 
     ``parent`` is the pre-split axis this one was carved out of: top-level axes (the ones the
@@ -62,7 +64,7 @@ class Window:
 
 
 @dataclass(frozen=True)
-class Axis:
+class Axis(Wire):
     """One named iteration variable.
 
     Referenced from ``Expr`` subtrees by ``Var(name)``. ``extent`` is a
@@ -90,6 +92,15 @@ class Axis:
     def source_axis(self) -> Axis | None:
         """The pre-split axis this one was carved out of — the window's ``parent``."""
         return self.window.parent if self.window is not None else None
+
+    def sources(self) -> Iterator[Axis]:
+        """The source-axis chain, nearest first; a cycle in the window metadata ends it."""
+        seen: set[int] = set()
+        parent = self.source_axis
+        while parent is not None and id(parent) not in seen:
+            seen.add(id(parent))
+            yield parent
+            parent = parent.source_axis
 
     @property
     def hint_extent(self) -> int:

@@ -75,6 +75,23 @@ def _wire(resp: dict) -> bytes:
     return len(body).to_bytes(8, "little") + body
 
 
+def test_worker_completes_short_response_writes():
+    child = """
+        import os
+        from emmy.compiler.backend.cuda import _bench_worker as worker
+        write = os.write
+        os.write = lambda fd, data: write(fd, data[:3])
+        async def result(request):
+            return {"result": request["value"]}
+        worker._run_job = result
+        worker.main()
+    """
+    with _spawn(child) as proc:
+        output, error = proc.communicate(_wire({"value": "reference" * 32}), timeout=5)
+    assert proc.returncode == 0, error.decode()
+    assert output == _wire({"ok": True, "result": "reference" * 32})
+
+
 class _FakeStdin:
     def __init__(self, *, broken: bool) -> None:
         self._broken = broken
@@ -147,11 +164,19 @@ def test_worker_exits_after_context_corruption() -> None:
     child = """
         import emmy.compiler.backend.cuda.program as program
         def _corrupt(graph, **kw):
-            import cupy
-            k = cupy.RawKernel(r'extern "C" __global__ void oob(float* p){ p[268435456] = 1.0f; }', 'oob')
-            buf = cupy.zeros(8, dtype=cupy.float32)
-            k((1,), (1,), (buf,))
-            cupy.cuda.runtime.deviceSynchronize()  # surfaces the sticky error
+            from emmy.compiler.backend.cuda.device import device
+            from emmy.compiler.backend.cuda.program import CompiledProgram
+            from emmy.compiler.backend.plan import BufferSpec, ExecutionPlan, KernelSpec, LaunchSpec
+            from emmy.compiler.dim import Dim
+            from emmy.compiler.dtype import F32
+            source = r'extern "C" __global__ void oob(float* p){ p[268435456] = 1.0f; }'
+            plan = ExecutionPlan(
+                "cuda", [], ["p"], [BufferSpec("p", (Dim(8),), F32, "output")], {}, {},
+                [LaunchSpec("p", "oob", ("p",), ((1,), (1,), (1,)), ((1,), (1,), (1,)), 0, ())],
+                {"oob": KernelSpec(source=source)},
+            )
+            CompiledProgram.build_from_plan(plan).run_once()
+            device().synchronize()  # surfaces the sticky error
             raise RuntimeError('unreached')
         program.benchmark_program = _corrupt
         from emmy.compiler.backend.cuda._bench_worker import main

@@ -41,11 +41,22 @@ Hybrid accumulation held relative L2 error near `3.3e-4` across the measured K r
 `0.695 ± 0.033` exact match on the 200-question GSM8K check, with no measured quality regression. The deployed
 inventory had 226 of 276 measured realizations at or above eager performance and a 1.30× geometric-mean ratio.
 
-The [RTX 5090 Gemma 4 golden](golden/rtx5090_sm120.yaml) has since been re-recorded as the serving-twin
-realization matrix (2026-08-23; 22 self-contained twin programs, 352 verified realizations). The measurements below
-were taken against the 281-program standalone-target inventory current at publication: representative selected
+The [RTX 5090 Gemma 4 golden](golden/rtx5090_sm120.json) was re-recorded as the serving-twin realization matrix on
+2026-08-23, when it held 22 self-contained twin programs and 352 verified realizations. The measurements below were
+taken against the 281-program standalone-target inventory current at publication: representative selected
 FAST_MATH projection times at sequence length 512 were 61.5 µs for Q, 36.4 µs for KV, 64.1 µs for output, 362.4 µs
 for gate/up, and 214.2 µs for down projection.
+
+## CSE golden refresh (2026-09-30)
+
+The current golden has 40 targets and 470 measured rows after restamping and re-recording on the RTX 5090. This is
+kernel and route evidence; the serving results above have not been remeasured. Some older alternate rows remain
+proposals, while the selected routes have fresh measurements.
+
+Long-context FAST_MATH route receipts are slower than the earlier recordings: 2,048-token postfill is 2.55 ms versus
+2.13 ms, and 4,096-token postfill is 5.04 ms versus 4.16 ms. The stored programs, route schedules, and dominant CUDA
+kernel bodies are unchanged across those recordings. The runs were made at different times, so they do not isolate a
+CSE performance effect. Manual schedule variants for the dominant kernels did not improve the current results.
 
 ## Reproduce
 

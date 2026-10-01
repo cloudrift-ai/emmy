@@ -30,6 +30,8 @@ Idempotent — a body already in interleaved form is a no-op.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.stmt import Body, Stmt
@@ -49,11 +51,11 @@ def rewrite(root: Node) -> KernelOp | None:
     # Only ``True`` is enumerated, so the autotuner never forks on this knob;
     # ``EMMY_INTERLEAVE_LOADS=0`` still pins ``False``.
     if not INTERLEAVE_LOADS.narrow((True,))[0]:
-        return KernelOp(body=op.body, name=op.name, knobs={**op.knobs, INTERLEAVE_LOADS.name: False})
+        return replace(op, body=op.body, knobs={**op.knobs, INTERLEAVE_LOADS.name: False})
     # Stamp the policy (True) even when no cluster benefits — the realized
     # config records that interleaving was enabled, keeping a uniform knob set.
     new_body, _changed = _walk(op.body)
-    return KernelOp(body=new_body, name=op.name, knobs={**op.knobs, INTERLEAVE_LOADS.name: True})
+    return replace(op, body=new_body, knobs={**op.knobs, INTERLEAVE_LOADS.name: True})
 
 
 def _walk(body: Body) -> tuple[Body, bool]:
@@ -76,10 +78,14 @@ def _walk(body: Body) -> tuple[Body, bool]:
                 nested_changed = True
         new_stmts.append(s)
     rebuilt = Body(tuple(new_stmts))
-    if not _has_load_and_assign(rebuilt):
-        return rebuilt, nested_changed
+    # A carried staged copy (``Load.carried``) is ordered against the barrier and the unpack that
+    # reads its vector, neither of which its ``defines`` names: it keeps its place, and so does the
+    # rest of that body.
+    if not _has_load_and_assign(rebuilt) or any(isinstance(s, Load) and s.carried for s in rebuilt):
+        return (rebuilt if nested_changed else body), nested_changed
     sunk = _sink_loads(rebuilt)
-    return sunk, nested_changed or tuple(sunk) != tuple(rebuilt)
+    changed = nested_changed or sunk != rebuilt
+    return (sunk if changed else body), changed
 
 
 def _has_load_and_assign(body: Body) -> bool:

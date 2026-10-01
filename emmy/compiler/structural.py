@@ -10,6 +10,7 @@ exact include/exclude list.
 
 Implementers today:
 
+- :class:`emmy.compiler.dim.Dim` — the extent expression; excludes its advisory expected-size hint.
 - :class:`emmy.compiler.graph.Graph` — Merkle digest over op kinds,
   body structure, output shapes/dtypes, input wiring; excludes node ids,
   Tensor names, and Hints.
@@ -23,7 +24,7 @@ Implementers today:
   cache).
 
 ``Op.identity_key`` layers on these: one lattice over the op's canonical
-Loop-IR body, folding in the io fingerprint and the knob dict for the
+Loop-IR body, typing its buffer roles and folding in the knob dict for the
 deploy join (the deploy identity (``identity_key(with_io=True)``)) and the tuning / cubin caches
 (``identity_key(with_io=True, with_knobs=True)``).
 

@@ -50,8 +50,10 @@ the recipe should no longer be used. Low demand or age alone is not enough. Disc
 `best-effort` recipe. Untagged recipes remain runnable for backward compatibility and are classified by the next
 discovery lifecycle run.
 
-Tag values are unique lowercase kebab-case strings. `onboarding` and `untested` must appear together. The runtime
-rejects direct use of disabled recipes, while bulk benchmark enumeration and package staging skip them.
+Tag values are unique lowercase kebab-case strings. `onboarding` and `untested` must appear together.
+`onboarding-failed` is not a lifecycle state: onboarding adds it when an attempt fails and removes it on success.
+Nightly selection skips such a recipe; an explicit manual dispatch can retry it after the failure is addressed. The
+runtime rejects direct use of disabled recipes, while bulk benchmark enumeration and package staging skip them.
 
 `model.rationale` is descriptive lifecycle metadata. It records why the model currently belongs in the inventory and
 does not affect engine arguments, deployment, or benchmark behavior. `model.heat` is an optional integer from 0
@@ -60,9 +62,12 @@ onboarding work; it is not a benchmark score and does not affect serving behavio
 legacy recipes and sorts as null until the next discovery run.
 
 `recipe_catalog()` is the shared repository scan behind `emmy recipe list` and model-discovery validation. The
-versioned JSON document produced by `recipe_inventory_document()` adds the directory name, lifecycle-aware runnable
-state, and each matrix-expanded deployment's effective context length to the identity, tags, task, rationale, and
-heat.
+versioned JSON document produced by `recipe_inventory_document()` (schema version 2) adds the directory name,
+lifecycle-aware runnable state, whether any variant serves through Emmy, and one entry per matrix-expanded
+deployment — its GPU, GPU count, GPU memory fraction (`engine.llm.gpu_memory_utilization`, default 0.9) and
+effective context length — to the identity, tags, task, rationale, and heat. Deployments are unique per (GPU, count,
+fraction): a recipe that may share its GPU lists a reduced-fraction entry beside its whole-GPU one, each with its
+own qualified context length, and both appear.
 This is the machine interface used by other services: consumers reject unknown `schema_version` values, while Emmy
 may add fields without removing or redefining fields in the current version. Editable installs read the checkout's
 live top-level `recipes/` and wheel installs read their packaged runnable recipes. `recipe list` deliberately exposes
@@ -83,14 +88,15 @@ The row fields are grouped by ownership:
 | Fields | Meaning |
 |---|---|
 | `model_id`, `name`, `recipe_path`, `tags`, `lifecycle`, `task`, `runnable`, `rationale`, `heat` | Compact catalog metadata |
+| `emmy_serving` | Some matrix variant serves through the Emmy vLLM plugin (an `Emmy*Model` architecture override) |
 | `operation`, `expected_lifecycle` | Lifecycle-derived onboarding or verification action |
-| `deployment.index`, `deployment.gpu`, `deployment.gpu_count`, `deployment.context_length` | One declared or explicitly requested setup |
+| `deployment.index`, `deployment.gpu`, `deployment.gpu_count`, `deployment.gpu_memory_utilization`, `deployment.context_length` | One declared or explicitly requested setup |
 | `deployment.availability.cloudrift` | Exact-count capacity reported by CloudRift |
 | `results.path`, `results.last_run_at` | Sibling report path and its last committed change |
 | `provider.cloudrift.team_access` | Whether the configured key can act for the configured team UUID |
 
 The expression grammar is deliberately constrained rather than evaluated as Python. Predicates use a documented
-field, one of `==`, `!=`, `>`, `>=`, `<`, `<=`, `in`, `contains`, or `matches`, and a JSON value. Sorts use
+field, one of `==`, `!=`, `>`, `>=`, `<`, `<=`, `in`, `contains`, `not contains`, or `matches`, and a JSON value. Sorts use
 `FIELD asc|desc` with an optional `nulls-first|nulls-last`, or `FIELD order JSON_ARRAY`. Repeated filters are logical
 AND; repeated sort keys are applied in command order. The independent versioned JSON result contains `schema_version`
 and `rows`; an empty result is successful, leaving exact-candidate row-count policy to the caller.
@@ -240,11 +246,12 @@ default sampling, not greedy. `temperature` / `ignore_eos` are generation-only a
 Use it when the serving engine performs request-time initialization after the deployment health check. The warmup
 requests use the same controlled workload configuration and run before every measured repeat.
 
-`benchmark.repeats` (default 1) reruns the identical bench-client workload N times against the one deployed server —
-the model is deployed once, only the client run repeats. Every client stanza remains in the raw benchmark artifact;
-the experiment record does not parse or aggregate those measurements. Because the seed and prompts are identical
-across repeats, a separate intelligent review may use their spread to assess run-to-run noise rather than workload
-variation.
+`benchmark.repeats` (default 1) reruns the bench-client workload N times against the one deployed server — the model
+is deployed once, only the client run repeats. Repeat `i` draws its prompts from `seed + i` (an unset seed counts as
+the client's default, 0): the engine keeps a prefix cache across requests, so replaying one prompt set would let every
+repeat after the first skip most of its prefill. Lengths, concurrency and request count stay identical, so a separate
+intelligent review may use the spread across repeats to assess run-to-run noise. Every client stanza remains in the
+raw benchmark artifact; the experiment record does not parse or aggregate those measurements.
 
 The `benchmark` block describes workload generation only. Unknown fields are rejected rather than becoming implicit
 result validators. `emmy bench`, the experiment record, and the `run-experiment` skill preserve raw observations but
@@ -409,10 +416,13 @@ _load_raw_config(recipe_dir) -> raw dict
     +-- load_recipe(): strips matrices, calls _validate_and_build()
     |       -> base Recipe (for bench/cloud commands that don't need matrix resolution)
     |
-    +-- resolve_for_hardware(recipe_dir, gpu_name): expands full matrix,
-    |       finds best combo matching gpu_name, deep_merges with base,
-    |       calls _validate_and_build()
-    |       -> hardware-resolved Recipe (for deploy local/ssh commands)
+    +-- resolve_for_hardware(recipe_dir, gpu_name, gpu_count, gpu_memory_utilization):
+    |       expands full matrix, keeps the combos naming gpu_name, picks one:
+    |       with a fraction, the exact (count, fraction) entry and nothing else (a plan);
+    |       else the highest fraction among exact-count entries, else the largest
+    |       count dividing gpu_count (scale-out), else the first entry (no count);
+    |       deep_merges with base, calls _validate_and_build()
+    |       -> hardware-resolved Recipe (for the deploy commands)
     |
     +-- enumerate_tasks(): reads matrices, expands via cross/zip:
             |-- expand_matrix() -> list of combinations

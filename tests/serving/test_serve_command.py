@@ -3,6 +3,7 @@
 import argparse
 import json
 import types
+from pathlib import Path
 
 import pytest
 
@@ -79,7 +80,9 @@ def test_own_flags_after_model_are_extracted(capsys):
     # The argparse-REMAINDER footgun: everything after MODEL lands in
     # vllm_args, INCLUDING emmy's own flags. They must still be honored
     # (this exact case once exec'd a real server out of a --dry-run test).
-    args = _parse(["serve", MODEL, "--bench", "--dry-run", "--random-input-len", "32", "--gpu-memory-utilization", "0.8"])
+    args = _parse(
+        ["serve", MODEL, "--runner", "pooling", "--bench", "--dry-run", "--random-input-len", "32", "--gpu-memory-utilization", "0.8"]
+    )
     handle_serve(args)
     out = capsys.readouterr().out.strip().splitlines()
     assert len(out) == 2, out
@@ -90,7 +93,7 @@ def test_own_flags_after_model_are_extracted(capsys):
 
 
 def test_verbatim_passthrough_after_double_dash(capsys):
-    args = _parse(["serve", MODEL, "--bench", "--dry-run", "--", "--port", "8222", "--seed", "3"])
+    args = _parse(["serve", MODEL, "--runner", "pooling", "--bench", "--dry-run", "--", "--port", "8222", "--seed", "3"])
     handle_serve(args)
     out = capsys.readouterr().out.strip().splitlines()
     assert len(out) == 2
@@ -107,7 +110,7 @@ def test_pinned_revision_splits_off_the_model_id(capsys):
     config probe returns ``None`` and each checkpoint special case it feeds — the coded-checkpoint
     unquantized override, the MoE capture cap — silently no-ops. Both the server and the bench
     client must see the bare repo, and the bench client must match what vLLM serves under."""
-    args = _parse(["serve", f"{MODEL}@abc123", "--bench", "--dry-run"])
+    args = _parse(["serve", f"{MODEL}@abc123", "--runner", "pooling", "--bench", "--dry-run"])
     handle_serve(args)
     serve_line, bench_line = capsys.readouterr().out.strip().splitlines()
     assert serve_line.startswith(f"vllm serve {MODEL} ")
@@ -117,14 +120,14 @@ def test_pinned_revision_splits_off_the_model_id(capsys):
 
 
 def test_explicit_revision_flag_wins_over_the_pin_suffix(capsys):
-    args = _parse(["serve", f"{MODEL}@abc123", "--dry-run", "--revision", "def456"])
+    args = _parse(["serve", f"{MODEL}@abc123", "--runner", "pooling", "--dry-run", "--revision", "def456"])
     handle_serve(args)
     line = capsys.readouterr().out.strip()
     assert "--revision def456" in line and "abc123" not in line
 
 
 def test_dry_run_serve_only(capsys):
-    args = _parse(["serve", MODEL, "--dry-run"])
+    args = _parse(["serve", MODEL, "--runner", "pooling", "--dry-run"])
     handle_serve(args)
     out = capsys.readouterr().out.strip().splitlines()
     assert len(out) == 1
@@ -132,7 +135,7 @@ def test_dry_run_serve_only(capsys):
 
 
 def test_bench_seed_is_distinct_from_vllm_seed(capsys):
-    args = _parse(["serve", MODEL, "--bench", "--dry-run", "--bench-seed", "9", "--seed", "1"])
+    args = _parse(["serve", MODEL, "--runner", "pooling", "--bench", "--dry-run", "--bench-seed", "9", "--seed", "1"])
     handle_serve(args)
     out = capsys.readouterr().out.strip().splitlines()
     assert "--seed 1" in out[0]  # vllm serve gets --seed
@@ -192,9 +195,9 @@ def test_serve_cmd_generate_branch():
     # Mixed-batch full capture needs an ALWAYS-support attention backend; FA2 is
     # uniform-batch only, so the emmy arm selects TRITON_ATTN.
     assert cmd[cmd.index("--attention-backend") + 1] == "TRITON_ATTN"
-    # The emmy generative arm defaults util to 0.97 — its cupy residents are invisible to
-    # vLLM's torch-only profiler, so the 0.90 line can fall below them and fail the min-KV
-    # fit at long model lens. Stock (and the embedding plugin) keep 0.90.
+    # The emmy generative arm defaults util to 0.97, the line measured when its residents were
+    # invisible to vLLM's profiler and 0.90 failed the min-KV fit at long model lens. Stock
+    # (and the embedding plugin) keep 0.90.
     assert "--gpu-memory-utilization=0.97" in cmd
     stock_cmd = build_serve_cmd(MODEL, stock=True, vllm_args=[], generate=True)
     assert "--gpu-memory-utilization=0.9" in stock_cmd
@@ -340,7 +343,7 @@ def test_serve_cmd_generate_hyper_connection_moe_serves_eager(monkeypatch):
     """A hyper-connection MoE has no fixed-slot tier — its routed combine host-syncs every step —
     so the serve default is eager, not the capture-size-1 ladder (the boot guard rejects capture)."""
     _force_moe_probe(monkeypatch)
-    monkeypatch.setattr("emmy.commands.serve._local_config", lambda model, vllm_args: types.SimpleNamespace(hc_mult=2))
+    monkeypatch.setattr("emmy.commands.serve._hf_config", lambda model, vllm_args, local=True: types.SimpleNamespace(hc_mult=2))
     cmd = build_serve_cmd(MODEL, stock=False, vllm_args=[], generate=True)
     assert "--enforce-eager" in cmd
     assert "--compilation-config" not in cmd
@@ -452,7 +455,7 @@ def test_serve_cmd_generate_kv_cache_dtype_passes_through(flag):
 def test_serve_kv_cache_dtype_survives_the_remainder_reparse(capsys):
     # The argparse-REMAINDER re-parse extracts emmy's own flags and forwards the rest; a
     # vLLM flag emmy does not own must come out the other side intact.
-    args = _parse(["serve", MODEL, "--generate", "--dry-run", "--kv-cache-dtype", "fp8_e4m3"])
+    args = _parse(["serve", MODEL, "--runner", "generate", "--dry-run", "--kv-cache-dtype", "fp8_e4m3"])
     handle_serve(args)
     out = capsys.readouterr().out.strip().splitlines()
     assert len(out) == 1
@@ -460,7 +463,7 @@ def test_serve_kv_cache_dtype_survives_the_remainder_reparse(capsys):
 
 
 def test_serve_generate_bench_targets_completions(capsys):
-    args = _parse(["serve", MODEL, "--generate", "--bench", "--dry-run"])
+    args = _parse(["serve", MODEL, "--runner", "generate", "--bench", "--dry-run"])
     handle_serve(args)
     out = capsys.readouterr().out.strip().splitlines()
     assert len(out) == 2  # serve + bench
@@ -470,7 +473,7 @@ def test_serve_generate_bench_targets_completions(capsys):
 
 
 def test_health_timeout_default():
-    args = _parse(["serve", MODEL, "--bench"])
+    args = _parse(["serve", MODEL, "--runner", "pooling", "--bench"])
     assert args.health_timeout == 1800
 
 
@@ -478,7 +481,7 @@ def test_health_timeout_after_model_is_extracted_not_forwarded(capsys):
     # A fresh-shape first boot can compile past the 1800 s default; --health-timeout
     # widens the --bench /health window. Like every emmy flag it must be extracted
     # from the REMAINDER, not forwarded to vllm serve.
-    args = _parse(["serve", MODEL, "--bench", "--dry-run", "--health-timeout", "5400"])
+    args = _parse(["serve", MODEL, "--runner", "pooling", "--bench", "--dry-run", "--health-timeout", "5400"])
     handle_serve(args)
     out = capsys.readouterr().out.strip().splitlines()
     assert len(out) == 2
@@ -528,20 +531,80 @@ def test_moe_probe_recognizes_the_deepseek_published_spelling(tmp_path):
     assert _is_moe_model(str(tmp_path), []) is True
 
 
-def test_golden_and_strict_evidence_reach_the_vllm_child_as_env(monkeypatch, tmp_path):
+_REGIME_GOLDEN = (
+    Path(__file__).resolve().parents[2] / "emmy" / "compiler" / "pipeline" / "search" / "golden" / "records" / "rtx4080_sm89.json"
+)
+
+
+def test_golden_and_strict_evidence_reach_the_vllm_child_as_env(monkeypatch):
     """``serve --golden PATH --strict-evidence`` spell the same flags every replaying command has; they
     are emmy's own (never forwarded to vllm) and reach the child process, where every program compiles
-    through the one evidence pick, as ``EMMY_GOLDEN_FILE`` / ``EMMY_STRICT_EVIDENCE``."""
+    through the one evidence pick, as ``EMMY_GOLDEN_FILE`` / ``EMMY_STRICT_EVIDENCE`` — together with
+    the precision regime the file's rows share, because a row is evidence only in its own regime and
+    the child learns it from nowhere else."""
     from emmy.commands import serve as serve_mod
 
-    golden = tmp_path / "working.yaml"
-    args = _parse(["serve", "--golden", str(golden), "--strict-evidence", "--dry-run", MODEL])
+    golden = _REGIME_GOLDEN
+    args = _parse(["serve", "--golden", str(golden), "--strict-evidence", "--dry-run", MODEL, "--runner", "pooling"])
     assert args.golden == str(golden) and args.strict_evidence is True
     captured = {}
+    monkeypatch.delenv("EMMY_FAST_MATH", raising=False)
     monkeypatch.setattr(serve_mod, "_vllm_bin", lambda: "/bin/vllm")
     monkeypatch.setattr(serve_mod, "_serve_and_bench", lambda cmd, *_a, env=None, **_k: captured.update({"cmd": cmd, "env": env}))
-    args = _parse(["serve", MODEL, "--golden", str(golden), "--strict-evidence", "--bench"])
+    args = _parse(["serve", MODEL, "--runner", "pooling", "--golden", str(golden), "--strict-evidence", "--bench"])
     handle_serve(args)
     assert captured["env"]["EMMY_GOLDEN_FILE"] == str(golden.resolve())
     assert captured["env"]["EMMY_STRICT_EVIDENCE"] == "1"
+    assert captured["env"]["EMMY_FAST_MATH"] == "False", "the rows' regime reaches the child as its pin"
     assert "--golden" not in captured["cmd"] and "--strict-evidence" not in captured["cmd"]
+
+
+def test_serve_refuses_an_environment_pin_that_contradicts_the_golden_regime(monkeypatch):
+    """An operator's ``EMMY_FAST_MATH=1`` against a file measured under ``FAST_MATH: False`` would deploy
+    an empty evidence index; the boot fails at the launcher, naming both, rather than at the first fork
+    twenty-five minutes in."""
+    from emmy.commands import serve as serve_mod
+
+    monkeypatch.setenv("EMMY_FAST_MATH", "1")
+    monkeypatch.setattr(serve_mod, "_vllm_bin", lambda: "/bin/vllm")
+    monkeypatch.setattr(serve_mod, "_serve_and_bench", lambda *_a, **_k: pytest.fail("the child must not launch"))
+    with pytest.raises(SystemExit):
+        handle_serve(_parse(["serve", MODEL, "--runner", "pooling", "--golden", str(_REGIME_GOLDEN), "--strict-evidence", "--bench"]))
+
+
+def test_serve_resolves_the_runner_of_the_pinned_revision(monkeypatch):
+    """``MODEL@rev`` pins a checkpoint that may differ from the default branch, so the runner probe
+    sees the pin as vLLM's own ``--revision`` before it reads any config."""
+    seen = []
+
+    def runner(model, vllm_args):
+        seen.append((model, list(vllm_args)))
+        return "generate"
+
+    monkeypatch.setattr("emmy.commands.serve.serving_runner", runner)
+    handle_serve(_parse(["serve", f"{MODEL}@abc", "--dry-run"]))
+    assert seen == [(MODEL, ["--revision", "abc"])]
+
+
+def test_serving_runner_resolves_like_vllm(tmp_path):
+    """The runner is vLLM's flag: explicit wins, a pooling convert pools, a Sentence Transformers
+    checkpoint pools even as a *ForCausalLM, the architecture suffix decides otherwise, and a
+    checkpoint that cannot be read generates, which is vLLM's own last resort."""
+    import json
+
+    from emmy.commands.serve import serving_runner
+
+    causal = tmp_path / "causal"
+    causal.mkdir()
+    (causal / "config.json").write_text(json.dumps({"architectures": ["Qwen3ForCausalLM"], "model_type": "qwen3"}))
+    assert serving_runner(str(causal), []) == "generate"
+    assert serving_runner(str(causal), ["--runner", "pooling"]) == "pooling"
+    assert serving_runner(str(causal), ["--convert", "embed"]) == "pooling"
+    (causal / "modules.json").write_text("[]")
+    assert serving_runner(str(causal), []) == "pooling"
+    assert serving_runner(str(causal), ["--runner", "generate"]) == "generate"
+    encoder = tmp_path / "encoder"
+    encoder.mkdir()
+    (encoder / "config.json").write_text(json.dumps({"architectures": ["XLMRobertaModel"], "model_type": "xlm-roberta"}))
+    assert serving_runner(str(encoder), []) == "pooling"
+    assert serving_runner(str(tmp_path / "missing"), []) == "generate"

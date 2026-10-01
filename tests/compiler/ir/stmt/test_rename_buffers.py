@@ -1,8 +1,8 @@
 """``rename_buffers`` — the setter counterpart of ``external_reads`` / ``external_writes``.
 
 What these pin: every buffer-bearing leaf renames its field (and only it), the body-level
-rename reaches leaves through wrappers, and ``canonicalize_buffer_names`` (behind
-``Body.structural_key``) covers EVERY external-buffer field — a kernel-stage body differing
+rename reaches leaves through wrappers, and identity normalization covers EVERY external-buffer
+field — a kernel-stage body differing
 only in a staged source buffer's name must key identically."""
 
 from __future__ import annotations
@@ -12,7 +12,6 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write, ZeroPrologue
-from emmy.compiler.ir.stmt.normalize import canonicalize_buffer_names
 
 
 def _body(x: str = "x", out: str = "o", zero: str = "acc_buf") -> Body:
@@ -44,7 +43,6 @@ def test_rename_is_identity_off_the_mapping() -> None:
     assert body.rename_buffers({"unrelated": "name"}) == body
 
 
-def test_canonicalization_covers_non_load_write_buffer_fields() -> None:
+def test_identity_canonicalization_covers_non_load_write_buffer_fields() -> None:
     a, b = _body(zero="acc_buf"), _body(zero="differently_named")
-    assert canonicalize_buffer_names(a) == canonicalize_buffer_names(b)
     assert a.structural_key() == b.structural_key()

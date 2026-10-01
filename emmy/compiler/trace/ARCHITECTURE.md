@@ -49,9 +49,10 @@ diagonal and a typed scalar zero everywhere else. Square and rectangular dimensi
 the exported tensor metadata. Dynamic dimensions, non-strided layouts, pinned memory, and unsupported overloads or
 constructor options fail closed rather than being stored as an elementwise operation without coordinate semantics.
 
-An explicit all-zero `aten.pad` width tuple stays as a unary `ElementwiseOp("pad")` identity so a working golden
-retains the frontend provenance and exact dtype. Any nonzero, symbolic, or otherwise unrepresented padding fails
-closed: the elementwise form has no coordinate, mode, or fill-value fields and cannot describe a changed tensor.
+Constant zero-fill `aten.pad` lowers to a two-source `IndexMapOp`: shifted input coordinates inside the original
+extent and a typed zero outside. Inactive input coordinates are clamped before selection because reference
+backends may evaluate both sources. Negative widths crop through the same map; an empty input uses only the zero
+source. All-zero widths alias the input. Symbolic widths, other modes and nonzero fill values fail explicitly.
 
 The default `aten.cumsum` overload with a static integer axis lowers to an additive `ScanOp`, preserving the input
 shape and dtype. Dynamic axes, dtype overrides, and unsupported overloads or keyword arguments fail closed.
@@ -74,6 +75,11 @@ by both reference backends and the decomposition's scale constant. Gemma-nano (E
 the scaling — so dropping the kwarg re-scaled every logit by `1/sqrt(d)` and redistributed the whole softmax.
 
 ### `huggingface.py` — trace-friendly wrapper
+
+`build_gdn_state_wrapper` exposes a linear-attention block as `(x, state, history) -> (y, next_state, next_history)`.
+The recurrent matrix is FP32 and history uses the projected activation dtype. Zero states start or reset a request;
+batch rows are independent. History is cloned before the installed Hugging Face forward can update it in place,
+so callers retain both inputs. Static prefill and decode programs share this explicit state contract.
 
 HuggingFace `CausalLM` models build their causal attention mask
 dynamically at forward time (`arange` → `cumsum` → `triu` → `eq` …),
@@ -199,13 +205,17 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
 
 - `load_quantized_split(model_dir, dtype) → (model, expert_store)` is the shard-streamed serving load of a
   quantized MoE checkpoint. The twin builds from config on the meta device (weights never read at trace; the
-  experts' would-be initialization never materializes), while the dense trunk streams per shard as real values and
-  attaches via `load_state_dict(assign=True)`. Expert tensors collect into a per-layer store keyed by the expert
+  experts' would-be initialization never materializes), while the dense trunk streams per shard as real values in the
+  requested dtype (a router's `e_score_correction_bias` stays float32, as `from_pretrained` keeps it) and attaches via
+  `load_state_dict(assign=True)`. Expert tensors collect into a per-layer store keyed by the expert
   program's input names: FP8 weights remain raw bits with f32 scales, and native-MXFP4 gpt-oss weights remain uint8
   blocks with uint8 E8M0 scales; biases stay in the requested value dtype. An NVFP4 dense-trunk weight streams as
   values: the loader dequantizes each packed trio (`<key>` + `<key>_scale` + `<key>_scale_2`) on read and consumes the
-  scale siblings. A packed NVFP4 EXPERT weight raises `NotImplementedError` — the expert lane has no packed-trio
-  decode. `expert_range=(lo, hi)` narrows the read to one tensor-parallel rank's expert shard, re-indexed
+  scale siblings. A packed int4 dense-trunk weight (AWQ, GPTQ, compressed-tensors `pack-quantized`) streams the same
+  way, dequantized from its packed codes, zero points and scales under the sibling names its own layout spells
+  (`qweight` / `qzeros` / `scales`, or `weight_packed` / `weight_zero_point` / `weight_scale`); a bfloat16 scale
+  is widened to float32 for the decode. A packed NVFP4 EXPERT weight raises `NotImplementedError` — the expert lane
+  has no packed-trio decode. `expert_range=(lo, hi)` narrows the read to one tensor-parallel rank's expert shard, re-indexed
   rank-locally, so a rank never reads bytes it does not own.
   The twin's config must resolve to Transformers' OWN class for the architecture: a hosting process can re-register
   the model type onto its own minimal config class (vLLM's config parser does, process-wide), which drops every field
@@ -311,14 +321,13 @@ shared with CausalLM traces.
 
 ## Entry points
 
-- CLI model/IR/code loading: `commands.compile.load_or_trace` is shared by `trace`, `compile`, `run`, and `tune`, so
+- CLI model/IR/code loading: `commands.compile.load_or_trace` is shared by `trace`, `compile` and `run`, so
   adapters, dynamic shapes, quantized checkpoint reconstruction, and the guarded remote-code fallback cannot drift.
 - Working-golden inventory generation is downstream compiler/search behavior, not frontend capture behavior:
   `compiler.pipeline.search.working_golden.write_trace_inventory` lowers the captured graph through fusion, enumerates
-  every fold-aware kernel occurrence, and embeds the complete stable Torch IR program once in the golden YAML. Each
-  target is selected by unique frontend origins when possible; an empty or ambiguous selector stores the standalone
-  post-fusion Loop IR slice instead. The smaller provenance tuning reproducer is derived in memory when the working
-  file is loaded. Quantized model traces also embed the digest of their exact checkpoint declaration. Frontend nodes
+  every fold-aware kernel occurrence, and embeds the complete stable Torch IR program once in the golden file. Each
+  target stores its kernel's standalone post-fusion Loop IR, with the frontend origins it computes whole as
+  provenance. Quantized model traces also embed the digest of their exact checkpoint declaration. Frontend nodes
   carrying the generic `trace.materialize` hint become auxiliary outputs only in the inventory copy. Maximal fusion
   retains that storage value as a live output in one frontend target; placement then enumerates its materialized cut
   without changing an ordinary model call.

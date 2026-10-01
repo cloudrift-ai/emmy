@@ -18,22 +18,29 @@ knob rows are asserted without a device. Numerics for every carrier and both arm
 
 from __future__ import annotations
 
+from itertools import permutations
+
 import pytest
 
 from emmy.compiler.context import Context
 from emmy.compiler.dim import Dim
 from emmy.compiler.dtype import BF16, F16, F32
 from emmy.compiler.graph import Graph, Tensor
+from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
+from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.frontend.ir import MatmulOp
 from emmy.compiler.ir.pure.fold import Fold
-from emmy.compiler.ir.stmt import Loop
+from emmy.compiler.ir.stmt import Load, Loop, Write
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
+from emmy.compiler.ir.tile import OutputSpec, Placement
 from emmy.compiler.ir.tile.ir import TileOp
+from emmy.compiler.ir.tile.ops import sched_of
 from emmy.compiler.pipeline import CUDA_PASSES, TILE_PASSES, Pipeline
-from emmy.compiler.pipeline.fork import iter_leaves
+from emmy.compiler.pipeline.fork import leaf_knobs
 from emmy.compiler.pipeline.knob import STRUCT_PREFIX, decision_view, family_of
 from emmy.compiler.pipeline.pipeline import Run
+from tests.compiler.terms import contraction
 
 _CTX = Context.from_target((12, 0))
 
@@ -68,7 +75,7 @@ def _multi_output_matmul() -> Graph:
 def _resolve(passes, graph=None):
     """Option-0 resolution — the no-evidence emission-order pick, so the assertions are about what
     the pipeline BUILDS rather than about what a prior happens to rank first."""
-    return Run(pipeline=Pipeline.build(passes), ctx=_CTX).resolve(graph or _matmul(), lambda fp: next(iter_leaves(fp.options)))
+    return Run(pipeline=Pipeline.build(passes), ctx=_CTX).resolve(graph or _matmul(), lambda fp: next(fp.leaves()))
 
 
 def _kernels(out) -> dict[str, dict]:
@@ -80,9 +87,9 @@ def _tile_pieces(graph=None) -> list[TileOp]:
         ["frontend/decomposition", "frontend/optimization", "loop/lifting", "loop/fusion", "loop/stamp"],
         graph,
     )
-    tiled, _ = Run(pipeline=Pipeline.build(["lowering/tile"]), ctx=_CTX).resolve(
+    tiled, _ = Run(pipeline=Pipeline.build(["tile/lift", "tile/cut", "tile/schedule"]), ctx=_CTX).resolve(
         loop,
-        lambda fp: next(iter_leaves(fp.options)),
+        lambda fp: next(fp.leaves()),
     )
     return [node.op for node in tiled.nodes.values() if isinstance(node.op, TileOp)]
 
@@ -118,6 +125,40 @@ def test_split_preserves_every_fused_output(monkeypatch) -> None:
     out.validate()
 
 
+@pytest.mark.parametrize("free_order", list(permutations(("head", "row", "channel"))))
+def test_split_workspace_preserves_output_axis_order(monkeypatch, free_order) -> None:
+    """A split must not turn a channel tile into a padded tile across four heads."""
+    axes = {name: Axis(name, extent) for name, extent in (("head", 4), ("row", 64), ("channel", 256))}
+    k = Axis("k", 512)
+    root = contraction(
+        k,
+        Load("a", "a", (Var("row"), Var("k"))),
+        (Load("b", "b", (Var("head"), Var("channel"), Var("k"))), "acc"),
+    )
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("a", (64, 512), F16), node_id="a")
+    graph.add_node(InputOp(), [], Tensor("b", (4, 256, 512), F16), node_id="b")
+    graph.add_node(
+        TileOp(
+            op=root,
+            place=Placement(free=tuple(axes[name] for name in free_order)),
+            axes=(*axes.values(), k),
+            output_specs=(OutputSpec(Write("out", (Var("head"), Var("row"), Var("channel")), "acc")),),
+        ),
+        ["a", "b"],
+        Tensor("out", (4, 64, 256), F32),
+        node_id="out",
+    )
+    graph.inputs, graph.outputs = ["a", "b"], ["out"]
+    monkeypatch.setenv("EMMY_REDUCE", "g2k")
+    result, _ = _resolve(["tile/lift", "tile/cut", "tile/schedule"], graph)
+    partial = result.nodes["out__partial"]
+    assert tuple(dim.as_static() for dim in partial.output.shape) == (2, 4, 64, 256)
+    # The piece is formed as its own kernel, which names its axes afresh: the tile axes are told by extent.
+    assert {axis.extent.as_static() for axis in sched_of(partial.op)._mn_for(partial.op.op)} == {64, 256}
+    result.validate()
+
+
 @pytest.mark.parametrize("dtype", [F16, BF16])
 def test_low_precision_output_refuses_direct_atomic_split(monkeypatch, dtype) -> None:
     """F16/BF16 outputs would round every CTA partial; contraction and plain reduce fail closed."""
@@ -125,6 +166,24 @@ def test_low_precision_output_refuses_direct_atomic_split(monkeypatch, dtype) ->
     for graph in (_matmul(out_dtype=dtype), _sum(dtype=dtype)):
         with pytest.raises(ValueError, match="direct atomic REDUCE.*output storage"):
             _resolve(TILE_PASSES, graph)
+
+
+@pytest.mark.parametrize(("dtype", "atomic"), [(F16, False), (BF16, False), (F32, True)])
+def test_the_split_offer_has_an_atomic_arm_only_into_f32(dtype, atomic) -> None:
+    """The unpinned offer, not only a pin, withholds the direct atomic arm from a 16-bit output: each
+    CTA's partial would round into the output storage, in whatever order the CTAs land. On a V100
+    an f16 GEMV (1 x 4096 x 4096) split g4a missed eager at rtol=atol=1e-3 on 13% of its outputs and
+    g16a on 28%, where g4k and g16k passed. The deferred f32 finalize stays offered."""
+    offered: set[str] = set()
+
+    def decide(fp):
+        for option in fp.options:
+            offered.update(value for key, value in leaf_knobs(option).items() if family_of(key) == "REDUCE" and value.startswith("g"))
+        return next(fp.leaves())
+
+    Run(pipeline=Pipeline.build(TILE_PASSES), ctx=_CTX).resolve(_matmul(out_dtype=dtype), decide)
+    assert any(value.endswith("k") for value in offered), offered
+    assert any(value.endswith("a") for value in offered) == atomic, offered
 
 
 def test_finalize_keeps_projection_input_edges(monkeypatch) -> None:
@@ -166,6 +225,17 @@ def test_split_reductions_remain_fold_trees(monkeypatch, graph) -> None:
     pieces = _tile_pieces(graph)
     assert len(pieces) == 2
     assert not any(_contains_raw_loop(piece.op) for piece in pieces)
+
+
+def test_a_matvec_partial_tiles_its_unit_row_not_the_partition(monkeypatch) -> None:
+    """Both operands of a matvec's partial read the partition coordinate, so it is the pair's only
+    shared axis and never a row: B changes with it. The partial keeps the unit row its kernel had,
+    and that row, not the partition, is the tile's M."""
+    monkeypatch.setenv("EMMY_REDUCE", "g2k")
+    (partial,) = [piece for piece in _tile_pieces(_matmul(m=1)) if len(piece.place.free) > 1]
+    (node,) = [node for node in partial.views if node.as_contraction() is not None]
+    m, _ = sched_of(partial)._mn_for(node)
+    assert m.extent == Dim(1) and m.name not in node.as_contraction().shared_axes
 
 
 def test_each_piece_decides_its_own_row(monkeypatch) -> None:
@@ -274,9 +344,8 @@ def test_the_split_node_is_priced_as_the_sum_of_its_pieces(monkeypatch) -> None:
 
 
 def _softmax_scale_chain() -> Graph:
-    """``softmax(x · c)`` with a broadcast scalar — the CHAIN form: the head fold is a BODY member
-    of its projection wrapper (``head``'s sweep case is the same family), and its lift CAPTURES
-    ``in0``, the scalar the projection loads once per cell."""
+    """``softmax(x · c)`` with a broadcast scalar provider before the reducing operand.
+    The split must find the reduction and keep the scalar its lift reads."""
     from emmy.compiler.ir.frontend.ir import SoftmaxOp
 
     g = Graph()
@@ -289,7 +358,7 @@ def _softmax_scale_chain() -> Graph:
 
 
 def test_chain_split_carries_the_captured_prologue_and_strips_the_finalize(monkeypatch) -> None:
-    """The body-resident (chain-form) head fold splits WHOLE: the partial carries the prologue
+    """The head fold behind a captured scalar splits WHOLE: the partial carries the prologue
     cone its slice still captures (the ``c`` load — a bare sliced fold would leave ``in0``
     dangling, the ``k_softmax__partial`` nvcc miscompile), and the finalize's epilogue DROPS the
     original fold (keeping it would re-run the whole reduction per cell and shadow the workspace
@@ -325,7 +394,7 @@ def test_sweep_resident_head_fold_refuses_the_split(monkeypatch) -> None:
     from emmy.compiler.ir.stmt import Assign, Load, Write
     from emmy.compiler.ir.tile import OutputSpec, Placement
     from emmy.compiler.ir.tile.ops import head
-    from emmy.compiler.pipeline.passes.lowering.tile._split import _projection_refusal, split_forks
+    from emmy.compiler.pipeline.passes.tile._split import _projection_refusal, split_forks
     from tests.compiler.terms import projection, reduction, slab
 
     # The fold reads the prologue value ``c[j]`` as its own slab operand, and that read indexes the

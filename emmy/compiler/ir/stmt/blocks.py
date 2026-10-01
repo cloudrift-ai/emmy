@@ -9,18 +9,56 @@ tile flavors of the (now demolished) tile IR.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
+from functools import cached_property
 
 from emmy.compiler.dtype import F32 as _F32
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Expr, Var
+from emmy.compiler.ir.expr import Expr, Literal, Var
 from emmy.compiler.ir.stmt.base import INDENT, RenderCtx, Stmt, _pad, pretty_body, render_body
 from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.stmt.leaves import Accum, Mma
+from emmy.compiler.ir.stmt.leaves import NEXT_STEP, Accum, Carry
 
 # The loop-carried reduce accumulators — a Loop is a *reduce* loop iff its immediate
 # body holds one of these (the predicate `is_reduce` keys off, see below).
-_CARRIERS = (Accum, Mma)
+_CARRIERS = (Accum,)
+
+
+def carried_cells(body: Body) -> dict[str, tuple[int | Axis, ...]]:
+    """The carried states a ``Loop`` over ``body`` carries, each with its cell shape — one entry
+    per index position, the cell's ``Axis`` or ``1`` where normalization dropped a size-one axis.
+
+    A state is carried by the nearest enclosing loop whose axis its ``Carry`` index does not read:
+    the loops over its cells are skipped, so the loop over the steps carries it from OUTSIDE them.
+    Read off the body, never annotated — like :attr:`Loop.is_reduce`, which this extends.
+    """
+    if not body.carries:
+        return {}
+    out: dict[str, tuple[int | Axis, ...]] = {}
+
+    def walk(stmts: Body, inner: dict[str, Axis]) -> None:
+        for s in stmts:
+            if isinstance(s, Carry) and set(inner) == set(s.cells):
+                out[s.name] = tuple(inner[e.name] if isinstance(e, Var) else 1 for e in s.index)
+            for child in s.nested():
+                walk(child, {**inner, s.axis.name: s.axis} if isinstance(s, Loop) else inner)
+
+    walk(body, {})
+    return out
+
+
+def _carries_note(carries: dict[str, tuple[int | Axis, ...]]) -> str:
+    """``# carries <name>[<extent>, ...]`` for the first line of a carrying loop.
+
+    Cell EXTENTS, not axis names: the cell axes are bound inside the loop, so their names are
+    not in scope on the line this prints on.
+    """
+
+    def cell(shape: tuple[int | Axis, ...]) -> str:
+        return ", ".join(str(d if isinstance(d, int) else d.extent) for d in shape)
+
+    return "# carries " + ", ".join(f"{name}[{cell(shape)}]" for name, shape in carries.items())
 
 
 def _source_suffix(axis: Axis) -> str:
@@ -88,15 +126,30 @@ class Loop(Stmt):
     def binds_axes(self) -> frozenset[str]:
         return frozenset({self.axis.name})
 
+    @cached_property
+    def carries(self) -> dict[str, tuple[int | Axis, ...]]:
+        """The carried states THIS loop carries (:func:`carried_cells`)."""
+        return carried_cells(self.body)
+
     @property
     def is_reduce(self) -> bool:
-        """A loop is a reduce-loop iff its immediate body contains a carrier (``Accum`` or its
-        tensor-core form ``Mma``) — read off the body, never annotated."""
-        return any(isinstance(s, _CARRIERS) for s in self.body)
+        """A loop is a reduce-loop iff it carries something: its immediate body contains a carrier
+        (``Accum``), or it carries a state (:attr:`carries`) — read off the body, never annotated.
+        A loop over a state's CELLS carries nothing: it is a free loop the step runs under."""
+        return any(isinstance(s, _CARRIERS) for s in self.body) or bool(self.carries)
 
     def pretty(self, indent: str = "") -> list[str]:
         head = f"{indent}for {self.axis.name} in 0..{self.axis.extent}{_source_suffix(self.axis)}"
-        return [head, *pretty_body(self.body, indent + INDENT)]
+        if not self.carries:
+            return [head, *pretty_body(self.body, indent + INDENT)]
+        # The bar marks the carrying loop as :func:`carried_cells` derives it: every step the
+        # state lives across, closed by the ``# commit`` line.
+        bar = indent + "|" + " " * (len(INDENT) - 1)
+        return [
+            f"{head}  {_carries_note(self.carries)}",
+            *pretty_body(self.body, bar),
+            *(f"{bar}# commit {name}" for name in self.carries),
+        ]
 
     def render(self, ctx: RenderCtx) -> list[str]:
 
@@ -115,6 +168,24 @@ class Loop(Stmt):
         # is the *serial* schedule's placement; a cooperative / cross-CTA realization reads
         # the same fold ``Accum``\\ s' ``op.identity`` to seed its partials.
         seen: set[str] = set()
+        # A carried state is two slots of its cell shape: the one the previous step left, which
+        # every read sees, and the one this step defines, committed when the step ends. The serial
+        # placement again; a schedule that keeps one slot, or stores it elsewhere, reads the same state.
+        for name, shape in self.carries.items():
+            carry = next(c for c in self.body.carries if c.name == name)
+            extents = tuple(1 if isinstance(d, int) else int(d.extent.as_static()) for d in shape)
+            size = 1
+            for extent in extents:
+                size *= extent
+            # The seed is a constant in every cell or a buffer of the state's shape, copied whole.
+            if isinstance(carry.seed, str):
+                seed = f"{carry.seed}, {carry.seed} + {size}"
+            else:
+                seed = f"{size}, {ctx.identity_literal(carry.seed, carry.dtype)}"
+            for slot in (name, f"{name}{NEXT_STEP}"):
+                ctx.shapes[slot] = extents
+                out.append(f"{pad}std::vector<{ctx.type_name(carry.dtype)}> {slot}({seed});")
+            ctx.ssa_dtypes[name] = (carry.dtype or _F32).name
         for s in self.body:
             if isinstance(s, Accum) and s.name not in seen:
                 seen.add(s.name)
@@ -131,6 +202,7 @@ class Loop(Stmt):
         out.append(f"{pad}for (int {var} = 0; {var} < {extent}; {var}++) {{")
         inner = ctx.child()
         out.extend(render_body(self.body, inner))
+        out.extend(f"{_pad(inner.indent)}{name} = {name}{NEXT_STEP};" for name in self.carries)
         out.append(f"{pad}}}")
         return out
 
@@ -281,7 +353,8 @@ class StridedLoop(Stmt):
         )
 
     def binds_axes(self) -> frozenset[str]:
-        return frozenset({self.axis.name})
+        # An ``end`` override is hoisted into the for-init as ``<var>_end``, which the body may read.
+        return frozenset({self.axis.name, f"{self.axis.name}_end"} if self.end is not None else {self.axis.name})
 
     def exprs(self) -> tuple[Expr, ...]:
         out = (self.start, self.step) if isinstance(self.step, Expr) else (self.start,)
@@ -289,8 +362,8 @@ class StridedLoop(Stmt):
 
     @property
     def is_reduce(self) -> bool:
-        """A strided loop is a reduce-loop iff its immediate body contains a carrier (``Accum`` /
-        ``Mma``) — read off the body, never annotated."""
+        """A strided loop is a reduce-loop iff its immediate body contains a carrier (``Accum``) —
+        read off the body, never annotated."""
         return any(isinstance(s, _CARRIERS) for s in self.body)
 
     def pretty(self, indent: str = "") -> list[str]:
@@ -334,6 +407,10 @@ class StridedLoop(Stmt):
         else:
             out.append(f"{pad}for (int {var} = {start_str}; {var} < {_extent_c(self.axis, ctx)}; {var} += {step_str}) {{")
         inner = ctx.child()
+        if isinstance(self.start, Literal) and isinstance(self.step, Literal | int):
+            step = self.step.value if isinstance(self.step, Literal) else self.step
+            if isinstance(self.start.value, int) and isinstance(step, int) and (stride := math.gcd(self.start.value, step)):
+                inner.aligned[var] = stride
         out.extend(render_body(self.body, inner))
         out.append(f"{pad}}}")
         return out

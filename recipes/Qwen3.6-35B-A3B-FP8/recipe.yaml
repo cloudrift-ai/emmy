@@ -3,8 +3,8 @@ tags:
 
 model:
   huggingface: "Qwen/Qwen3.6-35B-A3B-FP8"
-  rationale: "FP8 niche variant with minimal traction compared to the base model."
-  heat: 25
+  rationale: "Secondary variant, cooling family, minimal distinct attention."
+  heat: 12
 engine:
   llm:
     tensor_parallel_size: 1

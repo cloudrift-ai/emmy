@@ -3,9 +3,9 @@
 A data-driven regression lane for pinned schedules. Most cases are minimized reproducers of one failure class: **a
 schedule that should be realizable is not**. A small capability baseline also keeps the live GPU stages exercised where
 the corpus would otherwise have no exact-capability case. Every case has one program and one authored kernel set, and
-the lane replays it against the compiler in front of you: once as a hand pin, to ask whether each schedule can be
-offered at all, and then as the compile's only evidence, strict, to ask whether the compiler realizes, builds and runs
-the set the way a deploy would.
+the lane replays it against the compiler in front of you: once through the golden decode, to ask whether each entry
+still equals an enumerated schedule — the same question every recorded golden row answers — and then as the compile's
+only evidence, strict, to ask whether the compiler realizes, builds and runs the set the way a deploy would.
 
 This directory is kind-organized in the sense `tests/ARCHITECTURE.md` sanctions: its cases span lowering, the CUDA
 backend, the pin machinery and the golden loader, and they share one workflow.
@@ -16,7 +16,7 @@ backend, the pin machinery and the golden loader, and they share one workflow.
 helpers.py            # load, regenerate, and the four oracles
 regen.py              # `make test-corpus-regen` — applies the fix the staleness test detects
 test_realization.py   # one parametrized walker over cases/
-cases/<family>/<name>.yaml
+cases/<family>/<name>.json
 ```
 
 ## What earns a case
@@ -65,30 +65,34 @@ programs:
   nodes: …
 configs:
 - program: 0
-  target: {origins: [c]}
+  target: {loop: 0, origins: [c]}
   realizations:
-  - name: k_matmul_5b7645.167d5f47efce
-    bindings: {}
+  - name: k_matmul_5b7645
     pins: {FAST_MATH: true}
     knobs: {WORK: w2x2, TILE: mma_m16n8k16_f16_f16/f4x8/k2, REDUCE: g2k, STAGE: ''}
     identity: 0302cbd2c129ae1851d5f529621a752756f6181d0d4cbaf57eb22f85028d11c2
+loops:
+- inputs: [a, b]
+  outputs: [c]
+  nodes: …
 ```
 
 Why each part, and why nothing else:
 
-- `programs` / `target` / `compute_cap` — the reproducer. Stable Torch IR rather than a code snippet, so a frontend
-  change cannot silently alter what the corpus tests.
-- `name` — already carries the variant key (`identity_key(with_io=True, with_knobs=True)`)`[:12]`, so it detects
-  cache-key drift for free.
+- `programs` / `loops` / `target` / `compute_cap` — the reproducer: the kernel's own Loop IR, which every stage starts
+  from, and the stable Torch IR its `origins` came from, which `correct` compares against. Not a code snippet, so a
+  frontend change cannot silently alter what the corpus tests.
+- `name` — a label, written once and never re-derived: the kernel's provenance name for the target's entry
+  (`k_matmul_5b7645` — the ops it realizes, as the backend and the profiler show it), that name plus the piece's
+  identity prefix for a further entry. `--realization` selects a row by it, so it has to stay put whatever the
+  compiler does to keys and features.
 - `pins` / `knobs` — the authored schedule, one entry per kernel of the set. `pins` are the input regime; `knobs` are
   the row the entry's kernel realizes, spelled on that kernel's own tree — a kernel-set decision (`PLACE@seam: cut`,
   `REDUCE@k: g2k`) is an entry whose `identity` is the kernel the fork was offered on. Regeneration structurally cannot
   produce these, which is what makes the staleness mechanism safe.
 - `identity` — the record's deploy identity — `identity_key(with_io=True)`, structural flavor — is the digest of the
-  complete schedule-free Loop-IR body the term lowers to, folded with the io dtype/shape fingerprint. The variant key
-  (in `name`) is the
-  variant key — the same body + io folded with the knob row — so a knob-only change moves `name` while leaving
-  `identity` untouched.
+  complete schedule-free Loop-IR body the term lowers to, folded with the io dtype/shape fingerprint. It is the one
+  derived field a compiler change can move; the name never moves with it.
 - `identity` and the optional per-card `latency` block are the only additions the corpus makes to the golden schema,
   and both are optional keys the model goldens do not carry. On a further entry `identity` is authored: it is the
   selector that lets the replay apply that entry at its own kernel's forks (`golden._replay` walks a target's entries
@@ -99,14 +103,14 @@ Four spelling rules decide what a case actually asserts:
 - **On a kernel with several sites for one family, spell the family by route.** A bare `TILE` there asks for one of
   the sites — one carries the value, the rest are OFF — so a case that means "this tile at BOTH contraction roots"
   and spells it bare asserts something weaker than it reads, and passes on a schedule it was written to refuse.
-  `fused/gate-up-distinct-a` was mis-authored that way.
-- **A knob present with `''` is pinned OFF; a knob absent is free.** `''` is a decided value — the schedule declined
-  that family — while an absent key lets the fork choose. Several of the tests this corpus replaces `delenv` a family
-  rather than setting it empty, and the two are different pins.
+- **An entry is a complete row.** It spells every site its kernel decides, OFF as `''`, exactly as a golden row does,
+  because `offered` compares it against one enumerated schedule. A partial row — a key left out for the fork to choose,
+  a bare family on a kernel whose sites are routed — equals no schedule and fails. `helpers.complete` writes the rows
+  a replay realizes for the kernels no entry names, and drops an entry naming a kernel the compiler no longer mints.
 - **A placement is an entry of its own.** `PLACE@seam: cut` in the `knobs` of an entry whose identity is the kernel
   the cut is offered on; the golden validator refuses a placement key beside a schedule row. Older cases carry the
   route in the first entry's `pins`, which the replay reads the same way.
-- **Binding a symbolic dimension specializes the program.** A case with `bindings: {}` keeps its symbolic axis and runs
+- **Binding a symbolic dimension specializes the program.** A case with no `bindings` keeps its symbolic axis and runs
   at the dimension's own `Dim` hint — the size `emmy run` already resolves a symbolic reproducer to. The corpus has no
   spelling for "compile at the hint, run at some other size", so a sweep of one symbolic kernel across many runtime
   sizes stays in Python.
@@ -116,42 +120,43 @@ Four spelling rules decide what a case actually asserts:
 There is no manifest. Extending the corpus is writing one file:
 
 ```
-<family>/<name>.yaml                  # closed — every applicable stage must pass
-<family>/<name>_xfail_offered.yaml    # open — strict xfail at that stage
-<family>/<name>_xfail_realized.yaml
-<family>/<name>_xfail_built.yaml
-<family>/<name>_xfail_correct.yaml
+<family>/<name>.json                  # closed — every applicable stage must pass
+<family>/<name>_xfail_offered.json    # open — strict xfail at that stage
+<family>/<name>_xfail_realized.json
+<family>/<name>_xfail_built.json
+<family>/<name>_xfail_correct.json
 ```
 
-The open-gap inventory is `ls cases/**/*_xfail_*.yaml`, and the completion gate is "no file matches that glob". Closing
+The open-gap inventory is `ls cases/**/*_xfail_*.json`, and the completion gate is "no file matches that glob". Closing
 a gap is a `git mv`, so the diff shows the closure as a rename. And two concurrent runs on different models can each
 add a case without touching a shared file.
 
 The cost is that the filename is semantic, so an `_xfail`-shaped token naming something other than the four stages is a
 hard error rather than a silently-closed case.
 
-An `_xfail_*` file must carry a leading `# evidence:` comment naming why the schedule *should* be realizable — a
+An `_xfail_*` file's `note` must carry an `evidence:` paragraph naming why the schedule *should* be realizable — a
 sibling card's golden carrying that family for the same structural identity, the same family already winning at a
 neighbouring binding, or an explicit roofline argument. Without it the corpus fills with speculation. The rest of the
-leading comment block is prose about where the gap came from; regeneration preserves it.
+note is prose about where the gap came from; regeneration keeps it.
 
 ## The four stages
 
 | Stage | Assertion | GPU |
 | --- | --- | --- |
-| `offered` | under `pinned_knobs(pins + knobs)`, `enumerate_graph` at the declared capability returns at least one row satisfying the pin | no |
+| `offered` | every entry strictly decodes at the declared capability (`golden.decode_record`, beside the case's other entries) | no |
 | `realized` | with the case as the compile's only evidence, the graph lowers through `CUDA_PASSES` at that capability, `unreproducible_pin_flag` is `None`, every authored family is stamped, and every kernel-set decision the case spells was taken | no |
 | `built` | lower the same way on the live card, then build a `CompiledProgram` — nvcc accepts it | yes, exact capability |
 | `correct` | run against the reference within tolerance | yes, exact capability |
 
-**Only `offered` is a hand pin, asked of each entry.** The other three run under `helpers.evidence_scope`: the case's
+**Only `offered` asks each entry on its own.** The other three run under `helpers.evidence_scope`: the case's
 entries are the whole golden scope, strictly (`golden.sole_evidence`, the scope the release gate compiles under too;
 each entry standing in as a measured row — a case authors schedules rather than measuring them, and a proposal is no
-evidence), so a fork no entry decides is an `EvidenceError` naming the kernel, never a prior's guess; the machine-local
-online prior is out of the way, the tune DB is not consulted, and the environment carries the case's input pins alone — the regime
+evidence), so a fork no entry decides is an `EvidenceError` naming the kernel, never a prior's guess; the tune DB is
+not consulted, and the environment carries the case's input pins alone — the regime
 it was measured under (`FAST_MATH` and the precision gates), never its route or its schedule row. The route and the
-row reach the compile as measured rows of the kernels they decide, through the same evidence pick every `compile` /
-`run` / `serve` uses (`golden.evidence_rows`, `greedy._route_candidates`), or they do not reach it at all. That is the
+row reach the compile as measured rows of the kernels they decide — imported into the compile's DB, as every compile
+imports its golden scope (`golden/evidence.py`), and read through the same evidence pick every `compile` / `run` / `serve`
+uses (`greedy._route_candidates`) — or they do not reach it at all. That is the
 deploy contract, asked of every case on every commit: a row the compiler can honour under a pin but does not select
 when it is the evidence — a stale spelling, a route key no offered seam carries, a schedule that equals no leaf of the
 kernel that deploys — fails `realized`, and the failure names what was lost. A kernel-set decision is checked through
@@ -165,22 +170,19 @@ declared gap are skipped, because a schedule that never realizes has nothing to 
 GPU or not. `built` and `correct` run only when the live capability **equals** the declared one — a pinned schedule is
 a claim about one capability, never about a merely newer card.
 
-The reference for `correct` is derived from the target, the way `emmy run` derives it: a frontend program
-(`target: {origins: …}`) compares against the numpy backend; an exact Loop target has no torch twin and compares
-against the same-input greedy execution of the same program.
+The reference for `correct` is the kernel's traced ops (`target.origins`) run on the numpy backend, the slice
+`emmy run` benchmarks against (`GoldenRecord.reference_program`); a kernel with no exact frontend twin compares against
+the same-input greedy execution of the same program. Both sides share random weights by source path and bind them
+through their own load transformations, so a lowered transpose still reads the reference's weight.
 
-`offered` asks whether the pin *can be honoured*, not whether the tier would be offered to an **unpinned** search.
-Those differ, and the difference is load-bearing: a pin narrows the candidate grid authoritatively, so a schedule the
-cold search never enumerates can still be offered here. A tier the search will not reach on its own is a search
-shortfall, and the corpus does not express it. `realized` then asks the complementary question of the same schedule:
-given as evidence rather than as a pin, is it what the compiler picks.
-
-**Pinned-enumeration membership is the primary oracle, not `unreproducible_pin_flag` alone.** The flag answers `None`
-for a registered family that nothing stamped — serialized IR can omit knob stamps — so a pin that cannot be offered at
-all would read as satisfied. Membership is asked per row *through* the flag, so the families it already reads correctly
-(a `PLACE` consumed by a splice, the structural `g<n>` half of a cross-CTA `REDUCE` split) stay correctly read;
-`realized` closes the flag's hole with an explicit stamping check over the authored knobs, and asks the splice events
-whether those two structural decisions were taken.
+`offered` is the golden decode, so a corpus case and a recorded golden row cannot disagree about whether a schedule is
+still offered: the entry's route resolves to seams the cut pass offers, and its row equals an enumerated leaf of the
+kernel its `identity` names, the set's forks decided by the entries that name their kernels. It asks whether the
+schedule is in the enumeration, not whether an **unpinned** search would reach it; a tier the search will not reach on
+its own is a search shortfall, and the corpus does not express it. `realized` then asks the complementary question of
+the same schedule: given as evidence, is it what the compiler picks. The pin gate `unreproducible_pin_flag` answers
+`None` for a registered family that nothing stamped, so `realized` closes that hole with an explicit stamping check over
+the authored knobs, and asks the splice events whether a `PLACE` cut or a cross-CTA `REDUCE` split was taken.
 
 ## Latency
 
@@ -227,7 +229,7 @@ ratcheting.
 decode the program, re-run the inventory writer under `Context.from_target(compute_cap)`, re-derive `identity`,
 re-canonicalize `knobs` — and asserts it equals what is stored. The check is GPU-free at roughly 0.02 s per case, so
 codec and kernel-identity drift is caught on the pull request that causes it, by the commit that causes it. Nothing in
-the tree does that for `recipes/*/golden/*.yaml` today.
+the tree does that for `recipes/*/golden/*.json` today.
 
 `make test-corpus-regen` only *applies* the fix. That split is the shape the repository already uses twice:
 `ruff format --check` detects while `make format` fixes, and the session-end durations gate names its offenders and
@@ -237,7 +239,8 @@ Five rules make it load-bearing:
 
 1. **Regenerate through the library, not a CLI.** `emmy trace --target sm_89` still stamps `gpu_name` from the live
    card; the library path with an explicit context emits none. That is what makes the check machine-independent, so it
-   fires and its fix works on any box.
+   fires and its fix works on any box. A target without traced origins matches by its exact typed Loop identity;
+   changes to coordinate spelling or the derived kernel name do not lose the match.
 2. **Validate authored knobs strictly.** `validate_family_value` requires every classic value to use its sole wire
    spelling. Regeneration fails loudly on `STAGE=d2/ring`, `WORK=zzz9x9`, `TILE=mma_m64n64k64_…` or `REDUCE=g2z`,
    while a canonical but unreachable pin (`WORK=w7x13`, `TILE=…/f99x99/k8`) parses cleanly and falls through to
@@ -247,19 +250,21 @@ Five rules make it load-bearing:
    them is a review conversation, not a mechanical step.
 4. **Preserve what regeneration cannot produce.** A `latency` block is measured on a card, not derived from the
    program, so a regeneration on a machine without that card carries existing entries through untouched.
-5. **Preserve the leading comment block.** `dump_golden_file` is a plain YAML dump and drops comments, so a naive
-   rewrite would eat the `# evidence:` line on every regeneration.
+5. **Keep the note.** A case's evidence citation is the file's `note` field, not a comment, so a regeneration and
+   every dump carry it.
 
-**A non-target entry's `identity` is authored, and nothing re-derives it.** `regenerate` restamps the target
-entry's identity only, so a change that moves a PIECE's identity leaves every further entry addressing a kernel the
-case no longer compiles to — and the staleness test cannot see it, because it compares against what `regenerate`
-produces and `regenerate` reproduces the same stale identity. `COMPLETE=1` adds the entry the set is now missing but
-never removes the dead one, so a case can carry both. Re-authoring the entry is the fix; detecting it automatically
-would mean matching a stored identity against the kernels the replay actually resolves, which nothing does yet.
+**A non-target entry's `identity` is authored, and `regenerate` does not re-derive it.** `regenerate` restamps the
+target entry's identity only, so a change that moves a PIECE's identity leaves a further entry addressing a kernel
+the case no longer compiles to — and the staleness test cannot see it, because it compares against what `regenerate`
+produces and `regenerate` reproduces the same stale identity. Such an entry fails `realized` instead: the golden
+import files nothing for a kernel the set never mints, so that kernel has no row and strict evidence refuses its
+fork. `COMPLETE=1` is the fix — `helpers.complete` matches every further entry's identity against the kernels the
+set's replay resolves, drops the entries naming none, and adds one for each kernel no entry names, so a case holds
+one entry per kernel of its set and nothing stands in for a kernel no entry describes.
 
 **The authored half rots differently.** Those five rules are about the DERIVED half, and they all assume the case still
 loads. When an IR dataclass loses a field, every case whose stored program serialized it stops parsing —
-`load_golden_file` refuses the whole document on an unknown field, so `test_case_derived_half_is_current` reports a
+`GoldenFile.load` refuses the whole document on an unknown field, so `test_case_derived_half_is_current` reports a
 load error instead of a mismatch, and regeneration cannot help because it has nothing to read. The fix belongs with the
 commit that retires the field: drop the retired key from the stored programs. That is lossless exactly when the field
 sits at its default in every case, which is the ordinary situation for one only a now-deleted construct ever set; a
@@ -269,7 +274,7 @@ means grepping the corpus for its wire name, not only re-running regeneration.
 ## Adding a case
 
 ```bash
-case=tests/compiler/realization/cases/<family>/<name>_xfail_<stage>.yaml
+case=tests/compiler/realization/cases/<family>/<name>_xfail_<stage>.json
 emmy trace -c "<snippet>" --target sm_<cc> -o "$case"
 cat >> "$case" <<'EOF'   # the knobs block, copied from `run --json`'s record_knobs
 EOF

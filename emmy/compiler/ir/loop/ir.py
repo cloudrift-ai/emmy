@@ -10,7 +10,7 @@ an SSA program over a named iteration space:
     accums            : computed property  — unique Accum stmts, first-use order
     input_bufs        : computed property  — distinct Load.source names (in first-use order)
     num_inputs        : computed property  — len(input_bufs)
-    analyze()         : LoopMeta           — precomputed name → def / scope / reduce-axis / live-axes
+    analyze()         : BodyAnalysis           — precomputed name → def / scope / reduce-axis / live-axes
     __iter__          : Iterator[Stmt]     — pre-order walk (via ``iter_body``)
 
 Iteration is explicit via ``Loop(axis, body)`` statements. Each ``Loop``
@@ -44,39 +44,21 @@ from emmy.compiler.ir.stmt import (  # noqa: F401  (re-exported via __init__)
     Accum,
     Assign,
     Body,
+    Carry,
     Cond,
-    Const,
     Init,
+    Let,
     Load,
     Loop,
+    Pre,
     Select,
     SelectBranch,
     Stmt,
     Write,
     pretty_body,
 )
+from emmy.compiler.ir.stmt.analysis import BodyAnalysis, Scope  # noqa: F401 — public Loop IR aliases
 from emmy.compiler.ir.stmt.ir import BodyOp
-
-# ---------------------------------------------------------------------------
-# Scope — a path of enclosing axes
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class Scope:
-    """Enclosing loop nest from outermost to innermost.
-
-    A ``Scope`` identifies a location in a ``LoopOp`` body: the sequence
-    of ``Loop`` axes one descends to reach that point. Empty = body root.
-    Used by analysis passes that need to know where a named SSA value was
-    defined or where a new stmt should be emitted.
-    """
-
-    enclosing: tuple[Axis, ...] = ()
-
-    def nest(self, axis: Axis) -> Scope:
-        return Scope(enclosing=self.enclosing + (axis,))
-
 
 # Body Stmts (Stmt, Load, Assign, Accum, Write, Select, SelectBranch,
 # Loop, Cond) and the tree-walk helpers (map_body) live in
@@ -102,20 +84,20 @@ class LoopOp(BodyOp):
     matcher's ``with_io`` rebind.
     """
 
+    wire_tag = "loop"
+
     def __post_init__(self) -> None:
-        Op.__post_init__(self)  # BodyOp's coerce+seed is REPLACED below (normalize-then-seed), not chained
+        Op.__post_init__(self)  # BodyOp's coerce+seed is replaced below, not chained
         from emmy.compiler.ir.stmt import normalize_body
 
-        # Body is a tuple subclass; coerce so ``Op(body=tuple_value)``
-        # construction shape keeps working without forcing wrapping at
-        # every rule's rewrite site.
+        # Body is a tuple subclass; coerce so ``Op(body=tuple_value)`` construction keeps working.
+        # Seed the positional ABI before normalization reorders independent reads and writes; the
+        # matcher later refreshes these placeholders in graph order.
         coerced = Body.coerce(self.body)
+        object.__setattr__(self, "body", coerced)
+        self._seed_io_placeholders()
         normalized = normalize_body(coerced)
         object.__setattr__(self, "body", normalized if isinstance(normalized, Body) else Body(normalized))
-        # Seed before validating so ``_validate`` can read
-        # ``loop.outputs`` (populated from body-derived names) rather
-        # than the now-gone ``body_outputs`` property.
-        self._seed_io_placeholders()
         _validate(self)
 
     def rename_buffers(self, rename: dict[str, str]) -> LoopOp:
@@ -133,9 +115,9 @@ class LoopOp(BodyOp):
             )
 
         # A SPELLING-preserving clone — field-level, no ``__init__``: renaming must not
-        # renormalize (``sort_commutative_args`` orders by buffer name, so renormalizing a
-        # renamed body could reorder it mid-pipeline; a graph-level rename is a spelling edit,
-        # never a rebuild). Fresh ``__dict__``: no cached digest rides along.
+        # renormalize (canonical sibling order can depend on external-buffer spelling, so a
+        # graph-level rename is a spelling edit, never a rebuild). Fresh ``__dict__``: no cached
+        # digest rides along.
         clone = object.__new__(type(self))
         for f in fields(self):
             object.__setattr__(clone, f.name, getattr(self, f.name))
@@ -178,48 +160,13 @@ class LoopOp(BodyOp):
         walk(self.body, None)
         return frozenset(names)
 
-    def analyze(self) -> LoopMeta:
+    def analyze(self) -> BodyAnalysis:
         """One-pass summary of the body: name→def, name→scope, writes.
 
         Convenience for passes (e.g. the fusion splicer) that resolve SSA
         dependencies against a stable snapshot of the body tree.
         """
-        defs: dict[str, Stmt] = {}
-        scopes: dict[str, Scope] = {}
-        reduce_axes: dict[str, Axis] = {}
-        writes: list[tuple[Write, Scope]] = []
-
-        def walk(stmts: Body, scope: Scope) -> None:
-            for s in stmts:
-                if isinstance(s, Loop):
-                    walk(s.body, scope.nest(s.axis))
-                elif isinstance(s, Cond):
-                    walk(s.body, scope)
-                    walk(s.else_body, scope)
-                elif isinstance(s, Accum):
-                    defs[s.name] = s
-                    # Binding scope excludes the reduce axis (the Accum is live
-                    # after its reduce Loop completes).
-                    if scope.enclosing:
-                        reduce_axes[s.name] = scope.enclosing[-1]
-                        scopes[s.name] = Scope(enclosing=scope.enclosing[:-1])
-                    else:
-                        scopes[s.name] = scope
-                elif isinstance(s, (Load, Assign, Select)):
-                    defs[s.name] = s
-                    scopes[s.name] = scope
-                elif isinstance(s, Write):
-                    writes.append((s, scope))
-
-        walk(self.body, Scope())
-        return LoopMeta(
-            op=self,
-            defs=defs,
-            scopes=scopes,
-            reduce_axes=reduce_axes,
-            writes=tuple(writes),
-            live_axes=_compute_live_axes(self.body),
-        )
+        return BodyAnalysis.from_body(self.body)
 
     def forward(self, *inputs):
         """Evaluate the kernel body via cppyy-JIT'd C++ — mirrors the other ``Op.forward`` methods.
@@ -349,50 +296,6 @@ def _specialize_symbolic_axes(loop: LoopOp, input_arrays: dict) -> LoopOp:
 
 
 # ---------------------------------------------------------------------------
-# LoopMeta — analysis summary produced by ``LoopOp.analyze``
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class LoopMeta:
-    """Precomputed lookups over a ``LoopOp`` body.
-
-    - ``op``: the source ``LoopOp`` this meta was built from.
-    - ``defs``: SSA name → defining ``Stmt`` (``Load`` / ``Assign`` /
-      ``Select`` / ``Accum``). A ``Write`` has no SSA name and is not here.
-    - ``scopes``: SSA name → binding ``Scope`` (where the value is live
-      after its def). For plain stmts this is the enclosing axis chain;
-      for ``Accum`` the reduce axis is excluded — the Accum binds *after*
-      the reduce Loop completes.
-    - ``reduce_axes``: ``Accum`` name → its reduce ``Axis`` (the tail of
-      the raw enclosing chain, stripped from ``scopes``). Only present
-      for ``Accum`` defs.
-    - ``writes``: every ``Write`` stmt paired with the ``Scope`` it sits
-      in — one entry per output, in body order.
-    - ``live_axes``: SSA name → axis names transitively reachable through
-      Expr subtrees (``Load.index``, ``SelectBranch.select``) while resolving
-      the stmt's dep chain. For an ``Accum``, the reduce axis is excluded
-      since it gets freshened at emission time.
-    """
-
-    op: LoopOp
-    defs: dict[str, Stmt]
-    scopes: dict[str, Scope]
-    reduce_axes: dict[str, Axis]
-    writes: tuple[tuple[Write, Scope], ...]
-    live_axes: dict[str, frozenset[str]]
-
-
-def _compute_live_axes(body: Body) -> dict[str, frozenset[str]]:
-    """Axes reachable through Expr subtrees rooted at each SSA name.
-
-    Accums already have their reduce axis subtracted by
-    :attr:`Body.axis_dependencies`.
-    """
-    return body.axis_dependencies
-
-
-# ---------------------------------------------------------------------------
 # Validation helpers
 # ---------------------------------------------------------------------------
 
@@ -417,6 +320,7 @@ def _validate(loop: LoopOp) -> None:
     # Walks the body and rejects an Accum that conflicts with an
     # earlier Accum sharing its name. ``target_ops`` is the running map.
     target_ops: dict[str, ElementwiseImpl] = {}
+    celled: dict[str, int] = {}  # carried states -> their rank
 
     def _walk(stmts: Body, defined: set[str]) -> set[str]:
         """Validate a body scope. Returns the set of ``Accum.name`` names
@@ -437,12 +341,19 @@ def _validate(loop: LoopOp) -> None:
         for stmt in stmts:
             if isinstance(stmt, Accum):
                 defined.add(stmt.name)
+            elif isinstance(stmt, Loop):
+                # A carried state is live across the loop that CARRIES it, from outside the loops
+                # over its cells — a step reads it before the nest that defines it.
+                defined.update(stmt.carries)
+                celled.update({name: len(shape) for name, shape in stmt.carries.items()})
         exported_accs: set[str] = set()
         for stmt in stmts:
             if isinstance(stmt, Assign):
                 for arg in stmt.args:
                     if arg not in defined:
                         raise ValueError(f"Assign {stmt.name!r}: arg {arg!r} not defined")
+                    if arg in celled:
+                        raise ValueError(f"Assign {stmt.name!r}: {arg!r} is a carried state — read one cell with Pre")
                 if stmt.name in defined:
                     raise ValueError(f"Assign {stmt.name!r}: name already defined")
                 defined.add(stmt.name)
@@ -453,6 +364,23 @@ def _validate(loop: LoopOp) -> None:
                     raise ValueError(f"Load {stmt.name!r}: source {stmt.input!r} must be a non-empty string")
                 if stmt.name in defined:
                     raise ValueError(f"Load {stmt.name!r}: name already defined")
+                defined.add(stmt.name)
+            elif isinstance(stmt, Carry):
+                if stmt.value not in defined:
+                    raise ValueError(f"Carry {stmt.name!r}: value {stmt.value!r} not defined")
+                if stmt.name in exported_accs:
+                    raise ValueError(f"Carry {stmt.name!r}: one statement defines a carried state")
+                if stmt.name not in celled:
+                    raise ValueError(
+                        f"Carry {stmt.name!r}: no loop carries its cells {tuple(e.pretty() for e in stmt.index)} — each is a bare "
+                        "axis (or the 0 of a size-one axis) bound by a loop inside the one over the steps"
+                    )
+                exported_accs.add(stmt.name)
+            elif isinstance(stmt, Pre):
+                if len(stmt.index) != celled.get(stmt.carrier, -1):
+                    raise ValueError(f"Pre {stmt.name!r}: {stmt.carrier!r} is no state with {len(stmt.index)} cell axes in scope")
+                if stmt.name in defined:
+                    raise ValueError(f"Pre {stmt.name!r}: name already defined")
                 defined.add(stmt.name)
             elif isinstance(stmt, Accum):
                 if stmt.value not in defined and stmt.name != stmt.value:
@@ -478,12 +406,10 @@ def _validate(loop: LoopOp) -> None:
                 # the streaming Loop, so a post-loop sweep can read it).
                 defined.add(stmt.name)
                 exported_accs.add(stmt.name)
-            elif isinstance(stmt, Const):
-                # A pure constant binding — one scalar literal as an SSA name, which the
-                # twisted carrier's injection needs (softmax folds each element as
-                # ``(score, 1)``). Scoped like an Assign: a def, not an accumulator.
+            elif isinstance(stmt, Let):
+                # A pure expression binding. Scoped like an Assign: a def, not an accumulator.
                 if stmt.name in defined:
-                    raise ValueError(f"Const {stmt.name!r}: name already defined")
+                    raise ValueError(f"Let {stmt.name!r}: name already defined")
                 defined.add(stmt.name)
             elif isinstance(stmt, Write):
                 if stmt.value not in defined:

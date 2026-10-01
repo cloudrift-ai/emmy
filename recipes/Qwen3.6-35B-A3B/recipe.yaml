@@ -1,10 +1,10 @@
 tags:
-  - maintained
+  - best-effort
 
 model:
   huggingface: "Qwen/Qwen3.6-35B-A3B"
-  rationale: "Active on OpenRouter with moderate sustained community interest."
-  heat: 60
+  rationale: "Secondary MoE, cooling family, reduced interest from Qwen3.8."
+  heat: 20
 engine:
   llm:
     tensor_parallel_size: 2

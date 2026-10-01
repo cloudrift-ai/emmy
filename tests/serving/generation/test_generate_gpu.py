@@ -1,6 +1,6 @@
 """GPU spike for the Phase-0 generation oracle.
 
-Needs CUDA + cupy (skips itself otherwise). Builds a TINY random-weight
+Needs CUDA (skips itself otherwise). Builds a TINY random-weight
 Llama CausalLM (no network), compiles the whole-model fp16 dynamic path through
 ``_CompiledLM`` (full logits, last row sliced on the host), and checks the compiled
 next-token logits against an eager fp16 reference across a few growing prefixes — the
@@ -37,7 +37,6 @@ def _tiny_llama():
 
 @pytest.mark.skip(reason="large fused schedule composition is not yet lazy")
 def test_generate_oracle_matches_eager_fp16():
-    pytest.importorskip("cupy")
     import torch
 
     if not torch.cuda.is_available():
@@ -73,7 +72,6 @@ def test_slice_last_logits_lowers_cold():
     ``hidden[:, -1:, :]`` slice's negative row index once reached codegen as a raw ``-1``
     (``mul[-H + a1]``, an OOB read → silent zeros; fixed in ``140_slice`` by normalizing to
     ``seq_len - 1``). Runs the sliced graph at two lengths and checks logits against eager."""
-    pytest.importorskip("cupy")
     import torch
 
     if not torch.cuda.is_available():
@@ -128,7 +126,6 @@ def test_slice_last_logits_lowers_cold():
 @pytest.mark.skip(reason="large fused schedule composition is not yet lazy")
 def test_generate_loop_runs_end_to_end():
     """The full host loop over the compiled program produces a fixed-length output."""
-    pytest.importorskip("cupy")
     import torch
 
     if not torch.cuda.is_available():

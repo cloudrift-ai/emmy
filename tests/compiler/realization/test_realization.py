@@ -48,7 +48,7 @@ def _parameters():
             # its own context, which is the OOM-and-cascade the serial chain exists to prevent.
             marks = [requires_cuda] if stage in ("built", "correct") else []
             if case.xfail_stage == stage:
-                marks.append(pytest.mark.xfail(strict=True, reason=f"known gap — {helpers.evidence_line(path)}"))
+                marks.append(pytest.mark.xfail(strict=True, reason=f"known gap — {helpers.evidence_line(case.document)}"))
             elif case.xfail_stage is not None and STAGES.index(stage) > STAGES.index(case.xfail_stage):
                 # The schedule never realizes, so the stages past the gap have nothing to run.
                 marks.append(pytest.mark.skip(reason=f"open case: the gap at {case.xfail_stage} blocks {stage}"))
@@ -91,11 +91,24 @@ def _spell(cap: tuple[int, int]) -> str:
 
 @pytest.mark.parametrize("path", helpers.case_files(), ids=lambda path: path.relative_to(helpers.CASES_DIR).as_posix())
 def test_case_derived_half_is_current(path):
-    """The stored program wire, target, realization name, identity and canonical knobs still equal
-    what this compiler derives from the case's own program."""
+    """The stored program wire, target, identity and canonical knobs still equal what this compiler
+    derives from the case's own program."""
     case = helpers.load_case(path)
     assert helpers.regenerate(case.document) == case.document, (
         f"{path.name} is stale — a kernel identity or a schedule codec moved under it. "
         "Run `make test-corpus-regen` to restamp it; that command refuses to write when a case's "
         "verdict also changed, which is a review conversation rather than a mechanical step."
     )
+
+
+def test_volta_compute_fill_offers_no_prefetch_ring():
+    """The Volta mma atom's compute fill stages at depth 1 only. Its depth-2 B prefetch ring copies
+    with blocking copies (sm_70 has no cp.async) and returned silently wrong answers on a V100, so
+    the enumeration must never offer it — asked on the one program known to offer the fill."""
+    from dataclasses import replace
+
+    case = helpers.load_case(helpers.CASES_DIR / "matmul" / "volta-gptq-cone-d1smem.json")
+    assert helpers.offered(case) is None, "the depth-1 fill is offered"
+    (record,) = case.records
+    ringed = replace(record, knobs={**record.knobs, "STAGE": "d2/smem"})
+    assert helpers.offered(replace(case, records=(ringed,))) is not None, "the depth-2 ring is not"

@@ -26,6 +26,7 @@
       devShells.${system}.default = pkgs.mkShell {
         packages = [
           pkgs.pkg-config
+          pkgs.openssl
           pkgs.gcc
           pkgs.cmake
           # The interpreter ``make setup`` builds the venv with (``python3.12 -m venv``), so the
@@ -42,6 +43,9 @@
           pkgs.ruff
           # ``nvcc``, which the CUDA backend shells out to for every kernel it compiles.
           cudaPkgs.cudatoolkit
+          # ``make setup`` builds the runtime extension (``crates/emmy-runtime-py``) with cargo.
+          pkgs.rustc
+          pkgs.cargo
         ];
 
         # The compiler reads this to find the toolkit root; without it a CUDA build falls back to
@@ -63,7 +67,7 @@
         # ``/run/opengl-driver/lib`` FIRST: NixOS puts the NVIDIA driver's ``libcuda.so.1`` there
         # rather than in any store path, and nothing else on this list supplies it. Without it
         # every CUDA program reports "Found no NVIDIA driver on your system" while the driver is
-        # loaded and ``nvidia-smi`` works — torch and cupy both see zero devices. It is a host
+        # loaded and ``nvidia-smi`` works — torch and the runtime both see zero devices. It is a host
         # path by necessity: the driver has to match the running kernel, so it cannot come from
         # the flake.
         LD_LIBRARY_PATH = "/run/opengl-driver/lib:" + nixpkgs.lib.makeLibraryPath [

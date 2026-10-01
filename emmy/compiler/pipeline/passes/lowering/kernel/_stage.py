@@ -48,16 +48,15 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from emmy.compiler.dim import Dim
+from emmy.compiler.dtype import I32
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import BinaryExpr, Builtin, Expr, FuncCallExpr, Literal, SimplifyCtx, TernaryExpr, Var, affine_form
+from emmy.compiler.ir.expr import BinaryExpr, Builtin, Expr, FlatIndex, FuncCallExpr, Literal, SimplifyCtx, TernaryExpr, Var, affine_form
 from emmy.compiler.ir.kernel.ir import (
     VOLTA_B_CONGRUOUS,
     VOLTA_CROSSWISE,
     CpAsyncCommit,
     CpAsyncCopy,
     CpAsyncWait,
-    FlatIndexDecl,
-    IndexDecl,
     MbarrierArrive,
     MbarrierArriveExpectTx,
     MbarrierInit,
@@ -69,7 +68,7 @@ from emmy.compiler.ir.kernel.ir import (
     TmaLoad,
     swizzle_base,
 )
-from emmy.compiler.ir.stmt import Body, Cond, Load, Loop, Stmt, StridedLoop, Write
+from emmy.compiler.ir.stmt import Body, Cond, Let, Load, Loop, Stmt, StridedLoop, Write
 
 
 def _mul(a: Expr, b: Expr) -> Expr:
@@ -121,6 +120,7 @@ def cp_async_fill(
     name: str,
     row_offset: Expr | None = None,
     swizzle: str = "NONE",
+    valid=None,
 ) -> list[Stmt]:
     """Cooperatively ``cp.async``-copy a ``rows × cols`` (= ``shape``) row-major smem
     ``slab`` from gmem ``src``. ``gmem_index(row_expr, col_expr)`` returns the gmem
@@ -166,6 +166,7 @@ def cp_async_fill(
                     src_index=tuple(gmem_index(_add(lane_row, trip_row), lane_col)),
                     nbytes=v * elem_bytes,
                     swizzle=swizzle,
+                    valid=None if valid is None else valid(_add(lane_row, trip_row), lane_col),
                 )
             )
         return out
@@ -181,6 +182,7 @@ def cp_async_fill(
         src_index=tuple(gmem_index(row, col)),
         nbytes=v * elem_bytes,
         swizzle=swizzle,
+        valid=None if valid is None else valid(row, col),
     )
     loop = StridedLoop(axis=fe, start=cta.linear_tid, step=_lit(cta.n_threads), body=Body((copy,)), unroll=False)
     return [loop]
@@ -262,7 +264,7 @@ def _volta_store_plan(*, slab: str, shape: tuple[int, int], cta: CtaTile, elem_b
     return None
 
 
-def _volta_store_decl(*, op, ring: int, cta: CtaTile, elem_bytes: int) -> IndexDecl | None:
+def _volta_store_decl(*, op, ring: int, cta: CtaTile, elem_bytes: int) -> Let | None:
     """Precompute trip zero's physical shared address for a paired Volta copy."""
     eb = op.elem_bytes or elem_bytes
     plan = _volta_store_plan(slab=op.slab, shape=op.shape, cta=cta, elem_bytes=eb, swizzle=op.swizzle)
@@ -274,7 +276,7 @@ def _volta_store_decl(*, op, ring: int, cta: CtaTile, elem_bytes: int) -> IndexD
         value = FuncCallExpr("emmy_volta_crosswise", (row, col, _lit(ring * op.shape[0])))
     else:
         value = FuncCallExpr("emmy_volta_b_congruous", (row, col, _lit(op.shape[1])))
-    return IndexDecl(name=name, value=value)
+    return Let(name=name, value=value, dtype=I32)
 
 
 def _volta_gmem_bases(*, op, cta: CtaTile, elem_bytes: int) -> tuple[list[tuple[Expr, Expr]], list[tuple[Expr, ...]]] | None:
@@ -297,7 +299,7 @@ def _volta_gmem_bases(*, op, cta: CtaTile, elem_bytes: int) -> tuple[list[tuple[
     return coords, bases
 
 
-def _volta_gmem_decls(*, op, cta: CtaTile, elem_bytes: int) -> list[FlatIndexDecl]:
+def _volta_gmem_decls(*, op, cta: CtaTile, elem_bytes: int) -> list[Let]:
     """Precompute each lane's invariant global-copy bases and its K stride."""
     planned = _volta_gmem_bases(op=op, cta=cta, elem_bytes=elem_bytes)
     if planned is None:
@@ -305,13 +307,21 @@ def _volta_gmem_decls(*, op, cta: CtaTile, elem_bytes: int) -> list[FlatIndexDec
     coords, bases = planned
     step = tuple(op.index(_lit(1))(*coords[0]))
     return [
-        FlatIndexDecl(name=f"_{op.tag}_gmem_stride", buffer=op.buf, index=step, origin=bases[0]),
-        *(FlatIndexDecl(name=f"_{op.tag}_gmem{trip}", buffer=op.buf, index=base) for trip, base in enumerate(bases)),
+        Let(name=f"_{op.tag}_gmem_stride", value=FlatIndex(op.buf, step) - FlatIndex(op.buf, bases[0])),
+        *(Let(name=f"_{op.tag}_gmem{trip}", value=FlatIndex(op.buf, base)) for trip, base in enumerate(bases)),
     ]
 
 
 def sync_copy_issue(
-    *, shape: tuple[int, int], src: str, gmem_index, cta: CtaTile, elem_bytes: int, name: str, k0: Expr | None = None
+    *,
+    shape: tuple[int, int],
+    src: str,
+    gmem_index,
+    cta: CtaTile,
+    elem_bytes: int,
+    name: str,
+    k0: Expr | None = None,
+    carried: bool = False,
 ) -> list[Stmt] | None:
     """The gmem→REGISTER half of :func:`sync_copy_fill`: every lane vector-LOADS each of its
     ``V``-element chunks and STOPS, leaving the values in registers for :func:`sync_copy_deposit`.
@@ -321,7 +331,8 @@ def sync_copy_issue(
     chunks in flight here exactly as it counts commit groups on the cp.async ring and mbarrier slots
     on TMA's — one meaning of the knob across all three transports, differing only in WHERE the
     in-flight bytes sit (registers / the copy engine / the descriptor's box). ``None`` when the
-    lane's chunks do not divide evenly (:func:`_sync_copy_runs`)."""
+    lane's chunks do not divide evenly (:func:`_sync_copy_runs`). ``carried`` re-assigns the
+    registers an earlier issue declared (the chunk loop's back-edge issue, :func:`pipelined_kloop`)."""
     run = _sync_copy_runs(shape, cta, elem_bytes)
     if run is None:
         return None
@@ -335,7 +346,7 @@ def sync_copy_issue(
             index = (flat,)
         else:
             index = tuple(gmem_index(row, col))
-        out.append(Load(names=_staged_regs(name, trip, v), input=src, index=index))
+        out.append(Load(names=_staged_regs(name, trip, v), input=src, index=index, carried="load" if carried else ""))
     return out
 
 
@@ -665,6 +676,10 @@ class Operand:
     # :class:`SyncOperand`: its values are evaluated off the weight's scale cone, which is compute,
     # not a copy. ``None`` on every other operand.
     scale: tuple[str, int, int] | None = None
+    # ``(row, col) -> Expr``: whether a slab cell lies inside the source, when the tile overhangs a
+    # masked edge. The cp.async fill then zero-fills the chunks past it instead of re-reading the
+    # edge's last row (``CpAsyncCopy.valid``). ``None``: every cell is in bounds.
+    valid: Callable[[Expr, Expr], Expr] | None = None
 
     @property
     def slab(self) -> str:
@@ -691,8 +706,8 @@ class SyncOperand:
     async copy. ``value(k0, row, col)`` returns the stmts producing the cell's value at slab
     coords ``(row, col)`` of the K-chunk at ``k0`` + the SSA name holding it: the fused producer
     CONE (the fused-edge A operand — the computed tile materializes straight into the slab the
-    ``ldmatrix`` drain reads). A MATERIALIZED edge never rides this: every such fill — canonical or
-    transposed — is a vectorized copy :class:`Operand` on ``copy_operands``."""
+    ``ldmatrix`` drain reads), or a materialized A whose dtype is converted by the typed slab
+    store. Materialized edges already at the slab dtype use vectorized :class:`Operand` copies."""
 
     tag: str  # "a" / "b" — the smem-slab suffix
     shape: tuple[int, int]  # (rows, cols) of one ring slot
@@ -754,9 +769,15 @@ class SyncTransport:
     lane loads chunk ``i+ring-1`` into registers, the resident chunk's drain runs, and only then do
     the registers land in the slab. The in-flight bytes sit in registers instead of the copy engine
     — the same ``depth`` knob, one level further down the hierarchy — and the deposit's own CTA
-    barrier is the whole handshake, so the pipelined loop carries ONE barrier per chunk rather than
-    the two an unsplit fill needs. Requested by a ``depth >= 2`` schedule and confirmed per slab:
-    see :attr:`register_staged`.
+    barrier is the whole handshake FOR THE PEERS, so the pipelined loop carries ONE barrier per
+    chunk rather than the two an unsplit fill needs. Requested by a ``depth >= 2`` schedule and
+    confirmed per slab: see :attr:`register_staged`.
+
+    That saving is the peers' alone, and reading it as the group's was a silent wrong answer. The
+    compute fill below does NOT ring: it writes the current chunk into a single-buffer slab at the
+    top of the body and the drain reads it in the same body, so the deposit's end-of-body barrier
+    is behind both. :attr:`fills_current_slot` is what keeps :meth:`wait` emitting that group's
+    own barrier anyway.
 
     ``depth >= 2`` is the **asymmetric (peer-only) prefetch ring**: only the ``copy_operands``
     slabs ring (the copies for chunk ``i+ring-1`` fly under the compute fill AND the drain of chunk
@@ -935,7 +956,20 @@ class SyncTransport:
             cell_defs |= Body((a,)).ssa_defs
         return plans
 
-    def fill(self, *, k0: Expr, slot: Expr, k0_cur: Expr | None = None) -> list[Stmt]:
+    @property
+    def issues_across_back_edge(self) -> bool:
+        """Whether the ring issues each chunk's copy at the END of the iteration before the one that
+        deposits it, past that iteration's barrier, instead of at the top of the depositing one.
+
+        Measured on the V100: issued at the top, ptxas sinks the eight 16 B loads of a 128x128 tile a
+        third of the way into the mma stream, and the deposit then waits on them (a fifth of the
+        partial's stall samples). Issued past the barrier through the read-only path, and carried as
+        packed vectors until the deposit unpacks them, the Qwen3-0.6B s512 projections' best rows went
+        down 75.8 -> 67.1 us, o 52.3 -> 49.2, q 45.6 -> 42.5. Only a pure copy ring moves: a compute
+        fill writes the current chunk at the top of the body and keeps its own order."""
+        return self.register_staged and not self.fills_current_slot
+
+    def fill(self, *, k0: Expr, slot: Expr, k0_cur: Expr | None = None, carried: bool = False) -> list[Stmt]:
         out: list[Stmt] = []
         # Issue the peer copies FIRST — at ``depth 1`` they run (cp.async: fly) while the compute
         # fill below runs; at ``depth >= 2`` (the peer-only ring) ``k0``/``slot`` are the
@@ -954,6 +988,7 @@ class SyncTransport:
                     elem_bytes=op.elem_bytes or self.elem_bytes,
                     name=op.tag,
                     k0=k0 if _volta_gmem_bases(op=op, cta=self.cta, elem_bytes=self.elem_bytes) is not None else None,
+                    carried=carried,
                 )
                 continue
             out += copy(
@@ -1027,14 +1062,20 @@ class SyncTransport:
             out.append(StridedLoop(axis=fe, start=self.cta.linear_tid, step=_lit(self.cta.n_threads), body=Body(tuple(body)), unroll=False))
         return out
 
-    def deposit(self, *, slot: Expr, ring: int) -> list[Stmt]:
+    def deposit(self, *, slot: Expr, ring: int, unpack: bool = False) -> list[Stmt]:
         """Land the registers :meth:`fill` issued into ring ``slot`` — the second half of the split
         blocking copy, placed by :func:`pipelined_kloop` past the resident chunk's drain. Empty on
-        every unsplit transport, whose bytes land in their own ``wait``."""
+        every unsplit transport, whose bytes land in their own ``wait``. ``unpack`` first spreads the
+        packed vectors a back-edge issue carried into the staged names (:class:`Load` ``carried``)."""
         if not self.register_staged:
             return []
         out: list[Stmt] = []
         for op in self.copy_operands:
+            if unpack:
+                v, trips = _sync_copy_runs(op.shape, self.cta, op.elem_bytes or self.elem_bytes)
+                out += [
+                    Load(names=_staged_regs(op.tag, trip, v), input=op.buf, index=(_lit(0),), carried="unpack") for trip in range(trips)
+                ]
             out += sync_copy_deposit(
                 slab=op.slab,
                 shape=op.shape,
@@ -1051,8 +1092,20 @@ class SyncTransport:
     def commit(self) -> list[Stmt]:
         return cp_async_commit() if self.copy_operands and not self.copy_sync else []
 
+    @property
+    def fills_current_slot(self) -> bool:
+        """Whether this group writes a slab THIS iteration that the SAME iteration's drain reads.
+
+        The register-staged deposit publishes itself: it targets the PREFETCH slot no lane is
+        reading, and the barrier the skeleton places past the drain covers it. A compute fill is the
+        opposite — :meth:`fill` writes it at the top of the body into the CURRENT chunk's
+        single-buffer slab (the peer-only ring leaves those unringed by design), and the drain reads
+        it in the same body, so the deposit's barrier sits behind both and publishes nothing. An op
+        with a scheduled ``producer`` fills in its own segment and is not one of these."""
+        return any(op.producer is None for op in self.operands)
+
     def wait(self, *, in_flight: int, slot: Expr, phase: Expr) -> list[Stmt]:  # noqa: ARG002
-        if self.register_staged:
+        if self.register_staged and not self.fills_current_slot:
             return []  # the deposit's own barrier past the drain is this group's whole handshake
         return cp_async_wait(in_flight) if self.copy_operands and not self.copy_sync else [Sync()]
 
@@ -1105,6 +1158,7 @@ class CpAsyncTransport:
                 name=op.tag,
                 row_offset=op.slot_row(slot),
                 swizzle=op.swizzle,
+                valid=op.valid,
             )
         return out
 
@@ -1216,8 +1270,12 @@ _EMPTY_MBAR = "_mbar_empty"
 # TMA-gated, so the ``sm_<nn>a`` compile arch is already in effect). The proven pre-rebuild split:
 # producers drop to the 24-register floor, consumers raise to 240. ``setmaxnreg.inc`` claims from
 # the SM's per-CTA pool, so emit the pair only when the raised total provably fits the 64K-register
-# file — past that envelope the split still runs, just without redistribution.
+# file — past that envelope the split still runs, just without redistribution. ``setmaxnreg`` is a
+# warp-GROUP instruction (``.sync.aligned`` over all four warps), so a band that is not whole warp
+# groups — the one-warp producer of ``+p1`` — runs without it: beside two consumer groups, that
+# kernel hung on the H100.
 _PRODUCER_REGS = 24
+_WARP_GROUP = 128
 _CONSUMER_REGS = 240
 _SM_REGFILE = 65536
 
@@ -1233,6 +1291,7 @@ def _producer_band_kloop(
     aux_threads: int,
     block_threads: int,
     k_end: Expr | None = None,
+    in_flight=None,
 ) -> tuple[list[Stmt], list[Stmt]]:
     """The warp-SPECIALIZED staged K-loop — the same fill → wait → drain phases as the uniform
     skeleton below, split across two warp bands instead of software-pipelined in-warp. The producer
@@ -1269,7 +1328,11 @@ def _producer_band_kloop(
     k0, K = "_ks", k_extent
     i_expr = BinaryExpr("/", Var(k0), _lit(bk_elems))
     kaxis = Axis(name=k0, extent=K)
-    setmaxnreg = _CONSUMER_REGS * block_threads + _PRODUCER_REGS * aux_threads <= _SM_REGFILE
+    setmaxnreg = (
+        aux_threads % _WARP_GROUP == 0
+        and block_threads % _WARP_GROUP == 0
+        and _CONSUMER_REGS * block_threads + _PRODUCER_REGS * aux_threads <= _SM_REGFILE
+    )
 
     # Producer: prefetch chunk ``c = i + ring - 1`` into slot ``c % ring`` (k0 clamped to the last
     # chunk on the overrun tail, exactly as the uniform ring does); from the second lap on
@@ -1299,14 +1362,26 @@ def _producer_band_kloop(
     prod.append(StridedLoop(axis=kaxis, start=_lit(0), step=_lit(bk_elems), body=Body(tuple(prod_body)), unroll=False, end=k_end))
 
     # Compute: wait the data parity, drain the slot, close the band on the named barrier, release.
+    # A drain that leaves its group running (``in_flight``) has waited out the PREVIOUS chunk's
+    # group only, so it releases that chunk's slot, one chunk late (:func:`_in_flight_kloop`).
     read_slot = BinaryExpr("%", i_expr, _lit(ring))
     read_phase = BinaryExpr("%", BinaryExpr("/", i_expr, _lit(ring)), _lit(2))
     cons_body: list[Stmt] = list(transport.wait(in_flight=ring - 1, slot=read_slot, phase=read_phase))
-    cons_body += drain(read_slot)
+    if in_flight is None:
+        cons_body += drain(read_slot)
+    else:
+        cons_body += [*in_flight[0](read_slot), _last_chunk(k0, bk_elems, k_extent, k_end, in_flight[1])]
     cons_body.append(Sync(barrier_id=1, count=block_threads))
-    cons_body.append(
-        Cond(cond=BinaryExpr("==", transport.cta.linear_tid, _lit(0)), body=(MbarrierArrive(mbar=_EMPTY_MBAR, slot=read_slot),))
-    )
+    elected = BinaryExpr("==", transport.cta.linear_tid, _lit(0))
+    if in_flight is None:
+        cons_body.append(Cond(cond=elected, body=(MbarrierArrive(mbar=_EMPTY_MBAR, slot=read_slot),)))
+    else:
+        prev_slot = BinaryExpr("%", BinaryExpr("+", i_expr, _lit(ring - 1)), _lit(ring))
+        cons_body.append(
+            Cond(
+                cond=BinaryExpr("&&", elected, BinaryExpr(">=", i_expr, _lit(1))), body=(MbarrierArrive(mbar=_EMPTY_MBAR, slot=prev_slot),)
+            )
+        )
     cons: list[Stmt] = [SetMaxNReg(_CONSUMER_REGS, "inc")] if setmaxnreg else []
     cons.append(StridedLoop(axis=kaxis, start=_lit(0), step=_lit(bk_elems), body=Body(tuple(cons_body)), unroll=False, end=k_end))
 
@@ -1343,13 +1418,14 @@ class _Group:
     lag: int = 0
     n_flight: int = 0  # cp.async wait_group count (the static counting pass below)
     fill_slot: Expr = Literal(0, "int")  # the slot this iteration's fill targets — where a split fill lands
+    back_edge: bool = False  # a two-slot split ring issuing past the barrier (``issues_across_back_edge``)
 
 
-def _deposit(group: _Group, slot: Expr) -> list[Stmt]:
+def _deposit(group: _Group, slot: Expr, *, unpack: bool = False) -> list[Stmt]:
     """The transport's register→smem landing, or nothing for a transport whose fill is not split
     (cp.async / TMA leave their in-flight bytes with the copy engine, not in registers)."""
     land = getattr(group.transport, "deposit", None)
-    return land(slot=slot, ring=group.ring) if land is not None else []
+    return land(slot=slot, ring=group.ring, unpack=unpack) if land is not None else []
 
 
 def pipelined_kloop(
@@ -1363,6 +1439,8 @@ def pipelined_kloop(
     k_end: Expr | None = None,
     k_first: Expr | None = None,
     seed: bool = True,
+    carried=None,
+    in_flight=None,
 ) -> tuple[list[Stmt], list[Stmt]]:
     """The **one** liveness-scheduled staged K-loop skeleton — every staged form is this scheduler
     run over the loop body's dataflow; none is its own skeleton.
@@ -1425,6 +1503,13 @@ def pipelined_kloop(
         g.first, g.last = readers[0], readers[-1]
         if g.ring >= 2:
             g.kind, g.lag = "ring", g.ring - 1
+            g.back_edge = (
+                g.ring == 2
+                and getattr(g.transport, "issues_across_back_edge", False)
+                and not symbolic
+                and k_first is None
+                and k_end is None
+            )
         elif g.first == 0 and g.last == len(segments) - 1:
             g.kind, g.lag = "current", 0
         else:
@@ -1481,6 +1566,9 @@ def pipelined_kloop(
             primed_slots |= bool(landing)
     if primed_slots:
         pre.append(Sync())  # every primed slot visible to every lane before the first drain reads it
+    for g in groups:  # a back-edge ring issues chunk 1 here, into the registers the prime declared
+        if g.back_edge:
+            pre += g.transport.fill(k0=_lit(bk_elems), slot=_lit(1), carried=True)
 
     # The wait-group counting pass: lay the committing fills out in body order (top fills first,
     # then the kill-point refills by segment), and for each group count the commits issued between
@@ -1502,10 +1590,20 @@ def pipelined_kloop(
         g.n_flight = (w_cnt - f_idx - 1) if g.lag == 0 else (m - 1 - f_idx) + (g.lag - 1) * m + w_cnt
         assert g.n_flight >= 0, "wait-group counting derived a negative in-flight count"
 
+    if carried is not None and (
+        region := _carried_kloop(groups, carried, pre, i_expr, _fill_k0, k0, k_extent, bk_elems, k_end, seed, symbolic, k_first)
+    ):
+        return decls, region
+    if in_flight is not None and (
+        region := _in_flight_kloop(groups, in_flight, pre, i_expr, _fill_k0, k0, k_extent, bk_elems, k_end, seed, k_first)
+    ):
+        return decls, region
     body: list[Stmt] = []
     for g in groups:  # top fills: the ring prefetch / the single-buffer current-chunk fill
         if g.kind == "ring":
             g.fill_slot = BinaryExpr("%", BinaryExpr("+", i_expr, _lit(g.lag)), _lit(g.ring))
+            if g.back_edge:
+                continue  # its chunk ``i+1`` was issued past the previous iteration's barrier
             body += g.transport.fill(k0=_fill_k0(g.lag), slot=g.fill_slot, k0_cur=Var(k0))
             body += g.transport.commit()
         elif g.kind == "current":
@@ -1522,12 +1620,16 @@ def pipelined_kloop(
             # that publishes it. It targets the PREFETCH slot, which no lane is reading, so this one
             # barrier serves both the landing and the slab protection: the group needs no other.
             for g in enders:
-                body += _deposit(g, g.fill_slot)
+                body += _deposit(g, g.fill_slot, unpack=g.back_edge)
             body.append(Sync())  # every reader past the slab(s) before a refill / later prefetch overwrites them
             for g in enders:
                 if g.kind == "kill":
                     body += g.transport.fill(k0=_fill_k0(1), slot=_lit(0))
                     body += g.transport.commit()
+                elif g.back_edge:
+                    # Chunk ``i+2`` into the registers the deposit above just emptied; the next
+                    # iteration lands it. Past the barrier nothing can sink it into the mma stream.
+                    body += g.transport.fill(k0=_fill_k0(2), slot=_lit(0), carried=True)
 
     outer = StridedLoop(
         axis=Axis(name=k0, extent=k_extent),
@@ -1539,6 +1641,92 @@ def pipelined_kloop(
         seed=seed,
     )
     return decls, [*pre, outer]
+
+
+def _carried_kloop(groups, carried, pre, i_expr, fill_k0, k0, k_extent, bk_elems, k_end, seed, symbolic, k_first) -> list[Stmt] | None:
+    """The cp.async ring whose drain carries its fragments across chunks: every chunk's first atom-K
+    step is loaded while the previous chunk's last step is in the tensor cores, and each chunk has
+    one barrier. The last step of chunk ``i`` issues the prefetch of chunk ``i+ring-1`` into the
+    slot chunk ``i-1`` held, waits for chunk ``i+1``, crosses the barrier and loads chunk ``i+1``'s
+    first step into the other fragment set, then issues its own mmas. Chunk ``i-1``'s slot is free
+    to refill there: its last read is a load issued before chunk ``i-1``'s barrier. The
+    ``None`` return keeps the ordinary schedule: two groups, a ring under three (the prefetch would
+    target the slot about to be read), a symbolic or banded stream, an odd step count."""
+    if len(groups) != 1 or symbolic or k_first is not None:
+        return None
+    (g,) = groups
+    if g.kind != "ring" or g.ring < 3 or not isinstance(g.transport, CpAsyncTransport):
+        return None
+    steps, loads, mmas = carried(g.read_slot)
+    if steps < 2 or steps % 2:
+        return None
+    _, next_loads, _ = carried(BinaryExpr("%", BinaryExpr("+", i_expr, _lit(1)), _lit(g.ring)))
+    _, first_loads, _ = carried(_lit(0))
+    in_flight = g.ring - 2  # after this step's commit, every prefetch but the next chunk's may fly
+    head = [*pre, *g.transport.wait(in_flight=in_flight, slot=_lit(0), phase=_lit(0)), *first_loads(0, "_s0")]
+    body: list[Stmt] = []
+    for step in range(steps):
+        this, other = f"_s{step % 2}", f"_s{(step + 1) % 2}"
+        if step < steps - 1:
+            body += loads(step + 1, other)
+        else:
+            slot = BinaryExpr("%", BinaryExpr("+", i_expr, _lit(g.lag)), _lit(g.ring))
+            body += g.transport.fill(k0=fill_k0(g.lag), slot=slot, k0_cur=Var(k0))
+            body += g.transport.commit()
+            body += g.transport.wait(in_flight=in_flight, slot=slot, phase=_lit(0))
+            body += next_loads(0, other)
+        body += mmas(this)
+    outer = StridedLoop(
+        axis=Axis(name=k0, extent=k_extent), start=_lit(0), step=_lit(bk_elems), body=Body(tuple(body)), unroll=False, end=k_end, seed=seed
+    )
+    return [*head, outer]
+
+
+def _in_flight_kloop(groups, in_flight, pre, i_expr, fill_k0, k0, k_extent, bk_elems, k_end, seed, k_first) -> list[Stmt] | None:
+    """The ring whose drain leaves its last MMA group running (the ``wgmma`` drain waiting for all
+    but one group): chunk ``i``'s instructions are still in the tensor cores while chunk ``i+1``'s
+    are issued, so the tensor pipe never drains between chunks. The slot chunk ``i`` read is
+    released one chunk late — once chunk ``i+1``'s drain has waited it out and the CTA barrier
+    after it has passed — so the prefetch of chunk ``i+ring-1`` into slot ``(i-1) % ring`` moves
+    from the top of the body to past that barrier, and one fewer fill is in flight at the wait.
+    ``in_flight`` is ``(issue(slot), settle(n))``: the last chunk settles to no group in flight
+    inside the loop (:func:`_last_chunk`). ``None`` keeps the ordinary schedule: several groups, a
+    single-slot ring (its refill would overwrite the slot the running group reads), or a split fill."""
+    if len(groups) != 1:
+        return None
+    (g,) = groups
+    if g.kind != "ring" or g.back_edge or not isinstance(g.transport, (CpAsyncTransport, TmaTransport)):
+        return None
+    issue, settle = in_flight
+    fill_slot = BinaryExpr("%", BinaryExpr("+", i_expr, _lit(g.lag)), _lit(g.ring))
+    body = [
+        *g.transport.wait(in_flight=g.ring - 2, slot=g.read_slot, phase=g.read_phase),
+        *issue(g.read_slot),
+        _last_chunk(k0, bk_elems, k_extent, k_end, settle),
+        Sync(),
+        *g.transport.fill(k0=fill_k0(g.lag), slot=fill_slot, k0_cur=Var(k0)),
+        *g.transport.commit(),
+    ]
+    outer = StridedLoop(
+        axis=Axis(name=k0, extent=k_extent),
+        start=k_first if k_first is not None else _lit(0),
+        step=_lit(bk_elems),
+        body=Body(tuple(body)),
+        unroll=False,
+        end=k_end,
+        seed=seed,
+    )
+    return [*pre, outer]
+
+
+def _last_chunk(k0: str, bk_elems: int, k_extent, k_end: Expr | None, settle) -> Cond:
+    """``settle(1)`` on every chunk but the last, ``settle(0)`` on the last. The last group is
+    waited out INSIDE the loop, not by a wait after it: ptxas (CUDA 12.9) moved the epilogue's
+    accumulator reads above a trailing ``wgmma.wait_group 0`` once it had unrolled the loop, and
+    an H100 GEMM with a ReLU epilogue stored an eighth of its rows wrong."""
+    bound = Var(f"{k0}_end") if k_end is not None else (k_extent.expr if isinstance(k_extent, Dim) else _lit(k_extent))
+    more = BinaryExpr("<", BinaryExpr("+", Var(k0), _lit(bk_elems)), bound)
+    return Cond(cond=more, body=tuple(settle(1)), else_body=tuple(settle(0)))
 
 
 def staged_kloop(
@@ -1555,6 +1743,8 @@ def staged_kloop(
     k_end: Expr | None = None,
     k_first: Expr | None = None,
     seed: bool = True,
+    carried=None,
+    in_flight=None,
 ) -> tuple[list[Stmt], list[Stmt]]:
     """The whole-body staged K-loop — ONE operand-group live across the entire ``drain``, run through
     :func:`pipelined_kloop` (the segment list is the single ``(drain(slot), slabs)`` entry, so the
@@ -1593,7 +1783,7 @@ def staged_kloop(
         assert isinstance(transport, TmaTransport), "warp specialization drives the TMA transport only (scheduler legality)"
         assert block_threads is not None, "warp specialization needs the compute-band thread count"
         # A banded stream start is not built for the producer/compute band split — stream the full
-        # extent (the band FragmentMask keeps every skipped-candidate step at the fold identity, so
+        # extent (the band mask keeps every skipped-candidate step at the fold identity, so
         # dropping the OPTIMIZATION is exact; only the tile-skip is lost under the band).
         return _producer_band_kloop(
             transport=transport,
@@ -1605,6 +1795,7 @@ def staged_kloop(
             aux_threads=32 * workers.producer_warps,
             block_threads=block_threads,
             k_end=k_end,
+            in_flight=in_flight if min(depth, n_chunks) >= 2 else None,  # one slot cannot hold a running group and its refill
         )
     slabs = _staged_slabs(transport)
 
@@ -1621,4 +1812,6 @@ def staged_kloop(
         k_end=k_end,
         k_first=k_first,
         seed=seed,
+        carried=carried,
+        in_flight=in_flight,
     )

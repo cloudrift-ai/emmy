@@ -32,6 +32,7 @@ SUPPORTED = frozenset(
         "CatOp",
         "UnsqueezeOp",
         "LinearOp",
+        "Conv1dOp",
         "MatmulOp",
         "SdpaOp",
         "MeanOp",
@@ -247,8 +248,19 @@ def _eval(node, ins: list, sym_env: dict[str, int] | None = None, device=None):
         raise NotImplementedError(f"torch_ref: scan {fn!r} unmapped")
     if name == "LinearOp":
         return F.linear(ins[0], ins[1], ins[2] if op.has_bias else None)
+    if name == "Conv1dOp":
+        return F.conv1d(
+            ins[0],
+            ins[1],
+            ins[2] if len(ins) > 2 else None,
+            stride=op.stride,
+            padding=op.padding,
+            dilation=op.dilation,
+            groups=op.groups,
+        )
     if name == "MatmulOp":
-        out = ins[0] @ ins[1]
+        dtype = torch.promote_types(torch.promote_types(ins[0].dtype, ins[1].dtype), torch_dtype(node.output.dtype))
+        out = ins[0].to(dtype) @ ins[1].to(dtype)
         return out + ins[2] if op.has_bias else out
     if name == "SdpaOp":
         q, k, v = ins[0], ins[1], ins[2]
@@ -290,10 +302,9 @@ def _eval(node, ins: list, sym_env: dict[str, int] | None = None, device=None):
     if name == "SoftmaxOp":
         return torch.softmax(ins[0], dim=op.axis)
     if name == "TransposeOp":
-        ndim = ins[0].dim()
-        if len(op.axes) == ndim:
-            return ins[0].permute(*op.axes)
-        return ins[0].transpose(op.axes[0], op.axes[1])
+        if len(op.axes) == 2:
+            return ins[0].transpose(op.axes[0], op.axes[1])
+        return ins[0].permute(*op.axes)
     if name == "ReshapeOp":
         return ins[0].reshape(_shape_ints(node.output.shape, sym_env))
     if name == "UnsqueezeOp":
@@ -380,6 +391,21 @@ def _index_map(op, ins: list, sym_env: dict[str, int] | None = None, device=None
     from emmy.compiler.ir.expr import PLACEHOLDER_PREFIX  # noqa: PLC0415
 
     out_shape = _shape_ints(op.out_shape, sym_env or {})
+    if len(op.sources) == 1 and op.sources[0].select is None:
+        source = op.sources[0]
+        tensor = ins[source.input_idx]
+        if torch.is_tensor(tensor):
+            strides = [0] * len(out_shape)
+            axes = {f"{PLACEHOLDER_PREFIX}{i}": i for i in range(len(out_shape))}
+            for i, coord in enumerate(source.coord_map):
+                if tensor.shape[i] == 1 or (type(coord).__name__ == "Literal" and coord.value == 0):
+                    continue
+                axis = axes.get(getattr(coord, "name", None))
+                if axis is None or tensor.shape[i] != out_shape[axis]:
+                    break
+                strides[axis] += tensor.stride(i)
+            else:
+                return tensor.as_strided(out_shape, strides)
     # device / dtype from the first tensor-valued source (a source can be a
     # scalar constant — stored as a python float).
     base = next((ins[s.input_idx] for s in op.sources if torch.is_tensor(ins[s.input_idx])), None)

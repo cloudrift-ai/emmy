@@ -17,6 +17,9 @@ __pycache__/
 # Python egg-info
 *.egg-info/
 
+# The runtime extension an editable install builds in place
+emmy/emmy_runtime*.so
+
 # Build and run artifacts
 dist/
 dump/
@@ -85,3 +88,6 @@ docs/.vercel
 
 # Recipes staged into the package for a distribution build (scripts/prepare_dist.py)
 /emmy/recipes/
+
+# Native runtime build output
+/target/

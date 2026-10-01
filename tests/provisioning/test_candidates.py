@@ -30,7 +30,7 @@ def test_iter_candidates_h200_default_picks_cloudrift_first():
     cands = iter_candidates("NVIDIA H200 141GB", 8, provider=None)
     # Cloudrift entry, then GCP entries (one per zone)
     assert cands[0].provider == "cloudrift"
-    assert cands[0].instance_type == "h200-8-generic.8"
+    assert cands[0].instance_type == "h200-26-200-500-packed.8"
     gcp_cands = [c for c in cands if c.provider == "gcp"]
     h200_zones = GPU_GCP_ZONES["NVIDIA H200 141GB"]
     assert len(gcp_cands) == len(h200_zones)  # one per zone

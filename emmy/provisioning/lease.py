@@ -58,6 +58,24 @@ async def lease_is_active(lease: dict) -> bool:
     return await gcp_provider.instance_is_active(vm["instance_id"], vm["zone"])
 
 
+def add_lease_arguments(parser) -> None:
+    """Register ``--lease PATH --owner NAME`` on a command that rents a VM."""
+    parser.add_argument("--lease", type=Path, help="Atomically persist the allocation handle and connection details")
+    parser.add_argument("--owner", help="Exact owner recorded in --lease; required with --lease")
+
+
+def lease_observer(args, gpu: str, gpu_count: int) -> "VmLeaseObserver | None":
+    """The observer behind ``--lease/--owner``, or None without them (or in dry-run, which rents nothing).
+
+    Raises ValueError when only one of the pair is given.
+    """
+    if bool(args.lease) != bool(args.owner):
+        raise ValueError("--lease and --owner must be supplied together")
+    if args.lease is None or args.dry_run:
+        return None
+    return VmLeaseObserver(args.lease, args.owner, gpu, gpu_count)
+
+
 @dataclass(frozen=True)
 class VmLeaseObserver:
     """Persist allocation handles before readiness polling can be interrupted."""

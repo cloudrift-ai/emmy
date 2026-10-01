@@ -5,15 +5,14 @@ root `tests/conftest.py` deselects for any `tests/` collection unless `-m perf` 
 `make test` never runs it. Invoke it explicitly:
 
 ```bash
-make bench-kernels                 # the stock lane (no tune DB)
-make bench-kernels-tuned           # the same cases with EMMY_TUNE_DB pointed at a tuned DB
+make bench-kernels                 # the stock lane (a fresh tune DB, no machine-local evidence)
 pytest tests/perf/ -m perf -v      # directly
 ```
 
 ## The case list is the realization corpus
 
 There is no case table here. `test_corpus.py` parametrizes over every **closed**
-`tests/compiler/realization/cases/**.yaml` whose declared capability matches the live card, and
+`tests/compiler/realization/cases/**.json` whose declared capability matches the live card, and
 benches each one pinned to the schedule that case authors.
 
 That is deliberate, and it replaced a hand-curated list of twelve Qwen3-Embedding-0.6B layer-0

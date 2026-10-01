@@ -63,6 +63,7 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, Var
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.kernel.ir import FRAG, FragmentApply, RegFragment
+from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.stmt import Body, StridedLoop
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import unroll_ok_n
@@ -85,7 +86,7 @@ def rewrite(root: Node) -> KernelOp | None:
     n = LOOPIFY.read_int(2 if config.readable() else 0)
     knobs = {**op.knobs, LOOPIFY.name: n}
     if n < 2:  # 0 / unset / a lone iteration → off, byte-identical
-        return KernelOp(body=op.body, name=op.name, knobs=knobs)
+        return replace(op, body=op.body, knobs=knobs)
     # (2) Fuse each pointwise fragment chain (``p <- s − m`` then ``p *= exp(p)``) into one node
     # carrying a ``post`` tail, so it renders as ``p[_e] = expf(s[_e] − m)`` instead of two loops.
     body = _fuse_chains(op.body)
@@ -98,7 +99,7 @@ def rewrite(root: Node) -> KernelOp | None:
         if new_body == body:
             break
         body = new_body
-    return KernelOp(body=body, name=op.name, knobs=knobs)
+    return replace(op, body=body, knobs=knobs)
 
 
 def _is_unary_post(s, out: str, layout) -> bool:
@@ -227,6 +228,8 @@ def _reroll(vals: list, loopvar: str, frag_stems: set[str]):
         return _recurse_seq(vals, loopvar, frag_stems, Body)
     if all(isinstance(v, tuple) for v in vals) and len({len(v) for v in vals}) == 1:
         return _recurse_seq(vals, loopvar, frag_stems, tuple)
+    if isinstance(v0, Lambda):
+        return _FAIL  # a closed term binds only its params, so it cannot read the loop var — decline
     if all(type(v) is type(v0) for v in vals) and (isinstance(v0, Expr) or is_dataclass(v0)):
         accepted = _init_kwargs(type(v0))
         kw = {}

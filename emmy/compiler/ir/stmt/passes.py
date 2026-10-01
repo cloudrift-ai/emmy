@@ -1,21 +1,13 @@
-"""Stmt rewrite + simplify, dispatched by type.
-
-Replaces the per-class ``Stmt.rewrite`` overrides on body-carrying and
-leaf stmts, and the ``_simplify_stmt`` if-ladder in ``normalize``.
-The Stage hierarchy uses ``dataclasses.fields()`` introspection inside
-the registered handler — adding a new ``Expr`` / ``Axis`` field on a
-Stage subclass is picked up automatically (no override needed, no
-silent-drop bug).
-"""
+"""Stmt rewrite + simplify, dispatched by type."""
 
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-from dataclasses import fields, is_dataclass
+from dataclasses import replace
 from functools import singledispatch
 
 from emmy.compiler.ir.axis import Axis, extend_simplify_ctx
-from emmy.compiler.ir.expr import Expr, SimplifyCtx, Var
+from emmy.compiler.ir.expr import Expr, Literal, SimplifyCtx, Var
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt.base import Stmt, _axis_identity
 from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
@@ -23,14 +15,13 @@ from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.leaves import (
     Accum,
     Assign,
-    Const,
+    Carry,
     Init,
+    Let,
     Load,
-    Mma,
-    Pack,
+    Pre,
     Select,
     SelectBranch,
-    Unpack,
     Write,
     ZeroPrologue,
 )
@@ -60,27 +51,31 @@ def _rename_ssa_vars_in_expr(e: Expr, rename: Rename) -> Expr:
 
 
 # ---------------------------------------------------------------------------
-# Generic walker — recurses tuples + plain dataclasses (Addressing, BoundAxis,
-# SelectBranch); applies ``on_expr`` to Expr leaves and ``on_axis`` to Axis.
-# Stmt is excluded — Stmt traversal goes through the singledispatch handlers.
-# ---------------------------------------------------------------------------
-
-
-def _walk(value, *, on_expr, on_axis):
-    if isinstance(value, Expr):
-        return on_expr(value)
-    if isinstance(value, Axis):
-        return on_axis(value)
-    if isinstance(value, tuple):
-        return tuple(_walk(v, on_expr=on_expr, on_axis=on_axis) for v in value)
-    if is_dataclass(value) and not isinstance(value, Stmt):
-        return type(value)(**{f.name: _walk(getattr(value, f.name), on_expr=on_expr, on_axis=on_axis) for f in fields(value)})
-    return value
-
-
-# ---------------------------------------------------------------------------
 # rewrite — sigma + axis_fn + SSA renaming
 # ---------------------------------------------------------------------------
+
+
+def map_exprs(stmt: Stmt, fn: Callable[[Expr], Expr]) -> Stmt:
+    """``stmt`` with ``fn`` applied to each of its own Expr fields — an index, a predicate, a
+    stride — and not to nested bodies, which :meth:`Body.map` reaches on its own."""
+    from dataclasses import fields, replace  # noqa: PLC0415
+
+    from emmy.compiler.ir.stmt.leaves import SelectBranch  # noqa: PLC0415
+
+    changes = {}
+    for f in fields(stmt):
+        value = getattr(stmt, f.name)
+        if isinstance(value, Expr):
+            new = fn(value)
+        elif isinstance(value, tuple) and value and all(isinstance(item, Expr) for item in value):
+            new = tuple(fn(item) for item in value)
+        elif isinstance(value, tuple) and value and all(isinstance(item, SelectBranch) for item in value):
+            new = tuple(replace(branch, select=fn(branch.select)) for branch in value)
+        else:
+            continue
+        if new != value:
+            changes[f.name] = new
+    return replace(stmt, **changes) if changes else stmt
 
 
 @singledispatch
@@ -105,26 +100,10 @@ def rewrite(stmt: Stmt, rename: Rename, sigma: Sigma = Sigma.IDENTITY, axis_fn: 
 
 @_rewrite_kind.register
 def _(s: Load, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
-    return Load(
+    return replace(
+        s,
         names=tuple(rename(n) for n in s.names),
-        input=s.input,
         index=tuple(_rename_ssa_vars_in_expr(sigma.apply(e), rename) for e in s.index),
-        dtype=s.dtype,
-    )
-
-
-@_rewrite_kind.register
-def _(s: Pack, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
-    return Pack(name=rename(s.name), low=rename(s.low), high=rename(s.high), dtype=s.dtype)
-
-
-@_rewrite_kind.register
-def _(s: Unpack, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
-    return Unpack(
-        low_name=rename(s.low_name),
-        high_name=rename(s.high_name),
-        value=rename(s.value),
-        lane_dtype=s.lane_dtype,
     )
 
 
@@ -135,7 +114,7 @@ def _(s: Assign, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
 
 @_rewrite_kind.register
 def _(s: Accum, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
-    new_axes = tuple(n for old in s.axes for n in _rewrite_axis_name(old, sigma))
+    new_axes = tuple(sorted({rename(n) for old in s.axes for n in _rewrite_axis_name(old, sigma)}))
     return Accum(
         name=rename(s.name),
         value=rename(s.value),
@@ -147,22 +126,15 @@ def _(s: Accum, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
 
 
 @_rewrite_kind.register
-def _(s: Mma, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
-    new_axes = tuple(n for old in s.axes for n in _rewrite_axis_name(old, sigma))
+def _(s: Carry, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
+    index = tuple(_rename_ssa_vars_in_expr(sigma.apply(e), rename) for e in s.index)
+    return Carry(name=rename(s.name), value=rename(s.value), index=index, seed=s.seed, dtype=s.dtype)
 
-    def _g(guard):  # σ-substitute a (base, bound) guard's exprs so axis vars canonicalize
-        return None if guard is None else (sigma.apply(guard[0]), sigma.apply(guard[1]))
 
-    return Mma(
-        c=rename(s.c),
-        a=rename(s.a),
-        b=rename(s.b),
-        atom=s.atom,
-        axes=new_axes,
-        b_trans=s.b_trans,
-        m_guard=_g(s.m_guard),
-        n_guard=_g(s.n_guard),
-        k_zero=_g(s.k_zero),
+@_rewrite_kind.register
+def _(s: Pre, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
+    return Pre(
+        name=rename(s.name), carrier=rename(s.carrier), index=tuple(_rename_ssa_vars_in_expr(sigma.apply(e), rename) for e in s.index)
     )
 
 
@@ -191,8 +163,8 @@ def _(s: Init, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
 
 
 @_rewrite_kind.register
-def _(s: Const, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
-    return Const(name=rename(s.name), value=s.value, dtype=s.dtype)
+def _(s: Let, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
+    return Let(name=rename(s.name), value=_rename_ssa_vars_in_expr(sigma.apply(s.value), rename), dtype=s.dtype)
 
 
 @_rewrite_kind.register
@@ -237,19 +209,23 @@ def _(s: Loop, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
         axis=axis_fn(s.axis),
         body=tuple(rewrite(c, rename, sigma, axis_fn) for c in s.body),
         unroll=s.unroll,
+        seed=s.seed,
     )
 
 
 @_rewrite_kind.register
 def _(s: StridedLoop, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
-    step = sigma.apply(s.step) if isinstance(s.step, Expr) else s.step
+    def _expr(expr: Expr) -> Expr:
+        return _rename_ssa_vars_in_expr(sigma.apply(expr), rename)
+
+    step = _expr(s.step) if isinstance(s.step, Expr) else s.step
     return StridedLoop(
         axis=axis_fn(s.axis),
-        start=sigma.apply(s.start),
+        start=_expr(s.start),
         step=step,
         body=tuple(rewrite(c, rename, sigma, axis_fn) for c in s.body),
         unroll=s.unroll,
-        end=sigma.apply(s.end) if s.end is not None else None,
+        end=_expr(s.end) if s.end is not None else None,
         seed=s.seed,
     )
 
@@ -257,7 +233,7 @@ def _(s: StridedLoop, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
 @_rewrite_kind.register
 def _(s: Cond, rename: Rename, sigma: Sigma, axis_fn: AxisFn) -> Stmt:
     return Cond(
-        cond=sigma.apply(s.cond),
+        cond=_rename_ssa_vars_in_expr(sigma.apply(s.cond), rename),
         body=tuple(rewrite(c, rename, sigma, axis_fn) for c in s.body),
         else_body=tuple(rewrite(c, rename, sigma, axis_fn) for c in s.else_body),
     )
@@ -278,15 +254,29 @@ def rename_free(stmt: Stmt, alias: Mapping[str, str]) -> Stmt:
     """
     if not alias:
         return stmt
-    renamed = rewrite(stmt, lambda nm: alias.get(nm, nm), Sigma.IDENTITY, _axis_identity)
     bodies = stmt.nested()
+    shell = stmt.with_bodies(tuple(Body() for _ in bodies)) if bodies else stmt
+    renamed = rewrite(shell, lambda nm: alias.get(nm, nm), Sigma.IDENTITY, _axis_identity)
     if not bodies:
         return renamed
-    # ``rewrite`` just descended into the child scopes under the full alias. Redo each one with the
-    # names that scope re-binds pruned out, and put those bodies back.
+    # Rewrite each child once, with only the aliases its scope does not rebind.
     inner = []
     for b in bodies:
-        pruned = {k: v for k, v in alias.items() if k not in b.ssa_defs}
+        bound = b.local_defs
+        pruned = {k: v for k, v in alias.items() if k not in bound and k not in stmt.binds_axes()}
+        # The surviving value may itself be shadowed here. Rename the local binding before
+        # substituting, so dropping outer ``b = a`` cannot capture the use of b as an inner a.
+        captured = bound.intersection(pruned.values())
+        if captured:
+            used = set(b.ssa_defs | b.ssa_uses | b.axis_names) | set(alias) | set(alias.values())
+            renames = {}
+            for name in sorted(captured):
+                fresh = name + "_local"
+                while fresh in used:
+                    fresh += "_local"
+                renames[name] = fresh
+                used.add(fresh)
+            b = Body(member.rename(renames) for member in b)
         inner.append(Body(tuple(rename_free(c, pruned) for c in b)))
     return renamed.with_bodies(tuple(inner))
 
@@ -298,13 +288,12 @@ def rename_free(stmt: Stmt, alias: Mapping[str, str]) -> Stmt:
 
 @singledispatch
 def simplify(stmt: Stmt, ctx: SimplifyCtx) -> Stmt:
-    # Default: no Expr fields to simplify (Assign / Accum / Init).
-    return stmt
+    return map_exprs(stmt, lambda expr: expr.simplify(ctx))
 
 
 @simplify.register
 def _(s: Load, ctx: SimplifyCtx) -> Stmt:
-    return Load(names=s.names, input=s.input, index=tuple(e.simplify(ctx) for e in s.index), dtype=s.dtype)
+    return replace(s, index=tuple(e.simplify(ctx) for e in s.index))
 
 
 @simplify.register
@@ -321,13 +310,35 @@ def _(s: Write, ctx: SimplifyCtx) -> Stmt:
 
 @simplify.register
 def _(s: Select, ctx: SimplifyCtx) -> Stmt:
-    return Select(name=s.name, branches=tuple(SelectBranch(b.value, b.select.simplify(ctx)) for b in s.branches))
+    """Predicates simplified, then every branch the constants DECIDE is dropped.
+
+    Branches are ordered and the last one is the else, so a predicate that folds to false is
+    unreachable and one that folds to true is the else from there on. Keeping such a branch costs
+    far more than its own arithmetic: ``Select.deps`` names its value, so the tree-wide prune holds
+    the whole producer cone alive, and a reduce inside a cone nothing can select does not read the
+    output sweep -- which is what makes ``promoted_sweep`` refuse the grid and leave the kernel
+    sweeping every cell in one block. Fusing a scatter at a literal coordinate decides a branch this
+    way at every read it reaches, so this is the ordinary case, not a corner one.
+    """
+    branches = [SelectBranch(b.value, b.select.simplify(ctx)) for b in s.branches]
+    kept: list[SelectBranch] = []
+    for branch in branches[:-1]:
+        if not isinstance(branch.select, Literal):
+            kept.append(branch)
+        elif branch.select.value:
+            return Select(name=s.name, branches=(*kept, branch))
+    return Select(name=s.name, branches=(*kept, branches[-1]))
 
 
 @simplify.register
 def _(s: Loop, ctx: SimplifyCtx) -> Stmt:
     inner = extend_simplify_ctx(ctx, s.axis)
-    return Loop(axis=s.axis, body=tuple(simplify(c, inner) for c in s.body), unroll=s.unroll)
+    return Loop(
+        axis=s.axis,
+        body=tuple(simplify(c, inner) for c in s.body),
+        unroll=s.unroll,
+        seed=s.seed,
+    )
 
 
 @simplify.register
@@ -379,12 +390,12 @@ def projection_distributes(body, states: tuple[str, ...]) -> bool:
     state(s) — i.e. it distributes over the atomic-add combine, so applying it to each CTA's
     partition before the ``atomicAdd`` equals applying it once after the cross-CTA sum
     (``Σ c·xₛ = c·(Σ xₛ)``). A bare state write (``proj = id``) trivially distributes; a constant
-    *scale* — ``mean``'s ``×1/N`` — does; an additive offset (a fused bias), a nonlinear unary
+    *scale* — ``mean``'s ``/N`` — does; an additive offset (a fused bias), a nonlinear unary
     (``relu`` / ``reciprocal`` of the *state*), or a product of two state-derived values do NOT.
 
     Conservative forward dataflow: ``linear`` is the set of SSA names that are a
-    linear-homogeneous function of the state. A value is grown into it only by ``multiply`` with
-    a state-independent operand (an arg not itself in ``linear``); any other op that consumes a
+    linear-homogeneous function of the state. Multiplication by or division by a state-independent
+    operand grows this set; division requires the state in the numerator. Any other op that consumes a
     ``linear`` value — or any projection stmt we can't reason about — refuses. The final ``Write``
     must store only ``linear`` values."""
     linear = set(states)
@@ -398,8 +409,8 @@ def projection_distributes(body, states: tuple[str, ...]) -> bool:
         hot = [a for a in s.args if a in linear]
         if not hot:
             continue  # state-independent — a constant w.r.t. the split
-        if s.op.name == "multiply" and len(hot) == 1:
-            linear.add(s.name)  # state · constant — still linear-homogeneous
+        if len(hot) == 1 and (s.op.name == "multiply" or s.op.name == "divide" and s.args[0] in linear):
+            linear.add(s.name)  # state · constant or state / constant — still linear-homogeneous
             continue
-        return False  # add / divide / nonlinear of a state value breaks distributivity
+        return False  # offset / inverse / nonlinear of a state value breaks distributivity
     return False  # no Write reached

@@ -234,7 +234,7 @@ def _delinearized(index: tuple, shape: tuple) -> Expr | None:
 
 
 def split_pair(index: tuple, name: str) -> int | None:
-    """``Q`` when the exprs of ``index`` mentioning ``name`` are exactly one ``name // Q`` and one
+    """``Q`` when the exprs of ``index`` mentioning ``name`` are exactly one integer quotient and one
     ``name % Q`` (the split-store spelling a re-fused axis reaches a buffer with, in either dim
     order), else ``None``."""
     carrying = [e for e in index if name in e.free_vars()]
@@ -242,10 +242,10 @@ def split_pair(index: tuple, name: str) -> int | None:
         return None
     parts: dict[str, int] = {}
     for e in carrying:
-        if not (isinstance(e, BinaryExpr) and e.op in ("//", "%") and e.left == Var(name) and isinstance(e.right, Literal)):
+        if not (isinstance(e, BinaryExpr) and e.op in ("/", "//", "%") and e.left == Var(name) and isinstance(e.right, Literal)):
             return None
-        parts[e.op] = int(e.right.value)
-    return parts["//"] if set(parts) == {"//", "%"} and parts["//"] == parts["%"] else None
+        parts["/" if e.op == "//" else e.op] = int(e.right.value)
+    return parts["/"] if set(parts) == {"/", "%"} and parts["/"] == parts["%"] else None
 
 
 def split_addressable(index: tuple, shape, name: str, atom_ext: int, trailing: bool) -> bool:

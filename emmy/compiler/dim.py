@@ -40,6 +40,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Interval, Literal, SimplifyCtx, Var
+from emmy.compiler.wire import Wire
 
 # Default "expected size" for a symbolic dim when none is supplied explicitly.
 # Atomic symbolic Dims (input axes like ``Dim("seq_len")``) carry this so the
@@ -72,9 +73,7 @@ def _coerce_expr(value: int | str | Expr | Dim) -> Expr:
         return Literal(value, "int")
     if isinstance(value, str):
         return Var(value)
-    # Expr is a Union — check by membership in the known node classes
-    # via duck-typing on the AST API (``eval`` is on every concrete Expr).
-    if hasattr(value, "eval") and hasattr(value, "substitute"):
+    if isinstance(value, Expr):
         return value
     raise TypeError(f"Dim: cannot wrap {type(value).__name__}: {value!r}")
 
@@ -90,7 +89,28 @@ def _simplify(expr: Expr) -> Expr:
 
 
 @dataclass(frozen=True, init=False, eq=False)
-class Dim:
+class Dim(Wire):
+    wire_tag = "dim"
+
+    def to_wire(self):
+        """``int`` for a static dim, ``{sym, hint}`` for a bare symbol, ``{expr, hint}`` for a composite."""
+        if isinstance(self.expr, Literal) and self.expr.dtype == "int":
+            return int(self.expr.value)
+        out = {"sym": self.expr.name} if isinstance(self.expr, Var) else {"expr": self.expr.to_wire()}
+        if self.hint is not None:
+            out["hint"] = self.hint
+        return out
+
+    @classmethod
+    def from_wire(cls, value: object, where: str = "dim") -> Dim:
+        if isinstance(value, int) and not isinstance(value, bool):
+            return cls(value)
+        keys = set(value) if isinstance(value, dict) else set()
+        if not (("sym" in keys and keys <= {"sym", "hint"}) or ("expr" in keys and keys <= {"expr", "hint"})):
+            raise ValueError(f"{where} must be an integer, {{sym, hint}} or {{expr, hint}}")
+        hint = int(value["hint"]) if value.get("hint") is not None else None
+        return cls(str(value["sym"]), hint=hint) if "sym" in keys else cls(Expr.from_wire(value["expr"], f"{where}.expr"), hint=hint)
+
     expr: Expr
     # Advisory "expected size" for a symbolic dim — the value the tuner /
     # partition planner pretends the axis has when picking tile sizes (set
@@ -114,6 +134,12 @@ class Dim:
         if hint is None and isinstance(expr, Var):
             hint = DEFAULT_SEQ_HINT
         object.__setattr__(self, "hint", hint)
+
+    def structural_key(self) -> str:
+        """Identity of the extent expression; the expected-size hint is advisory."""
+        from emmy.compiler.structural import digest, form  # noqa: PLC0415
+
+        return digest(form(self.expr))
 
     # ---- inspection ------------------------------------------------------
 

@@ -86,7 +86,7 @@ for sequence_length in "${SEQUENCE_LENGTHS[@]}"; do
       # traced program lowered to several post-fusion kernels.
       if EMMY_NVCC_FLAGS= timeout --signal=TERM --kill-after=30s 1500s \
         "$emmy" run --golden "$golden" --bench --bench-backends emmy \
-        --warmup 1 --iters 15 --no-record-nodes \
+        --warmup 1 --iters 15 --no-record-evidence \
         --json "$results/json/$setup.replay-$repetition" --dump-dir "$results/dumps/$setup.replay-$repetition" \
         2>&1 | tee "$results/logs/$setup.replay-$repetition.log"; then
         replay_statuses+=(ok)
@@ -98,7 +98,7 @@ for sequence_length in "${SEQUENCE_LENGTHS[@]}"; do
   for repetition in 1 2; do
     if EMMY_NVCC_FLAGS= EMMY_KNOBS="$reference_knobs" timeout --signal=TERM --kill-after=30s 1500s \
       "$emmy" run -c "$source_code" --bench --strict --bench-backends eager,tcompile,emmy \
-      --warmup 1 --iters 15 --no-record-nodes --json "$results/json/$setup.reference-$repetition.json" \
+      --warmup 1 --iters 15 --no-record-evidence --json "$results/json/$setup.reference-$repetition.json" \
       2>&1 | tee "$results/logs/$setup.reference-$repetition.log"; then
       reference_statuses+=(ok)
     else

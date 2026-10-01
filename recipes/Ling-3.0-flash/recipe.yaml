@@ -3,9 +3,9 @@ tags:
   - untested
 model:
   huggingface: inclusionAI/Ling-3.0-flash
-  rationale: "Zero evidence across sources. Minimal presence."
-  heat: 10
+  rationale: "No current community or serving evidence found."
+  heat: 5
   task: generate
 matrices:
-- deploy.gpu: NVIDIA H200 141GB
-  deploy.gpu_count: 4
+- deploy.gpu: NVIDIA B200
+  deploy.gpu_count: 2

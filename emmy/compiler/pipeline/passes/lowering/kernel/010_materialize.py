@@ -27,9 +27,10 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.kernel.ir import FRAG_COL, FRAG_ROW
+from emmy.compiler.ir.kernel.ir import ELEM_COL, ELEM_ROW, FRAG_COL, FRAG_ROW
+from emmy.compiler.ir.schedule.register import RegisterMaterialization
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Body, Load, Write
+from emmy.compiler.ir.stmt import Assign, Body, Load, Write
 from emmy.compiler.ir.stmt.body import free_names
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.ops import UnbindableProjection, reduce_plan, sched_of
@@ -45,14 +46,40 @@ def rewrite(match: Match, root: Node, ctx=None) -> KernelOp | None:
     # structural ``tile/030_cut`` fork's, decided BEFORE scheduling (the walk's catalog
     # offers no ``g`` row, and its pin path strips the consumed ``g`` half). A surviving split
     # request is a bug — the materializer only lowers single-launch kernels.
-    rplan = reduce_plan(tile) if tile.op is not None else None
+    resident = isinstance(tile.materialization, RegisterMaterialization)
+    rplan = reduce_plan(tile) if tile.op is not None and not resident else None
     assert rplan is None or not rplan.needs_split, "materialize: a GRID split stage reached the kernel pass past 030_cut"
     try:
-        materialized = _pointwise_strip(tile, factorize(tile, root, sm_count=getattr(ctx, "sm_count", 0)))
+        materialized = factorize(tile, root, sm_count=getattr(ctx, "sm_count", 0))
+        if not resident:
+            materialized = _pointwise_strip(tile, materialized)
         body = _drop_repeated_declarations(Body((materialized,)))
         unbound = _unbound_names(tile, root, body)
         assert not unbound, f"materialize: kernel {tile.name!r} reads names it never binds: {sorted(unbound)}"
-        return KernelOp(body=body, name=tile.name)
+        kernel = KernelOp(body=body, name=tile.name, serial=() if resident else tuple(tile.place.serial))
+        if resident:
+            # The state's port — the buffer the lift added for the classic realization, which no
+            # store of the term writes. Register storage has no global state allocation, so the
+            # port goes: a graph splice; snapshots with external readers remain ordinary outputs.
+            written = {spec.write.output for spec in tile.output_specs}
+            ports = {t.name for t in root.outputs if t.name not in written and t.name not in match.graph.outputs}
+            ports = {name for name in ports if not match.graph.buffer_users(name)}
+            if ports:
+                from emmy.compiler.pipeline.passes.tile._cut import _input_fragment  # noqa: PLC0415
+
+                outputs = tuple(t for t in root.outputs if t.name not in ports)
+                names = {t.name: t.name + "__register" for t in outputs}
+                fragment = _input_fragment(match, root)
+                fragment.add_node(
+                    replace(kernel, body=body.rename_buffers(names), outputs={}, source=tile, knobs=tile.knobs),
+                    list(root.inputs),
+                    outputs=(outputs[0], *(replace(t, name=names[t.name]) for t in outputs[1:])),
+                    node_id=names[outputs[0].name],
+                )
+                fragment.outputs = list(names.values())
+                match.output = names
+                return fragment
+        return kernel
     except UnbindableProjection as exc:
         # The offered row has no multi-root binding (e.g. it tiles two contraction operands of a
         # projection whose outputs do not partition by root). The row stays OFFERED — the
@@ -63,9 +90,10 @@ def rewrite(match: Match, root: Node, ctx=None) -> KernelOp | None:
 
 #: Names the RENDERER supplies, so a statement may read them with no binding anywhere in the IR:
 #: the CTA helper coordinates it declares in the prologue of any body that uses them
-#: (``ir.stmt.blocks``), and the reserved coordinates a :class:`~emmy.compiler.ir.kernel.ir.FragmentMask`
-#: predicate is written over, which the render substitutes per element (tile origin + layout offset).
-_RENDERED_HELPERS = frozenset({"lane", "warp", FRAG_ROW, FRAG_COL})
+#: (``ir.stmt.blocks``), and the reserved coordinates a :class:`~emmy.compiler.ir.kernel.ir.FragmentApply`
+#: COORD / GMEM template is written over, which the render substitutes per element (tile origin + layout offset),
+#: and the in-fragment offsets a :class:`~emmy.compiler.ir.kernel.ir.RegStore` epilogue reads.
+_RENDERED_HELPERS = frozenset({"lane", "warp", FRAG_ROW, FRAG_COL, ELEM_ROW, ELEM_COL})
 
 
 def _unbound_names(tile: TileOp, root: Node, body: Body) -> set[str]:
@@ -81,7 +109,7 @@ def _unbound_names(tile: TileOp, root: Node, body: Body) -> set[str]:
     undefined*, a hundred errors deep in a generated source and attributed to whichever candidate the
     tuner happened to be benching. Asking it here names the kernel and the value instead, in the pass
     that built them."""
-    bound = {*root.inputs, *root.buffer_names(), *_RENDERED_HELPERS}
+    bound = {*root.inputs, *root.buffer_names(), *_RENDERED_HELPERS, *(axis.name for axis in tile.place.serial)}
     for axis in (*tile.axes, *tile.place.free):
         bound |= set(axis.extent_expr().free_vars())
     return set().union(*(free_names(stmt) for stmt in body)) - bound
@@ -126,16 +154,29 @@ def _pointwise_strip(tile: TileOp, materialized):
     return replace(materialized, axes=axes, body=Body((*loads, *computes, *writes)))
 
 
-def _drop_repeated_declarations(body: Body) -> Body:
-    """Drop a scalar ``Load`` re-binding a name already bound to the IDENTICAL ``(input, index)``
-    in the same scope — the emitted body's one legality guard.
+def _binding(stmt) -> tuple | None:
+    """What ``stmt`` binds its name TO, or ``None`` when it binds something this guard cannot
+    compare. A scalar ``Load`` binds an ADDRESS; an ``Assign`` binds an EXPRESSION over names the
+    scope has already bound. Both are repeatable: a second, identical one computes the same value."""
+    if isinstance(stmt, Load) and stmt.is_scalar:
+        return (stmt.input, tuple(e.pretty() for e in stmt.index))
+    if isinstance(stmt, Assign):
+        return (stmt.op.name, stmt.args, stmt.dtype)
+    return None
 
-    Operand cones splice INDEPENDENTLY (``Fold.spliced_step``), so two sibling cones reading one
-    shared broadcast constant each carry their own copy of its ``buf[0]`` ``Load``, under the same
-    SSA name and at the same address. Flattened into one loop body those are two C declarations of
-    one name, which nvcc rejects (*already declared in the current scope* — eleven of them on
-    DeepSeek-V4's MXFP4 expert kernel, whose decode applies eleven shared constants to both halves
-    of the fused ``gate_up`` weight).
+
+def _drop_repeated_declarations(body: Body) -> Body:
+    """Drop a statement re-binding a name already bound to the IDENTICAL value in the same scope —
+    the emitted body's one legality guard.
+
+    Operand cones splice INDEPENDENTLY (``Fold.spliced_step``), so two sibling cones over one
+    shared value each carry their own copy of the statements that bind it, under the same SSA
+    names. Flattened into one loop body those are two C declarations of one name, which nvcc
+    rejects (*already declared in the current scope*). Both repeatable kinds occur: the ``Load``
+    of a broadcast constant — eleven of them on DeepSeek-V4's MXFP4 expert kernel, whose decode
+    applies eleven shared constants to both halves of the fused ``gate_up`` weight — and the
+    ``Assign`` that DERIVES a value from one, which the same model's post block reaches whenever a
+    placement cut lands two cones of one reciprocal at the kernel's own scope.
 
     The repeat binds nothing new, so it is dropped with NO rewrite: every downstream use already
     names the survivor. That is what keeps the guard narrow, and narrow is what makes it safe over
@@ -145,7 +186,7 @@ def _drop_repeated_declarations(body: Body) -> Body:
     different value. A same-name repeat cannot hide such a reload — a rebind in one C scope is
     already illegal — so this guard needs no such analysis.
 
-    A name re-bound to a DIFFERENT address is left alone: that is an SSA fault, and it must surface
+    A name re-bound to a DIFFERENT value is left alone: that is an SSA fault, and it must surface
     as one rather than be collapsed onto a stale value. Per scope, so an inner body may legally
     shadow an outer binding."""
 
@@ -153,11 +194,11 @@ def _drop_repeated_declarations(body: Body) -> Body:
         bound: dict[str, tuple] = {}
         kept = []
         for stmt in stmts:
-            if isinstance(stmt, Load) and stmt.is_scalar:
-                address = (stmt.input, tuple(e.pretty() for e in stmt.index))
-                if bound.get(stmt.name) == address:
+            binding = _binding(stmt)
+            if binding is not None:
+                if bound.get(stmt.name) == binding:
                     continue
-                bound[stmt.name] = address
+                bound[stmt.name] = binding
             nested = stmt.nested()
             if nested:
                 stmt = stmt.with_bodies(tuple(Body(scope(inner)) for inner in nested))

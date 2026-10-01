@@ -20,16 +20,16 @@ from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import iter_leaves
 
-classic_forks = import_module("emmy.compiler.pipeline.passes.lowering.tile.040_schedule").classic_forks
+classic_forks = import_module("emmy.compiler.pipeline.passes.tile.schedule.040_schedule").classic_forks
 
 
 def _unmapped_tile(m: int, n: int, k: int = 64, dtype: str = "f16"):
     """The lifted, unscheduled ``TileOp`` for one ``m x k @ k x n`` matmul, knobs and all.
 
-    Lifting by hand rather than through ``lowering/tile`` lets the assertion below inspect the
+    Lifting by hand rather than through ``tile/lift`` lets the assertion below inspect the
     schedule-space stamp directly instead of inferring a collision from downstream symptoms.
     """
-    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op
+    from emmy.compiler.pipeline.passes.tile._fromloop import lift_loop_op
 
     g = Graph()
     g.add_node(InputOp(), [], Tensor("a", (Dim(m), Dim(k)), dtype=dtype), node_id="a")
@@ -50,7 +50,7 @@ def test_a_precision_gate_pin_stamps_a_different_space() -> None:
     from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC
 
     clean = schedule_pin_fingerprint()
-    with F16_MMA_F32_ACC.pinned("1"):
+    with F16_MMA_F32_ACC.pinned("0"):
         assert schedule_pin_fingerprint() != clean, "the precision gate must change the schedule-space stamp"
     assert schedule_pin_fingerprint() == clean
 
@@ -81,15 +81,14 @@ def test_split_dim_store_does_not_share_an_identity() -> None:
     """A buffer's SHAPE and the store's index are enumeration inputs, so both identities carry them.
 
     The same iteration space can reach its output flat (``128x128``) or through a re-fused split
-    axis spelled as a dim pair (``4x32x128``, index ``a0/32, a0%32, a1``). The fragment store can
-    address the pair only under a divisibility rule, so the split form loses the warp tier — 50538
-    candidates against 10284. The term carries neither fact: ``TileOp.structural_key`` excludes the
-    stores by design and the algebra digest canonicalizes sizes away. The complete Loop-body
-    identity and the schedule-space stamp must both carry the store boundary so a golden measured
-    on the flat kernel is never handed to a kernel that cannot realize its row.
+    axis spelled as a dim pair (``4x32x128``, index ``a0/32, a0%32, a1``). Free-axis normalization
+    now re-fuses that pair, so both forms can reach the warp tier. The term carries neither output
+    fact: ``TileOp.structural_key`` excludes the stores by design and the algebra digest canonicalizes
+    sizes away. The complete Loop-body identity and the schedule-space stamp must still carry the
+    store boundary so a golden measured on one output layout is never handed to the other.
     """
     from emmy.commands.trace import graph_from_code
-    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op
+    from emmy.compiler.pipeline.passes.tile._fromloop import lift_loop_op
 
     matmul = "(torch.randn(128,64,dtype=torch.float16) @ torch.randn(64,128,dtype=torch.float16))"
     ctx = Context.from_target((12, 0))
@@ -109,7 +108,7 @@ def test_split_dim_store_does_not_share_an_identity() -> None:
     def total(tile) -> int:
         return sum(1 for _ in iter_leaves(classic_forks(tile, "t", tile.knobs, ctx)))
 
-    assert total(flat) != total(split), "a split-pair store must not offer the same tiers"
+    assert total(flat) == total(split), "re-fusing the split pair must recover the contraction schedule space"
     assert flat.identity_key(with_io=True) != split.identity_key(with_io=True), "so a golden must not join across them"
     assert classic_forks(flat, "t", flat.knobs, ctx)[0].pool_id != classic_forks(split, "t", split.knobs, ctx)[0].pool_id, (
         "and they must not share a schedule-space stamp"
@@ -127,7 +126,7 @@ def test_an_axis_renamed_twin_preserves_the_node_id_vocabulary() -> None:
     from emmy.compiler.ir.sigma import Sigma
     from emmy.compiler.ir.stmt.passes import rewrite
     from emmy.compiler.ir.tile.ir import TileOp
-    from emmy.compiler.pipeline.passes.lowering.tile._fromloop import lift_loop_op
+    from emmy.compiler.pipeline.passes.tile._fromloop import lift_loop_op
 
     norm = "(lambda t: t*torch.rsqrt((t.float()*t.float()).mean(-1,keepdim=True)+1e-6).to(t.dtype))"
     code = f"torch.nn.functional.linear({norm}(torch.randn(128, 256, dtype=torch.float16)), torch.randn(256, 256, dtype=torch.float16))"
@@ -155,33 +154,54 @@ def test_an_axis_renamed_twin_preserves_the_node_id_vocabulary() -> None:
 
 def test_an_off_precision_gate_stamps_the_same_space() -> None:
     """The stamp seeds a budgeted pool's draw, so two pin states that enumerate the same rows must
-    share it. ``precision_pin`` reads an explicit OFF gate exactly as an unset one — neither offers
-    the f16-accumulate / native-fp8 siblings — and a standard-lane golden's regime publishes that
-    OFF spelling (``pinned_knobs({"FAST_MATH": False})``, what ``compile --golden`` and the release
-    gate install). Before this held, the regime pin re-seeded the draw of every budgeted pool and a
-    replay elected a different row than the deploy it replayed."""
+    share it. Explicitly disabling both precision gates matches FAST_MATH=false. The unset
+    default matches FAST_MATH=true, and individual pins still override that umbrella."""
     from emmy.compiler.pipeline.knob import schedule_pin_fingerprint
     from emmy.compiler.pipeline.search.pins import pinned_knobs
     from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC, FAST_MATH, FP8_MMA
 
-    clean = schedule_pin_fingerprint()
+    default = schedule_pin_fingerprint()
+    with FAST_MATH.pinned("0"):
+        clean = schedule_pin_fingerprint()
     for off in ({"FAST_MATH": False}, {"FAST_MATH": 0}, {"F16_MMA_F32_ACC": 0, "FP8_MMA": 0}):
         with pinned_knobs(off):
-            assert schedule_pin_fingerprint() == clean, f"an OFF gate {off} enumerates the unset space and must stamp it"
+            assert schedule_pin_fingerprint() == clean, f"an OFF gate {off} must enumerate the precise space"
     ctx = Context.from_target((12, 0))
     tile = _unmapped_tile(8, 8)
-    pool = classic_forks(tile, "t", tile.knobs, ctx)[0].pool_id
     with pinned_knobs({"FAST_MATH": False}):
-        assert classic_forks(tile, "t", tile.knobs, ctx)[0].pool_id == pool, "the published regime must mint the deploy's pool"
+        pool = classic_forks(tile, "t", tile.knobs, ctx)[0].pool_id
+    with pinned_knobs({"F16_MMA_F32_ACC": 0, "FP8_MMA": 0}):
+        assert classic_forks(tile, "t", tile.knobs, ctx)[0].pool_id == pool
     # The umbrella spells exactly what it enables: one stamp for ``FAST_MATH=1`` and for both gates pinned ON,
     # and an individual OFF pin under the umbrella is the other gate alone.
     with FAST_MATH.pinned("1"):
         umbrella = schedule_pin_fingerprint()
         with F16_MMA_F32_ACC.pinned("0"):
             f16_off = schedule_pin_fingerprint()
-    assert umbrella != clean
+    assert umbrella == default != clean
     with F16_MMA_F32_ACC.pinned("1"), FP8_MMA.pinned("1"):
         assert schedule_pin_fingerprint() == umbrella
-    with FP8_MMA.pinned("1"):
+    with FAST_MATH.pinned("0"), FP8_MMA.pinned("1"):
         assert schedule_pin_fingerprint() == f16_off
-    assert schedule_pin_fingerprint() == clean
+    assert schedule_pin_fingerprint() == default
+
+
+def test_a_kernel_pin_on_another_piece_leaves_the_stamp_alone() -> None:
+    """The stamp seeds a budgeted pool's draw, so a pin the kernel never reads must not move it: a
+    kernel pin naming another cut piece left an unpinned piece's cold pick moving between compiles
+    (a Qwen3.8 GPTQ V100 piece ran 1.5 to 48 ms depending on which other piece a sweep pinned). A
+    kernel pin naming this piece does change the space, so it must still change the stamp."""
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+    ctx = Context.from_target((12, 0))
+    name = "k_probe__place_aaaaaaaaaa"
+    tile = replace(_unmapped_tile(64, 128), name=name)
+
+    def stamp() -> str:
+        return classic_forks(tile, name, tile.knobs, ctx)[0].pool_id
+
+    clean = stamp()
+    with pinned_knobs({"WORK@place_bbbbbbbbbb": "w1x2"}):
+        assert stamp() == clean, "a pin on another piece must not re-seed this piece's draw"
+    with pinned_knobs({"WORK@place_aaaaaaaaaa": "w1x2"}):
+        assert stamp() != clean, "a pin on this piece changes its space, so it must change the stamp"

@@ -19,7 +19,7 @@ from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.schedule.packing import match_packed_kblock_b
 from emmy.compiler.ir.schedule.views import cone_seam
 from emmy.compiler.ir.stmt import Assign, Load
-from tests.compiler.helpers import requires_cuda
+from tests.compiler.helpers import requires_cuda, requires_sm
 
 pytest.importorskip("torch")
 
@@ -107,12 +107,40 @@ def test_the_seam_reads_the_group_maximum_as_a_per_chunk_statistic(tmp_path):
 
     graph, _, _ = _linear(tmp_path)
     with pinned_knobs({"PLACE": "fuse"}):
-        tiled = Pipeline.build([*LOOP_PASSES, "lowering/tile"]).run(graph, ctx=Context.from_target((12, 0)))
+        tiled = Pipeline.build([*LOOP_PASSES, "tile/lift", "tile/cut", "tile/schedule"]).run(graph, ctx=Context.from_target((12, 0)))
     tile = next(node.op for node in tiled.nodes.values() if isinstance(node.op, TileOp))
     node = next(site.node for site in tile.sites if site.node.as_contraction() is not None)
     _pro, cell, _stats, (chunk_pro, chunk_stats, block) = cone_seam(node.operands[0], node.axis, tile.axes)
     assert block == 128 and len(chunk_stats) == 1
     assert chunk_stats[0] not in {name for stmt in cell for name in stmt.defines()}, "the cell reads the statistic, it never computes it"
+
+
+def test_a_chunk_body_that_computes_a_row_statistic_does_not_reload_it(tmp_path):
+    """A fused SwiGLU reads the SiLU constant both in the row prologue and inside its gate/up chunk
+    body, which computes that value itself. The chunk refill bridges only what the body reads and
+    does not define, so each name is declared once."""
+    import re
+
+    from emmy.commands.trace import graph_from_code
+    from emmy.compiler.context import Context
+    from emmy.compiler.loader.synthesize import quantize_and_spell
+    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+    code = (
+        "from transformers import Qwen3Config\n"
+        "from transformers.models.qwen3.modeling_qwen3 import Qwen3MLP\n"
+        "Qwen3MLP(Qwen3Config(hidden_size=256, intermediate_size=256)).half()(torch.randn(16, 256, dtype=torch.float16))"
+    )
+    graph, _, bundle = graph_from_code(code)
+    quantize_and_spell(graph, bundle, tmp_path / "ckpt", scheme="fp8-block")
+    with pinned_knobs({"PLACE": "fuse"}):
+        lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((7, 0)))
+    (src,) = [s for node in lowered.nodes.values() if (s := getattr(node.op, "kernel_source", None))]
+    chunk = src[src.index("for (int _ks") :]
+    chunk = chunk[: chunk.index("for (int a")]
+    declared = re.findall(r"^\s*(?:float|__half|int) (\w+) = ", chunk, flags=re.M)
+    assert "_a_stat_" in src and len(declared) == len(set(declared))
 
 
 def _run(graph, bundle, ckpt, pins):
@@ -135,9 +163,14 @@ def _run(graph, bundle, ckpt, pins):
 @requires_cuda
 @pytest.mark.parametrize(
     ("dtype", "atom", "stage"),
-    [("bfloat16", K16_BF16, "d2/smem-async"), ("float16", K16, "d2/smem-async"), ("bfloat16", K16_BF16, "d2/smem-tma")],
+    [
+        ("bfloat16", K16_BF16, "d2/smem-async"),
+        ("float16", K16, "d2/smem-async"),
+        pytest.param("bfloat16", K16_BF16, "d2/smem-tma", marks=requires_sm(9)),
+    ],
 )
 @pytest.mark.xdist_group("cuda")
+@requires_sm(8)
 def test_the_byte_slab_matches_the_compute_fill_bit_for_bit(tmp_path, dtype, atom, stage):
     """The staged fp8 drain and the compute fill hand the tensor cores the same 16-bit values, so
     the matmul agrees to the bit on either copy transport and either fragment dtype."""
@@ -149,6 +182,7 @@ def test_the_byte_slab_matches_the_compute_fill_bit_for_bit(tmp_path, dtype, ato
 
 @requires_cuda
 @pytest.mark.xdist_group("cuda")
+@requires_sm(8)
 def test_the_fused_quantize_matches_the_cut_one_bit_for_bit(tmp_path):
     """The per-chunk group statistic computes the activation the quantize kernel writes, value for
     value, so fusing it into the matmul's fill changes nothing the tensor cores see."""

@@ -182,7 +182,7 @@ def handle_bench(args):
     # Run groups
     if fixed_host_mode:
         root_logger.info(f"Fixed-host mode: {len(allocated)} host(s), running {len(groups)} group(s)")
-        raw_results = asyncio.run(_run_groups_on_hosts(groups, allocated, config, ssh_key, dry_run, provider=args.provider))
+        raw_results = asyncio.run(_run_groups_on_hosts(groups, allocated, config, ssh_key, dry_run, no_teardown, provider=args.provider))
     else:
         raw_results = asyncio.run(_run_groups(groups, config, ssh_key, dry_run, args.max_workers, no_teardown, provider=args.provider))
 

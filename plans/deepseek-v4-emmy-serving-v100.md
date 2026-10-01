@@ -1,623 +1,453 @@
 # DeepSeek V4 Flash 0731 through `emmy serve` on 16× V100 (TP8 × PP2)
 
-Goal: boot `deepseek-ai/DeepSeek-V4-Flash-0731` through the Emmy vLLM plugin on the 16× V100 SXM3 host — Emmy compiled
-kernels for the hyper-connection stream mixing, norms, shared expert and routed experts; the pinned 1Cat sm_70 fork
-(`cloudriftai/1cat-vllm-deepseek-v4-flash-0731:1.2.3-d76126608`) supplying paged MLA attention and the serving shell —
-then A/B against the plain 1Cat container at an equal serving envelope.
-
-**Expectation setting, up front.** At this seam the Emmy arm replaces the fork's already-fused mHC kernels and its
-TurboMind MXFP4 MoE. With fp8 experts (2× the bytes, no fp8 tensor cores on Volta) and per-hit-expert dispatch, the
-first working arm should be expected to LOSE the A/B. The deliverable of stages 1–5 is a *working, measured* lane and
-the integration machinery; a *competitive* lane additionally needs stage 6 (MXFP4 expert inputs), and even that is a
-hypothesis until profiled. The A/B must rerun the 1Cat baseline at the same shorter context — the published
-30.79 tok/s was measured at a 1M-token envelope the Emmy arm cannot hold.
-
-## Current state (already landed on this branch)
-
-- The attention-sublayer seam: `pre(streams[T, hc·H]) → x[T, H]`, `post(attn_out[T, H], streams) → (mixed, xn,
-  mix[T, hc])`, routed experts on the MoE third seam, closed by `place_routed_streams`. CPU-proven against the eager
-  HF layer (sliding/HCA/CSA × hash/top-k). One twin profile per model (attention and routing are outside the twins).
-- Serving-twin capture + `eval golden` audit accept DeepSeek V4; on the target host the `pre` and `expert` twins
-  realize 20/20 (m1 / m32 / m4096 / dynamic) on sm_70.
-- Checkpoint facts: DeepSeek-native names (`layers.N.attn.wq_a` …), trunk fp8-e4m3 with `F8_E8M0` [128, 128] block
-  `.scale` siblings, routed experts MXFP4 (`I8 [out, in/2]` nibbles + e8m0 per-32 scales), `hc_mult` 4, 43 layers,
-  256 experts × top-6 + 1 shared, 3 hash-router layers. The snapshot ships a lossless MXFP4 → fp8+e8m0[128,128] cast
-  (`inference/convert.py`).
-- Fork facts: `DeepseekV4Attention.forward(positions, normed_x[T, H]) → [T, H]` is one self-contained sublayer whose
-  projections, compressors, indexer, FP8 paged insert and grouped output projection are fused with its own paged
-  caches (SWA + compressor + indexer cache layers registered by prefix); sm_70 requires `--dtype half` and the
-  `VLLM_SM70_*` env. There is no API accepting externally computed compressed latents.
-
-## Memory budget per GPU (32 GB; TP8 × PP2 ⇒ 21/22 layers per stage; 256 experts sharded 8-way per TP group)
-
-Worst (22-layer) stage, 32 experts/rank/layer, `w1+w2+w3` = 25.17 MB values per expert:
-
-| item | fp8 experts | MXFP4 experts (+e8m0 per-32 scales) |
-| --- | ---: | ---: |
-| routed experts (sharded) | ~17.7 GB | ~9.4 GB |
-| shared experts + hc/norm params (replicated) | ~0.6 GB | ~0.6 GB |
-| fork attention weights (TP-sharded + replicated parts) | ~1.0 GB | ~1.0 GB |
-| PP0 embedding (full vocab, fp16, runner-resident today) | ~1.1 GB | ~1.1 GB |
-| Emmy activation arenas (capacity 4096 × hc·H carrier) | ~1.5 GB | ~1.5 GB |
-| vLLM + CUDA context + fork workspaces | ~2–3 GB | ~2–3 GB |
-
-KV capacity is NOT derivable from a bytes/token constant: sliding layers cache a 128-token window and HCA/CSA layers
-cache compressed entries, which is how the recorded MXFP4 baseline allocates 4.2M tokens of KV per stage. Measure at
-the first full boot (weight bytes, arenas, non-Torch allocations, GPU blocks, KV tokens per stage). Qualify initially
-at 4K–32K `--max-model-len`; attempt the recipe's 1M only after that measurement proves capacity on both stages.
-
-## Stage −1 — freeze and probe the pinned fork contract (cheap; before everything)
-
-Resolve the base image to an immutable digest and record its source SHA. Inside that exact image: contract-test the
-attention class (constructor args, forward signature, cache-layer registration and prefix rules, `topk_indices_buffer`
-and aux-stream ownership, parameter `weight_loader`s, `WeightsMapper`, quantization config); install the Emmy wheel +
-`cupy-cuda12x`; probe `nvrtcVersion` and compile a trivial sm_70 kernel through the same cupy path Emmy uses (add the
-CUDA-12 `libnvrtc` preload only if that probe fails, using the path present in the image); confirm the unchanged plain
-1Cat model still boots. Stop the plan here if a required fork API is absent.
-
-### Stage −1 findings (2026-08-25, executed on the target host)
-
-- Image pinned: `cloudriftai/1cat-vllm-deepseek-v4-flash-0731@sha256:276240257b224097876b5b6db8f0d32484dff6a6f168d6
-  b03d6df188e5c65bc1`, labels confirm build commit `d76126608…` / model revision `7872f01b…` / target GPU V100 SXM3.
-- Source integrity: all 69 files of `vllm/models/deepseek_v4` + the MLA backends + the attention layer package are
-  byte-identical to the `d76126608` checkout (per-file sha256) — the studied API is the shipped API.
-- In-image stack: python 3.12.13, vLLM `1.2.3.dev87+gd76126608`, torch `2.10.0+cu129` — NVRTC in-image is **12.9**,
-  which still targets sm_70 (deprecation warning only), so the host-venv NVRTC-13 preload problem does NOT apply
-  inside the image.
-- Contract confirmed: `DeepseekV4Attention.__init__(vllm_config, prefix, topk_indices_buffer, aux_stream_list)`,
-  `forward(positions, hidden_states, llama_4_scaling)`; `DeepseekV4MLAModules` fields as studied;
-  `_is_exact_sm70_cuda()` True on the card; `DeepseekV4SWACache(head_dim, window_size, dtype, prefix, cache_config)`;
-  MLA attention + indexer cache are `AttentionLayerBase` (prefix-registered KV specs); the fp4/fp8 `WeightsMapper`
-  builders exist; `VLLM_SM70_*` env keys and `VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD` (1024) present;
-  `ModelRegistry.register_model` (the OOT plugin hook) available.
-- The emmy wheel + `cupy-cuda12x` install into the image cleanly beside vLLM's pins, and `emmy.serving.register` is
-  importable there.
-
-## Stage 0 — unblock the twins (compiler; hard prerequisite) — **all three twins COMPILE; `post4096` RUNTIME blocks**
-
-The first round closed (2026-08-25, below). Loop fusion was then rewritten under it, and the same class of pathology
-came back on both twins ("Round two"). Round two is now closed too — `pre16` runs in 8.18 s and `post4096` compiles,
-builds and launches — but round three found the remaining blocker one layer down: the plan the greedy selects for
-`post4096` contains a serially-impractical kernel, so a boot still stalls in the first prefill forward.
-
-### Round one — the `post` twin (2026-08-25) — closed
-
-The stall was never in the graph: it was a compiler pathology that main fixed while this plan was being written.
-
-**Diagnosis (2026-08-25).** A parameterized repro (capture + lower the `post` twin, `sm_70` forced) isolated it by
-elimination: hidden size 32→1024 flat at 2.3 s, `hc_sinkhorn_iters` 2→20 linear (+0.13 s/iter), `hc_mult` 2/3/4 flat,
-live CUDA device present or absent identical. The graph is byte-for-byte the same everywhere (644 IR nodes). What
-differed was the compiler revision: at `5646a0796` (pre-merge) the lowering does not terminate (>240 s locally, 3 days
-on the host); at merged main it takes 2.3 s locally and **7.3 s on the V100**. Reverting `71dfa184d` (#595, fresh-name
-scans) and `4443f5d98` (#597, memoized splicer walks) leaves it fast, so the fix is `1ee503099` — **Bound fusion
-construction work (#602)**, which rewrites exactly `merge_region` / `build_merged_region`, the two frames directly
-above the stalled `_ensure_dep` / `fresh` calls in every py-spy sample. It cannot be reverted in isolation because
-later commits build on it.
-
-**Realization (2026-08-25, on the target host at merged main).**
-
-| step | result |
-| --- | --- |
-| `emmy trace --serving-twins` (real checkpoint, pinned serving env) | ~60 s → **12 graphs, 380 distinct kernels** |
-| `emmy run --golden` over the inventory | **1520/1520** (380 × m1/m32/m4096/dynamic), exit 0, 550 s |
-| errors / tracebacks | none |
-| non-finite fragment outputs | 10 / 1520 (0.66 %), all `post` at the widest width |
-
-The non-finite outputs are a property of random-input fragment replay for this checkpoint, not a regression: the
-already-qualified, published golden (`recipes/DeepSeek-V4-Flash-0731/golden/v100_sm70.yaml`) replays 279/279 exit 0
-with **4 / 279 (1.4 %)** non-finite under the same harness — a higher rate than the new inventory's. `run --strict`
-cannot adjudicate a Loop-IR fragment either way (no Torch twin and no independent greedy reference; it reports
-"same-input greedy reference is unavailable"), so real correctness evidence comes from the CPU seam equivalence test
-today and from real-weight parity at Stage 3.
-
-Two environment notes for later stages — the first CORRECTED 2026-09-01: the old NVRTC-13 bench-worker constraint
-no longer applies (workers inherit the full environment, and the nvcc path dropped its NVRTC fallback). The real
-sm_70 trap is torch cu130 shipping no sm_70 kernels at all; `torch==2.13.0+cu126` fixes it, and `--bench` / `tune`
-then run fine in the plain host venv — no 1Cat image needed. The inventory is untuned (no knobs or timings) and is
-therefore NOT promoted to the canonical path; it regenerates in minutes (post-#691 rewrite: 12 graphs, 152 distinct
-kernels, 3 m 44 s on the host).
-
-### Round two — fusion rewritten under the twins (2026-08-28/29) — CLOSED
-
-**Make loop fusion maximal and multi-output (#648, `bff3e3444`) landed after gate (c) passed** and broke both remaining
-twins. All three defects are now fixed:
-
-| twin | at `ab1ad4592` (pre-#648) | at `bff3e3444` (#648) | now |
-| --- | --- | --- | --- |
-| `expert16` | compiles | 11 same-scope redeclarations, nvcc rejects | fixed by #671 |
-| `post16` | compiles | lowering never terminates | fixed by #676, ~57 s on the V100 |
-| `pre16` | 3 kernels, 0.001 s | 1 kernel, never returns | fixed; **8.18 s verified at main+#692** |
-
-`pre16` lowered to a single kernel recomputing the loop-invariant RMSNorm sum-of-squares under a crossed product
-(≈ 4.4 × 10¹² iterations/thread) because `_close_projection` sank the sibling reduce into a nested contraction's
-evaluation domain. The fix needed provider closure generalized from "direct body-member host" to lexical environments
-for every `Fold` occurrence, so an operand-edge capture closes into a dependent seam (`CutSite.requires`) — landed via
-#682 (provider-closed statistics seams) and #688 (one scoped-lambda `Closure` concept); the residual placement-cut
-correctness bugs ride #692 (also PR #686's standalone form). Re-verified 2026-08-31 on `claude/attr-v100`
-(main + #692): `pre16` builds 1 kernel and `run_once` returns in 8.182 s.
-
-### Round three — `post4096`'s placement (2026-08-30/31) — compile CLOSED by #692, runtime OPEN
-
-With `pre16` fixed, the TP8×PP2 boot got past compile and died in whole-program capture on a cut-workspace
-`KeyError`; fixing that (piece inputs declared from the lossy lowered view — `loaded_buffers` is the honest reader)
-exposed the real problem: `post4096`'s fused monster `k_linear_softmax_matmul_mean_reduce_3052e1` does **2⁵⁵ worst
-per-thread serial trips** (`block_threads=1`) — the recomputation blowup of maximal fusion — and no evidence could
-steer placement away from it. PR #692 fixes the whole chain, each step verified on the host:
-
-- **Attribution**: one hang condemned every kernel in the terminal (70 failures / 7 distinct errors); the watchdog
-  names the culprit, so only that kernel earns the `bench_fail` row (re-tune: 15/15 rows correct).
-- **Disqualification**: a kernel whose every measured variant failed prices its structural arm at `inf`, matched
-  exactly.
-- **The composed cut compiles**: the consumer piece's IR was scope-inverted (normalize hoisted a fold whose subtree
-  captures body-defined names; ILP replication renamed `deps()`-channel reads) — 17 nvcc errors → 0; the two-cut
-  plan builds and launches at 2³⁰ trips.
-- **The composed cut is on the ballot**: the unpinned fork offered plain seams only (2 of the monster's 33); now
-  every seam is offered with its transitive `requires` closure as one composed arm, and the feared recursion
-  explosion is measured convergent.
-
-**Measured (2026-08-31, V100): an unpinned `post4096` compile with clean attributed evidence selects a composed cut
-on its own — 52 kernels, worst 2³⁷ (was 2⁵⁵), placement terminating in 327 s.** Still not servable: 2³⁷ serial
-trips is hours per launch (the 2³⁰ two-cut variant ran 2.6 h without completing before being killed). Two named
-gaps stand between here and a boot that serves, both follow-ups to #692:
-
-1. **Partition the monster — LANDED (#693/#694).** A chain-form root's DIRECT body members (the piece's
-   workspace-rsqrt captures feeding the retained reduce, exactly the monster's shape) now offer and realize
-   cooperative/ILP partitions: the reduce tier binds a provider chain ahead of a strided cooperative/ILP fold
-   sharing one lane axis, closing lane-distributed. A fold nested deeper, and any member of a sweep- or
-   streamed-store-carrying kernel, still keep the serial fold — an offer-side decision, not a remaining capability
-   gap. Realization is corpus-ratcheted (a cooperative reduce row on a composed-cut chain-form piece).
-2. **Evidence electing the route — MECHANISM PROVEN on the host (2026-09-01), measurement still owed.** The first
-   tune pass over the new ballot could not measure the monster (below), but its 9 attributed `bench_fail` rows
-   alone flipped the greedy: the worst piece dropped 2³⁸ → 2³⁰ per-thread serial trips (256×) and three
-   partitioned reduces were elected (placement 857 s vs 616 s baseline). The elected consumer piece then failed nvcc — an
-   order-blind seam-capture accounting bug in the composed cut (a deeper occurrence of the same workspace `Load`
-   masked the shallower read, so the piece read the name before any definition); fixed by resolving seam captures
-   in program order with a realize-time no-read-before-definition guardrail (PR #700; all 12 pieces of the real
-   plan now compile, plan name-identical). What still blocks a MEASURED election: the tune's hardcoded compile
-   budget (12 s/74 s) is far under the >160 s these variants need, the monster exposes 45 site-local `REDUCE@`
-   knobs, and `--dump-dir` crashes on these targets — so no successful measurement exists yet, only
-   disqualifications, and no online prior was written. The monotone serial-work prior feature remains the
-   cold-start answer. NOTE: the host's tune DB now carries those 9 rows, so any unpinned compile there elects the
-   partitioned route — intended, now that #700 makes it build.
-3. **Price the recomputation so the statistics piece gets elected — LANDED (#702), then the clamp REVERTED by
-   review decision; the statistics piece elected under it measured 8.6 ms on the host.** Even the elected 2³⁰ route
-   ran past the 60 s bench watchdog
-   per launch: the dominant cost was re-evaluating the mHC statistics subtree 16,384× (4096 carrier positions × 4
-   streams) inside the consumer piece's sum-of-squares reduce. Characterized GPU-free: the materializing seam
-   (`PLACE@a8`, the gate's fn-projection) was OFFERED and priced away — the offline cold-start proxy gave the
-   fused 2³⁰-trip nest 4.29e-37 µs against the cut arm's 1.02e-17, with zero weights on any structural feature.
-   #702 answered with pricing: the nest-aware `S_ext_serial_cell_work` stamp, the `D_serial_cell_work` fit signal,
-   and a guarded clamp at the kernel-set Σ that priced a kernel at least its serial-work lower bound past 1 ms.
-   The clamp was reverted on review: a lower bound on the prior's estimate is not how the deploy path elects —
-   the prior must not decide a production election at all, and where it does, the missing golden or measured row
-   is the defect. The stamp and fit signal stay (the prior can learn serial work), as do the two fixes that rode
-   the same PR: disqualification signatures survive featurizer vocabulary growth (the stamp alone had silenced
-   the host DB's 9 `bench_fail` rows) and `SearchDB` schema v4 dropping stale `lowering` chains keyed pre-stamp.
-   Under the clamp, replayed on the pinned twins + host-DB copy, the greedy elected the same 12-piece plan plus
-   exactly the `PLACE@a8` statistics piece — 13 kernels, the consumer drops 2³⁰ → 2¹⁶ and the route's worst piece is 2¹⁹
-   per-thread trips (the unaided fused monster was 2³⁸).
-4. **Make the elected pieces fast — OPEN; the path is now recorded goldens, not pricing.** Measured on the host
-   2026-09-02: the elected route benched completely for the first time (every earlier attempt died on the 60 s
-   watchdog; the clean run needed `--warmup 3 --iters 10` plus `EMMY_BENCH_RUN_TIMEOUT_S` — a third budget knob
-   beside the two the tune report named) — 13 kernels, and the whole `post4096` forward **23.24 s**, not
-   servable, so gate (c) was not attempted. One piece (`__place_8a9a1fe058`, 13.2 s, 57 %) re-read both FFN
-   weight matrices per output element through serial 4096-trip hidden-dim reductions, and two 16384-grid sweep
-   pieces added 9.3 s. A measured tune pass (2026-09-03, three passes, 58 ok rows) found no faster row for those
-   pieces — every arm hung the watchdog — so the round turned to materializing the matmul contributions.
-   What stands from that round (all GPU-free, pinned twins + host-DB copy): **(a)** the (A) verdict — the
-   contribution seams (`PLACE@a29`, the linear_2/linear_3 contraction; `PLACE` on the activation cone) and the
-   mHC statistics seams are ON the ballot and realize; seam capability is not the gap, and the uncalibrated
-   proxy should not be the decider. **(b)** the materialized shape is right: a route whose contribution
-   consumer is a pure staged mma with no serial hidden-dim walk, the walk living once in a producer piece, and
-   the statistics computed once per row. **(c)** two blockers characterized on post-#699 main, each its own
-   item: the residual root's output sweeps were all promoted into its placement (the emitted kernel decoded a
-   2^56-thread linear grid — un-launchable) — FIXED by #723 (only the kernel's shared output sweep promotes; a
-   sibling output nest's axis stays a sweep, and the residual launches at its 4096-row grid, 16 blocks × 256
-   threads, again), and the contribution producer still recomputes the carrier chain
-   per (row, a28) cell (the next seam, `PLACE@…inner` on the `a32` contraction, is on its ballot). Pricing
-   floors beyond #702's are OUT by review decision: a golden must carry every kernel of the route, and strict
-   evidence then keeps the prior from deciding at all. The path to serving: make `emmy tune` able to measure
-   this family — the tune dead-end sink (#705), the retry-policy and regime-pin fixes in flight, the bench
-   budget knobs, and a flag to seed the deploy election's route as a measured proposal — then tune the serving
-   twins on the host, record the golden, and boot under strict evidence.
-   **Measured (2026-09-07, host round three): a 12-kernel route at 2.10 s per `post4096` forward** (11× off
-   the 23.24 s), benched completely under a pin set of 11 seams, recorded by `run --record-greedy` into the
-   working golden (one composed routing row, two split rows, 12 receipts, every one from measuring), and the
-   strict compile from the file alone emits the measured program byte-identical — with #739, without which a
-   recorded composed cut replayed as its first seam only. Three findings that redirect the rest of this item:
-   **(d)** the route was found by pinned characterization on the host CPU (27 s per probe), not by the loop or
-   the tune: the offline prior prices unmeasured arms at 1e-27 … 1e+67 µs, so every measured piece loses to any
-   arm holding an unmeasured kernel, the tune's 623 measured rows collapsed the election to six kernels, and the
-   online checkpoint fitted on this family is quarantined — the sequential loop and the tune cannot be resumed on
-   this target as they stand. **(e)** the one recompute behind every hang since round one is the mixed stream's
-   RMS statistic, whose provider seam sits inside the gate statistic's subtree; once it is a piece the consumer
-   reads it back instead of walking 16384 trips per cell. **(f)** 93 % of the 2.10 s is two kernels the route
-   left naive — the A-operand reduction (1.37 s, a matmul computed as 8 million 128-lane reductions) and the
-   one-thread-per-row root residual (0.59 s on 16 blocks) — both on the root's own ballot; cutting them is the
-   next measurement, before any route for the other twins. The route has NO correctness verdict yet: `--strict`
-   failed on non-finite values in the random-input replay (the round-one property above) and this twin has no
-   eager reference, so a finite-input check is owed with it.
-   **Measured (2026-09-08, host round four): 0.245 s per `post4096` forward** — 19 kernels, 8.6× off round
-   three and 95× off the 23.24 s of 2026-09-02 — and it is the UNPINNED strict-evidence election of what the
-   working golden deploys, stable byte-for-byte after every other twin's rows were recorded beside it. The path
-   there: six more seams (the twist and exp contractions, the RMS statistic, both A cones, the mixed-stream
-   store) at 2.68 s, a `REDUCE=` pin turning the A-operand contraction per-cell at 0.465 s, and one shared twist
-   A-cone seam at 0.319 s, with the file's own unpinned election beating each pinned route. **(g)** 75 % of the
-   remaining time is one contraction, the gate/up projection at 0.18 s, and it was NOT a tile site.
-   Diagnosed on the host 2026-09-08 and FIXED by PR #752: the carrier is two independent matmuls the loop
-   fusion put in one nest — each channel multiplies its own A cone by its own weight slab — and no tier folds
-   such a carrier whole, since a tile holds one A fragment against a B slab per channel. `TileOp.contracts`
-   refuses, no TILE row is enumerated, and no pin reaches an mma. Round four's stated cause is wrong on both
-   halves: the two A cones are not duplicates of one value — they share all three of their own operand edges
-   and read DIFFERENT components of one shared producer, acc42 and acc44 — and a commuted product could not
-   have hidden a duplicate anyway, because a commutative `Assign`'s arguments are re-sorted on the canonical
-   names whenever a `Lambda` is rebuilt, which makes exactly the two spellings that report quoted alpha-equal.
-   Normalization now hands back one fold per state under a projection re-exposing the state tuple; on the host
-   the kernel's a28 and a29 sites go from 0 tile sites to 22, and the contracting site carries a TILE knob in
-   its family. MEASURED the same day, same target and width: the refusing contraction goes from 179.7 ms in one
-   per-cell kernel to 15.4 ms in two kernels of 7.72 ms, both on `mma_m8n8k4`, and **the whole `post4096` forward
-   from 238.8 ms to 74.9 ms (3.2x) as the file's own UNPINNED strict-evidence election** — the number a deploy
-   picks. The pinned steps on the way, against round four's own 455.4 ms under that pin set: 292.8 ms with the
-   pins repaired and a cut per child, 152.0 ms with round four's shared-cone seam beside them, then 74.9 ms
-   unpinned, where every kernel takes its fastest measured row. Nothing else in the set moved more than noise.
-   Two things the round taught about re-measuring a route across this change: the seam
-   paths inside a carrier that comes apart shift one level (9 of the 11 Rstar pins resolved unchanged), and the
-   route's single cut now names ONE of the two children, so a cut per child is needed or the other stays fused
-   into its parent and recomputes its input per cell — the first two benches hung at the 180 s first-iteration
-   deadline on exactly that. Artifacts: `_verify/item3/route{11,12,13}.json`, `E{1,2,3}SPLIT.pins`,
-   `working.split-e{2,3}.yaml`, `autotune.split-e3.db`, `per-state.patch`; `working.yaml` and the tree itself were
-   restored to their round-four state after each run.
-   The nvcc refusal at `post` m1 is the same class of name collision, located this round: the per-cell
-   ILP replication suffixes two different accumulators to one name, so `float acc0__c0_0 = 0.0f;` is emitted
-   twice in one scope (8 collisions in the recorded reproduction). **(h)** the correctness verdict is not
-   obtainable with today's CLI: the twin draws its eps and count constants as random inputs, so every replay is
-   non-finite, and the same-input reference is the pinned route itself; a finite-input replay per twin and an
-   independent reference (the loop-IR CPU runner, unexposed) on `run --golden` are the missing flags. **(i)** all
-   151 serving-width realizations of the twins file ran unpinned and 123 carry measured routes (expert 4/4, pre
-   2/4 with `pre4096` on a three-seam pin, post 118/144); the 28 missing are the second large `post` kernel
-   family at m1 / m32 / dynamic (hangs unpinned — the `post4096` pin treatment), five small `post` reduces at m1
-   (two refused by nvcc on a same-scope accumulator redeclaration, reproduced GPU-free; three retry-arm timeouts)
-   and 18 rows lost to concurrent `--record-greedy` writers of one file. The `pre` twin's unpinned election is
-   the round-two recomputation class at every width, and its contractions also refuse an mma. Routing rows are
-   now priced at the launches their decision produced (#741), which is what let a measured split rank against
-   the unsplit receipt.
-
-**Consequence for the stages below.** Gate (c) passed at `ab1ad4592` and still does not reproduce: a boot now
-compiles end to end and the recorded route is a measured 0.245 s per `post4096` prefill forward (no longer a
-watchdog unknown) — the boot's roofline audit runs each program 4×, so serving needs the gate/up contraction
-tiled first, and a strict boot needs a measured route for every serving twin: 28 of 151 realizations still lack
-one, so `emmy serve --strict-evidence` would raise at their first fork. Stage 4 cannot warm or bake until that
-lands and gate (c) is re-run on the host, and the golden re-record should follow it, not precede it.
-
-### Round seven — the twins were the wrong width (2026-09-09/10) — golden CLOSED, serving OPEN
-
-**The whole evidence base described programs the server never compiles.** `emmy.serving.twins` defaults its decode
-bucket to 32; `config.gen_decode_bucket()` defaults to 16, and `emmy serve` deploys that. Nothing compared the two,
-so every round before this one tuned a width no deployment runs. Measured, not inferred: a boot pointed at the round-six
-golden compiled 117 kernels, the file held 24, and **zero** of them matched — same kernel families, every identity hash
-different. With no row to elect, the prior priced those forks, logged latency exponents outside the range it can
-represent, and the boot roofline audit then spent six hours on 16 GPUs timing one of its picks without ever reporting.
-
-The fix is a pinned serving config (`docker/vllm-emmy-serve/models/deepseek-v4-flash-0731.env`), the same mechanism the
-other served models use: `emmy trace --serving-twins --serving-config` reads the widths from
-`ServingConfig.static_widths`, so the capture and the deployment cannot disagree. Verified against a running boot —
-42 of the 43 kernels it compiles now have a twin; the exception is `k_view_3`, serving glue outside the pre/post/expert
-twins, about 5 µs.
-
-**The re-recorded golden is done.** 152 distinct kernels, 291 measured rows, the decode gate green, and a
-strict-evidence compile resolving 149 of 152 realizations from a recorded row. The other three resolve too but need
-more than fifteen minutes to EMIT — one is 817 KB of CUDA. Two shapes are dropped from the file and both matter:
-the trace emits a placeholder realization per graph and width that no command fills (the recorder writes a receipt row
-per kernel instead), and one hand-pinned `pre4096` route that no enumerated leaf equals — reachable under `EMMY_KNOBS`,
-not by the free enumeration, which is a gap in its own right. Nothing was lost: that kernel carries seven other rows and
-the fastest measures 79.9 µs against the pinned route's 1.09 s.
-
-**Two compiler findings came out of the round.** The schedule search rebuilt a kernel's whole site table for every
-candidate it considered — `_local_support` constructed a fresh `Sched` per frontier extension, and each one re-walked
-the term. `TileOp.grid_sched` builds it once (#770): a `post1` divide reduction that had been killed twice at 45
-minutes benches in 11, and `make test` drops 20–30%. The boot audit had no time budget, so the mispick it exists to
-report was the one thing it could not report (#771).
-
-**Gate (c) re-run: the server BOOTS and cannot serve.** Application startup complete, KV cache 68,738 / 70,886 tokens,
-160 deterministic resolves and **zero** prior fall-throughs. A four-token completion then dies on vLLM's
-`TimeoutError: RPC call to sample_tokens timed out` — one forward still exceeds 300 s.
-
-**The decisive measurement of the round: full evidence did not move the picks.** Boot audit ratios, prior-only against
-the recorded golden:
-
-| program | prior only | recorded golden |
-| --- | ---: | ---: |
-| `pre` chunk m4096 | 64,594× | 64,700× |
-| `post` chunk m4096 | 329× | 329× |
-| `post` decode | 1,509× (m32) | 1,155× (m16) |
-| `post` decode m1 | 1,285× | 1,283× |
-| `moe.expert` m1 | 36,108× | 38,075× |
-
-Every measured arm for these programs is as slow as the prior's guess. The evidence was never the bottleneck: the
-compiler cannot currently produce a fast schedule for `pre@4096` (~1.94 s), the single-token expert program (~4.9 s)
-or `post@decode`, and across 43 layers any one of them exceeds the RPC budget on its own. That is the whole remaining
-gap, and it is compiler work, not another measurement round.
-
-### Operations handoff — how the Stage 0 host loop is run (for a fresh session or another machine)
-
-The V100 host's address is deliberately absent from this repo; it lives in the operator's notes and is used only
-inside commands. Everything else a continuing session needs is here.
-
-**Host layout.** The compiler tree is `~/emmy-durations/` — a plain export of `origin/main` (no `.git`) with its own
-`./venv`; sync it with `git archive origin/main | ssh HOST tar -x -C STAGING` then `rsync -a --delete --exclude venv
---exclude _verify --exclude _tune --exclude 'durations*' --exclude emmy_ml.egg-info --exclude '*.db*' --exclude
-__pycache__ --exclude .git STAGING/ ~/emmy-durations/`. All loop artifacts sit in `~/emmy-durations/_verify/item3/`:
-`working.yaml` (the working golden — the measured routes; `working.routeN.yaml` / `working.final4.yaml` are its
-snapshots), `autotune.db` (the tune-DB COPY every command points at; `autotune.iterNstate.db`, `autotune.routeNstate.db`,
-`autotune.roundNstart.db`, `autotune.tune{1,2}state.db` are byte snapshots taken through SQLite's backup API),
-`online.json` (the online-prior checkpoint), `twins.yaml` (the captured serving twins, unchanged), the per-iteration
-`iterN.{cu,log}`, the pinned probes `*.pins` + `*.cu`, and the GPU-free reproductions `nvcc-refused-k_div_11_reduce.cu`
-(the same-scope accumulator redeclaration) and `tile_probe.py` (the two-channel contraction that is not a tile site).
-The round reports (`item3-host-report.md`, `item3-resume-report.md`, `item3-round3-report.md`,
-`item3-round4-report.md`) are untracked, under `.superpowers/` in the agent worktrees on the operator's Mac; this plan
-carries their conclusions.
-
-**Never touch** `~/.cache/emmy/autotune.db` (the real tune DB; backup `~/autotune.db.bak-2026-09-02`), `~/emmy`,
-`~/emmy-dsv4`, `~/emmy-fix-backup`, `~/emmy-durations/_verify/gap3-tune/` (partial rows that regress the election —
-never merge that DB), or `~/.cache/emmy/verify3/` (another user's live tuning session). Another user tunes kernels on
-this host: run `nvidia-smi --query-compute-apps=gpu_uuid,pid,process_name --format=csv` before every launch, use only
-devices nobody holds, never kill a foreign process, and delete nothing when done.
-
-**Invocation.** Every command runs from `~/emmy-durations` with `PATH=/usr/local/cuda-12.9/bin:$PATH
-CUDA_HOME=/usr/local/cuda-12.9 LD_PRELOAD=/usr/local/cuda-12.9/lib64/libnvrtc.so.12 HF_HOME=/hf_models
-HF_HUB_OFFLINE=1 EMMY_TUNE_DB=$HOME/emmy-durations/_verify/item3/autotune.db
-EMMY_ONLINE_FILE=$HOME/emmy-durations/_verify/item3/online.json` and the budgets `EMMY_KERNEL_TIMEOUT_MS=30000
-EMMY_FIRST_ITER_TIMEOUT_MS=180000 EMMY_BENCH_COMPILE_TIMEOUT_S=900 EMMY_BENCH_RUN_TIMEOUT_S=1800
-EMMY_BENCH_WALL_TIMEOUT_S=3600`; recording needs `--warmup 5 --iters 20`. The launchers in `_verify/item3/` carry all
-of it: `pin.sh NAME "K=V,…"` (a CPU-only pinned compile of the `post4096` target into `NAME.cu`, ~27 s — the way a
-route is shaped; `nest.py` / `ktable.py` read a dump's per-kernel grid and serial depth), `route.sh N PINSNAME` (bench +
-`--record-greedy` of `PINSNAME.pins` under `EMMY_KNOBS`, one device, writes the route into `working.yaml` and the
-per-kernel rows into the DB copy), `strict.sh NAME` (the gate: `compile --golden working.yaml --realization …
---strict-evidence --target sm_70 --ir cuda`, no pin, must emit the measured program byte-identical), `twins.sh LIST
-DEVICE` (unpinned strict bench + `--record-greedy` per realization, one writer per device), `iter.sh N` (the unpinned
-evidence-loop iteration — do not resume it, see finding (d)), `evidence_probe.py` / `ballot_probe*.py` (what the
-evidence index and each kernel-set fork see). Run long commands with `nohup … &` and poll; snapshot the DB before any
-kill.
-
-**Pin mechanics.** Under `EMMY_KNOBS` the cut pass visits only the root: every `PLACE@seam=cut` that resolves on the
-root joins one composed decision, nested cuts are spelled from the root (`map.4/map.2/inner…`), a key naming no root
-seam is silently skipped, and a bare `PLACE=fuse` fuses everything unaddressed. `Rstar.pins` (round three, 11 seams),
-`B6.pins`, `E1.pins` (+`REDUCE=`), `F1.pins` are the measured sets; the file's own unpinned strict election beat every
-one of them once their rows were recorded. Target realization:
-`post4096.k_linear_softmax_matmul_mean_reduce_9716a1.f86b6dbe35b7.m4096`, `--target sm_70`. A GPU-less `--target
-sm_70` compile on a Mac featurizes with the default card's 170 SMs and elects differently from the live V100 (80), so
-every election replay runs on the host CPU.
-
-**Rules that bind every round.** The prior must never decide a production election; the golden must carry a measured
-row for every kernel; `--strict-evidence` is the gate; no pricing floor, bound, clamp or hand-edited price, ever; no
-benchmark scripts (`emmy run --bench --json`, `emmy compile`, `emmy tune` only — a missing capability is a flag to
-add); every harness fix ships as a minimal PR per AGENTS.md with a red-then-green test and the goldens gate compared
-against pristine `origin/main` per-file counts (all 11 files are red on `main` since #691/#699 — identical counts mean
-pre-existing). On a CUDA-less Mac never run `make test-durations`; hand-insert a `tests/durations.json` entry at the
-CI-measured value if the durations gate fires. In an agent worktree, symlink the main checkout's `venv` and prefix
-`PYTHONPATH=$PWD`.
-
-## Stage 1 — loader lane: read the published checkpoint (CPU-testable) — **DONE (#651)**
-
-Extend the quantized split loader (`load_quantized_split` + `loader/quant.py`) with one DeepSeek-native lane:
-
-1. Key translation native → HF (`attn.wq_a` → `self_attn.q_a_proj` etc.) — reuse transformers' checkpoint
-   conversion mapping for `deepseek_v4`, not a hand-rolled copy. `.scale` joins `_scale`/`_scale_inv` as a sibling
-   form.
-2. e8m0 scales: `F8_E8M0` reads as f32 `2^(e−127)` (torch's `.float()` on `float8_e8m0fnu` is the conversion).
-3. Routed experts: per-expert `w1/w3` (gate/up) and `w2` (down) stack into the E-leading store the expert programs
-   feed from. **What landed instead of the planned fp8 cast:** the loader keeps the published MXFP4 bytes and views
-   them onto the uint8 blocks/scales carrier the expert programs already bind (`expert_dtype: fp4` selects it over
-   the fp8 trunk declaration), so serving deploys `@mxfp4` expert programs — half the expert bytes per rank, and no
-   cast to keep byte-exact. Two consequences, both found at the first real boot: the expert spelling had to learn
-   this checkpoint's `F.linear` weight layout, and the twin lane still spells `@f8e4m3` (below).
-4. `expert_range=(lo, hi)` filter so a rank reads only its expert shard (a PP stage's full fp8 expert set is
-   ~138 GB of host RAM otherwise), alongside the existing `layer_range`.
-5. Trunk fp8: dequantize to fp16 values at load (existing lane), including the grouped `wo_a`'s [128,128] blocks.
-
-→ verify: a synthetic tiny native-format checkpoint (tests, mirroring `test_load_quantized_split_*`) loads to a twin
-whose eager forward matches `load_dequantized_state_dict` values; the fp4→fp8 cast matches the reference converter in
-raw fp8 payload bytes AND raw e8m0 scale bytes across every fp4 nibble code, block-boundary exponents, and random
-tensors; `expert_range` applies before stacking/conversion and peak host memory proves no rank materializes non-local
-experts; on the host, one real layer's loaded expert slice matches the reference converter's output.
-
-## Stage 2 — runner: DeepSeek widths + TP expert sharding — **DONE (#656)**
-
-1. Seam plumbing in `EmmyGenRunner.from_model`: DeepSeek `_meta` (no `q_proj`; carrier `hc·H`, attention width `H`),
-   the 3-output post program (`mixed`, `xn`, `mix`) routed through `_route_post_device` (per-output dest shapes —
-   the rider path currently assumes residual-width outputs), `place_routed_streams` as the combine closer,
-   `input_ids` reaching the hash-router layers' gate, embed broadcast to `hc_mult` streams before layer 0, and
-   `final_norm` = `hc_head` collapse + RMSNorm. The carrier contract is explicit: `runner.carrier_size = hc_mult·H`
-   sizes the activation arenas AND the plugin's PP intermediate-tensor factory (which today allocates
-   `config.hidden_size`); every PP boundary transports the flattened carrier; only the last rank applies `hc_head`.
-2. TP expert sharding: `moe["inputs"]` holds the local expert slice + a global→local index map; the router runs
-   replicated (same weights, deterministic); `combine_routed_experts` skips non-local experts; the plugin all-reduces
-   the routed `[T, H]` partial (vLLM's tensor-parallel all-reduce) before `place_routed_streams`. `mixed`/`xn` stay
-   replicated compute. Eager routed path only at first; the fixed-slot capture tier (per-rank tables) is a follow-up,
-   so the first boots serve `--enforce-eager`.
-
-→ verify: a 2-rank CPU/GPU unit test proving sharded-combine + all-reduce equals the single-rank oracle
-(`combine_routed_experts` full set); a PP2 test asserting the intermediate-tensor factory, send/receive tensors and
-residual arenas all use `hc_mult·H` while attention and expert inputs stay `H`; the existing gen_runner GPU stitch
-tests stay green; a single-GPU tiny-config DeepSeek stitch test (seam programs + torch attention stand-in) matches
-eager.
-
-## Stage 3 — plugin: host the fork's attention inside `EmmyGenModel` — **in-repo work DONE (#662)**
-
-1. A DeepSeek branch that constructs the fork's `DeepseekV4Attention` per layer (needs `vllm_config`, the shared
-   `topk_indices_buffer`, aux streams, unique prefixes so its SWA/compressor/indexer cache layers register in the
-   static forward context and get KV allocations), instead of vLLM `Attention` + RoPE.
-2. Weight routing: an explicit ownership table over checkpoint keys — fork attention (via the pinned fork's
-   `WeightsMapper` + each destination's own `weight_loader`: `fused_wqa_wkv` ← `wq_a`+`wkv`, `compressor.
-   fused_wkv_wgate` ← `wkv`+`wgate`, `attn_sink` head-narrowing, indexer params), Emmy trunk/shared/routed programs,
-   `lm_head` ← `head.weight`, embedding ← `embed.weight`. Loading fails loudly if a fork-owned attention parameter is
-   missing, double-loaded, or an attention checkpoint key stays unclaimed. Fork attention keeps its pinned fp8 quant
-   config; Emmy owns trunk/expert conversion. Speculative/MTP serving is rejected at boot.
-3. Forward: carrier `[T, hc·H]` as the PP intermediate tensor; per layer `pre → fork attention (positions, x) →
-   post → local routed combine → all-reduce → place`; `hc_head` + norm on the last rank.
-4. Optional de-risk hybrid, decided UP FRONT (it must be algebraically exact): Emmy `post` already places the
-   shared expert, so a hybrid may only call a fork operation of the form `native_routed(xn, input_ids) → routed[T,H]`
-   — the fork's routed experts WITHOUT its shared expert and mHC placement. If the pinned fork only exposes the full
-   `DeepseekV4MoE` (shared expert included), either add a verified Emmy `post` variant that omits the shared expert,
-   or drop the hybrid. Silently keeping both double-counts the shared expert.
-
-→ verify, in grades: (a) a one-process attention contract test — unique absolute layer prefixes, every fork cache
-spec registered; (b) a TP2×PP2 small-config distributed test; (c) the TP8×PP2 target-host boot serving mixed
-prefill/decode requests (not just `/health`); (d) layer-level numerical agreement vs the eager seam at predefined
-atol/rtol, then deterministic greedy token-ID agreement on a fixed corpus spanning HCA/CSA/hash layers, multiple
-expert destinations, PP transport, and mixed scheduling — token IDs either agree or they do not. Also verify
-`emmy serve`'s MoE probe recognizes `n_routed_experts` (or pin capture sizes + eager in the release config).
-
-### Stage 3 findings (2026-08-26, PR #662)
-
-- Items 1–3 landed; gates (a), the weight-loading gate, and (b) are green in the pinned image: construction and
-  per-absolute-layer cache registration across all three attention layer types, the attention ownership table
-  against the real fork modules, and a REAL-engine parity gate — the same checkpoint served single-rank and
-  TP2×PP2 produces identical greedy token ids modulo numerical ties (exact ids stay the real checkpoint's gate,
-  where logits are decisive).
-- Load-bearing surprises, each encoded in code/tests/docs: a vLLM process re-registers `deepseek_v4` onto its own
-  rope-only config class process-wide, so the loader reloads with Transformers' same-named native class; the
-  fork's kernels accept only the published geometry (compressor head 512 / indexer head 128 / 128-aligned fp8
-  group outputs / 128×128 blocks, and no invented `compress_rates`); compiled twins may hand outputs back in
-  their accumulation dtype, normalized at the seam by the runner; and the machine-wide GPU file lock deadlocks
-  multi-rank serving (a rank holds it inside its combine while its pending collective waits on the peer queued
-  behind the same lock) — it is now scoped per physical device UUID.
-- The remaining gates move to the on-host block beside Stage 4's image work: (c) the TP8×PP2 target-host boot
-  serving mixed prefill/decode, and (d) real-checkpoint layer-level numerics plus greedy token-ID agreement.
-
-### Gate (c) — PASSED (2026-08-26, real checkpoint at TP8 × PP2, at `ab1ad4592`)
-
-**Re-run 2026-09-10 (round seven): boots, does not serve.** The server reaches `Application startup complete` on the
-re-recorded golden with zero prior fall-throughs, then a completion dies on vLLM's 300 s `sample_tokens` RPC budget —
-one forward is still too slow. The result below stands as evidence that the seam, the loader and the plugin are
-correct; what it now needs is a fast schedule for three programs, not more evidence.
-
-`deepseek-ai/DeepSeek-V4-Flash-0731` serves through `EmmyGenModel` on the 16× V100 SXM3 host, in the pinned 1Cat
-image, at TP8 × PP2 with `--max-model-len 4096 --kv-cache-dtype fp8 --block-size 256` and eager execution:
-
-| | |
-| --- | --- |
-| Boot (engine init → serving) | ~19 min: 55 s load, ~5 min compile (warm cubin cache), ~12 min profile + KV alloc |
-| KV cache | 78,730 tokens (PP0 stage) / 81,190 (PP1), from 12.99 GiB free after residents |
-| Resident per card | 30.8 GiB (PP0) / 31.75 GiB (PP1) of 32, at `--gpu-memory-utilization 0.90` |
-| Mixed prefill/decode | 8 concurrent requests, prompts 5–361 tokens, outputs 8 and 128, 544 output tokens in 101.9 s |
-| Output | coherent and correct: "The capital of France is" → " Paris. The capital of Spain is Madrid. …" |
-
-**Gate (d) — greedy token-ID half PASSED.** Against the plain 1Cat arm at the same shape and revision, on a fixed
-four-prompt corpus at temperature 0 × 32 tokens: three prompts agree on every token id (including a 361-token prompt
-that reaches the compressed/indexed attention layers, and a code prompt); the fourth diverges at token 6 on a near-tie
-(the fork's own top two are 0.125 nats apart, and Emmy's logprob for its pick is within 0.089 of the fork's). Each arm
-is individually deterministic across runs, so the divergence is arm-to-arm numerics at a tie, not noise. The
-layer-level tensor half of gate (d) was NOT run: an HF eager reference for a 156 GB checkpoint is impractical here, and
-the CPU seam-equivalence test plus this end-to-end agreement on real weights are what stand in for it.
-
-Generation quality is the load-bearing part of this result: a transposed expert matrix or a mis-scaled MXFP4 decode
-produces fluent-looking garbage, not correct capitals and a valid Python guard clause. Single-stream decode measured
-~3.6 tok/s (16 tokens in 4.43 s) against the plain 1Cat arm's published 30.79 tok/s — the loss the plan predicted,
-not yet an equal-envelope A/B (that is Stage 5). No pack exists yet, so every boot pays the compile (Stage 4).
-
-Three defects stood between the merged branch and a booting server. Both were invisible to every earlier gate
-because each lives on a path only the real checkpoint's geometry and the engine's own scheduling reach, and each
-killed all 16 workers:
-
-- **Expert spelling assumed one weight layout.** `spell_mxfp4_inputs` was written for gpt-oss, whose experts trace
-  as the `(in, out)` matrix applied with `x @ W`, so it closed the decode with a transpose. DeepSeek's experts are
-  `F.linear` parameters — `(out, in)`, already the stored orientation — and `w_down` failed its shape check before
-  a single weight was read. Each spec now declares its module's layout (`moe_expert_layout`), which is the only
-  sound source: a square expert matrix (gpt-oss `down_proj`, DeepSeek `gate_up_proj`) reads correctly both ways,
-  so a shape-sniffed guess would silently transpose the weights rather than fail.
-- **The rider destination was sized from a q/k/v seam.** A chunk step carrying decode riders splits across two
-  programs into one joint destination, sized from `(num_heads · head_dim, …)`. The fork-attention `pre` returns
-  one hidden-width activation instead — 4096 against the 32768 that sizing computed. vLLM's profiling run executes
-  at exactly the rider top (`max_num_batched_tokens` = prefill capacity + decode bucket = 4112), so this blocked
-  every boot of this seam, not an edge case. The post path already read its widths off the program's output count;
-  the pre path now does too.
-- **The expert program was built one step too narrow.** `pre`/`post` split a rider-width step across their static
-  twins, but the routed dispatch hands one expert program every row that chose it — and the profiling run's dummy
-  rows are identical, so one expert takes all 4112 of them against a 4096-row buffer. The expert program now takes
-  the rider allowance too (16 rows of arena on a 4096-row buffer). Pinned by a GPU test whose OLMoE router scores
-  every expert alike, which reproduces the degenerate routing without depending on a profiling run.
-
-**Found here — predicate half FIXED (#666), golden half still owed.** The twin lane and the serving lane disagreed
-about this checkpoint's experts: `mxfp4_weight_profile` keyed on `quant_method == "mxfp4"`, and DeepSeek declares
-`quant_method: fp8` with `expert_dtype: fp4`, so `capture_twin_graphs` recorded the expert twin as `@f8e4m3` while
-serving deployed `@mxfp4`. #666 added the one shared predicate both lanes now read (`native_mxfp4_experts`), so the
-recorded expert program is the one serving binds.
-
-The golden re-record is NOT done: `golden/v100_sm70.yaml` is still the #558 recording from before any of this, so it
-covers the routed-expert kernels not at all and they resolve from reservoir/prior evidence instead. Correctness is
-unaffected, but Stage 4 must not warm, bake or seal until the re-record happens on the host — which is itself blocked
-behind Stage 0 round three's runtime gap.
-
-## Stage 4 — image + release plumbing
-
-1. Build the plugin image FROM the immutable 1Cat digest with `cupy-cuda12x`, with its own image identity — do not
-   inherit the Makefile's default `v0.23.0` version/tag for a 1Cat 1.2.3 base. Label the 1Cat digest + source SHA,
-   Emmy SHA, checkpoint revision, and CUDA/NVRTC versions. The stage −1 NVRTC probe decides whether the serve
-   entrypoint needs the CUDA-12 `libnvrtc` preload for sm_70.
-2. Env passthrough: the serve image/env-file plumbing gains the fork's `VLLM_SM70_*` variables and
-   `--tensor-parallel-size 8 --pipeline-parallel-size 2 --distributed-executor-backend mp` in `SERVE_EXTRA_ARGS`.
-3. Headroom sweep on the host seals `docker/vllm-emmy-serve/models/deepseek-v4-flash-0731.env` (the sweep creates
-   it; do not author widths off-host); record the serving golden; warm → bake → verify per the release skill.
-
-→ verify: `make serve-config / serve-goldens / serve-warm / serve-image / serve-verify` pass on the host; the baked
-TP8×PP2 image cold-starts offline and EVERY one of the 16 workers reports its pack hit (today's verify accepts one
-`pack hit` line — insufficient for 16 workers), the cubin set is unchanged, and no request-time Triton JIT occurs.
-Build/bake/verify only; registry publication is a separate approval.
-
-## Stage 5 — A/B
-
-`emmy bench` two arms at the SAME envelope (same `--max-model-len`, mnbt, concurrency, KV dtype, warmups,
-immutable image digests and checkpoint revision; the existing serving_v100_sxm3 protocol, shorter context; one
-priming repeat + three steady repeats): the Emmy image vs plain 1Cat. Profile in a separate run — profiling the
-fork's multi-stream execution perturbs the A/B. Report output tok/s, TTFT,
-TPOT with repeat spread; archive per the experiment conventions (no credentials or VM identifiers). Publish the
-honest conclusion even if (as expected) the Emmy arm loses; include a per-phase profile (expert dispatch vs
-attention vs mHC) so stage 6's hypothesis is grounded.
-
-## Stage 6 (performance, optional) — MXFP4 expert inputs
-
-Largely landed upstream since this plan was drafted: main now spells native MXFP4 expert twins
-(`spell_mxfp4_inputs`, `decode_mxfp4`, `…@mxfp4` twin names — uint8 nibble blocks + uint8 e8m0 scales as program
-inputs). What remains for THIS checkpoint: its declaration is `quant_method: fp8` + `expert_dtype: fp4` (not
-`quant_method: mxfp4`), and its packing is `w1.weight I8 [out, in/2]` + `.scale [out, in/32]` (not the gpt-oss
-`_blocks`/`_scales` layout the profile recognizes) — so a DeepSeek declaration/orientation mapping onto the existing
-spelling, plus the loader keeping the fp4 store, plus tuning. NOTE: with the fp8 declaration, the expert twin already
-spells `@f8e4m3` today, which is exactly the stage-1 cast lane's deployed form (test:
-`test_deepseek_fp8_declaration_spells_the_expert_twin_for_the_cast_lane`). Only worth building if stage 5's profile
-shows expert weight streaming dominates and the fused-unpack GEMM can plausibly beat TurboMind's on Volta.
+Goal: serve `deepseek-ai/DeepSeek-V4-Flash-0731` through the Emmy vLLM plugin on the 16× V100 SXM3 host — Emmy
+compiled kernels for the hyper-connection stream mixing, norms, shared expert and routed experts; the pinned 1Cat
+sm_70 fork (`cloudriftai/1cat-vllm-deepseek-v4-flash-0731:1.2.3-d76126608`) supplying paged MLA attention and the
+serving shell — then A/B against the plain 1Cat container at an equal serving envelope.
+
+43 layers, `hc_mult` 4, 256 routed experts at top-6 plus one shared, 3 hash-router layers. At TP8 × PP2 the first
+stage owns layers 0–21 and the second 22–42.
+
+## Where it stands (2026-09-27, main at #929)
+
+`main` at `cc2bb92f` (#897) replaced this file. Loop fusion decides its regions from the graph now, the recurrence
+roller rolls the Sinkhorn rounds, and the post block lowers to five kernels per width instead of about thirty-five: a
+routing kernel (`k_linear_softmax_mean_reduce`), the two rolled Sinkhorn chains (`k_div_1_steps0_reduce`,
+`k_div_40_steps0_reduce`), the main kernel (`k_linear_matmul_softmax_mean_reduce`) and a last matmul kernel; the
+expert and pre twins are one kernel each. #897's refresh re-recorded the file on this card at every width, the post
+twins under hand-picked cut routes, and #905 recorded the M=1 pre route those rows could not price: boot43 served
+strict and coherent at 1.15 s per output token (0.56 on the file before #897) and 1.51 s per layer for a 4,096-token
+chunk (0.10). The M=1 expert route stays unrecorded (its record ran past the bench's 600 s under the prior's piece
+picks), so that twin rides width 16.
+
+This round re-tiled what #897 recorded at the tensor core's default K chunk. The width-16 expert pieces and every post
+twin's last matmul ran `mma` tiles without `/k8`, one `m8n8k4` step per shared-memory stage; hand-picked sweeps (the
+prior does not pick) moved them to `/k8`: the expert twin 5.33 → 0.79 ms, the last matmul 263 ms → 1.48 ms at width
+4,096, 16.4 ms → 227 µs symbolic, 1,232 → 115 µs at M=1 and 511 → 114 µs at M=16; the expert rows pass the eager
+check and the post rows' outputs are bit-identical to #897's spelling on the same inputs. Boot45 serves the file
+strict and coherent at 0.734 s per output token, 34.1 s / 14.4 s to first token at 2,155 prompt tokens cold and warm,
+and 1.25 s per layer for a 4,096-token chunk. #903 then dropped two receipts of the M=1 post twin's main-kernel route
+(split pieces its normalization re-formed), so on `main` that twin refused strict at its cut fork; the route was
+re-recorded on `main`'s tree (`--record-greedy` under its cut keys: the `hc_fn` projection split `g4a` at 56 µs where
+the old `g8a` set cost 3,048, the four-stream mix unsplit at 2.6 µs), 7,157 µs against 10,151 before #903, the output
+matching the other recorded route on the same inputs. Boot46 (`main` at #910 with it) serves strict and coherent at
+0.600 s per output token, 0.660 s at 2,155 prompt tokens, the M=1 post twin at 8.88 ms per layer (11.88).
+
+What held the numbers after that was the post routes, not the tiles. #897's routes leave this model's recurring defect
+in place: the hyper-connection logits (16,384-long f32 dot products against `hc_fn`) and the four-stream mix are
+recomputed inside sweeps that do not depend on them — five dot products per output cell of the mixing softmax, and the
+whole updated residual once per output column of each `hc_fn` projection. The cut pass offers the seams that compute
+each once, and the M=1 post twin now takes them: its main kernel 7,157 → 59 µs per launch, its routing kernel 1,517 → 27
+µs, the new pieces' schedules picked by hand, the outputs matching the old routes on the same inputs to 1.2e-7. Boot47
+serves strict and coherent at 0.244 s per output token (0.299 at 2,155 prompt tokens), 1.65× the fork's 0.148 s; the
+roofline audit no longer names the M=1 post twin. The symbolic post twin, which a single request's prefill rides, took
+the same seams and one more on its last kernel, where the shared expert's down projection ran once per stream: at the
+512-token hint its main kernel 262 → 1.28 ms, its routing kernel 63.5 → 0.94 ms, its last kernel 10.8 → 0.45 ms. Boot48
+reaches the first token of a 2,155-token prompt in 9.94 s cold and 1.86 s warm (34.1 and 14.4). The width-16 twin took
+the same routes: main kernel 28.7 ms → 111 µs, routing kernel 6.5 ms → 208 µs, last kernel 902 → 153 µs; boot49's audit
+has it at 0.70 ms per layer (34.25), and eight concurrent requests decode at 0.323 s per token. The 4,096-width twin
+took them too: main kernel 1,093 → 8.6 ms, routing kernel 122 → 7.3 ms, last kernel 38.6 → 3.0 ms per launch; boot51's
+audit, on `main` at #914, has it at 20.2 ms per layer (1,251). Missing tensor-core tiles are a small part of it: those
+contractions read f32 operands, which no Volta atom takes, or contract over the four streams (K=4), where a tensor core
+buys nothing.
+
+Stages −1 to 3 are done, and Stage 0's question — can the compiler serve this model — is answered yes. Gate (c),
+coherent completions, passed on the old tree, was red on `main` from #829 to #893 without anyone seeing it, and is
+green again with #893. Gate (d)'s greedy token-ID half: two of four prompts agree with the fork on all 32 token ids,
+two diverge at near-ties of about 0.2 nats; its layer-level half never ran, and an HF eager reference for a 156 GB
+checkpoint stays impractical here.
+
+## What is left, in order
+
+1. **Boot `main` after #888, #898 and #897.** Done 2026-09-25 (#905). The first form of this round re-recorded the
+   post and M=1 pre pieces after #888 and #898 (37 rows dropped, 43 added, the tuned divide sets at a fraction of the
+   dead rows' time, boot42 coherent at boot39's 0.56 s per token); #897 then replaced every kernel this file names and
+   re-recorded it, so those rows went with the kernels and the round's record is this plan. What ships is #897's file
+   plus the M=1 pre route's receipts, and the boot of it: boot43 serves strict in about ten minutes, coherent, at 1.15
+   s per output token and 1.51 s per layer for a 4,096-token chunk — twice and fifteen times boot42's, #897's untuned
+   cut routes. The M=1 post tier's divide rows are #897's now, recorded under cut routes; whether they are right needs
+   the eager comparison per width-1 set that `run --golden` has only where a target keeps a runnable frontend slice.
+2. **Boot `main` with the six pieces recorded.** Done 2026-09-24: the pieces #883 re-shaped are recorded serial, at
+   199 and 178 µs on the symbolic twin, 6 and 6 µs at width 16 and 1.4 and 1.6 ms at width 4,096 (the old
+   register-split row cost 39.7 ms and was never in the deployed route), all three post leads elect strict from the
+   file, and boot38 serves in thirteen minutes at the same numbers as boot36b: 0.71 s to first token warm at 5 prompt
+   tokens, 5.5 s at 2,155, 0.53–0.58 s per output token, the width-4,096 post twin at 104 ms per layer, the
+   completions degraded.
+3. **Correctness on `main`.** Found and fixed 2026-09-24 (#893): since #829 the expert cut piece's compute-filled B
+   slab staged the producer edge's last result for every channel, so both tensor-core B tiles held the up half and the
+   twins computed the up projection twice; the width-16 expert twin's random-input check failed by 70% of the output's
+   peak and single-token decode served noise. Bisected by pinning the twin's recorded tile on one host tree per
+   revision; fixed in the fold's channel walk and the fill; both expert twins pass on the fixed tree under their
+   recorded rows. Boot39 from that tree serves coherent completions at boot38's timings, so gate (c) is green again.
+   Still owed: a finite-input replay per twin and an independent reference on `run --golden`, and a boot that reads
+   the election's check instead of printing it as a warning.
+4. **Compute the recomputed cones once in the post routes.** Done 2026-09-27 on all four post twins: M=1 (#919, boot47
+   0.244 s per token), symbolic (#921, boot48, first token at 2,155 prompt tokens 34.1 → 9.94 s cold), width 16 (#923,
+   boot49, 34.25 → 0.70 ms per layer) and width 4,096 (#925, boot51 on `main` at #914, 1,251 → 20.2 ms per layer). Every
+   post twin spells its seams the same way: main kernel +`PLACE@map.1/map.1/twist.1/inner` and
+   `PLACE@map.1/map.1/twist.1/inner.2/map.1/reduce` (13 seams), routing kernel +`PLACE@map.1/map.1/reduce.1/inner` (5),
+   last kernel +`PLACE@map.2/inner` (3), which moves the shared expert's down projection out of the four-stream loop
+   into a piece that takes `mma` tiles. The prior's picks were 10–200× off on the new pieces, and every atomic split the
+   recorder took (`g2a`, `g4a`, `g8a`, `g2k`) lost or tied; the winners, all unsplit, are the recipe for the next width
+   or card: the f32 `hc_fn` projections under a cooperative reduce (`t512 coop`, `t64 coop` for the 16-logit ones), the
+   four-stream contractions (K=4) on scalar `t16x8 f4` / `t32x8 f4` tiles or register-split `r2`, never a cooperative
+   reduce (208 ms at width 4,096 against 1.0), the down projection on `mma` `/k8` tiles staged `d2/smem`. The flow: drop
+   a stale same-named route row first (#917 refuses a new route that lands on neither), record the route with
+   `--record-greedy` under its seams as `EMMY_KNOBS` pins, respell rows in scratch goldens (`edit_json.py`: `set:` a
+   split decision row to a schedule tests it unsplit), fold the appended decision row (`fold_route.py`), record strict,
+   drop the rows the strict election no longer uses, and check each kernel against the old route on the same inputs
+   (`pair919.sh`).
+5. **Stage 4 — image and release plumbing.** The pipeline ran end to end on the host on 2026-09-27 (#928, stacked on
+   #927): `make vllm-emmy-image` builds FROM the 1Cat digest (the config's `SERVE_BASE_IMAGE`, a model-scoped `-base`
+   tag), `make serve-goldens` passes (156 realizations cover the model, every row equals an offered leaf, all 9 twins in
+   scope deploy strict), the warm converges on its first offline pass (88 cubins, one pack per pipeline stage, 264 plan
+   files), `make serve-image` bakes `cloudriftai/vllm-emmy-deepseek-v4-flash-0731:1.2.3-<emmy sha>` with the snapshot in
+   24 sub-10 GB layers and labels for the runtime digest, CUDA 12.9.1, nvcc, the 1Cat source SHA and the checkpoint
+   revision, and verify passes: offline start in about 6 minutes, a pack hit on all 16 workers, no new cubin or Triton
+   cache entry. Found on the way and fixed: the 16 workers' golden imports raced on a fresh tune DB (#927); no wheel had
+   shipped a model golden since #912 (#929, merged); `serve.sh` could not render eager (it drops the capture config when
+   `--enforce-eager` is pinned, as `emmy serve` does); the GPU check compared `nvidia-smi`'s spelling (`Tesla
+   V100-SXM3-32GB`) with the registry's; verify failed on vLLM's JIT-monitor warning, which fires on a first launch
+   loaded from the baked cache (the fork's warmup does not launch its sparse-attention kernels), and now fails on a new
+   Triton cache entry instead. cupy is not needed: nothing imports it since #885. The config ships the M=1 tier off:
+   with it on the M=1 expert twin refuses strict and the release gate fails, and the tier is worth 0.252 → 0.269 s per
+   output token for one request (boot51 vs boot52) and nothing for eight at once. Left: rebuild, warm, bake and verify
+   the release image from the final commit once #927 and #928 are ready (the verified image predates #931 and #932's
+   compiler changes); the headroom sweep did not run, and the config keeps the 0.90 every boot since 09-11 has served at
+   (30.8 GiB resident on a first-stage card, 31.75 of 32 on a second-stage one); registry publication is a separate
+   approval.
+6. **Stage 5 — the A/B, the deliverable. Ran 2026-09-29** (PR #960, `experiments/DeepSeek-V4-Flash-0731/
+   emmy_ab_v100_sxm3/RESULTS.md`): the release image built from `4781e138` (#964's merge, before #969's Sinkhorn seed
+   miscompile that #978 fixes) against the fork digest, rounds fork/Emmy/Emmy/fork, 3 repeats each. Emmy takes 2.14×
+   the fork's time per output token for one 2,048-token request (316.7 vs 148.0 ms), 2.9× its time to first token, and
+   delivers a third of its throughput at 8 concurrent; start-up 440 vs 164 s (weights load 300 vs 26 s). The workers
+   log the 4,096-token prefill post at 10× and pre at 104× their floor. Quality: after #964's router-bias fix Emmy
+   scores GSM8K 0.71 strict / 0.96 flexible; the fork's 0.91 / 0.975 is an artifact of its prefill mHC prenorm kernels
+   squaring fp16 in fp16 (overflow once |x| ≥ 256, the row's mixing falls back to its bias); with that square in fp32
+   the fork's prompt likelihood equals Emmy's and it scores 0.755 / 0.96. Not done: the per-phase profile, and a
+   same-workload run of the `a98fd4f8` image to tell whether #964's float32 router costs decode time (0.269 s per
+   token then, on a different workload). The image is not published: it is slower than the fork it is built on.
+7. **Stage 6 — MXFP4 expert inputs**, only if Stage 5's profile shows expert weight streaming dominates and a
+   fused-unpack GEMM can plausibly beat TurboMind's on Volta. `main` spells native MXFP4 expert twins; this checkpoint
+   needs its declaration mapped onto that spelling (`quant_method: fp8` with `expert_dtype: fp4`, packed as `w1.weight
+   I8 [out, in/2]` with `.scale [out, in/32]`), plus tuning.
+
+Owed beside the list: the boot's roofline audit has no time limit (one mispicked program hung a boot for six hours); the
+expert M=1 twin offers no schedule knob under its cut and its residual runs 1.04 s per launch, so it needs tile or
+reduce sites from the compiler, not a row; the dynamic-width Sinkhorn twin cannot take its cut, a reshape lowering
+lockout #813 names. Left from item 4: the width-4,096 routing kernel runs 7.3 ms against eager's 2.8, its residual copy
+(2.6 ms, one block per token is the only mapping offered) and its 4-coefficient `hc_fn` projection (3.2 ms) the rest;
+the symbolic main kernel computes the four-stream mix three times into three layouts (123, 149 and 130 µs); #918 re-maps
+the M=1 last kernel's root (`WORK t16x8`, output bit-identical on both trees) from 64 to 194 µs per launch, which puts
+the M=1 post twin back on the audit at 0.66–0.70 ms, and `PLACE@map.2/inner` on that kernel would remove the root.
+
+## What every round has taught
+
+- **One bad measured row is binding under strict evidence.** A shape with one recorded candidate elects it however
+  slow: `pre1` at M=1 ran 29.7 s per layer until a cut was recorded, and no compiler capability was missing. Read the
+  golden's rows per program and shape, take the minimum per kernel, and treat a shape carrying one candidate as the
+  smell; `emmy compile --golden PATH --realization NAME --ir loop` prints the Loop IR, where the recurring defect on
+  this model is a dot product inside a sweep it does not depend on. - **A green strict decode is not a deploy.** The
+  decode is pooled — a row passes when any kernel of its set enumerates it — while the deploy keys every row under the
+  kernel it decides. Before any boot, run the deploy's own evidence index under the recorded regime and, per twin, the
+  kernels the route mints against the rows that vouch for them: a cut arm is eligible only when every piece has a row,
+  a row spelling a split or a cut whose pieces have no rows can still win its fork on a retime, an empty schedule row
+  is no evidence, and a schedule row carrying the identity a cut fork is offered on prices the fused arm with a
+  piece's timing. - **A compiler change can re-shape the kernels a golden names.** #863 changed this model's fusion
+  (36 → 45 kernels per post twin) and normalized the stored Loop IR, #864 dropped rows in a restamp, #883 split a
+  fused grid pair in two pieces per post twin, #888 stopped a lead's row standing in for a piece with none, #898
+  removed the grid tier nineteen divide-piece rows were composed against and merged with those rows red. `emmy trace
+  --serving-twins` on the tree, diffed against the golden's kernel families, sees a fusion change before a record; the
+  fresh-lowering gate sees a stored-target drift on any machine; and the GPU-less strict election of every twin
+  program under the file's own card is the one audit that sees all of these before a boot — the pooled decode saw none
+  of them, and logging every refusal instead of raising the first names every set to re-record in one pass.
+  #914's reducing-seam dtype gave ten 4,096-width pieces new identities: re-keyed by kernel name with their schedules
+  kept, then recorded strict on the new tree.
+  A row on a
+  kernel whose body changed is dropped, not re-keyed, and if the new kernel opens a cut fork the twin refuses until it
+  is recorded (boot37); a row whose kernel only changed identity is re-keyed and re-anchored — its OFF sites completed
+  against the new kernel, or a strict election realizes a 28 ms cooperative reduce under a serial row. - **Never
+  re-record a red row to make it green**, and the prior must never decide a production election. `--strict-evidence`
+  is the gate; no pricing floor, bound, clamp or hand-edited price; no benchmark scripts (`emmy run --bench --json`,
+  `emmy compile`, `emmy tune` only — a missing capability is a flag to add). Every harness fix ships as a minimal PR
+  with a red-then-green test. The launcher leaves prefix caching on, so a repeated prompt's time to first token is a
+  cache hit; cold numbers come from a prompt the server has not seen. - **Reproducing a boot failure without a boot.**
+  A twin's Graph IR is the golden's `programs[i]` entry (`graph_from_wire`, then `specialize_program` for a static
+  width); serving compiles it with `CudaBackend.compile` and then `plan_from_graph`, and only that pair shows a
+  plan-time failure — `emmy compile --ir cuda` and a `--golden --realization` replay stop before it. Host CPU compiles
+  need `~/emmy-durations/venv` with `PYTHONPATH` set to the tree under test and
+  `LD_PRELOAD=/usr/local/cuda-12.9/lib64/libnvrtc.so.12`, and a card visible: golden evidence is keyed by the live
+  card's name, so `CUDA_VISIBLE_DEVICES=""` empties it. - **Pin mechanics.** Under `EMMY_KNOBS` the cut pass visits
+  only the root: every `PLACE@seam=cut` that resolves on the root joins one composed decision, a key naming no root
+  seam is silently skipped, and a `PLACE` pin REPLACES the whole placement decision rather than adding to it. A
+  GPU-less `--target sm_70` compile on a Mac featurizes with the default card's 170 SMs and elects differently from
+  the live V100's 80, so every election replay runs on the host CPU. - **Three more things that each cost a day.** A
+  `perf` row times one CUDA op, so under a schedule that splits a kernel it is a fragment, and only the boot audit's
+  ratio says whether the program moved. `emmy tune` defaults to a 2 s cumulative bench budget, which a kernel near 1 s
+  per launch exhausts on warm-up, recording zero valid latencies while appearing to search; `EMMY_BENCH_RUN_TIMEOUT_S`
+  raises it. A replay must use the golden the boot uses: benched against a file with no rows for it, a kernel the boot
+  runs in 42 ms hung for a minute. - **Two deadlines bound any forward pass** under two-stage pipelining, because the
+  second stage blocks on the first for the whole traversal: `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS` (default 300) is
+  raisable; the NCCL collective watchdog at 600 s is compiled in, and `TORCH_NCCL_ASYNC_ERROR_HANDLING=0` does not
+  suppress it. A forward that needs more than 600 s cannot be measured at PP2 at all. #897 replaced every kernel the
+  file named and re-recorded it; a file another agent re-recorded still needs the GPU-less election before a boot —
+  #897's M=1 route rows carried a measurement and no piece receipt, and #880's rows carried identities no kernel on
+  `main` minted.
+
+## The record
+
+What the deleted results report established, kept here because the work continues from it. Every Emmy number is a
+strict boot from the repository golden on the 16× V100 host unless a host-local file is named; the probe is greedy,
+single stream, streamed and timestamped per chunk, 5 prompt tokens → 33 out and the long passage (2,275 tokens through
+2026-09-17, 2,155 on later boots) → 9 out, with prefix caching on, so the repeat column is a cache hit. Evidence for
+each boot is on the host under `~/serve-evidence/bootNN-*`.
+
+### The fork's baseline
+
+`emmy bench` on 2026-09-10 (run `20260910T174153Z`, fifteen rows, all succeeded): TP8 × PP2, `gpu_memory_utilization`
+0.80, `max_model_len` 4096, `max_num_batched_tokens` 4096, block size 256, float16 with `deepseek_v4_fp8` weights and
+an FP8 KV cache, prefix caching off; 57,594 KV tokens; greedy with `ignore_eos`. Image
+`cloudriftai/1cat-vllm-deepseek-v4-flash-0731:1.2.3-d76126608` (digest `sha256:276240257b22…c65bc1`, vLLM
+1.2.3.dev87), model revision `7872f01b`, driver 580.159.03, nvcc 12.9.86.
+
+| Concurrency | Input → output | Output tok/s, mean ± SD over 5 repeats | Mean TPOT | Mean TTFT |
+| ---: | ---: | ---: | ---: | ---: |
+| 8 | 128 → 128 | 33.71 ± 3.24 (29.03 – 38.31) | 221.6 ms | 2.50 s |
+| 4 | 1024 → 256 | 19.99 ± 0.39 | 179.7 ms | 5.41 s |
+| 1 | 2048 → 512 | 6.46 ± 0.00 | 147.7 ms | 3.77 s |
+
+The single-stream row is the one to compare against: its time per output token agrees to 0.2 ms across repeats, while
+the eight-way row spans 30% on noise alone. The earlier 30.79 tok/s figure was measured at a 1,048,576-token context
+the Emmy arm cannot hold and is no baseline.
+
+### The Emmy boots
+
+| Date | Tree, golden | TPOT | TTFT 5 tok (cold / repeat) | TTFT long (cold / repeat) | Health | What changed |
+| --- | --- | ---: | ---: | ---: | ---: | --- |
+| 09-11 | first strict boot | — | — | — | 949 s init | serves; without `--strict-evidence` a blown-out prior (exponent 996 against a peak near 28) scored every candidate alike |
+| 09-12 | host-local golden | 0.899 s | 7.05 s / — | 88.2 s at 2,405 / — | — | four cuts on `pre1` at M=1: 29.7 s → 474 µs, TPOT 5.565 → 0.899 s |
+| 09-15 | `7e9336e6` + #807, repo golden | 2.03 s | 6.14 / 3.37 s | 44.2 / 16.0 s | 12 min | the repository golden serves for the first time; `post.decode.m1` elects 44.7 ms where the host-local file elected 18 |
+| 09-17 | `3b5cc4ca`, #826 golden | 3.30 s | 6.33 / 3.60 s | 45.5 / 16.6 s | 15 min | after #804's re-key; strict refuses the M=1 tier, decode rides width 16 |
+| 09-18 | `483e4cb7`, #833 rows | 0.267 s | 3.73 / 0.96 s | 29.3 / 2.70 s | 17 min | the M=1 tier deploys again; post m1 3.4 ms per layer; `pre.chunk.m4096` regressed to 25.4 ms |
+| 09-19 | `cab3b735`, one split row dropped | 0.266 s | 3.74 / 0.97 s | 29.3 / 2.68 s | 29 min | #843's serial residuals; the first compile per rank took 800 s (cause never found) |
+| 09-19 | seven post receipts serial | 0.267 s | 3.67 / 0.92 s | 24.9 / 2.48 s | 21 min | `post.chunk.m4096` 599 → 318 ms |
+| 09-19 | three matmul pieces tiled | 0.267 s | 3.69 / 0.92 s | 18.3 / 2.21 s | 22 min | `post.chunk.m4096` 318 → 173 ms; the symbolic post twin 172.6 → 18.8 ms at 2,155 tokens |
+| 09-19 | M=1 post pieces on threads | 0.235 s | — | 18.3 / 2.22 s | 14 min | 851 → 52 µs per layer |
+| 09-20 | `9607133e`, expert m16 re-tiled | 0.214 s | — | 18.2 / 1.98 s | 25 min | 1.46× the fork; the last coherent boot before #829's defect reached the golden's rows |
+| 09-22 | `dab7bce9`, rec34 | died | | | 3.5 min | #863 changed the fusion: serving's kernels are not the golden's |
+| 09-23 | main + #875, restamped, fast math off | 0.56 s | 3.50 / 0.73 s | 68.7 / 5.53 s | 25 min | serves; text degraded; #868's default had killed three boots before |
+| 09-24 | `1494e4be` as merged | died | | | 17 min | #883's re-shaped pieces open cut forks no row spells |
+| 09-24 | + the six pieces' rows (#892) | 0.53 – 0.58 s | 3.50 / 0.71 s | 68.0 / 5.52 s | 13 min | serves; text degraded |
+| 09-24 | + #893 | 0.53 – 0.58 s | 3.49 / 0.70 s | 68.1 / 5.54 s | 27 min | coherent again |
+| 09-25 | `6c79e1d4` (#898), every row in (boot40) | 0.31 – 0.34 s | 3.53 / 0.76 s | 68.3 / 5.70 s | 16 min | the M=1 post twin deploys for the first time; its tuned k_div_18 set is wrong and the text degrades after six tokens |
+| 09-25 | as committed (boot42) | 0.56 – 0.62 s | 3.49 / 0.76 s | 68.2 / 5.66 s | 15 min | coherent; the M=1 post twin refuses at k_div_18 and rides width 16, as before |
+| 09-25 | `cc2bb92f` (#897) + the M=1 pre route (#905, boot43) | 1.15 – 1.19 s | 5.64 / 2.93 s | 39.5 / 17.1 s | 10 min | #897's untuned cut routes; the M=1 post twin deploys from a committed file |
+| 09-26 | + the width-16 expert pieces at `/k8` (boot44) | 0.777 s | 4.73 / 1.93 s | 38.1 / 14.8 s | 10 min | the expert twin 5.33 → 0.79 ms per launch |
+| 09-26 | + every post twin's last matmul at `/k8` (boot45) | 0.734 s | 4.65 / 1.92 s | 34.1 / 14.4 s | 10 min | the 5-token answer alternates "red, yellow, and blue" / "red, yellow, blue", as boot43's two repeats did |
+| 09-26 | `a091dbe7` (#910) + the M=1 post route re-recorded after #903 (boot46) | 0.600 s | 4.74 / 1.91 s | 34.2 / 14.5 s | 9.5 min | the first boot of a post-#909 tree; no runtime device patch (#907) |
+| 09-26 | + the M=1 post twin's logits and stream mix computed once (boot47) | 0.244 s | 4.66 / 1.91 s | 34.1 / 14.4 s | ~10 min | 2.5× boot46; 1.65× the fork; the M=1 post twin is off the roofline audit's list |
+| 09-27 | `7be6b330` (#919) + the symbolic post twin's logits, stream mix and down projection computed once (boot48) | 0.246 – 0.249 s | 4.67 / 1.92 s | 9.94 / 1.86 s | 9 min | the best time to first token this model has had (18.3 / 2.21 s on 09-19); completions as boot47's |
+| 09-27 | `0a891de2` (#921) + the width-16 post twin's routes (boot49) | 0.247 – 0.253 s | 3.21 / 0.47 s | 9.98 / 1.88 s | 9 min | the 5-token prompt's prefill runs at width 16; eight concurrent requests decode at 0.323 s per token |
+| 09-27 | `da021ffe` (#923) + the 4,096-width post twin's routes (boot50) | 0.252 – 0.254 s | 3.22 / 0.47 s | 10.1 / 1.91 s | 9 min | as boot49; the 4,096-width post twin at 21.1 ms per layer |
+| 09-27 | `6556d75e` (#914) + the 4,096-width rows re-keyed and re-recorded on #914's compiler (boot51) | 0.252 – 0.253 s | 3.26 / 0.47 s | 10.1 / 1.87 s | 9 min | the 4,096-width post twin at 20.2 ms per layer |
+
+The first decode step of a request costs more than a steady one (1.85 s against 0.90 on 09-12, 4.2 s against 2.03 on
+09-15): each layer's programs are CUDA-graph captured on first use. The first compile on each rank is the cold
+evidence index of a new compiler fingerprint, about 800 s; a repeated tree does not pay it.
+
+### Where the time went
+
+The boot's roofline audit, first layer of each stage, per layer:
+
+| Boot | `pre.chunk.m4096` | `post.decode.m1` | `post.decode.m16` | `post.chunk.m4096` |
+| --- | ---: | ---: | ---: | ---: |
+| 09-11 | 64,604× (1.92 s) | 1,273× | 1,154× | 343× |
+| 09-12, host-local | 107× (3.2 ms) | 294× (18 ms) | 1,156× | 321× (619 ms) |
+| 09-15 | 2.74 ms | 44.7 ms | 68.3 ms | 688 ms |
+| 09-18 | 25.4 ms | 3.2 – 3.6 ms | 13.6 ms | 599 ms |
+| 09-19, tiled | 3.10 ms | 3.2 – 3.9 ms | 12.5 ms | 172.8 ms |
+| 09-23 / 09-24 | 3.12 ms | not deployed | 7.41 – 8.06 ms | 104 ms |
+| 09-25, #897 | 3.12 ms | 12.96 ms | 34.7 ms | 1,510 ms |
+| 09-26, `/k8` (boot45) | 3.12 ms | 11.88 ms | 34.26 ms | 1,247 ms |
+| 09-26, M=1 post route after #903 (boot46) | 3.11 ms | 8.88 ms | 34.25 ms | 1,249 ms |
+| 09-26, M=1 post recompute cut (boot47) | 3.11 ms | not listed | 34.25 ms | 1,248 ms |
+| 09-27, symbolic post recompute cut (boot48) | 3.11 ms | not listed | 34.26 ms | 1,249 ms |
+| 09-27, width-16 post recompute cut (boot49; #918's M=1 slowdown) | 3.11 ms | 0.66 – 0.70 ms | 0.70 ms | 1,251 ms |
+| 09-27, 4,096-width post recompute cut (boot50) | 3.11 ms | 0.70 ms | 0.70 ms | 21.1 ms |
+| 09-27, `main` at #914 (boot51) | 3.12 ms | 0.65 – 0.74 ms | 0.71 – 0.76 ms | 20.2 ms |
+
+A decode step, profiled on 09-19 with torch's profiler over eleven single-stream steps on all sixteen workers (the
+model serves eager, because the hyper-connection routed combine host-syncs): per token about 126 ms of Emmy kernels
+(3,300 launches), 96 ms of NCCL all-reduce at a millisecond per call over PCIe (the host's, not the arm's), 22 ms of
+the fork's sparse attention and 36 ms of everything else. The boot audit's `post.decode.m1` figure is an uncaptured
+launch loop and overstates what serving pays. The symbolic post twin is linear in width, about 128 µs per token before
+the tiling and 18.8 ms per layer at 2,155 tokens after it; a single request under a 4,096-token context never makes
+the exactly-4,096-token step a chunk twin takes, so its prefill rides the symbolic twins and the m4096 twins matter
+only once concurrent prompts fill a step.
+
+### What made the kernels fast
+
+- **Placement cuts that hoist a loop-invariant dot out of a sweep.** `pre4096` computed four 16,384-long dot products
+  once per output channel, 8,192× redundant work: four `PLACE@…=cut` took it from 1,923,598 to 3,238 µs (594×, max abs
+  1.2e-4 against the greedy pick). `pre1` at M=1 is the same kernel and took the same cuts, 29.7 s → 474 µs. `post1`'s
+  `9e578e` ran sixteen long dots on one thread, 42,278 → 9,866 µs; its `4e26cc` evaluated sixteen logits 352 times,
+  30,016 → 5,347 µs; both bit-exact. Recorded with `run --golden --bench --record-greedy`, the election takes them on
+  price with nothing pinned.
+- **Serial residuals.** A `WORK: t128, REDUCE: coop` receipt recorded while the binder ignored the cooperative reduce
+  carried the serial kernel's time; when #813 honoured it, 128 threads shared a four-element reduce: `pre4096` 25.1 →
+  2.82 ms per layer once re-recorded serial (224 µs), `pre16` 1.55 → 1.27 ms. Seven post receipts with two cooperative
+  reduces and one block per output cell, the same way: `post-sym` 64.9 → 40.3 ms at the 512 hint, `post16` 9.88 → 8.85
+  ms, `post4096` 537 → 258 ms.
+- **Tensor-core tiles on the block's plain matmuls**, from kernel-scoped A/Bs (a scratch golden with one receipt
+  respelled, sixteen cards running sixteen candidates): `WORK: w2x2, TILE: mma_m8n8k4_f16_f32/f4x4/k8, STAGE: d2/smem`
+  on the 4,096 → 2,048 pieces (9,457 → 142 µs) and `w2x4 f4x2/k8 d2/smem` on the 2,048 → 4,096 piece (17,244 → 414 µs)
+  and the m4096 matmul (140,438 → 2,745 µs); staging is what makes the tile pay (895 µs unstaged against 142). The
+  symbolic post twin went 40.3 → 4.84 ms at its hint, the m4096 twin 258 → 121 ms.
+- **The M=1 post lead's two serial pieces on threads:** its residual `WORK: t256` 668 → 15.5 µs, its sum of squares
+  `t256 coop` 150 → 3.1 µs; the set 851 → 52 µs per layer.
+- **The width-16 expert twin re-tiled at depth 1** from forty-eight candidates: gate/up `w2x1 f1x1/k8 d2/smem` 554 →
+  265 µs, down `w2x4 f1x1/k8 d1/smem` 310 → 159 µs (the wide `f4x4/k8` tile that won the post matmuls is the worst row
+  here: the expert rows are narrow); the twin 864 → 430 µs, TPOT 0.235 → 0.214 s. #864 then removed the depth-2 ring
+  on Volta (wrong answers on nine of sixteen measured grids), and the re-tile at depth 1 measures 490 µs; the symbolic
+  expert twin's root piece offers no tensor-core tile since then (20.4 ms against 1.8 ms) and is what a single
+  request's prefill pays.
+- **The tensor core's K chunk after #897.** #897's refresh recorded `mma` tiles at the default `bk` of 1 (no `/kN`
+  suffix: one `m8n8k4` step per shared-memory stage). The width-16 expert gate/up piece `w4x1 f1x4 d1/smem` 3,861 µs →
+  `w2x1 f1x1/k8 d1/smem` 506 µs, its down piece `w2x4 f1x1` 1,464 → `w2x2 f1x1/k8` 279 µs (the same spelling at `/k2`,
+  `/k4`, `/k8`: 1,008, 530, 307 µs); each post twin's last matmul lead `w4x2 f2x2/k8 d2/smem` at width 4,096 (263 ms →
+  1.48 ms), `w2x4 f4x2/k8 d2/smem` symbolic (16.4 ms → 227 µs), `w2x1 f1x1/k8 d2/smem` at M=1 (1,232 → 115 µs) and `w2x2
+  f1x1/k8 d2/smem` at M=16 (511 → 114 µs). Only those last-matmul leads offer `/k8` in the post twins; the other
+  tensor-core pieces there offer `bk` 1 at `d1/smem` alone. Two rounds of sixteen cards per twin family, repeated within
+  1%; the expert still runs about twice its 09-20 kernels (410 / 159 µs), which is #897's lowering, not the schedule.
+- **`k_div_35`**: the pre-#813 rows put two cooperative reduces on seams the codec no longer allows together; one
+  `coop-t` seam measured 16.7 / 2.5 / 53.5 µs at dynamic / m16 / m4096 against main's picks of 140 / 4.7 / 492 µs.
+- **The restamp round (09-22, rec34, on `dab7bce9`)**, per layer against the old file on the #860 tree: post m1 406 →
+  449 µs, post m16 8,847 → 5,966, symbolic post 4,836 → 3,625 at the 512 hint, post m4096 120.6 → 84.6 ms, expert m16
+  430 → 719 µs, expert symbolic 2.44 → 22.6 ms, expert m4096 22.5 → 14.2 ms. Cooperative reductions ran 2 – 30× slower
+  on that tree than on `9607133e` for the same spelling (a `coop-t` t256 piece 61.8 → 133.5 µs; a single `coop` t128
+  residual 303 µs → 11 ms), which is why serial wins everywhere since.
+
+### Correctness
+
+Gate (c) passed on 09-12 ("Red, blue, and green are three classic colors…"), and every re-record through 09-20 left
+the long prompt's completion unchanged word for word, which was the only correctness evidence a post twin had. Gate
+(d)'s greedy half, the four-prompt corpus of 2026-08-26 at temperature 0 against the fork's dumps: code 32/32, medium
+32/32, short 5/32 (` Spain` −1.114 against ` Italy` −1.324, the same near-tie as in August), long 1/32 (` is` −1.075
+against `.` −0.869, which agreed on all 32 in August); its layer-level half never ran. Gate (c) was red from #829
+(09-20) to #893 without anyone seeing it, because the election's random-input check prints as a non-fatal warning and
+no boot reads it; the width-4,096 post twin's check returns NaN since 09-17 and is still unexplained. A post target
+has no eager reference, so `run --bench` compares a pinned row against the greedy of the same file and its exit code
+proves nothing; the `/k8` post rows were checked by compiling each target strict from both goldens and running both on
+the same seeded inputs (host `pair908.py`): bit-identical, and at width 4,096 the same 3,257 non-finite cells in the
+same places on both (f16 overflow of random inputs at 65,504).
+
+### Compiler defects met on the way
+
+Fixed: the constant-fold pass left a two-lane range unfolded under a broadcast, so the expert compile died at plan
+construction and no replay command reaches that step (#807); the cut splicer renamed a workspace read but not the
+values derived from it (#827); a schedule row carrying the identity a cut fork is offered on priced the fused arm with
+a piece's timing, and same-shaped twins were told apart by mint order (#826); an empty receipt row was dropped from
+the evidence index (#834); a split row that outbid its sibling on a retime, whose pieces had no rows (#849); the merge
+rule's copy-drop that changed this model's fusion (#875); the stored loops never re-lowered for #863's normalization
+(#878); serving publishing no precision pin after #868 made fast math the default (#891); the compute-filled B slab
+staging one producer edge's last result for every channel (#893); the one-value-per-name sweep stopping at nested
+scopes (#895). Open: a replay from another compiler tree wipes the one-fingerprint identity store (draft #851); #863's
+normalization lowers the divide kernels to chains of nested four-element folds (item 3); the M=1 expert twin offers no
+schedule knob under its cut and its residual runs 1.04 s per launch; the m256 expert twin is absent from the golden
+because the runner's expert prefill tier is a hardcoded constant the serving config cannot declare; the dynamic-width
+Sinkhorn twin cannot take its cut (a reshape lowering lockout #813 names); #898 removed the tier the divide pieces'
+rows were composed against and merged with the suite red on them (nineteen rows here, twenty-nine over three recipes),
+by decision, so re-recording on the card was the only fix; a compile reading a tune DB that holds a kernel-set
+decision whose piece is the parent itself (every tune DB this round produced held one to four) recurses without end
+between pricing the arm and pricing the piece, since #888; a tune candidate's serial cut piece fails nvcc with an
+undefined re-spelled name (`in0__s0`) in hundreds of candidates, the one-value-per-name sweep renaming a use whose
+define is not emitted in that scope; `tune --realization` matches a substring, so a width-1 lead also selects the
+width-16 rows and file order decides which is tuned first; an interrupted tune writes nothing into the golden, and its
+DB is harvested with `run --record-greedy` under `EMMY_TUNE_DB` pointing at it; since #885 the Rust runtime opens
+`Device(0)` in every serve worker, on the premise that a worker selects its card through `CUDA_VISIBLE_DEVICES` while
+vLLM's workers select theirs with `torch.cuda.set_device`, so a TP8 × PP2 boot of `main` runs GPU 0 out of memory at
+weight load — boot40 ran with a host-only patch handing the runtime torch's current device, and the repo fix belongs
+to the runtime; and the sixteen workers' imports of the golden into the shared tune DB race on its unique keys, so a
+boot seeds the DB with one full-scope import first (`seed41.sh`); #880's re-record of the three post sets carries four
+identities no kernel on `main` mints and refuses all three post twins at the main kernel's second occurrence, where
+this round's rows on the fresh loops elect; a route row recorded with `--record` alone (a measurement, no
+`kernel_set`, no receipt per piece) prices nothing under #888, and both of #897's M=1 route rows were that; the M=1
+expert route's `--record-greedy` under its one cut pin runs past 600 s of GPU time on the prior's piece picks.
+
+### Not established
+
+The numbers above Stage 5 are directional: separate invocations, different envelopes and prompt shapes, one repeat
+each. Stage 5's A/B is the balanced comparison, at one envelope only (context 4,096).
+
+## Operations handoff
+
+The host's address is deliberately absent from this repo; it lives in the operator's notes and is used only inside
+commands.
+
+**Layout.** `~/emmy-serve` is the serving checkout the boot container installs with `pip install -e .` — a plain
+directory, not a git checkout, so sync it with `rsync -a --delete --exclude __pycache__ emmy/ HOST:~/emmy-serve/emmy/`
+before recording anything. A boot can equally mount a revision-named copy (`~/emmy-main-<sha>`; the 2026-09-24 boot's
+`~/serve-evidence/boot37.sh` mounts `~/emmy-main-1494e4b`), which leaves the shared checkout alone and says what ran.
+Serving evidence, golden copies, boot, record and probe scripts live in `~/serve-evidence/`. The compiler tree for
+tuning work is `~/emmy-durations/` with its own `./venv`, and `py-spy` there is the tool that names a stalled program
+(`sudo -n ~/emmy-durations/venv/bin/py-spy dump --locals --pid PID`, one dump per rank, simultaneously).
+
+**A post-#885 tree in the serving image.** The image has no cargo, so a tree that needs the Rust runtime
+(`emmy.emmy_runtime`) is built once inside it: `~/serve-evidence/build-cc2b.sh` runs rustup in a throwaway container
+over the mounted tree and leaves the extension in the tree (`~/emmy-main-cc2bb92f` is `main` at #897 built this way,
+`~/emmy-main-6c79e1d4` main at #898); later containers `pip install -e .` without cargo and import it. Records run as
+`rec43.sh DEVICE TAG GOLDEN "LEAD|K=V,..."` (a lead under its route as `EMMY_KNOBS` pins, `--record-greedy`, one copy of
+the golden per container), tunes as `tune40.sh` (interrupt with `docker exec C pkill -INT -f "emmy.emmy tune"` once the
+per-kernel bests plateau, strip the DB's self-loop decisions with `dbcycles.py`, harvest with `rec42.sh`), the tune-DB
+seed as `seed43.sh GOLDEN` and the boot as `boot43.sh GOLDEN` (the seeded DB, the host device patch
+`patch_device_host.py TREE` applied to the tree first, `probe43.sh` for the timings). On the Mac, `elect88.py GOLDEN
+[TWIN…]` is the strict election of every twin program under the file's card and `forks88.py` the list of every fork a
+twin would refuse. `main` at #907 opens the runtime on torch's current device, so a tree at or after it needs no device
+patch; `~/emmy-main-cc2bb92f` predates it and carries the patch. Hand-picked schedule sweeps: `offers908.py` /
+`mmaoffers.py GOLDEN TWIN OUT.json` (on the Mac: every leaf a twin's schedule forks offer, keyed by the structural
+identity that is a piece row's suffix), `ab908.sh` / `abpost.sh` (one piece respelled in a scratch golden, strict,
+nothing recorded, one card each; `*round.sh` launches sixteen, `*wait.sh` summarizes), `rec908.sh` / `recpost908.sh`
+(respell and `--record-greedy --strict-evidence`), `pair908.sh` (the same-input output comparison above); cut routes:
+`cutforks.py GOLDEN TWIN` (every seam a kernel's cut fork offers) and `abroute.sh` / `abseams.sh` (a target under a
+hand-pinned route, not strict). Those respell and carry scripts edit the YAML wire; since #912 a golden is JSON with one
+row per line, so a respell there is one row's JSON rewritten (`json.dumps` of the row reproduces the file's spelling).
+`~/emmy-main-a091dbe7` is `main` at #910 (post-#909/#912, runtime built with `build-a091.sh`, no patch): `rec911.sh`
+records there, `pair911.sh NAME "GOLDEN|PINS|strict-or-loose"...` compares a target's outputs across compiles on the
+same inputs, `seed46.sh` seeds the tune DB through the post-#909 golden package and `boot46.sh` boots. On JSON goldens:
+`abroute911.sh` benches a target under a hand-pinned route (not strict), `abjson.sh` respells rows (`respell_json.py`)
+and benches strict, `rec911s.sh` records strict, `fold_route.py` folds an appended route decision row into its seed;
+`*wait.sh` summarize. `~/emmy-main-7be6b330` is `main` at #919 (the same compiler plus #917's recorder); its scripts
+carry `919` in the name (`abroute919.sh`, `abj919.sh`, `rec919.sh`, `rec919s.sh`, `pair919.sh`, `abj919round.sh` for one
+respelled line per card) and `abe919.sh` / `abe919round.sh` edit a scratch golden with `edit_json.py` (`set:`, `add:`
+for a row a strict A/B needs that no record wrote, `respell:`); `seed48.sh` and `boot48.sh` boot there. Those scripts
+default to `~/emmy-main-6556d75e` (`main` at #914) since #925, `~/emmy-main-0a891de2` being `main` at #921; `boot51.sh`
+boots there and `probe50c.sh N [PROMPT_TOKENS MAX_TOKENS]` runs N probes at once, so decode runs at width N (a repeated
+prompt is a prefix-cache hit, so concurrent long prompts do not measure a cold 4,096-token step). Copy a boot script by
+hand, not with a digit `sed`: `s/48/49/` also rewrote the checkpoint revision hash, and the boot died offline. The Stage
+4 release checkout is `~/emmy-stage4` (a GitHub clone of #928's branch, `dist/` holding the sdist built on the Mac with
+`scripts/prepare_dist.py --recipes` and `python -m build --sdist`, since the host has no Rust toolchain; build the base
+with `make -o wheel vllm-emmy-image MODEL=deepseek-ai/DeepSeek-V4-Flash-0731`); its `venv/bin/emmy` is a host-only shim
+running `emmy` in the base image so `make serve-goldens` works, and `~/serve-evidence/stage4-probe.sh IMAGE` boots a
+baked image and diffs its Triton and cubin sets around a request.
+
+**Never touch** `~/.cache/emmy/autotune.db` (the real tune DB), `~/emmy`, `~/emmy-dsv4`, `~/emmy-fix-backup`,
+`~/emmy-durations/_verify/gap3-tune/` (partial rows that regress the election — never merge that DB), or
+`~/.cache/emmy/verify3/` (another user's live tuning session). Another user tunes on this host: run `nvidia-smi
+--query-compute-apps=gpu_uuid,pid,process_name --format=csv` before every launch, use only devices nobody holds, never
+kill a foreign process, and delete nothing when done. `pkill -f` over ssh matches its own remote command line and
+kills the session — ship a script and run it by path. On a CUDA-less Mac never run `make test-durations`; hand-insert
+a `tests/durations.json` entry at the measured value if the durations gate fires.
 
 ## Risks
 
-- Stage 0 is open-ended compiler work; nothing below it ships without it. It has now reopened once: the twins sit on
-  the fusion/tile-lowering path, so any rewrite there (#648 was one) can re-block serving without touching this
-  model's code. Treat a green gate (c) as revision-scoped evidence, not a permanent one.
-- The fork's attention inside a foreign model class is the largest integration unknown (cache registration,
-  metadata, capture breaks, `VLLM_MULTI_STREAM_GEMM` aux streams); mitigated by the stage-3 hybrid boot.
-- Per-hit-expert dispatch at top-6 × 43 layers is a known latency wall (~0.23 ms/launch framing); the fixed-slot
-  tier only covers T=1 and needs per-rank tables under sharding.
-- Replicated mHC/norm/shared-expert compute across 8 TP ranks wastes ~7/8 of that compute; acceptable at first
-  (it is small next to experts), but it caps the ceiling.
-- vLLM/fork version drift: everything pins to the one 1Cat image; a fork bump reopens the weight-mapper and
-  attention-API assumptions.
-
-## Effort
-
-Stage −1: DONE (~2 h). Stage 0 round one: DONE (fixed upstream by #602). Stage 1: DONE (#651). Stage 2: DONE (#656).
-Stage 3 in-repo: DONE (#662); gate (c) passed once at `ab1ad4592`, gate (d)'s token-ID half with it.
-
-**Stage 0 is no longer an evidence gap — what is left is kernel quality.** Partitioning (#693/#694), the compiling
-composed cut (#700), the serial-work stamp (#702), the composed route rows (#739), the route-row pricing (#741), the
-recorder's lock (#751), the carrier taken apart (#752), the tail's own name (#757), the projection's own spelling
-(#759) and the per-kernel grid view (#770) have all landed. Round seven closed the evidence question outright: the
-golden now carries a measured row for every kernel the server compiles, serving elects from it with zero prior
-fall-throughs, and the boot reaches `Application startup complete`.
-
-What holds serving now is a compiler gap with three named programs — `pre` at the 4096 chunk (~1.94 s per layer), the
-single-token expert program (~4.9 s) and `post` at the decode widths (~76 ms). Across 43 layers any one of them
-exceeds vLLM's 300 s `sample_tokens` RPC budget, which is what a completion request dies on today. Measuring them
-harder will not help: the recorded arms and the prior's guesses land within a percent of each other. Also still owed,
-and now on the critical path rather than beside it: `run --golden` needs finite inputs and an independent reference,
-because `--strict` refuses these twins — the expert output is non-finite on random inputs, so no bench can carry a
-correctness verdict. Then Stage 4 (warm/bake/verify), Stage 5 (1–2 days), and stage 6 (MXFP4 + tuning) a further
-1–3 weeks.
+- Kernel quality is open-ended, and the twins sit on the fusion, cut and tile-lowering path, so any rewrite there can
+  re-block serving without touching this model's code. Treat a green gate as revision-scoped evidence; #804 staled 87
+  rows of a clean file in one merge, #863 changed the fusion, #883 re-shaped two pieces per post twin.
+- A single unrecorded shape is enough to make the model unservable, as `pre1` at M=1 was. Recording is not a finishing
+  step here; it is the mechanism.
+- A recorded row is not an elected row: a bad price beside it, or a piece without a row, can make a cut lose.
+- Per-hit-expert dispatch at top-6 across 43 layers is a known latency wall (~0.23 ms per launch of framing); the
+  fixed-slot tier covers only single-token decode and is excluded on an expert shard.
+- Replicated stream-mixing, norm and shared-expert compute across 8 tensor-parallel ranks wastes most of that compute.
+  Small next to the experts, but it caps the ceiling.
+- Everything pins to one 1Cat image; a fork bump reopens the weight-mapper and attention-API assumptions.

@@ -2,7 +2,7 @@
 
 Augments :class:`emmy.compiler.dtype.DataType` with CUDA-specific
 information: the C type name used in kernel source, any header that
-must be ``#include``'d, and the cupy dtype used for device allocations.
+must be ``#include``'d.
 
 Per-buffer / per-decl dtype lookup helpers (``nbytes_of``) accept the
 legacy CUDA C-name spellings (``"float"``, ``"half"``, ...) that older
@@ -130,13 +130,6 @@ def cuda_includes(dtypes: Iterable[str | DataType]) -> list[str]:
         if header is not None:
             seen.setdefault(header, None)
     return list(seen)
-
-
-def cupy_dtype(dtype: str | DataType):
-    """cupy dtype for device buffer allocation. Lazy-imports cupy."""
-    import cupy as cp  # noqa: PLC0415
-
-    return cp.dtype(_dtype.get(dtype).np)
 
 
 def nbytes_of(dtype: str | DataType) -> int:

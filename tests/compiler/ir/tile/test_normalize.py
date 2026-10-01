@@ -15,13 +15,13 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Fold, Lambda
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Let, Load, Loop, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.normalize import _share_common_cones
 from emmy.compiler.ir.tile.path import family_sites, sites
 from emmy.compiler.pipeline import Pipeline
-from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams
-from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
+from emmy.compiler.pipeline.passes.tile._cut import cuttable_seams
+from emmy.compiler.pipeline.passes.tile._fromloop import fold_from_loop
 from tests.compiler.helpers import case_target_tile
 from tests.compiler.terms import contraction, projection, reduction, slab
 
@@ -32,7 +32,7 @@ def _lift(body: Body) -> TileOp:
     graph = Graph()
     graph.add_node(LoopOp(body=body), [], Tensor("out", (1,)), node_id="out")
     graph.outputs = ["out"]
-    return Pipeline.build(["lowering/tile"], select=["lift"]).run(graph).nodes["out"].op
+    return Pipeline.build(["tile/lift"], select=["lift"]).run(graph).nodes["out"].op
 
 
 def _reduce_loop(*stmts, axis: Axis = K32) -> Fold:
@@ -182,6 +182,61 @@ def test_sibling_output_sweeps_stay_sweeps() -> None:
     assert tuple(tuple(axis.name for axis in store.sweep) for store in tile.output_specs) == (("n",), ("p",))
 
 
+def _independent_output_tile(reverse=False):
+    p, q, r, s = (Axis(name, size) for name, size in zip(("p", "q", "r", "s"), (3, 5, 7, 2), strict=True))
+    first = slab("xv", "x", "p", "q")
+    second = projection((slab("yv", "y", "p", "r"),), (Assign(name="zv", op="relu", args=("yv",)),), ("zv",))
+    third = slab("wv", "w", "s")
+    root = projection((first, second, third), (Let(name="unused", value=Literal(0)),), ("unused",))
+    specs = (
+        OutputSpec(write=Write(output="xo", index=(Var("p"), Var("q")), value="xv"), sweep=(p, q)),
+        OutputSpec(write=Write(output="yo", index=(Var("p"), Var("r")), value="zv"), sweep=(p, r)),
+        OutputSpec(write=Write(output="wo", index=(Var("s"),), value="wv"), sweep=(s,)),
+    )
+    return _tile(root, p, q, r, s, output_specs=specs[::-1] if reverse else specs)
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_dead_root_value_does_not_multiply_independent_output_sweeps(reverse):
+    tile = _independent_output_tile(reverse)
+    domains = {}
+
+    def visit(body, path=()):
+        for stmt in body:
+            if isinstance(stmt, Loop):
+                visit(stmt.body, (*path, stmt.axis.name))
+            elif isinstance(stmt, Write):
+                domains[stmt.output] = set(path)
+
+    visit(tile.loop_body)
+    assert domains == {"xo": {"p", "q"}, "yo": {"p", "r"}, "wo": {"s"}}
+
+
+@pytest.mark.xdist_group("cuda")
+def test_independent_output_computations_match_on_cuda():
+    import numpy as np
+
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.ir.base import InputOp
+    from tests.compiler.helpers import skip_if_no_cuda
+
+    skip_if_no_cuda()
+    tile = _independent_output_tile()
+    graph = Graph()
+    arrays = {
+        name: np.arange(np.prod(shape), dtype=np.float32).reshape(shape) - 4 for name, shape in (("x", (3, 5)), ("y", (3, 7)), ("w", (2,)))
+    }
+    for name, values in arrays.items():
+        graph.add_node(InputOp(), [], Tensor(name, values.shape), node_id=name)
+    graph.add_node(tile, list(arrays), outputs=[Tensor(name + "o", values.shape) for name, values in arrays.items()])
+    graph.inputs = list(arrays)
+    graph.outputs = [name + "o" for name in arrays]
+    backend = CudaBackend()
+    actual = backend.run(backend.compile(graph), input_data=arrays)[0].outputs
+    for name, values in arrays.items():
+        np.testing.assert_array_equal(actual[name + "o"], np.maximum(values, 0) if name == "y" else values)
+
+
 def _swept_reduce(*, per_cell: bool) -> TileOp:
     """One store swept over ``n``, computed from a reduce over ``r``.
 
@@ -207,7 +262,7 @@ def _swept_reduce(*, per_cell: bool) -> TileOp:
 def test_a_pointwise_sweep_stays_a_loop_for_the_worker_split() -> None:
     """A kernel whose only work IS the sweep keeps it. Nothing folds, so nothing would be
     replicated by binding it — but the kernel materializer already distributes a bare output sweep
-    across a worker inventory, and `cases/reduce/rms-norm-cut-sweep-work.yaml` pins the row that
+    across a worker inventory, and `cases/reduce/rms-norm-cut-sweep-work.json` pins the row that
     does it (885.9 us walking the sweep in one thread, 4.2 us split across 512). Taking the axis
     onto the grid here would decide that for the schedule instead of offering it."""
     body = (Load(name="v", input="x", index=(Var("m"), Var("n"))), Assign(name="out_v", op="negative", args=("v",)))
@@ -291,12 +346,29 @@ def test_matvec_recovers_an_implicit_unit_row_through_an_output_reshape() -> Non
     assert isinstance(tile.op, Fold) and tile.op.as_contraction() is not None
 
 
+def test_matvec_keeps_its_unit_row_beside_grouped_columns() -> None:
+    group, n, k = Axis("group", 8), Axis("n", 16), Axis("k", Dim(32))
+    product = _matmul(a_index=(Var("k"),), b_index=(Var("k"), Var("group") * 16 + Var("n")))
+    tile = _tile(
+        product,
+        k,
+        free=(group, n),
+        output_specs=(OutputSpec(Write(output="out", index=(Literal(0, "int"), Var("group"), Var("n")), value="acc")),),
+    )
+
+    assert tuple(axis.name for axis in tile.place.free) == ("_um", "group", "n")
+    assert tuple(axis.name for axis in tile.grid_sched._mn_for(tile.op)) == ("_um", "n")
+    assert tile.family_sites["TILE"] == (0,)
+    rebuilt = TileOp(op=tile.op, place=tile.place, axes=tile.axes, output_specs=tile.output_specs)
+    assert rebuilt.place == tile.place
+
+
 def test_promoted_attention_output_sweep_closes_the_a100_b_seam_idempotently() -> None:
     """The reduced Qwen3 target needs its promoted value-width axis to close computed B."""
-    tile = case_target_tile("attention/rmsnorm-gqa-b-cut.yaml")
+    tile = case_target_tile("attention/rmsnorm-gqa-b-cut.json")
     reconstructed = TileOp(op=tile.op, name=tile.name, place=tile.place, axes=tile.axes, output_specs=tile.output_specs)
 
-    assert tuple(axis.name for axis in tile.place.free) == ("a0", "a1", "a6")
+    assert tuple(axis.extent for axis in tile.place.free) == (Dim(4), Dim(4), Dim(16))
     assert all(spec.sweep == () for spec in tile.output_specs)
     assert reconstructed.op is tile.op
     # The authored seam — the score's K cone — is offered on the promoted tree.
@@ -411,6 +483,83 @@ def test_normalization_prunes_an_operand_component_no_reader_reads() -> None:
     assert not [stmt for stmt in edge.lift.body if isinstance(stmt, Load) and stmt.input == "sdpa_scale"]
 
 
+@pytest.mark.parametrize("stored_second", [False, True])
+def test_unread_planar_state_drops_its_independent_coordinate(stored_second) -> None:
+    """A shared reduction must not give a reader the coordinates of an unused state."""
+    r = Axis("r", 4)
+    stats = reduction(
+        r,
+        (slab("xv", "x", "m", "r"), slab("yv", "y", "n", "r")),
+        (Assign(name="sx__v", op="copy", args=("xv",)), Assign(name="sy__v", op="copy", args=("yv",))),
+        ("sx", "sy"),
+        "maximum",
+    )
+    root = projection((stats,), (Assign(name="out", op="negative", args=("sx",)),), ("out",))
+    specs = [OutputSpec(Write(output="o", index=(Var("m"),), value="out"))]
+    if stored_second:
+        specs.append(OutputSpec(Write(output="tap", index=(Var("n"),), value="sy")))
+    tile = _tile(root, N16, r, free=(M8,), output_specs=tuple(specs))
+    states = {site.node.exposes: site.node for site in sites(tile.op) if site.node.axis is not None}
+    assert set(states) == ({("sx",), ("sy",)} if stored_second else {("sx",)})
+    assert states[("sx",)].free_axes == frozenset({"m"})
+    if stored_second:
+        assert states[("sy",)].free_axes == frozenset({"n"})
+    assert all(len(stat.init) == len(stat.base.results) == len(stat.lift.results) == 1 for stat in states.values())
+    assert TileOp(op=tile.op, place=tile.place, axes=tile.axes, output_specs=tile.output_specs).op is tile.op
+
+    import numpy as np
+
+    from emmy.compiler.ir.loop.runner import execute_loop_op_cpp
+
+    x = np.arange(32, dtype=np.float32).reshape(8, 4) - 17
+    y = np.arange(64, dtype=np.float32).reshape(16, 4) - 33
+    shapes = {"o": (8,), **({"tap": (16,)} if stored_second else {})}
+    loop = LoopOp(body=tile.loop_body)
+    actual = execute_loop_op_cpp(loop, {"x": x, "y": y}, shapes)
+    outputs = dict(zip(loop.outputs, actual if isinstance(actual, tuple) else (actual,), strict=True))
+    if stored_second:
+        np.testing.assert_array_equal(outputs["tap"], y.max(axis=1))
+    np.testing.assert_array_equal(outputs["o"], -x.max(axis=1))
+
+
+def test_planar_state_pruning_does_not_depend_on_operand_object_sharing() -> None:
+    from dataclasses import replace
+
+    stat = reduction(
+        K32,
+        (slab("xv", "x", "m", "k"),),
+        (Assign(name="sx__v", op="copy", args=("xv",)), Assign(name="ss__v", op="multiply", args=("xv", "xv"))),
+        ("sx", "ss"),
+    )
+
+    def normalized(second):
+        left = projection((stat,), (Assign(name="left", op="negative", args=("sx",)),), ("left",))
+        right = projection((second,), (Assign(name="right", op="negative", args=("ss",)),), ("right",))
+        root = projection((left, right), (Assign(name="out", op="add", args=("left", "right")),), ("out",))
+        return _tile(root, K32, free=(M8,)).op
+
+    assert normalized(stat) == normalized(replace(stat))
+
+
+def test_readers_of_independent_shared_statistics_keep_only_their_own_coordinates() -> None:
+    stat = reduction(
+        K32,
+        (slab("xv", "x", "m", "k"), slab("yv", "y", "n", "k")),
+        (Assign(name="sx__v", op="copy", args=("xv",)), Assign(name="sy__v", op="copy", args=("yv",))),
+        ("sx", "sy"),
+        "maximum",
+    )
+    left = projection((stat,), (Assign(name="left", op="negative", args=("sx",)),), ("left",))
+    right = projection((stat,), (Assign(name="right", op="negative", args=("sy",)),), ("right",))
+    root = projection((left, right), (Assign(name="out", op="add", args=("left", "right")),), ("out",))
+    tile = _tile(root, K32, free=(M8, N16))
+    by_result = {site.node.exposes: site.node for site in sites(tile.op)}
+    assert by_result[("left",)].free_axes == frozenset({"m"})
+    assert by_result[("right",)].free_axes == frozenset({"n"})
+    assert tile.op.free_axes == frozenset({"m", "n"})
+    assert TileOp(op=tile.op, place=tile.place, axes=tile.axes).op is tile.op
+
+
 def test_normalization_keeps_a_component_only_a_boundary_store_reads() -> None:
     """A store is a reader too: a sweep's per-cell projection reaches its ``Write`` with no lift
     binding it, so the prune keeps what the output specifications name."""
@@ -431,7 +580,7 @@ def test_normalization_shares_structurally_identical_cones() -> None:
     sites (attention's softmax statistics, once in the weight cone and once in the epilogue) are
     one object, so placement sees one value and a composed cut materializes it once. Severed
     sharing is the recompute class PR #679 measured at three orders of magnitude."""
-    tile = case_target_tile("attention/rmsnorm-qk-sdpa-composed-cut.yaml")
+    tile = case_target_tile("attention/rmsnorm-qk-sdpa-composed-cut.json")
 
     by_identity = {id(site.node): site.node for site in sites(tile.op)}
     by_value: dict[tuple, list[Fold]] = {}
@@ -847,3 +996,65 @@ def test_an_unfed_fold_is_an_operand_edge_too() -> None:
 
     assert out.axis is not None or any(edge.axis is not None for edge in out.operands)
     assert not any(isinstance(stmt, Fold) for stmt in out.lift.body)
+
+
+def test_a_name_two_stores_ride_at_different_extents_is_not_one_axis() -> None:
+    """Loop IR scopes its axes lexically, so two sibling nests may spell one name at two extents,
+    and ``LoopOp.axes`` deduplicates them on the name. Promoting such a name sizes the grid for
+    whichever extent the dedup kept, and every store riding the other is written over the wrong
+    cells: a Gated DeltaNet chunk kernel this compiler minted returned half of one output as zeros
+    that way, faster than eager and with nothing to say it was wrong. Declining leaves the kernel
+    sweeping in one block — slow, and correct, which is what this refusal is for."""
+    from emmy.compiler.ir.tile.ir import promoted_sweep
+
+    op = projection((_matmul(),))
+    wide = OutputSpec(write=Write(output="wide", index=(Var("m"), Var("n")), value="acc"), sweep=(N16,))
+    narrow = OutputSpec(write=Write(output="narrow", index=(Var("m"), Var("n")), value="acc"), sweep=(Axis("n", 8),))
+
+    assert promoted_sweep(op, (wide, wide)) == {"n"}, "one axis two stores ride at one extent still promotes"
+    assert promoted_sweep(op, (wide, narrow)) == set()
+    assert promoted_sweep(op, (narrow, wide)) == set(), "and the refusal does not depend on which store is first"
+
+
+def test_a_pointwise_sweep_under_a_unit_row_promotes() -> None:
+    """A decode row is a static unit free axis: it launches one block like no free axis at all, so a
+    pointwise term's shared sweep is the only axis the launch can spread over. Kept a sweep, the
+    Gemma 4 width-1 q-norm piece walked 16 heads in 16 threads and 512 dims serially (20 us for 1)."""
+    from emmy.compiler.ir.tile.ir import promoted_sweep
+
+    op = projection((slab("x", "x", "h", "d"),))
+    store = OutputSpec(write=Write(output="out", index=(Var("h"), Var("d")), value="x"), sweep=(Axis("h", 16), Axis("d", 512)))
+
+    assert promoted_sweep(op, (store,), free=(Axis("_row", 1),)) == {"h", "d"}
+    assert promoted_sweep(op, (store,), free=(Axis("m", 4),)) == set(), "a real free axis still leaves the sweep to the schedule"
+
+
+def test_root_collapses_onto_the_operand_the_stores_read() -> None:
+    """The Gated DeltaNet chunk shape: the boundary reads its value off an operand and the root's own
+    result is a statistic nothing keeps. Left standing, the root holds an invariant reduce alive, and
+    ``promoted_sweep`` will not promote a store sweep past a reduce that does not read it — so the
+    kernel keeps a one-axis placement and walks every cell of the sweep in one block."""
+    carried = reduction(
+        K32,
+        (slab("near", "x", "m", "n", "k"),),
+        (Assign(name="carried__v", op="multiply", args=("near", "near")),),
+        ("carried",),
+    )
+    invariant = reduction(
+        K32,
+        (slab("far", "y", Literal(0, "int"), Var("k")),),
+        (Assign(name="stat__v", op="multiply", args=("far", "far")),),
+        ("stat",),
+    )
+    root = projection((invariant, carried), (Assign(name="dead", op="multiply", args=("stat", "stat")),), ("dead",))
+    tile = _tile(
+        root,
+        N16,
+        K32,
+        free=(M8,),
+        output_specs=(OutputSpec(write=Write(output="out", index=(Var("m"), Var("n")), value="carried"), sweep=(N16,)),),
+    )
+
+    assert tile.op == carried  # the root and the operand only its dead lift bound are gone
+    assert all(_input(edge) != "y" for edge in tile.op.operands)
+    assert [axis.name for axis in tile.place.free] == ["m", "n"]  # the store sweep promotes

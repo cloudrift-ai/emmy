@@ -38,7 +38,7 @@ from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.pure.twist import Recipe, Twist
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, OutputSpec, Stmt, StridedLoop
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Load, Loop, OutputSpec, Pre, Select, Stmt
 from emmy.compiler.ir.stmt.body import free_names
 
 # ``Body.structural_key()`` dispatches :func:`emmy.compiler.ir.stmt.passes.rewrite` over every
@@ -145,6 +145,52 @@ class ReductionView:
 
 
 @dataclass(frozen=True)
+class AffineView:
+    """A carried state's step read as AFFINE in the state, acting column-wise: every carrier read
+    keeps the cell's own coordinate at every position but ``mixed``, so the step is ``S ← A·S + b``
+    with ``A`` a matrix over the mixed axis alone, applied to every column of the block alike, and
+    two steps compose as affine maps. ``kept`` is the own position a probe packs basis vectors
+    along — the last one — so ``A`` is read off one walk of the step from the identity seed. A step
+    that reads its own cell alone has no mixed position (``None``): ``A`` is diagonal, and one walk
+    from a seed of ones reads it."""
+
+    state: str
+    mixed: int | None
+    kept: int | None
+
+
+#: The name a matcher spells both sides' bound axis as, so an operand that CAPTURES it compares
+#: alpha-invariantly. Reserved: no kernel axis is spelled this way.
+_MATCH_AXIS = "_match_axis"
+
+
+def _rebind(term: Fold, name: str) -> Fold:
+    """``term`` with the axis it BINDS spelled ``name`` — in its lift and in every operand that
+    captures it.
+
+    Not :func:`_rewrite_kind` on the term: that applies σ hygienically, and a term's own axis is
+    precisely the binder it drops σ for. Here the binder is what we are renaming, so the rename is
+    applied at this node and σ handed to the subtree unmodified; an operand that rebinds the same
+    spelling drops it for its own subtree, which is the hygiene that still applies.
+    """
+    old = term.axis
+    sigma = Sigma({old: Var(name)})
+
+    def axis_fn(axis, old=old, name=name):
+        return replace(axis, name=name) if axis.name == old else axis
+
+    return replace(
+        term,
+        operands=tuple(_rewrite_kind(edge, lambda n: n, sigma, axis_fn) for edge in term.operands),
+        lift=Lambda(
+            params=(name, *term.lift.params[1:]),
+            body=Body(tuple(_rewrite(stmt, lambda n: n, sigma, axis_fn) for stmt in term.lift.body)),
+            results=term.lift.results,
+        ),
+    )
+
+
+@dataclass(frozen=True)
 class Fold:
     """The ONE reduce term — ``reduce(⊕) ∘ map(f)``, the typed successor of the annotated reduce
     ``Loop``. It splits the reduce's **algebra** (the base monoid ``base``, plus the ``twist``
@@ -193,7 +239,18 @@ class Fold:
     # recipe that conjugates it. The ⊕ itself (:attr:`combine`), the serial step and the ``Accum``
     # forms are DERIVED (:attr:`combine` / :attr:`step` / ``__post_init__``). ------------------- #
     lift: Lambda = field(kw_only=True)  # the per-element contribution; CLOSED by ``Lambda.__post_init__``
-    init: tuple[float, ...] = ()  # the ⊕ seeds — op identities for a plain fold; (−inf, 0, …) LSE
+    # The ⊕ seeds — op identities for a plain fold; (−inf, 0, …) LSE; for a carried state the value
+    # it holds before the first step, a constant or the NAME of a buffer of the state's shape
+    # (``Carry.seed``).
+    init: tuple[float | str, ...] = ()
+    # A CARRIED STATE's cell axes, in the order every carrier read indexes them — ``Carry.index``:
+    # this fold's free coordinates, ORDERED, the one fact the term would otherwise lose (a step
+    # that reads only ``S[k, l]`` cannot tell ``S[i, j]`` from ``S[j, i]``, and the two are
+    # different recurrences). Batch and cell are not told apart here or in the Loop IR, whose
+    # ``Carry`` index spans every loop inside the step; which of them a CTA owns is the schedule's.
+    # Empty is the ordinary carrier: one scalar per output cell, the reduce loop inside the free
+    # loops. Non-empty only on a fold whose ⊕ is the action ``next`` (:attr:`carries`).
+    cells: tuple[str, ...] = field(kw_only=True, default=())
     # The BASE monoid's ⊕, as the componentwise program ``base = componentwise(ops, states)`` — one
     # op per carried component, and its RESULTS are the carrier's state names. ``None`` at zero
     # axes, where there is no monoid at all.
@@ -281,7 +338,28 @@ class Fold:
         # edge's result names was load-bearing at the constructor.
         arity = sum(len(edge.exposes) for edge in self.operands)
         assert len(lam.params) >= 1 + arity, f"lift binds {len(lam.params) - 1} params after the axis for {arity} operand result components"
-        assert len(lam.results) == n, "one lift result per monoid component"
+        if self.carries:
+            # A CARRIED STATE: the lift's leading results are the states' next values, and any
+            # result past them is a per-step output the step streams (``exposes``). The step may
+            # read the carrier at other cells through carrier-read operands, each indexing every
+            # cell axis; a coupled state has no observer and no twist of its own.
+            assert len(lam.results) >= n, "a carried state's lift defines every state's next value first"
+            assert self.twist is None and self.observe is None, (
+                "a carried state streams its step's own results; it is neither twisted nor observed"
+            )
+            pending, seen = list(self.operands), set()
+            while pending:
+                edge = pending.pop()
+                if id(edge) in seen:
+                    continue
+                seen.add(id(edge))
+                read = edge.as_carrier_read()
+                if read is not None and read.carrier in self.base.results and len(read.index) != len(self.cells):
+                    raise ValueError(f"carrier read {read.carrier}[{len(read.index)}] against a state with {len(self.cells)} cell axes")
+                pending.extend(edge.operands)
+        else:
+            assert len(lam.results) == n, "one lift result per monoid component"
+            assert not self.cells, "cell axes belong to a carried state: a fold whose ⊕ is `next`"
         # CANONICAL ORIENTATION of a bilinear term: A — the operand every product multiplies —
         # comes first, so ``operands[0]`` IS A by construction. With several channels (the fused
         # gate⊗up edge) A is the argument the products SHARE, and that names it outright; with one
@@ -310,6 +388,15 @@ class Fold:
                 rows = pair[0].free_axes ^ pair[1].free_axes if slabs else frozenset()
                 k_last.sort(key=lambda e: min(e.free_axes & rows, default=""))
                 a_edge = k_last[0] if len(pair) == 2 and k_last else None
+                # One slab and one computed operand: a slab that reads k in an earlier position than
+                # its last is laid out ``B[k, n]``, so the computed operand is A. A GEMV whose input
+                # is a fused prologue (``silu(gate) * up`` into the down projection) otherwise took
+                # the weight as A, which no fragment loader reads down its k column, and lost every
+                # tensor-core tier. The fold alone decides, so a fused tree and the piece formed from
+                # it orient the term the same way.
+                loaded = [e for e in pair if e.as_slab() is not None]
+                if len(pair) == 2 and len(loaded) == 1 and self.axis not in loaded[0].as_slab().load.index[-1].free_vars():
+                    a_edge = next(e for e in pair if e is not loaded[0])
             if a_edge is not None and self.operands[0] is not a_edge:
                 reordered = (a_edge, *(edge for edge in self.operands if edge is not a_edge))
                 bound = tuple(param for edge in reordered for param, held, _ in self.bindings if held is edge)
@@ -344,6 +431,8 @@ class Fold:
         if self.base is None:
             return self.applied.results
         state = self.base.results
+        if self.carries:
+            return (*state, *self.applied.results[len(state) :])
         return state if self.observe is None else (*state, *self.observe.results)
 
     @cached_property
@@ -373,12 +462,12 @@ class Fold:
         """This term restricted to the results ``names`` — same operands and params, body cut to
         what those results need.
 
-        What :meth:`lower` places when a reader takes only SOME of a computed edge's components. A
-        twisted carrier's weight cone carries the score its step folds beside a weight only a
-        schedule wants, and emitting the second costs a transcendental per element for nothing.
+        What :meth:`lower` places when a reader takes only SOME of a computed edge's components.
+        Planar reduction states are independent, so their injection and identity narrow together.
+        Twisted and observed states remain whole because their components can depend on each other.
         Memoized on the term.
         """
-        if self.axis is not None or self.exposes == names:
+        if self.exposes == names or self.twist is not None or self.observe is not None or self.carries:
             return self
         # ``names`` are EXPOSED names — what :attr:`applied` spells — while the body and the lift's
         # own results are in the term's private spelling. The two coincide wherever the body defines
@@ -386,13 +475,40 @@ class Fold:
         # projection over one term per carried state, once a cut renames a child's state to its
         # workspace). They stay positional, so translate before cutting: writing an exposed name
         # into the lift's results leaves a result nothing defines.
-        keep = tuple(self.lift.results[self.exposes.index(name)] for name in names)
+        positions = tuple(self.exposes.index(name) for name in names)
+        keep = tuple(self.lift.results[index] for index in positions)
         members = tuple(self.lift.body.backward_cone(keep).members)
-        return replace(self, lift=replace(self.lift, body=Body(members), results=keep))
+        lead = self.lift.params[: (self.axis is not None) + len(self.bindings)]
+        lift = Lambda.closing(lead, Body(members), keep)
+        if self.axis is None:
+            return replace(self, lift=lift)
+        ops = self.base.components()
+        return replace(
+            self,
+            lift=lift,
+            init=tuple(self.init[index] for index in positions),
+            base=Lambda.componentwise(tuple(ops[index] for index in positions), names),
+        )
 
     def binds_axes(self) -> frozenset[str]:
         """The axis this term binds — what the statement-door ``rewrite`` drops from σ for the subtree."""
         return frozenset() if self.axis is None else frozenset({self.axis})
+
+    @cached_property
+    def carries(self) -> bool:
+        """Whether this fold CARRIES A STATE: its ⊕ is the action ``next`` on every component, so
+        each step's result replaces the state rather than folding into it.
+
+        A recurrence folds the free monoid of step maps under composition — a real monoid, with
+        the identity map as its unit — but the composed map has a bounded form only for a closed
+        family (an affine step composes as a matmul), so what the term stores is that ⊕'s ACTION
+        on the seed, ``S ← step(S, x_c)``, the one form every step has. The state may be a block
+        (:attr:`cells`) whose step reads other cells through carrier-read operands
+        (:meth:`as_carrier_read`); ``next`` has no identity, so every partition arm refuses the
+        fold by the gate it already applies and it lowers as the serial walk, its state a
+        :class:`~emmy.compiler.ir.stmt.leaves.Carry` (:meth:`step`)."""
+        ops = self.base.components() if self.base is not None else None
+        return bool(ops) and all(op.name == "next" for op in ops)
 
     @cached_property
     def combine(self) -> Lambda | None:
@@ -513,11 +629,27 @@ class Fold:
         holds it, and a nested reduce that happens to bind the same name as the loop above still
         hoists. Their extents are the evaluator's, never the term's (:meth:`lower` takes them for
         the closed program).
+
+        Less, too, what the operands themselves PRODUCE. One operand can read a value a sibling
+        exposes — a mask fill's triple feeding both the score and the expectation — and the
+        reader's own ``free_axes`` then carries that name, having nothing below it that defines
+        one. It is not a coordinate: this term binds it and the sibling computes it, so no
+        evaluator can supply an extent. Leaving it in makes :meth:`lower` demand one and refuse a
+        cut that is perfectly well formed.
         """
         space = set(self.lift.params[(self.axis is not None) + len(self.bindings) :])
-        for edge in self.operands:
+        # A carrier read binds the state it reads as its first param so the lambda closes; the
+        # state is a value the enclosing fold carries, not a coordinate.
+        read = self.as_carrier_read()
+        if read is not None:
+            space.discard(read.carrier)
+        # A carried state's cells, and every coordinate its step sweeps a per-step output over,
+        # are the fold's own loops, opened inside its reduce loop (:meth:`lower`): from outside
+        # the fold is one block-valued value evaluated over nothing its operands read.
+        for edge in () if self.carries else self.operands:
             space |= edge.free_axes
-        return frozenset(space - ({self.axis} if self.axis is not None else set()))
+        produced = {name for edge in self.operands for name in edge.exposes}
+        return frozenset(space - produced - ({self.axis} if self.axis is not None else set()) - set(self.cells))
 
     @cached_method
     def as_contraction(self) -> ContractionView | None:
@@ -559,8 +691,6 @@ class Fold:
         if self.axis not in a_space & b_space:
             return None
         left_only, right_only = a_space - b_space, b_space - a_space
-        if len(left_only) > 1 and len(right_only) > 1:
-            return None  # several own axes on BOTH sides: an outer product over batches, not an orientable pair
         if not left_only and not right_only:
             return None  # a dot product over shared axes only carries no output role to tile: a planar reduce
         slab = b_edge.as_slab()
@@ -635,7 +765,16 @@ class Fold:
     @cached_method
     def bilinear_channels(self) -> tuple[tuple[int, Fold], ...]:
         """Every carried state whose per-element contribution is ONE product of ``operands[0]`` by
-        another operand edge, as ``(state index, that streamed edge)`` in carrier order.
+        another operand edge, as ``(state index, that streamed edge)`` in carrier order — the
+        channels of :meth:`channel_operands` without the value each multiplies."""
+        return tuple((index, edge) for index, edge, _ in self.channel_operands())
+
+    @cached_method
+    def channel_operands(self) -> tuple[tuple[int, Fold, str], ...]:
+        """Every carried state whose per-element contribution is ONE product of ``operands[0]`` by
+        another operand edge, as ``(state index, that streamed edge, the result of it the product
+        multiplies)`` in carrier order. The result matters when one edge exposes several — a packed
+        gate/up weight decoded by one lift — since each channel multiplies its own.
 
         The algebraic half of :meth:`as_contraction`, kept apart because the emission wants all of
         them and the geometry only the first: a fused multi-channel edge folds one A against a
@@ -666,7 +805,7 @@ class Fold:
         a_names = {edge.exposes[index] for _param, edge, index in self.bindings if edge is a_edge}
         uniform = {edge.exposes[index] for _param, edge, index in self.bindings if edge is not a_edge and not edge.free_axes}
         based = self.based()  # bilinearity lives in BASE coordinates; ψ divides the product away
-        out: list[tuple[int, Fold]] = []
+        out: list[tuple[int, Fold, str]] = []
         for index, result in enumerate(based.results):
             cone, product = _channel_product(based, result)
             if product is None or len(product.args) != 2:
@@ -678,11 +817,11 @@ class Fold:
                 continue  # a planar fold seeds the ⊕ itself; a recipe's base is a monoid by construction
             if not product.op.distributes_over(plus):
                 continue
-            left = [arg for arg in product.args if _over_a(arg, cone, a_names, uniform)]
+            left = [arg for arg in product.args if _over_a(arg, cone, a_names, uniform | a_edge.free_axes)]
             right = [arg for arg in product.args if (edge := by_name.get(arg)) is not None and edge is not a_edge and edge.free_axes]
             if len(left) != 1 or len(right) != 1 or left[0] == right[0]:
                 continue  # a square, or a product that does not multiply A by exactly one other edge
-            out.append((index, by_name[right[0]]))
+            out.append((index, by_name[right[0]], right[0]))
         return tuple(out)
 
     @cached_method
@@ -698,13 +837,13 @@ class Fold:
         (:meth:`bilinear_channels`, :meth:`tiles_whole`, ``TileOp.contracts``, the atom's channels)
         stays exactly as strict as it was.
 
-        Only what refuses comes apart: a carrier that folds whole is the FUSED form the atom wants
-        (one ldmatrix'd A fragment, N mma chains off it) and stays one term, and a state that is no
-        product of its own — a sum beside a sum of squares, whose two states read one loaded value —
-        stays too, since two terms would read that value twice for nothing. A twisted or observed
-        carrier never comes apart: its states are coupled by the recipe.
+        Independent states over different coordinates also separate: combining a row statistic
+        with a column statistic otherwise makes both depend on the full pair of coordinates.
+        A carrier that folds whole stays fused (one A fragment, N mma chains). Non-product states
+        over the same coordinates stay together too: a sum beside a sum of squares shares its
+        loads. A twisted or observed carrier never comes apart: its states are coupled by the recipe.
         """
-        if self.axis is None or self.twist is not None or self.observe is not None or self.base is None:
+        if self.axis is None or self.twist is not None or self.observe is not None or self.base is None or self.carries:
             return None
         pluses = self.base.components()
         if pluses is None or len(self.base.results) < 2 or self.tiles_whole():
@@ -712,7 +851,7 @@ class Fold:
         children: list[Fold] = []
         for index, result in enumerate(self.lift.results):
             body = Body(tuple(self.lift.body.backward_cone((result,)).members))
-            read = body.ssa_uses
+            read = body.ssa_uses | {result}
             operands, params = [], []
             for edge in self.operands:
                 slots = [param for param, other, _ in self.bindings if other is edge]
@@ -726,9 +865,9 @@ class Fold:
                 init=(self.init[index],),
                 base=Lambda.componentwise((pluses[index],), (self.base.results[index],)),
             )
-            if not child.tiles_whole():
-                return None
             children.append(child)
+        if not all(child.tiles_whole() for child in children) and len({child.free_axes for child in children}) == 1:
+            return None
         return Fold(operands=tuple(children), lift=Lambda.closing(self.exposes, Body(()), self.exposes))
 
     @cached_method
@@ -755,6 +894,18 @@ class Fold:
         return SlabView(load=self.lift.body[0])
 
     @cached_method
+    def as_carrier_read(self) -> Pre | None:
+        """The one ``Pre`` of a CARRIER READ — a slab over an enclosing fold's carried state at
+        some cell, the previous step's value there — or ``None`` for any other term. The read's
+        lift binds the state, then the carrying axis, then the cell coordinates it indexes
+        (:meth:`carrier_read`); it answers no :meth:`as_slab`, so a pair over it orients as over a
+        computed operand, which reads ``b_trans`` right: a ``pre S[k, j]`` streamed as B is
+        ``B[k, n]`` laid out. Memoized on the term."""
+        if self.operands or self.base is not None or len(self.lift.body) != 1 or not isinstance(self.lift.body[0], Pre):
+            return None
+        return self.lift.body[0]
+
+    @cached_method
     def scalar(self) -> bool:
         """Whether this term is ONE value for the whole kernel — no operands, no axis and no free
         coordinates, so its body is straight-line arithmetic over scalar reads (an sdpa scale and
@@ -775,6 +926,45 @@ class Fold:
         which :meth:`Lambda.closing` binds as its params. No operands, no ``combine``: a slab
         iterates, it does not reduce."""
         return cls(lift=Lambda.closing((), Body((load,)), load.names))
+
+    @cached_method
+    def affine(self) -> AffineView | None:
+        """The :class:`AffineView` of this carried state — its step affine in the state and
+        column-wise — or ``None``: for any other fold, a state read at an index of its own at two
+        positions (a map over the whole block, which has no bounded composition), or a step that
+        is not affine (a square of the state, a maximum over it, a gather it indexes).
+
+        Read structurally off the lift and its operands: a value is FREE of the state, AFFINE in it
+        (a carrier read; a sum, difference or copy of affine values; a product or quotient with
+        exactly one affine factor and a free divisor; a planar ``add`` fold of an affine
+        contribution) or neither; and the linear coefficients must not vary with the kept cell,
+        so that one matrix acts on every column. Memoized on the term."""
+        if not self.carries or len(self.base.results) != 1:
+            return None
+        (state,) = self.base.results
+        reads: list[Pre] = []
+        if _affine_classes(self, state, reads, {})[state][0] not in ("affine", "free") or not reads:
+            return None
+        own = tuple(Var(cell) for cell in self.cells)
+        mixed = {position for read in reads for position, expr in enumerate(read.index) if expr != own[position]}
+        if not mixed:
+            return AffineView(state=state, mixed=None, kept=None)  # a diagonal map: one coefficient per cell is what the probe reads
+        if len(mixed) != 1 or len(self.cells) < 2:
+            return None
+        (position,) = mixed
+        kept = max(p for p in range(len(self.cells)) if p != position)
+        # One matrix for every column: a coefficient, a gate or a read index that varies with the
+        # kept coordinate makes a map per column, which the probe's packed identity cannot read.
+        if _affine_classes(self, state, [], {}, (self.cells[kept], kept))[state][1]:
+            return None
+        return AffineView(state=state, mixed=position, kept=kept)
+
+    @classmethod
+    def carrier_read(cls, read: Pre, axis: str) -> Fold:
+        """A read of a carried state as a term — a lift of one ``Pre`` binding the state it reads,
+        the axis of the fold carrying it (so the read, and every term over it, sits inside that
+        loop: the value changes with the step) and the cell coordinates the index reads."""
+        return cls(lift=Lambda.closing((read.carrier, axis), Body((read,)), (read.name,)))
 
     @cached_method
     def merge(self, other: tuple[str, ...]) -> Body:
@@ -833,6 +1023,16 @@ class Fold:
         lift = self.injected
         if self.combine is None:
             return lift.body
+        if self.carries:
+            # The action: each state's next value is the lift's result for it, carried at the cell
+            # the fold's ``cells`` index. What the Loop IR ``Carry`` keeps of the fold is exactly
+            # what ``Accum`` keeps of a plain one — the seed and the value — plus the cell.
+            index = tuple(Var(cell) for cell in self.cells)
+            carried = tuple(
+                Carry(name=state, value=value, index=index, seed=seed)
+                for state, value, seed in zip(self.base.results, lift.results, self.init, strict=False)
+            )
+            return Body((*lift.body, *carried))
         merged = [replace(stmt, axes=(self.axis,)) if isinstance(stmt, Accum) else stmt for stmt in self.merge(lift.results)]
         observed = self.observe.body if self.observe is not None else ()
         return Body((*lift.body, *merged, *observed))
@@ -892,13 +1092,29 @@ class Fold:
             )
             return fn, values
 
+        def alike(x: Fold, y: Fold) -> bool:
+            """Whether two operand terms are the same value, up to the axis each of them BINDS.
+
+            :meth:`canonical` abstracts a term's bound axis in its own lift and leaves it FREE
+            wherever an operand captures it — a lift that reads a coordinate without declaring it as
+            a param, which a ``cat``'s coord-predicated ``Select`` does. Two alpha-equal score cones
+            whose contractions were numbered ``a2`` and ``a3`` at lift time then compare unequal,
+            and the online-softmax recipe declines on every rotary attention, whose ``rotate_half``
+            is exactly that ``cat``. Spelling both axes as one reserved name before comparing is
+            what the matcher can do that :meth:`canonical` cannot: the correspondence between these
+            two terms is the question being asked, and a term alone does not know it.
+            """
+            if x.axis is None or y.axis is None or x.axis == y.axis:
+                return x.canonical() == y.canonical()
+            return _rebind(x, _MATCH_AXIS).canonical() == _rebind(y, _MATCH_AXIS).canonical()
+
         def same(a: tuple, b: tuple) -> bool:
             if a[0].canonical() != b[0].canonical() or len(a[1]) != len(b[1]):
                 return False
             for x, y in zip(a[1], b[1], strict=True):
                 if (x is None) != (y is None) or isinstance(x, tuple) != isinstance(y, tuple):
                     return False
-                if x is not None and (not same(x, y) if isinstance(x, tuple) else x.canonical() != y.canonical()):
+                if x is not None and (not same(x, y) if isinstance(x, tuple) else not alike(x, y)):
                     return False
             return True
 
@@ -1074,6 +1290,28 @@ class Fold:
             observe=None if self.observe is None else self.observe.rename(mapping),
         )
 
+    def read_components(self, stored: frozenset[str] = frozenset()) -> dict[int, tuple[str, ...]]:
+        """The components each term in this tree supplies to all its readers and boundary stores.
+
+        Propagate demand through narrowed lifts. Shared terms keep the union of their readers'
+        requests, so lowering never emits overlapping carriers with duplicate accumulator names.
+        """
+        taken: dict[int, tuple[str, ...]] = {}
+        pending = [(self, self.exposes)]
+        while pending:
+            term, asked = pending.pop()
+            wanted = set(taken.get(id(term), ())) | set(asked)
+            names = tuple(name for name in term.exposes if name in wanted)
+            if taken.get(id(term)) == names:
+                continue
+            taken[id(term)] = names
+            narrowed = term.exposing(names) if names else None
+            read = narrowed.step().ssa_uses | set(narrowed.exposes) if narrowed is not None else set()
+            for edge in term.operands:
+                keep = edge.exposes if _writes_under(edge, stored) else tuple(name for name in edge.exposes if name in read)
+                pending.append((edge, keep))
+        return taken
+
     @cached_method
     def lower(self, bound: frozenset[str] | None = None, stores: tuple[OutputSpec, ...] = (), axes: tuple[Axis, ...] = ()) -> Body:
         """Flatten this term to the Loop IR nest the materializer expands, the kernel's boundary
@@ -1133,6 +1371,8 @@ class Fold:
             declared.extend(name for name in term.lift.params[(term.axis is not None) + len(term.bindings) :] if name not in declared)
             if term.axis is not None:
                 internal.add(term.axis)
+            if term.carries:  # a carried state's cells, and what its step sweeps, are its own loops (``place``)
+                internal.update(term.cells, *(edge.free_axes for edge in term.operands))
             for name in term.free_axes:
                 readers[name] = readers.get(name, 0) + 1
             if term.base is None:
@@ -1141,24 +1381,14 @@ class Fold:
                 origin.update((name, (id(term), "state")) for name in term.base.results)
                 if term.observe is not None:
                     origin.update((name, (id(term), "observed")) for name in term.observe.results)
+                if term.carries:  # a per-step output the step streams, stored inside the loop like an observed value
+                    origin.update((name, (id(term), "observed")) for name in term.exposes[len(term.base.results) :])
             pending.extend(reversed(term.operands))
         owned: dict[tuple[int, str], list[OutputSpec]] = {}
+        taken = self.read_components(frozenset(name for spec in stores for name in spec.write.values))
 
         def placed(term: Fold) -> tuple[Fold, ...]:
-            # An operand is placed for the COMPONENTS the term reads, or whole when the tree below
-            # it defines a value the kernel STORES — a nested output sweep is materialized for its
-            # own store, not for its reader, and narrowing it would lose that store's owner. An
-            # edge no component of which is read is a site the schedule may take and the nest has
-            # no use for; one only partly read costs only the part.
-            seen = set(term.step().ssa_uses) | set(term.exposes)
-            out = []
-            for edge in term.operands:
-                kept = tuple(name for name in edge.exposes if name in seen)
-                if _writes_under(edge, writing):
-                    out.append(edge)
-                elif kept:
-                    out.append(edge.exposing(kept))
-            return tuple(out)
+            return tuple(edge.exposing(taken[id(edge)]) for edge in term.operands if taken[id(edge)])
 
         for spec in stores:
             key = origin.get(spec.write.values[0])
@@ -1179,22 +1409,38 @@ class Fold:
             (name for name in coordinates if name in read and name not in bound and (name not in internal or name in self.free_axes)),
             key=lambda name: (-readers.get(name, 0), declared.index(name)),
         )
-        nest: dict[tuple[str, ...], list[Stmt]] = {(): []}
 
-        def path_of(free: frozenset[str], path: tuple[str, ...] | None) -> tuple[str, ...]:
-            # The free loops a term sits under: the shallowest prefix of its reader's path binding
-            # its coordinates, or — unconstrained — those coordinates in the opened order.
-            needed = {name for name in opened if name in free}
-            if path is None:
-                return tuple(name for name in opened if name in needed)
-            return next(path[:depth] for depth in range(len(path) + 1) if needed <= set(path[:depth]))
+        class _Nest:
+            """One scope's TREE of free loops: the coordinates it may open (outermost the one the
+            most terms are evaluated over), what the scope already binds, and the statements at
+            each path. The kernel has one; a carried state's loop holds one of its own for the
+            terms evaluated inside the step, its cells first."""
 
-        def sink(path: tuple[str, ...]) -> list[Stmt]:
-            for depth in range(len(path) + 1):
-                nest.setdefault(path[:depth], [])
-            return nest[path]
+            def __init__(self, opened: list[str], bound: frozenset[str]) -> None:
+                self.opened, self.bound = opened, bound
+                self.nest: dict[tuple[str, ...], list[Stmt]] = {(): []}
 
-        def attach(term: Fold, kind: str, target: list[Stmt], node: tuple[str, ...], scope: frozenset[str]) -> None:
+            def path_of(self, free: frozenset[str], path: tuple[str, ...] | None) -> tuple[str, ...]:
+                # The free loops a term sits under: the shallowest prefix of its reader's path
+                # binding its coordinates, or — unconstrained — those coordinates in the opened order.
+                needed = {name for name in self.opened if name in free}
+                if path is None:
+                    return tuple(name for name in self.opened if name in needed)
+                return next(path[:depth] for depth in range(len(path) + 1) if needed <= set(path[:depth]))
+
+            def sink(self, path: tuple[str, ...]) -> list[Stmt]:
+                for depth in range(len(path) + 1):
+                    self.nest.setdefault(path[:depth], [])
+                return self.nest[path]
+
+            def assemble(self, path: tuple[str, ...] = ()) -> Body:
+                body = list(self.nest[path])
+                for name in self.opened[self.opened.index(path[-1]) + 1 :] if path else self.opened:
+                    if (*path, name) in self.nest:
+                        body.append(Loop(axis=coordinates[name], body=self.assemble((*path, name))))
+                return Body(body).coalesce()
+
+        def attach(term: Fold, kind: str, target: list[Stmt], node: tuple[str, ...], scope: frozenset[str], nest: _Nest) -> None:
             # The stores over what ``term`` defines as ``kind`` — its step's results, its carried
             # state, or its observer's per-step values — land right after it, in ``target``.
             for spec in owned.get((id(term), kind), ()):
@@ -1202,75 +1448,91 @@ class Fold:
                 if not extra:
                     target.append(spec.write)
                     continue
-                assert extra <= set(opened), f"a store reads coordinates {sorted(extra - set(opened))} no term declares and no sweep names"
-                sink((*node, *(name for name in opened if name in extra))).append(spec.write)
+                assert extra <= set(nest.opened), (
+                    f"a store reads coordinates {sorted(extra - set(nest.opened))} no term declares and no sweep names"
+                )
+                nest.sink((*node, *(name for name in nest.opened if name in extra))).append(spec.write)
 
-        def place(term: Fold, loops: list[tuple[str, frozenset[str], list[Stmt]]], path: tuple[str, ...] | None) -> None:
+        emitted: dict[tuple[int, int], tuple[Fold, list[Stmt]]] = {}
+
+        def place(term: Fold, loops: list[tuple[str, frozenset[str], list[Stmt]]], path: tuple[str, ...] | None, nest: _Nest) -> None:
             # ``loops``: the reduce loops enclosing this position, outermost first, as (axis, scope, stmts).
             if any(axis in term.free_axes for axis, _, _ in loops):
                 depth = next(depth for depth, (_, scope, _) in enumerate(loops) if term.free_axes <= scope)
                 _, scope, stmts = loops[depth]
                 loops, node = loops[: depth + 1], path
             else:
-                node = path_of(term.free_axes, path)
-                scope, stmts, loops = frozenset(bound) | set(node), None, []
+                node = nest.path_of(term.free_axes, path)
+                scope, stmts, loops = nest.bound | set(node), None, []
+            if term.axis is not None or term.step():
+                target = stmts if stmts is not None else nest.sink(node)
+                key = (id(term), id(target))
+                if key in emitted:
+                    return
+                # Retain both objects: a completed inner scope's list otherwise permits id reuse.
+                emitted[key] = term, target
             if term.axis is None:
                 step = term.step()
+                # A step reading nothing the tree binds or defines (a multi-output root's constant result)
+                # needs no coordinate, so it sits at the top of its path.
+                reads = {name for stmt in step for name in free_names(stmt)} - {name for stmt in step for name in stmt.defines()}
+                if step and stmts is None and not reads & {*term.lift.params, *origin}:
+                    node = nest.path_of(frozenset(), path)
+                    nest.sink(node).extend(step)
+                    attach(term, "step", nest.sink(node), node, nest.bound | set(node), nest)
+                    step = ()
                 for edge in placed(term):
-                    place(edge, loops, node if step else path)
+                    place(edge, loops, node if step else path, nest)
                 if step:
-                    target = stmts if stmts is not None else sink(node)
+                    target = stmts if stmts is not None else nest.sink(node)
                     target.extend(step)
-                    attach(term, "step", target, node, scope)
+                    attach(term, "step", target, node, scope, nest)
+                return
+            if term.carries:
+                # A CARRIED STATE: its reduce loop encloses the loops over its cells, where the Loop
+                # IR puts a carrying loop, and holds a nest of its own for the terms evaluated inside
+                # the step — the cells first, then the coordinates a per-step output sweeps. Each
+                # opens only where the caller has not bound it (a serial launch binds the axis, a
+                # grid the cells). The step and the stores of its own per-step results land under the
+                # cells; the state is never stored after the loop: a ``Carry`` is read per step or
+                # not at all.
+                if owned.get((id(term), "state")):
+                    raise ValueError("a carried state is stored per step, never after its loop")
+                inside = scope | {term.axis}
+                reads = set().union(*(edge.free_axes for edge in term.operands))
+                cells = tuple(cell for cell in term.cells if cell not in inside)
+                extras = [name for name in declared if name in reads and name not in inside and name not in term.cells]
+                if missing := [name for name in (term.axis, *cells, *extras) if name not in coordinates and name not in bound]:
+                    raise ValueError(f"lower: no extent for {missing} — the kernel's axis table names a carried state's axis and cells")
+                local = _Nest([*cells, *extras], inside)
+                for edge in placed(term):
+                    # An operand over the cells sits on the step's path, as any operand sits on its
+                    # reader's; one a per-step output sweeps takes its own path beside the cells.
+                    place(edge, [], cells if edge.free_axes <= inside | set(cells) else None, local)
+                target = local.sink(cells)
+                target.extend(term.step())
+                attach(term, "observed", target, cells, inside | set(cells), local)
+                body = local.assemble()
+                outer = stmts if stmts is not None else nest.sink(node)
+                if term.axis in bound:
+                    outer.extend(body)
+                else:
+                    outer.append(Loop(axis=coordinates[term.axis], body=body))
                 return
             inner: list[Stmt] = []
             for edge in placed(term):
-                place(edge, [*loops, (term.axis, scope | {term.axis}, inner)], node)
+                place(edge, [*loops, (term.axis, scope | {term.axis}, inner)], node, nest)
             inner.extend(term.step())
-            attach(term, "observed", inner, node, scope | {term.axis})
-            target = stmts if stmts is not None else sink(node)
+            attach(term, "observed", inner, node, scope | {term.axis}, nest)
+            target = stmts if stmts is not None else nest.sink(node)
             if term.axis not in coordinates:
                 raise ValueError(f"lower: no extent for reduce axis {term.axis!r} — the kernel's axis table names it")
-            target.append(Loop(axis=coordinates[term.axis], body=_scope(inner)))
-            attach(term, "state", target, node, scope)
+            target.append(Loop(axis=coordinates[term.axis], body=Body(inner).coalesce()))
+            attach(term, "state", target, node, scope, nest)
 
-        def assemble(path: tuple[str, ...]) -> Body:
-            body = list(nest[path])
-            for name in opened[opened.index(path[-1]) + 1 :] if path else opened:
-                if (*path, name) in nest:
-                    body.append(Loop(axis=coordinates[name], body=assemble((*path, name))))
-            return _scope(body)
-
-        writing = {term for term, _ in owned}
-        place(self, [], None)
-        return assemble(())
-
-
-def _scope(stmts) -> Body:
-    """One scope's statements — a term reached through several operand positions defining its
-    names once, and sibling terms folding ONE coordinate iterating together.
-
-    The dedup is the shared-term rule. The FUSE is the same rule a level up: two loops over one
-    axis where neither reads what the other defines are two passes over one stream, and their
-    union is one pass, computing what they both read once. A loop that DOES read the loop above it (a
-    statistic's pass, then the pass that normalizes by it) reads a FINISHED accumulator, and
-    iterating together would hand it the in-flight one; that pair stays two loops.
-    """
-    out: list[Stmt] = []
-    for stmt in dict.fromkeys(stmts):
-        prior = out[-1] if out else None
-        if (
-            isinstance(stmt, (Loop, StridedLoop))
-            and isinstance(prior, (Loop, StridedLoop))
-            and prior.is_reduce
-            and stmt.is_reduce
-            and replace(prior, body=stmt.body) == stmt
-            and not (free_names(stmt) & prior.body.ssa_defs)
-        ):
-            stmt = replace(prior, body=_scope((*prior.body, *stmt.body)))
-            out.pop()
-        out.append(stmt)
-    return Body(tuple(out))
+        root = _Nest(opened, frozenset(bound))
+        place(self, [], None, root)
+        return root.assemble()
 
 
 @_rewrite_kind.register
@@ -1301,6 +1563,7 @@ def _(s: Fold, rename, sigma, axis_fn):
         results=tuple(rename(r) for r in s.lift.results),
     )
     base = s.base.rename(rename) if s.base is not None else None
+    cells = tuple(_param(cell) for cell in s.cells)  # coordinates, like the environment tail
     observe = None
     if s.observe is not None:
         # The observer renames in lockstep: param 0 tracks the axis, the state params track the
@@ -1310,7 +1573,81 @@ def _(s: Fold, rename, sigma, axis_fn):
             body=Body(tuple(_rewrite(st, rename, sigma, axis_fn) for st in s.observe.body)),
             results=tuple(rename(r) for r in s.observe.results),
         )
-    return replace(s, operands=operands, lift=lift, base=base, observe=observe)
+    return replace(s, operands=operands, lift=lift, base=base, observe=observe, cells=cells)
+
+
+def _affine_classes(
+    term: Fold, state: str, reads: list[Pre], memo: dict[int, dict[str, tuple[str, bool]]], kept: tuple[str, int] | None = None
+) -> dict[str, tuple[str, bool]]:
+    """How every value ``term`` exposes depends on the carried ``state`` — ``"free"``, ``"affine"``
+    or ``"non"`` — read off its lift with its operands classified first, beside whether the value
+    VARIES with the kept cell coordinate ``kept`` (its name and position): for a free value, whether
+    it reads that coordinate; for an affine one, whether its linear coefficient does — the offset may.
+    Without ``kept`` the second reading is off. The carrier reads of the state met on the way are
+    collected in ``reads``."""
+    if id(term) in memo:
+        return memo[id(term)]
+    name, position = kept if kept is not None else (None, None)
+    read = term.as_carrier_read()
+    if read is not None:
+        if read.carrier == state:
+            reads.append(read)
+        varies = any(name in expr.free_vars() for index, expr in enumerate(read.index) if index != position) if kept else False
+        out = {read.name: ("affine" if read.carrier == state else "free", varies)}
+        memo[id(term)] = out
+        return out
+    env: dict[str, tuple[str, bool]] = {}
+    for param, edge, index in term.bindings:
+        env[param] = _affine_classes(edge, state, reads, memo, kept).get(edge.exposes[index], ("free", False))
+
+    def of(value: str) -> tuple[str, bool]:
+        return env.get(value, ("free", value == name))  # a coordinate, a literal name: free of the state
+
+    def combine(op: str, args: tuple[tuple[str, bool], ...]) -> tuple[str, bool]:
+        kinds = tuple(kind for kind, _ in args)
+        if all(kind == "free" for kind in kinds):
+            return "free", any(varies for _, varies in args)
+        if any(kind == "non" for kind in kinds):
+            return "non", False
+        if op in ("add", "subtract", "copy", "negative"):
+            return "affine", any(varies for kind, varies in args if kind == "affine")
+        if op == "multiply" and kinds.count("affine") == 1:
+            return "affine", any(varies for _, varies in args)
+        if op == "divide" and kinds == ("affine", "free"):
+            return "affine", any(varies for _, varies in args)
+        return "non", False
+
+    for stmt in term.lift.body:
+        if isinstance(stmt, Fold):
+            env.update(_affine_classes(stmt, state, reads, memo, kept))
+        elif isinstance(stmt, Assign):
+            env[stmt.name] = combine(stmt.op.name, tuple(of(arg) for arg in stmt.args))
+        elif isinstance(stmt, Load):
+            coordinates = tuple(of(var) for expr in stmt.index for var in expr.free_vars())
+            env[stmt.name] = ("non", False) if any(kind != "free" for kind, _ in coordinates) else ("free", any(v for _, v in coordinates))
+        elif isinstance(stmt, Select):
+            branches = tuple(of(branch.value) for branch in stmt.branches)
+            predicates = tuple(of(var) for branch in stmt.branches for var in branch.select.free_vars())
+            if any(kind != "free" for kind, _ in predicates):
+                env[stmt.name] = ("non", False)
+            else:
+                kind, varies = combine("add", branches)
+                env[stmt.name] = (kind, varies or any(v for _, v in predicates))  # a choice by the kept cell varies the map
+        else:
+            env.update((defined, ("free", False) if stmt.pure and not stmt.deps() else ("non", False)) for defined in stmt.defines())
+    if term.base is None:
+        out = {exposed: of(own) for exposed, own in zip(term.exposes, term.lift.results, strict=True)}
+    else:
+        ops = term.base.components()
+        out = {}
+        for index, (exposed, own) in enumerate(zip(term.base.results, term.lift.results, strict=False)):
+            kind, varies = of(own)
+            folded = kind == "free" or (kind == "affine" and (term.carries or (ops is not None and ops[index].name == "add")))
+            out[exposed] = (kind, varies) if folded else ("non", False)
+        n = len(term.base.results)
+        out.update((exposed, of(own)) for exposed, own in zip(term.exposes[n:], term.lift.results[n:], strict=False))
+    memo[id(term)] = out
+    return out
 
 
 def _channel_product(lift: Lambda, result: str) -> tuple[Lambda, Assign | None]:
@@ -1325,25 +1662,24 @@ def _channel_product(lift: Lambda, result: str) -> tuple[Lambda, Assign | None]:
     return cone, stmt if isinstance(stmt, Assign) else None
 
 
-def _over_a(name: str, cone: Lambda, a_names: set[str], uniform: set[str]) -> bool:
+def _over_a(name: str, cone: Lambda, a_names: set[str], available: set[str]) -> bool:
     """Whether ``name`` is the A factor of ``cone``'s product — a component ``operands[0]`` binds,
-    or a value the cone computes from those components and kernel-UNIFORM ones alone.
+    or a value the cone computes from those components, A's coordinates and uniform values.
 
     The second reading is what lets a carrier read bilinear before its weight is reified. It walks
     the cone, which is this lift's own body, and never an operand's internals: a name bound to any
     other edge closes back as itself and fails the test.
 
-    ``uniform`` are the components of operands with no free coordinates — attention's scale, an rms
-    epsilon. One contributes no variation, so a factor reading it varies exactly as A does and the
-    channel is bilinear all the same. Without them the weight ``exp(a·scale)`` reads as a product
-    of A with a second varying value and no mma is offered at all."""
+    ``available`` includes A's free coordinates and components of coordinate-free operands. A mask
+    over A's coordinates or a uniform scale adds no dependence outside A; a coordinate exclusive
+    to B does, and must refuse the contraction."""
     if name in a_names:
         return True
     reads = set(cone.cone(name).params)
-    return bool(reads & a_names) and reads <= a_names | uniform
+    return bool(reads & a_names) and reads <= a_names | available
 
 
-def _writes_under(term: Fold, writing: set[int]) -> bool:
+def _writes_under(term: Fold, stored: frozenset[str]) -> bool:
     """Whether any term of ``term``'s subtree defines a value the kernel's boundary stores."""
     pending, seen = [term], set()
     while pending:
@@ -1351,7 +1687,7 @@ def _writes_under(term: Fold, writing: set[int]) -> bool:
         if id(node) in seen:
             continue
         seen.add(id(node))
-        if id(node) in writing:
+        if (set(node.exposes) | node.step().ssa_defs) & stored:
             return True
         pending.extend(node.operands)
     return False

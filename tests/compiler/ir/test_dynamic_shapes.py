@@ -14,13 +14,13 @@ import numpy as np
 import pytest
 
 from emmy.compiler import dtype as dt
-from emmy.compiler.dim import Dim
+from emmy.compiler.dim import DYNAMIC_DIM_MAX, Dim
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.loop.ir import LoopOp
 from emmy.compiler.ir.tensor.ir import ElementwiseOp, ReduceOp
 from emmy.compiler.pipeline import Pipeline
-from tests.compiler.helpers import from_pretrained_or_skip, requires_cuda
+from tests.compiler.helpers import qwen3_embedding_config, qwen3_embedding_model, requires_cuda
 
 
 def _seq_len_dim(*, min: int = 5, max: int = 4096):
@@ -105,9 +105,6 @@ def test_cuda_symbolic_elementwise_one_kernel_multiple_seq_lens():
     whose kernel signature carries ``int seq_len``; running it at two
     different ``seq_len`` values resolves the launch geometry from the
     actual input shape without recompiling."""
-    pytest = __import__("pytest")
-    cupy = pytest.importorskip("cupy")
-    del cupy
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.ir.cuda import CudaOp
 
@@ -167,8 +164,6 @@ def test_cuda_softmax_over_symbolic_seq_len():
     """Softmax reducing over a symbolic ``seq_len`` axis compiles to a
     single kernel whose serial reduce loop's bound is the runtime
     ``int seq_len`` arg."""
-    pytest = __import__("pytest")
-    pytest.importorskip("cupy")
     import torch
 
     from emmy.compiler.backend.cuda.backend import CudaBackend
@@ -195,8 +190,6 @@ def test_cuda_sdpa_over_symbolic_seq_len():
     """Full causal SDPA with symbolic seq_len compiles + runs
     end-to-end. Stresses symbolic on free axes (Q/K/V leading seq dim)
     AND on the matmul K axis (attn @ V)."""
-    pytest = __import__("pytest")
-    pytest.importorskip("cupy")
     import torch
 
     from emmy.compiler.backend.cuda.backend import CudaBackend
@@ -234,8 +227,6 @@ def test_cuda_symbolic_rmsnorm_traced_and_run():
     """End-to-end on a real ``torch.nn.RMSNorm`` traced with
     ``dynamic_shapes={"x": {1: Dim("seq_len")}}`` — compile once, run at
     two distinct seq_len values, compare to torch eager."""
-    pytest = __import__("pytest")
-    pytest.importorskip("cupy")
     import torch
 
     from emmy.compiler.backend.cuda.backend import CudaBackend
@@ -286,8 +277,6 @@ def test_cuda_symbolic_linear_traced_and_run():
     """End-to-end on a real ``torch.nn.Linear`` traced with
     ``dynamic_shapes={"x": {1: Dim("seq_len")}}`` — covers the
     matmul-on-symbolic-M code path."""
-    pytest = __import__("pytest")
-    pytest.importorskip("cupy")
     import torch
 
     from emmy.compiler.backend.cuda.backend import CudaBackend
@@ -341,10 +330,7 @@ def test_qwen_whole_model_dynamic_compiles_and_matches_eager():
     RoPE (the in-graph rotary used to constant-fold to ``cos=1, sin=0`` under
     ``torch.export``; the wrapper now precomputes + slices instead) and to
     wrong attention scores."""
-    pytest = __import__("pytest")
-    pytest.importorskip("cupy")
     import torch
-    from transformers import AutoConfig, AutoModel
 
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.backend.cuda.program import CompiledProgram
@@ -353,10 +339,8 @@ def test_qwen_whole_model_dynamic_compiles_and_matches_eager():
     from emmy.compiler.trace.huggingface import build_causal_mask, build_full_model_wrapper
     from emmy.compiler.trace.torch import trace_module
 
-    torch.manual_seed(0)
-    config = from_pretrained_or_skip(AutoConfig.from_pretrained, "Qwen/Qwen3-Embedding-0.6B")
-    config.num_hidden_layers = 1
-    model = AutoModel.from_config(config).float().eval()
+    config = qwen3_embedding_config()
+    model = qwen3_embedding_model(config)
 
     hint, dtype = 32, torch.float32
     wrapper = build_full_model_wrapper(model, hint, dtype, dynamic=True)
@@ -405,10 +389,7 @@ def _batched_dynamic_case(batch: int, run_seqs: tuple[int, ...]):
     """Shared body for the batched symbolic-seq matrix below: 1-layer random-weight
     Qwen3 trunk traced at ``(batch, hint)`` with ``seq_len`` symbolic, run at several
     seq_lens, every batch row compared against eager independently."""
-    pytest = __import__("pytest")
-    pytest.importorskip("cupy")
     import torch
-    from transformers import AutoConfig, AutoModel
 
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.backend.cuda.program import CompiledProgram
@@ -418,10 +399,8 @@ def _batched_dynamic_case(batch: int, run_seqs: tuple[int, ...]):
     from emmy.compiler.trace.huggingface import build_causal_mask, build_full_model_wrapper
     from emmy.compiler.trace.torch import trace_module
 
-    torch.manual_seed(0)
-    config = from_pretrained_or_skip(AutoConfig.from_pretrained, "Qwen/Qwen3-Embedding-0.6B")
-    config.num_hidden_layers = 1
-    model = AutoModel.from_config(config).float().eval()
+    config = qwen3_embedding_config()
+    model = qwen3_embedding_model(config)
 
     hint, dtype = 32, torch.float32
     wrapper = build_full_model_wrapper(model, hint, dtype, dynamic=True)
@@ -506,10 +485,7 @@ def test_qwen_layer_dynamic_compiles_and_matches_eager():
     The wrapper is load-bearing: tracing the bare block with concrete
     ``(cos, sin)`` kwargs specialises rotary to the trace seq_len, so the
     in-graph sliced-rotary buffers are what make per-layer dynamic work."""
-    pytest = __import__("pytest")
-    pytest.importorskip("cupy")
     import torch
-    from transformers import AutoConfig, AutoModel
 
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.backend.cuda.program import CompiledProgram
@@ -518,10 +494,8 @@ def test_qwen_layer_dynamic_compiles_and_matches_eager():
     from emmy.compiler.trace.huggingface import build_layer_wrapper
     from emmy.compiler.trace.torch import trace_module
 
-    torch.manual_seed(0)
-    config = from_pretrained_or_skip(AutoConfig.from_pretrained, "Qwen/Qwen3-Embedding-0.6B")
-    config.num_hidden_layers = 1
-    model = AutoModel.from_config(config).float().eval()
+    config = qwen3_embedding_config()
+    model = qwen3_embedding_model(config)
 
     hint, dtype = 32, torch.float32
     wrapper = build_layer_wrapper(model.layers[0], model.rotary_emb, config.hidden_size, dtype)
@@ -555,6 +529,120 @@ def test_qwen_layer_dynamic_compiles_and_matches_eager():
             np.testing.assert_allclose(out, ref, rtol=1e-3, atol=1e-3)
 
 
+# ---------------------------------------------------------------------------
+# Two independent symbolic extents: query rows and attended keys. One
+# ``seq_len`` covers both only while every query row is new — whole-sequence
+# prefill. A chunked prefill (or a decode step) has FEWER query rows than keys,
+# which is the same graph at ``q_len`` and ``kv_len = past + q_len`` rather
+# than a second program.
+# ---------------------------------------------------------------------------
+
+
+def _qwen_gqa_attention(heads: int, kv_heads: int):
+    """Qwen3's attention math with the query and key extents free: GQA by
+    ``repeat_interleave`` (what HF's ``repeat_kv`` lowers to) and an additive mask
+    the caller shapes ``(q_len, kv_len)``."""
+    import torch
+    import torch.nn as nn
+
+    class Attention(nn.Module):
+        def forward(self, q, k, v, mask):
+            repeat = heads // kv_heads
+            k = k.repeat_interleave(repeat, dim=1)
+            v = v.repeat_interleave(repeat, dim=1)
+            return torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+
+    return Attention()
+
+
+def _causal_mask(q_len: int, kv_len: int, past: int):
+    """Additive causal mask for ``q_len`` query rows starting at absolute position ``past``."""
+    import torch
+
+    rows = torch.arange(q_len)[:, None] + past
+    cols = torch.arange(kv_len)[None, :]
+    return torch.where(cols <= rows, 0.0, float("-inf"))[None, None]
+
+
+def _split_attention_trace(heads: int, kv_heads: int, head_dim: int, seq: int):
+    """Trace the attention above with ``q_len`` and ``kv_len`` as separate symbols."""
+    import torch
+
+    from emmy.compiler.trace.torch import trace_module
+
+    torch.manual_seed(0)
+    example = (
+        torch.randn(1, heads, seq, head_dim),
+        torch.randn(1, kv_heads, seq, head_dim),
+        torch.randn(1, kv_heads, seq, head_dim),
+        _causal_mask(seq, seq, 0),
+    )
+    q_dim = torch.export.Dim("q_len", min=1, max=DYNAMIC_DIM_MAX)
+    kv_dim = torch.export.Dim("kv_len", min=1, max=DYNAMIC_DIM_MAX)
+    dynamic = {"q": {2: q_dim}, "k": {2: kv_dim}, "v": {2: kv_dim}, "mask": {2: q_dim, 3: kv_dim}}
+    return trace_module(_qwen_gqa_attention(heads, kv_heads), example, dynamic_shapes=dynamic), example
+
+
+def test_split_seq_len_chunked_prefill_matches_one_shot():
+    """Chunk-invariance at Qwen3-Embedding-0.6B's layer-0 head geometry: the tail rows of a
+    whole-sequence prefill equal a chunk computed at ``q_len < kv_len`` over the same keys,
+    and both equal torch eager. One compiled program serves both — the split is the two
+    symbols, not a second graph. Runs on the Loop backend, so no GPU is needed."""
+    import numpy as np
+    import torch
+
+    from emmy.compiler.backend.loop.backend import LoopBackend
+
+    config = qwen3_embedding_config()
+    heads, kv_heads, head_dim = config.num_attention_heads, config.num_key_value_heads, config.head_dim
+    seq, past = 24, 16
+
+    graph, (q, k, v, _) = _split_attention_trace(heads, kv_heads, head_dim, seq)
+    backend = LoopBackend()
+    compiled = backend.compile(graph)
+
+    def run(*arrays):
+        result, _ = backend.run(compiled, input_data=dict(zip(compiled.inputs, [a.numpy() for a in arrays], strict=True)))
+        return next(iter(result.outputs.values()))
+
+    full = run(q, k, v, _causal_mask(seq, seq, 0))
+    chunk = run(q[:, :, past:], k, v, _causal_mask(seq - past, seq, past))
+
+    with torch.no_grad():
+        eager = _qwen_gqa_attention(heads, kv_heads)(q, k, v, _causal_mask(seq, seq, 0)).numpy()
+    np.testing.assert_allclose(full, eager, rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(chunk, full[:, :, past:], rtol=1e-5, atol=1e-5)
+
+
+def test_split_seq_len_reaches_the_cuda_kernel_signature():
+    """Both symbols survive lowering: the generated kernel takes ``q_len`` and ``kv_len`` as
+    runtime arguments, and the grid is sized by the query rows alone — the attended keys are
+    a loop bound inside the kernel, not more blocks. Codegen only, so no GPU is needed."""
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.ir.cuda.ir import CudaOp
+
+    config = qwen3_embedding_config()
+    graph, _ = _split_attention_trace(config.num_attention_heads, config.num_key_value_heads, config.head_dim, 24)
+    compiled = CudaBackend().compile(graph)
+
+    (kernel,) = (node.op for node in compiled.nodes.values() if isinstance(node.op, CudaOp))
+    assert set(kernel.runtime_args) == {"q_len", "kv_len"}, kernel.runtime_args
+    grid_symbols = {var.name for dim in kernel.grid[0] for var in _expr_vars(dim)}
+    assert grid_symbols == {"q_len"}, f"grid should scale with the query rows alone, got {grid_symbols}"
+
+
+def _expr_vars(expr):
+    """Every ``Var`` reachable from a shape expression."""
+    from emmy.compiler.ir.expr import Var
+
+    if isinstance(expr, Var):
+        yield expr
+    for child in ("left", "right", "operand", "value"):
+        sub = getattr(expr, child, None)
+        if hasattr(sub, "eval"):
+            yield from _expr_vars(sub)
+
+
 def test_qwen_whole_model_dynamic_traces():
     """End-to-end whole-model dynamic trace on Qwen3-Embedding-0.6B (1 layer,
     random weights so no checkpoint download). Exercises the CLI's
@@ -569,15 +657,13 @@ def test_qwen_whole_model_dynamic_traces():
     next-stretch (int64 index-math kernels for embedding lookup are
     still uncovered)."""
     import torch
-    from transformers import AutoConfig, AutoModelForCausalLM
+    from transformers import AutoModelForCausalLM
 
     from emmy.compiler.trace.huggingface import build_causal_mask, build_full_model_wrapper
     from emmy.compiler.trace.torch import trace_module
 
-    torch.manual_seed(0)
-    config = from_pretrained_or_skip(AutoConfig.from_pretrained, "Qwen/Qwen3-Embedding-0.6B")
-    config.num_hidden_layers = 1
-    model = AutoModelForCausalLM.from_config(config).float().eval()
+    config = qwen3_embedding_config()
+    model = qwen3_embedding_model(config, AutoModelForCausalLM)
 
     seq_len_int = 32
     dtype = torch.float32
@@ -621,8 +707,6 @@ def test_capture_replay_cache_rmsnorm_over_capacity_buffers():
     """RMSNorm built once at capacity 64; serve S ∈ {5,12,33,64,12} through the
     per-seq_len graph cache — capture lazily, replay at each S, slice the output
     to the real shape, match torch eager. Repeats hit the cache (no re-capture)."""
-    pytest = __import__("pytest")
-    pytest.importorskip("cupy")
     import torch
 
     from emmy.compiler.backend.cuda.backend import CudaBackend
@@ -652,19 +736,17 @@ def test_capture_replay_cache_rmsnorm_over_capacity_buffers():
                 ref = torch.nn.functional.rms_norm(torch.from_numpy(x), (2048,), m.weight, eps=m.eps).numpy()
             assert out.shape == (1, s, 2048)
             np.testing.assert_allclose(out, ref, rtol=1e-4, atol=1e-4)
-        assert set(k[0][1] for k in prog._graph_cache) == {5, 12, 33, 64}, "expected one cached graph per distinct seq_len"
+        for s in (5, 12, 33, 64):
+            prog.set_sym_values({"seq_len": s})
+            assert prog.executor.has_program_graph(), f"expected a cached graph for seq_len {s}"
 
 
 @requires_cuda
 def test_capture_replay_device_io_matches_eager():
-    """Serving zero-copy device I/O: feed cupy inputs through ``upload_prefix_device``
-    and read the output buffer's prefix back as a torch tensor via ``output_prefix_device``
-    + ``torch.from_dlpack`` — NO host round-trip — and confirm it matches torch eager
-    across seq_lens. The dlpack bridge (cupy ↔ torch) is what lets the runner accept
-    torch tensors straight from vLLM. Repeats hit the per-S graph cache."""
-    pytest = __import__("pytest")
-    pytest.importorskip("cupy")
-    import cupy as cp
+    """Serving zero-copy device I/O: feed CUDA tensors through ``upload_prefix_device`` and read
+    the output buffer's prefix back as a torch view via ``output_prefix_device`` — NO host round
+    trip — and confirm it matches torch eager across seq_lens. Repeats hit the per-S graph
+    cache."""
     import torch
 
     from emmy.compiler.backend.cuda.backend import CudaBackend
@@ -683,12 +765,12 @@ def test_capture_replay_device_io_matches_eager():
         for s in (7, 32, 48, 7):
             x = np.random.RandomState(s).standard_normal((1, s, 1024)).astype(np.float32)
             prog.set_sym_values({"seq_len": s})
-            prog.upload_prefix_device({"x": cp.asarray(x)})  # cupy in — no host upload
-            prog.capture_program_graph()
-            prog.replay_program_graph()
-            out_view = prog.output_prefix_device({"seq_len": s})[out_name]  # cupy view, no .get()
-            cp.cuda.runtime.deviceSynchronize()
-            out = torch.from_dlpack(out_view).clone().cpu().numpy()  # torch view of cupy mem
+            with prog.on_stream(torch.cuda.current_stream()):
+                prog.upload_prefix_device({"x": torch.from_numpy(x).cuda()})  # device in — no host upload
+                prog.capture_program_graph()
+                prog.replay_program_graph()
+                out_view = prog.output_prefix_device({"seq_len": s})[out_name]  # torch view, no copy
+                out = out_view.clone().cpu().numpy()
             with torch.no_grad():
                 ref = torch.nn.functional.rms_norm(torch.from_numpy(x), (1024,), m.weight, eps=m.eps).numpy()
             assert out.shape == (1, s, 1024)
@@ -703,10 +785,7 @@ def test_qwen_whole_model_capture_replay_cache_matches_eager():
     (capture at exact S, replay, slice), compare against torch eager with NON-ZERO
     ids. End-to-end gate for the attention / mask / shared-capacity-buffer story.
     Run under compute-sanitizer in dev to confirm zero illegal accesses."""
-    pytest = __import__("pytest")
-    pytest.importorskip("cupy")
     import torch
-    from transformers import AutoConfig, AutoModel
 
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.backend.cuda.program import CompiledProgram
@@ -715,10 +794,8 @@ def test_qwen_whole_model_capture_replay_cache_matches_eager():
     from emmy.compiler.trace.huggingface import build_causal_mask, build_full_model_wrapper
     from emmy.compiler.trace.torch import trace_module
 
-    torch.manual_seed(0)
-    config = from_pretrained_or_skip(AutoConfig.from_pretrained, "Qwen/Qwen3-Embedding-0.6B")
-    config.num_hidden_layers = 1
-    model = AutoModel.from_config(config).float().eval()
+    config = qwen3_embedding_config()
+    model = qwen3_embedding_model(config)
 
     hint, cap, dtype = 32, 64, torch.float32
     wrapper = build_full_model_wrapper(model, hint, dtype, dynamic=True)

@@ -1,4 +1,4 @@
-"""Tests for ``unify_sibling_reduce_axes`` (relaxed overlap matching) and
+"""Tests for ``_unify_siblings`` (relaxed overlap matching) and
 ``merge_sibling_reduce_loops`` in ``stmt/normalize.py``.
 
 Builds bodies by hand and asserts on the post-pass structure so failures
@@ -17,8 +17,9 @@ from emmy.compiler.ir.stmt.blocks import Loop
 from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.leaves import Accum, Assign, Load, Write
 from emmy.compiler.ir.stmt.normalize import (
+    _unify_siblings,
     merge_sibling_reduce_loops,
-    unify_sibling_reduce_axes,
+    normalize_body,
 )
 
 # ---------------------------------------------------------------------------
@@ -45,7 +46,7 @@ def _matmul_reduce(axis: Axis, w_buffer: str, out_acc: str, k_load: str = "x") -
 
 
 # ---------------------------------------------------------------------------
-# unify_sibling_reduce_axes — overlap-based grouping
+# _unify_siblings — overlap-based grouping
 # ---------------------------------------------------------------------------
 
 
@@ -61,7 +62,7 @@ def test_unify_groups_loops_with_shared_load_position() -> None:
         )
     )
 
-    out = unify_sibling_reduce_axes(body)
+    out = _unify_siblings(body)
 
     loops = [s for s in out if isinstance(s, Loop)]
     assert len(loops) == 2
@@ -81,7 +82,7 @@ def test_unify_skips_when_extents_differ() -> None:
         )
     )
 
-    out = unify_sibling_reduce_axes(body)
+    out = _unify_siblings(body)
 
     loops = [s for s in out if isinstance(s, Loop)]
     assert loops[0].axis.name == "a2"
@@ -100,7 +101,7 @@ def test_unify_skips_disjoint_load_positions() -> None:
         )
     )
 
-    out = unify_sibling_reduce_axes(body)
+    out = _unify_siblings(body)
 
     loops = [s for s in out if isinstance(s, Loop)]
     assert loops[0].axis.name == "a2"
@@ -129,7 +130,7 @@ def test_unify_transitively_groups_three_loops() -> None:
         )
     )
 
-    out = unify_sibling_reduce_axes(body)
+    out = _unify_siblings(body)
 
     loops = [s for s in out if isinstance(s, Loop)]
     assert {loop.axis.name for loop in loops} == {"a"}
@@ -262,7 +263,7 @@ def test_unify_groups_loops_indexed_affinely_in_the_reduce_axis() -> None:
         for name in ("i", "j")
     ]
 
-    out = unify_sibling_reduce_axes(Body(tuple(blocked)))
+    out = _unify_siblings(Body(tuple(blocked)))
 
     names = {s.axis.name for s in out if isinstance(s, Loop)}
     assert len(names) == 1, "affine siblings over one block index the same dimension"
@@ -284,9 +285,71 @@ def test_unify_keeps_apart_blocks_at_different_offsets() -> None:
             ),
         )
 
-    out = unify_sibling_reduce_axes(Body((at("i", 0), at("j", 32))))
+    out = _unify_siblings(Body((at("i", 0), at("j", 32))))
 
     assert len({s.axis.name for s in out if isinstance(s, Loop)}) == 2
+
+
+def _packed_stream_reduce(name: str, index, w_buffer: str = "W") -> Loop:
+    """A reduce loop ``acc += W[k] * bits[index(k)]`` reading one byte-packed stream ``bits`` — the
+    shape a 4-bit activation is read in, where the axis reaches the index through div and mod.
+    ``w_buffer`` names the weight, so two instances compute distinct values."""
+    return Loop(
+        axis=Axis(name, 256),
+        body=(
+            Load(name=f"w_{name}", input=w_buffer, index=(Var(name),)),
+            Load(name=f"v_{name}", input="bits", index=(index(Var(name)),)),
+            Assign(name=f"m_{name}", op="multiply", args=(f"w_{name}", f"v_{name}")),
+            Accum(name=f"acc_{name}", value=f"m_{name}"),
+        ),
+    )
+
+
+def _two_codes_per_byte(k):
+    """``(k / 16) * 8 + (k % 16) / 2`` — the byte holding logical element ``k`` of a stream packed
+    two codes per byte in blocks of 16."""
+    lit = lambda n: Literal(n, "int")  # noqa: E731
+    return BinaryExpr("+", BinaryExpr("*", BinaryExpr("/", k, lit(16)), lit(8)), BinaryExpr("/", BinaryExpr("%", k, lit(16)), lit(2)))
+
+
+def test_unify_groups_loops_indexed_through_one_composite_expression() -> None:
+    """A packed stream is read through div and mod of the axis, which is not affine in it. Two
+    siblings reading one stream through the same expression of their own axis walk the same
+    dimension and unify, the same way bare and affine readers do."""
+    out = _unify_siblings(Body((_packed_stream_reduce("i", _two_codes_per_byte), _packed_stream_reduce("j", _two_codes_per_byte))))
+
+    names = {s.axis.name for s in out if isinstance(s, Loop)}
+    assert len(names) == 1, "composite siblings over one packed stream index the same dimension"
+
+
+def test_unify_keeps_apart_different_composite_expressions() -> None:
+    """The composite key is the whole expression: ``bits[k / 16]`` and ``bits[k % 16]`` both
+    mention the axis at the same position and walk different things, so they stay distinct."""
+    lit = Literal(16, "int")
+    out = _unify_siblings(
+        Body(
+            (
+                _packed_stream_reduce("i", lambda k: BinaryExpr("/", k, lit), "Wg"),
+                _packed_stream_reduce("j", lambda k: BinaryExpr("%", k, lit), "Wu"),
+            )
+        )
+    )
+
+    assert len({s.axis.name for s in out if isinstance(s, Loop)}) == 2
+
+
+def test_unify_then_merge_collapses_two_readers_of_one_packed_stream() -> None:
+    """After unification the two packed-stream siblings merge into one loop with both
+    accumulators, which is the two-channel contraction a fused gate/up pair over a 4-bit
+    activation lowers to."""
+    out = normalize_body(
+        Body((_packed_stream_reduce("i", _two_codes_per_byte, "Wg"), _packed_stream_reduce("j", _two_codes_per_byte, "Wu")))
+    )
+
+    loops = [s for s in out if isinstance(s, Loop)]
+    assert len(loops) == 1
+    assert len([s for s in loops[0].body if isinstance(s, Accum)]) == 2
+    assert len([s for s in loops[0].body if isinstance(s, Load) and s.input == "bits"]) == 1, "the shared stream read is one load"
 
 
 def test_merge_skips_when_between_stmt_def_used_by_second_loop() -> None:
@@ -382,8 +445,7 @@ def test_unify_then_merge_collapses_gated_mlp_pattern() -> None:
         )
     )
 
-    unified = unify_sibling_reduce_axes(body)
-    merged = merge_sibling_reduce_loops(unified)
+    merged = merge_sibling_reduce_loops(body)
 
     loops = [s for s in merged if isinstance(s, Loop)]
     assert len(loops) == 1
@@ -391,6 +453,70 @@ def test_unify_then_merge_collapses_gated_mlp_pattern() -> None:
     assert accs_inside == ["acc0", "acc1"]
     x_loads = [s for s in loops[0].body if isinstance(s, Load) and s.input == "x"]
     assert len(x_loads) == 2, "dedup happens in a later pass — merge alone leaves both x loads"
+
+
+def test_normalize_closes_reductions_exposed_by_hoisting() -> None:
+    """A reduction hoisted beside an existing sibling merges in the same normalization."""
+    body = Body(
+        (
+            Loop(
+                Axis("i", 2),
+                (
+                    Loop(Axis("k0", 4), (Load("x0", "X", (Var("k0"),)), Accum("a", "x0"))),
+                    Write("A", (Var("i"),), "a"),
+                ),
+            ),
+            Loop(Axis("k1", 4), (Load("x1", "X", (Var("k1"),)), Accum("b", "x1"))),
+            Write("B", (), "b"),
+        )
+    )
+
+    normalized = normalize_body(body)
+    reduce_loops = [stmt for stmt in normalized if isinstance(stmt, Loop) and stmt.is_reduce]
+
+    assert len(reduce_loops) == 1
+    assert len([stmt for stmt in reduce_loops[0].body if isinstance(stmt, Load)]) == 1
+    assert normalize_body(Body(tuple(normalized))) == normalized
+
+
+def test_normalize_closes_children_exposed_by_parent_merge(monkeypatch) -> None:
+    """Close newly exposed child reductions before constructing the canonical graph once."""
+    from emmy.compiler.ir.stmt import normalize
+
+    builds = []
+    build = normalize.relation_graph
+
+    def counted(body):
+        builds.append(body)
+        return build(body)
+
+    monkeypatch.setattr(normalize, "relation_graph", counted)
+
+    def cone(outer: str, inner: str, tag: str) -> Loop:
+        return Loop(
+            Axis(outer, 4),
+            (
+                Loop(
+                    Axis(inner, 8),
+                    (
+                        Load(f"load_{tag}", "X", (Var(outer), Var(inner))),
+                        Accum(f"inner_{tag}", f"load_{tag}"),
+                    ),
+                ),
+                Accum(f"outer_{tag}", f"inner_{tag}"),
+            ),
+        )
+
+    body = Body((cone("k0", "j0", "a"), cone("k1", "j1", "b"), Write("Y", (), "outer_b")))
+    merged = merge_sibling_reduce_loops(body)
+    assert len(merged.iter_of_type(Loop)) == 2
+    assert len(merged.accums) == 4
+    normalized = normalize_body(body)
+
+    assert len(builds) == 1
+    assert len(tuple(normalized.iter_of_type(Loop))) == 2
+    assert len(tuple(normalized.iter_of_type(Load))) == 1
+    assert normalize_body(Body(tuple(normalized))) == normalized
 
 
 def test_merge_collapses_three_alpha_equal_siblings() -> None:
@@ -490,10 +616,11 @@ def test_merge_collapses_the_channel_loops_of_a_blocked_twisted_carrier() -> Non
         Accum(name="acc1", value="acc1__o__gn"),
     )
 
-    out = merge_sibling_reduce_loops(unify_sibling_reduce_axes(Body((pivot, expectation, denominator, *combine))))
+    out = merge_sibling_reduce_loops(Body((pivot, expectation, denominator, *combine)))
 
     loops = [s for s in out if isinstance(s, Loop)]
     assert len(loops) == 2, "the pivot stays apart; the two channels merge"
     assert [s.name for s in loops[0].body if isinstance(s, Accum)] == ["acc1__blk"]
     assert [s.name for s in loops[1].body if isinstance(s, Accum)] == ["acc5__sum__blk", "acc3__blk"]
-    assert len([s for s in loops[1].body if isinstance(s, Loop)]) == 2, "both score passes are inside now"
+    (score_loop,) = [s for s in loops[1].body if isinstance(s, Loop)]
+    assert len(score_loop.body.accums) == 2, "both score states share one inner loop"

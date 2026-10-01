@@ -53,7 +53,7 @@ async def resolve_fixed_hosts(
 
     if use_local:
         username = os.environ.get("USER", "deploy")
-        conn = VMConnectionInfo(host="127.0.0.1", username=username, ssh_port=22)
+        conn = VMConnectionInfo(host="127.0.0.1", username=username, ssh_port=22, is_local=True)
         if dry_run:
             hosts.append(AllocatedHost(conn=conn, gpu_name=None, gpu_count=0))
         else:

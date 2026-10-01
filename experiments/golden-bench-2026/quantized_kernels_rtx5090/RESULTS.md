@@ -1,5 +1,10 @@
 # Quantized checkpoint kernels — results
 
+**Retired rows (2026-09-28).** The block-FP8 rows and their two goldens are gone from the recipe. Maximal fusion now
+traces the `Qwen/Qwen3-0.6B-FP8` layer as one whole-layer kernel, so no fresh lowering writes the norm and
+activation-quantize targets those goldens stored, and a re-record would need a hand-made cut route for the FP8 layer.
+The run below is kept as the record of what they measured.
+
 ## RTX 5090 x1 (`rtx5090x1`)
 
 **Question.** Does Emmy compile and strictly execute every recorded post-fusion target of one `Qwen/Qwen3-0.6B-FP8`
@@ -44,7 +49,7 @@ projection recomputes the gate and up products inside its operand; neither runs 
 length, and both are left out of the goldens. The seq-512 causal-mask kernel is left out as well: its output is -inf
 by construction, which the strict check refuses. The previous decode golden covered the q and k projections; that
 coverage returns with a fusion change. Projection performance is measured separately, on isolated linears against
-vLLM's block-FP8 kernels, in `evaluation_results/2026-09-10_fp8-block-linear-rtx5090.md`.
+vLLM's block-FP8 kernels, by `scripts/bench_quant_linear.py --format fp8-block`.
 
 **Run.** Timestamp 2026-09-11T03:38:27Z, run ID `20260911T033827Z`, `emmy bench --local` on the host `kenshin`: one
 NVIDIA GeForce RTX 5090 (driver 580.173.02), AMD Ryzen 9 9950X3D, Ubuntu 24.04.2, kernel 7.0.0-28. The lane's staged

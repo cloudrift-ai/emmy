@@ -13,6 +13,7 @@ class VMConnectionInfo:
     ssh_port: int = 22
     port_mappings: list[tuple[int, int]] = field(default_factory=list)
     delete_info: tuple = ()
+    is_local: bool = False
 
     @property
     def address(self) -> str:

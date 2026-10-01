@@ -7,12 +7,14 @@ from importlib.metadata import PackageNotFoundError, version
 from emmy.commands.bench import register_bench_command
 from emmy.commands.compare import register_compare_command
 from emmy.commands.compile import register_compile_command
+from emmy.commands.db import register_db_command
 from emmy.commands.deploy.cloud import register_cloud_target
 from emmy.commands.deploy.local import register_local_target
 from emmy.commands.deploy.ssh import register_ssh_target
 from emmy.commands.eval import register_eval_command
 from emmy.commands.fit import register_fit_command
 from emmy.commands.generate import register_generate_command
+from emmy.commands.golden import register_golden_command
 from emmy.commands.inspect_graph import register_inspect_command
 from emmy.commands.publish import register_publish_command
 from emmy.commands.pull import register_pull_command
@@ -21,9 +23,7 @@ from emmy.commands.run import register_run_command
 from emmy.commands.serve import register_serve_command
 from emmy.commands.teardown import register_teardown_command
 from emmy.commands.trace import register_trace_command
-from emmy.commands.tune import register_tune_command
 from emmy.commands.vm import register_vm_command
-from emmy.compiler.target import check_nvrtc_supports_live_device
 from emmy.logging_setup import setup_cli_logging
 
 # Subcommands that never compile or launch a kernel on the local card, so they
@@ -31,7 +31,7 @@ from emmy.logging_setup import setup_cli_logging
 # listing recipes, tearing down a run). Everything else is guarded. The list is
 # opt-out on purpose: a new command that forgets to name itself here fails with
 # one explanation, which beats failing with a wall of NVRTC errors.
-_NO_GPU_COMMANDS = frozenset({"bench", "compare", "deploy", "publish", "pull", "recipe", "teardown", "trace", "vm"})
+_NO_GPU_COMMANDS = frozenset({"bench", "compare", "db", "deploy", "golden", "publish", "pull", "recipe", "teardown", "trace", "vm"})
 
 
 def _package_version():
@@ -67,18 +67,17 @@ def main():
     register_pull_command(subparsers)
     register_trace_command(subparsers)
     register_compile_command(subparsers)
-    register_tune_command(subparsers)
     register_run_command(subparsers)
     register_generate_command(subparsers)
     register_inspect_command(subparsers)
     register_eval_command(subparsers)
+    register_db_command(subparsers)
+    register_golden_command(subparsers)
     register_fit_command(subparsers)
     register_compare_command(subparsers)
 
     args = parser.parse_args()
     setup_cli_logging()
-    if args.command not in _NO_GPU_COMMANDS:
-        check_nvrtc_supports_live_device()
     args.func(args)
 
 

@@ -3,7 +3,7 @@
 Every atomic accumulator (atomic ``Write`` / ``RegStore`` output)
 pays a per-launch memset — a CUDA-graph MEMSET node per site (~1.3 µs isolated, 3-5 per gemma-4
 decode layer). The zero only has to happen-before the accumulating launch IN THE SAME STREAM, so
-it can ride any launch that precedes it: this rule injects a ``ZeroPrologue`` stmt (CTA 0 writes
+it can ride any launch that precedes it: this rule injects a ``ZeroPrologue`` stmt (the grid writes
 raw zero words) into a dataflow-PREDECESSOR kernel — a producer of one of the accumulator
 kernel's inputs, which topological launch order puts strictly earlier — and marks the buffer
 ``zero_delegated`` on the accumulator so ``010_lower_kernelop`` drops it from
@@ -12,8 +12,8 @@ still ``KernelOp``\\ s.
 
 Correctness:
 
-- **Happen-before**: single-stream serialization — every CTA of the predecessor (including the
-  zeroing CTA 0) completes before the accumulator kernel starts. Across capture replays the
+- **Happen-before**: single-stream serialization — every CTA of the predecessor, and with it every
+  zeroing thread, completes before the accumulator kernel starts. Across capture replays the
   previous step's consumers of the buffer also precede this step's predecessor in stream order,
   so the zero never wipes live data.
 - **No graph edge**: the target buffer is the DOWNSTREAM kernel's own output — an input edge on
@@ -41,7 +41,7 @@ from emmy.compiler.graph import Node, Tensor
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.stmt import Body, ZeroPrologue
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
-from emmy.compiler.pipeline.passes.lowering.cuda._helpers import atomic_outputs
+from emmy.compiler.pipeline.passes.lowering.cuda._helpers import atomic_outputs, launch_name
 
 PATTERN = [Pattern("root", KernelOp)]
 
@@ -83,7 +83,9 @@ def rewrite(match: Match, root: Node) -> KernelOp | None:
     # in the body; the target buffers join ``outputs`` with placeholder Tensors — the next
     # match's ``populate_io`` swaps in the real graph tensors (the buffers are graph nodes).
     total_words = sum(s.words for s in prologues) + sum(s.words for s in pnode.op.body.iter() if isinstance(s, ZeroPrologue))
-    base = pnode.op.name.rsplit("__zp", 1)[0] if "__zp" in pnode.op.name else pnode.op.name
+    # An unnamed kernel (a split piece) takes its launch name here: a bare ``__zp<words>`` would be
+    # shared by every unnamed predecessor zeroing as many words.
+    base = launch_name(pnode.op, pnode.id).rsplit("__zp", 1)[0]
     pnode.op = replace(
         pnode.op,
         body=Body((*prologues, *pnode.op.body)),

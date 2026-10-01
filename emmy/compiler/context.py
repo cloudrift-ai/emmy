@@ -19,7 +19,7 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from emmy import config, gpu
+from emmy import gpu
 
 if TYPE_CHECKING:
     from emmy.compiler.pipeline.search.pool import PoolSample
@@ -47,10 +47,12 @@ DEFAULT_SM_COUNT = gpu.DEFAULT_GPU.sm_count
 
 
 def _env_compile_flags() -> str:
-    """Extra nvcc flags for this compile (``EMMY_NVCC_FLAGS``). Set by the
-    CLI commands (via :func:`emmy.config.set_nvcc_flags`); folded into
-    :meth:`Context.structural_key` so the perf cache is partitioned by opt level."""
-    return config.nvcc_flags()
+    """Effective nvcc flags, including the FAST_MATH policy and custom overrides.
+
+    Folded into Context.structural_key so timing evidence cannot cross arithmetic regimes."""
+    from emmy.compiler.backend.cuda.nvcc import effective_flags  # noqa: PLC0415
+
+    return " ".join(effective_flags())
 
 
 # The cicc optimization level as it is spelled on the nvcc command line, with the ``-Xcicc``
@@ -59,8 +61,13 @@ def _env_compile_flags() -> str:
 _OPT_TOKEN = re.compile(r"(?:-Xcicc\s+)?-O(\d)")
 
 
+#: The flag fast math adds — the one extra compiler flag that is a regime of its own, since it changes the
+#: code a kernel runs as (``backend.cuda.nvcc.effective_flags``).
+FAST_MATH_FLAG = "--use_fast_math"
+
+
 def split_opt_level(compile_flags: str) -> tuple[int, str]:
-    """Split extra nvcc flags into ``(cicc opt level, everything else)``.
+    """Split effective nvcc flags into ``(cicc opt level, everything else)``.
 
     ONE parse, shared by the two places the opt level matters: the ``H_opt`` feature
     (:meth:`Context.features`) and the identity a measurement is stored under
@@ -149,31 +156,27 @@ class Context:
     # PCIe product name of the card this context is for (e.g. "NVIDIA H200 141GB"),
     # set by ``from_target(gpu_name=…)`` or probed live (``gpu.live_name``). The one
     # identity that separates same-die SKUs (H100 vs H200: identical cc + SM features,
-    # different VRAM) — used by the node-store key + ``gpu`` column so cross-hardware
-    # tuning data never collides. NOT in ``structural_key`` (the perf cache stays
-    # SKU-coarse on purpose; only the node *dataset* keys on it). ``None`` ⇒ unknown.
+    # different VRAM) — the ``perf`` table's ``gpu`` key column, so cross-hardware
+    # measurements never collide. NOT in ``structural_key``, which spells the regime (compute
+    # capability + compiler flags) and nothing about the card. ``None`` ⇒ unknown.
     gpu_name: str | None = None
     # Identifies which backend's perf rows this compile reads/writes — the
-    # tune DB keys ``perf`` by ``(context_key, op_key, backend)``. Defaults to
+    # tune DB keys ``perf`` by the card, the regime, the kernel and ``backend``. Defaults to
     # ``"cuda"`` — the canonical autotune target. ``run_autotune`` replaces
     # this when a live :class:`Backend` is supplied.
     backend_name: str = "cuda"
-    # Extra nvcc flags this compile uses (from ``EMMY_NVCC_FLAGS`` — e.g.
-    # normally empty — tune, compile and run all measure in the deployable regime).
-    # Folded into ``structural_key`` (split, see :func:`split_opt_level`) so the autotune
-    # ``perf`` cache is partitioned by opt level: a measurement taken under a deliberately
-    # non-deployable ``--nvcc-flags`` never answers for a deploy. Populated from the env by :meth:`probe` /
-    # :meth:`from_target`.
+    # Effective nvcc flags, from FAST_MATH plus EMMY_NVCC_FLAGS. Folded into structural_key
+    # so timings under different arithmetic or optimization flags cannot rank one another.
+    # Populated from the environment by probe / from_target.
     compile_flags: str = ""
-    # Whether the strict knob-pin validator (``lowering/tile/_validate``)
+    # Whether the strict knob-pin validator (``tile/_validate``)
     # is active. ``True`` on the deterministic greedy compile (``compile`` / ``run``),
     # where a force-pinned env knob foreign to the kernel's resolved tier is a user
-    # error that should fail loudly instead of silently mis-compiling. ``False`` under
-    # the tune SEARCH (``Run.drive`` flips it): the search legitimately explores
-    # tier-foreign forks and steers heterogeneous multi-op graphs with a UNION pin
-    # vector (warp ``WM``/``WN`` + scalar ``BM``/``BN`` together — each op takes its
-    # tier's subset), so a per-op contradiction is a pruned branch, not an error. NOT
-    # in ``structural_key`` (it changes no codegen, only whether a contradiction raises).
+    # error that should fail loudly instead of silently mis-compiling. ``False`` for a
+    # caller that steers heterogeneous multi-op graphs with a UNION pin vector (warp
+    # ``WM``/``WN`` + scalar ``BM``/``BN`` together — each op takes its tier's subset),
+    # so a per-op contradiction is a pruned branch, not an error. NOT in
+    # ``structural_key`` (it changes no codegen, only whether a contradiction raises).
     validate_pins: bool = True
     # The candidate-pool sample this compile enumerates under, or ``None`` for a LIVE compile,
     # which always sees the whole pool. Set by the offline dataset builders (``emmy fit``), never
@@ -190,12 +193,14 @@ class Context:
     kernel_cache: object | None = field(default=None, compare=False, repr=False)
 
     @classmethod
-    def from_target(cls, cap: tuple[int, int], *, gpu_name: str | None = None) -> Context:
+    def from_target(cls, cap: tuple[int, int], *, gpu_name: str | None = None, compile_flags: str | None = None) -> Context:
         """A target-derived context. ``gpu_name`` (a PCIe product name) pins the
         device-physical features to that card's **memorized** specs from the
         :mod:`emmy.gpu` registry — used to reconstruct a *golden* config's
         context so it featurizes with its own card's SM count / smem (not the live
         device's). Default ``None`` → the live device (the live-compile path).
+        ``compile_flags`` names the regime the context stands for — the flags a
+        recorded row was measured under — instead of the live environment's.
 
         A ``gpu_name`` the registry does not know is a hard error, never a fallback: the caller
         named a specific card, so substituting the live device's properties would featurize that
@@ -217,7 +222,7 @@ class Context:
             sm_count=sm,
             device_props=props,
             gpu_name=spec.name if spec else gpu_name,
-            compile_flags=_env_compile_flags(),
+            compile_flags=_env_compile_flags() if compile_flags is None else compile_flags,
         )
 
     @property
@@ -295,11 +300,11 @@ class Context:
         return digest("Context", self.compute_capability, *split_opt_level(self.compile_flags))
 
     def hardware_id(self) -> str:
-        """A stable per-card identity for the node-store key + ``gpu`` column: the PCIe
+        """A stable per-card identity for the ``perf`` table's ``gpu`` key column: the PCIe
         product name when known, else a digest of the device-physical regime (``H_*``
         features + capability). Separates same-die SKUs (H100 vs H200) that
         ``structural_key`` (cc + opt only) and the SM-only ``H_*`` features can't, so a
-        cross-hardware node dataset never collides."""
+        cross-hardware dataset never collides."""
         if self.gpu_name:
             return self.gpu_name
         from emmy.compiler.structural import digest  # noqa: PLC0415
@@ -344,7 +349,7 @@ class Context:
     @classmethod
     def probe(cls) -> Context:
         """Build by probing the live CUDA device. Falls back to (0, 0) if
-        cupy is unavailable — callers treat that as "no hardware feature
+        no CUDA device is visible — callers treat that as "no hardware feature
         support" (rules gating on capability self-skip via ``RuleSkipped``).
 
         ``max_dynamic_smem`` is the *live device's* opt-in cap, not the

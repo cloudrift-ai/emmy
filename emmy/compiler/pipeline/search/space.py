@@ -16,7 +16,7 @@ candidate schedules.
 Two groups:
 
 - **Schedule codec knobs** (``WORK`` / ``REDUCE`` / ``TILE`` / ``STAGE`` / ``RASTER``) — the tile-lowering schedule
-  fork points serialized by ``ClassicScheduleCodec``. The typed assignment is materialized in
+  fork points serialized by ``ClassicScheduleCodec``. The typed schedule is materialized in
   ``lowering/kernel/010_materialize``; its encoded row rides on ``TileOp.knobs`` so the online
   prior can featurize and tune the decision. ``off=""`` is the explicit direct leaf value.
 - **Kernel-lowering policy knobs** (``VECTORIZE_LOADS`` / ``INTERLEAVE_LOADS``) — boolean codegen
@@ -75,7 +75,8 @@ TILE = Knob(
 STAGE = Knob(
     "STAGE",
     KnobType.STR,
-    help="Operand-staging codec (d<depth>/smem|smem-async|smem-tma[/p<reg_depth>]; empty=no intermediate). "
+    help="Intermediate-storage codec (d1/reg; d<depth>/smem|smem-async|smem-tma[/p<reg_depth>]; "
+    "empty=no intermediate). "
     "Decided in the tile schedule, materialized in lowering/kernel/010_materialize.",
     off="",
 )
@@ -174,6 +175,14 @@ VECTORIZE_STORES = Knob(
     off=False,
 )
 
+GUARD_REDUCTIONS = Knob(
+    "GUARD_REDUCTIONS",
+    KnobType.BOOL,
+    hints=(True,),
+    help="Skip scalar reductions whose results are discarded by coordinate selects.",
+    off=False,
+)
+
 PAIR_LDMATRIX = Knob(
     "PAIR_LDMATRIX",
     KnobType.BOOL,
@@ -197,10 +206,8 @@ UNROLL = Knob(
 FAST_EXP = Knob(
     "FAST_EXP",
     KnobType.BOOL,
-    # Off by default and not a search dimension — a precision-trading knob (__expf ≈ 2 ulp vs
-    # correctly-rounded expf; numerically benign for the softmax family — the α rescale never
-    # amplifies and the carrier stays fp32 — but it must be a deliberate, pinnable choice, never
-    # a silent default). Enabled via EMMY_FAST_EXP=1 or the FAST_MATH umbrella.
+    # Pin-only precision policy; its effective default follows FAST_MATH. An explicit
+    # EMMY_FAST_EXP pin overrides the umbrella without changing the other precision gates.
     hints=(False,),
     help="Lower f32 exp through the SFU fast path (__expf: one FMUL + MUFU.EX2) instead of libm expf.",
     off=False,
@@ -209,20 +216,17 @@ FAST_EXP = Knob(
 
 # --- Precision-trading knobs (the FAST_MATH family) ---------------------------
 #
-# Knobs that trade numerical precision for throughput are NEVER silently on: each is off by
-# default and enabled by its own ``EMMY_<NAME>`` pin, or batch-enabled by the ``FAST_MATH``
-# umbrella (the ``-use_fast_math`` / ``-O3`` analogue). Precedence per knob: its own pin >
-# ``FAST_MATH`` > off (:func:`precision_pin`). The umbrella is a meta gate, not a kernel
-# property — the realized fork is already fully identified by what it enables (``FAST_EXP``'s
-# stamped BOOL, the ``TILE`` codec's bare atom token) — so it is ``unfeatured`` and never
-# stamped, enumerated, or featurized.
+# Precedence: an individual pin > FAST_MATH > True (precision_pin). The umbrella also
+# controls NVCC fast math and invariant reciprocal division. It is unfeatured: concrete
+# schedule choices retain their own identity, while effective compiler flags separate
+# the fast and precise measurement contexts. Golden input pins record the umbrella.
 
 FAST_MATH = Knob(
     "FAST_MATH",
     KnobType.BOOL,
-    hints=(False,),
-    help="Umbrella pin for the precision-trading knobs (FAST_EXP, F16_MMA_F32_ACC, FP8_MMA): "
-    "EMMY_FAST_MATH=1 enables each one not individually pinned; individual pins win.",
+    hints=(True,),
+    help="Fast math is enabled by default: NVCC fast math, invariant reciprocal division, and the "
+    "precision-trading knobs (FAST_EXP, F16_MMA_F32_ACC, FP8_MMA). Pin 0 to disable; individual pins win.",
     unfeatured=True,  # a meta gate over other knobs — must never enter the feature vector
 )
 
@@ -252,17 +256,21 @@ FP8_MMA = Knob(
 )
 
 
-def precision_pin(knob: Knob) -> bool | None:
+#: The precision-trading family: the umbrella and the knobs that follow it (:func:`precision_pin`) — what a
+#: recorded regime is compared on, in both directions, and what sorts a row into the fast-math lane.
+PRECISION_KNOBS = (FAST_MATH, FAST_EXP, F16_MMA_F32_ACC, FP8_MMA)
+
+
+def precision_pin(knob: Knob) -> bool:
     """The effective pin for a precision-trading BOOL ``knob``: its own ``EMMY_<NAME>`` pin when
-    set, else the ``FAST_MATH`` umbrella pin, else ``None`` (neither set — the caller applies its
-    conservative default, and may keep target gates that an *individual* pin overrides)."""
+    set, else the ``FAST_MATH`` umbrella pin, else its enabled default."""
     raw = knob.raw()
     if raw is not None:
         return knob.parse(raw)
     raw = FAST_MATH.raw()
     if raw is not None:
         return FAST_MATH.parse(raw)
-    return None
+    return FAST_MATH.hints[0]
 
 
 LOOPIFY = Knob(

@@ -38,12 +38,30 @@ def test_cone_stat_follows_the_first_top_level_reduce_in_lowering_order() -> Non
     axes = (Axis("first", 4), Axis("nested", 4))
     body_prologue = projection((first,))
     body_cone = projection((body_prologue,), (Assign(name="cell", op="copy", args=("first_acc",)),))
-    assert cone_stat(body_cone, axes) is first
+    assert cone_stat(body_cone, "k", axes) is first
 
     operand_stat = _sum_fold("operand", "operand_acc", "operand")
     operand_prologue = projection((operand_stat,), (Assign(name="scale", op="copy", args=("operand_acc",)),))
     operand_cone = projection((operand_prologue,), (Assign(name="cell", op="copy", args=("scale",)),))
-    assert cone_stat(operand_cone, (Axis("operand", 4),)) is operand_stat
+    assert cone_stat(operand_cone, "k", (Axis("operand", 4),)) is operand_stat
+
+
+def test_cone_stat_finds_the_statistic_edge_wherever_formation_put_it() -> None:
+    """Formation orders a cone's operands its own way, and the seam lowers every row-invariant edge in that
+    order. A fused norm→linear cone is two gmem reads that vary with the contraction axis and THEN the norm's
+    statistic, so a lookup that read only the first operand found no reduce, answered ``None``, and the
+    prologue fell back to one serial row per thread: the Gemma 4 norm → gate/up → GeGLU kernel went from
+    7.7 ms to 11.9 ms at 4096 tokens on an RTX 5090, same schedule. An edge that varies with the
+    contraction axis is the cell's, never the prologue's, even when it reduces."""
+    stat = _sum_fold("r", "acc", "m", "r")
+    prologue = projection((stat,), (Assign(name="scale", op="copy", args=("acc",)),))
+    per_cell = _sum_fold("s", "cell_acc", "k", "s")
+    cone = projection(
+        (slab("x_v", "x", "m", "k"), slab("w_v", "w", "k"), per_cell, prologue),
+        (Assign(name="cell", op="multiply", args=("x_v", "scale")),),
+    )
+    axes = (Axis("m", 4), Axis("k", 4), Axis("r", 4), Axis("s", 4))
+    assert cone_stat(cone, "k", axes) is stat
 
 
 def test_compute_fill_suffixes_nested_ssa_for_every_vector_cell() -> None:

@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import numpy as np
+import pytest
+import torch
+
 from emmy.commands.trace import graph_from_code
+from emmy.compiler.backend.cuda.backend import CudaBackend
 from emmy.compiler.context import Context
 from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 from emmy.compiler.pipeline.search.pins import pinned_knobs
+from tests.compiler.helpers import requires_cuda, requires_sm90
 
 
 def _chunk_loop(stage: str) -> str:
@@ -54,3 +60,34 @@ def test_a_single_slot_ring_refills_each_operand_at_its_own_kill_point() -> None
     value_drain = loop.index("&_b_smem[")  # the expectation's first read of the value slab
     value_refill = loop.index("emmy_cp_async_cg(&_b_smem")
     assert score < key_refill < value_drain < value_refill
+
+
+@requires_sm90
+@requires_cuda
+@pytest.mark.parametrize("stage", ["d1/smem-tma", "d2/smem-tma"])
+def test_tma_refills_preserve_causal_attention(stage: str) -> None:
+    """Shared slabs may be refilled only after their generic-proxy reads have completed."""
+    shape = (1, 8, 512, 128)
+    operand = "torch.randn(1, 8, 512, 128, dtype=torch.float16)"
+    graph = graph_from_code(f"F.scaled_dot_product_attention({operand}, {operand}, {operand}, is_causal=True)")[0]
+    pins = {
+        "WORK": "w2x1",
+        "TILE@map.1/twist": "mma_m16n8k16_f16_f32/f1x1",
+        "TILE@map.1/twist.1/inner": "mma_m16n8k16_f16_f32/f1x2",
+        "REDUCE@map.1/twist": "",
+        "REDUCE@map.1/twist.1/inner": "",
+        "STAGE@map.1/twist": stage,
+        "STAGE@map.1/twist.1/inner": stage,
+    }
+    with pinned_knobs(pins):
+        compiled = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.probe())
+    (source,) = [node.op.kernel_source for node in compiled.nodes.values() if isinstance(node.op, CudaOp)]
+    assert "cp_async_bulk_tensor_" in source and "emmy_mma_m16n8k16_f16_f32(" in source
+    backend = CudaBackend()
+    for seed in range(3):
+        rng = np.random.default_rng(seed)
+        feed = {name: rng.standard_normal(shape).astype(np.float16) for name in graph.inputs}
+        tensors = [torch.as_tensor(feed[name], device="cuda") for name in graph.inputs]
+        expected = torch.nn.functional.scaled_dot_product_attention(*tensors, is_causal=True).cpu().numpy()
+        actual = backend.run(compiled, input_data=feed)[0].outputs[graph.outputs[0]]
+        np.testing.assert_allclose(actual, expected, rtol=1e-3, atol=1e-3)

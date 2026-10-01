@@ -9,6 +9,7 @@ split choices remain separate from classic schedule choices.
 
 from __future__ import annotations
 
+import functools
 import importlib
 from dataclasses import replace as dc_replace
 from types import SimpleNamespace
@@ -23,25 +24,26 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.frontend.ir import MatmulOp, SdpaOp
 from emmy.compiler.ir.pure import Fold, Lambda
-from emmy.compiler.ir.schedule import Placement
-from emmy.compiler.ir.schedule import classic_projection as _classic
+from emmy.compiler.ir.schedule import Placement, Tile, Work
 from emmy.compiler.ir.schedule.catalog import coop_reduce_moves
+from emmy.compiler.ir.schedule.classic import refusals as _classic
+from emmy.compiler.ir.schedule.classic import sites as _sites
 from emmy.compiler.ir.schedule.views import ContractionFacts
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
-from emmy.compiler.ir.tile import OutputSpec, Reduce, TileOp
+from emmy.compiler.ir.tile import OutputSpec, Reduce, TileOp, ops
 from emmy.compiler.ir.tile.ops import Sched
 from emmy.compiler.pipeline.fork import iter_leaves
 from emmy.compiler.pipeline.knob import family_of
-from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop, scan_from_loop
-from emmy.compiler.pipeline.search.golden_eval import enumerate_graph
+from emmy.compiler.pipeline.passes.tile._fromloop import fold_from_loop, scan_from_loop
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from emmy.compiler.pipeline.search.pool import PoolSample
+from emmy.compiler.pipeline.search.ranking import enumerate_graph
 from tests.compiler.terms import contraction, projection, reduction, slab
 
 _CC = (12, 0)
 
 #: The scheduling rule, reached through ``importlib`` because its module name starts with a digit.
-_SCHEDULE_RULE = importlib.import_module("emmy.compiler.pipeline.passes.lowering.tile.040_schedule")
+_SCHEDULE_RULE = importlib.import_module("emmy.compiler.pipeline.passes.tile.schedule.040_schedule")
 
 #: The knob pins the enumeration reads off the environment. A host with one set would enumerate a
 #: narrowed pool and fail the offer assertions here for a reason that has nothing to do with the
@@ -135,18 +137,20 @@ def test_the_prescan_asks_each_catalog_question_once(case, unpinned, monkeypatch
     leaf, so a reintroduced per-branch re-ask shows up here as a repeated question, not as a slow
     test somebody eventually notices."""
     asked: list[tuple] = []
-    original = _classic._options
+    original = _sites.ClassicNodeSite.nodes.func
 
-    def spy(state, node):
-        asked.append((state.tile, node))  # strong refs, so ids below cannot alias freed objects
-        return original(state, node)
+    def spy(site):
+        asked.append((site.problem.tile, site.node))  # strong refs, so ids below cannot alias freed objects
+        return original(site)
 
-    monkeypatch.setattr(_classic, "_options", spy)
+    spied = functools.cached_property(spy)
+    spied.__set_name__(_sites.ClassicNodeSite, "nodes")
+    monkeypatch.setattr(_sites.ClassicNodeSite, "nodes", spied)
     assert _rows(FIXTURES[case]())
     assert asked, "the fixture built no catalog at all"
     keys = [(id(tile), id(node)) for tile, node in asked]
     repeats = len(keys) - len(set(keys))
-    assert not repeats, f"_options was asked the same question {repeats} time(s) over ({len(keys)} calls)"
+    assert not repeats, f"a site was asked its options {repeats} time(s) over ({len(keys)} calls)"
 
 
 def test_the_prescan_reads_each_computed_a_seam_once(unpinned, monkeypatch) -> None:
@@ -177,24 +181,12 @@ def test_the_prescan_reads_each_computed_a_seam_once(unpinned, monkeypatch) -> N
     assert len(calls) < len(rows)
 
 
-@pytest.mark.parametrize(
-    "case, tile_sites, reduce_sites",
-    (
-        ("fused_norm_linear", 1, 2),
-        pytest.param(
-            "flash_pair",
-            2,
-            3,
-            marks=pytest.mark.xfail(strict=True, reason="fused value channel on tensor cores: not on this tree yet (PR #699)"),
-        ),
-    ),
-)
-def test_computed_fold_sites_are_keyed_schedule_sites(case, tile_sites, reduce_sites, unpinned) -> None:
-    """A computed cone's fold and a derived site (flash's synthesized PV) are real schedule sites:
-    every row spells them with stable node identities, so nothing nested is silently undecided."""
-    row = _rows(FIXTURES[case]())[0]
-    assert sum(key == "TILE" or key.startswith("TILE@") for key in row) == tile_sites
-    assert sum(key == "REDUCE" or key.startswith("REDUCE@") for key in row) == reduce_sites
+def test_computed_fold_sites_are_keyed_schedule_sites(unpinned) -> None:
+    """A computed cone's fold is a real schedule site: every row spells it with a stable node
+    identity, so nothing nested is silently undecided."""
+    row = _rows(FIXTURES["fused_norm_linear"]())[0]
+    assert sum(key == "TILE" or key.startswith("TILE@") for key in row) == 1
+    assert sum(key == "REDUCE" or key.startswith("REDUCE@") for key in row) == 2
 
 
 def test_sdpa_fold_tree_offers_a_paired_mma_row(unpinned, monkeypatch) -> None:
@@ -242,7 +234,6 @@ def test_the_split_fork_offers_atomic_and_deferred_arms(unpinned) -> None:
     siblings of the unsplit tree (``030_cut``), and a fold that admits both finalizes
     still sees the atomic and the deferred arm offered together, beside the unsplit one."""
     from emmy.compiler.pipeline import TILE_PASSES, Pipeline  # noqa: PLC0415
-    from emmy.compiler.pipeline.fork import iter_leaves  # noqa: PLC0415
     from emmy.compiler.pipeline.pipeline import Run  # noqa: PLC0415
 
     offered: set[str] = set()
@@ -250,73 +241,10 @@ def test_the_split_fork_offers_atomic_and_deferred_arms(unpinned) -> None:
     def decide(fp):
         if any(getattr(option, "structural", False) for option in fp.options):
             offered.update(str(v) for option in fp.options for k, v in option.knobs.items() if family_of(k) == "REDUCE")
-        return next(iter_leaves(fp.options))
+        return next(fp.leaves())
 
     Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target(_CC)).resolve(_matmul_graph(64, 64, 64, "f32"), decide)
     assert {"", "g2a", "g2k"} <= offered
-
-
-@pytest.mark.xfail(strict=True, reason="fused value channel on tensor cores: not on this tree yet (PR #699)")
-def test_the_twisted_carrier_split_offers_only_the_deferred_arm(unpinned, monkeypatch) -> None:
-    """The cross-CTA split composes with the paired-mma flash cell. The offer is inspected directly
-    to isolate its algebraic legality from the rest of resolution. The atomic arm is refused on the
-    carrier's ARITY (``atomicAdd`` folds one additive state; the twisted
-    carrier streams three), while the deferred workspace arm slices the multi-component carrier.
-    And the pieces re-schedule their paired sites: under the pinned deferred split the partial's
-    row still spells BOTH mma contractions."""
-    from types import SimpleNamespace
-
-    from emmy.compiler.ir.tile.ir import TileOp
-    from emmy.compiler.pipeline import TILE_PASSES, Pipeline  # noqa: PLC0415
-    from emmy.compiler.pipeline.fork import iter_leaves  # noqa: PLC0415
-    from emmy.compiler.pipeline.passes.lowering.tile._split import split_forks
-    from emmy.compiler.pipeline.pipeline import Run  # noqa: PLC0415
-
-    ctx = Context.from_target(_CC)
-    captured: list[TileOp] = []
-
-    class _Captured(Exception):
-        pass
-
-    def keep(fp):
-        op = fp.root_op
-        if isinstance(op, TileOp) and op.op is not None and not op.place.is_mapped and not captured:
-            captured.append(op)
-            raise _Captured
-        return next(iter_leaves(fp.options))
-
-    with pytest.raises(_Captured):
-        Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(_sdpa_graph(), keep)
-    assert captured, "the flash cell must reach the tile passes as one fused kernel"
-    offers = split_forks(None, SimpleNamespace(op=captured[0]))
-    assert offers is not None
-    spellings = {str(v) for offer in offers for v in offer.knobs.values()}
-    assert "g2k" in spellings, "the deferred workspace arm must slice the twisted carrier"
-    assert not any(s.startswith("g") and s.endswith("a") for s in spellings), (
-        "atomicAdd folds ONE additive state; the three-component twisted carrier has no atomic arm"
-    )
-
-    monkeypatch.setenv("EMMY_WORK", "w1x1")
-    _pin(
-        monkeypatch,
-        **{
-            "TILE@map.1/twist.1/inner": "mma_m16n8k16_f16_f32/f1x2",
-            "TILE@map.1/twist": "mma_m16n8k16_f16_f32/f1x1",
-            "REDUCE@map": "",
-            "REDUCE@map.1/twist.1/inner": "",
-            "STAGE@map.1/twist.1/inner": "",
-            "STAGE@map.1/twist": "d1/smem",
-        },
-    )
-    monkeypatch.setenv("EMMY_RASTER", "")
-    monkeypatch.setenv("EMMY_REDUCE@MAP.1/TWIST", "g2k")
-    union_ctx = dc_replace(Context.from_target(_CC), validate_pins=False)
-    out, _ = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=union_ctx).resolve(_sdpa_graph(), lambda fp: next(iter_leaves(fp.options)))
-    partial = next(n.op for nid, n in out.nodes.items() if nid.endswith("__partial") and isinstance(n.op, TileOp))
-    assert partial.place.is_mapped, "the partial piece must decide its own row"
-    assert sum(key.startswith("TILE@") and "mma_" in str(value) for key, value in partial.knobs.items()) == 2, (
-        "the sliced piece must still spell both paired mma sites"
-    )
 
 
 def test_an_observed_fold_offers_only_the_serial_reduce(unpinned) -> None:
@@ -405,6 +333,78 @@ def test_a_direct_chain_member_offers_the_non_transposed_catalog(unpinned) -> No
     assert _classic._reduction_domain(_tile_stub(_chain_root(red)), red) == _member_catalog()
 
 
+def _norm_linear_root() -> Fold:
+    """A fused norm→linear: the contraction's A cone normalizes its row by a statistic the cone
+    folds itself. A tier COULD fold this root whole — its one carried state is the bilinear
+    channel — and the untiled tiers do not, which is the shape every pre-attention gate has."""
+    stat = reduction("k", (slab("x_e", "x", "m", "k"),), (Assign(name="acc_ms__v", op="multiply", args=("x_e", "x_e")),), ("acc_ms",))
+    cone = projection(
+        operands=(slab("x_k", "x", "m", "k"), stat),
+        body=(Assign(name="rs", op="rsqrt", args=("acc_ms",)), Assign(name="xn", op="multiply", args=("x_k", "rs"))),
+        results=("xn",),
+    )
+    return contraction("k", cone, (slab("w_e", "w", "n", "k"), "acc"))
+
+
+def test_a_tilable_contraction_roots_own_statistic_is_still_a_chain_member(unpinned) -> None:
+    """Whether a FILL takes the root's cone over is the schedule's answer, not the term's. A
+    contraction a tier could fold whole still binds through the untiled arm when nothing tiles it,
+    and there its statistic is a fold beside the root — so the member offers the catalog. Read off
+    the term, the statistic was serial-only, and the cooperative reduce over a 16384-wide gate
+    evaluated its whole row statistic once per thread."""
+    root = _norm_linear_root()
+    assert root.tiles_whole(), "the probe root is one a tier COULD fold whole"
+    statistic = next(member for member in ops.chain_members(root) if member.axis == "k")
+    assert _classic._reduction_domain(_tile_stub(root), statistic) == _member_catalog()
+
+
+def test_a_root_that_leaves_the_chain_arm_offers_its_member_no_partition(unpinned) -> None:
+    """The complement, and the reason the member's own catalog may stay term-read: a chain binds in
+    ONE of the binder's arms. A root that output-tiles reaches its cone through the fill, and one
+    carrying a transposed band binds its fold alone — either way a row that also partitions the
+    member spells a kernel the binder never builds, realizing without the partition and reading as
+    an unreproducible pin. The context refuses those two pairs and nothing else: the band survives
+    a member that folds SERIALLY, which is what the recorded transposed rows of a fused reduce
+    are, and withdrawing it there turned ten of them undecodable."""
+    tile = TileOp(
+        op=_norm_linear_root(),
+        place=Placement(free=(Axis("m", 64), Axis("n", 64))),
+        axes=(Axis("m", 64), Axis("n", 64), Axis("k", 256)),
+        name="k_norm_linear",
+        knobs={},
+    )
+    (root,) = ops.kernel_roots(tile.op)
+    statistic = next(member for member in ops.chain_members(root) if member.axis == "k")
+    sched = Sched(tile, place=tile.place.on_grid())
+    tile_key, band_key = sched.key("TILE", root), sched.key("REDUCE", root)
+    member_key = sched.key("REDUCE", statistic)
+
+    rows = [dict(leaf.knobs) for leaf in iter_leaves(_SCHEDULE_RULE.classic_forks(tile, tile.name, {}, Context.from_target(_CC)))]
+    picks = []
+    for row in rows:
+        work = Work.parse(str(row["WORK"])) if str(row.get("WORK", "")) else None
+        picks.append(
+            (
+                Tile.parse(str(row.get(tile_key, "")), work),
+                Reduce.parse(str(row.get(band_key, "")), work),
+                Reduce.parse(str(row.get(member_key, "")), work),
+            )
+        )
+    assert not [1 for plan, _, partition in picks if plan.is_tiled and partition != Reduce()], (
+        "the fill owns the cone; the pin would not realize"
+    )
+    assert not [1 for _, band, partition in picks if band.coop_transposed and partition != Reduce()], (
+        "the band binds its fold alone; the pin would not realize"
+    )
+    assert [1 for plan, _, partition in picks if not plan.is_tiled and partition != Reduce()], (
+        "an untiled root must still reach the partition"
+    )
+    assert [1 for plan, _, _ in picks if plan.is_tiled], "the root must still reach a tile"
+    assert [1 for _, band, _ in picks if band.coop_transposed], (
+        "a member that folds serially is hoisted ahead of the band's loop, and must not withdraw it"
+    )
+
+
 def test_a_transposed_band_is_not_in_a_direct_chain_members_domain(unpinned) -> None:
     """The ``coop-t`` band's σ-substitution and guarded close assume the fold is the kernel ROOT,
     so no chain member may carry one — offering it would mint one kernel from two knob spellings."""
@@ -446,6 +446,17 @@ def test_a_sweep_carrying_store_keeps_a_member_serial_only_when_the_member_reads
     assert _classic._reduction_domain(_tile_stub(_chain_root(red), (over,)), red) == (Reduce(),)
 
 
+def test_a_sweep_the_chain_root_reads_keeps_every_member_serial(unpinned) -> None:
+    """A sweep the ROOT is evaluated over wraps the whole chain, so a member that never reads it
+    is serial too: the chain arm closes one grid cell and dropped the sweep, leaving its coordinate
+    unbound (a cut piece's group amax over a projection, on a Qwen3.8 FP8 layer)."""
+    root = _norm_linear_root()
+    statistic = next(member for member in ops.chain_members(root) if member.axis == "k")
+    assert "n" in root.free_axes and "n" not in statistic.free_axes
+    swept = OutputSpec(write=Write(output="o", index=(Var("m"), Var("n")), value="acc"), sweep=(Axis("n", 4),))
+    assert _classic._reduction_domain(_tile_stub(root, (swept,)), statistic) == (Reduce(),)
+
+
 def test_a_streamed_store_keeps_chain_members_serial(unpinned) -> None:
     """A boundary store that streams into a SIBLING observed member's reduce loop keeps every
     OTHER direct member serial too: the trailing splice cannot reach a loop that already sits in an
@@ -465,14 +476,9 @@ def test_a_streamed_store_keeps_chain_members_serial(unpinned) -> None:
 
 
 def _per_cell_reductions(root, output_specs=()) -> set:
-    """The reduce values ``_contraction_domain`` offers on the PER-CELL tier of ``root``'s
-    contraction — asked through the contraction projection itself, not through
-    ``_reduction_domain``, so that deleting the delegation between them fails this.
-
-    The stub carries no typed inputs, so ``_warp_atoms`` refuses every tensor-core atom and the
-    catalog is the scalar tiles alone; a tiled plan contracts K serially per register cell and is
-    excluded here by ``is_tiled``.
-    """
+    """The reduce values the PER-CELL tier of ``root``'s contraction offers — asked through the
+    contraction's own reduction factor (``_contraction_reductions``), not through
+    ``_reduction_domain``, so that deleting the delegation between them fails this."""
     con = next(edge for edge in root.operands if edge.as_contraction() is not None)
     tile = SimpleNamespace(
         output_specs=output_specs,
@@ -482,8 +488,7 @@ def _per_cell_reductions(root, output_specs=()) -> set:
         packed_reading=lambda _node: (None, None),
         axis_of=lambda name: Axis(name=name, extent=Dim(1)),
     )
-    domain = _classic._contraction_domain(tile, None, con, ContractionFacts(k_axis=_K))
-    return {choice.reduce for choice in domain if not choice.tile.is_tiled}
+    return set(_classic._contraction_reductions(tile, con, ContractionFacts(k_axis=_K)))
 
 
 def test_a_contraction_chain_member_inherits_the_member_domain(unpinned) -> None:
@@ -492,8 +497,8 @@ def test_a_contraction_chain_member_inherits_the_member_domain(unpinned) -> None
     serial-only gates with no carve-out of its own. A contraction is a monoid with a ⊗ lift;
     nothing about the chain arm reads its algebra.
 
-    Asked through ``_contraction_domain``, which is the only thing that makes this a test OF the
-    delegation: routed through ``_reduction_domain`` directly it would stay green with the
+    Asked through ``_contraction_reductions``, which is the only thing that makes this a test OF
+    the delegation: routed through ``_reduction_domain`` directly it would stay green with the
     delegation deleted."""
     cone = projection(
         (_provider(),),

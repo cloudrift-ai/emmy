@@ -1,0 +1,11 @@
+[package]
+name = "emmy-runtime"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[dependencies]
+anyhow = "1"
+cudarc = { version = "=0.19.9", default-features = false, features = ["std", "driver", "nvrtc", "dynamic-loading", "cuda-12000"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

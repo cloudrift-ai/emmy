@@ -244,3 +244,40 @@ def test_externally_consumed_interior_declines_fold():
     graph = _compute_graph()
     graph.outputs = ["out", next(nid for nid, node in graph.nodes.items() if node.output.name == "a")]
     assert set(_apply(graph).nodes) == set(graph.nodes)
+
+
+def test_range_below_a_lazy_broadcast_folds_where_it_stands():
+    # The mxfp4 nibble shift as #793 spells it: a two-lane range multiplied at the lane extent,
+    # then broadcast to the packed weight's extent and consumed by an input-fed shift. The
+    # broadcast root keeps its scalar computation lazy, and the range root deferred to that
+    # broadcast as the maximal cone — so the range folded nowhere. Nothing lowers a RangeOp, so
+    # it reached the kernel as an input and ``plan_from_graph`` refused the program at serving
+    # boot (``non-CudaOp 'RangeOp'``). A generated sequence folds where it stands.
+    from emmy.compiler.pipeline.passes.frontend.decomposition._broadcast import broadcast_to
+
+    graph = Graph()
+    lanes = graph.add_node(op=RangeOp(stop=2, dtype="i32"), inputs=[], output=Tensor("lanes", (2,), "i32"), node_id="lanes")
+    lanes = graph.add_node(op=ReshapeOp(shape=(1, 2)), inputs=[lanes], output=Tensor("lanes_view", (1, 2), "i32"))
+    four = graph.add_node(op=ConstantOp(name="four", value=4), inputs=[], output=Tensor("four", (1,), "i32"))
+    four = graph.add_node(op=ReshapeOp(shape=(1, 1)), inputs=[four], output=Tensor("four_view", (1, 1), "i32"))
+    shifts = graph.add_node(
+        op=ElementwiseOp(op="multiply"),
+        inputs=[lanes, broadcast_to(graph, four, (1, 2))],
+        output=Tensor("shifts", (1, 2), "i32"),
+        node_id="shifts",
+    )
+    graph.add_node(op=InputOp(), inputs=[], output=Tensor("words", (8, 2), "i32"), node_id="words")
+    graph.add_node(
+        op=ElementwiseOp(op="right_shift"),
+        inputs=["words", broadcast_to(graph, shifts, (8, 2))],
+        output=Tensor("out", (8, 2), "i32"),
+        node_id="out",
+    )
+    graph.inputs = ["words"]
+    graph.outputs = ["out"]
+
+    folded = _apply(graph)
+    assert not any(isinstance(node.op, RangeOp) for node in folded.nodes.values())
+    op = folded.nodes["lanes"].op
+    assert isinstance(op, ConstantOp) and op.source_graph is not None
+    np.testing.assert_array_equal(evaluate_source_graph(op.source_graph, {}), np.arange(2, dtype=np.int32))

@@ -24,8 +24,8 @@ Protocol (length-prefixed pickle on stdin/stdout):
   "_retire_worker": bool}`` on exception — the two kind flags rebuild parent-side the exception
   kinds a pickled string loses; ``_retire_worker`` is the child's own verdict that its context is
   done for (both response shapes carry it).
-- Worker imports cupy / torch lazily on first request, writes ``<8-byte length><pickled response>``.
-- A ``worker_warmup`` request initializes CuPy and the CUDA context without consuming a candidate's wall budget.
+- Worker imports the runtime / torch lazily on first request, writes ``<8-byte length><pickled response>``.
+- A ``worker_warmup`` request creates the CUDA context without consuming a candidate's wall budget.
 - EOF on stdin (or parent SIGKILL) terminates the worker.
 
 Errors raised inside ``benchmark_program`` (bench_compile_timeout_s,
@@ -53,10 +53,33 @@ alive, so they don't pay the respawn cost.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import pickle
 import sys
 import traceback
+
+
+@contextlib.contextmanager
+def _reference_precision(strict: bool):
+    """Use full-width reductions for strict Torch comparisons, without changing the next worker job."""
+    if not strict:
+        yield
+        return
+    import torch
+
+    matmul = torch.backends.cuda.matmul
+    # Newer Torch versions pair the precision flag with an independent split-K flag.
+    # The native getter retains both; the public getter returns only the first.
+    fp16 = torch._C._get_cublas_allow_fp16_reduced_precision_reduction()
+    bf16 = torch._C._get_cublas_allow_bf16_reduced_precision_reduction()
+    try:
+        matmul.allow_fp16_reduced_precision_reduction = (False, fp16[1]) if isinstance(fp16, tuple) else False
+        matmul.allow_bf16_reduced_precision_reduction = (False, bf16[1]) if isinstance(bf16, tuple) else False
+        yield
+    finally:
+        matmul.allow_fp16_reduced_precision_reduction = fp16
+        matmul.allow_bf16_reduced_precision_reduction = bf16
 
 
 def _read_n(fd: int, n: int) -> bytes:
@@ -108,16 +131,19 @@ async def _run_job(req: dict) -> dict:
     hangs *this* child, which the parent SIGKILLs — recovering the device. ``nvcc_flags`` re-points
     the compile at a given opt level (the cubin cache key folds it in)."""
     if req.get("worker_warmup"):
-        import cupy as cp
+        from emmy.compiler.backend.cuda.device import device
 
-        cp.cuda.Device().use()
-        cp.cuda.runtime.free(0)
-        cp.cuda.runtime.deviceSynchronize()
+        device().synchronize()
         return {"warmed": True}
 
     from emmy import config
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
 
-    with config.nvcc_flags_override(req.get("nvcc_flags")):
+    with (
+        pinned_knobs({"FAST_MATH": req["fast_math"]} if "fast_math" in req else {}),
+        config.nvcc_flags_override(req.get("nvcc_flags")),
+        _reference_precision(req.get("strict_accuracy", False)),
+    ):
         spec = req.get("torch_spec")
         if spec is None:
             from emmy.compiler.backend.cuda.program import benchmark_program
@@ -139,7 +165,9 @@ async def _run_job(req: dict) -> dict:
 
                 run_result, _ = CudaBackend(bench_compile_timeout_s=60.0, bench_run_timeout_s=60.0).run(req["graph"], input_data=run_inputs)
                 run_outputs = run_result.outputs
-            result = benchmark_program(req["graph"], **req["kwargs"])
+            # Timed on the reference inputs when the row has them, so the pinned row, the
+            # greedy row and the torch table all read the same values.
+            result = benchmark_program(req["graph"], input_data=run_inputs, **req["kwargs"])
             return {"result": result, "results": None, "torch_available": False, "captured": result.captured, "run_outputs": run_outputs}
 
         from emmy.compiler.backend.cuda.backend import CudaBackend
@@ -197,6 +225,7 @@ async def _run_job(req: dict) -> dict:
             if bundle is None:
                 raise RuntimeError("trace_args produced no runnable module (embedded or debug IR has none)")
             module, args_t, kwargs = bundle
+            input_data = None  # bound by the correctness gate below; the bench then times emmy on them too
             if req.get("accuracy") or req.get("strict_accuracy") or req.get("want_ref"):
                 # The run path's correctness gate, in-child: bind the rebuilt module's real
                 # inputs, run the emmy program on them, compare vs the eager forward. A
@@ -210,13 +239,15 @@ async def _run_job(req: dict) -> dict:
                     _comparison_outputs,
                     _eager_output,
                     _strict_correctness_proof,
+                    correctness_oracle,
                 )
 
                 input_data = _bind_inputs(req["graph"], module, args_t, kwargs, checkpoint=payload.get("input"))
                 run_result, _ = backend.run(req["graph"], input_data=input_data)
                 run_outputs = _comparison_outputs(run_result.outputs, req["graph"])
                 if req.get("accuracy") or req.get("strict_accuracy"):
-                    eager_out = _eager_output(module, args_t, kwargs)
+                    with correctness_oracle():
+                        eager_out = _eager_output(module, args_t, kwargs)
                     if req.get("strict_accuracy"):
                         correctness = _strict_correctness_proof(run_outputs, eager_out)
                         if correctness["status"] != "pass":
@@ -243,6 +274,7 @@ async def _run_job(req: dict) -> dict:
                 warmup=req["warmup"],
                 iters=req["iters"],
                 bench_backends=req["bench_backends"],
+                input_data=input_data,
             )
             avail = True
         else:
@@ -265,20 +297,14 @@ async def _run_job(req: dict) -> dict:
 def _context_dirty() -> bool:
     """``True`` iff the live CUDA context is in a sticky-error state.
 
-    A cheap ``deviceSynchronize`` surfaces a context-wide sticky error (e.g.
+    A context synchronize surfaces a context-wide sticky error (e.g.
     ``CUDA_ERROR_MISALIGNED_ADDRESS`` / ``CUDA_ERROR_ILLEGAL_ADDRESS``) left by
     a prior illegal access — those keep returning the same status on every call
-    until the context is torn down. Returns ``False`` when cupy was never
-    imported / no context exists (a compile-only failure touches no context),
-    or when the sync succeeds (context healthy)."""
-    cupy = sys.modules.get("cupy")
-    if cupy is None:
-        return False  # no CUDA context was ever created in this worker
-    try:
-        cupy.cuda.runtime.deviceSynchronize()
-        return False
-    except Exception:  # noqa: BLE001 — any CUDA error here means the context is unusable
-        return True
+    until the context is torn down. Returns ``False`` when no context exists in this
+    worker (a compile-only failure touches no context), or when the sync succeeds."""
+    from emmy.compiler.backend.cuda.device import context_poisoned
+
+    return context_poisoned()
 
 
 def main() -> None:
@@ -328,8 +354,10 @@ def main() -> None:
                 "_retire_worker": dirty,
             }
         payload = pickle.dumps(resp, protocol=pickle.HIGHEST_PROTOCOL)
-        os.write(out_fd, len(payload).to_bytes(8, "little"))
-        os.write(out_fd, payload)
+        for part in (len(payload).to_bytes(8, "little"), payload):
+            pending = memoryview(part)
+            while pending:
+                pending = pending[os.write(out_fd, pending) :]
         if dirty:
             # Corrupted context — don't serve more requests from it. Exit so the
             # parent respawns a fresh context on its next bench (program.py

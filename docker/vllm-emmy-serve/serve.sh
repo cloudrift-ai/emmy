@@ -6,9 +6,9 @@
 #
 # The compilation-config mirrors emmy/commands/serve.py's generate path: FULL_DECODE_ONLY
 # whole-step decode cudagraphs (capture sizes = the power-of-two ladder to max-num-seqs,
-# with the decode bucket riding the list) and the forced fused rotary_embedding CustomOp
-# (vLLM's dispatch otherwise hands the eager-inside-graph plugin forward_native — a
-# ~0.9 ms/step per-layer torch-op soup). --no-enable-prefix-caching matches the
+# with the decode bucket riding the list) and the fused rotary_embedding CustomOp (redundant
+# since the plugin dispatches its RoPEs itself; kept because this rendered invocation is a
+# cache-key input of every released image). --no-enable-prefix-caching matches the
 # benchmark protocol (every request does full prefill work). Keep in sync with
 # _gen_graph_args / build_serve_cmd in emmy/commands/serve.py.
 #
@@ -35,7 +35,13 @@
 #                        stays eager.
 #   SERVE_EXTRA_ARGS     further pinned vLLM flags, word-split (e.g. `--kv-cache-dtype
 #                        fp8_e4m3`). They belong in the pinned config because a flag that
-#                        moves which programs the plugin builds is a cache-key input.
+#                        moves which programs the plugin builds is a cache-key input. An
+#                        `--enforce-eager` among them drops the capture config, as a caller's
+#                        does in `emmy serve`: a hyper-connection MoE (DeepSeek V4) host-syncs
+#                        every decode step and serves eager.
+#   SERVE_ENV            further environment the server runs under, word-split NAME=value
+#                        pairs exported before the exec (e.g. a fork's own switches, or
+#                        `EMMY_STRICT_EVIDENCE=1`), so the warm and the baked image run it alike.
 #   SERVE_EMBED_HOST / SERVE_PREFILL_CAPACITY / SERVE_PREFILL_BUCKET / SERVE_M1_TIER
 #                        the memory/shape lane exported as EMMY_GEN_* by warm and baked into
 #                        the image. They are compiler/pack-key inputs even though they do not
@@ -50,6 +56,17 @@
 [ -n "${EMMY_GEN_PREFILL_CAPACITY:-}" ] || unset EMMY_GEN_PREFILL_CAPACITY
 [ -n "${EMMY_GEN_PREFILL_BUCKET:-}" ] || unset EMMY_GEN_PREFILL_BUCKET
 [ -n "${EMMY_GEN_M1_TIER:-}" ] || unset EMMY_GEN_M1_TIER
+# The standard lane is this entrypoint's default, whatever the compiler's is. #868 made fast math
+# the compiler default, which would silently collapse the two serving lanes into one: every warm
+# shape without an `:fm` suffix would bake the SAME f16-accumulate cubins its `:fm` twin does, no
+# standard-lane pack would exist, and a deployment that asks for the standard lane — the golden's
+# own default, and what the experiment recipes run — would miss the pack and pay the full compiler
+# frontend on every boot. A caller wanting the other lane still says so, which is what the `:fm`
+# shapes and the recipes' EMMY_FAST_MATH=1 do.
+export EMMY_FAST_MATH="${EMMY_FAST_MATH:-0}"
+for pair in ${SERVE_ENV:-}; do
+    export "$pair"
+done
 if [ -n "${SERVE_V2_MODEL_RUNNER:-}" ]; then
     export VLLM_USE_V2_MODEL_RUNNER="$SERVE_V2_MODEL_RUNNER"
 else
@@ -73,6 +90,10 @@ fi
 
 # shellcheck disable=SC2086 — $REVISION and $SERVE_EXTRA_ARGS are deliberately word-split
 # flag lists, and both expand to nothing at all when unset.
+case " ${SERVE_EXTRA_ARGS:-} " in
+    *" --enforce-eager "*) set -- ${SERVE_EXTRA_ARGS:-} "$@" ;;
+    *) set -- --compilation-config "${COMPILE_CFG}" ${SERVE_EXTRA_ARGS:-} "$@" ;;
+esac
 exec python3 -m vllm.entrypoints.openai.api_server \
     --model "${SERVE_MODEL}" \
     $REVISION \
@@ -83,6 +104,4 @@ exec python3 -m vllm.entrypoints.openai.api_server \
     --gpu-memory-utilization "${SERVE_GPU_MEM_UTIL}" \
     --no-enable-prefix-caching \
     --hf-overrides "${OVERRIDES}" \
-    --compilation-config "${COMPILE_CFG}" \
-    ${SERVE_EXTRA_ARGS:-} \
     "$@"

@@ -1,0 +1,44 @@
+name: Review pull requests
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+concurrency:
+  group: pr-agent-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Review pull request
+        # PR Agent v0.46.0 GitHub Action image.
+        uses: docker://pragent/pr-agent@sha256:65e5b196e38cecd7df8a71fe29942052e081a0c6645132c2ac874df60b1760c7
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OPENAI_KEY: ${{ secrets.CLOUDRIFT_API_KEY }}
+          OPENAI__API_BASE: ${{ vars.CLOUDRIFT_INFERENCE_URL || 'https://inference.cloudrift.ai/v1' }}
+          CONFIG__MODEL: ${{ format('openai/{0}', vars.ONBOARD_AGENT_MODEL || 'Qwen/Qwen3.8-27B-FP8') }}
+          CONFIG__FALLBACK_MODELS: '[]'
+          CONFIG__CUSTOM_MODEL_MAX_TOKENS: '128000'
+          CONFIG__MAX_MODEL_TOKENS: '128000'
+          CONFIG__PATCH_EXTRA_LINES_BEFORE: '30'
+          CONFIG__PROPAGATE_TOOL_ERRORS: 'true'
+          CONFIG__RESTRICTED_MODE: 'true'
+          PR_REVIEWER__PUBLISH_OUTPUT_NO_SUGGESTIONS: 'false'
+          PR_REVIEWER__EXTRA_INSTRUCTIONS: >-
+            Report only actionable defects introduced by this change. Every finding needs a concrete failing path.
+            For a missing import or undefined name, check the surrounding unchanged lines before posting; if that
+            context is unavailable, omit the finding. Do not publish a concern that your own analysis resolves.
+          GITHUB__IGNORE_BOT_PR: 'false'
+          GITHUB_ACTION_CONFIG__AUTO_REVIEW: 'true'
+          GITHUB_ACTION_CONFIG__AUTO_DESCRIBE: 'false'
+          GITHUB_ACTION_CONFIG__AUTO_IMPROVE: 'false'
+          GITHUB_ACTION_CONFIG__PR_ACTIONS: '["opened", "reopened", "ready_for_review", "synchronize"]'

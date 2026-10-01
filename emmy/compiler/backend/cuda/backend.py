@@ -16,23 +16,12 @@ from emmy import config
 from emmy.compiler.backend import Backend, BenchmarkResult, RunResult
 from emmy.compiler.backend.cuda.program import (
     benchmark_program,
-    benchmark_program_isolated_async,
     run_program,
     run_program_debug,
 )
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 
 logger = logging.getLogger(__name__)
-
-# Hard wall-clock cap for ``benchmark()`` calls. Wraps the whole bench
-# in a daemon worker thread; if it doesn't return within this budget we
-# abandon and raise ``RuntimeError``. Needed because NVRTC compilation
-# inside the first kernel launch can take 30+ s on heavily-replicated
-# kernels (e.g. autotune variants with FM*FN=256 cells), which would
-# otherwise stall the whole sweep on one bad variant. Exposed via the
-# inherited ``Backend.bench_wall_timeout_s`` attribute for callers
-# (autotune cache reads it to set fail-row latencies).
-
 
 if TYPE_CHECKING:
     from emmy.compiler.context import Context
@@ -73,11 +62,9 @@ class CudaBackend(Backend):
         *,
         debug: bool | None = None,
         dump: CompilerDump | None = None,
-        bench_wall_timeout_s: float | None = None,
         bench_compile_timeout_s: float = 30.0,
         bench_run_timeout_s: float = 10.0,
         tune_db: Path | str | None = None,
-        device_id: int | None = None,
     ) -> None:
         if debug is None:
             debug = config.debug_enabled()
@@ -91,7 +78,6 @@ class CudaBackend(Backend):
         # When set, ``benchmark()`` runs in a subprocess so the parent
         # can SIGKILL a wedged worker. Defaults to ``None`` (in-process,
         # required when ``on_iter`` callbacks are supplied).
-        self._bench_wall_timeout_s = bench_wall_timeout_s
         # Per-stage bench budgets. Default 10 s suits the whole-graph
         # compile/run commands; the ``tune`` command overrides them *down*
         # (it benches isolated single kernels, where a fast-fail on a slow
@@ -107,25 +93,14 @@ class CudaBackend(Backend):
         # open if the file exists. Explicit ``Path`` → use that file
         # (open if it exists; silently skip otherwise).
         self.tune_db = _resolve_tune_db(tune_db)
-        # Physical GPU this backend's async bench worker is pinned to (multi-GPU
-        # tune). ``None`` → unpinned (default device). The pinned worker is the
-        # device-selection seam: ``benchmark_async`` drives it so one event loop
-        # can keep N GPUs benching concurrently.
-        self.device_id = device_id
-        self._async_worker_obj = None  # lazily spawned on first benchmark_async
+        self._async_worker_obj = None  # lazily spawned on the first isolated bench
 
     def _async_worker(self):
         from emmy.compiler.backend.cuda.program import _AsyncBenchWorker  # noqa: PLC0415
 
         if self._async_worker_obj is None:
-            self._async_worker_obj = _AsyncBenchWorker(device_id=self.device_id)
+            self._async_worker_obj = _AsyncBenchWorker()
         return self._async_worker_obj
-
-    def close_async_worker(self) -> None:
-        """SIGKILL this backend's async bench worker, if any (driver teardown)."""
-        if self._async_worker_obj is not None:
-            self._async_worker_obj.close()
-            self._async_worker_obj = None
 
     async def aclose_async_worker(self) -> None:
         """SIGKILL + await-reap this backend's async bench worker (driver teardown
@@ -142,10 +117,10 @@ class CudaBackend(Backend):
     def compile(self, graph: Graph, *, ctx: Context | None = None) -> Graph:
         """Lower ``Graph`` → ``Graph[LoopOp]`` → ``Graph[TileOp]`` → ``Graph[CudaOp]``."""
         db = None
-        if self.tune_db is not None and self.tune_db.exists():
+        if self.tune_db is not None:
             from emmy.compiler.pipeline.search.db import SearchDB
 
-            db = SearchDB(path=self.tune_db)
+            db = SearchDB.for_compile(self.tune_db)
         return Pipeline.build(CUDA_PASSES).run(graph, ctx=ctx, db=db, dump=self.dump)
 
     def run(
@@ -193,47 +168,28 @@ class CudaBackend(Backend):
         on_iter=None,
         nvcc_flags: str | None = None,
         capture_graphs: bool = True,
+        input_data: dict | None = None,
     ) -> BenchmarkResult:
-        """The single benchmarking entry point for ``CudaBackend`` — async, two paths.
+        """The in-process benchmarking entry point for ``CudaBackend`` (``emmy run --bench``).
 
-        ``nvcc_flags`` re-points this one bench's compile at a different opt level (e.g.
-        an -O3 re-bench of a tune winner) without disturbing the ambient flags — the
-        worker applies it per-request; in-process we wrap. ``bench_wall_timeout_s``
-        (plus the absence of ``on_iter``) selects the path:
-
-        - **Set, no ``on_iter`` (autotune sweep)**: bench in a device-pinned,
-          SIGKILL-able subprocess worker (:func:`benchmark_program_isolated_async`), so
-          one event loop keeps N GPUs benching concurrently and a wedged kernel never
-          dirties the parent's CUDA stream. ``wall_timeout_s`` is the backstop on top of
-          the in-worker ``bench_compile_timeout_s`` / ``bench_run_timeout_s`` budgets.
-        - **Otherwise (interactive ``emmy run --bench``)**: bench in-process via
-          :func:`benchmark_program`. Required when ``on_iter`` interleaves peer torch
-          closures — they share torch state with this process and can't cross the
-          subprocess boundary. The blocking bench runs directly on the event loop (it is
-          the only work in flight), so ``async`` here is just the uniform call shape."""
-        if self.bench_wall_timeout_s is not None and on_iter is None:
-            result = await benchmark_program_isolated_async(
+        ``nvcc_flags`` re-points this one bench's compile at a different opt level without
+        disturbing the ambient flags. ``input_data`` times the program on those inputs (the
+        run's reference inputs) instead of the synthetic fill. Benches in-process via
+        :func:`benchmark_program`: ``on_iter`` interleaves peer torch closures, which share
+        torch state with this process and can't cross the subprocess boundary. The blocking
+        bench runs directly on the event loop (it is the only work in flight), so ``async``
+        here is just the uniform call shape."""
+        with config.nvcc_flags_override(nvcc_flags):
+            result = benchmark_program(
                 compiled,
-                worker=self._async_worker(),
-                wall_timeout_s=self.bench_wall_timeout_s,
+                input_data=input_data,
                 warmup=warmup,
                 num_iters=num_iters,
+                on_iter=on_iter,
                 compile_timeout_s=self.bench_compile_timeout_s,
                 run_timeout_s=self.bench_run_timeout_s,
-                nvcc_flags=nvcc_flags,
                 capture_graphs=capture_graphs,
             )
-        else:
-            with config.nvcc_flags_override(nvcc_flags):
-                result = benchmark_program(
-                    compiled,
-                    warmup=warmup,
-                    num_iters=num_iters,
-                    on_iter=on_iter,
-                    compile_timeout_s=self.bench_compile_timeout_s,
-                    run_timeout_s=self.bench_run_timeout_s,
-                    capture_graphs=capture_graphs,
-                )
         return BenchmarkResult(
             time_ms=result.time_ms,
             min_ms=result.min_ms,

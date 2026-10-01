@@ -1,8 +1,8 @@
 """Boot roofline audit (serving/roofline.py) — decision logic and advisory-only contract.
 Pure CPU: the CUDA-touching measurement helpers are stubbed."""
 
+import contextlib
 import logging
-import sys
 import types
 
 import pytest
@@ -46,9 +46,27 @@ def test_flag_ratio_thresholds():
 
 
 def test_flag_ratio_skips_tiny_and_degenerate():
-    assert flag_ratio(1e6, 1_000, 1000 * GB) is None  # floor below MIN_FLOOR_US → skip
-    assert flag_ratio(1e6, 0, 1000 * GB) is None  # no weights at all
-    assert flag_ratio(1e6, 1_000_000, 0.0) is None  # broken bandwidth measurement
+    """A program with no usable floor is silent while it stays cheap. Each measured value here is
+    µs-class, which is what MIN_FLOOR_US exists to ignore — see the companion test for what happens
+    when such a program is not cheap."""
+    assert flag_ratio(150.0, 1_000, 1000 * GB) is None  # floor below MIN_FLOOR_US → no ratio
+    assert flag_ratio(150.0, 0, 1000 * GB) is None  # no weights at all
+    assert flag_ratio(150.0, 1_000_000, 0.0) is None  # broken bandwidth measurement
+
+
+def test_flag_ratio_reports_a_mispick_whose_floor_is_too_small_to_form():
+    """The 2026-09-12 DeepSeek-V4 V100 incident. A decode program elected at 29.7 s per forward had
+    a sub-MIN_FLOOR_US weight floor, so the audit exempted it entirely: sixteen workers booted clean
+    and every request died on the engine's RPC deadline. A small floor bounds what a HEALTHY program
+    costs, never what a mispicked one does, so absolute cost decides when no ratio can be formed."""
+    assert flag_ratio(roofline.MAX_ABS_US, 1_000, 1000 * GB) is None  # at the bar → still silent
+    verdict = flag_ratio(29_693_246.0, 1_000, 1000 * GB)
+    assert verdict is not None
+    floor_us, ratio = verdict
+    assert floor_us == roofline.MIN_FLOOR_US  # reported against the noise threshold
+    assert ratio > 1_000_000.0
+    # Degenerate inputs are judged the same way once the cost is real.
+    assert flag_ratio(29_693_246.0, 0, 1000 * GB) is not None
 
 
 def test_flag_ratio_compute_floor_bounds_compute_bound_shapes():
@@ -73,6 +91,23 @@ def test_flag_ratio_compute_floor_negligible_at_m1():
     verdict = flag_ratio(4_500.0, wb, 700 * GB, flops, 210e12)
     assert verdict is not None
     assert verdict[1] > 60.0
+
+
+def test_audit_returns_its_measurements_for_tier_choice(monkeypatch):
+    """The serving runner picks between the M=1 and bucket decode tiers from these numbers rather
+    than timing both again, so the audit has to hand them back keyed by label."""
+    monkeypatch.setattr(roofline, "measure_copy_bw", lambda: 1000 * GB)
+    monkeypatch.setattr(roofline, "measure_matmul_flops", lambda: 210e12)
+    monkeypatch.setattr(roofline, "time_program_us", lambda program, **kw: 123.0)
+    measured = audit_boot_programs([("L0.pre.decode.m1", _Prog(1_000_000), 1)])
+    assert measured == {"L0.pre.decode.m1": 123.0}
+
+
+def test_audit_returns_empty_when_it_cannot_run(monkeypatch):
+    """A caller must be able to tell "no data" from "measured fast" — an audit that bailed hands
+    back nothing, and the tier choice then leaves the default alone."""
+    monkeypatch.setattr(roofline, "measure_copy_bw", lambda: (_ for _ in ()).throw(RuntimeError("no cuda")))
+    assert audit_boot_programs([("L0.pre.decode.m1", _Prog(1_000_000), 1)]) == {}
 
 
 def test_audit_counts_weight_inputs(monkeypatch, caplog):
@@ -143,36 +178,32 @@ def test_audit_never_raises(monkeypatch, caplog):
     assert not caplog.records  # swallowed to debug level — a boot warning is never a boot blocker
 
 
-class _FakeEvent:
-    def record(self):
-        pass
-
-    def synchronize(self):
-        pass
-
-
-def _fake_cupy(elapsed_ms):
-    """A cupy stand-in whose event timer yields these millisecond readings, one per call."""
+def _fake_timer(monkeypatch, elapsed_ms):
+    """An event timer that runs the work and yields these millisecond readings, one per call."""
     readings = iter(elapsed_ms)
-    cuda = types.SimpleNamespace(Event=_FakeEvent, get_elapsed_time=lambda a, b: next(readings))
-    return types.SimpleNamespace(cuda=cuda)
+
+    def time_ms(work):
+        work()
+        return next(readings)
+
+    monkeypatch.setattr(roofline, "_time_ms", time_ms)
 
 
 def test_time_program_us_stops_after_a_warmup_that_blows_the_budget(monkeypatch):
     """The mispick this audit exists to report is also the most expensive thing to measure. Once
     the warmup alone is past the budget the verdict is settled, so the timed runs are skipped —
     the V100 incident ran one such program four times and held the boot for six hours."""
-    monkeypatch.setitem(sys.modules, "cupy", _fake_cupy([2.0]))
+    _fake_timer(monkeypatch, [2.0])
     runs = []
-    program = types.SimpleNamespace(run_once=lambda: runs.append(1))
+    program = types.SimpleNamespace(on_torch_stream=contextlib.nullcontext, run_once=lambda: runs.append(1))
     assert roofline.time_program_us(program, budget_us=1000.0) == pytest.approx(2000.0)
     assert len(runs) == 1, "a program past its budget is run once, not four times"
 
 
 def test_time_program_us_medians_the_timed_runs_inside_the_budget(monkeypatch):
-    monkeypatch.setitem(sys.modules, "cupy", _fake_cupy([0.1, 0.3, 0.2, 0.4]))
+    _fake_timer(monkeypatch, [0.1, 0.3, 0.2, 0.4])
     runs = []
-    program = types.SimpleNamespace(run_once=lambda: runs.append(1))
+    program = types.SimpleNamespace(on_torch_stream=contextlib.nullcontext, run_once=lambda: runs.append(1))
     assert roofline.time_program_us(program, budget_us=1000.0) == pytest.approx(300.0)
     assert len(runs) == 4, "warmup plus three timed runs"
 

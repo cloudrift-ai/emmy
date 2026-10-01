@@ -1,43 +1,29 @@
-"""Mutable working-golden inventories, candidates, and ranking feedback.
+"""Mutable working-golden inventories and measurement write-back.
 
-This module owns the untrusted side of the golden YAML workflow: trace inventory
-generation, target reconstruction, exact proposal measurement, and atomic ranking
-persistence. CLI commands only validate argument combinations and report errors.
+This module owns the untrusted side of the golden file workflow: trace inventory generation and the
+atomic write-back of what a record run measures. CLI commands only validate argument combinations
+and report errors.
 """
 
 from __future__ import annotations
 
 import contextlib
-import copy
 import fcntl
-from collections import Counter
-from dataclasses import dataclass, field, replace
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
+from emmy import gpu
 from emmy.compiler.pipeline.search.golden import (
-    GoldenEntryState,
-    dump_golden_file,
-    golden_entry_state,
-    golden_record_from_entry,
+    Config,
+    GoldenFile,
+    Latency,
+    Measurements,
+    Realization,
+    Target,
     is_repository_golden_path,
-    load_golden_file,
+    prepare_traced_graph,
 )
-from emmy.compiler.pipeline.strategy import PipelineStrategy
-
-
-@dataclass
-class WorkingGoldenTarget:
-    """One deduplicated working-file target and its candidate rows."""
-
-    label: str
-    code: str | None
-    input: str | None
-    dynamic: list[str] | None
-    bindings: dict[str, int] = field(default_factory=dict)
-    pins: dict[str, object] = field(default_factory=dict)
-    program: object | None = None
-    entry_indexes: list[tuple[int, int]] = field(default_factory=list)
-    proposals: list[tuple[tuple[int, int], dict]] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -62,7 +48,6 @@ def write_trace_inventory(
     *,
     model: str | None = None,
     ctx=None,
-    force_loop_targets: bool = False,
     realizations: list[dict] | None = None,
     model_quant_digest: str | None = None,
 ) -> TraceInventoryResult:
@@ -73,14 +58,13 @@ def write_trace_inventory(
     ctx = ctx or Context.probe()
     programs: list[dict] = []
     loops: list[dict] = []
-    entries: list[dict] = []
+    entries: list[Config] = []
     _append_trace_inventory(
         graph,
         ctx=ctx,
         programs=programs,
         loops=loops,
         entries=entries,
-        force_loop_targets=force_loop_targets,
         realizations=realizations,
     )
     _dump_trace_inventory(
@@ -95,13 +79,59 @@ def write_trace_inventory(
     return TraceInventoryResult(path=destination, target_count=len(entries))
 
 
+def append_trace_inventory(
+    graph,
+    path: str | Path,
+    *,
+    model: str | None = None,
+    ctx=None,
+    model_quant_digest: str | None = None,
+) -> TraceInventoryResult:
+    """Add one more traced program to an existing working inventory.
+
+    A model whose whole-graph export is not bounded is traced one distinct path at a
+    time -- each decoder-layer kind, then the embedding, final normalization and output
+    seams. Those are one model's inventory, so they belong in one file: a directory of
+    one-file-per-path is easy to promote only partially. Interning is shared with
+    :func:`write_trace_inventories`, so a kernel already covered is recorded once.
+    """
+    destination = Path(path)
+    from emmy.compiler.context import Context  # noqa: PLC0415
+
+    ctx = ctx or Context.probe()
+    document = GoldenFile.load(destination)
+    validate_working_gpu(document, ctx)
+    programs, loops, entries = document.programs, document.loops, document.configs
+    seen_loops = {entry.target.loop for entry in entries}
+    before = len(entries)
+    _append_trace_inventory(
+        graph,
+        ctx=ctx,
+        programs=programs,
+        loops=loops,
+        entries=entries,
+        seen_loops=seen_loops,
+    )
+    _dump_trace_inventory(
+        destination,
+        ctx=ctx,
+        model=model or document.model,
+        model_quant_digest=model_quant_digest or document.model_quant_digest,
+        programs=programs,
+        loops=loops,
+        entries=entries,
+        overwrite=True,
+    )
+    return TraceInventoryResult(path=destination, target_count=len(entries) - before)
+
+
 def write_trace_inventories(
     graphs: dict[str, object],
     path: str | Path,
     *,
     model: str | None = None,
     ctx=None,
-    realizations: list[dict] | None = None,
+    realizations: list[dict] | Mapping[str, list[dict]] | None = None,
     model_quant_digest: str | None = None,
 ) -> TraceInventoryResult:
     """Combine named traces into one exact-Loop-IR working inventory.
@@ -111,6 +141,9 @@ def write_trace_inventories(
     promote only partially.  This writer interns all of their programs and Loop IR
     targets into one self-contained artifact.  Identical Loop programs are recorded
     once: they are the same tuning target even when several serving twins consult it.
+    ``realizations`` is the row template every target takes, or a mapping from graph name
+    to the rows that graph's targets take — a static twin its own width's, a symbolic twin
+    the dynamic ones.
     """
     destination = preflight_trace_inventory(path)
     if not graphs:
@@ -120,7 +153,7 @@ def write_trace_inventories(
     ctx = ctx or Context.probe()
     programs: list[dict] = []
     loops: list[dict] = []
-    entries: list[dict] = []
+    entries: list[Config] = []
     seen_loops: set[int] = set()
     for name in sorted(graphs):
         _append_trace_inventory(
@@ -129,10 +162,9 @@ def write_trace_inventories(
             programs=programs,
             loops=loops,
             entries=entries,
-            force_loop_targets=True,
             name_prefix=name,
             seen_loops=seen_loops,
-            realizations=realizations,
+            realizations=realizations.get(name) if isinstance(realizations, Mapping) else realizations,
         )
     _dump_trace_inventory(
         destination,
@@ -146,52 +178,52 @@ def write_trace_inventories(
     return TraceInventoryResult(path=destination, target_count=len(entries))
 
 
+def whole_origins(coverage: Mapping, program) -> tuple[str, ...]:
+    """The traced ops a kernel computes, when it computes every one of them whole — the frontend
+    slice that is the kernel's exact Torch twin. Empty for a kernel holding part of an op."""
+    origins = tuple(sorted(origin for origin in coverage if origin in program.nodes))
+    return origins if origins and all(coverage[origin][2] for origin in origins) else ()
+
+
+def kernel_programs(fused) -> list[tuple[str, object]]:
+    """One standalone Loop IR program per kernel of a lowered graph, ``(kernel node id, program)``
+    in topological order — the targets an inventory stores and ``emmy compile --wire`` prints."""
+    from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.slice import single_node_graph  # noqa: PLC0415
+
+    kernels = [node_id for node_id in fused.topological_order() if isinstance(fused.nodes[node_id].op, LoopOp)]
+    return [(node_id, single_node_graph(fused, node_id)) for node_id in kernels]
+
+
+def lowered_kernels(graph, *, ctx) -> tuple[object, list[tuple[str, object]]]:
+    """``graph`` through the loop passes at ``ctx``: ``(fused graph, kernel programs)``. The one
+    lowering a trace inventory, ``emmy golden check`` and a restamp share, so a stored target and
+    its fresh lowering can only differ where the compiler differs."""
+    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline  # noqa: PLC0415
+
+    fused = Pipeline.build(LOOP_PASSES).run(graph, ctx=ctx)
+    return fused, kernel_programs(fused)
+
+
 def _append_trace_inventory(
     graph,
     *,
     ctx,
     programs: list[dict],
     loops: list[dict],
-    entries: list[dict],
-    force_loop_targets: bool,
+    entries: list[Config],
     name_prefix: str | None = None,
     seen_loops: set[int] | None = None,
     realizations: list[dict] | None = None,
 ) -> None:
     """Append one lowered graph to shared trace-inventory pools."""
     from emmy.compiler import provenance  # noqa: PLC0415
-    from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
-    from emmy.compiler.loop_wire import intern_loop_program  # noqa: PLC0415
-    from emmy.compiler.pipeline import LOOP_PASSES, Pipeline  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.slice import single_node_graph  # noqa: PLC0415
-    from emmy.compiler.torch_wire import intern_program  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import measured_precision_pins  # noqa: PLC0415
+    from emmy.compiler.wire import intern  # noqa: PLC0415  # noqa: PLC0415
 
-    # A birth-time speller may mark an internal storage value that has to remain
-    # materialized for a faithful target inventory (dynamic activation bits and
-    # scale are the first use). Promoting only the inventory copy to an auxiliary
-    # graph output preserves the boundary without changing normal model outputs.
-    for traced_node in graph.nodes.values():
-        if traced_node.hints.get("trace.materialize") and traced_node.id not in graph.outputs:
-            graph.outputs.append(traced_node.id)
-
-    # Torch tracing and checkpoint spelling may hand us a graph that has already crossed one
-    # compiler pipeline and therefore carries implementation-piece provenance. The stable wire
-    # deliberately does not persist provenance hints, so retaining those here would write
-    # selectors from one provenance universe and replay them after a fresh per-node seed — they
-    # cannot match.
-    # Re-seed the pristine frontend graph exactly as the wire decoder will.
-    for traced_node in graph.nodes.values():
-        traced_node.hints.remove(provenance.PROV)
-    provenance.seed(graph)
+    prepare_traced_graph(graph)
     input_graph = graph.copy()
-    fused = Pipeline.build(LOOP_PASSES).run(graph, ctx=ctx)
-
-    targets: list[tuple[str, object]] = []
-    for node_id in fused.topological_order():
-        node = fused.nodes[node_id]
-        if not isinstance(node.op, LoopOp):
-            continue
-        targets.append((node_id, node))
+    fused, kernels = lowered_kernels(graph, ctx=ctx)
 
     # Persist the pristine program once.  Per-target frontend slices are useful
     # ephemeral tuning views, but they can change fusion when independently
@@ -199,30 +231,23 @@ def _append_trace_inventory(
     # selectors must therefore resolve against the original trace context.
     program_ref: int | None = None
     inventory = []
-    for node_id, node in targets:
-        origins = tuple(sorted(origin for origin in provenance.get(node) if origin in input_graph.nodes))
-        inventory.append((node_id, node, origins))
-    origin_counts = Counter(origins for _node_id, _node, origins in inventory if origins)
-    used_names = {
-        realization["name"]
-        for entry in entries
-        for realization in entry.get("realizations", [])
-        if isinstance(realization, dict) and isinstance(realization.get("name"), str)
-    }
+    totals = provenance.totals(fused)
+    for node_id, program in kernels:
+        node = fused.nodes[node_id]
+        inventory.append((node_id, node, program, whole_origins(provenance.coverage(provenance.get(node), totals), input_graph)))
+    used_names = {realization.name for entry in entries for realization in entry.realizations}
 
-    for node_id, node, origins in inventory:
-        key = node.op.identity_key(with_io=True, with_knobs=True)
-        suffix = key[:12] if key is not None else node_id
-        name = f"{node.op.name or node_id}.{suffix}"
+    for node_id, node, program, origins in inventory:
+        # The entry's name is a label, never re-derived: the kernel's provenance name (the ops it
+        # realizes, as the backend and the profiler show it), so a reader can tell what a row is.
+        name = node.op.name or node_id
         if name_prefix:
             name = f"{name_prefix}.{name}"
         if name in used_names:
-            # One kernel body/cache key can occur at multiple exact Loop
-            # targets whose boundary shapes or checkpoint sources differ.
-            # ``emmy run --golden`` resolves by name, so retaining the bare
-            # duplicate makes the generated file impossible to replay. Node
-            # ids are deterministic within the persisted source program and
-            # distinguish these otherwise same-bodied target sites.
+            # One kernel name can occur at multiple exact Loop targets whose boundary shapes or
+            # checkpoint sources differ. ``emmy run --golden`` resolves by name, so retaining the
+            # bare duplicate makes the generated file impossible to replay. Node ids are
+            # deterministic within the persisted source program and distinguish these sites.
             base = f"{name}.{node_id}"
             name = base
             duplicate = 2
@@ -230,29 +255,25 @@ def _append_trace_inventory(
                 name = f"{base}.{duplicate}"
                 duplicate += 1
         used_names.add(name)
-        if origins and origin_counts[origins] == 1 and not force_loop_targets:
-            target = {"origins": list(origins)}
-        else:
-            loop_graph = single_node_graph(fused, node_id)
-            loop_ref = intern_loop_program(loops, loop_graph)
-            if seen_loops is not None and loop_ref in seen_loops:
-                continue
-            if seen_loops is not None:
-                seen_loops.add(loop_ref)
-            target = {"loop": loop_ref}
+        # The target IS the kernel's Loop IR: a replay starts from the stored kernel and never re-lowers
+        # the program. The traced ops it computes whole ride beside it as provenance — the frontend
+        # slice a benchmark compares the kernel against.
+        loop_ref = intern(loops, program)
+        if seen_loops is not None and loop_ref in seen_loops:
+            continue
+        if seen_loops is not None:
+            seen_loops.add(loop_ref)
+        target = Target(loop=loop_ref, origins=tuple(origins))
         if program_ref is None:
-            program_ref = intern_program(programs, input_graph)
+            program_ref = intern(programs, input_graph)
         if realizations is None:
-            rows = [{"name": name, "bindings": {}, "pins": {"FAST_MATH": False}}]
+            rows = [Realization(name=name, bindings={}, pins=measured_precision_pins())]
         else:
-            rows = []
-            for template in realizations:
-                row = copy.deepcopy(template)
-                suffix = row.pop("name")
-                row["name"] = f"{name}.{suffix}" if suffix else name
-                rows.append(row)
-        entry = {"program": program_ref, "target": target, "realizations": rows}
-        entries.append(entry)
+            rows = [
+                Realization.from_wire({**template, "name": f"{name}.{template['name']}" if template["name"] else name})
+                for template in realizations
+            ]
+        entries.append(Config(program=program_ref, target=target, realizations=rows))
 
 
 def _dump_trace_inventory(
@@ -263,224 +284,32 @@ def _dump_trace_inventory(
     model_quant_digest: str | None,
     programs: list[dict],
     loops: list[dict],
-    entries: list[dict],
+    entries: list[Config],
+    overwrite: bool = False,
 ) -> None:
     """Write shared trace-inventory pools with their card and model provenance."""
-    document: dict = {
-        "compute_cap": list(ctx.compute_capability),
-        "programs": programs,
-        "configs": entries,
-    }
-    if loops:
-        document["loops"] = loops
-    if ctx.gpu_name:
-        document["gpu_name"] = ctx.gpu_name
-    if model_quant_digest:
-        document["model_quant_digest"] = model_quant_digest
-    if model:
-        document["model"] = model
-
-    dump_golden_file(document, destination)
+    document = GoldenFile(
+        gpu_name=ctx.gpu_name or None,
+        compute_cap=tuple(ctx.compute_capability),
+        model=model or None,
+        model_quant_digest=model_quant_digest or None,
+        programs=programs,
+        configs=entries,
+        loops=loops,
+    )
+    document.dump(destination, overwrite=overwrite)
 
 
-def load_working_targets(path: str | Path, *, kernel: str | None = None) -> tuple[dict, list[WorkingGoldenTarget]]:
-    """Load a mutable YAML and reconstruct its deduplicated tune targets."""
-    source = Path(path)
-    if is_repository_golden_path(source):
-        raise ValueError(f"working golden cannot point inside the canonical repository goldens: {source}")
-    document = load_golden_file(source)
-
-    by_source: dict[tuple[int, tuple, tuple[tuple[str, int], ...], tuple[tuple[str, object], ...]], WorkingGoldenTarget] = {}
-    for index, entry in enumerate(document["configs"]):
-        for realization_index, realization in enumerate(entry["realizations"]):
-            if kernel and kernel not in realization["name"]:
-                continue
-            record = golden_record_from_entry(document, entry, realization)
-            key = (record.program_index, record.target_key, record.bindings, record.pins)
-            target = by_source.get(key)
-            if target is None:
-                target = WorkingGoldenTarget(
-                    label=realization["name"],
-                    code=None,
-                    input=None,
-                    dynamic=None,
-                    bindings=record.binding_map,
-                    pins=record.pin_map,
-                    program=record.target_program,
-                )
-                by_source[key] = target
-            path = (index, realization_index)
-            target.entry_indexes.append(path)
-            if "knobs" in realization:
-                target.proposals.append((path, dict(realization["knobs"])))
-
-    if not by_source:
-        raise ValueError(f"no working golden targets matched --kernel {kernel!r}")
-    return document, list(by_source.values())
-
-
-def validate_working_gpu(document: dict, ctx) -> None:
+def validate_working_gpu(document: GoldenFile, ctx) -> None:
     """Reject a working file recorded for a different concrete GPU."""
-    file_cap = document.get("compute_cap")
-    file_gpu = document.get("gpu_name")
+    file_cap = document.compute_cap
+    file_gpu = document.gpu_name
     if file_cap is not None and tuple(file_cap) != (0, 0) and tuple(file_cap) != tuple(ctx.compute_capability):
         raise ValueError(
             f"working golden targets compute capability {tuple(file_cap)}, but the live GPU is {tuple(ctx.compute_capability)}"
         )
-    if file_gpu and ctx.gpu_name and file_gpu != ctx.gpu_name:
+    if file_gpu and ctx.gpu_name and gpu.canonical_name(file_gpu) != gpu.canonical_name(ctx.gpu_name):
         raise ValueError(f"working golden targets {file_gpu}, but the live GPU is {ctx.gpu_name}")
-
-
-def realized_tuning_knobs(graph) -> dict[str, str] | None:
-    """Conflict-free canonical tuning knobs across every CudaOp in ``graph``."""
-    from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
-    from emmy.compiler.pipeline.knob import complete_kernel_row  # noqa: PLC0415
-
-    rows = [complete_kernel_row(node.op.knobs) for node in graph.nodes.values() if isinstance(node.op, CudaOp)]
-    if not rows:
-        return None
-    merged: dict[str, str] = {}
-    for row in rows:
-        for key, value in row.items():
-            if key in merged and str(merged[key]) != str(value):
-                return None
-            merged[key] = value
-    return merged
-
-
-class _ProposalLoopIdentity(PipelineStrategy):
-    """Capture the finalized Loop target and any measured structural parent."""
-
-    def __init__(self) -> None:
-        self.value: tuple[str, str, dict] | None = None
-        self.structural_parents: list[tuple[dict[str, str], str, dict]] = []
-
-    def _capture(self, graph) -> None:
-        if self.value is not None:
-            return
-        from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
-        from emmy.compiler.pipeline.knob import STRUCT_PREFIX  # noqa: PLC0415
-        from emmy.compiler.pipeline.passes.identity import IdentityStrategy  # noqa: PLC0415
-        from emmy.compiler.pipeline.strategy import discovered_strategies  # noqa: PLC0415
-
-        loops = [node.op for node in graph.nodes.values() if isinstance(node.op, LoopOp)]
-        if len(loops) != 1:
-            return
-        identity = next(strategy for strategy in discovered_strategies() if isinstance(strategy, IdentityStrategy))
-        stamped = {key: float(value) for key, value in loops[0].knobs.items() if key.startswith(STRUCT_PREFIX)}
-        cache_key = loops[0].identity_key(with_io=True, with_knobs=True)
-        if stamped and cache_key is not None:
-            self.value = identity.op_sig(loops[0], graph), cache_key, stamped
-
-    def on_run_start(self, event) -> None:
-        self._capture(event.graph)
-
-    def on_pass_end(self, event) -> None:
-        self._capture(event.graph)
-
-    def on_splice(self, event) -> None:
-        """Capture the consumed parent whose cross-CTA route changes the kernel set."""
-        from emmy.compiler.pipeline import TuningSearch  # noqa: PLC0415
-
-        parent_knobs = {**(getattr(event.root_op, "knobs", None) or {}), **getattr(event, "knobs", {})}
-        route = TuningSearch._structural_row(parent_knobs)
-        if route is None:
-            return
-        parent = replace(event.root_op, knobs={**parent_knobs, **route})
-        if not any(key.startswith("S_") for key in parent.knobs):
-            return
-        key = parent.identity_key(with_io=True, with_knobs=True)
-        if key is None:
-            return
-        receipt = (dict(route), key, dict(parent.knobs))
-        if receipt not in self.structural_parents:
-            self.structural_parents.append(receipt)
-
-    def structural_parent(self, route: dict) -> tuple[str, dict] | None:
-        """The one consumed parent that realized ``route``, or ``None`` if ambiguous."""
-        from emmy.compiler.pipeline import TuningSearch  # noqa: PLC0415
-
-        wanted = TuningSearch._structural_row(route)
-        matches = {(key, tuple(sorted(knobs.items()))) for got, key, knobs in self.structural_parents if got == wanted}
-        if len(matches) != 1:
-            return None
-        key, knob_items = matches.pop()
-        return key, dict(knob_items)
-
-
-async def measure_proposals(
-    graph, proposals, *, backend, db, ctx, max_candidates: int | None, prior=None, run_id: str | None = None
-) -> list[dict]:
-    """Measure working-file candidates exactly, in file order, before MCTS."""
-    from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
-    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline, TuningSearch  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.pins import pinned_knobs, unreproducible_pin_flag  # noqa: PLC0415
-
-    rankings: list[dict] = []
-    limit = len(proposals) if max_candidates is None else min(len(proposals), max_candidates)
-    for proposal_index, (_entry_index, pins) in enumerate(proposals):
-        if proposal_index >= limit:
-            rankings.append(
-                {
-                    "status": "skipped_budget",
-                    "latency_us": None,
-                    "compile_flags": ctx.compile_flags,
-                    "measured_knobs": {},
-                }
-            )
-            continue
-        search = TuningSearch(
-            patience=1,
-            max_visits=1,
-            max_measurements=1,
-            prior_model=prior,
-            base_knobs=ctx.features(),
-        )
-        loop_identity = _ProposalLoopIdentity()
-        terminal = None
-        with pinned_knobs(pins):
-            pipeline = Pipeline.build(CUDA_PASSES).with_strategies(loop_identity)
-            async for candidate in pipeline.tune_async(graph.copy(), search=search, ctx=ctx, backend=backend, db=db):
-                terminal = candidate
-        if loop_identity.value is not None:
-            search._base_knobs.update(loop_identity.value[2])
-        raw_rows = [node.op.knobs for node in terminal.graph.nodes.values() if isinstance(node.op, CudaOp)] if terminal else []
-        pin_error = unreproducible_pin_flag(pins, raw_rows) if raw_rows else "proposal produced no CUDA kernel"
-        validated_route = pins if pin_error is None and loop_identity.value is not None else None
-        searched = search.best_realized(validated_input_route=validated_route)
-        structural = searched if searched is not None and searched[3] else None
-        structural_parent = loop_identity.structural_parent(structural[0]) if structural is not None else None
-        if structural_parent is not None:
-            search._base_knobs.update({key: value for key, value in structural_parent[1].items() if key.startswith("S_")})
-        if prior is not None:
-            prior.add_rows(search._collect_rows())
-            prior.maybe_refit()
-        if loop_identity.value is not None:
-            db.record_nodes(
-                search._collect_node_records(
-                    context_key=ctx.structural_key(),
-                    op_sig=loop_identity.value[0],
-                    gpu=ctx.hardware_id(),
-                    run_id=run_id or "",
-                    validated_input_route=validated_route,
-                )
-            )
-        measured_knobs = dict(structural[0]) if structural is not None else (realized_tuning_knobs(terminal.graph) if terminal else None)
-        knob_error = None
-        if raw_rows and measured_knobs is None:
-            knob_error = f"proposal lowered to {len(raw_rows)} CUDA kernels with conflicting tuning knobs"
-        status = "pin_unmatched" if pin_error else ("ambiguous_multi_kernel" if knob_error else (search.last_status or "bench_fail"))
-        latency = search.last_stats.median if search.last_stats is not None and search.last_status == "ok" else None
-        ranking = {
-            "status": status,
-            "latency_us": latency,
-            "compile_flags": ctx.compile_flags,
-            "measured_knobs": measured_knobs,
-        }
-        if pin_error or knob_error:
-            ranking["error"] = pin_error or knob_error
-        rankings.append(ranking)
-    return rankings
 
 
 def record_latency(
@@ -522,65 +351,34 @@ def _record_latency_row(destination: Path, name: str, *, hardware_id, emmy_us, t
     """One card's latencies written into the file as it stands NOW. Runs under the lock."""
     from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
 
-    document = load_golden_file(destination)
+    document = GoldenFile.load(destination)
     wanted_knobs = canonical_row_key(knobs) if knobs is not None else None
     wanted_pins = tuple(sorted((key, str(value)) for key, value in pins.items())) if pins is not None else None
     matches = []
-    for entry in document["configs"]:
-        for realization in entry["realizations"]:
-            if realization["name"] != name:
+    for entry in document.configs:
+        for realization in entry.realizations:
+            if realization.name != name:
                 continue
-            if wanted_knobs is not None and canonical_row_key(realization.get("knobs", {})) != wanted_knobs:
+            if wanted_knobs is not None and canonical_row_key(realization.knobs or {}) != wanted_knobs:
                 continue
-            got_pins = tuple(sorted((key, str(value)) for key, value in realization.get("pins", {}).items()))
+            got_pins = tuple(sorted((key, str(value)) for key, value in realization.pins.items()))
             if wanted_pins is not None and got_pins != wanted_pins:
                 continue
             matches.append(realization)
     if len(matches) != 1:
         raise ValueError(f"{destination} resolves {name!r} to {len(matches)} latency rows; exact knobs and pins must select one")
-    timings = {"emmy_us": float(emmy_us), **{field: float(us) for field, us in torch_us.items() if us}}
-    matches[0].setdefault("latency", {})[hardware_id] = timings
-    dump_golden_file(document, destination, overwrite=True, incremental=True)
-
-
-class KernelSetDecisions(PipelineStrategy):
-    """Every kernel-set decision one compile took, as ``(identity, arm knobs)``: the deploy identity
-    of the kernel the fork was offered on and the knobs of the arm its splice carried — a placement
-    cut's ``PLACE@seam: cut``, a cross-CTA split's ``REDUCE`` value. ``kernel_sets`` pairs each
-    decision with the graph ids its splice consumed and minted (``(consumed root id, minted ids)``),
-    which :func:`kernel_set_prices` sums into the decision's measured price. Cleared when a resolve
-    starts, so a greedy retry reports only the resolution that stood."""
-
-    def __init__(self) -> None:
-        self.decisions: list[tuple[str, dict[str, str]]] = []
-        self.kernel_sets: list[tuple[str, tuple[str, ...]]] = []
-        self._open: str | None = None
-
-    def on_run_start(self, event) -> None:
-        del event
-        self.decisions.clear()
-        self.kernel_sets.clear()
-        self._open = None
-
-    def on_splice(self, event) -> None:
-        from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
-
-        identity = event.root_op.identity_key(with_io=True) if isinstance(event.root_op, TileOp) else None
-        if identity is not None:
-            self.decisions.append((identity, {str(key): str(value) for key, value in event.knobs.items()}))
-            self._open = event.match.root_node_id
-
-    def on_spliced(self, event) -> None:
-        if self._open is not None:
-            self.kernel_sets.append((self._open, tuple(event.receipt.new_compute_ids)))
-            self._open = None
+    timings = Latency(emmy_us=float(emmy_us), **{field: float(us) for field, us in torch_us.items() if us})
+    matches[0].latency = {**(matches[0].latency or {}), hardware_id: timings}
+    document.dump(destination, overwrite=True)
 
 
 def kernel_set_prices(kernel_sets: list[tuple[str, tuple[str, ...]]], launch_us: dict[str, float]) -> list[float | None]:
     """The measured price of each kernel-set decision: the summed launch timings of the kernels it
     produced, in the same units as the schedule receipt of the kernel it replaced — the two arms a
     kernel-set fork ranks against each other (``policy.greedy._route_candidates``). ``kernel_sets``
-    is :attr:`KernelSetDecisions.kernel_sets` in decision order: a later decision that consumed one
+    pairs each decision, in decision order, with the graph ids its splice consumed and minted
+    (``(consumed root id, minted ids)``, as the splice watcher ``inventory.KernelInventory`` reports
+    them): a later decision that consumed one
     of an earlier decision's kernels stands in for it with its own kernels. ``launch_us`` maps the
     terminal graph's CUDA kernel ids to their launch timings. ``None`` where a kernel of the set is
     not among the launches, so the caller can fall back to the whole graph's timing."""
@@ -608,15 +406,15 @@ def greedy_pick_rows(graph) -> list[tuple[str, dict[str, str]]]:
     names — and the schedule row it realized (the schedule families only; a forkless kernel's row
     is its OFF anchors, which is what its one enumerated row spells)."""
     from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
-    from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
     from emmy.compiler.pipeline.knob import schedule_row_key  # noqa: PLC0415
+    from emmy.compiler.wire import kernel_tile  # noqa: PLC0415
 
     rows: list[tuple[str, dict[str, str]]] = []
     for node_id in graph.topological_order():
         op = graph.nodes[node_id].op
         if not isinstance(op, CudaOp):
             continue
-        tile = next((ancestor for ancestor in op.source_chain() if isinstance(ancestor, TileOp)), None)
+        tile = kernel_tile(op)
         identity = tile.identity_key(with_io=True) if tile is not None else None
         if identity is None:
             raise ValueError(f"kernel {op.kernel_name} lowered from no tile kernel, so no receipt can name it")
@@ -676,102 +474,76 @@ def _record_rows(destination: Path, name: str, *, decisions, kernels, reference_
     from emmy.compiler.pipeline.knob import canonical_row_key, family_of  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import measured_precision_pins  # noqa: PLC0415
 
-    document = load_golden_file(destination)
-    seeds = [(entry, realization) for entry in document["configs"] for realization in entry["realizations"] if realization["name"] == name]
+    document = GoldenFile.load(destination)
+    seeds = [(entry, realization) for entry in document.configs for realization in entry.realizations if realization.name == name]
     if not seeds:
         raise ValueError(f"{destination} has no realization named {name!r}")
+
+    def regime_of(seed: Realization) -> dict:
+        # The seed's regime, with the precision gates the compile ACTUALLY enumerated under laid over
+        # it: a row measured with the reduced-accumulate cell offered must say so, or a replay
+        # republishes a regime that no longer offers it (``measured_precision_pins``).
+        return {**{key: value for key, value in seed.pins.items() if family_of(str(key)) != "PLACE"}, **measured_precision_pins()}
+
+    if decisions and len(seeds) > 1:
+        # One name can hold several routing rows for one target. The seed is the one whose route the
+        # compile took — the row its decision lands on; any other ends up with knobs spelling one
+        # route and a kernel set naming another.
+        identity, knobs = decisions[0][:2]
+        route = (identity, canonical_row_key(knobs))
+        seeds = [(e, r) for e, r in seeds if r.pins == regime_of(r) and (r.identity, canonical_row_key(r.knobs or {})) == route]
+        if len(seeds) != 1:
+            raise ValueError(
+                f"{destination} holds several realizations named {name!r} and {len(seeds)} of them record the route the "
+                f"compile took ({identity[:12]} {dict(knobs)}) under its pins; exactly one must, to carry the kernel set"
+            )
     entry, seed = seeds[0]
-    # The seed's regime, with the precision gates the compile ACTUALLY enumerated under laid over
-    # it: a row measured with the reduced-accumulate cell offered must say so, or a replay
-    # republishes a regime that no longer offers it (``measured_precision_pins``).
-    regime = {key: value for key, value in seed["pins"].items() if family_of(str(key)) != "PLACE"}
-    regime.update(measured_precision_pins())
+    regime = regime_of(seed)
     written: list[str] = []
     for identity, knobs, emmy_us, reference_us in (*decisions, *kernels):
-        row = {
-            "name": f"{name}.{identity[:12]}",
-            "bindings": dict(seed["bindings"]),
-            "pins": dict(regime),
-            "knobs": {str(key): str(value) for key, value in knobs.items()},
-            "identity": identity,
-            "measurements": {"emmy_us": float(emmy_us), "reference_us": float(reference_us), "reference_backend": reference_backend},
-        }
-        key = (row["bindings"], row["pins"], identity, canonical_row_key(row["knobs"]))
+        row = Realization(
+            name=f"{name}.{identity[:12]}",
+            bindings=dict(seed.bindings),
+            pins=dict(regime),
+            knobs={str(key): str(value) for key, value in knobs.items()},
+            identity=identity,
+            measurements=Measurements(emmy_us=float(emmy_us), reference_us=float(reference_us), reference_backend=reference_backend),
+        )
+        key = (row.bindings, row.pins, identity, canonical_row_key(row.knobs))
         recorded = next(
-            (
-                r
-                for r in entry["realizations"]
-                if (r.get("bindings"), r.get("pins"), r.get("identity"), canonical_row_key(r.get("knobs") or {})) == key
-            ),
+            (r for r in entry.realizations if (r.bindings, r.pins, r.identity, canonical_row_key(r.knobs or {})) == key),
             None,
         )
         if recorded is None:
-            entry["realizations"].append(row)
+            entry.realizations.append(row)
         else:
-            recorded["measurements"] = row["measurements"]
-        written.append(row["name"])
+            recorded.measurements = row.measurements
+        # The name of the row that CARRIES the measurement — the existing row's wherever the write
+        # landed on one. A route whose seam the seed itself records matches the seed on every key,
+        # so the decision lands there, and naming the row that was not written leaves
+        # ``kernel_set`` pointing at nothing: the file is refused on the way out and the
+        # measurement just taken is lost.
+        written.append(row.name if recorded is None else recorded.name)
     if decisions:
-        seed["kernel_set"] = written[: len(decisions)]
-    dump_golden_file(document, destination, overwrite=True, incremental=True)
-    return written
-
-
-def persist_proposal_rankings(path: str | Path, document: dict, target: WorkingGoldenTarget, rankings: list[dict]) -> None:
-    """Atomically persist measured proposal feedback for one target of a loaded document."""
-    configs = document["configs"]
-    for ((entry_index, realization_index), _pins), ranking in zip(target.proposals, rankings, strict=True):
-        realization = configs[entry_index]["realizations"][realization_index]
-        if golden_entry_state(realization) == GoldenEntryState.VERIFIED:
-            continue
-        realization["ranking"] = {**ranking, "source": "proposal"}
-    dump_golden_file(document, path, overwrite=True, incremental=True)
-
-
-def persist_tune_winner(
-    path: str | Path,
-    document: dict,
-    target: WorkingGoldenTarget,
-    winner: tuple[dict[str, str], float] | None,
-    *,
-    compile_flags: str,
-) -> None:
-    """Atomically persist one unambiguous directly searched winner into a loaded document."""
-    from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
-
-    configs = document["configs"]
-    if winner is not None:
-        winner_knobs, winner_us = winner
-        winner_ranking = {
-            "status": "ok",
-            "latency_us": winner_us,
-            "compile_flags": compile_flags,
-            "measured_knobs": winner_knobs,
-            "source": "tune",
-        }
-        winner_key = canonical_row_key(winner_knobs)
-        matching = [
-            path
-            for path in target.entry_indexes
-            if "knobs" in configs[path[0]]["realizations"][path[1]]
-            and canonical_row_key(configs[path[0]]["realizations"][path[1]]["knobs"]) == winner_key
+        # A realization's rows describe ONE kernel set. Re-recording the same realization under a
+        # different route rewrites the listing, and leaving the superseded set's rows behind makes
+        # the file self-contradictory: a schedule row does not store the route it was measured
+        # under, so the replay reads every row against whichever listing the seed now carries. The
+        # A100's softmax x V target replayed at 67 ms instead of 166 us that way. Scoped to THIS
+        # seed's family and regime — one config entry can hold several seeds side by side — and
+        # never to the seed itself, which carries no measurement of its own.
+        superseded = set(written[: len(decisions)])
+        entry.realizations = [
+            r
+            for r in entry.realizations
+            if not (
+                r.name.startswith(f"{name}.")
+                and r.bindings == seed.bindings
+                and r.pins == regime
+                and r.name not in written
+                and r.name not in superseded
+            )
         ]
-        writable = next(
-            (path for path in matching if golden_entry_state(configs[path[0]]["realizations"][path[1]]) != GoldenEntryState.VERIFIED),
-            None,
-        )
-        if writable is not None:
-            realization = configs[writable[0]]["realizations"][writable[1]]
-            realization["ranking"] = {
-                **winner_ranking,
-                "tune_winner": True,
-            }
-        elif not matching:
-            config_index, realization_index = target.entry_indexes[0]
-            seed = copy.deepcopy(configs[config_index]["realizations"][realization_index])
-            for key in ("knobs", "measurements", "ranking", "latency"):
-                seed.pop(key, None)
-            seed["knobs"] = winner_knobs
-            seed["ranking"] = {**winner_ranking, "tune_winner": True}
-            configs[config_index]["realizations"].append(seed)
-            target.entry_indexes.append((config_index, len(configs[config_index]["realizations"]) - 1))
-    dump_golden_file(document, path, overwrite=True, incremental=True)
+        seed.kernel_set = tuple(written[: len(decisions)])
+    document.dump(destination, overwrite=True)
+    return written

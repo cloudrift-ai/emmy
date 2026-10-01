@@ -19,6 +19,28 @@ HIDDEN = 16
 PLE_DIM = 4
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _warm_transformers():
+    """Build one transformers model before the tests, so none of them is charged for the first.
+
+    Resolving a lazy ``transformers`` model module and constructing a torch module for the first
+    time in a process costs ~1.3 s here and several seconds on a CI runner; every later build is
+    free. Whichever test got there first paid it and read as a 5 s test, which trips the durations
+    gate in ``tests/conftest.py`` — and because that gate's own baseline decides the bucketing,
+    recording the test that paid moves the cost to a different one, so the gate names a new test
+    every run. Fixture setup is not the call phase, so paying it here charges nobody.
+    """
+    import torch
+    import transformers
+
+    config = transformers.Qwen3Config(
+        vocab_size=64, hidden_size=64, intermediate_size=128, num_hidden_layers=1,
+        num_attention_heads=4, num_key_value_heads=2, head_dim=16, max_position_embeddings=64,
+    )  # fmt: skip
+    with torch.device("meta"):
+        transformers.Qwen3ForCausalLM(config)
+
+
 def _fake_rotary(sample, full_pos):
     import torch
 
@@ -951,6 +973,170 @@ def _qwen3_5_linear_block():
     torch.manual_seed(0)
     model = Qwen3_5TextModel(Qwen3_5TextConfig(**_QWEN3_5_TINY)).eval()
     return model.layers[0]
+
+
+@pytest.mark.parametrize("length", [1, 16, 63, 64, 65])
+def test_gdn_chunk_padding_keeps_the_logical_sequence_length(length):
+    import torch
+
+    from emmy.compiler.trace.torch import trace_module
+
+    pytest.importorskip("transformers.models.qwen3_5")
+    from transformers.models.qwen3_5.modeling_qwen3_5 import torch_chunk_gated_delta_rule
+
+    class Chunk(torch.nn.Module):
+        def forward(self, q, k, v, g, beta, state):
+            return torch_chunk_gated_delta_rule(q, k, v, g, beta, initial_state=state, output_final_state=True)
+
+    vectors = [torch.randn(1, length, 2, 8) * 0.1 for _ in range(3)]
+    args = (*vectors, -torch.rand(1, length, 2), torch.rand(1, length, 2), torch.randn(1, 2, 8, 8) * 0.1)
+    graph = trace_module(Chunk(), args)
+    assert tuple(graph.buffer(graph.outputs[0]).shape) == (1, length, 2, 8)
+    assert tuple(graph.buffer(graph.outputs[1]).shape) == (1, 2, 8, 8)
+
+
+@pytest.mark.parametrize("length", [1, 16, 65])
+def test_gdn_state_wrapper_continues_resets_and_isolates_requests(length):
+    import torch
+    from transformers.cache_utils import DynamicCache
+    from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
+
+    from emmy.compiler.trace.huggingface import build_gdn_state_wrapper
+
+    block = _qwen3_5_linear_block()
+    mixer = block.linear_attn
+    wrapper = build_gdn_state_wrapper(block)
+    state = torch.zeros(2, mixer.num_v_heads, mixer.head_k_dim, mixer.head_v_dim)
+    history = torch.zeros(2, mixer.conv_dim, mixer.conv_kernel_size)
+    cache = DynamicCache(config=Qwen3_5TextConfig(**_QWEN3_5_TINY))
+    chunks = [torch.randn(2, rows, mixer.hidden_size) * 0.1 for rows in (length, 1, 3)]
+    first = None
+    with torch.no_grad():
+        for x in chunks:
+            old_state, old_history = state.clone(), history.clone()
+            actual, next_state, next_history = wrapper(x, state, history)
+            expected = block(x, position_embeddings=None, past_key_values=cache)
+            torch.testing.assert_close(actual, expected, rtol=1e-4, atol=1e-5)
+            torch.testing.assert_close(next_state, cache.layers[0].recurrent_states[0], rtol=1e-4, atol=1e-5)
+            torch.testing.assert_close(next_history, cache.layers[0].conv_states[0])
+            torch.testing.assert_close(state, old_state, rtol=0, atol=0)
+            torch.testing.assert_close(history, old_history, rtol=0, atol=0)
+            for row in range(2):
+                isolated = wrapper(x[row : row + 1], state[row : row + 1], history[row : row + 1])
+                for single, batched in zip(isolated, (actual, next_state, next_history), strict=True):
+                    torch.testing.assert_close(single, batched[row : row + 1], rtol=1e-4, atol=1e-5)
+            if first is None:
+                first = tuple(t.clone() for t in (actual, next_state, next_history))
+            state, history = next_state, next_history
+        reset = wrapper(chunks[0], torch.zeros_like(state), torch.zeros_like(history))
+        for actual, expected in zip(reset, first, strict=True):
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("length", [1, 16])
+def test_gdn_state_wrapper_traces_both_state_outputs(length):
+    import numpy as np
+    import torch
+
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.trace.huggingface import build_gdn_state_wrapper
+    from emmy.compiler.trace.torch import trace_module_with_constants
+
+    block = _qwen3_5_linear_block()
+    mixer = block.linear_attn
+    state = torch.randn(1, mixer.num_v_heads, mixer.head_k_dim, mixer.head_v_dim) * 0.1
+    history = torch.randn(1, mixer.conv_dim, mixer.conv_kernel_size) * 0.1
+    x = torch.randn(1, length, mixer.hidden_size) * 0.1
+    wrapper = build_gdn_state_wrapper(block)
+    graph, targets = trace_module_with_constants(wrapper, (x, state, history))
+    assert len(graph.inputs) == len(graph.outputs) == 3
+    for name, value in zip(graph.outputs, (x, state, history), strict=True):
+        assert tuple(graph.buffer(name).shape) == tuple(value.shape)
+    tensors = dict(wrapper.named_parameters()) | dict(wrapper.named_buffers())
+    inputs = {name: value.numpy() for name, value in zip(graph.inputs, (x, state, history), strict=True)}
+    inputs.update({name: tensors[path].detach().numpy() for name, path in targets.items()})
+    result, _ = NumpyBackend().run(graph, input_data=inputs)
+    with torch.no_grad():
+        reference = wrapper(x, state, history)
+    for name, expected in zip(graph.outputs, reference, strict=True):
+        np.testing.assert_allclose(result.outputs[name], expected.numpy(), rtol=1e-4, atol=1e-5)
+
+
+@pytest.mark.xdist_group("cuda")
+@pytest.mark.parametrize("prefill", [1, 2])
+def test_gdn_state_wrapper_cuda_handoff_and_reset(prefill):
+    import numpy as np
+    import torch
+    from transformers.cache_utils import DynamicCache
+    from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
+    from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5TextModel
+
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+    from emmy.compiler.trace.huggingface import build_gdn_state_wrapper
+    from emmy.compiler.trace.torch import trace_module_with_constants
+    from tests.compiler.helpers import inject_constants, skip_if_no_cuda
+
+    skip_if_no_cuda()
+    config = Qwen3_5TextConfig(
+        **(
+            _QWEN3_5_TINY
+            | dict(
+                hidden_size=8,
+                intermediate_size=16,
+                num_hidden_layers=1,
+                num_attention_heads=2,
+                num_key_value_heads=1,
+                head_dim=4,
+                linear_key_head_dim=4,
+                linear_value_head_dim=4,
+                linear_num_key_heads=1,
+                linear_num_value_heads=1,
+                linear_conv_kernel_dim=3,
+                layer_types=["linear_attention"],
+            )
+        )
+    )
+    torch.manual_seed(0)
+    block = Qwen3_5TextModel(config).eval().layers[0]
+    wrapper = build_gdn_state_wrapper(block)
+    examples = (torch.zeros(2, 1, 8), torch.zeros(2, 1, 4, 4), torch.zeros(2, 12, 3))
+    tensors = dict(wrapper.named_parameters()) | dict(wrapper.named_buffers())
+    backend = CudaBackend()
+    programs = {}
+    for length in sorted({1, prefill}):
+        graph, targets = trace_module_with_constants(wrapper, (torch.zeros(2, length, 8), *examples[1:]))
+        weights = {name: tensors[path].detach().numpy() for name, path in targets.items()}
+        with pinned_knobs({"FAST_MATH": False, "PLACE": "fuse"}):
+            compiled = backend.compile(graph)
+        programs[length] = (graph, compiled, inject_constants(weights, compiled))
+    rng = np.random.default_rng(0)
+    chunks = [(rng.standard_normal((2, length, 8)) * 0.1).astype(np.float32) for length in (prefill, 1, 1)]
+    # Two independent batch rows, a seeded request, and two identical fresh requests after reset.
+    fresh = None
+    for seeded in (True, False, False):
+        state = (rng.standard_normal((2, 1, 4, 4)) * 0.1).astype(np.float32) if seeded else np.zeros((2, 1, 4, 4), np.float32)
+        history = (rng.standard_normal((2, 12, 3)) * 0.1).astype(np.float32) if seeded else np.zeros((2, 12, 3), np.float32)
+        cache = DynamicCache(config=config)
+        cache.update_conv_state(torch.from_numpy(history.copy()), 0)
+        cache.update_recurrent_state(torch.from_numpy(state.copy()), 0)
+        for index, x in enumerate(chunks):
+            graph, compiled, weights = programs[x.shape[1]]
+            inputs = weights | dict(zip(graph.inputs, (x, state, history), strict=True))
+            result, _ = backend.run(compiled, input_data=inputs)
+            values = tuple(result.outputs[name] for name in graph.outputs)
+            with torch.no_grad():
+                y = block(torch.from_numpy(x), position_embeddings=None, past_key_values=cache)
+            expected = (y, cache.layers[0].recurrent_states[0], cache.layers[0].conv_states[0])
+            for actual, reference in zip(values, expected, strict=True):
+                np.testing.assert_allclose(actual, reference.numpy(), rtol=1e-3, atol=1e-4)
+            if not seeded and index == 0:
+                if fresh is None:
+                    fresh = tuple(value.copy() for value in values)
+                else:
+                    for actual, reference in zip(values, fresh, strict=True):
+                        np.testing.assert_array_equal(actual, reference)
+            _, state, history = values
 
 
 # --- checkpoint keys vs twin parameter names ---------------------------------------------------

@@ -1,0 +1,11 @@
+tags:
+- onboarding
+- untested
+model:
+  huggingface: yandex/AliceAI-Foundation-80B-A3B-Base
+  rationale: New 80B/3B MoE base with KDA attention, 357 likes trending; unique architecture for the A3B large-class slot.
+  heat: 60
+  task: generate
+matrices:
+- deploy.gpu: NVIDIA B200
+  deploy.gpu_count: 4

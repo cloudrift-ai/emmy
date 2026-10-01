@@ -1,9 +1,10 @@
 """IdentityStrategy — a kernel's structural identity, owned end to end.
 
-The ``S_*`` row (an extent-aware histogram of the kernel body — the structural identity that
-keys the tune DB's evidence, featurizes into the online prior, and folds into ``identity_key(with_io=True, with_knobs=True)``'s
-knob half) is computed here and MATERIALIZED into ``op.knobs`` at exactly two moments, once per
-kernel, at birth:
+The ``S_*`` row is an extent-aware histogram used by the learned prior. ``I_kernel`` is the exact
+schedule-free typed identity measured evidence is keyed by: the loop op's at birth, and the tile
+kernel's once the lift has given it a body of its own — the identity the tune DB keys a kernel on
+(``search.bench_record.kernel_key``), so a kernel's rows and its forks name it alike. Both are
+materialized into ``op.knobs`` once per kernel, at birth:
 
 - **fusion settled** — the end of the pipeline's last non-lowering pass (``on_pass_end`` at the
   computed stamp boundary; run start for a pipeline entering at lowering): the fused body is
@@ -12,6 +13,13 @@ kernel, at birth:
 - **minted during lowering** — a cross-CTA split's pieces (``on_splice`` of a lowering pass):
   fresh knob-less TileOps stamped before the fragment enters the graph, so no rule can
   observe an unstamped kernel.
+- **given a body of its own** — the lift of a loop op into a tile, the twist of a tile's
+  exp-family cluster (``on_rebind`` of a lowering pass): the ``S_*`` row stays, the exact
+  identity is re-derived, so the kernel's forks, its rows and its stored definition name it alike.
+
+The ``S_*`` row of every kernel is the features of the loop body it was formed from — the fused loop op's for
+a kernel the lift threads it in as ``source``, the loop nest a cut or split piece was re-formed through — which
+is the body its ``kernel`` row stores, so re-lowering that definition stamps the kernel the same.
 
 Materializing into knobs (rather than compute-on-read everywhere) is deliberate: the stamped row
 rides the engine's rebind knob-merge into every later dialect, which is what keeps a terminal
@@ -35,28 +43,31 @@ from typing import TYPE_CHECKING
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.stmt import Body
 from emmy.compiler.ir.stmt.blocks import Cond, Loop
-from emmy.compiler.ir.stmt.leaves import Assign, Mma
+from emmy.compiler.ir.stmt.leaves import Assign
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.pipeline.knob import STRUCT_PREFIX
-from emmy.compiler.pipeline.strategy import PassEndEvent, PipelineStrategy, RunStartEvent, SpliceEvent
+from emmy.compiler.pipeline.knob import KERNEL_IDENTITY, STRUCT_PREFIX
+from emmy.compiler.pipeline.strategy import PassEndEvent, PipelineStrategy, RebindEvent, RunStartEvent, SpliceEvent
 from emmy.compiler.structural import digest
 
 if TYPE_CHECKING:
     from emmy.compiler.graph import Graph
 
+# The passes that lower a final fused body: a kernel minted or rebound there carries its own identity.
+_LOWERING = ("tile/", "lowering/")
+
 
 class IdentityStrategy(PipelineStrategy):
-    """Stamp every kernel's ``S_*`` structural identity at birth and serve the
-    one spelling of identity to every reader (``signature`` / ``op_sig``)."""
+    """Stamp exact identity and structural features at birth; expose the feature signature to
+    inventory and training readers (``signature`` / ``op_sig``)."""
 
     @staticmethod
     def _stamp_boundary(passes: tuple[str, ...]) -> str | None:
         """The pass whose END finalizes the fused kernel bodies for THIS pipeline: the last
-        non-lowering pass (``loop/stamp`` in the full pipeline; ``loop/fusion`` in a shorthand
+        pass before the tile passes (``loop/stamp`` in the full pipeline; ``loop/fusion`` in a shorthand
         pipeline that skips the naming pass). ``None`` for a pipeline that starts at lowering
         (a loop-stage IR resume, a slice tune) — its entry kernels are already final. Computed
         per event from the pass list, never stored: this instance is shared across runs."""
-        pre = [name for name in passes if name and not name.startswith("lowering/")]
+        pre = [name for name in passes if name and not name.startswith(_LOWERING)]
         return pre[-1] if pre else None
 
     def on_run_start(self, e: RunStartEvent) -> None:
@@ -77,24 +88,46 @@ class IdentityStrategy(PipelineStrategy):
     def on_splice(self, e: SpliceEvent) -> None:
         # Kernels minted inside lowering. Fusion-era splices are skipped: their kernels are
         # intermediate bodies whose identity is not final until the stamp boundary.
-        if not e.pass_name.startswith("lowering/"):
+        if not e.pass_name.startswith(_LOWERING):
             return
         for node in e.fragment.nodes.values():
             op = node.op
             if not isinstance(op, (LoopOp, TileOp)):
                 continue
-            if op.source is None and e.root_op.dialect == "loop":
+            lifted = e.root_op.dialect == "loop"
+            if op.source is None and lifted:
                 node.op = op = replace(op, source=e.root_op)
             # Fragment buffers carry the operand Tensors (the pieces' builders add them), so the
-            # dtype features read the same values the assembled graph would give.
-            self._stamp(node, e.fragment)
+            # dtype features read the same values the assembled graph would give. A kernel lifted
+            # from a loop op has a body of its own (a twisted reduction is rewritten), and its
+            # exact identity is re-derived from it: the ``S_*`` row stays the body's it was formed from.
+            self._stamp(node, e.fragment, exact=lifted)
 
-    def _stamp(self, node, graph: Graph) -> None:
-        op = node.op
-        if not isinstance(op, (LoopOp, TileOp)) or any(k.startswith(STRUCT_PREFIX) for k in op.knobs):
+    def on_rebind(self, e: RebindEvent) -> None:
+        # A lowering rewrite that gives a kernel a body of its own — the lift of a loop op into a
+        # tile, the twist of a tile's exp-family cluster — is the same logical kernel under a new
+        # exact identity, re-derived here; the ``S_*`` row stays the fused body's. A schedule keeps the
+        # stamp, even one that realizes the kernel through another term (a carried state's serial form):
+        # the kernel is the tile its schedule fork was offered, which its rows are filed under.
+        op, old = e.node.op, e.replaced
+        if not e.pass_name.startswith(_LOWERING) or not isinstance(op, (LoopOp, TileOp)):
             return
-        body = _identity_body(op)
-        node.op = replace(op, knobs={**op.knobs, **structure_features(body, graph)})
+        scheduled = isinstance(op, TileOp) and op.schedule is not None and isinstance(old, TileOp) and old.schedule is None
+        same_body = type(op) is type(old) and (op.op is old.op if isinstance(op, TileOp) else op.body is old.body)
+        if not (scheduled or same_body):
+            self._stamp(e.node, e.graph, exact=True)
+
+    def _stamp(self, node, graph: Graph, *, exact: bool = False) -> None:
+        op = node.op
+        if not isinstance(op, (LoopOp, TileOp)):
+            return
+        op = op.with_io(graph, node)
+        knobs = dict(op.knobs)
+        if not any(k.startswith(STRUCT_PREFIX) for k in knobs):
+            knobs.update(structure_features(_identity_body(op), graph))
+        if exact or KERNEL_IDENTITY not in knobs:
+            knobs[KERNEL_IDENTITY] = op.identity_key(structural=False, with_io=True)
+        node.op = replace(op, knobs=knobs)
 
     # --- the read API: the one spelling of identity ------------------------------------------
 
@@ -127,7 +160,21 @@ def _identity_body(op) -> Body | None:
         return op.body
     if not isinstance(op, TileOp):
         return getattr(op, "body", None)
-    return op.loop_body
+    # A tile formed from a loop op (a piece a cut re-formed) is featured from that body — the definition its
+    # kernel row stores — not from the derived body a later lowering rewrite may still change.
+    return op.source.body if isinstance(op.source, LoopOp) else op.loop_body
+
+
+def kernel_stamps(wire: dict) -> dict[str, float]:
+    """The ``S_*`` features of the kernel a ``wire.kernel_wire`` wire defines: :func:`structure_features`
+    of its body, the dtype half read off the wire's own buffers. What a ``kernel`` row stores for a tile
+    nothing stamped; a stamped tile's row carries the strategy's own stamps, which are the same features:
+    the wire holds the body the kernel was formed from, the body the strategy stamps."""
+    from emmy.compiler.graph import Graph  # noqa: PLC0415
+
+    graph = Graph.from_wire(wire)
+    [node] = [node for node in graph.nodes.values() if isinstance(node.op, LoopOp)]
+    return structure_features(node.op.body, graph)
 
 
 def structure_features(body: Body, graph: Graph | None = None) -> dict[str, float]:
@@ -149,7 +196,6 @@ def _skeleton(body: Body, graph: Graph | None) -> dict[str, float]:
     feats["S_n_distinct_input"] = len({ld.input for ld in loads})
     feats["S_n_write"] = len(body.writes)
     feats["S_n_accum"] = len(body.accums)
-    feats["S_n_mma"] = len(body.iter_of_type(Mma))
     feats["S_n_cond"] = len(body.iter_of_type(Cond))
     assigns = body.iter_of_type(Assign)
     feats["S_n_assign"] = len(assigns)

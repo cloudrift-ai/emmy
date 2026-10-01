@@ -1,6 +1,6 @@
 """Phase-2 multi-layer host-stitch test for ``EmmyGenRunner`` (no vLLM).
 
-Needs CUDA + cupy (skips itself otherwise). Builds a tiny multi-layer Qwen3, then runs a whole-model
+Needs CUDA (skips itself otherwise). Builds a tiny multi-layer Qwen3, then runs a whole-model
 Python stitch — ``embed`` → per layer (emmy ``pre`` kernels → reconstruct RoPE →
 reference causal GQA torch SDPA → emmy ``post`` kernels) → ``final_norm`` → lm_head —
 and checks the stitched logits against eager. This is the dress rehearsal for the vLLM
@@ -85,7 +85,6 @@ def test_gen_runner_gemma4_heterogeneous_stitch():
     runner must carry PER-LAYER attention metadata — a single (num_heads, head_dim) misshapes the global
     layers' ``o_proj``. Stitches the whole tiny gemma-4 trunk with per-layer dims + per-layer-type RoPE
     (full-causal since T < sliding_window) and checks it against the HF trunk's own hidden states."""
-    pytest.importorskip("cupy")
     pytest.importorskip("transformers.models.gemma4")
     import torch
     import torch.nn.functional as F
@@ -283,9 +282,9 @@ def test_moe_fixed_slot_combine_matches_routed_oracle(built):
     assert runner.has_moe_fixed_slot, "the fixed-slot tier must build for the plain OLMoE expert shape"
     assert len(runner._expert_slots) == config.num_experts_per_tok
     slots = runner._expert_slots
-    assert len({slot.program.slab_plan.slab.data.ptr for slot in slots}) == 1, "fixed slots must share scratch"
-    assert len({slot.program.arrays["x"].data.ptr for slot in slots}) == 1, "fixed slots must share their ordered input"
-    assert len({slot.program.arrays[slot.output_names[0]].data.ptr for slot in slots}) == len(slots), (
+    assert len({slot.program.regions().get("scratch", (None,))[0] for slot in slots}) == 1, "fixed slots must share scratch"
+    assert len({slot.program.executor.buffer("x")[0] for slot in slots}) == 1, "fixed slots must share their ordered input"
+    assert len({slot.program.executor.buffer(slot.output_names[0])[0] for slot in slots}) == len(slots), (
         "each fixed slot must retain its own partial output"
     )
 
@@ -306,7 +305,6 @@ def test_moe_indirect_slot_matches_direct_expert_bit_exact(built):
     expert of every MoE layer: the indirection is ABI-level, so both programs run the same
     schedule and the same kernels modulo where the base pointer comes from. Runs each expert's
     weights through both paths on the same row and compares raw bytes."""
-    import cupy as cp
     import torch
 
     from emmy.compiler.backend.gpu_lock import gpu_lock
@@ -318,19 +316,20 @@ def test_moe_indirect_slot_matches_direct_expert_bit_exact(built):
 
     slot0 = runner._expert_slots[0]
     # The slot plan must actually carry the indirect encoding for both weights.
-    marked = {a for lc in slot0.program.compiled.launches for a, _, _, _ in lc.indirect_args}
+    marked = {a for lc in slot0.program.plan.launches for a, _, _, _ in lc.indirect_args}
     assert marked == {"w_gate_up", "w_down"}
 
     torch.manual_seed(2)
     for moe in runner._moe:
         for e in range(config.num_experts):
             x = torch.randn(1, config.hidden_size, device="cuda")
-            with gpu_lock(), cp.cuda.Stream.from_external(torch.cuda.current_stream()):
+            with gpu_lock():
                 direct = runner._launch_expert(moe, e, x).clone()  # the direct M=1 twin (pointer swap)
                 runner._slot_sel[0] = moe["sel_off"] + e  # steer slot 0's table read at this expert
                 p = slot0.program
-                p.upload_prefix_device({"x": cp.from_dlpack(x.detach().contiguous())})
-                p.run_once()
+                with p.on_stream(torch.cuda.current_stream()):
+                    p.upload_prefix_device({"x": x.detach().contiguous()})
+                    p.run_once()
             torch.cuda.synchronize()
             got = runner._slot_partials[0:1]
             assert got.cpu().numpy().tobytes() == direct.cpu().numpy().tobytes(), f"expert {e}: indirect != direct bytes"
@@ -379,7 +378,6 @@ def test_moe_expert_m256_twin_matches_eager_across_experts(built):
     correct ACROSS experts: the captured graph bakes the twin's own buffer pointers, so a
     pointer-swap regression would freeze the first expert's weights into every later
     replay. ``_launch_expert`` routes row sets in (decode_bucket, 256] here."""
-    import cupy as cp
     import torch
 
     from emmy.compiler.backend.gpu_lock import gpu_lock
@@ -394,14 +392,14 @@ def test_moe_expert_m256_twin_matches_eager_across_experts(built):
     for t in (10, 5):  # both over-bucket widths must reuse the one cached graph (prefix upload pads)
         for e in (0, 3, 7):
             x = torch.randn(t, config.hidden_size, device="cuda")
-            with gpu_lock(), cp.cuda.Stream.from_external(torch.cuda.current_stream()):
+            with gpu_lock():
                 got = runner._launch_expert(moe, e, x).clone()
             torch.cuda.synchronize()
             gate, up = torch.nn.functional.linear(x, moe["inputs"]["w_gate_up"][e]).chunk(2, dim=-1)
             ref = torch.nn.functional.linear(torch.nn.functional.silu(gate) * up, moe["inputs"]["w_down"][e])
             assert got.shape == (t, config.hidden_size)
             torch.testing.assert_close(got, ref, rtol=1e-4, atol=1e-5)
-    assert runner._expert_m256.program._e2e_graph is not None, "the m256 tier must serve via the captured program graph"
+    assert runner._expert_m256.program.executor.has_program_graph(), "the m256 tier must serve via the captured program graph"
 
 
 def test_decode_twin_shares_weight_buffers(built):
@@ -416,7 +414,7 @@ def test_decode_twin_shares_weight_buffers(built):
     def const_ptrs(prog):
         """{base device pointer: nbytes} of every constant buffer in a built program."""
         p = prog.program
-        return {p.arrays[b.name].data.ptr: p.arrays[b.name].nbytes for b in p.compiled.bufs if b.role == "constant"}
+        return {p.executor.buffer(b.name)[0]: p.buffer_nbytes(b.name) for b in p.plan.buffers if b.role == "constant"}
 
     for sym, dec in ((runner._pre[0], runner._pre_decode[0]), (runner._post[0], runner._post_decode[0])):
         sym_ptrs = const_ptrs(sym)
@@ -482,14 +480,15 @@ def test_layers_share_activation_arena(built):
     def io_ptrs(prog):
         """{(role, name): base device pointer} for the input/output buffers."""
         p = prog.program
-        return {(b.role, b.name): p.arrays[b.name].data.ptr for b in p.compiled.bufs if b.role in ("input", "output")}
+        return {(b.role, b.name): p.executor.buffer(b.name)[0] for b in p.plan.buffers if b.role in ("input", "output")}
 
     for kind in ("_pre", "_post", "_pre_decode", "_post_decode"):
         programs = getattr(runner, kind)
         if programs is None:
             continue
         a, b = programs[1], programs[2]
-        assert a.program.slab_plan.slab.data.ptr == b.program.slab_plan.slab.data.ptr, f"{kind}: scratch slabs not shared"
+        slab_a, slab_b = (p.program.regions().get("scratch", (None,))[0] for p in (a, b))
+        assert slab_a == slab_b, f"{kind}: scratch slabs not shared"
         pa, pb = io_ptrs(a), io_ptrs(b)
         assert pa.keys() == pb.keys(), f"{kind}: layer programs disagree on buffer names"
         for key in pa:
@@ -504,7 +503,6 @@ def test_expert_program_fp8_inputs_match_reference():
     transposed expert layout. Runs the M=16 and M=1 static twins; the build goes
     through ``_compile_split``'s plan path, so the per-input feed binding (fp8 bits on the
     uint8 carrier from a torch fp8 tensor, f32 scales) is exercised too."""
-    pytest.importorskip("cupy")
     import torch
     import torch.nn as nn
 
@@ -590,8 +588,6 @@ def test_expert_program_fp8_indirect_compose(monkeypatch):
     stages an indirect operand through a TMA descriptor, and whether the evidence hierarchy picks
     one is a per-machine fact this test does not protect — the serving tier owns that fallback."""
     monkeypatch.setenv("EMMY_STAGE", "")
-    pytest.importorskip("cupy")
-    import cupy as cp
     import torch
     import torch.nn as nn
 
@@ -631,18 +627,18 @@ def test_expert_program_fp8_indirect_compose(monkeypatch):
     table_w = torch.tensor([t.data_ptr() for t in bits_e], dtype=torch.int64, device="cuda")
     table_s = torch.tensor([t.data_ptr() for t in scale_e], dtype=torch.int64, device="cuda")
     sel = torch.zeros(1, dtype=torch.int32, device="cuda")
-    with gpu_lock(), cp.cuda.Stream.from_external(torch.cuda.current_stream()):
-        p.arrays["w__table"] = cp.from_dlpack(table_w)
-        p.arrays["w__sel"] = cp.from_dlpack(sel)
-        p.arrays["w_scale__table"] = cp.from_dlpack(table_s)
-        p.arrays["w_scale__sel"] = cp.from_dlpack(sel)
+    with gpu_lock():
+        p.alias_buffer("w__table", table_w)
+        p.alias_buffer("w__sel", sel)
+        p.alias_buffer("w_scale__table", table_s)
+        p.alias_buffer("w_scale__sel", sel)
     for e in range(n_experts):
-        with gpu_lock(), cp.cuda.Stream.from_external(torch.cuda.current_stream()):
+        with gpu_lock(), p.on_stream(torch.cuda.current_stream()):
             sel[0] = e
-            p.upload_prefix_device({"x": cp.from_dlpack(x.cuda())})
+            p.upload_prefix_device({"x": x.cuda()})
             p.run_once()
             outs = p.output_prefix_device()
-            got = torch.from_dlpack(outs[prog.output_names[0]]).clone()
+            got = outs[prog.output_names[0]].clone()
         torch.cuda.synchronize()
         ref = (x.float() @ (bits_e[e].float().cpu() * scale_e[e].cpu())).to(torch.float16)
         torch.testing.assert_close(got.cpu().reshape(ref.shape), ref, rtol=2e-2, atol=2e-2)
@@ -668,7 +664,6 @@ def test_serving_split_computes_the_declared_w4a4_program(tmp_path, monkeypatch)
     where the declared program applies the two scale levels fused, one f16 rounding of a per-block
     constant apart. Both lowerings pass it — the generic reading reproduces the declared value to
     kernel noise."""
-    pytest.importorskip("cupy")
     import torch
 
     if not torch.cuda.is_available():
@@ -752,8 +747,9 @@ def test_host_mapped_embed_table_gathers_identically_and_costs_no_vram(monkeypat
     lands on the same values, the table's device pointer is NOT device memory (otherwise the
     bytes were never returned), and the numpy table the oracle path reads is a VIEW of the same
     allocation rather than a second host copy."""
-    import cupy as cp
     import torch
+
+    from emmy.compiler.backend.cuda.device import device
 
     ids = torch.tensor([1, 3, 5, 63], dtype=torch.long, device="cuda")
     device_runner = built("qwen3.l1.b16").runner
@@ -768,6 +764,6 @@ def test_host_mapped_embed_table_gathers_identically_and_costs_no_vram(monkeypat
 
     table = runner._embed_weight_dev
     assert table.is_cuda, "the gather must stay a device-side op (host round trips break capture)"
-    attrs = cp.cuda.runtime.pointerGetAttributes(table.data_ptr())
-    assert int(attrs.hostPointer) == table.data_ptr(), "the table must be host memory mapped into the device space"
+    host, device_ptr = device().pointer_attributes(table.data_ptr())
+    assert host and device_ptr == table.data_ptr(), "the table must be host memory mapped into the device space"
     assert runner._embed_weight.ctypes.data == table.data_ptr(), "the numpy view must alias the mapped buffer, not copy it"

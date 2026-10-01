@@ -6,10 +6,10 @@ from __future__ import annotations
 import pytest
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.twist import SOFTMAX
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Const, Init, Load, Loop, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Let, Load, Loop, Select, SelectBranch, Write
 
 # --- Lambda formation: the Stmt.pure gate + results-defined ------------------------------------- #
 
@@ -38,6 +38,17 @@ def test_lambda_post_init_canonicalizes_body_order() -> None:
     assert first == second
 
 
+def test_lambda_orders_the_definition_read_by_a_predicate_first() -> None:
+    predicate = Select("predicate", (SelectBranch("x", Var("column")), SelectBranch("y", Literal(True, "bool"))))
+    value = Select("value", (SelectBranch("x", Var("predicate")), SelectBranch("y", Literal(True, "bool"))))
+
+    forward = Lambda.closing((), Body((predicate, value)), ("value",))
+    reversed_body = Lambda.closing((), Body((value, predicate)), ("value",))
+
+    assert forward == reversed_body
+    assert forward.body == (predicate, value)
+
+
 @pytest.mark.parametrize(
     "stmt",
     [
@@ -62,8 +73,8 @@ def test_lambda_rejects_undefined_results() -> None:
 
 def test_lambda_allows_param_results_and_constant_results() -> None:
     """ι is spelled in the lift: softmax's singleton is ``(x, 1)`` — the constant component is a
-    ``Const`` def, a name like any other result."""
-    lam = Lambda(params=("k", "x"), body=Body((Const(name="one", value=1.0),)), results=("x", "one"))
+    ``Let`` def, a name like any other result."""
+    lam = Lambda(params=("k", "x"), body=Body((Let(name="one", value=1.0),)), results=("x", "one"))
     assert lam.results == ("x", "one") and lam.defined == frozenset({"k", "x", "one"})
 
 
@@ -80,6 +91,19 @@ def test_lambda_refuses_an_open_body_and_closing_binds_the_residual() -> None:
     assert lam.params == ("x", "outer")
     assert lam.defined == frozenset({"x", "outer", "y"})
     assert lam.results == ("y",)
+
+
+def test_select_predicate_is_bound_and_renamed_with_the_lambda() -> None:
+    body = Body((Select("v", (SelectBranch("x", BinaryExpr("==", Var("column"), Literal(0))), SelectBranch("y", Literal(True)))),))
+
+    with pytest.raises(ValueError, match=r"reads \['column'\]"):
+        Lambda(params=("x", "y"), body=body, results=("v",))
+
+    lam = Lambda.closing(("x", "y"), body, ("v",))
+    renamed = lam.rename({"column": "j"})
+    assert renamed.params == ("x", "y", "j")
+    assert renamed.body[0].branches[0].select.free_vars() == {"j"}
+    assert lam.alpha_eq(renamed)
 
 
 # --- α-invariance: canonical renumbering -------------------------------------------------------- #

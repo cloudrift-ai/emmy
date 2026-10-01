@@ -14,7 +14,7 @@ import yaml
 
 from emmy.hardware import gpu_short_name
 from emmy.recipe.catalog import validate_model_heat
-from emmy.recipe.lifecycle import validate_recipe_tags
+from emmy.recipe.lifecycle import ONBOARDING_FAILED_TAG, validate_recipe_tags
 
 ALLOWED_ARTIFACT_PREFIXES = (
     "docker/vllm-emmy-serve/models/",
@@ -28,7 +28,7 @@ MAX_IMPLEMENTATION_FILES = 8
 MAX_IMPLEMENTATION_CHANGED_LINES = 500
 
 #: Checked-in reproducers for the realization corpus. They live under ``tests/`` but are evidence,
-#: not code: an onboarding run records a compiler gap it measured by adding one YAML file here.
+#: not code: an onboarding run records a compiler gap it measured by adding one case file here.
 CORPUS_CASE_DIR = "tests/compiler/realization/cases/"
 #: The four stages a corpus case may declare as its expected failure, via its filename suffix. The
 #: filename is semantic, so an ``_xfail``-shaped token naming anything else must be rejected rather
@@ -90,7 +90,7 @@ def _is_tracked_deletion(workspace: Path, path: Path) -> bool:
 
 
 def _is_corpus_case(path: Path) -> bool:
-    return path.as_posix().startswith(CORPUS_CASE_DIR) and path.suffix == ".yaml"
+    return path.as_posix().startswith(CORPUS_CASE_DIR) and path.suffix == ".json"
 
 
 def _validate_corpus_case(path: Path) -> None:
@@ -126,7 +126,7 @@ def _relative_artifact(workspace: Path, raw_path: str) -> Path:
 
 def _invalid_result_artifacts(workspace: Path, artifacts: list[Path]) -> list[Path]:
     def is_recipe_golden(path: Path) -> bool:
-        return len(path.parts) == 4 and path.parts[0] == "recipes" and path.parts[2] == "golden" and path.suffix == ".yaml"
+        return len(path.parts) == 4 and path.parts[0] == "recipes" and path.parts[2] == "golden" and path.suffix == ".json"
 
     return [
         path
@@ -209,6 +209,43 @@ def _validate_implementation_patch(workspace: Path, changed: set[str]) -> None:
         raise ValueError(f"Onboarding small fix changes too many implementation lines: {changed_lines}")
 
 
+def _failure_artifacts(summary: dict, workspace: Path, model_id: str) -> list[Path]:
+    """A failed run tags its recipe, records the failure in RESULTS.md, and keeps its compiler work.
+
+    The tag sends the recipe to the back of the nightly selection, the dated report says why, and a
+    complete golden, corpus case, or bounded compiler fix stays durable even though serving failed.
+    """
+    report = _relative_file(workspace, summary.get("report") or "", ("recipes/",))
+    recipe = report.with_name("recipe.yaml")
+    if report.name != "RESULTS.md" or len(report.parts) != 3 or not (workspace / recipe).is_file():
+        raise ValueError(f"A failure report must be RESULTS.md beside the model's recipe: {report}")
+    config = yaml.safe_load((workspace / recipe).read_text()) or {}
+    if (config.get("model") or {}).get("huggingface") != model_id:
+        raise ValueError(f"Recipe model mismatch: {(config.get('model') or {}).get('huggingface')} != {model_id}")
+    committed = subprocess.run(
+        ["git", "show", f"HEAD:{recipe.as_posix()}"], cwd=workspace, capture_output=True, text=True, check=True
+    ).stdout
+    expected = yaml.safe_load(committed) or {}
+    expected["tags"] = list(dict.fromkeys([*(expected.get("tags") or []), ONBOARDING_FAILED_TAG]))
+    config["tags"] = list(config.get("tags") or [])
+    if config != expected:
+        raise ValueError(f"A failed run must add only the {ONBOARDING_FAILED_TAG!r} tag to {recipe}")
+    raw_artifacts = summary.get("artifacts") or []
+    if not isinstance(raw_artifacts, list):
+        raise ValueError("Summary artifacts must be a list")
+    artifacts = list(dict.fromkeys([recipe, report, *(_relative_artifact(workspace, raw_path) for raw_path in raw_artifacts)]))
+    invalid = [
+        path
+        for path in artifacts
+        if path.parts[0] in {"experiments", "docker"}
+        or (path.parts[0] == "recipes" and (path.parts[1] != report.parts[1] or not (workspace / path).is_file()))
+    ]
+    invalid += _invalid_result_artifacts(workspace, artifacts)
+    if invalid:
+        raise ValueError(f"A failed run keeps only its report, golden, and compiler work: {invalid}")
+    return artifacts
+
+
 def validate_summary(
     summary_path: Path,
     workspace: Path,
@@ -221,8 +258,9 @@ def validate_summary(
     expected_heat: int | None = None,
 ) -> tuple[dict, list[Path]]:
     summary = json.loads(summary_path.read_text())
-    if summary.get("status") != "success":
-        raise ValueError(f"Onboarding did not succeed: {summary.get('failure')}")
+    status = summary.get("status")
+    if status not in {"success", "failed"}:
+        raise ValueError(f"Summary status must be success or failed: {status!r}")
     if summary.get("model_id") != model_id:
         raise ValueError(f"Summary model mismatch: {summary.get('model_id')} != {model_id}")
     if summary.get("mode") != mode:
@@ -231,11 +269,18 @@ def validate_summary(
     expected_target = {"gpu": gpu, "gpu_count": gpu_count, "ssh": ssh_target}
     if target != expected_target:
         raise ValueError(f"Summary target mismatch: {target} != {expected_target}")
-    _summary_text(summary, "deployment_summary")
-    _summary_text(summary, "performance_summary")
     cleanup = summary.get("cleanup") or {}
     if cleanup.get("workloads") != "complete" or cleanup.get("docker_logout") is not True:
         raise ValueError(f"Remote workload or Docker credential cleanup is incomplete: {cleanup}")
+    if status == "failed":
+        failure = summary.get("failure")
+        if not isinstance(failure, dict) or not isinstance(failure.get("regression"), bool):
+            raise ValueError(f"A failed summary needs a failure object with a boolean regression: {failure!r}")
+        _summary_text(failure, "gate")
+        _summary_text(failure, "message")
+        return summary, _failure_artifacts(summary, workspace, model_id)
+    _summary_text(summary, "deployment_summary")
+    _summary_text(summary, "performance_summary")
 
     recipe = _relative_file(workspace, summary.get("recipe") or "", ("recipes/",))
     recipe_config = yaml.safe_load((workspace / recipe).read_text()) or {}
@@ -252,6 +297,8 @@ def validate_summary(
         raise ValueError(f"Recipe must retain lifecycle tag {expected_tag!r}: {recipe_tags}")
     if mode == "onboarding" and ({"onboarding", "untested"} & set(recipe_tags)):
         raise ValueError(f"Onboarding recipe still has pending lifecycle tags: {recipe_tags}")
+    if ONBOARDING_FAILED_TAG in recipe_tags:
+        raise ValueError(f"A successful run must remove the {ONBOARDING_FAILED_TAG!r} tag: {recipe_tags}")
     report = _relative_file(workspace, summary.get("report") or "", ("recipes/",))
     if report != recipe.with_name("RESULTS.md"):
         raise ValueError(f"Report must be RESULTS.md beside the final recipe: {report}")
@@ -393,7 +440,7 @@ def main() -> int:
         )
         if args.stage:
             archive_name = f"results_{_platform_name(args.gpu, args.gpu_count)}.tar.gz"
-            archive = next(path for path in artifacts if path.parts[0] == "experiments" and path.name == archive_name)
+            archive = next((path for path in artifacts if path.parts[0] == "experiments" and path.name == archive_name), None)
             stage_artifacts(args.workspace.resolve(), artifacts, archive)
         print(json.dumps(summary, sort_keys=True))
         return 0

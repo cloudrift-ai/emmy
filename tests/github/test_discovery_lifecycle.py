@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import tarfile
@@ -9,6 +10,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from emmy.provisioning import cloudrift
 from emmy.recipe.catalog import MAX_STUB_DEPLOYMENTS
 
 MODULE_PATH = Path(__file__).parents[2] / ".github" / "workflows" / "scripts" / "discovery_lifecycle.py"
@@ -23,7 +25,7 @@ GPU = "NVIDIA H200 141GB"
 @pytest.mark.parametrize(
     ("workflow", "message"),
     [
-        ("discover-model.yml", '"Complete the attached lifecycle task exactly."'),
+        ("discover-model.yml", '"Complete the attached lifecycle task exactly. Its file is $AGENT_TASK."'),
         ("onboard-model.yml", '"Complete the attached onboarding task exactly."'),
     ],
 )
@@ -69,7 +71,8 @@ def test_discovery_loads_control_code_and_agents_from_exact_workflow_commit():
     validation_script = steps[validation_index]["run"]
     cleanup_script = next(step["run"] for step in steps if step.get("name") == "Cleanup discovery credentials and output")
 
-    assert install_index < load_index < agent_index < validation_index
+    assert load_index < install_index < agent_index < validation_index
+    assert steps[install_index]["run"] == 'make setup-agent AGENT_SOURCE="$WORKFLOW_SOURCE"'
     assert checkout["with"]["ref"] == "${{ steps.rolling.outputs.branch || github.event.repository.default_branch }}"
     assert 'git archive "$WORKFLOW_SHA"' in load_script
     assert "GIT_LFS_SKIP_SMUDGE" in steps[load_index]["env"]
@@ -132,8 +135,8 @@ def test_model_lifecycle_workflow_posts_discord_summary_from_separate_job(workfl
         assert lifecycle["outputs"]["failure_summary"] == "${{ steps.notice.outputs.failure_summary }}"
         assert notify["env"]["FAILURE_KIND"] == "${{ needs.onboard.outputs.failure_kind }}"
         assert notify["env"]["FAILURE_SUMMARY"] == "${{ needs.onboard.outputs.failure_summary }}"
-        assert "deployment_summary=$(jq -r .deployment_summary" in artifacts["run"]
-        assert "performance_summary=$(jq -r .performance_summary" in artifacts["run"]
+        assert "deployment_summary=$(jq -r '.deployment_summary // empty'" in artifacts["run"]
+        assert "performance_summary=$(jq -r '.performance_summary // empty'" in artifacts["run"]
         notice = next(step for step in lifecycle["steps"] if step.get("id") == "notice")
         assert notice["if"] == "always() && steps.vm.outcome == 'success'"
         assert 'failure.get("regression") is True' in notice["run"]
@@ -147,7 +150,7 @@ def test_onboarding_requires_platform_results_snapshot_and_git_lfs():
     lfs_script = next(step["run"] for step in steps if step.get("name") == "Configure Git LFS")
     host_setup_script = next(step["run"] for step in steps if step.get("name") == "Prepare target GPU host")
     agent_script = next(step["run"] for step in steps if step.get("name") == "Run onboard-model agent")
-    cleanup_script = next(step["run"] for step in steps if step.get("name") == "Remove archived task-local raw results")
+    cleanup_script = next(step["run"] for step in steps if step.get("name") == "Prepare experiment artifacts")
     validation_script = next(step["run"] for step in steps if step.get("name") == "Validate and stage model artifacts")
     qualify = (workspace / "prompts" / "onboard-model" / "qualify.md").read_text()
 
@@ -163,13 +166,13 @@ def test_onboarding_requires_platform_results_snapshot_and_git_lfs():
     assert "tmpfs|ramfs" in host_setup_script
     assert "8388608" in host_setup_script
     subprocess.run(["bash", "-n"], input=host_setup_script, text=True, check=True)
-    assert "results_<gpu-short>x<gpu-count>.tar.gz" in qualify
-    assert "preserve every other platform" in qualify
-    assert "do not\nretain those records as top-level files" in qualify
+    skill_text = (workspace / ".agents" / "skills" / "onboard-model" / "SKILL.md").read_text()
+    assert "results_<gpu-short>x<gpu-count>.tar.gz" in skill_text
+    assert "A platform run replaces only its own archive" in skill_text
+    assert "never commit those records as\ntop-level files" in skill_text
     assert "`onboard-investigator` subagent" in qualify
-    assert "do not modify or list `.gitattributes`" in qualify
+    assert "touch `.gitattributes`" in qualify
     assert '"$WORKFLOW_SOURCE/.agents/skills/onboard-model/SKILL.md"' in agent_script
-    assert '"$WORKFLOW_SOURCE/.agents/skills/tune-kernels/SKILL.md"' in agent_script
     assert '"$WORKFLOW_SOURCE/.agents/skills/run-experiment/SKILL.md"' in agent_script
     assert 'tarfile.open(temporary_archive, "w:gz")' in cleanup_script
     assert "temporary_roots = verify_archive(temporary_archive)" in cleanup_script
@@ -192,6 +195,8 @@ def test_onboarding_uses_bounded_read_only_investigator():
     investigator_config = yaml.safe_load(investigator.split("---", 2)[1])
 
     assert parent_config["permission"]["task"] == {"*": "deny", "onboard-investigator": "allow"}
+    # The deadline bounds qualification; a step cap ended a run after 1h45m, with no summary written.
+    assert "steps" not in parent_config
     assert investigator_config["mode"] == "subagent"
     assert investigator_config["hidden"] is True
     assert investigator_config["steps"] == 20
@@ -211,7 +216,7 @@ def test_onboarding_uses_bounded_read_only_investigator():
 
 def test_onboarding_removes_only_raw_results_preserved_by_platform_archive(tmp_path):
     document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "onboard-model.yml").read_text())
-    step = next(step for step in document["jobs"]["onboard"]["steps"] if step.get("name") == "Remove archived task-local raw results")
+    step = next(step for step in document["jobs"]["onboard"]["steps"] if step.get("name") == "Prepare experiment artifacts")
     cleanup_source = step["run"].split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
 
     experiment_dir = tmp_path / "experiments" / "Model" / "serving"
@@ -264,9 +269,103 @@ def test_onboarding_removes_only_raw_results_preserved_by_platform_archive(tmp_p
     assert not any(path.endswith(".experiment.yaml") for path in updated_summary["experiment_artifacts"])
 
 
+def test_failed_onboarding_keeps_report_and_discards_incomplete_experiment(tmp_path):
+    workspace = Path(__file__).parents[2]
+    document = yaml.safe_load((workspace / ".github" / "workflows" / "onboard-model.yml").read_text())
+    step = next(step for step in document["jobs"]["onboard"]["steps"] if step.get("name") == "Prepare experiment artifacts")
+    cleanup_source = step["run"].split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+
+    recipe = tmp_path / "recipes/Model/recipe.yaml"
+    experiment = tmp_path / "experiments/Model/serving/recipe.yaml"
+    image = tmp_path / "docker/vllm-emmy-serve/models/model.env"
+    for path in (recipe, experiment, image):
+        path.parent.mkdir(parents=True, exist_ok=True)
+    recipe.write_text("tags: [onboarding, untested]\nmodel:\n  huggingface: org/Model\n  heat: 90\n")
+    experiment.write_text("original experiment\n")
+    image.write_text("original image\n")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "recipes", "experiments", "docker"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "-c", "user.name=test", "-c", "user.email=test@example.com", "commit", "-qm", "seed"],
+        cwd=tmp_path,
+        check=True,
+    )
+
+    recipe.write_text("tags: [onboarding, untested, onboarding-failed]\nmodel:\n  huggingface: org/Model\n  heat: 90\n")
+    report = recipe.with_name("RESULTS.md")
+    report.write_text("# Failure report\n")
+    experiment.write_text("incomplete experiment\n")
+    experiment.with_name("RESULTS.md").write_text("incomplete results\n")
+    image.write_text("incomplete image\n")
+    image.with_name("new.env").write_text("incomplete image\n")
+    summary = tmp_path / "summary.json"
+    summary.write_text(
+        json.dumps(
+            {
+                "status": "failed",
+                "mode": "onboarding",
+                "model_id": "org/Model",
+                "target": {"gpu": "AMD Instinct MI350X", "gpu_count": 4, "ssh": "user@host"},
+                "recipe": "recipes/Model/recipe.yaml",
+                "report": "recipes/Model/RESULTS.md",
+                "experiment": "experiments/Model/serving/recipe.yaml",
+                "experiment_artifacts": ["experiments/Model/serving/RESULTS.md"],
+                "artifacts": ["recipes/Model/recipe.yaml", "recipes/Model/RESULTS.md", "experiments/Model/serving/RESULTS.md"],
+                "deployment_summary": "unqualified",
+                "performance_summary": "incomplete",
+                "cleanup": {"workloads": "complete", "docker_logout": True},
+                "failure": {"gate": "serving", "message": "No supported image", "regression": False},
+            }
+        )
+    )
+
+    subprocess.run(
+        [sys.executable, "-"],
+        cwd=tmp_path,
+        env={**os.environ, "ONBOARD_SUMMARY": str(summary)},
+        input=cleanup_source,
+        text=True,
+        check=True,
+    )
+
+    assert recipe.read_text().startswith("tags: [onboarding, untested, onboarding-failed]")
+    assert report.is_file()
+    assert experiment.read_text() == "original experiment\n"
+    assert image.read_text() == "original image\n"
+    assert not experiment.with_name("RESULTS.md").exists()
+    assert not image.with_name("new.env").exists()
+    cleaned = json.loads(summary.read_text())
+    assert cleaned["artifacts"] == ["recipes/Model/recipe.yaml", "recipes/Model/RESULTS.md"]
+    assert cleaned["experiment"] is None and cleaned["experiment_artifacts"] == []
+    subprocess.run(
+        [
+            sys.executable,
+            str(workspace / ".github/scripts/onboarding_artifacts.py"),
+            "--summary",
+            str(summary),
+            "--model-id",
+            "org/Model",
+            "--gpu",
+            "AMD Instinct MI350X",
+            "--gpu-count",
+            "4",
+            "--ssh-target",
+            "user@host",
+            "--mode",
+            "onboarding",
+            "--expected-tag",
+            "best-effort",
+        ],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
 def test_onboarding_creates_platform_archive_and_preserves_other_platform(tmp_path):
     document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "onboard-model.yml").read_text())
-    step = next(step for step in document["jobs"]["onboard"]["steps"] if step.get("name") == "Remove archived task-local raw results")
+    step = next(step for step in document["jobs"]["onboard"]["steps"] if step.get("name") == "Prepare experiment artifacts")
     cleanup_source = step["run"].split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
 
     experiment_dir = tmp_path / "experiments" / "Model" / "serving"
@@ -333,6 +432,45 @@ def test_onboarding_creates_platform_archive_and_preserves_other_platform(tmp_pa
     assert not any(path.endswith(".experiment.yaml") for path in updated_summary["experiment_artifacts"])
 
 
+def test_onboarding_terminates_vms_an_interrupted_run_left_before_selecting(monkeypatch):
+    document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "onboard-model.yml").read_text())
+    job = document["jobs"]["onboard"]
+    names = [step.get("name") for step in job["steps"]]
+    sweep = job["steps"][names.index("Terminate VMs left by an interrupted run")]
+    source = sweep["run"].split("<<'PY'\n", 1)[1].split("\nPY", 1)[0]
+    calls = []
+
+    async def terminate(api_key, tags):
+        calls.append((api_key, tags))
+
+    monkeypatch.setattr(cloudrift, "terminate_instances_by_tags", terminate)
+    monkeypatch.setenv("CLOUDRIFT_API_KEY", "key")
+    monkeypatch.setenv("EMMY_RENTAL_TAGS", re.sub(r"\$\{\{[^}]*\}\}", "1", job["env"]["EMMY_RENTAL_TAGS"]))
+    exec(source, {})
+
+    assert names.index("Terminate VMs left by an interrupted run") < names.index("Select one available deployment")
+    assert "if" not in sweep
+    assert calls == [("key", ["emmy", "workflow:model-verification-onboarding"])]
+
+
+def test_onboarding_fails_legibly_when_the_agent_writes_no_summary(tmp_path):
+    document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "onboard-model.yml").read_text())
+    steps = document["jobs"]["onboard"]["steps"]
+    agent_script = next(step["run"] for step in steps if step.get("name") == "Run onboard-model agent")
+    notice = next(step for step in steps if step.get("id") == "notice")
+    source = notice["run"].split("<<'PY'\n", 1)[1].split("\nPY", 1)[0]
+    output = tmp_path / "github-output"
+    env = {**os.environ, "ONBOARD_SUMMARY": str(tmp_path / "missing.json"), "GITHUB_OUTPUT": str(output)}
+
+    subprocess.run([sys.executable, "-"], input=source, text=True, env=env, check=True)
+
+    assert 'if [ ! -s "$ONBOARD_SUMMARY" ]; then' in agent_script
+    assert output.read_text().splitlines() == [
+        "failure_kind=failure",
+        "failure_summary=The onboarding agent ended without writing its summary",
+    ]
+
+
 def test_onboarding_selects_with_generic_recipe_query():
     document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "onboard-model.yml").read_text())
     script = next(step["run"] for step in document["jobs"]["onboard"]["steps"] if step.get("name") == "Select one available deployment")
@@ -343,8 +481,15 @@ def test_onboarding_selects_with_generic_recipe_query():
     assert 'lifecycle == "onboarding"' in script
     assert 'lifecycle == "maintained"' in script
     assert "deployment.availability.cloudrift == true" in script
-    assert "heat desc nulls-last" in script
-    assert "results.last_run_at asc nulls-first" in script
+    assert "query+=(--filter 'tags not contains \"onboarding-failed\"')" in script
+    tiers = [
+        "pick --filter 'lifecycle == \"onboarding\"' --filter 'heat >= 70'",
+        "--filter 'emmy_serving == false'",
+        "--filter 'lifecycle == \"onboarding\"' --sort 'heat desc'",
+        "--filter 'lifecycle == \"maintained\"' --sort 'results.last_run_at asc nulls-first'",
+    ]
+    positions = [script.index(tier) for tier in tiers]
+    assert positions == sorted(positions)
     assert "deployment.index asc" in script
     assert "--candidate" in script
     assert 'lifecycle != "obsolete"' in script
@@ -368,7 +513,8 @@ def test_discovery_counts_lifecycle_with_recipe_query():
 def test_discovery_prompt_keeps_obsolete_classification_conservative():
     prompt = " ".join((Path(__file__).parents[2] / "prompts" / "discover-models" / "lifecycle.md").read_text().split())
 
-    assert "Invoke `discover-fit` once per onboarding model and in parallel" in prompt
+    assert "Invoke `discover-fit` once per model in `new_onboarding_models`, in parallel" in prompt
+    assert "Do not size an existing onboarding shell" in prompt
     assert "you never author hardware here" in prompt
     assert "A replacement that is merely comparable is not" in prompt
     assert "read both recipe files" in prompt
@@ -495,9 +641,13 @@ def test_onboarding_agent_reads_shared_prompts_from_a_compact_task():
     for field in ("mode", "model_id", "gpu_count", "ssh_key", "deadline", "publish_image", "summary_path"):
         assert f"{field}:" in script
         assert f"`{field}`" in qualify
-    assert "Do not select a model or GPU, provision or delete the VM, commit, push" in qualify
-    assert "never add a second root for a platform an existing one already covers" in qualify
-    assert "`recipe.yaml` path, never a directory" in qualify
+    assert "Do not select a model or GPU, rent or delete the VM, commit, push" in qualify
+    # The caller rents the node; finishing its provisioning is the run's own work, so the boundary
+    # must never read as putting the host's contents out of reach.
+    assert "The caller owns the VM's lifetime, not its contents" in qualify
+    assert "`ssh_user` has passwordless sudo" in qualify
+    assert "never add a second root\nfor a platform an existing one already covers" in qualify
+    assert "`recipe.yaml` path,\nnever a directory" in qualify
     assert "Use at most four public-web calls" in investigate
     assert "Apply the investigation prompt" in investigator
 
@@ -722,35 +872,57 @@ def test_preserves_existing_onboarding_shell(tmp_path):
     assert "`NVIDIA H200 141GB x1`" in (tmp_path / "summary.md").read_text()
 
 
-def test_resizes_an_existing_onboarding_shell_matrix(tmp_path):
+def test_never_rewrites_an_existing_onboarding_shell_matrix(tmp_path):
     _recipe(tmp_path, "ready", "org/ready")
     shell = _recipe(tmp_path, "pending", "org/pending", tags=["onboarding", "untested"])
+    before = shell.read_text()
     selection = tmp_path / "selection.json"
     resized = [{"deploy.gpu": GPU, "deploy.gpu_count": 4}, {"deploy.gpu": "NVIDIA B200", "deploy.gpu_count": 4}]
     _manifest(selection, ["org/ready"], onboarding=[_candidate("org/pending", deployments=resized)])
 
     manifest = discovery_lifecycle.validate_manifest(selection, tmp_path)
-    assert discovery_lifecycle.apply_manifest(manifest, tmp_path, tmp_path / "summary.md") == {"changed": True}
+    discovery_lifecycle.apply_manifest(manifest, tmp_path, tmp_path / "summary.md")
 
-    config = yaml.safe_load(shell.read_text())
-    assert config["matrices"] == resized
-    assert config["tags"] == ["onboarding", "untested"]
-    assert config["model"]["huggingface"] == "org/pending"
+    assert shell.read_text().split("matrices:", 1)[1] == before.split("matrices:", 1)[1]
+
+
+@pytest.mark.parametrize(
+    ("tags", "heat", "rewritten"),
+    [
+        (["maintained"], 59, False),
+        (["maintained"], 41, False),
+        (["maintained"], 60, True),
+        (["maintained"], 40, True),
+        (["best-effort"], 50, True),
+    ],
+)
+def test_keeps_recorded_rationale_and_heat_until_heat_moves_materially(tmp_path, tags, heat, rewritten):
+    recipe = _recipe(tmp_path, "ready", "org/ready", tags=tags)
+    recipe.write_text(recipe.read_text().replace("  heat: 50\n", "  rationale: Recorded wording.\n  heat: 50\n"))
+    before = recipe.read_text()
+    selection = tmp_path / "selection.json"
+    _manifest(selection, [_decision("org/ready", "Fresh wording of the same evidence.", heat)])
+
+    manifest = discovery_lifecycle.validate_manifest(selection, tmp_path)
+    result = discovery_lifecycle.apply_manifest(manifest, tmp_path, tmp_path / "summary.md")
+
+    assert result == {"changed": rewritten}
+    assert (recipe.read_text() != before) is rewritten
+    kept = {"rationale": "Recorded wording.", "heat": 50}
+    assert ({key: manifest["maintained_models"][0][key] for key in kept} != kept) is rewritten
 
 
 def test_rewrites_unindented_yaml_tag_lists_without_leaving_duplicate_items(tmp_path):
-    _recipe(tmp_path, "ready", "org/ready")
-    shell = _recipe(tmp_path, "pending", "org/pending", tags=["onboarding", "untested"])
-    shell.write_text(shell.read_text().replace("  - onboarding\n  - untested\n", "- onboarding\n- untested\n"))
+    recipe = _recipe(tmp_path, "ready", "org/ready", tags=["best-effort"])
+    recipe.write_text(recipe.read_text().replace("  - best-effort\n", "- best-effort\n"))
     selection = tmp_path / "selection.json"
-    pending = _candidate("org/pending", deployments=[{"deploy.gpu": GPU, "deploy.gpu_count": 1}])
-    _manifest(selection, ["org/ready"], onboarding=[pending])
+    _manifest(selection, ["org/ready"])
 
     manifest = discovery_lifecycle.validate_manifest(selection, tmp_path)
     discovery_lifecycle.apply_manifest(manifest, tmp_path, tmp_path / "summary.md")
 
-    assert yaml.safe_load(shell.read_text())["tags"] == ["onboarding", "untested"]
-    assert shell.read_text().count("- onboarding") == 1
+    assert yaml.safe_load(recipe.read_text())["tags"] == ["maintained"]
+    assert "best-effort" not in recipe.read_text()
 
 
 def test_moves_existing_rationale_immediately_below_model_id(tmp_path):

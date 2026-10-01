@@ -335,6 +335,50 @@ def test_resolve_for_hardware_skips_sweeps(tmp_path):
     assert recipe.deploy.gpu_count == 1
 
 
+def _write_shared_gpu_recipe(tmp_path):
+    """Two H200 x1 entries, the reduced-fraction one declared first, plus an H100 x4 entry."""
+    recipe_data = {
+        "model": {"huggingface": "test-org/test-model"},
+        "engine": {"llm": {"tensor_parallel_size": 1, "vllm": {"image": "vllm/vllm-openai:v0.17.0"}}},
+        "matrices": [
+            {
+                "deploy.gpu": "NVIDIA H200 141GB",
+                "deploy.gpu_count": 1,
+                "engine.llm.gpu_memory_utilization": 0.55,
+                "engine.llm.context_length": 131072,
+            },
+            {"deploy.gpu": "NVIDIA H200 141GB", "deploy.gpu_count": 1, "engine.llm.context_length": 262144},
+            {"deploy.gpu": "NVIDIA H100 80GB", "deploy.gpu_count": 4, "engine.llm.tensor_parallel_size": 4},
+        ],
+    }
+    (tmp_path / "recipe.yaml").write_text(yaml.safe_dump(recipe_data))
+    return str(tmp_path)
+
+
+def test_resolve_for_hardware_prefers_the_highest_fraction_without_a_selector(tmp_path):
+    """The whole-GPU qualification wins however the author ordered the entries."""
+    recipe = resolve_for_hardware(_write_shared_gpu_recipe(tmp_path), "NVIDIA H200 141GB", 1)
+    assert recipe.engine.llm.gpu_memory_utilization == 0.9
+    assert recipe.engine.llm.context_length == 262144
+
+
+def test_resolve_for_hardware_exact_fraction_selects_the_shared_entry(tmp_path):
+    recipe = resolve_for_hardware(_write_shared_gpu_recipe(tmp_path), "NVIDIA H200 141GB", 1, 0.55)
+    assert recipe.engine.llm.gpu_memory_utilization == 0.55
+    assert recipe.engine.llm.context_length == 131072
+
+
+def test_resolve_for_hardware_unknown_fraction_names_the_available_ones(tmp_path):
+    with pytest.raises(ValueError, match=r"Available fractions: \[0.55, 0.9\]"):
+        resolve_for_hardware(_write_shared_gpu_recipe(tmp_path), "NVIDIA H200 141GB", 1, 0.7)
+
+
+def test_resolve_for_hardware_fraction_has_no_divisible_fallback(tmp_path):
+    """A plan names the qualified entry; eight H100s do not resolve onto the x4 entry."""
+    with pytest.raises(ValueError, match="Available fractions"):
+        resolve_for_hardware(_write_shared_gpu_recipe(tmp_path), "NVIDIA H100 80GB", 8, 0.9)
+
+
 # ── validate_extra_args ────────────────────────────────────────────
 
 

@@ -22,7 +22,7 @@ kernel materialization consumes the same result without redefining the operand s
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from frozendict import frozendict
 
@@ -59,6 +59,17 @@ class PackedKBlockB:
     #: ``bits`` a real ``Load``) unless the caller passed ``codes_may_compute``; the packed
     #: byte-slab stage, whose bits COPY from gmem, never asks for it.
     codes: str | None = None
+    #: The OTHER weight channels' readings when the node folds several channels over one A (a
+    #: fused gate/up edge): each is this same reading of its own decode cone. Every channel shares
+    #: ``block`` and ``per_byte`` — the matcher declines a node whose channels disagree — so the
+    #: shared facts are read off this first channel and only the per-channel ones (``bits``,
+    #: ``table``, ``factor``) come from :attr:`channels`. Empty for the single-channel node.
+    siblings: tuple = ()
+
+    @property
+    def channels(self) -> tuple:
+        """Every channel's reading in channel order, this one first."""
+        return (self, *self.siblings)
 
     def scale_cols(self, bk_elems: int) -> int:
         """The scale slab's columns per chunk: one per block the chunk spans, and a single one when
@@ -280,10 +291,11 @@ def block_scaled_atom(atom) -> bool:
     return dtype_of is not None and dtype_of("a").logical_elems == 2
 
 
-def operand_statements(edge) -> list | None:
-    """A COMPUTED operand's statements as one flat list — its slab operands as their loads ahead
-    of its body, the statement defining its result last — the spelling the shape readers above
-    walk. That is the open body of a zero-axis term (:meth:`Fold.lower` with nothing bound); a
+def operand_statements(edge, result: str | None = None) -> list | None:
+    """A COMPUTED operand's statements, optionally restricted to one result, with its definition last.
+
+    ``result`` defaults to the edge's first exposed value; a channel selects the value it multiplies.
+    That is the open body of a zero-axis term (:meth:`Fold.lower` with nothing bound); a
     term that reduces, is a bare slab, or holds a reduce among its operands is not a scalar cone
     and answers ``None``."""
     if edge.axis is not None or edge.as_slab() is not None:
@@ -294,8 +306,10 @@ def operand_statements(edge) -> list | None:
         if term.axis is not None:
             return None
         pending.extend(term.operands)
-    result = edge.exposes[0]
     stmts = list(edge.lower(axes=()))
+    if result is not None:
+        stmts = list(Body(tuple(stmts)).backward_cone([result]).members)
+    result = edge.exposes[0] if result is None else result
     root = next((stmt for stmt in stmts if result in stmt.defines()), None)
     return None if root is None else [*(stmt for stmt in stmts if stmt is not root), root]
 
@@ -303,17 +317,30 @@ def operand_statements(edge) -> list | None:
 def match_packed_b_node(node, inputs) -> PackedKBlockB | None:
     """The contraction ``node``'s packed-pair k-block B operand, or ``None``.
 
-    The whole node shape the packed byte-slab stage stands on: one channel and a computed B whose
-    cone is :func:`match_packed_kblock_b`'s. A may be materialized OR a producer cone — it rides
+    The whole node shape the packed byte-slab stage stands on: a computed B per channel, each
+    cone :func:`match_packed_kblock_b`'s, all over one block extent and byte width. A may be materialized OR a producer cone — it rides
     whichever side the compute fill gives it — so only B decides this. Asked here rather than
     spelled at each consumer, so the schedule's offer, the stage resolver and the materializer
     recognize one set of nodes and cannot drift apart. Everything else answers ``None`` and keeps
     the generic computed-B reading, which computes the same values through the smem compute fill.
     """
-    if inputs is None or node.as_contraction() is None or len(node.combine.results) != 1 or len(node.operands) != 2:
+    if inputs is None or node.as_contraction() is None:
         return None
-    cone = operand_statements(node.operands[1])
-    return None if cone is None else match_packed_kblock_b(cone, node.axis, inputs)
+    # The weight edges are the node's bilinear channels, read off the algebra: one A (the first
+    # operand) against one streamed B per accumulator. A gate/up edge has two, the ordinary
+    # matmul one; a node with none is no contraction this reading stands on.
+    reads = []
+    for _index, edge, value in node.channel_operands():
+        cone = operand_statements(edge, value)
+        read = match_packed_kblock_b(cone, node.axis, inputs) if cone is not None else None
+        if read is None:
+            return None
+        reads.append(read)
+    # Every channel rides ONE slab geometry and one drain: the same block extent and the same
+    # bytes-per-element on every weight, or the node keeps the generic computed-B reading.
+    if not reads or len({(read.block, read.per_byte) for read in reads}) != 1:
+        return None
+    return replace(reads[0], siblings=tuple(reads[1:]))
 
 
 def match_packed_pair_node(node, inputs) -> BlockScaledPair | None:

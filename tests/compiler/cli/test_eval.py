@@ -1,72 +1,15 @@
-"""Tests for ``emmy eval knobs`` / ``eval variants`` — the tune-DB analysis CLIs.
-
-Each test builds a synthetic tune-DB inline (just the two tables the
-commands read: ``cuda_op`` and ``perf``), so the suite stays hermetic
-and does not depend on a real autotune cache or GPU. The ``variants``
-CLI tests pin ``--prior`` to a nonexistent file so the pick comes from
-the cold ``OfflinePrior`` regardless of any prior checkpoint on the host.
-"""
+"""Tests for ``emmy eval golden`` — the release audit of one canonical golden against its serving
+configuration — the offer audit the golden views share, and ``eval prior`` over an exported dataset."""
 
 from __future__ import annotations
 
+import argparse
 import json
-import sqlite3
+import logging
 from pathlib import Path
 
-
-def _make_tune_db(path: Path, variants: list[tuple[str, str, dict, float]]) -> None:
-    """Write a minimal tune DB to ``path``.
-
-    ``variants`` is a list of ``(op_key, kernel_name, knobs, latency_us)``
-    rows; one ``cuda_op`` + one ``perf`` row is written per entry. Other
-    real-DB columns (kernel_source, arg_order, grid, block, smem_bytes)
-    are filled with dummy values — ``knobs`` only reads ``cuda_op.pretty``
-    and ``perf.knobs``/``perf.latency_us_median``.
-    """
-    con = sqlite3.connect(str(path))
-    con.executescript(
-        """
-        CREATE TABLE cuda_op (
-            key           TEXT PRIMARY KEY,
-            kernel_source TEXT NOT NULL,
-            arg_order     TEXT NOT NULL,
-            grid          TEXT NOT NULL,
-            block         TEXT NOT NULL,
-            smem_bytes    INTEGER NOT NULL,
-            pretty        TEXT NOT NULL
-        );
-        CREATE TABLE perf (
-            context_key          TEXT NOT NULL,
-            op_key               TEXT NOT NULL,
-            backend              TEXT NOT NULL,
-            status               TEXT NOT NULL,
-            latency_us_median    REAL NOT NULL,
-            latency_us_min       REAL NOT NULL,
-            latency_us_max       REAL NOT NULL,
-            latency_us_mean      REAL NOT NULL,
-            latency_us_variance  REAL NOT NULL,
-            n_samples            INTEGER NOT NULL,
-            measured_at          TEXT NOT NULL,
-            knobs                TEXT NOT NULL DEFAULT '{}',
-            PRIMARY KEY (context_key, op_key, backend)
-        );
-        """
-    )
-    for op_key, kernel_name, knobs, us in variants:
-        pretty = f'extern "C" __global__\n__launch_bounds__(256) void {kernel_name}(const float* x) {{ }}\n'
-        con.execute(
-            "INSERT INTO cuda_op (key, kernel_source, arg_order, grid, block, smem_bytes, pretty) "
-            "VALUES (?, '', '[]', '[1,1,1]', '[1,1,1]', 0, ?)",
-            (op_key, pretty),
-        )
-        con.execute(
-            "INSERT INTO perf (context_key, op_key, backend, status, latency_us_median, latency_us_min, latency_us_max, "
-            "latency_us_mean, latency_us_variance, n_samples, measured_at, knobs) "
-            "VALUES ('ctx', ?, 'cuda', 'ok', ?, 0, 0, 0, 0, 1, '2026-05-24', ?)",
-            (op_key, us, json.dumps(knobs)),
-        )
-    con.commit()
-    con.close()
+from emmy.compiler.pipeline.search.golden import GoldenFile
+from tests.compiler.helpers import loop_target
 
 
 def test_eval_golden_requires_exact_file_and_serving_config(run_cli, tmp_path):
@@ -74,8 +17,8 @@ def test_eval_golden_requires_exact_file_and_serving_config(run_cli, tmp_path):
     assert rc == 2
     assert "--golden" in stdout + stderr
 
-    golden = tmp_path / "given.yaml"
-    configured = tmp_path / "configured.yaml"
+    golden = tmp_path / "given.json"
+    configured = tmp_path / "configured.json"
     config = tmp_path / "release.env"
     config.write_text(
         f"SERVE_MODEL=org/model\nSERVE_GPU=NVIDIA-Test\nSERVE_GOLDEN_FILE={configured}\n"
@@ -89,7 +32,7 @@ def test_eval_golden_requires_exact_file_and_serving_config(run_cli, tmp_path):
 def test_serving_config_derives_standard_and_fast_math_realizations(tmp_path):
     from emmy.serving.release import load_serving_config
 
-    golden = tmp_path / "golden.yaml"
+    golden = tmp_path / "golden.json"
     config = tmp_path / "release.env"
     config.write_text(
         f"SERVE_MODEL=org/model\nSERVE_GPU=NVIDIA-Test\nSERVE_GOLDEN_FILE={golden}\n"
@@ -108,22 +51,20 @@ def test_serving_config_derives_standard_and_fast_math_realizations(tmp_path):
 
 def _write_release_golden(path: Path, realizations: list[dict]) -> None:
     from emmy.commands.trace import trace_inline_code
-    from emmy.compiler.pipeline.search.golden import GoldenFileValidation, dump_golden_file
-    from emmy.compiler.torch_wire import graph_to_wire
 
     graph = trace_inline_code("torch.relu(torch.randn(8))")["graph"]
     terminal = graph.producer(graph.outputs[0])
-    dump_golden_file(
+    loops: list[dict] = []
+    GoldenFile.from_wire(
         {
             "gpu_name": "NVIDIA GeForce RTX 4090",
             "compute_cap": [8, 9],
             "model": "org/model",
-            "programs": [graph_to_wire(graph)],
-            "configs": [{"program": 0, "target": {"origins": [terminal.id]}, "realizations": realizations}],
-        },
-        path,
-        validation=GoldenFileValidation.REPOSITORY,
-    )
+            "programs": [graph.to_wire()],
+            "configs": [{"program": 0, "target": loop_target(graph, [terminal.id], loops, (8, 9)), "realizations": realizations}],
+            "loops": loops,
+        }
+    ).dump(path, repository=True)
 
 
 def test_eval_golden_audits_file_scoped_static_release(monkeypatch, tmp_path):
@@ -136,7 +77,7 @@ def test_eval_golden_audits_file_scoped_static_release(monkeypatch, tmp_path):
     from emmy.compiler.pipeline import Pipeline
     from emmy.compiler.pipeline.search import golden as golden_mod
 
-    golden = tmp_path / "golden.yaml"
+    golden = tmp_path / "golden.json"
     _write_release_golden(
         golden,
         [
@@ -157,7 +98,6 @@ def test_eval_golden_audits_file_scoped_static_release(monkeypatch, tmp_path):
     )
     ctx = Context.from_target((8, 9), gpu_name="NVIDIA GeForce RTX 4090")
     monkeypatch.setattr(Context, "probe", staticmethod(lambda: ctx))
-    monkeypatch.setattr(eval_cmd, "_emit_prior_golden_check", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(eval_cmd, "_emit_offer_audit", lambda _records: False)
     captured = {"compiles": []}
     twin = object()
@@ -169,7 +109,7 @@ def test_eval_golden_audits_file_scoped_static_release(monkeypatch, tmp_path):
     def fake_run(self, graph, *, ctx=None, **_kwargs):
         # What the gate's compile sees: the lane's rows as the only golden scope, strict on, the
         # live card's context.
-        scope = {(record.bindings, record.pins) for record in golden_mod.RECORDS_OVERRIDE}
+        scope = {(record.bindings, record.pins) for record in golden_mod.repository.RECORDS_OVERRIDE}
         captured["compiles"].append((graph, ctx, emmy_config.strict_evidence(), scope))
         return graph
 
@@ -180,7 +120,7 @@ def test_eval_golden_audits_file_scoped_static_release(monkeypatch, tmp_path):
 
     assert captured["capture"] == ("org/model", {"decode_bucket": 1, "prefill_bucket": 0, "symbolic": False, "static_only": True})
     assert captured["compiles"] == [(twin, ctx, True, {((("num_tokens", 1),), (("FAST_MATH", False),))})]
-    assert golden_mod.RECORDS_OVERRIDE is None and not emmy_config.strict_evidence()
+    assert golden_mod.repository.RECORDS_OVERRIDE is None and not emmy_config.strict_evidence()
 
 
 def test_eval_golden_rejects_a_missing_config_realization(monkeypatch, tmp_path):
@@ -191,7 +131,7 @@ def test_eval_golden_rejects_a_missing_config_realization(monkeypatch, tmp_path)
     import emmy.commands.eval as eval_cmd
     from emmy.compiler.context import Context
 
-    golden = tmp_path / "golden.yaml"
+    golden = tmp_path / "golden.json"
     _write_release_golden(
         golden,
         [
@@ -232,7 +172,7 @@ def test_eval_golden_fails_when_a_twin_is_not_decided_by_the_golden_rows(monkeyp
     from emmy.compiler.pipeline import Pipeline
     from emmy.compiler.pipeline.search.policy.greedy import EvidenceError
 
-    golden = tmp_path / "golden.yaml"
+    golden = tmp_path / "golden.json"
     _write_release_golden(
         golden,
         [
@@ -253,10 +193,9 @@ def test_eval_golden_fails_when_a_twin_is_not_decided_by_the_golden_rows(monkeyp
     )
     ctx = Context.from_target((8, 9), gpu_name="NVIDIA GeForce RTX 4090")
     monkeypatch.setattr(Context, "probe", staticmethod(lambda: ctx))
-    monkeypatch.setattr(eval_cmd, "_emit_prior_golden_check", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(eval_cmd, "_emit_offer_audit", lambda _records: False)
     undecided = object()
-    monkeypatch.setattr(twins, "capture_twin_graphs", lambda source, **kwargs: {"pre1": object(), "pre2": undecided})
+    monkeypatch.setattr(twins, "capture_twin_graphs", lambda source, **kwargs: {"pre1": object(), "post1": undecided})
 
     def fake_run(self, graph, *, ctx=None, **_kwargs):
         if graph is undecided:
@@ -268,7 +207,76 @@ def test_eval_golden_fails_when_a_twin_is_not_decided_by_the_golden_rows(monkeyp
     with caplog.at_level(logging.ERROR), pytest.raises(SystemExit) as exc:
         eval_cmd.handle_eval_golden(SimpleNamespace(golden=str(golden), serving_config=str(config)))
     assert exc.value.code == 1
-    assert any("pre2" in r.message and "k_linear" in r.message for r in caplog.records)
+    assert any("post1" in r.message and "k_linear" in r.message for r in caplog.records)
+
+
+def test_eval_golden_compiles_a_static_twin_only_in_the_lanes_that_warm_its_width(monkeypatch, tmp_path):
+    """A warm shape names its lane (``64:::fm``), so a served process in a lane compiles the
+    static twins of that lane's widths and nothing wider or narrower; the audit asks the same of
+    each lane's rows — a symbolic twin in every lane, a static twin where its width is warmed."""
+    from types import SimpleNamespace
+
+    import emmy.commands.eval as eval_cmd
+    import emmy.serving.twins as twins
+    from emmy.commands.trace import trace_inline_code
+    from emmy.compiler.context import Context
+    from emmy.compiler.pipeline import Pipeline
+
+    graph = trace_inline_code("torch.relu(torch.randn(8))")["graph"]
+    loops: list[dict] = []
+    target = loop_target(graph, [graph.producer(graph.outputs[0]).id], loops, (8, 9))
+
+    def rows(*names_and_bindings):
+        return [
+            {
+                "name": name,
+                "bindings": bindings,
+                "pins": {"FAST_MATH": name.endswith(".fm")},
+                "knobs": {},
+                "measurements": {"emmy_us": 1.0, "reference_us": 1.0, "reference_backend": "torch"},
+            }
+            for name, bindings in names_and_bindings
+        ]
+
+    golden = tmp_path / "golden.json"
+    GoldenFile.from_wire(
+        {
+            "gpu_name": "NVIDIA GeForce RTX 4090",
+            "compute_cap": [8, 9],
+            "model": "org/model",
+            "programs": [graph.to_wire()],
+            "configs": [
+                {"program": 0, "target": target, "realizations": rows(("pre8.m8", {"num_tokens": 8}))},
+                {"program": 0, "target": target, "realizations": rows(("pre64.m64.fm", {"num_tokens": 64}))},
+                {"program": 0, "target": target, "realizations": rows(("pre-sym.dynamic", {}), ("pre-sym.dynamic.fm", {}))},
+            ],
+            "loops": loops,
+        }
+    ).dump(golden, repository=True)
+    config = tmp_path / "release.env"
+    config.write_text(
+        f'SERVE_MODEL=org/model\nSERVE_GPU="NVIDIA GeForce RTX 4090"\nSERVE_GOLDEN_FILE={golden}\n'
+        "SERVE_MAX_NUM_BATCHED_TOKENS=64\nSERVE_DECODE_BUCKET=8\nSERVE_PREFILL_CAPACITY=64\nSERVE_PREFILL_BUCKET=0\n"
+        'SERVE_M1_TIER=0\nSERVE_WARM_SHAPES="64:::fm"\n'
+    )
+    ctx = Context.from_target((8, 9), gpu_name="NVIDIA GeForce RTX 4090")
+    monkeypatch.setattr(Context, "probe", staticmethod(lambda: ctx))
+    monkeypatch.setattr(eval_cmd, "_emit_offer_audit", lambda _records: False)
+    graphs = {"pre8": object(), "pre64": object(), "pre-sym": object()}
+    monkeypatch.setattr(twins, "capture_twin_graphs", lambda source, **kwargs: dict(graphs))
+    compiled = []
+
+    def fake_run(self, graph, *, ctx=None, **_kwargs):
+        from emmy import config as emmy_config
+
+        compiled.append((next(name for name, g in graphs.items() if g is graph), emmy_config.knob_raw("FAST_MATH")))
+        return graph
+
+    monkeypatch.setattr(Pipeline, "run", fake_run)
+
+    eval_cmd.handle_eval_golden(SimpleNamespace(golden=str(golden), serving_config=str(config)))
+
+    assert sorted(compiled) == [("pre-sym", "False"), ("pre-sym", "True"), ("pre64", "True"), ("pre8", "False")]
 
 
 def test_offer_audit_flags_unrealized_entries(monkeypatch, caplog):
@@ -289,11 +297,10 @@ def test_offer_audit_flags_unrealized_entries(monkeypatch, caplog):
     from emmy.compiler.context import Context
     from emmy.compiler.ir.base import InputOp
     from emmy.compiler.ir.schedule import Tile, Work
-    from emmy.compiler.ir.schedule import classic_projection as classic
+    from emmy.compiler.ir.schedule.classic import refusals as classic
+    from emmy.compiler.ir.schedule.classic import sites as classic_sites
     from emmy.compiler.pipeline.knob import complete_kernel_row
-    from emmy.compiler.pipeline.search.golden import load_golden_records
-    from emmy.compiler.pipeline.search.golden_eval import enumerate_graph
-    from emmy.compiler.torch_wire import graph_to_wire
+    from emmy.compiler.pipeline.search.ranking import enumerate_graph
 
     gpu, cap = "NVIDIA GeForce RTX 5090", (12, 0)
     with config.nvcc_flags_override(""):  # the deployable -O3 regime the tier is gated on
@@ -306,7 +313,7 @@ def test_offer_audit_flags_unrealized_entries(monkeypatch, caplog):
     monkeypatch.setattr(classic, "warp_tile_moves", lambda atoms: [warp] if warp.atom.name in atoms else [])
     monkeypatch.setattr(classic, "coop_reduce_moves", lambda: [])
     monkeypatch.setattr(classic, "stage_moves", lambda *, warp, ctx=None: [])
-    monkeypatch.setattr(classic, "raster_moves", lambda: [""])
+    monkeypatch.setattr(classic_sites, "raster_moves", lambda: [""])
 
     def enumerated_row(graph):
         rows = enumerate_graph(graph.copy(), ctx).rows
@@ -319,17 +326,20 @@ def test_offer_audit_flags_unrealized_entries(monkeypatch, caplog):
         return row
 
     def records(graph, name, entries):
+
         origins = [nid for nid, node in graph.nodes.items() if not isinstance(node.op, InputOp)]
-        return load_golden_records(
+        loops: list[dict] = []
+        return GoldenFile.from_wire(
             {
                 "gpu_name": gpu,
                 "compute_cap": list(cap),
                 "model": "org/model",
-                "programs": [graph_to_wire(graph)],
+                "programs": [graph.to_wire()],
+                "loops": loops,
                 "configs": [
                     {
                         "program": 0,
-                        "target": {"origins": origins},
+                        "target": loop_target(graph, origins, loops, cap),
                         "realizations": [
                             {
                                 "name": name,
@@ -343,7 +353,7 @@ def test_offer_audit_flags_unrealized_entries(monkeypatch, caplog):
                     }
                 ],
             }
-        )
+        ).records()
 
     def matmul(m):
         code = f"torch.matmul(torch.randn({m},128, dtype=torch.float16), torch.randn(128,{m}, dtype=torch.float16))"
@@ -375,3 +385,25 @@ def test_offer_audit_flags_unrealized_entries(monkeypatch, caplog):
     msgs = [r.getMessage() for r in caplog.records]
     assert any("equal an enumerated leaf" in m for m in msgs)
     assert not any("UNREALIZED" in m or "FALL-THROUGH" in m for m in msgs)
+
+
+def test_eval_prior_golden_ranks_an_exported_datasets_golden_pools(tmp_path, caplog):
+    """``eval prior`` reads the golden pools of a dataset ``emmy db export`` wrote — the positional argument names the
+    directory — and its header names the dataset and the golden files its rows came from. The deploy-faithful check
+    runs over the same pools, re-lowering each kernel from the definition the dataset carries."""
+    from emmy.commands.eval import register_eval_command
+    from emmy.compiler.pipeline.search.db.export import export_dataset
+    from tests.compiler.pipeline.search.helpers import tuned_db
+
+    db = tuned_db(None, ("matmul/f16-mma-m128n128k128-f32.json",), source="golden:case")
+    export_dataset(db, source="test", pool_sample=0, seed=0).dump(tmp_path / "dataset")
+    parser = argparse.ArgumentParser()
+    register_eval_command(parser.add_subparsers())
+    dataset, out = str(tmp_path / "dataset"), str(tmp_path / "r.json")
+    args = parser.parse_args(["eval", "prior", dataset, "--json", out])
+    with caplog.at_level(logging.INFO):
+        args.func(args)
+    header = json.loads((tmp_path / "r.json").read_text())["header"]
+    assert (header["dataset"], header["source"], header["sources"]) == ("golden", dataset, {"golden:case": 1})
+    assert (header["groups"], header["positives"], header["skipped"]) == (1, 1, 0)
+    assert "Golden reproduction" in caplog.text and "k_matmul_" in caplog.text

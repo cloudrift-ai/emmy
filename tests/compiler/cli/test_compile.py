@@ -52,7 +52,7 @@ def test_compile_code_functional_silu(run_cli):
     rc, stdout, stderr = run_cli("compile", "--code", "F.silu(torch.randn(1,32,128))", "--ir", "tensor")
     assert rc == 0, f"stderr: {stderr}"
     assert "exp(" in stdout
-    assert "reciprocal(" in stdout
+    assert "divide(" in stdout
 
 
 def test_compile_code_functional_softmax_bakes_kwargs(run_cli):
@@ -64,12 +64,22 @@ def test_compile_code_functional_softmax_bakes_kwargs(run_cli):
 
 
 def test_compile_passes_shorthand(run_cli, tmp_path):
-    """'dolft' should expand to decomposition/optimization/lifting/fusion/lowering/tile."""
+    """'dolfnstph' should expand to every pass through the tile schedule."""
     out = tmp_path / "out.txt"
-    rc, stdout, stderr = run_cli("compile", "-c", "F.relu(torch.randn(8))", "--passes", "dolft", "-o", str(out), "-vv")
+    rc, stdout, stderr = run_cli("compile", "-c", "F.relu(torch.randn(8))", "--passes", "dolfnstph", "-o", str(out), "-vv")
     assert rc == 0, f"stderr: {stderr}"
     log = stdout + stderr
-    for name in ("frontend/decomposition", "frontend/optimization", "loop/lifting", "loop/fusion", "lowering/tile"):
+    for name in (
+        "frontend/decomposition",
+        "frontend/optimization",
+        "loop/lifting",
+        "loop/fusion",
+        "loop/canonicalize",
+        "loop/stamp",
+        "tile/lift",
+        "tile/cut",
+        "tile/schedule",
+    ):
         assert name in log, f"missing pass {name!r} in log"
     assert "lowering/cuda" not in log
 

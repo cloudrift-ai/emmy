@@ -10,9 +10,10 @@ The boundary is deliberately the END OF THE KERNEL PASSES, before ``lowering/cud
 pass group holds the per-graph negotiations (``005_delegate_zero_init`` injects a
 ``ZeroPrologue`` into a *neighbor* kernel; ``010`` renders per-graph buffer names), so artifacts
 above the boundary stay a pure function of the kernel while the negotiations run fresh on every
-assembled graph. Entries store the ``KernelOp`` with its buffers renamed to positional slots
-(``Stmt.rename_buffers``); a hit renames the slots to the consumer's io — sound because the key
-folds the io fingerprint, so the io orders correspond positionally.
+assembled graph. Entries store the ``KernelOp`` with its buffers renamed to ROLE slots
+(``Stmt.rename_buffers`` over ``Op.canonical_buffers``); a hit renames the slots to the buffers
+filling the same roles on the consumer — sound because the key types every role, whatever order
+either side declared its io in.
 
 The key is the exact variant key (``identity_key(structural=False, with_io=True,
 with_knobs=True)`` — an artifact is exact code, never a cluster representative) folded with the
@@ -76,18 +77,17 @@ class KernelCache:
 
     def fetch(self, key: str, target) -> object | None:
         """The cached lowering rebound to ``target``'s buffer names, or ``None`` (miss /
-        poisoned). ``target`` is the consuming fused Loop-IR op; its io orders correspond to the
-        stored slots positionally because the key folds the io fingerprint."""
+        poisoned). ``target`` is the consuming fused Loop-IR op; its buffers fill the stored
+        slots by role, which the key types."""
         entry = self._store.get(key)
         if entry is None or entry is POISON:
             self.misses += 1
             return None
         self._store.move_to_end(key)
         self.hits += 1
-        names = (*target.inputs, *target.outputs)
         return replace(
             entry.kernel,
-            body=entry.kernel.body.rename_buffers(dict(zip(entry.slots, names, strict=True))),
+            body=entry.kernel.body.rename_buffers(dict(zip(entry.slots, target.canonical_buffers(), strict=True))),
             inputs=dict(target.inputs),
             outputs=dict(target.outputs),
         )
@@ -103,11 +103,11 @@ class KernelCache:
             if held.origin_id == id(origin) and held.kernel is not kernel:
                 self._store[key] = POISON
             return
-        names = (*origin.inputs, *origin.outputs)
+        names = origin.canonical_buffers()
         decls = {n for s in kernel.body.iter() for n in s.local_decls()}
         buffers = {n for s in kernel.body.iter() for n in (*s.external_reads(), *s.external_writes())} - decls
         if not buffers <= set(names):
-            return  # the kernel reads buffers beyond its origin's io — not a pure single-kernel lowering
+            return  # the kernel reads buffers beyond its origin's roles — not a pure single-kernel lowering
         slots = tuple(f"__kc{i}" for i in range(len(names)))
         slot_map = dict(zip(names, slots, strict=True))
         slotted = replace(

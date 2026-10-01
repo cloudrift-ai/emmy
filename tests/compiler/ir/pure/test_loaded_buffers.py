@@ -6,7 +6,7 @@ from __future__ import annotations
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.stmt import Assign, Load
-from emmy.compiler.pipeline.passes.lowering.tile._cut import _buffer_reads
+from emmy.compiler.pipeline.passes.tile._cut import _buffer_reads
 from tests.compiler.terms import contraction, projection, slab
 
 

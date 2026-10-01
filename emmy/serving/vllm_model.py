@@ -92,7 +92,7 @@ class EmmyEmbedModel(nn.Module, IsAttentionFree):
     def forward(self, input_ids, positions, intermediate_tensors=None, inputs_embeds=None, **kwargs):
         # Packed (num_tokens_padded,) tensors: sequences flattened back-to-back,
         # positions 0-based per request. Everything stays on-device — each span's
-        # ids slice straight into the runner (torch→cupy zero-copy) and hidden
+        # ids slice straight into the runner (device-to-device, no host hop) and hidden
         # states come back as torch CUDA tensors. Only the span boundaries need a
         # host read of positions (a tiny (num_tokens,) int vector); garbage
         # dummy-run batches survive via the vocab clamp + split_spans' chunking.

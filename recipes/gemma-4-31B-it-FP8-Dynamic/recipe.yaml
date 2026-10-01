@@ -3,7 +3,7 @@ tags:
 
 model:
   huggingface: "RedHatAI/gemma-4-31B-it-FP8-Dynamic"
-  rationale: "Cooling post-Qwen3.8 with no trending momentum."
+  rationale: "Cooling interest, eclipsed by Qwen3.8 and GLM waves, minimal current momentum."
   heat: 15
 engine:
   llm:

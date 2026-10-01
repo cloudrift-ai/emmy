@@ -17,7 +17,7 @@ from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
 from emmy.compiler.ir.tile import Placement
 from emmy.compiler.ir.tile.ir import TileOp
-from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
+from emmy.compiler.pipeline.passes.tile._fromloop import fold_from_loop
 from tests.compiler.terms import contraction, projection, slab
 
 K = 512

@@ -24,7 +24,7 @@ tests/compiler/passes/
 ├── test_optimization_rules.py      # optimization rules (structural + correctness)
 ├── test_fusion_rules.py            # maximal/multi-output fusion structure and Loop-runner correctness
 ├── test_matcher.py                 # Pattern matcher unit tests
-├── test_maximal_fusion.py          # one-pass maximal fusion, including nested reductions
+├── test_maximal_fusion.py          # maximal fusion: every kernel boundary is a correctness boundary (golden programs too)
 ├── test_twisted_rewrite.py         # general exp-family Tile rewrite: softmax and masked/unmasked SDPA
 ├── test_matmul_rules.py            # matmul-specific rewrite rules
 ├── test_reduction_rules.py         # reduction-pattern rewrite rules
@@ -112,7 +112,7 @@ numpy backends in three places:
   eager. The `_cpu` variant runs `LoopBackend` + CPU eager (always
   on, ~3s); the `_cuda` variants are gated by `@requires_cuda`.
 
-### Tile lowering (`passes/lowering/tile/`)
+### Tile lowering (`passes/tile/`)
 
 `test_twisted_rewrite.py` traces softmax, SDPA, and causal SDPA through total lift and the same `020_twisted` rule,
 then checks the resulting carrier arity, the derived contraction sites, and that plain and causal SDPA reach both MMA
@@ -177,12 +177,15 @@ This group is the ONLY coverage the output-owning cut has, and the corpus delibe
 multi-root kernel a real grid — the NVFP4 encode's packed-code piece then has six contraction roots offering ~1400
 rows each, and their composition is past enumerating. Pinning the contraction seams beside it shrinks every piece to
 at most two roots and does enumerate, and a route spelled on the parent's tree replays from evidence since the cut
-pass offers the composed arm a measured route row names (`attention/rmsnorm-qk-sdpa-composed-cut.yaml` closed that
+pass offers the composed arm a measured route row names (`attention/rmsnorm-qk-sdpa-composed-cut.json` closed that
 gap). So the numerics of a cut kernel set stay unproven on hardware until the first holds; the tests here prove the
 structure only.
 The recipe program's monoid laws are covered
 independently by `tests/compiler/ir/pure/test_twist.py`; end-to-end softmax and attention accuracy remain covered by
 the e2e suites.
+
+The chunk-staging tests compare one- and two-buffer causal TMA attention against PyTorch on several random inputs.
+These exercise shared-memory reuse across the generic and asynchronous proxies on a live GPU supporting TMA.
 
 `test_volta_mma.py` covers the SM70 atom as one capability family: cooperative global loads, paired crosswise and
 congruous staged layouts with their interleaved accumulator map, the policy-off and gmem-direct gather fallbacks,
@@ -211,3 +214,12 @@ def test_<op>_correctness():
 Use small concrete shapes (avoid symbolic dims) so the numpy backend
 can execute the graph. `IndexMapOp.forward` iterates in Python, so keep
 tensor sizes under ~1000 elements for fast tests.
+
+Register carry tests cover strict schedule round trips, precision gating, ownership refusals, and a chunk loop
+inside one launch on both sm70 and modern targets. CUDA cases check old-state reads, uneven GDN matrices, both
+accumulation precisions, and absence of spills against the Loop reference. The real Qwen3.5 trace checks that the
+correction product is reused by its two consumers. Nonzero seed tensors with singleton dimensions exercise both
+classic and register addressing, and time-dependent lifts retain their time binding after root extraction.
+Independent output sweeps, including dead loads left after lifting, have structural and numerical checks. Vector
+memory tests prove alignment across complete row strides, not just the last coordinate.
+Volta corpus cases exercise the shared FP16 promotion in direct and staged matrix schedules.

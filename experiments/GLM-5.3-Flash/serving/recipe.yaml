@@ -1,0 +1,45 @@
+model:
+  huggingface: "zai-org/GLM-5.3-Flash"
+
+engine:
+  llm:
+    tensor_parallel_size: 2
+    pipeline_parallel_size: 1
+    gpu_memory_utilization: 0.9
+    context_length: 65536
+    max_concurrent_requests: 32
+    docker_options:
+      privileged: true
+    vllm:
+      image: "vllm/vllm-openai-rocm@sha256:d5da8f963f0571a171f6817cc108bc2371a39528a11aeba5a00cb78177fcb4e5"
+      extra_env:
+        VLLM_ROCM_USE_AITER: "1"
+      extra_args: >-
+        --enable-auto-tool-choice --tool-call-parser glm47 --reasoning-parser glm47
+        --chat-template-content-format=string
+
+benchmark:
+  max_concurrency: 1
+  num_prompts: 8
+  random_input_len: 4096
+  random_output_len: 4096
+
+matrices:
+  - deploy.gpu: "AMD Instinct MI350X"
+    deploy.gpu_count: 2
+    benchmark.max_concurrency: 1
+    benchmark.num_prompts: 8
+    benchmark.random_input_len: 4096
+    benchmark.random_output_len: 4096
+  - deploy.gpu: "AMD Instinct MI350X"
+    deploy.gpu_count: 2
+    benchmark.max_concurrency: 32
+    benchmark.num_prompts: 64
+    benchmark.random_input_len: 4096
+    benchmark.random_output_len: 4096
+  - deploy.gpu: "AMD Instinct MI350X"
+    deploy.gpu_count: 2
+    benchmark.max_concurrency: 1
+    benchmark.num_prompts: 20
+    benchmark.random_input_len: 8192
+    benchmark.random_output_len: 256

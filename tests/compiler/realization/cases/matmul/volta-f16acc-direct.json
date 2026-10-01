@@ -1,0 +1,13 @@
+{"compute_cap": [7, 0],
+ "note": "Volta FP16 partials promote into the FP32 lane layout, including a short final K group.",
+ "programs": [
+  {"inputs":["a","b"],"outputs":["o"],"nodes":[{"id":"a","op":"input","outputs":[["a","f16",[35,36]]]},{"id":"b","op":"input","outputs":[["b","f16",[36,37]]]},{"id":"o","op":"torch.matmul","inputs":["a","b"],"outputs":[["o","f16",[35,37]]]}]}
+ ],
+ "configs": [
+  {"program": 0, "target": {"loop": 0, "origins": ["o"]}, "realizations": [
+   {"name": "k_matmul_volta_f16acc", "pins": {"FAST_MATH": true}, "knobs": {"TILE": "mma_m8n8k4_f16_f16/f2x2/k4", "WORK": "w1x1", "STAGE": ""}, "identity": "09880539ff5b32f771dd2e8713356767fc282c3428e279f49b8e045a83928afe"}
+  ]}
+ ],
+ "loops": [
+  {"inputs":["a","b"],"outputs":["o"],"nodes":[{"id":"a","op":"input","outputs":[["a","f16",[35,36]]]},{"id":"b","op":"input","outputs":[["b","f16",[36,37]]]},{"id":"o","op":"loop","attrs":{"body":[{"Loop":{"axis":{"name":"a0","extent":35},"body":[{"Loop":{"axis":{"name":"a1","extent":37},"body":[{"Loop":{"axis":{"name":"a2","extent":36},"body":[{"Load":{"names":["in0"],"input":"a","index":["a0","a2"]}},{"Load":{"names":["in1"],"input":"b","index":["a2","a1"]}},{"Assign":{"name":"v0","op":"multiply","args":["in0","in1"],"dtype":"f32"}},{"Accum":{"name":"acc0","value":"v0","axes":["a2"]}}]}},{"Write":{"output":"o","index":["a0","a1"],"values":["acc0"]}}]}}]}}],"name":"k_matmul_2b5d9b"},"inputs":["b","a"],"outputs":[["o","f16",[35,37]]]}]}
+ ]}

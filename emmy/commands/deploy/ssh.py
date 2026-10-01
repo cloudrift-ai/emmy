@@ -5,15 +5,17 @@ import logging
 import os
 import sys
 
-from emmy.deploy import DEFAULT_STRATEGY, STRATEGIES, DeployParams
+from emmy.deploy import DEFAULT_STRATEGY, STRATEGIES, DeployParams, replica_services
 from emmy.deploy import (
     deploy as deploy_entry,
 )
 from emmy.deploy import (
     teardown as teardown_entry,
 )
+from emmy.deploy.plan import load_plan
 from emmy.detect import detect_remote_gpus
 from emmy.provisioning.host import RemoteHost
+from emmy.provisioning.proxy import add_proxy_argument
 from emmy.provisioning.remote import provision_remote
 from emmy.provisioning.ssh_target import parse_ssh_target
 from emmy.recipe import resolve_for_hardware, resolve_recipe_dir
@@ -52,12 +54,28 @@ async def _handle_ssh(args):
     gpu_count = args.gpu_count or detected_count
     logger.info(f"GPU: {gpu_count}x {gpu_name}")
 
-    # Matrix resolution
-    recipe = resolve_for_hardware(resolve_recipe_dir(args.recipe), gpu_name, gpu_count)
-
-    # Scale-out
-    strategy_cls = STRATEGIES[args.scale_out_strategy]
-    recipe = strategy_cls().apply(recipe, gpu_count)
+    if args.plan:
+        # A plan names the host it was written for; on an existing host that shape must be the one found.
+        try:
+            plan = load_plan(args.plan)
+        except (ValueError, KeyError, TypeError, OSError) as exc:
+            logger.error(f"Invalid plan {args.plan}: {exc}")
+            sys.exit(1)
+        if (gpu_name, gpu_count) != (plan.gpu, plan.gpu_count):
+            logger.error(f"Plan {args.plan} is for {plan.gpu_count}x {plan.gpu}, but the host has {gpu_count}x {gpu_name}")
+            sys.exit(1)
+        services, load_balancer = plan.services, False
+        for index, service in enumerate(services):
+            devices = ",".join(map(str, service.gpu_device_ids))
+            logger.info(
+                f"Model {index}: {service.recipe.model_name} on GPU {devices} at gpu_memory_utilization="
+                f"{service.recipe.engine.llm.gpu_memory_utilization}, port {service.port}"
+            )
+    else:
+        recipe = resolve_for_hardware(resolve_recipe_dir(args.recipe), gpu_name, gpu_count)
+        recipe = STRATEGIES[args.scale_out_strategy]().apply(recipe, gpu_count)
+        services, load_balancer = replica_services(recipe)
+    deploy_config = services[0].recipe.deploy  # a plan validated that every recipe pins the same versions
 
     hf_token = args.hf_token or os.environ.get("HF_TOKEN", "")
     register_secret(hf_token)
@@ -65,20 +83,22 @@ async def _handle_ssh(args):
         server=server,
         ssh_key=args.ssh_key,
         ssh_port=port,
-        recipe=recipe,
+        services=services,
+        load_balancer=load_balancer,
         model_dir=args.model_dir,
         hf_token=hf_token,
         dry_run=args.dry_run,
+        proxy=args.vm_proxy,
     )
-    skip_nvidia = recipe.deploy.gpu is not None and recipe.deploy.gpu.startswith("AMD")
-    host = RemoteHost(params.server, params.ssh_key, params.ssh_port, dry_run=params.dry_run)
+    skip_nvidia = deploy_config.gpu is not None and deploy_config.gpu.startswith("AMD")
+    host = RemoteHost(params.server, params.ssh_key, params.ssh_port, dry_run=params.dry_run, proxy=params.proxy)
     timer = PhaseTimer()
     async with timer.ameasure(PHASE_REMOTE_PROVISION):
         await provision_remote(
             host,
             skip_nvidia=skip_nvidia,
-            driver_version=recipe.deploy.driver_version,
-            cuda_version=recipe.deploy.cuda_version,
+            driver_version=deploy_config.driver_version,
+            cuda_version=deploy_config.cuda_version,
         )
 
     if args.teardown:
@@ -95,7 +115,13 @@ async def _handle_ssh(args):
 def register_ssh_target(subparsers):
     """Register the SSH deploy target."""
     parser = subparsers.add_parser("ssh", help="Deploy via SSH to a remote server")
-    parser.add_argument("--recipe", required=True, help="Path to recipe directory")
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--recipe", help="Path to recipe directory")
+    source.add_argument(
+        "--plan",
+        help="Plan file: the models to run on the host, each pinned to its GPU devices (see the deploy command "
+        "reference); the host must have exactly the plan's GPU name and count. Exclusive with --recipe",
+    )
     parser.add_argument("--hf-token", default=None, help="HuggingFace token (default: $HF_TOKEN)")
     parser.add_argument("--model-dir", default="/mnt/models", help="Model cache directory")
     parser.add_argument("--teardown", action="store_true", help="Stop containers instead of deploying")
@@ -107,6 +133,7 @@ def register_ssh_target(subparsers):
         help="SSH target (e.g. user@host or user@host:2222). Default port: 22",
     )
     parser.add_argument("--ssh-key", default="~/.ssh/id_ed25519", help="SSH key path")
+    add_proxy_argument(parser)
     # Deprecated — kept for backwards compatibility. Prefer --ssh USER@HOST[:PORT].
     parser.add_argument("--server", default=None, help="[DEPRECATED] SSH address (user@host); use --ssh instead")
     parser.add_argument("--ssh-port", type=int, default=None, help="[DEPRECATED] SSH port; encode it in --ssh USER@HOST:PORT")

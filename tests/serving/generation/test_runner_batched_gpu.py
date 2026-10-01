@@ -1,6 +1,6 @@
 """Batched serving paths (``EMMY_SERVING_STATIC=1`` / ``EMMY_SERVING_BATCHED=1``).
 
-Needs CUDA + cupy + the Qwen3-Embedding config (skips itself off-GPU; the config comes
+Needs CUDA + the Qwen3-Embedding config (skips itself off-GPU; the config comes
 from the HF cache like the compiler e2e tests'). Builds a 1-layer ``(batch, S)`` trunk
 (fully static, and batched symbolic-seq), wraps a ``EmmyForwardRunner`` around it, and checks that
 ``forward_hidden_states_batched`` runs several different-length sequences in ONE
@@ -20,7 +20,6 @@ MODEL = "Qwen/Qwen3-Embedding-0.6B"
 
 @pytest.mark.skip(reason="large fused schedule composition is not yet lazy")
 def test_runner_batched_matches_eager():
-    pytest.importorskip("cupy")
     import torch
     from transformers import AutoConfig, AutoModel
 
@@ -88,7 +87,6 @@ def test_runner_batched_symbolic_matches_eager():
     at the cap, seq_len symbolic — each step pads only to the step's longest sequence
     and replays the captured graph for that seq_len. Mixed lengths per row + a second
     step at a different step-length (a fresh capture) must both match eager."""
-    pytest.importorskip("cupy")
     import torch
     from transformers import AutoConfig, AutoModel
 

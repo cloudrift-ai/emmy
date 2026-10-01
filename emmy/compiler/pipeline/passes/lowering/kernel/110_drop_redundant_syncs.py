@@ -13,6 +13,8 @@ are load-bearing.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.kernel import KernelOp, Tile
 from emmy.compiler.ir.kernel.ir import (
@@ -102,4 +104,4 @@ def rewrite(root: Node) -> KernelOp | None:
 
     if not changed:
         raise RuleSkipped("no redundant syncs at the tile body level")
-    return KernelOp(body=Body(new_body), name=op.name, knobs=dict(op.knobs))
+    return replace(op, body=Body(new_body), knobs=dict(op.knobs))

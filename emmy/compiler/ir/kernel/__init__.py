@@ -1,10 +1,10 @@
 """Kernel IR — fully-scheduled kernel form, lowered directly to CUDA source.
 
-- :mod:`.ir` — dataclass definitions: ``KernelOp`` wrapper plus
-  ``Smem`` / ``Sync`` / ``TreeHalve`` hardware primitives. Shared
-  structural types (``Loop``, ``StridedLoop``) come from ``ir.stmt``;
-  the typed tile flavors (``GridTile``, ``ThreadTile``, etc.) come from
-  ``ir.tile.ir``.
+- :mod:`.ir` — dataclass definitions: the ``KernelOp`` wrapper plus the hardware
+  primitives (launch geometry, shared memory, barriers, the transports into shared
+  memory, the cross-thread combines, the tensor-core fragment nodes). Shared leaves and
+  structural types (``Load``, ``Assign``, ``Loop``, ``StridedLoop``, …) come from
+  ``ir.stmt``.
 - :mod:`.render` — ``render_kernelop`` emitting CUDA source.
 """
 

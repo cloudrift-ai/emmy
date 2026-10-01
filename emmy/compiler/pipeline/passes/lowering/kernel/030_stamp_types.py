@@ -15,7 +15,7 @@ Stamping rules:
   and ``pow`` are promoted to f32 (overflow guard, below).
 - ``Write(output, value)`` — ``value_dtype = ssa[value]``. The destination
   buffer dtype stays a render-time concern; only the value side is stamped.
-- ``Accum`` / ``Init`` / ``Pack`` / ``Unpack`` are already typed — register
+- ``Accum`` / ``Init`` are already typed — register
   them in the running ``ssa_dtypes`` so downstream Assigns / Writes pick up
   the right arg dtype.
 
@@ -31,8 +31,9 @@ from dataclasses import dataclass, field, replace
 from emmy.compiler.dtype import F16, F32, DataType
 from emmy.compiler.dtype import get as dtype_get
 from emmy.compiler.graph import Node
+from emmy.compiler.ir.expr import Literal
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Const, Init, Load, Pack, Stmt, Unpack, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Let, Load, Select, Stmt, Write
 from emmy.compiler.ir.stmt.base import dtype_promote
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 
@@ -61,7 +62,7 @@ def rewrite(root: Node) -> KernelOp | None:
         new_body = stamped
     if new_body == op.body:
         raise RuleSkipped("every Load/Assign/Write already stamped")
-    return KernelOp(body=new_body, name=op.name, knobs=dict(op.knobs))
+    return replace(op, body=new_body, knobs=dict(op.knobs))
 
 
 def _seed_explicit_dtypes(body: Body, ctx: _StampCtx) -> None:
@@ -74,13 +75,8 @@ def _seed_explicit_dtypes(body: Body, ctx: _StampCtx) -> None:
     for s in body:
         if isinstance(s, Load) and s.dtype is not None:
             ctx.ssa_dtypes.update((name, s.dtype) for name in s.names)
-        elif isinstance(s, (Assign, Accum, Init, Const)) and s.dtype is not None:
+        elif isinstance(s, (Assign, Accum, Init, Let)) and s.dtype is not None:
             ctx.ssa_dtypes[s.name] = s.dtype
-        elif isinstance(s, Pack):
-            ctx.ssa_dtypes[s.name] = s.dtype
-        elif isinstance(s, Unpack):
-            ctx.ssa_dtypes[s.low_name] = s.lane_dtype
-            ctx.ssa_dtypes[s.high_name] = s.lane_dtype
         for nested in s.nested():
             _seed_explicit_dtypes(nested, ctx)
 
@@ -94,6 +90,9 @@ def _stamp_stmt(s: Stmt, ctx: _StampCtx) -> Stmt:
         return _stamp_load(s, ctx)
     if isinstance(s, Assign):
         return _stamp_assign(s, ctx)
+    if isinstance(s, Select):
+        ctx.ssa_dtypes[s.name] = dtype_get(dtype_promote("add", [(ctx.ssa_dtypes.get(b.value) or F32).name for b in s.branches]))
+        return s
     if isinstance(s, Write):
         return _stamp_write(s, ctx)
     if isinstance(s, Accum):
@@ -101,15 +100,12 @@ def _stamp_stmt(s: Stmt, ctx: _StampCtx) -> Stmt:
     if isinstance(s, Init):
         ctx.ssa_dtypes[s.name] = s.dtype or F32
         return s
-    if isinstance(s, Const):
-        ctx.ssa_dtypes[s.name] = s.dtype or F32
-        return s if s.dtype is not None else replace(s, dtype=F32)
-    if isinstance(s, Pack):
-        ctx.ssa_dtypes[s.name] = s.dtype
-        return s
-    if isinstance(s, Unpack):
-        ctx.ssa_dtypes[s.low_name] = s.lane_dtype
-        ctx.ssa_dtypes[s.high_name] = s.lane_dtype
+    if isinstance(s, Let):
+        # A float literal takes f32 when nothing narrows it; an index keeps its expression's type.
+        if s.dtype is None and isinstance(s.value, Literal) and s.value.dtype == "float":
+            s = replace(s, dtype=F32)
+        if s.dtype is not None:
+            ctx.ssa_dtypes[s.name] = s.dtype
         return s
     # Block-structured stmts (Tile / Loop / StridedLoop / Cond, …):
     # recurse through children via the generic ``nested()`` / ``with_bodies()``
@@ -143,7 +139,7 @@ def _stamp_load(s: Load, ctx: _StampCtx) -> Load:
         for n in s.names:
             ctx.ssa_dtypes[n] = dt
         if s.dtype is None:
-            return Load(names=s.names, input=s.input, index=s.index, dtype=dt)
+            return replace(s, dtype=dt)
     return s
 
 
@@ -160,8 +156,8 @@ def _stamp_assign(s: Assign, ctx: _StampCtx) -> Assign:
     # Overflow guard: a square (``x * x``) or a ``pow`` of an fp16 value can
     # blow past fp16's 65504 ceiling, giving inf → a garbage reduction
     # (RMSNorm's mean-of-squares). torch computes that reduction in fp32; do
-    # the same here. Matmul — ``multiply`` of *distinct* args — keeps its fp16
-    # path; only the same-arg square / pow are promoted.
+    # the same here. Matmul products already carry an explicit compute dtype;
+    # this fallback promotes only an untyped same-arg square / pow.
     if result_dt == F16 and _is_overflow_prone(s):
         result_dt = F32
     ctx.ssa_dtypes[s.name] = result_dt
@@ -170,8 +166,7 @@ def _stamp_assign(s: Assign, ctx: _StampCtx) -> Assign:
 
 def _is_overflow_prone(s: Assign) -> bool:
     """True for elementwise ops that can overflow fp16 from in-range inputs —
-    the square ``multiply(a, a)`` and any ``pow``. Distinct-arg ``multiply``
-    (matmul) is excluded."""
+    the square ``multiply(a, a)`` and any ``pow``. Distinct-arg products are excluded."""
     if s.op.name == "pow":
         return True
     return s.op.semiring_product and len(s.args) == 2 and s.args[0] == s.args[1]

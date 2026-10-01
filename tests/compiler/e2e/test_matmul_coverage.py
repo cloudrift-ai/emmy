@@ -26,8 +26,6 @@ structure tests (forced sm_120) need no GPU; warp-tier accuracy needs sm_90+.
 
 from __future__ import annotations
 
-import re
-
 import numpy as np
 import pytest
 
@@ -41,25 +39,15 @@ from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.pipeline import CUDA_PASSES, TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.knob import family_value
 from emmy.compiler.pipeline.search.features import mma_atom
-from tests.compiler.helpers import dyn_M, requires_cuda, requires_sm90
-
-
-def _has_cuda() -> bool:
-    try:
-        import cupy as cp  # noqa: PLC0415
-
-        return cp.cuda.is_available()
-    except Exception:  # noqa: BLE001
-        return False
+from tests.compiler.helpers import dyn_M, requires_cuda, requires_sm, requires_sm90
 
 
 def _supports_tma() -> bool:
     """TMA (``cp.async.bulk.tensor``) needs sm_90+ (Hopper / Blackwell)."""
-    if not _has_cuda():
-        return False
-    import cupy as cp  # noqa: PLC0415
+    from emmy.compiler.backend.cuda.device import compute_capability  # noqa: PLC0415
 
-    return int(cp.cuda.Device().compute_capability) >= 90
+    cap = compute_capability()
+    return cap is not None and cap >= (9, 0)
 
 
 def _dtype(name: str):
@@ -328,6 +316,7 @@ def test_tma_stage_pin_refuses_below_sm90(monkeypatch) -> None:
 
 @requires_cuda
 @pytest.mark.parametrize("stage", ["d2/smem-async", "d3/smem-async"])
+@requires_sm(8)
 def test_scalar_ring_matches_gmem_direct_bit_for_bit(monkeypatch, stage):
     """The SCALAR gmem→smem prefetch ring (``STAGE=d<depth>/cp``, depth ≥ 2) runs the same
     ``staged_kloop`` phases as the warp ring — the atom contributes only the slab drain — and is a
@@ -621,8 +610,27 @@ def test_fully_overhanging_m_fragment_clamps_its_reads_into_the_tile(monkeypatch
     monkeypatch.setenv("EMMY_STAGE", "")  # gmem-direct: the tier whose loaders clamp per fragment
     src = _render_src(_mma_matmul_graph("static", 1, 128, 64, "f32", False))
     assert "emmy_mma_load_a_gmem_mclamp" in src, "M=1 under this tile must reach the masked-M loader"
-    assert "rows_left - 1;" not in src, "the M clamp must not address below the tile base"
-    assert "row = max(rows_left - 1, 0);" in src
+    assert "if (rows_left > 0) {  // wholly past the bound: read nothing" in src, "an overhanging fragment reads nothing"
+
+
+def test_every_clamped_fragment_loader_reads_nothing_wholly_past_its_bound():
+    """A fragment wholly past its bound has no in-range address: clamping to the fragment base read
+    past the buffer's end. Eight 128-row warps over a 512-row attention (the RTX 5090's hd64 fused
+    kernel under ``WORK=w8x1``) handed warps 4-7 their own Q base at rows 512+; for the last head that
+    is past the allocation, an intermittent CUDA_ERROR_ILLEGAL_ADDRESS. Every clamped loader of every
+    prelude now predicates those reads off and zero-fills the fragment."""
+    import re
+
+    from emmy.compiler.ir.kernel import render
+
+    source = "".join(getattr(render, name) for name in dir(render) if name.endswith("_PRELUDE"))
+    loaders = re.findall(r"void (emmy_\w*(?:clamp\w*|_impl|_gmem4))\(([^)]*)\)\s*\{\n(.*?)\n\}", source, re.S)
+    assert len(loaders) >= 12, [name for name, _, _ in loaders]
+    for name, params, body in loaders:
+        left = next(p.split()[-1] for p in params.split(",") if p.split()[-1] in ("left", "rows_left", "cols_left"))
+        delegates = re.match(r"\s*emmy_\w*_impl<", body)
+        assert delegates or f"{left} > 0" in body, f"{name} reads without checking {left} > 0"
+        assert "return;" not in body, f"{name}: an early return cost the decode split partial 18% on an RTX 5090"
 
 
 @pytest.mark.parametrize(("K", "masked"), [(128, False), (136, True), (132, True)])
@@ -649,7 +657,7 @@ def test_warp_tier_is_offered_at_a_static_k_the_step_does_not_tile(monkeypatch):
     """The unpinned fork OFFERS mma rows at a static K the K-step does not tile (no GPU —
     enumeration only). The K-step divisibility used to drop every warp candidate on such a shape,
     so no golden could record one."""
-    from emmy.compiler.pipeline.search.golden_eval import enumerate_graph  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.ranking import enumerate_graph  # noqa: PLC0415
 
     for var in ("EMMY_TILE", "EMMY_WORK", "EMMY_STAGE", "EMMY_REDUCE"):
         monkeypatch.delenv(var, raising=False)
@@ -710,7 +718,7 @@ def test_trans_b_offers_staged_rows(monkeypatch):
     The serving ``F.linear`` forks used to enumerate gmem-direct rows ONLY (the ``.lin`` golden
     drift-warning class); the N-major B slab lifts that: d*/cp* and d*/tma* spellings ride the
     fork at sm_90+, cp.async alone below the TMA floor (sm_89)."""
-    from emmy.compiler.pipeline.search.golden_eval import enumerate_graph  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.ranking import enumerate_graph  # noqa: PLC0415
 
     for var in ("EMMY_TILE", "EMMY_WORK", "EMMY_STAGE", "EMMY_REDUCE"):
         monkeypatch.delenv(var, raising=False)
@@ -808,7 +816,7 @@ def test_f16acc_enumeration_policy(monkeypatch):
     forks everywhere they are legal (which sibling deploys is evidence's decision per shape and
     card), and the precise ``F16_MMA_F32_ACC`` pin stays authoritative in both directions."""
     from emmy.compiler.context import Context  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.golden_eval import enumerate_graph  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.ranking import enumerate_graph  # noqa: PLC0415
     from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC, precision_pin  # noqa: PLC0415
 
     def allowed(**env) -> bool:
@@ -818,7 +826,8 @@ def test_f16acc_enumeration_policy(monkeypatch):
             monkeypatch.setenv(var, val)
         return bool(precision_pin(F16_MMA_F32_ACC))
 
-    assert not allowed(), "policy unset: no f16acc forks"
+    assert allowed(), "fast math is enabled by default"
+    assert not allowed(EMMY_FAST_MATH="0"), "the precise mode excludes f16acc forks"
     assert allowed(EMMY_FAST_MATH="1"), "FAST_MATH offers the forks — on every target, evidence ranks them"
     assert allowed(EMMY_F16_MMA_F32_ACC="1"), "the precise pin offers everywhere"
     assert not allowed(EMMY_FAST_MATH="1", EMMY_F16_MMA_F32_ACC="0"), "the precise pin wins over the umbrella"
@@ -1208,6 +1217,25 @@ def test_staged_splitk_matches_gmem_direct_bit_for_bit(monkeypatch, transport):
     np.testing.assert_allclose(staged.astype(np.float32).reshape(m, n), ref, rtol=2e-2, atol=2e-2)
 
 
+@requires_cuda
+def test_matvec_splitk_matches_the_reference(monkeypatch):
+    """A one-row matmul split across CTAs: each partition reads its own slice of B. Tiling the
+    partition as the row read every partition's B at the first one's slice."""
+    from emmy.compiler.backend.cuda.backend import CudaBackend  # noqa: PLC0415
+
+    k, n = 1024, 256
+    rng = np.random.default_rng(5)
+    a = (rng.standard_normal((1, k)) * 0.1).astype(np.float16)
+    b = (rng.standard_normal((k, n)) * 0.1).astype(np.float16)
+    monkeypatch.setenv("EMMY_REDUCE", "g8k")
+    be = CudaBackend()
+    compiled = be.compile(_splitk_mma_graph(1, k, n))
+    assert "o__partial" in compiled.nodes
+    got = np.asarray(be.run(compiled, input_data={"a": a, "b": b})[0].outputs["o"])
+    ref = a.astype(np.float32) @ b.astype(np.float32)
+    np.testing.assert_allclose(got.astype(np.float32).reshape(1, n), ref, rtol=2e-2, atol=2e-2)
+
+
 # =========================================================================== #
 # Compile-time schedule guards — pins that would silently lower to a wrong / un-launchable
 # kernel. Run the TILE pass only (no GPU): the schedule rejects the pin with a clear
@@ -1353,45 +1381,6 @@ def test_masked_symbolic_m_structure(transport, monkeypatch):
         assert stage.endswith("/smem-tma"), f"symbolic-M with static innermost dim must stage via TMA: {stage!r}"
         assert "cp.async.bulk.tensor" in src, "A operand must stage via TMA"
         assert "CUtensorMap" in src, "kernel must take the TMA descriptor param"
-
-
-@pytest.mark.xfail(strict=True, reason="fused value channel on tensor cores: not on this tree yet (PR #699)")
-def test_computed_a_symbolic_k_reaches_warp(monkeypatch):
-    """A COMPUTED-A contraction over a SYMBOLIC K — softmax(scores) @ V, the SDPA P@V edge under a
-    dynamic sequence — reaches the mma tier through the smem compute fill, whose K MASK covers the
-    last chunk's overhang: the cone's own reads clamp in-bounds and every slab lane past the
-    runtime extent stores the additive fold identity, so the drain still reads whole chunks. The
-    B peer clamps its overhanging slab ROW the same way (K is that slab's outer dim, so the
-    cp.async chunk stays contiguous). Without the mask the schedule refused the tier outright and
-    this shape had only the scalar rows."""
-    for k, v in {"TILE": _MASK_WARP[0], "WORK": _MASK_WARP[1], "STAGE": "d1/smem", "REDUCE": ""}.items():
-        monkeypatch.setenv(f"EMMY_{k}", v)
-    monkeypatch.setenv("EMMY_PLACE", "fuse")
-    lowered = Pipeline.build(CUDA_PASSES).run(_pv_softmax_graph(), ctx=Context(compute_capability=(12, 0)))
-    kop = lowered.nodes["o"].op
-    assert mma_atom(kop.knobs) == "mma_m16n8k16_f16_f32", "a computed-A symbolic-K contraction must reach the warp tier"
-    src = kop.kernel_source
-    assert "mma.sync.aligned.m16n8k16" in src and "int seq_len" in src
-    assert "for (int _ks = 0; _ks < seq_len;" in src, "the staged chunk loop must run to the runtime extent"
-    lines = src.splitlines()
-    score_loads = [ln for ln in lines if "scores[" in ln and "__half2float" in ln]
-    # Every fragment score load carries TWO clamps — the masked M row AND the runtime K — so no
-    # element ever reads past the scores buffer (the seq-16 dirty-pool OOB defect).
-    assert score_loads and all(ln.count("< seq_len) ?") == 2 for ln in score_loads), "score loads must clamp both M and K"
-    # The compute-filled A slab covers the WHOLE bk=32 chunk the ldmatrix drain reads: with 8-wide
-    # fragment column cells the store offsets must reach 24 (cells at K+0/8/16/24 — sizing the
-    # cells off the output tile's n.reg left K 16..31 uninitialized smem, the dirty-pool defect).
-    fill_stores = [ln for ln in lines if "_a_smem[" in ln and "__floats2half2_rn" in ln]
-    offs = {int(m.group(1)) for ln in fill_stores for m in re.finditer(r"_ks \+ (\d+) - _ks", ln)} | {0}
-    # The count is invariant under arithmetic simplification of the offset spelling; the offsets
-    # pin the spread (pre-fix: 8 stores at [0, 8]).
-    assert len(fill_stores) == 16 and max(offs) == 24, (
-        f"the A slab fill must cover the whole 32-element chunk ({len(fill_stores)} stores, offsets {sorted(offs)})"
-    )
-    masked = [ln for ln in lines if ">= seq_len) in0__f" in ln]
-    assert masked and all("-1e+30f" in ln for ln in masked), "the overhang must use the Fold identity"
-    fill = next(ln for ln in lines if "emmy_cp_async_c" in ln and "_b_smem" in ln)
-    assert "< seq_len) ?" in fill and "seq_len - 1" in fill, f"the B slab fill must clamp its overhanging K row: {fill}"
 
 
 # (label, env, seqs, make). ``make(seq)`` builds (graph, feed, want) for one off-hint runtime
@@ -1622,7 +1611,7 @@ def test_raster_fork_offers_both_orders(monkeypatch):
     """The enumeration carries the ``RASTER`` family on every contraction row — the flat ``""``
     and the ``gm8`` sibling — so the search can price them per shape (live-fork capture, no
     GPU). Non-contraction kernels never spell the key."""
-    from emmy.compiler.pipeline.search.golden_eval import enumerate_graph  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.ranking import enumerate_graph  # noqa: PLC0415
 
     g = _mma_matmul_graph("static", 1280, 2048, 1024, "f16", False)
     rows = enumerate_graph(g, Context.from_target((12, 0))).rows
@@ -1634,7 +1623,7 @@ def test_raster_symbolic_grid_stays_flat(monkeypatch):
     """A symbolic-M (masked-tile) grid renders through the dynamic decode path, which does not
     carry the swizzle — the enumeration must decide the flat ``""`` only there (offering ``gm8``
     would stamp a launch order the kernel doesn't realize: the silent-degrade family)."""
-    from emmy.compiler.pipeline.search.golden_eval import enumerate_graph  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.ranking import enumerate_graph  # noqa: PLC0415
 
     g = _mma_matmul_graph("dynamic", 1280, 2048, 1024, "f16", False)
     rows = enumerate_graph(g, Context.from_target((12, 0))).rows
@@ -1669,9 +1658,10 @@ def test_regstore_rewrite_preserves_atomic():
 #
 # The contract now: the row stride is DERIVED from the index (``_addr.gmem_row_stride``, which
 # recovers the flat coordinate a delinearizing reshape splits across components), the columns must
-# be gmem-CONTIGUOUS, and TMA additionally needs the axes on the descriptor's own two trailing
-# dims. What no loader can read is left unmapped and falls back — a transposed operand to the
-# per-cell scalar tier, a re-strided one off TMA onto cp.async / gmem-direct.
+# be gmem-CONTIGUOUS, and TMA additionally needs the axes in the same order as the logical slab on
+# the descriptor's own two trailing dims. What no loader can read is left unmapped and falls back —
+# a transposed operand to the per-cell scalar tier, a re-strided one off TMA onto cp.async /
+# gmem-direct.
 
 _IMAP_N = 64  # output columns, shared by every case below
 
@@ -1727,33 +1717,20 @@ def _imap_run(g: Graph) -> tuple[np.ndarray, str]:
 
 
 @requires_cuda
-@pytest.mark.parametrize("form", ["transpose_a", "reshape_b"])
-@pytest.mark.xfail(
-    run=False,
-    reason="reshape_b under cp.async hangs on a misaligned 16 B copy until the launch watchdog fires, "
-    "and the CUDA_ERROR_MISALIGNED_ADDRESS it returns sticks to the context for the rest of the process",
-)
-def test_operand_index_map_accuracy(form, monkeypatch):
-    """The two cp.async cells of the operand index-map matrix the realization corpus deliberately
-    holds no case for. ``transpose_a`` is a correct REFUSAL — a cp.async fill copies a contiguous
-    chunk per row and a transposed operand's columns are strided, so the transport has nothing to
-    express the copy with. ``reshape_b`` is the one row that FAULTS rather than returning a wrong
-    answer, which is why it must never be launched by the suite: it poisons the CUDA context for
-    every later test in the process. The other ten cells of this matrix are corpus cases, and they
-    record what the corpus found by actually running them — a silently wrong answer, not a fault."""
+@requires_sm(8)
+def test_reshaped_b_under_cp_async_matches_reference(monkeypatch):
+    """A re-strided B staged through cp.async: each copy chunk reads the index at its own
+    coordinates, so the derived row stride is what the fill copies."""
     monkeypatch.setenv("EMMY_STAGE", "d2/smem-async")
-    g, ref = _imap_graph(form)
+    g, ref = _imap_graph("reshape_b")
     got, _, ins = _imap_run(g)
     want = ref(ins)
     diff = np.abs(got - want).max()
-    assert diff < 5e-2 * max(1.0, np.abs(want).max()), f"{form}/cp.async: max abs err {diff}"
+    assert diff < 5e-2 * max(1.0, np.abs(want).max()), f"reshape_b/cp.async: max abs err {diff}"
 
 
-@pytest.mark.xfail(
-    run=False,
-    reason="pre-existing on clean main: the reshaped-A fragment faults and can poison the CUDA context",
-)
 @requires_cuda
+@requires_sm(8)
 def test_reshaped_a_fragment_takes_the_derived_row_stride(monkeypatch):
     """The gmem-direct mma fragment loader steps the reshaped A's rows at the DERIVED 128, not the
     buffer's declared trailing extent 256 — the ``ldm`` argument IS the bug, visible in the source."""
@@ -1764,21 +1741,41 @@ def test_reshaped_a_fragment_takes_the_derived_row_stride(monkeypatch):
     assert all(ln.endswith(", 128);") for ln in calls), f"A fragments must take ldm=128, got {calls}"
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="pre-existing on clean main: nvcc rejects the fallback kernel (undefined reshape-residue identifier)",
-)
+@pytest.mark.parametrize("form", ["reshape_a", "transpose_a"])
 @requires_cuda
-def test_reshaped_a_declines_tma_and_falls_back(monkeypatch):
+def test_an_operand_the_transports_cannot_copy_compiles_correct_unpinned(form):
+    """With no transport pinned, a re-strided or transposed A compiles to a kernel that reads it
+    correctly: the refused transports leave the loaders that can."""
+    g, ref = _imap_graph(form)
+    got, _, ins = _imap_run(g)
+    want = ref(ins)
+    diff = np.abs(got - want).max()
+    assert diff < 5e-2 * max(1.0, np.abs(want).max()), f"{form}: max abs err {diff}"
+
+
+def test_reshaped_a_tma_pin_is_refused(monkeypatch):
     """TMA's box is a rectangle in the DESCRIPTOR's coordinates, so a re-strided A has no
-    descriptor — the pin DECLINES and the row falls back to a correct transport rather than
-    copying the declared row pitch. The unmapped-falls-back half of the guardrail contract."""
+    descriptor: the pinned transport is refused rather than copying the declared row pitch."""
     monkeypatch.setenv("EMMY_STAGE", "d2/smem-tma")
-    _, imap_src, _ = _imap_run(_imap_graph("reshape_a")[0])
-    assert "cp.async.bulk.tensor" not in imap_src, "a re-strided A must not reach a TMA box copy"
+    with pytest.raises(ValueError, match="does not resolve for this contraction"):
+        _run_tile_pass(_imap_graph("reshape_a")[0])
+
+
+@requires_cuda
+@requires_sm(9)
+def test_sliced_a_still_stages_through_tma(monkeypatch):
+    """The canonical (sliced) A keeps its TMA box, so the refusal above is not a dead pin."""
     monkeypatch.setenv("EMMY_STAGE", "d2/smem-tma")
-    _, plain_src, _ = _imap_run(_imap_graph("slice_a")[0])
-    assert "cp.async.bulk.tensor" in plain_src, "the canonical (sliced) A still stages via TMA — the pin is not dead"
+    _, src, _ = _imap_run(_imap_graph("slice_a")[0])
+    assert "cp.async.bulk.tensor" in src
+
+
+def test_transposed_a_cp_async_pin_is_refused(monkeypatch):
+    """A cp.async fill copies A's rows in chunks along K, and a transposed A strides its columns:
+    the pinned transport is refused before its misaligned copy can hang the launch."""
+    monkeypatch.setenv("EMMY_STAGE", "d2/smem-async")
+    with pytest.raises(ValueError, match="does not resolve for this contraction"):
+        _run_tile_pass(_imap_graph("transpose_a")[0])
 
 
 def test_transposed_a_warp_pin_restricts_the_schedule_to_empty(monkeypatch) -> None:
@@ -1792,3 +1789,44 @@ def test_transposed_a_warp_pin_restricts_the_schedule_to_empty(monkeypatch) -> N
     tile = next(node.op for node in out.nodes.values() if isinstance(node.op, TileOp))
 
     assert not tile.place.is_mapped and tile.schedule is None
+
+
+def test_transposed_a_tma_pin_is_refused(monkeypatch) -> None:
+    """TMA cannot transpose a physical ``(K, M)`` box into the logical ``(M, K)`` shared slab.
+    Refuse the pinned transport before its invalid transaction can poison the CUDA context."""
+    monkeypatch.setenv("EMMY_STAGE", "d2/smem-tma")
+
+    with pytest.raises(ValueError, match="does not resolve for this contraction"):
+        _run_tile_pass(_imap_graph("transpose_a")[0])
+
+
+@requires_cuda
+def test_a_split_partition_is_never_a_fragment_column(monkeypatch):
+    """A split-K partial of ``sigmoid(x) @ W.T`` at one token reads its partition coordinate in both
+    operands (``x[p·bk + k]``, ``W[n, p·bk + k]``). Tiled as the fragment's columns, the staged W
+    slab served every column at the tile's first partition: 1024 of 1024 outputs were wrong on an
+    RTX 5090 (``REDUCE=g8k``, a synchronous compute fill of the sigmoid). A coordinate both operands
+    read is a batch, never a fragment row or column."""
+    from emmy.commands.trace import graph_from_code
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+
+    code = (
+        "(lambda x, w: torch.nn.functional.linear(torch.sigmoid(x), w))"
+        "(torch.randn(1, 1024, dtype=torch.float16), torch.randn(1024, 1024, dtype=torch.float16))"
+    )
+    graph = graph_from_code(code)[0]
+    for key, value in {"REDUCE": "g8k", "TILE": "mma_m16n8k16_f16_f32/f1x4", "WORK": "w4x1", "STAGE": "d1/smem", "PLACE": "fuse"}.items():
+        monkeypatch.setenv(f"EMMY_{key}", value)
+    rng = np.random.default_rng(0)
+    x = rng.standard_normal((1, 1024)).astype(np.float16)
+    w = (rng.standard_normal((1024, 1024)) / 32).astype(np.float16)
+    backend = CudaBackend()
+    try:
+        compiled = backend.compile(graph)
+    except ValueError as exc:  # the pinned tile may now be refused outright, which is the fix too
+        assert "does not resolve" in str(exc) or "no schedule row" in str(exc), exc
+        return
+    (out_name,) = compiled.outputs
+    result, _ = backend.run(compiled, input_data=dict(zip(compiled.inputs, (x, w), strict=True)))
+    reference = (1 / (1 + np.exp(-x.astype(np.float32)))) @ w.astype(np.float32).T
+    np.testing.assert_allclose(result.outputs[out_name].astype(np.float32), reference, rtol=2e-2, atol=2e-2)
