@@ -313,24 +313,27 @@ def _bind_plan_constants(plan, sources, cache):
     per-build numpy feeds would upload a second full on-GPU copy of the trunk (~2× the
     weight footprint). ``cache`` must be scoped to one wrapper — param paths are
     wrapper-relative, so a cross-wrapper cache would collide."""
+    from emmy.compiler.backend.cuda.program import _numpy_storage
     from emmy.compiler.backend.plan import apply_weight_loads
     from emmy.compiler.loader.binder import assemble_source
 
     out = {}
+    buffer_dtypes = {b.name: b.dtype for b in plan.buffers}
     for nid, w in plan.weights.items():
         src = assemble_source(w, sources)
         if src is None or w.load_ops is None:
             continue
+        dtype = buffer_dtypes[nid]
         if cache is None:
-            out[nid] = apply_weight_loads(src, w.load_ops)
+            out[nid] = _numpy_storage(apply_weight_loads(src, w.load_ops), dtype)
             continue
         import numpy as np
         import torch
 
-        key = (w.source_path, w.source_parts, w.generated, w.load_ops)
+        key = (w.source_path, w.source_parts, w.generated, w.load_ops, dtype.name)
         arr = cache.get(key)
         if arr is None:
-            arr = torch.from_numpy(np.ascontiguousarray(apply_weight_loads(src, w.load_ops))).cuda()
+            arr = torch.from_numpy(np.ascontiguousarray(_numpy_storage(apply_weight_loads(src, w.load_ops), dtype))).cuda()
             cache[key] = arr
         out[nid] = arr
     return out
@@ -508,6 +511,7 @@ def _compile_split(
 
     from emmy.compiler.backend.cuda.program import CompiledProgram
     from emmy.compiler.backend.gpu_lock import gpu_lock
+    from emmy.compiler.dtype import encode_bf16
 
     if plan is None:
         from emmy.compiler.backend.cuda.backend import CudaBackend
@@ -599,7 +603,10 @@ def _compile_split(
             # EXAMPLE's dtype, not the buffer's — a bf16 buffer also carries an integer numpy
             # dtype (the uint16 bits carrier) but arrives as a float tensor.
             return a.detach().cpu().numpy().astype(dt.np, copy=False)
-        return a.detach().cpu().to(torch.float32).numpy().astype(dt.np if dt is not None else np_dtype, copy=False)
+        values = a.detach().cpu().to(torch.float32).numpy()
+        if dt is not None and dt.name == "bf16":
+            return encode_bf16(values)
+        return values.astype(dt.np if dt is not None else np_dtype, copy=False)
 
     feed = {n: _np_in(n, a) for n, a in zip(plan.inputs, build_args, strict=True)}
     with gpu_lock():
