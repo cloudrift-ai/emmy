@@ -22,6 +22,21 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
 The opt-in native text server is a separate consumer of the Rust execution runtime. Its preparation and launcher
 contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains this integration's default.
 
+## Mixed Qwen3.8 NVFP4 text serving
+
+`emmy serve MODEL --runner generate --compile-scope mlp` registers a subclass of vLLM 0.23's Qwen3.5 hybrid model.
+Stock vLLM constructs and runs attention, GDN and recurrent state, norms, residuals, embeddings, the output head,
+and scheduling. The subclass replaces each dense text MLP before checkpoint loading and consumes only that MLP's
+packed ModelOpt NVFP4 keys. All other parameters and state interfaces remain stock vLLM's.
+
+`mlp.py` captures one standalone MLP graph per structural profile and compiles reusable BF16 packed programs.
+The initial RTX 5090 route pads decode to static M=16 and prefill to static M=64, returns only active output rows,
+and shares plans, constant uploads, and the buffer arena across the 64 layers. Symbolic prefill remains available
+through the lower-level program interface. Checkpoint values stay layer-specific even when plans share a profile.
+The serving recipe explicitly pins `FAST_MATH` and scoped placement, work, tile, and stage knobs for both shapes;
+their identities must be rechecked after compiler graph changes. Shared BF16 input, constant, NumPy reference, and
+device-output handling also serves the existing generation paths.
+
 ## Module map
 
 - `__init__.py` — `register()`, the entry-point hook. Never imports vllm/torch at module level. Besides registering
@@ -29,7 +44,7 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   nothing handles emmy's INFO records, which would silence the runners' boot/pack lines in `docker logs` — the
   gemma4 image's verify gate greps the "pack hit" line there (no-op when logging is already configured, e.g. the
   `emmy` CLI).
-- `vllm_model.py` — `EmmyEmbedModel` (the only module importing vllm). An `nn.Module` with **no parameters**:
+- `vllm_model.py` — `EmmyEmbedModel`. An `nn.Module` with **no parameters**:
   `is_pooling_model = True`, `IsAttentionFree` (no vLLM `Attention` layers → V1 builds an empty KV-cache spec),
   `attn_type = "encoder_only"` (vLLM disables chunked prefill → every request reaches `forward` whole),
   `pooler = DispatchPooler.for_embedding(...)` (last-token pooling + L2 normalize + matryoshka — identical to stock
