@@ -45,14 +45,27 @@ NVFP4 model serving or stock byte parity is established. The generation split fe
 view are covered, while complete BF16 `EmmyGenRunner.from_loaded` remains outside this extraction:
 that path still calls `np.dtype("bfloat16")` and needs a separate end-to-end qualification.
 
-The TMA GPU test is pending on this new branch. Local `cargo check --offline -p emmy-runtime` passes.
-The existing 5090 host has byte-identical runtime and test source files from PR #993 (both SHA256
-digests match this branch), but its running server occupies about 31.8 GiB. In a separate read-only
-GPU container, Emmy's device initialization returned `CUDA_ERROR_OUT_OF_MEMORY`; pytest skipped the
-TMA case because the runtime could not report its SM version. Automatic approval review rejected
-exporting new/base repository snapshots to that host, and separately rejected stopping the running
-server, citing missing explicit authorization for each action. Neither rejected action was retried
-through another route. The actual GPU capture/replay gate remains open.
+The affected test files passed **303 tests, 42 skipped** on the extracted branch. Local `make lint`,
+`cargo fmt`, and offline `cargo clippy` passed. `emmy golden check` found all **15 repository goldens
+current**; the full suite's golden and realization cases reported no stale rows. Local `make test`
+reported **5,563 passed, 1,231 skipped, 23 failed, 7 errors** on this Nix host. The failures involve
+spawned workers missing `libz.so.1`, scripts whose `#!/bin/bash` interpreter is absent, a C++/CUDA
+toolchain case, and the expert single-row exact-bit assertion. Four representative failures were
+rerun on unpatched main `754d1afa` and reproduced there: worker import, WGMMA build, shell slug,
+and expert single-row bit equality. No extracted-code failure was identified; the Linux CI suite
+for the PR is the portable final gate and remains pending at this report revision.
+
+The user later explicitly authorized source transfer and stopping the paused server, superseding
+two earlier automatic approval rejections. The preserved `emmy-final-8080` container was stopped
+and left stopped; PR #993 is paused. On its now-idle RTX 5090, isolated base and fixed source trees
+each rebuilt the actual `emmy.emmy_runtime` extension with `setuptools-rust` before testing.
+The same `test_first_program_graph_capture_prepares_tma_descriptors` failed on base `754d1afa`
+with `CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED` at first capture and passed on the fixed tree:
+capture before any warm launch, then replay with changed input (**1 passed in 0.68 s**).
+The existing mainstream generation W4A4 split GPU test also passed on the fixed tree. The new
+BF16 generation wrapper test failed on rebuilt base because it returned `torch.uint16` and passed
+on rebuilt fixed source with two different BF16 inputs, checking the BF16 output dtype and exact
+values (**0.87 s call**). These tests do not import the mixed serving adapter.
 
 ## Findings to retain for full Emmy NVFP4 work
 
@@ -82,7 +95,5 @@ Follow-up issues remain separate from the fixes above:
 
 ## Remaining qualification
 
-Run the real first-capture TMA regression against a rebuilt native extension on RTX 5090. Run the
-affected compiler, runtime, and existing generation tests on this branch; verify repository golden
-freshness and realization cases without re-recording rows; then run required full tests and lint.
-Publish the separate draft PR with exact test results and limits. PR #993 stays draft and paused.
+Review the Linux full-suite verdict and the final PR diff. The separate PR stays draft while that
+portable gate is open. No golden row has been re-recorded, and PR #993 stays draft and paused.
