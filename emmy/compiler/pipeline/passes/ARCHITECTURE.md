@@ -138,12 +138,10 @@ determined for one. The ownership test is `ops.output_regions` — every store m
 operands' cones over the root body must be disjoint and must cover it — and the piece takes the projection statements
 its own stores read. The seam decides between the two readings rather than offering both, on the same ground as the
 storage frontier: the workspace here would hold the output's exact bytes at the output's exact dtype, leaving the
-sibling nothing to do for them but copy. What earns the offer is RANK. A kernel whose stores ride axes with no axis in
-common promotes no sweep and keeps a one-axis grid, so its contraction sites can name no `(m, n)` pair; each store
-taken alone may promote its own, and the fork asks `TileOp`'s own `promoted_sweep` of the candidate piece to find out.
-Where the piece would promote nothing the kernel does not already, splitting buys a second launch and no grid, and the
-seam keeps its workspace reading — the pointwise NVFP4 quantize, whose branches own a store but hold no contraction
-reading it.
+sibling nothing to do for them but copy. Every independent output region offers this cut, including regions whose
+pieces use the same grid. The cut remains available after sibling producers fuse, so evidence can choose their
+boundaries again. A piece's grid follows `TileOp`'s `promoted_sweep`; separating stores whose axes differ can expose
+the `(m, n)` pair that a contraction's schedule needs.
 The producer piece is minted with its workspace axes as its store's SWEEP and an EMPTY placement, so the same rank
 rule decides its grid: an axis the piece's own reduce does not read is that reduce's row statistic, and binding it
 folds the statistic once per output cell. A free axis per workspace dimension did exactly that, and a materialized
@@ -157,12 +155,16 @@ rather than being cut off by any count or depth guard.
 Scoped `PLACE@path=cut` pins are authoritative and COMPOSE: every pin that resolves on
 one kernel joins a single realization — one producer per seam, one consumer, a producer reading another seam's
 workspace when its value nests inside (a normalized K cone contains the K-norm statistic cut beside it) — and all
-pieces set `placement_decided` and proceed to scheduling. A bare pinned cut consumes its one
-root-most cut the same way and may join scoped cuts in that single decision. A scoped pin whose site path does
-not exist on a kernel addresses another kernel of the graph; a kernel none of the pins address fuses, deterministic,
+pieces consume that placement restriction. Sibling workspace producers with the same workspace dependencies then
+lower to Loop IR, use the ordinary fusion splicer, and lift back to unscheduled Tile IR. The consumer stays outside
+that region, preserving the selected workspace edge. The fused producer re-enters the cut pass; an output-owning
+cut can separate it again without creating workspace producers to re-fuse. Input argument order and prior
+cross-CTA split receipts survive the round trip. Packed storage retains its required boundary. A bare pinned cut
+consumes its one root-most cut the same way and may join scoped cuts in that single decision. A scoped pin whose site
+path does not exist on a kernel addresses another kernel of the graph; a kernel none of the pins address fuses, deterministic,
 so the unpinned placement fork never returns under a pin-driven compile. A pin that resolves to an edge no cut
-realizes is an addressing error. Only unpinned cuts leave the pieces undecided, so search can explore their smaller
-seams before scheduling. The environment is the pass's one pin source (`knob.family_pins`); a measured route row
+realizes is an addressing error. Newly fused producers and pieces of unpinned cuts can expose smaller seams before
+scheduling. The environment is the pass's one pin source (`knob.family_pins`); a measured route row
 never becomes a pin — the deploy's evidence pick takes one of the pass's own offered arms with it
 (`pins.spelled_arm`), and every piece the arm mints is a brand-new kernel whose own forks consult its own rows. A
 row that names several of a kernel's seams (the composed decision a pinned compile consumed them as, written by

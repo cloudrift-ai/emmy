@@ -135,8 +135,7 @@ def _stale_route_reasons(document: GoldenFile, entry: Config) -> list[str]:
             continue
         checked.add(identity)
         reasons += [
-            f"{record.name}: route key {key!r} names no seam of the fresh lowering"
-            for key in unresolved_route_keys(record, keys, records)
+            f"{record.name}: route key {key!r} names no seam of the fresh lowering" for key in unresolved_route_keys(record, keys, records)
         ]
     return reasons
 

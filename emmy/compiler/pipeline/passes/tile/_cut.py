@@ -1177,7 +1177,7 @@ def realize(
     """Build the cut fragment for ``seams`` — one piece per seam plus the ONE sibling piece that
     reads what they produced. A single seam is the two-kernel cut; several seams are one COMPOSED
     placement decision (a pinned compile consumes every scoped PLACE pin that resolves on this
-    kernel at once, so the pieces stay decided and the knob row records every spelling).
+    kernel at once, and the knob row records every spelling).
 
     A frontier seam cuts at the cone's storage waypoint: the piece computes the encode prefix, the
     workspace holds the raw bits, and the sibling keeps the decode + factor residue as its operand
@@ -1186,8 +1186,8 @@ def realize(
     workspace, and the sibling keeps the rest; the two kinds compose, because a workspace cut nested
     under an output-owning region is applied to that region's term like any other consumer's.
 
-    ``placement_decided`` consumes an authoritative pinned PLACE restriction on every piece.
-    Unpinned cuts leave it false so fresh pieces can expose and decide smaller seams. A placement
+    ``placement_decided`` consumes an authoritative pinned PLACE restriction on each emitted piece.
+    Unpinned pieces and newly fused producers can expose and decide smaller seams. A placement
     cut never erases an earlier cross-CTA decision: every piece inherits the parent's explicit or
     sliced-axis split receipt."""
     tile: TileOp = root.op
