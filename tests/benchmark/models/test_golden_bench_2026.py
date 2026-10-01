@@ -105,7 +105,7 @@ def test_common_kernel_corpus_is_small_and_identical(project_root) -> None:
     ]
     assert recipe.command.strict is True
     assert recipe.command.result_files == ["artifacts.tar.gz"]
-    assert "pip freeze --all" in run
+    assert "./venv/bin/python -m pip freeze --all" in run
     assert "tar -C $task_dir" in run
 
 

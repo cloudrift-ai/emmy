@@ -30,8 +30,8 @@ command:
     finalize() {
       final_status=$$?
       trap - EXIT
-      if [ -x ./venv/bin/pip ]; then
-        ./venv/bin/pip freeze --all > $task_dir/requirements.freeze.txt || final_status=1
+      if [ -x ./venv/bin/python ]; then
+        ./venv/bin/python -m pip freeze --all > $task_dir/requirements.freeze.txt || final_status=1
       else
         echo "venv pip unavailable" > $task_dir/requirements.freeze.txt
         final_status=1
@@ -46,7 +46,7 @@ command:
 
     [ -d venv ] || make setup
     # A venv staged before the runtime was compiled lacks the extension; build it in place.
-    ./venv/bin/python -c 'import emmy.emmy_runtime' 2>/dev/null || ./venv/bin/pip install -q -e .
+    ./venv/bin/python -c 'import emmy.emmy_runtime' 2>/dev/null || ./venv/bin/python -m pip install -q -e .
     export EMMY_TUNE_DB=$task_dir/autotune.db
     export EMMY_ONLINE_FILE=$task_dir/online.json
     export EMMY_CUBIN_CACHE=$task_dir/cubins
