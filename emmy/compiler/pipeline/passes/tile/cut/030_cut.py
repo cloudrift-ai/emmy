@@ -125,6 +125,7 @@ def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str] | None:
     by_node = _seam_index(seams)
     cut: list = []
     fused: list[str] = []
+    addressed: list[tuple[str, str, object]] = []
     missing = False
     for name, value in pins:
         if name == "PLACE":
@@ -134,10 +135,10 @@ def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str] | None:
         except MissingSiteError:
             missing = True  # the key addresses a seam of another kernel in the graph
             continue
-        note_place_key(source_keys.get(name, name))
         if id(site.node) not in by_node:
             raise ValueError(f"PLACE pin {name!r} does not address a cuttable Fold edge in this kernel")
         seam = by_node[id(site.node)]
+        addressed.append((source_keys.get(name, name), value, seam))
         if value == "fuse":
             fused.append(seam.spelling)
         elif not any(chosen is seam for chosen in cut):
@@ -150,8 +151,14 @@ def _placement_restriction(tile: TileOp, seams) -> tuple[tuple, str] | None:
         if seam is not None and not any(chosen is seam for chosen in cut):
             cut.append(seam)
     if cut:
+        for original, value, seam in addressed:
+            if (value == "cut" and any(chosen is seam for chosen in cut)) or (value == "fuse" and seam.spelling in refused):
+                note_place_key(original)
         return tuple(cut), "cut"
     if fused:
+        for original, value, seam in addressed:
+            if value == "fuse" and seam.spelling in refused:
+                note_place_key(original)
         return (fused[0],), "fuse"
     for name, value in pins:
         if name != "PLACE":

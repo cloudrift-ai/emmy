@@ -420,8 +420,9 @@ def test_ir_ab_replay_retains_boolean_input_pins(tmp_path, monkeypatch):
     source.write_text("{}")
     monkeypatch.setattr(run_mod, "pinned_knobs", capture_pins)
     monkeypatch.setattr(run_mod, "_cuda_knob_dicts", lambda _graph: [{"TILE": "f2x4"}])
+    monkeypatch.setattr(run_mod, "_cuda_kernel_names", lambda _graph: [("k_mock", "k_mock")])
     monkeypatch.setattr(run_mod, "_placement_knob_dicts", lambda _graph: [])
-    monkeypatch.setattr(Graph, "from_dict", staticmethod(lambda _document: object()))
+    monkeypatch.setattr(Graph, "from_dict", staticmethod(lambda _document: Graph()))
 
     rows = asyncio.run(run_mod._bench_ab_variants_ir(Backend(), source, (), ["FAST_MATH=False,TILE=f2x4"], warmup=1, iters=2))
 
@@ -989,7 +990,7 @@ def test_ab_json_labels_each_row_with_its_lane(tmp_path, monkeypatch):
     def _node(knobs):
         return _FakeNode(SimpleNamespace(kernel_name="k_matmul", smem_bytes=0, knobs=knobs), "k_matmul")
 
-    greedy_graph, fm_graph, std_graph = object(), object(), object()
+    greedy_graph, fm_graph, std_graph = (SimpleNamespace(hints={}) for _ in range(3))
 
     def _nodes(graph):
         knobs = _classic_row(tile="mma_m16n8k16_f16_f16/f2x2/k4") if graph is fm_graph else _classic_row(work="t32x8", tile="f2x8")
@@ -1484,6 +1485,34 @@ def test_bind_inputs_preserves_bf16_bits_for_inputs_and_constants():
         _comparison_outputs({"x": bound["x"]}, g)["x"],
         np.array([1.0, -2.0], dtype=np.float32),
     )
+
+
+def test_packed_fp4_correctness_decodes_signed_zero_but_rejects_other_codes():
+    import numpy as np
+
+    from emmy.commands.run import _check_accuracy, _comparison_outputs, _eager_outputs_by_name, _wrong_answer_flag
+    from emmy.compiler import dtype as dt
+    from emmy.compiler.graph import Graph, Tensor
+    from emmy.compiler.ir.base import InputOp
+
+    graph = Graph()
+    graph.add_node(op=InputOp(), inputs=[], output=Tensor("packed", (1, 2), dt.F4E2M1x2), node_id="packed")
+    graph.inputs = graph.outputs = ["packed"]
+
+    emmy = _comparison_outputs({"packed": np.array([[0x88, 0x21]], dtype=np.uint8)}, graph)
+    eager = _eager_outputs_by_name(emmy, torch.tensor([[0x00, 0x21]], dtype=torch.uint8), graph)
+    assert _wrong_answer_flag(emmy, eager) is None
+    assert _check_accuracy(emmy, eager) is None
+    for changed in (0x22, 0x31):
+        bad = _comparison_outputs({"packed": np.array([[0x88, changed]], dtype=np.uint8)}, graph)
+        assert _wrong_answer_flag(bad, eager) is not None
+
+    opaque = Graph()
+    opaque.add_node(op=InputOp(), inputs=[], output=Tensor("packed", (1, 2), dt.U8), node_id="packed")
+    opaque.inputs = opaque.outputs = ["packed"]
+    bits = _comparison_outputs({"packed": np.array([[0x88, 0x21]], dtype=np.uint8)}, opaque)
+    assert bits["packed"].dtype == np.uint8
+    np.testing.assert_array_equal(bits["packed"], [[0x88, 0x21]])
 
 
 def test_bind_inputs_arity_mismatch_raises():

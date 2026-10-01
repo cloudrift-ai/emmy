@@ -125,3 +125,34 @@ def test_a_family_pinned_off_is_realized_by_a_kernel_that_never_stamps_it() -> N
 
     # A non-OFF pin the kernel never stamps is still a miss.
     assert unreproducible_pin_flag({"TILE": "f4"}, per_cell) is not None
+
+
+def test_piece_site_pin_requires_applied_local_receipt_and_resolved_source() -> None:
+    original = "PLACE@place_abc123/map.1/inner"
+    local = [{"PLACE@map.1/inner": "cut"}]
+    assert unreproducible_pin_flag({original: "cut"}, [{}], placement_knobs=local, applied_place_pins={original: "cut"}) is None
+    assert unreproducible_pin_flag({original: "cut"}, [{}], placement_knobs=local, applied_place_pins={}) is not None
+    assert unreproducible_pin_flag({original: "fuse"}, [{}], placement_knobs=local, applied_place_pins={original: "cut"}) is not None
+    assert unreproducible_pin_flag({original: "cut"}, [{}], placement_knobs=[{"PLACE": "fuse"}], applied_place_pins={}) is not None
+    other = "PLACE@place_abc123/map.2/inner"
+    assert (
+        unreproducible_pin_flag(
+            {original: "fuse", other: "fuse"},
+            [{}],
+            placement_knobs=[{"PLACE": "fuse"}],
+            applied_place_pins={original: "fuse", other: "fuse"},
+        )
+        is None
+    )
+
+
+def test_scoped_kernel_pin_supersedes_bare_only_on_its_own_kernel() -> None:
+    names = [("__place_a1", "linear_0"), ("__place_b2", "linear_1")]
+    pins = {"WORK": "w1x4", "WORK@place_a1": "w1x1"}
+    assert unreproducible_pin_flag(pins, [{"WORK": "w1x1"}, {"WORK": "w1x4"}], kernel_names=names) is None
+    assert unreproducible_pin_flag(pins, [{"WORK": "w1x1"}, {"WORK": "w1x2"}], kernel_names=names) is not None
+    assert unreproducible_pin_flag(pins, [{"WORK": "w1x2"}, {"WORK": "w1x4"}], kernel_names=names) is not None
+    # An explicit scoped OFF overrides the bare value on exactly its target.
+    off = {"TILE": "f1x2", "TILE@place_a1": ""}
+    assert unreproducible_pin_flag(off, [{"TILE": ""}, {"TILE": "f1x2"}], kernel_names=names) is None
+    assert unreproducible_pin_flag(off, [{"TILE": ""}, {"TILE": "f1x1"}], kernel_names=names) is not None

@@ -33,6 +33,7 @@ _ANY_THREAD_WORK = Work(kind="thread", units=(32, 1))
 #: Graph hint carrying the final greedy resolution's placement receipts. Placement is consumed by
 #: a graph splice before CUDA kernels exist, so this is the realized side of a PLACE pin check.
 PLACEMENT_DECISIONS_HINT = "search.placement_decisions"
+PLACEMENT_APPLIED_PINS_HINT = "search.placement_applied_pins"
 
 
 def parse_reduce(spec: str) -> Reduce | None:
@@ -136,6 +137,7 @@ def unreproducible_pin_flag(
     placement_knobs: list[dict] | None = None,
     reject_conflicts: bool = False,
     kernel_names: list[tuple[str, ...]] | None = None,
+    applied_place_pins: dict[str, str] | None = None,
 ) -> str | None:
     """Describe pins not realized by any compiled CUDA kernel, or return ``None``.
 
@@ -160,12 +162,30 @@ def unreproducible_pin_flag(
             if placement_knobs is None:
                 continue  # callers without a resolution trace cannot gate a splice receipt
             realized_knobs = placement_knobs
+            # A child-site pin addresses a named piece, while the structural
+            # receipt uses a site name local to that piece. The cut pass records
+            # an exact source-key/value receipt only after applying its choice.
+            if "/" in (axis_of(label) or "") and applied_place_pins is not None:
+                if label in applied_place_pins and values_equal(label, want, applied_place_pins[label]):
+                    continue
         elif kernel_scoped(label) and kernel_names is not None:
             realized_knobs = [
                 knobs for knobs, names in zip(kernel_knobs, kernel_names, strict=True) if any(reaches(label, name) for name in names)
             ]
         else:
             realized_knobs = kernel_knobs
+            if name == fam and kernel_names is not None:
+                # A kernel-scoped pin supersedes the bare family pin on that
+                # kernel, including when the scoped value is OFF. Other kernels
+                # remain subject to the bare pin and are still checked below.
+                scoped = [key for key in pinned if family_of(key) == fam and kernel_scoped(key)]
+                realized_knobs = [
+                    raw
+                    for raw, names in zip(kernel_knobs, kernel_names, strict=True)
+                    if not any(any(reaches(key, kernel) for kernel in names) for key in scoped)
+                ]
+                if not realized_knobs:
+                    continue
         probe = want
         if fam == "REDUCE":
             # Likewise a realized cross-CTA split — but only its ``g<n>`` stage is structural,
