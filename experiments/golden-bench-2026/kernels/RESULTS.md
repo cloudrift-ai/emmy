@@ -1,5 +1,94 @@
 # Golden-bench kernel corpus
 
+## Five-card baseline before the next optimization round (2026-10-01)
+
+The current pinned kernels still pass correctness on all five exact cards. Eight of the ten same-input Hugging Face
+layer comparisons favor Emmy. V100 decode remains slower than `torch.compile`, and H100 prefill retains a smaller
+loss. A100 prefill is close enough to parity that its lead is timing-sensitive. These measurements validate the
+existing selections; they do not measure a new compiler optimization.
+
+The target is Qwen3-0.6B at revision `c1899de289a04d12100db370d81485cdf75e47ca`, layer 0, sequence lengths 1 and
+512. Every model-form process compares eager, `torch.compile` and Emmy on the same inputs, with deployable O3,
+`EMMY_FAST_MATH=0`, 10 warmups and 100 iterations. The committed exact-card golden supplies measured evidence.
+Five fresh-process golden replays follow each model comparison, with strict correctness and strict evidence. Each
+repeat has a separate tune database and disables recording new measurements, so an early repeat cannot change a
+later repeat's kernel selection.
+
+Captured whole-forward latency in microseconds. Ratio is `torch.compile` / Emmy; above 1 means Emmy is faster.
+
+| Card | s1 Emmy | s1 `torch.compile` | s1 ratio | s512 Emmy | s512 `torch.compile` | s512 ratio |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| RTX 5090 | 20.534 | 25.892 | 1.261× | 130.160 | 138.625 | 1.065× |
+| RTX 4090 | 26.359 | 29.180 | 1.107× | 156.501 | 162.992 | 1.041× |
+| A100 40GB | 53.356 | 57.534 | 1.078× | 179.541 | 181.409 | 1.010× |
+| H100 80GB | 30.051 | 31.650 | 1.053× | 86.757 | 81.869 | 0.944× |
+| V100 SXM2 16GB | 71.360 | 58.628 | 0.822× | 501.760 | 643.811 | 1.283× |
+
+The five strict golden replays give the following median and full range, in microseconds. These are a separate
+input and timing path; use the same-input model-form table above for comparisons with `torch.compile`.
+
+| Card | s1 median [range] | s512 median [range] |
+| --- | ---: | ---: |
+| RTX 5090 | 20.531 [20.528–20.553] | 129.844 [129.480–130.472] |
+| RTX 4090 | 26.440 [26.347–26.458] | 156.315 [155.819–156.331] |
+| A100 40GB | 53.207 [52.470–53.895] | 179.541 [178.176–180.053] |
+| H100 80GB | 25.600 [25.188–25.715] | 88.707 [88.275–88.851] |
+| V100 SXM2 16GB | 71.552 [71.270–72.000] | 499.200 [491.008–501.760] |
+
+All ten recipe rows succeeded, and all 50 strict replays passed. Every replay matches its paired model run's ordered
+CUDA source hashes, schedules and shared-memory sizes. Decode uses
+16 launches on each card; prefill uses 12 on A100, H100, RTX 4090 and RTX 5090, and 21 on V100. Both compiled
+model-form backends pass the scaled accuracy check. The strict golden checks use the existing tolerance without
+changes. Historical speedup ratios are not a controlled compiler comparison: the software environment and reference
+timings have changed, especially on RTX 5090. Candidate acceptance needs contemporaneous baseline and candidate
+processes, not a comparison with a previous day's reference time.
+
+The first run exposed two validation problems. The format change in #1007 had left all ten benchmark goldens
+unreadable. Conversion through the preceding compiler's importer recovered 144 per-kernel measurements and 61
+routing decisions without new measurements. The 41 older aggregate timings remain in the migration audit archive;
+they are not per-kernel performance rows in the current format. All ten converted files pass fresh-lowering checks.
+Automatic golden replay also treated a descendant's schedule as whole-target pins when its row supplied the target
+name. That produced failing extra prefill variants despite correct model-form and greedy golden results. Automatic
+replay now uses descendant rows as measured evidence and only pins rows that measure the complete target.
+
+The initial failed attempts remain in the raw archive. Their timings were not recorded over the committed evidence.
+V100's first prefill replay was interrupted while the CPU was compiling placement alternatives; later complete
+repeats show that the delay was compilation, not a GPU hang. A copied V100 virtual environment also retained old
+launcher paths. Its benchmark used the intended task code, as a neutral-directory import audit confirmed. Both the
+original and task environment registrations were restored and verified, with no other package changes. H100's
+benchmark used the correct task interpreter, but its original package-freeze command used an old pip launcher.
+The raw freeze is preserved beside a separate audit and corrected freeze. The recipe now captures packages through
+the benchmark's Python interpreter.
+
+The baseline source is `5694af721`; V100 uses the equivalent cherry-picked changes at `dea05fd94`. The exact GPU
+UUIDs are unchanged from the September 30 table below. Package freezes and system records retain the full environment.
+All cards use Transformers 5.14.1. The compiler toolkit and PyTorch package versions are listed separately because
+they need not use the same CUDA libraries.
+
+| Card | PyTorch package | Triton | nvcc | Driver |
+| --- | --- | --- | --- | --- |
+| RTX 5090 | 2.14.1 | 3.8.0 | 13.0.88 | 580.173.02 |
+| RTX 4090 | 2.14.1 | 3.8.0 | 13.3.73 | 580.159.03 |
+| A100 40GB | 2.14.1 | 3.8.0 | 12.9.41 | 580.173.02 |
+| H100 80GB | 2.14.0 | 3.8.0 | 12.9.41 | 580.178.04 |
+| V100 SXM2 16GB | 2.13.0+cu126 | 3.7.1 | 12.9.86 | 580.178.04 |
+
+Raw snapshots are Git LFS archives in this experiment directory. Each root below contains its two system-only
+`<variant>.experiment.yaml` records, `<variant>/torch-compile/model.json`, five
+`<variant>/verification/repeat-N` JSON files and their status files, the working golden, package freeze and logs.
+
+| Archive | Root member | Run ID |
+| --- | --- | --- |
+| `results_rtx5090x1.tar.gz` | `2026-10-01_17-14-41/` | `20261001T171441Z` |
+| `results_rtx4090x1.tar.gz` | `2026-10-01_17-24-20/` | `20261001T172420Z` |
+| `results_a100x1.tar.gz` | `2026-10-01_17-28-34/` | `20261001T172834Z` |
+| `results_h100x1.tar.gz` | `2026-10-01_17-17-59/` | `20261001T171759Z` |
+| `results_v100x1.tar.gz` | `2026-10-01_17-12-12/` | `20261001T171212Z` |
+
+`tuning_baseline_2026-10-01.tar.gz` retains these baseline runs, the initial terminal failed runs, and the environment
+audits under `2026-10-01/{baseline,initial,provenance}/`. `tuning_migration_2026-10-01.tar.gz` retains the original
+goldens and the import audit. No user-owned GPU instance was stopped or deleted.
+
 ## Post-cut producer fusion compatibility (#1003)
 
 All ten golden files have been updated for producer fusion after a cut. Twenty ordinary output-cut routing rows
