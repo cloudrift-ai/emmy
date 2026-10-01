@@ -177,24 +177,43 @@ __launch_bounds__(256) void k_rms_norm_reduce(const float* x, const float* p_wei
 }
 ```
 
-## Fit the offline prior
+## Fit the priors
 
-The offline prior is the cold-start ranker a compile falls back on where nothing was measured. It is fitted on the
-golden files, GPU-free, and ships in the repo as `emmy/compiler/pipeline/search/prior/weights/offline.json`.
+Two priors ship in the repo, both fit GPU-free on the golden files and consulted by a compile only where nothing was
+measured: the **schedule prior** (`emmy/compiler/pipeline/search/prior/weights/schedule.json`) ranks a kernel's
+schedule rows, and the **placement prior** (`weights/placement.json` beside it) ranks the arms of a placement fork —
+keep the kernel fused, or cut one of its seams.
 
 ```bash
 # 1. Load the hardware goldens into a DB of their own (--fresh: it then holds exactly these files)
 emmy db import --db _data/dataset.db --fresh emmy/compiler/pipeline/search/golden/records/*.json
-# 2. Export its rows as the dataset: every golden pool enumerated and featurized, every measured pool
-emmy db export --db _data/dataset.db _data/dataset
-# 3. Fit the offline prior from it, rewriting the checked-in weights file
-emmy fit _data/dataset emmy/compiler/pipeline/search/prior/weights/offline.json
-# 4. Where each golden row now ranks among the candidates its kernel offers, under the shipped weights
-emmy eval prior _data/dataset
+# 2. Export one dataset per space: every golden pool enumerated and featurized, or every placement fork's arms
+emmy db export --db _data/dataset.db _data/schedule --space schedule
+emmy db export --db _data/dataset.db _data/placement --space placement
+# 3. Fit each prior from its dataset, rewriting the checked-in weights file
+emmy fit _data/schedule emmy/compiler/pipeline/search/prior/weights/schedule.json
+emmy fit _data/placement emmy/compiler/pipeline/search/prior/weights/placement.json
+# 4. Where each golden decision ranks under the shipped weights, and what the greedy would pick with no measurement
+emmy eval prior _data/schedule
+emmy eval prior _data/placement
 ```
 
-Additionally, `emmy fit` writes a metrics file under `_tune/fits/<timestamp>-linear/`; two fits
-are compared by diffing their metrics files.
+`emmy fit` also writes a metrics file under `_tune/fits/<timestamp>-linear/`; two fits are compared by diffing their
+metrics files.
+
+**The reproduction gate.** `tests/compiler/pipeline/search/prior/test_reproduction.py` re-decides every repository
+golden with the shipped priors and no measurement in scope: the hardware goldens' placement forks exactly (the
+placement prior is fit on them), every other file at least at the rate its `FLOORS` entry records — a ratchet, raised
+when a refit improves it. The placement half runs in `make test`; the schedule half re-walks every kernel's pool and
+runs under `make test-priors`. A red node names the rows the prior cannot reproduce. Refit after any change to a
+hardware golden. Where the rows are a model golden's, extend the card's hardware golden with them first, then refit:
+
+```bash
+emmy golden extract recipes/<model>/golden/<card>.json \
+    emmy/compiler/pipeline/search/golden/records/<card>.json --kernel NAME
+```
+
+Never lower a floor to make a node green without naming, in the PR body, the change that moved it.
 
 ## Benchmark
 

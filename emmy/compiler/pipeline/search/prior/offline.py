@@ -13,7 +13,7 @@ set selected on the ``S_ext_n_symbolic_axis`` stamp) or :mod:`.catboost_model` (
 neither — a tree splits on the routing stamp and forms the interaction from its two columns). This class is the
 adapter that turns a knob dict into features and satisfies the ``Prior`` contract around whichever one it holds.
 
-The model lives in the repo-checked artifact ``weights/offline.json`` beside this module (override with
+The model lives in the repo-checked artifact ``weights/schedule.json`` beside this module (override with
 ``EMMY_OFFLINE_FILE`` / ``emmy eval … --offline-file`` to A/B a candidate fit), written by ``emmy fit DATASET
 WEIGHTS`` jointly over EVERY kernel regime — fp32-scalar / fp16-warp matmul, cooperative reduce, and pointwise
 goldens — so one model ranks them all. Its ``kind`` field names the model class and :func:`_load_artifact`
@@ -36,7 +36,7 @@ from emmy.compiler.pipeline.search.prior.base import Prior
 from emmy.compiler.pipeline.search.prior.catboost_model import CatBoostModel
 from emmy.compiler.pipeline.search.prior.linear_model import LinearModel
 
-_DEFAULT_FILE = Path(__file__).parent / "weights" / "offline.json"
+_DEFAULT_FILE = Path(__file__).parent / "weights" / "schedule.json"
 _PLACEMENT_FILE = Path(__file__).parent / "weights" / "placement.json"
 
 

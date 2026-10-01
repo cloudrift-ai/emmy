@@ -10,7 +10,7 @@ import re
 import tempfile
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from enum import StrEnum
 from pathlib import Path
 
@@ -266,6 +266,35 @@ class GoldenFile(Wire):
             if temporary is not None and temporary.exists():
                 temporary.unlink()
         return destination
+
+    def absorb(self, other: GoldenFile, kernels: Sequence[str]) -> int:
+        """Copy in every config of ``other`` (a golden of the same card) whose rows name a kernel matching one of
+        ``kernels`` — a substring of a realization name, the ``--kernel`` narrowing every prior command takes —
+        with the program and the target it references, so this file's pools gain those rows: how a hardware
+        golden is extended with the rows a prior cannot reproduce. A config already here (same target, same row
+        names) is skipped. Returns the configs added."""
+        if (self.gpu_name, tuple(self.compute_cap)) != (other.gpu_name, tuple(other.compute_cap)):
+            raise ValueError(f"{other.gpu_name} sm_{other.compute_cap} rows cannot join a {self.gpu_name} sm_{self.compute_cap} golden")
+        programs = {_document_text(program): i for i, program in enumerate(self.programs)}
+        loops = {_document_text(loop): i for i, loop in enumerate(self.loops)}
+        present = {(entry.target.loop, tuple(row.name for row in entry.realizations)) for entry in self.configs}
+        added = 0
+        for entry in other.configs:
+            if not any(kernel in row.name for row in entry.realizations for kernel in kernels):
+                continue
+            loop = loops.setdefault(_document_text(other.loops[entry.target.loop]), len(self.loops))
+            if loop == len(self.loops):
+                self.loops.append(other.loops[entry.target.loop])
+            program = None
+            if entry.program is not None:
+                program = programs.setdefault(_document_text(other.programs[entry.program]), len(self.programs))
+                if program == len(self.programs):
+                    self.programs.append(other.programs[entry.program])
+            if (loop, tuple(row.name for row in entry.realizations)) in present:
+                continue
+            self.configs.append(replace(entry, program=program, target=replace(entry.target, loop=loop)))
+            added += 1
+        return added
 
     def check(self, *, repository: bool = False) -> None:
         """The rules the declarations cannot say: pool references resolve, pins name known knobs, a

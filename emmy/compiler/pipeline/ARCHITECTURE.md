@@ -66,8 +66,9 @@ rule that measured evidence applies only to a compile at deployable `-O3` flags.
 
 Structural forks — the ones that change which kernels exist — follow the same rule. A decision the tune DB stores on
 the kernel (a **routing row** — a golden's cut or split, imported as one) is priced as the sum of its pieces' fastest
-rows, and outranks arms whose price is a Σ of nested predictions. With no measured arm the compiler compares
-whole-kernel-set costs, priced by measurements where they exist and by the prior for the remainder (Part 4).
+rows, and outranks arms whose price is a Σ of nested predictions. With no measured arm, a placement fork goes to the
+placement prior, which ranks keep-fused and every offered cut from the kernels each arm leaves; a split fork compares
+whole-kernel-set costs, priced by measurements where they exist and by the schedule prior for the remainder (Part 4).
 
 ### The four stores
 
@@ -94,10 +95,10 @@ golden import (once per digest) ─────▶ perf table   (autotune.db) �
                                                                          kernel-set forks
 emmy db import ◀─ freezes, goldens, tune DBs ─▶ dataset DB (_data/dataset.db) ─▶ emmy db export ─▶ dataset (_data/dataset)
 dataset (manifest.json + one matrix per pool) ─┬▶ emmy eval prior (never a deploy)
-                                               └▶ emmy fit ─▶ weights/offline.json (repo)
+  one per space: _data/schedule, _data/placement └▶ emmy fit ─▶ weights/schedule.json, weights/placement.json (repo)
 recorded from those rows ────────────▶ recipe-local / hardware golden file ──▶ greedy compile (golden rows: the
                                                                               card's files, or --golden PATH)
-                                       weights/offline.json ──────────────▶ greedy compile, the prior
+                                       weights/schedule.json, placement.json ▶ greedy compile, the priors
 ```
 
 Everything above is measured in ONE regime: the deployable one a compile runs in. A bench runs at the flags a deploy
@@ -400,15 +401,24 @@ box, say — and it answers nowhere else, because measured evidence outranks it 
 
 `OfflinePrior` scores a candidate with a linear formula over the `D_*` features — hand-designed descriptions of a
 tile's geometry and its occupancy — fitted ahead of time. It never falls back on the order the rule emitted its
-options in. The complete scoring function lives in the repo-checked artifact `search/prior/weights/offline.json`:
+options in. The complete scoring function lives in the repo-checked artifact `search/prior/weights/schedule.json`:
 both weight sets plus the scalar params, carrying a `feat_ver` version and a `provenance` block. The offline fitter
 writes it (`search/prior/fit/`, driven by `emmy fit`). The training pools are the golden groups of the dataset
 `emmy db export` writes (`db/export.py` over `search/ranking.build_golden_groups`, Part 8): one per kernel, card,
 regime and sizes a golden file recorded a row on, enumerated from the kernel's own definition — the fit reads the
 directory and enumerates nothing.
 
-`weights/offline.json` is the one artifact anything loads by default. A sibling file in that directory is a **scoped
-experiment**, not a second default: `weights/offline_matmul_rtx5090.json` is fit on RTX 5090 matmul goldens alone and
+**The placement prior** is the same model class over another space. `weights/placement.json` ranks the arms of a
+placement fork — keep fused, or cut one offered seam — each featurized as `P_*` columns from the `S_*` stamps of the
+kernels the arm leaves (`ranking.arm_features`: the piece count, each stamp summed and maxed over the pieces). Its
+dataset is `emmy db export --space placement`: one pool per placement fork of every golden kernel, walked through
+the lift and the cut pass only (`ranking.walk_placement`), the arm the routing row recorded marked — keep fused where
+none was. The greedy asks it at a placement fork no routing row decides (`policy/greedy._placement_pick`), with the
+same featurizer, so the dataset's rank and the deploy's pick are one computation. Both artifacts name their `space`,
+and a reader refuses the other's.
+
+`weights/schedule.json` is the one schedule artifact anything loads by default. A sibling file in that directory is a
+**scoped experiment**, not a second default: `weights/offline_matmul_rtx5090.json` is fit on RTX 5090 matmul goldens alone and
 is reached only by pointing `EMMY_OFFLINE_FILE` (or `--offline-file`) at it. Each such file says so in its
 `provenance.scope`; read that before drawing conclusions from one, because a scoped artifact has no reason to beat
 the shipped weights outside the slice it was fit on.
@@ -568,8 +578,10 @@ value carries; an arm whose cut seams are not on this ballot decides nothing). A
 outranks every arm priced by nested resolution (a Σ that may hold predictions); among measured arms the fastest wins;
 strict evidence refuses a kernel-set fork no measured arm decides — a fork with more than one arm left, that is: a
 hand pin that leaves one arm decides it, which is how a kernel set gets recorded under strict evidence before its
-routing row exists, and the strict check then falls on the pieces. With no measured arm the arms are priced exactly as
-Part 4 describes (`_priced_pick`, the streamed fused-vs-splice comparison, the serial-work floor). Nothing is
+routing row exists, and the strict check then falls on the pieces. With no measured arm, a placement fork goes to the
+placement prior (`_placement_pick`: its argmin over the arms' `P_*` rows, the fused arm included) when the shipped
+placement weights load; a split fork, and every kernel-set fork without those weights, is priced exactly as Part 4
+describes (`_priced_pick`, the streamed fused-vs-splice comparison, the serial-work floor). Nothing is
 installed on the kernel: a piece a cut or split mints is a brand-new kernel (`knob.consume_kernel_row` strips every
 decision family and every feature), its own forks consult the rows of its own signature, and a piece that fails to
 lower re-ranks at its own forks and, once no row of it binds, retires the one cut that minted it (`Pipeline.run`'s
@@ -793,7 +805,8 @@ knob pick (the tune DB's measured rows and the golden rows, model prediction onl
 sum-of-predictions comparison would be exposed to the model's absolute-µs error, which doesn't cancel across
 different kernel families, and that is a fitting requirement on the prior. When a splice cannot be priced at all,
 the pricing decides nothing and every leaf — cuts included — goes on to the ordinary leaf ranking
-(`_priced_pick`, the flat-list form kept for exactly these corners). **No leaf is
+(`_priced_pick`, the flat-list form kept for exactly these corners). A placement fork never reaches this pricing
+while the placement prior loads: `_placement_pick` ranks its arms directly, no nested resolution. **No leaf is
 withheld to keep a kernel set unchanged.** The one thing that does withdraw every splice is `price_structural=False`,
 which is not about speed: it is how a nested price probe avoids re-splitting the slice it is pricing, and how a
 pipeline that ends between `tile/cut` and `tile/schedule` resolves its cut forks — a price is a scheduled row, which
@@ -1260,9 +1273,12 @@ lands in the record.
 
 ## Part 8: Evaluating the prior and the goldens (`emmy eval`)
 
-`emmy eval prior` is how you find out whether the prior is any good and, when it isn't, where it goes wrong. It runs
-over a dataset `emmy db export` wrote — its golden pools or its measured pools — and scores them with the prior a
-compile loads (`load_prior`), or with the artifact `--offline-file` names.
+`emmy eval prior` is how you find out whether a prior is any good and, when it isn't, where it goes wrong. It runs
+over a dataset `emmy db export` wrote — its golden pools or its measured pools — and scores them with the shipped
+prior of the dataset's space, or with the artifact `--offline-file` names. Beside the ranks it re-decides every pool
+with no measurement in scope (`prior/reproduce.py`: the greedy tile lowering against the closest golden row; the cut
+pass with the placement prior deciding against the golden's arm) — the deploy-faithful check the reproduction gate in
+`make test` asserts a rate on, per repository golden (README, "Fit the priors").
 
 **Two datasets, two questions, one report.** `search/prior/report.py` assembles both into one serialisable schema
 (`--json`), so comparing two models is a `diff`. `emmy fit` writes the same summaries into its `metrics.json`, through

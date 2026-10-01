@@ -47,8 +47,9 @@ relevant `ARCHITECTURE.md` before answering.
   or the file `--golden PATH` names) are imported into it before the compile picks, once per golden digest. NOTE:
   those commands resolve forks through ONE measured-evidence pick — this DB's `perf` rows and the golden rows among
   them, ranked fastest-first; a kernel-set decision (a routing row, a golden's cut or split) is priced as the sum of
-  its pieces' rows; and the offline prior (`OfflinePrior`, fit by `emmy fit`, shipped as `weights/offline.json`)
-  decides only where nothing was measured; `--strict-evidence` turns that fall-through into an error. `run --golden
+  its pieces' rows; and the priors (fit by `emmy fit`: the schedule prior `weights/schedule.json` for a kernel's
+  schedule rows, the placement prior `weights/placement.json` for a placement fork's arms) decide only where nothing
+  was measured; `--strict-evidence` turns that fall-through into an error. `run --golden
   PATH --bench` writes what it measures back into this DB (`--record` / `--record-greedy` write the golden file too),
   which is how a golden row becomes what the next compile picks. Use the README architecture index for the prior
   and the evidence design.
@@ -179,20 +180,21 @@ it before answering any CLI-flag question. Quickstart for the common paths:
 | `emmy serve <model> [--runner generate] [--bench] [vllm flags…]` | serve via vLLM, or opt into native text serving with `--runner generate --native` |
 | `emmy compile <model_or_ir> [--layer N] [--ir STAGE] [--dynamic …] [--target sm_NN]`, `emmy compile --golden PATH --program N --ir loop -o fresh.json` | trace + run the compiler; print or save any IR stage; lower a golden's stored program and write the stage as the golden's wire |
 | `emmy run <model_or_ir_or_--code> [--bench]` | compile + execute on the CUDA backend, check accuracy, optionally bench vs eager / `torch.compile` |
-| `emmy eval {prior,golden} …` | `eval prior DATASET [--pools {golden,measured}]` scores a dataset's pools with the offline prior; `eval golden --golden PATH --serving-config PATH` audits a golden against its serving matrix |
-| `emmy golden {check,restamp} [PATH…]`, `emmy golden kernels PATH [--program N]` | name the stored targets a fresh lowering of a golden's programs no longer writes; rewrite the golden onto that lowering (every repository golden by default); print the Loop IR pool a golden stores |
+| `emmy eval {prior,golden} …` | `eval prior DATASET [--pools {golden,measured}]` scores a dataset's pools with the prior of the dataset's space and re-decides each pool with no measurement in scope; `eval golden --golden PATH --serving-config PATH` audits a golden against its serving matrix |
+| `emmy golden {check,restamp} [PATH…]`, `emmy golden kernels PATH [--program N]`, `emmy golden extract SRC DEST --kernel NAME` | name the stored targets a fresh lowering of a golden's programs no longer writes; rewrite the golden onto that lowering (every repository golden by default); print the Loop IR pool a golden stores; copy a kernel's configs from one golden into another of the same card |
 | `emmy fit DATASET WEIGHTS [--folds N]` | fit the offline prior from a dataset's golden groups and cross-validate it; the whole refit is README's "Fit the offline prior" |
-| `emmy db {import,export,freeze,check} --db PATH …` | fill a DB instance from the freeze directories, golden files and tune DBs named on the command line (nothing by default, and never the tune DB), every kernel re-lowered; export its rows as the dataset the fit and `eval prior` read; snapshot it into a freeze; check its tables agree with themselves |
+| `emmy db {import,export,freeze,check} --db PATH …` | fill a DB instance from the freeze directories, golden files and tune DBs named on the command line (nothing by default, and never the tune DB), every kernel re-lowered; export its rows as the dataset of one space (`--space {schedule,placement}`) the fit and `eval prior` read; snapshot it into a freeze; check its tables agree with themselves |
 | `emmy {pull,trace,generate,inspect,compare} …` | model download, IR tracing, the naive generation oracle, IR inspection, dump diffing |
- Refitting the offline prior is the four commands under README's "Fit the offline prior". Every path is explicit — the
+ Refitting the priors is the commands under README's "Fit the priors". Every path is explicit — the
 DB instance `emmy db import --db PATH` fills (the tune DB's tables in a file of their own, never read by a compile; a
 measurement freeze directory under `emmy/compiler/pipeline/search/freezes/`, tracked in **git LFS**, none checked in
 at the moment, or a tune DB joins the goldens the same way), and the dataset `emmy db export` writes from it (a
 `manifest.json` beside one matrix file per pool, which `emmy fit` and `emmy eval prior` read; the readers never open
 the DB) — and nothing has a default, so a refit never touches the tune DB. The examples keep both under `_data/`,
-which git ignores. `emmy fit DATASET emmy/compiler/pipeline/search/prior/weights/offline.json` rewrites the checked-in
-weights. Re-export and refit after a featurizer version bump (a stale dataset or artifact is refused at load) and when
-the hardware goldens change; the recipe goldens are not in the documented set yet.
+which git ignores. `emmy fit DATASET WEIGHTS` rewrites the checked-in weights of the dataset's space. Re-export and
+refit after a featurizer version bump (a stale dataset or artifact is refused at load) and whenever a hardware golden
+changes: the reproduction gate (README, "Fit the priors") holds the shipped priors to the repository goldens, and
+`emmy golden extract` is how a model golden's rows join the hardware golden the priors are fit on.
 
 Quick test models / scripts (for local iteration):
 
@@ -217,6 +219,8 @@ Quick test models / scripts (for local iteration):
 - `make test` — run `pytest` using the venv (skips the off-lane `perf` / `goldens` tests). Compiles
   kernels at `-Xcicc -O1` (correctness lane, ~12% faster than `-O3` on a cold cache; perf tests use `-O3` via
   `make bench-kernels`)
+- `make test-priors` — the schedule half of the prior reproduction gate (`tests/compiler/pipeline/search/prior/`),
+  a greedy walk per golden pool, off the default lane like `perf`
 - `make test-corpus-regen` — restamp the realization corpus's derived half after a kernel-identity or schedule-codec
   change (`make test` detects the staleness on any machine; this applies the fix)
 - `make test-durations` — re-measure `tests/durations.json`, the checked-in per-test timings the suite balances its
@@ -336,11 +340,15 @@ Then update the documentation:
 
 Then run the gates, in this order, after every edit above is in:
 
-22. **Run the full suite**: `make test` — fix any failures. If a realization case comes back stale, `make
+22. **Refit the priors if a hardware golden changed**: a row added, re-recorded, restamped or dropped under
+    `search/golden/records/` means both priors are refit (README, "Fit the priors") and the weights committed with
+    it — the reproduction gate holds the shipped priors to those goldens. A refit that lowers a reproduction floor
+    says which change moved it in the PR body.
+23. **Run the full suite**: `make test` — fix any failures. If a realization case comes back stale, `make
     test-corpus-regen` applies the fix; if a golden's stored targets stop being the fresh lowering, `emmy golden
     restamp` applies that one (the `refresh-golden` skill). If golden rows go red, name the change that did it in the
     PR body — do **not** re-record them to make it green, which enshrines the regression as the new reference.
-23. **Record the durations of every test this change ADDS that takes over half a second.** `make test` fails at
+24. **Record the durations of every test this change ADDS that takes over half a second.** `make test` fails at
     session end when a test at or over 5 s is missing from `tests/durations.json`, because CI buckets its xdist
     workers on that file and plans around a hole. Record well BELOW that bar: the gate reads the runner's clock,
     and a CI runner is several times slower than a dev box — the three nodes that failed this way measured 3-4 s
@@ -352,19 +360,19 @@ Then run the gates, in this order, after every edit above is in:
     `make test-durations` re-measures the WHOLE suite serially and REPLACES the file; reach for it when the balance
     has drifted, not to land a handful of new tests. If one still slips through, the gate names it and prints the
     id in the form to paste — that is the backstop, not the plan.
-24. **Run the linter**: `make lint` — if it fails, run `make format` and re-check
-25. **Write the PR body** in an untracked temporary file outside the repository, using
+25. **Run the linter**: `make lint` — if it fails, run `make format` and re-check
+26. **Write the PR body** in an untracked temporary file outside the repository, using
     `.github/PULL_REQUEST_TEMPLATE.md` as a guide. Never replace the tracked template with a PR's content. The title
     is a functional description readable with no context. The abstract is one short plain-English paragraph — no
     bullets, no code references. One optional artifact may follow it — a small table, a diagram, a few lines of
     output — when it carries the claim better than the paragraph. Then a horizontal rule, then everything else —
     decisions, measurements, what broke, what got slower, what was removed — under headings that fit the story.
     `Abstract` is the only fixed heading.
-26. **Revise the PR body at least twice before posting.** Write it, then reread it as a reviewer with no
+27. **Revise the PR body at least twice before posting.** Write it, then reread it as a reviewer with no
     context, check it against the template and against the design philosophy below, cut, and repeat. A first
     draft is always too long: it lists what was done instead of saying what the change is, and it keeps
     sentences that no reviewer would miss. Stop when nothing else can come out without losing the point.
-27. **Mark the PR ready for review.** This is the last step. A draft PR that has not been through finalization
+28. **Mark the PR ready for review.** This is the last step. A draft PR that has not been through finalization
     is not ready, whatever else is green.
 
 # Behavioral Guidelines:

@@ -231,7 +231,7 @@ def strict_evidence_override(flag: bool | None):
 def offline_path() -> Path | None:
     """Offline-prior weights artifact override: ``EMMY_OFFLINE_FILE`` → ``None``.
 
-    ``None`` means the repo-checked default (``weights/offline.json`` next to
+    ``None`` means the repo-checked default (``weights/schedule.json`` next to
     ``search/prior/offline.py`` — package-relative, so it resolves there, not
     here). Swap in a candidate fit for an A/B by pointing this at another
     artifact; a version-mismatched or missing file is a hard error, never a

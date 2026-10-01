@@ -11,7 +11,7 @@ and A/B'd against the other.
 A run writes ``<out>/metrics.json`` — the deterministic, diff-able record two fits are
 compared by (same header inputs → identical content; the run dir name, not the file,
 carries the timestamp) — and the full-train artifact at the path the second positional argument names, in the shipped
-``weights/offline.json`` format. The metrics layout (``full_train`` +
+``weights/schedule.json`` format. The metrics layout (``full_train`` +
 a ``cv`` holdout/train/gap block, both carrying ``prior/report.py`` summaries) is documented on
 :mod:`emmy.compiler.pipeline.search.prior.fit.cv`, which owns all the fold machinery;
 the run itself is :func:`~emmy.compiler.pipeline.search.prior.fit.run.run_fit`. This
@@ -88,7 +88,7 @@ def register_fit_command(subparsers) -> None:
     )
     parser.add_argument(
         "weights",
-        help="Weights artifact to write — emmy/compiler/pipeline/search/prior/weights/offline.json is the shipped offline prior "
+        help="Weights artifact to write — emmy/compiler/pipeline/search/prior/weights/schedule.json is the shipped offline prior "
         "(README, 'Fit the offline prior'); any other path is a candidate to A/B through EMMY_OFFLINE_FILE.",
     )
     parser.add_argument("--out", default=None, help="Run dir (default: _tune/fits/<timestamp>-<trainer>/).")

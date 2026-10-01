@@ -231,7 +231,9 @@ take new identities without it. A row that no longer decodes, a row whose kernel
 kernel-set row whose members all lost their measurements are dropped and named. The command never deletes a file: one nothing survives
 in is left alone and reported. The lowering behind the check, the restamp and `emmy trace`'s inventory is one function
 (`golden.lowered_kernels`), and every command that reads a golden by path loads it through
-`GoldenFile.load`, which validates a repository golden strictly and anything else as a working file.
+`GoldenFile.load`, which validates a repository golden strictly and anything else as a working file. `emmy golden extract SRC DEST --kernel NAME…` copies the configs whose rows name a kernel from
+one golden into another of the same card, with the programs and targets they reference — how a model golden's rows
+join the hardware golden the priors are fit on when the reproduction gate names them.
 
 **One golden flag pair on every command.** `--golden PATH` names a golden file (working or canonical) on `run`,
 `compile`, `serve`, `generate` and `eval golden`: its MEASURED rows are the golden evidence that command deploys from,
@@ -810,11 +812,13 @@ through the lowering passes by the current compiler (`golden.evidence.import_gol
 file's rows record, and its rows are sourced by the file's kind and digest — `freeze:` for a freeze directory's files,
 `golden:` for a golden file; a source the instance already holds is skipped, and `--fresh` rebuilds from nothing. A
 held file is recorded in the `source` table whatever became of its rows, so naming a file again is a no-op and a
-report can list its sources. `export --db PATH OUT [--pool-sample N] [--seed N]` writes the instance's rows as the
-dataset at `OUT` (`search/dataset/document.py` owns the format): every golden pool enumerated from its kernel's
-definition and packed (`db/export.py` over `ranking.build_golden_groups`; the pipeline ARCHITECTURE's Part 8 owns the
-pool), every measured pool labelled with its microseconds, and the provenance — the DB, its sources by digest, the
-sample and seed, the featurizer version and the compiler commit. `emmy fit` and `eval prior` read that directory and
+report can list its sources. `export --db PATH OUT [--space {schedule,placement}] [--pool-sample N] [--seed N]` writes
+the instance's rows as the dataset of one space at `OUT` (`search/dataset/document.py` owns the format): the schedule
+space is every golden pool enumerated from its kernel's definition and packed (`db/export.py` over
+`ranking.build_golden_groups`; the pipeline ARCHITECTURE's Part 8 owns the pool) and every measured pool labelled
+with its microseconds; the placement space is every golden kernel's placement forks, each the arms the cut pass
+offers with the golden's arm marked (`ranking.build_placement_groups`); both carry the provenance — the DB, its
+sources by digest, the space, the sample and seed, the featurizer version and the compiler commit. `emmy fit` and `eval prior` read that directory and
 never the DB; exporting the same instance twice writes the same bytes. `freeze --db PATH --out DIR` writes an
 instance's admitted rows (`db/freeze.freeze_reason`) as a golden file per card — the artifact that gets checked in.
 `check [--db PATH]` counts the rows of an instance whose tables disagree with themselves (`SearchDB.drift`) and exits
@@ -888,7 +892,7 @@ sit BESIDE the summaries in `full_train.skipped`, keyed by card: they have no po
 about the corpus rather than about a scored card, and keeping them out preserves the shared summary shape. The
 full-train artifact is written at `WEIGHTS`, the second positional argument, in the shipped format (a `catboost` fit
 also writes the booster as a `.cbm` sidecar beside it, named after its own JSON so several artifacts can share a
-directory): `prior/weights/offline.json` when a refit rewrites the shipped weights, any other path for a candidate to
+directory): `prior/weights/schedule.json` when a refit rewrites the shipped weights, any other path for a candidate to
 A/B through `EMMY_OFFLINE_FILE` (the flow that replaced the retired `scripts/golden_knob_heuristics.py`). The header
 names the dataset it read and the dataset's provenance — the DB, the golden files (by source digest) the pools were
 read from: two fits are comparable only when they were computed over the same rows. `emmy/commands/fit.py` owns the
@@ -905,11 +909,17 @@ says so in the provenance notes) is a shipping choice, not part of the shape of 
 both seeding policies and the ranking loss the fit ran under; two fits are only comparable when those match, the
 same way they must match on `--features`.
 
+The dataset's space selects the rest: a placement dataset fits the `P_*` view, seeds from the shipped placement
+weights (zeros before any exist) and writes `space` into the artifact, which the loader checks against the fork it
+is asked at.
+
 ```bash
 emmy db import --db _data/dataset.db --fresh emmy/compiler/pipeline/search/golden/records/*.json   # the rows
-emmy db export --db _data/dataset.db _data/dataset     # the dataset the fit reads
-emmy fit _data/dataset emmy/compiler/pipeline/search/prior/weights/offline.json   # the shipped weights, 5 shape folds
-emmy fit _data/dataset _tune/fits/ab/offline.json --folds 0 --out _tune/fits/ab     # full-train only, a candidate to A/B
+emmy db export --db _data/dataset.db _data/schedule --space schedule     # the dataset the schedule fit reads
+emmy db export --db _data/dataset.db _data/placement --space placement   # the dataset the placement fit reads
+emmy fit _data/schedule emmy/compiler/pipeline/search/prior/weights/schedule.json     # the shipped weights, 5 shape folds
+emmy fit _data/placement emmy/compiler/pipeline/search/prior/weights/placement.json
+emmy fit _data/schedule _tune/fits/ab/offline.json --folds 0 --out _tune/fits/ab     # full-train only, a candidate to A/B
 ```
 
 ## Experiments

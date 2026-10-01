@@ -414,3 +414,29 @@ def test_a_stored_identity_the_compiler_re_keyed_is_refused() -> None:
     assert _decode(record, case.records) is None
     stale = replace(record, identity="0" * 64)
     assert "stored identity equals none of the kernel identities" in (_decode(stale, [stale]) or "")
+
+
+def test_extract_copies_a_kernels_configs_once_with_their_program_and_target() -> None:
+    """``emmy golden extract``: the configs whose rows name the kernel join the destination with the program
+    and the target they reference, re-indexed into its pools; a second extract adds nothing, and a name no row
+    carries adds nothing."""
+    from emmy.compiler.pipeline.search.golden import GoldenFile
+    from tests.compiler.realization import helpers as corpus
+
+    source = GoldenFile.load(corpus.CASES_DIR / "fused/linear-add-place-cut-sm70.json", repository=False)
+    destination = GoldenFile(compute_cap=tuple(source.compute_cap), configs=[])
+    assert destination.absorb(source, ["k_linear"]) == len(source.configs) > 0
+    assert destination.absorb(source, ["k_linear"]) == 0 and destination.absorb(source, ["k_nothing"]) == 0
+    referenced = {_document_key(source.loops[c.target.loop]) for c in source.configs}
+    assert len(destination.loops) == len(referenced)
+    assert [c.realizations[0].name for c in destination.configs] == [c.realizations[0].name for c in source.configs]
+    pairs = zip(destination.configs, source.configs, strict=True)
+    assert all(destination.loops[c.target.loop] == source.loops[s.target.loop] for c, s in pairs)
+    with pytest.raises(ValueError, match="cannot join"):
+        GoldenFile(compute_cap=(9, 0), configs=[]).absorb(source, ["k_linear"])
+
+
+def _document_key(wire: dict) -> str:
+    import json
+
+    return json.dumps(wire, sort_keys=True)
