@@ -255,6 +255,10 @@ Never re-record a row to make a red node green: a re-keyed kernel is a change in
 enshrines it. The realization corpus's staleness test is the same restamp (see
 `tests/compiler/realization/ARCHITECTURE.md`).
 
+The golden-bench experiment applies the same restamp check to each of its checked-in kernel goldens under
+`benchmark/models/`. This covers format and lowering drift without tracing a model or qualifying a card; its
+experiment recipe owns the measured replay and whole-layer comparison.
+
 Repository golden *qualification* is intentionally outside pytest. Model goldens are GPU-specific qualification
 evidence, so the nightly `onboard-model` workflow validates the selected recipe-local file and replays it on the named
 GPU. This keeps expensive model/card qualification out of the default suite. The restamp half needs no card and runs on
