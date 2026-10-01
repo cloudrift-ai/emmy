@@ -1,10 +1,5 @@
-"""The CatBoost offline model: its artifact round-trip, its absent-feature semantics, its exact
-decomposition, and the trainer that produces it. No GPU — CatBoost fits on CPU in a fraction of a second at
-these sizes.
-
-The two model classes answer one surface (``mean_score_features`` / ``mean_scores_features`` /
-the packed-pool ``score_rows``), so most of what matters here is that a tree honours the contracts the linear model
-does, plus the two it deliberately does not: masking is no longer exact, and a fit is no longer byte-identical.
+"""The CatBoost offline model: its artifact round-trip, its absent-feature semantics, and the trainer that
+produces it. No GPU — CatBoost fits on CPU in a fraction of a second at these sizes.
 """
 
 from __future__ import annotations
@@ -12,7 +7,6 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import replace
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -96,14 +90,8 @@ def test_routing_stamp_is_an_ordinary_column():
     model = _fit(groups, feature_names=(*FEATURES, *routing))
     assert model.cols == (*FEATURES, *routing)
     static, dynamic = groups[0], groups[-1]
-    assert (dynamic.matrix(list(routing), fill=ABSENT) == 1.0).all()
-    assert (static.matrix(list(routing), fill=ABSENT) == 0.0).all()
-
-
-def test_trainer_declares_no_fittability_constraint():
-    """The linear trainer excludes folds whose training slice cannot fit a weight set it needs. A tree has
-    no weight sets, so it declares no constraint and the fold harness reads ``None``."""
-    assert not hasattr(CatBoostTrainer(feature_names=FEATURES), "unfittable")
+    assert (dynamic.matrix(list(routing)) == 1.0).all()
+    assert (static.matrix(list(routing)) == 0.0).all()
 
 
 def test_score_rows_covers_the_full_pool_not_the_sample():
@@ -129,7 +117,7 @@ def test_score_rows_projects_onto_the_models_own_columns():
     assert group.feat_names == ("D_a",)  # the pool is missing a column the model wants
 
     scores = model.score_rows(group)
-    assert np.array_equal(scores, model.quality_rows(group.matrix(list(model.cols), fill=ABSENT)))
+    assert np.array_equal(scores, model.quality_rows(group.matrix(list(model.cols))))
     assert not np.array_equal(replace(model, cols=("D_b", "D_a")).score_rows(group), scores)
 
 
@@ -201,8 +189,8 @@ def test_batched_and_single_row_scoring_agree():
 
 
 def test_score_polarity_is_lower_is_better():
-    """``mean_score`` is a latency proxy in both model classes, so the greedy argmin means the same thing
-    whichever one is loaded: the row the ranker prefers must score LOWER."""
+    """``mean_score`` is a latency proxy, so the greedy argmin means "fastest": the row the ranker prefers must
+    score LOWER."""
     model = _fit()
     assert model.mean_score_features({"D_a": 29.0, "D_b": 1.0}) < model.mean_score_features({"D_a": 0.0, "D_b": 1.0})
 
@@ -219,69 +207,37 @@ def test_absent_features_are_nan_not_zero():
 # --- the artifact ------------------------------------------------------------------
 
 
-def _artifact(model: CatBoostModel, tmp_path=None, name: str = "weights") -> dict:
-    """The artifact dict, and (when given a directory) its sidecar written beside it — the pair the loader
-    expects, since the booster no longer rides inside the JSON."""
-    art = model.to_artifact(provenance={"fitted": "2026-08-13"}, model_file=f"{name}.cbm")
-    if tmp_path is not None:
-        (tmp_path / art["model_file"]).write_bytes(model.blob)
-    return art
+def _write(model: CatBoostModel, path) -> None:
+    from emmy import storage
+
+    storage.write_json(path, model.to_artifact(provenance={"fitted": "2026-10-01"}), indent=1)
 
 
 def test_artifact_round_trip_preserves_predictions(tmp_path):
-    """The sidecar IS the model: a reloaded artifact scores identically, so an A/B against a written artifact
-    measures the fit rather than the serialization."""
+    """The booster rides in the JSON as CatBoost's own JSON model: a reloaded artifact scores identically, so an
+    A/B against a written artifact measures the fit rather than the serialization."""
     model = _fit()
-    art = json.loads(json.dumps(_artifact(model, tmp_path)))  # through JSON, as the file path does
-    assert art["kind"] == "catboost" and art["feat_ver"] == FEATURIZER_VERSION
-    assert art["model_file"] == "weights.cbm" and "model" not in art, "the booster must not ride in the JSON"
-    reloaded = CatBoostModel.from_artifact(art, base_dir=tmp_path)
+    _write(model, tmp_path / "weights.json")
+    art = json.loads((tmp_path / "weights.json").read_text())
+    assert art["feat_ver"] == FEATURIZER_VERSION and "oblivious_trees" in art["model"]
+    reloaded = CatBoostModel.from_artifact(art)
     assert reloaded.cols == model.cols and reloaded.scale == model.scale
-    rows = [{"D_a": float(i), "D_b": 1.0} for i in range(10)]
+    rows = [{"D_a": float(i), "D_b": 1.0 if i % 3 else math.nan} for i in range(10)]
     assert reloaded.mean_scores_features(rows) == model.mean_scores_features(rows)
 
 
-def test_sidecar_path_is_relative_so_the_pair_can_move(tmp_path):
-    """The recorded path must be relative: an absolute one breaks the moment the JSON + cbm pair is copied into a
-    run directory or rsynced to a tuning box with a different scratch root."""
+def test_two_fits_on_one_input_write_the_same_model_info(tmp_path):
+    """CatBoost stamps a GUID and a finish time per training run; the artifact drops them, so they cannot be the
+    only difference two refits show."""
     model = _fit()
-    art = _artifact(model, tmp_path)
-    assert not Path(art["model_file"]).is_absolute()
-    moved = tmp_path / "elsewhere"
-    moved.mkdir()
-    (moved / "weights.json").write_text(json.dumps(art))
-    (moved / art["model_file"]).write_bytes(model.blob)
-    assert CatBoostModel.from_artifact(art, base_dir=moved).cols == model.cols
+    info = model.to_artifact(provenance={})["model"]["model_info"]
+    assert "model_guid" not in info and "train_finish_time" not in info
 
 
-def test_two_artifacts_in_one_directory_do_not_collide(tmp_path):
-    """The sidecar is named after ITS OWN json, so a run directory holding several artifacts keeps a distinct
-    model per artifact rather than the last write winning."""
-    a, b = _fit(), _fit(_groups(n_pools=6))
-    art_a, art_b = _artifact(a, tmp_path, "cand-a"), _artifact(b, tmp_path, "cand-b")
-    assert art_a["model_file"] != art_b["model_file"]
-    assert (tmp_path / "cand-a.cbm").read_bytes() != (tmp_path / "cand-b.cbm").read_bytes()
-
-
-def test_inline_blob_still_loads(tmp_path):
-    """Artifacts written before the sidecar split carry the booster inline as base64. They still load — run
-    outputs under ``_tune/`` predate the change and are still referenced by in-flight experiments."""
-    from emmy.compiler.pipeline.search.prior.catboost_model import to_b64
-
-    model = _fit()
-    legacy = {k: v for k, v in _artifact(model, tmp_path).items() if k != "model_file"}
-    legacy["model"] = to_b64(model.booster)
-    assert CatBoostModel.from_artifact(legacy).cols == model.cols
-
-
-def test_offline_prior_loads_a_tree_artifact(tmp_path, monkeypatch):
-    """The deploy path end to end: ``kind`` dispatches the load, and the prior ranks through the tree with
-    no caller aware of which model class it holds."""
-    from emmy import storage
-
+def test_offline_prior_loads_an_artifact(tmp_path, monkeypatch):
+    """The deploy path end to end: the prior loads the file the override names and ranks through it."""
     path = tmp_path / "tree.json"
-    model = _fit()
-    storage.write_json(path, _artifact(model, tmp_path, "tree"))
+    _write(_fit(), path)
     monkeypatch.setenv("EMMY_OFFLINE_FILE", str(path))
     prior = OfflinePrior()
     assert isinstance(prior.model, CatBoostModel)
@@ -290,37 +246,23 @@ def test_offline_prior_loads_a_tree_artifact(tmp_path, monkeypatch):
     assert max(prior.mean_scores_features([fast, slow])) > 0
 
 
-def test_linear_only_overrides_are_rejected_against_a_tree_artifact(tmp_path, monkeypatch):
-    """A per-field override silently ignored would hand an A/B the unmodified model and let it report a
-    difference of zero as a real result — the same rule the ``model=``-plus-override case follows."""
+def test_artifact_missing_a_key_is_a_hard_error(tmp_path, monkeypatch):
+    """An artifact without its column order, params or model must not load — and a retired linear artifact has
+    no ``model``."""
     from emmy import storage
 
-    path = tmp_path / "tree.json"
-    storage.write_json(path, _artifact(_fit(), tmp_path, "tree"))
-    monkeypatch.setenv("EMMY_OFFLINE_FILE", str(path))
-    with pytest.raises(ValueError, match="no per-field overrides"):
-        OfflinePrior(scale=2.0)
-
-
-def test_unknown_artifact_kind_is_a_hard_error(tmp_path, monkeypatch):
-    from emmy import storage
-
-    path = tmp_path / "weird.json"
-    storage.write_json(path, {"feat_ver": FEATURIZER_VERSION, "kind": "randomforest", "params": {}})
-    monkeypatch.setenv("EMMY_OFFLINE_FILE", str(path))
-    with pytest.raises(RuntimeError, match="kind='randomforest'"):
-        OfflinePrior()
-
-
-def test_tree_artifact_missing_its_own_keys_is_a_hard_error(tmp_path, monkeypatch):
-    """Per-kind validation: a tree artifact needs its column order and blob, which the linear key set
-    would never have caught."""
-    from emmy import storage
-
-    art = _artifact(_fit(), tmp_path, "partial")
+    art = _fit().to_artifact(provenance={})
     del art["cols"]
     path = tmp_path / "partial.json"
     storage.write_json(path, art)
     monkeypatch.setenv("EMMY_OFFLINE_FILE", str(path))
     with pytest.raises(RuntimeError, match="cols"):
         OfflinePrior()
+
+
+def test_shipped_artifacts_load():
+    """Both checked-in priors load, each naming its own space."""
+    from emmy.compiler.pipeline.search.prior.offline import default_file
+
+    for space in ("schedule", "placement"):
+        assert OfflinePrior(path=str(default_file(space))).space == space

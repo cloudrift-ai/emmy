@@ -1,10 +1,9 @@
 """The CatBoost trainer — the offline learning-to-rank fit of a :class:`CatBoostModel`.
 
 :class:`CatBoostTrainer` holds the hyperparameters and :meth:`~CatBoostTrainer.fit` turns a
-:class:`GoldenGroup` list into a :class:`CatBoostFit`. Same contract as :class:`~.linear.LinearTrainer` — the
-trainer is immutable and one instance serves every cross-validation fold — with one contract the linear trainer
-keeps and this one does not: **a fit is not byte-reproducible**. CatBoost's histogram build is threaded, so two
-runs on identical inputs give models that differ in the last bits. Deliberate: the alternative is
+:class:`GoldenGroup` list into a :class:`CatBoostFit`. The trainer is immutable and one instance serves every
+cross-validation fold. **A fit is not byte-reproducible**: CatBoost's histogram build is threaded, so two runs on
+identical inputs give models that differ in the last bits. Deliberate: the alternative is
 ``thread_count=1``, and the metrics file plus the rank tables are what a fit is compared by, not a checksum.
 
 This module owns what is specific to the model class; everything a different model class would also need lives
@@ -18,9 +17,8 @@ the softmax ranks by. ``QuerySoftMax`` takes several positives per group as they
 a pool with more than one verified config needs no reshaping — and those siblings are then never drawn as
 negatives against each other, which is what labelling a verified-good config 0.0 used to do.
 
-**Why negatives are sampled.** The linear fit scores whole pools every descent step because a pool is one matrix
-multiply. Here the pools are the training set: all of them at once is ~38 M rows / ~18 GB before CatBoost's own
-quantized copy. So each round draws ``negatives`` rows per pool, uniformly, from the rows that are NOT pinned.
+**Why negatives are sampled.** The pools are the training set, and all of them at once is ~38 M rows / ~18 GB before
+CatBoost's own quantized copy. So each round draws ``negatives`` rows per pool, uniformly, from the rows that are NOT pinned.
 The full pool is still what :meth:`CatBoostFit.score_rows` ranks the golden within, so the *metric* never sees
 the sampling.
 
@@ -28,9 +26,8 @@ A further round instead mines **hard negatives** — the rows the current model 
 implemented and reachable (``--rounds 2``) but OFF by default, because the one measurement of it says it hurts;
 :data:`DEFAULT_ROUNDS` carries the numbers and the likely reason.
 
-The routing feature (``S_ext_n_symbolic_axis``) is an ordinary packed column here, read like any other.
-For a tree it is simply a feature to split on — one model prices both regimes, where the linear model needs a
-second weight set and therefore narrows the column out (:func:`~..linear_model.descent_cols`).
+The routing feature (``S_ext_n_symbolic_axis``) is an ordinary packed column, read like any other: one model
+prices both regimes by splitting on it.
 """
 
 from __future__ import annotations
@@ -43,45 +40,10 @@ import numpy as np
 
 from emmy.compiler.pipeline.search.dataset.group import GoldenGroup
 from emmy.compiler.pipeline.search.metrics import best_rank
-from emmy.compiler.pipeline.search.prior.catboost_model import ABSENT, DEFAULT_SCALE, CatBoostModel, new_ranker
+from emmy.compiler.pipeline.search.prior.catboost_model import DEFAULT_SCALE, CatBoostModel, new_ranker
 from emmy.compiler.pipeline.search.prior.fit.tables import topk_table
 
 logger = logging.getLogger(__name__)
-
-# The tree view: the default view MINUS every feature that exists only because an additive model cannot
-# form it. A tree forms these itself from columns the view keeps, so carrying them spends split budget on
-# a fact the model can already express — and the hand-set constant inside each one (a target, a threshold)
-# is a constant the fit cannot revise. Each exclusion below is derivable by axis-aligned splits on kept
-# columns, which is exactly what a tree does; nothing here is a judgement about usefulness.
-#
-# - MONOTONE DUPLICATES of a kept column. A tree only ever compares a feature to a threshold, so any
-#   order-preserving transform of a column it already has is the same column: ``D_l2_threads`` =
-#   log2(``D_threads``), ``D_l2_reuse`` = log2(``D_reuse``), ``D_cells_cap`` = clipped ``D_cells``.
-# - FOLDS, ``-|x - target|`` around a hand-set target: ``D_near_threads``, ``D_near_area``,
-#   ``D_near_cells``, ``D_near_intensity``, ``D_near_tilen``, ``D_near_waves``, ``D_w_near_bk``, and
-#   ``D_square`` = ``-|D_aspect|``. A linear model cannot represent a peak, so the peak was precomputed;
-#   two splits on the kept column reproduce it, around a threshold the fit chooses rather than inherits.
-#   (The tier-aware targets in ``D_near_threads`` / ``D_near_area`` come back as a split on ``MMA_tier``.)
-# - THRESHOLDS on a kept column, i.e. one split each: ``D_stage_prefetch`` (``D_stage_depth`` >= 2),
-#   ``D_bk_ge32``, ``D_splitk_le2``, ``D_ctas_ge_sm`` (``D_log2_waves`` >= 0), ``D_bn_band``,
-#   ``D_bm_band``, ``D_tilen_clean``.
-# - MASKED INTERACTIONS of two kept columns — a copy of one feature gated on another being nonzero,
-#   which is a split on the gate followed by a split on the feature: the six ``D_tma_*`` mirrors (gated on
-#   ``D_stage_tma``) and ``D_l2_cells_occ`` (``D_cells`` gated on ``D_ctas_ge_sm``).
-#
-# What deliberately STAYS, because axis-aligned splits cannot reach it: ``D_pow2_threads`` (a periodic
-# predicate, not an interval), ``D_bn_ge_bm`` (a relation BETWEEN two columns), ``D_w_grid_aspect`` (a
-# difference), ``D_log2_area`` (a product), and the whole knob × state block — ``D_splitk_excess`` /
-# ``D_splitk_deficit`` / ``D_splitk_roundtrip`` / ``D_near_kchunks`` / ``D_scalar_on_warp_eligible`` —
-# whose state operand (the needed split count, the reduce extent, the warp-eligibility stamp) is not a
-# candidate column at all, so no split on the pool can recover it.
-TREE_FEATURES = (
-    "D_*,MMA_tier,MMA_acc_bits,"
-    "-D_l2_threads,-D_l2_reuse,-D_cells_cap,"
-    "-D_near_threads,-D_near_area,-D_near_cells,-D_near_intensity,-D_near_tilen,-D_near_waves,-D_w_near_bk,-D_square,"
-    "-D_stage_prefetch,-D_bk_ge32,-D_splitk_le2,-D_ctas_ge_sm,-D_bn_band,-D_bm_band,-D_tilen_clean,"
-    "-D_tma_*,-D_l2_cells_occ"
-)
 
 # Sampled negatives per pool per round. ~500 against a pool's handful of positives puts the softmax denominator in
 # the range the loss was designed for, and 490 golden pools × 500 rows is a dataset CatBoost fits in seconds.
@@ -111,10 +73,8 @@ class CatBoostTrainer:
     fit is a function of ``(groups, hyperparameters)`` alone — modulo CatBoost's threading, which is why this
     trainer promises reproducible *metrics* rather than a reproducible artifact.
 
-    No ``init`` and no warm start: a tree ensemble does not chain from a previous fit the way a weight vector
-    does, so every fit here starts from nothing. That also removes the fold-leakage question the linear trainer
-    answers with ``warm_start=False`` — a fold model here cannot inherit anything from a model trained on the
-    held-out golden, because there is nothing to inherit."""
+    No warm start: every fit starts from nothing, so a fold model cannot inherit anything from a model trained on
+    the held-out golden."""
 
     feature_names: tuple[str, ...]
     iterations: int = 500
@@ -134,7 +94,7 @@ class CatBoostTrainer:
         emphasis on the first draw."""
         rng = np.random.default_rng(self.random_state)
         cols = list(self.feature_names)
-        pools = [g.matrix(cols, fill=ABSENT) for g in groups]
+        pools = [g.matrix(cols) for g in groups]
         # Sampled negative indices per pool, grown each round. The pinned rows are added at assembly time, so
         # one can never be sampled in as a negative — against itself or against a verified sibling.
         sampled = [self._uniform(len(m), g.golden_ids, rng) for m, g in zip(pools, groups, strict=True)]
@@ -168,7 +128,7 @@ class CatBoostTrainer:
     @staticmethod
     def _ranks(model: CatBoostModel, pools, groups: list[GoldenGroup]) -> list[int]:
         """Every pool's best golden rank in its FULL pool under ``model`` — the fit-objective tie convention
-        (:func:`~..metrics.best_rank`), matching what the linear fit reports per round."""
+        (:func:`~..metrics.best_rank`)."""
         return [best_rank(model.quality_rows(m), g.golden_ids) for m, g in zip(pools, groups, strict=True)]
 
     def _uniform(self, n: int, pinned: Sequence[int], rng) -> np.ndarray:
@@ -223,9 +183,7 @@ class CatBoostTrainer:
 class CatBoostFit:
     """One :meth:`CatBoostTrainer.fit` result: the fitted model plus the golden ranks it reached.
 
-    The linear fit's ``(static_ranks, dyn_ranks)`` pair has no counterpart — one model ranks every pool, so there
-    is one rank list, and :meth:`score_rows` never returns ``None`` (the "this fold could not fit the weight set
-    your holdout needs" group cannot arise)."""
+    One model ranks every pool, so there is one rank list."""
 
     model: CatBoostModel
     ranks: list[int]

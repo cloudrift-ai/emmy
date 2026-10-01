@@ -547,15 +547,13 @@ def test_the_placement_prior_decides_an_unmeasured_placement_fork(weight: float,
     from emmy.compiler.pipeline.pipeline import Run
     from emmy.compiler.pipeline.search.pins import pinned_knobs, unpinned_decisions
     from emmy.compiler.pipeline.search.policy.greedy import greedy_decide
-    from emmy.compiler.pipeline.search.prior import OfflinePrior
-    from emmy.compiler.pipeline.search.prior.linear_model import LinearModel
     from tests.compiler.pipeline.search.helpers import CARDS
     from tests.compiler.realization import helpers as corpus
 
     case = corpus.load_case(corpus.CASES_DIR / "fused/linear-add-place-cut-sm70.json")
     ctx = Context.from_target(case.compute_cap, gpu_name=CARDS[case.compute_cap], compile_flags="")
-    scalars = {"scale": 1.0, "atomic_free_weight": 0.0, "atomic_free_split_threshold": 0.0}
-    placement = OfflinePrior(model=LinearModel(weights={"P_n_pieces": weight}, weights_dynamic={}, **scalars))
+    # Lower is better: a positive weight rewards pieces.
+    placement = SimpleNamespace(mean_scores_features=lambda rows: [-weight * row.get("P_n_pieces", 0.0) for row in rows])
     regime = case.regime
 
     priced_pick = greedy._priced_pick

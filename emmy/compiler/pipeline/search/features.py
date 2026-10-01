@@ -45,16 +45,12 @@ from emmy.compiler.pipeline.knob import (
 #
 # Version 4 is the exact-site classic schedule vocabulary. It retires the tree-path keys and the
 # old ``STAGE`` tokens, so mutable v3 rows must age out rather than silently featurize under a new
-# meaning. The shipped linear artifacts were schema-migrated with the bump: their retired
-# ``D_stage_ring`` coefficient moved to ``D_stage_prefetch``, the identical ``depth >= 2`` signal,
-# so the scoring function did not change and no synthetic refit was needed.
+# meaning.
 FEATURIZER_VERSION = 4
 
-# The features that SELECT a weight set rather than describe a candidate — the ``S_ext_n_symbolic_axis`` stamp
-# a masked-tile (symbolic-axis) kernel carries. The stamp VOCABULARY belongs here with the rest of the feature
-# spelling, so a dataset can read it without importing a model; what to DO with it stays with the model classes
-# (``prior/linear_model.py``: the two weight sets, and ``descent_cols``, which keeps the stamp out of the linear
-# descent because a pool-constant term cancels out of a within-pool ranking).
+# The features that name a candidate's regime rather than describe it — the ``S_ext_n_symbolic_axis`` stamp a
+# masked-tile (symbolic-axis) kernel carries. The stamp VOCABULARY belongs here with the rest of the feature
+# spelling, so a dataset can read it without importing a model; the model splits on it like any column.
 #: The ``H_opt`` value of the DEPLOYABLE regime — the nvcc opt level ``compile`` / ``run`` / ``tune``
 #: all compile at, and therefore the only one a measurement is worth anything under. Rows carrying
 #: any other value came from a deliberately pinned sweep or from the era when tuning ranked at
@@ -68,9 +64,8 @@ ROUTING_FEATURES = ("S_ext_n_symbolic_axis",)
 def is_dynamic_row(feats: dict) -> bool:
     """Whether a featurized row carries the symbolic-axis (masked-tile) routing stamp — the ONE reading of it.
 
-    What the stamp SELECTS is the reader's business: the linear model routes to a second weight vector
-    (``LinearModel.weight_set``), a tree splits on the column, and ``ShapeKey.is_dyn`` records it as part of a
-    shape's identity. All three ask this one question, because a second spelling of "is the stamp set" would be
+    What the stamp SELECTS is the reader's business: the model splits on the column, and ``ShapeKey.is_dyn``
+    records it as part of a shape's identity. Both ask this one question, because a second spelling of "is the stamp set" would be
     a second chance to disagree about which regime a pool belongs to."""
     return any(feats.get(name, 0.0) > 0 for name in ROUTING_FEATURES)
 

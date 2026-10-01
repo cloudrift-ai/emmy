@@ -55,16 +55,6 @@ def test_a_pool_too_small_for_a_metric_is_excluded_and_the_count_says_so():
     assert summary.metrics["regret10"]["groups"] == 1  # needs eleven — a top-10 over ten rows is the whole pool
 
 
-def test_a_pool_the_model_cannot_score_is_counted_not_dropped():
-    """A linear model with no dynamic weight set answers ``None`` for every symbolic-axis pool. Dropping
-    those silently would report a healthy static corpus with no sign that the rest is unmeasured."""
-    groups = [_measured("a", [20.0, 10.0]), _measured("b", [20.0, 10.0])]
-    summary = measured_summaries("offline", groups, lambda g: None if g.key == "b" else _by_d_a(g))[0]
-
-    assert (summary.groups, summary.unscored) == (2, 1)
-    assert summary.metrics["regret1"]["groups"] == 1
-
-
 def test_measured_summaries_key_on_card_and_compile_regime():
     """Cards never pool, and neither do nvcc regimes — ``-O1`` and ``-O3`` reorder the same candidates."""
     groups = [
@@ -117,7 +107,7 @@ def test_the_report_serializes_to_a_diffable_schema():
 
     assert obj["header"] == {"dataset": "db", "source": "dataset.db"}
     assert obj["summaries"][0]["axes"] == {"half": "offline", "gpu": "card-a", "H_opt": "O3"}
-    assert obj["summaries"][0]["groups"] == 1 and obj["summaries"][0]["unscored"] == 0
+    assert obj["summaries"][0]["groups"] == 1
     assert EvalReport({"dataset": "db", "source": "dataset.db"}, summaries).to_json() == obj
 
 

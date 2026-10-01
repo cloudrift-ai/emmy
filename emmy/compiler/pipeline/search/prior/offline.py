@@ -4,37 +4,27 @@ The ONE ranking model a compile consults where nothing measured decides a fork, 
 dataset's golden groups and shipped with the repo.
 
 ``mean_score`` returns a positive latency *proxy* (``exp(-scale · quality)``), **lower is better**. The proxy is
-not calibrated µs; only its ordering matters (the greedy argmin). Its magnitude may span ``e**±700``, so a
-consumer needing a bounded quantity derives one.
+not calibrated µs; only its ordering matters (the greedy argmin).
 
-**Two model classes, one adapter.** The scoring itself lives in a model value object: :mod:`.linear_model` (fixed
-weights over the ``D_*`` geometry/occupancy features, plus one fitted non-linear interaction and a second weight
-set selected on the ``S_ext_n_symbolic_axis`` stamp) or :mod:`.catboost_model` (a CatBoost ranker, which needs
-neither — a tree splits on the routing stamp and forms the interaction from its two columns). This class is the
-adapter that turns a knob dict into features and satisfies the ``Prior`` contract around whichever one it holds.
+The scoring itself lives in :class:`~.catboost_model.CatBoostModel`; this class is the adapter that turns a knob
+dict into features and satisfies the ``Prior`` contract around it.
 
 The model lives in the repo-checked artifact ``weights/schedule.json`` beside this module (override with
 ``EMMY_OFFLINE_FILE`` / ``emmy eval … --offline-file`` to A/B a candidate fit), written by ``emmy fit DATASET
-WEIGHTS`` jointly over EVERY kernel regime — fp32-scalar / fp16-warp matmul, cooperative reduce, and pointwise
-goldens — so one model ranks them all. Its ``kind`` field names the model class and :func:`_load_artifact`
-dispatches on it; per-refit history rides the artifact's ``provenance`` block and the findings reports, not this
-docstring. The artifact is version-gated on ``feat_ver`` — its feature names are that featurizer version's, so a
-cross-version file is meaningless and loading it is a hard error (refit, don't guess); a *retired* feature inside
-a same-version file is merely a dead term.
+WEIGHTS`` jointly over EVERY kernel regime, so one model ranks them all. The artifact is version-gated on
+``feat_ver`` — its columns are that featurizer version's, so a cross-version file is meaningless and loading it is
+a hard error (refit, don't guess).
 """
 
 from __future__ import annotations
 
 import functools
-from dataclasses import replace
 from pathlib import Path
 
 from emmy import config, storage
 from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION, knob_features
-from emmy.compiler.pipeline.search.prior import catboost_model, linear_model
 from emmy.compiler.pipeline.search.prior.base import Prior
 from emmy.compiler.pipeline.search.prior.catboost_model import CatBoostModel
-from emmy.compiler.pipeline.search.prior.linear_model import LinearModel
 
 _DEFAULT_FILE = Path(__file__).parent / "weights" / "schedule.json"
 _PLACEMENT_FILE = Path(__file__).parent / "weights" / "placement.json"
@@ -45,30 +35,14 @@ def default_file(space: str) -> Path:
     return _PLACEMENT_FILE if space == "placement" else _DEFAULT_FILE
 
 
-# The model classes an artifact's ``kind`` field can name, each with the top-level keys its
-# ``from_artifact`` reads and the scalar ``params`` keys its ``to_artifact`` emits. Both key sets are
-# derived from the writer rather than re-spelled here: what a fit emits and what a deploy load demands
-# must not be able to drift, or a new scalar param ships unvalidated and silently defaults.
-#
-# ``kind`` has always been written; this is where it is finally read. A file naming an unknown kind is a
-# hard error, not a fallback to linear — see :func:`_load_artifact`.
-_KINDS = {
-    "linear": (LinearModel, ("weights", "weights_dynamic", "params"), linear_model.PARAM_ORDER),
-    # ``model_file`` (the sidecar path) is the current spelling; the inline base64 ``model`` is the pre-split
-    # one, still readable so run artifacts written before the split keep loading. Either satisfies the check.
-    "catboost": (CatBoostModel, ("cols", "params"), catboost_model.PARAM_ORDER),
-}
-
-# The linear model's scalar scoring params, named identically in the JSON ``params`` block and the
-# ``OfflinePrior.__init__`` kwargs: ``scale`` is rank-neutral (a monotone transform of quality) and carried;
-# the two ``atomic_free_*`` params ARE fitted, being the one term the fit cannot express as a linear weight.
-_PARAM_KEYS = linear_model.PARAM_ORDER
+# The keys every artifact carries — what ``CatBoostModel.from_artifact`` reads.
+_KEYS = ("cols", "params", "model")
 
 
 @functools.lru_cache(maxsize=8)
 def _load_artifact(path_str: str) -> dict:
     """Load and validate a weights artifact — hard error on a missing/corrupt file, a ``feat_ver``
-    mismatch, an unknown ``kind``, or keys that kind's model class needs. No silent fallback: an A/B
+    mismatch, or a missing key. No silent fallback: an A/B
     that quietly reverts to other weights measures nothing, and both shipped artifacts are
     schema-tested."""
     obj = storage.read_json(Path(path_str))
@@ -85,85 +59,32 @@ def _load_artifact(path_str: str) -> dict:
             f"expected {FEATURIZER_VERSION} — its features are spelled in a different "
             f"featurizer vocabulary. Refit it: emmy fit DATASET WEIGHTS (README, 'Fit the offline prior')"
         )
-    kind = obj.get("kind")
-    if kind not in _KINDS:
-        raise RuntimeError(
-            f"offline prior weights artifact {path_str} has kind={kind!r}, expected one of {sorted(_KINDS)} — "
-            f"refit it with 'emmy fit --trainer <kind> DATASET WEIGHTS'"
-        )
-    _, top_keys, param_keys = _KINDS[kind]
-    missing = [k for k in top_keys if k not in obj]
-    if kind == "catboost" and not (obj.get("model_file") or obj.get("model")):
-        missing.append("model_file")
-    missing += [f"params.{k}" for k in param_keys if k not in obj.get("params", {})]
+    missing = [k for k in _KEYS if k not in obj]
     if missing:
-        raise RuntimeError(f"offline prior weights artifact {path_str} (kind={kind}) lacks {missing}")
+        raise RuntimeError(f"offline prior weights artifact {path_str} lacks {missing} — refit it with 'emmy fit DATASET WEIGHTS'")
     return obj
 
 
 class OfflinePrior(Prior):
     """Fixed ranker over ``knob_features`` — the cold-start prior.
 
-    An adapter, not a model: the scoring is a :class:`LinearModel` or a
-    :class:`~emmy.compiler.pipeline.search.prior.catboost_model.CatBoostModel` (whichever the artifact's ``kind``
-    names — the same definition the fitter optimizes), and this class adds what ``Prior`` needs around it:
-    knob-dict featurization.
-    Two ways to construct, and they do not mix: pass a ready ``model``, or let it resolve from the weights
-    artifact (``config.offline_path()`` override → the repo-checked default). The per-field kwargs are
-    LINEAR-ONLY and win over the file field by field; passing one against a non-linear artifact raises, exactly
-    as combining them with ``model=`` does — an A/B that quietly measured the unmodified model would measure
-    nothing."""
+    An adapter, not a model: the scoring is a :class:`CatBoostModel`, and this class adds what ``Prior`` needs
+    around it: knob-dict featurization. Pass a ready ``model``, or let it resolve from the weights artifact
+    (``path`` → ``config.offline_path()`` override → the repo-checked default)."""
 
-    def __init__(
-        self,
-        *,
-        model=None,
-        weights: dict[str, float] | None = None,
-        weights_dynamic: dict[str, float] | None = None,
-        scale: float | None = None,
-        atomic_free_split_threshold: float | None = None,
-        atomic_free_weight: float | None = None,
-        path: str | None = None,
-    ) -> None:
-        # Keyed by LinearModel's own field names, which is what lets the merge below be a ``replace``.
-        overrides = {
-            "weights": weights,
-            "weights_dynamic": weights_dynamic,
-            "scale": scale,
-            "atomic_free_weight": atomic_free_weight,
-            "atomic_free_split_threshold": atomic_free_split_threshold,
-        }
-        if model is not None and any(v is not None for v in overrides.values()):
-            raise ValueError("OfflinePrior takes either a ready model= or per-field overrides, not both")
-        #: The space the weights rank — ``schedule`` for a ready model or a full override set, else the artifact's.
+    def __init__(self, *, model: CatBoostModel | None = None, path: str | None = None) -> None:
+        #: The space the weights rank — ``schedule`` for a ready model, else the artifact's.
         self.space = "schedule"
-        self._model = model if model is not None else self._resolve(overrides, path)
-
-    def _resolve(self, overrides: dict, path: str | None):
-        """The model the artifact names, with the linear per-field overrides layered over it. A fully-specified
-        override set skips the file read entirely (tests construct a model that way); anything less reads the
-        artifact — ``path``, else the override env var, else the shipped schedule weights — and dispatches on
-        its ``kind``."""
-        if all(v is not None for v in overrides.values()):
-            return LinearModel(**overrides)
-        path = str(path or config.offline_path() or _DEFAULT_FILE)
-        art = _load_artifact(path)
-        self.space = art.get("space", "schedule")
-        cls = _KINDS[art["kind"]][0]
-        if cls is not LinearModel:
-            if any(v is not None for v in overrides.values()):
-                raise ValueError(
-                    f"the offline weights artifact {path} is kind={art['kind']!r}, which has no per-field "
-                    f"overrides — pass a ready model= instead"
-                )
-            return cls.from_artifact(art, base_dir=Path(path).parent)
-        # ``from_artifact`` is lenient about the params block; ``_load_artifact`` has already proved every key
-        # this kind needs is present, so the two agree here and the field-by-field merge is a plain replace.
-        return replace(LinearModel.from_artifact(art), **{k: v for k, v in overrides.items() if v is not None})
+        if model is None:
+            path = str(path or config.offline_path() or _DEFAULT_FILE)
+            art = _load_artifact(path)
+            self.space = art.get("space", "schedule")
+            model = CatBoostModel.from_artifact(art)
+        self._model = model
 
     @property
     def model(self):
-        """The scoring function this prior ranks with — a :class:`LinearModel` or a ``CatBoostModel``."""
+        """The scoring function this prior ranks with."""
         return self._model
 
     @property
@@ -171,29 +92,18 @@ class OfflinePrior(Prior):
         return True
 
     def mean_score(self, knobs: dict) -> float:
-        """Latency proxy (``exp(-scale · quality)``), lower is better. Under the linear model a config the
-        weights have no opinion on (no ``D_*`` features — e.g. a non-tiled kernel) scores the neutral ``1.0``,
-        so ties fall to enumeration order, and symbolic-axis (masked-tile) kernels rank under the dynamic weight
-        set; under the tree model both facts are ordinary splits."""
+        """Latency proxy (``exp(-scale · quality)``), lower is better."""
         return self.mean_score_features(knob_features(knobs))
 
     def mean_scores(self, knobs_list: list[dict]) -> list[float]:
-        """Batched :meth:`mean_score` — featurize the whole candidate set, then ONE scoring pass. The tree model
-        has a vectorized predict whose per-call overhead would otherwise be paid once per candidate."""
+        """Batched :meth:`mean_score` — featurize the whole candidate set, then ONE scoring pass. The model has a
+        vectorized predict whose per-call overhead would otherwise be paid once per candidate."""
         return self.mean_scores_features([knob_features(k) for k in knobs_list])
-
-    def quality(self, feats: dict) -> float:
-        """The linear model's ranking quantity (higher = predicted faster), before the monotone
-        ``exp(-scale··)`` wrapper. This is what ``emmy fit``'s linear cell minimizes golden rank over — the
-        fitter scores through the SAME :class:`LinearModel`, so the fitted objective IS the deployed ranking and
-        not a proxy for it. Linear-only: a tree's pre-transform score has no additive reading, and its
-        equivalent entry point is ``CatBoostModel.quality_rows``."""
-        return self._model.quality(feats)
 
     def mean_score_features(self, feats: dict) -> float:
         """:meth:`mean_score` from an already-featurized row — the entry point for a caller that featurized
-        once and wants to score without a knob dict to hand. An absent key carries the model's own semantics:
-        the linear model's ``0.0`` no-opinion default, the tree's ``NaN`` missing bucket."""
+        once and wants to score without a knob dict to hand. An absent key lands in the tree's ``NaN`` missing
+        bucket."""
         return self._model.mean_score_features(feats)
 
     def mean_scores_features(self, feats_list: list[dict]) -> list[float]:
