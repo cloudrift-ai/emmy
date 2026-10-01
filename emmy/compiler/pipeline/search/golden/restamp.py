@@ -269,7 +269,8 @@ def _rekeyed_rows(document: GoldenFile, entry: Config, wire: dict, report: Resta
     for row in [row for row in rows if row.kernel_set_state(rows) is GoldenEntryState.INVENTORY]:
         rows.remove(row)
         report.rows_dropped.append(f"{row.name}: its kernel set lost its measurements")
-    return rows
+    names = {row.name for row in rows}
+    return [replace(row, kernel_set=tuple(name for name in row.kernel_set if name in names)) for row in rows]
 
 
 def _respelled_route(document: GoldenFile, entry: Config, row: Realization, report: RestampReport) -> Realization | None:
