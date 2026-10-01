@@ -87,6 +87,32 @@ jobs:
           private-key: ${{ secrets.EXPERIMENT_APP_PRIVATE_KEY }}
           repositories: ${{ github.event.repository.name }}
 
+      - name: Ensure GitHub CLI is available
+        run: |
+          if command -v gh >/dev/null 2>&1; then
+            exit 0
+          fi
+
+          gh_version=2.101.0
+          gh_archive="gh_${gh_version}_linux_amd64.tar.gz"
+          gh_release_url="https://github.com/cli/cli/releases/download/v${gh_version}"
+          gh_install_dir="$RUNNER_TEMP/gh-${gh_version}"
+
+          curl --fail --location --retry 3 --retry-all-errors --silent --show-error \
+            --output "$RUNNER_TEMP/$gh_archive" \
+            "$gh_release_url/$gh_archive"
+          curl --fail --location --retry 3 --retry-all-errors --silent --show-error \
+            --output "$RUNNER_TEMP/gh_checksums.txt" \
+            "$gh_release_url/gh_${gh_version}_checksums.txt"
+          grep "  $gh_archive\$" "$RUNNER_TEMP/gh_checksums.txt" \
+            | (cd "$RUNNER_TEMP" && sha256sum --check)
+          mkdir -p "$gh_install_dir"
+          tar -xzf "$RUNNER_TEMP/$gh_archive" \
+            --strip-components=2 \
+            -C "$gh_install_dir" \
+            "gh_${gh_version}_linux_amd64/bin/gh"
+          echo "$gh_install_dir" >> "$GITHUB_PATH"
+
       - name: Find rolling model lifecycle pull request
         id: rolling
         env:
