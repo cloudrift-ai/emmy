@@ -1,9 +1,9 @@
 ---
 sidebar_position: 2
-validated_against_commit: 261039d9161f9349b1c6fef0678ec98ce04b433d
+validated_against_commit: 29fa2768929dd4d6a797fa52dd85376c6d4977c4
 title: "From PyTorch to CUDA: Compiler Deep Dive"
-description: Follow Emmy's compiler from PyTorch tracing through graph rewrites, scheduling, CUDA, runtime, and tuning.
-keywords: [Emmy, compiler, IR, CUDA, graph rewriting, scheduling, autotuning]
+description: Follow Emmy's compiler from PyTorch tracing through graph rewrites, scheduling, CUDA, runtime, and evidence.
+keywords: [Emmy, compiler, IR, CUDA, graph rewriting, scheduling, benchmarking]
 ---
 
 # How the Emmy compiler works
@@ -24,7 +24,7 @@ changes how explicitly the computation is described.
 
 Start with [Learn Emmy from the code](./project_course) if you have not yet covered the repository and CLI architecture.
 After this chapter, [How Emmy Chooses Fast GPU Schedules](./prior_and_goldens) explains the schedule decision system
-in full: evidence precedence, offline and online priors, MCTS labels, golden matching, and recording integrity.
+in full: evidence precedence, offline fitting, dataset export, golden matching, and recording integrity.
 
 The short answer is this pipeline. Read it from left to right: recognizable model operations gradually become explicit
 GPU instructions.
@@ -89,16 +89,17 @@ Here, a **driver** is code that coordinates other components. `handle_compile` i
 `Pipeline.build(CUDA_PASSES).run(...)`. The distinction is what happens afterward: `compile` formats an IR for a human,
 while the backend passes the lowered graph to the CUDA runtime.
 
-In other words, `emmy trace` stops after PyTorch capture and FX-to-Emmy conversion. `emmy compile` traces when
-necessary, then applies lowering passes and prints the selected IR. Despite its name, the `compile` CLI does not
+`emmy trace` captures the program, lowers its target inventory to Loop IR, and writes both into a golden JSON file.
+`emmy compile` traces when necessary, then applies lowering passes and prints the selected IR. It can also select a
+stored program with `--golden PATH --program N`. Despite its name, the `compile` CLI does not
 invoke `nvcc` or execute the program; `emmy run` and the CUDA runtime do that.
 
 The canonical pass lists live in `emmy/compiler/pipeline/__init__.py`:
 
 ```python
 TENSOR_PASSES = ["frontend/decomposition", "frontend/optimization"]
-LOOP_PASSES = [*TENSOR_PASSES, "loop/lifting", "loop/fusion", "loop/stamp"]
-TILE_PASSES = [*LOOP_PASSES, "lowering/tile"]
+LOOP_PASSES = [*TENSOR_PASSES, "loop/lifting", "loop/fusion", "loop/canonicalize", "loop/stamp"]
+TILE_PASSES = [*LOOP_PASSES, "tile/lift", "tile/cut", "tile/schedule"]
 KERNEL_PASSES = [*TILE_PASSES, "lowering/kernel"]
 CUDA_PASSES = [*KERNEL_PASSES, "lowering/cuda"]
 ```
@@ -162,11 +163,13 @@ learned weight, but still produces short IR listings.
 ### Generate the complete artifacts
 
 Run this from the repository root. `--target sm_80` selects an Ampere capability without requiring a live GPU.
-The schedule can still depend on local measurements and prior artifacts; record those alongside the source revision
-when reproducing an exact pick:
+The listings below use the shipped prior with an empty evidence scope. A fresh temporary database and an empty golden
+selection reproduce that setup without reading your ordinary deployment cache:
 
 ```bash
+course_dir=$(mktemp -d)
 for stage in torch tensor loop tile kernel cuda; do
+  EMMY_TUNE_DB="$course_dir/tune.db" EMMY_GOLDEN_FILE= \
   ./venv/bin/emmy compile \
     --code "nn.RMSNorm(16)(torch.randn(2, 8, 16))" \
     --ir "$stage" \
@@ -371,21 +374,20 @@ sed -n '1,160p' /tmp/emmy-rmsnorm-loop.txt
 
 ```text
 === 0: k_rms_norm_example ===
-    v0 = reciprocal(16)
     for a0 in 0..16
         for a1 in 0..16
-            in2 = load x[(a0 // 8), (a0 % 8), a1]
-            v1 = multiply(in2, in2)
-            acc0 <- add(acc0, v1)
-        v2 = multiply(acc0, v0)
-        v3 = add(1e-06, v2)
-        v4 = rsqrt(v3)
+            in2 = load x[(a0 / 8), (a0 % 8), a1]
+            v0 = multiply(in2, in2)
+            acc0 <- add(acc0, v0)
+        v1 = divide(acc0, 16)
+        v2 = add(1e-06, v1)
+        v3 = rsqrt(v2)
         for a2 in 0..16
-            in3 = load x[(a0 // 8), (a0 % 8), a2]
-            v5 = multiply(in3, v4)
+            in3 = load x[(a0 / 8), (a0 % 8), a2]
+            v4 = multiply(in3, v3)
             in4 = load p_weight[a2]
-            v6 = multiply(in4, v5)
-            rms_norm[(a0 // 8), (a0 % 8), a2] = v6
+            v5 = multiply(in4, v4)
+            rms_norm[(a0 / 8), (a0 % 8), a2] = v5
 ```
 
 **Outer in-memory graph (schematic):**
@@ -412,15 +414,14 @@ flowchart LR
 LoopOp
 └── body: Body
     ├── Load(rms_norm_mean_count)
-    ├── Assign(v0)
     ├── Load(rms_norm_eps)
     └── Loop(axis=a0)                   # flattened 2 × 8 row domain
         └── body: Body
             ├── Loop(axis=a1)
             │   └── body: Body[Load, Assign, Accum]
+            ├── Assign(v1)
             ├── Assign(v2)
             ├── Assign(v3)
-            ├── Assign(v4)
             └── Loop(axis=a2)
                 └── body: Body[Load, Assign, Load, Assign, Write]
 ```
@@ -436,9 +437,9 @@ mean, or scale. Their values stay inside the fused computation.
 
 The axes have distinct roles:
 
-- `a0` and `a1` choose one of the 16 independent rows;
-- `a2` visits the 16 values being reduced; and
-- `a3` revisits the row to apply the computed scale and weight.
+- `a0` chooses one of the 16 independent rows, flattening the original `2 × 8` dimensions;
+- `a1` visits the 16 values being reduced; and
+- `a2` revisits the row to apply the computed scale and weight.
 
 This representation is still hardware-independent. It says which iteration and arithmetic must happen, not how CUDA
 blocks and threads should cooperate.
@@ -454,26 +455,25 @@ sed -n '1,160p' /tmp/emmy-rmsnorm-tile.txt
     place  free=(a0)  grid=(a0)
     work   t128
     Fold  free
-    ├─ operand[v4]: Fold  free   ‹computed›
+    ├─ operand[v3]: Fold  free   ‹computed›
     │  ├─ operand[acc0]: Fold[a1 in 0..16] reduce   ⟨REDUCE=coop⟩   ‹computed›
-    │  │  ├─ operand[in2]: load x[(a0 // 8), (a0 % 8), a1]   ‹materialized›
+    │  │  ├─ operand[in2]: load x[(a0 / 8), (a0 % 8), a1]   ‹materialized›
     │  │  ├─ init: (0)
-    │  │  ├─ lift: λ(a1, in2) -> (v1)
-    │  │  │    v1 = multiply(in2, in2)
+    │  │  ├─ lift: λ(a1, in2) -> (v0)
+    │  │  │    v0 = multiply(in2, in2)
     │  │  └─ combine: λ(acc0, acc0__o) -> (acc0)
     │  │       acc0 = add(acc0, acc0__o)
-    │  └─ lift: λ(acc0) -> (v4)
-    │       v0 = reciprocal(16)
-    │       v2 = multiply(acc0, v0)
-    │       v3 = add(1e-06, v2)
-    │       v4 = rsqrt(v3)
-    └─ lift: λ(v4, a0, a2) -> (v6)
+    │  └─ lift: λ(acc0) -> (v3)
+    │       v1 = divide(acc0, 16)
+    │       v2 = add(1e-06, v1)
+    │       v3 = rsqrt(v2)
+    └─ lift: λ(v3, a0, a2) -> (v5)
          in4 = load p_weight[a2]
-         in3 = load x[(a0 // 8), (a0 % 8), a2]
-         v5 = multiply(in3, v4)
-         v6 = multiply(in4, v5)
+         in3 = load x[(a0 / 8), (a0 % 8), a2]
+         v4 = multiply(in3, v3)
+         v5 = multiply(in4, v4)
     outputs
-    └─ sweep(a2) rms_norm[(a0 // 8), (a0 % 8), a2] = v6
+    └─ sweep(a2) rms_norm[(a0 / 8), (a0 % 8), a2] = v5
 ```
 
 **In-memory structural operation tree (schematic):**
@@ -518,25 +518,25 @@ sed -n '1,160p' /tmp/emmy-rmsnorm-kernel.txt
 === 0: k_rms_norm_example ===
     Tile[a0, a1_co] (N=2048)
         for a1 in a1_co..16:128
-            in2 = load x[(a0 // 8), (a0 % 8), a1]
-            f32 v1 = multiply(in2, in2)
-            f32 acc0 <- add(acc0, v1)
+            in2 = load x[(a0 / 8), (a0 % 8), a1]
+            f32 v0 = multiply(in2, in2)
+            f32 acc0 <- add(acc0, v0)
         WarpShuffle(acc0, length=32)
         Smem float acc0_smem[4]
         if ((lane == 0)):
             acc0_smem[warp] = acc0
         Sync
         TreeHalve(acc0, length=4, tid=warp)
-        f32 v0 = reciprocal(16)
-        f32 v2 = multiply(acc0, v0)
-        f32 v3 = add(1e-06, v2)
-        f32 v4 = rsqrt(v3)
+        f32 recip_0 = reciprocal(16)
+        f32 v1 = multiply(acc0, recip_0)
+        f32 v2 = add(1e-06, v1)
+        f32 v3 = rsqrt(v2)
         for a2 in a1_co..16:128
-            in3 = load x[(a0 // 8), (a0 % 8), a2]
-            f32 v5 = multiply(in3, v4)
+            in3 = load x[(a0 / 8), (a0 % 8), a2]
+            f32 v4 = multiply(in3, v3)
             in4 = load p_weight[a2]
-            f32 v6 = multiply(in4, v5)
-            rms_norm[(a0 // 8), (a0 % 8), a2] = v6
+            f32 v5 = multiply(in4, v4)
+            rms_norm[(a0 / 8), (a0 % 8), a2] = v5
 ```
 
 **In-memory hardware statement tree (schematic):**
@@ -587,18 +587,22 @@ The generated source is short enough to recognize the Kernel IR structure:
 ```c
 extern "C" __global__
 __launch_bounds__(128) void k_rms_norm_example(
-    const float* rms_norm_mean_count, const float* rms_norm_eps,
-    const float* x, const float* p_weight, float* rms_norm) {
+    const float* __restrict__ rms_norm_mean_count, const float* __restrict__ rms_norm_eps,
+    const float* __restrict__ x, const float* __restrict__ p_weight, float* __restrict__ rms_norm) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+    asm volatile("griddepcontrol.wait;" ::: "memory");
+#endif
     int lane = threadIdx.x & 31;
     int warp = threadIdx.x >> 5;
     int _gid = blockIdx.x * blockDim.x + threadIdx.x;
         int a0 = _gid / 128;
         int a1_co = (_gid) % 128;
         float acc0 = 0.0f;
+        #pragma unroll
         for (int a1 = a1_co; a1 < 16; a1 += 128) {
             float in2 = x[a0 * 16 + a1];
-            float v1 = in2 * in2;
-            acc0 += v1;
+            float v0 = in2 * in2;
+            acc0 += v0;
         }
         {
             float acc0__o = __shfl_xor_sync(__activemask(), acc0, 16);
@@ -625,24 +629,31 @@ __launch_bounds__(128) void k_rms_norm_example(
             acc0_smem[warp] = acc0;
         }
         __syncthreads();
-        for (int s = 2; s > 0; s >>= 1) {
-            if (warp < s) {
-                float acc0 = acc0_smem[warp];
-                float acc0__o = acc0_smem[warp + s];
+        if (warp == 0) {
+            float acc0 = acc0_smem[lane & 3];
+            {
+                float acc0__o = __shfl_xor_sync(__activemask(), acc0, 2);
                 acc0 = acc0 + acc0__o;
-                acc0_smem[warp] = acc0;
             }
-            __syncthreads();
+            {
+                float acc0__o = __shfl_xor_sync(__activemask(), acc0, 1);
+                acc0 = acc0 + acc0__o;
+            }
+            if (lane == 0) {
+                acc0_smem[0] = acc0;
+            }
         }
+        __syncthreads();
         acc0 = acc0_smem[0];
-        float in0 = rms_norm_mean_count[0];
-        float in1 = rms_norm_eps[0];
-        float v4 = rsqrtf((in1 + (acc0 * (1.0f / in0))));
+        float in1 = rms_norm_mean_count[0];
+        float in0 = rms_norm_eps[0];
+        float v3 = rsqrtf((in0 + (acc0 * (1.0f / in1))));
+        #pragma unroll
         for (int a2 = a1_co; a2 < 16; a2 += 128) {
             float in3 = x[a0 * 16 + a2];
             float in4 = p_weight[a2];
-            float v6 = in4 * (in3 * v4);
-            rms_norm[a0 * 16 + a2] = v6;
+            float v5 = in4 * (in3 * v3);
+            rms_norm[a0 * 16 + a2] = v5;
         }
 }
 ```
@@ -708,8 +719,8 @@ meaningful performance work.
 
 1. In Tensor IR, underline the nodes whose output shape is `(2, 8, 1)`. Explain why the reduction result must be
    broadcast before it can multiply the `(2, 8, 16)` input.
-2. In Loop IR, identify where the `a2` accumulator becomes available to the later `a3` loop.
-3. In Kernel IR, match `WarpShuffle` to the four `__shfl_xor_sync` calls in CUDA.
+2. In Loop IR, identify where the `a1` accumulator becomes available to the later `a2` loop.
+3. In CUDA, identify which shuffle calls reduce each warp and which combine the warps' results.
 4. Change `RMSNorm(16)` and the input's last dimension to `32`. Regenerate every stage and find which constants, loop
    bounds, schedule choices, and CUDA instructions change.
 5. Add `-vv --color never` to one compile command and locate the exact rewrite that removes `RmsNormOp`.
@@ -721,24 +732,24 @@ they produce and consume. It owns:
 
 ```text
 nodes:    node id -> Node
-inputs:   ordered graph input node ids
-outputs:  ordered graph output node ids
+inputs:   ordered graph input buffer names
+outputs:  ordered graph output buffer names
 hints:    graph-level metadata
-_users:   producer id -> consumer ids
+_users:   input buffer name -> consumer ids
 ```
 
-A `Node` represents one item in that network. It has four important pieces:
+A `Node` represents one item in that network. Its main fields are:
 
 ```text
 id       stable buffer/dataflow identity
 op       the operation from the current IR dialect
-inputs   producer node ids
-output   Tensor(name, shape, dtype)
+inputs   input buffer names
+outputs  ordered tuple of Tensor(name, shape, dtype)
 hints    metadata such as provenance and scheduling features
 ```
 
-The operation does not own output shape. Shape lives on `node.output`. This matters because a rewrite may replace an
-operation while retaining the same dataflow identity and tensor contract.
+Shape belongs to the node's output tensors. `node.output` is the primary output; additional outputs have their own
+buffer names and shapes. A rewrite may replace the operation while retaining that dataflow and tensor contract.
 
 Graph boundary nodes are special:
 
@@ -937,8 +948,9 @@ not additional Graph nodes. Fusion later merges compatible `LoopOp` graph nodes 
 An elementwise operation becomes nested loops over its output axes, loads, an assignment, and a write. A reduction
 becomes free-axis loops around a reduce-axis loop containing an accumulator.
 
-Before fusion, neighboring tensor nodes have separate `LoopOp` bodies. Fusion combines compatible producer and
-consumer bodies, substitutes coordinates, deduplicates loads, and removes intermediate graph buffers.
+Before fusion, neighboring tensor nodes have separate `LoopOp` bodies. Fusion merges every structurally legal region
+to fixpoint, substitutes coordinates, deduplicates loads, and removes intermediate graph buffers. It has no speed,
+size, or scheduling gate. Later cuts expose alternative kernel boundaries for evidence to decide.
 
 After fusion, the whole RMSNorm is one `LoopOp`:
 
@@ -1014,7 +1026,7 @@ A rewrite can return:
 
 1. A `Graph` fragment. The engine calls `Graph.splice` and changes graph topology.
 2. An `Op`. The engine rebinds the matched node in place.
-3. Several alternatives or a lazy fork. The engine exposes a decision point to greedy resolution or tuning.
+3. Several alternatives or a lazy fork. The engine exposes a decision point to greedy resolution.
 
 If no option is valid for the current `Context`, the rule is rejected and the reason is recorded. A final graph that
 still contains an operation that should have lowered raises `LoweringError`; the backend is not allowed to execute a
@@ -1029,7 +1041,7 @@ boundary, which is why post-pass artifacts correspond to stable fixed points rat
 ### Source chains and provenance are different
 
 An in-place operation rebind sets `new_op.source` to the previous operation. A final `CudaOp` can therefore point back
-through `KernelOp`, `TileOp`, and `LoopOp`. Tuning uses this rewrite ancestry to attribute measurements.
+through `KernelOp`, `TileOp`, and `LoopOp`. Benchmark recording uses this ancestry to attribute measurements.
 
 Provenance is separate metadata in `Node.hints["prov"]`. It maps fused kernels to original frontend operations and
 their decomposition pieces. Decomposition mints pieces, fusion aggregates piece sets, and in-place lowering leaves
@@ -1050,8 +1062,9 @@ The `axis` and `combine` properties derive from that storage. Familiar forms are
 
 - a zero-axis `Fold` is pointwise work or a projection;
 - an iterating planar `Fold` is an ordinary associative reduction;
-- a twisted `Fold` carries stable multi-component state for online softmax or attention; and
-- a contraction is a bilinear lift followed by an additive fold.
+- a twisted `Fold` carries stable multi-component state for online softmax or attention;
+- a contraction is a bilinear lift followed by an additive fold; and
+- a carried-state `Fold` applies a recurrence's state update, with explicit cell coordinates and seed values.
 
 ### Why these names?
 
@@ -1260,7 +1273,7 @@ guessing operand meaning from indices.
 
 ### How Loop IR becomes Tile IR
 
-The boundary begins in `pipeline/passes/lowering/tile/010_lift.py`, which delegates to `_fromloop.lift_loop_op`. It
+The boundary begins in `pipeline/passes/tile/lift/010_lift.py`, which delegates to `_fromloop.lift_loop_op`. It
 matches a `LoopOp`, peels its outer free-axis chain into `Placement`, mechanically replaces every reduction loop with a
 `Fold`, extracts output effects as `OutputSpec` values, and emits an unmapped `TileOp`. Later passes rewrite twisted
 clusters, enumerate structural cuts, and schedule the immutable Fold tree.
@@ -1392,8 +1405,9 @@ k_matmul:
     write output[m, n]
 ```
 
-The graph fragment returned by that option changes the kernel set. A compatible measured route row prices its
-structural choice directly. Without measured arms, greedy resolution resolves and estimates their kernel slices.
+The graph fragment returned by that option changes the kernel set. A routing row links the decision to its pieces;
+the sum of their fastest compatible measurements prices that decision. Without measured arms, greedy resolution
+resolves and estimates their kernel slices.
 Each resulting child kernel chooses its own schedule from its own evidence.
 
 ## 10. Kernel materialization: schedule to hardware statements
@@ -1454,7 +1468,7 @@ TMA. The scheduled `Stage` is materialized once and later rendering is mechanica
 
 `_atom.py` materializes twisted state, including state held in warp fragments. It uses the Fold's derived combine and
 the recipe in `ir/pure/twist.py`, keeping the stable arithmetic shared across hardware implementations. The separate
-`lowering/tile/_twist.py` owns algebraic rewriting before scheduling, not hardware materialization.
+`tile/_twist.py` owns algebraic rewriting before scheduling, not hardware materialization.
 
 ### Kernel peepholes
 
@@ -1517,22 +1531,23 @@ At this point, compilation decisions are finished. The remaining work is runtime
 
 ### Runtime compilation
 
-**Runtime compilation** means compiling generated CUDA after Emmy itself has started, instead of shipping a fixed GPU
-binary in advance.
+**Runtime compilation** means compiling generated CUDA after Emmy itself has started. Emmy invokes `nvcc --cubin` and
+caches the resulting binary by source, target, and flags. `nvcc` is required; there is no NVRTC fallback.
 
-`program._compile` walks the graph and:
+`plan_from_graph` projects buffer roles, kernel references, launch order, geometry, and symbolic arguments into an
+execution plan. `CompiledProgram.build_from_plan` then:
 
-1. Classifies graph nodes as inputs, constants, outputs, or scratch buffers.
-2. Compiles each unique kernel name through `backend/cuda/nvcc.py`.
-3. Builds an ordered launch record with kernel, argument names, grid, block, shared memory, and zeroing requirements.
+1. compiles or locates the cubins;
+2. resolves symbolic dimensions and asks the Rust runtime for the buffer layout;
+3. allocates Torch buffers for that layout and prepares host input bytes; and
+4. loads the plan, cubins, and borrowed device regions through the runtime extension.
 
-The preferred compiler path invokes offline nvcc to produce a **cubin**, a compiled CUDA binary, caches it by source,
-target, and flags, then loads the symbol through cupy. If nvcc is absent or compilation fails, the runtime can fall
-back to cupy's NVRTC path.
+The Rust runtime owns execution: loading binaries, memory layout, launches, TMA descriptors, CUDA graphs, and event
+timing. The Python host supplies tensors and the plan. `make setup` builds the extension from a Rust toolchain.
 
-`EMMY_NVCC_FLAGS` participates in both cubin and performance-context keys. Tune and deployment default to the same
-deployable `-O3` regime. The correctness test lane uses `-Xcicc -O1` only to reduce compilation time; it does not
-measure performance, and a deliberately non-default tune remains isolated by its context key.
+`EMMY_NVCC_FLAGS` participates in cubin and performance-context keys. Benchmarks and deployment default to `-O3`.
+The correctness test lane uses `-Xcicc -O1` for compilation speed and does not measure performance. Measurements taken
+with other flags remain separate from the default deployment regime.
 
 ### Buffer roles and scratch reuse
 
@@ -1587,8 +1602,8 @@ Captures are cached per exact symbolic environment because some generated kernel
 while pretending the logical extent is smaller. Exact-S capture keeps grid decoding and staged loads consistent with
 the runtime dimension.
 
-Torch and cupy serving paths exchange device arrays through DLPack and an external stream, avoiding GPU-to-host copies
-for model tensors.
+The Python host lends Torch CUDA buffers to the Rust runtime. Output views return as Torch tensors through DLPack,
+and stream coordination keeps those device transfers ordered without copying model tensors through the host.
 
 ## 14. Benchmarking semantics
 
@@ -1602,8 +1617,8 @@ A **benchmark** measures performance under controlled conditions. Emmy reports t
 Adding isolated per-kernel medians is not equivalent to whole-program time. Isolated windows change cache state and
 remove inter-kernel relationships.
 
-Autotuning often executes benchmarks in a subprocess worker. A kernel that hangs or poisons its CUDA context can then
-be terminated without wedging the parent compiler or preventing the sweep from continuing.
+Benchmarks can execute in a subprocess worker. A kernel that hangs or poisons its CUDA context can then be terminated
+without wedging the parent compiler. The worker executes through the same Rust runtime as serving.
 
 For executable examples that compare eager PyTorch, `torch.compile`, and Emmy; save JSON evidence; invoke Nsight
 Compute; and distinguish this compiler workflow from recipe-based server load tests, see
@@ -1618,10 +1633,9 @@ At a fork, greedy resolution:
 
 1. Expands lazy branches to complete knob configurations.
 2. Filters options that are invalid for the compilation context.
-3. Tries compatible measured rows in the online reservoir.
-4. Tries the fastest compatible tune-DB or golden row in the shared evidence index.
-5. Under `--strict-evidence`, fails if no measurement decides; otherwise asks the online/offline prior.
-6. Uses the first emitted option only when every evidence source and prior is silent.
+3. Tries the fastest compatible tune-DB row, with the golden rows in scope imported into the same measured index.
+4. Under `--strict-evidence`, fails if no measurement decides; otherwise asks the fitted offline prior.
+5. Uses the first emitted option only when both evidence and the prior are silent.
 
 Large unmeasured pools use a bounded deterministic sample of complete rows. Measured rows descend directly to their
 offered choices regardless of pool size; partial branches are never scored as substitutes for complete schedules.
@@ -1633,43 +1647,33 @@ fallback, but enumeration order makes no performance promise. If no valid loweri
 This explains an important behavior: `emmy compile` can benefit from a tuning database and prior, but it never trains
 them and does not time alternatives during compilation.
 
-## 16. How autotuning explores alternatives
+## 16. How measurements become future choices
 
-**Autotuning** explores multiple valid schedules, measures them, and records what works well. `Pipeline.tune_async` uses
-`Run.drive` rather than `Run.resolve`.
+`emmy run --bench` supplies evidence for a later compile. A clean pinned row or isolated greedy measurement records
+per-kernel latency in the tune DB, with the kernel identity, schedule, hardware, and regime. `--no-record-evidence`
+disables automatic recording. There is currently no `emmy tune` command, MCTS driver, or online-prior training loop.
 
 ```mermaid
 flowchart TB
-    Root[Start with a compiler candidate] --> Rewrite[Apply deterministic rewrites]
-    Rewrite --> Fork{Reach a schedule fork}
-    Fork --> A[Option A]
-    Fork --> B[Option B]
-    Fork --> C[Option C and later choices]
-    A --> Policy[Search policy selects a candidate]
-    B --> Policy
-    C --> Policy
-    Policy --> Lower[Finish lowering to CUDA]
-    Lower --> Measure[Benchmark isolated kernels]
-    Measure --> Store[Save the measurement]
-    Store --> Learn[Update search statistics and online prior]
-    Learn --> Fork
+    Compile[Resolve a schedule or apply a hand pin] --> Run[Compile and execute]
+    Run --> Check[Check correctness and timing integrity]
+    Check --> DB[Record kernel measurements in the tune DB]
+    Golden[Import measured golden rows] --> DB
+    DB --> Next[Choose at the next compatible fork]
+    Dataset[Export fixed candidate pools] --> Fit[Fit offline weights]
+    Fit --> Missing[Rank choices without measured evidence]
+    Missing --> Next
 ```
 
-The tuning search uses PUCT/MCTS, a tree-search algorithm, to balance **exploitation** (revisiting choices that look
-fast) with **exploration** (trying choices with less evidence). A two-level design separates
-outer structural choices that change the kernel graph from inner per-kernel schedule choices.
+A working golden supplies a durable program and target inventory. `--record` writes replay measurements into it;
+`--record-greedy` records the chosen kernel set, routing decisions, and child schedule receipts. Structural choices are
+priced from the measurements of their pieces, while each child independently selects its schedule.
 
-Measurements are stored with two kinds of identity:
+Fitting is separate from benchmarking. Explicit imports fill a dataset DB; export creates the fixed candidate pools
+that `emmy fit DATASET WEIGHTS` and `emmy eval prior DATASET` read. A compile loads only the fitted weights and its
+measured evidence, not the dataset.
 
-- An operation identity captures body and realized knob structure without cosmetic naming.
-- A context identity separates target capability, backend, and compiler flags that change codegen or performance.
-
-The online prior learns latency from hardware, shape, structural, and knob features. The offline prior supplies cold
-ranking before enough local evidence exists. Golden configurations are known-good reference evidence and integrity
-checks; they are not ordinary online-training samples.
-
-This section gives the compiler-facing boundary. The full data model, score units, evidence order, CatBoost
-persistence, strict deploy-identity join, A/B gates, and evaluation workflow are in
+The full persistence, dataset, strict replay, and release workflow is in
 [How Emmy Chooses Fast GPU Schedules](./prior_and_goldens).
 
 ## 17. Dynamic shapes through the entire pipeline
@@ -1831,13 +1835,13 @@ Read one vertical slice rather than a directory at a time.
 4. Mean and broadcast decomposition helpers used by the fragment.
 5. `pipeline/passes/loop/lifting`: elementwise, reduction, and index-map lifting.
 6. `pipeline/passes/loop/fusion/010_merge_loop_ops.py`.
-7. `pipeline/passes/lowering/tile/010_lift.py` and `_fromloop.py`: total Fold lifting and output extraction.
-8. `compiler/ir/pure/fold.py`, `tree.py`, and `compiler/ir/tile/ir.py`: pure terms and the Tile boundary.
-9. `pipeline/passes/lowering/tile/020_twisted.py`, `030_cut.py`, and `040_schedule.py`.
+7. `pipeline/passes/tile/lift/010_lift.py` and `tile/_fromloop.py`: total Fold lifting and output extraction.
+8. `compiler/ir/pure/fold.py` and `compiler/ir/tile/ir.py`: pure terms and the Tile boundary.
+9. `pipeline/passes/tile/lift/020_twisted.py`, `tile/cut/030_cut.py`, and `tile/schedule/040_schedule.py`.
 10. `pipeline/passes/lowering/kernel/010_materialize.py` and `_factor.py`.
 11. `compiler/ir/kernel/render.py`.
 12. `pipeline/passes/lowering/cuda/010_lower_kernelop.py`.
-13. `backend/cuda/program.py`: compilation, allocation, and launch.
+13. `backend/cuda/program.py` and `crates/emmy-runtime/ARCHITECTURE.md`: the Python host and Rust executor.
 
 ### Matmul slice
 
@@ -1941,7 +1945,7 @@ The compiler is easiest to understand as three nested transformations:
    CUDA source + launch metadata -> compiled functions + buffers -> ordered launches
 ```
 
-Autotuning sits between meaning and realization. It chooses among schedules that must already preserve the same loop
+Schedule selection sits between meaning and realization. It chooses among schedules that must preserve the same loop
 semantics. The runtime sits after realization. It must execute the source and metadata exactly as lowered without
 inventing new compiler decisions.
 

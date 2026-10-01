@@ -1,6 +1,6 @@
 ---
 sidebar_position: 6
-validated_against_commit: 261039d9161f9349b1c6fef0678ec98ce04b433d
+validated_against_commit: 29fa2768929dd4d6a797fa52dd85376c6d4977c4
 title: Emmy Course Glossary
 description: >-
   Plain-language definitions of the machine-learning, compiler, GPU, deployment, and tuning terms used in the Emmy
@@ -98,9 +98,9 @@ through Hugging Face libraries.
 A program that translates code from one form into another. Emmy translates PyTorch model operations into CUDA code.
 
 **Trace versus compile**
-Tracing captures PyTorch operations and converts them into Emmy's frontend `Graph`. Compilation starts from that graph
-and runs transformation passes toward Tensor, Loop, Tile, Kernel, or CUDA IR. The `emmy compile` CLI emits the selected
-IR for inspection; `emmy run` continues into CUDA runtime compilation and GPU execution.
+Tracing captures PyTorch operations into Emmy's frontend `Graph`. The `emmy trace` command also derives Loop IR targets
+and saves a golden JSON inventory. `emmy compile` lowers toward a selected IR stage; `emmy run` continues into CUDA
+compilation and GPU execution. Select a stored traced program with `compile --golden PATH --program N`.
 
 **Operation (op)**
 One unit of computation, such as add, matrix multiplication, softmax, or RMSNorm.
@@ -110,8 +110,8 @@ A representation of a program as nodes connected by data-flow edges. A node usua
 means that one operation uses a value produced by another.
 
 **Node**
-One item in a graph. In Emmy, it stores an operation, its input node IDs, output tensor information, and optional
-metadata.
+One item in a graph. In Emmy, it stores an operation, input buffer names, an ordered tuple of output tensors, and
+metadata. The primary output uses the node's ID; additional outputs have their own buffer names.
 
 **Intermediate representation (IR)**
 A compiler's internal description of a program. Emmy uses several IR stages. Early stages resemble PyTorch; later
@@ -133,6 +133,10 @@ have been fused. Its compute nodes carry `LoopOp` operations.
 Tile IR's pure reduction term: a lift lambda, initial state, base monoid, optional twist recipe, and operand edges.
 The iteration axis and associative combine are derived; axis extents belong to the kernel's axis table. Pointwise
 maps, ordinary reductions, twisted state, and contractions are readings of this single representation.
+
+**Carried state**
+A recurrence's state, read from the previous step and replaced by the current step's result. Loop IR represents the
+seed, reads, and writes explicitly; Tile IR preserves the update as a Fold with its state coordinates.
 
 **Total lift**
 The Loop-to-Tile invariant that every reduction loop becomes a Fold and every output effect becomes an output
@@ -203,10 +207,9 @@ A description of how output coordinates correspond to input coordinates. Emmy us
 transposing, slicing, and reshaping.
 
 **Tracing**
-The general act of observing a program with representative inputs to capture its operations and data flow. In Emmy,
-this is a multi-part boundary: PyTorch's `torch.export.export` produces an FX graph, then Emmy's `trace_module` wrapper
-converts it into an Emmy `Graph`. The `emmy trace` CLI command prepares inputs and saves that result. This is not the
-older `torch.jit.trace` API.
+Observing a program with representative inputs to capture its operations and data flow. PyTorch's `torch.export`
+produces an FX graph; Emmy's wrapper converts it into an Emmy `Graph`. The trace CLI writes that program and its
+lowered target inventory into a golden file. This is not the older `torch.jit.trace` API.
 
 **`torch.export`**
 PyTorch's library for capturing an `nn.Module` and representative inputs as an `ExportedProgram`. Emmy uses its FX
@@ -225,12 +228,13 @@ Moving from a high-level representation to a more detailed, machine-oriented one
 meaning.
 
 **Runtime**
-The code and state involved while a compiled program is executing. Emmy's CUDA runtime allocates buffers, resolves
-dynamic sizes, and launches kernels.
+The code and state involved while a compiled program executes. Emmy's Rust runtime loads cubins, derives memory
+layouts, resolves dynamic geometry, launches kernels, and owns CUDA graph capture and timing. The Python host lends
+Torch-allocated buffers through the runtime extension.
 
 **Fusion**
-Combining operations so that one GPU kernel performs work that would otherwise require several kernels. Fusion can
-avoid writing temporary values to slower global memory.
+Combining structurally legal operation regions to fixpoint. Emmy's loop fusion is maximal; performance and scheduling
+do not gate a merge. Later cuts expose alternative kernel boundaries for evidence to choose.
 
 **Static shape**
 A tensor shape known when compiling, such as exactly 512 tokens.
@@ -321,7 +325,8 @@ accumulated number; stable softmax needs several related values.
 Specialized GPU hardware for performing small matrix operations efficiently.
 
 **nvcc / NVRTC**
-Two NVIDIA CUDA compilers. `nvcc` compiles ahead of execution; NVRTC compiles CUDA source at runtime.
+Two NVIDIA CUDA compilers. Emmy requires `nvcc` to compile generated source into cached cubins before execution.
+NVRTC is NVIDIA's runtime compiler; Emmy does not use it as a fallback.
 
 **CUDA graph capture**
 Recording a sequence of GPU launches so the sequence can be replayed with less CPU overhead.
@@ -456,21 +461,13 @@ One complete set of choices that the compiler could use.
 **Greedy selection**
 Choosing the candidate that currently appears best without exploring alternatives during normal compilation.
 
-**MCTS (Monte Carlo tree search)**
-A search method that treats decisions as a tree and balances trying promising branches with exploring less-tested ones.
-
 **Prior**
-In Emmy, a ranker that estimates which schedule will be fast before the current candidate is measured. The offline
-prior is fitted ahead of time by `emmy fit` on canonical goldens and ships with the repository; the online prior learns
-from local tuning measurements.
+A ranker that estimates which schedule will be fast when no measurement decides. Emmy's offline prior is fitted ahead
+of time from an exported dataset and ships with the repository. Compilation does not train it.
 
 **Trainer**
 An immutable object that turns candidate-pool data into a fitted model. `emmy fit --trainer linear` uses
 `LinearTrainer`; `--trainer catboost` uses `CatBoostTrainer`.
-
-**Blend**
-The named strategy that decides which prior half owns deployment ranking and how the halves influence MCTS selection.
-`EMMY_PRIOR_BLEND` selects it; the default uses the offline half until the online half is trustworthy.
 
 **Candidate pool**
 Every valid schedule row for one kernel. Pool members compute the same result and differ only in realization and speed;
@@ -482,46 +479,53 @@ after verification, paired measurements for one exact GPU platform.
 
 **Realization**
 One statically bound or symbolic instance of a golden configuration: named bindings, input pins, selected schedule
-knobs, and optional measurements and ranking feedback.
+knobs, optional measurements, and any recorded kernel-set listing.
 
 **Working golden file**
-A mutable local YAML inventory containing program targets, unverified realizations, proposals, and tuning feedback. It
-is search state. Its measured rows supply evidence when a command names the file with `--golden PATH`.
+A mutable local JSON inventory containing program targets, unmeasured realizations, proposed schedules, and recorded
+measurements. Only its measured rows supply evidence when `--golden PATH` selects it.
 
 **Canonical golden file**
-A reviewed per-GPU YAML in a recipe's `golden/` directory or the model-agnostic hardware-golden directory. Every
-realization has verified deployable measurements, and `emmy tune` refuses to mutate the file directly.
+Reviewed per-GPU JSON evidence in a recipe's `golden/` directory or `search/golden/records/`. Recording commands refuse
+canonical destinations; re-recording works on a copy and requires qualification before promotion.
 
 **Child-identity schedule receipt**
-A realization that freezes structural cuts in its pins, records one resulting child kernel's schedule row, and stores
-that child's deploy identity. Strict decode selects the child by that identity. As evidence it supplies a route row
-for the parent and a schedule row for the child.
+A realization storing one resulting kernel's identity and schedule row. `--record-greedy` writes it under the seed's
+input regime, beside routing rows and a kernel-set listing. A corpus case may pin the route to reproduce that child;
+ordinary recorded receipts do not copy the parent's cut pins onto every piece.
 
 **Evidence**
 A compatible recorded measurement used to select between schedule candidates.
 
-**Reservoir**
-The bounded sample of past tuning measurements stored inside the online-prior checkpoint. It trains the online model,
-and its compatible deployable rows are also a direct evidence tier.
+**Dataset DB**
+A database separate from the deployment cache, filled from explicit golden, freeze, or tune-DB sources by `emmy db
+import`. It uses the tune DB's schema; its rows are exported for fitting and evaluation, never read by compilation.
+
+**Dataset**
+A directory written by `emmy db export`, with a manifest and one matrix per candidate pool. `emmy fit` and `emmy eval
+prior` read it so candidate models can be compared on the same pools.
+
+**Kernel set listing**
+A realization's `kernel_set` names the routing rows describing its selected kernel set. Child schedule receipts retain
+the measurements used to price its pieces.
 
 **Measurement freeze**
-A checksum- and vocabulary-pinned snapshot of node measurements used for reproducible evaluation. Unlike one machine's
-mutable tune DB or reservoir, the same freeze yields the same evaluation dataset wherever it is read.
+A fixed snapshot of admitted kernel measurements as JSON golden files, one per GPU. It contains kernel definitions,
+schedules, regimes, and timings. Import re-lowers the definitions; the exported dataset then fixes the pools used for
+fitting and evaluation.
 
 **Deploy evidence hierarchy**
-The greedy-compile order: compatible reservoir measurements, then the fastest compatible tune-DB or golden row in
-scope, then the prior prediction, and finally the rule's first emitted option. Goldens have no separate priority.
+The greedy-compile order: fastest compatible measured row, fitted offline prior, then the rule's first emitted option.
+Golden rows are imported into the tune DB and compete with local measurements in the same evidence index.
 
-**Route row**
-A measured row spelling a placement or cross-CTA split. It prices that structural choice; the resulting child kernels
-choose their own schedules from their own evidence.
+**Routing row**
+The record linking one kernel-set decision to the pieces it creates. Its measured
+price is the sum of those pieces' fastest compatible rows; every piece must be measured. A stored aggregate timing
+does not itself determine the route's price.
 
 **Strict evidence**
 A mode selected by `--strict-evidence` or `EMMY_STRICT_EVIDENCE`. A fork that no measurement decides raises an error
 instead of using a prior prediction or emission order.
-
-**Calibration**
-A check of whether a learned model ranks measured candidates well enough to influence compilation.
 
 **Regime**
 The compile settings under which a candidate is measured or deployed, especially nvcc optimization and fast-math pins.
@@ -538,11 +542,9 @@ How closely a model's ordering follows measured ordering, from `+1` for identica
 The position of a verified realization in the prior's ordering of its candidate pool. It measures discoverability, not
 the realization's absolute speed.
 
-**Quarantine**
-The state in which an online model may continue learning but is not trusted to choose deployed schedules.
-
 **CatBoost**
-The machine-learning library Emmy uses for its online schedule-ranking model.
+The machine-learning library behind Emmy's optional offline tree ranker. `emmy fit --trainer catboost` trains it from
+an exported dataset.
 
 **SQLite**
 A small database stored in one local file. Emmy uses it to persist tuning measurements.

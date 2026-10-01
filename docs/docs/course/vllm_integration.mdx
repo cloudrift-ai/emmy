@@ -1,6 +1,6 @@
 ---
 sidebar_position: 5
-validated_against_commit: 261039d9161f9349b1c6fef0678ec98ce04b433d
+validated_against_commit: 29fa2768929dd4d6a797fa52dd85376c6d4977c4
 title: Integrating Emmy with vLLM
 description: >-
   Learn how Emmy plugs compiled embedding and generation programs into vLLM, then run and validate both serving paths.
@@ -155,16 +155,18 @@ registry later.
 after the model name. Unrecognized flags pass through to vLLM. Tokens after a literal `--` always pass through
 verbatim, which provides an escape hatch if a future vLLM flag collides with an Emmy flag.
 
-Use `--dry-run` to see the generated command without importing vLLM, loading a model, or touching a GPU:
+Use `--dry-run` to see the generated command without starting vLLM or loading model weights. An explicit `--runner`
+selects the serving task; automatic selection may fetch checkpoint metadata when it is not cached locally:
 
 ```bash
-./venv/bin/emmy serve Qwen/Qwen3-Embedding-0.6B --dry-run
+./venv/bin/emmy serve Qwen/Qwen3-Embedding-0.6B --runner pooling --dry-run
 ```
 
 The embedding command includes the important integration choices:
 
 ```text
 vllm serve Qwen/Qwen3-Embedding-0.6B \
+  --runner pooling \
   --runner pooling \
   --enforce-eager \
   --hf-overrides '{"architectures": ["EmmyEmbedModel"]}' \
@@ -182,7 +184,7 @@ default A/B comparison uses the same maximum model length. A caller-supplied vLL
 Now inspect generation:
 
 ```bash
-./venv/bin/emmy serve TinyLlama/TinyLlama-1.1B-Chat-v1.0 --generate --dry-run
+./venv/bin/emmy serve TinyLlama/TinyLlama-1.1B-Chat-v1.0 --runner generate --dry-run
 ```
 
 The generated command instead selects:
@@ -206,15 +208,16 @@ flag routing and A/B symmetry are visible without requiring a GPU.
 ### Evidence used during startup
 
 `--golden PATH` selects the golden file whose measured rows the serving compiler reads. The command forwards it to the
-vLLM child through `EMMY_GOLDEN_FILE`. Those rows join local tune-DB evidence after reservoir lookup; the fastest
-compatible DB or golden row wins. Without the flag, the compiler reads the live GPU's repository goldens.
+vLLM child through `EMMY_GOLDEN_FILE`. Its measured rows are imported into the tune DB and compete with compatible
+local measurements on latency. Without the flag, the compiler imports the live GPU's repository goldens. The wrapper
+also forwards a shared precision regime from the selected golden; a conflicting environment pin fails startup.
 
 `--strict-evidence` forwards `EMMY_STRICT_EVIDENCE` and fails startup if a fork has no measured choice. Without that
 mode the prior supplies unmeasured choices. Inspect the forwarded settings without starting a server:
 
 ```bash
 ./venv/bin/emmy serve TinyLlama/TinyLlama-1.1B-Chat-v1.0 \
-  --generate --strict-evidence --dry-run
+  --runner generate --strict-evidence --dry-run
 ```
 
 For a release, `emmy eval golden --golden PATH --serving-config PATH` goes further: it checks the exact live GPU,
@@ -226,7 +229,7 @@ measurements cannot hide a gap in the release file. See [How Emmy Chooses Fast G
 `--stock` removes the Emmy model override and plugin-specific execution flags:
 
 ```bash
-./venv/bin/emmy serve Qwen/Qwen3-Embedding-0.6B --stock --dry-run
+./venv/bin/emmy serve Qwen/Qwen3-Embedding-0.6B --runner pooling --stock --dry-run
 ```
 
 This is the baseline for answering “what did the Emmy integration change?” It uses the same wrapper defaults, such
@@ -263,12 +266,12 @@ of a request. `split_spans` recovers the individual sequences.
 
 For each sequence, the default runner:
 
-1. shares Torch token IDs with cupy through DLPack;
+1. accepts token IDs as a Torch CUDA tensor;
 2. resolves the symbolic `seq_len`;
 3. uploads the real input prefix into the capacity buffers on the device;
 4. builds or reuses a device causal mask for that length;
 5. captures the whole compiled program once for that exact length, or replays its cached CUDA graph;
-6. shares the real output prefix back with Torch through DLPack; and
+6. exposes the Rust runtime's output prefix as a Torch tensor through DLPack; and
 7. returns hidden states to vLLM for pooling.
 
 ```mermaid
@@ -396,6 +399,7 @@ Start the server:
 
 ```bash
 ./venv/bin/emmy serve Qwen/Qwen3-Embedding-0.6B \
+  --runner pooling \
   --max-model-len 512 \
   --gpu-memory-utilization 0.8
 ```
@@ -424,7 +428,7 @@ Use an ungated small model for the first smoke test:
 
 ```bash
 ./venv/bin/emmy serve TinyLlama/TinyLlama-1.1B-Chat-v1.0 \
-  --generate \
+  --runner generate \
   --max-model-len 512 \
   --max-num-seqs 4
 ```
@@ -502,6 +506,7 @@ Preview an embedding benchmark:
 
 ```bash
 ./venv/bin/emmy serve Qwen/Qwen3-Embedding-0.6B \
+  --runner pooling \
   --bench \
   --dry-run \
   --max-concurrency 4 \
@@ -514,7 +519,7 @@ completions endpoint and adds an output length:
 
 ```bash
 ./venv/bin/emmy serve TinyLlama/TinyLlama-1.1B-Chat-v1.0 \
-  --generate \
+  --runner generate \
   --bench \
   --max-concurrency 4 \
   --num-prompts 32 \
@@ -570,9 +575,9 @@ rotary buffers, scratch memory, and tests; it is not only a CLI change.
 
 ### The server runs out of GPU memory
 
-Start with smaller values for `--max-model-len`, `--max-num-seqs`, and benchmark concurrency. Remember that vLLM's
-memory profiler sees Torch allocations, while Emmy also holds cupy-backed buffers and weights. The generation wrapper
-uses a different default utilization from stock because the KV-cache budget must account for those residents.
+Start with smaller values for `--max-model-len`, `--max-num-seqs`, and benchmark concurrency. Emmy lends Torch-allocated
+buffers and weights to the Rust runtime, so vLLM's memory profiler counts them. The generation wrapper still defaults
+to 0.97 memory utilization for Emmy and 0.90 for stock; pin the same value when that difference would confound an A/B.
 
 ### Embeddings are correct but high-concurrency throughput is poor
 

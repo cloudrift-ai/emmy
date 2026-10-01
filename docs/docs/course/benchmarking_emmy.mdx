@@ -1,6 +1,6 @@
 ---
 sidebar_position: 3
-validated_against_commit: 261039d9161f9349b1c6fef0678ec98ce04b433d
+validated_against_commit: 29fa2768929dd4d6a797fa52dd85376c6d4977c4
 title: Benchmarking and Comparing Emmy
 description: >-
   Measure Emmy kernels and deployed model servers, compare them fairly with PyTorch, and understand the resulting
@@ -138,7 +138,7 @@ type together when sharing a result.
 
 Clean pinned benchmark rows and the greedy isolated re-benchmark can also write deployment measurements to the tune
 DB. Set `EMMY_TUNE_DB=/tmp/emmy-course-bench.db` on learning runs to keep those measurements separate from your usual
-cache. `--no-record-nodes` disables this automatic DB recording, including both node and `perf` rows. Clean rows
+cache. `--no-record-evidence` disables this automatic DB recording of per-kernel `perf` rows. Clean rows
 require at least 5 warmups and 20 measurement iterations; deployment evidence also requires the `-O3` regime.
 
 For a golden inventory, `run --golden PATH --bench` walks every realization. With multiple realization names, a
@@ -197,7 +197,7 @@ alternative schedule:
 ./venv/bin/emmy run \
   --code "nn.RMSNorm(256)(torch.randn(4, 256, device='cuda', dtype=torch.float16))" \
   --bench --warmup 10 --iters 100 \
-  --ab "REDUCE=b256,VECTORIZE_LOADS=true" \
+  --ab "WORK=t128,REDUCE=coop,VECTORIZE_LOADS=true" \
   --json /tmp/emmy-rmsnorm-ab.json
 ```
 
