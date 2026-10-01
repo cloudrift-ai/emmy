@@ -19,20 +19,21 @@ between sites and nothing else. Its defining operations are a lazy frontier and 
 
 Every context prefix and extension is a `Schedule[KernelT, NodeT, EdgeT]`; a non-`None` kernel marks completion.
 `extensions` yields the next site's options that compose with the prefix; `extend` composes one and returns a context
-containing the composed facts, leaving the original unchanged, or raises `ScheduleRefused`. `extend` is also the
-validation boundary for a complete classic schedule supplied directly by a pinned golden, even when that assignment
-was not emitted by `extensions`. The generic `schedule(context)` recursively composes those lazy frontiers and yields
-only complete schedules. Recursion is the generic Algorithm 1 traversal; consumers do not write a family-specific
-visitor or feed contexts back themselves. The driver knows no concrete family, pipeline fork type, site order, or
-enumeration slice. `narrowed(row)` is the one way a row enters after construction: an EMPTY prefix over the same
-problem with the row installed, which is what a descent that already holds a row asks for before expanding anything.
-Strict narrowing marks only the supplied codec keys as exact; inherited peer-kernel pins keep their ordinary tolerant
-reading. A row narrows WITHIN the live hand pins and never lifts one: where an evidence row and an environment pin name
-the same site with different values the site keeps the pin's, no leaf equals the row, and the descent that followed
-the row re-decides. A recorded receipt of the same kernel used to win that disagreement, so an `EMMY_KNOBS` fast-math
-pin silently deployed the standard receipt.
-The pipeline's generic schedule-fork adapter preserves the same contexts as deferred search branches without adding
-compatibility logic.
+containing the composed facts, leaving the original unchanged, or raises `ScheduleRefused`. `random_extension(rng)` is
+the third operation, one option drawn uniformly among those `extensions` would yield, or `None`: the step of a random
+descent, which the default answers by materializing the frontier and a family with a cheaper answer overrides.
+`extend` is also the validation boundary for a complete classic schedule supplied directly by a pinned golden, even
+when that assignment was not emitted by `extensions`. The generic `schedule(context)` recursively composes those lazy
+frontiers and yields only complete schedules. Recursion is the generic Algorithm 1 traversal; consumers do not write a
+family-specific visitor or feed contexts back themselves. The driver knows no concrete family, pipeline fork type,
+site order, or enumeration slice. `narrowed(row)` is the one way a row enters after construction: an EMPTY prefix over
+the same problem with the row installed, which is what a descent that already holds a row asks for before expanding
+anything. Strict narrowing marks only the supplied codec keys as exact; inherited peer-kernel pins keep their ordinary
+tolerant reading. A row narrows WITHIN the live hand pins and never lifts one: where an evidence row and an
+environment pin name the same site with different values the site keeps the pin's, no leaf equals the row, and the
+descent that followed the row re-decides. A recorded receipt of the same kernel used to win that disagreement, so an
+`EMMY_KNOBS` fast-math pin silently deployed the standard receipt. The pipeline's generic schedule-fork adapter
+preserves the same contexts as deferred search branches without adding compatibility logic.
 
 Classic sites additionally expose their independent factors — a node site's `nodes` and `edges`, the kernel site's
 `kernels` — and `ClassicProblem.bounds` reports the size of their product without building it. There is no product
@@ -98,9 +99,14 @@ resource limits, producer-band/TMA agreement, target availability. A site's tupl
 local support record is derived lazily, once per site object, after the context has selected one node and its
 incident edge values. This node-plus-incident-edges frontier is granular enough to reject mixed transport and
 fragment-seam combinations before they create subtrees, without materializing the full node × edge product.
-`extensions` emits partial schedules at that granularity; `extend` derives and composes their support. Kernel picks
-form the final frontier: the kernel site's catalog is what the node sites' choices imply, so it is the last site. The
-fragment-seam relation has no pipeline-side copy.
+`extensions` emits partial schedules at that granularity; `extend` derives and composes their support. The supports
+a prefix admits are filtered once per RELATION the compatibility check reads — the worker inventory, the axis and
+fragment agreements, the allowed works, and the decided nodes only where a shared root or a chain pair makes them
+matter — and kept on the per-target tables, so prefixes that decided different nodes but agree on those facts share
+one filter; `random_extension` draws from that memoized set, which is what makes a descent cheap after the first
+prefix through a site. The site's local frontier itself, support derived for every option of the product, is the
+fixed cost a site pays once per target. Kernel picks form the final frontier: the kernel site's catalog is what the
+node sites' choices imply, so it is the last site. The fragment-seam relation has no pipeline-side copy.
 
 A pointwise map's site reads a catalog of its own (`map_tile_moves`): the per-cell form and the register strips that
 hand one thread 2, 3, 4 or 8 contiguous inner-axis elements, each offered when it divides a static inner extent. It
