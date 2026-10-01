@@ -4,6 +4,7 @@ inventory, physical-axis agreement, fragment seams, raster eligibility, resource
 
 from __future__ import annotations
 
+import random
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from functools import cached_property
@@ -232,19 +233,63 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         cache[key] = result
         return result
 
-    def _compatible_frontier(self, site: ClassicNodeSite) -> tuple[_LocalSupport, ...]:
-        """Filter one local frontier through this exact immutable prefix."""
+    def _work_frontier(self, site: ClassicNodeSite) -> tuple[_LocalSupport, ...]:
+        """The site's local frontier narrowed to the supports that can ride this prefix's worker inventory —
+        the catalog the prefix filter runs over, indexed once per site by work."""
         frontier = self._local_frontier(site)
-        if self._work is not None:
-            indexes = _target_memo(self.tile_op, self.target, "_memo_frontier_by_work")
-            key = (site.id, id(site))
-            if key not in indexes:
-                by_work = {}
-                for support in frontier:
-                    by_work.setdefault(support.work, []).append(support)
-                indexes[key] = {work: tuple(supports) for work, supports in by_work.items()}
-            frontier = (*indexes[key].get(None, ()), *indexes[key].get(self._work, ()))
-        return tuple(support for support in frontier if self._support_refusal(site.id, support) is None)
+        if self._work is None:
+            return frontier
+        indexes = _target_memo(self.tile_op, self.target, "_memo_frontier_by_work")
+        key = (site.id, id(site))
+        if key not in indexes:
+            by_work = {}
+            for support in frontier:
+                by_work.setdefault(support.work, []).append(support)
+            indexes[key] = {work: tuple(supports) for work, supports in by_work.items()}
+        return (*indexes[key].get(None, ()), *indexes[key].get(self._work, ()))
+
+    def _compatible_frontier(self, site: ClassicNodeSite) -> tuple[_LocalSupport, ...]:
+        """Filter one local frontier through this exact immutable prefix — once per RELATION the refusal reads
+        (:meth:`_support_refusal_reason`: the inventory, the axis and fragment agreements, the allowed works,
+        and the decided nodes only where a shared root or a chain pair makes them matter). Prefixes that
+        decided different nodes but agree on those facts admit the same supports, so a walk or a draw that
+        reaches a site through many prefixes filters its tens of thousands of supports a few hundred times,
+        not once per prefix."""
+        cache = _target_memo(self.tile_op, self.target, "_memo_compatible_frontier")
+        nodes = self.schedule.nodes
+        chained = site.id in self._shared_roots or any(site.id in pair for pair in self._chain_pairs)
+        key = (
+            site.id,
+            id(site),
+            id(self.problem),
+            self._work,
+            tuple(self._axes.items()),
+            tuple(self._fragments.items()),
+            tuple(nodes.items()) if chained or self._work is None else (),
+        )
+        if key not in cache:
+            cache[key] = tuple(support for support in self._work_frontier(site) if self._support_refusal(site.id, support) is None)
+        return cache[key]
+
+    def random_extension(self, rng: random.Random) -> ClassicSchedule | None:
+        """One compatible extension drawn uniformly: a kernel pick past the last node, tried in random order;
+        else one of the site's compatible supports, which :meth:`_compatible_frontier` holds per relation so the
+        draw is a lookup wherever a prefix with the same inventory and agreements came through before."""
+        if self.schedule.kernel is not None:
+            return None
+        if self.problem is None:
+            raise ValueError("classic compatibility composition requires a projected problem")
+        if self.nodes_complete:
+            picks = list(self.problem.kernel_site.options)
+            rng.shuffle(picks)
+            return next((pick for pick in picks if self._kernel_composes(pick.kernel)), None)
+        assert self.next_site is not None
+        site = self.problem.node_site(self.next_site)
+        frontier = self._compatible_frontier(site)
+        if not frontier:
+            return None
+        support = rng.choice(frontier)
+        return Schedule(None, {site.id: support.node}, support.edges)
 
     def extend(self, pick: ClassicSchedule) -> ClassicScheduleContext:
         """Compose a frontier pick or validate and accept one complete schedule."""

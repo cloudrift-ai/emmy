@@ -15,6 +15,7 @@ sequence; ``ForkPoint`` wraps them for an offer.
 
 from __future__ import annotations
 
+import random
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -24,7 +25,7 @@ if TYPE_CHECKING:
     from emmy.compiler.graph import Graph
     from emmy.compiler.ir.base import Op
 
-from emmy.compiler.ir.schedule import Schedule, ScheduleContext, schedule
+from emmy.compiler.ir.schedule import Schedule, ScheduleContext, ScheduleRefused, schedule
 from emmy.compiler.pipeline.knob import EVIDENCE_PREFIXES, METADATA_PREFIXES, evidence_row_vouches, values_equal
 
 
@@ -70,6 +71,13 @@ class Fork(ABC):
     @abstractmethod
     def expand(self) -> list[Op | Graph | Fork]: ...
 
+    def sample_child(self, rng: random.Random) -> Op | Graph | Fork | None:
+        """One option below this branch, drawn uniformly, or ``None`` when it has none — the step of a random
+        descent (:func:`descent_sample`). The default expands the branch and draws; a branch that can draw
+        without expanding (a schedule prefix, whose context draws one extension) overrides it."""
+        kids = self.expand()
+        return rng.choice(kids) if kids else None
+
     def narrow(self, row: Mapping) -> Fork:
         """This branch with its enumeration re-sourced to ``row`` where it can be: a schedule
         root offers the row's values at the sites the row names. The default is the branch itself —
@@ -105,6 +113,11 @@ class DeferredFork(Fork):
         return [self.materialize()]
 
 
+#: How many extensions a sampled child draws before giving the branch up as dead: a pick the composition
+#: refuses is rare (the frontier was filtered for it), so a run of them means the prefix has nothing to offer.
+_REFUSED_PICK_DRAWS = 4
+
+
 @dataclass(frozen=True)
 class _ScheduleTree:
     """Shared callbacks and identity for one generic lazy schedule tree."""
@@ -117,13 +130,16 @@ class _ScheduleTree:
     exact_keys: frozenset[str] | None = None
 
     def step(self, context: ScheduleContext, row: Mapping) -> list[Fork]:
-        forks = []
-        for child in schedule(context, recursive=False):
-            if isinstance(child, Schedule):
-                forks.append(self.leaf(child))
-            else:
-                forks.append(_ScheduleFork(self, child, {**row, **self.row_delta(context, child)}))
-        return forks
+        """Every extension of ``context``, composed by the generic driver, as a child of the prefix spelling ``row``."""
+        return [self.child(context, row, composed) for composed in schedule(context, recursive=False)]
+
+    def child(self, context: ScheduleContext, row: Mapping, composed: ScheduleContext | Schedule) -> Fork:
+        """One composed extension of ``context`` as a child: a complete schedule becomes a leaf, a context the next
+        prefix carrying ``row`` plus what the step decided. The one place a child is built, for the walk
+        (:meth:`step`) and the draw (``_ScheduleFork.sample_child``)."""
+        if isinstance(composed, Schedule):
+            return self.leaf(composed)
+        return _ScheduleFork(self, composed, {**row, **self.row_delta(context, composed)})
 
 
 @dataclass(frozen=True)
@@ -152,6 +168,22 @@ class _ScheduleFork(Fork):
 
     def expand(self) -> list[Fork]:
         return self.tree.step(self.context, self.row)
+
+    def sample_child(self, rng: random.Random) -> Fork | None:
+        """One child drawn without expanding: the context draws one compatible extension
+        (:meth:`ScheduleContext.random_extension`), composed by :meth:`_ScheduleTree.child` as the walk composes
+        every extension. A pick the composition refuses is drawn again, as the walk skips such a pick; ``None``
+        is a dead end the descent restarts from."""
+        for _ in range(_REFUSED_PICK_DRAWS):
+            pick = self.context.random_extension(rng)
+            if pick is None:
+                return None
+            try:
+                composed = self.context.extend(pick)
+            except ScheduleRefused:
+                continue
+            return self.tree.child(self.context, self.row, composed.schedule if composed.schedule.kernel is not None else composed)
+        return None
 
     def narrow(self, row: Mapping) -> Fork:
         """The root of a schedule tree re-sourced to ``row``: its problem offers the row's values at
@@ -238,28 +270,16 @@ def descent_sample(
     options: Sequence[Op | Graph | Fork], *, draw: int, seed: object, work_budget: int | None = None, skip: Callable | None = None
 ) -> list:
     """Up to ``draw`` complete leaves drawn by seeded uniform descents through the lazy tree — a child at
-    random at every branch, which reaches every level's values the way an emission-order prefix never does.
-    Dead ends (a branch whose expansion is empty — legality killed the subtree) and leaves ``skip`` refuses
-    retry, up to a bounded attempt count. With a ``work_budget`` (option checks, the deploy's cold-pool
-    budget) a tree whose declared ``pool_descent_bound`` exceeds it gets exactly one attempt: completing a
-    legal row is indivisible through the Fork interface. Without one, every descent is afforded. Duplicates
-    are kept; the caller decides whether a repeat matters. The draw is a pure function of the tree, ``draw``
-    and ``seed``."""
-    import random  # noqa: PLC0415
-
+    random at every branch (:meth:`Fork.sample_child`, which a schedule prefix answers without expanding), so
+    the draw reaches every level's values the way an emission-order prefix never does and costs the options
+    it tries rather than the frontiers it passes. Dead ends (a branch with no child — legality killed the
+    subtree) and leaves ``skip`` refuses retry, up to a bounded attempt count. With a ``work_budget`` (option
+    checks, the deploy's cold-pool budget) a tree whose declared ``pool_descent_bound`` exceeds it gets exactly
+    one attempt: completing a legal row is indivisible through the Fork interface. Without one, every descent
+    is afforded. Duplicates are kept; the caller decides whether a repeat matters. The draw is a pure function
+    of the tree, ``draw`` and ``seed``."""
     rng = random.Random(str(seed))
     sample: list = []
-    # A lazy branch recomputes its children on every ``expand`` — the whole frontier at that site — and the
-    # descents share their upper levels, so each node visited is expanded once and its children kept for the
-    # next descent through it: the draw then costs the distinct nodes it visits, not depth times descents.
-    expanded: dict[int, list] = {}
-
-    def kids_of(branch) -> list:
-        kids = expanded.get(id(branch))
-        if kids is None:
-            kids = expanded[id(branch)] = branch.expand()
-        return kids
-
     if work_budget is None:
         attempts = 4 * draw
     else:
@@ -272,14 +292,13 @@ def descent_sample(
             attempts = min(4 * draw, attempt_budget)
     while len(sample) < draw and attempts > 0:
         attempts -= 1
-        option = options[rng.randrange(len(options))]
+        option = rng.choice(options)
         dead = False
         while isinstance(option, Fork) and not option.is_leaf:
-            kids = kids_of(option)
-            if not kids:
+            option = option.sample_child(rng)
+            if option is None:
                 dead = True
                 break
-            option = kids[rng.randrange(len(kids))]
         if dead or (skip is not None and skip(option)):
             continue
         sample.append(option)

@@ -32,6 +32,7 @@ the lazy enumeration; no schedule-family visitor or product materialization exis
 
 from __future__ import annotations
 
+import random
 from abc import ABC, abstractmethod
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
@@ -142,6 +143,15 @@ class ScheduleContext[KernelT, NodeT, EdgeT](ABC):
     @abstractmethod
     def extend(self, pick: Schedule[KernelT, NodeT, EdgeT]) -> Self:
         """Compose a partial or complete pick, or raise when it is incompatible."""
+
+    def random_extension(self, rng: random.Random) -> Schedule[KernelT, NodeT, EdgeT] | None:
+        """One of the next site's options that compose with this prefix, drawn uniformly, or ``None`` when
+        none does — the step of a random descent through the enumeration. The default draws from the
+        frontier materialized whole; a family whose frontier is a filter over a fixed catalog overrides it to
+        try the catalog in random order and stop at the first option that composes, so a descent costs the
+        options it tries rather than every option the site has."""
+        options = list(self.extensions())
+        return rng.choice(options) if options else None
 
     def narrowed(self, row: Mapping[str, str], *, strict: bool = False) -> Self:
         """This prefix over the problem with ``row`` installed. Only an empty prefix can be
