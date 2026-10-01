@@ -148,6 +148,26 @@ now use that latest run. Its preceding `2026-10-01_20-56-48` archive is retained
 under `post-main-validation/` for the three-card checks, `2026-10-01-upstream-qualification/` for V100, and
 `merged-runtime/` for H100. These checks preserve the accepted comparison; they do not select another candidate.
 
+## FP4 correctness found during finalization (2026-10-01)
+
+The full RTX 5090 suite exposed twelve FP4 accuracy failures after merging main. A separate clean checkout of
+`c536afe4e`, with its own rebuilt runtime and the same GPU and dependencies, reproduces the three representative
+errors exactly. TMA and cp.async outputs still agree bit for bit. Disabling fast math or enabling precise division
+passes those controls, identifying an approximate quotient crossing an e2m1 encoding boundary.
+
+The fix at `b59142774` gives static FP4 encoding an explicit round-to-nearest f32 divide, retaining the f32 divisor
+and fast math elsewhere. All twelve original failures pass at default fast math and the suite's O1 setting, with
+unchanged tolerances. All 431 repository golden freshness checks, nine FP4 realization-case freshness checks and
+all ten benchmark golden checks pass without restamping. This repair changes no selected Qwen route; the benchmark
+uses unquantized weights. FP4 throughput was not measured in this experiment. The RTX 5090 tuning archive retains
+the failed run, clean-main controls and corrected checks under `fp4-gate/`.
+
+The complete RTX 5090 suite at the same source passes with eight workers: 6,460 passed and 394 skipped in
+1,252.12 seconds. An earlier 32-worker run lost one worker during the GDN state handoff/reset test. Its replacement
+passed that test, as did an isolated rerun and the complete eight-worker run. The cause of the exit remains unknown;
+the archive retains both full logs, the isolated check and the available system events. The CPU suite also passes
+at this source: 5,621 passed and 1,233 skipped.
+
 ## Five-card baseline before the next optimization round (2026-10-01)
 
 The current pinned kernels still pass correctness on all five exact cards. Eight of the ten same-input Hugging Face
