@@ -235,7 +235,8 @@ Pins addressing a peer kernel's sites do not prevent direct decoding. A refused 
 
 Transposed cooperative reductions use 32 output lanes by default. Volta's catalog also offers `coop-t/n8`: eight
 output lanes, with the remaining threads partitioning the reduction. `/v<n>` still names adjacent columns per lane.
-Both layouts use the same reduction choice, codec and materializer; the worker count must divide into output lanes.
+Both layouts use the same reduction choice, codec and materializer. The worker count is divisible by the output lane
+count.
 
 The structural cut phase runs before any schedule is composed. The single `030_cut` pass reaches a fixpoint over two
 ordered domains: stored-Fold-edge placement first, then cross-CTA reduction splitting. Every successful choice and
