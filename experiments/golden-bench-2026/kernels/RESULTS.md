@@ -21,7 +21,7 @@ with the earlier baseline table. Every individual timing is retained in the corr
 
 | Card | Pairs | Baseline median | Candidate median | Lower latency | Selection |
 | --- | ---: | ---: | ---: | ---: | --- |
-| A100 40GB | 3 | 53.895 | 51.769 | 3.95% | shared K/V |
+| A100 40GB | 3 | 53.895 | 51.769 | 3.94% | shared K/V |
 | H100 80GB | 12 | 29.158 | 27.739 | 4.87% | shared K/V |
 | V100 SXM2 16GB | 3 | 72.431 | 67.704 | 6.53% | shared K/V |
 | RTX 4090 | 3 | 26.349 | 24.676 | 6.35% | shared K/V |
@@ -122,6 +122,20 @@ provenance audit verifies that the neutral-directory import, installed editable 
 resolve the intended task checkout at the recorded commit. The misleading origin URL did not select different
 benchmark code. The RTX 4090 tuning archive also retains an initial staging failure from a dirty copied golden;
 that attempt ran no GPU benchmark. The canonical run began from the clean committed source.
+
+Finalization corrected coordinate substitution so that a self-referenced coordinate keeps its original parameter
+position. The original NVFP4 and RMSNorm corpus cases then passed on RTX 5090 and A100 without changing either
+case. Qualification of this final compiler preserves the measured Qwen evidence: the actual model comparison was
+repeated on A100, RTX 4090 and RTX 5090, with every ordered source hash, schedule and shared-memory size unchanged.
+Fresh H100 model-form compiles likewise reproduce all sources and launch configurations.
+
+V100 decode retains all 14 source hashes. In prefill, the fix restores the one renamed kernel above to the exact
+source of the successful baseline; all 21 launch configurations, arguments and address expressions remain equivalent.
+Thus 140 of the 141 source hashes across the ten workloads match the final snapshots, and the remaining difference
+is this coordinate rename back to the baseline. Both V100 shapes also pass one additional strict replay with one
+warmup and one iteration. These short checks establish correctness, not new performance evidence. The three-card
+records are under `post-fold-validation/` in their tuning archives; H100's are under `fold-source-check/`, and V100's
+archive retains the exact pre-fix and fixed CUDA graphs, source diff and strict replay records.
 
 ## Five-card baseline before the next optimization round (2026-10-01)
 
