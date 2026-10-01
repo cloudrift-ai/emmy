@@ -69,6 +69,8 @@ def _pin(monkeypatch, atom: str, *, tile: str = "f1x1", stage: str = "") -> None
 
 
 def _pin_sdpa(monkeypatch) -> None:
+    # One fused kernel is what these tests read the source of; the placement prior would otherwise decide the cut.
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
     monkeypatch.setenv("EMMY_WORK", "w1x1")
     monkeypatch.setenv("EMMY_TILE@map.1/twist.1/inner", f"{VOLTA}/f1x1/k4")
     monkeypatch.setenv("EMMY_TILE@map.1/twist", f"{VOLTA}/f1x1/k4")

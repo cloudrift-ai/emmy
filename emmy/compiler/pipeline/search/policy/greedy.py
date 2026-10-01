@@ -156,18 +156,21 @@ def _load_placement_prior():
     return prior if prior.space == "placement" else None
 
 
-def _placement_pick(fp: ForkPoint, prior) -> object:
+def _placement_pick(fp: ForkPoint, prior) -> object | None:
     """The placement prior's argmin over a placement fork's arms — keep fused and every cut the pass
-    offers — each featurized from the kernels it leaves (``ranking.placement_features``), exactly as the
-    arms of the placement dataset the prior was fit on. The first of equally scored arms wins."""
+    offers — each featurized from the kernels it leaves (``ranking.arm_features``), exactly as the
+    arms of the placement dataset the prior was fit on. The first of equally scored arms wins. ``None``
+    when some arm cannot be featurized (a kernel with no body to stamp), and the fork is priced as before."""
     from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
     from emmy.compiler.pipeline.search.ranking import arm_features  # noqa: PLC0415
 
     leaves = fp.flat()
     root = fp.root_op.with_io(fp.match.graph, fp.match.root)
+    rows = [arm_features(_leaf_graph(o) if _is_structural_option(o) else _leaf_op(o), root, fp.match.graph) for o in leaves]
+    if any(row is None for row in rows):
+        return None
     base = fp.ctx.features()
-    feats = [{**base, **arm_features(_leaf_graph(o) if _is_structural_option(o) else _leaf_op(o), root, fp.match.graph)} for o in leaves]
-    scores = prior.mean_scores_features(feats)
+    scores = prior.mean_scores_features([{**base, **row} for row in rows])
     return leaves[min(range(len(leaves)), key=scores.__getitem__)]
 
 
@@ -1080,7 +1083,8 @@ def greedy_decide(
             # No measured row spelled an arm here (those return above): the placement prior ranks the
             # arms, which strict evidence refuses the same way it refuses a priced comparison.
             _require_evidence(fp, "no measured row spells a kernel-set arm")
-            return _placement_pick(fp, placement)
+            if (picked := _placement_pick(fp, placement)) is not None:
+                return picked
         if dkey is not None and _schedule_fork(fp):
             picked = _direct_measured_pick(fp, blocked, db_index())
             if picked is not None:

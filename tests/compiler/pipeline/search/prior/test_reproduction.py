@@ -1,6 +1,7 @@
 """The reproduction gate on the shipped priors: with no measurement in scope, the greedy must reproduce what the
-repository goldens record — exactly on the hardware goldens' placement forks, which the placement prior is fit on,
-and at least at the recorded rate elsewhere (``FLOORS``: a ratchet, raised when a refit improves it).
+repository goldens record — exactly on the hardware goldens' placement forks, which the placement prior is fit on
+and which ``make test`` runs, and at least at the recorded rate elsewhere (``FLOORS``: a ratchet, raised when a refit
+improves it), under ``make test-priors``.
 
 A red node names the rows the prior cannot reproduce. The fix is a refit (README, "Fit the priors"), and where the
 rows are a model golden's, extending the hardware golden with them first (``emmy golden extract``) — never a
@@ -44,10 +45,15 @@ def _golden_id(path: Path) -> str:
 def _parameters():
     with repository_golden_paths() as paths:
         files = sorted(paths, key=_golden_id)
-    # The schedule half re-walks every kernel's pool through the greedy, minutes per file: the off-lane ``priors``
-    # marker keeps it out of ``make test`` (``make test-priors`` runs it); the placement half takes seconds.
-    marks = {"placement": (), "schedule": (pytest.mark.priors,)}
-    return [pytest.param(path, space, id=f"{_golden_id(path)}/{space}", marks=marks[space]) for path in files for space in marks]
+
+    # The default lane holds the exact gate alone — the hardware goldens' placement forks, seconds per file. The
+    # schedule half re-walks every kernel's pool through the greedy, minutes per file, and a model golden's
+    # placement walk is minutes too: both carry the off-lane ``priors`` marker (``make test-priors`` runs them).
+    def marks(path: Path, space: str) -> tuple:
+        return () if space == "placement" and path.parent == _RECORDS_DIR else (pytest.mark.priors,)
+
+    spaces = ("placement", "schedule")
+    return [pytest.param(path, space, id=f"{_golden_id(path)}/{space}", marks=marks(path, space)) for path in files for space in spaces]
 
 
 @functools.lru_cache(maxsize=2)

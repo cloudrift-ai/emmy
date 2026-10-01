@@ -316,23 +316,27 @@ def build_golden_groups(
 PLACEMENT_PASSES = ("tile/lift", "tile/cut")
 
 
-def _arm_stamps(option, fused, graph) -> list[dict]:
+def _arm_stamps(option, fused, graph) -> list[dict] | None:
     """The ``S_*`` stamps of each kernel an arm's option leaves: the fused tile itself (``fused``, the fork's root
     in ``graph``), or every tile piece of a cut's fragment — each stamped as the identity strategy stamps a kernel
-    (:func:`~..passes.identity.op_stamps`), without the identities a ``kernel`` row would also digest."""
+    (:func:`~..passes.identity.op_stamps`), without the identities a ``kernel`` row would also digest. ``None``
+    when a kernel has no body to stamp: such an arm cannot be featurized."""
     from emmy.compiler.graph import Graph  # noqa: PLC0415
     from emmy.compiler.ir.tile.ir import TileOp  # noqa: PLC0415
     from emmy.compiler.pipeline.passes.identity import op_stamps  # noqa: PLC0415
 
     if isinstance(option, Graph):
-        return [op_stamps(node.op.with_io(option, node), option) for node in option.nodes.values() if isinstance(node.op, TileOp)]
-    return [op_stamps(fused, graph)]
+        stamps = [op_stamps(node.op.with_io(option, node), option) for node in option.nodes.values() if isinstance(node.op, TileOp)]
+    else:
+        stamps = [op_stamps(fused, graph)]
+    return None if any(s is None for s in stamps) else stamps
 
 
-def arm_features(option, fused, graph) -> dict[str, float]:
+def arm_features(option, fused, graph) -> dict[str, float] | None:
     """One placement arm's ``P_*`` row from the option that realizes it — the dataset's and the deploy's one
-    featurizer (:func:`placement_features` over :func:`_arm_stamps`)."""
-    return placement_features(_arm_stamps(option, fused, graph))
+    featurizer (:func:`placement_features` over :func:`_arm_stamps`) — or ``None`` for an arm no stamp describes."""
+    stamps = _arm_stamps(option, fused, graph)
+    return None if stamps is None else placement_features(stamps)
 
 
 def placement_features(pieces: list[dict]) -> dict[str, float]:
@@ -400,7 +404,7 @@ def walk_placement(pool: GoldenPool, ctx: Context, decisions: dict[str, dict], s
             else:
                 unmatched.append(identity[:12])
         arms = [i for i in place if i != steer]
-        feats = [{**base, **arm_features(leaves[i].expand()[0], root, fp.match.graph)} for i in arms]
+        feats = [{**base, **(arm_features(leaves[i].expand()[0], root, fp.match.graph) or {})} for i in arms]
         if scorer is not None:
             scores = scorer(feats)
             chosen = arms[min(range(len(arms)), key=scores.__getitem__)]

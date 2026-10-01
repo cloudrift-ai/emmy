@@ -17,7 +17,7 @@ from emmy.compiler.pipeline.search.dataset import Dataset, GoldenPool, GoldenRow
 from emmy.compiler.pipeline.search.db import PerfRow, SearchDB, knobs_json
 from emmy.compiler.pipeline.search.db.freeze import freeze_reason, schedule_row
 from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION, knob_features
-from emmy.compiler.pipeline.search.ranking import build_golden_groups, build_placement_groups, pool_context
+from emmy.compiler.pipeline.search.ranking import build_golden_groups, build_placement_groups
 from emmy.compiler.structural import digest
 
 logger = logging.getLogger(__name__)
@@ -70,7 +70,7 @@ def placement_pools(db: SearchDB, pools: list[GoldenPool]) -> tuple[list[GoldenP
             return pool
         return next((p for child in children.get(identity, ()) if (p := measured(child)) is not None), None)
 
-    out = [_placement_pool(db, pool, pool.kernel, decisions.get(pool.kernel.exact_identity)) for pool in pools]
+    out = [_placement_pool(pool, pool.kernel, decisions.get(pool.kernel.exact_identity)) for pool in pools]
     for parent in sorted(decisions):
         if parent in by_identity:
             continue
@@ -78,20 +78,18 @@ def placement_pools(db: SearchDB, pools: list[GoldenPool]) -> tuple[list[GoldenP
         if below is None:
             dropped["no measured piece"] += 1
             continue
-        out.append(_placement_pool(db, below, kernels[parent], decisions[parent]))
+        out.append(_placement_pool(below, kernels[parent], decisions[parent]))
     return out, dict(dropped)
 
 
-def _placement_pool(db: SearchDB, like: GoldenPool, kernel, arm: dict | None) -> GoldenPool:
+def _placement_pool(like: GoldenPool, kernel, arm: dict | None) -> GoldenPool:
     """``kernel`` as a placement pool on the card and sizes of ``like`` (itself, or a measured descendant). Its one
-    row is the decision ``arm``, priced as the DB prices a decision — the sum of its pieces' fastest rows on the
-    card, NaN while a piece is unmeasured — under the source ``like``'s rows were filed under."""
+    row is the decision ``arm`` under the source ``like``'s rows were filed under; a mark, so its microseconds are
+    NaN — a decision's price is the DB's reading of its pieces' rows (``SearchDB.priced_arms``), never stored."""
     pool = GoldenPool(like.gpu, like.cap, like.regime, kernel, dict(like.bindings), ())
     if arm is None:
         return pool
-    priced = {knobs_json(a): us for a, us in db.priced_arms(pool_context(pool), kernel.exact_identity, bindings=pool.bindings)}
-    row = GoldenRow({k: str(v) for k, v in arm.items()}, priced.get(knobs_json(arm), math.nan), like.rows[0].source)
-    return replace(pool, rows=(row,))
+    return replace(pool, rows=(GoldenRow({k: str(v) for k, v in arm.items()}, math.nan, like.rows[0].source),))
 
 
 def kernel_sig(feats: dict) -> str:

@@ -342,8 +342,9 @@ Then run the gates, in this order, after every edit above is in:
 
 22. **Refit the priors if a hardware golden changed**: a row added, re-recorded, restamped or dropped under
     `search/golden/records/` means both priors are refit (README, "Fit the priors") and the weights committed with
-    it — the reproduction gate holds the shipped priors to those goldens. A refit that lowers a reproduction floor
-    says which change moved it in the PR body.
+    it — the reproduction gate holds the shipped priors to those goldens. A change to a prior or a golden also runs
+    `make test-priors`, the gate's off-lane half. A refit that lowers a reproduction floor says which change moved it
+    in the PR body.
 23. **Run the full suite**: `make test` — fix any failures. If a realization case comes back stale, `make
     test-corpus-regen` applies the fix; if a golden's stored targets stop being the fresh lowering, `emmy golden
     restamp` applies that one (the `refresh-golden` skill). If golden rows go red, name the change that did it in the

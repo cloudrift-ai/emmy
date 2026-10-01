@@ -204,8 +204,9 @@ metrics files.
 **The reproduction gate.** `tests/compiler/pipeline/search/prior/test_reproduction.py` re-decides every repository
 golden with the shipped priors and no measurement in scope: the hardware goldens' placement forks exactly (the
 placement prior is fit on them), every other file at least at the rate its `FLOORS` entry records — a ratchet, raised
-when a refit improves it. The placement half runs in `make test`; the schedule half re-walks every kernel's pool and
-runs under `make test-priors`. A red node names the rows the prior cannot reproduce. Refit after any change to a
+when a refit improves it. The exact gate runs in `make test`; the rest re-walks every kernel's pool and runs under
+`make test-priors`, which a change to a prior or a golden runs at finalization. A red node names the rows the prior
+cannot reproduce. Refit after any change to a
 hardware golden. Where the rows are a model golden's, extend the card's hardware golden with them first, then refit:
 
 ```bash
