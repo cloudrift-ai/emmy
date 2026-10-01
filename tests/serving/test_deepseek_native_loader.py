@@ -177,7 +177,7 @@ def test_a_float16_twin_keeps_the_routing_bias_float32(tmp_path):
     torch.testing.assert_close(loaded, references["gate_bias"], rtol=0, atol=0)
 
 
-def test_expert_slice_keeps_one_ranks_cut_of_every_expert(tmp_path):
+def test_expert_slice_keeps_one_ranks_slice_of_every_expert(tmp_path):
     """A tensor-parallel rank holds every expert, sliced along the intermediate axis: gate and up keep
     the same rows, down the matching block columns, and the twin declares the sliced shapes."""
     torch = pytest.importorskip("torch")
