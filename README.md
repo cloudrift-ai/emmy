@@ -201,9 +201,20 @@ emmy eval prior _data/placement
 `emmy fit` also writes a metrics file under `_tune/fits/<timestamp>/`; two fits are compared by diffing their
 metrics files.
 
-Nightly **CI optimization** refits the schedule and placement priors independently from the repository goldens. It
-compares the shipped and fitted weights on the same dataset and commits a candidate directly to `main` only when a
-GPU, tier and pool-size group's median golden rank falls by at least 5% and no group's median rises or loses coverage.
+To compare a candidate with the shipped schedule prior without replacing it:
+
+```bash
+emmy fit _data/schedule _data/schedule-candidate.json --folds 0
+emmy eval prior _data/schedule \
+  --offline-file emmy/compiler/pipeline/search/prior/weights/schedule.json \
+  --compare-to _data/schedule-candidate.json --json _data/schedule-comparison.json
+```
+
+The JSON report includes both rank summaries and the comparison decision.
+
+**Nightly refresh** refits the schedule and placement priors independently from the repository goldens. It compares
+the shipped and fitted weights on the same dataset and commits a candidate directly to `main` only when a GPU, tier
+and pool-size group's median golden rank falls by at least 5% and no group's median rises or loses coverage.
 Each result is reported to #emmy-robots. Golden rank measures where a verified row landed, not the latency of a wrong
 pick; the reproduction gate below still runs before a candidate is committed.
 

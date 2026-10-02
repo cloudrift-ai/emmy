@@ -1,4 +1,4 @@
-name: CI optimization
+name: Nightly refresh
 
 on:
   schedule:
@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: ci-optimization
+  group: nightly-refresh
   cancel-in-progress: false
 
 jobs:
@@ -95,7 +95,7 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_EMMY_ROBOTS_WEBHOOK_URL }}
         run: |
           jq -n --arg url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
-            '{content: "CI optimization updated CPU test durations on main. " + $url, allowed_mentions: {parse: []}}' \
+            '{content: "Nightly refresh updated CPU test durations on main. " + $url, allowed_mentions: {parse: []}}' \
             | curl --fail-with-body --silent --show-error \
                 --header 'Content-Type: application/json' \
                 --data-binary @- "$DISCORD_WEBHOOK_URL"
@@ -150,7 +150,7 @@ jobs:
         run: |
           cp _data/candidate.json "$WEIGHTS"
           EMMY_GOLDEN_FILE= ./venv/bin/pytest tests/compiler/pipeline/search/prior/test_reproduction.py \
-            -k "$SPACE" -q -p no:randomly -n 8 --dist=loadgroup
+            -k "$SPACE" -q -p no:randomly -n auto --dist=loadgroup
 
       - name: Generate GitHub App token
         if: steps.compare.outputs.updated == 'true'
@@ -201,7 +201,7 @@ jobs:
           fi
           jq -n --arg space "$SPACE" --arg result "$result" \
             --arg url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
-            '{content: "CI optimization " + $space + " prior: " + $result + ". " + $url, allowed_mentions: {parse: []}}' \
+            '{content: "Nightly refresh " + $space + " prior: " + $result + ". " + $url, allowed_mentions: {parse: []}}' \
             | curl --fail-with-body --silent --show-error \
                 --header 'Content-Type: application/json' \
                 --data-binary @- "$DISCORD_WEBHOOK_URL"

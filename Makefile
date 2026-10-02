@@ -101,10 +101,10 @@ test-corpus-regen: setup
 	./venv/bin/python -m tests.compiler.realization.regen $(if $(COMPLETE),--complete,)
 
 # Regenerate CPU test timings for CI's first (cache-less) run. A nightly workflow
-# commits the result to main. Eight xdist workers measure the CPU suite; GPU
+# commits the result to main. xdist uses all available cores for the CPU suite; GPU
 # timings remain in their separate checked-in file.
 test-durations: setup
-	EMMY_NVCC_FLAGS="-Xcicc -O1" EMMY_GOLDEN_FILE= ./venv/bin/pytest tests/ -q -p no:randomly -n 8 --dist=loadgroup --write-durations
+	EMMY_NVCC_FLAGS="-Xcicc -O1" EMMY_GOLDEN_FILE= ./venv/bin/pytest tests/ -q -p no:randomly -n auto --dist=loadgroup --write-durations
 
 # The name the docs reference; the stock (no tune DB) lane is the default.
 bench-kernels: bench-kernels-clean
