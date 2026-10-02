@@ -19,10 +19,11 @@ jobs:
     outputs:
       updated: ${{ steps.commit.outputs.updated }}
     env:
-      # The prior job may land its weights on main while this job measures; any other move stops the push.
+      # The prior and discovery jobs may land their files on main while this job measures; any other move stops the push.
       TOLERATED_PATHS: >-
         emmy/compiler/pipeline/search/prior/weights/schedule.json
         emmy/compiler/pipeline/search/prior/weights/placement.json
+        recipes/*/recipe.yaml
     steps:
       - uses: actions/checkout@v4
         with:
@@ -98,8 +99,8 @@ jobs:
     env:
       SPACE: ${{ matrix.space }}
       WEIGHTS: emmy/compiler/pipeline/search/prior/weights/${{ matrix.space }}.json
-      # The durations job may land its file on main while this job fits; any other move stops the push.
-      TOLERATED_PATHS: tests/durations_cpu.json
+      # The duration and discovery jobs may land their files on main while this job fits; any other move stops the push.
+      TOLERATED_PATHS: tests/durations_cpu.json recipes/*/recipe.yaml
     steps:
       - uses: actions/checkout@v4
         with:
@@ -173,80 +174,30 @@ jobs:
     timeout-minutes: 120
     permissions:
       contents: read
-      pull-requests: read
-    # The prompt review appends to the same rolling branch; neither may run while the other does.
-    concurrency:
-      group: model-discovery
-      cancel-in-progress: false
     outputs:
-      pr_number: ${{ steps.lifecycle-pr.outputs.number || steps.rolling.outputs.number }}
       modified_models: ${{ steps.lifecycle.outputs.modified_models }}
     env:
-      GH_REPO: ${{ github.repository }}
       MAINTAINED_MODEL_COUNT: 10
       AGENT_MODEL: ${{ vars.ONBOARD_AGENT_MODEL || 'Qwen/Qwen3.8-27B-FP8' }}
       CLOUDRIFT_INFERENCE_URL: ${{ vars.CLOUDRIFT_INFERENCE_URL || 'https://inference.cloudrift.ai/v1' }}
       OPENCODE_DISABLE_AUTOUPDATE: "true"
-      WORKFLOW_SOURCE: /tmp/emmy-discovery-source-${{ github.run_id }}-${{ github.run_attempt }}
-      OPENCODE_CONFIG_DIR: /tmp/emmy-discovery-source-${{ github.run_id }}-${{ github.run_attempt }}/.opencode
+      OPENCODE_CONFIG_DIR: ${{ github.workspace }}/.opencode
       AGENT_TASK: ${{ github.workspace }}/.emmy-discovery-task-${{ github.run_id }}-${{ github.run_attempt }}.json
       AGENT_EVENTS: /tmp/emmy-discovery-events-${{ github.run_id }}-${{ github.run_attempt }}.jsonl
       AGENT_SELECTION: /tmp/emmy-discovery-selection-${{ github.run_id }}-${{ github.run_attempt }}.json
       AGENT_MANIFEST: /tmp/emmy-discovery-manifest-${{ github.run_id }}-${{ github.run_attempt }}.json
       AGENT_REJECTION: /tmp/emmy-discovery-rejection-${{ github.run_id }}-${{ github.run_attempt }}.txt
       DISCOVERY_SUMMARY: /tmp/emmy-discovery-summary-${{ github.run_id }}-${{ github.run_attempt }}.md
+      # The duration and prior jobs may land their files on main while the agent works; any other move stops the push.
+      TOLERATED_PATHS: >-
+        tests/durations_cpu.json
+        emmy/compiler/pipeline/search/prior/weights/schedule.json
+        emmy/compiler/pipeline/search/prior/weights/placement.json
     steps:
-      - name: Generate GitHub App token
-        id: app-token
-        uses: actions/create-github-app-token@v1
+      - uses: actions/checkout@v4
         with:
-          app-id: ${{ secrets.EXPERIMENT_APP_ID }}
-          private-key: ${{ secrets.EXPERIMENT_APP_PRIVATE_KEY }}
-          repositories: ${{ github.event.repository.name }}
-
-      - name: Load the shared rolling-branch helpers
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-
-      - name: Find rolling discovery pull request
-        id: rolling
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-        run: |
-          source .github/workflows/scripts/bot_git.sh
-          find_rolling_pr
-
-      - name: Checkout discovery branch
-        uses: actions/checkout@v4
-        with:
-          token: ${{ steps.app-token.outputs.token }}
-          ref: ${{ steps.rolling.outputs.branch || github.event.repository.default_branch }}
           fetch-depth: 0
           persist-credentials: false
-
-      - name: Load exact workflow source
-        env:
-          WORKFLOW_SHA: ${{ github.sha }}
-          GIT_LFS_SKIP_SMUDGE: "1"
-        run: |
-          if ! git cat-file -e "$WORKFLOW_SHA^{commit}"; then
-            git fetch --depth=1 origin "$WORKFLOW_SHA"
-          fi
-          mkdir -p "$WORKFLOW_SOURCE"
-          git archive "$WORKFLOW_SHA" | tar -x -C "$WORKFLOW_SOURCE"
-          echo "PYTHONPATH=$WORKFLOW_SOURCE" >> "$GITHUB_ENV"
-          echo "PYTHONSAFEPATH=1" >> "$GITHUB_ENV"
-
-      - name: Rebase existing discovery branch on latest main
-        if: steps.rolling.outputs.branch != ''
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          BASE_BRANCH: ${{ github.event.repository.default_branch }}
-          EXISTING_BRANCH: ${{ steps.rolling.outputs.branch }}
-        run: |
-          source "$WORKFLOW_SOURCE/.github/workflows/scripts/bot_git.sh"
-          rebase_rolling_branch
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -257,7 +208,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Install Emmy
-        run: make setup-agent AGENT_SOURCE="$WORKFLOW_SOURCE"
+        run: make setup-agent
 
       - name: Run discover-models agent
         env:
@@ -272,7 +223,7 @@ jobs:
             | jq \
                 --argjson maintained_count "$MAINTAINED_MODEL_COUNT" \
                 --argjson batch_size 6 \
-                -f "$WORKFLOW_SOURCE/.github/workflows/scripts/discovery_task.jq" \
+                -f .github/workflows/scripts/discovery_task.jq \
             > "$AGENT_TASK"
           # One short line per agent event: the job log is the only view of a run in progress,
           # and a rejected selection has to be readable after the fact.
@@ -292,7 +243,7 @@ jobs:
               "$AGENT_EVENTS" > "$AGENT_SELECTION"
             jq \
               --rawfile selection "$AGENT_SELECTION" \
-              -f "$WORKFLOW_SOURCE/.github/workflows/scripts/discovery_manifest.jq" \
+              -f .github/workflows/scripts/discovery_manifest.jq \
               "$AGENT_TASK" > "$AGENT_MANIFEST" 2> "$AGENT_REJECTION"
             # A reply carrying no JSON object matches nothing and leaves jq successful but silent.
             if [ -s "$AGENT_MANIFEST" ]; then
@@ -306,11 +257,11 @@ jobs:
           set +e
           : > "$AGENT_EVENTS"
           run_agent "Complete the attached lifecycle task exactly. Its file is $AGENT_TASK." \
-            --file "$WORKFLOW_SOURCE/.agents/skills/discover-models/SKILL.md" \
-            --file "$WORKFLOW_SOURCE/prompts/model-fit.md" \
-            --file "$WORKFLOW_SOURCE/prompts/discover-models/lifecycle.md" \
-            --file "$WORKFLOW_SOURCE/prompts/discover-models/score-recipes.md" \
-            --file "$WORKFLOW_SOURCE/prompts/discover-models/size-deployments.md" \
+            --file "$GITHUB_WORKSPACE/.agents/skills/discover-models/SKILL.md" \
+            --file "$GITHUB_WORKSPACE/prompts/model-fit.md" \
+            --file "$GITHUB_WORKSPACE/prompts/discover-models/lifecycle.md" \
+            --file "$GITHUB_WORKSPACE/prompts/discover-models/score-recipes.md" \
+            --file "$GITHUB_WORKSPACE/prompts/discover-models/size-deployments.md" \
             --file "$AGENT_TASK"
           agent_status=$?
           build_manifest
@@ -350,9 +301,10 @@ jobs:
       - name: Validate and apply model lifecycle
         id: lifecycle
         run: |
-          ./venv/bin/python "$WORKFLOW_SOURCE/.github/workflows/scripts/discovery_lifecycle.py" \
+          ./venv/bin/python .github/workflows/scripts/discovery_lifecycle.py \
             --input "$AGENT_MANIFEST" \
             --summary "$DISCOVERY_SUMMARY"
+          cat "$DISCOVERY_SUMMARY" >> "$GITHUB_STEP_SUMMARY"
           maintained_count="$(./venv/bin/emmy recipe query --root recipes --filter 'tags contains "maintained"' --json | jq '.rows | length')"
           if [ "$maintained_count" -ne "$MAINTAINED_MODEL_COUNT" ]; then
             echo "Expected $MAINTAINED_MODEL_COUNT maintained recipes, found $maintained_count" >&2
@@ -402,82 +354,24 @@ jobs:
           PY
           git diff --check
 
-      - name: Refresh GitHub App token
-        if: steps.lifecycle.outputs.changed == 'true' || steps.rolling.outputs.exists == 'true'
-        id: app-token-refresh
+      - name: Generate GitHub App token
+        if: steps.lifecycle.outputs.changed == 'true' && github.ref == 'refs/heads/main'
+        id: app-token
         uses: actions/create-github-app-token@v1
         with:
           app-id: ${{ secrets.EXPERIMENT_APP_ID }}
           private-key: ${{ secrets.EXPERIMENT_APP_PRIVATE_KEY }}
           repositories: ${{ github.event.repository.name }}
 
-      - name: Commit and push rolling lifecycle update
-        if: steps.lifecycle.outputs.changed == 'true'
-        id: branch
+      - name: Commit the lifecycle update to main
+        if: steps.lifecycle.outputs.changed == 'true' && github.ref == 'refs/heads/main'
         env:
-          GH_TOKEN: ${{ steps.app-token-refresh.outputs.token }}
-          EXISTING_BRANCH: ${{ steps.rolling.outputs.branch }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
-          source "$WORKFLOW_SOURCE/.github/workflows/scripts/bot_git.sh"
-          bot_git_identity
-          branch="$EXISTING_BRANCH"
-          if [ -n "$branch" ]; then
-            git switch -C "$branch"
-          else
-            branch="agents/model-discovery-${GITHUB_RUN_ID}"
-            git switch -c "$branch"
-          fi
-          git add --all -- recipes
-          git diff --cached --check
-          git commit -m "recipes: refresh model lifecycle"
-          # An onboarding run may have pushed to this branch while the agent was deciding.
-          # Replay the lifecycle commit onto the branch as it stands now.
-          for attempt in 1 2 3; do
-            git push origin "HEAD:refs/heads/$branch" && break
-            if [ "$attempt" -eq 3 ]; then
-              exit 1
-            fi
-            git fetch origin "+refs/heads/$branch:refs/remotes/origin/$branch"
-            git rebase "origin/$branch" || { git rebase --abort; exit 1; }
-            sleep "$attempt"
-          done
-          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          source .github/workflows/scripts/bot_git.sh
+          push_to_main "recipes: refresh model lifecycle" recipes
 
-      - name: Create or update rolling discovery pull request
-        id: lifecycle-pr
-        if: steps.lifecycle.outputs.changed == 'true' || steps.rolling.outputs.exists == 'true'
-        env:
-          GH_TOKEN: ${{ steps.app-token-refresh.outputs.token }}
-          PR_NUMBER: ${{ steps.rolling.outputs.number }}
-          DISCOVERY_BRANCH: ${{ steps.branch.outputs.branch || steps.rolling.outputs.branch }}
-          BASE_BRANCH: ${{ github.event.repository.default_branch }}
-        run: |
-          source "$WORKFLOW_SOURCE/.github/workflows/scripts/bot_git.sh"
-          retry_gh gh label create model-discovery \
-            --description "Automated model recipe lifecycle" \
-            --color 5319E7 --force
-          retry_gh gh label create model-onboarding \
-            --description "Automated model discovery and onboarding" \
-            --color 1D76DB --force
-          if [ -n "$PR_NUMBER" ]; then
-            retry_gh gh api --method PATCH "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" \
-              -f title="Refresh model lifecycle and onboarding" \
-              -F body=@"$DISCOVERY_SUMMARY" >/dev/null
-          else
-            PR_NUMBER=$(retry_gh gh api --method POST "repos/$GITHUB_REPOSITORY/pulls" \
-              -f head="$DISCOVERY_BRANCH" \
-              -f base="$BASE_BRANCH" \
-              -f title="Refresh model lifecycle and onboarding" \
-              -F body=@"$DISCOVERY_SUMMARY" \
-              -F draft=true \
-              --jq .number)
-          fi
-          retry_gh gh api --method POST "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels" \
-            -f 'labels[]=model-discovery' \
-            -f 'labels[]=model-onboarding' >/dev/null
-          echo "number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
-
-      - name: Cleanup discovery credentials and output
+      - name: Cleanup discovery output
         if: always()
         run: |
           rm -f \
@@ -487,10 +381,6 @@ jobs:
             "$AGENT_MANIFEST" \
             "$AGENT_REJECTION" \
             "$DISCOVERY_SUMMARY"
-          case "$WORKFLOW_SOURCE" in
-            /tmp/emmy-discovery-source-*) rm -rf -- "$WORKFLOW_SOURCE" ;;
-            *) echo "Refusing to remove unexpected workflow source path: $WORKFLOW_SOURCE" >&2; exit 1 ;;
-          esac
           git config --unset-all credential.helper || true
 
   notify:
@@ -511,7 +401,6 @@ jobs:
       PLACEMENT_PRIOR: ${{ needs.prior.outputs.placement }}
       DISCOVER_RESULT: ${{ needs.discover.result }}
       MODIFIED_MODELS: ${{ needs.discover.outputs.modified_models }}
-      PR_NUMBER: ${{ needs.discover.outputs.pr_number }}
     steps:
       - name: Checkout exact workflow source
         uses: actions/checkout@v4

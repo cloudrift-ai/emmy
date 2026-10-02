@@ -35,7 +35,8 @@ source lives outside the package:
 | `architecture/` | repository-wide dependency and layering invariants |
 
 The GitHub automation tests also pin workflow-level safety contracts that cannot be expressed inside a helper, such
-as loading discovery and onboarding control code from the exact workflow commit while editing the rolling branch.
+as loading onboarding control code from the exact workflow commit while editing the rolling branch, and the nightly
+jobs committing to `main` only from a run on `main`.
 
 Three small organizing directories are also intentional:
 

@@ -101,13 +101,15 @@ rebase_rolling_branch() {
 }
 
 # Commits the named paths and pushes that commit onto main: `push_to_main MESSAGE PATH...`.
-# Rebases over a main that moved only in $TOLERATED_PATHS (another nightly job's file) and retries
-# the push; any other move of main stops the push, so a stale measurement cannot overwrite newer work.
+# Rebases over a main that moved only in $TOLERATED_PATHS (the other nightly jobs' files, as git
+# pathspecs) and retries the push; any other move of main stops the push, so a stale result cannot
+# overwrite newer work.
 push_to_main() {
   local message=$1 base attempt path
-  local -a excludes=()
+  local -a excludes=() tolerated=()
   shift
-  for path in ${TOLERATED_PATHS:-}; do
+  read -ra tolerated <<< "${TOLERATED_PATHS:-}"
+  for path in "${tolerated[@]}"; do
     excludes+=(":(exclude)$path")
   done
   bot_git_identity

@@ -63,7 +63,6 @@ NIGHTLY_ENVIRONMENT = {
     "SCHEDULE_PRIOR": "candidate rejected: median rank rose in 1 of 3 cells",
     "PLACEMENT_PRIOR": "Updated the weights on main; candidate qualifies: 2 of 3 cells improved by at least 5%, none regressed",
     "DISCOVER_RESULT": "success",
-    "PR_NUMBER": "487",
 }
 
 
@@ -95,7 +94,6 @@ def test_nightly_success_payload_reports_every_job_and_groups_modified_models():
         {"name": "Maintained", "value": "• `org/maintained` · heat **70**", "inline": False},
         {"name": "Best effort", "value": "• `org/best-effort` · heat **40**", "inline": False},
         {"name": "Onboarding", "value": "• `org/new` · heat **95**", "inline": False},
-        {"name": "Rolling PR", "value": "[#487](https://github.com/cloudrift-ai/emmy/pull/487)", "inline": True},
     ]
 
 
@@ -115,7 +113,6 @@ def test_nightly_failure_payload_names_the_failed_job_and_keeps_the_other_result
         "PRIOR_RESULT": "failure",
         "PLACEMENT_PRIOR": "",
         "DISCOVER_RESULT": "failure",
-        "PR_NUMBER": "",
     }
 
     payload = discord_notification.build_payload(environment)
@@ -139,7 +136,7 @@ def test_nightly_cancellation_is_not_a_failure():
 
     assert embed["title"] == "Nightly refresh cancelled"
     assert embed["color"] == discord_notification.CANCELLED_COLOR
-    assert embed["fields"][-2] == {"name": "Modified models", "value": "Cancelled.", "inline": False}
+    assert embed["fields"][-1] == {"name": "Modified models", "value": "Cancelled.", "inline": False}
 
 
 def test_no_eligible_onboarding_is_a_neutral_summary():

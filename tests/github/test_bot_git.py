@@ -56,14 +56,17 @@ def _push_to_main(repo, tmp_path, *, tolerated=""):
 def test_push_to_main_rebases_over_the_other_jobs_file(remote, tmp_path):
     origin, nightly, other = remote
     _commit(other, "weights/schedule.json", '{"refit": true}\n', "compiler: refresh schedule prior")
+    _commit(other, "recipes/new-model/recipe.yaml", "tags: [onboarding]\n", "recipes: refresh model lifecycle")
     _git(other, "push", "-q", "origin", "HEAD:main")
     (nightly / "tests/durations.json").write_text('{"measured": true}\n')
 
-    result = _push_to_main(nightly, tmp_path, tolerated="weights/schedule.json weights/placement.json")
+    # A tolerated path is a git pathspec, so the recipe glob reaches git unexpanded.
+    result = _push_to_main(nightly, tmp_path, tolerated="weights/schedule.json weights/placement.json recipes/*/recipe.yaml")
 
     assert result.returncode == 0, result.stderr
     assert _git(nightly, "log", "--format=%s", "origin/main").stdout.splitlines() == [
         "tests: refresh durations",
+        "recipes: refresh model lifecycle",
         "compiler: refresh schedule prior",
         "seed weights",
         "seed",

@@ -157,7 +157,7 @@ def _nightly_summary(environment: Mapping[str, str]) -> tuple[str, str, int, lis
         color = CANCELLED_COLOR
     elif all(result == "success" for result in results):
         title = "Nightly refresh completed"
-        description = "CPU test durations and the priors were refreshed on main, and the maintained recipe set was reviewed."
+        description = "CPU test durations, the priors and the recipe lifecycle were refreshed on main."
         color = SUCCESS_COLOR
     else:
         title = "Nightly refresh failed"

@@ -11,7 +11,7 @@ skills and CloudRift inference endpoint.
 | Workflow | Trigger | Runner | Result |
 | --- | --- | --- | --- |
 | **Tests** | Pull request to `main` | GitHub-hosted + `ubuntu-runners` | Runs Ruff, the complete test suite, and a PyPI package dry run. |
-| **Nightly refresh** | Nightly schedule or manual dispatch | `ubuntu-runners` + `agent-runners` / `agents` | Refreshes CPU test durations and qualified schedule or placement priors directly on `main`, refreshes recipe lifecycle tags and onboarding shells in one rolling PR without renting a VM, and posts one summary to #emmy-robots. |
+| **Nightly refresh** | Nightly schedule or manual dispatch | `ubuntu-runners` + `agent-runners` / `agents` | Refreshes CPU test durations and qualified schedule or placement priors directly on `main`, refreshes recipe lifecycle tags and onboarding shells on `main` without renting a VM, and posts one summary to #emmy-robots. |
 | **Review pull requests** | Ready PR or new commit | GitHub-hosted | Posts a PR Agent review using the nightly CloudRift model. |
 | **Publish to PyPI** | Manual dispatch or published GitHub release | GitHub-hosted | Verifies the source and distribution, publishes to PyPI, and optionally creates the release. |
 | **Verify or onboard model** | Nightly schedule or manual dispatch | `agent-runners` / `agents` | Qualifies one available exact model/GPU deployment and updates the rolling lifecycle PR. |
@@ -113,7 +113,7 @@ receives a 0-100 heat score for current onboarding priority. Each promising new 
 an onboarding shell with one to three proposed deployment entries made only from `deploy.gpu` and
 `deploy.gpu_count`; there is no shell-count limit.
 
-An exact-SHA `emmy recipe query` reads the rolling `recipes/` root and expands its deployment rows. The workflow's
+`emmy recipe query` reads the checkout's `recipes/` root and expands its deployment rows. The workflow's
 tracked `discovery_task.jq` filter groups those rows into recipe records and bounded scoring batches. The skill's
 lifecycle and scoring prompts are attached from that same workflow commit, so the skill and GitHub Actions share one
 prompt source. Three source investigators collect independent demand evidence, then hidden scorer subagents score the
@@ -122,8 +122,8 @@ parallel, reading that checkpoint's published configuration and the `emmy/gpu.py
 `prompts/model-fit.md` contract; the parent relays their deployments and authors no hardware itself. The parent
 returns only scores, maintained IDs, obsolete proposals, new onboarding models, and the sized deployments. The tracked
 `discovery_manifest.jq` filter validates exact score coverage, ignores already-inventoried IDs repeated as new
-candidates, and mechanically assembles the four-list manifest before the lifecycle validator applies policy. An
-exact-SHA recipe query against the rolling root enforces the maintained count after application.
+candidates, and mechanically assembles the four-list manifest before the lifecycle validator applies policy. A
+recipe query enforces the maintained count after application.
 
 A rejected selection is not a failed run on its own: the step resumes the same OpenCode session with the exact
 rejection and accepts a corrected selection, twice, before failing. A reply carrying no JSON object counts as a
@@ -135,13 +135,14 @@ step prints one line per agent event: a run in progress is visible only through 
 has to stay readable afterwards. The task is indented JSON inside the checkout so the agent can read it again after
 the initial attachment: its read tool truncates a line at 2000 characters, and the compact form was one 33 KB line
 it could not read back, which cost a run its recipe IDs. The workflow removes the task before checking that discovery
-made no repository edits. The exact workflow source stays readable through a narrow external-directory permission.
+made no repository edits.
 
-The workflow checks that the agent did not modify the checkout, then validates and applies its lifecycle manifest. Its
-artifact worktree remains on the rolling lifecycle branch, while the catalog, workflow scripts, OpenCode agent and
-plugin directory, attached discovery skill, and prompt files come from the exact `github.sha` that started the run.
-This lets a manual dispatch test a workflow PR without copying its implementation commits into the rolling branch or
-silently using an older manifest contract. The manifest filter reads the last fenced or bare object carrying exactly
+The workflow checks that the agent did not modify the checkout, then validates and applies its lifecycle manifest
+and commits the result to `main` through the shared push helper, as the duration and prior jobs do and under the
+same gate: only a run on `main` commits. The checkout is the commit the run started from, so the catalog, workflow
+scripts, OpenCode agent and plugin directory, attached discovery skill, prompt files and the recipes they edit are
+one tree, and a dispatch from a branch tests that branch without committing. The validator's full lifecycle summary
+is the job's step summary. The manifest filter reads the last fenced or bare object carrying exactly
 the five expected selection fields, so reasoning before or after it is tolerated, and requires exactly the five
 expected selection fields before assembling the manifest. Only new candidates are sized: an existing onboarding
 shell keeps the matrix it was created with, because sizing it again every run only reshuffled its hardware. An empty
@@ -157,8 +158,9 @@ model's chat-template thinking mode for the concise JSON result. Discovery never
 
 OpenCode is provisioned on the self-hosted runners rather than maintained inside Emmy. `.opencode/opencode.json` owns
 the model provider alias, while `.opencode/agents/` owns the separate discovery and onboarding limits and permissions.
-Both live under `.opencode/` because the workflows point OpenCode's config directory at the exact workflow source,
-which loads after the checked-out branch's config; a provider setting anywhere else would come from that branch. The
+Both live under `.opencode/` because the onboarding workflow points OpenCode's config directory at the exact
+workflow source, which loads after the rolling branch's config; a provider setting anywhere else would come from
+that branch. The
 tracked `.agents/skills/` remain the canonical task definitions. Compatibility symlinks under `.claude/skills/`
 expose the same packages through OpenCode's native skill tool.
 
@@ -250,7 +252,7 @@ rolling model lifecycle PR using renewable GitHub App credentials for the long-r
 The nightly refresh and the onboarding workflow each finish with a separate GitHub-hosted notification job, built by
 one script, `.github/scripts/discord_notification.py`, so every message has the same shape: a titled embed colored by
 the result, linked to the run, with one field per fact. The nightly summary groups only recipe entries actually
-modified by discovery under their resulting lifecycle, includes each current heat score, and links the rolling PR.
+modified by discovery under their resulting lifecycle and includes each current heat score.
 Onboarding includes the selected model, target, operation mode, serving deployment, and measured performance from its
 validated atomic summary. A failed summary marks a regression only when a previously qualified behavior or measured
 lane cannot be restored by a bounded fix; the isolated notification job then sends a prominent red Discord notice with
@@ -280,33 +282,30 @@ because an agent blocked by such a rule is usually the rule working.
 
 A correction lands as one commit on the rolling discovery branch with a comment on the PR, so it reaches the nightly
 agents only once a person merges it. That is the review's real safety property: it proposes, and a human still
-decides. It shares the `model-discovery` concurrency group with the discovery job, and
-`.github/workflows/scripts/bot_git.sh` holds the one copy of the bot's git operations: the rolling-branch lookup and
-force-with-lease rebase both use, and the push to `main` the duration and prior jobs use. Once a job has loaded the
-exact workflow source, it sources the helpers from there rather than from the rolling checkout, whose copy is as old
-as the branch.
+decides. `.github/workflows/scripts/bot_git.sh` holds the one copy of the bot's git operations: the rolling-branch
+lookup and force-with-lease rebase the review and onboarding use, and the push to `main` every nightly job uses. Once
+the review has loaded the exact workflow source, it sources the helpers from there rather than from the rolling
+checkout, whose copy is as old as the branch.
 
-### Discovery lifecycle PR
+### Discovery lifecycle update
 
-Discovery is the `discover` job of **Nightly refresh**, so it runs nightly or by manual dispatch of that workflow.
-Discovery and qualification share one rolling draft PR rather than opening one PR per model, but each holds only its
-own concurrency group, set on the discovery job itself: a qualification run keeps a rented GPU for up to a day, and
-serialising the two behind one group made every discovery run wait for it. What they share is the
-branch, so each does its long work on its own checkout and replays its commit onto the rolling branch as it stands at
-push time, retrying when the branch moved underneath. A conflict there is a genuine overlap and fails the run. Each
-workflow fails closed if more than one rolling PR exists. It also adopts one unpaired
-discovery branch left by an interrupted PR-creation step, while
-failing closed if multiple such branches would make ownership ambiguous. Before rendering inventory or running the
-agent, it rebases an existing rolling branch onto the latest default branch. The rebase push uses the exact original
-remote head as its force-with-lease expectation; a conflict, a stale checkout, or a concurrent branch update stops the
-run before any lifecycle changes are applied.
+Discovery is the `discover` job of **Nightly refresh**, so it runs nightly or by manual dispatch of that workflow, and
+its validated lifecycle changes land on `main` as one commit per night, the way the duration and prior jobs land
+theirs. Qualification keeps the rolling draft PR: a qualification run holds a rented GPU for up to a day and brings
+artifacts a person reviews before they merge, while a lifecycle update is tags, heat and rationale the validator
+already bounds. The onboarding workflow rebases its rolling branch onto `main` before each run, so it picks up
+discovery's shells and scores; a recipe both touched since that rebase is a genuine overlap, and the rebase stops the
+run before any artifact is applied. The onboarding workflow fails closed if more than one rolling PR exists, adopts
+one unpaired branch left by an interrupted PR-creation step, and fails closed if several would make ownership
+ambiguous. Its rebase push uses the exact original remote head as its force-with-lease expectation; a conflict, a
+stale checkout, or a concurrent branch update stops the run.
 
 The validated manifest tags the ten selected complete recipes `maintained`, keeps other useful recipes runnable as
 `best-effort`, and uses `obsolete` only when the rationale names the exact ID of an all-around better maintained or
-best-effort replacement for the same task at a comparable or lower practical VRAM footprint, or gives a technical
-reason the recipe should no longer be used. The manifest must classify and score every complete recipe exactly once.
-For decisions with a replacement, the validator demotes the proposal to `best-effort` unless the replacement is active
-and serves the same task. A replacement described as merely comparable, or whose recipe reduces configured context or
+best-effort replacement for the same task at a comparable or lower practical VRAM footprint, or gives a technical reason
+the recipe should no longer be used. The manifest must classify and score every complete recipe exactly once. For
+decisions with a replacement, the validator demotes the proposal to `best-effort` unless the replacement is active and
+serves the same task. A replacement described as merely comparable, or whose recipe reduces configured context or
 concurrency, also defaults to `best-effort` while retaining the supplied heat. No repository code estimates whether a
 checkpoint fits a platform: memory footprint depends on total parameters, quantization, and context, which the recipe
 does not record. `prompts/model-fit.md` is the shared contract where that reasoning happens, attached to both the
@@ -316,20 +315,19 @@ checkpoint name is normalized across a missing or incorrect organization only wh
 recipe; ambiguous or unknown maintained IDs still fail validation because all ten selections must resolve exactly. The
 agent must use `best-effort` when the old model retains any material capability or operating advantage. Every complete
 recipe stores its rationale and heat immediately after `model.huggingface`. Every run scores every recipe afresh,
-rewording the rationale and moving the heat a few points even when nothing changed, so a recipe keeps its recorded
-pair until its lifecycle changes or its heat moves by at least 10; rewriting both every run buried the real changes
-of each rolling PR. Obsolete recipes remain in git but cannot be deployed, benchmarked, published, or bundled; a later
+rewording the rationale and moving the heat a few points even when nothing changed, so a recipe keeps its recorded pair
+until its lifecycle changes or its heat moves by at least 10; rewriting both every run buried the real changes of each
+nightly commit. Obsolete recipes remain in git but cannot be deployed, benchmarked, published, or bundled; a later
 reassessment may return one to the maintained or best-effort set.
 
-The workflow creates every selected `onboarding`/`untested` shell through the same catalog library that backs
-`emmy recipe create`. Each shell stores its rationale and heat under `model` and a list of one to three candidate
-deployment entries under `matrices`; subsequent runs preserve the task and setups mechanically and refresh heat and
-rationale under the same rule. A shell does not claim qualification. The workflow commits lifecycle updates to the
-rolling branch and uses the `make setup-agent` target, built from the workflow commit, plus `gh` for rolling-PR
-discovery and updates. It never rents a VM. Network operations use bounded retries, and discovery keeps source
-evidence, batched recipe context, retained history, and final output within the inference endpoint's context limit.
-The workflow filters perform only structural batching and manifest assembly; the lifecycle validator retains
-classification policy and manifest application.
+The workflow creates every selected `onboarding`/`untested` shell through the same catalog library that backs `emmy
+recipe create`. Each shell stores its rationale and heat under `model` and a list of one to three candidate deployment
+entries under `matrices`; subsequent runs preserve the task and setups mechanically and refresh heat and rationale under
+the same rule. A shell does not claim qualification. The workflow commits lifecycle updates to `main` and uses the `make
+setup-agent` target, built from the checkout. It never rents a VM. Network operations use bounded retries, and discovery
+keeps source evidence, batched recipe context, retained history, and final output within the inference endpoint's
+context limit. The workflow filters perform only structural batching and manifest assembly; the lifecycle validator
+retains classification policy and manifest application.
 
 ## Credentials, VM ownership, and cleanup
 
