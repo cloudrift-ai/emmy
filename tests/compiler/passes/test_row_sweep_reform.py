@@ -171,7 +171,8 @@ def test_transposed_sweeps_preserve_shared_rows_and_output_order(batched) -> Non
     inputs = {
         name: np.arange(np.prod([dim.as_static() for dim in tensor.shape]), dtype=np.float32).reshape(
             tuple(dim.as_static() for dim in tensor.shape)
-        ) / 10
+        )
+        / 10
         for name, tensor in tile.inputs.items()
     }
     expected = {
@@ -183,7 +184,10 @@ def test_transposed_sweeps_preserve_shared_rows_and_output_order(batched) -> Non
         actual = loop.forward(*(inputs[name] for name in piece.inputs))
         for name, value in zip(piece.outputs, actual, strict=True):
             np.testing.assert_allclose(value, expected[name], rtol=1e-6, atol=1e-6)
-    assert {spec.write.output: len(spec.write.index) for spec in formed.output_specs} == {"out0": 3 if batched else 2, "out1": 4 if batched else 3}
+    assert {spec.write.output: len(spec.write.index) for spec in formed.output_specs} == {
+        "out0": 3 if batched else 2,
+        "out1": 4 if batched else 3,
+    }
 
 
 def test_incompatible_row_mapping_keeps_separate_sweeps() -> None:
@@ -219,7 +223,9 @@ def test_two_input_coordinates_cannot_map_to_one_shared_axis() -> None:
         op=projection((first, tile.op.operands[1]), results=("acc0", "acc1")),
         inputs={**tile.inputs, "x": Tensor("x", (3, 3, 5), "f32"), "w0": Tensor("w0", (5, 8, 3), "f32")},
         outputs={"out0": Tensor("out0", (8, 3, 3), "f32"), "out1": Tensor("out1", (2, 3, 3, 4), "f32")},
-        output_specs=tuple(replace(spec, sweep=tuple(next(axis for axis in axes if axis.name == old.name) for old in spec.sweep))
-                           for spec in tile.output_specs),
+        output_specs=tuple(
+            replace(spec, sweep=tuple(next(axis for axis in axes if axis.name == old.name) for old in spec.sweep))
+            for spec in tile.output_specs
+        ),
     )
     assert reformed(tile) is tile

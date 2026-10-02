@@ -207,8 +207,11 @@ def _align_owned_sweeps(piece: TileOp) -> TileOp:
 
     def loads(region: Fold) -> tuple[Load, ...]:
         return tuple(
-            stmt for site in sites(region) for node in (site.node, *(edge for edge in site.node.operands if edge.as_slab() is not None))
-            for stmt in node.lift.body.iter() if isinstance(stmt, Load)
+            stmt
+            for site in sites(region)
+            for node in (site.node, *(edge for edge in site.node.operands if edge.as_slab() is not None))
+            for stmt in node.lift.body.iter()
+            if isinstance(stmt, Load)
         )
 
     anchor_region = next(region for (region, _, _), sweep in zip(regions, sweeps, strict=True) if sweep == anchor)
@@ -225,20 +228,27 @@ def _align_owned_sweeps(piece: TileOp) -> TileOp:
                 if load.input != other.input or len(load.index) != len(other.index):
                     continue
                 coordinates = tuple(
-                    (left, right) for left, right in zip(load.index, other.index, strict=True)
-                    if isinstance(left, Var) and isinstance(right, Var) and left.name in extents and right.name in extents
+                    (left, right)
+                    for left, right in zip(load.index, other.index, strict=True)
+                    if isinstance(left, Var)
+                    and isinstance(right, Var)
+                    and left.name in extents
+                    and right.name in extents
                     and extents[left.name] == extents[right.name]
                 )
                 shared = {left.name: right for left, right in coordinates if left.name in owned and right.name in reference}
                 reduced = {
-                    left.name: right for left, right in coordinates
+                    left.name: right
+                    for left, right in coordinates
                     if left.name not in region.free_axes and right.name not in anchor_region.free_axes
                 }
                 # Equal load indices prove the shared coordinates, modulo equal-domain reduce binders.
                 # The rest of the output domain may flatten without mixing those coordinates.
-                if shared and len({expr.name for expr in shared.values()}) == len(shared) and tuple(
-                    expr.substitute({**reduced, **shared}) for expr in load.index
-                ) == other.index:
+                if (
+                    shared
+                    and len({expr.name for expr in shared.values()}) == len(shared)
+                    and tuple(expr.substitute({**reduced, **shared}) for expr in load.index) == other.index
+                ):
                     return shared
         return None
 
@@ -253,8 +263,7 @@ def _align_owned_sweeps(piece: TileOp) -> TileOp:
             return piece
         substitutions[sweep] = substitution
     operands = tuple(
-        rewrite(region, lambda name: name, substitutions[sweep])
-        for (region, _, _), sweep in zip(regions, sweeps, strict=True)
+        rewrite(region, lambda name: name, substitutions[sweep]) for (region, _, _), sweep in zip(regions, sweeps, strict=True)
     )
     specs = tuple(replace(spec, write=spec.write.substitute(substitutions[spec.sweep]), sweep=anchor) for spec in piece.output_specs)
     aligned = replace(piece, op=replace(op, operands=operands), output_specs=specs)

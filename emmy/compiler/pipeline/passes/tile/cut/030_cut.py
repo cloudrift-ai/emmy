@@ -232,6 +232,7 @@ def _placement_forks(match: Match, root: Node, tile: TileOp, ctx=None):
         if value == "fuse":
             (spelling,) = chosen
             return DeferredFork(lambda: replace(tile, placement_decided=True), {spelling: "fuse"})
+
         # A later, explicitly targeted cut of a newly minted piece is still a pinned
         # decision. Other children settle to fuse; parent-only pins stay terminal.
         def cut():

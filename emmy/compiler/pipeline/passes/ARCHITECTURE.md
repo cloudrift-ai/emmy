@@ -100,8 +100,8 @@ rectangular sweeps can also align coordinates an indexed input read proves equal
 equal-domain reduction binders. Only the remaining coordinates flatten; output indices keep their original order.
 Shared tails, cross-branch coordinates, captured names, and sweep coordinates used as scalar values retain their
 original form. The common coordinates let ordinary Loop normalization share loads and combine sibling reductions.
-Output cuts remain available, and measured evidence chooses the kernel set. The re-lift otherwise keeps the grid the cut minted;
-store sweeps that cannot be promoted stay sweeps.
+Output cuts remain available, and measured evidence chooses the kernel set. The re-lift otherwise keeps the grid
+the cut minted; store sweeps that cannot be promoted stay sweeps.
 A piece with no contraction orders that grid as its store writes, last axis fastest, so its threads write
 consecutive addresses; a contraction piece keeps the lift's order, because its last two grid axes are the
 fragment's rows and columns. A bare `PLACE=cut` pin
