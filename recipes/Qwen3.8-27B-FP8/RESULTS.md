@@ -248,7 +248,7 @@ not a tensor-parallel model benchmark. Every schedule and cut was selected manua
 
 This pass covers the ten targets already stored in the golden's four programs. All ten now pass strict replay using
 only the golden's evidence and a fresh tune DB, at nvcc's deployable `-O3`. The file contains 28 kernels, nine routing
-rows and 24 measured schedule rows, including the older fused alternatives. It contains no unmeasured proposals.
+rows and 26 measured schedule rows, including the older fused alternatives. It contains no unmeasured proposals.
 This is partial model coverage; the pass did not retrace or qualify the full decoder inventory.
 
 ### Exact frontend comparisons
@@ -287,7 +287,7 @@ kernel-set execution. Their numbers therefore support a compiler improvement, no
 | Ordered triangular update, 64 tokens | 1.3–1.5 ms | 17.1 ms |
 | Ordered triangular update, 512 tokens | 13.0–13.5 ms | 135.6 ms |
 | GDN output contraction | 122 us | 6,093 us |
-| GDN final state and output | 332–361 us | unmeasured proposals |
+| GDN final state and output | 323 us | unmeasured proposals |
 
 The triangular updates still execute 61 ordered launches and store each requested state snapshot. Block-uniform demand
 skips reductions for unchanged rows without bypassing a barrier on only some lanes. The recorded 512-thread band
@@ -297,6 +297,8 @@ errors accumulated through the recurrence; those schedules were rejected.
 The GDN output cut materializes its complete operand once rather than repeating it across output cells. The final
 state path stages computed operands and independent product channels through the existing synchronous fill. Each
 operand retains its own dtype, and unknown global strides use compute fill instead of an unjustified vector copy.
+Smaller producer tiles reduce shared memory from 49.5 to 41.2 KiB, allowing two blocks per SM. They passed on seeds
+0, 2 and 3. The final captured frontend run takes 323 us; the same kernel set's recorded replay takes 308 us.
 
 ### Reproduce
 
