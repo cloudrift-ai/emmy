@@ -39,7 +39,7 @@ from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.pipeline import CUDA_PASSES, TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.knob import family_value
 from emmy.compiler.pipeline.search.features import mma_atom
-from tests.compiler.helpers import dyn_M, requires_cuda, requires_sm, requires_sm90
+from tests.compiler.helpers import device_compute_capability, dyn_M, requires_cuda, requires_sm, requires_sm90
 
 
 def _supports_tma() -> bool:
@@ -61,6 +61,7 @@ def _dtype(name: str):
 
 @requires_cuda
 @pytest.mark.xdist_group("cuda")
+@pytest.mark.skipif(device_compute_capability() != (7, 0), reason="eight-output-lane reduction schedules are offered only on sm_70")
 def test_transposed_reduction_preserves_the_cross_warp_addition_order():
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.pipeline.search.pins import pinned_knobs
