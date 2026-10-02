@@ -91,6 +91,30 @@ def test_shared_storage_requires_room_for_both_states_and_the_combine():
     assert op.serial and not op.knobs.get("SHARED_CARRY")
 
 
+def test_recorded_shared_storage_is_picked_again_without_a_pin(tmp_path):
+    from emmy import config
+    from emmy.compiler.pipeline.search.golden import GoldenFile, record_greedy_pick, sole_evidence
+    from tests.compiler.helpers import inventory_document
+
+    card = "Tesla V100-SXM2-16GB"
+    document = inventory_document(_graph(), (7, 0), gpu_name=card)
+    path = tmp_path / "state.json"
+    document.dump(path)
+    target = document.targets()[0]
+    with pinned_knobs({**_PINS, "SHARED_CARRY": 2}):
+        compiled = Pipeline.build(CUDA_PASSES).run(target.program({}), ctx=Context.from_target((7, 0), gpu_name=card), db=None)
+        nodes = [n for n in compiled.nodes.values() if isinstance(n.op, CudaOp)]
+        record_greedy_pick(
+            path, document.rows[0].name, decisions=[], kernels=[(n.op, 1.0, 1.0) for n in nodes], reference_backend="same-input-greedy"
+        )
+    measured = GoldenFile.load(path)
+    assert measured.rows[-1].knobs["SHARED_CARRY"] == "2"
+    with sole_evidence([measured]), config.strict_evidence_override(True):
+        replay = Pipeline.build(CUDA_PASSES).run(target.program({}), ctx=Context.from_target((7, 0), gpu_name=card), db=None)
+    [op] = [n.op for n in replay.nodes.values() if isinstance(n.op, CudaOp)]
+    assert op.knobs["SHARED_CARRY"] == 2 and not op.serial
+
+
 @requires_cuda
 def test_an_exposed_state_port_keeps_every_snapshot():
     graph = Pipeline.build(["tile/lift"]).run(_graph(), ctx=Context.probe())
