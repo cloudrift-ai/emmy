@@ -14,7 +14,7 @@ from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from tests.compiler.helpers import requires_cuda
 
-_TILE = {"WORK": "w2x2", "TILE": "mma_m16n8k16_f16_f32/f4x4/k4", "RASTER": "gm8"}
+_TILE = {"WORK": "w2x2", "TILE": "mma_m16n8k16_f16_f32/f4x4/k4", "RASTER": "gm8", "REDUCE": ""}
 
 
 def _code(k: int) -> str:

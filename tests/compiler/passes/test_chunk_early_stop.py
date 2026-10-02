@@ -149,6 +149,7 @@ def _sources(code: str, window: int | None = None) -> list[str]:
         "TILE@map.1/twist.1/inner": "mma_m16n8k16_f16_f32/f1x4/k2",
         "STAGE@map.1/twist": "d2/smem-async",
         "STAGE@map.1/twist.1/inner": "d2/smem-async",
+        "REDUCE": "",
         "WORK": "w1x1",
     }
     with pinned_knobs(pins):

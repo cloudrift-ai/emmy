@@ -66,7 +66,7 @@ def test_interleaved_weight_channels_use_gathers_before_mma(stage, channels, col
         graph.add_node(ElementwiseOp(op="multiply"), ["out0", "out1"], Tensor("out", (32, columns), F16), node_id="out")
     graph.inputs, graph.outputs = ["a", "b"], ["out" if channels == 2 else "out0"]
     backend = CudaBackend()
-    with pinned_knobs({"PLACE": "fuse", "TILE": _WARP_TILE, "WORK": _WARP_WORK, "STAGE": stage}):
+    with pinned_knobs({"PLACE": "fuse", "TILE": _WARP_TILE, "WORK": _WARP_WORK, "STAGE": stage, "REDUCE": ""}):
         compiled = backend.compile(graph)
     sources = [node.op.kernel_source for node in compiled.nodes.values() if hasattr(node.op, "kernel_source")]
     assert len(sources) == 1

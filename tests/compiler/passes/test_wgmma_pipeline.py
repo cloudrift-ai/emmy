@@ -33,7 +33,7 @@ def _code(n: int, k: int, epilogue: str = "") -> str:
 
 def _compile(code: str, pins: dict, ctx: Context):
     graph = graph_from_code(code)[0]
-    with pinned_knobs({"RASTER": "gm8", **pins}):
+    with pinned_knobs({"RASTER": "gm8", "REDUCE": "", **pins}):
         return graph, Pipeline.build(CUDA_PASSES).run(graph, ctx=ctx)
 
 
