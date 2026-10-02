@@ -259,11 +259,8 @@ def test_eval_prior_golden_ranks_an_exported_datasets_golden_pools(tmp_path, cap
     from emmy.compiler.pipeline.search.prior.offline import default_file
 
     weights = str(default_file("schedule"))
-    comparison = parser.parse_args(
-        ["eval", "prior", dataset, "--offline-file", weights, "--compare-to", weights, "--json", out]
-    )
+    comparison = parser.parse_args(["eval", "prior", dataset, "--offline-file", weights, "--compare-to", weights, "--json", out])
     comparison.func(comparison)
     result = json.loads((tmp_path / "r.json").read_text())
     assert not result["comparison"]["qualified"]
     assert {row["axes"]["half"] for row in result["summaries"]} == {"current", "candidate"}
-

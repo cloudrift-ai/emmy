@@ -12,7 +12,14 @@ import numpy as np
 import pytest
 
 from emmy.compiler.pipeline.search.dataset.group import GoldenGroup, MeasuredGroup
-from emmy.compiler.pipeline.search.prior.report import EvalReport, Summary, compare_golden_ranks, golden_summaries, measured_summaries, pool_bucket
+from emmy.compiler.pipeline.search.prior.report import (
+    EvalReport,
+    Summary,
+    compare_golden_ranks,
+    golden_summaries,
+    measured_summaries,
+    pool_bucket,
+)
 
 
 def _measured(key: str, latencies: list[float], *, gpu: str = "card-a", h_opt: float = 3.0) -> MeasuredGroup:

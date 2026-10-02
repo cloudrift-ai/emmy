@@ -64,7 +64,9 @@ def register_eval_command(subparsers) -> None:
     pp.add_argument("--rank-only", action="store_true", help="Skip the greedy golden reproduction check after the rank report.")
     pp.add_argument("--compare-to", metavar="PATH", help="Compare golden ranks with another weights artifact on this dataset.")
     pp.add_argument(
-        "--min-rank-improvement", type=float, default=0.05,
+        "--min-rank-improvement",
+        type=float,
+        default=0.05,
         help="Minimum median rank reduction for --compare-to (default: 0.05).",
     )
     pp.set_defaults(func=handle_eval_prior)
