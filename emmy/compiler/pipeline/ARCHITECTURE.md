@@ -462,6 +462,13 @@ What a newcomer needs to know about the fit:
 - **The quality score is turned into a positive stand-in for latency by an exponential** (`exp(-scale·quality)`),
   so one greedy argmin and one kernel-set sum read it like a latency.
 
+**Known gap: the fit never sees the rows a deploy ranks.** The fit trains on a 2000-row draw of each pool and 500
+sampled negatives, and the reproduction gate scores a 500-row draw. A cold deploy ranks 2048 rows drawn from the WHOLE
+pool (`policy/greedy._descent_sample`), so it reaches candidates no fit or gate ever scored, and the model can rate
+some of them far above the golden. On the V100 Qwen3.8-27B-FP8 golden the deployed lm_head ran 29× slower than its
+golden row and a fused matmul-reduce exceeded the 60 s bench limit, while every gate slice reproduced. The fix is a
+fit and a gate that draw the way the deploy draws; until then a cold V100 compile needs recorded evidence.
+
 **A subtlety about features.** The `H_*` features (which GPU, which nvcc level) have the same value for every
 candidate competing at one fork, so on their own they cannot change a ranking within that set. A tree can still
 combine one with a per-candidate feature — split on the card, then on the accumulator width — which is how a single

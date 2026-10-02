@@ -169,7 +169,7 @@ def test_fit_treats_every_pin_as_a_positive():
     unpinned row. A run that had drawn one of them as a negative would have pushed it back down."""
     rows = [{"D_a": float(i), "D_b": 0.0} for i in range(20)]
     groups = [GoldenGroup.from_dicts(f"gpuA/p{i}", f"p{i}", "warp", "gpuA", f"shape{i}", (18, 19), rows) for i in range(6)]
-    fit = CatBoostTrainer(feature_names=FEATURES, iterations=40, negatives=8).fit(groups)
+    fit = CatBoostTrainer(feature_names=FEATURES, iterations=40, learning_rate=0.05, negatives=8).fit(groups)
     assert fit.rows == 6 * (8 + 2)
     assert set(np.argsort(-fit.score_rows(groups[0]), kind="stable")[:2].tolist()) == {18, 19}
     # Was [1] * 6 while the trainer appended a routing name the matrix could not fill: the resulting
@@ -223,7 +223,8 @@ def test_artifact_round_trip_preserves_predictions(tmp_path):
     reloaded = CatBoostModel.from_artifact(art)
     assert reloaded.cols == model.cols and reloaded.scale == model.scale
     rows = [{"D_a": float(i), "D_b": 1.0 if i % 3 else math.nan} for i in range(10)]
-    assert reloaded.mean_scores_features(rows) == model.mean_scores_features(rows)
+    # CatBoost's JSON writes leaf values in decimal, so a reload agrees to the last bit, not bit for bit.
+    assert reloaded.mean_scores_features(rows) == pytest.approx(model.mean_scores_features(rows), rel=1e-12)
 
 
 def test_two_fits_on_one_input_write_the_same_model_info(tmp_path):
