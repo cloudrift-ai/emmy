@@ -508,18 +508,20 @@ def test_server_env_is_warm_bake_verify_parity():
     assert 'check_baked SERVE_ENV "${SERVE_ENV:-}"' in verify
 
 
-def test_capture_ladder_is_warm_bake_verify_parity():
-    """The capture ladder decides which decode steps replay a graph, and nothing else in verify would notice
-    an image baked from another ladder (its packs hit, its one request completes): the warm passes it, the
-    bake bakes it and verify refuses an image baked from another value."""
+@pytest.mark.parametrize(("key", "build_arg"), [("SERVE_CAPTURE_SIZES", "CAPTURE_SIZES"), ("SERVE_EXTRA_ARGS", "EXTRA_ARGS")])
+def test_capture_ladder_and_pinned_flags_are_warm_bake_verify_parity(key, build_arg):
+    """The capture ladder decides which decode steps replay a graph and the pinned flags are the rest of the
+    server's command line, and nothing else in verify would notice an image baked from other values (its
+    packs can still hit, its one request completes): the warm passes each, the bake bakes it and verify
+    refuses an image baked from another value."""
     make = (PROJECT_ROOT / "Makefile").read_text()
     warm = (SERVE_DIR / "warm.sh").read_text()
     dockerfile = (SERVE_DIR / "Dockerfile").read_text()
     verify = (SERVE_DIR / "verify.sh").read_text()
-    assert warm.count("-e SERVE_CAPTURE_SIZES") == 2, "the initial boot and every fixpoint pass"
-    assert 'SERVE_CAPTURE_SIZES="${CAPTURE_SIZES}"' in dockerfile
-    assert "--build-arg 'CAPTURE_SIZES=$(SERVE_CAPTURE_SIZES_VALUE)'" in make
-    assert 'check_baked SERVE_CAPTURE_SIZES "${SERVE_CAPTURE_SIZES:-}"' in verify
+    assert warm.count(f"-e {key}") == 2, "the initial boot and every fixpoint pass"
+    assert f'{key}="${{{build_arg}}}"' in dockerfile
+    assert f"--build-arg '{build_arg}=$({key}_VALUE)'" in make
+    assert f'check_baked {key} "${{{key}:-}}"' in verify
 
 
 def test_release_bakes_and_verifies_the_request_time_triton_cache():
