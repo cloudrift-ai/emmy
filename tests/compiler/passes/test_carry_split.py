@@ -60,6 +60,16 @@ def test_a_stored_carried_kernel_relifts_with_one_state_port() -> None:
     assert fresh.op.with_io(replayed, fresh).identity_key(structural=False, with_io=True) == stored.exact_identity
 
 
+def test_an_unmapped_carried_kernel_uses_ordered_cuda_launches() -> None:
+    """The scalar fallback owns the same global state port as a classic schedule."""
+    from emmy.compiler.ir.cuda import CudaOp  # noqa: PLC0415
+
+    graph = Pipeline.build(["tile/lift", "lowering/kernel", "lowering/cuda"]).run(_graph(steps=STEPS))
+    (op,) = (node.op for node in graph.nodes.values() if isinstance(node.op, CudaOp))
+    assert len(op.serial) == 1 and op.serial[0][1] == STEPS
+    assert "std::vector" not in op.kernel_source
+
+
 def test_the_walk_is_offered_its_split_and_declines_it_by_default() -> None:
     """The unsplit walk beside one arm per width the step count divides into, the row spelled on
     the carrying site; a step that squares its state is not affine and offers nothing."""
@@ -131,6 +141,18 @@ def test_the_split_parts_match_the_sequential_walk(parts: int) -> None:
 
     arrays = _run(graph)
     np.testing.assert_allclose(arrays["out"], _reference(arrays), rtol=1e-4, atol=1e-5)
+
+
+@requires_cuda
+@pytest.mark.xdist_group("cuda")
+def test_an_unmapped_carried_kernel_matches_the_sequential_walk_on_the_gpu() -> None:
+    from emmy.compiler.backend.cuda.program import run_program  # noqa: PLC0415
+
+    graph = Pipeline.build(["tile/lift", "lowering/kernel", "lowering/cuda"]).run(_graph(steps=STEPS))
+    arrays = _inputs(steps=STEPS)
+    result, _ = run_program(graph, arrays)
+    want = _reference(arrays)
+    np.testing.assert_allclose(np.asarray(result.outputs["out"]).reshape(want.shape), want, rtol=1e-4, atol=1e-5)
 
 
 @requires_cuda

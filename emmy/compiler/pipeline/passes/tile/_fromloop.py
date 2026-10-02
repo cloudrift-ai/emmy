@@ -775,4 +775,17 @@ def lift_serial(op: LoopOp, *, name: str, prefix: str) -> tuple[TileOp, dict[str
     return lift_loop_op(op, name=name, body=body, serial=serial), shapes
 
 
-__all__ = ["fold_from_loop", "lift_body", "lift_loop_op", "lift_serial", "seed_index", "states_as_buffers"]
+def serial_form(tile: TileOp, prefix: str) -> TileOp:
+    """A kernel that carries a state as the classic schedule realizes it: its Loop IR lifted again
+    with every carried state a buffer the kernel owns — the port the lift added, named under
+    ``prefix`` — and the carrying loop the kernel's serial launch axis (``lift_serial``): one
+    launch per step, each reading the previous launch's stores. The term the classic tiers then
+    tile is the STEP, a projection over ordinary slabs; the register schedule reads the carrying
+    fold itself."""
+    formed, _ = lift_serial(LoopOp(body=tile.loop_body, inputs=tile.inputs), name=tile.name, prefix=prefix)
+    # The kernel's own knobs and its BOUND I/O: a standalone loop op seeds placeholder tensors, and
+    # the schedule reads operand dtypes, output shapes and the ``with_io`` identity off these maps.
+    return replace(formed, knobs=tile.knobs, inputs=tile.inputs, outputs=tile.outputs)
+
+
+__all__ = ["fold_from_loop", "lift_body", "lift_loop_op", "lift_serial", "seed_index", "serial_form", "states_as_buffers"]
