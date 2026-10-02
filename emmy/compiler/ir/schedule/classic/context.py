@@ -387,7 +387,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         )
         return (
             cooperative
-            and work in packed_works(self._relation.work, axes=self.tile_op.place.free)
+            and work in packed_works(self._relation.work)
             and all(choice.stage.is_direct for choice in self.schedule.edges.values())
         )
 

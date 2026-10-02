@@ -7,7 +7,6 @@ what they are and how each one is spelled."""
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import prod
 
 from emmy.compiler.ir.schedule.base import Schedule
 from emmy.compiler.ir.schedule.catalog import coop_reduce_moves
@@ -139,7 +138,7 @@ def binds_root(choice: ProjectionSchedule | ReductionSchedule) -> bool:
 PACKED_CTA_THREADS = 128
 
 
-def packed_works(work: Work | None, *, axes=None) -> frozenset[Work]:
+def packed_works(work: Work | None) -> frozenset[Work]:
     """The inventory that packs several cells of a cooperative reduce into one CTA.
 
     A cooperative reduce launches one CTA per output cell, ``coop`` threads each. When ``coop`` is
@@ -147,19 +146,9 @@ def packed_works(work: Work | None, *, axes=None) -> frozenset[Work]:
     launch can stack cells in one CTA (``t<coop>x<cells>``, ``PACKED_CTA_THREADS`` threads): the
     flat thread decode already hands consecutive cells to consecutive lane groups. At a 128-wide
     row the one-cell CTA is 32 or 64 threads, and the launch pays per CTA."""
-    if work is None or work.kind != "thread" or work.units[1] != 1 or work.units[0] <= 1:
+    if work is None or work.kind != "thread" or work.units[1] != 1 or not 1 < work.units[0] <= 32:
         return frozenset()
-    coop = work.units[0]
-    if coop <= 32:
-        return frozenset({Work(kind="thread", units=(coop, PACKED_CTA_THREADS // coop))})
-    # Cross-warp combines synchronize the whole block. No partial final block may
-    # leave some cell groups outside the tile's enclosing coordinate guard.
-    cells = None if axes is None else prod(a.extent.as_static() for a in axes) if all(a.extent.is_static for a in axes) else 0
-    return frozenset(
-        Work(kind="thread", units=(coop, threads // coop))
-        for threads in (256, 512, 1024)
-        if threads > coop and (cells is None or cells and cells % (threads // coop) == 0)
-    )
+    return frozenset({Work(kind="thread", units=(work.units[0], PACKED_CTA_THREADS // work.units[0]))})
 
 
 def output_sweep_works(tile_op, claimed_work: Work | None) -> frozenset[Work]:

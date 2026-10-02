@@ -765,14 +765,7 @@ def merge_stmts(fold: Fold, other: tuple[str, ...]) -> list[Stmt]:
 
 
 def emit_combine(
-    fold: Fold,
-    t: str,
-    n_threads: int,
-    *,
-    warp_size: int = 32,
-    segmented: bool = False,
-    inner: tuple[str, int] | None = None,
-    groups: int = 1,
+    fold: Fold, t: str, n_threads: int, *, warp_size: int = 32, segmented: bool = False, inner: tuple[str, int] | None = None
 ) -> list[Stmt]:
     """Build the cross-thread combine of a cooperative reduce — the algebra read off the
     ``red`` fold NODE's stored ``combine`` — over ``n_threads`` cooperating threads,
@@ -833,7 +826,7 @@ def emit_combine(
             hierarchical = i > 0 and folds[i - 1] is FoldMove.SHFL
             width = n_threads // warp_size if hierarchical else n_threads
             tid_var = "warp" if hierarchical else t
-            out += [Smem(name=b, extents=(width * groups,), dtype=smem_c) for b in bufs]
+            out += [Smem(name=b, extents=(width,), dtype=smem_c) for b in bufs]
             if hierarchical:
                 # Lane-0 of each warp stages that warp's broadcast state, indexed by ``warp``.
                 out.append(
@@ -845,18 +838,13 @@ def emit_combine(
             else:
                 out += [Write(output=b, index=(Var(tid_var),), value=st) for b, st in zip(bufs, state, strict=True)]
             out.append(Sync())
-            offset = BinaryExpr("*", BinaryExpr("/", Var(tid_var), Literal(width, "int")), Literal(width, "int")) if groups > 1 else None
-            out.append(
-                TreeHalve(
-                    bufs=bufs, state=state, state_b=state_b, combine_states=prog, length=width, tid_var=tid_var, dtype=dtype, offset=offset
-                )
-            )
+            out.append(TreeHalve(bufs=bufs, state=state, state_b=state_b, combine_states=prog, length=width, tid_var=tid_var, dtype=dtype))
         else:  # FoldMove.ATOMIC / FoldMove.REG — cross-CTA / register tiers, not emitted by the intra-CTA walk.
             raise NotImplementedError(f"intra-CTA combine cannot emit {fold} (cta/reg tiers are future work)")
     return out
 
 
-def combine_tail(fold: Fold, *, reg: int, coop: int, lane, groups: int = 1) -> list[Stmt]:
+def combine_tail(fold: Fold, *, reg: int, coop: int, lane) -> list[Stmt]:
     """The algebra-driven **partial merge** that follows a partitioned reduce loop — the one place the
     two partial-fold geometries are assembled: the REG-tree fold of the ``reg`` ILP register copies
     into copy 0 (:func:`merge_stmts`), then — when threads cooperate (``lane`` is a lane :class:`Axis`,
@@ -869,7 +857,7 @@ def combine_tail(fold: Fold, *, reg: int, coop: int, lane, groups: int = 1) -> l
     the copy name, so each fold's internals are already unique."""
     merge: list[Stmt] = [st for r in range(1, reg) for st in merge_stmts(fold, tuple(f"{n}__r{r}" for n in fold.combine.results))]
     if lane is not None:
-        merge += emit_combine(fold, t=lane.name, n_threads=coop, groups=groups)
+        merge += emit_combine(fold, t=lane.name, n_threads=coop)
     return merge
 
 
@@ -1090,7 +1078,7 @@ def _strided_fold(op: Fold, rloop, plan, ctx: Ctx, lane: Axis | None) -> list[St
     # (copy 0's names) + (when threads cooperate) the cross-thread combine, reassigning the carried
     # state in place. The one shared tail a cooperative reduce and a future cooperative-K contraction
     # both emit (``combine_tail``).
-    return [strided, *combine_tail(op, reg=reg, coop=coop, lane=lane, groups=ctx.packed_cells)]
+    return [strided, *combine_tail(op, reg=reg, coop=coop, lane=lane)]
 
 
 def _tile_chain_members(
