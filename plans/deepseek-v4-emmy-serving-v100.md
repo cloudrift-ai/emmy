@@ -151,9 +151,10 @@ checkpoint stays impractical here.
      inside one boot it changes no log-probability, at 5 or 1,905 prompt tokens. Two boots of `main` differ instead,
      from the fork's layer-0 attention on (one fp16 step, on bit-identical input, stable within a boot): the fork
      times its fp8 GEMM kernels for small shapes at warm-up and keeps the winner. With
-     `VLLM_SM70_FP8_TUNE_SMALL_SHAPES=0` two boots of `main` and one of the memo agree to the last bit. The release
-     config leaves that tuning on; whether to pin it off is open (its cost per token is not measured). Next: decode
-     batches of 2-16 could be captured too (they already ride the fixed slots row by row).
+     `VLLM_SM70_FP8_TUNE_SMALL_SHAPES=0` two boots of `main` and one of the memo agree to the last bit, and the
+     release config now pins it: boot87 with it off against boot88 with it on, 119.3 against 118.8 ms per token, 16.8
+     against 15.4 tokens/s at 8 concurrent, inside the spread of two default boots. GSM8K has not run with it off.
+     Next: decode batches of 2-16 could be captured too (they already ride the fixed slots row by row).
    - Prefill: 5.7 s per stage against 1.9. The symbolic expert program takes 2.7 s against the fork's 1.0 (its main
      kernel reaches ~0.1 TFLOP/s on large experts, not on tensor cores), and ranks holding whole experts finish
      unevenly, so the others wait ~1.3 s per stage in all-reduces the fork does not wait in.
