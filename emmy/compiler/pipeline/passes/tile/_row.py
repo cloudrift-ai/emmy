@@ -205,6 +205,7 @@ def _align_owned_sweeps(piece: TileOp) -> TileOp:
         return Sigma(mapping)
 
     substitutions = {}
+    extents = {axis.name: axis.extent for axis in piece.axes}
     anchor_region = next(region for (region, _, _), sweep in zip(regions, sweeps, strict=True) if sweep == anchor)
     def loads(region):
         return tuple(stmt for site in sites(region) for node in (site.node, *site.node.operands)
@@ -229,8 +230,14 @@ def _align_owned_sweeps(piece: TileOp) -> TileOp:
                         if isinstance(left, Var) and isinstance(right, Var) and left.name in owned and right.name in reference
                         and owned[left.name].extent == reference[right.name].extent
                     }
+                    reduced = {
+                        left.name: right for left, right in zip(load.index, other.index, strict=True)
+                        if isinstance(left, Var) and isinstance(right, Var) and left.name not in region.free_axes
+                        and right.name not in anchor_region.free_axes and left.name in extents and right.name in extents
+                        and extents[left.name] == extents[right.name]
+                    }
                     if paired and len({expr.name for expr in paired.values()}) == len(paired) and tuple(
-                        expr.substitute(paired) for expr in load.index
+                        expr.substitute({**reduced, **paired}) for expr in load.index
                     ) == other.index:
                         mapping = paired
                         break

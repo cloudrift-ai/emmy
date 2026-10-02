@@ -133,11 +133,12 @@ def test_repeated_output_buffer_keeps_separate_sweeps() -> None:
 
 def _transposed_siblings(*, incompatible=False) -> TileOp:
     n, m, h, row, d, k = Axis("n", 8), Axis("m", 3), Axis("h", 2), Axis("row", 3), Axis("d", 4), Axis("k", 5)
+    k1 = Axis("k1", 5)
     first = contraction(k, slab("x0", "x", "m", "k"), (slab("w0v", "w0", "k", "n"), "acc0"))
-    second = contraction(k, slab("x1", "x", "k", "row") if incompatible else slab("x1", "x", "row", "k"),
-                         (slab("w1v", "w1", "k", "h", "d"), "acc1"))
+    second = contraction(k1, slab("x1", "x", "k1", "row") if incompatible else slab("x1", "x", "row", "k1"),
+                         (slab("w1v", "w1", "k1", "h", "d"), "acc1"))
     return TileOp(
-        op=projection((first, second), results=("acc0", "acc1")), place=Placement(free=()), axes=(n, m, h, row, d, k),
+        op=projection((first, second), results=("acc0", "acc1")), place=Placement(free=()), axes=(n, m, h, row, d, k, k1),
         inputs={"x": Tensor("x", (3, 5), "f32"), "w0": Tensor("w0", (5, 8), "f32"), "w1": Tensor("w1", (5, 2, 4), "f32")},
         outputs={"out0": Tensor("out0", (8, 3), "f32"), "out1": Tensor("out1", (2, 3, 4), "f32")},
         output_specs=(OutputSpec(write=Write(output="out0", index=(Var("n"), Var("m")), value="acc0"), sweep=(n, m)),
