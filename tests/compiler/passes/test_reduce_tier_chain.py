@@ -146,9 +146,7 @@ def test_transposed_columns_keep_the_serial_provider_loop_coordinate() -> None:
     stat = reduction(_J, (slab("z_e", "z", "m", "j"),), (Assign(name="stat__v", op="multiply", args=("z_e", "z_e")),), ("stat",))
     provider = projection((stat,), (Assign(name="scale", op="rsqrt", args=("stat",)),))
     red = _reduce(_K, "acc", provider, "x")
-    bound = factorize(
-        _stamped(red, {red: Reduce.of(coop=128, coop_transposed=True, output_lanes=8, columns=2)}, axes=(_K, _J)), root=None
-    )
+    bound = factorize(_stamped(red, {red: Reduce.of(coop=128, coop_transposed=True, output_lanes=8, columns=2)}, axes=(_K, _J)), root=None)
     flat = _flat(bound.body)
     assert any(isinstance(stmt, Loop) and stmt.axis.name == "j" for stmt in flat)
     assert "j__v1" not in _names_read(flat)
@@ -160,7 +158,10 @@ def _transposed_masked(predicate):
     red = reduction(_K, (slab("x_e", "x", "m", "n", "k"),), (Assign(name="acc__v", op="copy", args=("x_e",)),), ("acc",))
     root = projection(
         (red,),
-        (Let(name="zero", value=Literal(0.0, "f32")), Select(name="chosen", branches=(SelectBranch("acc", predicate), SelectBranch("zero", Literal(1, "int"))))),
+        (
+            Let(name="zero", value=Literal(0.0, "f32")),
+            Select(name="chosen", branches=(SelectBranch("acc", predicate), SelectBranch("zero", Literal(1, "int")))),
+        ),
     )
     tile = _stamped(root, {red: Reduce.of(coop=128, coop_transposed=True, output_lanes=8)})
     tile = replace(tile, place=Placement(free=(_M, n)), axes=(_M, n, _K))

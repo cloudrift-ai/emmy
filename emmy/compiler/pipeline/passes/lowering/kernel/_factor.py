@@ -804,7 +804,9 @@ def emit_combine(
             # The flat tree's high bits fold first. Rotate the warp bits to keep the same
             # within-warp, then cross-warp order as the ordinary cooperative combine.
             slot = BinaryExpr(
-                "+", BinaryExpr("*", slot % warp_size, Literal(n_threads // warp_size, "int")), BinaryExpr("/", slot, Literal(warp_size, "int"))
+                "+",
+                BinaryExpr("*", slot % warp_size, Literal(n_threads // warp_size, "int")),
+                BinaryExpr("/", slot, Literal(warp_size, "int")),
             )
         idx = BinaryExpr("+", BinaryExpr("*", slot, Literal(scale, "int")), Var(iv))
         out: list[Stmt] = [Smem(name=b, extents=(n_threads * scale,), dtype=smem_c) for b in bufs]

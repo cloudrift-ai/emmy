@@ -637,8 +637,10 @@ def resolve_scalar_stage(c: Fold, tile: Tile, stage: Stage, inputs, budget: int,
     elem_bytes, b_bytes = (dt.nbytes for dt in elems)
     # Every staged transport needs 16 B-aligned inner global strides.
     n_ext = tile.n.axis.extent
-    if not n_ext.is_static or (a is not None and (k * elem_bytes) % _TMA_ALIGN) or (
-        any(copied) and ((k if b_trans else n_ext.as_static()) * b_bytes) % _TMA_ALIGN
+    if (
+        not n_ext.is_static
+        or (a is not None and (k * elem_bytes) % _TMA_ALIGN)
+        or (any(copied) and ((k if b_trans else n_ext.as_static()) * b_bytes) % _TMA_ALIGN)
     ):
         return None
     _, _, stats, chunk = cone_seam(c.operands[0], k_axis.name, axes) if a is None else ((), (), (), ())
@@ -648,14 +650,15 @@ def resolve_scalar_stage(c: Fold, tile: Tile, stage: Stage, inputs, budget: int,
     depth, bk_elems = max(1, requested), 0
     while depth >= 1:
 
-        def fits(bk):
+        def fits(bk, slots):
             pa, pb = scalar_slab_pads(bk, elem_bytes, b_bytes, b_trans, stage.transport)
-            size = tile.m.tile * (bk + pa) * elem_bytes + sum(
-                tile.n.tile * (bk + pb) if b_trans and copy else bk * tile.n.tile for copy in copied
-            ) * b_bytes
-            return depth * size + stat_bytes <= budget and (not chunk or chunk[2] % bk == 0)
+            size = (
+                tile.m.tile * (bk + pa) * elem_bytes
+                + sum(tile.n.tile * (bk + pb) if b_trans and copy else bk * tile.n.tile for copy in copied) * b_bytes
+            )
+            return slots * size + stat_bytes <= budget and (not chunk or chunk[2] % bk == 0)
 
-        bk_elems = next((v for v in (128, 64, 32, 16, 8, 4) if k % v == 0 and fits(v)), 0)
+        bk_elems = next((v for v in (128, 64, 32, 16, 8, 4) if k % v == 0 and fits(v, depth)), 0)
         if bk_elems >= 4:
             break
         depth -= 1

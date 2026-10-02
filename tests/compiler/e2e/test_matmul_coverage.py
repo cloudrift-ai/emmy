@@ -58,6 +58,7 @@ def _dtype(name: str):
 # Scalar TILE tier — register-tile variants, epilogues, staging, regressions.
 # =========================================================================== #
 
+
 @requires_cuda
 @pytest.mark.xdist_group("cuda")
 def test_transposed_reduction_preserves_the_cross_warp_addition_order():
@@ -305,7 +306,6 @@ def test_scalar_matmul_stages_through_pipeline(monkeypatch) -> None:
 def test_scalar_stage_budget_includes_the_bank_padding() -> None:
     from emmy.commands.trace import graph_from_code  # noqa: PLC0415
     from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
-
     from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
 
     graph = graph_from_code("import torch\na=torch.randn(64,128)\nb=torch.randn(64,128)\na @ b.transpose(-2,-1)")[0]
