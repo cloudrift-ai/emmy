@@ -272,8 +272,9 @@ def build_golden_groups(
     if jobs == 1:
         results = map(_enumerate_packed, tasks)
     else:
-        # The workers never touch CUDA; forkserver keeps them from forking a parent that may hold threads.
-        with ProcessPoolExecutor(jobs, mp_context=get_context("forkserver")) as workers:
+        # Spawned: the one start method every platform has, and a fresh interpreter per worker, so what a worker
+        # imports is the whole contract (the kernel definition imports the IR it decodes with).
+        with ProcessPoolExecutor(jobs, mp_context=get_context("spawn")) as workers:
             results = list(workers.map(_enumerate_packed, tasks, chunksize=1))
     packed_pools: dict[tuple, _Packed] = {}
     for (pool, *_), (entry, missed, note) in zip(tasks, results, strict=True):

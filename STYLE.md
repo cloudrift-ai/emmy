@@ -213,6 +213,15 @@ async def run_cmd(command, stream=True, timeout=600):
 
 On `TimeoutError`: kill the process, await termination, log, return `(1, "", "")`.
 
+### Portability
+
+Emmy runs on Linux and macOS, and Windows is a target. Code takes the path every platform has: `pathlib` for paths,
+`os.cpu_count()` for the core count, and worker processes started with `multiprocessing.get_context("spawn")` — the
+one start method all three offer (`fork` and `forkserver` are Unix-only). A spawned worker is a fresh interpreter, so
+the worker function is a module-level function (it has to pickle) that imports what it needs itself, and a script
+that starts workers guards its entry with `if __name__ == "__main__":`. A Unix-only tool belongs to the code that
+runs on the remote Linux host it deploys to, never to the local CLI.
+
 ## Rust
 
 Use the checked-in Cargo lockfile and standard Rustfmt formatting. Keep unsafe CUDA calls inside the runtime's CUDA
