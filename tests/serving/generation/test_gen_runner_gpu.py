@@ -767,3 +767,103 @@ def test_host_mapped_embed_table_gathers_identically_and_costs_no_vram(monkeypat
     host, device_ptr = device().pointer_attributes(table.data_ptr())
     assert host and device_ptr == table.data_ptr(), "the table must be host memory mapped into the device space"
     assert runner._embed_weight.ctypes.data == table.data_ptr(), "the numpy view must alias the mapped buffer, not copy it"
+
+
+@pytest.fixture(scope="module")
+def gated_runner():
+    """A tiny Qwen3.5 whose layers are all full attention — the layer whose query projection also
+    carries an attention output gate — built with every tier: the single-token twin, decode bucket
+    4, prefill bucket 16 (so 17..20 is the rider split) and the symbolic program up to 32 tokens.
+    Not in the lane's golden: it compiles cold, so its schedules are this card's picks."""
+    pytest.importorskip("transformers.models.qwen3_5")
+    import torch
+    import transformers
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+    from emmy.serving.gen_runner import EmmyGenRunner
+    from tests.serving.generation.test_gen_runner import _qwen3_5_full_attention_config
+
+    torch.manual_seed(0)
+    model = transformers.Qwen3_5ForCausalLM(_qwen3_5_full_attention_config()).eval()
+    with torch.no_grad():
+        for block in model.model.layers:
+            # At init the gate half of q_proj gives |gate| < 0.5, where sigmoid(gate) is nearly the
+            # 0.5 a zero gate gives: a dropped gate would pass. q itself goes through q_norm, so
+            # scaling the whole projection only moves the gate.
+            block.self_attn.q_proj.weight.mul_(10)
+    runner = EmmyGenRunner.from_model(model, dtype_str="float32", decode_bucket=4, prefill_bucket=16, max_tokens=32)
+    return runner, model
+
+
+def _gated_stitch(runner, model, t, *, gate_fn=lambda gate: gate):
+    """Per layer, on the same input: the runner's ``pre`` → the Hugging Face rotary and causal GQA
+    attention → the runner's ``post``, beside the Hugging Face layer's own forward. Returns
+    ``[(runner output, Hugging Face output)]`` per layer, as numpy."""
+    import torch
+    import torch.nn.functional as F
+    from transformers.models.qwen3_5.modeling_qwen3_5 import apply_rotary_pos_emb
+
+    from emmy.compiler.trace.huggingface import build_causal_mask
+
+    torch.manual_seed(t)
+    hidden = torch.randn(t, model.config.hidden_size)
+    cos, sin = model.model.rotary_emb(hidden[None], torch.arange(t)[None])
+    mask = build_causal_mask(t, torch.float32)
+    out = []
+    for layer, block in enumerate(model.model.layers):
+        hd, nh, nkv, scaling = runner.layer_meta(layer)
+        q, k, v, gate = runner.forward_layer_pre_device(layer, hidden.cuda())
+        q = q.view(t, nh, hd).transpose(0, 1)[None]
+        k = k.view(t, nkv, hd).transpose(0, 1)[None]
+        v = v.view(t, nkv, hd).transpose(0, 1)[None]
+        q, k = apply_rotary_pos_emb(q, k, cos.cuda(), sin.cuda())
+        k, v = _repeat_kv(k, nh // nkv), _repeat_kv(v, nh // nkv)
+        attn = F.scaled_dot_product_attention(q, k, v, attn_mask=mask.cuda(), scale=scaling).transpose(1, 2).reshape(t, nh * hd)
+        got = runner.forward_layer_post_device(layer, attn.contiguous(), hidden.cuda(), gate_fn(gate))
+        with torch.no_grad():
+            expected = block(hidden[None], position_embeddings=(cos, sin), attention_mask=mask)[0]
+        out.append((got.cpu().numpy(), expected.numpy()))
+        hidden = expected
+    return out
+
+
+#: The single-token twin and the symbolic program lower Qwen3.5's input norm with its ``1 + weight``
+#: scale folded into a constant that the plan carries no source for, so the runner never binds it and
+#: ``pre`` reads zeros. Gemma-3's norm has the same form and the same fault; it is not the gate.
+_UNBOUND_NORM_CONSTANT = pytest.mark.xfail(strict=True, reason="folded (1 + norm weight) constant left unbound by the runner")
+
+
+# 1: the single-token twin; 3: the decode bucket; 9: the symbolic program; 16: the prefill bucket;
+# 18: the rider split (16 rows on the prefill twin, 2 on the decode twin).
+@pytest.mark.parametrize("t", [pytest.param(1, marks=_UNBOUND_NORM_CONSTANT), 3, pytest.param(9, marks=_UNBOUND_NORM_CONSTANT), 16, 18])
+def test_gated_attention_layer_matches_hugging_face(gated_runner, t):
+    """The attention output gate travels from ``pre`` to ``post`` on every device tier, and each
+    layer matches the Hugging Face layer on the same input. Replacing the gate with zeros must break
+    the match — otherwise the comparison could not see a dropped gate."""
+    import torch
+
+    runner, model = gated_runner
+    assert runner.layer_meta(0)[1] == 4 and runner._output_gates == (True, True)
+    for got, expected in _gated_stitch(runner, model, t):
+        np.testing.assert_allclose(got, expected, rtol=2e-3, atol=2e-3)
+    for got, expected in _gated_stitch(runner, model, t, gate_fn=torch.zeros_like):
+        assert not np.allclose(got, expected, rtol=2e-3, atol=2e-3)
+
+
+def test_gated_attention_layer_host_path_matches_device(gated_runner):
+    """The host numpy path carries the gate as well, and runs the same programs as the device path."""
+    import torch
+
+    runner, _model = gated_runner
+    t = 3
+    hidden = np.random.RandomState(0).randn(t, 64).astype(np.float32)
+    host = runner.forward_layer_pre(0, hidden)
+    device = runner.forward_layer_pre_device(0, torch.from_numpy(hidden).cuda())
+    assert len(host) == len(device) == 4
+    for h, d in zip(host, device, strict=True):
+        np.testing.assert_array_equal(h, d.cpu().numpy())
+    attn = np.random.RandomState(1).randn(t, 64).astype(np.float32)
+    out_host = runner.forward_layer_post(0, attn, hidden, host[3])
+    out_device = runner.forward_layer_post_device(0, torch.from_numpy(attn).cuda(), torch.from_numpy(hidden).cuda(), device[3])
+    np.testing.assert_array_equal(out_host, out_device.cpu().numpy())
