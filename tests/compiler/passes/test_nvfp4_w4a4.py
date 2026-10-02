@@ -23,7 +23,7 @@ from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.frontend.ir import LinearOp
 from emmy.compiler.loader.quant import spell_quantized_constants, spell_static_fp4_activations
 from emmy.compiler.tensor import Tensor
-from tests.compiler.helpers import device_compute_capability, requires_cuda
+from tests.compiler.helpers import device_compute_capability, requires_cuda, requires_sm
 from tests.compiler.loader.test_quant import _w4a4_checkpoint
 
 pytest.importorskip("torch")
@@ -117,7 +117,13 @@ def test_a_shared_quantized_activation_behind_a_norm_compiles_and_holds_flip_bou
     [
         (32, 128, 128, {"WORK": "t4", "TILE": "", "REDUCE": "coop", "STAGE": ""}),
         (16, 512, 2048, {"WORK": "t512", "TILE": "", "REDUCE": "coop-t", "STAGE": ""}),
-        (256, 512, 2048, {"WORK": "w1x8", "TILE": "mma_m16n8k64_e2m1_f32/f1x1/k8", "REDUCE": "", "STAGE": "d3/smem-tma"}),
+        pytest.param(
+            256,
+            512,
+            2048,
+            {"WORK": "w1x8", "TILE": "mma_m16n8k64_e2m1_f32/f1x1/k8", "REDUCE": "", "STAGE": "d3/smem-tma"},
+            marks=requires_sm(12),
+        ),
     ],
 )
 @pytest.mark.xdist_group("cuda")
