@@ -19,10 +19,11 @@ def _fresh_state(model):
     holds ``None``."""
     import torch
 
+    dtype = model.lm_head.weight.dtype  # the history is in the trunk dtype; the recurrent state is always float32
     return [
         (
             torch.zeros(1, mixer.num_v_heads, mixer.head_k_dim, mixer.head_v_dim, device="cuda"),
-            torch.zeros(1, mixer.conv_dim, mixer.conv_kernel_size, device="cuda"),
+            torch.zeros(1, mixer.conv_dim, mixer.conv_kernel_size, dtype=dtype, device="cuda"),
         )
         if mixer is not None
         else None
@@ -110,6 +111,23 @@ def test_gdn_padded_step_corrupts_the_state(built):
     runner.forward_layer_gdn_device(0, torch.cat([hidden, torch.zeros_like(hidden[:1])]), padded_state, padded_history)
     assert not torch.allclose(padded_history, history)
     assert not torch.allclose(padded_state, state)
+
+
+@pytest.mark.parametrize("length", [1, 5, 21])
+def test_gdn_bf16_prompt_matches_eager(built, length):
+    """The Qwen3.8 checkpoints are BF16: the same GDN programs with BF16 activations and history, and the float32
+    recurrent state. The reference is the eager model computing in float32 on the same BF16 weights. BF16 keeps 8
+    significant bits, so the tolerance is a few BF16 steps at the logits' magnitude, not the float32 tolerance."""
+    import copy
+
+    import torch
+
+    pair = built("qwen3_5.gdn.l2.bf16")
+    ids = _prompt(length)
+    logits = _step(pair, ids, _fresh_state(pair.model)).float()
+    eager = _eager(copy.deepcopy(pair.model).float(), ids)
+    # The logits are of magnitude 0.5 here, where one BF16 step is 0.002: allow a few steps.
+    torch.testing.assert_close(logits, eager, rtol=0, atol=1e-2)
 
 
 @pytest.fixture(scope="module")
