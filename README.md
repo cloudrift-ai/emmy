@@ -215,8 +215,8 @@ The JSON report includes both rank summaries and the comparison decision.
 **Nightly refresh** refits the schedule and placement priors independently from the repository goldens. It compares
 the shipped and fitted weights on the same dataset and commits a candidate directly to `main` only when a GPU, tier
 and pool-size group's median golden rank falls by at least 5% and no group's median rises or loses coverage.
-Each result is reported to #emmy-robots. Golden rank measures where a verified row landed, not the latency of a wrong
-pick; the reproduction gate below still runs before a candidate is committed.
+The nightly summary in #emmy-robots carries each result. Golden rank measures where a verified row landed, not the
+latency of a wrong pick; the reproduction gate below still runs before a candidate is committed.
 
 **The reproduction gate.** `tests/compiler/pipeline/search/prior/test_reproduction.py` holds the shipped priors to
 every repository golden, with no measurement in scope, at one tolerance over each corpus and space: a placement fork's

@@ -24,7 +24,8 @@ jobs:
       AGENT_MODEL: ${{ vars.ONBOARD_AGENT_MODEL || 'Qwen/Qwen3.8-27B-FP8' }}
       CLOUDRIFT_INFERENCE_URL: ${{ vars.CLOUDRIFT_INFERENCE_URL || 'https://inference.cloudrift.ai/v1' }}
       OPENCODE_DISABLE_AUTOUPDATE: "true"
-      REVIEWED_WORKFLOWS: "Discover model,Verify or onboard model"
+      # Each entry names the workflow and the one job of it that runs an agent.
+      REVIEWED_JOBS: "Nightly refresh/discover,Verify or onboard model/onboard"
       WORKFLOW_SOURCE: /tmp/emmy-review-source-${{ github.run_id }}-${{ github.run_attempt }}
       OPENCODE_CONFIG_DIR: /tmp/emmy-review-source-${{ github.run_id }}-${{ github.run_attempt }}/.opencode
       AGENT_TASK: /tmp/emmy-review-task-${{ github.run_id }}-${{ github.run_attempt }}.json
@@ -51,10 +52,10 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
-          source .github/workflows/scripts/rolling_pr.sh
+          source .github/workflows/scripts/bot_git.sh
           find_rolling_pr
 
-      - name: Collect the last run of every reviewed workflow
+      - name: Collect the last run of every reviewed job
         id: evidence
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -64,27 +65,34 @@ jobs:
           # which is the common case and keeps the nightly cost near zero.
           runs='[]'
           worth_reviewing=false
-          IFS=',' read -r -a workflows <<< "$REVIEWED_WORKFLOWS"
-          for workflow in "${workflows[@]}"; do
+          IFS=',' read -r -a reviewed <<< "$REVIEWED_JOBS"
+          for entry in "${reviewed[@]}"; do
+            workflow="${entry%/*}"
+            job_name="${entry##*/}"
             latest=$(gh run list --workflow "$workflow" --status completed --limit 1 \
-              --json databaseId,conclusion,url,createdAt \
+              --json databaseId,url,createdAt \
               --jq '.[0] // empty')
             if [ -z "$latest" ]; then
               echo "No completed run found for $workflow"
               continue
             fi
             run_id=$(jq -r .databaseId <<< "$latest")
-            conclusion=$(jq -r .conclusion <<< "$latest")
-            # Annotations carry every ::warning:: and ::error:: the run emitted, without downloading its log.
-            annotations=$(gh api --paginate "repos/$GH_REPO/actions/runs/$run_id/jobs" \
-              --jq '.jobs[].check_run_url' \
-              | while read -r check_run_url; do
-                  gh api "$check_run_url/annotations" \
-                    --jq '.[] | select(.annotation_level != "notice") | "\(.annotation_level): \(.message)"' || true
-                done | head -c 8000)
+            # Only the agent's own job reads a prompt; the other jobs of a nightly run are not its evidence.
+            job=$(gh api "repos/$GH_REPO/actions/runs/$run_id/jobs" \
+              --jq --arg name "$job_name" '[.jobs[] | select(.name == $name)][0] // empty')
+            if [ -z "$job" ]; then
+              echo "No $job_name job in the last $workflow run"
+              continue
+            fi
+            conclusion=$(jq -r .conclusion <<< "$job")
+            # Annotations carry every ::warning:: and ::error:: the job emitted, without downloading its log.
+            annotations=$(gh api "$(jq -r .check_run_url <<< "$job")/annotations" \
+              --jq '.[] | select(.annotation_level != "notice") | "\(.annotation_level): \(.message)"' \
+              | head -c 8000 || true)
             failing_log=""
             if [ "$conclusion" != "success" ]; then
-              failing_log=$(gh run view "$run_id" --log-failed 2>/dev/null | tail -c 40000 || true)
+              failing_log=$(gh run view "$run_id" --job "$(jq -r .id <<< "$job")" --log-failed 2>/dev/null \
+                | tail -c 40000 || true)
             fi
             if [ "$conclusion" != "success" ] || [ -n "$annotations" ]; then
               worth_reviewing=true
@@ -92,11 +100,12 @@ jobs:
             runs=$(jq \
               --argjson run "$latest" \
               --arg workflow "$workflow" \
+              --arg conclusion "$conclusion" \
               --arg annotations "$annotations" \
               --arg failing_log "$failing_log" \
               '. + [{
                  workflow: $workflow,
-                 conclusion: $run.conclusion,
+                 conclusion: $conclusion,
                  run_url: $run.url,
                  created_at: $run.createdAt,
                  annotations: $annotations,
@@ -117,16 +126,6 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Rebase the rolling branch on latest main
-        if: steps.evidence.outputs.worth_reviewing == 'true' && steps.rolling.outputs.branch != ''
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          BASE_BRANCH: ${{ github.event.repository.default_branch }}
-          EXISTING_BRANCH: ${{ steps.rolling.outputs.branch }}
-        run: |
-          source .github/workflows/scripts/rolling_pr.sh
-          rebase_rolling_branch
-
       - name: Load exact workflow source
         if: steps.evidence.outputs.worth_reviewing == 'true'
         env:
@@ -138,6 +137,16 @@ jobs:
           fi
           mkdir -p "$WORKFLOW_SOURCE"
           git archive "$WORKFLOW_SHA" | tar -x -C "$WORKFLOW_SOURCE"
+
+      - name: Rebase the rolling branch on latest main
+        if: steps.evidence.outputs.worth_reviewing == 'true' && steps.rolling.outputs.branch != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          BASE_BRANCH: ${{ github.event.repository.default_branch }}
+          EXISTING_BRANCH: ${{ steps.rolling.outputs.branch }}
+        run: |
+          source "$WORKFLOW_SOURCE/.github/workflows/scripts/bot_git.sh"
+          rebase_rolling_branch
 
       - name: Run the prompt review agent
         if: steps.evidence.outputs.worth_reviewing == 'true'
@@ -228,9 +237,8 @@ jobs:
           EXISTING_BRANCH: ${{ steps.rolling.outputs.branch }}
         run: |
           set -euo pipefail
-          git config user.name "emmy-onboarding-bot"
-          git config user.email "emmy-onboarding-bot[bot]@users.noreply.github.com"
-          gh auth setup-git
+          source "$WORKFLOW_SOURCE/.github/workflows/scripts/bot_git.sh"
+          bot_git_identity
           branch="$EXISTING_BRANCH"
           if [ -n "$branch" ]; then
             git switch -C "$branch"
@@ -266,15 +274,7 @@ jobs:
           BASE_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
-          retry_gh() {
-            for attempt in 1 2 3; do
-              "$@" && return 0
-              if [ "$attempt" -eq 3 ]; then
-                return 1
-              fi
-              sleep "$attempt"
-            done
-          }
+          source "$WORKFLOW_SOURCE/.github/workflows/scripts/bot_git.sh"
           {
             echo "## Nightly prompt review"
             echo
