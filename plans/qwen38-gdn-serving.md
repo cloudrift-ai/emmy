@@ -92,8 +92,9 @@ each of them needs to know about this branch.
 keeps the GDN code in its own functions and adds one layer-type check per shared loop. Stages 1 to 4 ran on a tiny
 config with GDN layers only (`qwen3_5.gdn.l2` in `tests/serving/helpers.py`). One runner test covers the tiny hybrid
 model: a prompt in one step, with a reference attention between `pre` and `post`. That model is `_QWEN3_5_TINY` in
-`tests/compiler/trace/test_huggingface.py`: one GDN layer, one full-attention layer. Before #1024, three constants that tracing folds into the graph (`1 + weight` of both norms,
-and `-exp(A_log)`) had no value when serving bound the weights, so the width-1 GDN program returned a wrong state.
+`tests/compiler/trace/test_huggingface.py`: one GDN layer, one full-attention layer. Before #1024, three constants
+that tracing folds into the graph (`1 + weight` of both norms, and `-exp(A_log)`) had no value when serving bound
+the weights, so the width-1 GDN program returned a wrong state.
 
 **BF16 trunk (`feat/serve-bf16-trunk`).** That branch owns the code that picks the trunk dtype in the same two files.
 This branch adds no dtype choice of its own: a GDN program takes the trunk dtype for `x` and `H`, and `S` is always
