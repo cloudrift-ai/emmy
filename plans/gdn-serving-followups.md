@@ -55,6 +55,17 @@ mints a piece whose CUDA source does not compile: nvcc reports `identifier "in0_
 `v1 = in0__s0 * in2;`. The lowering passes accept the piece; the error appears only when the program builds its
 kernels. The recorded rows cut the kernel at 44 other seams and leave this one fused.
 
+### A text-only Qwen3.5 NVFP4 checkpoint keeps its quantized weights unspelled in serving
+
+`EmmyGenRunner.from_model` addresses a coded trunk's constants by checkpoint key. It derives each key from the
+parameter's identity through the model's reversed key renamer, which yields `model.language_model.layers.N.*` for
+Qwen3.5. The Qwen3.8 NVFP4 checkpoint uses that key layout, and there the runner's GDN programs have the kernel
+identities of the serving twins. A checkpoint saved by `Qwen3_5ForCausalLM.save_pretrained` uses `model.layers.N.*`
+instead. For it the runner looks up a key that the checkpoint does not hold, the NVFP4 speller finds nothing, and
+the program keeps a BF16 weight. Serving-twin capture matches constants by suffix and spells them, so the two sides
+lower to different kernels and golden rows recorded on the twins do not apply. We saw this on a synthetic checkpoint
+with one NVFP4 linear in a GDN layer; attention layers were not compared.
+
 ### GDN programs and packs
 
 A pack is the on-disk store of compiled plans that a serving image boots from.
