@@ -416,12 +416,20 @@ enumerated from the kernel's own definition — the fit reads the directory and 
 
 **The placement prior** is the same model class over another space. `weights/placement.json` ranks the arms of a
 placement fork — keep fused, or cut one offered seam — each featurized as `P_*` columns from the `S_*` stamps of the
-kernels the arm leaves (`ranking.arm_features`: the piece count, each stamp summed and maxed over the pieces). Its
-dataset is `emmy db export --space placement`: one pool per placement fork of every golden kernel, walked through
+kernels the arm leaves (`ranking.arm_features`: the piece count, each stamp summed and maxed over the pieces), plus
+the number of kernel roots that fold a whole contraction. That fact separates cuts with equal Loop histograms but
+different projection placement. Its dataset is `emmy db export --space placement`: one pool per placement fork of
+every golden kernel, walked through
 the lift and the cut pass only (`ranking.walk_placement`), the arm the routing row recorded marked — keep fused where
 none was. The greedy asks it at a placement fork no routing row decides (`policy/greedy._placement_pick`), with the
 same featurizer, so the dataset's rank and the deploy's pick are one computation. Both artifacts name their `space`,
 and a reader refuses the other's.
+
+The placement view also retains `H_cc` and `H_total_mem`. They are constant inside a fork, but a tree can combine
+them with arm features to learn a different ranking per card, including same-die SKUs with different VRAM.
+The export prices each arm on its pool's card, precision regime and sizes using the same measured-evidence prices
+as a compile. A structural routing row on one card cannot mark a cut on another card that has no measurements for
+its pieces. Shared cut parents receive one pool per recorded context, and the walk keeps decisions within it.
 
 The proxy stays uncalibrated, and nothing in the deploy path corrects it by hand: the kernel-set Σ
 (`policy/greedy._resolved_price`) sums each row's own price as stamped or estimated. Where the prior ends up deciding

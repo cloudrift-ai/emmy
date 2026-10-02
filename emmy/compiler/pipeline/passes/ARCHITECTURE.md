@@ -58,6 +58,16 @@ This boundary is a review judgment, not a scripted check: when a change wants to
 for speed, move the decision to a fork plus evidence instead. The same rule governs the PROSE — a rationale for a
 deleted gate is a template for its return, so it is deleted with the code rather than left behind as history.
 
+## A knob lives in its pass
+
+The transform a knob, a pin or an evidence row decides lives in the pass that reads that decision, and nowhere else.
+Body normalization (`ir/stmt/normalize.py`) is the opposite kind of code: the canonical form every Loop IR body
+takes at construction and every identity digest takes, which can answer to nothing the pipeline chooses, and `ir/`
+imports no pipeline module. A pass may call a normalization step as a mechanical helper (`040_split_invariant_divides`
+calls `hoist_loop_invariants`); moving a pass's transform into the normalization module so another pass can reuse it
+inverts that direction and leaves a transform no normalization step runs. The IR `ARCHITECTURE.md` owns the
+normalization contract; `tests/architecture/test_layering.py` guards both sides.
+
 ## Quantization is not a concept past the decomposition band
 
 A quantized checkpoint is spelled as generic in-graph algebra at BIRTH (`loader.quant`, immediately post-trace).
@@ -93,13 +103,15 @@ FORMED AGAIN as a kernel of its own: its tile is lowered to a loop body, normali
 where a statement repeated on both sides of the seam folds to one), and lifted through the same entry as
 `010_lift`, so its sites are the ones its own body earns rather than a slice of the parent's tree — a gate/up piece
 carved out of a fused half is one twin contraction site, not the parent's contraction beside a scalar-only leftover.
-Before this round trip, independent output sweeps over the same domain can share one coordinate. Each branch must
-own one distinct output and read only its own sweep coordinates. Equal single-axis domains retain their windows;
-a full static rectangle can use an existing flat axis of equal volume through quotient/remainder indices. Shared
-tails, cross-branch coordinates, captured names, and sweep coordinates used as scalar values retain their original
-form. The common coordinate lets ordinary Loop normalization share loads and combine sibling reductions. Output cuts
-remain available, and measured evidence chooses the kernel set. The re-lift otherwise keeps the grid the cut minted;
-store sweeps that cannot be promoted stay sweeps.
+Before this round trip, independent output sweeps over the same domain can share common coordinates. Each branch
+must own one distinct output and read only its own sweep coordinates. Equal single-axis domains retain their windows;
+a full static rectangle can use an existing flat axis of equal volume through quotient/remainder indices. Two
+rectangular sweeps can also align coordinates an indexed input read proves equal, allowing different names for
+equal-domain reduction binders. Only the remaining coordinates flatten; output indices keep their original order.
+Shared tails, cross-branch coordinates, captured names, and sweep coordinates used as scalar values retain their
+original form. The common coordinates let ordinary Loop normalization share loads and combine sibling reductions.
+Output cuts remain available, and measured evidence chooses the kernel set. The re-lift otherwise keeps the grid
+the cut minted; store sweeps that cannot be promoted stay sweeps.
 A piece with no contraction orders that grid as its store writes, last axis fastest, so its threads write
 consecutive addresses; a contraction piece keeps the lift's order, because its last two grid axes are the
 fragment's rows and columns. A bare `PLACE=cut` pin
@@ -170,7 +182,7 @@ consumes its one root-most cut the same way and may join scoped cuts in that sin
 pinned on a named child with `PLACE@place_<token>/<site>=cut`, where the site is relative to that child. For example,
 `PLACE@place_abc123/map.1/inner=cut` addresses only that piece; the other children settle to fuse. The
 `place_<token>` name comes from the preceding cut's emitted kernel identity. Parent-only placement pins remain
-terminal, and a child pin that no piece resolves is rejected. A scoped pin whose site
+terminal on the unchanged parent remainder, and a child pin that no piece resolves is rejected. A scoped pin whose site
 path does not exist on a kernel addresses another kernel of the graph; a kernel none of the pins address fuses, deterministic,
 so the unpinned placement fork never returns under a pin-driven compile. A pin that resolves to an edge no cut
 realizes is an addressing error. Newly fused producers and pieces of unpinned cuts can expose smaller seams before
@@ -795,9 +807,11 @@ catalogs without changing them.
 The producer band is a fixed kernel-domain factor (`""`, `+p1`, `+p2`; since step 7 a resolved band is spelled in
 `WORK`, never a per-row `WSPEC` key). Compatibility accepts a nonzero member only on a warp row over resolved **TMA**
 transport without a cross-CTA split and within the thread budget; a row can select a member but cannot add
-another width. A single-channel computed-A (fused-cone) contraction enumerates scalar
-register-tile rows with staging off: the scalar atom evaluates the cone once per operand row or column and reuses it
-across the sibling register cells. It also enumerates its warp rows with the mandatory resolved `sync` compute-fill
+another width. A computed-operand contraction enumerates scalar register-tile rows: the scalar atom evaluates the
+cone once per operand row or column and reuses it across the sibling register cells. Independent product channels
+share the A operand on that tier too. A planar whole contraction also offers synchronous staging at depth one when
+each computed operand depends only on its own output coordinate. It also enumerates its warp rows with the mandatory
+resolved `sync` compute-fill
 stage at BOTH depths
 (`d1` + the asymmetric B-only prefetch ring `d2` as fork siblings — the M=512 occupancy loss inverts at decode M,
 so the depth is measured per shape), crossed with the shared `RASTER` launch-order candidates (its B stripes
@@ -811,9 +825,8 @@ projection folds into the deferred finalize. Multi-channel (gate/up) nodes split
 carries the true N-component identity-family carrier (one additive state per channel), the partial stores each
 channel's raw state to its `ws[comp, ksplit, *cell]` slice — no ⊗-combine in
 the partial — and the deferred finalize folds every component before applying the combine projection once.
-Multi-channel products still have no scalar / gmem-direct / WSPEC rows; the compute-producer role for the fused edge
-is the anticipated
-`RoleKind` extension. `TILE` values reach each site through the exact codec spelling: an explicit `TILE@<route>`
+Multi-channel scalar staging keeps one slab per streamed channel and sizes them at their own operand dtype.
+`TILE` values reach each site through the exact codec spelling: an explicit `TILE@<route>`
 names one site when sites need different values, while the canonical bare spelling names one site among those that
 support its value. A value no applicable site can take leaves no schedule rather than changing a factor. Staging
 additionally

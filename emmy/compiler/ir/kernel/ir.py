@@ -895,30 +895,59 @@ class WarpShuffle(Stmt):
     combine_states: tuple[Assign, ...]
     length: int
     dtype: DataType = F32
+    prefix: bool = False
 
     def deps(self) -> tuple[str, ...]:
         return tuple(self.state)
 
     def pretty(self, indent: str = "") -> list[str]:
-        return [f"{indent}WarpShuffle({', '.join(self.state)}, length={self.length})"]
+        return [f"{indent}WarpShuffle({', '.join(self.state)}, length={self.length}, prefix={self.prefix})"]
 
     def render(self, ctx: RenderCtx) -> list[str]:
         pad = _pad(ctx.indent)
         inner = _pad(ctx.indent + 1)
         ty = ctx.type_name(self.dtype.name)
         out: list[str] = []
-        s = int(self.length) // 2
-        while s > 0:
+        s = 1 if self.prefix else int(self.length) // 2
+        while 0 < s < self.length:
             # Block-scope each step so the shuffled state_b + merge temps redeclare
             # cleanly per round (the carried state is declared by an enclosing Init).
             out.append(f"{pad}{{")
             for st, sb in zip(self.state, self.state_b, strict=True):
-                out.append(f"{inner}{ty} {sb} = __shfl_xor_sync(__activemask(), {st}, {s});")
+                exchange = (
+                    f"__shfl_up_sync(__activemask(), {st}, {s}, {self.length})"
+                    if self.prefix
+                    else f"__shfl_xor_sync(__activemask(), {st}, {s})"
+                )
+                out.append(f"{inner}{ty} {sb} = {exchange};")
                 ctx.ssa_dtypes[sb] = self.dtype.name
-            out.extend(render_merge_program(self.combine_states, self.state, ctx, pad=inner, dtype=self.dtype))
+            if self.prefix:
+                out.append(f"{inner}if (threadIdx.x % {self.length} >= {s}) {{")
+            merge_pad = _pad(ctx.indent + 2) if self.prefix else inner
+            out.extend(render_merge_program(self.combine_states, self.state, ctx, pad=merge_pad, dtype=self.dtype))
+            if self.prefix:
+                out.append(f"{inner}}}")
             out.append(f"{pad}}}")
-            s >>= 1
+            s = s << 1 if self.prefix else s >> 1
         return out
+
+
+@dataclass(frozen=True)
+class WarpBroadcast(Stmt):
+    """Broadcast the last lane's state within each aligned lane group, in place."""
+
+    state: tuple[str, ...]
+    length: int
+
+    def deps(self) -> tuple[str, ...]:
+        return self.state
+
+    def pretty(self, indent: str = "") -> list[str]:
+        return [f"{indent}WarpBroadcast({', '.join(self.state)}, length={self.length})"]
+
+    def render(self, ctx: RenderCtx) -> list[str]:
+        pad = _pad(ctx.indent)
+        return [f"{pad}{name} = __shfl_sync(__activemask(), {name}, {self.length - 1}, {self.length});" for name in self.state]
 
 
 #: The per-arg distribution kinds of a :class:`FragmentApply` operand.
@@ -2924,6 +2953,7 @@ __all__ = [
     "Sync",
     "TreeHalve",
     "WarpShuffle",
+    "WarpBroadcast",
     "CpAsyncCopy",
     "CpAsyncCommit",
     "CpAsyncWait",
@@ -3115,7 +3145,13 @@ def _(s: WarpShuffle, rename, sigma, axis_fn):
         combine_states=tuple(_rewrite(a, rename, sigma, axis_fn) for a in s.combine_states),
         length=s.length,
         dtype=s.dtype,
+        prefix=s.prefix,
     )
+
+
+@_rewrite_kind.register
+def _(s: WarpBroadcast, rename, sigma, axis_fn):
+    return WarpBroadcast(state=tuple(rename(n) for n in s.state), length=s.length)
 
 
 # --- MMA fragment rewrites -------------------------------------------------

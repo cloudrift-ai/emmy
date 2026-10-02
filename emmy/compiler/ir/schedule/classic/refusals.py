@@ -72,7 +72,7 @@ def _reduction_domain(tile: TileOp, node, target=None) -> tuple[Reduce, ...]:
     roots = kernel_roots(tile.op)
     is_root = any(node is root for root in roots)
     owner = node if is_root else next((root for root in roots if any(node is member for member in chain_members(root))), None)
-    if node.observe is not None or node.carries or owner is None:
+    if node.carries or owner is None:
         return (Reduce(),)  # the binder partitions the roots it peels and their chain members; any other reduce lowers serially
     # A sweep the member's own ROOT is evaluated over wraps the whole chain, members included, and
     # only the serial fold spells that: the chain arm closes one grid cell.
@@ -82,7 +82,16 @@ def _reduction_domain(tile: TileOp, node, target=None) -> tuple[Reduce, ...]:
         # A split's deferred finalize: one partial per split per cell, the parallelism is the cells,
         # and a band over the few partials pays a barrier per cell.
         return (Reduce(),)
-    transposed_ok = _transposed_reduction_ok(tile) and is_root and not chain_form(node)
+    if node.observe is not None:
+        # A prefix scan keeps every lane's inclusive state. Ordinary register partials,
+        # transposed bands and cross-warp trees do not preserve those states.
+        if not is_root or chain_form(node):
+            return (Reduce(),)
+        return (
+            Reduce(),
+            *(choice for choice in coop_reduce_moves() if 1 < choice.coop <= WARP_LANES and choice.reg == 1 and not choice.coop_transposed),
+        )
+    transposed_ok = _transposed_reduction_ok(tile) and is_root
     lanes = (32, 8) if target is not None and target.compute_capability == (7, 0) else (32,)
     return (
         Reduce(),
@@ -392,12 +401,10 @@ def _warp_plan_ok(node, facts: ContractionFacts, plan: Tile) -> bool:
 def _uniform_extras(node) -> bool:
     # The scalar register tier replicates the TERM's own step per cell, so a recipe folds there
     # like any other algebra — three states under their own ops, seeded by the ⊕'s identities.
-    # What it has no residence for is an operand past the streamed one that VARIES: those are read
-    # once, ahead of the cells, so every one of them must be uniform across the tile (attention's
-    # scale and its mask fills are; a second streamed B is not, and rides the warp compute fill).
-    # The same holds for a second channel on ONE edge — a packed gate/up weight exposes both
-    # projections from a single operand, so the channel count, not the operand count, decides.
-    return len(node.operands) >= 2 and len(node.bilinear_channels()) <= 1 and not any(edge.free_axes for edge in node.operands[2:])
+    # Product channels read their streamed edges per register column. Any remaining operand is
+    # read once ahead of the cells, so it must be uniform across the tile.
+    streamed = {id(edge) for _, edge in node.bilinear_channels()}
+    return len(node.operands) >= 2 and not any(edge.free_axes for edge in node.operands[1:] if id(edge) not in streamed)
 
 
 def _warp_plans(node, facts: ContractionFacts, atoms: tuple[str, ...]) -> Iterator[Tile]:
@@ -491,8 +498,8 @@ def _stage_candidates(tile: TileOp, target, node, choice: NodeSchedule) -> tuple
         candidates = (*fill_stage_moves(), *stage_moves(warp=True, ctx=target))
     else:
         candidates = (direct, *stage_moves(warp=choice.tile.is_warp, ctx=target))
-    # The per-cell tier has neither a multi-slab drain nor a fill to fall back to, so a prefetching
-    # transport there would name a deposit its materializer cannot emit.
+    # Scalar multi-channel staging uses the blocking fill; the byte-copy catalogs below
+    # keep their single-channel scalar geometry.
     if len(node.bilinear_channels()) > 1 and not choice.tile.is_warp:
         candidates = tuple(stage for stage in candidates if stage.transport not in ("smem-async", "smem-tma"))
     if not (choice.tile.is_warp and choice.tile.atom.is_wgmma):
@@ -684,7 +691,9 @@ def _resolve_stage(
             producer=facts.producer,
             producer_k=tile_op.axis_of(facts.producer.axis) if facts.producer is not None else None,
         )
-    return staging.resolve_scalar_stage(node, placed, choice, tile_op.inputs, target.max_dynamic_smem, facts.k_axis)
+    return staging.resolve_scalar_stage(
+        node, placed, choice, tile_op.inputs, target.max_dynamic_smem, facts.k_axis, tile_op.axes, seam=facts.seam
+    )
 
 
 @dataclass(frozen=True)

@@ -1,5 +1,363 @@
 # Golden-bench kernel corpus
 
+## Matched NVIDIA profiles of the remaining gaps (2026-10-02)
+
+These captures compare the accepted H100 prefill and single-V100 decode selections with the kernels actually used
+by `torch.compile`. The built-in profiling child runs Emmy and eager PyTorch once; it does not collect the compiled
+reference. The diagnostic commands therefore wrap the original model benchmark with Nsight Systems and Nsight
+Compute. The pinned model revision, shape, precision, source and golden evidence remain unchanged.
+
+Systems attribution uses complete ordered graph replays, excluding eager execution, Inductor compilation trials
+and the benchmark's repeated single-kernel graphs. Kernel boundaries differ, so an operation's comparison includes
+all kernels that produce its result. Nsight Compute captures use the same replay, cache and clock settings on both
+sides of each comparison. Isolated kernel replay does not preserve whole-graph cache behavior; its durations are
+not new whole-layer benchmark results. NVIDIA documents these replay and cache effects in its
+[profiling guide](https://docs.nvidia.com/nsight-compute/ProfilingGuide/).
+
+### H100: attention work and data movement
+
+The reference has 13 launches: vendor GEMMs, cuDNN attention and Triton normalization/elementwise kernels. Emmy has
+11 after the accepted shared K/V change. In complete late graph replays, attention takes 12.672 µs versus 10.272 µs;
+Q takes 6.944 versus 5.952 µs, and gate plus up takes 19.200 versus 17.664 µs. Shared K/V wins, 8.896 versus
+9.792 µs. Both reference gate/up kernels are included. These are diagnostic kernel-group medians.
+
+Matched cold attention captures use four occurrences per launch configuration, kernel replay, node profiling,
+17 metric passes, cache flushing and no profiler clock adjustment. Both Nsight Compute invocations pass the model's
+scaled correctness checks. Medians below describe isolated replay, not whole-layer cache behavior.
+
+| Attention metric | Emmy | cuDNN reference |
+| --- | ---: | ---: |
+| CTAs / threads per CTA | 128 / 128 | 64 / 384 |
+| Tensor work, GFLOP | 2.147 | 1.342 |
+| Load/store warp instructions | 149,504 | 15,872 |
+| Total warp instructions | 3,870,720 | 1,053,598 |
+| DRAM read, MB | 4.233 | 4.220 |
+| Requested L2 traffic, MB | 23.699 | 15.564 |
+| Active / eligible warps per scheduler active cycle | 0.997 / 0.328 | 2.286 / 0.359 |
+| Isolated diagnostic duration, µs | 15.072 | 12.912 |
+
+cuDNN executes 37.5% less tensor work. This calculation weights each instruction by its matrix dimensions;
+the raw instruction counts alone would exaggerate the difference. It is consistent with skipping causal tiles,
+while Emmy's existing schedule walks all 512 keys. The reference loop bounds were not fully reconstructed, so
+this does not establish the gain from changing Emmy's causal bound or CTA count.
+
+Disassembly shows bulk TMA loads/stores and separate producer/consumer warps in cuDNN. Eight consumer warps receive
+232 registers each; one producer warp remains active after three other reserved producer warps exit. Emmy uses
+individual asynchronous copies and a uniform register allocation. The reference executes 9.42 times fewer
+load/store instructions, but reads almost the same DRAM bytes. Instruction accounting differs for TMA, so this is
+not a ninefold traffic saving. Its eligible-warp count improves only 9%, and its barrier-stall ratio is higher.
+Neither low occupancy nor barriers alone explains the comparison.
+
+Q supplies an equal-tensor-work control: Emmy executes 20.78 times as many load/store instructions and 2.29 times
+as many total instructions as the vendor kernel. Shared K/V already reduces traffic and a launch. Gate/up is
+nearly tied in cold replay, 21.216 versus 21.600 µs, despite favoring the reference in the late graph trace.
+That difference needs a comparison preserving whole-graph cache locality before another schedule is selected.
+The cold reference K/V captures are startup eager launches with the same vendor function, shape, strides and launch
+geometry as the compiled graph's external matrix multiplies; they are not captures of warmed compiled invocations.
+
+Both Systems attempts end with a CUDA launch failure during Emmy timing. The second nevertheless retains 264
+complete Emmy graphs and 4,843 complete compiled-reference graphs in one worker. The last 100 of each in an
+overlapping time window have median graph spans of 82.320 and 83.056 µs, respectively; the instrumented comparison
+slightly favors Emmy, while the final unprofiled comparison slightly favors the reference. Kernel-duration sums
+are 80.672 and 71.440 µs, leaving very different inter-kernel gaps. Those sums cannot explain the net latency gap
+by themselves, and the failed trace is not a successful benchmark.
+
+The next work is bulk TMA staging and producer/consumer warp specialization through the existing schedule
+mechanisms, followed by a measured causal-work alternative. Each needs balanced unprofiled whole-layer pairs and
+unchanged numerical checks. A blanket increase in CTA count or removal of barriers is not supported by these data.
+Raw reports, disassembly, generated sources, commands, software versions, both failed traces and a checksum manifest
+are retained in `tuning_h100x1_round2_matched_profiles_2026-10-02.tar.gz`, rooted at `matched-profile/`.
+
+### V100: split projection finalizers
+
+The actual compiled model uses nine Triton kernels, with no cuBLAS kernel in that graph. Emmy uses fourteen kernels.
+A successful short Systems run distinguishes that model from a second worker's reconstructed Torch comparison,
+which uses some different launch configurations. Complete graph attribution finds the largest deficit in input
+normalization plus Q/K/V: 24.831 µs for Emmy versus 16.448 µs for the reference. Emmy wins attention plus O,
+18.192 versus 22.272 µs, and loses post-attention normalization plus the MLP, 37.792 versus 32.832 µs.
+These are sums of per-node medians in the instrumented trace, not new unprofiled performance results.
+
+Matched cold projection captures use the exact reference function and launch geometry verified in the Systems
+trace and generated source. Both sides use kernel replay, flushed caches, base clock control and 18 metric passes.
+Each Emmy comparison includes its partial reduction and finalizer; comparing only its main projection would omit
+work the reference completes inside one kernel.
+
+| Cold diagnostic, µs | Emmy partial | Emmy finalizer | Reference complete projection |
+| --- | ---: | ---: | ---: |
+| Q | 9.024 | 2.688 | 8.640 |
+| Shared K/V | 9.536 | 3.616 | 9.952 |
+| Gate/up | 21.216 | 3.168 | 19.808 |
+| Down | 12.160 | 2.912 | 18.592 |
+
+The main Q and K/V kernels read essentially one pass of their weights: about 4.2 MB each. Their isolated times
+are close to the reference, while Emmy adds the finalizer. K/V's partial is slightly faster despite much lower
+occupancy. These measurements support the extra reduction stage as a concrete cost; they do not establish poor
+occupancy or inflated DRAM transactions as the cause.
+
+Gate/up's partial already reaches about 85% of reported DRAM utilization and adds a 3.168 µs finalizer. Down is
+faster in the captured comparison, so extra launches are not a universal explanation. Fused work differs: reference
+gate/up includes normalization, while reference down includes SiLU and multiplication. Emmy pays a separate
+normalization and materializes the half-precision SiLU/product before down. These row differences are not equal-work
+speedups and cannot be summed into a whole-layer result.
+
+In that down configuration, the reference executes 24.117 million FP32 FMA thread instructions versus 3.146 million
+in Emmy's partial, despite nearly equal DRAM reads. Its source recomputes the FP32 SiLU/product within each output
+tile. Materializing Emmy's product once avoids that repeated work, so removing this cut is not an established win.
+
+The down reference above matches the longer Systems run's selected 1,024-CTA, 512-thread configuration. The shorter
+run selects a different configuration, and its exact register/shared-memory allocation was not captured by Compute.
+The reference attention/O captures likewise match no selected Systems configuration and remain unselected tuning
+diagnostics. They do not establish a hardware-counter comparison for that group. Q/K/V and gate/up configurations
+match both traces.
+
+The source explains a relevant design difference. Triton reads row-major output-by-reduction weights and completes
+the reduction in one CTA. Emmy uses transposed reduction-by-output weights and global split partials. Q writes a
+64 KiB partial workspace; K/V writes 128 KiB. Changing the split factor alone previously failed to improve the
+whole layer. A legal unsplit realization with an appropriate weight layout is the next targeted comparison.
+
+The reference also retains FP32 Q/K/V and gate/up buffers, and their consumers do not restore intermediate FP16
+rounding. Only specific boundaries, including key/RoPE and the final output, store FP16. Emmy preserves its own
+explicit FP16 boundaries. This corrects the earlier diagnostic note claiming that all consumer rounding was
+retained. Matching the reference's kernel boundaries is not permission to drop those numerical obligations.
+
+All fifteen targeted CLI runs exit successfully, pass the actual-model Emmy and compiled-reference numerical checks,
+and reproduce all fourteen accepted Emmy kernel source hashes. The initial combined Compute filter captures an
+unselected tuning kernel despite exiting successfully; the initial Systems run times out at 600 seconds. Both are
+preserved alongside the successful shorter trace. Copied Torch cache entries retain absolute source paths, and four
+old-cache configuration records were changed during profiling; their before/after contents are retained and their
+original bytes restored. This cache behavior and the observed tuning variation limit claims about a particular
+reference configuration across processes.
+
+Raw reports, exports, sources, launch-selection records, commands and failed attempts are retained in
+`tuning_v100x1_round2_matched_profiles_2026-10-02.tar.gz`. The canonical unprofiled recipe archives remain unchanged.
+
+### Validation after profiling
+
+Profiling adds no kernel, golden or prior changes. CI exposed an attention availability test whose placement and
+cross-CTA split were still chosen by the prior. The test now pins its intended fused, unsplit realization and
+keeps the one-kernel and tensor-core assertions. Focused checks pass on the exact CI merge with Python 3.13.
+The full local CPU suite passes after both pins: 5,716 passed and 1,250 skipped in 359.65 seconds.
+
+## Shared K/V prefill and V100 input normalization (2026-10-02)
+
+Sharing K/V production improves prefill on H100, A100, RTX 4090 and RTX 5090. Separating the input RMSNorm statistic
+improves V100 decode. H100 has the clearest reduction; the RTX improvements are small. H100 prefill and V100 decode
+still do not establish a reliable advantage over `torch.compile`.
+
+Each comparison uses six baseline/candidate pairs with alternating execution order. Both arms use the pinned
+Qwen3-0.6B layer and measurement settings described in the baseline below. Every process starts with a fresh tune
+database and uses strict evidence without recording new timings. The model comparisons use scaled correctness;
+all twelve processes per card pass. Each accepted golden also passes five fresh-process strict replays. The selected
+routes need no manual pins. No completed pair is dropped, and every rejected or incomplete probe remains archived.
+
+Whole-layer times are microseconds. The reduction is the difference between the two arm medians divided by the
+baseline median. It is not the median of paired differences or a comparison with the historical baseline table.
+
+| Card and shape | Baseline median | Candidate median | Lower latency | Winning pairs | Launches before / after |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| H100, s512 | 86.765 | 82.518 | 4.90% | 6 / 6 | 12 / 11 |
+| A100, s512 | 179.456 | 175.957 | 1.95% | 6 / 6 | 12 / 11 |
+| RTX 4090, s512 | 156.501 | 155.904 | 0.38% | 5 / 6 | 12 / 11 |
+| RTX 5090, s512 | 129.950 | 129.353 | 0.46% | 6 / 6 | 12 / 11 |
+| V100, s1 | 68.288 | 67.396 | 1.31% | 5 / 6 | 14 / 14 |
+
+The losing RTX 4090 pair costs 0.171 µs; the losing V100 pair costs 0.192 µs. V100's arm means are 68.139 and
+67.432 µs, a 1.04% reduction. These are modest changes, and another GPU, shape or load can give a different result.
+The first RTX 4090 protocol hit its 115-second setup limit before producing a baseline JSON record. Its complete
+six-pair protocol restarted with a fixed 300-second process limit; the initial attempt remains in the archive.
+
+### Compiler and evidence changes
+
+Independent output sweeps can now align through coordinates established by shared input loads. This extends the
+previous flat-domain reform to the differently ordered row and channel coordinates in prefill K/V. Equal shared
+coordinates remain fixed; only the remaining equal-volume domain is flattened and expanded. The mapping must be
+injective and preserve output index order. Numerical tests cover one and two shared axes, distinct row/channel
+values, incompatible mappings and the existing symbolic and windowed single-axis cases. Fusion remains maximal,
+and ordinary cuts still offer separate producers.
+
+Each accepted prefill golden adds one shared K/V kernel, one producer route and one measured schedule row. All
+previous programs, kernel definitions, routes and rows remain unchanged. Nine unrelated emitted kernels are
+byte-identical between the two arms; Q's complete CUDA body is identical after its generated function and workspace
+names are aligned. The recorded shared K/V rows cost 7.350 µs on H100, 19.850 µs on A100, 17.821 µs on RTX 4090
+and 13.938 µs on RTX 5090. These costs select the new route through normal evidence.
+
+V100 instead cuts the raw input mean square and applies normalization while reading the Q and shared K/V projections.
+This removes the separate normalized input vector without changing the layer's 14 launches. Seven kernel
+definitions, four routes and four measured rows are added; all 28 original definitions, 11 routes and 18 rows remain
+unchanged. The measured new rows cost 1.933, 4.623, 2.510 and 4.637 µs. Source changes are confined to that statistic,
+Q/K/V normalization and consistent K/V channel order, plus generated names and an unused down-projection argument.
+
+The nested cut used to construct this candidate exposed a pin-consumption bug: a parent placement pin could apply
+again to the parent's remaining work when another pin targeted a newly created child. The parent remainder now
+consumes its decision while explicitly named children retain theirs. A regression test checks the resulting three
+pieces instead of four. This affects explicit placement pins; accepted qualification uses unpinned evidence.
+
+All six maintained hardware goldens and nine maintained model goldens remain current without restamping. No
+maintained golden or prior weight changes in this round. The five edited goldens belong to this experiment. Existing
+measurements are never overwritten to make a slower or changed kernel look unchanged.
+
+### Rejected probes and remaining costs
+
+H100's first, wider shared K/V tile wins six pairs but costs 11.519 µs in isolation, above the old separate K/V sum
+of 11.357 µs. It therefore does not win normal evidence selection. The accepted narrower tile costs 7.350 µs and
+improves the complete layer more. A100's earlier larger reduction tiles and eight-warp candidate lose; its selected
+smaller reduction tile wins all six pairs. RTX 4090's smaller row tile loses, and its eight-warp shared tile reduces
+register use from 150 to 104. RTX 5090's eight-warp shared tile ties and its shallower pipeline loses.
+
+V100 profiling shows gate/up near 86% of measured cold DRAM throughput, while Q, K/V and O reach roughly 56–58%
+and spend 59–65% of sampled warp time stalled on long scoreboards. Its wider Q split wins only three of six pairs
+and is tied on average, so the original split stays. Cutting an input normalization factor instead of the mean square
+also ties. Moving the post-attention RMSNorm statistic separately preserves O but makes gate/up repeat more
+normalization work; the new gate/up and scalar costs outweigh the saving. Existing evidence continues to select the accepted
+input-only change. No mathematical precision or correctness tolerance is changed.
+
+The V100 trace has 14 Emmy launches versus nine for `torch.compile`, including five projection partial/final pairs.
+The reference uses a different weight orientation, so its unsplit geometry cannot simply replace those schedules.
+A useful next investigation is a legal unsplit projection with coalesced weight access, measured in the whole layer;
+the current split-factor trials do not establish that it will win.
+
+The exact-source H100 attention profile has 128 CTAs on 132 SMs, 168 registers per thread and 80 KiB shared memory.
+It exposes about one active warp per scheduler and 0.36 eligible warps, with no eligible warp in 63.79% of sampled
+cycles. Compute utilization is 27.95%, L2 20.43% and DRAM 6.60%. Fixed-latency waits and barriers outweigh GMMA waits.
+Smaller row-tile probes are refused by existing schedule legality before CUDA emission; they provide no timing.
+An A100 attention schedule with more, smaller CTAs times out in two 115-second attempts and one fixed 300-second
+attempt without producing a timing. These attempts establish no performance result, and the old schedule remains.
+The remaining question is whether a supported smaller attention tile can improve latency hiding without adding
+more synchronization or changing rounding. Another broad schedule sweep is not supported by this evidence.
+
+RTX 5090 gate/up reaches 45.68% tensor throughput, 33.81% SM utilization and 51.47% L2 throughput, with 384 CTAs,
+256 threads, 104 registers and 50,176 total shared-memory bytes. A larger row tile was attempted to reuse each
+weight tile across more rows, but its bounded attempt returned no measurement. RTX 4090 profiling is blocked by
+`ERR_NVGPUCTRPERM`; no counters were obtained and host permissions were left unchanged. Profiled durations are
+diagnostics only, never the unprofiled latency claim.
+
+The qualification archives retain all paired records, strict repeats, commands, source comparisons and rejected
+trials: `tuning_h100x1_round2_2026-10-02.tar.gz`, `tuning_a100x1_round2_2026-10-02.tar.gz`,
+`tuning_rtx4090x1_round2_2026-10-02.tar.gz`, `tuning_rtx5090x1_round2_2026-10-02.tar.gz` and
+`results_v100x1_round2_diagnostics_2026-10-02.tar.gz`.
+
+## Final five-card recipe after the second round (2026-10-02)
+
+All ten model comparisons and all fifty strict golden replays pass. These are the unchanged two-shape recipe on
+each exact card, with the accepted evidence and the same protocol as the baseline. Captured whole-forward model
+latencies are microseconds. The balanced pairs above establish the improvements; this table validates the final
+selections and retains the contemporaneous reference timings.
+
+| Card | s1 Emmy | s1 `torch.compile` | s512 Emmy | s512 `torch.compile` | Launches s1 / s512 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| A100 40GB | 49.688 | 55.896 | 176.333 | 180.120 | 14 / 11 |
+| H100 80GB | 29.200 | 31.729 | 82.942 | 82.037 | 14 / 11 |
+| V100 SXM2 16GB | 67.648 | 60.849 | 496.640 | 637.012 | 14 / 21 |
+| RTX 4090 | 24.545 | 29.163 | 155.502 | 162.778 | 14 / 11 |
+| RTX 5090 | 20.473 | 24.591 | 129.344 | 135.717 | 16 / 11 |
+
+The strict golden replays use different inputs and a different reference path. Their medians and full ranges are
+validation results, not the values to compare against the model's `torch.compile` column.
+
+| Card | s1 median [range], µs | s512 median [range], µs |
+| --- | ---: | ---: |
+| A100 40GB | 50.712 [50.404–51.054] | 175.787 [174.763–176.299] |
+| H100 80GB | 24.506 [23.907–25.088] | 83.877 [83.508–84.241] |
+| V100 SXM2 16GB | 67.968 [67.464–68.367] | 496.640 [491.520–499.200] |
+| RTX 4090 | 24.625 [24.576–24.726] | 155.467 [154.770–156.160] |
+| RTX 5090 | 20.472 [20.471–20.473] | 129.783 [129.308–130.139] |
+
+Within each shape, the model run and all five strict repeats have identical ordered CUDA source hashes, schedules
+and shared-memory sizes. Changed shapes match the accepted candidates; unchanged shapes match the baseline.
+H100's final recipe precedes the parent placement-pin fix. Fresh strict compiles of both H100 shapes reproduce
+byte-identical complete CUDA under the integrated parent in the same compilation context, confirming the fix leaves
+these unpinned selections unchanged. Later formatting changes preserve the Python ASTs.
+
+Every canonical archive contains two succeeded system-only experiment records, raw command artifacts, source
+provenance and logs. Earlier canonical snapshots remain in Git at the round's base; the newly measured baselines
+remain in the separate archives below. All GPU VMs are retained. Only the single V100 machine was used.
+
+| Card | Canonical archive | Root member | Executed source |
+| --- | --- | --- | --- |
+| A100 | `results_a100x1.tar.gz` | `2026-10-02_09-21-02/` | `9c81582c4` |
+| H100 | `results_h100x1.tar.gz` | `2026-10-02_08-35-50/` | `8872d9346` |
+| V100 | `results_v100x1.tar.gz` | `2026-10-02_09-09-03/` | `9c81582c4` |
+| RTX 4090 | `results_rtx4090x1.tar.gz` | `2026-10-02_09-13-19/` | `eb33f345c` |
+| RTX 5090 | `results_rtx5090x1.tar.gz` | `2026-10-02_09-17-30/` | `9c81582c4` |
+
+All five use Transformers 5.14.1. The recorded Torch versions and CUDA compilers differ between hosts, so comparisons
+between cards include those software differences. Exact GPU UUIDs, clocks, operating systems and package freezes
+are preserved in the matching records and artifacts.
+
+| Card | Host | Torch | nvcc | Driver |
+| --- | --- | --- | --- | --- |
+| A100 | `bench-keep-a100-0921-1621-6784` | 2.14.0 | 12.9.41 | 580.173.02 |
+| H100 | `bench-gb-h100-0924-1252-99aa` | 2.14.0 | 12.9.41 | 580.178.04 |
+| V100 | `riftvm`, single SXM2 card | 2.13.0+cu126 | 12.9.86 | 580.178.04 |
+| RTX 4090 | `riftvm`, single RTX 4090 | 2.14.0 | 13.3.73 | 580.159.03 |
+| RTX 5090 | `kenshin` | 2.13.0 | 13.0.88 | 580.173.02 |
+
+Final validation passes the full CPU suite with 5,716 passed and 1,250 skipped in 367.03 seconds, including
+maintained-golden freshness and prior reproduction. The full RTX 5090 suite passes with eight workers: 6,583 passed
+and 398 skipped in 1,117.76 seconds. Its initial missing test-entrypoint setup failure is retained separately.
+All ten experiment goldens pass a final freshness check without rewriting anything. Lint passes after formatting
+the new code and tests. The RTX 4090 tuning archive retains the CPU, lint and freshness logs; the RTX 5090 tuning
+archive retains the complete GPU suite and its setup provenance.
+
+## Five-card baseline for the second optimization round (2026-10-02)
+
+All ten model comparisons and all fifty strict golden replays pass on the merge of PR #1011,
+`2ffe2b81be3a24f27a9dbfb10a5b274527a677f2`. H100 prefill and V100 decode remain slower than the same-input
+`torch.compile` reference. These measurements validate the pinned routes before this round's changes.
+
+The unchanged recipe runs Qwen3-0.6B revision `c1899de289a04d12100db370d81485cdf75e47ca`, layer 0, with sequence
+lengths 1 and 512, O3, fast math disabled, 10 warmups and 100 iterations. Every process starts with a fresh tune
+database, requires measured evidence and disables new timing writes. Model comparisons use the scaled correctness
+check. Each of the five subsequent golden replays uses strict correctness. The table reports captured whole-forward
+model times in microseconds; the three backends receive identical inputs within each process.
+
+| Card | s1 Emmy | s1 `torch.compile` | s512 Emmy | s512 `torch.compile` | Launches s1 / s512 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| A100 40GB | 51.769 | 54.491 | 178.347 | 180.120 | 14 / 12 |
+| H100 80GB | 29.370 | 31.673 | 86.781 | 80.486 | 14 / 12 |
+| V100 SXM2 16GB | 68.335 | 65.009 | 500.736 | 639.631 | 14 / 21 |
+| RTX 4090 | 24.651 | 28.978 | 156.976 | 162.343 | 14 / 12 |
+| RTX 5090 | 20.469 | 36.849 | 129.833 | 135.189 | 16 / 12 |
+
+The strict golden replays use different inputs and a different reference path from the model comparison. Their
+medians and full ranges are validation results, not substitutes for the model's `torch.compile` comparison.
+
+| Card | s1 median [range], µs | s512 median [range], µs |
+| --- | ---: | ---: |
+| A100 40GB | 50.783 [50.615–51.314] | 178.176 [177.835–179.883] |
+| H100 80GB | 24.538 [24.363–24.738] | 88.315 [87.883–88.685] |
+| V100 SXM2 16GB | 67.704 [67.584–68.006] | 497.664 [495.616–502.272] |
+| RTX 4090 | 24.699 [24.571–24.751] | 156.315 [155.819–156.613] |
+| RTX 5090 | 20.471 [20.470–20.478] | 130.025 [129.605–130.592] |
+
+All cards use task-owned source checkouts and runtime extensions. Initial A100 and RTX 4090 invocations inherited
+an older runtime that rejected the `dependent_launch` field; those setup failures remain in the raw evidence.
+The reported runs rebuild the runtime from the exact source above. RTX 5090 was rebuilt and repeated too.
+Its ordered kernel sources, schedules and shared-memory sizes match the previous canonical qualification on both
+shapes. Its reference timing varies substantially: decode measured 24.592 µs in the first invocation, 36.849 µs in
+the rebuilt-runtime recipe and 30.810 µs in a supplemental check. Accepted changes therefore need contemporaneous
+balanced pairs, not a comparison with a historical reference column.
+
+A supplemental strict model-form prefill check on the unchanged RTX 5090 baseline fails on 5 of 524,288 outputs,
+with maximum absolute error 0.00390625 and mean absolute error 0.0000539. The corresponding scaled model comparison
+and all five strict golden replays pass. No tolerance changes or retry-until-pass procedure were used. Model tracing
+samples new inputs per process; the CLI's seed controls the golden reference but does not seed those model inputs.
+The failed model's input tensor is not persisted by the CLI, so this supplemental sample cannot be replayed exactly.
+The RTX 4090 supplemental strict prefill check timed out before returning a verdict; that attempt supplies no
+correctness or performance result. Supplemental strict decode checks pass on both cards.
+
+The raw baseline archives preserve the system-only experiment records, command logs, JSON measurements and
+provenance. A100, RTX 4090 and RTX 5090 archives also retain the initial environment qualification attempts.
+Only the single V100 SXM2 machine was used.
+
+| Card | Archive | Successful recipe root |
+| --- | --- | --- |
+| A100 | `tuning_a100x1_round2_baseline_2026-10-02.tar.gz` | `2026-10-02_06-51-38/` |
+| H100 | `tuning_h100x1_round2_baseline_2026-10-02.tar.gz` | `2026-10-02_06-30-53/` |
+| V100 | `results_v100x1_round2_baseline_2026-10-02.tar.gz` | `2026-10-02_06-31-09/` |
+| RTX 4090 | `tuning_rtx4090x1_round2_baseline_2026-10-02.tar.gz` | `2026-10-02_06-47-49/` |
+| RTX 5090 | `tuning_rtx5090x1_round2_baseline_2026-10-02.tar.gz` | `2026-10-02_06-39-47/` |
+
 ## Shared K/V decode producers (2026-10-01)
 
 Sharing the K/V producer lowers whole-layer decode latency on A100, H100, V100 and RTX 4090. The selected route keeps Q

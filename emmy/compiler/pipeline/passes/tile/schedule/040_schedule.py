@@ -36,6 +36,7 @@ from emmy.compiler.pipeline.fork import SCHEDULE_FORK_STAMPS, Fork, exact_schedu
 # pass. Pin reads / knob-key spelling ride the enumerator's helpers instead; the family NAMES below
 # are plain strings and a function, which that scan does not see.
 from emmy.compiler.pipeline.knob import STRUCT_PREFIX, family_pins, kernel_pin, schedule_pin_fingerprint
+from emmy.compiler.pipeline.passes.tile._fromloop import serial_form
 from emmy.compiler.pipeline.schedule import fork_schedule
 from emmy.compiler.structural import digest
 
@@ -60,24 +61,6 @@ def pin_row(*kernel: str, split_consumed: bool, published: bool = True) -> dict[
                 value = "/".join(part for part in value.split("/") if not part.startswith("g"))
             row[key] = value
     return row
-
-
-def serial_form(tile: TileOp, prefix: str) -> TileOp:
-    """A kernel that carries a state as the classic schedule realizes it: its Loop IR lifted again
-    with every carried state a buffer the kernel owns — the port the lift added, named under
-    ``prefix`` — and the carrying loop the kernel's serial launch axis (``lift_serial``): one
-    launch per step, each reading the previous launch's stores. The term the classic tiers then
-    tile is the STEP, a projection over ordinary slabs; the register schedule reads the carrying
-    fold itself."""
-    from dataclasses import replace  # noqa: PLC0415
-
-    from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
-    from emmy.compiler.pipeline.passes.tile._fromloop import lift_serial  # noqa: PLC0415
-
-    formed, _ = lift_serial(LoopOp(body=tile.loop_body, inputs=tile.inputs), name=tile.name, prefix=prefix)
-    # The kernel's own knobs and its BOUND I/O: a standalone loop op seeds placeholder tensors, and
-    # the schedule reads operand dtypes, output shapes and the ``with_io`` identity off these maps.
-    return replace(formed, knobs=tile.knobs, inputs=tile.inputs, outputs=tile.outputs)
 
 
 def classic_forks(

@@ -696,6 +696,16 @@ def test_a_walk_recording_the_greedy_pick_still_times_it_isolated(monkeypatch, t
     assert exit_code.value.code == 1
     assert "recorded" not in seen
 
+    # A strict file walk also needs the reference when only the cut pieces have measured rows.
+    # It has no whole-target pin and is not recording anything.
+    args.record_greedy = False
+    returned["accuracy_error"] = None
+    seen.clear()
+    with pytest.raises(SystemExit) as exit_code:
+        run_module._handle_run_ir(args, FakeBackend, _FakeDump)
+    assert exit_code.value.code == 1  # the fake worker has no captured timing
+    assert seen == {"want_ref": True}
+
 
 @pytest.mark.parametrize("card,cap", [("NVIDIA GeForce RTX 4090", (8, 9)), ("NVIDIA A100-SXM4-40GB", (8, 0))])
 def test_recorded_greedy_pick_is_picked_again_under_strict_evidence(tmp_path, card, cap, monkeypatch):

@@ -143,8 +143,10 @@ decided once, at the offer, and never dropped from a priced row later. The parti
 nodes the binder builds the kernel around — the roots it peels from the root projection (`ops.kernel_roots`: a tiled
 contraction's root, every one of them for a multi-output kernel, else the first operand) and the folds those roots'
 cones close over (`ops.chain_members`, which the binder's chain arm strides around one shared lane axis). A reduce
-NESTED under one of those lowers serially inside its reader, so it carries the serial fold only, as does an observed
-node and one whose reduce reads a boundary store's output sweep. Whether a fill takes a root's cone over is the
+NESTED under one of those lowers serially inside its reader, so it carries the serial fold only, as does a node whose
+reduce reads a boundary store's output sweep. An observed root without a provider chain also offers cooperative
+widths up to one warp, with no register partials or transposition: the materializer retains every inclusive prefix.
+Whether a fill takes a root's cone over is the
 SCHEDULE's answer and not the term's, so a contraction a tier could fold whole still offers its own row statistic the
 member catalog: the untiled tiers bind it as a fold beside the root, and reading the tier off the term left a
 cooperative reduce evaluating a 16384-wide statistic once per thread. The contraction per-cell tier reads that same

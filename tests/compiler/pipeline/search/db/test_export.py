@@ -89,6 +89,27 @@ def test_a_golden_over_a_kernel_set_is_one_pool_per_piece():
     assert all(row.source == "golden:case" for pool in pools for row in pool.rows)
 
 
+def test_placement_labels_use_only_measurements_from_the_pool_card():
+    """One card measured a cut; another measured only the same kernel fused. Both labels survive export."""
+    db = tuned_db(None, (_CUT,), source="golden:case")
+    [parent] = [pool for pool in placement_pools(db, golden_pools(db)[0])[0] if pool.rows]
+    other = "NVIDIA Tesla V100 SXM3 32GB"
+    db.record_perf_row(
+        perf_row(
+            parent.kernel.exact_identity,
+            us=500.0,
+            gpu=other,
+            cc=70,
+            flags=parent.regime,
+            bindings=parent.bindings,
+            knobs={"WORK": "t1"},
+            source="golden:other",
+        )
+    )
+    dataset = export_dataset(db, source="test", pool_sample=0, seed=0, space="placement")
+    assert {group.gpu: group.golden_ids for group in dataset.golden} == {parent.gpu: (1,), other: (0,)}
+
+
 def test_a_pool_of_a_kernel_formed_from_no_loop_op_is_skipped_by_name():
     """A piece carved from a twisted tree has no definition the lowering takes back to it; its rows are counted
     out under their kernel's name rather than enumerated through a body that would make another kernel."""

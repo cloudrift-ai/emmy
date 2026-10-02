@@ -315,9 +315,9 @@ class Context:
     def features(self) -> dict[str, float]:
         """Host/hardware regime as ``H_*`` features for the online prior, so a
         SINGLE global prior spans every GPU and nvcc opt level (these are
-        constant across a compile's sibling candidates → they never change the
-        argmax; they only let the model fit per-regime offsets instead of
-        averaging across regimes). Combines capability-derived facts with the
+        constant across a compile's sibling candidates, but trees can combine
+        them with candidate features to rank differently per regime).
+        Combines capability-derived facts with the
         live device's physical SKU properties:
 
         - ``H_cc`` — compute capability ``major*10 + minor``

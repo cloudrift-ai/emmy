@@ -159,6 +159,8 @@ def copy_cell(body, sigma, suffix: str, protected) -> list:
     one copy per output cell ``(i, j)`` → ``__c{i}_{j}``) and the ILP register fold (``_factor``
     ``_tile_reduce_axis``, one copy per accumulator chain ``r`` → ``__r{r}``); the caller supplies the per-copy
     ``sigma`` (the coordinate offset) and ``suffix`` (the SSA tag)."""
+    # Replication keeps each nested loop's binder. Its coordinate reads must keep the same name.
+    protected = protected | Body(body).axis_names
     rename = lambda n: n if n in protected else f"{n}{suffix}"  # noqa: E731
     return [s.rewrite(rename, sigma) for s in body]
 
@@ -1095,6 +1097,8 @@ def _sync_operands(
     k_axis: Axis,
     axes: tuple = (),
     b_atoms: int = 1,
+    pads: tuple[int, int] = (0, 0),
+    elems: tuple = (),
 ) -> tuple[tuple, tuple[SyncOperand, ...], tuple[Operand, ...], list[Stmt]]:
     """The ``smem`` compute fill's drain-ordered, computed, copied, and prologue operands.
 
@@ -1148,6 +1152,10 @@ def _sync_operands(
         k_axis=k_axis,
         axes=axes,
     )
+    if pads[0]:
+        a_op = replace(a_op, pad_cols=pads[0])
+    if elems:
+        a_op = replace(a_op, dtype=cuda_name(elems[0]), elem_bytes=elems[0].nbytes)
     # One B slab per fold channel (the multi-B node fills each projection's weights alongside the
     # one compute-filled A slab); drain order is (A, B0, B1, …) regardless of which fill each rides.
     # ``swizzles`` are the per-operand slab modes (the mma tier's ``slab_swizzles``; NONE elsewhere):
@@ -1186,6 +1194,8 @@ def _sync_operands(
                 return _k_masked([s.substitute(sigma) for s in body], exposed, k, k_ext)
 
             op = SyncOperand(tag=tag, shape=(bk_elems * b_atoms, mn[1].tile // b_atoms), value=b_value, swizzle=swizzles[1])
+            if elems:
+                op = replace(op, dtype=cuda_name(elems[1]), elem_bytes=elems[1].nbytes)
             sync_ops.append(op)
             drain.append(op)
             continue
@@ -1202,9 +1212,10 @@ def _sync_operands(
             swizzles=swizzles,
             b_trans=c.as_contraction().b_trans,
             b_atoms=b_atoms,
+            pads=pads,
             roles=(1,),
         )
-        op = replace(op, tag=tag)
+        op = replace(op, tag=tag, dtype=cuda_name(elems[1]) if elems else op.dtype, elem_bytes=elems[1].nbytes if elems else op.elem_bytes)
         async_ops.append(op)
         drain.append(op)
     return tuple(drain), tuple(sync_ops), tuple(async_ops), prologue
@@ -1677,6 +1688,8 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
                 k_axis=k_axis,
                 axes=ops.axes,
                 b_atoms=ops.b_atoms(mn),
+                pads=ops.slab_pads(),
+                elems=ops.slab_elems(),
             )
         common = dict(slab_dtype=cuda_name(elem), elem_bytes=elem.nbytes, cta=cta)
         if stage.transport == "smem-tma":
@@ -1718,7 +1731,10 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
         # byte-gather drain spreads across banks; a TMA box deposit is dense, so its byte slab
         # stays unpadded (the resolver sized the budget with the same rule).
         elems = ops.slab_elems()
-        pads = tuple(BYTE_SLAB_PAD if e.nbytes == 1 and stage.transport == "smem-async" else 0 for e in elems)
+        pads = tuple(
+            BYTE_SLAB_PAD if e.nbytes == 1 and stage.transport == "smem-async" else pad
+            for e, pad in zip(elems, ops.slab_pads(), strict=True)
+        )
         geometry = dict(
             mn=mn,
             k_axis=k_axis,
@@ -1886,13 +1902,12 @@ def _scalar_bound(mn, offset, i: int, j: int):
     return cond
 
 
-def _scalar_protected(c: Fold, tile: Tile, lead: tuple = (), *, body: Body | tuple = (), k_axis: Axis) -> frozenset[str]:
+def _scalar_protected(tile: Tile, lead: tuple = (), *, k_axis: Axis) -> frozenset[str]:
     """The shared iteration coordinates — the block / unit / loop / extent vars excluded from the
     per-cell SSA rename (everything else is suffixed ``__c{i}_{j}`` so each cell owns its names).
     ``lead`` is the kernel's leading (batch / ksplit) grid axes: one coordinate for the whole cell
-    block, so renaming one would emit a reference no enclosing loop defines. ``body`` contributes
-    projection-local loop coordinates, notably an output sweep that remains bound inside every
-    replicated cell."""
+    block, so renaming one would emit a reference no enclosing loop defines. ``copy_cell`` protects
+    the coordinates bound inside each copy."""
     m, n = tile.m, tile.n
     prot = {k_axis.name}
     for s in (m, n):
@@ -1901,13 +1916,10 @@ def _scalar_protected(c: Fold, tile: Tile, lead: tuple = (), *, body: Body | tup
         prot.add(a.name)
     for a in (m.axis, n.axis, k_axis, *lead):
         prot |= set(a.extent_expr().free_vars())
-    prot.update(Body(body).axis_names)
     return frozenset(prot)
 
 
-def _scalar_drain(
-    c: Fold, cells, offset, slabs: tuple[str, str], ki: str, bk_elems: int, base: tuple[Expr, Expr], offs=(None, None)
-) -> Loop:
+def _scalar_drain(c: Fold, cells, offset, operands, ki: str, bk_elems: int, base: tuple[Expr, Expr], slot) -> Loop:
     """The inner slab-drain reduce loop ``for ki: b = b_slab[ki, n_local]; a = a_slab[m_local, ki];
     v = a·b; acc += v`` — the scalar counterpart of the mma ``ldmatrix`` drain. Built per-cell directly
     (NOT via the masked gmem-direct σ, whose ``% extent`` wrap would corrupt the slab index for an
@@ -1916,24 +1928,30 @@ def _scalar_drain(
     clamped / zero-filled slab row and its store is discarded by the guard. ``_dedup_loads`` still
     shares A across the n-cells and B across the m-cells exactly as gmem-direct does. **Seed-less**
     (the accumulators are pre-seeded once by :meth:`_ScalarOps.state` outside the
-    outer slab loop, so the drain folds into them without re-seeding. ``offs`` (the gmem→smem ring,
-    depth > 1) is the ``(a, b)`` read SLOT row offset pair, added to each slab's ROW — the same slot
-    seam the mma drain rides."""
-    (a_slab, b_slab), (row_base, col_base) = slabs, base
-    off_a, off_b = offs
-    b_name, a_name = c.operands[1].exposes[-1], c.operands[0].exposes[-1]
+    outer slab loop, so the drain folds into them without re-seeding. Each operand adds its
+    ring-slot row offset to its slab read — the same slot seam the mma drain rides."""
+    a_op, *bs = operands
+    row_base, col_base = base
+    off_a = a_op.slot_row(slot)
+    a_name = c.operands[0].exposes[-1]
     body: list[Stmt] = []
     for i, j in cells:
         sfx = f"__c{i}_{j}"
-        bn, an, vn, cn = f"{b_name}{sfx}", f"{a_name}{sfx}", f"{c.exposes[0]}__v{sfx}", f"{c.exposes[0]}{sfx}"
+        an = f"{a_name}{sfx}"
         m_local = BinaryExpr("-", offset[0].base(i), row_base)
         n_local = BinaryExpr("-", offset[1].base(j), col_base)
-        k_row = Var(ki) if off_b is None else BinaryExpr("+", off_b, Var(ki))
         m_row = m_local if off_a is None else BinaryExpr("+", off_a, m_local)
-        body.append(Load(names=(bn,), input=b_slab, index=(k_row, n_local)))
-        body.append(Load(names=(an,), input=a_slab, index=(m_row, Var(ki))))
-        body.append(Assign(name=vn, op=_MUL, args=(bn, an)))
-        body.append(Accum(name=cn, value=vn, op=_ADD, axes=(ki,)))
+        body.append(Load(names=(an,), input=a_op.slab, index=(m_row, Var(ki))))
+        for op, (index, _, b_name) in zip(bs, c.channel_operands(), strict=True):
+            trans = getattr(op, "trans", False)
+            off_b = op.slot_row(slot)
+            b_row = n_local if trans else Var(ki)
+            b_row = b_row if off_b is None else BinaryExpr("+", off_b, b_row)
+            b_col = Var(ki) if trans else n_local
+            bn, vn, cn = f"{b_name}{sfx}", f"{c.exposes[index]}__v{sfx}", f"{c.exposes[index]}{sfx}"
+            body.append(Load(names=(bn,), input=op.slab, index=(b_row, b_col)))
+            body.append(Assign(name=vn, op=_MUL, args=(bn, an)))
+            body.append(Accum(name=cn, value=vn, op=_ADD, axes=(ki,)))
     body = _dedup_loads(body)
     # seed=False: the accumulators are pre-seeded once by _ScalarOps.state outside the outer slab loop, so
     # this inner drain must NOT re-declare (re-zero) them each slab iteration.
@@ -2051,6 +2069,9 @@ class _AtomOps:
         at fp32 spacing over fp16 memory (misaligned + overlapped — the Gemma bench_fail cluster)."""
         elem = self.slab_elem()
         return (elem, elem)
+
+    def slab_pads(self) -> tuple[int, int]:
+        return (0, 0)
 
 
 class _MmaOps(_AtomOps):
@@ -2495,12 +2516,19 @@ class _ScalarOps(_AtomOps):
 
     def slab_elem(self):
         """The slab element dtype — the gmem operand's own dtype (fp32 SGEMM stages fp32)."""
-        return self.inputs[self.c.operands[0].as_slab().load.input].dtype
+        return self.slab_elems()[0]
 
     def slab_elems(self) -> tuple:
-        """Each gmem operand's OWN dtype — A and B may differ on the scalar tier (fp32 split
-        partials × fp16 weights); the drain's fma converts like the gmem-direct path does."""
-        return (self.inputs[self.c.operands[0].as_slab().load.input].dtype, self.inputs[self.c.operands[1].as_slab().load.input].dtype)
+        """Each operand's own dtype, including a computed cone's result type."""
+        from emmy.compiler.ir.schedule.staging import scalar_slab_elems  # noqa: PLC0415
+
+        return scalar_slab_elems(self.c, self.inputs)
+
+    def slab_pads(self) -> tuple[int, int]:
+        from emmy.compiler.ir.schedule.staging import scalar_slab_pads  # noqa: PLC0415
+
+        a, b = self.slab_elems()
+        return scalar_slab_pads(self.stage.bk_elems, a.nbytes, b.nbytes, self.c.as_contraction().b_trans, self.stage.transport)
 
     def carried_drain(self, operands, mn):  # noqa: ARG002 — the scalar drain carries no fragments
         """``None``: a scalar drain has no fragments to carry across chunks."""
@@ -2514,9 +2542,7 @@ class _ScalarOps(_AtomOps):
         """The scalar slab drain — the plain-``Load`` fma leaf (:func:`_scalar_drain`), reading by
         LOCAL tile coords over ring ``slot`` (the ``depth >= 2`` gmem→smem ring offsets each slab's
         row by the slot, exactly as the mma drain does)."""
-        a_op, b_op = operands
-        offs = tuple(op.slot_row(slot) for op in operands)
-        return [_scalar_drain(self.c, cells, offset, (a_op.slab, b_op.slab), "_ki", self.stage.bk_elems, _tile_base(mn), offs)]
+        return [_scalar_drain(self.c, cells, offset, operands, "_ki", self.stage.bk_elems, _tile_base(mn), slot)]
 
     def state(self, cells):
         """The scalar accumulator seeds. Gmem-direct (unstaged): none — the accumulators are seeded
@@ -2528,7 +2554,7 @@ class _ScalarOps(_AtomOps):
         c = self.c
         if self.stage is None:
             return []
-        return [Init(name=f"{c.exposes[0]}__c{i}_{j}", identity=_ADD.identity, dtype=F32) for i, j in cells]
+        return [Init(name=f"{name}__c{i}_{j}", identity=_ADD.identity, dtype=F32) for name in c.exposes for i, j in cells]
 
     def gmem_leaves(self, offset, mn):
         """The gmem-direct scalar leaf constructors: each register ROW reads its A operand once (a
@@ -2547,7 +2573,6 @@ class _ScalarOps(_AtomOps):
         An operand that VARIES ALONG THE OTHER output axis (:func:`_cell_varying`) is read once per
         CELL instead — the row / column reuse is a property of the operand, not of the tier."""
         c = self.c
-        assert len(self.channels) == 1, "the scalar tier is single-fold — a multi-B node rides the warp smem compute fill"
         k_axis = self.k_axis
         m, n = mn
         step = tuple(c.step())
@@ -2555,19 +2580,16 @@ class _ScalarOps(_AtomOps):
         # (:func:`_hoist_k_invariant`), the rest is the per-step read. A plain gmem-``Load`` A has
         # no prologue and the split is empty.
         a_pro, a_body = _hoist_k_invariant(c.operands[0].lower(axes=self.axes), k_axis.name)
-        b_body = c.operands[1].lower(axes=self.axes)
-        uniform = [stmt for edge in c.operands[2:] for stmt in edge.lower(axes=self.axes)]
-        # The operand bodies contribute their OWN loop coordinates (a computed cone's internal
-        # fold axes): a replicated read of such a coordinate must keep its name — the loop that
-        # binds it is copied with the cell, so suffixing the reads (but never a Loop's binding)
-        # emitted references no scope defines.
-        prot = _scalar_protected(c, self.tile, self.lead, body=(*a_pro, *a_body, *b_body, *step), k_axis=self.k_axis)
-        b_name, a_name = c.operands[1].exposes[-1], c.operands[0].exposes[-1]
+        streamed = tuple(dict.fromkeys(edge for _, edge in c.bilinear_channels()))
+        b_body = tuple(dict.fromkeys(stmt for edge in streamed for stmt in edge.lower(axes=self.axes)))
+        uniform = [stmt for edge in c.operands[1:] if all(edge is not other for other in streamed) for stmt in edge.lower(axes=self.axes)]
+        prot = _scalar_protected(self.tile, self.lead, k_axis=self.k_axis)
+        b_names, a_names = {name for edge in streamed for name in edge.exposes}, set(c.operands[0].exposes)
         # Whatever the step reads and does not define is bound OUTSIDE the cell — a uniform leaf
         # above the loop. Only the two operand results (rebound per row / column below) and the
         # carried states (one copy per cell) are the cell's own.
         outer = {name for stmt in step for name in free_names(stmt)} - {name for stmt in step for name in stmt.defines()}
-        prot |= outer - {a_name, b_name} - set(c.exposes)
+        prot |= outer - a_names - b_names - set(c.exposes)
         a_cell, b_cell = _cell_varying((*a_pro, *a_body), n), _cell_varying(b_body, m)
 
         def at_m(i):  # register row ``i``'s m coordinate (a 1-D output has no m side)
@@ -2602,7 +2624,7 @@ class _ScalarOps(_AtomOps):
                 *(copy_cell((*a_pro, *a_body), cell, a_sfx, prot) if a_cell else ()),
                 *(copy_cell(b_body, cell, b_sfx, prot) if b_cell else ()),
             ]
-            bound = {a_name: f"{a_name}{a_sfx}", b_name: f"{b_name}{b_sfx}"}
+            bound = {**{name: f"{name}{a_sfx}" for name in a_names}, **{name: f"{name}{b_sfx}" for name in b_names}}
             rebound = [stmt.rewrite(lambda name: bound.get(name, name)) for stmt in step]
             return [*reads, *copy_cell(rebound, cell, f"__c{i}_{j}", prot | set(bound.values()))]
 
@@ -2617,7 +2639,7 @@ class _ScalarOps(_AtomOps):
         c = self.c
         sigma = _scalar_sigma(mn, offset, i, j)
         tail = _unshadowed(self.epilogue, c.exposes)
-        cell = copy_cell(tail, sigma, f"__c{i}_{j}", _scalar_protected(c, self.tile, self.lead, body=tail, k_axis=self.k_axis))
+        cell = copy_cell(tail, sigma, f"__c{i}_{j}", _scalar_protected(self.tile, self.lead, k_axis=self.k_axis))
         cell = _guard_writes(cell, _scalar_bound(mn, offset, i, j))
         return _dedup_loads(cell)
 

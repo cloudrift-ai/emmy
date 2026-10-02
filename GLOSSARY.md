@@ -79,6 +79,9 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   backend turns a lower-level representation into executable code for a target such as CUDA.
 - **Pass** — One ordered compiler phase. A pass searches for known patterns and rewrites them into a form suitable
   for the next phase.
+- **Body normalization** — The canonical form every Loop IR body takes at construction and inside every identity
+  digest, so two spellings of one program key the same. It answers to no knob, pin or evidence; a transform that
+  something decides is a pass, not a normalization step.
 - **Rewrite rule** — A small compiler transformation. It recognizes a pattern, such as RMSNorm, and replaces it with
   equivalent lower-level operations.
 - **Pipeline** — An ordered sequence of compiler passes. The output of one stage becomes the input to the next.
@@ -95,8 +98,8 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   partials, then performs one merge through the stable ⊕ per chunk instead of per element.
 - **Scan (prefix reduction)** — A reduction that also stores its running state at every step, such as `cumsum`. In
   Emmy a scan is a Fold with an **observer**: a pure per-step function over the carried state whose results only
-  kernel-boundary output writes consume. An observed fold preserves its stream order, so it schedules as the serial
-  fold only.
+  kernel-boundary output writes consume. A serial scan preserves every prefix directly. A cooperative warp scan
+  preserves the same prefixes by combining consecutive lane groups and carrying each group's final state forward.
 - **Serial axis / lagged read** — The classic schedule's realization of a carried state: a `Placement.serial` axis
   is launched once per coordinate, in order, the coordinate a runtime `int` in the body, and the kernel reads its
   own output strictly behind the step it writes (`S[c − 1]` while writing `S[c]`). The state lives in the buffer,

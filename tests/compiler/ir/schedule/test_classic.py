@@ -3,7 +3,7 @@
 import json
 import pickle
 import random
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from itertools import permutations
 
 import pytest
@@ -601,7 +601,9 @@ def test_codec_rejects_a_noncanonical_value_spelling() -> None:
 
 
 def test_context_enforces_kernel_resource_and_producer_band_invariants() -> None:
-    context = ClassicScheduleContext(*_problem(_contraction()))
+    tile, target = _problem(_contraction())
+    tile = replace(tile, inputs={name: Tensor(name, (8, 8), "f16") for name in ("a", "b")})
+    context = ClassicScheduleContext(tile, target)
     direct = _direct(context)
     site = context.tile_op.node_sites[0]
     atom = ATOM_REGISTRY["mma_m16n8k16_f16_f32"]

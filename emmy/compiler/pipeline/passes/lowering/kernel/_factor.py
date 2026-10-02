@@ -36,7 +36,7 @@ strategy + the one :func:`~...kernel._stage.staged_kloop`); the ONE atom-agnosti
 (``_atom._staged``) builds the transport, the atom strategy supplying only the slab drain leaf.
 It is driven off the node's ``STAGE`` codec →
 :class:`~...schedule.Stage` (``d<depth>`` gmem→smem ring · ``smem``/``smem-async``/``smem-tma`` transport ·
-``p<n>`` smem→register double-buffer). The **scalar** contraction tier stays gmem-direct. The fused
+``p<n>`` smem→register double-buffer). The **scalar** contraction tier shares the operand staging driver. The fused
 norm→linear **shared-row** prologue is Stage-driven too: the schedule detects the reused input row
 and stamps an ``smem`` :class:`~...schedule.Stage` whose slab list names it; :func:`_tile_reduce_axis` only
 applies it (the 1-D ``sync_row_fill`` + the load rewrite). Leading ``_`` so the pass loader skips this
@@ -45,24 +45,25 @@ module."""
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from importlib import import_module
 
 from emmy.compiler.backend.cuda.dtype import cuda_name
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expr import BinaryExpr, Literal, TernaryExpr, Var
 from emmy.compiler.ir.kernel import Tile
-from emmy.compiler.ir.kernel.ir import Smem, Sync, TreeHalve, WarpShuffle
+from emmy.compiler.ir.kernel.ir import Smem, Sync, TreeHalve, WarpBroadcast, WarpShuffle
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule import Raster
 from emmy.compiler.ir.schedule.classic.schedule import binds_root
 from emmy.compiler.ir.schedule.views import cone_seam
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
 from emmy.compiler.ir.stmt.body import _exposed_defines
 from emmy.compiler.ir.tile import FoldMove, Level, Reduce, ReduceStage
 from emmy.compiler.ir.tile.ir import apply_output_specs, observed_result_names
-from emmy.compiler.ir.tile.ops import UnbindableProjection, chain_form, chain_members, projection_regions, sched_of, tiled_edges
+from emmy.compiler.ir.tile.ops import UnbindableProjection, chain_members, projection_regions, sched_of, tiled_edges
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import (
     clamp_last,
     copy_cell,
@@ -72,6 +73,9 @@ from emmy.compiler.pipeline.passes.lowering.kernel._atom import (
 )
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import sync_row_fill
 from emmy.compiler.pipeline.passes.lowering.kernel._tiling import atomize, grid_tile, register_tile, unit_tile
+from emmy.compiler.pipeline.search.space import GUARD_REDUCTIONS
+
+_guard_reductions = import_module("emmy.compiler.pipeline.passes.lowering.kernel.090_guard_reductions")
 
 # ---- the ambient cell environment and the wire a node produces ---------------------------------- #
 
@@ -583,7 +587,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
             state, fold, close, lane = _tile_chain_members(op, parts, ctx, tail, out_val)
             t = replace(t, axes=(lane,)) if lane is not None else t
             bt = lane.extent.as_static() * ctx.packed_cells if lane is not None else None
-        elif plan is None or (plan.coop <= 1 and plan.reg <= 1) or (plan.coop_transposed and chain_form(op)):
+        elif plan is None or (plan.coop <= 1 and plan.reg <= 1):
             # The TERM places its own stores (``Fold.lower``): a sweep store's loop opens around
             # exactly the terms evaluated over that sweep, so sibling sweeps stay siblings, and a
             # streamed store rides its observed fold's reduce loop — the one placement rule the
@@ -618,7 +622,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
             t = replace(t, axes=lanes_axes)
             bt = plan.coop
         else:
-            state, fold, close, lane = _tile_reduce_axis(op, plan, ctx, tail, out_val)
+            state, fold, close, lane = _tile_reduce_axis(op, plan, ctx, tail, out_val, output_specs)
             t = replace(t, axes=(lane,)) if lane is not None else t
             bt = plan.coop * ctx.packed_cells if lane is not None else None
 
@@ -797,7 +801,16 @@ def emit_combine(
         # smem tree: ``n_threads`` k-slices × ``scale`` lanes per slab, each lane's tree
         # halving its own segment (``TreeHalve.inner``).
         iv, scale = inner
-        idx = BinaryExpr("+", BinaryExpr("*", Var(t), Literal(scale, "int")), Var(iv))
+        slot = Var(t)
+        if n_threads > warp_size:
+            # The flat tree's high bits fold first. Rotate the warp bits to keep the same
+            # within-warp, then cross-warp order as the ordinary cooperative combine.
+            slot = BinaryExpr(
+                "+",
+                BinaryExpr("*", slot % warp_size, Literal(n_threads // warp_size, "int")),
+                BinaryExpr("/", slot, Literal(warp_size, "int")),
+            )
+        idx = BinaryExpr("+", BinaryExpr("*", slot, Literal(scale, "int")), Var(iv))
         out: list[Stmt] = [Smem(name=b, extents=(n_threads * scale,), dtype=smem_c) for b in bufs]
         out += [Write(output=b, index=(idx,), value=st) for b, st in zip(bufs, state, strict=True)]
         out.append(Sync())
@@ -881,6 +894,18 @@ def _tile_reduce_axis_transposed(
     assert not (stage is not None and stage.smem), "transposed coop cannot ride shared-row staging"
     *hoisted, rloop = op.lower(axes=ctx.sched.tile.axes)
     out_ax = _coalescing_axis(rloop, grid, ctx.inputs)
+    candidate = rloop
+    if GUARD_REDUCTIONS.narrow((True,))[0]:
+        guarded = _guard_reductions._guard(Body((*hoisted, rloop, *tail)), frozenset(ax.name for ax in (*grid, *ctx.serial)))
+        candidate = guarded[len(hoisted)]
+    predicate = candidate.end.cond if isinstance(candidate, StridedLoop) and isinstance(candidate.end, TernaryExpr) else None
+
+    def uniform_parts(expr):
+        if isinstance(expr, BinaryExpr) and expr.op == "&&":
+            return (*uniform_parts(expr.left), *uniform_parts(expr.right))
+        return (expr,) if out_ax.name not in expr.free_vars() else ()
+
+    uniform = uniform_parts(predicate) if predicate is not None else ()
     view = op.as_reduction()
     axis = rloop.axis
     stride = k_ways * reg
@@ -904,14 +929,13 @@ def _tile_reduce_axis_transposed(
     out_ext = out_ax.extent_expr()
     overhang = not (out_ax.extent.is_static and out_ax.extent.as_static() % span == 0)
 
-    nested_axes = {lp.axis.name for lp in rloop.body.iter_of_type(Loop, StridedLoop)}
     defined = {nm for s in rloop.body.iter() for nm in s.defines()}
     expr_external = {v for s in rloop.body.iter() for e in s.exprs() for v in e.free_vars()} - defined
     # A value defined ahead of the loop and read inside it (a hoisted operand's) is one value
     # shared by every register copy — the same exclusion :func:`_strided_fold` makes.
     deps_external = {nm for s in rloop.body.iter() for nm in s.deps()} - defined
     protected = frozenset(
-        {axis.name, *(ax.name for ax in grid), blk_name, n_lane.name, *axis.extent_expr().free_vars(), *nested_axes, *expr_external}
+        {axis.name, *(ax.name for ax in grid), blk_name, n_lane.name, *axis.extent_expr().free_vars(), *expr_external}
         | deps_external
         | ({k_co.name} if k_co is not None else set())
     )
@@ -947,6 +971,17 @@ def _tile_reduce_axis_transposed(
         stores = [Cond(cond=BinaryExpr("==", Var(k_co.name), Literal(0, "int")), body=tuple(stores))]
 
     lanes_axes = ((k_co,) if k_co is not None else ()) + (n_lane,)
+    if uniform:
+        condition = uniform[0]
+        for part in uniform[1:]:
+            condition = BinaryExpr("&&", condition, part)
+        # Output-axis predicates can differ between lanes. Only their independent conjuncts
+        # guard the collective; every thread reaches its barriers together. Seeds stay visible
+        # to the projection even when the whole block skips the reduction.
+        accums = {stmt.name: stmt for stmt in strided.body if isinstance(stmt, Accum)}
+        seeds = [Init(name=stmt.name, identity=stmt.op.identity, dtype=stmt.dtype or F32) for stmt in accums.values()]
+        strided = replace(strided, seed=False)
+        return seeds, [*sweep, Cond(cond=condition, body=(strided, *merge))], stores, lanes_axes, out_ax
     return [], [*sweep, strided, *merge], stores, lanes_axes, out_ax
 
 
@@ -1017,12 +1052,7 @@ def _strided_fold(op: Fold, rloop, plan, ctx: Ctx, lane: Axis | None) -> list[St
     # accumulator (``StridedLoop.render``).
     # The shared iteration coordinates (grid + reduce + lane axis vars) and the symbolic
     # extent's runtime arg(s) (e.g. ``seq_len``) are common to every register copy — exclude
-    # them from the per-copy SSA rename. So too any nested loop-axis variable (a child contraction
-    # contraction's own reduce coordinate ``dd`` / ``j``): ``copy_cell``'s ``rewrite`` renames
-    # a var's USES but not a ``Loop``'s own axis DECLARATION, so suffixing the uses (``dd__r1``)
-    # while the ``for`` decl stays ``dd`` emits an undefined identifier. Each copy re-declares
-    # its own nested loop, so a shared name is correct (loop-scoped).
-    nested_axes = {lp.axis.name for lp in rloop.body.iter_of_type(Loop, StridedLoop)}
+    # them from the per-copy SSA rename. ``copy_cell`` also protects nested loop coordinates.
     # ... and ANY external name the body's index/extent Exprs read without defining — a symbolic
     # dim can enter through a buffer's flattened STRIDES (a 4-D tensor's ``seq_len``) on an op
     # whose own reduce extent is static, where none of the named sets above cover it; renaming
@@ -1037,7 +1067,7 @@ def _strided_fold(op: Fold, rloop, plan, ctx: Ctx, lane: Axis | None) -> list[St
     # emits an undeclared identifier (surfaced by DeepSeek-V4 post4096's two-cut piece).
     deps_external = {nm for s in rloop.body.iter() for nm in s.deps()} - defined
     protected = frozenset(
-        {axis.name, *(ax.name for ax in ctx.grid), *axis.extent_expr().free_vars(), *nested_axes, *expr_external, *deps_external}
+        {axis.name, *(ax.name for ax in ctx.grid), *axis.extent_expr().free_vars(), *expr_external, *deps_external}
         | ({lane.name} if lane is not None else set())
     )
     # A twisted fold's masked tail clamps the STREAMED VALUE to the pivot fold's identity
@@ -1111,7 +1141,9 @@ def _lane_close(tail: list[Stmt], lane: Axis | None, coop: int, ctx: Ctx, out_va
     return body_tail
 
 
-def _tile_reduce_axis(op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str) -> tuple[list[Stmt], list[Stmt], list[Stmt], Axis | None]:
+def _tile_reduce_axis(
+    op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str, output_specs=()
+) -> tuple[list[Stmt], list[Stmt], list[Stmt], Axis | None]:
     """Tile the REDUCE axis per the node's cooperating :class:`Reduce` — the reduce counterpart
     of the output ``unit_tile`` / ``register_tile`` levels: ``coop`` lanes across threads (the
     ``_co`` lane axis, the axis's UNIT level) and ``reg`` ILP chains across per-thread accumulators
@@ -1131,7 +1163,7 @@ def _tile_reduce_axis(op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str) -> tu
     # :func:`emit_combine` machinery folds either). An operand that does not index the fold's axis
     # is hoisted ahead of the loop and leads the region; the enclosing zero-axis ``Fold``'s
     # projection is ``tail`` (already walked).
-    *hoisted, rloop = op.lower(axes=ctx.sched.tile.axes)
+    *hoisted, rloop = op.lower(stores=output_specs, axes=ctx.sched.tile.axes)
     axis = rloop.axis
 
     # The cooperative lane axis (Tile-decoded, innermost) — present only when threads
@@ -1165,5 +1197,51 @@ def _tile_reduce_axis(op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str) -> tu
         rloop = replace(rloop, body=Body(tuple(_restage_loads(list(rloop.body), staged, smem_name, n_grid, grid_vars))))
         tail_src = _restage_loads(tail_src, staged, smem_name, n_grid, grid_vars)
 
-    fold = _strided_fold(op, rloop, plan, ctx, lane)
-    return fill_stmts, [*hoisted, *fold], _lane_close(tail_src, lane, coop, ctx, out_val), lane
+    fold = _scan_fold(op, rloop, plan, lane) if op.observe is not None else _strided_fold(op, rloop, plan, ctx, lane)
+    close = _lane_close(tail_src, lane, coop, ctx, out_val) if tail_src or not output_specs else []
+    return fill_stmts, [*hoisted, *fold], close, lane
+
+
+def _scan_fold(op: Fold, rloop: Loop, plan: Reduce, lane: Axis) -> list[Stmt]:
+    """Scan consecutive lane groups, retaining each prefix for the observer and broadcasting
+    the group's final state before the next group. Padded lanes contribute the monoid identity;
+    every lane participates in the shuffles, while only valid prefixes reach the boundary."""
+    axis, width = rloop.axis, plan.coop
+    state = op.combine.results
+    previous = tuple(f"{name}__previous" for name in state)
+    chunk = Axis(name=f"{axis.name}_chunk", extent=axis.extent)
+    coordinate = BinaryExpr("+", Var(chunk.name), Var(lane.name))
+    valid = BinaryExpr("<", coordinate, axis.extent_expr())
+    padded = not (axis.extent.is_static and axis.extent.as_static() % width == 0)
+    read = Sigma({axis.name: BinaryExpr("%", coordinate, axis.extent_expr()) if padded else coordinate})
+    last = max(i for i, stmt in enumerate(rloop.body) if isinstance(stmt, Accum) and stmt.name in state)
+    body: list[Stmt] = [Assign(name=other, op="copy", args=(name,), dtype=F32) for name, other in zip(state, previous, strict=True)]
+    for stmt in rloop.body[: last + 1]:
+        stmt = stmt.rewrite(lambda name: name, sigma=read)
+        if isinstance(stmt, Accum) and stmt.name in state:
+            empty = f"{stmt.name}__empty"
+            body.append(Init(name=empty, identity=stmt.op.identity, dtype=F32))
+            if padded:
+                masked = f"{stmt.value}__scan_mask"
+                body.append(Select(name=masked, branches=(SelectBranch(stmt.value, valid), SelectBranch(empty, Literal(1, "int")))))
+                stmt = replace(stmt, value=masked)
+            stmt = replace(stmt, base=empty, axes=(chunk.name,), dtype=F32)
+        body.append(stmt)
+    body.append(
+        WarpShuffle(state=state, state_b=op.combine.params[len(state) :], combine_states=tuple(op.combine.body), length=width, prefix=True)
+    )
+    body.extend(merge_stmts(op, previous))
+    observed = [stmt.rewrite(lambda name: name, sigma=Sigma({axis.name: coordinate})) for stmt in rloop.body[last + 1 :]]
+    body.extend([Cond(cond=valid, body=tuple(observed))] if padded else observed)
+    body.append(WarpBroadcast(state=state, length=width))
+    return [
+        *(Init(name=name, identity=seed, dtype=F32) for name, seed in zip(state, op.init, strict=True)),
+        StridedLoop(
+            axis=chunk,
+            start=Literal(0, "int"),
+            step=Literal(width, "int"),
+            body=Body(tuple(body)),
+            unroll=_lane_unroll(axis, width),
+            seed=False,
+        ),
+    ]

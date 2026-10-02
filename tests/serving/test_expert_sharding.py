@@ -111,7 +111,7 @@ def test_a_single_row_routes_without_waiting_on_the_device(monkeypatch):
     gated = _router_return(torch, 2, experts, top_k, seed=4)
 
     def run_expert(e, rows):
-        return rows @ weights[e]
+        return (rows.unsqueeze(-1) * weights[e]).sum(dim=1)
 
     batch = combine_routed_experts(xn, gated, run_expert, num_experts=experts)
     launched: list[int] = []
