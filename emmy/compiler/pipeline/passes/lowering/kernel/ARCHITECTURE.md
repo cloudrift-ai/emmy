@@ -754,6 +754,10 @@ reduction whose result is read only under an enclosing-coordinate predicate beco
 Its identity seed stays outside the loop. Stores, synchronization, warp operations and predicates depending on values
 computed later cannot be guarded this way.
 
+`_guard` owns the shared coordinate-demand transform used here and by transposed cooperative reductions. The latter
+guard their collectives only with predicates independent of the swept output coordinate. Seeds, prologues and stores
+remain outside the collective guard.
+
 Memory and reduction peepholes record their decisions as on-by-default BOOL policy knobs on the `KernelOp`
 (`VECTORIZE_LOADS` / `VECTORIZE_STORES` / `GUARD_REDUCTIONS` / `INTERLEAVE_LOADS` / `PAIR_LDMATRIX` — the `050`
 pattern: idempotence via the recorded knob, `EMMY_<NAME>=0` pins it off, never a search dimension).
