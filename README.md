@@ -179,8 +179,8 @@ __launch_bounds__(256) void k_rms_norm_reduce(const float* x, const float* p_wei
 
 ## Fit the priors
 
-Two priors ship in the repo, both fit GPU-free on the repository goldens and consulted by a compile only where nothing
-was measured: the **schedule prior** (`emmy/compiler/pipeline/search/prior/weights/schedule.json`) ranks a kernel's
+Two priors ship in the repo, both small CatBoost rankers stored as one JSON file each, fit GPU-free on the repository
+goldens and consulted by a compile only where nothing was measured: the **schedule prior** (`emmy/compiler/pipeline/search/prior/weights/schedule.json`) ranks a kernel's
 schedule rows, and the **placement prior** (`weights/placement.json` beside it) ranks the arms of a placement fork —
 keep the kernel fused, or cut one of its seams.
 
