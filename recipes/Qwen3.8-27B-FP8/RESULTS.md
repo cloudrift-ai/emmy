@@ -242,14 +242,15 @@ the slowest of the three measured setups (table above), and it cannot hold a 250
 
 ## Emmy
 
-The V100 golden was optimized on 2026-10-02 on four Tesla V100-SXM2-16GB cards with CUDA 12.9 and torch 2.14.0+cu126.
-The final branch was rebased onto main `be7023c94`. Each card ran an independent kernel benchmark. These are single-GPU
+The first V100 golden optimization pass ran on 2026-10-02 on four Tesla V100-SXM2-16GB cards with CUDA 12.9 and
+torch 2.14.0+cu126.
+That branch was rebased onto main `be7023c94`. Each card ran an independent kernel benchmark. These are single-GPU
 kernel results, not a tensor-parallel model benchmark. Every schedule and cut was selected manually; `emmy tune` was not used.
 
-This pass covers the ten targets already stored in the golden's four programs. All ten now pass strict replay using
+That pass covered the ten targets already stored in the golden's four programs. All ten passed strict replay using
 only the golden's evidence and a fresh tune DB, at nvcc's deployable `-O3`. Every target passed on seeds 0, 1, 2 and 3,
-with one seed on each card. The file contains 28 kernels, nine routing rows and 26 measured schedule rows, including
-the older fused alternatives. It contains no unmeasured proposals.
+with one seed on each card. At the end of that pass, the file contained 28 kernels, nine routing rows and 26 measured
+schedule rows, including the older fused alternatives. It contained no unmeasured proposals.
 This is partial model coverage; the pass did not retrace or qualify the full decoder inventory.
 
 ### Exact frontend comparisons
@@ -314,6 +315,51 @@ EMMY_NVCC_FLAGS= emmy run --golden /tmp/qwen38-v100.json --bench --strict --stri
 
 The serving figures above remain measurements of stock 1Cat-vLLM. This compiler pass does not establish an Emmy
 serving result.
+
+### Shared triangular update — second pass, 2026-10-02
+
+The second pass used the same four cards and software, starting from main `e53587a91`. Each independent matrix now
+stays in two shared buffers while one CTA executes all 61 ordered steps. Padding shared rows by one column reduces
+bank conflicts. The original 512-thread cooperative reduction tree is preserved. Both the requested snapshots and
+the exposed carry output remain stored; these timings include both outputs.
+
+| Internal target | Previous golden | New isolated row | Improvement |
+| --- | ---: | ---: | ---: |
+| Triangular update, 64 tokens | 1.51 ms | 0.226 ms | 6.7x |
+| Triangular update, 512 tokens | 12.93 ms | 1.094 ms | 11.8x |
+
+Each new layout passed strict same-input A/B against global storage on seeds 0, 1, 2 and 3, one seed per card, at
+deployable `-O3`. Fresh-DB strict-evidence replay selects the new layouts without pins. The golden now contains
+28 kernels, nine routing rows and 28 measured rows, with no proposals. Existing rows and kernel identities are
+unchanged. Internal targets still have no exact standalone Torch twin, so the table makes no `torch.compile` claim.
+
+A separate frontend triangular recurrence, using inputs scaled by 0.01 and returning both the stacked snapshots and
+their first-batch view, passed strict comparison against eager on all four seeds. Captured whole-program latency was
+2.096–2.102 ms for Emmy, 1.680–1.688 ms for `torch.compile`, and 3.324–3.357 ms for eager, with five warm-ups and
+30 iterations. Emmy's update takes 0.640–0.646 ms once its private carry output is removed. Its remaining copy takes
+1.457–1.464 ms: Emmy allocates both outputs, whereas Torch can return the second as a view. The frontend remains
+about 25% behind `torch.compile`. Unscaled random inputs are numerically unstable under differing reduction orders;
+this comparison does not qualify them.
+
+Reproduce the frontend comparison with the recipe golden in scope:
+
+```bash
+EMMY_GOLDEN_FILE=recipes/Qwen3.8-27B-FP8/golden/v100_sm70.json \
+EMMY_NVCC_FLAGS= EMMY_FAST_MATH=1 EMMY_KNOBS='SHARED_CARRY=2,TILE@node_stack=f4' \
+emmy run --bench --strict --warmup 5 --iters 30 --bench-backends eager,emmy,tcompile --code '
+class TriangularUpdate(torch.nn.Module):
+    def forward(self, state):
+        snapshots = []
+        for i in range(2, 63):
+            row = state[..., i, :i]
+            update = row + (row.unsqueeze(-1) * state[..., :i, :i]).sum(-2)
+            state = state.clone()
+            state[..., i, :i] = update
+            snapshots.append(state)
+        snapshots = torch.stack(snapshots)
+        return snapshots, snapshots[:, 0]
+TriangularUpdate()(torch.randn(1, 48, 8, 64, 64) * 0.01)'
+```
 
 ## Reproduce
 

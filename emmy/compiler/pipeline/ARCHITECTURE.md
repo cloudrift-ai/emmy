@@ -945,11 +945,11 @@ program first, since a kernel at a size is a kernel of its own.
 **A record run writes what the DB holds.** `run --golden PATH --realization NAME --bench --record-greedy`
 (`golden.record_greedy_pick`) writes the kernel set the greedy compile picked: the kernels it minted, one routing row
 per kernel-set decision the splice watcher reported (`search/inventory.py`), and one measured row per CUDA kernel —
-the tile kernel it lowered from, its realized schedule row, its own isolated launch timing — under the seed row's
-input regime with the compile's own precision gates laid over it (`pins.measured_precision_pins`) and the greedy
-comparison row as `same-input-greedy` reference. A row of the same kernel, sizes, regime and schedule takes the new
-timings. Recorded this way, a strict-evidence compile of the file picks the same kernel set again from the file's rows
-alone (no tune DB, no prior). `--record` writes a row's per-card latencies (`golden.record_latency`), the corpus's
+the tile kernel it lowered from, its realized schedule and later storage choices, its own isolated launch timing —
+under the seed row's input regime with the compile's own precision gates laid over it (`pins.measured_precision_pins`)
+and the greedy comparison row as `same-input-greedy` reference. A row of the same kernel, sizes, regime and schedule
+takes the new timings. Recorded this way, a strict-evidence compile picks the same kernel set again from the file's
+rows alone (no tune DB, no prior). `--record` writes a row's per-card latencies (`golden.record_latency`), the corpus's
 ratchet. Both refuse a canonical path: a re-record works on a copy.
 
 **A kernel entry's stamps are the identity strategy's, less the ones a schedule fork mints.** `golden.definition`
@@ -1337,6 +1337,11 @@ no per-CTA work, layout, or schedule — only the block-id decode (`ir/kernel` `
 `grid_tile` eligibility). The fixed 2-D contraction domain is `('', 'gm8', 'gn4', 'gn8')`; the schedule restriction
 keeps `gn4` and `gn8` out unless an exact `RASTER` parameter selects one. Wall-time effect is small and shape-dependent
 (±2–4% measured), so golden evidence arbitrates per shape.
+
+**`SHARED_CARRY`** (INT, `lowering/kernel/035_shared_carry`) — late carried-state storage: `0` retains global
+storage and ordered launches, `1` uses two dense shared buffers, and `2` pads each shared row by one column. The pass
+offers shared layouts only when state reads prove CTA ownership and both buffers plus existing scratch fit. The
+choice is part of the measured kernel row, so a recorded row replays its storage without a manual pin.
 
 **`S_*`** (FLOAT, the `IdentityStrategy` — `passes/identity.py`) — a kernel's structural features (statement/op
 histogram + loop extents + operand dtypes). A fresh Tile fragment is temporarily lowered only for this feature read.

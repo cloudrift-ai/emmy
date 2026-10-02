@@ -1,4 +1,4 @@
-"""Compute a coordinate select's two branches once, at a selected load index.
+"""Compute matching coordinate-select branches once, at selected load indices.
 
 A concatenation along an axis lowers to a :class:`Select` whose branches read the same buffers at
 different offsets: RoPE's rotate-half is ``cat(-x[..., 64:], x[..., :64])``, so each cell computes
@@ -12,6 +12,9 @@ once, each load reading at ``cond ? index_a : index_b``, and the select picks be
 value and that unary op of it. The inner clamps fold against the condition, so RoPE's partner read
 becomes ``(i < 64) ? i + 64 : i - 64``: one load of the row and one of the weight per cell instead
 of two each.
+
+For more than two branches, every private chain must match exactly. Nested index selects retain
+the branches' priority and use the last branch as the fallback, regardless of its predicate.
 
 Structural and idempotent: once merged, the select's branches share their chain and no longer match.
 """

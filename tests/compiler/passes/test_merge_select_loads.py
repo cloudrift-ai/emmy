@@ -9,10 +9,10 @@ import pytest
 
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.kernel import KernelOp, Sync
 from emmy.compiler.ir.loop.runner import execute_loop_op_cpp
-from emmy.compiler.ir.stmt import Assign, Body, Let, Load, Loop, Select, SelectBranch, Write
+from emmy.compiler.ir.stmt import Body, Let, Load, Loop, Select, SelectBranch, Write
 
 merge = import_module("emmy.compiler.pipeline.passes.lowering.kernel.045_merge_select_loads")
 

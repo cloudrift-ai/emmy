@@ -13,12 +13,14 @@ The classic schedule's typed move catalogs live with its model in
 :mod:`emmy.compiler.ir.schedule.catalog`; search consumes encoded rows but does not define the
 candidate schedules.
 
-Two groups:
+The main groups:
 
 - **Schedule codec knobs** (``WORK`` / ``REDUCE`` / ``TILE`` / ``STAGE`` / ``RASTER``) — the tile-lowering schedule
   fork points serialized by ``ClassicScheduleCodec``. The typed schedule is materialized in
   ``lowering/kernel/010_materialize``; its encoded row rides on ``TileOp.knobs`` so the online
   prior can featurize and tune the decision. ``off=""`` is the explicit direct leaf value.
+- **Kernel storage knobs** (``SHARED_CARRY``) — later lowering choices retained in measured rows,
+  with global storage and each legal shared layout offered as siblings.
 - **Kernel-lowering policy knobs** (``VECTORIZE_LOADS`` / ``INTERLEAVE_LOADS``) — boolean codegen
   policies recorded on the kernel op (idempotence + env override), on by default and not search
   dimensions (``hints=(True,)``).
@@ -145,6 +147,15 @@ RASTER = Knob(
 )
 
 
+SHARED_CARRY = Knob(
+    "SHARED_CARRY",
+    KnobType.INT,
+    hints=(0, 1, 2),
+    help="Carried-state storage: 0 global, 1 dense shared, 2 shared with one extra column per row.",
+    off=0,
+)
+
+
 # --- Kernel-lowering policy knobs -------------------------------------------
 #
 # Boolean codegen policies recorded on the kernel op — on by default, not search dimensions
@@ -179,16 +190,8 @@ GUARD_REDUCTIONS = Knob(
     "GUARD_REDUCTIONS",
     KnobType.BOOL,
     hints=(True,),
-    help="Skip scalar reductions whose results are discarded by coordinate selects.",
+    help="Guard private scalar reductions, projection loads and stores by their consuming coordinate selects.",
     off=False,
-)
-
-SHARED_CARRY = Knob(
-    "SHARED_CARRY",
-    KnobType.INT,
-    hints=(0, 1, 2),
-    help="Carried-state storage: 0 global, 1 dense shared, 2 shared with one extra column per row.",
-    off=0,
 )
 
 PAIR_LDMATRIX = Knob(

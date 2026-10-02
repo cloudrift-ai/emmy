@@ -15,7 +15,7 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.expr import BinaryExpr, Literal, TernaryExpr, Var
 from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Load, Loop, Pre, Select, SelectBranch, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Loop, Pre, Select, SelectBranch, Write
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from tests.compiler.helpers import requires_cuda

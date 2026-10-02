@@ -1,4 +1,4 @@
-"""Skip pure scalar reductions outside the coordinates that consume their results."""
+"""Guard private scalar reductions and projections by their consuming coordinates."""
 
 from __future__ import annotations
 
@@ -33,8 +33,8 @@ def rewrite(root: Node) -> KernelOp:
 def _guard_stores(body: Body, types=None) -> Body:
     """Sink private scalar cones and their stores into the branch that consumes them.
 
-    Only a select immediately followed by its scalar stores can move. Other readers, nested
-    effects and intervening writes to a cone's input keep the original stream unchanged.
+    A select's dependent assignments and scalar stores must form one contiguous continuation.
+    Other readers, nested effects and intervening writes to a cone's input keep the stream unchanged.
     """
     if types is None:
         ctx = _stamp._StampCtx({})
@@ -68,7 +68,7 @@ def _guard_stores(body: Body, types=None) -> Body:
             continue
         defs = {name: i for i, stmt in enumerate(stmts[:position]) for name in stmt.defines()}
 
-        def cone(name, found):
+        def cone(name, found, defs=defs, stmts=stmts):
             i = defs.get(name)
             if i is None or uses[name] != 1 or not isinstance(stmts[i], (Assign, Let, Load, Select)):
                 return
