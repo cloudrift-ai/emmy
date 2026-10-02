@@ -121,12 +121,25 @@ def test_a_transposed_band_on_a_chain_member_binds_serial() -> None:
     """The ``coop-t`` band's σ-substitution and guarded close assume the fold is the kernel ROOT,
     so the chain arm cannot realize one. It must fall to the degenerate serial arm — realizing it
     as a PLAIN coop band would mint one kernel from two knob spellings."""
-    bound = factorize(_chain_tile(Reduce.of(coop=32, coop_transposed=True)), root=None)
+    bound = factorize(_two_member_tile(Reduce.of(coop=32, coop_transposed=True), Reduce()), root=None)
     flat = _flat(bound.body)
     assert not any(isinstance(s, StridedLoop) for s in flat), "a transposed band is not offered the chain arm"
     assert any(isinstance(s, Loop) for s in flat), "the member still folds serially per cell"
     assert not any(a.name.endswith("_co") for a in bound.axes)
     assert bound.block_threads is None
+
+
+def test_a_transposed_root_emits_its_computed_provider_at_the_lane_owned_cell() -> None:
+    red = _reduce(_K, "acc", _provider(), "x")
+    bound = factorize(_stamped(red, {red: Reduce.of(coop=128, coop_transposed=True, output_lanes=8)}), root=None)
+    stmts = list(bound.body)
+    loop = next(i for i, stmt in enumerate(stmts) if isinstance(stmt, StridedLoop))
+    provider = next(i for i, stmt in enumerate(stmts) if isinstance(stmt, Load) and stmt.input == "cutbuf")
+    assert provider < loop
+    assert "m" not in stmts[provider].index[0].free_vars()
+    assert {"m_blk", "m_ln"} <= stmts[provider].index[0].free_vars()
+    assert any(isinstance(stmt, TreeHalve) and stmt.inner == ("m_ln", 8) for stmt in _flat(stmts))
+    assert bound.block_threads == 128
 
 
 def _two_member_root() -> tuple[Fold, Fold, Fold]:

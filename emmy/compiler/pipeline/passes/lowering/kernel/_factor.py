@@ -62,7 +62,7 @@ from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, S
 from emmy.compiler.ir.stmt.body import _exposed_defines
 from emmy.compiler.ir.tile import FoldMove, Level, Reduce, ReduceStage
 from emmy.compiler.ir.tile.ir import apply_output_specs, observed_result_names
-from emmy.compiler.ir.tile.ops import UnbindableProjection, chain_form, chain_members, projection_regions, sched_of, tiled_edges
+from emmy.compiler.ir.tile.ops import UnbindableProjection, chain_members, projection_regions, sched_of, tiled_edges
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import (
     clamp_last,
     copy_cell,
@@ -583,7 +583,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
             state, fold, close, lane = _tile_chain_members(op, parts, ctx, tail, out_val)
             t = replace(t, axes=(lane,)) if lane is not None else t
             bt = lane.extent.as_static() * ctx.packed_cells if lane is not None else None
-        elif plan is None or (plan.coop <= 1 and plan.reg <= 1) or (plan.coop_transposed and chain_form(op)):
+        elif plan is None or (plan.coop <= 1 and plan.reg <= 1):
             # The TERM places its own stores (``Fold.lower``): a sweep store's loop opens around
             # exactly the terms evaluated over that sweep, so sibling sweeps stay siblings, and a
             # streamed store rides its observed fold's reduce loop — the one placement rule the
@@ -804,7 +804,14 @@ def emit_combine(
         # smem tree: ``n_threads`` k-slices × ``scale`` lanes per slab, each lane's tree
         # halving its own segment (``TreeHalve.inner``).
         iv, scale = inner
-        idx = BinaryExpr("+", BinaryExpr("*", Var(t), Literal(scale, "int")), Var(iv))
+        slot = Var(t)
+        if n_threads > warp_size:
+            # The flat tree's high bits fold first. Rotate the warp bits to keep the same
+            # within-warp, then cross-warp order as the ordinary cooperative combine.
+            slot = BinaryExpr(
+                "+", BinaryExpr("*", slot % warp_size, Literal(n_threads // warp_size, "int")), BinaryExpr("/", slot, Literal(warp_size, "int"))
+            )
+        idx = BinaryExpr("+", BinaryExpr("*", slot, Literal(scale, "int")), Var(iv))
         out: list[Stmt] = [Smem(name=b, extents=(n_threads * scale,), dtype=smem_c) for b in bufs]
         out += [Write(output=b, index=(idx,), value=st) for b, st in zip(bufs, state, strict=True)]
         out.append(Sync())

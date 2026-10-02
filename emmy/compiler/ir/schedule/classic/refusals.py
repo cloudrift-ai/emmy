@@ -91,7 +91,7 @@ def _reduction_domain(tile: TileOp, node, target=None) -> tuple[Reduce, ...]:
             Reduce(),
             *(choice for choice in coop_reduce_moves() if 1 < choice.coop <= WARP_LANES and choice.reg == 1 and not choice.coop_transposed),
         )
-    transposed_ok = _transposed_reduction_ok(tile) and is_root and not chain_form(node)
+    transposed_ok = _transposed_reduction_ok(tile) and is_root
     lanes = (32, 8) if target is not None and target.compute_capability == (7, 0) else (32,)
     return (
         Reduce(),
