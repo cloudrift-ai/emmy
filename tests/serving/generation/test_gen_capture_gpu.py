@@ -9,8 +9,9 @@ tensor produce the matching output, i.e. the whole-step graph vLLM records is li
 baked snapshot of the capture-time values.
 """
 
-import numpy as np
 import pytest
+
+from emmy.compiler.dtype import F16
 
 # NOT perf-marked (correctness pin, must run under ``make test``; see tests/ARCHITECTURE.md).
 pytestmark = [pytest.mark.xdist_group("cuda")]
@@ -26,7 +27,7 @@ def test_run_device_inside_outer_capture_replays_live():
 
     torch.manual_seed(0)
     wrapper = torch.nn.Linear(16, 16, bias=False).to(torch.float16).eval()
-    prog, _ = _compile_split(wrapper, [torch.zeros(4, 16, dtype=torch.float16)], None, np.dtype("float16"))
+    prog, _ = _compile_split(wrapper, [torch.zeros(4, 16, dtype=torch.float16)], None, F16)
 
     x = torch.randn(4, 16, dtype=torch.float16, device="cuda")
     ref0 = prog.run_device([x])[0].clone()  # uncaptured baseline (also warms the program)
@@ -64,7 +65,7 @@ def test_run_device_sym_inside_outer_capture_replays_live():
 
     torch.manual_seed(0)
     wrapper = torch.nn.Linear(16, 16, bias=False).to(torch.float16).eval()
-    prog, _ = _compile_split(wrapper, [torch.zeros(4, 16, dtype=torch.float16)], ["input"], np.dtype("float16"), capacity=64)
+    prog, _ = _compile_split(wrapper, [torch.zeros(4, 16, dtype=torch.float16)], ["input"], F16, capacity=64)
 
     ref_mod = wrapper.cuda()
     graphs = {}
@@ -104,7 +105,7 @@ def test_run_device_aliased_input_backing_replays_live():
 
     torch.manual_seed(0)
     wrapper = torch.nn.Linear(16, 16, bias=False).to(torch.float16).eval()
-    prog, _ = _compile_split(wrapper, [torch.zeros(4, 16, dtype=torch.float16)], None, np.dtype("float16"))
+    prog, _ = _compile_split(wrapper, [torch.zeros(4, 16, dtype=torch.float16)], None, F16)
 
     # The alias: a torch view of the program's OWN input buffer (the post twin's attn_out class).
     x = prog.program.buffer_view(prog.input_names[0])
@@ -289,7 +290,7 @@ def test_run_device_sym_aliased_input_backing_replays_live():
 
     torch.manual_seed(0)
     wrapper = torch.nn.Linear(16, 16, bias=False).to(torch.float16).eval()
-    prog, _ = _compile_split(wrapper, [torch.zeros(4, 16, dtype=torch.float16)], ["input"], np.dtype("float16"), capacity=64)
+    prog, _ = _compile_split(wrapper, [torch.zeros(4, 16, dtype=torch.float16)], ["input"], F16, capacity=64)
 
     ref_mod = wrapper.cuda()
     t = 24

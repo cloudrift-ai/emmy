@@ -17,6 +17,7 @@ from __future__ import annotations
 _TYPE_NAME: dict[str, str] = {
     "f32": "float",
     "f16": "__half",
+    "bf16": "__nv_bfloat16",
     "f16x2": "__half2",
     "f8e4m3": "__nv_fp8_e4m3",
     "f8e5m2": "__nv_fp8_e5m2",
@@ -186,6 +187,12 @@ class CudaRenderTarget:
             return f"__float2half({value})"
         if dst_dt == "f32" and src_dt == "f16":
             return f"__half2float({value})"
+        # The kernel IR may compute a BF16 node through an F32 scalar. Keep
+        # the narrowing round explicit before its result is used again.
+        if dst_dt == "bf16" and src_dt == "f32":
+            return f"__float2bfloat16({value})"
+        if dst_dt == "f32" and src_dt == "bf16":
+            return f"__bfloat162float({value})"
         if dst_dt == "f16x2" and src_dt == "f16":
             # Broadcast scalar __half into both lanes of a __half2.
             return f"__half2half2({value})"
