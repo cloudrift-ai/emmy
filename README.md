@@ -304,6 +304,9 @@ emmy serve Qwen/Qwen3-Embedding-0.6B --bench --random-input-len 32
 emmy serve Qwen/Qwen3-Embedding-0.6B --bench --random-input-len 32 --stock
 ```
 
+For the generative vLLM runner, pass `--runner generate --dtype bfloat16` to keep a dense model's
+compiled trunk in BF16. The generative default remains FP16.
+
 ## Experimental native generation
 
 Dense FP16 Qwen3 can be prepared as a standalone artifact and run through the Rust cached-generation loop. This
