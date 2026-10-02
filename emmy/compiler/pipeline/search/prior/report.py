@@ -153,7 +153,7 @@ def compare_golden_ranks(report: EvalReport, minimum: float) -> dict:
         raise ValueError("prior evaluation has no scored golden pools")
     qualified = bool(improved) and not regressed
     cells_word = "cell" if compared == 1 else "cells"
-    percent = f"{minimum:.0%}"
+    percent = f"{minimum * 100:g}%"
     if regressed:
         message = f"candidate rejected: median rank rose in {len(regressed)} of {compared} {cells_word}"
     elif not improved:
