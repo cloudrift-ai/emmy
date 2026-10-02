@@ -127,6 +127,31 @@ def test_selected_rows_vectorize_only_when_their_stride_preserves_alignment() ->
     assert not vector_run(changed, Tensor("x", (4, 8), F32), 4)
 
 
+def test_interleaved_output_stores_widen_without_crossing_effects() -> None:
+    from emmy.compiler.graph import Tensor
+    from emmy.compiler.ir.kernel import Sync
+    from emmy.compiler.ir.stmt import Write
+
+    stores = tuple(Write(output=name, index=(Literal(i, "int"),), value=f"v{i}", value_dtype=F32) for i in range(4) for name in ("x", "y"))
+    op = KernelOp(body=Body(), outputs={name: Tensor(name, (4,), F32) for name in ("x", "y")})
+    out = _vectorize_stores(op, Body(stores))
+    assert tuple(s.output for s in out) == ("x", "y")
+    assert all(s.values == ("v0", "v1", "v2", "v3") for s in out)
+
+    for effect in (
+        Sync(),
+        Load(name="read", input="x", index=(Literal(0, "int"),), dtype=F32),
+        Write(output="x", index=(Literal(0, "int"),), value="v0", atomic=True, value_dtype=F32),
+    ):
+        out = _vectorize_stores(op, Body((*stores[:2], effect, *stores[2:])))
+        assert out.index(effect) == 2
+        assert all(not s.is_vector for s in out[:2])
+
+    repeated = Write(output="x", index=(Literal(0, "int"),), value="later", value_dtype=F32)
+    out = _vectorize_stores(op, Body((*stores[:2], repeated)))
+    assert tuple(s.value for s in out if s.output == "x") == ("v0", "later")
+
+
 def test_a_load_whose_index_is_computed_in_between_stays_put() -> None:
     """A later load moves up only when its index needs nothing defined in between."""
     from emmy.compiler.dtype import F16

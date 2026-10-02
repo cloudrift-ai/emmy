@@ -81,6 +81,20 @@ def _vectorize_body(top: KernelOp, body: Body) -> Body:
         else:
             descended.append(s)
 
+    # Multi-output strips interleave stores by cell. A write-only run may group
+    # independent buffers while retaining the order of writes to each buffer.
+    grouped: list[Stmt] = []
+    pending: dict[str, list[Write]] = {}
+    for s in descended:
+        if isinstance(s, Write) and not s.atomic:
+            pending.setdefault(s.output, []).append(s)
+        else:
+            grouped.extend(store for stores in pending.values() for store in stores)
+            pending.clear()
+            grouped.append(s)
+    grouped.extend(store for stores in pending.values() for store in stores)
+    descended = grouped
+
     out: list[Stmt] = []
     i = 0
     while i < len(descended):
