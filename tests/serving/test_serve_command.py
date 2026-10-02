@@ -363,8 +363,13 @@ def test_serve_cmd_generate_moe_bucket_off_forces_eager(monkeypatch):
 
 
 def test_serve_cmd_generate_rejects_incompatible_dtype():
-    with pytest.raises(ValueError, match="fp16"):
-        build_serve_cmd(MODEL, stock=False, vllm_args=["--dtype", "bfloat16"], generate=True)
+    with pytest.raises(ValueError, match="fp16, bf16, or fp32"):
+        build_serve_cmd(MODEL, stock=False, vllm_args=["--dtype", "float64"], generate=True)
+
+
+def test_serve_cmd_generate_accepts_bfloat16_dtype():
+    cmd = build_serve_cmd(MODEL, stock=False, vllm_args=["--dtype", "bfloat16"], generate=True)
+    assert cmd[cmd.index("--dtype") + 1] == "bfloat16"
 
 
 def test_serve_cmd_generate_rejects_oversized_batched_tokens():

@@ -810,6 +810,7 @@ def test_storage_expanding_checkpoint_trunk_compiles_plans_and_rebinds(tmp_path)
 
     from emmy.compiler.backend.plan import plan_from_graph
     from emmy.compiler.context import Context
+    from emmy.compiler.dtype import F16
     from emmy.compiler.graph import Tensor
     from emmy.compiler.ir.base import ConstantOp, InputOp
     from emmy.compiler.ir.cuda import CudaOp
@@ -841,7 +842,7 @@ def test_storage_expanding_checkpoint_trunk_compiles_plans_and_rebinds(tmp_path)
     assert {"p_w_shift_step", "p_w_tile_step"} <= set(plan.weights)
     assert any(spec.generated is not None and spec.generated[1] == (128, 128) for spec in plan.weights.values())
 
-    sources = _plan_sources(plan, torch.nn.Module(), np.float16, str(tmp_path), {})
+    sources = _plan_sources(plan, torch.nn.Module(), F16, str(tmp_path), {})
     bound = _bind_plan_constants(plan, sources, cache=None)
     assert set(bound) == set(plan.weights)
     by_path = {weight.source_path: bound[nid] for nid, weight in plan.weights.items() if weight.source_path is not None}
