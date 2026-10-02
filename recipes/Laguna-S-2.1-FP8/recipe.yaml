@@ -1,10 +1,10 @@
 # Volta deployment for the exact public FP8 checkpoint on 8x V100 SXM3 32GB.
 tags:
-  - maintained
+  - best-effort
 
 model:
   huggingface: "poolside/Laguna-S-2.1-FP8"
-  rationale: "Low current attention but maintained for its unique 1M-context coding architecture and serving value, keeping it firmly in the little-current-evidence band rather than niche."
+  rationale: "Low current attention but maintained for unique 1M-context coding architecture and serving value."
   heat: 15
   revision: 06d71e91db70a11b08ee6a09c3c4818c85a61953
   task: generate
