@@ -55,14 +55,15 @@ the recorded time. A successful run with changed timings commits and pushes dire
 GitHub App token, then posts the run link to #emmy-robots. An unchanged run posts nothing.
 The repository's pull-request ruleset grants that App a bypass; the separate rule still rejects force pushes.
 
-The prior job follows durations and runs schedule and placement independently, one at a time, so their direct pushes
-cannot race. Each run imports the repository goldens into its own DB, exports that space's dataset, and fits a linear
-candidate without cross-validation. The comparison mode of `eval prior` scores both weights on the same dataset and
+The prior job runs beside durations, with schedule and placement one at a time. Each run imports the repository
+goldens into its own DB, exports that space's dataset, and fits a linear candidate without cross-validation. The
+comparison mode of `eval prior` scores both weights on the same dataset and
 skips the CLI's separate greedy reproduction walk. A candidate needs at least one GPU/tier/pool-size cell
 with 5% lower median golden rank, no cell with higher median rank, and unchanged scored-pool coverage. The matching
-space's reproduction tests run before a qualified candidate is committed. A move of `main` during evaluation stops
-the push, so a fit from stale goldens cannot overwrite newer weights. Every prior result, including no change or
-failure, posts to #emmy-robots with the run link.
+space's reproduction tests run before a qualified candidate is committed. Each job rebases and retries its push when
+the other job updated only its own file; any other move of `main` stops the push, so stale measurements or weights
+cannot overwrite newer work. Every prior result, including no change or failure, posts to #emmy-robots with the run
+link.
 
 **Review pull requests** runs the pinned PR Agent image when a PR is opened, reopened, marked ready, or updated. It
 reviews ready PRs from both repository branches and forks, including bot-authored PRs. The action reads the diff through
