@@ -70,13 +70,12 @@ jobs:
         run: |
           git config user.name "emmy-onboarding-bot"
           git config user.email "emmy-onboarding-bot[bot]@users.noreply.github.com"
-          gh auth setup-git
           git add -- tests/durations_cpu.json
           git diff --cached --check
           git commit -m "tests: refresh CPU durations"
           git fetch origin main
           git rebase origin/main
-          git push origin HEAD:main
+          git -c credential.helper='!f() { printf "username=x-access-token\npassword=%s\n" "$GH_TOKEN"; }; f' push origin HEAD:main
 
       - name: "Notify #emmy-robots"
         if: steps.changes.outputs.updated == 'true'
