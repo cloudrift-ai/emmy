@@ -242,13 +242,14 @@ the slowest of the three measured setups (table above), and it cannot hold a 250
 
 ## Emmy
 
-The V100 golden was optimized on 2026-10-02 from main `22bf24e43`, on four Tesla V100-SXM2-16GB cards with CUDA
-12.9 and torch 2.14.0+cu126. Each card ran an independent kernel benchmark. These are single-GPU kernel results,
+The V100 golden was optimized on 2026-10-02 and rebased onto main `037cef09c`, on four Tesla V100-SXM2-16GB cards
+with CUDA 12.9 and torch 2.14.0+cu126. Each card ran an independent kernel benchmark. These are single-GPU kernel results,
 not a tensor-parallel model benchmark. Every schedule and cut was selected manually; `emmy tune` was not used.
 
 This pass covers the ten targets already stored in the golden's four programs. All ten now pass strict replay using
-only the golden's evidence and a fresh tune DB, at nvcc's deployable `-O3`. The file contains 28 kernels, nine routing
-rows and 26 measured schedule rows, including the older fused alternatives. It contains no unmeasured proposals.
+only the golden's evidence and a fresh tune DB, at nvcc's deployable `-O3`. Every target passed on seeds 0, 1, 2 and 3,
+with one seed on each card. The file contains 28 kernels, nine routing rows and 26 measured schedule rows, including
+the older fused alternatives. It contains no unmeasured proposals.
 This is partial model coverage; the pass did not retrace or qualify the full decoder inventory.
 
 ### Exact frontend comparisons
@@ -298,7 +299,7 @@ The GDN output cut materializes its complete operand once rather than repeating 
 state path stages computed operands and independent product channels through the existing synchronous fill. Each
 operand retains its own dtype, and unknown global strides use compute fill instead of an unjustified vector copy.
 Smaller producer tiles reduce shared memory from 49.5 to 41.2 KiB, allowing two blocks per SM. They passed on seeds
-0, 2 and 3. Captured frontend runs take 317–352 us across the final fresh-process proofs and whole-file replay.
+0, 1, 2 and 3. Captured frontend runs take 317–352 us across the final fresh-process proofs and whole-file replay.
 The same kernel set's recorded replay takes 306–325 us. Both paths select identical CUDA sources.
 
 ### Reproduce
@@ -313,16 +314,6 @@ EMMY_NVCC_FLAGS= emmy run --golden /tmp/qwen38-v100.json --bench --strict --stri
 
 The serving figures above remain measurements of stock 1Cat-vLLM. This compiler pass does not establish an Emmy
 serving result.
-
-## Reproduce
-
-```bash
-emmy trace Qwen/Qwen3.8-27B-FP8 --layer 0 --target sm_70 -o layer0.yaml     # and --layer 3
-emmy run --golden recipes/Qwen3.8-27B-FP8/golden/v100_sm70.json --bench --bench-backends eager,tcompile,emmy
-```
-
-On a Volta host, install a torch build that still ships `sm_70` kernels (`torch==2.13.0+cu126`) and preload a CUDA 12
-NVRTC, per the README's pre-Turing notes.
 
 ## Reproduce
 
