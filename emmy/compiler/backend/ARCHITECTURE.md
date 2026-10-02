@@ -144,6 +144,11 @@ A deterministic source-free bind record is the third binding kind: `plan_from_gr
 evaluates it once and its bytes ride the plan (`WeightSpec.generated`), so no checkpoint can supply it and
 `build_from_plan` fills that buffer from the plan itself — a caller-supplied array still wins, but an
 unsupplied constant buffer would otherwise allocate as ZEROS and run a silently weightless program.
+A bind record computed from ONE checkpoint tensor (the constant fold turns a norm's `1 + weight` into one, at a width
+where the broadcast to the token axis does not stop it) binds from that tensor: its `source_path` is the tensor's,
+and its first load op, `("record", …)`, carries the record with that leaf renamed to a fixed slot, which
+`apply_weight_loads` evaluates. Any other record keeps `load_ops=None`; the serving runner's binding raises on such
+a weight, and on one with no source, instead of leaving its buffer zero.
 `plan_from_graph` is the seam the whole runtime builds from: after it runs,
 nothing reads the graph again — `CompiledProgram.build(graph)` is exactly `build_from_plan(plan_from_graph(g))`,
 so a plan loaded from disk and a freshly compiled one share one launch path. The JSON form (`plan_to_dict` /

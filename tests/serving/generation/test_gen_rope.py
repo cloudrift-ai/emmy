@@ -83,3 +83,50 @@ def test_rope_takes_the_fused_path_under_inductor_default_custom_ops():
 
     assert [type(r).__name__ for r in rotaries] == ["RotaryEmbedding", "Gemma4RotaryEmbedding"]
     assert all(r._forward_method.__name__ != "forward_native" for r in rotaries)
+
+
+def test_qwen3_5_rope_matches_hugging_face_on_text_positions():
+    """Qwen3.5's full-attention layers rotate a quarter of each head with a three-axis (MRoPE)
+    schedule. For text every axis carries the same position, and the served rotary must then turn
+    ``q`` and ``k`` exactly as the Hugging Face ``qwen3_5`` text model does."""
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("vllm")
+    pytest.importorskip("transformers.models.qwen3_5")
+    from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
+    from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5TextRotaryEmbedding, apply_rotary_pos_emb
+    from vllm.config import VllmConfig
+    from vllm.config.vllm import set_current_vllm_config
+
+    from emmy.serving.vllm_model_gen import _build_rotaries
+
+    # Inferact/Qwen3.8-27B-NVFP4's full-attention geometry and rotary parameters, at two heads.
+    head_dim, heads, kv_heads, t = 256, 2, 1, 48
+    config = Qwen3_5TextConfig(
+        head_dim=head_dim,
+        num_attention_heads=heads,
+        num_key_value_heads=kv_heads,
+        layer_types=["full_attention"],
+        num_hidden_layers=1,
+        rope_parameters={
+            "rope_type": "default",
+            "rope_theta": 10_000_000,
+            "partial_rotary_factor": 0.25,
+            "mrope_section": [11, 11, 10],
+            "mrope_interleaved": True,
+        },
+    )
+    runner = SimpleNamespace(layer_meta=lambda _i: (head_dim, heads, kv_heads, head_dim**-0.5), global_layer_id=lambda i: i)
+    with set_current_vllm_config(VllmConfig()):
+        (rotary,) = _build_rotaries(config, runner, 1, max_position=64, dtype=torch.float32)
+
+    torch.manual_seed(0)
+    q, k = torch.randn(t, heads * head_dim), torch.randn(t, kv_heads * head_dim)
+    positions = torch.arange(t)
+    got_q, got_k = rotary.forward_native(positions, q.clone(), k.clone())
+
+    cos, sin = Qwen3_5TextRotaryEmbedding(config)(q[None], positions[None])
+    want_q, want_k = apply_rotary_pos_emb(
+        q.view(1, t, heads, head_dim).transpose(1, 2), k.view(1, t, kv_heads, head_dim).transpose(1, 2), cos, sin
+    )
+    torch.testing.assert_close(got_q, want_q.transpose(1, 2).reshape(t, -1), rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(got_k, want_k.transpose(1, 2).reshape(t, -1), rtol=1e-5, atol=1e-5)

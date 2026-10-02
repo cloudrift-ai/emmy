@@ -57,9 +57,9 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   each is captured at its EXACT S so every kernel runs at its exact grid — no oversized-grid masking (a single
   capacity-baked graph for all S is **not** viable: several symbolic-M kernels do illegal reads at an oversized grid,
   the swizzle decode + staged loads among them). See `compiler/backend/cuda/ARCHITECTURE.md`
-  → repeated execution + captured replay. Trunk compute dtype follows vLLM's `--dtype` (`mc.dtype`, mapped in
-  `vllm_model._trunk_dtype_str`): `float32`→fp32, `float16`→fp16, anything else (e.g. `bfloat16`/`auto`) downcasts to
-  fp16 with a warn — the runner's numpy weight carrier can't represent bf16, and only fp16/fp32 trunks are supported.
+  → repeated execution + captured replay. The pooling trunk supports fp16 and fp32. It still maps a BF16 vLLM dtype
+  to fp16 with a warning. The generative trunk accepts explicit BF16: its host arrays carry encoded `uint16` bits,
+  its device buffers expose `torch.bfloat16`, and its default remains fp16.
   With `EMMY_SERVING_BATCHED=1` (`config.serving_batched`) the symbolic-seq trace bakes the batch extent at
   `max_num_seqs` and `forward_hidden_states_batched` runs each step as one batched forward padded to the step's
   longest sequence; `EMMY_SERVING_STATIC=1` (`config.serving_static`) instead traces a **fully-static**
@@ -172,6 +172,11 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   A Laguna post program recomputes the input normalization needed by its softplus `g_proj` and applies that gate to
   the flattened attention output before `o_proj`; a per-head gate temporarily views the seam as
   `[num_tokens, num_heads, head_dim]`.
+  A Qwen3.5 full-attention layer's `q_proj` is twice its query width: per head, the second half is an output gate.
+  Its `pre` returns that gate as a fourth tensor and its `post` takes it as a third input and multiplies the attention
+  output by its sigmoid before `o_proj` (`EmmyGenRunner.from_model` reads which layers do this off `pre.emits_gate`).
+  The gate does not go through attention: every forward path, tier and rider split carries it from `pre` to `post`.
+  Head counts come from the query half, the same rule the serving-twin capture uses.
   Attention dims are **per layer** (`layer_meta(L)` → head_dim / num_heads / num_kv / scaling) — Gemma-4's global layers
   use a larger `global_head_dim` than its sliding ones, so each layer's `pre`/`post` compiles at its own width. The
   caller stitches between `pre` and `post` (a reference torch SDPA in the Phase-2 host stitch; vLLM paged `Attention`
@@ -519,9 +524,10 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   verifies the runner adopted that same tensor (not in the gather itself — vLLM compiles the drafter's forward, and
   dynamo can't trace `data_ptr()`). `forward` branches on `num_tokens`: the decode hot
   path (`≤ bucket`) runs `_forward_device` (q/k/v + attn_out stay CUDA tensors through RoPE + attention, no host
-  hop); prefill keeps the numpy path. Select via `--runner generate` +
-  `--hf-overrides '{"architectures":["EmmyGenModel"]}'` + `--dtype float16` (the `serve --runner generate` branch forces
-  this for seam coherence). Registered in `__init__.py`. **Whole-step CUDA graphs are the `emmy serve
+  hop); prefill runs the symbolic device programs. Select via `--runner generate` +
+  `--hf-overrides '{"architectures":["EmmyGenModel"]}'` + `--dtype float16` (the `serve --runner generate` branch defaults
+  this for seam coherence; explicit `--dtype bfloat16` runs a BF16 residual stream). Registered in `__init__.py`.
+  **Whole-step CUDA graphs are the `emmy serve
   --runner generate` DEFAULT — decode AND chunk/mixed steps**: no `--enforce-eager`; instead a `--compilation-config`
   with `cudagraph_mode: FULL` (full cudagraphs need no torch.compile — vLLM wraps the model in its
   `CUDAGraphWrapper`) and

@@ -668,10 +668,15 @@ class EmmyGenModel(nn.Module, SupportsPP):
                 f"token width {t} exceeds the compiled widths for this hyper-connection model "
                 f"(prefill capacity {self.runner.prefill_capacity}); lower --max-num-batched-tokens"
             )
+        if self.runner.residual_dtype == torch.bfloat16:
+            raise ValueError(
+                f"BF16 token width {t} exceeds the compiled widths (prefill capacity {self.runner.prefill_capacity}); "
+                "lower --max-num-batched-tokens"
+            )
         hidden_np = hidden.detach().cpu().numpy()
         for layer in range(self.runner.num_layers):
             residual_np = hidden_np
-            q_np, k_np, v_np = self.runner.forward_layer_pre(layer, hidden_np, positions)
+            q_np, k_np, v_np, *gate = self.runner.forward_layer_pre(layer, hidden_np, positions)
             q = torch.from_numpy(np.ascontiguousarray(q_np)).to(device)
             k = torch.from_numpy(np.ascontiguousarray(k_np)).to(device)
             v = torch.from_numpy(np.ascontiguousarray(v_np)).to(device)
@@ -680,7 +685,7 @@ class EmmyGenModel(nn.Module, SupportsPP):
             # rejects anything but fp16/bf16, so restore the trunk dtype (no-op when already right).
             q, k = q.to(self.dtype), k.to(self.dtype)
             attn_out = self.attn[layer](q, k, v)  # vLLM paged attention (pulls attn_metadata from forward context)
-            hidden_np = self.runner.forward_layer_post(layer, attn_out.detach().cpu().numpy(), residual_np)
+            hidden_np = self.runner.forward_layer_post(layer, attn_out.detach().cpu().numpy(), residual_np, *gate)
         if self._is_last_rank:
             hidden_np = self.runner.final_norm(hidden_np)
             return torch.from_numpy(np.ascontiguousarray(hidden_np)).to(device)
@@ -711,13 +716,14 @@ class EmmyGenModel(nn.Module, SupportsPP):
             return self._forward_streams(hidden, positions, token_ids)
         for layer in range(self.runner.num_layers):
             residual = hidden
-            q, k, v = self.runner.forward_layer_pre_device(layer, hidden)
+            # A gated layer's fourth tensor is its attention output gate; it skips attention and goes to ``post``.
+            q, k, v, *gate = self.runner.forward_layer_pre_device(layer, hidden)
             q, k = self.rotary_emb[layer](positions, q, k)  # A2: per-layer RoPE (Gemma local/global theta)
             q, k = q.to(self.dtype), k.to(self.dtype)  # rotary may promote to fp32; flash-attn needs fp16/bf16
             attn_out = self._attn_aliased(layer, q, k, v) if self._alias_attn else None  # A4: any tier; the backing router decides
             if attn_out is None:
                 attn_out = self.attn[layer](q, k, v)  # vLLM paged attention
-            hidden = self.runner.forward_layer_post_device(layer, attn_out, residual)
+            hidden = self.runner.forward_layer_post_device(layer, attn_out, residual, *gate)
         if self._is_last_rank:
             return self.runner.final_norm_device(hidden)
         return IntermediateTensors({"hidden_states": hidden})

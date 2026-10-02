@@ -5,6 +5,40 @@ from types import SimpleNamespace
 import pytest
 
 
+def test_generative_trunk_dtype_accepts_bfloat16():
+    import torch
+
+    from emmy.serving.trunk_dtype import _trunk_dtype_str
+
+    assert _trunk_dtype_str(torch.bfloat16) == "bfloat16"
+    assert _trunk_dtype_str(torch.bfloat16, allow_bf16=False) == "float16"
+
+
+def test_bf16_host_fallback_names_width():
+    pytest.importorskip("vllm")
+    import torch
+
+    from emmy.serving.vllm_model_gen import EmmyGenModel
+
+    model = EmmyGenModel.__new__(EmmyGenModel)
+    torch.nn.Module.__init__(model)
+    model.runner = SimpleNamespace(
+        maybe_log_routing_histogram=lambda: None,
+        has_device_decode=False,
+        decode_bucket=0,
+        prefill_capacity=2,
+        prefill_bucket=0,
+        rider_width=0,
+        residual_dtype=torch.bfloat16,
+    )
+    model.config = SimpleNamespace(vocab_size=32)
+    model._is_first_rank = False
+    model.fork_attn = None
+    hidden = torch.zeros(3, 8, dtype=torch.bfloat16)
+    with pytest.raises(ValueError, match="BF16 token width 3.*lower --max-num-batched-tokens"):
+        model.forward(None, torch.arange(3), intermediate_tensors={"hidden_states": hidden})
+
+
 def test_pipeline_ranges_cover_every_layer_once_with_uneven_partition(monkeypatch):
     pytest.importorskip("vllm")
     from emmy.serving.vllm_model_gen import _pipeline_layer_range

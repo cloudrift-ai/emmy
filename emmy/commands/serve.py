@@ -390,12 +390,11 @@ def build_serve_cmd(model: str, *, stock: bool, vllm_args: list[str], generate: 
         overrides: dict = {"architectures": ["EmmyGenModel"]}
         overrides.update(engine_config_overrides(_hf_config(model, vllm_args)))
         cmd += ["--hf-overrides", json.dumps(overrides)]
-        # Force fp16 across the emmy↔vLLM seam: vLLM defaults --dtype auto → bf16 for a
-        # bf16 checkpoint, but the emmy trunk emits fp16. Reject an incompatible override.
+        # Keep the default fp16; an explicit bf16 or fp32 keeps the engine and trunk aligned.
         if _has_flag(vllm_args, "--dtype"):
             dt = _flag_value(vllm_args, "--dtype", "")
-            if dt not in ("float16", "half", "fp16"):
-                raise ValueError(f"generative serving requires fp16; --dtype {dt!r} is incompatible (use --dtype float16)")
+            if dt not in ("float16", "half", "fp16", "bfloat16", "bf16", "float32", "fp32"):
+                raise ValueError(f"generative serving requires fp16, bf16, or fp32; --dtype {dt!r} is incompatible")
         else:
             cmd += ["--dtype", "float16"]
         # The flattened width (sum of newly-scheduled tokens per step) must stay within the

@@ -582,8 +582,9 @@ bundle and executes a prebuilt binary. Native arguments are validated separately
 See the [native serving contract](../serving/native/ARCHITECTURE.md) for supported options and preparation controls.
 
 
-Serves an embedding model (or a generative chat model via `EmmyGenModel` with `--runner generate`, in
-fp16) through vLLM with the emmy plugin flags baked in (`serving/` plugin; needs the `serving` extra). Without `--runner` the
+Serves an embedding model (or a generative chat model via `EmmyGenModel` with `--runner generate`, defaulting to
+fp16 and accepting explicit `--dtype bfloat16`) through vLLM with the emmy plugin flags baked in (`serving/` plugin;
+needs the `serving` extra). Without `--runner` the
 runner is resolved the way vLLM resolves `--runner auto`, from the checkpoint's config and a Sentence Transformers
 `modules.json`, cached or fetched, so a bare `emmy serve MODEL` needs no flag. Unrecognized flags forward to `vllm serve`; tokens after a literal `--` forward verbatim (emmy's
 own flags are otherwise extracted wherever they appear — argparse REMAINDER swallows everything after MODEL, so the
