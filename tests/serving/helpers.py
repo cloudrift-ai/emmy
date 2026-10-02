@@ -126,6 +126,20 @@ def llama_model(layers: int = 1):
     ).eval()
 
 
+def qwen3_5_gdn_model(layers: int, *, dtype: str = "float32"):
+    """The lane's GDN model: a Qwen3.5 whose layers are all linear attention (gated DeltaNet), so a runner test
+    needs no attention stitch between its layer programs."""
+    import torch
+    from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
+    from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5ForCausalLM
+
+    from tests.compiler.trace.test_huggingface import _QWEN3_5_TINY
+
+    tiny = {**_QWEN3_5_TINY, "num_hidden_layers": layers, "layer_types": ["linear_attention"] * layers}
+    torch.manual_seed(0)
+    return Qwen3_5ForCausalLM(Qwen3_5TextConfig(**tiny)).eval().to(getattr(torch, dtype))
+
+
 #: Every runner shape this lane builds: ``id -> (model factory, from_model kwargs)``. The golden
 #: covers exactly these, so a test asks for one by id rather than spelling a config of its own.
 RUNNERS: dict[str, tuple] = {
@@ -147,6 +161,14 @@ RUNNERS: dict[str, tuple] = {
     "olmoe.l1.rider": (
         lambda: olmoe_model(1, max_position_embeddings=128, flat_router=True),
         {"dtype_str": "float32", "decode_bucket": 16, "max_tokens": 512, "prefill_bucket": 512},
+    ),
+    "qwen3_5.gdn.l2": (
+        lambda: qwen3_5_gdn_model(2),
+        {"dtype_str": "float32", "decode_bucket": 4, "max_tokens": 64, "prefill_bucket": 16},
+    ),
+    "qwen3_5.gdn.l2.bf16": (
+        lambda: qwen3_5_gdn_model(2, dtype="bfloat16"),
+        {"dtype_str": "bfloat16", "decode_bucket": 4, "max_tokens": 64, "prefill_bucket": 16},
     ),
 }
 

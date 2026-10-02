@@ -671,6 +671,16 @@ def _static_decode_covers_capacity(max_tokens, decode_bucket, prefill_bucket=0) 
     )
 
 
+def _gdn_decomposition(tokens: int, widths: tuple[int, ...]) -> list[int]:
+    """``tokens`` as a sum of static GDN program widths, widest first. ``widths`` descends and ends in 1,
+    so the greedy choice always reaches the full count."""
+    parts: list[int] = []
+    for width in widths:
+        count, tokens = divmod(tokens, width)
+        parts += [width] * count
+    return parts
+
+
 class EmmyGenRunner:
     def __init__(
         self,
@@ -694,6 +704,7 @@ class EmmyGenRunner:
         pre_prefill=None,
         post_prefill=None,
         prefill_bucket=0,
+        gdn=None,
         moe=None,
         expert_tiers=None,
         residual_float32=False,
@@ -729,7 +740,10 @@ class EmmyGenRunner:
         self._pre_prefill = pre_prefill  # list[_Program] — static M=prefill_bucket chunk twins (or None → symbolic prefill)
         self._post_prefill = post_prefill
         self._prefill_bucket = prefill_bucket
-        self._attn_meta = attn_meta  # per-layer list of (head_dim, num_heads, num_kv, scaling)
+        self._attn_meta = attn_meta  # per-layer list of (head_dim, num_heads, num_kv, scaling); None for a GDN layer
+        # Per-layer ``{width: _Program}`` for a GDN layer, None for an attention layer. A GDN layer holds
+        # None in every pre/post tier above, and an attention layer holds None here.
+        self._gdn = gdn if gdn is not None else [None] * len(attn_meta)
         # MoE third seam: per-layer dict (router module + the E-stacked expert INPUT tensors
         # under ``inputs`` — weights, and for gpt-oss biases + fp8 bits/scales — plus ``top_k``
         # and the expert SHAPE GROUP the layer belongs to) or None for dense layers.
@@ -763,9 +777,11 @@ class EmmyGenRunner:
             for prog in (tiers["sym"], tiers["bucket"], tiers["one"])
             if prog is not None
         }
-        # Layer-0 convenience scalars — correct for homogeneous models (Qwen3 / Llama). Gemma-4's
-        # global layers differ, so the vLLM model reads per-layer dims via ``layer_meta``.
-        self.head_dim, self.num_heads, self.num_kv_heads, self.scaling = attn_meta[0]
+        # Convenience scalars of the first attention layer — correct for homogeneous models (Qwen3 /
+        # Llama). Gemma-4's global layers differ, so the vLLM model reads per-layer dims via
+        # ``layer_meta``. A model with GDN layers only has no attention dims at all.
+        first_attn = next((meta for meta in attn_meta if meta is not None), (None, None, None, None))
+        self.head_dim, self.num_heads, self.num_kv_heads, self.scaling = first_attn
         self._np_dtype = np_dtype
         self._residual_float32 = residual_float32
         self._activation_dtype = activation_dtype
@@ -809,6 +825,12 @@ class EmmyGenRunner:
     @property
     def num_layers(self) -> int:
         return len(self._attn_meta)
+
+    @property
+    def gdn_widths(self) -> tuple[int, ...]:
+        """Static widths of the GDN layer programs, widest first; empty for a model without GDN layers."""
+        programs = next((p for p in self._gdn if p is not None), {})
+        return tuple(sorted(programs, reverse=True))
 
     @property
     def carrier_size(self) -> int:
@@ -1030,6 +1052,7 @@ class EmmyGenRunner:
         from emmy.compiler.dtype import get
         from emmy.compiler.trace.huggingface import (
             build_attention_split_wrapper,
+            build_gdn_state_wrapper,
             build_moe_split_wrapper,
             deinterleave_gate_up,
             hyper_connection_seam,
@@ -1410,7 +1433,44 @@ class EmmyGenRunner:
                     )
             return tiers
 
+        # A GDN layer never pads: a padded token would still decay its recurrent state and enter its
+        # convolution history. It therefore gets one exact-width program per static width, and width 1
+        # is always among them so that any token count decomposes into these widths.
+        gdn_widths = sorted({w for w in (1, decode_bucket, prefill_bucket) if w and w > 0}, reverse=True)
+        gdn_programs: list = []  # per-layer: None (attention) or {width: _Program}
+
+        def _build_gdn_layer(i, block):
+            """The whole-layer programs of one GDN layer, keyed by static width. The recurrent state and the
+            convolution history are explicit inputs and outputs, so a program at any of these widths continues
+            a request from the state another one returned."""
+            mixer = block.linear_attn
+            wrapper = build_gdn_state_wrapper(block)
+            consts: dict = {}  # every width binds the SAME weights — share one upload
+
+            def example(width):
+                return [
+                    torch.zeros(1, width, hidden, dtype=dtype),
+                    torch.zeros(1, mixer.num_v_heads, mixer.head_k_dim, mixer.head_v_dim, dtype=torch.float32),
+                    torch.zeros(1, mixer.conv_dim, mixer.conv_kernel_size, dtype=dtype),
+                ]
+
+            with torch.device("cpu"):
+                return {
+                    width: build(
+                        f"L{i:02d}.gdn{width}", wrapper, example(width), None, compiler_dtype, dev_consts=consts, ckpt=ckpt, arena=arena
+                    )
+                    for width in gdn_widths
+                }
+
         for local_i, (i, block) in enumerate(layer_items):
+            if getattr(block, "linear_attn", None) is not None:
+                logger.info("[gen_runner] compiling layer %d (rank-local %d/%d, gdn)...", i, local_i + 1, len(layers))
+                gdn_programs.append(_build_gdn_layer(i, block))
+                attn_meta.append(None)
+                output_gates.append(False)
+                moe_meta.append(None)
+                continue
+            gdn_programs.append(None)
             meta = _meta(block.self_attn)
             attn_meta.append(meta)
             attn_width = meta[1] * meta[0]  # this layer's num_heads * head_dim (gemma-4: global ≠ sliding)
@@ -1721,9 +1781,16 @@ class EmmyGenRunner:
                 embed_weight = embed_weight.astype(np_dtype, copy=False)
                 if embed_scale != 1.0:
                     embed_weight = embed_weight * np_dtype.type(embed_scale)
-        use_decode = decode_ok and len(pre_decode) == len(layers)
-        use_m1 = m1_ok and len(pre_m1) == len(layers) and len(post_m1) == len(layers)
-        use_prefill = prefill_ok and len(pre_prefill) == len(layers)
+        attn_layers = gdn_programs.count(None)
+        use_decode = decode_ok and len(pre_decode) == attn_layers
+        use_m1 = m1_ok and len(pre_m1) == attn_layers and len(post_m1) == attn_layers
+        use_prefill = prefill_ok and len(pre_prefill) == attn_layers
+
+        def per_layer(tier):
+            """Index a complete pre/post tier by layer: a GDN layer has no such program and holds ``None``."""
+            programs = iter(tier)
+            return [next(programs) if gdn is None else None for gdn in gdn_programs]
+
         if plan_cache.hits or plan_cache.misses:
             logger.info(
                 "[gen_runner] structural plan cache: %d hit(s), %d miss(es), %d template(s)",
@@ -1755,19 +1822,20 @@ class EmmyGenRunner:
             hidden_size=hidden,
             layer_ids=[i for i, _block in layer_items],
             output_gates=output_gates,
-            pre=pre_programs,
-            post=post_programs,
+            pre=pre_programs if static_only else per_layer(pre_programs),
+            post=post_programs if static_only else per_layer(post_programs),
             attn_meta=attn_meta,
             np_dtype=np_dtype,
-            pre_decode=pre_decode if use_decode else None,
-            post_decode=post_decode if use_decode else None,
-            pre_m1=pre_m1 if use_m1 else None,
-            post_m1=post_m1 if use_m1 else None,
+            pre_decode=per_layer(pre_decode) if use_decode else None,
+            post_decode=per_layer(post_decode) if use_decode else None,
+            pre_m1=per_layer(pre_m1) if use_m1 else None,
+            post_m1=per_layer(post_m1) if use_m1 else None,
             decode_bucket=decode_bucket,
             prefill_capacity=max_tokens,
-            pre_prefill=pre_prefill if use_prefill else None,
-            post_prefill=post_prefill if use_prefill else None,
+            pre_prefill=per_layer(pre_prefill) if use_prefill else None,
+            post_prefill=per_layer(post_prefill) if use_prefill else None,
             prefill_bucket=prefill_bucket,
+            gdn=gdn_programs,
             moe=moe_meta if any(m is not None for m in moe_meta) else None,
             expert_tiers=expert_tiers or None,
             residual_float32=residual_float32,
@@ -2120,6 +2188,28 @@ class EmmyGenRunner:
                 raise RuntimeError(f"rider destination {name!r} requested inside an active CUDA-graph capture; warm the width first")
             d = dests[(name, cols, dtype)] = torch.empty(cap, cols, dtype=dtype, device=ref.device)
         return d[:rows]
+
+    def forward_layer_gdn_device(self, layer, hidden, state, history):
+        """One GDN layer over ``hidden[T, H]``, the consecutive tokens of ONE request → ``[T, H]``.
+
+        ``state`` (the float32 recurrent matrix) and ``history`` (the convolution history) are that
+        request's own CUDA tensors with a leading axis of 1. Zeros start a request, and this call
+        updates both in place: the runner keeps no state between calls. No program pads — a padded
+        token would still decay the state and enter the history — so the tokens are decomposed into
+        the static widths, widest first, and the state threads through the calls."""
+        import torch
+
+        assert state.dtype == torch.float32 and history.dtype == hidden.dtype, (state.dtype, history.dtype, hidden.dtype)
+        programs = self._gdn[layer]
+        out = torch.empty_like(hidden)
+        start = 0
+        for width in _gdn_decomposition(hidden.shape[0], self.gdn_widths):
+            rows = slice(start, start + width)
+            # ``out=`` lands each output in the caller's memory: the program's own buffers live in the
+            # arena every layer shares, where the next layer's program would overwrite the new state.
+            programs[width].run_device([hidden[rows][None], state, history], out=[out[rows][None], state, history])
+            start += width
+        return out
 
     def forward_layer_pre_device(self, layer, hidden):
         """Device twin of :meth:`forward_layer_pre`: ``hidden[T,H]`` CUDA → un-rotated

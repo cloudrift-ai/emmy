@@ -195,6 +195,15 @@ def _is_moe_model(model: str, vllm_args: list[str]) -> bool:
     return bool(getattr(cfg, "num_experts", None) or getattr(cfg, "num_local_experts", None))
 
 
+def _has_gdn_layers(model: str, vllm_args: list[str]) -> bool:
+    """True when the checkpoint's config lists GDN layers (``linear_attention`` in ``layer_types``:
+    Qwen3.5 / Qwen3.8). Best-effort LOCAL config probe (:func:`_hf_config`), UX only: on a probe miss
+    the plain ``EmmyGenModel`` boots and refuses such a checkpoint, naming the class to use."""
+    cfg = _hf_config(model, vllm_args)
+    cfg = getattr(cfg, "text_config", cfg)
+    return "linear_attention" in (getattr(cfg, "layer_types", None) or ())
+
+
 def _chunk_capture_rungs(vllm_args: list[str], bucket: int) -> set[int]:
     """Token-count capture sizes for the chunk/prefill and mixed prefill+decode steps
     (``EMMY_GEN_CHUNK_CAPTURE``). vLLM pads a step UP to the first rung at or above its
@@ -256,6 +265,11 @@ def _gen_graph_args(vllm_args: list[str], *, model: str | None = None) -> list[s
     are not spec-adjusted."""
     from emmy import config as emmy_config  # noqa: PLC0415
 
+    if model is not None and _has_gdn_layers(model, vllm_args):
+        # A GDN layer reads each request's token range on the host, which no capture can record, so
+        # such a checkpoint serves eager. A caller-supplied config forwards untouched and meets the
+        # boot guard in ``EmmyGenModel.__init__``.
+        return [] if _has_flag(vllm_args, "--enforce-eager") or _has_flag(vllm_args, "--compilation-config") else ["--enforce-eager"]
     if model is not None and _is_moe_model(model, vllm_args):
         # MoE decode capture is FIXED-SLOT: single-token steps ride the runner's k-slot expert
         # dispatch (fixed launch set, no host sync — capture-legal), while wider decode steps
@@ -386,7 +400,9 @@ def build_serve_cmd(model: str, *, stock: bool, vllm_args: list[str], generate: 
         # those are (naming a checkpoint format here would cross the band).
         from emmy.compiler.loader.quant import engine_config_overrides  # noqa: PLC0415
 
-        overrides: dict = {"architectures": ["EmmyGenModel"]}
+        # A checkpoint with GDN layers boots the hybrid class, which declares those layers'
+        # per-request state to vLLM.
+        overrides: dict = {"architectures": ["EmmyGenHybridModel" if _has_gdn_layers(model, vllm_args) else "EmmyGenModel"]}
         overrides.update(engine_config_overrides(_hf_config(model, vllm_args)))
         cmd += ["--hf-overrides", json.dumps(overrides)]
         # Keep the default fp16; an explicit bf16 or fp32 keeps the engine and trunk aligned.

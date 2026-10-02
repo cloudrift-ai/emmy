@@ -39,6 +39,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from vllm.distributed import get_pp_group, get_tp_group
 from vllm.distributed.utils import get_pp_indices
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.attention import (
@@ -47,13 +48,15 @@ from vllm.model_executor.layers.attention.attention import (
     unified_kv_cache_update,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.rotary_embedding.yarn_scaling_rope import YaRNScalingRotaryEmbedding
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.interfaces import SupportsPP
+from vllm.model_executor.models.interfaces import IsHybrid, SupportsPP
 from vllm.model_executor.models.utils import PPMissingLayer, make_empty_intermediate_tensors_factory
 from vllm.sequence import IntermediateTensors
+from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
 from emmy import config as emmy_config  # aliased: `config` is the HF config in this module
 from emmy.serving.gen_runner import EmmyGenRunner
@@ -193,7 +196,8 @@ def _build_rotaries(config, runner, n_layers, max_position, dtype):
                 hd = runner.layer_meta(i)[0]
                 by_type[lt] = _get_rope(hd, max_position, rope_params[lt], dtype)
         return [by_type[layer_types[runner.global_layer_id(i)]] for i in range(n_layers)]
-    return [_build_rotary(config, runner.layer_meta(0)[0], max_position, dtype)] * n_layers
+    # ``runner.head_dim`` is the first attention layer's: layer 0 may be a GDN layer, which has no RoPE.
+    return [_build_rotary(config, runner.head_dim, max_position, dtype)] * n_layers
 
 
 def _rope_cache_limit(model_config, config) -> int:
@@ -373,6 +377,47 @@ class _EmmyTargetInner(nn.Module):
         self.embed_tokens = embed_tokens
 
 
+def _gdn_state_layout(config, dtype):
+    """``(shapes, dtypes)`` of one request's state for one GDN layer, in the order vLLM stores them: the
+    convolution history ``[conv_dim, kernel]`` in the trunk dtype, then the recurrent matrix
+    ``[value heads, key head dim, value head dim]`` in float32. These are the ``history`` and ``state``
+    inputs of a GDN layer program, without their leading axis."""
+    key_dim = config.linear_num_key_heads * config.linear_key_head_dim
+    value_dim = config.linear_num_value_heads * config.linear_value_head_dim
+    history = (2 * key_dim + value_dim, config.linear_conv_kernel_dim)
+    state = (config.linear_num_value_heads, config.linear_key_head_dim, config.linear_value_head_dim)
+    return (history, state), (dtype, torch.float32)
+
+
+class _GdnStateLayer(nn.Module, MambaBase):
+    """One GDN layer's per-request state, as vLLM sees it. vLLM allocates the state in its KV cache
+    blocks, frees it with the request, and binds the cache here as ``kv_cache``: ``(history, state)``,
+    each with the KV cache block index as its leading axis. The runner computes the layer; this module
+    only declares the layout, and has no weights."""
+
+    def __init__(self, vllm_config, layout, prefix):
+        super().__init__()
+        self._shapes, self._dtypes = layout
+        self.prefix = prefix
+        self.kv_cache = (torch.tensor([]), torch.tensor([]))
+        context = vllm_config.compilation_config.static_forward_context
+        if prefix in context:
+            raise ValueError(f"Duplicate layer name: {prefix}")
+        context[prefix] = self
+
+    def get_state_shape(self):
+        return self._shapes
+
+    def get_state_dtype(self):
+        return self._dtypes
+
+    @property
+    def mamba_type(self):
+        # The plain linear-attention backend: its metadata carries each request's token range, sequence
+        # length and state block, and none of the kernel-specific inputs of vLLM's own GDN layer.
+        return MambaAttentionBackendEnum.LINEAR
+
+
 class EmmyGenModel(nn.Module, SupportsPP):
     def __init__(self, *, vllm_config, prefix: str = ""):
         super().__init__()
@@ -534,6 +579,24 @@ class EmmyGenModel(nn.Module, SupportsPP):
                 [nn.Parameter(torch.empty(self.runner.layer_meta(i)[1], dtype=mc.dtype), requires_grad=False) for i in range(n_layers)]
             )
 
+        # GDN layers (Qwen3.5 / Qwen3.8 ``linear_attention``): the runner computes the whole layer, and
+        # vLLM keeps each request's recurrent state in its KV cache blocks. One state layer per GDN
+        # layer declares that state to vLLM; an attention layer holds ``None`` here, and a GDN layer
+        # holds ``None`` among the attention modules below.
+        gdn_layers = [
+            layer_types is not None and layer_types[self.runner.global_layer_id(i)] == "linear_attention" for i in range(n_layers)
+        ]
+        if any(gdn_layers):
+            self._check_gdn_serving(vllm_config)
+        self.gdn_state = nn.ModuleList(
+            _GdnStateLayer(
+                vllm_config, _gdn_state_layout(config, mc.dtype), f"{prefix}.layers.{self.runner.global_layer_id(i)}.linear_attn"
+            )
+            if gdn
+            else None
+            for i, gdn in enumerate(gdn_layers)
+        )
+
         # One real vLLM Attention per layer — unique prefix (vLLM keys static_forward_context /
         # cache-spec discovery by it and rejects duplicates). No weights (except sinks, above).
         # per_layer_sliding_window makes vLLM's paged attention window that layer (and size its
@@ -552,6 +615,9 @@ class EmmyGenModel(nn.Module, SupportsPP):
         else:
             attn = []
             for i in range(n_layers):
+                if gdn_layers[i]:
+                    attn.append(None)
+                    continue
                 global_i = self.runner.global_layer_id(i)
                 hd, nh, nkv, scaling = self.runner.layer_meta(i)
                 attn.append(
@@ -666,6 +732,12 @@ class EmmyGenModel(nn.Module, SupportsPP):
                 f"token width {t} exceeds the compiled widths for this hyper-connection model "
                 f"(prefill capacity {self.runner.prefill_capacity}); lower --max-num-batched-tokens"
             )
+        if any(state is not None for state in self.gdn_state):
+            # The host numpy fallback has no GDN form: its layer loop is pre / attention / post.
+            raise ValueError(
+                f"token width {t} exceeds the compiled widths for this model with GDN layers "
+                f"(prefill capacity {self.runner.prefill_capacity}); lower --max-num-batched-tokens"
+            )
         if self.runner.residual_dtype == torch.bfloat16:
             raise ValueError(
                 f"BF16 token width {t} exceeds the compiled widths (prefill capacity {self.runner.prefill_capacity}); "
@@ -713,6 +785,9 @@ class EmmyGenModel(nn.Module, SupportsPP):
         if self.fork_attn is not None:
             return self._forward_streams(hidden, positions, token_ids)
         for layer in range(self.runner.num_layers):
+            if self.gdn_state[layer] is not None:
+                hidden = self._forward_gdn(layer, hidden)
+                continue
             residual = hidden
             # A gated layer's fourth tensor is its attention output gate; it skips attention and goes to ``post``.
             q, k, v, *gate = self.runner.forward_layer_pre_device(layer, hidden)
@@ -725,6 +800,64 @@ class EmmyGenModel(nn.Module, SupportsPP):
         if self._is_last_rank:
             return self.runner.final_norm_device(hidden)
         return IntermediateTensors({"hidden_states": hidden})
+
+    @classmethod
+    def _check_gdn_serving(cls, vllm_config):
+        """Refuse, with the reason, what serving a model with GDN layers does not support."""
+        if not getattr(cls, "is_hybrid", False):
+            raise ValueError(
+                "this checkpoint has GDN (linear_attention) layers; serve it with the architecture "
+                "EmmyGenHybridModel, which declares their per-request state to vLLM"
+            )
+        if vllm_config.cache_config.enable_prefix_caching:
+            raise NotImplementedError(
+                "prefix caching is not supported on a model with GDN layers: a request keeps one recurrent "
+                "state and no snapshot that a cached prefix could resume from; serve with --no-enable-prefix-caching"
+            )
+        if vllm_config.speculative_config is not None:
+            raise NotImplementedError(
+                "speculative decoding is not supported on a model with GDN layers: a rejected draft token "
+                "would already have advanced the recurrent state; serve without --speculative-config"
+            )
+        cg_mode = getattr(vllm_config.compilation_config, "cudagraph_mode", None)
+        if not vllm_config.model_config.enforce_eager and (cg_mode is None or getattr(cg_mode, "name", str(cg_mode)) != "NONE"):
+            raise ValueError(
+                "CUDA graph capture is not supported on a model with GDN layers: a GDN layer reads each "
+                "request's token range on the host, which a capture cannot record; serve with --enforce-eager"
+            )
+
+    def _forward_gdn(self, layer, hidden):
+        """One GDN layer over a step that may hold the tokens of several requests.
+
+        vLLM's metadata for the layer gives, per request, its token range in the step, its sequence
+        length, and the KV cache block that holds its state. The runner then runs the layer for one
+        request after another, each on its own state. vLLM never zeroes a KV cache block: a request
+        whose scheduled tokens are its whole sequence has no computed token yet, so its state is zeroed
+        here first."""
+        module = self.gdn_state[layer]
+        metadata = get_forward_context().attn_metadata
+        if metadata is None:
+            # vLLM's memory-profiling run carries no metadata and no request: run on a scratch state,
+            # so that the programs' own memory still falls inside the profiled footprint.
+            (history_shape, state_shape), (history_dtype, state_dtype) = module.get_state_shape(), module.get_state_dtype()
+            state = torch.zeros(1, *state_shape, dtype=state_dtype, device=hidden.device)
+            history = torch.zeros(1, *history_shape, dtype=history_dtype, device=hidden.device)
+            return self.runner.forward_layer_gdn_device(layer, hidden, state, history)
+        metadata = metadata[module.prefix]
+        history_cache, state_cache = module.kv_cache
+        bounds = metadata.query_start_loc.tolist()
+        out = torch.empty_like(hidden)
+        for block, seq_len, start, end in zip(
+            metadata.state_indices_tensor.tolist(), metadata.seq_lens.tolist(), bounds[:-1], bounds[1:], strict=True
+        ):
+            if end == start:
+                continue
+            state, history = state_cache[block : block + 1], history_cache[block : block + 1]
+            if seq_len == end - start:
+                state.zero_()
+                history.zero_()
+            out[start:end] = self.runner.forward_layer_gdn_device(layer, hidden[start:end], state, history)
+        return out
 
     def _attn_aliased(self, layer, q, k, v):
         """vLLM paged attention writing INTO the post program's ``attn_out`` input backing —
@@ -937,3 +1070,30 @@ class EmmyGenModel(nn.Module, SupportsPP):
             free / 2**30,
             total / 2**30,
         )
+
+
+class EmmyGenHybridModel(EmmyGenModel, IsHybrid):
+    """``EmmyGenModel`` for a checkpoint that mixes attention layers with GDN layers (Qwen3.5 /
+    Qwen3.8). vLLM asks a hybrid class for the layout of the per-request state before it builds the
+    model, then allocates that state in its KV cache blocks beside the attention layers' pages. It is
+    an architecture of its own because the hybrid flag belongs to the class: on ``EmmyGenModel`` it
+    would switch every model emmy serves to hybrid KV cache sizing."""
+
+    @classmethod
+    def _state_layout(cls, vllm_config):
+        mc = vllm_config.model_config
+        return _gdn_state_layout(getattr(mc.hf_config, "text_config", mc.hf_config), mc.dtype)
+
+    @classmethod
+    def get_mamba_state_shape_from_config(cls, vllm_config):
+        return cls._state_layout(vllm_config)[0]
+
+    @classmethod
+    def get_mamba_state_dtype_from_config(cls, vllm_config):
+        return cls._state_layout(vllm_config)[1]
+
+    @classmethod
+    def get_mamba_state_copy_func(cls):
+        # vLLM copies state between KV cache blocks only for prefix caching and speculative decoding,
+        # and ``_check_gdn_serving`` refuses both.
+        raise NotImplementedError("a model with GDN layers serves without prefix caching and speculative decoding")
