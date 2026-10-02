@@ -732,7 +732,8 @@ Both are structural and carry no knob: they change no schedule and no identity, 
 buffer parameter is `__restrict__` (a launch's output never shares memory with its inputs), which lets nvcc keep
 read-only operands in registers across the kernel's stores and read them through the non-coherent path.
 
-`090_guard_reductions` propagates coordinate demand backward through pure scalar expressions and selects. A scalar
+`090_guard_reductions` invokes `stmt.normalize.guard_reductions`, which propagates coordinate demand backward through
+pure scalar expressions and selects. A scalar
 reduction whose result is read only under an enclosing-coordinate predicate becomes a zero-trip loop elsewhere.
 Its identity seed stays outside the loop. Stores, synchronization, warp operations and predicates depending on values
 computed later cannot be guarded this way.

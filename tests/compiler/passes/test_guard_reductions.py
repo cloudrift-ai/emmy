@@ -13,7 +13,6 @@ from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Select, Selec
 from emmy.compiler.ir.stmt.normalize import guard_reductions
 
 
-
 def _body(*, extra_use=False, overlapping=False, strided=False) -> Body:
     reduction = Loop(
         Axis("k", 7),

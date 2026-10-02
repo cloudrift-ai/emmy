@@ -13,6 +13,9 @@ from ``Fold.lower``. So a body these passes could improve reaches the emitter
 unchanged whenever it comes down the term path — the sibling-loop merge below
 is reachable from Loop IR and from the digest, not from a materialized
 ``KernelOp``.
+
+``guard_reductions`` is a separately invoked coordinate-demand transform. The kernel pass owns
+its policy; keeping the pure transform here lets lowering reuse it without changing body identities.
 """
 
 from __future__ import annotations
