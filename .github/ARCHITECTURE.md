@@ -11,7 +11,7 @@ skills and CloudRift inference endpoint.
 | Workflow | Trigger | Runner | Result |
 | --- | --- | --- | --- |
 | **Tests** | Pull request to `main` | GitHub-hosted + `ubuntu-runners` | Runs Ruff, the complete test suite, and a PyPI package dry run. |
-| **CI optimization** | Nightly schedule or manual dispatch | `ubuntu-runners` | Measures CPU test durations and pushes changed timings directly to `main`. |
+| **Nightly refresh** | Nightly schedule or manual dispatch | `ubuntu-runners` | Refreshes CPU test durations and qualified schedule or placement priors directly on `main`. |
 | **Review pull requests** | Ready PR or new commit | GitHub-hosted | Posts a PR Agent review using the nightly CloudRift model. |
 | **Publish to PyPI** | Manual dispatch or published GitHub release | GitHub-hosted | Verifies the source and distribution, publishes to PyPI, and optionally creates the release. |
 | **Verify or onboard model** | Nightly schedule or manual dispatch | `agent-runners` / `agents` | Qualifies one available exact model/GPU deployment and updates the rolling lifecycle PR. |
@@ -49,10 +49,21 @@ installation and cache setup.
 The native-runtime job runs Rustfmt, Clippy with warnings denied, and locked Cargo tests on a GitHub-hosted runner.
 These checks require no GPU. Native GPU parity and failure recovery run through `make test-native` on supplied hardware.
 
-**CI optimization** runs the same CPU test lane on `ubuntu-runners` through one xdist worker. It rewrites only the CPU
-duration file, leaving GPU timings intact. A successful run with changed timings commits and pushes directly to `main`
-with the repository's GitHub App token, then posts the run link to #emmy-robots. An unchanged run posts nothing.
+**Nightly refresh** runs the CPU test lane on `ubuntu-runners` with one xdist worker per available core. It rewrites
+only the CPU duration file, leaving GPU timings intact. Existing rows change only when they differ by at least 0.5 s
+and 50% of the recorded time. A successful run with changed timings commits and pushes directly to `main` with the
+repository's GitHub App token, then posts the run link to #emmy-robots. An unchanged run posts nothing.
 The repository's pull-request ruleset grants that App a bypass; the separate rule still rejects force pushes.
+
+The prior job runs beside durations, with schedule and placement one at a time. Each run imports the repository
+goldens into its own DB, exports that space's dataset, and fits a CatBoost candidate without cross-validation. The
+comparison mode of `eval prior` scores both weights on the same dataset and skips the CLI's separate greedy
+reproduction walk. A candidate needs at least one GPU/tier/pool-size cell with 5% lower median golden rank, no cell
+with higher median rank, and unchanged scored-pool coverage. The matching space's reproduction tests run before a
+qualified candidate is committed. Each job rebases and retries its push when
+the other job updated only its own file; any other move of `main` stops the push, so stale measurements or weights
+cannot overwrite newer work. Every prior result, including no change or failure, posts to #emmy-robots with the run
+link.
 
 **Review pull requests** runs the pinned PR Agent image when a PR is opened, reopened, marked ready, or updated. It
 reviews ready PRs from both repository branches and forks, including bot-authored PRs. The action reads the diff through

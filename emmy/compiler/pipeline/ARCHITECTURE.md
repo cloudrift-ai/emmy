@@ -1073,8 +1073,10 @@ pass with the placement prior deciding against the golden's arm) — the deploy-
 `make test` asserts a rate on, per slice of a repository golden's pools (README, "Fit the priors").
 
 **Two datasets, two questions, one report.** `search/prior/report.py` assembles both into one serialisable schema
-(`--json`), so comparing two models is a `diff`. `emmy fit` writes the same summaries into its `metrics.json`, through
-the same `report.rank_metrics`. The report computes nothing itself:
+(`--json`). With `--compare-to`, `eval prior` scores two weights on the same golden pools and compares their median
+ranks group by group; changed coverage or a higher median in any group prevents a candidate from qualifying. This mode
+skips the separate reproduction walk. `emmy fit` writes the same summaries into its `metrics.json`, through the same
+`report.rank_metrics`. The report does not define the metrics:
 `search/metrics.py` owns every metric's definition, and `Prior.score_rows(group)` — the pool-shaped scoring surface,
 projecting the packed matrix onto the model's own columns with its own absent-value fill — is where a score comes
 from.

@@ -218,10 +218,14 @@ what it had not reached, so the run still finishes and reports exactly one failu
 Those costs come from `tests/durations_cpu.json` and `tests/durations_gpu.json` — checked-in nodeid → seconds maps —
 with the box's own pytest cache overlaid on top. The files exist because CI starts every job with an empty cache:
 without a baseline the bucketing never fired there and the long poles landed wherever chance put them. They record
-only entries at or above 0.05 s; anything unlisted is assumed to cost 0.05 s. The nightly **CI optimization** workflow
-runs `make test-durations` on the CPU runner, replaces the CPU file with that run's timings, and commits a change
-directly to `main`. GPU rows remain in their own file. The refresh runs on one xdist loadgroup worker so execution
-stays serial. Point it at the whole suite, never a subset.
+only entries at or above 0.05 s; anything unlisted is assumed to cost 0.05 s. The **Nightly refresh** workflow runs
+`make test-durations` on the CPU runner, replaces the CPU file with that run's timings, and commits a change
+directly to `main`. GPU rows remain in their own file. The refresh uses all available cores with xdist loadgroup.
+Point it at the whole suite, never a subset.
+
+An existing CPU timing changes only when the difference reaches both 0.5 s and 50% of its recorded value. New test
+rows are added and rows for tests no longer measured are removed. This keeps small timing variation out of nightly
+commits while allowing changes large enough to affect bucketing through.
 
 Keep the JSON entries alphabetized by full node ID, one entry per line. `make format` restores this order without
 changing timings; `make lint` checks it. The duration writer uses the same format.

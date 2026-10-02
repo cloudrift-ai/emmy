@@ -222,7 +222,7 @@ Quick test models / scripts (for local iteration):
 - `make test-corpus-regen` — restamp the realization corpus's derived half after a kernel-identity or schedule-codec
   change (`make test` detects the staleness on any machine; this applies the fix)
 - `make test-durations` — re-measure `tests/durations_cpu.json`, the checked-in CPU test timings the suite balances its
-  xdist workers on; the nightly CI optimization workflow commits updates directly to `main`
+  xdist workers on; the **Nightly refresh** workflow commits updates directly to `main`
 - `make lint` — run `ruff check`, `ruff format --check`, and check test-duration formatting
 - `make format` — auto-format code, fix lint violations, and sort test durations without re-measuring
 - `make bench` — run benchmarks (`emmy bench recipes/*`)
@@ -347,9 +347,10 @@ Then run the gates, in this order, after every edit above is in:
     test-corpus-regen` applies the fix; if a repository golden stops being the fresh lowering, `emmy golden restamp`
     applies that one (the `refresh-golden` skill). If golden rows go red, name the change that did it in the PR body —
     do **not** re-record them to make it green, which enshrines the regression as the new reference.
-24. **Let the nightly CI optimization run refresh CPU test durations.** Missing duration rows do not fail `make test`.
+24. **Let the nightly workflow refresh CPU test durations.** Missing duration rows do not fail `make test`.
     The nightly run re-measures the whole CPU suite and commits `tests/durations_cpu.json` directly to `main` when it
-    changes. GPU timings stay in `tests/durations_gpu.json` and are not rewritten on the CPU runner.
+    changes. Existing entries update only when they differ by at least 0.5 s and 50% of the recorded time. GPU
+    timings stay in `tests/durations_gpu.json` and are not rewritten on the CPU runner.
 25. **Run the linter**: `make lint` — if it fails, run `make format` and re-check
 26. **Write the PR body** in an untracked temporary file outside the repository, using
     `.github/PULL_REQUEST_TEMPLATE.md` as a guide. Never replace the tracked template with a PR's content. The title

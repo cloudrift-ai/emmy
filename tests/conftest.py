@@ -211,11 +211,17 @@ def pytest_sessionfinish(session):
         # Replace CPU rows so renamed tests drop out. The nightly runner has no GPU,
         # so its skipped CUDA tests must not remove the separate GPU baseline.
         # Point --write-durations at the whole suite, never a subset.
-        fresh = {
+        measured = {
             k: round(v, 2)
             for k, v in _CALL_DURATIONS.items()
             if v >= _MIN_RECORDED and k not in _OFF_LANE_ITEMS and not k.endswith(("@cuda", "@cuda-cli"))
         }
+        # Retain small changes; new rows enter and tests absent from the run drop out.
+        previous = _load_baseline()
+        fresh = {}
+        for key, value in measured.items():
+            old = previous.get(key)
+            fresh[key] = old if old is not None and abs(value - old) < max(0.5, old / 2) else value
         with open(_DURATIONS_CPU_FILE, "w") as fh:
             json.dump(dict(sorted(fresh.items())), fh, indent=1)
             fh.write("\n")

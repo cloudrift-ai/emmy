@@ -1,0 +1,207 @@
+name: Nightly refresh
+
+on:
+  schedule:
+    - cron: "13 8 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: nightly-refresh
+  cancel-in-progress: false
+
+jobs:
+  durations:
+    runs-on:
+      group: ubuntu-runners
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch the measurement freeze from LFS
+        run: git lfs pull --include="emmy/compiler/pipeline/search/freezes/*"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: make setup-ci
+
+      - name: Cache HuggingFace models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-models-v1
+
+      - name: Measure CPU test durations
+        timeout-minutes: 110
+        run: make test-durations
+
+      - name: Check for updated durations
+        id: changes
+        run: |
+          if git diff --quiet -- tests/durations_cpu.json; then
+            echo "updated=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "updated=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Generate GitHub App token
+        if: steps.changes.outputs.updated == 'true'
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.EXPERIMENT_APP_ID }}
+          private-key: ${{ secrets.EXPERIMENT_APP_PRIVATE_KEY }}
+          repositories: ${{ github.event.repository.name }}
+
+      - name: Commit updated durations to main
+        if: steps.changes.outputs.updated == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          git config user.name "emmy-onboarding-bot"
+          git config user.email "emmy-onboarding-bot[bot]@users.noreply.github.com"
+          git add -- tests/durations_cpu.json
+          git diff --cached --check
+          git commit -m "tests: refresh CPU durations"
+          base=$(git rev-parse HEAD^)
+          for attempt in 1 2 3; do
+            git fetch origin main
+            if ! git diff --quiet "$base" origin/main -- . \
+              ':(exclude)emmy/compiler/pipeline/search/prior/weights/schedule.json' \
+              ':(exclude)emmy/compiler/pipeline/search/prior/weights/placement.json'; then
+              echo "main changed beyond prior weights; leaving the measured durations in place" >&2
+              exit 1
+            fi
+            git rebase origin/main
+            if git -c credential.helper='!f() { printf "username=x-access-token\npassword=%s\n" "$GH_TOKEN"; }; f' push origin HEAD:main; then
+              exit 0
+            fi
+          done
+          exit 1
+
+      - name: "Notify #emmy-robots"
+        if: steps.changes.outputs.updated == 'true'
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_EMMY_ROBOTS_WEBHOOK_URL }}
+        run: |
+          jq -n --arg url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            '{content: "Nightly refresh updated CPU test durations on main. " + $url, allowed_mentions: {parse: []}}' \
+            | curl --fail-with-body --silent --show-error \
+                --header 'Content-Type: application/json' \
+                --data-binary @- "$DISCORD_WEBHOOK_URL"
+
+  prior:
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        space: [schedule, placement]
+    runs-on:
+      group: ubuntu-runners
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    env:
+      SPACE: ${{ matrix.space }}
+      WEIGHTS: emmy/compiler/pipeline/search/prior/weights/${{ matrix.space }}.json
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: make setup-ci
+
+      - name: Export repository goldens
+        run: |
+          ./venv/bin/emmy db import --db _data/ci-prior.db --fresh --repository
+          ./venv/bin/emmy db export --db _data/ci-prior.db _data/ci-prior --space "$SPACE"
+
+      - name: Fit candidate prior
+        run: ./venv/bin/emmy fit _data/ci-prior _data/candidate.json --folds 0 --out _data/fit
+
+      - name: Compare prior ranks
+        id: compare
+        run: |
+          ./venv/bin/emmy eval prior _data/ci-prior --offline-file "$WEIGHTS" \
+            --compare-to _data/candidate.json --min-rank-improvement 0.05 --json _data/decision.json
+          echo "updated=$(jq -r .comparison.qualified _data/decision.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Verify improved prior
+        if: steps.compare.outputs.updated == 'true'
+        run: |
+          cp _data/candidate.json "$WEIGHTS"
+          EMMY_GOLDEN_FILE= ./venv/bin/pytest tests/compiler/pipeline/search/prior/test_reproduction.py \
+            -k "$SPACE" -q -p no:randomly -n auto --dist=loadgroup
+
+      - name: Generate GitHub App token
+        if: steps.compare.outputs.updated == 'true'
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.EXPERIMENT_APP_ID }}
+          private-key: ${{ secrets.EXPERIMENT_APP_PRIVATE_KEY }}
+          repositories: ${{ github.event.repository.name }}
+
+      - name: Commit improved prior to main
+        if: steps.compare.outputs.updated == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          git config user.name "emmy-onboarding-bot"
+          git config user.email "emmy-onboarding-bot[bot]@users.noreply.github.com"
+          git add -- "$WEIGHTS"
+          git diff --cached --check
+          git commit -m "compiler: refresh $SPACE prior"
+          base=$(git rev-parse HEAD^)
+          for attempt in 1 2 3; do
+            git fetch origin main
+            if ! git diff --quiet "$base" origin/main -- . ':(exclude)tests/durations_cpu.json'; then
+              echo "main changed beyond CPU test durations; leaving the current weights in place" >&2
+              exit 1
+            fi
+            git rebase origin/main
+            if git -c credential.helper='!f() { printf "username=x-access-token\npassword=%s\n" "$GH_TOKEN"; }; f' push origin HEAD:main; then
+              exit 0
+            fi
+          done
+          exit 1
+
+      - name: "Notify #emmy-robots of prior result"
+        if: ${{ always() }}
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_EMMY_ROBOTS_WEBHOOK_URL }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          if [ "$JOB_STATUS" = success ]; then
+            result=$(jq -r .comparison.message _data/decision.json)
+            if [ "$(jq -r .comparison.qualified _data/decision.json)" = true ]; then
+              result="updated weights on main; $result"
+            fi
+          else
+            result="failed before updating weights; see run"
+          fi
+          jq -n --arg space "$SPACE" --arg result "$result" \
+            --arg url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            '{content: "Nightly refresh " + $space + " prior: " + $result + ". " + $url, allowed_mentions: {parse: []}}' \
+            | curl --fail-with-body --silent --show-error \
+                --header 'Content-Type: application/json' \
+                --data-binary @- "$DISCORD_WEBHOOK_URL"
