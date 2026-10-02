@@ -77,7 +77,7 @@ def rewrite(match: Match, root: Node, ctx=None) -> KernelOp | None:
 
 def _drop_private_ports(match: Match, root: Node, kernel: KernelOp, suffix: str):
     """Remove unused global state allocations after a resident materialization."""
-    written = {stmt.output for stmt in kernel.body.iter() if isinstance(stmt, Write)}
+    written = {name for stmt in kernel.body.iter() for name in stmt.external_writes()}
     ports = {t.name for t in root.outputs if t.name not in written and t.name not in match.graph.outputs}
     ports = {name for name in ports if not match.graph.buffer_users(name)}
     if not ports:
