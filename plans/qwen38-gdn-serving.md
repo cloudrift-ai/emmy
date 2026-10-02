@@ -1,6 +1,8 @@
 # Serving the GDN layers of Qwen3.5 / Qwen3.8 through emmy
 
-Status: open, written 2026-10-02 against main `22bf24e4`. Branch `feat/serve-gdn-layers`. The branch has no code yet.
+Status: open, written 2026-10-02, last updated the same day on main `76c02562`. Branch `feat/serve-gdn-layers`.
+We finished stages 1 to 4 for a model with GDN layers only. Stage 5 comes next. Follow-ups that this goal does not need
+are in [`gdn-serving-followups.md`](gdn-serving-followups.md).
 
 ## Goal
 
@@ -86,36 +88,40 @@ Each stage starts with a failing test.
 Three other branches remove the remaining blockers for serving Qwen3.8 NVFP4 on an RTX 5090. This section says what
 each of them needs to know about this branch.
 
-**Output gate (`feat/serve-attention-output-gate`).** Both branches edit `EmmyGenRunner.from_model` and the two layer
-loops of `EmmyGenModel`. This branch keeps the GDN code in its own functions and adds one layer-type check per shared
-loop. The tiny hybrid test model (`_QWEN3_5_TINY` in `tests/compiler/trace/test_huggingface.py`: one GDN layer, one
-full-attention layer) computes its full-attention layer wrongly on main until the output-gate change lands. Stages 1
-to 4 therefore start on a tiny config with GDN layers only. The hybrid tests follow after a rebase onto the
-output-gate branch.
+**Output gate (merged, #1022) and the folded norm constant (merged, #1024).** We rebased this branch onto both. It
+keeps the GDN code in its own functions and adds one layer-type check per shared loop. Stages 1 to 4 ran on a tiny
+config with GDN layers only (`qwen3_5.gdn.l2` in `tests/serving/helpers.py`). One runner test covers the tiny hybrid
+model: a prompt in one step, with a reference attention between `pre` and `post`. That model is `_QWEN3_5_TINY` in
+`tests/compiler/trace/test_huggingface.py`: one GDN layer, one full-attention layer. Before #1024, three constants that tracing folds into the graph (`1 + weight` of both norms,
+and `-exp(A_log)`) had no value when serving bound the weights, so the width-1 GDN program returned a wrong state.
 
 **BF16 trunk (`feat/serve-bf16-trunk`).** That branch owns the code that picks the trunk dtype in the same two files.
 This branch adds no dtype choice of its own: a GDN program takes the trunk dtype for `x` and `H`, and `S` is always
 float32. The real checkpoint needs BF16; the tiny-model tests do not.
 
 **Golden recording (`feat/qwen38-nvfp4-rtx5090-golden`).** The GDN rows to record are the `gdn<W>` twins at the three
-widths above. Capture them with `extra_widths=(1,)` so that width 1 is among them. Stage 1 fixes the concrete widths
-for the RTX 5090 serve command, and this file will list them then. Until then, treat recorded GDN rows as provisional.
+widths above. Capture them with `extra_widths=(1,)` so that width 1 is among them. The concrete widths for the
+RTX 5090 serve command are its decode bucket, its prefill bucket, and 1. The tiny test model showed two things:
+
+- GDN rows need cuts. A placement cut, spelled `PLACE@<route>=cut` in `EMMY_KNOBS`, splits a fused kernel into
+  pieces, each its own kernel. With no cut, a fused GDN kernel recomputes its producers inside every output cell:
+  one width-1 call of the tiny model took 165 s. Cutting `k_linear_matmul_mean_reduce_a19fd0` (width 4) and
+  `k_linear_matmul_mean_reduce_5d3ccd` (width 16) into 7 pieces each, and `k_linear_mean_conv1d_reduce_290483`
+  (width 1) into 4, brought a call to milliseconds. The routing rows of `tests/serving/goldens/serving.golden.json`
+  record the cuts that worked.
+- Do not take GDN schedules from a compile that has no golden row for the kernel. At the time of writing the team
+  treats the schedule prior as broken, so pin every GDN kernel by a golden row or by `EMMY_KNOBS`.
 
 ## Open questions
 
-- Rounding. Hugging Face computes a prompt in one call. The decomposition mixes wide calls with width-1 calls, which
-  use a different but mathematically equal computation. Stage 3 measures the drift. If it exceeds the test tolerance,
-  the test gives Hugging Face the same decomposition and compares against that.
+- Rounding in half precision. Hugging Face computes a prompt in one call. The decomposition mixes wide calls with
+  width-1 calls, which use a different but mathematically equal computation. In float32 on the tiny model the two
+  agree within the test tolerance (2e-3 on the logits) for every tested prompt length. Nobody has tested FP16 or
+  BF16 yet.
 - Whether vLLM sets `has_initial_state` to false for a one-token prompt. If vLLM treats such a prompt as a decode, the
   model class would read a stale KV cache block. Stage 5 tests this early.
 
 ## Parked for the performance phase
 
-- More widths. With all powers of two up to the prefill bucket, the decomposition is the binary expansion of the
-  length. Example with a decode bucket of 16 and a prefill bucket of 64: a request with 63 tokens costs 6 calls with
-  powers of two, and 18 calls with widths 64, 16 and 1. The cost is more programs to compile at boot and more rows to
-  record.
-- A program with a length input that masks padded tokens. Hugging Face's chunked computation already pads to a
-  multiple of 64 inside the layer, after the projections. A masked program would turn that padded length into an
-  input. One consequence to measure: a narrow program may cost nearly as much as the width-64 program.
-- A mix of both: decompose the large part of a length into wide programs, then mask the remainder.
+The "Speed" section of [`gdn-serving-followups.md`](gdn-serving-followups.md) covers more widths (powers of two),
+a masked program and the mix of both, with the measurements so far.

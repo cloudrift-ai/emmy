@@ -15,7 +15,8 @@ RUNNER = "qwen3_5.gdn.l2"
 
 
 def _fresh_state(model):
-    """Zero recurrent state and convolution history per layer — what starts a request."""
+    """Zero recurrent state and convolution history per GDN layer — what starts a request. An attention layer
+    holds ``None``."""
     import torch
 
     return [
@@ -23,7 +24,9 @@ def _fresh_state(model):
             torch.zeros(1, mixer.num_v_heads, mixer.head_k_dim, mixer.head_v_dim, device="cuda"),
             torch.zeros(1, mixer.conv_dim, mixer.conv_kernel_size, device="cuda"),
         )
-        for mixer in (layer.linear_attn for layer in model.model.layers)
+        if mixer is not None
+        else None
+        for mixer in (getattr(layer, "linear_attn", None) for layer in model.model.layers)
     ]
 
 
@@ -107,3 +110,65 @@ def test_gdn_padded_step_corrupts_the_state(built):
     runner.forward_layer_gdn_device(0, torch.cat([hidden, torch.zeros_like(hidden[:1])]), padded_state, padded_history)
     assert not torch.allclose(padded_history, history)
     assert not torch.allclose(padded_state, state)
+
+
+@pytest.fixture(scope="module")
+def hybrid():
+    """The tiny hybrid Qwen3.5: one GDN layer, then one full-attention layer that carries an output gate. The lane's
+    golden decides the GDN kernels — an uncut GDN kernel takes minutes per call. It holds no row for the attention
+    programs, so those compile cold, as the gated-attention tests in ``test_gen_runner_gpu`` do."""
+    import torch
+    from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
+    from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5ForCausalLM
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+    from emmy.compiler.pipeline.search.golden import evidence_scope
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+    from emmy.serving.gen_runner import EmmyGenRunner
+    from tests.compiler.trace.test_huggingface import _QWEN3_5_TINY
+    from tests.serving import helpers
+    from tests.serving.conftest import Built
+
+    torch.manual_seed(0)
+    model = Qwen3_5ForCausalLM(Qwen3_5TextConfig(**_QWEN3_5_TINY)).eval()
+    document = helpers.golden_document()
+    with pinned_knobs(document.shared_regime()), evidence_scope([document]):
+        runner = EmmyGenRunner.from_model(model, dtype_str="float32", decode_bucket=4, prefill_bucket=16, max_tokens=32)
+    return Built(runner, model)
+
+
+# 1: single-token programs; 3: the decode bucket; 9: the symbolic attention program; 16: the prefill bucket;
+# 18: the attention rider split, and GDN widths 16 + 1 + 1.
+@pytest.mark.parametrize("length", [1, 3, 9, 16, 18])
+def test_hybrid_prompt_matches_eager(hybrid, length):
+    """GDN and attention layers in one model. The GDN layer runs its exact-width programs; the attention layer runs
+    ``pre`` → the Hugging Face rotary and causal attention → ``post``, at whichever tier serves this length."""
+    import torch
+    import torch.nn.functional as F
+    from transformers.models.qwen3_5.modeling_qwen3_5 import apply_rotary_pos_emb
+
+    from emmy.compiler.trace.huggingface import build_causal_mask
+    from tests.serving.generation.test_gen_runner_gpu import _repeat_kv
+
+    runner, model = hybrid.runner, hybrid.model
+    ids = _prompt(length)
+    hidden = runner.embed_device(torch.tensor(ids, device="cuda"))
+    cos, sin = (t.cuda() for t in model.model.rotary_emb(hidden[None].cpu(), torch.arange(length)[None]))
+    mask = build_causal_mask(length, torch.float32).cuda()
+    for layer, gdn_state in enumerate(_fresh_state(model)):
+        if gdn_state is not None:
+            hidden = runner.forward_layer_gdn_device(layer, hidden, *gdn_state)
+            continue
+        hd, nh, nkv, scaling = runner.layer_meta(layer)
+        q, k, v, gate = runner.forward_layer_pre_device(layer, hidden)
+        q = q.view(length, nh, hd).transpose(0, 1)[None]
+        k = k.view(length, nkv, hd).transpose(0, 1)[None]
+        v = v.view(length, nkv, hd).transpose(0, 1)[None]
+        q, k = apply_rotary_pos_emb(q, k, cos, sin)
+        k, v = _repeat_kv(k, nh // nkv), _repeat_kv(v, nh // nkv)
+        attn = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, scale=scaling).transpose(1, 2).reshape(length, nh * hd)
+        hidden = runner.forward_layer_post_device(layer, attn.contiguous(), hidden, gate)
+    with torch.no_grad():
+        logits = model.lm_head(runner.final_norm_device(hidden).cpu())
+    torch.testing.assert_close(logits, _eager(model, ids), rtol=2e-3, atol=2e-3)
