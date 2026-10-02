@@ -10,6 +10,7 @@ this file rather than scattering one-off greps elsewhere.
 
 from __future__ import annotations
 
+import ast
 import pathlib
 import re
 
@@ -103,16 +104,45 @@ def test_lowering_tile_does_not_import_kernel_passes() -> None:
     )
 
 
-def test_schedule_model_does_not_import_pipeline() -> None:
-    """The schedule model defines domains and compatibility; pipeline search only consumes it."""
-    schedule_dir = _REPO_ROOT / "emmy" / "compiler" / "ir" / "schedule"
+def test_ir_does_not_import_pipeline() -> None:
+    """``ir/`` defines the dialects, body normalization and the schedule model; the pipeline consumes them.
+
+    Knobs, pins and evidence live in the pipeline, so nothing an IR module computes — a canonical
+    form, an identity, a schedule domain — can depend on a tuning choice.
+    """
+    ir_dir = _REPO_ROOT / "emmy" / "compiler" / "ir"
     forbidden = re.compile(r"^\s*(?:from|import)\s+emmy\.compiler\.pipeline\b")
     offenders = []
-    for py in sorted(schedule_dir.rglob("*.py")):
+    for py in sorted(ir_dir.rglob("*.py")):
         for lineno, line in enumerate(py.read_text().splitlines(), start=1):
             if forbidden.search(line):
                 offenders.append(f"{py.relative_to(_REPO_ROOT)}:{lineno}: {line.strip()}")
-    assert not offenders, "ir/schedule must not import the pipeline layer:\n" + "\n".join(offenders)
+    assert not offenders, "ir/ must not import the pipeline layer:\n" + "\n".join(offenders)
+
+
+def test_normalization_has_one_entry_point_and_no_orphan_transform() -> None:
+    """Every transform in ``ir/stmt/normalize.py`` runs inside ``normalize_body``.
+
+    Body normalization is the canonical form every Loop IR body and every identity digest takes;
+    it answers to no knob, pin or evidence. A transform a pass invokes on its own is that pass's
+    code and lives in its pass file. Two signs give one away: it is exported beside
+    ``normalize_body``, or no other function in the module calls it.
+    """
+    module = ast.parse((_REPO_ROOT / "emmy" / "compiler" / "ir" / "stmt" / "normalize.py").read_text())
+    exported = next(
+        ast.literal_eval(node.value)
+        for node in module.body
+        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "__all__" for t in node.targets)
+    )
+    assert exported == ["normalize_body"], f"normalize.py exports {exported}; normalization has one entry point"
+    functions = [node for node in module.body if isinstance(node, ast.FunctionDef)]
+    drivers = {"normalize_body", "_normalize_body"}
+    orphans = []
+    for function in functions:
+        callers = {name.id for other in module.body if other is not function for name in ast.walk(other) if isinstance(name, ast.Name)}
+        if function.name not in drivers and function.name not in callers:
+            orphans.append(function.name)
+    assert not orphans, "no normalization step calls these; a transform invoked only from outside is a pass:\n" + "\n".join(orphans)
 
 
 # ---------------------------------------------------------------------------

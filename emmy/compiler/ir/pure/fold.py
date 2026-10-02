@@ -866,7 +866,7 @@ class Fold:
                 base=Lambda.componentwise((pluses[index],), (self.base.results[index],)),
             )
             children.append(child)
-        if not all(child.tiles_whole() for child in children) and len({child.free_axes for child in children}) == 1:
+        if not any(child.tiles_whole() for child in children) and len({child.free_axes for child in children}) == 1:
             return None
         return Fold(operands=tuple(children), lift=Lambda.closing(self.exposes, Body(()), self.exposes))
 

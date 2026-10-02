@@ -219,6 +219,9 @@ def test_sdpa_score_contraction_reaches_the_mma_tier(monkeypatch) -> None:
     which one the unmeasured greedy picks is the prior's, and it moves with any change to the
     program (f32 scores moved it to the scalar tile)."""
     monkeypatch.setenv(config.knob_var("TILE@map.1/twist"), "mma_m16n8k16_f16_f32/f1x2")
+    monkeypatch.setenv("EMMY_PLACE", "fuse")
+    monkeypatch.setenv("EMMY_WORK", "w1x1")
+    monkeypatch.setenv("EMMY_REDUCE", "")
     graph, _, _ = graph_from_code(
         "F.scaled_dot_product_attention("
         "torch.randn(1, 1, 32, 16, dtype=torch.float16), "

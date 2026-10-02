@@ -81,7 +81,10 @@ def test_interleaved_weight_channels_use_gathers_before_mma(stage, channels, col
 
 def _pin_warp(monkeypatch) -> None:
     """Pin the one-warp mma tier — the TILE value at its site, the warps in WORK."""
-    monkeypatch.setenv("EMMY_TILE", _WARP_TILE)
+    from emmy.compiler.backend.cuda.device import compute_capability  # noqa: PLC0415
+
+    tile = "mma_m8n8k4_f16_f32/f4x2/k8" if compute_capability() == (7, 0) else _WARP_TILE
+    monkeypatch.setenv("EMMY_TILE", tile)
     monkeypatch.setenv("EMMY_WORK", _WARP_WORK)
 
 
@@ -406,7 +409,7 @@ def test_mixed_dtype_matmul_demotes_a_to_mma(tier, monkeypatch):
     np.testing.assert_allclose(got.reshape(_M, _N).astype(np.float32), ref, atol=0.1, rtol=2e-2)
 
 
-@requires_cuda
+@requires_sm(8)
 def test_sdpa_consumer_projection_reaches_mma(monkeypatch):
     """The attention output projection — ``linear(reshape(transpose(sdpa(q, k, v))))`` over a
     **symbolic seq axis, causal**: gemma's o_proj composition — must reach the mma tier under a

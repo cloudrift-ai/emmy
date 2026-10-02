@@ -354,8 +354,8 @@ A carrier that qualifies as NEITHER, because its channels multiply different ope
 does not stay one term: normalization hands it back as one fold per state under a projection re-exposing the state
 tuple (`Fold.per_state`). Two matmuls loop fusion put in one nest fold whole one at a time and not together — a tile
 holds one A fragment against a B slab per channel — and the mma tier the pair is refused is the one each of them
-alone already has. Only what refuses comes apart, and only when every state that comes out folds whole on its own,
-which is what leaves the fused shared-A form and a carrier of plain statistics as they were.
+alone already has. An independent bilinear state can also separate from a plain reduction on the same coordinates.
+The fused shared-A form and a carrier of plain statistics on one domain stay whole.
 
 ## Kernel identity
 

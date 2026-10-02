@@ -32,7 +32,7 @@ def test_generation_device_wrapper_preserves_bf16_input_and_output():
         {},
         {},
         [LaunchSpec("y", "copy_bf16", ("y", "x"), ((1,), (1,), (1,)), ((32,), (1,), (1,)), 0, ())],
-        {"copy_bf16": KernelSpec(source=source, arch_specific=True)},
+        {"copy_bf16": KernelSpec(source=source)},
     )
     values = np.array([1.0, -2.0, 3.140625, -0.5], dtype=np.float32)
     with gpu_lock():
