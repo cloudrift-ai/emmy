@@ -314,7 +314,8 @@ def _bind_plan_constants(plan, sources, cache):
     program builds — the symbolic and decode/prefill-bucket twins bind the same weights;
     per-build numpy feeds would upload a second full on-GPU copy of the trunk (~2× the
     weight footprint). ``cache`` must be scoped to one wrapper — param paths are
-    wrapper-relative, so a cross-wrapper cache would collide."""
+    wrapper-relative, so a cross-wrapper cache would collide. A weight the plan cannot rebuild
+    from ``sources`` raises: the program would otherwise read its buffer as zeros."""
     from emmy.compiler.backend.cuda.program import _numpy_storage
     from emmy.compiler.backend.plan import apply_weight_loads
     from emmy.compiler.loader.binder import assemble_source
@@ -324,7 +325,8 @@ def _bind_plan_constants(plan, sources, cache):
     for nid, w in plan.weights.items():
         src = assemble_source(w, sources)
         if src is None or w.load_ops is None:
-            continue
+            reason = "no source" if src is None else "no load-op chain the plan can replay"
+            raise RuntimeError(f"plan constant {nid!r} cannot bind: {reason}")
         dtype = buffer_dtypes[nid]
         if cache is None:
             out[nid] = _numpy_storage(apply_weight_loads(src, w.load_ops), dtype)

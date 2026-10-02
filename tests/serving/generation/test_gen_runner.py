@@ -478,3 +478,63 @@ def test_create_passes_the_expert_slice_through_to_the_loader(tmp_path, monkeypa
 
     assert seen["expert_slice"] == (3, 8), "the slice never reached the checkpoint read"
     assert built["expert_slices"] == 8, "the slice never reached the pack key"
+
+
+def _offset_norm_pre(family):
+    """The ``pre`` wrapper of one layer whose norms scale by ``1 + weight``: Qwen3.5 full attention
+    or Gemma-3. The input norm's weight is random, so a zero or ``1`` buffer cannot pass for it."""
+    torch = pytest.importorskip("torch")
+    import transformers
+
+    from emmy.compiler.trace.huggingface import build_attention_split_wrapper
+    from tests.serving.helpers import _block
+
+    torch.manual_seed(0)
+    if family == "qwen3_5":
+        block = transformers.Qwen3_5ForCausalLM(_qwen3_5_full_attention_config()).eval().model.layers[0]
+    else:
+        _config, block = _block("gemma3")
+    with torch.no_grad():
+        block.input_layernorm.weight.normal_()
+    return build_attention_split_wrapper(block)[0]
+
+
+@pytest.mark.parametrize("family", ["qwen3_5", "gemma3"])
+def test_single_token_pre_plan_binds_every_constant(family):
+    """At one row the compiler folds the input norm's ``1 + weight`` into one constant computed
+    from the checkpoint weight. The serving runner binds constants from the execution plan alone,
+    so the plan must say how to rebuild that constant from the weight; when it could not, the
+    runner skipped it and ``pre`` read a zero buffer. Every constant the plan declares must bind,
+    and the folded one must hold ``1 + weight``. Lowering needs no GPU."""
+    torch = pytest.importorskip("torch")
+
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.backend.plan import plan_from_graph
+    from emmy.compiler.context import Context
+    from emmy.serving.gen_runner import _bind_plan_constants, trace_split
+
+    pre = _offset_norm_pre(family)
+    graph = trace_split(pre, [torch.zeros(1, 64)], None)
+    plan = plan_from_graph(CudaBackend().compile(graph, ctx=Context.from_target((12, 0), gpu_name="NVIDIA GeForce RTX 5090")))
+    sources = {path: t.detach().numpy() for path, t in [*pre.named_parameters(), *pre.named_buffers()]}
+
+    bound = _bind_plan_constants(plan, sources, None)
+
+    assert set(bound) == set(plan.weights)
+    norm = [nid for nid, w in plan.weights.items() if w.source_path == "input_layernorm.weight"]
+    assert len(norm) == 1
+    expected = 1 + sources["input_layernorm.weight"]
+    np.testing.assert_array_equal(bound[norm[0]].reshape(expected.shape), expected)
+
+    # A pack stores the plan as JSON; the folded constant must rebind from that form too.
+    import dataclasses
+    import json
+
+    from emmy.compiler.backend.plan import WeightSpec, plan_from_dict, plan_to_dict
+
+    packed = plan_from_dict(json.loads(json.dumps(plan_to_dict(plan))))
+    np.testing.assert_array_equal(_bind_plan_constants(packed, sources, None)[norm[0]], bound[norm[0]])
+    # And a constant the plan cannot rebuild is an error, never a zero buffer.
+    unbindable = dataclasses.replace(plan, weights={**plan.weights, norm[0]: WeightSpec(source_path=None, load_ops=None)})
+    with pytest.raises(RuntimeError, match=f"plan constant '{norm[0]}' cannot bind"):
+        _bind_plan_constants(unbindable, sources, None)
