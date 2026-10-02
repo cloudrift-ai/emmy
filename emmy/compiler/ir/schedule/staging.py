@@ -583,7 +583,9 @@ def scalar_slab_elems(c: Fold, inputs) -> tuple:
     return (a, next(iter(bs))) if a is not None and len(bs) == 1 and None not in bs else ()
 
 
-def resolve_scalar_stage(c: Fold, tile: Tile, stage: Stage, inputs, budget: int, k_axis: Axis, axes: tuple = ()) -> ResolvedStage | None:
+def resolve_scalar_stage(
+    c: Fold, tile: Tile, stage: Stage, inputs, budget: int, k_axis: Axis, axes: tuple = (), *, seam: tuple | None = None
+) -> ResolvedStage | None:
     """Resolve an operand ``Stage`` against the scalar register-tile contraction ``c``, or ``None``
     (gmem-direct). The slab K-chunk ``bk_elems`` is DERIVED to fit ``depth`` operand slots in the
     smem ``budget`` (the largest offered chunk dividing K) — not codec-spelled, so no schema change;
@@ -643,7 +645,7 @@ def resolve_scalar_stage(c: Fold, tile: Tile, stage: Stage, inputs, budget: int,
         or (any(copied) and ((k if b_trans else n_ext.as_static()) * b_bytes) % _TMA_ALIGN)
     ):
         return None
-    _, _, stats, chunk = cone_seam(c.operands[0], k_axis.name, axes) if a is None else ((), (), (), ())
+    _, _, stats, chunk = (seam if seam is not None else cone_seam(c.operands[0], k_axis.name, axes)) if a is None else ((), (), (), ())
     stat_bytes = (len(stats) + (len(chunk[1]) if chunk else 0)) * tile.m.tile * 4
     # A scalar tile always copies with the blocking load/store, so its ``smem`` ring splits too.
     requested = min(stage.depth, SPLIT_COPY_DEPTH) if stage.transport == "smem" else stage.depth

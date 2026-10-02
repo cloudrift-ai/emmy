@@ -691,7 +691,9 @@ def _resolve_stage(
             producer=facts.producer,
             producer_k=tile_op.axis_of(facts.producer.axis) if facts.producer is not None else None,
         )
-    return staging.resolve_scalar_stage(node, placed, choice, tile_op.inputs, target.max_dynamic_smem, facts.k_axis, tile_op.axes)
+    return staging.resolve_scalar_stage(
+        node, placed, choice, tile_op.inputs, target.max_dynamic_smem, facts.k_axis, tile_op.axes, seam=facts.seam
+    )
 
 
 @dataclass(frozen=True)
