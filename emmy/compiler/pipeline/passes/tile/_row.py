@@ -19,7 +19,7 @@ from dataclasses import replace
 from math import prod
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Fold
 from emmy.compiler.ir.sigma import Sigma
@@ -186,7 +186,7 @@ def _align_owned_sweeps(piece: TileOp) -> TileOp:
         ):
             return piece
 
-    def sigma(sweep: tuple[Axis, ...], mapping: dict) -> Sigma | None:
+    def sigma(sweep: tuple[Axis, ...], mapping: dict[str, Var]) -> Sigma | None:
         remaining = tuple(axis for axis in sweep if axis.name not in mapping)
         available = tuple(axis for axis in anchor if axis.name not in {expr.name for expr in mapping.values()})
         if prod(axis.extent.as_static() for axis in remaining) != prod(axis.extent.as_static() for axis in available):
@@ -194,6 +194,7 @@ def _align_owned_sweeps(piece: TileOp) -> TileOp:
         flat = Var(available[0].name) if available else Literal(0, "int")
         for axis in available[1:]:
             flat = flat * Literal(axis.extent.as_static(), "int") + Var(axis.name)
+        substitution: dict[str, Expr] = dict(mapping)
         for i, axis in enumerate(remaining):
             stride = prod(follower.extent.as_static() for follower in remaining[i + 1 :])
             expr = flat
@@ -201,51 +202,53 @@ def _align_owned_sweeps(piece: TileOp) -> TileOp:
                 expr = BinaryExpr("/", expr, Literal(stride, "int"))
             if i:
                 expr = BinaryExpr("%", expr, Literal(axis.extent.as_static(), "int"))
-            mapping[axis.name] = expr
-        return Sigma(mapping)
+            substitution[axis.name] = expr
+        return Sigma(substitution)
 
-    substitutions = {}
-    extents = {axis.name: axis.extent for axis in piece.axes}
+    def loads(region: Fold) -> tuple[Load, ...]:
+        return tuple(
+            stmt for site in sites(region) for node in (site.node, *site.node.operands)
+            for stmt in node.lift.body.iter() if isinstance(stmt, Load)
+        )
+
     anchor_region = next(region for (region, _, _), sweep in zip(regions, sweeps, strict=True) if sweep == anchor)
-    def loads(region):
-        return tuple(stmt for site in sites(region) for node in (site.node, *site.node.operands)
-                     for stmt in node.lift.body.iter() if isinstance(stmt, Load))
-
     anchor_loads = loads(anchor_region)
+    extents = {axis.name: axis.extent for axis in piece.axes}
+    reference = {axis.name for axis in anchor}
+
+    def correspondence(region: Fold, sweep: tuple[Axis, ...]) -> dict[str, Var] | None:
+        if len(anchor) == 1:
+            return {}
+        owned = {axis.name for axis in sweep}
+        for load in loads(region):
+            for other in anchor_loads:
+                if load.input != other.input or len(load.index) != len(other.index):
+                    continue
+                coordinates = tuple(
+                    (left, right) for left, right in zip(load.index, other.index, strict=True)
+                    if isinstance(left, Var) and isinstance(right, Var) and left.name in extents and right.name in extents
+                    and extents[left.name] == extents[right.name]
+                )
+                shared = {left.name: right for left, right in coordinates if left.name in owned and right.name in reference}
+                reduced = {
+                    left.name: right for left, right in coordinates
+                    if left.name not in region.free_axes and right.name not in anchor_region.free_axes
+                }
+                # Equal load indices prove the shared coordinates, modulo equal-domain reduce binders.
+                # The rest of the output domain may flatten without mixing those coordinates.
+                if shared and len({expr.name for expr in shared.values()}) == len(shared) and tuple(
+                    expr.substitute({**reduced, **shared}) for expr in load.index
+                ) == other.index:
+                    return shared
+        return None
+
+    substitutions: dict[tuple[Axis, ...], Sigma] = {}
     for (region, _, _), sweep in zip(regions, sweeps, strict=True):
         if sweep == anchor or len(sweep) == len(anchor) == 1:
             substitutions[sweep] = Sigma({sweep[0].name: Var(anchor[0].name)}) if sweep != anchor else Sigma.IDENTITY
             continue
-        mapping = {}
-        if len(anchor) > 1:
-            owned = {axis.name: axis for axis in sweep}
-            reference = {axis.name: axis for axis in anchor}
-            for load in loads(region):
-                for other in anchor_loads:
-                    if load.input != other.input or len(load.index) != len(other.index):
-                        continue
-                    paired = {
-                        left.name: right
-                        for left, right in zip(load.index, other.index, strict=True)
-                        if isinstance(left, Var) and isinstance(right, Var) and left.name in owned and right.name in reference
-                        and owned[left.name].extent == reference[right.name].extent
-                    }
-                    reduced = {
-                        left.name: right for left, right in zip(load.index, other.index, strict=True)
-                        if isinstance(left, Var) and isinstance(right, Var) and left.name not in region.free_axes
-                        and right.name not in anchor_region.free_axes and left.name in extents and right.name in extents
-                        and extents[left.name] == extents[right.name]
-                    }
-                    if paired and len({expr.name for expr in paired.values()}) == len(paired) and tuple(
-                        expr.substitute({**reduced, **paired}) for expr in load.index
-                    ) == other.index:
-                        mapping = paired
-                        break
-                if mapping:
-                    break
-            if not mapping:
-                return piece
-        substitution = sigma(sweep, mapping)
+        mapping = correspondence(region, sweep)
+        substitution = sigma(sweep, mapping) if mapping is not None else None
         if substitution is None:
             return piece
         substitutions[sweep] = substitution
