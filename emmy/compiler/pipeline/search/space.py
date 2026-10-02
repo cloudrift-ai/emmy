@@ -183,6 +183,14 @@ GUARD_REDUCTIONS = Knob(
     off=False,
 )
 
+SHARED_CARRY = Knob(
+    "SHARED_CARRY",
+    KnobType.BOOL,
+    hints=(False, True),
+    help="Keep a CTA-owned carried state in shared memory across its ordered steps.",
+    off=False,
+)
+
 PAIR_LDMATRIX = Knob(
     "PAIR_LDMATRIX",
     KnobType.BOOL,

@@ -65,24 +65,7 @@ def rewrite(match: Match, root: Node, ctx=None) -> KernelOp | None:
             # The state's port — the buffer the lift added for the classic realization, which no
             # store of the term writes. Register storage has no global state allocation, so the
             # port goes: a graph splice; snapshots with external readers remain ordinary outputs.
-            written = {spec.write.output for spec in tile.output_specs}
-            ports = {t.name for t in root.outputs if t.name not in written and t.name not in match.graph.outputs}
-            ports = {name for name in ports if not match.graph.buffer_users(name)}
-            if ports:
-                from emmy.compiler.pipeline.passes.tile._cut import _input_fragment  # noqa: PLC0415
-
-                outputs = tuple(t for t in root.outputs if t.name not in ports)
-                names = {t.name: t.name + "__register" for t in outputs}
-                fragment = _input_fragment(match, root)
-                fragment.add_node(
-                    replace(kernel, body=body.rename_buffers(names), outputs={}, source=tile, knobs=tile.knobs),
-                    list(root.inputs),
-                    outputs=(outputs[0], *(replace(t, name=names[t.name]) for t in outputs[1:])),
-                    node_id=names[outputs[0].name],
-                )
-                fragment.outputs = list(names.values())
-                match.output = names
-                return fragment
+            return _drop_private_ports(match, root, replace(kernel, source=tile, knobs=tile.knobs), "register")
         return kernel
     except UnbindableProjection as exc:
         # The offered row has no multi-root binding (e.g. it tiles two contraction operands of a
@@ -90,6 +73,29 @@ def rewrite(match: Match, root: Node, ctx=None) -> KernelOp | None:
         # realization corpus pins that — and the compile declines it here: the skip is recorded,
         # the node stays a TileOp, and the greedy blocklist retry resolves onto the next row.
         raise RuleSkipped(f"kernel binder refuses this row's projection ownership: {exc}", reject=True) from exc
+
+
+def _drop_private_ports(match: Match, root: Node, kernel: KernelOp, suffix: str):
+    """Remove unused global state allocations after a resident materialization."""
+    written = {stmt.output for stmt in kernel.body.iter() if isinstance(stmt, Write)}
+    ports = {t.name for t in root.outputs if t.name not in written and t.name not in match.graph.outputs}
+    ports = {name for name in ports if not match.graph.buffer_users(name)}
+    if not ports:
+        return kernel
+    from emmy.compiler.pipeline.passes.tile._cut import _input_fragment  # noqa: PLC0415
+
+    outputs = tuple(t for t in root.outputs if t.name not in ports)
+    names = {t.name: t.name + "__" + suffix for t in outputs}
+    fragment = _input_fragment(match, root)
+    fragment.add_node(
+        replace(kernel, body=kernel.body.rename_buffers(names), outputs={}),
+        list(root.inputs),
+        outputs=(outputs[0], *(replace(t, name=names[t.name]) for t in outputs[1:])),
+        node_id=names[outputs[0].name],
+    )
+    fragment.outputs = list(names.values())
+    match.output = names
+    return fragment
 
 
 #: Names the RENDERER supplies, so a statement may read them with no binding anywhere in the IR:
