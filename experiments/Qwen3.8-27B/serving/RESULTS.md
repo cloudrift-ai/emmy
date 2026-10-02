@@ -6,15 +6,15 @@ recipe in `recipes/Qwen3.8-27B/RESULTS.md`.
 
 ## NVIDIA Tesla V100 SXM2 16GB x8
 
-### 2026-10-01 run (current archive)
+### 2026-10-02 run (current archive)
 
-- Archive: `results_v100x8.tar.gz`, archived root `2026-10-01_10-07-45/`.
-- Run timestamp `2026-10-01T10:07:45Z`; repository revision `7c317658681415c73a929493bb9a803151486db5`.
+- Archive: `results_v100x8.tar.gz`, archived root `2026-10-02_10-06-46/`.
+- Run timestamp `2026-10-02T10:06:46Z`; repository revision `2f5ae0962f898aa7b9a1a80d079cd34f136308f6`.
 - Host: `riftvm`, Ubuntu 24.04.1, kernel 6.8.0-139-generic, Intel Xeon E5-2680 v4, 48 logical CPUs, 409 GiB RAM.
 - GPUs: eight NVIDIA Tesla V100-SXM2-16GB, 16,384 MiB each, compute capability 7.0, driver 580.178.04. The host
   reports NV1/NV2 between some GPU pairs and PHB between others, so the eight-way tensor-parallel all-reduce still
   crosses at least one PCIe hop per step.
-- Model: `Qwen/Qwen3.8-27B@1d4bf0f2ff6012fd82039d0dd7c60c0`, BF16 weights served as FP16 (`--dtype half`).
+- Model: `Qwen/Qwen3.8-27B@1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0`, BF16 weights served as FP16 (`--dtype half`).
 - Engine image: `cloudriftai/1cat-vllm-deepseek-v4-flash-0731:1.2.3-d76126608` (vLLM
   `1.2.3.dev87+gd76126608.d20260810`).
 - Controls: seed 0, temperature 0, ignored EOS, 2 warm-ups, text-only path (`--language-model-only`), context
@@ -24,11 +24,22 @@ recipe in `recipes/Qwen3.8-27B/RESULTS.md`.
 - Rows executed: 1 of 1 succeeded, 0 failed requests.
 
 | Row | Input / output | Concurrency | Prompts | Duration | Output tok/s | Median TPOT |
-| --- | ---: | ---: | ---: | --- | ---: | ---: |
-| `v100x8_ea16f6fcc69d` | 1,000 / 1,000 | 4 | 32 | 837.32 s | 38.22 | 104.90 ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `v100x8_ea16f6fcc69d` | 1,000 / 1,000 | 4 | 32 | 862.86 s | 37.09 | 105.77 ms |
 
-The row ran 837.32 s (wall 888.4 s including teardown), under the 20-minute per-variant benchmark cap. Startup
-cost recorded for this row: deploy 131.5 s from container create to health.
+The row ran 862.86 s (total wall 1,832.05 s, including image pull 435.5 s and deploy 906.2 s), under the 20-minute
+per-variant benchmark cap of 1,200 s. Startup cost this row: deploy 906.2 s from container create to
+teardown-complete (image pull dominates because the 1Cat sm_70 image was not already cached on this fresh host).
+
+### 2026-10-01 run (superseded archive, preserved for the report cross-comparison)
+
+- Archive root `2026-10-01_10-07-45/`; run timestamp `2026-10-01T10:07:45Z`; repository revision
+  `7c317658681415c73a929493bb9a803151486db5`.
+- Host: same model, kernel 6.8.0-139-generic, driver 580.178.04.
+- Model, image, and controls: identical to the current run.
+- Measured KV pool: 279,171 tokens, 1.06x maximum concurrency at full context.
+- Row `v100x8_ea16f6fcc69d` at the same workload: 837.32 s, 38.22 tok/s output, median TPOT 104.90 ms.
+  Deploy from container create to health took 131.5 s (image already cached on that host).
 
 ### 2026-09-05 run (superseded archive, preserved for the report cross-comparison)
 

@@ -12,10 +12,9 @@ tags:
   - best-effort
 model:
   huggingface: ornith-ai/Ornith-1.5-35B-A3B-FP8
+  rationale: "FP8 twin of Ornith shell; 36B-total agentic coding MoE in one card."
+  heat: 20
   revision: fab11c26e2325a42f4b32da0249c819a0bade1b1
-  rationale: 'FP8 twin of the Ornith-1.5-35B-A3B shell: a 36B-total, 3B-active agentic coding MoE whose FP8 weights (~37
-    GiB) serve within a fraction of one datacenter card.'
-  heat: 0
   task: generate
 
 engine:
