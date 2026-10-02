@@ -853,10 +853,9 @@ class ClassicProblem(ScheduleProblem[ClassicSchedule]):
         return any(site.warp_eligible for site in self.node_sites)
 
     @cached_property
-    def bounds(self) -> tuple[int, int]:
-        size = descent = len(self.kernel_site.kernels)
+    def bound(self) -> int:
+        size = len(self.kernel_site.kernels)
         for site in self.node_sites:
             incident = len(self.tile.incident_edges[site.id])
             size *= len(site.nodes) * (len(site.edges) ** incident)
-            descent += len(site.nodes) * max(len(site.edges), 1)
-        return size, descent
+        return size

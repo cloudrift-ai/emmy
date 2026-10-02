@@ -21,7 +21,7 @@ from dataclasses import dataclass, replace
 
 from emmy.compiler.context import Context
 from emmy.compiler.pipeline.search import features
-from emmy.compiler.pipeline.search.dataset.group import DEFAULT_FEATURES, GoldenGroup, feature_view, pack_features
+from emmy.compiler.pipeline.search.dataset.group import GoldenGroup, feature_view, pack_features
 from emmy.compiler.pipeline.search.dataset.pool import GoldenPool
 from emmy.compiler.pipeline.search.dataset.shape import ShapeKey
 from emmy.compiler.pipeline.search.pool import Candidates, PoolSample
@@ -158,14 +158,14 @@ def _pool_identity(gpu: str, tier: str, shape: str, packed) -> tuple:
     Two enumerations belong in one group when this matches — the featurized pool is then byte-identical, so
     one enumeration's row index addresses the same row the other's does, and the goldens behind them are
     several verified answers to one question. The identity fields ride along with the matrix digest because
-    they decide things the matrix does not: the weight set (``dynamic``), the fold group (``shape``) and the
+    they decide things the matrix does not: the regime (``dynamic``), the fold group (``shape``) and the
     report axes. Requiring them to agree can only hold two pools apart, never fuse two that differ."""
     names, matrix, dynamic = packed
     return (gpu, tier, shape, dynamic, names, hashlib.blake2b(matrix, digest_size=16).digest())
 
 
 def build_golden_groups(
-    pools: Sequence[GoldenPool], features_spec: str = DEFAULT_FEATURES, *, sample: int = 0, seed: int = 0, kernel: str | None = None
+    pools: Sequence[GoldenPool], features_spec: str = "*", *, sample: int = 0, seed: int = 0, kernel: str | None = None
 ) -> tuple[list[GoldenGroup], list[tuple[str, str, str]]]:
     """Enumerate each golden pool (``db/export.golden_pools``), pin its golden rows, and featurize every
     candidate, as :class:`GoldenGroup` records (name, tier, card, pinned rows, per-row features filtered through
@@ -252,9 +252,8 @@ def build_golden_groups(
         shape = ShapeKey.from_s_features(pool.kernel.stamps)
         tier = "dyn" if shape.is_dyn else (shape.kind or ("warp" if shape.is_warp else "thread"))
         fold_group = _shape_group(shape)
-        # The feature view (default ``DEFAULT_FEATURES``: ``D_*`` geometry/occupancy plus ``MMA_tier`` — see
-        # its rationale in ``search/dataset/group.py``) filters here, before the pool is packed, so the
-        # trained-under view is exactly what the Group stores. ``feature_view`` keeps the routing features
+        # The feature view (default every feature) filters here, before the pool is packed, so the view is
+        # exactly what the Group stores. ``feature_view`` keeps the routing features
         # whatever the spec says, so a narrower ``--features`` cannot silently misroute a symbolic-axis pool.
         feats = [{k: v for k, v in features.knob_features({**base, **r}).items() if keep(k)} for r in rows]
         packed = pack_features(feats)

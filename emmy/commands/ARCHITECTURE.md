@@ -804,25 +804,20 @@ checked in. `check [--db PATH]` counts the rows of an instance whose tables disa
 `commands/db.db_path`, which refuses a missing one with the command that fills it.
 
 ### `emmy fit`
- Fit an offline-prior weights artifact and cross-validate it, GPU-free, over the golden groups of a dataset `emmy db
+Fit an offline-prior weights artifact and cross-validate it, GPU-free, over the golden groups of a dataset `emmy db
 export` wrote — the directory the positional argument names — the same groups `eval prior` reads (`Dataset.load`; the
-pipeline ARCHITECTURE's Part 8 owns the pool). The trainer's feature view (`--features`) is a projection of the
-dataset's full featurization, taken at fit time. One switch, `--trainer {linear,catboost}`; the two trainers write the
-same artifact shape, distinguished by its `kind` field, so either can be pointed at with `EMMY_OFFLINE_FILE` and A/B'd
-against the other.
+pipeline ARCHITECTURE's Part 8 owns the pool). The feature view (`--features`) is a projection of the dataset's full
+featurization, taken at fit time. The artifact is one JSON file — the trees in CatBoost's own JSON model format —
+and any written one can be pointed at with `EMMY_OFFLINE_FILE` and A/B'd against the shipped one.
 
-`linear` fits weights by random search + coordinate descent: `--samples N` (default 0: coordinate-descent-from-seed,
-the incumbent practice) and `--l2 λ` (the raw-space L2 penalty strength in the fit loss — default the declared
-tie-breaker strength `fit/linear.DEFAULT_L2`, `0` disables; keeps a rank-flat weight magnitude identified, the
-D_pow2_threads 686 incident). `catboost` fits a `QuerySoftMax` ranker, one group per candidate pool with every
-golden matched into that pool as a positive: `--iterations N`, `--negatives K` (sampled negatives per pool per round,
-drawn from the unpinned rows — the full corpus is ~38 M rows, so training samples while the rank metric still covers
-whole pools) and `--rounds R` (the first draws negatives uniformly, each further one mines hard negatives from what
-the current model ranks near the golden — **default 1, so mining is off**: the one measurement of it moved top-1
+The fit is a `QuerySoftMax` CatBoost ranker, one group per candidate pool with every golden matched into that pool as
+a positive: `--iterations N` (trees), `--depth D`, `--learning-rate η`, `--negatives K` (sampled negatives per pool per
+round, drawn from the unpinned rows — the full corpus is ~38 M rows, so training samples while the rank metric still
+covers whole pools) and `--rounds R` (the first draws negatives uniformly, each further one mines hard negatives from
+what the current model ranks near the golden — **default 1, so mining is off**: the one measurement of it moved top-1
 from 545 to 517 over the 1278-group golden dataset, in-sample, and `fit/catboost.DEFAULT_ROUNDS` records why that is
-the expected direction when the negatives are unlabeled rather than known-bad). Its fits are not byte-reproducible
-— CatBoost's histogram build is threaded — so two fits are compared by their metrics files rather than by a
-checksum.
+the expected direction when the negatives are unlabeled rather than known-bad). Fits are not byte-reproducible —
+CatBoost's histogram build is threaded — so two fits are compared by their metrics files rather than by a checksum.
 
 **A group is a candidate pool, not a golden.** A pool is one kernel on one card, in one precision regime, at one
 set of sizes — every golden row measured on it pins a row of that ONE group, whatever name or file recorded it, and
@@ -849,16 +844,11 @@ provenance, so two fits are only comparable when it matches. `catboost`'s `--neg
 draw from whatever pool it is handed, and a uniform draw from a uniform draw is a uniform draw from the
 original — the two nest by construction, and the trainer warns when `--negatives` reaches the size of the
 pools it is given and therefore selects nothing.
- Shared: `--seed`, `--folds N` (default 5; `0` skips cross-validation), `--out DIR`, and `--features SPEC` — the
+Shared: `--seed`, `--folds N` (default 5; `0` skips cross-validation), `--out DIR`, and `--features SPEC` — the
 feature view, comma-separated names with a trailing `*` for a prefix glob and a leading `-` to exclude, recorded in
-the metrics header and artifact provenance so two fits are only compared under matching views. **The default view is
-the trainer's own**: `search/dataset/group.DEFAULT_FEATURES` (`D_*,MMA_tier,MMA_acc_bits`) for `linear`, and
-`prior/fit/catboost.TREE_FEATURES` for `catboost` — that set minus every feature that exists only because an additive
-model cannot form it (monotone duplicates, `-|x - target|` folds, threshold flags, the `D_tma_*` interaction mirrors),
-each of which a tree re-derives by splitting on columns the view keeps. `search/dataset/group.MATMUL_FEATURES` is a
-third ready spec, holding just the 53 features that can move a matmul ranking — the rest are either constant within
-every pool or affine copies of a kept feature, so excluding them is expressiveness-neutral. `--out DIR` defaults to
-`_tune/fits/<timestamp>-<trainer>/`. A run writes `metrics.json` — the per-run record two fits are diffed by:
+the metrics header and artifact provenance so two fits are only compared under matching views. The default view is
+`search/dataset/group.DEFAULT_FEATURES` for the schedule space and `P_*` for the placement space. `--out DIR` defaults
+to `_tune/fits/<timestamp>/`. A run writes `metrics.json` — the per-run record two fits are diffed by:
 `full_train` (per-golden dual ranks plus per-card **summaries**) and the `cv` block (holdout and train summaries,
 per-card gap, per-fold detail); folds group by shape, so goldens sharing a candidate pool are held out together rather
 than scored by a model trained on that pool. The per-card blocks are the same `Summary` `emmy eval prior` emits — same
@@ -867,9 +857,8 @@ screen identically rather than agreeing by coincidence; each summary's `axes` ca
 `holdout` / `train`) beside the card, because one file holds all three. Goldens that never produced a candidate pool
 sit BESIDE the summaries in `full_train.skipped`, keyed by card: they have no pool and no rank, so they are a fact
 about the corpus rather than about a scored card, and keeping them out preserves the shared summary shape. The
-full-train artifact is written at `WEIGHTS`, the second positional argument, in the shipped format (a `catboost` fit
-also writes the booster as a `.cbm` sidecar beside it, named after its own JSON so several artifacts can share a
-directory): `prior/weights/schedule.json` when a refit rewrites the shipped weights, any other path for a candidate to
+full-train artifact is written at `WEIGHTS`, the second positional argument, in the shipped format:
+`prior/weights/schedule.json` when a refit rewrites the shipped weights, any other path for a candidate to
 A/B through `EMMY_OFFLINE_FILE` (the flow that replaced the retired `scripts/golden_knob_heuristics.py`). The header
 names the dataset it read and the dataset's provenance — the DB, the golden files (by source digest) the pools were
 read from: two fits are comparable only when they were computed over the same rows. `emmy/commands/fit.py` owns the
@@ -878,17 +867,12 @@ trainer wiring, the artifact assembly and the file writing; the pool builder is
 `emmy/compiler/pipeline/search/prior/fit/` (`run.py` / `cv.py`), documented there and in the pipeline ARCHITECTURE's
 prior sections.
 
-The command layer builds two `LinearTrainer` objects from these flags — the full-train one, warm-started from the
-incumbent artifact, and the fold one derived as `replace(trainer, warm_start=False)` so no held-out golden leaks
-into the model that is supposed to have never seen it. `run_fit` returns the fit rather than an artifact, because
-deciding what a fit with no dynamic cases ships with (it carries the incumbent's dynamic weight set forward, and
-says so in the provenance notes) is a shipping choice, not part of the shape of a run. The metrics header records
-both seeding policies and the ranking loss the fit ran under; two fits are only comparable when those match, the
-same way they must match on `--features`.
+The command layer builds one `CatBoostTrainer` from these flags; it serves the full-train fit and every fold, since a
+tree ensemble has no warm start through which a held-out golden could leak. The metrics header records its
+hyperparameters; two fits are only comparable when those match, the same way they must match on `--features`.
 
-The dataset's space selects the rest: a placement dataset fits the `P_*` view, seeds from the shipped placement
-weights (zeros before any exist) and writes `space` into the artifact, which the loader checks against the fork it
-is asked at.
+The dataset's space selects the rest: a placement dataset fits the `P_*` view and writes `space` into the artifact,
+which the loader checks against the fork it is asked at.
 
 ```bash
 emmy db import --db _data/dataset.db --fresh emmy/compiler/pipeline/search/golden/records/*.json   # the rows

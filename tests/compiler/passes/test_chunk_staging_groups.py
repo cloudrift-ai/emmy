@@ -20,6 +20,9 @@ def _chunk_loop(stage: str) -> str:
     q = "torch.randn(1, 8, 512, 64, dtype=torch.float16)"
     graph = graph_from_code(f"F.scaled_dot_product_attention({q}, {q}, {q}, is_causal=True)")[0]
     pins = {
+        "PLACE": "fuse",
+        "REDUCE@map.1/twist": "",
+        "REDUCE@map.1/twist.1/inner": "",
         "TILE@map.1/twist": "mma_m16n8k16_f16_f32/f1x8/k4",
         "TILE@map.1/twist.1/inner": "mma_m16n8k16_f16_f32/f1x8/k4",
         "STAGE@map.1/twist": stage,

@@ -379,7 +379,7 @@ def test_reference_is_the_compatible_cartesian_subset() -> None:
     assert {_schedule_signature(schedule) for schedule, verdict in schedules if verdict} == {
         _schedule_signature(schedule) for schedule in enumerate_classic_reference(context)
     }
-    assert len(schedules) == context.problem.bounds[0] == 24
+    assert len(schedules) == context.problem.bound == 24
 
 
 def test_every_lazy_traversal_equals_the_cartesian_reference() -> None:
@@ -694,7 +694,7 @@ def test_generic_fork_adapter_drives_a_schedule_context_lazily() -> None:
     )
 
     assert forks and not accepted
-    assert forks[0].pool_bound == 1 and forks[0].pool_descent_bound == 2  # the bounds read off the problem, lazily
+    assert forks[0].pool_bound == 1  # the bound read off the problem, lazily
     assert tuple(iter_leaves(forks))
     assert accepted
 

@@ -45,16 +45,12 @@ from emmy.compiler.pipeline.knob import (
 #
 # Version 4 is the exact-site classic schedule vocabulary. It retires the tree-path keys and the
 # old ``STAGE`` tokens, so mutable v3 rows must age out rather than silently featurize under a new
-# meaning. The shipped linear artifacts were schema-migrated with the bump: their retired
-# ``D_stage_ring`` coefficient moved to ``D_stage_prefetch``, the identical ``depth >= 2`` signal,
-# so the scoring function did not change and no synthetic refit was needed.
+# meaning.
 FEATURIZER_VERSION = 4
 
-# The features that SELECT a weight set rather than describe a candidate — the ``S_ext_n_symbolic_axis`` stamp
-# a masked-tile (symbolic-axis) kernel carries. The stamp VOCABULARY belongs here with the rest of the feature
-# spelling, so a dataset can read it without importing a model; what to DO with it stays with the model classes
-# (``prior/linear_model.py``: the two weight sets, and ``descent_cols``, which keeps the stamp out of the linear
-# descent because a pool-constant term cancels out of a within-pool ranking).
+# The features that name a candidate's regime rather than describe it — the ``S_ext_n_symbolic_axis`` stamp a
+# masked-tile (symbolic-axis) kernel carries. The stamp VOCABULARY belongs here with the rest of the feature
+# spelling, so a dataset can read it without importing a model; the model splits on it like any column.
 #: The ``H_opt`` value of the DEPLOYABLE regime — the nvcc opt level ``compile`` / ``run`` / ``tune``
 #: all compile at, and therefore the only one a measurement is worth anything under. Rows carrying
 #: any other value came from a deliberately pinned sweep or from the era when tuning ranked at
@@ -68,9 +64,8 @@ ROUTING_FEATURES = ("S_ext_n_symbolic_axis",)
 def is_dynamic_row(feats: dict) -> bool:
     """Whether a featurized row carries the symbolic-axis (masked-tile) routing stamp — the ONE reading of it.
 
-    What the stamp SELECTS is the reader's business: the linear model routes to a second weight vector
-    (``LinearModel.weight_set``), a tree splits on the column, and ``ShapeKey.is_dyn`` records it as part of a
-    shape's identity. All three ask this one question, because a second spelling of "is the stamp set" would be
+    What the stamp SELECTS is the reader's business: the model splits on the column, and ``ShapeKey.is_dyn``
+    records it as part of a shape's identity. Both ask this one question, because a second spelling of "is the stamp set" would be
     a second chance to disagree about which regime a pool belongs to."""
     return any(feats.get(name, 0.0) > 0 for name in ROUTING_FEATURES)
 
@@ -162,18 +157,6 @@ def _stage_features(knobs: dict) -> dict[str, float]:
         return {"D_stage_reg": 1.0}  # register storage has no shared-memory pipeline
     return {
         "D_stage_depth": float(st.depth),
-        # Does the gmem→smem pipeline prefetch at all — depth 1 is a single buffer, ≥ 2 is a ring.
-        # A STEP, deliberately, on a feature the linear model otherwise only holds linearly: a weight
-        # on ``D_stage_depth`` is monotone in depth and cannot express "prefetching is on", so without
-        # this the whole single-buffer-vs-ring distinction is inexpressible to the offline prior. The
-        # retired ``D_stage_ring`` flag was carrying exactly this step (measured: identical to
-        # ``depth >= 2`` over 2 033 344 candidate rows, zero disagreements) and its removal cost the
-        # RTX 5090 matmul fit its top-1 entirely — 54 of 242 goldens ranked first, then 4. Restoring
-        # the step recovers it; restoring the retired FLAG would not, since the flag named a rotation
-        # discipline the staged K-loop no longer has (it compiled byte-identically either way).
-        # Additive: an artifact fit before this key simply has no weight for it and scores it 0.0, so
-        # no ``FEATURIZER_VERSION`` bump is owed for the addition itself.
-        "D_stage_prefetch": 1.0 if st.depth >= 2 else 0.0,
         "D_stage_async": 1.0 if st.is_async else 0.0,
         "D_stage_tma": 1.0 if st.transport == "smem-tma" else 0.0,
         "D_stage_reg_depth": float(st.reg_depth),  # smem→register double-buffer (p<n>)
@@ -330,29 +313,11 @@ def _schedule_node_features(node_knobs: dict) -> dict[str, float]:
     # the row: the packed dtype (``S_dtype_f4e2m1x2``) is a whole-kernel fact that the compute-fill
     # sibling rows share, and ``D_stage_async`` is a transport flag every 16-bit matmul sets too.
     # Only their conjunction is the packed byte slab, and the packed arm of ``resolve_warp_stage``
-    # is its only producer. Emitted ONLY there, the way the ``D_tma_*`` terms are emitted only on a
-    # TMA-staged row, so every other row is untouched. Additive: a fit made before this key has no
+    # is its only producer. Emitted ONLY there, so every other row is untouched. Additive: a fit made before this key has no
     # weight for it and scores it 0.0, so no ``FEATURIZER_VERSION`` bump is owed, and both fitted
     # views name their ``MMA_*`` keys explicitly, so neither picks it up until asked to.
     if feats.get("D_stage_async") and float(node_knobs.get("S_dtype_f4e2m1x2", 0.0) or 0.0) > 0 and "MMA_a_bits" in feats:
         feats["MMA_b_store_bits"] = float(PACKED_PAIR_STORE_BITS)
-    # TMA-conditioned tile pricing: TMA staging only enumerates where the hardware offers it
-    # (Hopper/Blackwell), so a geometry term gated on ``D_stage_tma`` is where one weight set
-    # prices those cards' tiles separately — no per-arch split needed. The 2026-07-09 5090
-    # sweep showed the golden TMA tiles want narrower/squarer warp grids and wider splits than
-    # the shared weights choose (TILE match 0/17); these give the fit that axis. Emitted only
-    # on a TMA-staged row (skip-if-missing 0.0 elsewhere).
-    if feats.get("D_stage_tma"):
-        for src, dst in (
-            ("D_aspect", "D_tma_aspect"),
-            ("D_log2_area", "D_tma_log2_area"),
-            ("D_w_grid_m", "D_tma_grid_m"),
-            ("D_w_grid_n", "D_tma_grid_n"),
-        ):
-            if src in feats:
-                feats[dst] = feats[src]
-        if "D_splitk" in feats:
-            feats["D_tma_l2_splitk"] = math.log2(max(feats["D_splitk"], 1.0))
     return feats
 
 
@@ -574,26 +539,19 @@ def _geom_feats(
     finalize: str = "atomic",
 ) -> dict[str, float]:
     """The engineered ``D_*`` tile-geometry / occupancy feature family — the
-    single featurization the priors rank on. It folds in everything the old
-    hand-coded matmul heuristic scored (occupancy waves, tile-area / thread /
-    aspect targets, the geometry "bands", K-chunk depth), so a fixed linear model
-    over these features (:class:`~emmy.compiler.pipeline.search.prior.OfflinePrior`)
-    reproduces that heuristic, and a tree model sees the same derived signal it can't
-    cheaply reconstruct from raw knobs + the *coarse* ``S_ext_*`` extents.
+    single featurization the priors rank on: the derived signal a tree can't
+    cheaply reconstruct from raw knobs + the *coarse* ``S_ext_*`` extents. A
+    monotone transform of a kept column, or a threshold on one, is left out: a
+    tree forms it with a split.
 
-    Tier-aware: the "ideal" tile / thread targets differ between the scalar thread
-    tile (256 threads, 8192-elem area) and the warp tile (128 threads = 4 warps,
-    64×64 = 4096 area), selected by ``warp``. ``free_prod`` is the output free-dim
+    ``warp`` selects the tier. ``free_prod`` is the output free-dim
     product (``S_ext_free_prod``); when present the occupancy terms are added —
     ``#CTAs ≈ M·N / tile_area · SPLITK`` (ceil-free, needs only the product the
-    ``S_*`` features carry, not the per-axis split). The ``BN``/``BM`` band
-    features are the OFF sentinel ``0`` on a warp row (so they don't fire there);
-    the K-chunk ``bk`` is a live knob on the warp tier only today (the ``TILE``
-    codec's ``k<n>``, atom_k multiples — the scalar codec spells no K token, so
-    the scalar ``D_*_bk`` bands stay 0), riding tier-split features (``D_*_bk``
-    scalar vs ``D_w_*_bk`` warp) because the tiers pull opposite ways. The rest
-    of the warp tier's signal rides the geometry / occupancy terms via the
-    tier-aware targets."""
+    ``S_*`` features carry, not the per-axis split). ``BN``/``BM`` are the OFF
+    sentinel ``0`` on a warp row; the K-chunk ``bk`` is a live knob on the warp
+    tier only today (the ``TILE`` codec's ``k<n>``, atom_k multiples — the scalar
+    codec spells no K token, so the scalar ``D_l2_bk`` stays 0), riding
+    tier-split features (``D_l2_bk`` scalar vs ``D_w_l2_bk`` warp)."""
 
     def l2(x: float) -> float:
         return math.log2(max(float(x), 1.0))
@@ -601,8 +559,6 @@ def _geom_feats(
     area = max(tile_m * tile_n, 1)
     reuse = area / (tile_m + tile_n) if (tile_m + tile_n) else 0.0
     aspect = l2(tile_m) - l2(tile_n)
-    thr_target = 7.0 if warp else 8.0  # log2 threads: 128 (4-warp) vs 256
-    area_target = 12.0 if warp else 13.0  # log2 area: 64×64=4096 vs 8192
     masked_m = float(knobs.get("S_masked_m", 0.0) or 0.0)
     masked_n = float(knobs.get("S_masked_n", 0.0) or 0.0)
     masked_k = float(knobs.get("S_masked_k", 0.0) or 0.0)
@@ -617,16 +573,8 @@ def _geom_feats(
         "D_log2_area": l2(area),
         "D_reuse": reuse,
         "D_aspect": aspect,
-        # offline (ex-heuristic) terms — tier-aware targets
-        "D_l2_threads": l2(threads),
-        "D_near_threads": -abs(l2(threads) - thr_target),
+        # a periodic predicate no split on ``D_threads`` can express
         "D_pow2_threads": 1.0 if threads > 0 and (threads & (threads - 1)) == 0 else 0.0,
-        "D_cells_cap": min(float(cells), 128.0),
-        "D_near_cells": -abs(float(cells) - 16.0),
-        "D_near_area": -abs(l2(area) - area_target),
-        "D_square": -abs(aspect),
-        "D_l2_reuse": l2(reuse),
-        "D_near_intensity": -abs(l2(reuse) - 5.0),
         "D_near_kchunks": -abs(l2(kchunks) - 5.0),
         # Per-role masked-tile penalties: split M / N / K so the prior can weight K-masking
         # distinctly. Negative = penalty.
@@ -637,23 +585,16 @@ def _geom_feats(
         "D_l2_bn": l2(bn),
         "D_l2_bm": l2(bm),
         "D_bn_ge_bm": 1.0 if bn > 0 and bn >= bm else 0.0,
-        "D_bn_band": 1.0 if 16 <= bn <= 64 else 0.0,
-        "D_bm_band": 1.0 if 8 <= bm <= 16 else 0.0,
         # BK bands are tier-specific: the scalar tile wants deep K-chunks (BK≥32)
         # while the warp / TMA tile wants a shallow pipelined BK≈2 — opposite
         # directions, so they ride separate features (one weight can't serve both).
         "D_l2_bk": 0.0 if warp else l2(bk),
-        "D_bk_ge32": 0.0 if warp else (1.0 if bk >= 32 else 0.0),
         "D_w_l2_bk": l2(bk) if warp else 0.0,
-        "D_w_near_bk": (-abs(l2(bk) - 1.0)) if warp else 0.0,
         "D_splitk": float(splitk),
-        "D_splitk_le2": 1.0 if splitk <= 2 else 0.0,
         # Cross-CTA finalize fold (the REDUCE codec ``c`` field's letter): 1.0 = deferred
         # KERNEL combine (``c<cta>k``), 0.0 = in-place ATOMIC (``c<cta>a`` / bare). The
         # offline prior's split-K gate reads it.
         "D_finalize_kernel": 1.0 if (splitk > 1 and finalize == "kernel") else 0.0,
-        "D_tilen_clean": 1.0 if tile_n in (32, 64, 128) else 0.0,
-        "D_near_tilen": -abs(l2(tile_n) - 6.0),
         # A scalar tile on a warp-ELIGIBLE contraction (16-bit operands, atoms offered — the
         # scheduler's ``S_warp_eligible`` kernel stamp) competes against tensor cores: the
         # roofline bar none of the flat geometry terms can see. 0 on warp rows and on kernels
@@ -665,17 +606,13 @@ def _geom_feats(
         waves = math.log2(max(ctas / sm, 1e-3))
         out["D_log2_ctas"] = l2(ctas)
         out["D_log2_waves"] = waves  # CTAs relative to SM count
-        out["D_near_waves"] = -abs(waves - 1.0)  # target ~2 waves
-        out["D_ctas_ge_sm"] = 1.0 if ctas >= sm else 0.0
         # Split-K beyond what occupancy needs is pure atomic/combine waste. The free
         # axes alone give ``free_ctas = free_prod/area`` CTAs; split-K is justified
-        # only to lift that toward the ~2·SM ``D_near_waves`` target. The terms above
+        # only to lift that toward ~2 waves. The terms above
         # fold ``splitk`` straight into ``ctas``, so they CANNOT tell "≈2 waves via a
         # small tile" (golden, free) from "≈2 waves via heavy split-K on a big tile"
-        # (atomic-bound) — both score the same waves / ctas≥sm. This credits split-K
-        # up to the need and penalizes the excess, the engineered signal the online
-        # prior needs to separate the SPLITK=1/2 goldens from the SPLITK=8/16 tiles
-        # the -O1 sweep over-ranks (the offline prior already gets it via D_splitk_le2).
+        # (atomic-bound) — both score the same waves. This credits split-K up to the
+        # need and penalizes the excess.
         free_ctas = float(free_prod) / area
         # Split-K is justified to (a) lift occupancy toward ~2 waves AND (b) hide the K-streaming
         # latency of a K-HEAVY GEMM — a long reduction per output tile parallelizes across the split
@@ -692,19 +629,12 @@ def _geom_feats(
         # The deficit side: UNDER-splitting a shape that justifies a wide split (``splitk < needed``)
         # is the K-heavy miss — the penalty that lifts the ``g<w>k`` golden over the ``g1`` tile the
         # occupancy terms alone rank as safe. Zero once ``splitk ≥ needed`` (and for every shape with
-        # ``needed == 1``, so the well-tuned non-split geometries are untouched). Was absent: split-K
-        # had only penalties (``D_splitk_le2`` / ``D_splitk_excess``), never a reward when justified.
+        # ``needed == 1``, so the well-tuned non-split geometries are untouched).
         out["D_splitk_deficit"] = math.log2(max(needed / max(float(splitk), 1.0), 1.0))
         # The deferred split-K finalize (``g<w>k``) writes + re-reads a full free-size partial
         # workspace and launches the combine kernel — a round-trip volume the in-place atomic
         # ``g<w>a`` finalize does not pay.
         out["D_splitk_roundtrip"] = l2(free_prod) if out["D_finalize_kernel"] else 0.0
-        # Register-tile intensity × occupancy interaction: a wide per-thread
-        # register tile (big FM·FN) is a win only while the grid still covers
-        # the SMs — the flat D_cells* terms can't express that, so the big-FM
-        # goldens (square.2048's FM=26) rank deep under any sign the fit gives
-        # them (2026-06-12 golden-sweep finding 2).
-        out["D_l2_cells_occ"] = l2(cells) if ctas >= sm else 0.0
     return out
 
 
@@ -714,11 +644,8 @@ def _geom_feats(
 # (``area=1`` makes ``#CTAs = free_prod·splitk`` — exactly the per-output-cell reduce grid).
 _REDUCE_FEATURE_KEYS = (
     "D_threads",
-    "D_l2_threads",
     "D_pow2_threads",
-    "D_near_threads",
     "D_splitk",
-    "D_splitk_le2",
     "D_splitk_excess",
     "D_finalize_kernel",
     "D_splitk_roundtrip",
@@ -729,8 +656,6 @@ _REDUCE_FEATURE_KEYS = (
     "D_scalar_on_warp_eligible",
     "D_log2_ctas",
     "D_log2_waves",
-    "D_near_waves",
-    "D_ctas_ge_sm",
 )
 
 
@@ -794,7 +719,7 @@ def _tile_features(knobs: dict) -> dict[str, float]:
     d = _reduce_decomp(knobs)
     # The scalar ``TILE`` codec spells no K-chunk (the smem slab's K granularity is derived
     # fit-to-smem at stage resolution, never a knob), so ``bk`` is structurally 1 here and the
-    # scalar ``D_l2_bk`` / ``D_bk_ge32`` bands stay 0 until the codec grows a K token.
+    # scalar ``D_l2_bk`` stays 0 until the codec grows a K token.
     bn, bm, fm, fn, br, bk, splitk = par_n, par_m, reg_m, reg_n, d.coop, 1, d.cta
     return _geom_feats(
         knobs,
@@ -841,7 +766,7 @@ def _warp_tile_features(knobs: dict) -> dict[str, float]:
         bn=0,  # OFF sentinels: the BN/BM bands don't fire on a warp row
         bm=0,
         # The slab K-chunk is the TILE codec's ``k<n>`` token (``Tile.bk``, atom_k multiples —
-        # the codec's native unit, matching the shallow ``D_w_near_bk`` ≈2 target). It used to read
+        # the codec's native unit). It used to read
         # the never-set ``_Decomp.serial`` (always 1), so every ``D_w_*_bk`` was constant and
         # k-chunk siblings featurized byte-identically.
         bk=plan.bk,

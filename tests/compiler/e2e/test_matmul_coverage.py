@@ -377,6 +377,7 @@ def test_producer_band_without_a_driveable_stage_enumerates_nothing(monkeypatch)
 
     monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_f16_f32/f2x2/k2")
     monkeypatch.setenv("EMMY_WORK", "w2x2+p2")
+    monkeypatch.setenv("EMMY_REDUCE", "")  # serial K: the subject is the band, not the split fork
     monkeypatch.setenv("EMMY_STAGE", "d2/smem-async")
     out = Pipeline.build(TILE_PASSES).run(_scalar_stage_graph(dtype=F16), ctx=Context.from_target((9, 0)))
     tile_op = next(n.op for n in out.nodes.values() if isinstance(n.op, TileOp))
@@ -1138,6 +1139,7 @@ def test_bf16_operands_stage_via_cp_async(monkeypatch):
 
     monkeypatch.setenv("EMMY_TILE", "mma_m16n8k16_bf16_f32/f2x2/k2")
     monkeypatch.setenv("EMMY_WORK", "w2x2")
+    monkeypatch.setenv("EMMY_REDUCE", "")
     monkeypatch.setenv("EMMY_STAGE", "d2/smem-async")
     M = 256
     g = Graph()

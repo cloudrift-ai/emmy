@@ -110,24 +110,37 @@ def test_a_shared_quantized_activation_behind_a_norm_compiles_and_holds_flip_bou
 
 
 @requires_cuda
-@pytest.mark.parametrize(("m", "n", "k"), [(32, 128, 128), (16, 512, 2048), (256, 512, 2048)])
+@pytest.mark.parametrize(
+    ("m", "n", "k", "schedule"),
+    [
+        (32, 128, 128, {"WORK": "t4", "TILE": "", "REDUCE": "coop", "STAGE": ""}),
+        (16, 512, 2048, {"WORK": "t512", "TILE": "", "REDUCE": "coop-t", "STAGE": ""}),
+        (256, 512, 2048, {"WORK": "w1x8", "TILE": "mma_m16n8k64_e2m1_f32/f1x1/k8", "REDUCE": "", "STAGE": "d3/smem-tma"}),
+    ],
+)
 @pytest.mark.xdist_group("cuda")
-def test_the_spelled_w4a4_program_matches_numpy_on_device(tmp_path, m, n, k):
+def test_the_spelled_w4a4_program_matches_numpy_on_device(tmp_path, m, n, k, schedule):
     """numpy-vs-CUDA parity on the declared W4A4 program. numpy evaluates the same graph the CUDA
     backend compiles, so any gap is a lowering defect. The deep-K decode shape and a prefill-wide
     M ride along — split-K and the wider schedules are where the packed lane has been bitten
-    before. Bound is roughly 3x the measured error on an RTX 5090 (4.8e-4 – 6.3e-4)."""
+    before. Bound is roughly 3x the measured error on an RTX 5090 (4.8e-4 – 6.3e-4).
+
+    Each shape's schedule is pinned, so the subject is the lowering and not the prior's pick, and
+    fast math is off through the run: its approximate division moves a quotient that sits one ulp
+    above an e2m1 midpoint onto it, and that code flip alone is a 2-3% gap to the oracle."""
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.backend.numpy import NumpyBackend
     from emmy.compiler.loader.safetensors import load_constants_from_safetensors
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
 
     g = _w4a4_linear(tmp_path, m=m, n=n, k=k)
     x = (np.random.default_rng(3).standard_normal((m, k)) * 0.05).astype(np.float16)
     data = load_constants_from_safetensors(g, str(tmp_path))
     ref, _ = NumpyBackend().run(g, input_data={**data, "x": x})
     backend = CudaBackend()
-    compiled = backend.compile(g)
-    got, _ = backend.run(compiled, input_data={**data, "x": x})
+    with pinned_knobs({"PLACE": "fuse", **schedule, "FAST_MATH": "False"}):
+        compiled = backend.compile(g)
+        got, _ = backend.run(compiled, input_data={**data, "x": x})
     r = ref.outputs["y"].astype(np.float32)
     c = np.asarray(got.outputs["y"]).reshape(m, n).astype(np.float32)
     denom = max(float(np.abs(r).max()), 1e-9)
@@ -262,10 +275,11 @@ def test_the_block_scaled_cell_runs_and_holds_its_declared_tolerance(tmp_path):
     """The native fp4 path end to end: both operands packed, the block-scaled cell spelled, and
     the result within the gap PR decision 18 accepts.
 
-    The cell is PINNED rather than elected. This lane gives every test an empty online prior, so an
-    unpinned compile decides the cell's fork by the prior's cold-start order — which arm that names
-    is not this test's subject, and it moved with the catalog. The pin makes the subject the cell
-    itself: that it reaches the kernel with its own scale operands and holds its declared tolerance.
+    The cell's whole schedule is PINNED rather than elected: an unpinned fork follows the prior,
+    which arm that names is not this test's subject, and it moves whenever the prior is refit. The
+    pin makes the subject the cell itself: that it reaches the kernel with its own scale operands
+    and holds its declared tolerance. Fast math stays off through the run, since its approximate
+    division flips activation codes at e2m1 midpoints, a gap no fused-scale rounding explains.
 
     That gap is not rounding noise, so this is a tolerance and not the exact oracle every other
     lowering answers to. The declared program applies ``f16(block_scale x tensor_scale)`` per
@@ -288,15 +302,15 @@ def test_the_block_scaled_cell_runs_and_holds_its_declared_tolerance(tmp_path):
     data = load_constants_from_safetensors(g, str(tmp_path))
     ref, _ = NumpyBackend().run(g, input_data={**data, **feed})
     backend = CudaBackend()
-    with pinned_knobs({"TILE": "mma_m16n8k64_e2m1_f32/f1x2/k4"}):
+    with pinned_knobs(_fp4_tma_pins("d1/smem-async")):
         compiled = backend.compile(g)
+        got, _ = backend.run(compiled, input_data={**data, **feed})
     sources = [s for node in compiled.nodes.values() if (s := getattr(node.op, "kernel_source", None))]
     assert any("emmy_mma_m16n8k64_e2m1_f32(" in s for s in sources), "the pinned block-scaled cell never reached a kernel"
     native = next(s for s in sources if "emmy_mma_m16n8k64_e2m1_f32(" in s)
     assert "emmy_mma_load_sfa_f4" in native and "emmy_mma_load_sfb_f4" in native, "the cell ran without its scale operands"
     assert "EMMY_F4_LUT" not in native, "a native cell must not decode either operand through the value table"
 
-    got, _ = backend.run(compiled, input_data={**data, **feed})
     for out in g.outputs:
         r = ref.outputs[out].astype(np.float32).reshape(-1)
         c = np.asarray(got.outputs[out]).astype(np.float32).reshape(-1)
@@ -466,14 +480,14 @@ def test_the_two_channel_block_scaled_cell_runs_and_holds_the_declared_tolerance
     data = load_constants_from_safetensors(g, str(tmp_path))
     ref, _ = NumpyBackend().run(g, input_data={**data, **feed})
     backend = CudaBackend()
-    with pinned_knobs({"TILE": "mma_m16n8k64_e2m1_f32/f1x2/k4", "STAGE": "d1/smem-async", "PLACE": "fuse"}):
+    with pinned_knobs(_fp4_tma_pins("d1/smem-async")):
         compiled = backend.compile(g)
+        got, _ = backend.run(compiled, input_data={**data, **feed})
     sources = [s for node in compiled.nodes.values() if (s := getattr(node.op, "kernel_source", None))]
     native = [s for s in sources if "emmy_mma_m16n8k64_e2m1_f32(" in s]
     assert len(native) == 1, "the pinned block-scaled cell never reached the gate/up kernel"
     assert "_b1_smem" in native[0] and "_b1s_smem" in native[0], "the second channel has no slabs of its own"
 
-    got, _ = backend.run(compiled, input_data={**data, **feed})
     r = ref.outputs["act"].astype(np.float32).reshape(-1)
     c = np.asarray(got.outputs["act"]).astype(np.float32).reshape(-1)
     rel = np.abs(c - r) / max(float(np.abs(r).max()), 1e-9)
@@ -492,7 +506,7 @@ def _fp4_tma_program(tmp_path, channels, *, m, k):
 
 
 def _fp4_tma_pins(stage: str) -> dict:
-    return {"TILE": "mma_m16n8k64_e2m1_f32/f1x2/k4", "WORK": "w1x2", "STAGE": stage, "PLACE": "fuse"}
+    return {"TILE": "mma_m16n8k64_e2m1_f32/f1x2/k4", "WORK": "w1x2", "STAGE": stage, "PLACE": "fuse", "REDUCE": "", "FAST_MATH": "False"}
 
 
 @pytest.mark.parametrize("channels", [1, 2])
@@ -546,11 +560,11 @@ def test_fp4_tma_matches_cp_async_bit_for_bit(tmp_path, channels, ring, k):
         backend = CudaBackend()
         with pinned_knobs(_fp4_tma_pins("/".join((depth, transport, *register)))):
             compiled = backend.compile(g)
-        native = [
-            s for node in compiled.nodes.values() if "emmy_mma_m16n8k64_e2m1_f32(" in (s := getattr(node.op, "kernel_source", "") or "")
-        ]
-        assert native and all(("cp_async_bulk_tensor" in s) == (transport == "smem-tma") for s in native)
-        runs = [backend.run(compiled, input_data={**data, **feed})[0] for _ in range(2)]
+            native = [
+                s for node in compiled.nodes.values() if "emmy_mma_m16n8k64_e2m1_f32(" in (s := getattr(node.op, "kernel_source", "") or "")
+            ]
+            assert native and all(("cp_async_bulk_tensor" in s) == (transport == "smem-tma") for s in native)
+            runs = [backend.run(compiled, input_data={**data, **feed})[0] for _ in range(2)]
         outputs[transport] = [np.asarray(run.outputs[out]) for run in runs for out in g.outputs]
     async_out, tma_out = outputs["smem-async"], outputs["smem-tma"]
     assert all(np.array_equal(a, t) for a, t in zip(async_out, tma_out, strict=True)), "TMA and cp.async disagree"

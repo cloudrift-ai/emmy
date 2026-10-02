@@ -19,11 +19,9 @@ import pytest
 
 from emmy.compiler.pipeline.search.golden.repository import _RECORDS_DIR, repository_golden_paths
 
-#: The fraction of a slice's pools whose recorded decision the shipped prior must re-decide, in either space.
-#: Provisional: set where the 2026-10-01 refit passes every slice. At 0.9 five slices were red, four of them slices
-#: of four to six pools failing on one miss; the prior and the gate are to be tightened together, never the number
-#: alone.
-TOLERANCE = 0.75
+#: The fraction of a slice's pools whose recorded decision the shipped prior must re-decide, in either space. The
+#: CatBoost priors re-decide every one: each slice of the 2026-10-01 refit reproduces all of its pools.
+TOLERANCE = 1.0
 #: Pools per node: enough for the tolerance to mean something, few enough that a schedule node — a draw per pool,
 #: seconds each — stays a few minutes on a CI runner, which is several times slower than a dev box.
 SLICE = 16
