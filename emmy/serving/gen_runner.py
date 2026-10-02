@@ -1771,6 +1771,7 @@ class EmmyGenRunner:
             """Index a complete pre/post tier by layer: a GDN layer has no such program and holds ``None``."""
             programs = iter(tier)
             return [next(programs) if gdn is None else None for gdn in gdn_programs]
+
         if plan_cache.hits or plan_cache.misses:
             logger.info(
                 "[gen_runner] structural plan cache: %d hit(s), %d miss(es), %d template(s)",
