@@ -8,11 +8,13 @@ from importlib import import_module
 from math import prod
 
 from emmy.compiler.backend.cuda.dtype import cuda_name
+from emmy.compiler.dtype import get as dtype_get
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import BinaryExpr, Builtin, Literal, TernaryExpr, Var
 from emmy.compiler.ir.kernel import KernelOp, Smem, Sync, Tile
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Cond, Let, Load, Loop, Pre, Select, StridedLoop, Write
+from emmy.compiler.ir.stmt.base import dtype_promote
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.fork import DeferredFork
 from emmy.compiler.pipeline.passes.tile._fromloop import seed_index
@@ -149,7 +151,8 @@ def _resident(op, program, retained=frozenset()):
                 if held is not None and held.input == port and seed is not None and seed.input == carry.seed:
                     if uses[seed.name] == 1:
                         discarded.add(seed.name)
-                    stmt = Assign(stmt.name, "copy", (held.name,), dtype=tensor.dtype)
+                    promoted = dtype_get(dtype_promote("add", [held.dtype.name, seed.dtype.name]))
+                    stmt = Assign(stmt.name, "copy", (held.name,), dtype=promoted)
             if isinstance(stmt, Load) and stmt.input == port:
                 stmt = replace(stmt, input=shared, index=(parity, *stmt.index[1 + len(batch) :]), dtype=tensor.dtype)
             elif isinstance(stmt, Write) and stmt.output == port:
@@ -219,6 +222,8 @@ def _parallel_copy(op, program, step, shared, parity, shape, batch, threads, dty
     for store in outputs:
         value = store.value
         while isinstance(defs.get(value), Assign) and defs[value].op.name == "copy":
+            if defs[value].dtype not in (None, dtype):
+                return None
             value = defs[value].args[0]
         if value != carry.value or op.outputs[store.output].dtype != dtype:
             return None
@@ -235,14 +240,14 @@ def _parallel_copy(op, program, step, shared, parity, shape, batch, threads, dty
             stmt = definitions.get(name)
             if isinstance(stmt, Load) and stmt.input == shared:
                 return stmt.index
-            if isinstance(stmt, Assign) and stmt.op.name == "copy":
+            if isinstance(stmt, Assign) and stmt.op.name == "copy" and stmt.dtype in (None, dtype):
                 return address(stmt.args[0])
             return None
 
         for s in body:
             if isinstance(s, Load) and s.input == shared:
                 values[s.name] = s.index
-            elif isinstance(s, Assign) and s.op.name == "copy" and address(s.args[0]) is not None:
+            elif isinstance(s, Assign) and s.op.name == "copy" and s.dtype in (None, dtype) and address(s.args[0]) is not None:
                 values[s.name] = address(s.args[0])
             elif isinstance(s, Write) and address(s.value) is not None:
                 stores.append(s)

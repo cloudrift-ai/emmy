@@ -105,6 +105,32 @@ def test_an_exposed_state_port_keeps_every_snapshot():
 
 
 @requires_cuda
+def test_parallel_snapshot_copy_keeps_intermediate_casts():
+    graph = _graph()
+
+    def cast_snapshot(body):
+        stmts = []
+        for stmt in body:
+            if isinstance(stmt, Write):
+                stmts.append(Assign("narrowed", "copy", (stmt.value,), dtype=F16))
+                stmt = replace(stmt, values=("narrowed",))
+            elif stmt.nested():
+                stmt = stmt.with_bodies(tuple(cast_snapshot(b) for b in stmt.nested()))
+            stmts.append(stmt)
+        return Body(stmts)
+
+    graph.nodes["out"].op = replace(graph.nodes["out"].op, body=cast_snapshot(graph.nodes["out"].op.body))
+    array = (np.random.default_rng(0).standard_normal((2, 40, 40)) * 0.03).astype(np.float32)
+    outputs = []
+    for enabled in (False, True):
+        with pinned_knobs({**_PINS, "SHARED_CARRY": enabled}):
+            compiled = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.probe())
+        outputs.append(CudaBackend().run(compiled, input_data={"seed": array})[0].outputs["out"])
+    np.testing.assert_array_equal(*outputs)
+    np.testing.assert_array_equal(outputs[0], outputs[0].astype(np.float16).astype(np.float32))
+
+
+@requires_cuda
 @pytest.mark.parametrize("dtype", [F32, F16], ids=["f32", "f16"])
 @pytest.mark.parametrize("masked", [True, False], ids=["selected", "full"])
 def test_shared_state_matches_the_global_state_on_the_same_inputs(dtype, masked):
