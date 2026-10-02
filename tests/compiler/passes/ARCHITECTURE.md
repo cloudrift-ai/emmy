@@ -119,7 +119,8 @@ views become one shared-input contraction, and both results are compared with Nu
 prove one or two shared input coordinates across differently named reduction axes, with distinct row/channel values
 and preserved output index order. Equal single-axis symbolic domains and windows stay intact. Unequal domains or
 windows, incompatible or repeated input coordinates, cross-coordinate dependencies, variable capture, scalar
-coordinate uses, and repeated output buffers retain their existing form. Separate Fold tests hold expression substitution to its parameter-binding and closure contracts.
+coordinate uses, and repeated output buffers retain their existing form. Separate Fold tests hold expression
+substitution to its parameter-binding and closure contracts.
 
 `test_twisted_rewrite.py` traces softmax, SDPA, and causal SDPA through total lift and the same `020_twisted` rule,
 then checks the resulting carrier arity, the derived contraction sites, and that plain and causal SDPA reach both MMA
