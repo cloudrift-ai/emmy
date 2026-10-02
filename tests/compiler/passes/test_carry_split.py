@@ -46,6 +46,20 @@ def _cut(graph, pins: dict) -> object:
         return Pipeline.build(["tile/lift", "tile/cut"], select=["lift", "cut"]).run(graph)
 
 
+def test_a_stored_carried_kernel_relifts_with_one_state_port() -> None:
+    """A golden stores the lifted node's state port beside its public output. Replaying that
+    body must reuse the port, preserving the kernel's identity and output interface."""
+    from emmy.compiler.pipeline.search.golden.restamp import definition  # noqa: PLC0415
+
+    lifted = Pipeline.build(["tile/lift"], select=["lift"]).run(_graph(steps=STEPS))
+    (node,) = (n for n in lifted.nodes.values() if isinstance(n.op, TileOp))
+    stored = definition(node.op.with_io(lifted, node), node.op.name)
+    replayed = Pipeline.build(["tile/lift"], select=["lift"]).run(stored.program({}))
+    (fresh,) = (n for n in replayed.nodes.values() if isinstance(n.op, TileOp))
+    assert len(fresh.outputs) == len(node.outputs) == 2
+    assert fresh.op.with_io(replayed, fresh).identity_key(structural=False, with_io=True) == stored.exact_identity
+
+
 def test_the_walk_is_offered_its_split_and_declines_it_by_default() -> None:
     """The unsplit walk beside one arm per width the step count divides into, the row spelled on
     the carrying site; a step that squares its state is not affine and offers nothing."""
