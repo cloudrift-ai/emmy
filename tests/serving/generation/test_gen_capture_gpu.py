@@ -194,23 +194,29 @@ def test_rider_split_inside_outer_capture_replays_live(built):
         close(o, r)
 
 
-def test_moe_fixed_slot_decode_step_inside_outer_capture_replays_live(built):
+@pytest.mark.parametrize("rows", [1, 3, 16])
+def test_moe_fixed_slot_decode_step_inside_outer_capture_replays_live(built, monkeypatch, rows):
     """The fixed-slot MoE decode step (post_attn twin → router → index_select staging → k slot
     launches → score matmul) under an outer torch CUDA-graph capture — what vLLM's whole-step
-    FULL_DECODE_ONLY capture at size 1 records for an MoE model. Captured once, replayed twice:
-    new values in the same input tensors must flow through the ROUTING too (the top-k indices
-    and the staged expert weights are data-dependent VALUES inside the graph), checked against
-    the eager routed path on fresh inputs."""
+    FULL_DECODE_ONLY capture records for an MoE model: at size 1 always, and up to the decode
+    bucket where the ranks hold slices of every expert, the rows going through the one selector
+    and partials pair in turn. Captured once, replayed twice: new values in the same input
+    tensors must flow through the ROUTING too (the top-k indices and the staged expert weights
+    are data-dependent VALUES inside the graph, each row's its own), checked against the eager
+    routed path on fresh inputs."""
     import torch
 
     pair = built("olmoe.l2.b16")
     runner, config = pair.runner, pair.config
     assert runner.has_moe_fixed_slot
+    if rows > 1:
+        monkeypatch.setattr(runner, "_expert_slices", 8)  # the rule a sliced rank routes by; the experts stay whole
+    assert rows <= runner.moe_slot_width
 
     attn_width = runner.num_heads * runner.head_dim
     torch.manual_seed(1)
-    attn = torch.randn(1, attn_width, device="cuda")
-    residual = torch.randn(1, config.hidden_size, device="cuda")
+    attn = torch.randn(rows, attn_width, device="cuda")
+    residual = torch.randn(rows, config.hidden_size, device="cuda")
 
     def eager_ref(a, r):
         """The routed path on the same twin outputs — the parity oracle for the captured step."""
@@ -232,8 +238,8 @@ def test_moe_fixed_slot_decode_step_inside_outer_capture_replays_live(built):
     # Replay must be LIVE through the routing: new inputs select a different expert set.
     for seed in (2, 3):
         torch.manual_seed(seed)
-        a2 = torch.randn(1, attn_width, device="cuda")
-        r2 = torch.randn(1, config.hidden_size, device="cuda")
+        a2 = torch.randn(rows, attn_width, device="cuda")
+        r2 = torch.randn(rows, config.hidden_size, device="cuda")
         ref2 = eager_ref(a2, r2)
         attn.copy_(a2)
         residual.copy_(r2)

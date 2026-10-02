@@ -60,6 +60,7 @@ check_baked EMMY_GEN_PREFILL_BUCKET "${SERVE_PREFILL_BUCKET:-}"
 check_baked EMMY_GEN_M1_TIER "${SERVE_M1_TIER:-}"
 check_baked SERVE_V2_MODEL_RUNNER "${SERVE_V2_MODEL_RUNNER:-}"
 check_baked SERVE_ENV "${SERVE_ENV:-}"
+check_baked SERVE_CAPTURE_SIZES "${SERVE_CAPTURE_SIZES:-}"
 
 # A parallel boot runs one worker per card and each loads the pack of its pipeline stage, so every
 # worker must log a hit: one that fell back recompiles its layers on every customer boot while the

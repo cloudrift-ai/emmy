@@ -189,9 +189,10 @@ the same cubins and the standard-lane pack never exists.
   prebuilt image was possible. `emmy bench` runs its client in the same image and, for a recipe that pins a revision,
   names that snapshot as the client's tokenizer: the baked cache holds no branch ref, so a lookup by repo id finds
   nothing offline.
-- `verify.sh` — compares the image's baked `SERVE_REVISION` against the config's (a tag built from an older config
-  serves different weights and still passes every check below), then cold-starts the **baked** image with no token,
-  issues one completion, and diffs the cubin file set before/after: an empty diff proves 100% Emmy cache hit. It
+- `verify.sh` — compares the image's baked `SERVE_REVISION`, serving environment and capture ladder against the
+  config's (a tag built from an older config serves different weights, or replays graphs for other decode widths, and
+  still passes every check below), then cold-starts the **baked** image with no token, issues one completion, and
+  diffs the cubin file set before/after: an empty diff proves 100% Emmy cache hit. It
   also fails when the boot or the request writes a new entry into the baked Triton cache, which every Triton compile
   does. It does not read vLLM's JIT-monitor warning: that one also fires on a kernel's first launch in a process when
   the binary loads straight from the cache, which the 1Cat fork's first request does for its attention kernels with
