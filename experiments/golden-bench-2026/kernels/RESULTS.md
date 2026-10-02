@@ -98,8 +98,9 @@ Repeating it with matching rendering proves all fourteen V100 CUDA objects and a
 the prior accepted/profile sources. Both captures and the correction are retained. No identity change or restamp
 is required. Only this experiment's V100 decode golden changes; all other canonical recipe archives stay unchanged.
 
-V100 uses Torch 2.13.0+cu126 and NVCC 12.9.86; H100 uses Torch 2.14.0+cu130 and NVCC 12.9.41. Both use
-Transformers 5.14.1 and driver 580.178.04. Measurements use fresh task-owned runtime and cache directories. Cold
+The cards are a Tesla V100 SXM2 16GB and an H100 80GB HBM3. V100 uses Torch 2.13.0+cu126 and NVCC 12.9.86;
+H100 uses Torch 2.14.0+cu130 and NVCC 12.9.41. Both use Transformers 5.14.1 and driver 580.178.04. Measurements
+use fresh task-owned runtime and cache directories. Cold
 setup timeouts, refused pins, unsupported intermediate-IR attempts and malformed output-path attempts are retained
 with their terminal statuses. A100 is stopped with its persistent disk retained. The 4×V100 VM is unused.
 
@@ -107,7 +108,9 @@ V100 qualification and rejected probes are retained in `tuning_v100x1_round3_202
 `tuning_h100x1_round3_diagnostics_2026-10-02.tar.gz`,
 `tuning_h100x1_round3_m32_priceprobe_2026-10-02.tar.gz` and
 `tuning_h100x1_round3_pvn64_priceprobe_2026-10-02.tar.gz`. The corrected source audit is in
-`tuning_round3_source_audit_2026-10-02.tar.gz`. Each archive includes a verified checksum manifest.
+`tuning_round3_source_audit_2026-10-02.tar.gz`. Each archive includes a verified checksum manifest. The edited
+experiment golden passes fresh lowering. Final local CPU validation passes: 5,776 tests passed and 1,305 skipped
+in 412.19 seconds. Lint passes. GPU correctness is established by the separate V100 and H100 checks above.
 
 ## Matched NVIDIA profiles of the remaining gaps (2026-10-02)
 
