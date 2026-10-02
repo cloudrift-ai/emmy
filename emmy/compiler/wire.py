@@ -357,6 +357,34 @@ def formed_from(tile):
     return next((op for op in tile.source_chain() if isinstance(op, LoopOp)), None)
 
 
+def body_writes(body) -> frozenset[str]:
+    """The buffers a Loop IR ``body`` stores to."""
+    from emmy.compiler.ir.stmt import Body, Write  # noqa: PLC0415
+
+    return frozenset(write.output for write in Body.coerce(body).iter_of_type(Write))
+
+
+def wire_writes(wire: dict) -> frozenset[str]:
+    """The outputs of a kernel wire its loop node's body writes — the buffers a restamp matches the fresh kernel by
+    (:func:`declared_outputs` on the fresh side), whether or not the stored wire also declares a carried state's port."""
+    from emmy.compiler.graph import Graph  # noqa: PLC0415
+    from emmy.compiler.ir.loop import LoopOp  # noqa: PLC0415
+
+    graph = Graph.from_wire(wire)
+    written = frozenset().union(*(body_writes(node.op.body) for node in graph.nodes.values() if isinstance(node.op, LoopOp)))
+    return frozenset(name for name in graph.outputs if name in written)
+
+
+def declared_outputs(tile) -> tuple[str, ...]:
+    """The outputs a kernel's wire declares (:func:`kernel_wire`): the tile's outputs that the body it was formed from
+    writes. A kernel that carries a state also owns the buffer its serial realization keeps the state in — a port the
+    lift adds to the node it lifts — and the wire leaves that port to the lift: declared, the lift would add it a
+    second time, and the wire would not lower on its own."""
+    formed = formed_from(tile)
+    written = body_writes(formed.body if formed is not None else tile.loop_body)
+    return tuple(name for name in tile.outputs if name in written)
+
+
 def kernel_wire(tile) -> dict:
     """The Loop IR wire of one tile kernel: a one-node program holding the body the kernel was formed from
     (:func:`formed_from`), bound to the tile's own buffers. The lowering passes take that body back to the
@@ -377,9 +405,10 @@ def kernel_wire(tile) -> dict:
     primary, *_ = tile.outputs
     formed = formed_from(tile)
     body = formed.body if formed is not None else tile.loop_body
-    graph.add_node(LoopOp(body=body, name=tile.name), list(tile.inputs), outputs=tuple(tile.outputs.values()), node_id=primary)
+    outputs = tuple(tile.outputs[name] for name in declared_outputs(tile))
+    graph.add_node(LoopOp(body=body, name=tile.name), list(tile.inputs), outputs=outputs, node_id=primary)
     graph.inputs = list(tile.inputs)
-    graph.outputs = list(tile.outputs)
+    graph.outputs = [tensor.name for tensor in outputs]
     return graph.to_wire()
 
 
