@@ -133,18 +133,32 @@ def test_repeated_output_buffer_keeps_separate_sweeps() -> None:
 
 
 def _transposed_siblings(*, incompatible=False, repeated=False, batched=False) -> TileOp:
-    n, m, h, row, d, k = Axis("n", 8), Axis("m", 3), Axis("h", 2), Axis("row", 3), Axis("d", 4), Axis("k", 3 if repeated else 5)
+    n, m, h, row, d = Axis("n", 8), Axis("m", 3), Axis("h", 2), Axis("row", 3), Axis("d", 4)
+    k = Axis("k", 3 if repeated else 5)
     k1 = Axis("k1", k.extent)
     b, batch = Axis("b", 2), Axis("batch", 2)
-    first = contraction(k, slab("x0", "x", *(("b", "m", "k") if batched else ("m", "k"))), (slab("w0v", "w0", "k", "n"), "acc0"))
-    second = contraction(k1, slab("x1", "x", *(("batch", "row", "k1") if batched else ("row", "row") if repeated else ("k1", "row") if incompatible else ("row", "k1"))),
-                         (slab("w1v", "w1", "k1", "h", "d"), "acc1"))
+    first_index = ("b", "m", "k") if batched else ("m", "k")
+    second_index = ("batch", "row", "k1") if batched else ("row", "row") if repeated else ("k1", "row") if incompatible else ("row", "k1")
+    first = contraction(k, slab("x0", "x", *first_index), (slab("w0v", "w0", "k", "n"), "acc0"))
+    second = contraction(k1, slab("x1", "x", *second_index), (slab("w1v", "w1", "k1", "h", "d"), "acc1"))
+    first_sweep, second_sweep = ((n, b, m), (h, row, batch, d)) if batched else ((n, m), (h, row, d))
     return TileOp(
-        op=projection((first, second), results=("acc0", "acc1")), place=Placement(free=()), axes=(n, m, h, row, d, k, k1, b, batch),
-        inputs={"x": Tensor("x", (2, 3, k.extent) if batched else (3, k.extent), "f32"), "w0": Tensor("w0", (k.extent, 8), "f32"), "w1": Tensor("w1", (k.extent, 2, 4), "f32")},
-        outputs={"out0": Tensor("out0", (8, 2, 3) if batched else (8, 3), "f32"), "out1": Tensor("out1", (2, 3, 2, 4) if batched else (2, 3, 4), "f32")},
-        output_specs=(OutputSpec(write=Write(output="out0", index=(Var("n"), Var("b"), Var("m")) if batched else (Var("n"), Var("m")), value="acc0"), sweep=(n, b, m) if batched else (n, m)),
-                      OutputSpec(write=Write(output="out1", index=(Var("h"), Var("row"), Var("batch"), Var("d")) if batched else (Var("h"), Var("row"), Var("d")), value="acc1"), sweep=(h, row, batch, d) if batched else (h, row, d))),
+        op=projection((first, second), results=("acc0", "acc1")),
+        place=Placement(free=()),
+        axes=(n, m, h, row, d, k, k1, b, batch),
+        inputs={
+            "x": Tensor("x", (2, 3, k.extent) if batched else (3, k.extent), "f32"),
+            "w0": Tensor("w0", (k.extent, 8), "f32"),
+            "w1": Tensor("w1", (k.extent, 2, 4), "f32"),
+        },
+        outputs={
+            "out0": Tensor("out0", (8, 2, 3) if batched else (8, 3), "f32"),
+            "out1": Tensor("out1", (2, 3, 2, 4) if batched else (2, 3, 4), "f32"),
+        },
+        output_specs=(
+            OutputSpec(write=Write(output="out0", index=tuple(Var(axis.name) for axis in first_sweep), value="acc0"), sweep=first_sweep),
+            OutputSpec(write=Write(output="out1", index=tuple(Var(axis.name) for axis in second_sweep), value="acc1"), sweep=second_sweep),
+        ),
     )
 
 
@@ -154,10 +168,16 @@ def test_transposed_sweeps_preserve_shared_rows_and_output_order(batched) -> Non
     formed = reformed(tile)
     contractions = [site.node for site in formed.sites if site.node.as_contraction() is not None]
     assert len(contractions) == 1 and len(contractions[0].bilinear_channels()) == 2
-    inputs = {name: np.arange(np.prod([dim.as_static() for dim in tensor.shape]), dtype=np.float32).reshape(
-        tuple(dim.as_static() for dim in tensor.shape)) / 10 for name, tensor in tile.inputs.items()}
-    expected = {"out0": np.einsum("brk,kn->nbr", inputs["x"], inputs["w0"]) if batched else (inputs["x"] @ inputs["w0"]).T,
-                "out1": np.einsum("brk,khd->hrbd", inputs["x"], inputs["w1"]) if batched else np.tensordot(inputs["x"], inputs["w1"], axes=([1], [0])).transpose(1, 0, 2)}
+    inputs = {
+        name: np.arange(np.prod([dim.as_static() for dim in tensor.shape]), dtype=np.float32).reshape(
+            tuple(dim.as_static() for dim in tensor.shape)
+        ) / 10
+        for name, tensor in tile.inputs.items()
+    }
+    expected = {
+        "out0": np.tensordot(inputs["x"], inputs["w0"], axes=([-1], [0])).transpose((2, 0, 1) if batched else (1, 0)),
+        "out1": np.tensordot(inputs["x"], inputs["w1"], axes=([-1], [0])).transpose((2, 1, 0, 3) if batched else (1, 0, 2)),
+    }
     for piece in (tile, formed):
         loop = LoopOp(body=piece.loop_body, inputs=piece.inputs, outputs=piece.outputs)
         actual = loop.forward(*(inputs[name] for name in piece.inputs))
