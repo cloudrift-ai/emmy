@@ -2570,7 +2570,6 @@ class _ScalarOps(_AtomOps):
         An operand that VARIES ALONG THE OTHER output axis (:func:`_cell_varying`) is read once per
         CELL instead — the row / column reuse is a property of the operand, not of the tier."""
         c = self.c
-        assert len(self.channels) == 1, "the scalar tier is single-fold — a multi-B node rides the warp smem compute fill"
         k_axis = self.k_axis
         m, n = mn
         step = tuple(c.step())
@@ -2578,19 +2577,20 @@ class _ScalarOps(_AtomOps):
         # (:func:`_hoist_k_invariant`), the rest is the per-step read. A plain gmem-``Load`` A has
         # no prologue and the split is empty.
         a_pro, a_body = _hoist_k_invariant(c.operands[0].lower(axes=self.axes), k_axis.name)
-        b_body = c.operands[1].lower(axes=self.axes)
-        uniform = [stmt for edge in c.operands[2:] for stmt in edge.lower(axes=self.axes)]
+        streamed = tuple(dict.fromkeys(edge for _, edge in c.bilinear_channels()))
+        b_body = tuple(dict.fromkeys(stmt for edge in streamed for stmt in edge.lower(axes=self.axes)))
+        uniform = [stmt for edge in c.operands[1:] if all(edge is not other for other in streamed) for stmt in edge.lower(axes=self.axes)]
         # The operand bodies contribute their OWN loop coordinates (a computed cone's internal
         # fold axes): a replicated read of such a coordinate must keep its name — the loop that
         # binds it is copied with the cell, so suffixing the reads (but never a Loop's binding)
         # emitted references no scope defines.
         prot = _scalar_protected(c, self.tile, self.lead, body=(*a_pro, *a_body, *b_body, *step), k_axis=self.k_axis)
-        b_name, a_name = c.operands[1].exposes[-1], c.operands[0].exposes[-1]
+        b_names, a_names = {name for edge in streamed for name in edge.exposes}, set(c.operands[0].exposes)
         # Whatever the step reads and does not define is bound OUTSIDE the cell — a uniform leaf
         # above the loop. Only the two operand results (rebound per row / column below) and the
         # carried states (one copy per cell) are the cell's own.
         outer = {name for stmt in step for name in free_names(stmt)} - {name for stmt in step for name in stmt.defines()}
-        prot |= outer - {a_name, b_name} - set(c.exposes)
+        prot |= outer - a_names - b_names - set(c.exposes)
         a_cell, b_cell = _cell_varying((*a_pro, *a_body), n), _cell_varying(b_body, m)
 
         def at_m(i):  # register row ``i``'s m coordinate (a 1-D output has no m side)
@@ -2625,7 +2625,7 @@ class _ScalarOps(_AtomOps):
                 *(copy_cell((*a_pro, *a_body), cell, a_sfx, prot) if a_cell else ()),
                 *(copy_cell(b_body, cell, b_sfx, prot) if b_cell else ()),
             ]
-            bound = {a_name: f"{a_name}{a_sfx}", b_name: f"{b_name}{b_sfx}"}
+            bound = {**{name: f"{name}{a_sfx}" for name in a_names}, **{name: f"{name}{b_sfx}" for name in b_names}}
             rebound = [stmt.rewrite(lambda name: bound.get(name, name)) for stmt in step]
             return [*reads, *copy_cell(rebound, cell, f"__c{i}_{j}", prot | set(bound.values()))]
 

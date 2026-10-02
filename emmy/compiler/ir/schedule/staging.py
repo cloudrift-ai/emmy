@@ -579,7 +579,7 @@ def resolve_scalar_stage(c: Fold, tile: Tile, stage: Stage, inputs, budget: int,
     (gmem-direct). The slab K-chunk ``bk_elems`` is DERIVED to fit ``depth`` operand slots in the
     smem ``budget`` (the largest offered chunk dividing K) — not codec-spelled, so no schema change;
     when no chunk fits at the requested depth the depth steps down, single-buffer last."""
-    if stage.transport not in ("smem", "smem-tma", "smem-async") or not k_axis.extent.is_static:
+    if stage.transport not in ("smem", "smem-tma", "smem-async") or not k_axis.extent.is_static or len(c.bilinear_channels()) != 1:
         return None
     # A K-major masked-N fill can clamp a chunk-start column into a row-crossing address.
     # N-major B copies complete contiguous K chunks and clamps only its row.

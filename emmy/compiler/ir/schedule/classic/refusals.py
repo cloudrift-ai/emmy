@@ -401,12 +401,10 @@ def _warp_plan_ok(node, facts: ContractionFacts, plan: Tile) -> bool:
 def _uniform_extras(node) -> bool:
     # The scalar register tier replicates the TERM's own step per cell, so a recipe folds there
     # like any other algebra — three states under their own ops, seeded by the ⊕'s identities.
-    # What it has no residence for is an operand past the streamed one that VARIES: those are read
-    # once, ahead of the cells, so every one of them must be uniform across the tile (attention's
-    # scale and its mask fills are; a second streamed B is not, and rides the warp compute fill).
-    # The same holds for a second channel on ONE edge — a packed gate/up weight exposes both
-    # projections from a single operand, so the channel count, not the operand count, decides.
-    return len(node.operands) >= 2 and len(node.bilinear_channels()) <= 1 and not any(edge.free_axes for edge in node.operands[2:])
+    # Product channels read their streamed edges per register column. Any remaining operand is
+    # read once ahead of the cells, so it must be uniform across the tile.
+    streamed = {id(edge) for _, edge in node.bilinear_channels()}
+    return len(node.operands) >= 2 and not any(edge.free_axes for edge in node.operands[1:] if id(edge) not in streamed)
 
 
 def _warp_plans(node, facts: ContractionFacts, atoms: tuple[str, ...]) -> Iterator[Tile]:

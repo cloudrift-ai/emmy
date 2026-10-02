@@ -47,13 +47,13 @@ def _cone(name: str, buf: str, index: tuple) -> Fold:
     )
 
 
-def _tile(a, b):
+def _tile(a, b, *channels):
     """The scalar contraction ``a ⊗ b`` bound to the grid — the ``Tile`` and its ``(m, n)`` sides."""
-    c = contraction(_K, a, (b, "acc"))
+    c = contraction(_K, a, (b, "acc"), *channels)
     plan = _PLAN.at(_M, _N)
     mn = plan.mn
     state, reduce_region = reduce_codegen(c, plan, k_axis=_K, axes=(_M, _N, _K))
-    epilogue = Body((Write(output="out", index=(Var("m"), Var("n")), value=c.combine.results[0]),))
+    epilogue = Body(tuple(Write(output=f"out{i}", index=(Var("m"), Var("n")), value=acc) for i, acc in enumerate(c.combine.results)))
     return grid_tile(
         unit_tile(register_tile(atomize(plan.atom.shape[:2]), mn), mn),
         mn=mn,
@@ -127,3 +127,12 @@ def test_materialized_operands_keep_the_row_and_column_reuse() -> None:
     assert len(_loads_of(tile, "A")) == mn[0].reg
     assert len(_loads_of(tile, "B")) == mn[1].reg
     assert _factors(tile) == {frozenset((f"a__ar{i}", f"b__bc{j}")) for i, j in _cells(mn)}
+
+
+def test_two_product_channels_reuse_a_rows_and_b_columns() -> None:
+    tile, mn = _tile(_a_load(), _b_load(), (_cone("b2", "B2", (Var("n"), Var("k"))), "acc2"))
+    assert _unbound(tile) == set()
+    assert len(_loads_of(tile, "A")) == mn[0].reg
+    assert len(_loads_of(tile, "B")) == len(_loads_of(tile, "B2")) == mn[1].reg
+    products = [stmt for stmt in tile.body.iter() if isinstance(stmt, Assign) and stmt.name.startswith("acc2__v")]
+    assert {frozenset(stmt.args) for stmt in products} == {frozenset((f"a__ar{i}", f"b2__bc{j}")) for i, j in _cells(mn)}
