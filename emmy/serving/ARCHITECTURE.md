@@ -172,6 +172,11 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   A Laguna post program recomputes the input normalization needed by its softplus `g_proj` and applies that gate to
   the flattened attention output before `o_proj`; a per-head gate temporarily views the seam as
   `[num_tokens, num_heads, head_dim]`.
+  A Qwen3.5 full-attention layer's `q_proj` is twice its query width: per head, the second half is an output gate.
+  Its `pre` returns that gate as a fourth tensor and its `post` takes it as a third input and multiplies the attention
+  output by its sigmoid before `o_proj` (`EmmyGenRunner.from_model` reads which layers do this off `pre.emits_gate`).
+  The gate does not go through attention: every forward path, tier and rider split carries it from `pre` to `post`.
+  Head counts come from the query half, the same rule the serving-twin capture uses.
   Attention dims are **per layer** (`layer_meta(L)` → head_dim / num_heads / num_kv / scaling) — Gemma-4's global layers
   use a larger `global_head_dim` than its sliding ones, so each layer's `pre`/`post` compiles at its own width. The
   caller stitches between `pre` and `post` (a reference torch SDPA in the Phase-2 host stitch; vLLM paged `Attention`
