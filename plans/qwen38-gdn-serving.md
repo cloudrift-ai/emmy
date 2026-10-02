@@ -1,9 +1,9 @@
 # Serving the GDN layers of Qwen3.5 / Qwen3.8 through emmy
 
 Status: open, written 2026-10-02, last updated the same day on main `272b1094`. Branch `feat/serve-gdn-layers`.
-We finished stages 1 to 5 and the refusals of stage 6 on tiny models: a tiny hybrid Qwen3.5 generates through vLLM
-what Hugging Face generates. The architecture doc and stage 7, the real checkpoint, remain. Follow-ups that this
-goal does not need are in [`gdn-serving-followups.md`](gdn-serving-followups.md).
+We finished stages 1 to 6 on tiny models: a tiny hybrid Qwen3.5 generates through vLLM what Hugging Face generates,
+and the GDN programs match the eager model in BF16. Stage 7, the real checkpoint, remains. Follow-ups that this goal
+does not need are in [`gdn-serving-followups.md`](gdn-serving-followups.md).
 
 ## Goal
 
@@ -120,6 +120,10 @@ RTX 5090 serve command are its decode bucket, its prefill bucket, and 1. The tin
   `k_linear_matmul_mean_reduce_5d3ccd` (width 16) into 7 pieces each, and `k_linear_mean_conv1d_reduce_290483`
   (width 1) into 4, brought a call to milliseconds. The routing rows of `tests/serving/goldens/serving.golden.json`
   record the cuts that worked.
+- Record the GDN rows on BF16 programs, the dtype the checkpoint serves in. Cuts do not carry over between dtypes.
+  On the tiny model the float32 program has one big recurrence kernel, the float16 width-1 program fuses into a
+  single kernel, and the BF16 program splits into 8 to 13 kernels, because every dtype boundary of the Hugging Face
+  layer becomes a small cast kernel. Each dtype needed its own cuts.
 - Do not take GDN schedules from a compile that has no golden row for the kernel. At the time of writing the team
   treats the schedule prior as broken, so pin every GDN kernel by a golden row or by `EMMY_KNOBS`.
 
