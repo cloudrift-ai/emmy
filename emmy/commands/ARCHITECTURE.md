@@ -267,9 +267,9 @@ and the JSON record identifies the inputs that were compiled. A scoped schedule-
 pin also remains explicit as the exact-site exception to that bare pin. A failed row with
 no realized graph reports the precision lane requested by those parsed input pins, including explicit false
 overrides, rather than defaulting every failure to the standard lane. `run --golden PATH` replays it through the
-full compiler pipeline. When that replay has
-pinned rows, its greedy execution returns same-input outputs so every pinned schedule receives the normal wrong-answer
-check; strict JSON labels the reference `same-input-greedy` when no Torch twin exists. That reference is accepted only
+full compiler pipeline. Its greedy execution returns same-input outputs when checking pinned rows, recording a pick,
+or strictly verifying an embedded Loop target, including a file walk whose measured rows name only cut pieces.
+Strict JSON labels the reference `same-input-greedy` when no Torch twin exists. That reference is accepted only
 for an embedded Loop target whose worker returned the exact same inputs and outputs; runnable frontend targets still
 require direct eager correctness. A completed reference survives a later greedy
 timing watchdog: JSON records the exact failure and one-run timing, omits the isolated greedy row, and keeps the command
