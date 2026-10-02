@@ -149,10 +149,11 @@ def _resident(op, program, retained=frozenset(), padding=0):
                 held = defs.get(stmt.branches[0].value)
                 seed = defs.get(stmt.branches[1].value)
                 if held is not None and held.input == port and seed is not None and seed.input == carry.seed:
-                    if uses[seed.name] == 1:
-                        discarded.add(seed.name)
                     promoted = dtype_get(dtype_promote("add", [held.dtype.name, seed.dtype.name]))
-                    stmt = Assign(stmt.name, "copy", (held.name,), dtype=promoted)
+                    if promoted == tensor.dtype:
+                        if uses[seed.name] == 1:
+                            discarded.add(seed.name)
+                        stmt = Assign(stmt.name, "copy", (held.name,), dtype=promoted)
             if isinstance(stmt, Load) and stmt.input == port:
                 stmt = replace(stmt, input=shared, index=(parity, *stmt.index[1 + len(batch) :]), dtype=tensor.dtype)
             elif isinstance(stmt, Write) and stmt.output == port:

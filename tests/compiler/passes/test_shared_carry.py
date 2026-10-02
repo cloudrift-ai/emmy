@@ -8,7 +8,7 @@ import pytest
 
 from emmy.compiler.backend.cuda.backend import CudaBackend
 from emmy.compiler.context import Context
-from emmy.compiler.dtype import F16, F32
+from emmy.compiler.dtype import F16, F32, F64
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
@@ -152,6 +152,18 @@ def test_parallel_snapshot_copy_keeps_intermediate_casts():
         outputs.append(CudaBackend().run(compiled, input_data={"seed": array})[0].outputs["out"])
     np.testing.assert_array_equal(*outputs)
     np.testing.assert_array_equal(outputs[0], outputs[0].astype(np.float16).astype(np.float32))
+
+
+@requires_cuda
+def test_shared_state_does_not_round_the_seed_before_its_first_use():
+    graph = _graph(F64)
+    array = np.random.default_rng(0).standard_normal((2, 40, 40)) * 0.03
+    outputs = []
+    for storage in (0, 2):
+        with pinned_knobs({**_PINS, "SHARED_CARRY": storage}):
+            compiled = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.probe())
+        outputs.append(CudaBackend().run(compiled, input_data={"seed": array})[0].outputs["out"])
+    np.testing.assert_array_equal(*outputs)
 
 
 @requires_cuda
