@@ -52,13 +52,13 @@ from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.kernel import Tile
-from emmy.compiler.ir.kernel.ir import Smem, Sync, TreeHalve, WarpShuffle
+from emmy.compiler.ir.kernel.ir import Smem, Sync, TreeHalve, WarpBroadcast, WarpShuffle
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule import Raster
 from emmy.compiler.ir.schedule.classic.schedule import binds_root
 from emmy.compiler.ir.schedule.views import cone_seam
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
 from emmy.compiler.ir.stmt.body import _exposed_defines
 from emmy.compiler.ir.tile import FoldMove, Level, Reduce, ReduceStage
 from emmy.compiler.ir.tile.ir import apply_output_specs, observed_result_names
@@ -618,7 +618,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
             t = replace(t, axes=lanes_axes)
             bt = plan.coop
         else:
-            state, fold, close, lane = _tile_reduce_axis(op, plan, ctx, tail, out_val)
+            state, fold, close, lane = _tile_reduce_axis(op, plan, ctx, tail, out_val, output_specs)
             t = replace(t, axes=(lane,)) if lane is not None else t
             bt = plan.coop * ctx.packed_cells if lane is not None else None
 
@@ -1111,7 +1111,9 @@ def _lane_close(tail: list[Stmt], lane: Axis | None, coop: int, ctx: Ctx, out_va
     return body_tail
 
 
-def _tile_reduce_axis(op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str) -> tuple[list[Stmt], list[Stmt], list[Stmt], Axis | None]:
+def _tile_reduce_axis(
+    op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str, output_specs=()
+) -> tuple[list[Stmt], list[Stmt], list[Stmt], Axis | None]:
     """Tile the REDUCE axis per the node's cooperating :class:`Reduce` — the reduce counterpart
     of the output ``unit_tile`` / ``register_tile`` levels: ``coop`` lanes across threads (the
     ``_co`` lane axis, the axis's UNIT level) and ``reg`` ILP chains across per-thread accumulators
@@ -1131,7 +1133,7 @@ def _tile_reduce_axis(op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str) -> tu
     # :func:`emit_combine` machinery folds either). An operand that does not index the fold's axis
     # is hoisted ahead of the loop and leads the region; the enclosing zero-axis ``Fold``'s
     # projection is ``tail`` (already walked).
-    *hoisted, rloop = op.lower(axes=ctx.sched.tile.axes)
+    *hoisted, rloop = op.lower(stores=output_specs, axes=ctx.sched.tile.axes)
     axis = rloop.axis
 
     # The cooperative lane axis (Tile-decoded, innermost) — present only when threads
@@ -1165,5 +1167,51 @@ def _tile_reduce_axis(op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str) -> tu
         rloop = replace(rloop, body=Body(tuple(_restage_loads(list(rloop.body), staged, smem_name, n_grid, grid_vars))))
         tail_src = _restage_loads(tail_src, staged, smem_name, n_grid, grid_vars)
 
-    fold = _strided_fold(op, rloop, plan, ctx, lane)
-    return fill_stmts, [*hoisted, *fold], _lane_close(tail_src, lane, coop, ctx, out_val), lane
+    fold = _scan_fold(op, rloop, plan, lane) if op.observe is not None else _strided_fold(op, rloop, plan, ctx, lane)
+    close = _lane_close(tail_src, lane, coop, ctx, out_val) if tail_src or not output_specs else []
+    return fill_stmts, [*hoisted, *fold], close, lane
+
+
+def _scan_fold(op: Fold, rloop: Loop, plan: Reduce, lane: Axis) -> list[Stmt]:
+    """Scan consecutive lane groups, retaining each prefix for the observer and broadcasting
+    the group's final state before the next group. Padded lanes contribute the monoid identity;
+    every lane participates in the shuffles, while only valid prefixes reach the boundary."""
+    axis, width = rloop.axis, plan.coop
+    state = op.combine.results
+    previous = tuple(f"{name}__previous" for name in state)
+    chunk = Axis(name=f"{axis.name}_chunk", extent=axis.extent)
+    coordinate = BinaryExpr("+", Var(chunk.name), Var(lane.name))
+    valid = BinaryExpr("<", coordinate, axis.extent_expr())
+    padded = not (axis.extent.is_static and axis.extent.as_static() % width == 0)
+    read = Sigma({axis.name: BinaryExpr("%", coordinate, axis.extent_expr()) if padded else coordinate})
+    last = max(i for i, stmt in enumerate(rloop.body) if isinstance(stmt, Accum) and stmt.name in state)
+    body: list[Stmt] = [Assign(name=other, op="copy", args=(name,), dtype=F32) for name, other in zip(state, previous, strict=True)]
+    for stmt in rloop.body[: last + 1]:
+        stmt = stmt.rewrite(lambda name: name, sigma=read)
+        if isinstance(stmt, Accum) and stmt.name in state:
+            empty = f"{stmt.name}__empty"
+            body.append(Init(name=empty, identity=stmt.op.identity, dtype=F32))
+            if padded:
+                masked = f"{stmt.value}__scan_mask"
+                body.append(Select(name=masked, branches=(SelectBranch(stmt.value, valid), SelectBranch(empty, Literal(1, "int")))))
+                stmt = replace(stmt, value=masked)
+            stmt = replace(stmt, base=empty, axes=(chunk.name,), dtype=F32)
+        body.append(stmt)
+    body.append(
+        WarpShuffle(state=state, state_b=op.combine.params[len(state) :], combine_states=tuple(op.combine.body), length=width, prefix=True)
+    )
+    body.extend(merge_stmts(op, previous))
+    observed = [stmt.rewrite(lambda name: name, sigma=Sigma({axis.name: coordinate})) for stmt in rloop.body[last + 1 :]]
+    body.extend([Cond(cond=valid, body=tuple(observed))] if padded else observed)
+    body.append(WarpBroadcast(state=state, length=width))
+    return [
+        *(Init(name=name, identity=seed, dtype=F32) for name, seed in zip(state, op.init, strict=True)),
+        StridedLoop(
+            axis=chunk,
+            start=Literal(0, "int"),
+            step=Literal(width, "int"),
+            body=Body(tuple(body)),
+            unroll=_lane_unroll(axis, width),
+            seed=False,
+        ),
+    ]

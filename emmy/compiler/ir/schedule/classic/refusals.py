@@ -72,7 +72,7 @@ def _reduction_domain(tile: TileOp, node, target=None) -> tuple[Reduce, ...]:
     roots = kernel_roots(tile.op)
     is_root = any(node is root for root in roots)
     owner = node if is_root else next((root for root in roots if any(node is member for member in chain_members(root))), None)
-    if node.observe is not None or node.carries or owner is None:
+    if node.carries or owner is None:
         return (Reduce(),)  # the binder partitions the roots it peels and their chain members; any other reduce lowers serially
     # A sweep the member's own ROOT is evaluated over wraps the whole chain, members included, and
     # only the serial fold spells that: the chain arm closes one grid cell.
@@ -82,6 +82,15 @@ def _reduction_domain(tile: TileOp, node, target=None) -> tuple[Reduce, ...]:
         # A split's deferred finalize: one partial per split per cell, the parallelism is the cells,
         # and a band over the few partials pays a barrier per cell.
         return (Reduce(),)
+    if node.observe is not None:
+        # A prefix scan keeps every lane's inclusive state. Ordinary register partials,
+        # transposed bands and cross-warp trees do not preserve those states.
+        if not is_root or chain_form(node):
+            return (Reduce(),)
+        return (
+            Reduce(),
+            *(choice for choice in coop_reduce_moves() if 1 < choice.coop <= WARP_LANES and choice.reg == 1 and not choice.coop_transposed),
+        )
     transposed_ok = _transposed_reduction_ok(tile) and is_root and not chain_form(node)
     lanes = (32, 8) if target is not None and target.compute_capability == (7, 0) else (32,)
     return (
