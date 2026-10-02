@@ -58,6 +58,29 @@ def _dtype(name: str):
 # Scalar TILE tier — register-tile variants, epilogues, staging, regressions.
 # =========================================================================== #
 
+@requires_cuda
+@pytest.mark.xdist_group("cuda")
+def test_transposed_reduction_preserves_the_cross_warp_addition_order():
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (1, 64), F32), node_id="x")
+    graph.add_node(InputOp(), [], Tensor("w", (8, 64), F32), node_id="w")
+    graph.add_node(LinearOp(), ["x", "w"], Tensor("out", (1, 8), F32), node_id="out")
+    graph.inputs, graph.outputs = ["x", "w"], ["out"]
+    rng = np.random.default_rng(4)
+    inputs = {"x": np.linspace(1e-4, 1e4, 64, dtype=np.float32).reshape(1, 64), "w": rng.standard_normal((8, 64), dtype=np.float32)}
+    backend = CudaBackend()
+    outputs = []
+    for work, reduce in (("t64", "coop"), ("t512", "coop-t/n8/v4")):
+        with pinned_knobs({"WORK": work, "REDUCE": reduce, "TILE": "", "STAGE": "", "PLACE": "fuse"}):
+            compiled = backend.compile(graph)
+        result, _ = backend.run(compiled, input_data=inputs)
+        outputs.append(np.asarray(result.outputs["out"]))
+    np.testing.assert_array_equal(*outputs)
+
+
 # Square base shape, divisible by every variant's parallel·register product; the symbolic column
 # runs at an off-divisor length (masked tail), which is the size a stored case cannot ask for.
 _M = _K = _N = 64
