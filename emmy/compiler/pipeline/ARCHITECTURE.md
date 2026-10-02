@@ -416,8 +416,10 @@ enumerated from the kernel's own definition — the fit reads the directory and 
 
 **The placement prior** is the same model class over another space. `weights/placement.json` ranks the arms of a
 placement fork — keep fused, or cut one offered seam — each featurized as `P_*` columns from the `S_*` stamps of the
-kernels the arm leaves (`ranking.arm_features`: the piece count, each stamp summed and maxed over the pieces). Its
-dataset is `emmy db export --space placement`: one pool per placement fork of every golden kernel, walked through
+kernels the arm leaves (`ranking.arm_features`: the piece count, each stamp summed and maxed over the pieces), plus
+the number of kernel roots that fold a whole contraction. That fact separates cuts with equal Loop histograms but
+different projection placement. Its dataset is `emmy db export --space placement`: one pool per placement fork of
+every golden kernel, walked through
 the lift and the cut pass only (`ranking.walk_placement`), the arm the routing row recorded marked — keep fused where
 none was. The greedy asks it at a placement fork no routing row decides (`policy/greedy._placement_pick`), with the
 same featurizer, so the dataset's rank and the deploy's pick are one computation. Both artifacts name their `space`,
