@@ -163,7 +163,8 @@ the same cubins and the standard-lane pack never exists.
   seals: `SERVE_QUANT=exl3` adds `"quantization_config": null` beside the architectures override (vLLM has no EXL3
   quantization method and refuses the boot at config parsing, though nothing in the engine needs one — emmy owns
   every coded weight), and `SERVE_CAPTURE_SIZES` replaces the power-of-two capture ladder, which an **MoE model must
-  cap at `[1]`**: single-token steps ride the runner's fixed-slot expert dispatch (fixed launch set, capture-legal)
+  cap**: at `[1]` on a rank holding whole experts, at the decode bucket where tensor parallelism gives each rank a
+  slice of every expert. Those steps ride the runner's fixed-slot expert dispatch (fixed launch set, capture-legal)
   while wider decode steps keep the routed dispatch, which host-syncs and stays eager. `SERVE_V2_MODEL_RUNNER=1`
   opts a qualified dense model into vLLM's V2 runner; it executes real prefill/decode warmups before enabling vLLM's
   request-time JIT monitor. An `--enforce-eager` in `SERVE_EXTRA_ARGS` drops the capture config, as a caller's does in

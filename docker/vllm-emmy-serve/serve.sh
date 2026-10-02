@@ -29,10 +29,11 @@
 #                        vLLM-owned parameter (lm_head) is handled at load. So the override
 #                        tells vLLM the model is unquantized, which for vLLM's purposes it is.
 #   SERVE_CAPTURE_SIZES  the cudagraph capture ladder, as a JSON list. An MoE model must cap
-#                        it at [1] (see _is_moe_model): single-token steps ride the runner's
-#                        fixed-slot expert dispatch (fixed launch set, capture-legal) while
-#                        wider decode steps keep the routed dispatch, which host-syncs and
-#                        stays eager.
+#                        it (see _is_moe_model): at [1] on whole experts, at the decode bucket
+#                        where each tensor-parallel rank holds a slice of every expert. Those
+#                        steps ride the runner's fixed-slot expert dispatch (fixed launch set,
+#                        capture-legal) while wider decode steps keep the routed dispatch,
+#                        which host-syncs and stays eager.
 #   SERVE_EXTRA_ARGS     further pinned vLLM flags, word-split (e.g. `--kv-cache-dtype
 #                        fp8_e4m3`). They belong in the pinned config because a flag that
 #                        moves which programs the plugin builds is a cache-key input. An

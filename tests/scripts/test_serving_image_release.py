@@ -364,11 +364,11 @@ def test_serve_sh_renders_the_quantized_moe_invocation(tmp_path):
 
 def test_serve_sh_renders_the_deepseek_v4_parallel_invocation(tmp_path):
     """DeepSeek V4 on 16 V100s: the vLLM arguments every strict boot of its golden ran, rendered from the
-    pinned config, with decode captured at size 1 only — single-token decode rides the fixed-slot expert
-    tier, and every wider step runs eager."""
+    pinned config, with decode captured up to the decode bucket — each rank holds a slice of every
+    expert, so those steps ride the fixed-slot expert tier, and every wider step runs eager."""
     config = {key: value.strip('"') for key, value in config_values(SERVE_DIR / "models" / "deepseek-v4-flash-0731.env").items()}
     argv = render_serve_sh(tmp_path, config)
-    capture = '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1], "custom_ops": ["+rotary_embedding"]}'
+    capture = '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1, 2, 4, 8, 16], "custom_ops": ["+rotary_embedding"]}'
     assert argv == [
         "-m",
         "vllm.entrypoints.openai.api_server",
