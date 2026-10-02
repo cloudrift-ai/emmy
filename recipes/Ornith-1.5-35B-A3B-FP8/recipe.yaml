@@ -33,8 +33,8 @@ matrices:
   - deploy.gpu: NVIDIA H100 80GB
     deploy.gpu_count: 1
 
-  # Reduced-fraction entry so this model can share an H200 with Qwen3-30B-A3B-Instruct-2507 at 0.55 through a
-  # deploy plan. 0.35 x 141 GB is a ~49 GiB budget: ~36 GiB of weights and engine overhead leave ~12.6 GiB of
+  # Reduced-fraction entry so this model can share an H200 through a deploy plan with a partner at 0.55
+  # (Qwen3-30B-A3B-Instruct-2507 or Qwen3.8-27B-FP8, each with its own 0.55 entry). 0.35 x 141 GB is a ~49 GiB budget: ~36 GiB of weights and engine overhead leave ~12.6 GiB of
   # KV, about 640K tokens, so the full 262,144-token context still fits with two sequences resident. The same
   # 49 GiB budget was booted on an H100 (0.62 of the card) and passed every capability probe at full context;
   # the H200 itself is unverified until a record run there.
