@@ -39,7 +39,7 @@ descent that followed the row re-decides. A recorded receipt of the same kernel 
 preserves the same contexts as deferred search branches without adding compatibility logic.
 
 Classic sites additionally expose their independent factors — a node site's `nodes` and `edges`, the kernel site's
-`kernels` — and `ClassicProblem.bounds` reports the size of their product without building it. There is no product
+`kernels` — and `ClassicProblem.bound` reports the size of their product without building it. There is no product
 OBJECT: the sites are the factors, so a type holding a copy of them would be a second answer to one question. Tests
 build the literal product themselves, and a bounded test hands the sites hand-written factors by subclassing them
 (`tests/compiler/helpers.literal_classic_context`), which is the only way to offer a site values it did not project:

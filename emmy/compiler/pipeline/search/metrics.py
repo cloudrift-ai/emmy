@@ -26,8 +26,7 @@ at all, exactly as it is for the online prior, which regresses µs.
 
 The offline prior's two available spellings — the raw quality (negated) and the deployed
 ``exp(-scale · quality)`` proxy — therefore order a pool identically, so pass whichever the caller already
-holds. (The proxy would lose that only past its exponent bound, which the shipped artifact cannot reach —
-see :data:`~.prior.base.PROXY_CLIP`.)
+holds.
 
 Both families charge the model for a tie, but they charge it differently, and the difference is not a
 detail. :func:`rank_of_golden` models EMISSION ORDER — the row greedy actually deploys out of a plateau —

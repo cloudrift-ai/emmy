@@ -99,9 +99,8 @@ class ScheduleProblem[Pick](ABC):
 
     ``sites`` lists the node sites in composition order and the kernel site last. ``row`` is the
     knob row installed, empty for a catalog enumeration; ``with_row`` is the same problem with a
-    row installed, whose sites offer the row's values where it names them. ``bounds`` are the
-    pool's size bound and one descent's work bound, which a search reads before deciding whether
-    to walk the pool at all.
+    row installed, whose sites offer the row's values where it names them. ``bound`` is an upper
+    bound on the pool's size, which a search reads before deciding whether to walk the pool at all.
     """
 
     row: Mapping[str, str]
@@ -112,7 +111,7 @@ class ScheduleProblem[Pick](ABC):
 
     @property
     @abstractmethod
-    def bounds(self) -> tuple[int, int]: ...
+    def bound(self) -> int: ...
 
     @abstractmethod
     def with_row(self, row: Mapping[str, str], *, strict: bool = False) -> Self: ...

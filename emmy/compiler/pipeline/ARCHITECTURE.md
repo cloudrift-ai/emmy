@@ -171,9 +171,9 @@ Everything in this table recurs on nearly every page below. The rest of the docu
 | `search/strategy/` | The search shape above the loop: `base.SearchStrategy` and its one realization, `greedy.GreedyStrategy` — the greedy compile's retry orchestration (Part 4). |
 | `search/inventory.py` | `KernelInventory`, the splice watcher that reports each kernel a lowering mints and each kernel-set decision it takes, and `record_routing`, the routing-row writer. The golden import and `run --record-greedy` compose one into their pipeline (Part 6). |
 | `search/bench_record.py` | The perf-row writers: `persist_kernel_perf` (a `kernel` + `perf` row per benched kernel), `persist_bench_failure` (the `bench_fail` row of the kernel a failure names), `kernel_row` and `point_stats`. `run --bench` records through them (Part 5). |
-| `search/prior/` | The ONE ranking path: the `Prior` ABC (`base.py`) and its one implementation, `OfflinePrior` (`offline.py`), which `load_prior` builds from the weights artifact. `linear_model.py` holds `LinearModel`, the offline prior's scoring function as a value object — the one definition the fitter optimizes and the deploy path ranks by. `fit/` is the offline fitter, split by responsibility — `linear.py` trainer, `cv.py` fold harness, `tables.py` the rank-table rendering, `run.py` the pure `emmy fit` run harness. The candidate pool it all trains over is `search/dataset/group.Group`, one layer down: a pool is data, not a fitter detail. |
+| `search/prior/` | The ONE ranking path: the `Prior` ABC (`base.py`) and its one implementation, `OfflinePrior` (`offline.py`), which `load_prior` builds from the weights artifact. `catboost_model.py` holds `CatBoostModel`, the offline prior's scoring function as a value object — the one definition the fitter trains and the deploy path ranks by. `fit/` is the offline fitter, split by responsibility — `catboost.py` trainer, `cv.py` fold harness, `tables.py` the rank-table rendering, `run.py` the pure `emmy fit` run harness. The candidate pool it all trains over is `search/dataset/group.Group`, one layer down: a pool is data, not a fitter detail. |
 | `search/metrics.py` | What a scored candidate pool is worth, as pure functions over numbers: golden ranks and their tie conventions, `topk_pick` / `topk_regret` against measured latencies, and Spearman ρ. No model, no I/O, no strings, so the callers cannot each hold a slightly different definition — every rank and regret metric resolves here. Rendering lives with the caller (`prior/fit/tables.py` for the fit's rank tables; the other top-k summaries have not been unified yet). |
-| `search/dataset/` | The training data as values and as a document. `Group` (`group.py`) — one candidate pool packed as a matrix plus one label per row; the base says nothing about what the labels mean, which is all a ranking metric needs. `GoldenGroup` is the subclass whose labels MARK rows (`golden_ids`) rather than measure them, and it carries the `GoldenPool`s it was built from (`pool.py`: card, regime, sizes, the verified `GoldenRow`s, and the `KernelDef` the pool is enumerated from — `kernel.py`); `MeasuredGroup` is the one whose labels ARE the microseconds. `Dataset` (`document.py`) is the groups as a directory — `manifest.json` beside one `.npy` per group — written by `emmy db export`, read by `emmy fit` and `eval prior`; the leaf values are wire classes. `Sample` / `Samples` and `ShapeKey` are the per-row read-view over a DB's rows. Nothing here reads a DB — `db/export.py` builds the groups, the one place the two packages meet — and nothing imports `search/prior/`: a group carries every column it was given, and each model class narrows to the ones it wants when it asks for the matrix — `TREE_FEATURES`, the view argued entirely from what a tree can re-derive, lives with the CatBoost trainer for the same reason. |
+| `search/dataset/` | The training data as values and as a document. `Group` (`group.py`) — one candidate pool packed as a matrix plus one label per row; the base says nothing about what the labels mean, which is all a ranking metric needs. `GoldenGroup` is the subclass whose labels MARK rows (`golden_ids`) rather than measure them, and it carries the `GoldenPool`s it was built from (`pool.py`: card, regime, sizes, the verified `GoldenRow`s, and the `KernelDef` the pool is enumerated from — `kernel.py`); `MeasuredGroup` is the one whose labels ARE the microseconds. `Dataset` (`document.py`) is the groups as a directory — `manifest.json` beside one `.npy` per group — written by `emmy db export`, read by `emmy fit` and `eval prior`; the leaf values are wire classes. `Sample` / `Samples` and `ShapeKey` are the per-row read-view over a DB's rows. Nothing here reads a DB — `db/export.py` builds the groups, the one place the two packages meet — and nothing imports `search/prior/`: a group carries every column it was given, and the model narrows to the ones it wants when it asks for the matrix. |
 | `search/db/` | The SQLite store (`SearchDB`: the kernels, the decisions that minted them, their measurements) and what fills and drains it: `freeze.py`, a DB's admitted rows as a golden file per card (`freeze_reason` is the one admission rule every measured-pool reader applies), and `export.py`, its rows as the dataset (`golden_pools`, `measured_groups`, `export_dataset`) — where `db` rows become `dataset` values, in that one direction. |
 | `search/golden/` | The golden package, one module per job: the file format in the DB's shape (`format`: `GoldenFile`, `Kernel`, `Row`), the copy into the DB a compile reads (`evidence`), the repository index and the evidence scope (`repository`), the rewrite onto a fresh lowering (`restamp`: `restamp`, `mint`, `lift_targets`), the working golden's writers (`working`: trace inventories, `record_greedy_pick`, `record_latency`). |
 | `slice.py` | Isolates one finalized kernel into a standalone graph (used by structural pricing and the working golden's per-kernel slices). |
@@ -404,14 +404,15 @@ box, say — and it answers nowhere else, because measured evidence outranks it 
 
 ### The offline prior
 
-`OfflinePrior` scores a candidate with a linear formula over the `D_*` features — hand-designed descriptions of a
-tile's geometry and its occupancy — fitted ahead of time. It never falls back on the order the rule emitted its
-options in. The complete scoring function lives in the repo-checked artifact `search/prior/weights/schedule.json`:
-both weight sets plus the scalar params, carrying a `feat_ver` version and a `provenance` block. The offline fitter
-writes it (`search/prior/fit/`, driven by `emmy fit`). The training pools are the golden groups of the dataset
-`emmy db export` writes (`db/export.py` over `search/ranking.build_golden_groups`, Part 8): one per kernel, card,
-regime and sizes a golden file recorded a row on, enumerated from the kernel's own definition — the fit reads the
-directory and enumerates nothing.
+`OfflinePrior` scores a candidate with a CatBoost ranker — a sum of small decision trees — over the `D_*` features,
+hand-designed descriptions of a tile's geometry and its occupancy, fitted ahead of time. It never falls back on the
+order the rule emitted its options in. The complete scoring function lives in the repo-checked artifact
+`search/prior/weights/schedule.json`: the column order, the scalar `scale`, a `feat_ver` version, a `provenance`
+block, and the trees themselves in CatBoost's own JSON model format (`model`), which CatBoost loads back with
+predictions identical to its binary form. The offline fitter writes it (`search/prior/fit/`, driven by `emmy fit`).
+The training pools are the golden groups of the dataset `emmy db export` writes (`db/export.py` over
+`search/ranking.build_golden_groups`, Part 8): one per kernel, card, regime and sizes a golden file recorded a row on,
+enumerated from the kernel's own definition — the fit reads the directory and enumerates nothing.
 
 **The placement prior** is the same model class over another space. `weights/placement.json` ranks the arms of a
 placement fork — keep fused, or cut one offered seam — each featurized as `P_*` columns from the `S_*` stamps of the
@@ -422,12 +423,6 @@ none was. The greedy asks it at a placement fork no routing row decides (`policy
 same featurizer, so the dataset's rank and the deploy's pick are one computation. Both artifacts name their `space`,
 and a reader refuses the other's.
 
-`weights/schedule.json` is the one schedule artifact anything loads by default. A sibling file in that directory is a
-**scoped experiment**, not a second default: `weights/offline_matmul_rtx5090.json` is fit on RTX 5090 matmul goldens alone and
-is reached only by pointing `EMMY_OFFLINE_FILE` (or `--offline-file`) at it. Each such file says so in its
-`provenance.scope`; read that before drawing conclusions from one, because a scoped artifact has no reason to beat
-the shipped weights outside the slice it was fit on.
-
 The proxy stays uncalibrated, and nothing in the deploy path corrects it by hand: the kernel-set Σ
 (`policy/greedy._resolved_price`) sums each row's own price as stamped or estimated. Where the prior ends up deciding
 a production election, the defect is the missing evidence — no recorded golden or measured row for that kernel —
@@ -436,76 +431,51 @@ log-scaled, rides the featurization as an ordinary fit signal.)
 
 What a newcomer needs to know about the fit:
 
-- **The fit optimizes the deployed score itself, not a linear stand-in for it.** Both sides go through one
-  `LinearModel`, which offers the same arithmetic in two access shapes: a per-dict entry for scoring a live
-  candidate, and a matrix entry for scoring a whole candidate pool (one fp16 golden enumerates ~78k rows, so the
-  fitter cannot use the dict path). The non-linear term's weight and threshold are fitted alongside the feature
-  weights — the optimizer is derivative-free, so a threshold costs it nothing. A scoring constant the fit cannot see
-  is a constant the fit optimizes *around*: while two hand-set gates sat outside the objective, the reported golden
-  ranks were not the deployed ones (on the RTX 5090 matmul goldens, median rank 228 reported against 367 deployed).
-- **The trainer is an object, and fitting is pure.** `LinearTrainer` carries the hyperparameters — feature names, the
-  incumbent to chain from, sample count, L2 strength, seed, warm start, and the ranking loss — and `fit(groups)`
-  returns a `LinearFit` without touching the trainer. One instance therefore serves every cross-validation fold with
-  no copying, and a fit is a function of its inputs alone. The two seeding policies are data rather than code: the
-  full-train fit warm-starts from the incumbent, and the fold trainer is the same object under
-  `replace(trainer, warm_start=False)`, because the incumbent's weights were fit on every golden and warm-starting a
-  fold from them would leak each held-out golden into the model meant never to have seen it. Both are recorded in
-  the metrics header, along with the loss — two fits are only comparable under the same one.
+- **The objective is the deployed ranking.** `QuerySoftMax` over one group per candidate pool: every row a golden
+  verified is a positive, and a uniform draw of the other rows (`--negatives` per pool) are the negatives. The rank
+  every report quotes is still taken over the FULL pool, through the same `CatBoostModel.score_rows` the deploy path
+  ranks by, so the sampling never reaches a metric.
+- **The trainer is an object, and fitting is pure.** `CatBoostTrainer` carries the hyperparameters — feature names,
+  trees, depth, learning rate, negatives, mining rounds, seed — and `fit(groups)` returns a `CatBoostFit` without
+  touching the trainer, so one instance serves every cross-validation fold. A fit is not byte-reproducible (CatBoost's
+  histogram build is threaded); two fits are compared by their metrics files.
 - **A group is a candidate pool, and it may have more than one right answer.** `GoldenGroup.golden_ids` is the
   set of rows in that pool a golden verified: usually one, several when the builder matched
   several goldens onto one pool (the same shape recorded under two names, or one name recorded twice). Which
   goldens share a pool is settled before any group is built, so a group's labels are final at construction.
-  The per-group term is then the BEST rank over that set (`search/metrics.best_rank`), because deploy ships one
-  config: any acceptable one ranked first is the win, and a mean would spend weights pushing up the runner-up.
-  At one positive it is the single-golden rank exactly, so the
-  supervision generalized without moving any fitted artifact. The sibling positives also stop being drawn as the
-  tree fit's negatives, which had been teaching it that a measured-good config was bad.
+  The per-group rank is then the BEST rank over that set (`search/metrics.best_rank`), because deploy ships one
+  config: any acceptable one ranked first is the win. Sibling positives are never drawn as negatives.
 - **A pool may be a SAMPLE of itself.** `emmy db export --pool-sample N` draws its candidates during enumeration
-  (`search/pool.py`), so `Group` carries both the drawn rows and `total`, the true pool size. The linear
-  trainer's z-scoring is over the FULL pools' moments, now estimated rather than counted: each group's rows
-  carry weight `total / len(feats)` in the two streaming passes, so a 5-row pool and a 325k one do not weigh
-  the same under fixed-size sampling — which would otherwise change the standardization and with it the
-  raw-space L2 the artifact ships. Unsampled every weight is exactly 1.0 and the arithmetic is bit-identical,
-  so a full-pool refit reproduces byte for byte.
-- **The loss has two parts**: an objective that pushes each recorded golden's rank up inside its own candidate set —
-  each group counting once — plus an L2 penalty in
-  raw feature units (`DEFAULT_L2`, CLI `--l2`). The penalty exists to make the fit **well-determined, not to shrink
-  the weights**. The rank objective barely moves when you scale a feature that hardly varies across the golden
-  candidate sets, so an unpenalized fit is free to pick an arbitrarily large weight there. That is invisible in
-  golden-rank metrics and catastrophic when scoring a fork, where a not-yet-decided knob scores such a feature 0.0.
-  The penalty must be in raw units (`w_z/sd`), because after de-standardizing, the inflated weight looks like an
-  ordinary O(1) weight.
-- **Loading is strict.** A missing artifact, or one whose `feat_ver` does not match, is a hard error — refit it, never
-  a silent fallback. The error comes from the artifact loader, and it surfaces in `eval` / `fit`, which load the
+  (`search/pool.py`), so `Group` carries both the drawn rows and `total`, the true pool size a report prints beside
+  the raw sample rank.
+- **Absent is not zero.** A feature a row never stamped is `NaN`, CatBoost's own missing bucket, so "this knob is not
+  decided" stays a different fact from a knob legitimately at 0. The dataset stores `NaN` and the model reads it.
+- **Loading is strict.** A missing artifact, one whose `feat_ver` does not match, or one lacking `cols`, `params` or
+  `model` is a hard error — refit it, never a silent fallback. The error surfaces in `eval` / `fit`, which load the
   prior directly. A greedy compile wraps `load_prior` best-effort, so there a bad artifact does not abort the compile:
   it produces the no-prior resolve described under the hierarchy below (first leaf, with the evidence index unread
-  along with the prior object). A weight key that is no longer used, inside an artifact of the current version, is
-  simply ignored. `EMMY_OFFLINE_FILE` (or `emmy eval … --offline-file`) swaps in a candidate fit for an A/B.
-- A separate `weights_dynamic` set ranks kernels whose tiles are masked because an axis is symbolic; it is selected on
-  the stamped `S_ext_n_symbolic_axis`. That stamp **routes and never carries a weight**: the dataset packs it like
-  any other column, and the linear fit narrows it out of its own descent coordinates (`descent_cols`) while a tree
-  splits on it to price both regimes in one model. The reason is identifiability: the stamp is constant
-  across a candidate pool, so a linear term on it shifts every candidate equally and cancels out of the within-pool
-  ranking. The rank objective cannot see such a term at all, which makes whatever value a descent lands on there
-  noise rather than a fitted quantity.
-- One feature interaction sits outside the linear weights, because it cannot be written as one: the atomic-free
-  split-K term, which rewards the deferred combine kernel above a split-count threshold and penalizes it below.
-  Its weight and its threshold are both fitted. `D_scalar_on_warp_eligible` and `D_splitk_roundtrip` — which express
-  a preference for the tensor-core path, driven by the per-kernel `S_warp_eligible` value the scheduler stamps — used
-  to carry hand-set coefficients here as well. They are plain linear terms on features the weight vector already
-  holds, so they were double-counting constants the fit could not see, and the fitted weights now carry them alone.
-- **The linear quality score is turned into a positive stand-in for latency by an exponential**
-  (`exp(-scale·quality)`), whose argument is clipped only at the point where floats stop being safe (~±700). **That
-  exponential must never flatten out over the range of quality scores that actually occur.** A clip inside the live
-  range collapses good candidates onto one identical value, and the argmin then falls back on the order the options
-  were emitted in.
+  along with the prior object). `EMMY_OFFLINE_FILE` (or `emmy eval … --offline-file`) swaps in a candidate fit for
+  an A/B.
+- **Symbolic-axis kernels are one more split.** A kernel whose tiles are masked because an axis is symbolic carries
+  the stamp `S_ext_n_symbolic_axis`; every feature view keeps it, and the trees split on it to price both regimes in
+  one model.
+- **The quality score is turned into a positive stand-in for latency by an exponential** (`exp(-scale·quality)`),
+  so one greedy argmin and one kernel-set sum read it like a latency.
+
+**Known gap: the fit never sees the rows a deploy ranks.** The fit trains on a 2000-row draw of each pool and 500
+sampled negatives, and the reproduction gate scores a 500-row draw. A cold deploy ranks 2048 rows drawn from the WHOLE
+pool (`policy/greedy._descent_sample`), so it reaches candidates no fit or gate ever scored, and the model can rate
+some of them far above the golden. On the V100 Qwen3.8-27B-FP8 golden the deployed lm_head ran 29× slower than its
+golden row and a fused matmul-reduce exceeded the 60 s bench limit, while every gate slice reproduced. The fix is a
+fit and a gate that draw the way the deploy draws; until then a cold V100 compile needs recorded evidence.
 
 **A subtlety about features.** The `H_*` features (which GPU, which nvcc level) have the same value for every
-candidate competing at one fork, so no weight on them can change the ranking within that set. What tells GPU
-architectures apart is therefore a *per-candidate* feature — one that only takes a value where the hardware offers the
-thing it describes. The `D_tma_*` features mirror the tile geometry onto rows that stage through TMA, which lets one
-weight set score Hopper/Blackwell tiles differently from cp.async-era ones. The `D_w_grid_*` features separate
-candidates with the same tile but a different warp grid, which used to produce byte-identical feature vectors.
+candidate competing at one fork, so on their own they cannot change a ranking within that set. A tree can still
+combine one with a per-candidate feature — split on the card, then on the accumulator width — which is how a single
+model can prefer f16 accumulation on one architecture and f32 on another; the default view carries `H_cc` for that
+reason. The `D_w_grid_*` features separate candidates with the same tile but a different warp grid, which used to
+produce byte-identical feature vectors. A feature that is a monotone transform of another, or a threshold on one,
+does not exist: a tree forms it with a split.
 
 ### What a `Prior` offers its callers
 
@@ -1170,10 +1140,9 @@ count and smem specs, and the regime's flags — never the host's. Building them
 ranks machine-dependent, because the occupancy features then describe tiles for a GPU that is not the one the row came
 from. A golden that lowers to several kernels is one pool per piece, each holding the rows measured on it.
 
-The export packs the pools over the FULL featurization; a fit projects them onto its trainer's feature view. The view is
-a property of the model being fitted: the linear model reads only its own weight names, so its ranks are identical
-either way, while a CatBoost fit regresses on the `S_*` / `H_*` columns a narrow view drops and would otherwise be
-asked about a kernel with no shape.
+The export packs the pools over the FULL featurization; a fit projects them onto its feature view, and the model
+records the columns it reads. Scoring a pool packed under a narrower view would ask the model about a kernel with
+no shape, which is why every pool is packed whole.
 
 **The per-fork view is retired.** Until 2026-08 this part also documented three node-tree diagnostics: fork-sibling
 regret (what following the prior's pick at each fork cost, bucketed by knob family), a golden-anchored descent (how

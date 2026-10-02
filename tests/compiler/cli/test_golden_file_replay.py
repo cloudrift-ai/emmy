@@ -26,6 +26,9 @@ from emmy.compiler.wire import kernel_tile
 from tests.compiler.helpers import inventory_document
 
 _CUT = {"PLACE@inner.1/map": "cut"}
+# The residual matmul's cross-CTA split, pinned on its graph node: the route a recorded golden replays is the test's
+# input, not the prior's pick.
+_SPLIT = {"REDUCE@node_y": "g2k"}
 
 
 def _relu_graph() -> Graph:
@@ -86,13 +89,13 @@ def _compile_pinned(document: GoldenFile, pins: dict, cap=(8, 9), gpu_name=None)
 
 
 def _working_placement_route(path, cap=(8, 9), gpu_name=None) -> GoldenFile:
-    """A working golden whose one target, a norm into a matmul, was cut once: the seed row ``working.route``, the
-    decision as a routing row, and a measured row per piece — what ``run --record-greedy`` writes."""
+    """A working golden whose one target, a norm into a matmul, was cut once and its residual matmul split: the seed row
+    ``working.route``, each decision as a routing row, and a measured row per piece — what ``run --record-greedy`` writes."""
     document = inventory_document(_norm_matmul_graph(), cap, gpu_name=gpu_name)
     [row] = document.rows
     document = replace(document, rows=[replace(row, name="working.route", pins={"FAST_MATH": False})])
     document.dump(path, overwrite=True)
-    picked, taken = _compile_pinned(document, {"FAST_MATH": False, **_CUT}, cap, gpu_name)
+    picked, taken = _compile_pinned(document, {"FAST_MATH": False, **_CUT, **_SPLIT}, cap, gpu_name)
     assert taken and taken[0][1] == _CUT
     record_greedy_pick(
         path, "working.route", decisions=taken, kernels=[(node.op, 1.0, 2.0) for node in _cuda_nodes(picked)], reference_backend="torch"

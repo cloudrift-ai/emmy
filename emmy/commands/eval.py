@@ -133,8 +133,7 @@ def _golden_report(args, halves, dataset, source: str):
     """``eval prior --pools golden`` — the report over the dataset's golden pools: the rows the golden files record,
     each ranked among the candidates its kernel offers — the groups ``emmy fit`` trains on, over the FULL
     featurization rather than the fit's ``D_*`` view. The view is a property of the model being fitted, and this
-    command scores the model class the artifact names: the linear model reads only its own weight names, so its
-    ranks are identical either way, while a tree model reads the ``S_*`` / ``H_*`` columns a narrow view drops and would
+    command scores the model the artifact names, which may read ``S_*`` / ``H_*`` columns a narrow view drops and would
     otherwise be asked about a kernel with no shape. ``--kernel`` keeps the pools whose kernel's C name contains it
     — a view; each retained pool's rank is unchanged by it."""
     from emmy.compiler.pipeline.search.prior.report import EvalReport, golden_summaries  # noqa: PLC0415
@@ -226,7 +225,7 @@ _REPORT_TABLES = {
         [
             ("rank", lambda c: _metric(c.metrics["rank"], "median", "{:g}")),
             ("rank(opt)", lambda c: _metric(c.metrics["rank"], "median_optimistic", "{:g}")),
-            *((f"top{k}", lambda c, k=k: f"{c.metrics[f'top{k}']['count']}/{c.groups - c.unscored}") for k in (1, 10, 50)),
+            *((f"top{k}", lambda c, k=k: f"{c.metrics[f'top{k}']['count']}/{c.groups}") for k in (1, 10, 50)),
         ],
     ),
 }
@@ -247,9 +246,7 @@ def _emit_report(report) -> None:
     """Print an :class:`EvalReport` — the provenance header, then one table of summaries.
 
     Which columns appear follows the report's dataset, since that is what decided which metrics the summaries carry.
-    The ``pools`` column is the summary's own total, annotated when the model could not score some of them: an
-    unscored pool is not a small one, and a report that dropped it silently would show a healthy corpus with no
-    sign that part of the deploy surface is unmeasured."""
+    The ``pools`` column is the summary's own total."""
     head = report.header
     logger.info("")
     logger.info("[prior] %s dataset — %s", head.get("dataset", "?"), head.get("source", ""))
@@ -268,9 +265,7 @@ def _emit_report(report) -> None:
     axes, metrics = _REPORT_TABLES[head["dataset"]]
     columns = [Col(a) for a in (*axes, "pools")] + [Col(name) for name, _ in metrics]
     rows = [
-        [summary.axes.get(a, "") for a in axes]
-        + [str(summary.groups) + (f" ({summary.unscored} unscored)" if summary.unscored else "")]
-        + [render(summary) for _, render in metrics]
+        [summary.axes.get(a, "") for a in axes] + [str(summary.groups)] + [render(summary) for _, render in metrics]
         for summary in report.summaries
     ]
     logger.info("")

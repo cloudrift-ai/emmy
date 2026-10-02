@@ -211,18 +211,15 @@ def test_search_dataset_does_not_import_the_prior() -> None:
 
     The data layer describes candidates and their labels — a :class:`Group` is a packed pool plus what
     is known about its rows, and that is the same object whether a trainer, a fold harness or an
-    evaluation report is asking. Deciding what a SCORE means is the layer above, and it has two model
-    classes that disagree: the linear one narrows the routing stamp out of its coordinates, the tree
-    splits on it. A dataset that imported either would be answering for both — which is exactly the
-    train/serve skew ``Group`` shipped with while it stripped the routing column on the linear model's
-    behalf, leaving the tree a column of NaN.
+    evaluation report is asking. Deciding what a SCORE means is the layer above: a dataset that imported
+    the model would be making that decision for it.
 
     If this fires, the fact you reached for is either feature SPELLING (``search/features.py``, imported
     by both layers) or a model DECISION that belongs to its caller — pass it in.
     """
     data_dir = _REPO_ROOT / "emmy" / "compiler" / "pipeline" / "search" / "dataset"
     assert data_dir.is_dir(), f"search/dataset/ not found at {data_dir}"
-    # Both spellings, because the repo uses both: the dotted path (``from ….search.prior.linear_model import X``)
+    # Both spellings, because the repo uses both: the dotted path (``from ….search.prior.offline import X``)
     # and the package-import idiom (``from ….search import prior``) that ``commands/fit.py`` already writes for
     # ``features``. A guard that caught only the first would wave through the form a future violation is most
     # likely to be written in.

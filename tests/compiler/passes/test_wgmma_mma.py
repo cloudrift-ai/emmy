@@ -198,6 +198,7 @@ def _graph(m: int, n: int, k: int) -> Graph:
 def test_env_pins_reach_the_wgmma_rules_and_a_legal_row_schedules(monkeypatch) -> None:
     monkeypatch.setenv("EMMY_TILE", f"{N128}/f1x16/k4")
     monkeypatch.setenv("EMMY_STAGE", "d2/smem-tma")
+    monkeypatch.setenv("EMMY_REDUCE", "")
     monkeypatch.setenv("EMMY_WORK", "w2x4")
     with pytest.raises(ValueError, match="w<4k>x1 warp grid"):
         Pipeline.build(TILE_PASSES).run(_graph(128, 256, 256), ctx=Context.from_target((9, 0)))
