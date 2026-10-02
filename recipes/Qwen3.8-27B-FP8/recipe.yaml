@@ -1,17 +1,18 @@
-# Qwen3.8-27B-FP8 on four V100 SXM2 16 GB (sm_70 Volta).
+# Qwen3.8-27B-FP8 on four V100 SXM2 16 GB (sm_70 Volta), and on part of one H200.
 #
 #   emmy deploy ssh --recipe recipes/Qwen3.8-27B-FP8 --ssh user@host
 #
-# This is a DEPLOYMENT config, not an experiment: one variant, no workload grid, no `benchmark:`
-# block. The workload grid that justifies these values lives in
+# This is a DEPLOYMENT config, not an experiment: one variant per platform, no workload grid, no
+# `benchmark:` block. The workload grid that justifies the Volta values lives in
 # experiments/Qwen3.8-27B-FP8/serving/.
 #
-# SCOPE: this recipe records the platform that was actually qualified, which is Volta. The
-# discovery shell it replaces proposed one RTX PRO 6000 Blackwell Max-Q and one H200 141GB; both
-# remain UNQUALIFIED here, which means unmeasured, not unsuitable. Either card has native FP8
-# hardware that this one lacks, so their numbers would not resemble these.
+# SCOPE: the Volta lane is the platform that was actually qualified. The discovery shell it
+# replaced proposed one RTX PRO 6000 Blackwell Max-Q and one H200 141GB; the Max-Q remains
+# UNQUALIFIED here, which means unmeasured, not unsuitable. The H200 entry below exists so this
+# model can share one H200 with Ornith-1.5-35B-A3B-FP8 through a deploy plan; it runs stock vLLM
+# with Hopper's native FP8 and is sized from the checkpoint, unverified until a record run on an H200.
 #
-# There is no Emmy lane: this recipe serves the stock 1Cat-vLLM fork. See RESULTS.md.
+# There is no Emmy lane: this recipe serves stock engines. See RESULTS.md.
 tags:
   - maintained
 
@@ -80,18 +81,6 @@ engine:
         --exclude-tools-when-tool-choice-none
         --structured-outputs-config '{"backend":"xgrammar","disable_any_whitespace":true}'
         --reasoning-parser qwen3
-      extra_env:
-        # Volta has no FP8 arithmetic. The fork serves FP8 checkpoints on sm_70 through its
-        # TurboMind dequantization path, which these two switches select; neither is baked into
-        # the image, and the DeepSeek-V4-Flash lane on this same engine sets them the same way.
-        VLLM_SM70_FP8_TURBOMIND: "1"
-        VLLM_SM70_QUANT_BACKEND: "turbomind"
-        # 48 of the 64 layers are Gated DeltaNet, so that path is unavoidable. This image cannot
-        # build the Volta-native flash_qla GDN extension: it ships the sources but not the CUDA
-        # development headers, so the JIT fails at `fatal error: cusparse.h`. Selecting the Triton
-        # GDN *prefill* backend above is not sufficient, because the GDN decode path reaches for
-        # flash_qla independently; this knob is what keeps the JIT out of the run.
-        VLLM_SM70_GDN_DECODE_FLASHQLA: "0"
 
 # The host must have NVLink up. On CloudRift that means a VM image newer than the catalog default
 # (ubuntu-noble-server-gpup-580-129-20260430-084759 sets NvLinkDisable=1); this lane was measured on
@@ -99,5 +88,42 @@ engine:
 # longer and prompts past about 190K exceed a 300 s client timeout. Check with `nvidia-smi topo -m`:
 # linked pairs show NV1/NV2, not PHB.
 matrices:
-  deploy.gpu: "NVIDIA Tesla V100 SXM2 16GB"
-  deploy.gpu_count: 4
+  - deploy.gpu: "NVIDIA Tesla V100 SXM2 16GB"
+    deploy.gpu_count: 4
+    # These switches live on the Volta entry, not in the base, because a matrix entry can add to
+    # the base's environment but not take from it, and the H200 entry below must not carry them.
+    engine.llm.vllm.extra_env:
+      # Volta has no FP8 arithmetic. The fork serves FP8 checkpoints on sm_70 through its
+      # TurboMind dequantization path, which these two switches select; neither is baked into
+      # the image, and the DeepSeek-V4-Flash lane on this same engine sets them the same way.
+      VLLM_SM70_FP8_TURBOMIND: "1"
+      VLLM_SM70_QUANT_BACKEND: "turbomind"
+      # 48 of the 64 layers are Gated DeltaNet, so that path is unavoidable. This image cannot
+      # build the Volta-native flash_qla GDN extension: it ships the sources but not the CUDA
+      # development headers, so the JIT fails at `fatal error: cusparse.h`. Selecting the Triton
+      # GDN *prefill* backend above is not sufficient, because the GDN decode path reaches for
+      # flash_qla independently; this knob is what keeps the JIT out of the run.
+      VLLM_SM70_GDN_DECODE_FLASHQLA: "0"
+
+  # Reduced-fraction entry so this model can share an H200 with Ornith-1.5-35B-A3B-FP8 at 0.35 through
+  # a deploy plan. 0.55 x 141 GB is a ~77 GiB budget: 28.8 GiB of FP8 weights and ~1.5 GiB of engine
+  # overhead leave ~47 GiB of KV, about 760K tokens at 64 KiB each (16 full-attention layers x 4 KV
+  # heads x 256), so the full 262,144-token window fits with 2.9 sequences resident, or sixteen
+  # 47K-token requests at the inherited concurrency. Stock vLLM on Hopper: native FP8 and BF16, its
+  # own attention and Gated DeltaNet kernels, the engine's default prefill chunk. The flags kept are
+  # the ones about the model's own behaviour (vision tower off, tool and reasoning parsers, the
+  # tool_choice "none" and "required" fixes explained above); the Volta ones are left out.
+  # Unverified until a record run on an H200.
+  - deploy.gpu: "NVIDIA H200 141GB"
+    deploy.gpu_count: 1
+    engine.llm.tensor_parallel_size: 1
+    engine.llm.gpu_memory_utilization: 0.55
+    engine.llm.vllm.image: "vllm/vllm-openai:v0.30.0"
+    engine.llm.vllm.extra_args: >-
+      --enable-prompt-tokens-details
+      --language-model-only
+      --enable-auto-tool-choice
+      --tool-call-parser qwen3_coder
+      --exclude-tools-when-tool-choice-none
+      --structured-outputs-config '{"backend":"xgrammar","disable_any_whitespace":true}'
+      --reasoning-parser qwen3
