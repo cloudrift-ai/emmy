@@ -206,3 +206,20 @@ def test_equal_single_axis_symbolic_and_windowed_sweeps_keep_their_domain(extent
     assert formed is not tile
     assert all(not spec.sweep for spec in formed.output_specs)
     assert formed.place.free[-1].extent == extent and formed.place.free[-1].window == window
+
+
+def test_two_input_coordinates_cannot_map_to_one_shared_axis() -> None:
+    tile = _transposed_siblings(batched=True)
+    axes = tuple(replace(axis, extent=Dim(3)) if axis.name in {"b", "batch"} else axis for axis in tile.axes)
+    k = next(axis for axis in axes if axis.name == "k")
+    first = contraction(k, slab("x0", "x", "m", "m", "k"), (slab("w0v", "w0", "k", "n", "b"), "acc0"))
+    tile = replace(
+        tile,
+        axes=axes,
+        op=projection((first, tile.op.operands[1]), results=("acc0", "acc1")),
+        inputs={**tile.inputs, "x": Tensor("x", (3, 3, 5), "f32"), "w0": Tensor("w0", (5, 8, 3), "f32")},
+        outputs={"out0": Tensor("out0", (8, 3, 3), "f32"), "out1": Tensor("out1", (2, 3, 3, 4), "f32")},
+        output_specs=tuple(replace(spec, sweep=tuple(next(axis for axis in axes if axis.name == old.name) for old in spec.sweep))
+                           for spec in tile.output_specs),
+    )
+    assert reformed(tile) is tile
