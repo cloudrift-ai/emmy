@@ -588,6 +588,19 @@ def test_random_packed_sources_spread_codes_and_scales_stay_positive():
     scales = _random_source_values(rng, (64, 32), "f8e4m3", name="model.layers.3.mlp.gate_proj.weight_scale")
     decoded = decode_f8(scales, "f8e4m3")
     assert np.isfinite(decoded).all() and (decoded > 0).all()
+    tensor_scale = _random_source_values(rng, (64,), "f32", name="model.layers.3.mlp.gate_proj.weight_scale_2")
+    assert (tensor_scale >= 1e-4).all() and (tensor_scale <= 1e-1).all()
+
+
+@requires_cuda
+def test_bf16_bits_bind_by_reinterpretation_for_the_eager_reference():
+    """A folded BF16 table evaluates to its bits on a ``uint16`` carrier; converting them would read each bit pattern
+    as a number, and the eager reference would disagree with every NVFP4 kernel by orders of magnitude."""
+    from emmy.commands.run import _to_cuda_tensor
+    from emmy.compiler.dtype import encode_bf16
+
+    values = np.array([0.5, -6.0, 1.5], dtype=np.float32)
+    assert _to_cuda_tensor(encode_bf16(values), "bf16").float().cpu().numpy().tolist() == values.tolist()
 
 
 def test_strict_correctness_proof_uses_compiler_baseline_tolerance():

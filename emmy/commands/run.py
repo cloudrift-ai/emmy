@@ -2251,24 +2251,30 @@ def _random_source_values(rng, shape, dtype, *, name: str | None = None):
     """Return nontrivial deterministic values in a constant's declared storage dtype.
 
     Packed 4-bit pairs are uniform random bytes, so every code appears in both halves of a byte, as in a real
-    checkpoint. An 8-bit float whose ``name`` (the checkpoint key) says it is a scale is drawn from the codes
-    between 1 and 448: a block scale is positive, and a calibrated one spans the format's upper range."""
+    checkpoint. A source whose ``name`` (the checkpoint key) ends in a scale leaf is positive, like every calibrated
+    scale: an 8-bit float one is drawn from the codes between 1 and 448, the format's upper range where block scales
+    sit; any other one log-uniformly from 1e-4 to 1e-1, which spans tensor and input scales. A scale drawn from a normal
+    distribution can be negative or near zero, and its reciprocal then overflows the 8-bit block scales computed from
+    it."""
     import numpy as np  # noqa: PLC0415
 
     from emmy.compiler.dtype import decode_f8  # noqa: PLC0415
     from emmy.compiler.dtype import get as get_dtype  # noqa: PLC0415
 
     canonical = get_dtype(dtype or "f32").name
+    is_scale = name is not None and "scale" in name.rsplit(".", 1)[-1]
     if canonical == "f4e2m1x2":
         return rng.integers(0, 256, shape, dtype=np.uint8)
     if canonical in {"f8e4m3", "f8e5m2"}:
-        if name is not None and "scale" in name:
+        if is_scale:
             codes = np.arange(256, dtype=np.uint8)
             values = decode_f8(codes, canonical)
             return rng.choice(codes[(values >= 1.0) & (values <= 448.0)], size=shape)
         bits = rng.integers(0, 256, shape, dtype=np.uint8)
         bits[~np.isfinite(decode_f8(bits, canonical))] = np.uint8(0)
         return bits
+    if is_scale:
+        return np.exp(rng.uniform(np.log(1e-4), np.log(1e-1), shape)).astype(np.float32)
     return rng.standard_normal(shape, dtype=np.float32) * 0.02
 
 
@@ -3253,12 +3259,19 @@ def _eager_output(module, args, kwargs):
 
 
 def _to_cuda_tensor(arr, dtype):
-    """numpy array → CUDA torch tensor in the node's dtype (default fp32)."""
+    """numpy array → CUDA torch tensor in the node's dtype (default fp32).
+
+    A BF16 value bound from its bits (the ``uint16`` carrier a folded table constant evaluates to) is reinterpreted,
+    not converted: converting would read each bit pattern as a number."""
+    import numpy as np
     import torch
 
     from emmy.compiler.backend.torch_ref import torch_dtype
 
-    return torch.from_numpy(arr).to("cuda").to(torch_dtype(dtype) or torch.float32)
+    target = torch_dtype(dtype) or torch.float32
+    if target is torch.bfloat16 and arr.dtype == np.uint16:
+        return torch.from_numpy(np.ascontiguousarray(arr).view(np.int16)).to("cuda").view(torch.bfloat16)
+    return torch.from_numpy(arr).to("cuda").to(target)
 
 
 def _to_cuda_kwargs(kwargs):
