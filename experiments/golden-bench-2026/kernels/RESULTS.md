@@ -1,5 +1,117 @@
 # Golden-bench kernel corpus
 
+## One-warp V100 decode and rejected H100 alternatives (2026-10-02)
+
+An existing one-warp schedule reduces V100 decode latency by 0.62% across six balanced whole-layer pairs. It changes
+only the fused Q/K normalization, RoPE and score kernel. The tested H100 causal bounds and smaller tiles do not
+justify replacing its accepted schedule. This phase adds one measured experiment-golden row and diagnostic evidence;
+there is no compiler, kernel-identity, precision, maintained golden or prior change.
+
+### V100: a small gain from one-warp reductions
+
+Both arms use the pinned Qwen3-0.6B revision `c1899de289a04d12100db370d81485cdf75e47ca`, layer zero, sequence length
+one, FP16, O3 and fast math disabled. The compiler is main after #1019, `e53587a910d9e6372814800e22e88a06f742fc31`.
+Each process uses a fresh tune database, strict measured evidence, no recording, ten warmups and 100 iterations.
+Execution order alternates over six fixed pairs. All twelve completed samples are retained, including the loss.
+
+| Pair | Order | Baseline, µs | Candidate, µs |
+| --- | --- | ---: | ---: |
+| 1 | Baseline then candidate | 67.328 | 67.072 |
+| 2 | Candidate then baseline | 67.520 | 67.136 |
+| 3 | Baseline then candidate | 67.456 | 66.880 |
+| 4 | Candidate then baseline | 67.789 | 66.688 |
+| 5 | Baseline then candidate | 67.136 | 67.392 |
+| 6 | Candidate then baseline | 67.328 | 66.816 |
+| **Arm medians** | | **67.392** | **66.976** |
+
+The reduction is 0.416 µs, or 0.617%, between the arm medians. Five pairs win; the loss costs 0.256 µs. Arm means
+are 67.426 and 66.997 µs, a 0.636% reduction. This is a modest result on one shape and card, not an established
+advantage over `torch.compile`. The final separate model comparison measures 66.500 µs for Emmy and 54.345 µs for
+the compiled reference. Those single-process numbers are not the paired speedup claim.
+
+The pairs time Emmy alone and explicitly report unchecked correctness. Separate model comparisons before and after
+them pass both Emmy and `torch.compile` against eager under the unchanged scaled tolerance. All twelve timing
+samples have whole-program end-to-end semantics, fourteen launches and the exact expected source inventory.
+The candidate changes one CUDA body; the other thirteen complete CUDA objects remain identical. Five fresh-database
+strict replays of the stored complete program also pass against eager at 0.001 absolute and relative tolerances,
+with zero reported error and the same fourteen selected sources.
+
+The selected kernel keeps sixteen CTAs but uses 32 instead of 128 threads per CTA. Both cooperative reductions
+remain, while their cross-warp shared-memory collectives disappear. Shared memory falls from 48 bytes to zero;
+registers rise from 32 to 40, with no spills. All cuts and intermediate FP16 boundaries remain. An isolated strict
+same-input comparison against the exact accepted Emmy source reports zero error and 2.326 versus 2.738 µs. That
+closed kernel has no independent Torch boundary, so this check supplements the complete model validation.
+
+The existing recording command writes the added row's measured cost of 2.349 µs. Fresh databases select it without
+pins. A retained control containing only a latency snapshot correctly keeps the old schedule: a snapshot alone is
+not selection evidence. All 35 original kernel definitions, 15 routes, 22 measured rows and program/provenance fields
+remain unchanged. The later recording comparison selects the candidate itself and is not a second independent
+comparison against the old kernel.
+
+Current-layout unsplit projections lose their operation-matched comparisons. The best screened Q candidate costs
+6.922 µs against about 6.567 µs for the accepted partial plus finalizer; shared K/V's better candidate costs
+8.443 versus 7.118 µs. More independent accumulators and output lanes do not recover the finalizer cost here.
+Their experimental catalog extensions remain only in archived patches and correctness evidence. No layout change,
+fusion restriction or numerical relaxation is proposed.
+
+### H100: causal skipping and smaller tiles do not pay here
+
+All H100 probes keep the original mask, FP16 boundaries and accepted input shapes. Enabling the existing causal
+bound in the accepted one-wave schedule gives 83.180 µs for the layer against an 82.767 µs baseline screen, even
+though its attention kernel is slightly faster. This does not justify changing the general policy, which also has
+an older head-width-256 regression control.
+
+Two existing smaller schedules allow the causal bound naturally by increasing the grid from 128 to 256 CTAs.
+Supported closed-kernel comparisons use the exact accepted production source as their same-input reference. Both
+pass strict comparison with zero reported error at unchanged 0.001 absolute and relative tolerances. Their candidate
+sources match strict full-program CPU lowering, with all ten unrelated CUDA bodies unchanged. The smaller output
+tile additionally preserves all ten unrelated complete CUDA objects, including their launch metadata.
+
+| Attention schedule | Query rows / output channels | Threads | Shared memory | Registers | Candidate / baseline isolated, µs |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Smaller query tile, mma.sync | 32 / 128 | 64 | 64 KiB | 234 | 15.329 / 12.257 |
+| Smaller output tile, WGMMA | 64 / 64 | 128 | 64 KiB | 128 | 14.072 / 12.340 |
+
+The accepted schedule uses 64 query rows, 128 output channels, 128 threads, 80 KiB shared memory and 168 registers.
+Both candidates have no spills. These isolated losses reject these particular schedules; they do not measure a
+whole-layer change or prove that every smaller tile loses. Earlier incomplete model and intermediate-IR attempts
+are retained as failures, not timings. The supported comparisons remove that earlier measurement uncertainty.
+
+Packing eight normalization rows per CTA makes both selected normalization kernels slightly slower. Its model JSON
+reports a 0.50% lower total, followed by terminal timeout status 124. That single run with a nonzero terminal status
+is insufficient for acceptance. The experimental catalog extension is excluded.
+
+The earlier NVIDIA profiles still support investigating bulk TMA staging and producer/consumer warp specialization
+on H100. The bounded alternatives here do not establish a smaller scheduling fix for its remaining gap. V100's
+unsplit projection question remains tied to weight layout and complete-layer costs. Neither larger change is
+implemented or claimed as a future speedup by this phase.
+
+### Controls and retained evidence
+
+Fresh baseline model screens pass on single V100 at both sequence lengths and on H100 prefill. V100 s1 measures
+67.644 µs versus 54.963 µs for `torch.compile`; V100 s512 measures 497.664 versus 605.335 µs; H100 s512 measures
+82.767 versus 79.642 µs. These are setup controls, not repeated comparisons. Reference tuning differs across
+processes, so changes from earlier reports cannot be attributed to Emmy.
+
+The first CPU source audit compared readable rendering with benchmark rendering and wrongly suggested source drift.
+Repeating it with matching rendering proves all fourteen V100 CUDA objects and all eleven H100 CUDA bodies equal
+the prior accepted/profile sources. Both captures and the correction are retained. No identity change or restamp
+is required. Only this experiment's V100 decode golden changes; all other canonical recipe archives stay unchanged.
+
+The cards are a Tesla V100 SXM2 16GB and an H100 80GB HBM3. V100 uses Torch 2.13.0+cu126 and NVCC 12.9.86;
+H100 uses Torch 2.14.0+cu130 and NVCC 12.9.41. Both use Transformers 5.14.1 and driver 580.178.04. Measurements
+use fresh task-owned runtime and cache directories. Cold
+setup timeouts, refused pins, unsupported intermediate-IR attempts and malformed output-path attempts are retained
+with their terminal statuses. A100 is stopped with its persistent disk retained. The 4×V100 VM is unused.
+
+V100 qualification and rejected probes are retained in `tuning_v100x1_round3_2026-10-02.tar.gz`. H100 evidence is in
+`tuning_h100x1_round3_diagnostics_2026-10-02.tar.gz`,
+`tuning_h100x1_round3_m32_priceprobe_2026-10-02.tar.gz` and
+`tuning_h100x1_round3_pvn64_priceprobe_2026-10-02.tar.gz`. The corrected source audit is in
+`tuning_round3_source_audit_2026-10-02.tar.gz`. Each archive includes a verified checksum manifest. The edited
+experiment golden passes fresh lowering. Final local CPU validation passes: 5,776 tests passed and 1,305 skipped
+in 412.19 seconds. Lint passes. GPU correctness is established by the separate V100 and H100 checks above.
+
 ## Matched NVIDIA profiles of the remaining gaps (2026-10-02)
 
 These captures compare the accepted H100 prefill and single-V100 decode selections with the kernels actually used
