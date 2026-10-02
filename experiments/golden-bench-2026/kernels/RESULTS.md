@@ -69,8 +69,8 @@ register use from 150 to 104. RTX 5090's eight-warp shared tile ties and its sha
 V100 profiling shows gate/up near 86% of measured cold DRAM throughput, while Q, K/V and O reach roughly 56–58%
 and spend 59–65% of sampled warp time stalled on long scoreboards. Its wider Q split wins only three of six pairs
 and is tied on average, so the original split stays. Cutting an input normalization factor instead of the mean square
-also ties. Moving the post-attention RMSNorm statistic separately preserves O but makes gate/up repeat more normalization
-work; the new gate/up and scalar costs outweigh the saving. Existing evidence continues to select the accepted
+also ties. Moving the post-attention RMSNorm statistic separately preserves O but makes gate/up repeat more
+normalization work; the new gate/up and scalar costs outweigh the saving. Existing evidence continues to select the accepted
 input-only change. No mathematical precision or correctness tolerance is changed.
 
 The V100 trace has 14 Emmy launches versus nine for `torch.compile`, including five projection partial/final pairs.
