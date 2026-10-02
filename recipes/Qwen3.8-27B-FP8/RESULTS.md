@@ -242,9 +242,9 @@ the slowest of the three measured setups (table above), and it cannot hold a 250
 
 ## Emmy
 
-The V100 golden was optimized on 2026-10-02 and rebased onto main `037cef09c`, on four Tesla V100-SXM2-16GB cards
-with CUDA 12.9 and torch 2.14.0+cu126. Each card ran an independent kernel benchmark. These are single-GPU kernel results,
-not a tensor-parallel model benchmark. Every schedule and cut was selected manually; `emmy tune` was not used.
+The V100 golden was optimized on 2026-10-02 on four Tesla V100-SXM2-16GB cards with CUDA 12.9 and torch 2.14.0+cu126.
+The final branch was rebased onto main `7beb606e9`. Each card ran an independent kernel benchmark. These are single-GPU
+kernel results, not a tensor-parallel model benchmark. Every schedule and cut was selected manually; `emmy tune` was not used.
 
 This pass covers the ten targets already stored in the golden's four programs. All ten now pass strict replay using
 only the golden's evidence and a fresh tune DB, at nvcc's deployable `-O3`. Every target passed on seeds 0, 1, 2 and 3,
