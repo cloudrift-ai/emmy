@@ -287,7 +287,7 @@ kernel-set execution. Their numbers therefore support a compiler improvement, no
 | Ordered triangular update, 64 tokens | 1.3–1.5 ms | 17.1 ms |
 | Ordered triangular update, 512 tokens | 13.0–13.5 ms | 135.6 ms |
 | GDN output contraction | 122 us | 6,093 us |
-| GDN final state and output | 323 us | unmeasured proposals |
+| GDN final state and output | 317–352 us | unmeasured proposals |
 
 The triangular updates still execute 61 ordered launches and store each requested state snapshot. Block-uniform demand
 skips reductions for unchanged rows without bypassing a barrier on only some lanes. The recorded 512-thread band
@@ -298,7 +298,8 @@ The GDN output cut materializes its complete operand once rather than repeating 
 state path stages computed operands and independent product channels through the existing synchronous fill. Each
 operand retains its own dtype, and unknown global strides use compute fill instead of an unjustified vector copy.
 Smaller producer tiles reduce shared memory from 49.5 to 41.2 KiB, allowing two blocks per SM. They passed on seeds
-0, 2 and 3. The final captured frontend run takes 323 us; the same kernel set's recorded replay takes 308 us.
+0, 2 and 3. Captured frontend runs take 317–352 us across the final fresh-process proofs and whole-file replay.
+The same kernel set's recorded replay takes 306–325 us. Both paths select identical CUDA sources.
 
 ### Reproduce
 
