@@ -113,13 +113,12 @@ def reproduce_placement(pools: Sequence[GoldenPool], scorer: Callable, *, kernel
     ``scorer`` (the placement prior's ``mean_scores_features``)."""
     from emmy.compiler.pipeline.search.ranking import placement_decisions, pool_context, walk_placement  # noqa: PLC0415
 
-    decisions = placement_decisions(pools)
     out: list[Verdict] = []
     for pool in pools:
         if not pool.kernel.formed or (kernel and kernel not in pool.kernel.name):
             continue
         try:
-            forks, _unmatched = walk_placement(pool, pool_context(pool), decisions, scorer=scorer)
+            forks, _unmatched = walk_placement(pool, pool_context(pool), placement_decisions(pools, pool), scorer=scorer)
         except Exception as exc:  # noqa: BLE001
             out.append(Verdict(pool, error=" ".join(f"{type(exc).__name__}: {exc}".split())[:100]))
             continue

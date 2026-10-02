@@ -105,6 +105,12 @@ Re-verified against the current compiler on the requested platform in this run:
 **The golden does not qualify serving.** Every serving figure above is the stock 1Cat-vLLM fork, which reads none of
 these kernels. The golden is durable compiler evidence for Volta, not a measurement of the deploy.
 
+On 2026-10-02, the Qwen3.8 FP8 kernel pass also recorded cuts for the identical QK and GDN output targets in this
+16 GB V100 golden. Their captured whole-forward latencies were 127 us and 123 us, respectively, with strict
+same-input replay on seed 3. Four measured rows and two routing rows were added; the older fused measurements and
+the checkpoint's stored program were preserved. These kernels contain no GPTQ weight decoding, so this is shared
+compiler evidence rather than new checkpoint or serving qualification.
+
 ## Reproduce
 
 ```bash

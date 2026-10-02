@@ -425,6 +425,12 @@ none was. The greedy asks it at a placement fork no routing row decides (`policy
 same featurizer, so the dataset's rank and the deploy's pick are one computation. Both artifacts name their `space`,
 and a reader refuses the other's.
 
+The placement view also retains `H_cc` and `H_total_mem`. They are constant inside a fork, but a tree can combine
+them with arm features to learn a different ranking per card, including same-die SKUs with different VRAM.
+The export prices each arm on its pool's card, precision regime and sizes using the same measured-evidence prices
+as a compile. A structural routing row on one card cannot mark a cut on another card that has no measurements for
+its pieces. Shared cut parents receive one pool per recorded context, and the walk keeps decisions within it.
+
 The proxy stays uncalibrated, and nothing in the deploy path corrects it by hand: the kernel-set Σ
 (`policy/greedy._resolved_price`) sums each row's own price as stamped or estimated. Where the prior ends up deciding
 a production election, the defect is the missing evidence — no recorded golden or measured row for that kernel —

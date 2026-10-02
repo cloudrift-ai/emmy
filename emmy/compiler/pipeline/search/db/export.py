@@ -52,34 +52,48 @@ def golden_pools(db: SearchDB) -> tuple[list[GoldenPool], dict[str, int]]:
 
 def placement_pools(db: SearchDB, pools: list[GoldenPool]) -> tuple[list[GoldenPool], dict[str, int]]:
     """The kernels whose placement forks the placement space ranks, each a pool whose one row is the ``PLACE``
-    routing decision the golden took on it, or no row where it kept the kernel fused: every golden pool (a piece a
+    cheapest measured routing decision on it, or no row where keeping the kernel fused is cheaper: every golden pool (a piece a
     cut minted included — it is a kernel with forks of its own, walked from its own definition), and every parent
     of a decision that is no pool, on the card and sizes of a measured descendant (a cut parent is never measured
     itself, its pieces are). The second return counts the parents dropped, by reason."""
     routing = [row for row in db.iter_routing() if all(key.startswith("PLACE") for key in row.arm)]
-    decisions = {row.parent: row.arm for row in routing}
-    children: dict[str, tuple[str, ...]] = {row.parent: row.children for row in routing}
-    by_identity: dict[str, GoldenPool] = {}
+    children: dict[str, set[str]] = defaultdict(set)
+    for row in routing:
+        children[row.parent].update(row.children)
+    by_identity: dict[str, list[GoldenPool]] = defaultdict(list)
     for pool in pools:
-        by_identity.setdefault(pool.kernel.exact_identity, pool)
+        by_identity[pool.kernel.exact_identity].append(pool)
     kernels = {k.exact_identity: k for k in db.iter_kernels()}
     dropped: dict[str, int] = defaultdict(int)
 
-    def measured(identity: str) -> GoldenPool | None:
-        if (pool := by_identity.get(identity)) is not None:
-            return pool
-        return next((p for child in children.get(identity, ()) if (p := measured(child)) is not None), None)
+    def measured(identity: str):
+        yield from by_identity.get(identity, ())
+        for child in sorted(children.get(identity, ())):
+            yield from measured(child)
 
-    out = [_placement_pool(pool, pool.kernel, decisions.get(pool.kernel.exact_identity)) for pool in pools]
-    for parent in sorted(decisions):
-        if parent in by_identity:
-            continue
-        below = measured(parent)
-        if below is None:
+    def marked(like, kernel):
+        from emmy.compiler.pipeline.search.ranking import pool_context  # noqa: PLC0415
+
+        prices = [
+            (arm, us)
+            for arm, us in db.priced_arms(pool_context(like), kernel.exact_identity, bindings=like.bindings)
+            if all(key.startswith("PLACE") for key in arm)
+        ]
+        best = min(prices, key=lambda item: item[1]) if prices else None
+        fused = like.emmy_us if like.kernel.exact_identity == kernel.exact_identity else math.inf
+        return _placement_pool(like, kernel, best[0] if best is not None and best[1] < fused else None)
+
+    out = {(pool.kernel.exact_identity, pool.gpu, pool.regime, knobs_json(pool.bindings)): marked(pool, pool.kernel) for pool in pools}
+    for parent in sorted(children):
+        found = False
+        for like in measured(parent):
+            pool = marked(like, kernels[parent])
+            if pool.rows or like.kernel.exact_identity == parent:
+                out.setdefault((parent, pool.gpu, pool.regime, knobs_json(pool.bindings)), pool)
+                found = True
+        if not found:
             dropped["no measured piece"] += 1
-            continue
-        out.append(_placement_pool(below, kernels[parent], decisions[parent]))
-    return out, dict(dropped)
+    return list(out.values()), dict(dropped)
 
 
 def _placement_pool(like: GoldenPool, kernel, arm: dict | None) -> GoldenPool:

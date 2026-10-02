@@ -399,15 +399,21 @@ def walk_placement(pool: GoldenPool, ctx: Context, decisions: dict[str, dict], s
     return forks, unmatched
 
 
-def placement_decisions(pools: Sequence[GoldenPool]) -> dict[str, dict]:
-    """The ``PLACE`` arm each placement pool's one row records, by the kernel's exact identity."""
-    return {pool.kernel.exact_identity: pool.rows[0].knobs for pool in pools if pool.rows}
+def placement_decisions(pools: Sequence[GoldenPool], like: GoldenPool) -> dict[str, dict]:
+    """Recorded ``PLACE`` arms in ``like``'s card, precision regime and sizes, by kernel identity."""
+    return {
+        pool.kernel.exact_identity: pool.rows[0].knobs
+        for pool in pools
+        if pool.rows
+        and (pool.gpu, pool.regime) == (like.gpu, like.regime)
+        and all(like.bindings.get(name) == size for name, size in pool.bindings.items())
+    }
 
 
 def build_placement_groups(pools: Sequence[GoldenPool]) -> tuple[list[GoldenGroup], list[tuple[str, str, str]]]:
     """Enumerate each placement pool's forks and pack them as :class:`GoldenGroup` records, one per fork: the
     arms the cut pass offers unpinned (keep fused, one seam each, the full-projection cut), each featurized from
-    the kernels it leaves (:func:`placement_features`), with the arms the golden took marked. The second return
+    the kernels it leaves (:func:`placement_features`), with the cheapest measured arms marked. The second return
     is the pools that produced no group, as ``(gpu, name, reason)``.
 
     A placement pool's one row is the ``PLACE`` routing decision recorded on its kernel (none: it stayed fused).
@@ -418,7 +424,6 @@ def build_placement_groups(pools: Sequence[GoldenPool]) -> tuple[list[GoldenGrou
     the pass offers single seams, and those are what the prior ranks. A single seam the decision names is a
     positive, as is the full-projection arm when it is exactly the decision; fused is the positive where
     nothing was recorded."""
-    decisions = placement_decisions(pools)
     groups: list[GoldenGroup] = []
     skipped: list[tuple[str, str, str]] = []
     ctxs: dict[tuple, Context] = {}
@@ -431,7 +436,7 @@ def build_placement_groups(pools: Sequence[GoldenPool]) -> tuple[list[GoldenGrou
         if ctx is None:
             ctx = ctxs[card] = pool_context(pool)
         try:
-            forks, unmatched = walk_placement(pool, ctx, decisions)
+            forks, unmatched = walk_placement(pool, ctx, placement_decisions(pools, pool))
         except ValueError as exc:
             # The same definition the schedule enumeration does not take back (``build_golden_groups``): the
             # reduce piece of a cross-CTA split re-offers the split and mints the buffer it already holds.
