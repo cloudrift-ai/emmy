@@ -106,7 +106,7 @@ def _program(op):
     return None
 
 
-def _resident(op, program, retained=frozenset()):
+def _resident(op, program, retained=frozenset(), padding=0):
     loop, carry, batch = program
     if len(op.serial) != 1 or op.serial[0] != loop.axis or len(op.body) != 1 or not isinstance(op.body[0], Tile):
         return None
@@ -205,7 +205,7 @@ def _resident(op, program, retained=frozenset()):
         Literal(tile.block_threads, "int"),
         (seed, Write(shared, (Literal(0, "int"), *suffix), "_carry_seed", value_dtype=seed.dtype)),
     )
-    body = (Smem(shared, (2, *shape), cuda_name(tensor.dtype)), initialize, Sync(), *step)
+    body = (Smem(shared, (2, *shape[:-1], shape[-1] + padding), cuda_name(tensor.dtype)), initialize, Sync(), *step)
     return replace(op, serial=(), body=Body((replace(tile, axes=(*tile.axes[: len(batch)], *tile.axes[split:]), body=Body(body)),)))
 
 
@@ -296,16 +296,19 @@ def rewrite(match: Match, root: Node, ctx=None):
         raise RuleSkipped("shared carry already decided or no serial state")
     program = _program(op)
     retained = frozenset(t.name for t in root.outputs if t.name in match.graph.outputs or match.graph.buffer_users(t.name))
-    candidate = _resident(op, program, retained) if program is not None else None
-    if candidate is None or candidate.smem_bytes() > ctx.max_dynamic_smem:
+    if program is None or _resident(op, program, retained) is None:
         raise RuleSkipped("this kernel has no CTA-owned state that fits shared memory")
     variants = []
-    for enabled in SHARED_CARRY.narrow((False, True)):
-        selected = candidate if enabled else op
+    for enabled in SHARED_CARRY.narrow((0, 1, 2)):
+        selected = _resident(op, program, retained, padding=enabled - 1) if enabled else op
+        if selected.smem_bytes() > ctx.max_dynamic_smem:
+            continue
         selected = replace(selected, source=op, knobs={**op.knobs, SHARED_CARRY.name: enabled})
         variants.append(
             DeferredFork(lambda selected=selected: _materialize._drop_private_ports(match, root, selected, "shared"), knobs=selected.knobs)
             if enabled
             else selected
         )
+    if not variants:
+        raise RuleSkipped("the requested carried-state storage exceeds shared memory")
     return variants

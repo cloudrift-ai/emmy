@@ -185,10 +185,10 @@ GUARD_REDUCTIONS = Knob(
 
 SHARED_CARRY = Knob(
     "SHARED_CARRY",
-    KnobType.BOOL,
-    hints=(False, True),
-    help="Keep a CTA-owned carried state in shared memory across its ordered steps.",
-    off=False,
+    KnobType.INT,
+    hints=(0, 1, 2),
+    help="Carried-state storage: 0 global, 1 dense shared, 2 shared with one extra column per row.",
+    off=0,
 )
 
 PAIR_LDMATRIX = Knob(

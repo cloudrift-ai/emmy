@@ -72,12 +72,12 @@ def test_discarded_clamps_do_not_change_the_state_owner():
 
 
 def test_shared_storage_keeps_the_ordered_loop_inside_one_launch():
-    with pinned_knobs({**_PINS, "SHARED_CARRY": True}):
+    with pinned_knobs({**_PINS, "SHARED_CARRY": 2}):
         compiled = Pipeline.build(CUDA_PASSES).run(_graph(), ctx=Context.from_target((7, 0)))
     (op,) = (node.op for node in compiled.nodes.values() if isinstance(node.op, CudaOp))
     assert not op.serial
     assert op.arg_order == ("seed", "out")
-    assert op.knobs["SHARED_CARRY"] is True
+    assert op.knobs["SHARED_CARRY"] == 2
     assert "_carry_copy" in op.kernel_source
     assert "__acc" not in op.kernel_source
     assert len(compiled.nodes["out"].outputs) == 1
@@ -85,7 +85,7 @@ def test_shared_storage_keeps_the_ordered_loop_inside_one_launch():
 
 def test_shared_storage_requires_room_for_both_states_and_the_combine():
     target = replace(Context.from_target((7, 0)), max_dynamic_smem=10000)
-    with pinned_knobs({**_PINS, "SHARED_CARRY": True}):
+    with pinned_knobs({**_PINS, "SHARED_CARRY": 2}):
         compiled = Pipeline.build(CUDA_PASSES).run(_graph(), ctx=target)
     (op,) = (node.op for node in compiled.nodes.values() if isinstance(node.op, CudaOp))
     assert op.serial and not op.knobs.get("SHARED_CARRY")
@@ -96,7 +96,7 @@ def test_an_exposed_state_port_keeps_every_snapshot():
     graph = Pipeline.build(["tile/lift"]).run(_graph(), ctx=Context.probe())
     (port,) = (t.name for t in graph.nodes["out"].outputs if t.name != "out")
     graph.outputs.append(port)
-    with pinned_knobs({**_PINS, "SHARED_CARRY": True}):
+    with pinned_knobs({**_PINS, "SHARED_CARRY": 2}):
         compiled = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.probe())
     array = (np.random.default_rng(0).standard_normal((2, 40, 40)) * 0.03).astype(np.float32)
     outputs = CudaBackend().run(compiled, input_data={"seed": array})[0].outputs
@@ -122,7 +122,7 @@ def test_parallel_snapshot_copy_keeps_intermediate_casts():
     graph.nodes["out"].op = replace(graph.nodes["out"].op, body=cast_snapshot(graph.nodes["out"].op.body))
     array = (np.random.default_rng(0).standard_normal((2, 40, 40)) * 0.03).astype(np.float32)
     outputs = []
-    for enabled in (False, True):
+    for enabled in (0, 2):
         with pinned_knobs({**_PINS, "SHARED_CARRY": enabled}):
             compiled = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.probe())
         outputs.append(CudaBackend().run(compiled, input_data={"seed": array})[0].outputs["out"])
@@ -131,13 +131,14 @@ def test_parallel_snapshot_copy_keeps_intermediate_casts():
 
 
 @requires_cuda
+@pytest.mark.parametrize("storage", [1, 2], ids=["dense", "padded"])
 @pytest.mark.parametrize("dtype", [F32, F16], ids=["f32", "f16"])
 @pytest.mark.parametrize("masked", [True, False], ids=["selected", "full"])
-def test_shared_state_matches_the_global_state_on_the_same_inputs(dtype, masked):
+def test_shared_state_matches_the_global_state_on_the_same_inputs(dtype, masked, storage):
     graph = _graph(dtype, masked=masked)
     backend = CudaBackend()
     candidates = []
-    for enabled in (False, True):
+    for enabled in (0, storage):
         with pinned_knobs({**_PINS, "SHARED_CARRY": enabled}):
             candidates.append(Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.probe()))
     for seed in (0, 1):
