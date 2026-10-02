@@ -132,9 +132,10 @@ and fail the run two steps later on a parse error. The rejection names the offen
 because the agent assembles its answer from subagent reports with the batch rows long out of context; for the same
 reason the task states the selectable set once as `maintainable_model_ids` rather than only as a per-row flag. The
 step prints one line per agent event: a run in progress is visible only through the job log, and a rejected decision
-has to stay readable afterwards. The task is compact JSON inside the checkout so the agent can read it again after
-the initial attachment; the workflow removes it before checking that discovery made no repository edits. The exact
-workflow source stays readable through a narrow external-directory permission.
+has to stay readable afterwards. The task is indented JSON inside the checkout so the agent can read it again after
+the initial attachment: its read tool truncates a line at 2000 characters, and the compact form was one 33 KB line
+it could not read back, which cost a run its recipe IDs. The workflow removes the task before checking that discovery
+made no repository edits. The exact workflow source stays readable through a narrow external-directory permission.
 
 The workflow checks that the agent did not modify the checkout, then validates and applies its lifecycle manifest. Its
 artifact worktree remains on the rolling lifecycle branch, while the catalog, workflow scripts, OpenCode agent and

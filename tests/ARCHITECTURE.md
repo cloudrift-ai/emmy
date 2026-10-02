@@ -244,6 +244,11 @@ large fraction of the card FREE at startup, plus checkpoint downloads and minute
 mark on anything else silently drops it from `make test` even on GPU machines (this hid the serving runner's GPU
 correctness pins for a while). GPU correctness tests guard themselves with `requires_cuda` / `importorskip` instead.
 
+A lane whose torch has no CUDA hides the device from the compiler as well (`tests/conftest.py` empties
+`CUDA_VISIBLE_DEVICES`). The CI runners carry a GTX 1080 Ti that CPU-only torch cannot use, yet the runtime reached
+it through the driver and the prior featured its SM count, so an unpinned pick there diverged from every other host.
+Hidden, the lane features the default card everywhere.
+
 `tests/compiler/pipeline/search/test_golden.py` holds every repository golden — the hardware goldens and each
 recipe's model golden — to the fresh lowering of its own traced programs on the DEFAULT lane: a restamp
 (`golden.restamp`, the rewrite `emmy golden restamp` writes) must leave the file unchanged, one node per traced

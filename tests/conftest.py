@@ -29,6 +29,13 @@ import yaml
 # instead of serializing (CI run 32339655489). Cross-user serialization was never real.
 os.environ.setdefault("EMMY_GPU_LOCK", f"/tmp/emmy-gpu-{os.getuid()}.lock")
 
+# The CPU lane sees no CUDA device at all. A host with a card but CPU-only torch (the CI runners)
+# cannot run a kernel, yet the runtime still reaches the card through the driver and the prior
+# features its SM count and memory, so a pick, and the kernel count a test asserts, followed
+# whichever card the runner happened to hold. Hidden, every CPU lane features the default card.
+if not torch.cuda.is_available():
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""
+
 
 # ── CUDA context poisoning containment ──────────────────────────────
 # An illegal / misaligned access leaves the CUDA context in a STICKY error

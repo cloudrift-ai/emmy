@@ -269,7 +269,7 @@ jobs:
             --sort 'model_id asc' \
             --sort 'deployment.index asc' \
             --json \
-            | jq -c \
+            | jq \
                 --argjson maintained_count "$MAINTAINED_MODEL_COUNT" \
                 --argjson batch_size 6 \
                 -f "$WORKFLOW_SOURCE/.github/workflows/scripts/discovery_task.jq" \
