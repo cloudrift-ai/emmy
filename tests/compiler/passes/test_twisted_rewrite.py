@@ -215,9 +215,10 @@ def test_sdpa_score_contraction_reaches_the_mma_tier(monkeypatch) -> None:
     tier tiles — and the carrier itself is a site the chunk tier folds, so the value channel
     reaches the tensor cores in the same kernel.
 
-    The carrier's tier is pinned: whether the tensor cores are OFFERED is the compiler's contract,
-    which one the unmeasured greedy picks is the prior's, and it moves with any change to the
-    program (f32 scores moved it to the scalar tile)."""
+    The fused placement, unsplit reduction and carrier tier are pinned: whether the tensor cores
+    are OFFERED is the compiler's contract; the unmeasured greedy schedule is the prior's choice."""
+    monkeypatch.setenv(config.knob_var("PLACE"), "fuse")
+    monkeypatch.setenv(config.knob_var("REDUCE"), "")  # no cross-CTA split
     monkeypatch.setenv(config.knob_var("TILE@map.1/twist"), "mma_m16n8k16_f16_f32/f1x2")
     monkeypatch.setenv("EMMY_PLACE", "fuse")
     monkeypatch.setenv("EMMY_WORK", "w1x1")

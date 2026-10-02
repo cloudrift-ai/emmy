@@ -103,13 +103,15 @@ FORMED AGAIN as a kernel of its own: its tile is lowered to a loop body, normali
 where a statement repeated on both sides of the seam folds to one), and lifted through the same entry as
 `010_lift`, so its sites are the ones its own body earns rather than a slice of the parent's tree — a gate/up piece
 carved out of a fused half is one twin contraction site, not the parent's contraction beside a scalar-only leftover.
-Before this round trip, independent output sweeps over the same domain can share one coordinate. Each branch must
-own one distinct output and read only its own sweep coordinates. Equal single-axis domains retain their windows;
-a full static rectangle can use an existing flat axis of equal volume through quotient/remainder indices. Shared
-tails, cross-branch coordinates, captured names, and sweep coordinates used as scalar values retain their original
-form. The common coordinate lets ordinary Loop normalization share loads and combine sibling reductions. Output cuts
-remain available, and measured evidence chooses the kernel set. The re-lift otherwise keeps the grid the cut minted;
-store sweeps that cannot be promoted stay sweeps.
+Before this round trip, independent output sweeps over the same domain can share common coordinates. Each branch
+must own one distinct output and read only its own sweep coordinates. Equal single-axis domains retain their windows;
+a full static rectangle can use an existing flat axis of equal volume through quotient/remainder indices. Two
+rectangular sweeps can also align coordinates an indexed input read proves equal, allowing different names for
+equal-domain reduction binders. Only the remaining coordinates flatten; output indices keep their original order.
+Shared tails, cross-branch coordinates, captured names, and sweep coordinates used as scalar values retain their
+original form. The common coordinates let ordinary Loop normalization share loads and combine sibling reductions.
+Output cuts remain available, and measured evidence chooses the kernel set. The re-lift otherwise keeps the grid
+the cut minted; store sweeps that cannot be promoted stay sweeps.
 A piece with no contraction orders that grid as its store writes, last axis fastest, so its threads write
 consecutive addresses; a contraction piece keeps the lift's order, because its last two grid axes are the
 fragment's rows and columns. A bare `PLACE=cut` pin
@@ -180,7 +182,7 @@ consumes its one root-most cut the same way and may join scoped cuts in that sin
 pinned on a named child with `PLACE@place_<token>/<site>=cut`, where the site is relative to that child. For example,
 `PLACE@place_abc123/map.1/inner=cut` addresses only that piece; the other children settle to fuse. The
 `place_<token>` name comes from the preceding cut's emitted kernel identity. Parent-only placement pins remain
-terminal, and a child pin that no piece resolves is rejected. A scoped pin whose site
+terminal on the unchanged parent remainder, and a child pin that no piece resolves is rejected. A scoped pin whose site
 path does not exist on a kernel addresses another kernel of the graph; a kernel none of the pins address fuses, deterministic,
 so the unpinned placement fork never returns under a pin-driven compile. A pin that resolves to an edge no cut
 realizes is an addressing error. Newly fused producers and pieces of unpinned cuts can expose smaller seams before
