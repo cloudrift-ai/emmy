@@ -98,8 +98,8 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   partials, then performs one merge through the stable ⊕ per chunk instead of per element.
 - **Scan (prefix reduction)** — A reduction that also stores its running state at every step, such as `cumsum`. In
   Emmy a scan is a Fold with an **observer**: a pure per-step function over the carried state whose results only
-  kernel-boundary output writes consume. An observed fold preserves its stream order, so it schedules as the serial
-  fold only.
+  kernel-boundary output writes consume. A serial scan preserves every prefix directly. A cooperative warp scan
+  preserves the same prefixes by combining consecutive lane groups and carrying each group's final state forward.
 - **Serial axis / lagged read** — The classic schedule's realization of a carried state: a `Placement.serial` axis
   is launched once per coordinate, in order, the coordinate a runtime `int` in the body, and the kernel reads its
   own output strictly behind the step it writes (`S[c − 1]` while writing `S[c]`). The state lives in the buffer,

@@ -298,27 +298,26 @@ def build_golden_groups(
 PLACEMENT_PASSES = ("tile/lift", "tile/cut")
 
 
-def _arm_stamps(option, fused, graph) -> list[dict] | None:
-    """The ``S_*`` stamps of each kernel an arm's option leaves: the fused tile itself (``fused``, the fork's root
-    in ``graph``), or every tile piece of a cut's fragment — each stamped as the identity strategy stamps a kernel
-    (:func:`~..passes.identity.op_stamps`), without the identities a ``kernel`` row would also digest. ``None``
-    when a kernel has no body to stamp: such an arm cannot be featurized."""
+def arm_features(option, fused, graph) -> dict[str, float] | None:
+    """One placement arm's ``P_*`` row from the kernels it leaves: their structural stamps aggregated by
+    :func:`placement_features`, and how many kernel roots fold a whole contraction. The root fact distinguishes
+    cuts whose Loop histograms agree but whose contraction has a surrounding projection. ``None`` when a piece
+    has no body to stamp, so the arm cannot be featurized."""
     from emmy.compiler.graph import Graph  # noqa: PLC0415
     from emmy.compiler.ir.tile.ir import TileOp  # noqa: PLC0415
     from emmy.compiler.pipeline.passes.identity import op_stamps  # noqa: PLC0415
 
     if isinstance(option, Graph):
-        stamps = [op_stamps(node.op.with_io(option, node), option) for node in option.nodes.values() if isinstance(node.op, TileOp)]
+        pieces = [node.op.with_io(option, node) for node in option.nodes.values() if isinstance(node.op, TileOp)]
     else:
-        stamps = [op_stamps(fused, graph)]
-    return None if any(s is None for s in stamps) else stamps
-
-
-def arm_features(option, fused, graph) -> dict[str, float] | None:
-    """One placement arm's ``P_*`` row from the option that realizes it — the dataset's and the deploy's one
-    featurizer (:func:`placement_features` over :func:`_arm_stamps`) — or ``None`` for an arm no stamp describes."""
-    stamps = _arm_stamps(option, fused, graph)
-    return None if stamps is None else placement_features(stamps)
+        pieces = [fused]
+    stamps = [op_stamps(piece, option if isinstance(option, Graph) else graph) for piece in pieces]
+    if any(stamp is None for stamp in stamps):
+        return None
+    return {
+        **placement_features(stamps),
+        "P_n_whole_contraction_roots": float(sum(piece.op is not None and piece.op.tiles_whole() for piece in pieces)),
+    }
 
 
 def placement_features(pieces: list[dict]) -> dict[str, float]:
@@ -400,15 +399,21 @@ def walk_placement(pool: GoldenPool, ctx: Context, decisions: dict[str, dict], s
     return forks, unmatched
 
 
-def placement_decisions(pools: Sequence[GoldenPool]) -> dict[str, dict]:
-    """The ``PLACE`` arm each placement pool's one row records, by the kernel's exact identity."""
-    return {pool.kernel.exact_identity: pool.rows[0].knobs for pool in pools if pool.rows}
+def placement_decisions(pools: Sequence[GoldenPool], like: GoldenPool) -> dict[str, dict]:
+    """Recorded ``PLACE`` arms in ``like``'s card, precision regime and sizes, by kernel identity."""
+    return {
+        pool.kernel.exact_identity: pool.rows[0].knobs
+        for pool in pools
+        if pool.rows
+        and (pool.gpu, pool.regime) == (like.gpu, like.regime)
+        and all(like.bindings.get(name) == size for name, size in pool.bindings.items())
+    }
 
 
 def build_placement_groups(pools: Sequence[GoldenPool]) -> tuple[list[GoldenGroup], list[tuple[str, str, str]]]:
     """Enumerate each placement pool's forks and pack them as :class:`GoldenGroup` records, one per fork: the
     arms the cut pass offers unpinned (keep fused, one seam each, the full-projection cut), each featurized from
-    the kernels it leaves (:func:`placement_features`), with the arms the golden took marked. The second return
+    the kernels it leaves (:func:`placement_features`), with the cheapest measured arms marked. The second return
     is the pools that produced no group, as ``(gpu, name, reason)``.
 
     A placement pool's one row is the ``PLACE`` routing decision recorded on its kernel (none: it stayed fused).
@@ -419,7 +424,6 @@ def build_placement_groups(pools: Sequence[GoldenPool]) -> tuple[list[GoldenGrou
     the pass offers single seams, and those are what the prior ranks. A single seam the decision names is a
     positive, as is the full-projection arm when it is exactly the decision; fused is the positive where
     nothing was recorded."""
-    decisions = placement_decisions(pools)
     groups: list[GoldenGroup] = []
     skipped: list[tuple[str, str, str]] = []
     ctxs: dict[tuple, Context] = {}
@@ -432,7 +436,7 @@ def build_placement_groups(pools: Sequence[GoldenPool]) -> tuple[list[GoldenGrou
         if ctx is None:
             ctx = ctxs[card] = pool_context(pool)
         try:
-            forks, unmatched = walk_placement(pool, ctx, decisions)
+            forks, unmatched = walk_placement(pool, ctx, placement_decisions(pools, pool))
         except ValueError as exc:
             # The same definition the schedule enumeration does not take back (``build_golden_groups``): the
             # reduce piece of a cross-CTA split re-offers the split and mints the buffer it already holds.

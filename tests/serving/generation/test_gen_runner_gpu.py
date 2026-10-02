@@ -98,7 +98,7 @@ def test_bf16_runner_keeps_residual_and_constants_in_bf16(tmp_path):
     assert out.dtype == torch.bfloat16
     assert runner.final_norm_device(out).dtype == torch.bfloat16
 
-    eager = copy.deepcopy(model)
+    eager = copy.deepcopy(model).cuda()
     ids = torch.tensor([1, 2], device="cuda")
     positions = torch.arange(len(ids), device="cuda")[None]
     hidden = runner.embed_device(ids)
@@ -108,8 +108,7 @@ def test_bf16_runner_keeps_residual_and_constants_in_bf16(tmp_path):
         q = q2.view(1, len(ids), runner.num_heads, runner.head_dim).transpose(1, 2)
         k = k2.view(1, len(ids), runner.num_kv_heads, runner.head_dim).transpose(1, 2)
         v = v2.view(1, len(ids), runner.num_kv_heads, runner.head_dim).transpose(1, 2)
-        cos, sin = eager.model.rotary_emb(hidden.cpu()[None], positions.cpu())
-        cos, sin = cos.cuda(), sin.cuda()
+        cos, sin = eager.model.rotary_emb(hidden[None], positions)
         q, k = apply_rotary_pos_emb(q, k, cos, sin)
         k = _repeat_kv(k, runner.num_heads // runner.num_kv_heads)
         v = _repeat_kv(v, runner.num_heads // runner.num_kv_heads)
@@ -119,12 +118,10 @@ def test_bf16_runner_keeps_residual_and_constants_in_bf16(tmp_path):
 
     with torch.no_grad():
         got = stitched()
-        reference = eager.model(input_ids=ids.cpu()[None], use_cache=False).last_hidden_state[0].cuda()
+        reference = eager.model(input_ids=ids[None], use_cache=False).last_hidden_state[0]
         again = stitched()
-    # This model has no quantization. On the sm_120 test card the maximum
-    # and mean error were both zero (absolute and relative to peak 2.453125);
-    # 5e-3 allows one BF16 rounding step if another card orders a reduction
-    # differently, while still catching a BF16 transport or cast error.
+    # Compare on the same card: CPU and CUDA BF16 kernels can round differently.
+    # This tolerance still catches a BF16 transport or cast error.
     torch.testing.assert_close(got, reference, atol=5e-3, rtol=5e-3)
     assert torch.equal(got, again)
 

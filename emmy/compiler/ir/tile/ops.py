@@ -648,13 +648,12 @@ def chain_members(root: Fold) -> tuple[Fold, ...]:
 
 def chain_form(root: Fold) -> bool:
     """Whether a computed provider cone — a workspace row and its rsqrt — is hoisted ahead of this
-    root's loop, beside its own fold. The transposed band's σ-substitution and guarded close assume
-    the fold stands alone at the kernel root, so such a root takes no band.
+    root's loop, beside its own fold. A prefix scan does not yet bind that provider chain.
 
-    A MEMBER is not what decides that. The band absorbs one that folds serially, hoisted ahead of
-    its loop, which is what every recorded transposed row of a fused reduce does; only a member the
-    schedule PARTITIONS makes the root a chain, and that is a relation between two picks rather
-    than a fact about the term (``classic.context`` refuses the pair)."""
+    A MEMBER is not what decides that. A member that folds serially can be hoisted ahead of the
+    root's loop; only a member the schedule PARTITIONS makes the root a cooperative chain, and
+    that is a relation between two picks rather than a fact about the term (``classic.context``
+    refuses that member beside a transposed root)."""
     if not isinstance(root, Fold) or root.axis is None:
         return False
     return any(

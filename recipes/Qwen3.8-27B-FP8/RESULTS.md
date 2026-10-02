@@ -242,86 +242,78 @@ the slowest of the three measured setups (table above), and it cannot hold a 250
 
 ## Emmy
 
-There is still no Emmy serving lane: the recipe serves the stock 1Cat-vLLM fork, and every serving figure above is
-that engine. What follows is compiler evidence — measured CUDA kernels for this checkpoint's decoder path on one
-V100 — and it does not imply that Emmy can serve the model.
+The V100 golden was optimized on 2026-10-02 on four Tesla V100-SXM2-16GB cards with CUDA 12.9 and torch 2.14.0+cu126.
+The final branch was rebased onto main `be7023c94`. Each card ran an independent kernel benchmark. These are single-GPU
+kernel results, not a tensor-parallel model benchmark. Every schedule and cut was selected manually; `emmy tune` was not used.
 
-Compiler rechecked 2026-09-28 from `a98fd4f85` on four Tesla V100-SXM2-16GB (one card per independent walk), CUDA
-12.9, torch 2.13.0+cu126, at nvcc's deployable `-O3`. `emmy tune` was not used; every result below came from a
-manually pinned schedule or kernel-set cut.
+This pass covers the ten targets already stored in the golden's four programs. All ten now pass strict replay using
+only the golden's evidence and a fresh tune DB, at nvcc's deployable `-O3`. Every target passed on seeds 0, 1, 2 and 3,
+with one seed on each card. The file contains 28 kernels, nine routing rows and 26 measured schedule rows, including
+the older fused alternatives. It contains no unmeasured proposals.
+This is partial model coverage; the pass did not retrace or qualify the full decoder inventory.
 
-### Current coverage
+### Exact frontend comparisons
 
-| Item | Value |
-| --- | --- |
-| Stored programs | 5, covering the Gated DeltaNet paths, full attention, recurrent update and output projection |
-| Fresh Loop targets | 17 |
-| Existing V100 golden | 10 targets; 13 measured schedule rows and one routing row |
-| Working golden | all 17 targets; 11 have a runnable O3 fallback and 6 remain blocked |
-| Frontend reference | eager and `torch.compile`, 10 warm-up / 100 measured, strict eager correctness |
-| Internal-target reference | isolated same-input greedy output; these targets have no standalone Torch twin |
+The following targets have an exact stored Torch twin. Emmy and `torch.compile` were checked against eager on the
+same inputs. Timings are captured whole-program latencies, including every kernel selected by a cut. Runs used five
+warm-ups and 100 iterations, except the output head, which used 50 iterations. The table uses the final paired run
+on seed 3.
 
-The previous 129-target figures described an older lowering. Maximal fusion in the current compiler produces 17
-targets from the same five stored programs. The existing ten golden targets still lower freshly and strictly decode,
-but the file is not a complete inventory for the current compiler. The working file adds all seven missing targets;
-only `k_matmul_reduce_81b2ae` currently reaches a valid measured fallback.
+| Target | Emmy | `torch.compile` | Speedup |
+| --- | ---: | ---: | ---: |
+| 64-step scan, 384 rows | 1.64 us | 5.68 us | 3.47x |
+| 64-step scan, 48 rows | 1.49 us | 3.25 us | 2.17x |
+| QK and triangular mask, 64 tokens | 20.5 us | 29.7 us | 1.45x |
+| QK and triangular mask, 512 tokens | 114.8 us | 127.3 us | 1.11x |
+| Recurrent update | 14.0 us | 20.3 us | 1.45x |
+| Output head | 3,380 us | 6,255 us | 1.85x |
 
-The checkpoint's weights reach the kernels as stored e4m3 bytes with one scale per 128x128 block, and its declared
-dynamic per-token activation scaling is spelled in the graph. These kernels therefore compute the W8A8 form declared
-by the checkpoint rather than a dequantized f16 stand-in.
+The recurrent update passed on seeds 0, 1, 2 and 3. Its three kernels compute the key norm, the normalized state-vector
+product, and the residual update. Kernel-scoped pins let the producer use transposed cooperative reduction while the
+consumer uses eight lanes and four register partials. The golden stores those schedules on their actual derived
+kernel identities; it does not copy measurements from independently re-lifted pieces.
 
-### Manual schedule results
+The scans now use warp prefix scans. QK cuts the independent contraction from its mask and scan-derived projections,
+then stages the transposed operand into an N-major shared slab. The head's depth-two shared ring improves its previous
+3,483 us row to 3,319 us in isolated recording. This head consumes f16 weights; the FP8 checkpoint name does not mean
+that this target executes FP8 arithmetic on Volta.
 
-| Target | Emmy | `torch.compile` | Result |
-| --- | ---: | ---: | --- |
-| output projection `k_linear_a08942` | 3,771-3,778 us | 6,082-6,089 us | 1.61x faster, strict pass twice |
-| 64-step scan, 384 rows | 30.56-31.01 us | 4.00-4.45 us | 6.87-7.75x slower, strict pass twice |
-| 64-step scan, 48 rows | 6.93-7.84 us | 2.93-3.17 us | 2.18-2.68x slower, strict pass twice |
-| recurrent update, existing golden | 194.36 us | 25.19 us | 7.72x slower, strict pass |
-| recurrent update, manual winner | 33.63-34.21 us | 19.48-19.50 us | 1.72-1.75x slower, strict pass twice |
-| new internal matmul-reduce | 492.54-514.05 us | — | strict same-input pass twice |
+### Internal Gated DeltaNet targets
 
-The recurrent winner cuts `PLACE@map.1/map.2/inner`, runs both reductions in its producer serially, and schedules the
-residual with `WORK=t32` and cooperative reductions. It reduces the isolated kernel-set sum from 194 us to 28-29 us;
-whole-program capture is 34 us. Every other single cut, every composition of that winner with one other legal cut,
-thread widths from 4 through 512, and the remaining reduction choices were slower.
+These targets have no exact standalone Torch twin. They pass strict same-input comparisons against a complete
+kernel-set execution. Their numbers therefore support a compiler improvement, not a `torch.compile` speedup claim.
 
-### Why the golden was not promoted
+| Target | Captured Emmy latency | Previous isolated golden row |
+| --- | ---: | ---: |
+| Ordered triangular update, 64 tokens | 1.3–1.5 ms | 17.1 ms |
+| Ordered triangular update, 512 tokens | 13.0–13.5 ms | 135.6 ms |
+| GDN output contraction | 122 us | 6,093 us |
+| GDN final state and output | 317–352 us | unmeasured proposals |
 
-The two scan targets expose no schedule choice: their one implementation is a serial prefix. A parallel scan
-schedule is required before either can meet the `torch.compile` bar; measuring more rows cannot change them.
+The triangular updates still execute 61 ordered launches and store each requested state snapshot. Block-uniform demand
+skips reductions for unchanged rows without bypassing a barrier on only some lanes. The recorded 512-thread band
+preserves the original reduction tree. Smaller bands were faster but failed accuracy on other seeds after rounding
+errors accumulated through the recurrence; those schedules were rejected.
 
-Six fresh maximal targets still lack a valid O3 fallback:
-
-- Both conv-linear targets exceed the 10 s first-iteration watchdog. Thirteen single cuts were screened on the first
-  target and all 15 on the second; both full composed cut sets with explicit thread widths still leave the residual
-  kernel over the watchdog.
-- The ordered GDN target has no cut. Its six register schedules spend minutes in CUDA compilation and do not reach a
-  benchmark within the bounded run.
-- The 150-origin Gated DeltaNet target still exceeds the watchdog after all 85 legal cuts, after its 30-seam full
-  projection cut, and with explicit thread widths.
-- The 784-origin Gated DeltaNet target now survives schedule-tree enumeration, but its 122-seam composed cut does not
-  reach a benchmark within ten minutes.
-- The full-attention target does not finish even the cut/schedule walk within ten minutes.
-
-The deep Gated DeltaNet target originally raised `RecursionError` while walking more than 2,000 nested schedule
-branches. The walk is now iterative, so this failure is gone. That exposes the underlying compile-time and generated
-work, but does not make those kernels fast. The remaining failures are scan, cut and lowering gaps rather than search
-shortfalls; retaining an arbitrary row would turn a failed onboarding run into deploy evidence.
-
-The complete working inventory and raw O3 records remain under `_tune/qwen38_fp8_v100_manual/`. The repository golden
-was deliberately left unchanged because six targets have no measured fallback and three frontend targets remain
-slower than `torch.compile`.
+The GDN output cut materializes its complete operand once rather than repeating it across output cells. The final
+state path stages computed operands and independent product channels through the existing synchronous fill. Each
+operand retains its own dtype, and unknown global strides use compute fill instead of an unjustified vector copy.
+Smaller producer tiles reduce shared memory from 49.5 to 41.2 KiB, allowing two blocks per SM. They passed on seeds
+0, 1, 2 and 3. Captured frontend runs take 317–352 us across the final fresh-process proofs and whole-file replay.
+The same kernel set's recorded replay takes 306–325 us. Both paths select identical CUDA sources.
 
 ### Reproduce
 
+Use a CUDA 12 toolkit and a torch wheel that includes `sm_70`. Work on a copy when recording new measurements:
+
 ```bash
-emmy trace Qwen/Qwen3.8-27B-FP8 --layer 0 --target sm_70 -o layer0.yaml     # and --layer 3
-emmy run --golden recipes/Qwen3.8-27B-FP8/golden/v100_sm70.json --bench --bench-backends eager,tcompile,emmy
+cp recipes/Qwen3.8-27B-FP8/golden/v100_sm70.json /tmp/qwen38-v100.json
+EMMY_NVCC_FLAGS= emmy run --golden /tmp/qwen38-v100.json --bench --strict --strict-evidence \
+  --bench-backends eager,tcompile,emmy --warmup 5 --iters 100
 ```
 
-On a Volta host, install a torch build that still ships `sm_70` kernels (`torch==2.13.0+cu126`) and preload a CUDA 12
-NVRTC, per the README's pre-Turing notes.
+The serving figures above remain measurements of stock 1Cat-vLLM. This compiler pass does not establish an Emmy
+serving result.
 
 ## Reproduce
 

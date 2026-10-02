@@ -40,7 +40,8 @@ cross-partition merge statements.
 A fold with an `observe` is a **scan**: the observer binds `(axis, *state)` positionally, its results are fresh names
 only kernel-boundary `OutputSpec` writes consume, and the streamed store reconstitutes inside the reduce loop after
 the observer stmts (`observed_result_names` + the `observed=` reconstitution arm). An observed fold makes the stream
-order-visible, so the schedule offers exactly the serial reduce plan and the cross-CTA split fork declines it.
+order-visible. A root without a provider chain offers a cooperative warp prefix scan beside the serial plan;
+register partials, transposed bands and cross-CTA splits remain unavailable.
 
 A recurrence is a fold that **carries a state** (`Fold.carries`): its ⊕ is the action `next` — the state becomes
 what the step computed — on every component, and its `cells` are the state's coordinates in the order the Loop IR
@@ -74,7 +75,9 @@ form is a realization of the kernel, not another kernel: the kernel keeps the li
 fork and its golden rows name. The state's cells are its axes alone, so a size-one dim the Loop IR spelled `0` holds
 no cell; a seed tensor keeps that dim, and both schedules read it with `0` there (`seed_index`). The
 register schedule reads the carrying fold itself and realizes the loop inside each CTA when the state rows are
-independent; the state's port, added at the lift for the classic realization, disappears during materialization,
+independent. An unmapped classic fallback takes the same serial form during materialization. Re-lifting a stored
+kernel reuses the state ports it already owns. The state's port, added at the lift for the classic realization,
+disappears during materialization,
 and externally read snapshots remain global outputs. Both preserve previous-state reads until the step has
 finished evaluating its outputs. The domain and choices are described in
 [`ir/schedule/ARCHITECTURE.md`](../schedule/ARCHITECTURE.md).

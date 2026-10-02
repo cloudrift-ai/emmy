@@ -54,9 +54,9 @@ from emmy.compiler.pipeline.search.features import ROUTING_FEATURES, is_dynamic_
 # differently per architecture (f16 accumulation pays on Ada and Blackwell, not on Volta). Cross-validated over the
 # repository goldens it lifted held-out top-1 from 250 to 263 of 733 pools.
 DEFAULT_FEATURES = "D_*,MMA_tier,MMA_acc_bits,H_cc"
-# The placement space's view: its ``P_*`` arm features (``ranking.placement_features``); the ``H_*`` card facts are
-# constant within a fork and cancel out of the ranking.
-PLACEMENT_FEATURES = "P_*"
+# Placement arms can rank differently across cards. Although hardware facts are constant within
+# a fork, the tree uses them to condition its ranking on capability and the physical SKU.
+PLACEMENT_FEATURES = "P_*,H_cc,H_total_mem"
 
 
 def pack_features(feats: list[dict[str, float]]) -> tuple[tuple[str, ...], np.ndarray, bool]:

@@ -39,7 +39,7 @@ from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.pipeline import CUDA_PASSES, TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.knob import family_value
 from emmy.compiler.pipeline.search.features import mma_atom
-from tests.compiler.helpers import dyn_M, requires_cuda, requires_sm, requires_sm90
+from tests.compiler.helpers import device_compute_capability, dyn_M, requires_cuda, requires_sm, requires_sm90
 
 
 def _supports_tma() -> bool:
@@ -57,6 +57,31 @@ def _dtype(name: str):
 # =========================================================================== #
 # Scalar TILE tier — register-tile variants, epilogues, staging, regressions.
 # =========================================================================== #
+
+
+@requires_cuda
+@pytest.mark.xdist_group("cuda")
+@pytest.mark.skipif(device_compute_capability() != (7, 0), reason="eight-output-lane reduction schedules are offered only on sm_70")
+def test_transposed_reduction_preserves_the_cross_warp_addition_order():
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("x", (1, 64), F32), node_id="x")
+    graph.add_node(InputOp(), [], Tensor("w", (8, 64), F32), node_id="w")
+    graph.add_node(LinearOp(), ["x", "w"], Tensor("out", (1, 8), F32), node_id="out")
+    graph.inputs, graph.outputs = ["x", "w"], ["out"]
+    rng = np.random.default_rng(4)
+    inputs = {"x": np.linspace(1e-4, 1e4, 64, dtype=np.float32).reshape(1, 64), "w": rng.standard_normal((8, 64), dtype=np.float32)}
+    backend = CudaBackend()
+    outputs = []
+    for work, reduce in (("t64", "coop"), ("t512", "coop-t/n8/v4")):
+        with pinned_knobs({"WORK": work, "REDUCE": reduce, "TILE": "", "STAGE": "", "PLACE": "fuse"}):
+            compiled = backend.compile(graph)
+        result, _ = backend.run(compiled, input_data=inputs)
+        outputs.append(np.asarray(result.outputs["out"]))
+    np.testing.assert_array_equal(*outputs)
+
 
 # Square base shape, divisible by every variant's parallel·register product; the symbolic column
 # runs at an off-divisor length (masked tail), which is the size a stored case cannot ask for.
@@ -277,6 +302,19 @@ def test_scalar_matmul_stages_through_pipeline(monkeypatch) -> None:
     assert stage is not None and stage.transport == "smem" and stage.depth == 2, stage
     src = _render_src(_scalar_stage_graph(), cc=(7, 0))
     assert "__shared__" in src and "cp.async" not in src
+
+
+def test_scalar_stage_budget_includes_the_bank_padding() -> None:
+    from emmy.commands.trace import graph_from_code  # noqa: PLC0415
+    from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
+
+    graph = graph_from_code("import torch\na=torch.randn(64,128)\nb=torch.randn(64,128)\na @ b.transpose(-2,-1)")[0]
+    with pinned_knobs({"WORK": "t16x8", "TILE": "f2x8", "REDUCE": "", "STAGE": "d2/smem", "RASTER": ""}):
+        out = Pipeline.build(TILE_PASSES).run(graph, ctx=Context.from_target((7, 0)))
+    op = next(n.op for n in out.nodes.values() if isinstance(n.op, TileOp))
+    stage = _node_stage(op)
+    assert stage.depth == 2 and stage.bk_elems == 64, "128-wide chunks fit only if both operands' row pads are omitted"
 
 
 def test_scalar_masked_n_stage_pin_refuses(monkeypatch) -> None:

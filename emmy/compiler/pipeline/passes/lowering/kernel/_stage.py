@@ -735,6 +735,8 @@ class SyncOperand:
     # per-chunk statistic (:func:`~emmy.compiler.ir.schedule.views.cone_seam`'s ``chunk``), whose
     # rows the cells read back. ``None`` when the cone has none.
     before: Callable[[Expr], list[Stmt]] | None = None
+    # The row pad the scalar drain uses to spread power-of-two rows across banks.
+    pad_cols: int = 0
 
     @property
     def slab(self) -> str:
@@ -848,7 +850,7 @@ class SyncTransport:
                 slab_smem(
                     op.slab,
                     op.shape[0],
-                    op.shape[1],
+                    op.shape[1] + op.pad_cols,
                     op.dtype or self.slab_dtype,
                     align=_fill_align(op.shape[1], op.elem_bytes or self.elem_bytes, op.swizzle),
                 )

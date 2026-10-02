@@ -805,9 +805,11 @@ catalogs without changing them.
 The producer band is a fixed kernel-domain factor (`""`, `+p1`, `+p2`; since step 7 a resolved band is spelled in
 `WORK`, never a per-row `WSPEC` key). Compatibility accepts a nonzero member only on a warp row over resolved **TMA**
 transport without a cross-CTA split and within the thread budget; a row can select a member but cannot add
-another width. A single-channel computed-A (fused-cone) contraction enumerates scalar
-register-tile rows with staging off: the scalar atom evaluates the cone once per operand row or column and reuses it
-across the sibling register cells. It also enumerates its warp rows with the mandatory resolved `sync` compute-fill
+another width. A computed-operand contraction enumerates scalar register-tile rows: the scalar atom evaluates the
+cone once per operand row or column and reuses it across the sibling register cells. Independent product channels
+share the A operand on that tier too. A planar whole contraction also offers synchronous staging at depth one when
+each computed operand depends only on its own output coordinate. It also enumerates its warp rows with the mandatory
+resolved `sync` compute-fill
 stage at BOTH depths
 (`d1` + the asymmetric B-only prefetch ring `d2` as fork siblings — the M=512 occupancy loss inverts at decode M,
 so the depth is measured per shape), crossed with the shared `RASTER` launch-order candidates (its B stripes
@@ -821,9 +823,8 @@ projection folds into the deferred finalize. Multi-channel (gate/up) nodes split
 carries the true N-component identity-family carrier (one additive state per channel), the partial stores each
 channel's raw state to its `ws[comp, ksplit, *cell]` slice — no ⊗-combine in
 the partial — and the deferred finalize folds every component before applying the combine projection once.
-Multi-channel products still have no scalar / gmem-direct / WSPEC rows; the compute-producer role for the fused edge
-is the anticipated
-`RoleKind` extension. `TILE` values reach each site through the exact codec spelling: an explicit `TILE@<route>`
+Multi-channel scalar staging keeps one slab per streamed channel and sizes them at their own operand dtype.
+`TILE` values reach each site through the exact codec spelling: an explicit `TILE@<route>`
 names one site when sites need different values, while the canonical bare spelling names one site among those that
 support its value. A value no applicable site can take leaves no schedule rather than changing a factor. Staging
 additionally

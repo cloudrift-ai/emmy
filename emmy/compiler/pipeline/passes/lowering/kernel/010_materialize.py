@@ -47,6 +47,10 @@ def rewrite(match: Match, root: Node, ctx=None) -> KernelOp | None:
     # offers no ``g`` row, and its pin path strips the consumed ``g`` half). A surviving split
     # request is a bug — the materializer only lowers single-launch kernels.
     resident = isinstance(tile.materialization, RegisterMaterialization)
+    if tile.carries and not resident:
+        from emmy.compiler.pipeline.passes.tile._fromloop import serial_form  # noqa: PLC0415
+
+        tile = serial_form(tile, root.id)
     rplan = reduce_plan(tile) if tile.op is not None and not resident else None
     assert rplan is None or not rplan.needs_split, "materialize: a GRID split stage reached the kernel pass past 030_cut"
     try:
