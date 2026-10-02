@@ -121,7 +121,11 @@ def test_bf16_runner_keeps_residual_and_constants_in_bf16(tmp_path):
         got = stitched()
         reference = eager.model(input_ids=ids.cpu()[None], use_cache=False).last_hidden_state[0].cuda()
         again = stitched()
-    torch.testing.assert_close(got, reference, atol=0.08, rtol=0.08)
+    # This model has no quantization. On the sm_120 test card the maximum
+    # and mean error were both zero (absolute and relative to peak 2.453125);
+    # 5e-3 allows one BF16 rounding step if another card orders a reduction
+    # differently, while still catching a BF16 transport or cast error.
+    torch.testing.assert_close(got, reference, atol=5e-3, rtol=5e-3)
     assert torch.equal(got, again)
 
     wide = torch.full((2, config.hidden_size), 70000.0, dtype=torch.bfloat16, device="cuda")
@@ -914,6 +918,9 @@ def test_bf16_nvfp4_post_matches_numpy(tmp_path, monkeypatch, signed):
     rounded = decode_bf16(bits)
     ulp = np.maximum(np.abs(decode_bf16(bits + np.uint16(1)) - rounded), np.abs(decode_bf16(bits - np.uint16(1)) - rounded))
     error = np.abs(got - expected)
+    # The reference is NumPy evaluation of this quantized graph, not HF.
+    # This bound covers CUDA accumulation order after NVFP4 decoding, not
+    # the plain BF16 transport checked by the unquantized Qwen3 test.
     # Adjacent BF16 codes give one unit in the last place at each reference value.
     assert np.all(error <= ulp), (np.count_nonzero(error > ulp), float(np.max(error / ulp)))
 
@@ -974,9 +981,10 @@ def test_bf16_nvfp4_native_mma_matches_numpy_with_quantization_tolerance(tmp_pat
     got = decode_bf16(got_bits)
     error = np.abs(got - expected)
     peak = float(np.max(np.abs(expected)))
-    # At this signed 64x256 shape on sm_120, native code×scale MMA differed
-    # from the BF16-decoded NumPy graph by 0.00685 peak-relative max and
-    # 0.000521 peak-relative mean; allow modest headroom for device variance.
+    # The reference evaluates the same quantized graph in NumPy, not HF.
+    # This bound covers native code×scale precision versus BF16-decoded
+    # operands, not plain BF16 trunk handling: on sm_120 the signed case
+    # differed by 0.00685 peak-relative max and 0.000521 mean.
     assert float(error.max()) / peak < 8e-3
     assert float(error.mean()) / peak < 8e-4
 
