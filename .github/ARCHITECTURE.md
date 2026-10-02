@@ -49,7 +49,7 @@ installation and cache setup.
 The native-runtime job runs Rustfmt, Clippy with warnings denied, and locked Cargo tests on a GitHub-hosted runner.
 These checks require no GPU. Native GPU parity and failure recovery run through `make test-native` on supplied hardware.
 
-**CI optimization** runs the same CPU test lane on `ubuntu-runners` through one xdist worker. It rewrites only the CPU
+**CI optimization** runs the CPU test lane on `ubuntu-runners` with eight xdist workers. It rewrites only the CPU
 duration file, leaving GPU timings intact. Existing rows change only when they differ by at least 0.5 s and 50% of
 the recorded time. A successful run with changed timings commits and pushes directly to `main` with the repository's
 GitHub App token, then posts the run link to #emmy-robots. An unchanged run posts nothing.
