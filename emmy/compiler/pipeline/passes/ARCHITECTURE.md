@@ -95,9 +95,11 @@ where a statement repeated on both sides of the seam folds to one), and lifted t
 carved out of a fused half is one twin contraction site, not the parent's contraction beside a scalar-only leftover.
 Before this round trip, independent output sweeps over the same domain can share one coordinate. Each branch must
 own one distinct output and read only its own sweep coordinates. Equal single-axis domains retain their windows;
-a full static rectangle can use an existing flat axis of equal volume through quotient/remainder indices. Shared
-tails, cross-branch coordinates, captured names, and sweep coordinates used as scalar values retain their original
-form. The common coordinate lets ordinary Loop normalization share loads and combine sibling reductions. Output cuts
+a full static rectangle can use an existing flat axis of equal volume through quotient/remainder indices. Two
+rectangular sweeps can also align coordinates an indexed input read proves equal, allowing different names for
+equal-domain reduction binders. Only the remaining coordinates flatten; output indices keep their original order.
+Shared tails, cross-branch coordinates, captured names, and sweep coordinates used as scalar values retain their
+original form. The common coordinate lets ordinary Loop normalization share loads and combine sibling reductions. Output cuts
 remain available, and measured evidence chooses the kernel set. The re-lift otherwise keeps the grid the cut minted;
 store sweeps that cannot be promoted stay sweeps.
 A piece with no contraction orders that grid as its store writes, last axis fastest, so its threads write
