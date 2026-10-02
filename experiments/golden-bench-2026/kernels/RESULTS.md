@@ -79,7 +79,7 @@ are retained as failures, not timings. The supported comparisons remove that ear
 
 Packing eight normalization rows per CTA makes both selected normalization kernels slightly slower. Its model JSON
 reports a 0.50% lower total, followed by terminal timeout status 124. That single run with a nonzero terminal status
-is insufficient for acceptance. The generic packed-thread catalog extension is excluded along with the other rejected code.
+is insufficient for acceptance. The experimental catalog extension is excluded.
 
 The earlier NVIDIA profiles still support investigating bulk TMA staging and producer/consumer warp specialization
 on H100. The bounded alternatives here do not establish a smaller scheduling fix for its remaining gap. V100's
