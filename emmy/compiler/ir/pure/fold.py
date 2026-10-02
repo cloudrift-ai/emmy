@@ -1557,11 +1557,20 @@ def _(s: Fold, rename, sigma, axis_fn):
         mapped = sigma.get(name) if sigma is not None else None
         return mapped.name if isinstance(mapped, Var) else rename(name)
 
-    lift = Lambda(
-        params=(*lead, *(_param(p) for p in s.lift.params[len(lead) :])),
-        body=Body(tuple(_rewrite(st, rename, sigma, axis_fn) for st in s.lift.body)),
-        results=tuple(rename(r) for r in s.lift.results),
-    )
+    bound_count = len(lead) + len(s.bindings)
+    substitutions = {
+        p: mapped
+        for p in s.lift.params[bound_count:]
+        if sigma is not None and (mapped := sigma.get(p)) is not None and not isinstance(mapped, Var)
+    }
+    needed = set().union(*(expr.free_vars() for expr in substitutions.values()))
+    params = (*lead, *(_param(p) for p in s.lift.params[len(lead) : bound_count]))
+    params += tuple(_param(p) for p in s.lift.params[bound_count:] if p not in substitutions or p in needed)
+    body = Body(tuple(_rewrite(st, rename, sigma, axis_fn) for st in s.lift.body))
+    results = tuple(rename(r) for r in s.lift.results)
+    # Only an expression substitution can introduce a coordinate absent from the original tail.
+    # A self-referential substitution still keeps its old binder in its original position.
+    lift = Lambda.closing(params, body, results) if substitutions else Lambda(params, body, results)
     base = s.base.rename(rename) if s.base is not None else None
     cells = tuple(_param(cell) for cell in s.cells)  # coordinates, like the environment tail
     observe = None

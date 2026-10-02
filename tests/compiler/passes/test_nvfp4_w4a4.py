@@ -47,13 +47,14 @@ def _w4a4_linear(tmp_path, *, m, n, k, dtype="f16", input_scale=0.02):
     return g
 
 
-def test_the_spelled_w4a4_program_lowers_whole(tmp_path):
+def test_the_spelled_w4a4_program_lowers_whole(tmp_path, monkeypatch):
     """The full CUDA pass list consumes the spelled chain — quantize, pack, decode and matmul all
     land in kernels, with the e2m1 encode reaching the emitted source. Structure only; which
     kernel carries which piece is the scheduler's call and not pinned here."""
     from emmy.compiler.context import Context
     from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 
+    monkeypatch.setenv("EMMY_FAST_MATH", "1")
     g = _w4a4_linear(tmp_path, m=32, n=128, k=128)
     lowered = Pipeline.build(CUDA_PASSES).run(g, ctx=Context.from_target((12, 0)))
     sources = [s for node in lowered.nodes.values() if (s := getattr(node.op, "kernel_source", None))]
@@ -61,6 +62,7 @@ def test_the_spelled_w4a4_program_lowers_whole(tmp_path):
     leftovers = [nid for nid, n in lowered.nodes.items() if type(n.op).__name__ not in ("CudaOp", "ConstantOp", "InputOp")]
     assert not leftovers, f"lowering left tensor ops behind: {leftovers}"
     assert any("emmy_to_f4e2m1" in s for s in sources), "the activation encode never reached a kernel"
+    assert any("__fdiv_rn" in s for s in sources), "fast math lost the precise quotient before the FP4 encode"
 
 
 @requires_cuda

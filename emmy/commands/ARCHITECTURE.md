@@ -234,13 +234,14 @@ same one `EMMY_KNOBS` publishes (a hand pin of the same seam with another value 
 picks the kernel set from the evidence, and a routing row alone prices nothing.
 
 `run --golden PATH` without `--realization` walks every target kernel of the file once per input regime its rows
-record, in one process, benching each target's measured rows and skipping its proposals (the unmeasured rows). A piece
-a decision minted runs with its target, not as a target of its own; the target is named by the shortest row name on it
-or on its pieces — the seed a record run wrote the set under. A failing target does not stop the walk: every target
-reports, and the command exits non-zero at the end naming the failures. It parses and validates the document once and
-hands that object to each name's resolution step, because a whole-model inventory is large enough that re-reading it
-per target dominates the replay. Only this read-only replay path shares a document; a record write-back loads its own
-copy under the file's lock.
+record, in one process. Measured rows whose kernel is the complete target also run as pinned schedules; descendant
+rows remain evidence for their own pieces, even when a descendant's name selects the target. Proposals remain
+unbenched. A piece a decision minted runs with its target, not as a target of its own; the target is named by the
+shortest row name on it or on its pieces — the seed a record run wrote the set under. A failing target does not stop
+the walk. Every target reports, and the command exits non-zero at the end naming the failures. It parses and validates
+the document once and hands that object to each name's resolution step, because a whole-model inventory is large
+enough that re-reading it per target dominates the replay. Only this read-only replay path shares a document; a record
+write-back loads its own copy under the file's lock.
 
 The in-model audit uses those serving twins for every architecture, DeepSeek V4 included (its layers take the
 attention-sublayer seam; see `emmy/serving/ARCHITECTURE.md`).
@@ -253,12 +254,13 @@ exact or unambiguous substring match. With several targets, `--json DIR` writes 
 there is no repeat or child-process orchestration layer. Invoke `emmy run` again when independent process
 observations are required. Which rows bench as pinned rows: a realization named explicitly is always benched,
 measurement state notwithstanding — the realization corpus and the perf lane replay unmeasured cases this way — while
-the whole-file walk benches a name's verified rows and skips its proposals. Every pinned row (a golden row and an
+the whole-file walk pins only measured rows of the complete target. Every pinned row (a golden row and an
 `--ab` hand row alike) is MEASURED under a hand pin published to the
 environment for that one compile, then recorded (see `--record` and the bench-to-DB recording below); deploying it
 is the evidence pick's business, never the pin's. The selected target's records are also the compile's golden
-evidence for the greedy row. The selected realization's input regime is published so its rows read as live
-measurements. A schedule or routing row deploys only where it is the fastest measured row for its kernel.
+evidence for the greedy row. The selected realization's input regime is published even when it supplies no automatic
+pin, so its rows read as live measurements. A schedule or routing row deploys only where it is the fastest measured
+row for its kernel.
 Embedded Loop IR stores stable algebra rather than derived structural stamps. Registered
 Boolean values in an explicit `--ab` row remain input pins, so false values are not dropped with kernel pass markers
 and the JSON record identifies the inputs that were compiled. A scoped schedule-key OFF beside a non-OFF bare family
@@ -285,8 +287,9 @@ it minted, one routing row per kernel-set decision the compile took, and one mea
 isolated launch, with the greedy comparison row as its `same-input-greedy` reference (`golden.record_greedy_pick`; the
 pipeline ARCHITECTURE's Part 7 has the spelling). Recording a set the file describes takes `--pin-route` beside it: a routing row's own time prices nothing,
 so without the pin the greedy row is the compiler's own pick, whole, and the rows this writes are what price the
-decision for a compile nothing pins. That is how a pick the prior made becomes rows a strict-evidence compile of
-the file deploys from without a prior. Under `EMMY_KNOBS` the recorded pick IS the pin, so the recording refuses, and
+decision for a compile nothing pins. `--record-greedy` turns on strict evidence. A new candidate can first be measured
+with `--bench`, which writes its per-kernel rows into the tune DB, then recorded with that same DB in scope.
+Under `EMMY_KNOBS` the recorded pick IS the pin, so the recording refuses, and
 the run exits nonzero, when the env pin did not realize (`greedy_record_refusal`): the row would file the planner's own schedule
 under the pin's name and lane. It refuses a pick whose answer `--strict` rejected for the same reason. Independently of both, every clean pinned row and the greedy isolated re-bench are written into
 the tune DB by default: per-kernel `perf` rows through `search/bench_record.py` —

@@ -74,6 +74,11 @@ parameters; direct construction rejects them. Canonical ordering uses the same d
 move before its definition. The narrower `Body.ssa_uses` query follows statement `deps()` and does not include every
 expression read.
 
+Coordinate substitution through a `Fold` preserves its iteration and operand-binding parameter prefix. An environment
+parameter replaced by an expression leaves that tail only if the replacements no longer read it. Existing coordinates
+keep their order; `Lambda.closing` adds newly introduced free coordinates only for expression substitutions. Pure
+renaming preserves the established tail. A nested reduction keeps its own binder; substitution cannot capture it.
+
 ## Classic schedule model
 
 The [schedule package](schedule/ARCHITECTURE.md) separates schedule-wide interfaces and reusable choices from concrete

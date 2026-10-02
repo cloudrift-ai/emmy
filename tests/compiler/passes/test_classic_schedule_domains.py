@@ -506,6 +506,30 @@ def test_bare_kernel_parameter_applies_when_scoped_pin_targets_another_kernel() 
     assert tuple(enumerate_classic_reference(c)) == ()
 
 
+@pytest.mark.parametrize(
+    "family,value,target",
+    [
+        ("REDUCE", "coop-t/n8/v2", (7, 0)),
+        ("TILE", "wgmma_m64n64k16_f16_f32/f1x8/k4", (9, 0)),
+    ],
+)
+def test_kernel_pin_without_work_keeps_the_matching_catalog_rows(monkeypatch, family, value, target) -> None:
+    tile = _matmul(
+        Axis("m", 64),
+        Axis("n", 64),
+        Axis("k", 64),
+        name="k_matmul__place_ab12",
+        inputs={name: Tensor(name, (64, 64), "f16") for name in ("a", "b")},
+        outputs={"out": Tensor("out", (64, 64), "f16")},
+    )
+    monkeypatch.setenv(f"EMMY_{family}@place_ab12", value)
+    forks = classic_forks(tile, tile.name, {}, Context.from_target(target), kernel_set=True)
+    leaf = next(iter_leaves(forks), None)
+    assert leaf is not None, "a partial kernel pin must find WORK in the catalog"
+    assert leaf.row[family] == value
+    assert leaf.row["WORK"]
+
+
 def test_union_parameter_ignores_a_global_value_unsupported_by_this_kernel() -> None:
     """A graph-wide pin may target a sibling kernel in a union compile."""
     tile = _pointwise()

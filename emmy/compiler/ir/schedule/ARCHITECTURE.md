@@ -224,6 +224,11 @@ the card cannot run, and a hand-pinned transport no support resolves raise with 
 re-decides. Strict complete-row decode does not take that tolerant catalog fallback: once parsing or an intrinsic
 check fails, the empty site is returned without walking the catalog.
 
+A kernel-scoped hand pin remains partial: every named value must realize, while unnamed families retain their
+catalogs. Exact replay applies to the supplied keys of a complete row followed from evidence, not to an ordinary
+hand pin merely because it names one kernel. Omitting `WORK` from a reduction pin therefore leaves worker selection
+open; an impossible named worker or reduction still refuses.
+
 A bare pin on a kernel that spells its family per site is a DISJUNCTION over those sites: one carries the value and
 every other is OFF. That is the reading `unreproducible_pin_flag` and `evidence_row_vouches` already give a bare key,
 so a row measured under a bare pin reads back the same way it was pinned. Each such site therefore offers the pin's

@@ -20,14 +20,38 @@ from dataclasses import replace
 
 from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Literal, Var
+from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.pure.twist import SOFTMAX, Twist
+from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Let, Load, Loop, OutputSpec, Write
+from emmy.compiler.ir.stmt.passes import rewrite
 from tests.compiler.terms import contraction, projection, reduction, slab
 
 M_AXIS, N_AXIS, K_AXIS = Axis("m", Dim(8)), Axis("n", Dim(4)), Axis("k", Dim(16))
 SCOPE = (M_AXIS, N_AXIS, K_AXIS)
+
+
+def test_expression_substitution_replaces_free_coordinate_params() -> None:
+    term = contraction(K_AXIS, slab("xv", "x", "m", "k"), (slab("wv", "w", "k", "p", "q"), "acc"))
+    sigma = Sigma({"p": BinaryExpr("/", Var("n"), Literal(4, "int")), "q": BinaryExpr("%", Var("n"), Literal(4, "int"))})
+    rewritten = rewrite(term, lambda name: name, sigma)
+    assert rewritten.free_axes == frozenset({"m", "n"})
+    assert "p" not in rewritten.operands[1].lift.params and "q" not in rewritten.operands[1].lift.params
+    assert _chain(rewritten.lower(frozenset(), axes=(M_AXIS, Axis("n", 8), K_AXIS))) == ["m", "n", "k"]
+
+
+def test_expression_substitution_keeps_a_self_referenced_coordinate_in_place() -> None:
+    term = slab("v", "x", "a1", "a2", "a3")
+    rewritten = rewrite(term, lambda name: name, Sigma({"a1": BinaryExpr("*", Var("a1"), Literal(8, "int"))}))
+    assert rewritten.lift.params == term.lift.params == ("a1", "a2", "a3")
+    assert rewritten.free_axes == term.free_axes
+
+
+def test_expression_substitution_stops_at_reduce_binder() -> None:
+    term = reduction(Axis("p", 8), (slab("v", "x", "p"),), (Assign(name="acc__v", op="copy", args=("v",)),), ("acc",))
+    rewritten = rewrite(term, lambda name: name, Sigma({"p": BinaryExpr("%", Var("n"), Literal(8, "int"))}))
+    assert rewritten == term and rewritten.axis == "p"
 
 
 def _reduce(operands: tuple[Fold, ...], body: tuple, acc: str, op: str = "add") -> Fold:

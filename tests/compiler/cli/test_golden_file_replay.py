@@ -244,6 +244,26 @@ def test_a_recorded_kernel_set_is_the_evidence_a_compile_cuts_by(tmp_path, monke
     assert len(names) >= 2 and sum("__place_" in name for name in names) == 1, names
 
 
+def test_a_file_walk_does_not_pin_a_pieces_schedule_across_its_target(tmp_path):
+    """A seedless route is named by a piece's row. Its schedule belongs to that piece only; the target replays
+    from the file's measured evidence, in the selected row's regime even when the file also has another regime."""
+    from emmy.commands.compile import golden_regime, resolve_golden_arg
+
+    path = tmp_path / "working-route.json"
+    document = _working_placement_route(path)
+    pieces = [row for row in document.rows if row.measured]
+    document = replace(document, rows=[*pieces, replace(pieces[0], name="fast", pins={"FAST_MATH": True})])
+    document.dump(path, overwrite=True)
+    args = _args(path, realization=_piece_name(document), _explicit_realization=False)
+
+    resolve_golden_arg(args)
+
+    assert args.golden_configs == []
+    assert golden_regime(args) == {"FAST_MATH": False}
+    assert args._golden_scope == [document]
+    assert args._golden_reference is not None
+
+
 @pytest.mark.parametrize("explicit", [False, True], ids=["ordinary", "explicit"])
 def test_recorded_route_cuts_the_selected_compile_target(run_cli, tmp_path, monkeypatch, explicit):
     """``--pin-route`` compiles a named piece's row under the decisions that mint its kernel: the route is pinned for
@@ -309,7 +329,7 @@ def test_selected_file_scopes_the_evidence_and_a_split_regime_publishes_nothing(
 
     assert [sample.record.pins for sample in args.golden_configs] == [{"FAST_MATH": False}, {"FAST_MATH": True}]
     assert golden_regime(args) == {}
-    args.golden_configs = args.golden_configs[:1]
+    args._golden_rows = args._golden_rows[:1]
     assert golden_regime(args) == {"FAST_MATH": False}
     assert [len(scope.rows) for scope in args._golden_scope] == [2]
 

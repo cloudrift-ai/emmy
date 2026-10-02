@@ -93,7 +93,13 @@ FORMED AGAIN as a kernel of its own: its tile is lowered to a loop body, normali
 where a statement repeated on both sides of the seam folds to one), and lifted through the same entry as
 `010_lift`, so its sites are the ones its own body earns rather than a slice of the parent's tree — a gate/up piece
 carved out of a fused half is one twin contraction site, not the parent's contraction beside a scalar-only leftover.
-The re-lift keeps the grid the cut minted; the store sweeps it would peel off stay sweeps.
+Before this round trip, independent output sweeps over the same domain can share one coordinate. Each branch must
+own one distinct output and read only its own sweep coordinates. Equal single-axis domains retain their windows;
+a full static rectangle can use an existing flat axis of equal volume through quotient/remainder indices. Shared
+tails, cross-branch coordinates, captured names, and sweep coordinates used as scalar values retain their original
+form. The common coordinate lets ordinary Loop normalization share loads and combine sibling reductions. Output cuts
+remain available, and measured evidence chooses the kernel set. The re-lift otherwise keeps the grid the cut minted;
+store sweeps that cannot be promoted stay sweeps.
 A piece with no contraction orders that grid as its store writes, last axis fastest, so its threads write
 consecutive addresses; a contraction piece keeps the lift's order, because its last two grid axes are the
 fragment's rows and columns. A bare `PLACE=cut` pin

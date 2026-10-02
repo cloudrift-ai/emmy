@@ -56,6 +56,29 @@ def test_the_render_emits_the_encode_helper_rather_than_a_dtype_conversion():
     assert expr.name == "emmy_to_f4e2m1"
 
 
+def test_round_to_nearest_f32_division_has_reference_and_target_spellings():
+    from emmy.compiler.backend.cuda.render_target import CudaRenderTarget
+    from emmy.compiler.backend.loop.render_target import LoopRenderTarget
+    from emmy.compiler.ir.expr import FuncCallExpr, Var
+    from emmy.compiler.ir.kernel.render import _INTRINSIC_TO_CUDA
+    from emmy.compiler.ir.loop.runner import _INTRINSICS_CPP, PRELUDE
+    from emmy.compiler.ir.stmt.base import RenderCtx, op_to_expr
+
+    numerator = np.array([0.75, -1.25], dtype=np.float32)
+    denominator = np.array([1.0, 2.0], dtype=np.float32)
+    op = ElementwiseImpl("divide_rn_f32")
+    assert op.arity == 2
+    np.testing.assert_array_equal(op(numerator, denominator), numerator / denominator)
+    expr = op_to_expr("divide_rn_f32", [Var("x"), Var("scale")], dtype="f32")
+    assert isinstance(expr, FuncCallExpr)
+    np.testing.assert_array_equal(expr.eval({"x": numerator, "scale": denominator}), numerator / denominator)
+    ctx = RenderCtx(target=CudaRenderTarget(), intrinsics=_INTRINSIC_TO_CUDA)
+    assert expr.render(ctx) == "__fdiv_rn(x, scale)"
+    host = RenderCtx(target=LoopRenderTarget(), intrinsics=_INTRINSICS_CPP)
+    assert expr.render(host) == "emmy_divide_rn_f32(x, scale)"
+    assert "float emmy_divide_rn_f32(float x, float y)" in PRELUDE
+
+
 @requires_cuda
 @pytest.mark.xdist_group("cuda")
 def test_the_cuda_encode_matches_the_numpy_encode():

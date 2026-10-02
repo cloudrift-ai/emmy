@@ -62,3 +62,14 @@ def test_integer_or_varying_division_is_not_split(monkeypatch, dtype, varying):
     monkeypatch.setenv("EMMY_FAST_MATH", "1")
     with pytest.raises(RuleSkipped, match="no invariant"):
         rule.rewrite(SimpleNamespace(op=KernelOp(body=_body(dtype, varying=varying))))
+
+
+def test_round_to_nearest_division_is_not_split(monkeypatch):
+    monkeypatch.setenv("EMMY_FAST_MATH", "1")
+    body = _body()
+    loop = body[0]
+    stmts = list(loop.body)
+    stmts[2] = Assign("out", "divide_rn_f32", ("recip_0", "denominator"), dtype=F32)
+    body = Body((Loop(loop.axis, Body(tuple(stmts))),))
+    with pytest.raises(RuleSkipped, match="no invariant"):
+        rule.rewrite(SimpleNamespace(op=KernelOp(body=body)))

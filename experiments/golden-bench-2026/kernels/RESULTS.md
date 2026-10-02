@@ -1,5 +1,326 @@
 # Golden-bench kernel corpus
 
+## Shared K/V decode producers (2026-10-01)
+
+Sharing the K/V producer lowers whole-layer decode latency on A100, H100, V100 and RTX 4090. The selected route keeps Q
+separate and replaces the four K/V kernels with two, reducing the layer from 16 launches to 14. V100 still trails the
+same-input `torch.compile` reference. The equivalent RTX 5090 trial saves only 0.02–0.04 µs per pair, so that card
+keeps its existing selection.
+
+These are contemporaneous baseline and candidate processes on the same card, using Qwen3-0.6B revision
+`c1899de289a04d12100db370d81485cdf75e47ca`, layer 0, sequence length 1, deployable O3, `EMMY_FAST_MATH=0`,
+10 warmups and 100 iterations. Each process starts with a fresh tune database, requires measured evidence and
+disables new timing evidence. All eager-referenced Emmy and `torch.compile` checks pass. A100, RTX 4090 and RTX 5090
+use strict correctness throughout; V100's first pair and all H100 pairs use the scaled check. V100's remaining two
+pairs also pass strict correctness. No tolerance changed. H100's manual commands used the unversioned model name;
+the cache audit records the same revision in `refs/main` since September 30, before these trials. Its final recipe
+pins that revision explicitly.
+
+Whole-layer Emmy times below are microseconds. The reduction compares the two arm medians; it is not a comparison
+with the earlier baseline table. Every individual timing is retained in the corresponding raw archive.
+
+| Card | Pairs | Baseline median | Candidate median | Lower latency | Selection |
+| --- | ---: | ---: | ---: | ---: | --- |
+| A100 40GB | 3 | 53.895 | 51.769 | 3.94% | shared K/V |
+| H100 80GB | 12 | 29.158 | 27.739 | 4.87% | shared K/V |
+| V100 SXM2 16GB | 3 | 72.431 | 67.704 | 6.53% | shared K/V |
+| RTX 4090 | 3 | 26.349 | 24.676 | 6.35% | shared K/V |
+| RTX 5090 | 3 | 20.490 | 20.456 | 0.16% | unchanged |
+
+All ten unrelated kernel sources remain byte-identical. The two Q kernels retain identical bodies, arguments,
+launch geometry and shared memory; only their generated function names change. Every arm keeps the same sources,
+schedules and shared-memory sizes across repeats. A100's reference stays between 57.6 and 58.3 µs. V100's reference
+medians are 59.231 µs for baseline processes and 58.500 µs for candidate processes; that drift is smaller than the
+4.726 µs separation between Emmy medians. RTX 4090's three paired gains are 1.641, 1.748 and 1.763 µs; their median
+is 1.748 µs, while the difference between arm medians reported above is 1.674 µs. Its reference varies from 27.331
+to 29.249 µs. RTX 5090's tiny reduction does not establish a useful layer improvement.
+
+H100 needed more sampling: the first six pairs had four wins and a 0.609 µs separation between arm medians. A fixed
+set of six additional pairs balanced execution order; there was no further sampling. Across all twelve pairs, the
+candidate wins ten and loses two, by 0.751 and 0.654 µs. The median paired gain is 1.549 µs; no sample is excluded.
+The `torch.compile` medians stay at 31.674 and 31.670 µs in baseline and candidate processes. Every pre-run GPU
+process list is empty, and all captures use the same UUID and 1980/2619 MHz clocks, at 34–40°C. The raw protocol
+retains all 24 timings and their execution order, including both losses.
+
+The compiler can now give independent outputs with equal iteration domains a common coordinate. A rectangular
+domain maps to the flat coordinate by quotient and remainder. Existing normalization then combines the two producer
+reductions. This applies only where output ownership and binding make the substitution legal; ordinary cuts still
+offer separate producers. No fusion gate, grouped cut, new schedule family or benchmark implementation was added.
+The deployed K/V route uses the existing split reduction and cooperative partial schedule.
+
+Each selected experiment golden adds three kernel identities, two routing decisions and two measured schedule rows.
+Every previous program, kernel, route and row is retained unchanged. Measurements come from the exact named card.
+Fresh unpinned strict-evidence replay selects the route through those rows. A100's paired source is `55ea5c75e`,
+equivalent to parent compiler integration `9989b6b37`; V100 used `4fd360ef0` and `bd3132c35` over the baseline repairs.
+After merging main `754d1afa6`, fresh strict compiles on A100 and V100 retained all 14 ordered CUDA sources and launch
+signatures. RTX 4090 and RTX 5090 pairs ran on that merged source at `c902cfbb4`. H100's paired remote source is
+`1b44919c9`, equivalent to `59e3d8d66` over its baseline repairs.
+
+Several rejected probes remain in the evidence. V100's eight-output-lane K and V schedules lost in full-layer runs.
+A smaller 128-thread K/V partial also lost to the selected 256-thread partial, 4.6 versus 4.3 µs in the bounded
+isolated comparison, so it was not promoted. A standalone normalized child initially had a different parent identity
+and output order; its timings were never used as full-layer evidence. The accepted route is derived from the actual
+full-layer parent. Global pins that changed unrelated decisions were likewise rejected before acceptance.
+
+`tuning_a100x1_2026-10-01.tar.gz`, `tuning_v100x1_2026-10-01.tar.gz`, `tuning_rtx4090x1_2026-10-01.tar.gz` and
+`tuning_rtx5090x1_2026-10-01.tar.gz` retain the paired JSON, logs, task databases, working goldens, source audits,
+failed probes and exact command protocols under `2026-10-01-a100/`, `2026-10-01-v100/`, `2026-10-01-rtx4090/` and
+`2026-10-01-rtx5090/`, respectively. The V100 work used the single SXM2 card throughout.
+H100's corresponding evidence is under `2026-10-01-h100/shared-kv/` in
+`tuning_h100x1_2026-10-01.tar.gz`, alongside the prefill profiling and rejected trials described below.
+
+## Final five-card recipe after route selection (2026-10-01)
+
+All ten model comparisons and all 50 strict golden replays pass after selecting the four shared K/V routes.
+Each model comparison uses the explicitly pinned revision above, the same inputs
+for all three backends, O3, fast math disabled, 10 warmups and 100 iterations. Each of the five following replays
+uses a fresh tune database, strict correctness and strict evidence, without recording new measurements.
+
+Captured whole-forward latency is in microseconds. These final checks validate the selected routes; the interleaved
+pairs above establish the improvement over the previous selections.
+
+| Card | s1 Emmy | s1 `torch.compile` | s512 Emmy | s512 `torch.compile` | Launches s1 / s512 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| A100 40GB | 51.086 | 56.247 | 177.664 | 181.541 | 14 / 12 |
+| H100 80GB | 27.255 | 31.710 | 87.347 | 81.992 | 14 / 12 |
+| V100 SXM2 16GB | 68.335 | 62.498 | 500.224 | 641.360 | 14 / 21 |
+| RTX 4090 | 24.626 | 29.096 | 156.160 | 162.816 | 14 / 12 |
+| RTX 5090 | 20.549 | 24.591 | 129.572 | 146.398 | 16 / 12 |
+
+The separate strict golden replays give these medians and full ranges, also in microseconds. Their input and timing
+path differs from the model comparison, so they are not the numbers to compare with `torch.compile`.
+
+| Card | s1 median [range] | s512 median [range] |
+| --- | ---: | ---: |
+| A100 40GB | 50.603 [50.214–50.935] | 178.688 [177.835–179.541] |
+| H100 80GB | 24.190 [23.873–24.614] | 88.448 [88.221–88.637] |
+| V100 SXM2 16GB | 67.644 [67.644–68.066] | 496.640 [491.520–498.688] |
+| RTX 4090 | 24.755 [24.676–24.773] | 156.160 [155.989–156.501] |
+| RTX 5090 | 20.543 [20.532–20.559] | 129.916 [129.800–130.892] |
+
+Within each row, all six processes keep identical ordered CUDA sources, schedules and shared-memory sizes. Each
+selected decode row matches its accepted candidate; RTX 5090 matches its unchanged baseline. Prefill sources match
+the baseline on four cards. V100's one differing prefill source only renames local coordinates: its addresses,
+arguments, launch geometry and shared memory remain equivalent. Compiling the old source with only the coordinate
+reform reproduces that change, so it is attributable to this work rather than the intervening main merge. Its other
+20 prefill sources remain byte-identical. The exact old, reform-only and final sources are in the V100 tuning archive.
+
+The canonical result archives now contain the final runs below. Each has two succeeded system-only experiment
+records, the raw artifact bundles and logs. The earlier baseline runs remain in the baseline archive described
+below. No benchmark timing was copied into an existing reference row to hide a regression.
+
+| Card | Archive | Root member | Executed source |
+| --- | --- | --- | --- |
+| A100 | `results_a100x1.tar.gz` | `2026-10-01_20-14-59/` | `c902cfbb4` |
+| H100 | `results_h100x1.tar.gz` | `2026-10-01_22-17-55/` | `0c7a36e8a` |
+| V100 | `results_v100x1.tar.gz` | `2026-10-01_20-17-08/` | `ab9647672` |
+| RTX 4090 | `results_rtx4090x1.tar.gz` | `2026-10-01_20-21-25/` | `e56914c03` |
+| RTX 5090 | `results_rtx5090x1.tar.gz` | `2026-10-01_20-15-51/` | `c902cfbb4` |
+
+H100's package freeze renders the task clone's inherited local Git origin in its editable requirement. The raw
+provenance audit verifies that the neutral-directory import, installed editable path and executable shebangs all
+resolve the intended task checkout at the recorded commit. The misleading origin URL did not select different
+benchmark code. The RTX 4090 tuning archive also retains an initial staging failure from a dirty copied golden;
+that attempt ran no GPU benchmark. The canonical run began from the clean committed source.
+
+Finalization corrected coordinate substitution so that a self-referenced coordinate keeps its original parameter
+position. The original NVFP4 and RMSNorm corpus cases then passed on RTX 5090 and A100 without changing either
+case. Qualification of this final compiler preserves the measured Qwen evidence: the actual model comparison was
+repeated on A100, RTX 4090 and RTX 5090, with every ordered source hash, schedule and shared-memory size unchanged.
+Fresh H100 model-form compiles likewise reproduce all sources and launch configurations.
+
+V100 decode retains all 14 source hashes. In prefill, the fix restores the one renamed kernel above to the exact
+source of the successful baseline; all 21 launch configurations, arguments and address expressions remain equivalent.
+Thus 140 of the 141 source hashes across the ten workloads match the final snapshots, and the remaining difference
+is this coordinate rename back to the baseline. Both V100 shapes also pass one additional strict replay with one
+warmup and one iteration. These short checks establish correctness, not new performance evidence. The three-card
+records are under `post-fold-validation/` in their tuning archives; H100's are under `fold-source-check/`, and V100's
+archive retains the exact pre-fix and fixed CUDA graphs, source diff and strict replay records.
+
+Main's BF16/FP4 and runtime changes were subsequently merged through `c536afe4e`. Rebuilt task-owned runtimes at
+`0c7a36e8a` pass all ten workloads. A100, RTX 4090 and RTX 5090 repeat the actual model comparisons with scaled
+correctness, strict evidence, 10 warmups and 100 iterations; every source hash, schedule and shared-memory size
+matches the canonical results. V100 repeats both strict 1/1 correctness checks, with its complete lowered CUDA
+graphs unchanged from the fixed compiler. H100 reruns the whole two-row recipe, including all ten strict repeats;
+its sources, schedules and observed launch geometry remain unchanged. The H100 tables and canonical archive above
+now use that latest run. Its preceding `2026-10-01_20-56-48` archive is retained byte-for-byte under
+`prior-final-replay/prior-canonical-results.tar.gz` in the H100 tuning archive. The new qualification records are
+under `post-main-validation/` for the three-card checks, `2026-10-01-upstream-qualification/` for V100, and
+`merged-runtime/` for H100. These checks preserve the accepted comparison; they do not select another candidate.
+
+## FP4 correctness found during finalization (2026-10-01)
+
+The full RTX 5090 suite exposed twelve FP4 accuracy failures after merging main. A separate clean checkout of
+`c536afe4e`, with its own rebuilt runtime and the same GPU and dependencies, reproduces the three representative
+errors exactly. TMA and cp.async outputs still agree bit for bit. Disabling fast math or enabling precise division
+passes those controls, identifying an approximate quotient crossing an e2m1 encoding boundary.
+
+The fix at `b59142774` gives static FP4 encoding an explicit round-to-nearest f32 divide, retaining the f32 divisor
+and fast math elsewhere. All twelve original failures pass at default fast math and the suite's O1 setting, with
+unchanged tolerances. All 431 repository golden freshness checks, nine FP4 realization-case freshness checks and
+all ten benchmark golden checks pass without restamping. This repair changes no selected Qwen route; the benchmark
+uses unquantized weights. FP4 throughput was not measured in this experiment. The RTX 5090 tuning archive retains
+the failed run, clean-main controls and corrected checks under `fp4-gate/`.
+
+The complete RTX 5090 suite at the same source passes with eight workers: 6,460 passed and 394 skipped in
+1,252.12 seconds. An earlier 32-worker run lost one worker during the GDN state handoff/reset test. Its replacement
+passed that test, as did an isolated rerun and the complete eight-worker run. The cause of the exit remains unknown;
+the archive retains both full logs, the isolated check and the available system events. The CPU suite also passes
+at this source: 5,621 passed and 1,233 skipped.
+
+## Five-card baseline before the next optimization round (2026-10-01)
+
+The current pinned kernels still pass correctness on all five exact cards. Eight of the ten same-input Hugging Face
+layer comparisons favor Emmy. V100 decode remains slower than `torch.compile`, and H100 prefill retains a smaller
+loss. A100 prefill is close enough to parity that its lead is timing-sensitive. These measurements validate the
+existing selections; they do not measure a new compiler optimization.
+
+The target is Qwen3-0.6B at revision `c1899de289a04d12100db370d81485cdf75e47ca`, layer 0, sequence lengths 1 and
+512. Every model-form process compares eager, `torch.compile` and Emmy on the same inputs, with deployable O3,
+`EMMY_FAST_MATH=0`, 10 warmups and 100 iterations. The committed exact-card golden supplies measured evidence.
+Five fresh-process golden replays follow each model comparison, with strict correctness and strict evidence. Each
+repeat has a separate tune database and disables recording new measurements, so an early repeat cannot change a
+later repeat's kernel selection.
+
+Captured whole-forward latency in microseconds. Ratio is `torch.compile` / Emmy; above 1 means Emmy is faster.
+
+| Card | s1 Emmy | s1 `torch.compile` | s1 ratio | s512 Emmy | s512 `torch.compile` | s512 ratio |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| RTX 5090 | 20.534 | 25.892 | 1.261× | 130.160 | 138.625 | 1.065× |
+| RTX 4090 | 26.359 | 29.180 | 1.107× | 156.501 | 162.992 | 1.041× |
+| A100 40GB | 53.356 | 57.534 | 1.078× | 179.541 | 181.409 | 1.010× |
+| H100 80GB | 30.051 | 31.650 | 1.053× | 86.757 | 81.869 | 0.944× |
+| V100 SXM2 16GB | 71.360 | 58.628 | 0.822× | 501.760 | 643.811 | 1.283× |
+
+The five strict golden replays give the following median and full range, in microseconds. These are a separate
+input and timing path; use the same-input model-form table above for comparisons with `torch.compile`.
+
+| Card | s1 median [range] | s512 median [range] |
+| --- | ---: | ---: |
+| RTX 5090 | 20.531 [20.528–20.553] | 129.844 [129.480–130.472] |
+| RTX 4090 | 26.440 [26.347–26.458] | 156.315 [155.819–156.331] |
+| A100 40GB | 53.207 [52.470–53.895] | 179.541 [178.176–180.053] |
+| H100 80GB | 25.600 [25.188–25.715] | 88.707 [88.275–88.851] |
+| V100 SXM2 16GB | 71.552 [71.270–72.000] | 499.200 [491.008–501.760] |
+
+All ten recipe rows succeeded, and all 50 strict replays passed. Every replay matches its paired model run's ordered
+CUDA source hashes, schedules and shared-memory sizes. Decode uses
+16 launches on each card; prefill uses 12 on A100, H100, RTX 4090 and RTX 5090, and 21 on V100. Both compiled
+model-form backends pass the scaled accuracy check. The strict golden checks use the existing tolerance without
+changes. Historical speedup ratios are not a controlled compiler comparison: the software environment and reference
+timings have changed, especially on RTX 5090. Candidate acceptance needs contemporaneous baseline and candidate
+processes, not a comparison with a previous day's reference time.
+
+The first run exposed two validation problems. The format change in #1007 had left all ten benchmark goldens
+unreadable. Conversion through the preceding compiler's importer recovered 144 per-kernel measurements and 61
+routing decisions without new measurements. The 41 older aggregate timings remain in the migration audit archive;
+they are not per-kernel performance rows in the current format. All ten converted files pass fresh-lowering checks.
+Automatic golden replay also treated a descendant's schedule as whole-target pins when its row supplied the target
+name. That produced failing extra prefill variants despite correct model-form and greedy golden results. Automatic
+replay now uses descendant rows as measured evidence and only pins rows that measure the complete target.
+
+The initial failed attempts remain in the raw archive. Their timings were not recorded over the committed evidence.
+V100's first prefill replay was interrupted while the CPU was compiling placement alternatives; later complete
+repeats show that the delay was compilation, not a GPU hang. A copied V100 virtual environment also retained old
+launcher paths. Its benchmark used the intended task code, as a neutral-directory import audit confirmed. Both the
+original and task environment registrations were restored and verified, with no other package changes. H100's
+benchmark used the correct task interpreter, but its original package-freeze command used an old pip launcher.
+The raw freeze is preserved beside a separate audit and corrected freeze. The recipe now captures packages through
+the benchmark's Python interpreter.
+
+The baseline source is `5694af721`; V100 uses the equivalent cherry-picked changes at `dea05fd94`. The exact GPU
+UUIDs are unchanged from the September 30 table below. Package freezes and system records retain the full environment.
+All cards use Transformers 5.14.1. The compiler toolkit and PyTorch package versions are listed separately because
+they need not use the same CUDA libraries.
+
+| Card | PyTorch package | Triton | nvcc | Driver |
+| --- | --- | --- | --- | --- |
+| RTX 5090 | 2.14.1 | 3.8.0 | 13.0.88 | 580.173.02 |
+| RTX 4090 | 2.14.1 | 3.8.0 | 13.3.73 | 580.159.03 |
+| A100 40GB | 2.14.1 | 3.8.0 | 12.9.41 | 580.173.02 |
+| H100 80GB | 2.14.0 | 3.8.0 | 12.9.41 | 580.178.04 |
+| V100 SXM2 16GB | 2.13.0+cu126 | 3.7.1 | 12.9.86 | 580.178.04 |
+
+Baseline snapshots are retained in the Git LFS archive `tuning_baseline_2026-10-01.tar.gz`. Each root below contains
+its two system-only
+`<variant>.experiment.yaml` records, `<variant>/torch-compile/model.json`, five
+`<variant>/verification/repeat-N` JSON files and their status files, the working golden, package freeze and logs.
+
+| Card | Root member within the baseline archive | Run ID |
+| --- | --- | --- |
+| RTX 5090 | `2026-10-01/baseline/rtx5090/2026-10-01_17-14-41/` | `20261001T171441Z` |
+| RTX 4090 | `2026-10-01/baseline/rtx4090/2026-10-01_17-24-20/` | `20261001T172420Z` |
+| A100 | `2026-10-01/baseline/a100/2026-10-01_17-28-34/` | `20261001T172834Z` |
+| H100 | `2026-10-01/baseline/h100/2026-10-01_17-17-59/` | `20261001T171759Z` |
+| V100 | `2026-10-01/baseline/v100/2026-10-01_17-12-12/` | `20261001T171212Z` |
+
+`tuning_baseline_2026-10-01.tar.gz` retains these baseline runs, the initial terminal failed runs, and the environment
+audits under `2026-10-01/{baseline,initial,provenance}/`. `tuning_migration_2026-10-01.tar.gz` retains the original
+goldens and the import audit. No user-owned GPU instance was stopped or deleted.
+
+## H100 prefill profiling and bounded trials (2026-10-01)
+
+Three schedule trials did not improve the whole layer. A fourth trial removed unused asynchronous copies and
+measured a small gain, but the gain depended on measurement order and did not justify the shared codegen change.
+The H100 prefill selections remain unchanged. All comparisons use the same pinned model revision and existing
+correctness tolerance as the baseline above.
+
+The K-tile and gate/up trials each alternated three baseline and three candidate processes, with 10 warmups and
+100 iterations. Every process passed scaled eager correctness and launched 12 kernels. Ordered source hashes,
+schedules and shared-memory sizes prove that only the intended kernel changed. Each process used a fresh tune
+database and disabled new timing evidence. Whole-layer Emmy times below are microseconds; brackets contain all
+three measurements in execution order.
+
+| Change | Baseline | Candidate | Baseline median | Candidate median |
+| --- | --- | --- | ---: | ---: |
+| K tile width 128 to 64 | [87.048, 86.803, 87.160] | [87.061, 87.773, 87.125] | 87.048 | 87.125 |
+| Gate/up plain TMA staging | [86.891, 86.288, 87.568] | [87.749, 88.221, 87.658] | 86.891 | 87.749 |
+
+The K trial doubled its launch from 64 to 128 blocks, holding work, staging and rasterization fixed. It produced
+no reliable gain. Gate/up changed from the recorded asynchronous staging to plain two-stage TMA while keeping
+its tile, work and rasterization choices. Its isolated kernel became faster, but the layer became slower in all
+three pairs. A separate Q-projection TMA probe changed only Q, passed scaled correctness, and measured Emmy at
+89.795 µs against `torch.compile` at 82.274 µs with 5 warmups and 20 iterations. Its isolated Q kernel also became
+slower, so this candidate stopped before repeated pairs. No schedule candidate was recorded into a golden.
+
+The paired Nsight Systems trace locates costs across several parts of the layer. Q/K/V kernel durations total
+about 19.9 µs for Emmy and 16.3 µs for the vendor path. Attention contributes another roughly 2.4 µs difference.
+The remaining projections, normalization, MLP and output work account for about 5 µs. Vendor gate/up spans two
+kernels, about 7.3 and 10.5 µs; comparing Emmy's roughly 19.3 µs fused kernel with only the latter would overstate
+the gap. Launch gaps favor Emmy by about 8 µs in this trace. These diagnostic timings include profiler overhead;
+the unprofiled, same-input whole-layer results remain the performance comparison.
+
+An exact-source Nsight Compute diagnostic matched all 12 baseline source hashes and schedules. Its Q kernel
+launches 256 blocks of 128 threads, with 64 registers per thread and 64 KiB of shared memory. The counters report
+244,736 LSU instructions and 65,536 tensor-pipe instructions, about 29% SM throughput and 16% DRAM throughput,
+and no shared-memory bank conflicts. The source issues 24 asynchronous copies per thread during the final three
+loop iterations whose results are never consumed. Older counter captures lack exact source proof and are retained
+as unattributed diagnostics. Counter-run durations around 10 µs, including a repeat without cache flushing, must
+not be substituted for the roughly 7 µs warm Q duration in the Systems trace.
+
+The copy-removal prototype guarded those unused transfers while preserving every commit and wait. Six paired
+whole-layer comparisons passed scaled correctness, kept all 12 schedules and changed only the seven eligible
+kernel sources. Five pairs favored the candidate; one differed by only 0.024 µs in the other direction. Pooled
+medians were 86.981 µs for baseline and 86.697 µs for the candidate, a 0.284 µs improvement (0.33%). The first
+three baseline-first pairs showed a 0.717 µs median difference; three additional candidate-first pairs showed
+0.149 µs. Those reversed runs recorded an idle GPU before each process, the same 1980/2619 MHz clocks, 35–37°C,
+and 124–127 W. Both experiment goldens remained fresh. This small, order-sensitive gain is preserved as a finding;
+the code change was reverted.
+
+The K trial used source `5694af721`; later trials used `2daed32f`, the H100 cherry-pick of the partial-pin repair.
+Every control reproduced the validated baseline kernels. `tuning_h100x1_2026-10-01.tar.gz`, rooted at
+`2026-10-01-h100/`, preserves the profiles, exact commands, source proofs, trial JSON/log/database files, failed
+probes, copy-removal patch and system snapshots. A tile-only pin initially hit the partial-pin bug, another probe
+lacked nvcc on its SSH path, and a separate work/staging probe failed strict accuracy before timing. Those failed
+probes supply no performance result and do not change the headline tolerance.
+
+The prefill K/V producers need a different coordinate alignment from decode: V sweeps `(1024, 512)`, while K
+sweeps `(8, 512, 128)`. Their shared row coordinate appears in different positions. Flattening both in stored
+order would mix row and channel coordinates, so the decode reform does not apply. A future shared-producer trial
+must preserve that correspondence explicitly and beat the complete layer, including attention and MLP costs.
+Persistent kernels remain outside this experiment's scope. The current evidence does not close the H100 prefill
+gap or bring V100 decode to parity.
+
 ## Post-cut producer fusion compatibility (#1003)
 
 All ten golden files have been updated for producer fusion after a cut. Twenty ordinary output-cut routing rows

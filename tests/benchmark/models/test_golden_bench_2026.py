@@ -3,11 +3,27 @@
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from emmy.benchmark.command_workload import build_substitution_map, render_command
 from emmy.benchmark.tasks import enumerate_tasks
 from emmy.recipe import load_recipe
 
 EXP = Path("experiments/golden-bench-2026")
+
+
+@pytest.mark.parametrize(
+    "path",
+    sorted((Path(__file__).resolve().parents[3] / EXP / "kernels" / "golden").glob("*.golden.json")),
+    ids=lambda path: path.name,
+)
+def test_kernel_golden_matches_fresh_lowering(path) -> None:
+    from emmy.compiler.pipeline.search.golden import GoldenFile, restamp
+
+    document = GoldenFile.load(path)
+    assert document.targets() and any(row.measured for row in document.rows)
+    fresh, report = restamp(document)
+    assert fresh == document, "\n".join(report.lines())
 
 
 def _experiment(project_root: str, name: str) -> str:
@@ -67,6 +83,9 @@ def test_common_kernel_corpus_is_small_and_identical(project_root) -> None:
     assert "./venv/bin/emmy run" in run
     assert "for repeat in 0 1 2 3 4" in run
     assert "--golden $task_dir/working.json --bench --strict" in run
+    assert 'if [ -n "$golden" ]; then\n  evidence_args=(--strict-evidence --no-record-evidence)' in run
+    assert "export EMMY_TUNE_DB=$task_dir/verification/repeat-$$repeat.db" in run
+    assert run.count('"$${evidence_args[@]}"') == 2
     assert '"$model_ref" --layer "$layer" --seq-len "$seq_len" --bench' in run
     assert "EMMY_GOLDEN_FILE=$task_dir/working.json" in run
     assert "--bench-backends eager,tcompile,emmy" in run
@@ -86,7 +105,7 @@ def test_common_kernel_corpus_is_small_and_identical(project_root) -> None:
     ]
     assert recipe.command.strict is True
     assert recipe.command.result_files == ["artifacts.tar.gz"]
-    assert "pip freeze --all" in run
+    assert "./venv/bin/python -m pip freeze --all" in run
     assert "tar -C $task_dir" in run
 
 

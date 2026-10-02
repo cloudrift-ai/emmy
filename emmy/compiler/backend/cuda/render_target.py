@@ -59,6 +59,7 @@ _F8_DTYPES = ("f8e4m3", "f8e5m2")
 # Intrinsic spellings — per dtype.  Keys are abstract op names emitted
 # by ``op_to_expr`` (``"exp"``, ``"fmax"``, ``"fabs"``, ...).
 _INTRINSIC_F32: dict[str, str] = {
+    "divide_rn_f32": "__fdiv_rn",
     "exp": "expf",
     "exp_fast": "__expf",
     "log": "logf",

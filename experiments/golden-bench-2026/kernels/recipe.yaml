@@ -5,7 +5,8 @@
 # schedules were tuned by the tune-kernels skill and committed beside this recipe, and the row only re-measures them
 # at deployable -O3. Rows with `golden: ""` keep the original trace + in-recipe search. Both paths end in the same
 # fresh-process `emmy run --golden ... --bench --strict` repeats against eager and Emmy, so the two lanes produce
-# the same terminal correctness evidence. A separate torch.compile run is diagnostic because a reference backend
+# the same terminal correctness evidence. Committed goldens also require measured evidence for every compiler
+# choice. A separate torch.compile run is diagnostic because a reference backend
 # can be unavailable for a valid target; its absence must not fail an otherwise-correct Emmy replay. It times the
 # Hugging Face layer itself (`emmy run MODEL --layer N`), with the working golden as evidence, so eager,
 # torch.compile and Emmy run on the module a user would compile rather than on the golden's traced program.
@@ -29,8 +30,8 @@ command:
     finalize() {
       final_status=$$?
       trap - EXIT
-      if [ -x ./venv/bin/pip ]; then
-        ./venv/bin/pip freeze --all > $task_dir/requirements.freeze.txt || final_status=1
+      if [ -x ./venv/bin/python ]; then
+        ./venv/bin/python -m pip freeze --all > $task_dir/requirements.freeze.txt || final_status=1
       else
         echo "venv pip unavailable" > $task_dir/requirements.freeze.txt
         final_status=1
@@ -45,7 +46,7 @@ command:
 
     [ -d venv ] || make setup
     # A venv staged before the runtime was compiled lacks the extension; build it in place.
-    ./venv/bin/python -c 'import emmy.emmy_runtime' 2>/dev/null || ./venv/bin/pip install -q -e .
+    ./venv/bin/python -c 'import emmy.emmy_runtime' 2>/dev/null || ./venv/bin/python -m pip install -q -e .
     export EMMY_TUNE_DB=$task_dir/autotune.db
     export EMMY_ONLINE_FILE=$task_dir/online.json
     export EMMY_CUBIN_CACHE=$task_dir/cubins
@@ -60,7 +61,9 @@ command:
     devices="$gpu_device_ids"
     first_device=$${devices%%,*}
 
+    evidence_args=()
     if [ -n "$golden" ]; then
+      evidence_args=(--strict-evidence --no-record-evidence)
       cp $repo_dir/experiments/golden-bench-2026/kernels/golden/$golden.golden.json $task_dir/working.json
       echo "replaying committed golden $golden" | tee $task_dir/trace.log
       echo "search owned by the tune-kernels skill; this row only re-measures" | tee $task_dir/tune.log
@@ -82,7 +85,7 @@ command:
 
     mkdir -p $task_dir/torch-compile
     if EMMY_NVCC_FLAGS= EMMY_GOLDEN_FILE=$task_dir/working.json CUDA_VISIBLE_DEVICES="$$first_device" ./venv/bin/emmy run \
-      "$model_ref" --layer "$layer" --seq-len "$seq_len" --bench \
+      "$model_ref" --layer "$layer" --seq-len "$seq_len" --bench "$${evidence_args[@]}" \
       --json $task_dir/torch-compile/model.json --warmup 10 --iters 100 \
       --bench-backends eager,tcompile,emmy 2>&1 | tee $task_dir/torch-compile.log; then
       torch_compile_status=0
@@ -96,8 +99,11 @@ command:
     # fails, so an Emmy failure is reported rather than hidden. torch.compile availability is non-gating above.
     verification_status=0
     for repeat in 0 1 2 3 4; do
+      if [ -n "$golden" ]; then
+        export EMMY_TUNE_DB=$task_dir/verification/repeat-$$repeat.db
+      fi
       if EMMY_NVCC_FLAGS= CUDA_VISIBLE_DEVICES="$$first_device" ./venv/bin/emmy run \
-        --golden $task_dir/working.json --bench --strict \
+        --golden $task_dir/working.json --bench --strict "$${evidence_args[@]}" \
         --json $task_dir/verification/repeat-$$repeat --warmup 10 --iters 100 \
         --bench-backends eager,emmy 2>&1 | tee $task_dir/verification-$$repeat.log; then
         repeat_status=0

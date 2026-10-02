@@ -1372,6 +1372,7 @@ def _wgmma_prelude(kernel_op: KernelOp) -> str:
 
 
 _INTRINSIC_TO_CUDA: dict[str, str] = {
+    "divide_rn_f32": "__fdiv_rn",
     "exp": "expf",
     "exp_fast": "__expf",
     "rsqrt": "rsqrtf",

@@ -743,7 +743,8 @@ pattern: idempotence via the recorded knob, `EMMY_<NAME>=0` pins it off, never a
 
 `040_split_invariant_divides` replaces floating division by an axis-invariant divisor with a hoisted reciprocal and
 multiply when `FAST_MATH` is enabled. It runs after dtype stamping, preserves floating dtypes, and leaves integer or
-varying division alone. Structural body normalization stays independent of arithmetic policy.
+varying division and explicit round-to-nearest f32 division alone. The latter protects FP4 encoding boundaries even
+under the default fast-math regime. Structural body normalization stays independent of arithmetic policy.
 
 `085_fast_exp` follows the enabled `FAST_MATH` default, unless an explicit `FAST_EXP` pin overrides it. It lowers
 `exp` through `__expf`, promoting half inputs and rounding back afterward, and records the policy for idempotence.

@@ -27,7 +27,7 @@ produces the golden files, they are committed under `golden/`, and the recipe re
 program definition — a checked-in snippet or trace input the skill reads — so the tuned program and the benched
 program cannot drift apart.
 
-The committed files remain search state, so the measuring lane re-measures every schedule they pin and its own
+The committed files remain search state, so the measuring lane re-measures their selected kernels and its own
 records stay the experiment's evidence. They are per-card and are retuned when the platform changes, which is why a
 compiler change is re-measured by rerunning the recipe alone.
 
