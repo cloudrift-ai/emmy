@@ -5,7 +5,6 @@ import numpy as np
 import pytest
 
 from emmy.compiler.dtype import F32
-
 from emmy.serving.gen_runner import EmmyGenRunner, _pad_rows, _program_config_sha, _static_decode_covers_capacity
 
 

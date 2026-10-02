@@ -23,8 +23,13 @@ def test_bf16_host_fallback_names_width():
     model = EmmyGenModel.__new__(EmmyGenModel)
     torch.nn.Module.__init__(model)
     model.runner = SimpleNamespace(
-        maybe_log_routing_histogram=lambda: None, has_device_decode=False, decode_bucket=0,
-        prefill_capacity=2, prefill_bucket=0, rider_width=0, residual_dtype=torch.bfloat16,
+        maybe_log_routing_histogram=lambda: None,
+        has_device_decode=False,
+        decode_bucket=0,
+        prefill_capacity=2,
+        prefill_bucket=0,
+        rider_width=0,
+        residual_dtype=torch.bfloat16,
     )
     model.config = SimpleNamespace(vocab_size=32)
     model._is_first_rank = False

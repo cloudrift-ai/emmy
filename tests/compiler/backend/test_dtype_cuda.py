@@ -23,6 +23,34 @@ from tests.compiler.helpers import requires_cuda
 
 
 @requires_cuda
+def test_f16_to_bf16_intermediate_rounds_before_multiply():
+    """A fused kernel must keep the BF16 cast between an FP16 scale and its use."""
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.backend.numpy import NumpyBackend
+
+    graph = Graph()
+    graph.add_node(InputOp(), [], Tensor("scale", (16,), dt.F16), node_id="scale")
+    graph.add_node(InputOp(), [], Tensor("code", (16,), dt.BF16), node_id="code")
+    graph.add_node(ElementwiseOp("copy"), ["scale"], Tensor("rounded", (16,), dt.BF16), node_id="rounded")
+    graph.add_node(ElementwiseOp("multiply"), ["rounded", "code"], Tensor("out", (16,), dt.BF16), node_id="out")
+    graph.inputs, graph.outputs = ["scale", "code"], ["out"]
+
+    scale = np.array([1.00390625, -1.00390625] * 8, dtype=np.float16)
+    code = dt.encode_bf16(np.array([3.0, -3.0] * 8, dtype=np.float32))
+    feed = {"scale": scale, "code": code}
+    expected, _ = NumpyBackend().run(graph, input_data=feed)
+    shortcut = dt.encode_bf16(scale.astype(np.float32) * dt.decode_bf16(code))
+    assert np.any(expected.outputs["out"] != shortcut), "fixture must distinguish the intermediate BF16 round"
+
+    backend = CudaBackend()
+    compiled = backend.compile(graph)
+    sources = "\n".join(n.op.kernel_source for n in compiled.nodes.values() if hasattr(n.op, "kernel_source"))
+    assert "__float2bfloat16" in sources
+    actual, _ = backend.run(compiled, input_data=feed)
+    np.testing.assert_array_equal(actual.outputs["out"], expected.outputs["out"])
+
+
+@requires_cuda
 @pytest.mark.parametrize(("dtype", "delta"), [(dt.F16, 2**-10), (dt.F32, 2**-13)])
 def test_separate_multiply_and_add_preserve_rounding(dtype, delta):
     """A multiply and an add round separately, as eager does. f16 needs no flag: its ops are spelled

@@ -52,15 +52,23 @@ def test_bf16_runner_keeps_residual_and_constants_in_bf16(tmp_path):
     from transformers import Qwen3Config, Qwen3ForCausalLM
     from transformers.models.qwen3.modeling_qwen3 import apply_rotary_pos_emb
 
-    from emmy.compiler.dtype import encode_bf16
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.backend.plan import plan_from_graph
+    from emmy.compiler.dtype import encode_bf16
     from emmy.serving.gen_runner import EmmyGenRunner
     from emmy.serving.twins import capture_twin_graphs
 
     config = Qwen3Config(
-        vocab_size=32, hidden_size=64, intermediate_size=128, num_hidden_layers=1,
-        num_attention_heads=4, num_key_value_heads=2, head_dim=16,
+        vocab_size=32,
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=1,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=16,
     )
     model = Qwen3ForCausalLM(config).to(torch.bfloat16).eval()
     runner = EmmyGenRunner.from_model(model, dtype_str="bfloat16", decode_bucket=4, max_tokens=4)
@@ -817,12 +825,16 @@ def test_serving_split_computes_the_declared_w4a4_program(tmp_path, monkeypatch)
         assert float(rel.max()) < 2e-3, f"{name}: past one fused-scale rounding per side"
 
 
-def test_bf16_nvfp4_post_matches_numpy(tmp_path, monkeypatch):
+@pytest.mark.parametrize("signed", [False, True])
+def test_bf16_nvfp4_post_matches_numpy(tmp_path, monkeypatch, signed):
     import torch
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
 
     from emmy.compiler.backend.cuda.backend import CudaBackend
     from emmy.compiler.backend.numpy import NumpyBackend
-    from emmy.compiler.dtype import BF16, decode_bf16, encode_bf16
+    from emmy.compiler.dtype import BF16, decode_bf16, decode_f4x2, decode_f8, encode_bf16
     from emmy.compiler.loader.safetensors import load_constants_from_safetensors
     from emmy.compiler.loader.synthesize import write_quantized_checkpoint
     from emmy.serving.gen_runner import _compile_split, trace_split
@@ -837,8 +849,12 @@ def test_bf16_nvfp4_post_matches_numpy(tmp_path, monkeypatch):
 
     torch.manual_seed(0)
     wrapper = Post().to(torch.bfloat16).eval()
-    wrapper.o_proj.weight.data.abs_()
-    attn = torch.rand(8, 64, dtype=torch.bfloat16)
+    if not signed:
+        wrapper.o_proj.weight.data.abs_()
+    attn = torch.randn(8, 64, dtype=torch.bfloat16) if signed else torch.rand(8, 64, dtype=torch.bfloat16)
+    if signed:
+        attn[0, :16] = 0
+        attn[0, 0] = -0.0
     residual = torch.zeros(8, 64, dtype=torch.bfloat16)
     examples = (attn, residual)
     traced = trace_split(wrapper, examples, None)
@@ -865,8 +881,32 @@ def test_bf16_nvfp4_post_matches_numpy(tmp_path, monkeypatch):
     assert any("emmy_to_f4e2m1" in s for s in sources)
 
     feed = {n: encode_bf16(t.float().numpy()) for n, t in zip(prog.input_names, examples, strict=True)}
-    ref, _ = NumpyBackend().run(graph, input_data={**load_constants_from_safetensors(graph, str(ckpt)), **feed})
+    probe = graph.copy()
+    probes = ("attn_out_static_fp4_bits", "attn_out_static_fp4_scale_bits")
+    probe.outputs.extend(probes)
+    constants = load_constants_from_safetensors(graph, str(ckpt))
+    ref, _ = NumpyBackend().run(probe, input_data={**constants, **feed})
     (got_bits,) = prog.run(list(feed.values()))
+    for name in probes:
+        np.testing.assert_array_equal(prog.program.buffer_view(name).cpu().numpy(), ref.outputs[name])
+    if signed:
+        assert ref.outputs[probes[0]][0, 0] == 8  # negative zero, then positive zero
+        assert ref.outputs[probes[1]][0, 0, 0] == 0  # all-zero block
+        # The format rounds the fused scale to FP16, then the BF16 decode
+        # rounds that scale and the signed code product separately.
+        codes = decode_f4x2(constants["p_o_proj_weight_bits"]).astype(np.float64).reshape(64, 4, 16)
+        block_scale = decode_f8(constants["p_o_proj_weight_scale_bits"], "f8e4m3").astype(np.float64)
+        tensor_scale = constants["p_o_proj_weight_scale_2"].astype(np.float64).reshape(())
+        fused_f16 = (block_scale * tensor_scale).astype(np.float16)
+        fused_bf16 = decode_bf16(encode_bf16(fused_f16.astype(np.float32))).astype(np.float64)
+        weight_ref = encode_bf16((codes * fused_bf16[..., None]).reshape(64, 64).astype(np.float32))
+        weight_graph = graph.copy()
+        weight_graph.outputs = ["p_o_proj_weight"]
+        weight_numpy, _ = NumpyBackend().run(weight_graph, input_data={**constants, **feed})
+        weight_backend = CudaBackend(tune_db="auto")
+        weight_cuda, _ = weight_backend.run(weight_backend.compile(weight_graph), input_data={**constants, **feed})
+        np.testing.assert_array_equal(weight_numpy.outputs["p_o_proj_weight"], weight_ref)
+        np.testing.assert_array_equal(weight_cuda.outputs["p_o_proj_weight"], weight_ref)
     expected = ref.outputs[prog.output_names[0]]
     expected = decode_bf16(expected) if expected.dtype == np.uint16 else expected.astype(np.float32)
     got = decode_bf16(got_bits)
@@ -874,7 +914,71 @@ def test_bf16_nvfp4_post_matches_numpy(tmp_path, monkeypatch):
     rounded = decode_bf16(bits)
     ulp = np.maximum(np.abs(decode_bf16(bits + np.uint16(1)) - rounded), np.abs(decode_bf16(bits - np.uint16(1)) - rounded))
     error = np.abs(got - expected)
+    # Adjacent BF16 codes give one unit in the last place at each reference value.
     assert np.all(error <= ulp), (np.count_nonzero(error > ulp), float(np.max(error / ulp)))
+
+
+def test_bf16_nvfp4_native_mma_matches_numpy_with_quantization_tolerance(tmp_path, monkeypatch):
+    import torch
+
+    if not torch.cuda.is_available() or torch.cuda.get_device_capability() < (12, 0):
+        pytest.skip("native FP4 MMA requires sm_120")
+
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.dtype import BF16, decode_bf16, encode_bf16
+    from emmy.compiler.loader.safetensors import load_constants_from_safetensors
+    from emmy.compiler.loader.synthesize import write_quantized_checkpoint
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+    from emmy.serving.gen_runner import _compile_split, trace_split
+
+    class Post(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.o_proj = torch.nn.Linear(256, 256, bias=False)
+
+        def forward(self, attn_out, residual):
+            return self.o_proj(attn_out) + residual
+
+    torch.manual_seed(0)
+    wrapper = Post().to(torch.bfloat16).eval()
+    attn = torch.randn(64, 256, dtype=torch.bfloat16)
+    attn[0, :16] = 0
+    attn[0, 0] = -0.0
+    residual = torch.zeros_like(attn)
+    examples = (attn, residual)
+    traced = trace_split(wrapper, examples, None)
+    param_path = {nid: op.source_path for nid, op in traced.loadable_constants()}
+    ckpt = write_quantized_checkpoint(traced, (wrapper, examples, {}), tmp_path / "ckpt")
+    params = dict(wrapper.named_parameters())
+    id_to_key = {id(params[param_path[nid]]): op.source_path for nid, op in traced.loadable_constants()}
+
+    stamped, lowered = [], []
+    real_compile = CudaBackend.compile
+
+    def capture(self, graph):
+        stamped.append(graph.copy())
+        lowered.append(real_compile(self, graph))
+        return lowered[-1]
+
+    monkeypatch.setattr(CudaBackend, "compile", capture)
+    tile = "mma_m16n8k64_e2m1_f32/f1x2/k4"
+    with pinned_knobs({"TILE": tile, "WORK": "w2x2", "STAGE": "d2/smem-tma", "REDUCE": ""}):
+        prog, _ = _compile_split(wrapper, list(examples), None, BF16, ckpt=(str(ckpt), id_to_key))
+    assert any((getattr(node.op, "knobs", None) or {}).get("TILE") == tile for node in lowered[0].nodes.values())
+
+    feed = {n: encode_bf16(t.float().numpy()) for n, t in zip(prog.input_names, examples, strict=True)}
+    ref, _ = NumpyBackend().run(stamped[0], input_data={**load_constants_from_safetensors(stamped[0], str(ckpt)), **feed})
+    (got_bits,) = prog.run(list(feed.values()))
+    expected = decode_bf16(ref.outputs[prog.output_names[0]])
+    got = decode_bf16(got_bits)
+    error = np.abs(got - expected)
+    peak = float(np.max(np.abs(expected)))
+    # At this signed 64x256 shape on sm_120, native code×scale MMA differed
+    # from the BF16-decoded NumPy graph by 0.00685 peak-relative max and
+    # 0.000521 peak-relative mean; allow modest headroom for device variance.
+    assert float(error.max()) / peak < 8e-3
+    assert float(error.mean()) / peak < 8e-4
 
 
 def test_host_mapped_embed_table_gathers_identically_and_costs_no_vram(monkeypatch, built, build_runner):

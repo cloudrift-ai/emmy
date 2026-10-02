@@ -33,6 +33,7 @@ from emmy.serving.trunk_dtype import _trunk_dtype_str
 
 logger = logging.getLogger(__name__)
 
+
 def pinned_model_id(model_config) -> str:
     """vLLM's model id carrying its ``--revision``, as ``<repo>@<revision>``.
 

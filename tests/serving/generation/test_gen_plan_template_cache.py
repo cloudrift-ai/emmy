@@ -5,9 +5,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from emmy.compiler.dtype import F16, F32
-
 from emmy.compiler.backend.plan_cache import PlanTemplateCache
+from emmy.compiler.dtype import F16, F32
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.cuda import CudaOp

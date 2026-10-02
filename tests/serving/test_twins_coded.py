@@ -18,7 +18,6 @@ from pathlib import Path
 import pytest
 
 from emmy.compiler.dtype import F16
-
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.frontend.ir import LinearOp
@@ -709,7 +708,6 @@ def test_nvfp4_twin_is_the_graph_serving_stamps(tmp_path):
     torch = pytest.importorskip("torch")
     pytest.importorskip("transformers")
 
-    import numpy as np
     import transformers
 
     from emmy.compiler.loader.quant import strip_engine_quant_config

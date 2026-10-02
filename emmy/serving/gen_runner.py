@@ -1017,6 +1017,7 @@ class EmmyGenRunner:
         import numpy as np
         import torch
 
+        from emmy.compiler.dtype import get
         from emmy.compiler.trace.huggingface import (
             build_attention_split_wrapper,
             build_moe_split_wrapper,
@@ -1025,8 +1026,6 @@ class EmmyGenRunner:
             moe_block_parts,
             moe_expert_layout,
         )
-
-        from emmy.compiler.dtype import get
 
         dtype = getattr(torch, dtype_str)
         compiler_dtype = get(dtype_str)
