@@ -78,6 +78,14 @@ def test_gen_runner_stitch_matches_eager(built):
     assert int(np.argmax(logits_dep[-1])) == int(np.argmax(eager[-1]))
 
 
+def test_gen_runner_builds_gdn_layers(built):
+    """A linear-attention (gated DeltaNet) layer has no ``self_attn``. The runner builds one stateful program per
+    static width for it — 1, the decode bucket, the prefill bucket — in place of the pre/post pair."""
+    pair = built("qwen3_5.gdn.l2")
+    assert pair.runner.num_layers == pair.config.num_hidden_layers
+    assert pair.runner.gdn_widths == (16, 4, 1)
+
+
 @pytest.mark.skip(reason="large fused schedule composition is not yet lazy")
 def test_gen_runner_gemma4_heterogeneous_stitch():
     """Gemma-4 (gap #9): global (``full_attention``) layers use a LARGER head_dim (``global_head_dim``)
