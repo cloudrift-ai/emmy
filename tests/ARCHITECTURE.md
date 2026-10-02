@@ -218,20 +218,20 @@ what it had not reached, so the run still finishes and reports exactly one failu
 Those costs come from `tests/durations_cpu.json` and `tests/durations_gpu.json` — checked-in nodeid → seconds maps —
 with the box's own pytest cache overlaid on top. The files exist because CI starts every job with an empty cache:
 without a baseline the bucketing never fired there and the long poles landed wherever chance put them. They record
-only entries at or above 0.05 s; anything unlisted is assumed to cost 0.05 s. The **Nightly refresh** workflow runs
-`make test-durations` on the CPU runner, replaces the CPU file with that run's timings, and commits a change
-directly to `main`. GPU rows remain in their own file. The refresh uses all available cores with xdist loadgroup.
-Point it at the whole suite, never a subset.
+only tests at or above 5 s, the few hundred that set the makespan; anything unlisted is noise to the bucketing and is
+assumed to cost 0.05 s. The **Nightly refresh** workflow runs `make test-durations` on the CPU runner, which measures
+on the machine the balance is for, replaces the CPU file with that run's timings, and commits a change directly to
+`main`. GPU rows remain in their own file. The refresh uses all available cores with xdist loadgroup. Point it at
+the whole suite, never a subset.
 
-An existing CPU timing changes only when the difference reaches both 0.5 s and 50% of its recorded value. New test
-rows are added and rows for tests no longer measured are removed. This keeps small timing variation out of nightly
-commits while allowing changes large enough to affect bucketing through.
+A recorded CPU timing holds through any measurement within 50% of its value, even one under 5 s, so a test near the
+floor does not flip in and out of the file night after night. Outside that band the measurement replaces it, and a
+row enters only at 5 s or more. Rows for tests no longer measured are removed.
 
 Keep the JSON entries alphabetized by full node ID, one entry per line. `make format` restores this order without
 changing timings; `make lint` checks it. The duration writer uses the same format.
 
-`make test` passes `--durations=0 --durations-min=1`, so every run (CI included) prints every test that takes at least
-1 s instead of only a fixed-size tail. Missing baseline rows do not fail the suite; the nightly run updates CPU rows.
+Missing baseline rows do not fail the suite; the nightly run updates CPU rows.
 
 The `perf` marker gates **suite-wide**, not just `tests/perf/`: the root `tests/conftest.py` hook skips every
 perf-marked item unless `-m perf` was passed, and since the root conftest loads for any `tests/` collection the gate

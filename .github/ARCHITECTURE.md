@@ -51,7 +51,7 @@ These checks require no GPU. Native GPU parity and failure recovery run through 
 **Nightly refresh** holds every scheduled job that needs no rented GPU: the duration and prior jobs on
 `ubuntu-runners`, and the discovery job on the agent runners (see Model discovery and onboarding). The durations job
 runs the CPU test lane with one xdist worker per available core. It rewrites only the CPU duration file, leaving GPU
-timings intact. Existing rows change only when they differ by at least 0.5 s and 50% of the recorded time. A
+timings intact, records tests of 5 s or more, and keeps a recorded row while measurements stay within 50% of it. A
 successful run with changed timings commits and pushes directly to `main` with the repository's GitHub App token,
 through the `push_to_main` helper in `.github/workflows/scripts/bot_git.sh`, with the GitHub CLI as git's credential
 helper. The repository's pull-request ruleset grants that App a bypass; the separate rule still rejects force pushes.
