@@ -265,10 +265,11 @@ def plan_from_graph(graph: Graph) -> ExecutionPlan:
     for nid, op in graph.loadable_constants():
         load_ops = _encode_load_ops(op.load_ops)
         generated = None
+        source_path = op.source_path
         if op.source_graph is not None:
             # A source-free deterministic record is a generated constant: evaluate it once on
-            # CPU and carry its compact bytes in the plan. Records with checkpoint/input leaves
-            # still require sources the plan grammar cannot express and remain unbindable.
+            # CPU and carry its compact bytes in the plan. A record with one checkpoint leaf binds
+            # from that leaf (below); any other record stays unbindable from the plan.
             from emmy.compiler.loader.binder import evaluate_source_graph  # noqa: PLC0415
 
             try:
@@ -278,12 +279,16 @@ def plan_from_graph(graph: Graph) -> ExecutionPlan:
             if value is not None:
                 value = np.ascontiguousarray(value)
                 generated = (value.dtype.str, tuple(int(d) for d in value.shape), value.tobytes())
+            elif (record := _encode_source_record(op.source_graph)) is not None and load_ops is not None:
+                # A record computed from ONE checkpoint tensor (a norm's folded ``1 + weight``) binds
+                # from that tensor, replaying the record as the first load op.
+                source_path, load_ops = record[0], (record[1], *load_ops)
             else:
-                logger.warning("plan: constant %r rides a bind record with unresolved leaves; weight will not rebind from a pack", nid)
+                logger.warning("plan: constant %r rides a bind record the plan cannot replay; it cannot bind from the plan", nid)
                 load_ops = None
         node = graph.nodes.get(nid)
         weights[nid] = WeightSpec(
-            source_path=op.source_path,
+            source_path=source_path,
             load_ops=load_ops,
             source_parts=tuple((p, tuple(int(d) for d in s)) for p, s in op.source_parts),
             generated=generated,
@@ -374,6 +379,35 @@ def _encode_index_map(op) -> tuple | None:
     return ("slice", tuple(spans))
 
 
+#: The name the one checkpoint leaf of a ``("record", …)`` load op is bound under. The record never
+#: carries the leaf's real path: that is the ``WeightSpec``'s own ``source_path``, which the plan
+#: template cache and the checkpoint loaders already rewrite per layer.
+_RECORD_SOURCE = "__record_source__"
+
+
+def _encode_source_record(record: Graph) -> tuple[str, tuple] | None:
+    """``(leaf path, ("record", (wire,)))`` for a ``ConstantOp.source_graph`` bind record with
+    exactly one checkpoint leaf, a single ``source_path`` read of a non-f8 value; ``None``
+    otherwise. Replaying the op evaluates the record with the assembled source as that leaf
+    (:func:`apply_weight_loads`). An f8 leaf is left out because the plan's loaders decide raw
+    bits or decoded values from the weight's ``graph_dtype``, the record output's dtype, not the
+    leaf's."""
+    import json  # noqa: PLC0415
+    from dataclasses import replace  # noqa: PLC0415
+
+    leaves = list(record.loadable_constants())
+    if len(leaves) != 1:
+        return None
+    nid, leaf = leaves[0]
+    if leaf.source_path is None or leaf.source_parts or leaf.source_graph is not None:
+        return None
+    if record.nodes[nid].output.dtype.name in ("f8e4m3", "f8e5m2"):
+        return None
+    slotted = type(record).from_wire(record.to_wire())
+    slotted.nodes[nid].op = replace(slotted.nodes[nid].op, source_path=_RECORD_SOURCE)
+    return leaf.source_path, ("record", (json.dumps(slotted.to_wire(), sort_keys=True),))
+
+
 def _encode_load_ops(load_ops: tuple) -> tuple[tuple, ...] | None:
     """Encode a ``ConstantOp.load_ops`` chain into the plan's vocabulary
     (``("transpose", axes)`` / ``("reshape", shape)`` / ``("slice", spans)`` /
@@ -414,6 +448,13 @@ def apply_weight_loads(source: np.ndarray, load_ops: tuple[tuple, ...]) -> np.nd
             a = a[tuple(slice(start, start + step * extent, step) for start, step, extent in spans)]
         elif kind == "reciprocal" and not arg:
             a = np.reciprocal(a)
+        elif kind == "record" and len(arg) == 1:
+            import json  # noqa: PLC0415
+
+            from emmy.compiler.graph import Graph  # noqa: PLC0415
+            from emmy.compiler.loader.binder import evaluate_source_graph  # noqa: PLC0415
+
+            a = evaluate_source_graph(Graph.from_wire(json.loads(arg[0])), {_RECORD_SOURCE: a})
         else:
             raise ValueError(f"apply_weight_loads: unknown load op kind {kind!r}")
     return np.ascontiguousarray(a)
