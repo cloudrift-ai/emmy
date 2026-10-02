@@ -36,7 +36,7 @@ strategy + the one :func:`~...kernel._stage.staged_kloop`); the ONE atom-agnosti
 (``_atom._staged``) builds the transport, the atom strategy supplying only the slab drain leaf.
 It is driven off the node's ``STAGE`` codec →
 :class:`~...schedule.Stage` (``d<depth>`` gmem→smem ring · ``smem``/``smem-async``/``smem-tma`` transport ·
-``p<n>`` smem→register double-buffer). The **scalar** contraction tier stays gmem-direct. The fused
+``p<n>`` smem→register double-buffer). The **scalar** contraction tier shares the operand staging driver. The fused
 norm→linear **shared-row** prologue is Stage-driven too: the schedule detects the reused input row
 and stamps an ``smem`` :class:`~...schedule.Stage` whose slab list names it; :func:`_tile_reduce_axis` only
 applies it (the 1-D ``sync_row_fill`` + the load rewrite). Leading ``_`` so the pass loader skips this
