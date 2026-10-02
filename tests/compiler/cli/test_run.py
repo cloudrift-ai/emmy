@@ -546,18 +546,29 @@ def test_wrong_answer_flag_catches_bad_pinned_output():
     from emmy.commands.run import _wrong_answer_flag
 
     ref = {"o": np.full((4, 4), 100.0)}
-    assert _wrong_answer_flag({"o": ref["o"].copy()}, ref) is None
-    assert _wrong_answer_flag({"o": ref["o"] + 1.0}, ref) is None  # 1% off — reorder noise
-    assert "wrong-answer" in _wrong_answer_flag({"o": ref["o"] * 0.5}, ref)
-    assert "missing" in _wrong_answer_flag({}, ref)
-    assert "shape" in _wrong_answer_flag({"o": np.zeros((2, 2))}, ref)
-    flipped = ref["o"].copy()
-    flipped[0, 0] = 50.0  # one quantization code flip among sixteen values: mean error 3% of peak
-    assert "wrong-answer" in _wrong_answer_flag({"o": flipped}, ref)
-    many = np.full((64, 64), 100.0)
-    one_flip = many.copy()
-    one_flip[0, 0] = 50.0  # the same flip among 4096 values stays under the 0.5% mean
-    assert _wrong_answer_flag({"o": one_flip}, {"o": many}) is None
+    none = frozenset()
+    assert _wrong_answer_flag({"o": ref["o"].copy()}, ref, none) is None
+    assert _wrong_answer_flag({"o": ref["o"] + 1.0}, ref, none) is None  # 1% off — reorder noise
+    assert "wrong-answer" in _wrong_answer_flag({"o": ref["o"] * 0.5}, ref, none)
+    assert "missing" in _wrong_answer_flag({}, ref, none)
+    assert "shape" in _wrong_answer_flag({"o": np.zeros((2, 2))}, ref, none)
+
+
+def test_wrong_answer_flag_forgives_sparse_code_flips_only_in_quantized_outputs():
+    """One bad row among 64 has a mean error under 0.5% of peak. It is a fault in an ordinary output, and the same
+    sparse pattern is a rounding-boundary code flip in a quantized one; an output wrong everywhere fails either way."""
+    from emmy.commands.run import _wrong_answer_flag
+
+    ref = {"o": np.full((64, 64), 6.0)}
+    one_row = ref["o"].copy()
+    one_row[17] *= 0.7  # 30% off on one row: mean error 0.47% of peak
+    assert "wrong-answer" in _wrong_answer_flag({"o": one_row}, ref, frozenset())
+    flips = ref["o"].copy()
+    flips.flat[::97] = 4.0  # sparse code flips, one quantization step each
+    assert _wrong_answer_flag({"o": flips}, ref, frozenset({"o"})) is None
+    assert "wrong-answer" in _wrong_answer_flag({"o": ref["o"] * 0.5}, ref, frozenset({"o"}))
+    with pytest.raises(AssertionError, match="frozenset"):
+        _wrong_answer_flag({"o": flips}, ref, {"o"})
 
 
 @pytest.mark.parametrize(
@@ -578,7 +589,7 @@ def test_wrong_answer_flag_compares_non_finite_values_by_position(got, ref, flag
     reference[1, 2] = ref
     output = reference.copy()
     output[1, 2] = got
-    assert (_wrong_answer_flag({"o": output}, {"o": reference}) is not None) is flagged
+    assert (_wrong_answer_flag({"o": output}, {"o": reference}, frozenset()) is not None) is flagged
 
 
 def test_random_packed_sources_spread_codes_and_scales_stay_positive():
@@ -1548,7 +1559,7 @@ def test_bind_inputs_preserves_bf16_bits_for_inputs_and_constants():
 def test_packed_fp4_correctness_decodes_signed_zero_but_rejects_other_codes():
     import numpy as np
 
-    from emmy.commands.run import _check_accuracy, _comparison_outputs, _eager_outputs_by_name, _wrong_answer_flag
+    from emmy.commands.run import _check_accuracy, _comparison_outputs, _eager_outputs_by_name, _quantized_outputs, _wrong_answer_flag
     from emmy.compiler import dtype as dt
     from emmy.compiler.graph import Graph, Tensor
     from emmy.compiler.ir.base import InputOp
@@ -1559,11 +1570,13 @@ def test_packed_fp4_correctness_decodes_signed_zero_but_rejects_other_codes():
 
     emmy = _comparison_outputs({"packed": np.array([[0x88, 0x21]], dtype=np.uint8)}, graph)
     eager = _eager_outputs_by_name(emmy, torch.tensor([[0x00, 0x21]], dtype=torch.uint8), graph)
-    assert _wrong_answer_flag(emmy, eager) is None
+    quantized = _quantized_outputs(emmy, graph)
+    assert quantized == frozenset({"packed"})
+    assert _wrong_answer_flag(emmy, eager, quantized) is None
     assert _check_accuracy(emmy, eager) is None
     for changed in (0x22, 0x31):
         bad = _comparison_outputs({"packed": np.array([[0x88, changed]], dtype=np.uint8)}, graph)
-        assert _wrong_answer_flag(bad, eager) is not None
+        assert _wrong_answer_flag(bad, eager, quantized) is not None
 
     opaque = Graph()
     opaque.add_node(op=InputOp(), inputs=[], output=Tensor("packed", (1, 2), dt.U8), node_id="packed")

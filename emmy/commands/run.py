@@ -944,18 +944,24 @@ def _intensity_floor_flag(sample, total_us: float) -> str | None:
     return None
 
 
-def _wrong_answer_flag(outputs: dict, ref_outputs: dict) -> str | None:
+def _wrong_answer_flag(outputs: dict, ref_outputs: dict, quantized: frozenset[str]) -> str | None:
     """Output-correctness gate for a pinned A/B row: compare the pinned kernel's outputs
     against the greedy run's on the SAME inputs. Both sides are emmy kernels over one
     graph, so they agree to reduction-reorder noise — a large deviation means the pinned
     config computed the wrong answer (the ``g2a`` atomic-split re-bench class: a skipped
     zero-init / finalize benches fast and silently wrong). Returns a flag string or
-    ``None``; loose 5% relative tolerance so split-K / atomic reorders never trip it. An output
-    whose worst element misses it still passes when its mean error stays under 0.5% of its peak:
-    a quantized output (4-bit codes) flips a code wherever a value sits on a rounding boundary,
-    and a kernel that computes the wrong answer is wrong on far more than a few elements."""
+    ``None``; loose 5% relative tolerance so split-K / atomic reorders never trip it.
+
+    ``quantized`` names the outputs whose buffers are packed 4-bit codes (``f4e2m1x2``, compared decoded). Such an
+    output flips a code wherever a value sits on a rounding boundary, which moves that element by a whole
+    quantization step, so its worst element alone proves nothing: it flags only when its mean error also exceeds 0.5%
+    of its peak. That bound comes from the Qwen3.8-27B-NVFP4 MLP on an RTX 5090, whose encoded output differs from
+    both the NumPy and the Torch reference on 1.2% of its codes with mean error 0.17% of peak, under every schedule
+    tried, the scalar one included. Every other output flags on its worst element, so a sparse fault (one bad row,
+    a wrong tail element) still fails."""
     import numpy as np  # noqa: PLC0415
 
+    assert isinstance(quantized, frozenset), f"quantized must be a frozenset of output names, got {type(quantized).__name__}"
     worst = 0.0
     for nid, ref in ref_outputs.items():
         got = outputs.get(nid)
@@ -971,11 +977,19 @@ def _wrong_answer_flag(outputs: dict, ref_outputs: dict) -> str | None:
         if finite.any():
             denom = float(np.abs(b[finite]).max()) or 1.0
             diff = np.abs(a[finite] - b[finite]) / denom
-            if float(diff.mean()) > 0.005:
+            if nid not in quantized or float(diff.mean()) > 0.005:
                 worst = max(worst, float(diff.max()))
     if worst > 0.05:
         return f"wrong-answer: rel err {worst:.3f} vs greedy output"
     return None
+
+
+def _quantized_outputs(outputs: dict, graph) -> frozenset[str]:
+    """The names in ``outputs`` whose buffers in ``graph`` are packed 4-bit codes — the ones
+    :func:`_comparison_outputs` decodes, under the same rule."""
+    if not hasattr(graph, "buffer"):
+        return frozenset()
+    return frozenset(name for name in outputs if graph.buffer(name).dtype.name == "f4e2m1x2")
 
 
 def _nonfinite_mismatch(actual, expected) -> bool:
@@ -1407,7 +1421,7 @@ async def _bench_golden_variants(
             elif not strict_correctness:
                 # Held back until every row is in: whether this verdict means anything depends on
                 # whether the reference reproduces, which only the whole set can answer.
-                wrong_answer[len(out)] = _wrong_answer_flag(run_outputs, ref_outputs)
+                wrong_answer[len(out)] = _wrong_answer_flag(run_outputs, ref_outputs, _quantized_outputs(run_outputs, g_compiled))
                 realized[len(out)] = _cuda_knob_dicts(g_compiled)
         total_us = (g_bench.min_ms if g_bench.min_ms is not None else g_bench.time_ms) * 1000
         flag = _intensity_floor_flag(sample, total_us)
