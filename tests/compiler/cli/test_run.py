@@ -9,6 +9,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 import torch  # used by test_bind_inputs_preserves_int_dtype
 
@@ -550,6 +551,43 @@ def test_wrong_answer_flag_catches_bad_pinned_output():
     assert "wrong-answer" in _wrong_answer_flag({"o": ref["o"] * 0.5}, ref)
     assert "missing" in _wrong_answer_flag({}, ref)
     assert "shape" in _wrong_answer_flag({"o": np.zeros((2, 2))}, ref)
+
+
+@pytest.mark.parametrize(
+    ("got", "ref", "flagged"),
+    [
+        (np.nan, 1.0, True),  # a NaN from the pinned kernel
+        (1.0, np.nan, True),  # a NaN in the reference only
+        (-np.inf, -np.inf, False),  # a mask on both sides
+        (np.inf, -np.inf, True),  # infinities of opposite sign
+        (1.0, -np.inf, True),  # a finite value where the reference masks
+    ],
+)
+def test_wrong_answer_flag_compares_non_finite_values_by_position(got, ref, flagged):
+    """A NaN must not pass because ``max`` ignores it; a matching mask is not a wrong answer."""
+    from emmy.commands.run import _wrong_answer_flag
+
+    reference = np.full((2, 3), 100.0)
+    reference[1, 2] = ref
+    output = reference.copy()
+    output[1, 2] = got
+    assert (_wrong_answer_flag({"o": output}, {"o": reference}) is not None) is flagged
+
+
+def test_random_packed_sources_spread_codes_and_scales_stay_positive():
+    """A generated NVFP4 weight looks like a real one: its 4-bit codes spread over the format and its
+    block scales decode positive and finite. Near-zero codes or negative scales bench a kernel on data no
+    checkpoint holds."""
+    from emmy.commands.run import _random_source_values
+    from emmy.compiler.dtype import decode_f8
+
+    rng = np.random.default_rng(0)
+    packed = _random_source_values(rng, (64, 256), "f4e2m1x2", name="model.layers.3.mlp.gate_proj.weight")
+    assert packed.dtype == np.uint8
+    assert len(np.unique(packed & 0xF)) >= 12 and len(np.unique(packed >> 4)) >= 12
+    scales = _random_source_values(rng, (64, 32), "f8e4m3", name="model.layers.3.mlp.gate_proj.weight_scale")
+    decoded = decode_f8(scales, "f8e4m3")
+    assert np.isfinite(decoded).all() and (decoded > 0).all()
 
 
 def test_strict_correctness_proof_uses_compiler_baseline_tolerance():

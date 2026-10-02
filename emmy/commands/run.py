@@ -962,11 +962,26 @@ def _wrong_answer_flag(outputs: dict, ref_outputs: dict) -> str | None:
         b = np.asarray(ref, dtype=np.float64)
         if a.shape != b.shape:
             return f"wrong-answer: output {nid!r} shape {a.shape} != greedy {b.shape}"
-        denom = float(np.abs(b).max()) or 1.0
-        worst = max(worst, float(np.abs(a - b).max()) / denom)
+        if _nonfinite_mismatch(a, b):
+            return f"wrong-answer: output {nid!r} has non-finite values the greedy output does not"
+        finite = np.isfinite(b)
+        if finite.any():
+            denom = float(np.abs(b[finite]).max()) or 1.0
+            worst = max(worst, float(np.abs(a[finite] - b[finite]).max()) / denom)
     if worst > 0.05:
         return f"wrong-answer: rel err {worst:.3f} vs greedy output"
     return None
+
+
+def _nonfinite_mismatch(actual, expected) -> bool:
+    """Whether a NaN or an infinity sits where the other side does not hold the same value.
+
+    A mask legitimately holds ``-inf``, so an infinity of one sign at the same position on both sides passes;
+    so does a NaN on both sides. Both arguments are float64 arrays of one shape."""
+    import numpy as np  # noqa: PLC0415
+
+    finite = np.isfinite(expected)
+    return not np.array_equal(np.isfinite(actual), finite) or not np.array_equal(actual[~finite], expected[~finite], equal_nan=True)
 
 
 def env_pin_refusal(
@@ -1131,11 +1146,10 @@ def _strict_correctness_proof(outputs: dict, reference_out, *, reference="eager"
         if actual.shape != expected.shape:
             failure = f"output {name!r} shape {actual.shape} != {reference} {expected.shape}"
             break
-        # A mask legitimately holds -inf; a non-finite value passes only where the reference has the same one.
-        finite = np.isfinite(expected)
-        if not np.array_equal(np.isfinite(actual), finite) or not np.array_equal(actual[~finite], expected[~finite], equal_nan=True):
+        if _nonfinite_mismatch(actual, expected):
             failure = f"output {name!r} has non-finite values the {reference} output does not"
             break
+        finite = np.isfinite(expected)
         actual, expected = actual[finite], expected[finite]
         absolute = np.abs(actual - expected)
         tolerance = atol + rtol * np.abs(expected)
@@ -2233,15 +2247,25 @@ def _replay_stage_and_passes(graph, *, embedded_golden: bool) -> tuple[str, list
     return stage, _passes_after_stage(stage)
 
 
-def _random_source_values(rng, shape, dtype):
-    """Return nontrivial deterministic values in a constant's declared storage dtype."""
+def _random_source_values(rng, shape, dtype, *, name: str | None = None):
+    """Return nontrivial deterministic values in a constant's declared storage dtype.
+
+    Packed 4-bit pairs are uniform random bytes, so every code appears in both halves of a byte, as in a real
+    checkpoint. An 8-bit float whose ``name`` (the checkpoint key) says it is a scale is drawn from the codes
+    between 1 and 448: a block scale is positive, and a calibrated one spans the format's upper range."""
     import numpy as np  # noqa: PLC0415
 
     from emmy.compiler.dtype import decode_f8  # noqa: PLC0415
     from emmy.compiler.dtype import get as get_dtype  # noqa: PLC0415
 
     canonical = get_dtype(dtype or "f32").name
+    if canonical == "f4e2m1x2":
+        return rng.integers(0, 256, shape, dtype=np.uint8)
     if canonical in {"f8e4m3", "f8e5m2"}:
+        if name is not None and "scale" in name:
+            codes = np.arange(256, dtype=np.uint8)
+            values = decode_f8(codes, canonical)
+            return rng.choice(codes[(values >= 1.0) & (values <= 448.0)], size=shape)
         bits = rng.integers(0, 256, shape, dtype=np.uint8)
         bits[~np.isfinite(decode_f8(bits, canonical))] = np.uint8(0)
         return bits
@@ -2255,8 +2279,8 @@ def _random_input_values(rng, shape, dtype, *, name: str | None = None):
     from emmy.compiler.dtype import get as get_dtype  # noqa: PLC0415
 
     canonical = get_dtype(dtype).name
-    if canonical in {"f8e4m3", "f8e5m2"}:
-        return _random_source_values(rng, shape, dtype)
+    if canonical in {"f4e2m1x2", "f8e4m3", "f8e5m2"}:
+        return _random_source_values(rng, shape, dtype, name=name)
     if canonical == "u8" and name is not None and "scale" in name:
         # MXFP4 boundary scales are E8M0 bytes with bias 127. Arbitrary u8 codes span
         # exponents that overflow a two-linear random reproducer before correctness can run.
@@ -2350,13 +2374,13 @@ async def bench_lowered_vs_torch(
                 continue
             if op.source_path and op.source_path not in sources:
                 shp = _static(op.source_shape or node.output.shape)
-                sources[op.source_path] = _random_source_values(rng, shp, op.source_dtype)
+                sources[op.source_path] = _random_source_values(rng, shp, op.source_dtype, name=op.source_path)
             # A merged (source_parts) constant draws one random source PER PART, keyed by the
             # part path — the same tensors the pre-merge frontend reference binds its separate
             # weights from, so emmy's concat and the torch ref stay numerically aligned.
             for path, shp in op.source_parts:
                 if path not in sources:
-                    sources[path] = _random_source_values(rng, _static(shp), op.source_dtype)
+                    sources[path] = _random_source_values(rng, _static(shp), op.source_dtype, name=path)
 
     input_data: dict[str, object] = {}
     input_tensors: dict[str, object] = {}
