@@ -3,8 +3,8 @@ tags:
 - untested
 model:
   huggingface: apple/LensVLM-9B
-  rationale: "New first-party lab VLM release with early momentum; 262 likes in 8 days, 262K-context visual compression novelty."
-  heat: 75
+  rationale: "Not in current trending, OpenRouter, or arena evidence; prior heat unsupported."
+  heat: 30
   task: generate
 matrices:
 - deploy.gpu: NVIDIA H200 141GB

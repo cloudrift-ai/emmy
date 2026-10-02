@@ -7,8 +7,8 @@ tags:
   - untested
 model:
   huggingface: openai/gpt-oss-120b
-  rationale: "Recent batch variant trending >999% week-over-week on OpenRouter provides a strong fresh volume signal, reinforcing the model's stable serving value on a single H200."
-  heat: 75
+  rationale: "Batch-only OpenRouter trend over 999%; weak real-serve signal, no leaderboard row."
+  heat: 40
   revision: b5c939de8f754692c1647ca79fbf85e8c1e70f8a
   task: generate
 matrices:

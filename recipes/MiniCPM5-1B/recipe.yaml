@@ -3,8 +3,8 @@ tags:
   - untested
 model:
   huggingface: openbmb/MiniCPM5-1B
-  rationale: "Modest edge demand inferred from the MiniCPM5-2B trend, but direct evidence is limited."
-  heat: 35
+  rationale: "No specific current evidence; lower priority than MiniCPM5-2B without strong signals."
+  heat: 15
   task: generate
 matrices:
 - deploy.gpu: NVIDIA GeForce RTX 4090

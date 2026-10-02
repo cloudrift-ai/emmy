@@ -1,0 +1,11 @@
+tags:
+- onboarding
+- untested
+model:
+  huggingface: tencent/Hy4-preview
+  rationale: Huge +863% 30-day OpenRouter growth for Tencent's new 780B MoE flagship with official FP8 repo.
+  heat: 85
+  task: generate
+matrices:
+- deploy.gpu: AMD Instinct MI350X
+  deploy.gpu_count: 16

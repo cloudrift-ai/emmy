@@ -4,8 +4,8 @@ tags:
   - untested
 model:
   huggingface: XiaomiMiMo/MiMo-V2.6-Flash-RL
-  rationale: "#7 weekly, >999% WoW, arena #23, 28k downloads; strong current breakout attention."
-  heat: 90
+  rationale: "Strong serving volume and MiMo wave; specific RL variant trending absent."
+  heat: 55
   task: generate
 matrices:
 - deploy.gpu: AMD Instinct MI350X

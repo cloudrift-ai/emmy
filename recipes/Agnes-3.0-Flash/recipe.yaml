@@ -3,8 +3,8 @@ tags:
 - untested
 model:
   huggingface: Agnes-AI/Agnes-3.0-Flash
-  rationale: "No independent signals; niche unproven newcomer, modestly cooled by arrivals."
-  heat: 24
+  rationale: "No independent signals found; niche unproven newcomer with little current evidence."
+  heat: 12
   task: generate
 matrices:
 - deploy.gpu: NVIDIA H200 141GB

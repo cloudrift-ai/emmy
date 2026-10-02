@@ -9,12 +9,12 @@
 # There is no Emmy lane here. Exact compiler coverage is complete, but strict correctness and attention performance
 # still block a canonical golden file; see RESULTS.md for the measured qualification gates.
 tags:
-  - best-effort
+  - maintained
 
 model:
   huggingface: "philbert440/Qwen3.8-27B-W4A16-AWQ"
-  rationale: "Dominates HF trending with strong downloads; AWQ gives consumer hardware coverage."
-  heat: 95
+  rationale: "Qwen3.8-27B momentum strong on HF; consumer coverage, though not top-30 trending itself."
+  heat: 75
   revision: 7908d42a71077a5e4dc458f273682b12dfe384a0
   task: generate
 
