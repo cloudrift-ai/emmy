@@ -1,5 +1,143 @@
 # Golden-bench kernel corpus
 
+## Matched NVIDIA profiles of the remaining gaps (2026-10-02)
+
+These captures compare the accepted H100 prefill and single-V100 decode selections with the kernels actually used
+by `torch.compile`. The built-in profiling child runs Emmy and eager PyTorch once; it does not collect the compiled
+reference. The diagnostic commands therefore wrap the original model benchmark with Nsight Systems and Nsight
+Compute. The pinned model revision, shape, precision, source and golden evidence remain unchanged.
+
+Systems attribution uses complete ordered graph replays, excluding eager execution, Inductor compilation trials
+and the benchmark's repeated single-kernel graphs. Kernel boundaries differ, so an operation's comparison includes
+all kernels that produce its result. Nsight Compute captures use the same replay, cache and clock settings on both
+sides of each comparison. Isolated kernel replay does not preserve whole-graph cache behavior; its durations are
+not new whole-layer benchmark results. NVIDIA documents these replay and cache effects in its
+[profiling guide](https://docs.nvidia.com/nsight-compute/ProfilingGuide/).
+
+### H100: attention work and data movement
+
+The reference has 13 launches: vendor GEMMs, cuDNN attention and Triton normalization/elementwise kernels. Emmy has
+11 after the accepted shared K/V change. In complete late graph replays, attention takes 12.672 µs versus 10.272 µs;
+Q takes 6.944 versus 5.952 µs, and gate plus up takes 19.200 versus 17.664 µs. Shared K/V wins, 8.896 versus
+9.792 µs. Both reference gate/up kernels are included. These are diagnostic kernel-group medians.
+
+Matched cold attention captures use four occurrences per launch configuration, kernel replay, node profiling,
+17 metric passes, cache flushing and no profiler clock adjustment. Both Nsight Compute invocations pass the model's
+scaled correctness checks. Medians below describe isolated replay, not whole-layer cache behavior.
+
+| Attention metric | Emmy | cuDNN reference |
+| --- | ---: | ---: |
+| CTAs / threads per CTA | 128 / 128 | 64 / 384 |
+| Tensor work, GFLOP | 2.147 | 1.342 |
+| Load/store warp instructions | 149,504 | 15,872 |
+| Total warp instructions | 3,870,720 | 1,053,598 |
+| DRAM read, MB | 4.233 | 4.220 |
+| Requested L2 traffic, MB | 23.699 | 15.564 |
+| Active / eligible warps per scheduler active cycle | 0.997 / 0.328 | 2.286 / 0.359 |
+| Isolated diagnostic duration, µs | 15.072 | 12.912 |
+
+cuDNN executes 37.5% less tensor work. This calculation weights each instruction by its matrix dimensions;
+the raw instruction counts alone would exaggerate the difference. It is consistent with skipping causal tiles,
+while Emmy's existing schedule walks all 512 keys. The reference loop bounds were not fully reconstructed, so
+this does not establish the gain from changing Emmy's causal bound or CTA count.
+
+Disassembly shows bulk TMA loads/stores and separate producer/consumer warps in cuDNN. Eight consumer warps receive
+232 registers each; one producer warp remains active after three other reserved producer warps exit. Emmy uses
+individual asynchronous copies and a uniform register allocation. The reference executes 9.42 times fewer
+load/store instructions, but reads almost the same DRAM bytes. Instruction accounting differs for TMA, so this is
+not a ninefold traffic saving. Its eligible-warp count improves only 9%, and its barrier-stall ratio is higher.
+Neither low occupancy nor barriers alone explains the comparison.
+
+Q supplies an equal-tensor-work control: Emmy executes 20.78 times as many load/store instructions and 2.29 times
+as many total instructions as the vendor kernel. Shared K/V already reduces traffic and a launch. Gate/up is
+nearly tied in cold replay, 21.216 versus 21.600 µs, despite favoring the reference in the late graph trace.
+That difference needs a comparison preserving whole-graph cache locality before another schedule is selected.
+The cold reference K/V captures are startup eager launches with the same vendor function, shape, strides and launch
+geometry as the compiled graph's external matrix multiplies; they are not captures of warmed compiled invocations.
+
+Both Systems attempts end with a CUDA launch failure during Emmy timing. The second nevertheless retains 264
+complete Emmy graphs and 4,843 complete compiled-reference graphs in one worker. The last 100 of each in an
+overlapping time window have median graph spans of 82.320 and 83.056 µs, respectively; the instrumented comparison
+slightly favors Emmy, while the final unprofiled comparison slightly favors the reference. Kernel-duration sums
+are 80.672 and 71.440 µs, leaving very different inter-kernel gaps. Those sums cannot explain the net latency gap
+by themselves, and the failed trace is not a successful benchmark.
+
+The next work is bulk TMA staging and producer/consumer warp specialization through the existing schedule
+mechanisms, followed by a measured causal-work alternative. Each needs balanced unprofiled whole-layer pairs and
+unchanged numerical checks. A blanket increase in CTA count or removal of barriers is not supported by these data.
+Raw reports, disassembly, generated sources, commands, software versions, both failed traces and a checksum manifest
+are retained in `tuning_h100x1_round2_matched_profiles_2026-10-02.tar.gz`, rooted at `matched-profile/`.
+
+### V100: split projection finalizers
+
+The actual compiled model uses nine Triton kernels, with no cuBLAS kernel in that graph. Emmy uses fourteen kernels.
+A successful short Systems run distinguishes that model from a second worker's reconstructed Torch comparison,
+which uses some different launch configurations. Complete graph attribution finds the largest deficit in input
+normalization plus Q/K/V: 24.831 µs for Emmy versus 16.448 µs for the reference. Emmy wins attention plus O,
+18.192 versus 22.272 µs, and loses post-attention normalization plus the MLP, 37.792 versus 32.832 µs.
+These are sums of per-node medians in the instrumented trace, not new unprofiled performance results.
+
+Matched cold projection captures use the exact reference function and launch geometry verified in the Systems
+trace and generated source. Both sides use kernel replay, flushed caches, base clock control and 18 metric passes.
+Each Emmy comparison includes its partial reduction and finalizer; comparing only its main projection would omit
+work the reference completes inside one kernel.
+
+| Cold diagnostic, µs | Emmy partial | Emmy finalizer | Reference complete projection |
+| --- | ---: | ---: | ---: |
+| Q | 9.024 | 2.688 | 8.640 |
+| Shared K/V | 9.536 | 3.616 | 9.952 |
+| Gate/up | 21.216 | 3.168 | 19.808 |
+| Down | 12.160 | 2.912 | 18.592 |
+
+The main Q and K/V kernels read essentially one pass of their weights: about 4.2 MB each. Their isolated times
+are close to the reference, while Emmy adds the finalizer. K/V's partial is slightly faster despite much lower
+occupancy. These measurements support the extra reduction stage as a concrete cost; they do not establish poor
+occupancy or inflated DRAM transactions as the cause.
+
+Gate/up's partial already reaches about 85% of reported DRAM utilization and adds a 3.168 µs finalizer. Down is
+faster in the captured comparison, so extra launches are not a universal explanation. Fused work differs: reference
+gate/up includes normalization, while reference down includes SiLU and multiplication. Emmy pays a separate
+normalization and materializes the half-precision SiLU/product before down. These row differences are not equal-work
+speedups and cannot be summed into a whole-layer result.
+
+In that down configuration, the reference executes 24.117 million FP32 FMA thread instructions versus 3.146 million
+in Emmy's partial, despite nearly equal DRAM reads. Its source recomputes the FP32 SiLU/product within each output
+tile. Materializing Emmy's product once avoids that repeated work, so removing this cut is not an established win.
+
+The down reference above matches the longer Systems run's selected 1,024-CTA, 512-thread configuration. The shorter
+run selects a different configuration, and its exact register/shared-memory allocation was not captured by Compute.
+The reference attention/O captures likewise match no selected Systems configuration and remain unselected tuning
+diagnostics. They do not establish a hardware-counter comparison for that group. Q/K/V and gate/up configurations
+match both traces.
+
+The source explains a relevant design difference. Triton reads row-major output-by-reduction weights and completes
+the reduction in one CTA. Emmy uses transposed reduction-by-output weights and global split partials. Q writes a
+64 KiB partial workspace; K/V writes 128 KiB. Changing the split factor alone previously failed to improve the
+whole layer. A legal unsplit realization with an appropriate weight layout is the next targeted comparison.
+
+The reference also retains FP32 Q/K/V and gate/up buffers, and their consumers do not restore intermediate FP16
+rounding. Only specific boundaries, including key/RoPE and the final output, store FP16. Emmy preserves its own
+explicit FP16 boundaries. This corrects the earlier diagnostic note claiming that all consumer rounding was
+retained. Matching the reference's kernel boundaries is not permission to drop those numerical obligations.
+
+All fifteen targeted CLI runs exit successfully, pass the actual-model Emmy and compiled-reference numerical checks,
+and reproduce all fourteen accepted Emmy kernel source hashes. The initial combined Compute filter captures an
+unselected tuning kernel despite exiting successfully; the initial Systems run times out at 600 seconds. Both are
+preserved alongside the successful shorter trace. Copied Torch cache entries retain absolute source paths, and four
+old-cache configuration records were changed during profiling; their before/after contents are retained and their
+original bytes restored. This cache behavior and the observed tuning variation limit claims about a particular
+reference configuration across processes.
+
+Raw reports, exports, sources, launch-selection records, commands and failed attempts are retained in
+`tuning_v100x1_round2_matched_profiles_2026-10-02.tar.gz`. The canonical unprofiled recipe archives remain unchanged.
+
+### Validation after profiling
+
+Profiling adds no kernel, golden or prior changes. CI exposed an attention availability test whose placement and
+cross-CTA split were still chosen by the prior. The test now pins its intended fused, unsplit realization and
+keeps the one-kernel and tensor-core assertions. Focused checks pass on the exact CI merge with Python 3.13.
+The full local CPU suite passes after both pins: 5,716 passed and 1,250 skipped in 359.65 seconds.
+
 ## Shared K/V prefill and V100 input normalization (2026-10-02)
 
 Sharing K/V production improves prefill on H100, A100, RTX 4090 and RTX 5090. Separating the input RMSNorm statistic
