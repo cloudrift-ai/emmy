@@ -104,7 +104,7 @@ def _program(op):
     return None
 
 
-def _resident(op, program):
+def _resident(op, program, retained=frozenset()):
     loop, carry, batch = program
     if len(op.serial) != 1 or op.serial[0] != loop.axis or len(op.body) != 1 or not isinstance(op.body[0], Tile):
         return None
@@ -153,6 +153,8 @@ def _resident(op, program):
             if isinstance(stmt, Load) and stmt.input == port:
                 stmt = replace(stmt, input=shared, index=(parity, *stmt.index[1 + len(batch) :]), dtype=tensor.dtype)
             elif isinstance(stmt, Write) and stmt.output == port:
+                if port in retained:
+                    out.append(stmt)
                 stmt = replace(
                     stmt, output=shared, index=(Literal(1, "int") - parity, *stmt.index[1 + len(batch) :]), value_dtype=tensor.dtype
                 )
@@ -162,7 +164,10 @@ def _resident(op, program):
         return Body(s for s in out if not isinstance(s, Load) or s.name not in discarded)
 
     step = rewrite(tile.body)
-    snapshot = _parallel_copy(op, program, step, shared, parity, shape, batch, tile.block_threads, tensor.dtype)
+    snapshots = tuple(s for s in loop.body.iter() if isinstance(s, Write))
+    if port in retained:
+        snapshots += (Write(port, (Var(loop.axis.name), *carry.index), carry.value),)
+    snapshot = _parallel_copy(op, program, step, shared, parity, shape, batch, tile.block_threads, tensor.dtype, snapshots)
     if snapshot is not None:
         copying, step, predicate = snapshot
     else:
@@ -201,7 +206,7 @@ def _resident(op, program):
     return replace(op, serial=(), body=Body((replace(tile, axes=(*tile.axes[: len(batch)], *tile.axes[split:]), body=Body(body)),)))
 
 
-def _parallel_copy(op, program, step, shared, parity, shape, batch, threads, dtype):
+def _parallel_copy(op, program, step, shared, parity, shape, batch, threads, dtype, outputs):
     """Copy unchanged cells with the whole CTA, then overwrite only the selected updates."""
     loop, carry, _ = program
     defs = {s.name: s for s in loop.body.iter() for _ in s.defines() if hasattr(s, "name")}
@@ -211,7 +216,6 @@ def _parallel_copy(op, program, step, shared, parity, shape, batch, threads, dty
     previous = defs.get(selected.branches[1].value)
     if not isinstance(previous, Pre) or previous.carrier != carry.name or previous.index != carry.index:
         return None
-    outputs = tuple(s for s in loop.body.iter() if isinstance(s, Write))
     for store in outputs:
         value = store.value
         while isinstance(defs.get(value), Assign) and defs[value].op.name == "copy":
@@ -286,12 +290,10 @@ def rewrite(match: Match, root: Node, ctx=None):
     if not op.serial or SHARED_CARRY.name in op.knobs:
         raise RuleSkipped("shared carry already decided or no serial state")
     program = _program(op)
-    candidate = _resident(op, program) if program is not None else None
+    retained = frozenset(t.name for t in root.outputs if t.name in match.graph.outputs or match.graph.buffer_users(t.name))
+    candidate = _resident(op, program, retained) if program is not None else None
     if candidate is None or candidate.smem_bytes() > ctx.max_dynamic_smem:
         raise RuleSkipped("this kernel has no CTA-owned state that fits shared memory")
-    written = {s.output for s in candidate.body.iter() if isinstance(s, Write)}
-    if any(t.name not in written and (t.name in match.graph.outputs or match.graph.buffer_users(t.name)) for t in root.outputs):
-        raise RuleSkipped("shared carry requires private global state ports")
     variants = []
     for enabled in SHARED_CARRY.narrow((False, True)):
         selected = candidate if enabled else op

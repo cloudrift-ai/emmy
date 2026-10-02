@@ -92,6 +92,19 @@ def test_shared_storage_requires_room_for_both_states_and_the_combine():
 
 
 @requires_cuda
+def test_an_exposed_state_port_keeps_every_snapshot():
+    graph = Pipeline.build(["tile/lift"]).run(_graph(), ctx=Context.probe())
+    (port,) = (t.name for t in graph.nodes["out"].outputs if t.name != "out")
+    graph.outputs.append(port)
+    with pinned_knobs({**_PINS, "SHARED_CARRY": True}):
+        compiled = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.probe())
+    array = (np.random.default_rng(0).standard_normal((2, 40, 40)) * 0.03).astype(np.float32)
+    outputs = CudaBackend().run(compiled, input_data={"seed": array})[0].outputs
+    np.testing.assert_array_equal(outputs["out"], outputs[port])
+    assert np.isfinite(outputs[port]).all()
+
+
+@requires_cuda
 @pytest.mark.parametrize("dtype", [F32, F16], ids=["f32", "f16"])
 @pytest.mark.parametrize("masked", [True, False], ids=["selected", "full"])
 def test_shared_state_matches_the_global_state_on_the_same_inputs(dtype, masked):
