@@ -569,10 +569,10 @@ def resolve_scalar_stage(c: Fold, tile: Tile, stage: Stage, inputs, budget: int,
     when no chunk fits at the requested depth the depth steps down, single-buffer last."""
     if stage.transport not in ("smem", "smem-tma", "smem-async") or not k_axis.extent.is_static:
         return None
-    # A masked-N B-slab fill would clamp a chunk-start column into a row-crossing gmem address and
-    # hang on the misaligned copy; a transposed B has no scalar drain variant (the warp tier stages
-    # it into an N-major slab).
-    if tile.n.mask or c.as_contraction().b_trans:
+    # A K-major masked-N fill can clamp a chunk-start column into a row-crossing address.
+    # N-major B copies complete contiguous K chunks and clamps only its row.
+    b_trans = c.as_contraction().b_trans
+    if tile.n.mask and not b_trans:
         return None
     if not inputs or c.operands[0].as_slab() is None or c.operands[1].as_slab() is None or c.operands[0].as_slab().load.input not in inputs:
         return None
@@ -590,7 +590,12 @@ def resolve_scalar_stage(c: Fold, tile: Tile, stage: Stage, inputs, budget: int,
         return None
     if stage.transport == "smem-tma" and not (
         _tma_operand_box(c.operands[0].as_slab().load.index, tile.m.axis.name, k_axis.name, (tile.m.axis.name, k_axis.name))
-        and _tma_operand_box(c.operands[1].as_slab().load.index, tile.n.axis.name, k_axis.name, (k_axis.name, tile.n.axis.name))
+        and _tma_operand_box(
+            c.operands[1].as_slab().load.index,
+            tile.n.axis.name,
+            k_axis.name,
+            (tile.n.axis.name, k_axis.name) if b_trans else (k_axis.name, tile.n.axis.name),
+        )
     ):
         return None
     # Staging needs the CTA to BE one (tile_m x tile_n) output tile (the cooperative fill / drain
@@ -601,11 +606,11 @@ def resolve_scalar_stage(c: Fold, tile: Tile, stage: Stage, inputs, budget: int,
         return None
     k = k_axis.extent.as_static()
     elem_bytes = inputs[c.operands[0].as_slab().load.input].dtype.nbytes
-    # Every staged transport needs 16 B-aligned inner global strides — A's is K, B's is N.
+    # Every staged transport needs 16 B-aligned inner global strides.
     n_ext = tile.n.axis.extent
-    if not n_ext.is_static or (k * elem_bytes) % _TMA_ALIGN or (n_ext.as_static() * elem_bytes) % _TMA_ALIGN:
-        return None
     b_bytes = inputs[c.operands[1].as_slab().load.input].dtype.nbytes if c.operands[1].as_slab().load.input in inputs else elem_bytes
+    if not n_ext.is_static or (k * elem_bytes) % _TMA_ALIGN or ((k if b_trans else n_ext.as_static()) * b_bytes) % _TMA_ALIGN:
+        return None
     # A scalar tile always copies with the blocking load/store, so its ``smem`` ring splits too.
     requested = min(stage.depth, SPLIT_COPY_DEPTH) if stage.transport == "smem" else stage.depth
     depth, bk_elems = max(1, requested), 0

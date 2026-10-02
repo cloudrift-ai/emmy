@@ -1906,7 +1906,7 @@ def _scalar_protected(c: Fold, tile: Tile, lead: tuple = (), *, body: Body | tup
 
 
 def _scalar_drain(
-    c: Fold, cells, offset, slabs: tuple[str, str], ki: str, bk_elems: int, base: tuple[Expr, Expr], offs=(None, None)
+    c: Fold, cells, offset, slabs: tuple[str, str], ki: str, bk_elems: int, base: tuple[Expr, Expr], offs=(None, None), *, b_trans=False
 ) -> Loop:
     """The inner slab-drain reduce loop ``for ki: b = b_slab[ki, n_local]; a = a_slab[m_local, ki];
     v = a·b; acc += v`` — the scalar counterpart of the mma ``ldmatrix`` drain. Built per-cell directly
@@ -1928,9 +1928,11 @@ def _scalar_drain(
         bn, an, vn, cn = f"{b_name}{sfx}", f"{a_name}{sfx}", f"{c.exposes[0]}__v{sfx}", f"{c.exposes[0]}{sfx}"
         m_local = BinaryExpr("-", offset[0].base(i), row_base)
         n_local = BinaryExpr("-", offset[1].base(j), col_base)
-        k_row = Var(ki) if off_b is None else BinaryExpr("+", off_b, Var(ki))
+        b_row = n_local if b_trans else Var(ki)
+        b_row = b_row if off_b is None else BinaryExpr("+", off_b, b_row)
+        b_col = Var(ki) if b_trans else n_local
         m_row = m_local if off_a is None else BinaryExpr("+", off_a, m_local)
-        body.append(Load(names=(bn,), input=b_slab, index=(k_row, n_local)))
+        body.append(Load(names=(bn,), input=b_slab, index=(b_row, b_col)))
         body.append(Load(names=(an,), input=a_slab, index=(m_row, Var(ki))))
         body.append(Assign(name=vn, op=_MUL, args=(bn, an)))
         body.append(Accum(name=cn, value=vn, op=_ADD, axes=(ki,)))
@@ -2516,7 +2518,11 @@ class _ScalarOps(_AtomOps):
         row by the slot, exactly as the mma drain does)."""
         a_op, b_op = operands
         offs = tuple(op.slot_row(slot) for op in operands)
-        return [_scalar_drain(self.c, cells, offset, (a_op.slab, b_op.slab), "_ki", self.stage.bk_elems, _tile_base(mn), offs)]
+        return [
+            _scalar_drain(
+                self.c, cells, offset, (a_op.slab, b_op.slab), "_ki", self.stage.bk_elems, _tile_base(mn), offs, b_trans=b_op.trans
+            )
+        ]
 
     def state(self, cells):
         """The scalar accumulator seeds. Gmem-direct (unstaged): none — the accumulators are seeded
