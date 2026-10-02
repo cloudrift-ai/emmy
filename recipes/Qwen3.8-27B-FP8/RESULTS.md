@@ -318,8 +318,8 @@ serving result.
 
 ### Shared triangular update — second pass, 2026-10-02
 
-The second pass used the same four cards and software, starting from main `e53587a91`. Each independent matrix now
-stays in two shared buffers while one CTA executes all 61 ordered steps. Padding shared rows by one column reduces
+The second pass used the same four cards and software. Each independent matrix now stays in two shared buffers while
+one CTA executes all 61 ordered steps. Padding shared rows by one column reduces
 bank conflicts. The original 512-thread cooperative reduction tree is preserved. Both the requested snapshots and
 the exposed carry output remain stored; these timings include both outputs.
 
