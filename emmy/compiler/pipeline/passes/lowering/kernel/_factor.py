@@ -45,6 +45,7 @@ module."""
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from importlib import import_module
 
 from emmy.compiler.backend.cuda.dtype import cuda_name
 from emmy.compiler.dtype import F32
@@ -70,10 +71,11 @@ from emmy.compiler.pipeline.passes.lowering.kernel._atom import (
     store_sink,
     unroll_ok_n,
 )
-from emmy.compiler.pipeline.passes.lowering.kernel._guard import guard_reductions
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import sync_row_fill
 from emmy.compiler.pipeline.passes.lowering.kernel._tiling import atomize, grid_tile, register_tile, unit_tile
 from emmy.compiler.pipeline.search.space import GUARD_REDUCTIONS
+
+_guard_reductions = import_module("emmy.compiler.pipeline.passes.lowering.kernel.090_guard_reductions")
 
 # ---- the ambient cell environment and the wire a node produces ---------------------------------- #
 
@@ -894,7 +896,7 @@ def _tile_reduce_axis_transposed(
     out_ax = _coalescing_axis(rloop, grid, ctx.inputs)
     candidate = rloop
     if GUARD_REDUCTIONS.narrow((True,))[0]:
-        guarded = guard_reductions(Body((*hoisted, rloop, *tail)), frozenset(ax.name for ax in (*grid, *ctx.serial)))
+        guarded = _guard_reductions._guard(Body((*hoisted, rloop, *tail)), frozenset(ax.name for ax in (*grid, *ctx.serial)))
         candidate = guarded[len(hoisted)]
     predicate = candidate.end.cond if isinstance(candidate, StridedLoop) and isinstance(candidate.end, TernaryExpr) else None
 
