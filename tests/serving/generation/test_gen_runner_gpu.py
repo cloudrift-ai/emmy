@@ -1107,9 +1107,9 @@ def test_gated_attention_layer_matches_hugging_face(gated_runner, t):
         assert not np.allclose(got, expected, rtol=2e-3, atol=2e-3)
 
 
-@pytest.mark.parametrize("t", [3, 16, 18])
+@pytest.mark.parametrize("t", [1, 3, 9, 16, 18])
 def test_bf16_gated_attention_layer_matches_hugging_face(bf16_gated_runner, t):
-    """BF16 retains the attention output gate across decode, prefill and the rider split."""
+    """BF16 retains the attention output gate across every serving width tier."""
     import torch
 
     runner, model = bf16_gated_runner
@@ -1163,11 +1163,12 @@ def test_gemma3_single_token_pre_matches_torch():
 
     if not torch.cuda.is_available():
         pytest.skip("CUDA not available")
+    from emmy.compiler.dtype import F32
     from emmy.serving.gen_runner import _compile_split
     from tests.serving.generation.test_gen_runner import _offset_norm_pre
 
     pre = _offset_norm_pre("gemma3")
-    program, plan = _compile_split(pre, [torch.zeros(1, 64)], None, np.dtype("float32"))
+    program, plan = _compile_split(pre, [torch.zeros(1, 64)], None, F32)
     assert any(w.load_ops and w.load_ops[0][0] == "record" for w in plan.weights.values()), "the fold did not happen"
     hidden = torch.randn(1, 64, generator=torch.Generator().manual_seed(1))
     with torch.no_grad():
