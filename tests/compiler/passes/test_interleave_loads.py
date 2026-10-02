@@ -114,6 +114,19 @@ def test_vector_alignment_recomposes_split_coordinates() -> None:
     assert not vector_run([(Var("row"), Literal(i, "int")) for i in range(2)], None, 2)
 
 
+def test_selected_rows_vectorize_only_when_their_stride_preserves_alignment() -> None:
+    from emmy.compiler.graph import Tensor
+    from emmy.compiler.ir.expr import TernaryExpr, Var
+    from emmy.compiler.pipeline.passes.lowering.kernel._vector import vector_run
+
+    row = TernaryExpr(Var("which").lt(Literal(2, "int")), Literal(1, "int"), Literal(3, "int"))
+    indices = [(row, Var("cell") * Literal(4, "int") + Literal(i, "int")) for i in range(4)]
+    assert vector_run(indices, Tensor("x", (4, 8), F32), 4)
+    assert not vector_run(indices, Tensor("x", (4, 7), F32), 4)
+    changed = [*indices[:-1], (Literal(2, "int"), indices[-1][1])]
+    assert not vector_run(changed, Tensor("x", (4, 8), F32), 4)
+
+
 def test_a_load_whose_index_is_computed_in_between_stays_put() -> None:
     """A later load moves up only when its index needs nothing defined in between."""
     from emmy.compiler.dtype import F16

@@ -11,8 +11,19 @@ def vector_run(indices, tensor, width: int) -> bool:
     if rank > 1 and (tensor is None or len(tensor.shape) != rank):
         return False
     ctx = SimplifyCtx.empty()
+    # A common row offset cancels from address differences. When its stride is
+    # a multiple of the vector width, it also cannot change base alignment,
+    # even when the selected row is not affine in the kernel's coordinates.
+    ignored = set()
+    stride = 1
+    for dim in reversed(range(rank)):
+        if stride is not None and stride % width == 0 and all(index[dim] == indices[0][dim] for index in indices):
+            ignored.add(dim)
+        size = tensor.shape[dim] if tensor is not None else None
+        stride = stride * size.as_static() if stride is not None and size is not None and size.is_static else None
     addresses = []
     for index in indices:
+        index = tuple(Literal(0, "int") if dim in ignored else coord for dim, coord in enumerate(index))
         flat = index[0]
         for coord, size in zip(index[1:], tensor.shape[1:] if rank > 1 else (), strict=True):
             flat = BinaryExpr("+", BinaryExpr("*", flat, size.expr), coord)
