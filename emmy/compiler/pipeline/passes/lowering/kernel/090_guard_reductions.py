@@ -61,8 +61,10 @@ def _guard_stores(body: Body, types=None) -> Body:
             end += 1
         stores = stmts[start:end]
         readers = Counter(name for stmt in (*continuation, *stores) for name in free_names(stmt))
-        if not stores or any(uses[name] != readers[name] for name in names) or any(
-            s.atomic or any(names & e.free_vars() for e in s.index) for s in stores
+        if (
+            not stores
+            or any(uses[name] != readers[name] for name in names)
+            or any(s.atomic or any(names & e.free_vars() for e in s.index) for s in stores)
         ):
             position += 1
             continue
@@ -85,10 +87,14 @@ def _guard_stores(body: Body, types=None) -> Body:
             branches.append(found)
         moved = branches[0] | branches[1]
         reads = {stmts[i].input for i in moved if isinstance(stmts[i], Load)}
-        if not moved or branches[0] & branches[1] or any(
-            not isinstance(stmt, (Assign, Let, Load, Select, Write)) or getattr(stmt, "output", None) in reads
-            for i, stmt in enumerate(stmts[:position])
-            if min(moved) <= i and i not in moved
+        if (
+            not moved
+            or branches[0] & branches[1]
+            or any(
+                not isinstance(stmt, (Assign, Let, Load, Select, Write)) or getattr(stmt, "output", None) in reads
+                for i, stmt in enumerate(stmts[:position])
+                if min(moved) <= i and i not in moved
+            )
         ):
             position += 1
             continue

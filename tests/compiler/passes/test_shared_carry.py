@@ -38,8 +38,10 @@ def _body(n=40, *, masked=True, extra_reader=False):
             Accum(name="sum", op="add", value="product"),
         ),
     )
-    value = Select("next", (SelectBranch("updated", predicate), SelectBranch("old", Literal(True, "bool")))) if masked else Assign(
-        "next", "copy", ("updated",)
+    value = (
+        Select("next", (SelectBranch("updated", predicate), SelectBranch("old", Literal(True, "bool"))))
+        if masked
+        else Assign("next", "copy", ("updated",))
     )
     carry = Carry("state", "next", (b, r, c), "seed")
     cell = (

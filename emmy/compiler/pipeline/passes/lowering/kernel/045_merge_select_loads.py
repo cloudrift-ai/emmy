@@ -183,9 +183,7 @@ def _merge_many(stmts, position, uses):
         merged[i] = replace(stmt, index=tuple(index))
     dropped = combined - cones[0]
     return [
-        Assign(select.name, "copy", (first,)) if i == position else merged.get(i, stmt)
-        for i, stmt in enumerate(stmts)
-        if i not in dropped
+        Assign(select.name, "copy", (first,)) if i == position else merged.get(i, stmt) for i, stmt in enumerate(stmts) if i not in dropped
     ]
 
 
