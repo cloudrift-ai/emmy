@@ -183,6 +183,8 @@ def test_gdn_serving_capture_has_explicit_state_inputs_and_outputs(tmp_path, qua
                 f"{base}.weight_scale": torch.from_numpy(np.ascontiguousarray(scales)).view(torch.float8_e4m3fn),
                 f"{base}.weight_scale_2": torch.from_numpy(scale2),
                 f"{base}.input_scale": torch.tensor([0.05]),
+                # An unquantized multi-token-prediction layer numbered like the trunk's first: not a twin's layer.
+                "mtp.layers.0.linear_attn.in_proj_qkv.weight": torch.zeros(128, 64, dtype=torch.bfloat16),
             },
             str(tmp_path / "model.safetensors"),
         )
@@ -201,8 +203,36 @@ def test_gdn_serving_capture_has_explicit_state_inputs_and_outputs(tmp_path, qua
     assert len(graphs["pre1-global"].outputs) == 4
     post = graphs["post1-global"]
     assert [tuple(post.buffer(key).shape) for key in post.inputs] == [(1, 64)] * 3
+    # A GDN layer has no any-width program: the any-width capture keeps its static twins and adds only attention's.
+    symbolic = capture_twin_graphs(str(tmp_path), decode_bucket=1, prefill_bucket=16)
+    assert set(symbolic) == set(graphs) | {"pre-sym-global", "post-sym-global"}
     with pytest.raises(NotImplementedError, match="static sequence widths"):
-        capture_twin_graphs(str(tmp_path), decode_bucket=1, prefill_bucket=16)
+        capture_twin_graphs(str(tmp_path), decode_bucket=0, prefill_bucket=0)
+
+
+def test_bf16_serving_config_captures_bf16_twins_with_static_gdn(tmp_path):
+    """A config serving ``--dtype bfloat16`` gets BF16 twins: every buffer crossing a twin's boundary is BF16
+    except the GDN matrix state, which stays f32. The GDN layer has static twins only."""
+    pytest.importorskip("transformers.models.qwen3_5")
+    from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
+
+    from emmy.serving.release import load_serving_config
+    from emmy.serving.twins import capture_serving_twins
+    from tests.compiler.trace.test_huggingface import _QWEN3_5_TINY
+
+    Qwen3_5TextConfig(**_QWEN3_5_TINY).save_pretrained(tmp_path / "model")
+    env = tmp_path / "serving.env"
+    env.write_text(
+        f"SERVE_MODEL=org/model\nSERVE_GPU=NVIDIA-Test\nSERVE_GOLDEN_FILE={tmp_path / 'g.json'}\nSERVE_MAX_NUM_BATCHED_TOKENS=16\n"
+        'SERVE_DECODE_BUCKET=4\nSERVE_PREFILL_BUCKET=16\nSERVE_M1_TIER=0\nSERVE_EXTRA_ARGS="--dtype bfloat16"\n'
+    )
+    graphs = capture_serving_twins(str(tmp_path / "model"), load_serving_config(env))
+    assert set(graphs) == {"gdn4", "gdn16", "pre4-global", "post4-global", "pre16-global", "post16-global", "pre-sym-global", "post-sym-global"}
+    for name, graph in graphs.items():
+        boundary = {key: graph.buffer(key).dtype.name for key in (*graph.inputs, *graph.outputs)}
+        state = {key for key in boundary if len(graph.buffer(key).shape) == 4}  # S[1, heads, k, v]
+        assert {key: dt for key, dt in boundary.items() if key not in state} == dict.fromkeys(set(boundary) - state, "bf16"), name
+        assert all(boundary[key] == "f32" for key in state), name
 
 
 def test_attention_query_layout_accepts_validated_deepseek_low_rank_signature():

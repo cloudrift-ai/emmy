@@ -115,6 +115,7 @@ def test_trace_serving_twins_writes_one_exact_inventory_with_explicit_provenance
         "extra_widths": (1, 64, 512, 1024),
         "symbolic": True,
         "expert_slices": 1,
+        "dtype": "float16",
     }
     assert document.model == "cloudriftai/model-exl3@0123456789abcdef0123456789abcdef01234567"
     assert {row.name.split(".", 1)[0] for row in document.rows} == {"pre1@b2", "expert512@b2"}
@@ -166,6 +167,7 @@ def test_trace_serving_twins_static_only_release_forwards_exact_scope(monkeypatc
         "symbolic": False,
         "static_only": True,
         "expert_slices": 1,
+        "dtype": "float16",
     }
     assert {(bindings, pins) for _twin, bindings, pins in _coverage(GoldenFile.load(output))} == {
         ((("num_tokens", 1),), (("FAST_MATH", False),))
