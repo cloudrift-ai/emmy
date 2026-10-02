@@ -1,7 +1,10 @@
 # Remaining golden-bench performance work
 
-Status: planned follow-up to [PR #1011](https://github.com/cloudrift-ai/emmy/pull/1011). These are hypotheses to
-test, not demonstrated speedups. The completed shared K/V decode work and its raw evidence are recorded in the
+Status: in progress from the merge of [PR #1011](https://github.com/cloudrift-ai/emmy/pull/1011), commit
+`2ffe2b81be3a24f27a9dbfb10a5b274527a677f2`. The round runs from October 2, 2026, 06:19 UTC to 18:19 UTC, with the
+last two hours reserved for integration and validation. These are hypotheses to test, not demonstrated speedups.
+One agent owns H100 prefill, one owns single-V100 decode, and one owns A100, RTX 4090 and RTX 5090 controls.
+The completed shared K/V decode work and its raw evidence are recorded in the
 [experiment report](../experiments/golden-bench-2026/kernels/RESULTS.md).
 
 ## Baseline and scope
