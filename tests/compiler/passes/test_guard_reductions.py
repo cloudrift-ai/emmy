@@ -1,6 +1,7 @@
 """Coordinate selects can discard a scalar reduction without executing its loop."""
 
 from dataclasses import replace
+from importlib import import_module
 
 import numpy as np
 import pytest
@@ -10,7 +11,8 @@ from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.kernel import KernelOp, Sync
 from emmy.compiler.ir.loop.runner import execute_loop_op_cpp
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Select, SelectBranch, StridedLoop, Write
-from emmy.compiler.ir.stmt.normalize import guard_reductions
+
+guard = import_module("emmy.compiler.pipeline.passes.lowering.kernel.090_guard_reductions")
 
 
 def _body(*, extra_use=False, overlapping=False, strided=False) -> Body:
@@ -55,7 +57,7 @@ def _run(body: Body, *, extra_use=False) -> tuple:
 @pytest.mark.parametrize("extra_use", [False, True])
 def test_coordinate_demand_preserves_values_and_skips_only_unused_iterations(strided, overlapping, extra_use):
     body = _body(strided=strided, overlapping=overlapping, extra_use=extra_use)
-    changed = guard_reductions(body)
+    changed = guard._guard(body)
     reduction = changed[0].body[0]
     if extra_use:
         assert reduction == body[0].body[0], "one unmasked reader requires every original iteration"
@@ -87,4 +89,4 @@ def test_guard_does_not_skip_effects_or_use_an_unavailable_predicate(unsafe):
             for s in tail
         ]
     candidate = Body((replace(outer, body=(reduction, *tail)),))
-    assert guard_reductions(candidate)[0].body[0] == reduction
+    assert guard._guard(candidate)[0].body[0] == reduction
