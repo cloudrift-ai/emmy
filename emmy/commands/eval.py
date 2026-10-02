@@ -158,55 +158,6 @@ def _golden_report(args, halves, dataset, source: str):
     return EvalReport(header, [c for half, prior in halves for c in golden_summaries(half, groups, prior.score_rows)])
 
 
-def _compare_golden_ranks(report, minimum: float) -> dict:
-    """Compare both weights over the same golden pools, without losing any scored pools."""
-    cells = {}
-    for summary in report.summaries:
-        half = summary.axes["half"]
-        key = tuple(sorted((name, value) for name, value in summary.axes.items() if name != "half"))
-        cells.setdefault(half, {})[key] = summary
-    current, candidate = cells.get("current", {}), cells.get("candidate", {})
-    if not current or current.keys() != candidate.keys():
-        raise ValueError("prior evaluations have different or empty GPU, tier, or pool-size cells")
-
-    improved = []
-    regressed = []
-    compared = 0
-    for key in sorted(current):
-        before, after = current[key], candidate[key]
-        if (before.groups, before.unscored) != (after.groups, after.unscored):
-            raise ValueError(f"prior evaluation coverage changed for {key}")
-        baseline = before.metrics["rank"]["median"]
-        fitted = after.metrics["rank"]["median"]
-        if baseline is None or fitted is None:
-            if baseline != fitted:
-                raise ValueError(f"prior evaluation rank coverage changed for {key}")
-            continue
-        compared += 1
-        if fitted > baseline:
-            regressed.append(key)
-        elif baseline > 0 and fitted <= baseline * (1 - minimum):
-            improved.append((key, baseline, fitted))
-
-    if not compared:
-        raise ValueError("prior evaluation has no scored golden pools")
-    qualified = bool(improved) and not regressed
-    cells_word = "cell" if compared == 1 else "cells"
-    percent = f"{minimum:.0%}"
-    if regressed:
-        message = f"candidate rejected: median rank rose in {len(regressed)} of {compared} {cells_word}"
-    elif not improved:
-        message = f"candidate rejected: no median rank fell by at least {percent} across {compared} {cells_word}"
-    else:
-        key, baseline, fitted = max(improved, key=lambda row: (row[1] - row[2]) / row[1])
-        axes = dict(key)
-        message = (
-            f"candidate qualifies: {len(improved)} of {compared} {cells_word} improved by at least {percent}, none regressed; "
-            f"largest change {baseline:g} to {fitted:g} on {axes['gpu']}, {axes['tier']}, {axes['pool']}"
-        )
-    return {"qualified": qualified, "message": message, "compared": compared, "improved": len(improved), "regressed": len(regressed)}
-
-
 def handle_eval_prior(args) -> None:
     """``eval prior`` — how well the prior ranks a candidate pool, over a dataset ``emmy db export`` wrote.
 
@@ -236,7 +187,7 @@ def handle_eval_prior(args) -> None:
     result = report.to_json()
     if args.compare_to:
         try:
-            result["comparison"] = _compare_golden_ranks(report, args.min_rank_improvement)
+            result["comparison"] = report_mod.compare_golden_ranks(report, args.min_rank_improvement)
         except ValueError as exc:
             logger.error("%s", exc)
             sys.exit(2)

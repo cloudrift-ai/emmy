@@ -9,9 +9,10 @@ model is, which is the failure this whole module exists to prevent.
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from emmy.compiler.pipeline.search.dataset.group import GoldenGroup, MeasuredGroup
-from emmy.compiler.pipeline.search.prior.report import EvalReport, golden_summaries, measured_summaries, pool_bucket
+from emmy.compiler.pipeline.search.prior.report import EvalReport, Summary, compare_golden_ranks, golden_summaries, measured_summaries, pool_bucket
 
 
 def _measured(key: str, latencies: list[float], *, gpu: str = "card-a", h_opt: float = 3.0) -> MeasuredGroup:
@@ -140,3 +141,32 @@ def test_quality_is_negated_into_a_cost_exactly_once():
     (flipped,) = measured_summaries("offline", [group], lambda g: -_by_d_a(g))
     assert flipped.metrics["regret1"]["median"] == 1.0  # the flipped scorer agrees with the hardware
     assert np.isclose(summary.metrics["regret1"]["median"], 3.0)
+
+
+def _rank_comparison_report(current: list[float], candidate: list[float], *, candidate_unscored: int = 0):
+    summaries = [
+        Summary(
+            axes={"half": half, "gpu": f"gpu{i}", "tier": "warp", "pool": "<1k"},
+            groups=10,
+            unscored=candidate_unscored if half == "candidate" else 0,
+            metrics={"rank": {"median": median}},
+        )
+        for half, medians in (("current", current), ("candidate", candidate))
+        for i, median in enumerate(medians)
+    ]
+    return EvalReport({"dataset": "golden"}, summaries)
+
+
+def test_comparison_requires_five_percent_gain_without_regression():
+    result = compare_golden_ranks(_rank_comparison_report([20, 4], [19, 4]), 0.05)
+    assert result["qualified"]
+    assert (result["compared"], result["improved"], result["regressed"]) == (2, 1, 0)
+    assert not compare_golden_ranks(_rank_comparison_report([20], [19.1]), 0.05)["qualified"]
+    assert not compare_golden_ranks(_rank_comparison_report([20, 4], [18, 4.1]), 0.05)["qualified"]
+
+
+def test_comparison_refuses_coverage_changes():
+    with pytest.raises(ValueError, match="coverage changed"):
+        compare_golden_ranks(_rank_comparison_report([20], [18], candidate_unscored=1), 0.05)
+    with pytest.raises(ValueError, match="different or empty"):
+        compare_golden_ranks(_rank_comparison_report([20], [18, 4]), 0.05)

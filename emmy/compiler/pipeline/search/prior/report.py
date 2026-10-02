@@ -11,6 +11,9 @@ pool and reads the ranks off the scores, and the fit through :func:`rank_metrics
 cross-validated summary spans SEVERAL models and there is no one scorer to hand it. The two commands' numbers are
 therefore comparable by construction rather than by two paths agreeing.
 
+:func:`compare_golden_ranks` compares two summaries produced over the same pools. It checks coverage and each
+GPU/tier/pool-size cell before qualifying a candidate at the requested median-rank threshold.
+
 **Two questions, and they are not interchangeable.**
 
 - A MEASURED pool (:class:`~..data.group.MeasuredGroup`: freeze or tune-DB rows, every candidate benched) can
@@ -114,6 +117,55 @@ class EvalReport:
 
     def to_json(self) -> dict:
         return {"header": self.header, "summaries": [c.to_json() for c in self.summaries]}
+
+
+def compare_golden_ranks(report: EvalReport, minimum: float) -> dict:
+    """Compare current and candidate weights over the same golden pools without losing scored pools."""
+    cells = {}
+    for summary in report.summaries:
+        half = summary.axes["half"]
+        key = tuple(sorted((name, value) for name, value in summary.axes.items() if name != "half"))
+        cells.setdefault(half, {})[key] = summary
+    current, candidate = cells.get("current", {}), cells.get("candidate", {})
+    if not current or current.keys() != candidate.keys():
+        raise ValueError("prior evaluations have different or empty GPU, tier, or pool-size cells")
+
+    improved = []
+    regressed = []
+    compared = 0
+    for key in sorted(current):
+        before, after = current[key], candidate[key]
+        if (before.groups, before.unscored) != (after.groups, after.unscored):
+            raise ValueError(f"prior evaluation coverage changed for {key}")
+        baseline = before.metrics["rank"]["median"]
+        fitted = after.metrics["rank"]["median"]
+        if baseline is None or fitted is None:
+            if baseline != fitted:
+                raise ValueError(f"prior evaluation rank coverage changed for {key}")
+            continue
+        compared += 1
+        if fitted > baseline:
+            regressed.append(key)
+        elif baseline > 0 and fitted <= baseline * (1 - minimum):
+            improved.append((key, baseline, fitted))
+
+    if not compared:
+        raise ValueError("prior evaluation has no scored golden pools")
+    qualified = bool(improved) and not regressed
+    cells_word = "cell" if compared == 1 else "cells"
+    percent = f"{minimum:.0%}"
+    if regressed:
+        message = f"candidate rejected: median rank rose in {len(regressed)} of {compared} {cells_word}"
+    elif not improved:
+        message = f"candidate rejected: no median rank fell by at least {percent} across {compared} {cells_word}"
+    else:
+        key, baseline, fitted = max(improved, key=lambda row: (row[1] - row[2]) / row[1])
+        axes = dict(key)
+        message = (
+            f"candidate qualifies: {len(improved)} of {compared} {cells_word} improved by at least {percent}, none regressed; "
+            f"largest change {baseline:g} to {fitted:g} on {axes['gpu']}, {axes['tier']}, {axes['pool']}"
+        )
+    return {"qualified": qualified, "message": message, "compared": compared, "improved": len(improved), "regressed": len(regressed)}
 
 
 def _round(x: float | None, digits: int) -> float | None:
