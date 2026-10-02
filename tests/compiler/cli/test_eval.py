@@ -227,7 +227,7 @@ def test_eval_golden_compiles_a_static_twin_only_in_the_lanes_that_warm_its_widt
     assert sorted(compiled) == [("pre-sym", "False"), ("pre-sym", "True"), ("pre64", "True"), ("pre8", "False")]
 
 
-def test_eval_prior_golden_ranks_an_exported_datasets_golden_pools(tmp_path, caplog):
+def test_eval_prior_golden_ranks_an_exported_datasets_golden_pools(tmp_path, caplog, monkeypatch):
     """``eval prior`` reads the golden pools of a dataset ``emmy db export`` wrote — the positional argument names the
     directory — and its header names the dataset and the golden files its rows came from. The deploy-faithful check
     runs over the same pools, re-lowering each kernel from the definition the dataset carries."""
@@ -247,3 +247,11 @@ def test_eval_prior_golden_ranks_an_exported_datasets_golden_pools(tmp_path, cap
     assert (header["dataset"], header["source"], header["sources"]) == ("golden", dataset, {"golden:case": 1})
     assert (header["groups"], header["positives"], header["skipped"]) == (1, 1, 0)
     assert "Golden reproduction" in caplog.text and "k_matmul_" in caplog.text
+
+    def forbidden(*_args):
+        raise AssertionError("rank-only evaluation must skip golden reproduction")
+
+    monkeypatch.setattr("emmy.commands.eval._emit_golden_deploy_check", forbidden)
+    rank_only = parser.parse_args(["eval", "prior", dataset, "--json", out, "--rank-only"])
+    rank_only.func(rank_only)
+    assert json.loads((tmp_path / "r.json").read_text())["summaries"]

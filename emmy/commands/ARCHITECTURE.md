@@ -883,6 +883,10 @@ emmy fit _data/placement emmy/compiler/pipeline/search/prior/weights/placement.j
 emmy fit _data/schedule _tune/fits/ab/offline.json --folds 0 --out _tune/fits/ab     # full-train only, a candidate to A/B
 ```
 
+`emmy eval prior --rank-only --json PATH` writes the same golden rank report while skipping the separate greedy
+reproduction walk. The nightly CI optimization workflow uses it to compare shipped and candidate weights on one
+exported dataset before running the reproduction gate for a candidate it would commit.
+
 ## Experiments
 
 Experiments are self-contained parameter sweeps in `experiments/{model}/{name}/`. Each directory keeps the recipe and

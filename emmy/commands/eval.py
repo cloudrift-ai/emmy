@@ -61,6 +61,7 @@ def register_eval_command(subparsers) -> None:
     )
     add_dataset_args(pp)
     pp.add_argument("--json", dest="json_out", metavar="PATH", help="Also write the report as JSON, for diffing two runs.")
+    pp.add_argument("--rank-only", action="store_true", help="Skip the greedy golden reproduction check after the rank report.")
     pp.set_defaults(func=handle_eval_prior)
 
     pg = sub.add_parser(
@@ -175,9 +176,11 @@ def handle_eval_prior(args) -> None:
     if args.json_out:
         storage.write_json(Path(args.json_out), report.to_json(), indent=2)
         logger.info("wrote %s", args.json_out)
-    if golden and space == "placement":
+    if not golden or args.rank_only:
+        return
+    if space == "placement":
         _emit_placement_deploy_check(args, dataset, halves[0][1])
-    elif golden:
+    else:
         _emit_golden_deploy_check(args, [pool for group in dataset.golden for pool in group.pools])
 
 

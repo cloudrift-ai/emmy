@@ -87,3 +87,106 @@ jobs:
             | curl --fail-with-body --silent --show-error \
                 --header 'Content-Type: application/json' \
                 --data-binary @- "$DISCORD_WEBHOOK_URL"
+
+  prior:
+    needs: durations
+    if: ${{ always() }}
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        space: [schedule, placement]
+    runs-on:
+      group: ubuntu-runners
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    env:
+      SPACE: ${{ matrix.space }}
+      WEIGHTS: emmy/compiler/pipeline/search/prior/weights/${{ matrix.space }}.json
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: make setup-ci
+
+      - name: Export repository goldens
+        run: |
+          ./venv/bin/emmy db import --db _data/ci-prior.db --fresh --repository
+          ./venv/bin/emmy db export --db _data/ci-prior.db _data/ci-prior --space "$SPACE"
+
+      - name: Evaluate current prior
+        run: ./venv/bin/emmy eval prior _data/ci-prior --offline-file "$WEIGHTS" --rank-only --json _data/current.json
+
+      - name: Fit candidate prior
+        run: ./venv/bin/emmy fit _data/ci-prior _data/candidate.json --trainer linear --folds 0 --out _data/fit
+
+      - name: Evaluate candidate prior
+        run: ./venv/bin/emmy eval prior _data/ci-prior --offline-file _data/candidate.json --rank-only --json _data/candidate-eval.json
+
+      - name: Compare prior ranks
+        id: compare
+        run: |
+          ./venv/bin/python .github/scripts/compare_prior_eval.py _data/current.json _data/candidate-eval.json --out _data/decision.json
+          echo "updated=$(jq -r .updated _data/decision.json)" >> "$GITHUB_OUTPUT"
+
+      - name: Verify improved prior
+        if: steps.compare.outputs.updated == 'true'
+        run: |
+          cp _data/candidate.json "$WEIGHTS"
+          EMMY_GOLDEN_FILE= ./venv/bin/pytest tests/compiler/pipeline/search/prior/test_reproduction.py \
+            -k "$SPACE" -q -p no:randomly -n 8 --dist=loadgroup
+
+      - name: Generate GitHub App token
+        if: steps.compare.outputs.updated == 'true'
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.EXPERIMENT_APP_ID }}
+          private-key: ${{ secrets.EXPERIMENT_APP_PRIVATE_KEY }}
+          repositories: ${{ github.event.repository.name }}
+
+      - name: Commit improved prior to main
+        if: steps.compare.outputs.updated == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          git config user.name "emmy-onboarding-bot"
+          git config user.email "emmy-onboarding-bot[bot]@users.noreply.github.com"
+          git add -- "$WEIGHTS"
+          git diff --cached --check
+          git commit -m "compiler: refresh $SPACE prior"
+          git fetch origin main
+          if [ "$(git rev-parse HEAD^)" != "$(git rev-parse origin/main)" ]; then
+            echo "main changed during prior evaluation; leaving the current weights in place" >&2
+            exit 1
+          fi
+          git -c credential.helper='!f() { printf "username=x-access-token\npassword=%s\n" "$GH_TOKEN"; }; f' push origin HEAD:main
+
+      - name: "Notify #emmy-robots of prior result"
+        if: ${{ always() }}
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_EMMY_ROBOTS_WEBHOOK_URL }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          if [ "$JOB_STATUS" = success ]; then
+            result=$(jq -r .message _data/decision.json)
+          else
+            result="failed before updating weights; see run"
+          fi
+          jq -n --arg space "$SPACE" --arg result "$result" \
+            --arg url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            '{content: "CI optimization " + $space + " prior: " + $result + ". " + $url, allowed_mentions: {parse: []}}' \
+            | curl --fail-with-body --silent --show-error \
+                --header 'Content-Type: application/json' \
+                --data-binary @- "$DISCORD_WEBHOOK_URL"
