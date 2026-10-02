@@ -276,7 +276,7 @@ def build_golden_groups(
         with ProcessPoolExecutor(jobs, mp_context=get_context("forkserver")) as workers:
             results = list(workers.map(_enumerate_packed, tasks, chunksize=1))
     packed_pools: dict[tuple, _Packed] = {}
-    for (pool, *_), (entry, missed, note) in zip(tasks, results):
+    for (pool, *_), (entry, missed, note) in zip(tasks, results, strict=True):
         skipped.extend(missed)
         if note is not None:
             logger.warning("  !! %s: %s", pool.name, note)
