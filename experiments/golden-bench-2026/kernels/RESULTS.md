@@ -1,5 +1,64 @@
 # Golden-bench kernel corpus
 
+## Five-card baseline for the second optimization round (2026-10-02)
+
+All ten model comparisons and all fifty strict golden replays pass on the merge of PR #1011,
+`2ffe2b81be3a24f27a9dbfb10a5b274527a677f2`. H100 prefill and V100 decode remain slower than the same-input
+`torch.compile` reference. These measurements validate the pinned routes before this round's changes.
+
+The unchanged recipe runs Qwen3-0.6B revision `c1899de289a04d12100db370d81485cdf75e47ca`, layer 0, with sequence
+lengths 1 and 512, O3, fast math disabled, 10 warmups and 100 iterations. Every process starts with a fresh tune
+database, requires measured evidence and disables new timing writes. Model comparisons use the scaled correctness
+check. Each of the five subsequent golden replays uses strict correctness. The table reports captured whole-forward
+model times in microseconds; the three backends receive identical inputs within each process.
+
+| Card | s1 Emmy | s1 `torch.compile` | s512 Emmy | s512 `torch.compile` | Launches s1 / s512 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| A100 40GB | 51.769 | 54.491 | 178.347 | 180.120 | 14 / 12 |
+| H100 80GB | 29.370 | 31.673 | 86.781 | 80.486 | 14 / 12 |
+| V100 SXM2 16GB | 68.335 | 65.009 | 500.736 | 639.631 | 14 / 21 |
+| RTX 4090 | 24.651 | 28.978 | 156.976 | 162.343 | 14 / 12 |
+| RTX 5090 | 20.469 | 36.849 | 129.833 | 135.189 | 16 / 12 |
+
+The strict golden replays use different inputs and a different reference path from the model comparison. Their
+medians and full ranges are validation results, not substitutes for the model's `torch.compile` comparison.
+
+| Card | s1 median [range], µs | s512 median [range], µs |
+| --- | ---: | ---: |
+| A100 40GB | 50.783 [50.615–51.314] | 178.176 [177.835–179.883] |
+| H100 80GB | 24.538 [24.363–24.738] | 88.315 [87.883–88.685] |
+| V100 SXM2 16GB | 67.704 [67.584–68.006] | 497.664 [495.616–502.272] |
+| RTX 4090 | 24.699 [24.571–24.751] | 156.315 [155.819–156.613] |
+| RTX 5090 | 20.471 [20.470–20.478] | 130.025 [129.605–130.592] |
+
+All cards use task-owned source checkouts and runtime extensions. Initial A100 and RTX 4090 invocations inherited
+an older runtime that rejected the `dependent_launch` field; those setup failures remain in the raw evidence.
+The reported runs rebuild the runtime from the exact source above. RTX 5090 was rebuilt and repeated too.
+Its ordered kernel sources, schedules and shared-memory sizes match the previous canonical qualification on both
+shapes. Its reference timing varies substantially: decode measured 24.592 µs in the first invocation, 36.849 µs in
+the rebuilt-runtime recipe and 30.810 µs in a supplemental check. Accepted changes therefore need contemporaneous
+balanced pairs, not a comparison with a historical reference column.
+
+A supplemental strict model-form prefill check on the unchanged RTX 5090 baseline fails on 5 of 524,288 outputs,
+with maximum absolute error 0.00390625 and mean absolute error 0.0000539. The corresponding scaled model comparison
+and all five strict golden replays pass. No tolerance changes or retry-until-pass procedure were used. Model tracing
+samples new inputs per process; the CLI's seed controls the golden reference but does not seed those model inputs.
+The failed model's input tensor is not persisted by the CLI, so this supplemental sample cannot be replayed exactly.
+The RTX 4090 supplemental strict prefill check timed out before returning a verdict; that attempt supplies no
+correctness or performance result. Supplemental strict decode checks pass on both cards.
+
+The raw baseline archives preserve the system-only experiment records, command logs, JSON measurements and
+provenance. A100, RTX 4090 and RTX 5090 archives also retain the initial environment qualification attempts.
+Only the single V100 SXM2 machine was used.
+
+| Card | Archive | Successful recipe root |
+| --- | --- | --- |
+| A100 | `tuning_a100x1_round2_baseline_2026-10-02.tar.gz` | `2026-10-02_06-51-38/` |
+| H100 | `tuning_h100x1_round2_baseline_2026-10-02.tar.gz` | `2026-10-02_06-30-53/` |
+| V100 | `results_v100x1_round2_baseline_2026-10-02.tar.gz` | `2026-10-02_06-31-09/` |
+| RTX 4090 | `tuning_rtx4090x1_round2_baseline_2026-10-02.tar.gz` | `2026-10-02_06-47-49/` |
+| RTX 5090 | `tuning_rtx5090x1_round2_baseline_2026-10-02.tar.gz` | `2026-10-02_06-39-47/` |
+
 ## Shared K/V decode producers (2026-10-01)
 
 Sharing the K/V producer lowers whole-layer decode latency on A100, H100, V100 and RTX 4090. The selected route keeps Q
