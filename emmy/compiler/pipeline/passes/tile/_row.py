@@ -136,7 +136,7 @@ def _orients_by_nest(tile: TileOp) -> bool:
 
 
 def _align_owned_sweeps(piece: TileOp) -> TileOp:
-    """Give independent, equal-domain output sweeps one coordinate before re-forming the piece."""
+    """Give independent, equal-domain output sweeps common coordinates before re-forming the piece."""
     op = piece.op
     if piece.schedule is not None or len(piece.output_specs) < 2 or not isinstance(op, Fold) or op.axis is not None:
         return piece
@@ -207,7 +207,7 @@ def _align_owned_sweeps(piece: TileOp) -> TileOp:
 
     def loads(region: Fold) -> tuple[Load, ...]:
         return tuple(
-            stmt for site in sites(region) for node in (site.node, *site.node.operands)
+            stmt for site in sites(region) for node in (site.node, *(edge for edge in site.node.operands if edge.as_slab() is not None))
             for stmt in node.lift.body.iter() if isinstance(stmt, Load)
         )
 
