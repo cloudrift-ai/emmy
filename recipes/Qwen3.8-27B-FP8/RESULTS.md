@@ -266,7 +266,7 @@ on seed 3.
 | QK and triangular mask, 64 tokens | 20.5 us | 29.7 us | 1.45x |
 | QK and triangular mask, 512 tokens | 114.8 us | 127.3 us | 1.11x |
 | Recurrent update | 14.0 us | 20.3 us | 1.45x |
-| Output head | 3,378 us | 6,234 us | 1.85x |
+| Output head | 3,380 us | 6,255 us | 1.85x |
 
 The recurrent update passed on seeds 0, 1, 2 and 3. Its three kernels compute the key norm, the normalized state-vector
 product, and the residual update. Kernel-scoped pins let the producer use transposed cooperative reduction while the
