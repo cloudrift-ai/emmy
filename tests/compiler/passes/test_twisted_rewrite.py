@@ -215,9 +215,10 @@ def test_sdpa_score_contraction_reaches_the_mma_tier(monkeypatch) -> None:
     tier tiles — and the carrier itself is a site the chunk tier folds, so the value channel
     reaches the tensor cores in the same kernel.
 
-    The fused placement and carrier tier are pinned: whether the tensor cores are OFFERED is the
-    compiler's contract; the unmeasured greedy placement and schedule are the prior's choices."""
+    The fused placement, unsplit reduction and carrier tier are pinned: whether the tensor cores
+    are OFFERED is the compiler's contract; the unmeasured greedy schedule is the prior's choice."""
     monkeypatch.setenv(config.knob_var("PLACE"), "fuse")
+    monkeypatch.setenv(config.knob_var("REDUCE"), "")  # no cross-CTA split
     monkeypatch.setenv(config.knob_var("TILE@map.1/twist"), "mma_m16n8k16_f16_f32/f1x2")
     graph, _, _ = graph_from_code(
         "F.scaled_dot_product_attention("
