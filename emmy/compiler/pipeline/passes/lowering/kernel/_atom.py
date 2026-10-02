@@ -159,6 +159,8 @@ def copy_cell(body, sigma, suffix: str, protected) -> list:
     one copy per output cell ``(i, j)`` → ``__c{i}_{j}``) and the ILP register fold (``_factor``
     ``_tile_reduce_axis``, one copy per accumulator chain ``r`` → ``__r{r}``); the caller supplies the per-copy
     ``sigma`` (the coordinate offset) and ``suffix`` (the SSA tag)."""
+    # Replication keeps each nested loop's binder. Its coordinate reads must keep the same name.
+    protected = protected | Body(body).axis_names
     rename = lambda n: n if n in protected else f"{n}{suffix}"  # noqa: E731
     return [s.rewrite(rename, sigma) for s in body]
 
@@ -1900,13 +1902,12 @@ def _scalar_bound(mn, offset, i: int, j: int):
     return cond
 
 
-def _scalar_protected(c: Fold, tile: Tile, lead: tuple = (), *, body: Body | tuple = (), k_axis: Axis) -> frozenset[str]:
+def _scalar_protected(tile: Tile, lead: tuple = (), *, k_axis: Axis) -> frozenset[str]:
     """The shared iteration coordinates — the block / unit / loop / extent vars excluded from the
     per-cell SSA rename (everything else is suffixed ``__c{i}_{j}`` so each cell owns its names).
     ``lead`` is the kernel's leading (batch / ksplit) grid axes: one coordinate for the whole cell
-    block, so renaming one would emit a reference no enclosing loop defines. ``body`` contributes
-    projection-local loop coordinates, notably an output sweep that remains bound inside every
-    replicated cell."""
+    block, so renaming one would emit a reference no enclosing loop defines. ``copy_cell`` protects
+    the coordinates bound inside each copy."""
     m, n = tile.m, tile.n
     prot = {k_axis.name}
     for s in (m, n):
@@ -1915,7 +1916,6 @@ def _scalar_protected(c: Fold, tile: Tile, lead: tuple = (), *, body: Body | tup
         prot.add(a.name)
     for a in (m.axis, n.axis, k_axis, *lead):
         prot |= set(a.extent_expr().free_vars())
-    prot.update(Body(body).axis_names)
     return frozenset(prot)
 
 
@@ -2583,11 +2583,7 @@ class _ScalarOps(_AtomOps):
         streamed = tuple(dict.fromkeys(edge for _, edge in c.bilinear_channels()))
         b_body = tuple(dict.fromkeys(stmt for edge in streamed for stmt in edge.lower(axes=self.axes)))
         uniform = [stmt for edge in c.operands[1:] if all(edge is not other for other in streamed) for stmt in edge.lower(axes=self.axes)]
-        # The operand bodies contribute their OWN loop coordinates (a computed cone's internal
-        # fold axes): a replicated read of such a coordinate must keep its name — the loop that
-        # binds it is copied with the cell, so suffixing the reads (but never a Loop's binding)
-        # emitted references no scope defines.
-        prot = _scalar_protected(c, self.tile, self.lead, body=(*a_pro, *a_body, *b_body, *step), k_axis=self.k_axis)
+        prot = _scalar_protected(self.tile, self.lead, k_axis=self.k_axis)
         b_names, a_names = {name for edge in streamed for name in edge.exposes}, set(c.operands[0].exposes)
         # Whatever the step reads and does not define is bound OUTSIDE the cell — a uniform leaf
         # above the loop. Only the two operand results (rebound per row / column below) and the
@@ -2643,7 +2639,7 @@ class _ScalarOps(_AtomOps):
         c = self.c
         sigma = _scalar_sigma(mn, offset, i, j)
         tail = _unshadowed(self.epilogue, c.exposes)
-        cell = copy_cell(tail, sigma, f"__c{i}_{j}", _scalar_protected(c, self.tile, self.lead, body=tail, k_axis=self.k_axis))
+        cell = copy_cell(tail, sigma, f"__c{i}_{j}", _scalar_protected(self.tile, self.lead, k_axis=self.k_axis))
         cell = _guard_writes(cell, _scalar_bound(mn, offset, i, j))
         return _dedup_loads(cell)
 
