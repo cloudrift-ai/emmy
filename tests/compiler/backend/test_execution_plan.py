@@ -350,19 +350,23 @@ def test_non_affine_index_map_stays_outside_the_vocabulary():
 
 
 def test_unreproducible_bind_record_marks_the_weight_unbindable(caplog):
-    """A record the plan cannot reproduce (leaves it would have to read from the checkpoint)
-    must mark the weight ``load_ops=None`` — the pack save then refuses, rather than writing a
-    pack whose boot silently drops the weight."""
+    """A record the plan cannot reproduce (more than one leaf it would have to read from the
+    checkpoint) must mark the weight ``load_ops=None`` — the pack save then refuses, and the
+    serving runner's binding raises, rather than a boot that silently drops the weight."""
     import logging
 
+    from emmy.compiler.ir.tensor.ir import ElementwiseOp
+
     record = Graph()
-    record.add_node(
-        op=ConstantOp(name="leaf", source_path="model.external", source_shape=(4, 4), source_dtype="f32"),
-        inputs=[],
-        output=Tensor("leaf", (4, 4)),
-        node_id="leaf",
-    )
-    record.outputs = ["leaf"]
+    for leaf in ("a", "b"):
+        record.add_node(
+            op=ConstantOp(name=leaf, source_path=f"model.{leaf}", source_shape=(4, 4), source_dtype="f32"),
+            inputs=[],
+            output=Tensor(leaf, (4, 4)),
+            node_id=leaf,
+        )
+    record.add_node(op=ElementwiseOp(op="add"), inputs=["a", "b"], output=Tensor("sum", (4, 4)), node_id="sum")
+    record.outputs = ["sum"]
     with caplog.at_level(logging.WARNING, logger="emmy.compiler.backend.plan"):
         plan = _one_weight_plan(ConstantOp(name="h", source_graph=record, source_shape=(4, 4)))
     assert plan.weights["w"].load_ops is None
