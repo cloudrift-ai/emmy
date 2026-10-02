@@ -1873,7 +1873,7 @@ class EmmyGenRunner:
             )
         a = self._host_input(attn_out)
         r = self._host_input(residual, residual=True)
-        ins = [a, r] if gate is None else [a, r, gate.astype(self._np_dtype, copy=False)]
+        ins = [a, r] if gate is None else [a, r, self._host_input(gate)]
         t = a.shape[0]
         if self._post_decode is not None and t <= self._decode_bucket:
             out = self._post_decode[layer].run([_pad_rows(x, self._decode_bucket) for x in ins])[0]

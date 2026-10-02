@@ -1026,6 +1026,10 @@ def gated_runner():
     carries an attention output gate — built with every tier: the single-token twin, decode bucket
     4, prefill bucket 16 (so 17..20 is the rider split) and the symbolic program up to 32 tokens.
     Not in the lane's golden: it compiles cold, so its schedules are this card's picks."""
+    return _build_gated_runner("float32")
+
+
+def _build_gated_runner(dtype_str):
     pytest.importorskip("transformers.models.qwen3_5")
     import torch
     import transformers
@@ -1043,8 +1047,14 @@ def gated_runner():
             # 0.5 a zero gate gives: a dropped gate would pass. q itself goes through q_norm, so
             # scaling the whole projection only moves the gate.
             block.self_attn.q_proj.weight.mul_(10)
-    runner = EmmyGenRunner.from_model(model, dtype_str="float32", decode_bucket=4, prefill_bucket=16, max_tokens=32)
+    model = model.to(getattr(torch, dtype_str))
+    runner = EmmyGenRunner.from_model(model, dtype_str=dtype_str, decode_bucket=4, prefill_bucket=16, max_tokens=32)
     return runner, model
+
+
+@pytest.fixture(scope="module")
+def bf16_gated_runner():
+    return _build_gated_runner("bfloat16")
 
 
 def _gated_stitch(runner, model, t, *, gate_fn=lambda gate: gate):
@@ -1058,9 +1068,9 @@ def _gated_stitch(runner, model, t, *, gate_fn=lambda gate: gate):
     from emmy.compiler.trace.huggingface import build_causal_mask
 
     torch.manual_seed(t)
-    hidden = torch.randn(t, model.config.hidden_size)
+    hidden = torch.randn(t, model.config.hidden_size).to(model.dtype)
     cos, sin = model.model.rotary_emb(hidden[None], torch.arange(t)[None])
-    mask = build_causal_mask(t, torch.float32)
+    mask = build_causal_mask(t, model.dtype)
     out = []
     for layer, block in enumerate(model.model.layers):
         hd, nh, nkv, scaling = runner.layer_meta(layer)
@@ -1074,7 +1084,7 @@ def _gated_stitch(runner, model, t, *, gate_fn=lambda gate: gate):
         got = runner.forward_layer_post_device(layer, attn.contiguous(), hidden.cuda(), gate_fn(gate))
         with torch.no_grad():
             expected = block(hidden[None], position_embeddings=(cos, sin), attention_mask=mask)[0]
-        out.append((got.cpu().numpy(), expected.numpy()))
+        out.append((got.float().cpu().numpy(), expected.float().numpy()))
         hidden = expected
     return out
 
@@ -1100,6 +1110,36 @@ def test_gated_attention_layer_matches_hugging_face(gated_runner, t):
         np.testing.assert_allclose(got, expected, rtol=2e-3, atol=2e-3)
     for got, expected in _gated_stitch(runner, model, t, gate_fn=torch.zeros_like):
         assert not np.allclose(got, expected, rtol=2e-3, atol=2e-3)
+
+
+@pytest.mark.parametrize("t", [3, 16, 18])
+def test_bf16_gated_attention_layer_matches_hugging_face(bf16_gated_runner, t):
+    """BF16 retains the attention output gate across decode, prefill and the rider split."""
+    import torch
+
+    runner, model = bf16_gated_runner
+    assert runner._output_gates == (True, True)
+    for got, expected in _gated_stitch(runner, model, t):
+        np.testing.assert_allclose(got, expected, rtol=1e-2, atol=1e-2)
+    for got, expected in _gated_stitch(runner, model, t, gate_fn=torch.zeros_like):
+        assert not np.allclose(got, expected, rtol=1e-2, atol=1e-2)
+
+
+def test_bf16_gated_attention_host_gate_matches_device(bf16_gated_runner):
+    """A float32 host gate is encoded as BF16 bits before entering the post program."""
+    import torch
+
+    from emmy.compiler.dtype import decode_bf16
+
+    runner, _model = bf16_gated_runner
+    hidden = torch.randn(3, 64, dtype=torch.bfloat16, device="cuda")
+    q, _k, _v, gate = runner.forward_layer_pre_device(0, hidden)
+    host_hidden = hidden.view(torch.uint16).cpu().numpy()
+    host_attn = q.view(torch.uint16).cpu().numpy()
+    host_gate = decode_bf16(gate.view(torch.uint16).cpu().numpy())
+    got = runner.forward_layer_post(0, host_attn, host_hidden, host_gate)
+    expected = runner.forward_layer_post_device(0, q, hidden, gate)
+    np.testing.assert_array_equal(got, expected.view(torch.uint16).cpu().numpy())
 
 
 def test_gated_attention_layer_host_path_matches_device(gated_runner):
