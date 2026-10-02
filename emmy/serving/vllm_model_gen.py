@@ -666,6 +666,11 @@ class EmmyGenModel(nn.Module, SupportsPP):
                 f"token width {t} exceeds the compiled widths for this hyper-connection model "
                 f"(prefill capacity {self.runner.prefill_capacity}); lower --max-num-batched-tokens"
             )
+        if self.runner.residual_dtype == torch.bfloat16:
+            raise ValueError(
+                f"BF16 token width {t} exceeds the compiled widths (prefill capacity {self.runner.prefill_capacity}); "
+                "lower --max-num-batched-tokens"
+            )
         hidden_np = hidden.detach().cpu().numpy()
         for layer in range(self.runner.num_layers):
             residual_np = hidden_np

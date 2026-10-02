@@ -11,6 +11,8 @@ fp32 (carve correctness is dtype-independent; the fp16 path is covered by the Ph
 import numpy as np
 import pytest
 
+from emmy.compiler.dtype import F16
+
 # NOT perf-marked: these are correctness pins (the only regression guards for the serving
 # runner's GPU paths), and the ``perf`` gating in the root ``tests/conftest.py`` skips every
 # perf-marked item suite-wide under plain ``pytest tests/`` — a perf mark here would silently
@@ -40,6 +42,83 @@ def _reference_attention(runner, q_np, k_np, v_np, cos, sin, mask, apply_rotary)
     k, v = _repeat_kv(k, hq // hkv), _repeat_kv(v, hq // hkv)
     attn = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, scale=runner.scaling)  # [1, Hq, T, D]
     return attn.transpose(1, 2).reshape(t, hq * d).numpy()
+
+
+def test_bf16_runner_keeps_residual_and_constants_in_bf16(tmp_path):
+    import copy
+
+    import torch
+    import torch.nn.functional as F
+    from transformers import Qwen3Config, Qwen3ForCausalLM
+    from transformers.models.qwen3.modeling_qwen3 import apply_rotary_pos_emb
+
+    from emmy.compiler.dtype import encode_bf16
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.backend.plan import plan_from_graph
+    from emmy.serving.gen_runner import EmmyGenRunner
+    from emmy.serving.twins import capture_twin_graphs
+
+    config = Qwen3Config(
+        vocab_size=32, hidden_size=64, intermediate_size=128, num_hidden_layers=1,
+        num_attention_heads=4, num_key_value_heads=2, head_dim=16,
+    )
+    model = Qwen3ForCausalLM(config).to(torch.bfloat16).eval()
+    runner = EmmyGenRunner.from_model(model, dtype_str="bfloat16", decode_bucket=4, max_tokens=4)
+    pre = runner._pre_decode[0].program
+    post = runner._post_decode[0].program
+
+    config.save_pretrained(tmp_path)
+    twins = capture_twin_graphs(str(tmp_path), decode_bucket=4, prefill_bucket=0, symbolic=False, dtype="bfloat16")
+    for name, program in (("pre4", pre), ("post4", post)):
+        twin_plan = plan_from_graph(CudaBackend(tune_db="auto").compile(twins[name]))
+        assert set(program.plan.kernels) == set(twin_plan.kernels)
+
+    for program in (pre, post):
+        buffers = {b.name: b.dtype.name for b in program.plan.buffers}
+        assert all(buffers[n] == "bf16" for n in program.plan.inputs + program.plan.outputs)
+    weight_name = next(n for n, w in pre.plan.weights.items() if w.source_path.endswith("input_layernorm.weight"))
+    expected = encode_bf16(model.model.layers[0].input_layernorm.weight.detach().float().numpy())
+    actual = pre.buffer_view(weight_name).view(torch.uint16).cpu().numpy()
+    np.testing.assert_array_equal(actual, expected)
+    assert expected[0] == 0x3F80
+
+    hidden = runner.embed_device(torch.tensor([1, 2], device="cuda"))
+    assert hidden.dtype == torch.bfloat16
+    q, k, v = runner.forward_layer_pre_device(0, hidden)
+    assert all(x.dtype == torch.bfloat16 for x in (q, k, v))
+    out = runner.forward_layer_post_device(0, q, hidden)
+    assert out.dtype == torch.bfloat16
+    assert runner.final_norm_device(out).dtype == torch.bfloat16
+
+    eager = copy.deepcopy(model)
+    ids = torch.tensor([1, 2], device="cuda")
+    positions = torch.arange(len(ids), device="cuda")[None]
+    hidden = runner.embed_device(ids)
+
+    def stitched():
+        q2, k2, v2 = runner.forward_layer_pre_device(0, hidden)
+        q = q2.view(1, len(ids), runner.num_heads, runner.head_dim).transpose(1, 2)
+        k = k2.view(1, len(ids), runner.num_kv_heads, runner.head_dim).transpose(1, 2)
+        v = v2.view(1, len(ids), runner.num_kv_heads, runner.head_dim).transpose(1, 2)
+        cos, sin = eager.model.rotary_emb(hidden.cpu()[None], positions.cpu())
+        cos, sin = cos.cuda(), sin.cuda()
+        q, k = apply_rotary_pos_emb(q, k, cos, sin)
+        k = _repeat_kv(k, runner.num_heads // runner.num_kv_heads)
+        v = _repeat_kv(v, runner.num_heads // runner.num_kv_heads)
+        attn = F.scaled_dot_product_attention(q, k, v, is_causal=True, scale=runner.scaling)
+        attn = attn.transpose(1, 2).reshape(len(ids), -1)
+        return runner.final_norm_device(runner.forward_layer_post_device(0, attn, hidden))
+
+    with torch.no_grad():
+        got = stitched()
+        reference = eager.model(input_ids=ids.cpu()[None], use_cache=False).last_hidden_state[0].cuda()
+        again = stitched()
+    torch.testing.assert_close(got, reference, atol=0.08, rtol=0.08)
+    assert torch.equal(got, again)
+
+    wide = torch.full((2, config.hidden_size), 70000.0, dtype=torch.bfloat16, device="cuda")
+    assert torch.isfinite(runner.forward_layer_pre_device(0, wide)[0]).all()
+    assert torch.isinf(torch.tensor(70000.0, dtype=torch.float16, device="cuda"))
 
 
 def test_gen_runner_stitch_matches_eager(built):
@@ -549,7 +628,7 @@ def test_expert_program_fp8_inputs_match_reference():
             Expert(),
             [x, gu_bits, dn_bits, gu_scale, dn_scale],  # torch fp8 tensors: the feed must view bits
             None,
-            np.dtype("float16"),
+            F16,
             plan=plan,
         )
         (out,) = prog.run(
@@ -622,7 +701,7 @@ def test_expert_program_fp8_indirect_compose(monkeypatch):
         bits_e.append((w / scale).clamp(-448.0, 448.0).to(torch.float8_e4m3fn).cuda())
         scale_e.append(scale.cuda())
 
-    prog, _ = _compile_split(XW(), [x, bits_e[0], scale_e[0]], None, np.dtype("float16"), plan=plan)
+    prog, _ = _compile_split(XW(), [x, bits_e[0], scale_e[0]], None, F16, plan=plan)
     p = prog.program
     table_w = torch.tensor([t.data_ptr() for t in bits_e], dtype=torch.int64, device="cuda")
     table_s = torch.tensor([t.data_ptr() for t in scale_e], dtype=torch.int64, device="cuda")
@@ -710,7 +789,7 @@ def test_serving_split_computes_the_declared_w4a4_program(tmp_path, monkeypatch)
         return lowered[-1]
 
     monkeypatch.setattr(CudaBackend, "compile", capture)
-    prog, _plan = _compile_split(wrapper, [x], None, np.dtype("float16"), ckpt=(str(ckpt), id_to_key))
+    prog, _plan = _compile_split(wrapper, [x], None, F16, ckpt=(str(ckpt), id_to_key))
     (graph,) = stamped
 
     # The program must carry the ACTIVATION encode: a W4A16 split would pass every numeric check
@@ -736,6 +815,66 @@ def test_serving_split_computes_the_declared_w4a4_program(tmp_path, monkeypatch)
         rel = np.abs(c - r) / float(np.abs(r).max())
         assert float(np.median(rel)) < 1e-4, f"{name}: a systematic shift, not the fused-scale rounding"
         assert float(rel.max()) < 2e-3, f"{name}: past one fused-scale rounding per side"
+
+
+def test_bf16_nvfp4_post_matches_numpy(tmp_path, monkeypatch):
+    import torch
+
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.backend.numpy import NumpyBackend
+    from emmy.compiler.dtype import BF16, decode_bf16, encode_bf16
+    from emmy.compiler.loader.safetensors import load_constants_from_safetensors
+    from emmy.compiler.loader.synthesize import write_quantized_checkpoint
+    from emmy.serving.gen_runner import _compile_split, trace_split
+
+    class Post(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.o_proj = torch.nn.Linear(64, 64, bias=False)
+
+        def forward(self, attn_out, residual):
+            return self.o_proj(attn_out) + residual
+
+    torch.manual_seed(0)
+    wrapper = Post().to(torch.bfloat16).eval()
+    wrapper.o_proj.weight.data.abs_()
+    attn = torch.rand(8, 64, dtype=torch.bfloat16)
+    residual = torch.zeros(8, 64, dtype=torch.bfloat16)
+    examples = (attn, residual)
+    traced = trace_split(wrapper, examples, None)
+    param_path = {nid: op.source_path for nid, op in traced.loadable_constants()}
+    ckpt = write_quantized_checkpoint(traced, (wrapper, examples, {}), tmp_path / "ckpt")
+    params = dict(wrapper.named_parameters())
+    id_to_key = {id(params[param_path[nid]]): op.source_path for nid, op in traced.loadable_constants()}
+
+    stamped, lowered = [], []
+    real_compile = CudaBackend.compile
+
+    def capture(self, graph):
+        stamped.append(graph.copy())
+        lowered.append(real_compile(self, graph))
+        return lowered[-1]
+
+    monkeypatch.setattr(CudaBackend, "compile", capture)
+    prog, plan = _compile_split(wrapper, list(examples), None, BF16, ckpt=(str(ckpt), id_to_key))
+    (graph,) = stamped
+    assert all(b.dtype.name == "bf16" for b in plan.buffers if b.name in plan.inputs + plan.outputs)
+    assert any(type(n.op).__name__ == "ElementwiseOp" and n.op.name == "to_f4e2m1" for n in graph.nodes.values())
+    assert any(n.output.dtype.name == "f4e2m1x2" for n in graph.nodes.values())
+    sources = [s for n in lowered[0].nodes.values() if (s := getattr(n.op, "kernel_source", None))]
+    assert any("emmy_to_f4e2m1" in s for s in sources)
+
+    feed = {n: encode_bf16(t.float().numpy()) for n, t in zip(prog.input_names, examples, strict=True)}
+    ref, _ = NumpyBackend().run(graph, input_data={**load_constants_from_safetensors(graph, str(ckpt)), **feed})
+    (got_bits,) = prog.run(list(feed.values()))
+    expected = ref.outputs[prog.output_names[0]]
+    expected = decode_bf16(expected) if expected.dtype == np.uint16 else expected.astype(np.float32)
+    got = decode_bf16(got_bits)
+    bits = encode_bf16(expected)
+    rounded = decode_bf16(bits)
+    ulp = np.maximum(np.abs(decode_bf16(bits + np.uint16(1)) - rounded), np.abs(decode_bf16(bits - np.uint16(1)) - rounded))
+    error = np.abs(got - expected)
+    assert np.all(error <= ulp), (np.count_nonzero(error > ulp), float(np.max(error / ulp)))
 
 
 def test_host_mapped_embed_table_gathers_identically_and_costs_no_vram(monkeypatch, built, build_runner):

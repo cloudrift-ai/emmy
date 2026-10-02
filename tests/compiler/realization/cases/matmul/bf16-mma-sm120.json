@@ -1,0 +1,263 @@
+{
+ "compute_cap": [
+  12,
+  0
+ ],
+ "programs": [
+  {
+   "inputs": [
+    "x0",
+    "x1"
+   ],
+   "outputs": [
+    "matmul"
+   ],
+   "nodes": [
+    {
+     "id": "x0",
+     "op": "input",
+     "outputs": [
+      [
+       "x0",
+       "bf16",
+       [
+        128,
+        256
+       ]
+      ]
+     ]
+    },
+    {
+     "id": "x1",
+     "op": "input",
+     "outputs": [
+      [
+       "x1",
+       "bf16",
+       [
+        256,
+        128
+       ]
+      ]
+     ]
+    },
+    {
+     "id": "matmul",
+     "op": "torch.matmul",
+     "inputs": [
+      "x0",
+      "x1"
+     ],
+     "outputs": [
+      [
+       "matmul",
+       "bf16",
+       [
+        128,
+        128
+       ]
+      ]
+     ]
+    }
+   ]
+  }
+ ],
+ "kernels": [
+  {
+   "exact_identity": "298021e7f8c617a1bf9500a83ae0c912c1efefc9ea98fe6b45c60d9304cc7742",
+   "structural_identity": "9ee35cccd476e5ab2cac7c739d54ec5fb67884c56e6be03df7c8a0818dc6ece6",
+   "loop_ir": {
+    "inputs": [
+     "x1",
+     "x0"
+    ],
+    "outputs": [
+     "matmul"
+    ],
+    "nodes": [
+     {
+      "id": "x0",
+      "op": "input",
+      "outputs": [
+       [
+        "x0",
+        "bf16",
+        [
+         128,
+         256
+        ]
+       ]
+      ]
+     },
+     {
+      "id": "x1",
+      "op": "input",
+      "outputs": [
+       [
+        "x1",
+        "bf16",
+        [
+         256,
+         128
+        ]
+       ]
+      ]
+     },
+     {
+      "id": "matmul",
+      "op": "loop",
+      "attrs": {
+       "body": [
+        {
+         "Loop": {
+          "axis": {
+           "name": "a0",
+           "extent": 128
+          },
+          "body": [
+           {
+            "Loop": {
+             "axis": {
+              "name": "a1",
+              "extent": 128
+             },
+             "body": [
+              {
+               "Loop": {
+                "axis": {
+                 "name": "a2",
+                 "extent": 256
+                },
+                "body": [
+                 {
+                  "Load": {
+                   "names": [
+                    "in0"
+                   ],
+                   "input": "x0",
+                   "index": [
+                    "a0",
+                    "a2"
+                   ]
+                  }
+                 },
+                 {
+                  "Load": {
+                   "names": [
+                    "in1"
+                   ],
+                   "input": "x1",
+                   "index": [
+                    "a2",
+                    "a1"
+                   ]
+                  }
+                 },
+                 {
+                  "Assign": {
+                   "name": "v0",
+                   "op": "multiply",
+                   "args": [
+                    "in0",
+                    "in1"
+                   ]
+                  }
+                 },
+                 {
+                  "Accum": {
+                   "name": "acc0",
+                   "value": "v0",
+                   "axes": [
+                    "a2"
+                   ]
+                  }
+                 }
+                ]
+               }
+              },
+              {
+               "Write": {
+                "output": "matmul",
+                "index": [
+                 "a0",
+                 "a1"
+                ],
+                "values": [
+                 "acc0"
+                ]
+               }
+              }
+             ]
+            }
+           }
+          ]
+         }
+        }
+       ],
+       "name": "k_matmul_7325d9"
+      },
+      "inputs": [
+       "x1",
+       "x0"
+      ],
+      "outputs": [
+       [
+        "matmul",
+        "bf16",
+        [
+         128,
+         128
+        ]
+       ]
+      ]
+     }
+    ]
+   },
+   "name": "k_matmul_7325d9",
+   "stamps": {
+    "S_n_load": 2.0,
+    "S_n_distinct_input": 2.0,
+    "S_n_write": 1.0,
+    "S_n_accum": 1.0,
+    "S_n_cond": 0.0,
+    "S_n_assign": 1.0,
+    "S_pw_multiply": 1.0,
+    "S_reduce_add": 1.0,
+    "S_n_loop": 3.0,
+    "S_n_reduce_loop": 1.0,
+    "S_n_free_loop": 2.0,
+    "S_loop_depth": 3.0,
+    "S_dtype_bf16": 2.0,
+    "S_ext_n_free_axis": 2.0,
+    "S_ext_free_prod": 16384.0,
+    "S_ext_free_max": 128.0,
+    "S_ext_n_reduce_axis": 1.0,
+    "S_ext_reduce_prod": 256.0,
+    "S_ext_reduce_max": 256.0,
+    "S_ext_n_symbolic_axis": 0.0,
+    "S_ext_serial_cell_work": 256.0
+   },
+   "formed": true,
+   "traced": 0,
+   "origins": [
+    "matmul"
+   ]
+  }
+ ],
+ "rows": [
+  {
+   "name": "k_matmul_7325d9",
+   "kernel": "298021e7f8c617a1bf9500a83ae0c912c1efefc9ea98fe6b45c60d9304cc7742",
+   "pins": {
+    "FAST_MATH": true
+   },
+   "knobs": {
+    "WORK": "w4x1",
+    "TILE": "mma_m16n8k16_bf16_f32/f1x1/k8",
+    "REDUCE": "",
+    "STAGE": "d2/smem-tma",
+    "RASTER": ""
+   }
+  }
+ ]
+}

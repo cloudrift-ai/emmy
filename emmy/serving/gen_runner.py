@@ -365,7 +365,7 @@ def _retarget_constants(graph, wrapper, id_to_key) -> None:
             graph.nodes[nid].op = retargeted
 
 
-def _plan_sources(plan, wrapper, np_dtype, ckpt_dir, id_to_key):
+def _plan_sources(plan, wrapper, dtype, ckpt_dir, id_to_key):
     """The constant feed's raw sources for a plan whose weights are addressed by CHECKPOINT key.
 
     Reads exactly the paths the plan asks for — straight from the shards — and falls back to the
@@ -376,9 +376,13 @@ def _plan_sources(plan, wrapper, np_dtype, ckpt_dir, id_to_key):
     Raises when a weight cannot be sourced at all — a silently unbound trunk weight computes
     garbage, and the folded checkpoint-basis cone (which the plan cannot reproduce) reaches here
     exactly that way."""
+    import numpy as np
     import torch
 
+    from emmy.compiler.dtype import DataType
     from emmy.compiler.loader.safetensors import load_sources_by_path
+
+    assert isinstance(dtype, DataType)
 
     unbindable = [
         nid
@@ -414,7 +418,8 @@ def _plan_sources(plan, wrapper, np_dtype, ckpt_dir, id_to_key):
         for path, t in list(wrapper.named_parameters(remove_duplicate=False)) + list(wrapper.named_buffers(remove_duplicate=False)):
             key = id_to_key.get(id(t), path)
             if key in missing:
-                sources[key] = t.detach().cpu().to(torch.float32).numpy().astype(np_dtype, copy=False)
+                source_dtype = np.float32 if dtype.name == "bf16" else dtype.np
+                sources[key] = t.detach().cpu().to(torch.float32).numpy().astype(source_dtype, copy=False)
         still = want - set(sources)
         if still:
             raise RuntimeError(f"checkpoint-sourced compile: no source for {sorted(still)[:3]} (of {len(still)})")
@@ -441,7 +446,7 @@ def _compile_split(
     wrapper,
     example_args,
     argnames,
-    np_dtype,
+    dtype,
     dev_consts=None,
     arena=None,
     capacity=None,
@@ -507,11 +512,14 @@ def _compile_split(
         raise ValueError("expert input formats are mutually exclusive")
     if mxfp4_specs and mxfp4_transposed is None:
         raise ValueError("mxfp4_specs needs mxfp4_transposed: the experts module's weight layout decides the decode's orientation")
+    import numpy as np
     import torch
 
     from emmy.compiler.backend.cuda.program import CompiledProgram
     from emmy.compiler.backend.gpu_lock import gpu_lock
-    from emmy.compiler.dtype import encode_bf16
+    from emmy.compiler.dtype import DataType, encode_bf16
+
+    assert isinstance(dtype, DataType)
 
     if plan is None:
         from emmy.compiler.backend.cuda.backend import CudaBackend
@@ -563,13 +571,14 @@ def _compile_split(
         example_args = [aux_examples.get(n, a) for n, a in zip(plan.inputs, padded, strict=True)]
 
     if ckpt is not None:
-        sources = _plan_sources(plan, wrapper, np_dtype, ckpt[0], ckpt[1])
+        sources = _plan_sources(plan, wrapper, dtype, ckpt[0], ckpt[1])
     else:
         sources = {}
+        source_dtype = np.float32 if dtype.name == "bf16" else dtype.np
         for path, t in wrapper.named_parameters(remove_duplicate=False):
-            sources[path] = t.detach().cpu().to(torch.float32).numpy().astype(np_dtype, copy=False)
+            sources[path] = t.detach().cpu().to(torch.float32).numpy().astype(source_dtype, copy=False)
         for path, t in wrapper.named_buffers(remove_duplicate=False):
-            sources[path] = t.detach().cpu().to(torch.float32).numpy().astype(np_dtype, copy=False)
+            sources[path] = t.detach().cpu().to(torch.float32).numpy().astype(source_dtype, copy=False)
 
     build_args = example_args
     if capacity is not None and argnames:
@@ -586,8 +595,6 @@ def _compile_split(
     # uint8 carrier — the same rule as the constant side in ``loader/safetensors.py`` — and
     # a scale input keeps its traced f32. A torch fp8 example tensor reinterprets via
     # ``.view``; a value cast would decode it.
-    import numpy as np  # noqa: PLC0415
-
     input_dtypes = {b.name: b.dtype for b in plan.buffers}
     torch_f8 = (torch.float8_e4m3fn, torch.float8_e5m2)
 
@@ -606,7 +613,7 @@ def _compile_split(
         values = a.detach().cpu().to(torch.float32).numpy()
         if dt is not None and dt.name == "bf16":
             return encode_bf16(values)
-        return values.astype(dt.np if dt is not None else np_dtype, copy=False)
+        return values.astype(dt.np if dt is not None else dtype.np, copy=False)
 
     feed = {n: _np_in(n, a) for n, a in zip(plan.inputs, build_args, strict=True)}
     with gpu_lock():
@@ -1019,8 +1026,11 @@ class EmmyGenRunner:
             moe_expert_layout,
         )
 
+        from emmy.compiler.dtype import get
+
         dtype = getattr(torch, dtype_str)
-        np_dtype = np.dtype(dtype_str)
+        compiler_dtype = get(dtype_str)
+        np_dtype = compiler_dtype.np
         trunk = getattr(model, "model", model)
         # Multimodal wrappers (gemma-4 "unified") nest the decoder stack + embed/norm under
         # ``language_model`` and carry the text dims on ``config.text_config``.
@@ -1278,7 +1288,7 @@ class EmmyGenRunner:
                         expert_w,
                         [torch.zeros(8, hidden, dtype=dtype), *example_w],
                         ["x"],
-                        np_dtype,
+                        compiler_dtype,
                         arena=arena,
                         # The one program that can be handed the WHOLE step: pre/post split a
                         # rider-width step across their static twins, but the routed dispatch
@@ -1306,7 +1316,7 @@ class EmmyGenRunner:
                             expert_w,
                             [torch.zeros(m, hidden, dtype=dtype), *example_w],
                             None,
-                            np_dtype,
+                            compiler_dtype,
                             arena=arena,
                             **expert_kw,
                         )
@@ -1342,7 +1352,7 @@ class EmmyGenRunner:
                             expert_w,
                             slot_example,
                             None,
-                            np_dtype,
+                            compiler_dtype,
                             plan=stored_ind,
                             plan_cache=plan_cache,
                             indirect_inputs=ind_names,
@@ -1358,7 +1368,7 @@ class EmmyGenRunner:
                                 expert_w,
                                 slot_example,
                                 None,
-                                np_dtype,
+                                compiler_dtype,
                                 plan=_plan_with_slot(ind_plan, j),
                                 aux_examples=aux_examples,
                                 weight_inputs=ind_names,
@@ -1482,7 +1492,7 @@ class EmmyGenRunner:
                             pre_w,
                             [torch.zeros(8, carrier, dtype=residual_dtype)],
                             ["hidden"],
-                            np_dtype,
+                            compiler_dtype,
                             dev_consts=pre_consts,
                             ckpt=ckpt,
                             arena=arena,
@@ -1495,7 +1505,7 @@ class EmmyGenRunner:
                             post_w,
                             [torch.zeros(8, attn_width, dtype=dtype), torch.zeros(8, carrier, dtype=residual_dtype)],
                             ["attn_out", "residual"],
-                            np_dtype,
+                            compiler_dtype,
                             dev_consts=post_consts,
                             ckpt=ckpt,
                             arena=arena,
@@ -1513,7 +1523,7 @@ class EmmyGenRunner:
                                 pre_w,
                                 [torch.zeros(decode_bucket, carrier, dtype=residual_dtype)],
                                 None,
-                                np_dtype,
+                                compiler_dtype,
                                 dev_consts=pre_consts,
                                 ckpt=ckpt,
                                 arena=arena,
@@ -1528,7 +1538,7 @@ class EmmyGenRunner:
                                     torch.zeros(decode_bucket, carrier, dtype=residual_dtype),
                                 ],
                                 None,
-                                np_dtype,
+                                compiler_dtype,
                                 dev_consts=post_consts,
                                 ckpt=ckpt,
                                 arena=arena,
@@ -1555,7 +1565,7 @@ class EmmyGenRunner:
                                 pre_w,
                                 [torch.zeros(1, carrier, dtype=residual_dtype)],
                                 None,
-                                np_dtype,
+                                compiler_dtype,
                                 dev_consts=pre_consts,
                                 ckpt=ckpt,
                                 arena=arena,
@@ -1567,7 +1577,7 @@ class EmmyGenRunner:
                                 post_w,
                                 [torch.zeros(1, attn_width, dtype=dtype), torch.zeros(1, carrier, dtype=residual_dtype)],
                                 None,
-                                np_dtype,
+                                compiler_dtype,
                                 dev_consts=post_consts,
                                 ckpt=ckpt,
                                 arena=arena,
@@ -1587,7 +1597,7 @@ class EmmyGenRunner:
                                 pre_w,
                                 [torch.zeros(prefill_bucket, carrier, dtype=residual_dtype)],
                                 None,
-                                np_dtype,
+                                compiler_dtype,
                                 dev_consts=pre_consts,
                                 ckpt=ckpt,
                                 arena=arena,
@@ -1602,7 +1612,7 @@ class EmmyGenRunner:
                                     torch.zeros(prefill_bucket, carrier, dtype=residual_dtype),
                                 ],
                                 None,
-                                np_dtype,
+                                compiler_dtype,
                                 dev_consts=post_consts,
                                 ckpt=ckpt,
                                 arena=arena,
@@ -1667,10 +1677,18 @@ class EmmyGenRunner:
         # gather table so ``embed`` / ``embed_device`` both apply it with zero per-step cost.
         embed_scale = 1.0
         if include_embed:
-            embed_weight = trunk.embed_tokens.weight.detach().cpu().to(torch.float32).numpy().astype(np_dtype, copy=False)
+            from emmy.compiler.dtype import encode_bf16
+
+            embed_weight = trunk.embed_tokens.weight.detach().cpu().to(torch.float32).numpy()
             embed_scale = float(getattr(trunk.embed_tokens, "embed_scale", 1.0))
-            if embed_scale != 1.0:
-                embed_weight = embed_weight * np_dtype.type(embed_scale)
+            if compiler_dtype.name == "bf16":
+                if embed_scale != 1.0:
+                    embed_weight = embed_weight * np.float32(embed_scale)
+                embed_weight = encode_bf16(embed_weight)
+            else:
+                embed_weight = embed_weight.astype(np_dtype, copy=False)
+                if embed_scale != 1.0:
+                    embed_weight = embed_weight * np_dtype.type(embed_scale)
         use_decode = decode_ok and len(pre_decode) == len(layers)
         use_m1 = m1_ok and len(pre_m1) == len(layers) and len(post_m1) == len(layers)
         use_prefill = prefill_ok and len(pre_prefill) == len(layers)
@@ -1803,7 +1821,7 @@ class EmmyGenRunner:
         ``positions`` is unused under A2 (RoPE applied downstream); kept for signature parity.
         Uses the static decode-bucket program when ``T <= decode_bucket`` (pad → run → slice)."""
         del positions
-        h = hidden.astype("float32" if self._residual_float32 else self._np_dtype, copy=False)
+        h = self._host_input(hidden, residual=True)
         t = h.shape[0]
         if self._pre_decode is not None and t <= self._decode_bucket:
             q, k, v = self._pre_decode[layer].run([_pad_rows(h, self._decode_bucket)])
@@ -1820,8 +1838,8 @@ class EmmyGenRunner:
                 "MoE layers run device-resident only — the routed expert dispatch has no host numpy path; "
                 "serve within the compiled programs' token capacity"
             )
-        a = attn_out.astype(self._np_dtype, copy=False)
-        r = residual.astype("float32" if self._residual_float32 else self._np_dtype, copy=False)
+        a = self._host_input(attn_out)
+        r = self._host_input(residual, residual=True)
         t = a.shape[0]
         if self._post_decode is not None and t <= self._decode_bucket:
             out = self._post_decode[layer].run([_pad_rows(a, self._decode_bucket), _pad_rows(r, self._decode_bucket)])[0]
@@ -1829,6 +1847,19 @@ class EmmyGenRunner:
         if not self._post:
             raise RuntimeError(f"token width {t} exceeds static-only capacity {self.prefill_capacity}")
         return self._post[layer].run([a, r])[0]
+
+    def _host_input(self, values, *, residual=False):
+        import numpy as np
+        import torch
+
+        assert isinstance(values, np.ndarray)
+        if residual and self._residual_float32:
+            return values.astype(np.float32, copy=False)
+        if self._activation_dtype == torch.bfloat16:
+            from emmy.compiler.dtype import encode_bf16
+
+            return values if values.dtype == np.uint16 else encode_bf16(values)
+        return values.astype(self._np_dtype, copy=False)
 
     def final_norm(self, hidden):
         """Apply the model's final norm (held as a torch module) to ``hidden[T, H]`` numpy."""
@@ -1838,6 +1869,12 @@ class EmmyGenRunner:
         if self._norm is None:
             raise RuntimeError("this pipeline stage does not own the final norm")
         with torch.no_grad():
+            if self._activation_dtype == torch.bfloat16:
+                from emmy.compiler.dtype import decode_bf16, encode_bf16
+
+                assert isinstance(hidden, np.ndarray) and hidden.dtype == np.uint16
+                out = self._norm(torch.from_numpy(decode_bf16(hidden)).to(torch.bfloat16))
+                return encode_bf16(out.float().numpy())
             out = self._norm(torch.from_numpy(np.ascontiguousarray(hidden)))
             if self._residual_float32:
                 out = out.to(self._activation_dtype)
@@ -1867,6 +1904,8 @@ class EmmyGenRunner:
                 self._embed_weight, self._embed_weight_dev = self._map_embed_table_to_host()
             else:
                 self._embed_weight_dev = torch.from_numpy(self._embed_weight).cuda()
+                if self._activation_dtype == torch.bfloat16:
+                    self._embed_weight_dev = self._embed_weight_dev.view(torch.bfloat16)
         if self._norm is not None:
             self._norm_dev = copy.deepcopy(self._norm).to("cuda")
         if self._hc_head is not None and not getattr(self, "_hc_head_on_device", False):
@@ -1917,12 +1956,10 @@ class EmmyGenRunner:
                     # kernels read the E-tensors directly (no per-step weight staging; the
                     # ~100 MB stage-1 staging pair is gone, returned to vLLM's KV-cache budget).
                     # Slot i's table/selector/output arrays are bound here ONCE.
-                    import numpy as np  # noqa: PLC0415
-
                     k = len(self._expert_tiers[0]["slots"])
                     h = self._hidden_size
                     self._slot_sel = torch.zeros(k, dtype=torch.int32, device="cuda")
-                    act_dtype = torch.from_numpy(np.empty(0, dtype=self._np_dtype)).dtype
+                    act_dtype = self._activation_dtype
                     slot_precision = {m["accumulate_float32"] for m in self._moe if m is not None}
                     if len(slot_precision) != 1:
                         raise RuntimeError("fixed-slot expert groups must agree on their output precision")
@@ -1981,6 +2018,8 @@ class EmmyGenRunner:
         host = pinned.numpy()
         host[...] = table
         arr = device_view(pinned)  # the same bytes, addressed as a device tensor
+        if self._activation_dtype == torch.bfloat16:
+            arr = arr.view(torch.bfloat16)
         self._embed_pinned = (pinned, arr)  # keepalive: the views below do not own the allocation
         logger.info(
             "[gen_runner] embed table (%d x %d, %.3f GiB) mapped in host memory — 0 device bytes",

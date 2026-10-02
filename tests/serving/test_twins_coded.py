@@ -17,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+from emmy.compiler.dtype import F16
+
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import ConstantOp, InputOp
 from emmy.compiler.ir.frontend.ir import LinearOp
@@ -748,7 +750,7 @@ def test_nvfp4_twin_is_the_graph_serving_stamps(tmp_path):
         patch.setattr("emmy.compiler.backend.cuda.backend.CudaBackend", _CaptureBackend)
         for half, wrapper in (("pre", pre_w), ("post", post_w)):
             with pytest.raises(_Stamped) as caught:
-                _compile_split(wrapper, examples[half], None, np.dtype("float16"), ckpt=(str(tmp_path), id_to_key))
+                _compile_split(wrapper, examples[half], None, F16, ckpt=(str(tmp_path), id_to_key))
             assert _structure(caught.value.graph) == _structure(twins[f"{half}4@nvfp4"])
 
 
