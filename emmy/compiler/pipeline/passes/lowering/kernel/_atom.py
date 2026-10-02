@@ -1095,6 +1095,7 @@ def _sync_operands(
     k_axis: Axis,
     axes: tuple = (),
     b_atoms: int = 1,
+    pads: tuple[int, int] = (0, 0),
 ) -> tuple[tuple, tuple[SyncOperand, ...], tuple[Operand, ...], list[Stmt]]:
     """The ``smem`` compute fill's drain-ordered, computed, copied, and prologue operands.
 
@@ -1148,6 +1149,8 @@ def _sync_operands(
         k_axis=k_axis,
         axes=axes,
     )
+    if pads[0]:
+        a_op = replace(a_op, pad_cols=pads[0])
     # One B slab per fold channel (the multi-B node fills each projection's weights alongside the
     # one compute-filled A slab); drain order is (A, B0, B1, …) regardless of which fill each rides.
     # ``swizzles`` are the per-operand slab modes (the mma tier's ``slab_swizzles``; NONE elsewhere):
@@ -1202,6 +1205,7 @@ def _sync_operands(
             swizzles=swizzles,
             b_trans=c.as_contraction().b_trans,
             b_atoms=b_atoms,
+            pads=pads,
             roles=(1,),
         )
         op = replace(op, tag=tag)
@@ -1677,6 +1681,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
                 k_axis=k_axis,
                 axes=ops.axes,
                 b_atoms=ops.b_atoms(mn),
+                pads=ops.slab_pads(),
             )
         common = dict(slab_dtype=cuda_name(elem), elem_bytes=elem.nbytes, cta=cta)
         if stage.transport == "smem-tma":
@@ -1718,7 +1723,10 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
         # byte-gather drain spreads across banks; a TMA box deposit is dense, so its byte slab
         # stays unpadded (the resolver sized the budget with the same rule).
         elems = ops.slab_elems()
-        pads = tuple(BYTE_SLAB_PAD if e.nbytes == 1 and stage.transport == "smem-async" else 0 for e in elems)
+        pads = tuple(
+            BYTE_SLAB_PAD if e.nbytes == 1 and stage.transport == "smem-async" else pad
+            for e, pad in zip(elems, ops.slab_pads(), strict=True)
+        )
         geometry = dict(
             mn=mn,
             k_axis=k_axis,
@@ -2053,6 +2061,9 @@ class _AtomOps:
         at fp32 spacing over fp16 memory (misaligned + overlapped — the Gemma bench_fail cluster)."""
         elem = self.slab_elem()
         return (elem, elem)
+
+    def slab_pads(self) -> tuple[int, int]:
+        return (0, 0)
 
 
 class _MmaOps(_AtomOps):
@@ -2503,6 +2514,12 @@ class _ScalarOps(_AtomOps):
         """Each gmem operand's OWN dtype — A and B may differ on the scalar tier (fp32 split
         partials × fp16 weights); the drain's fma converts like the gmem-direct path does."""
         return (self.inputs[self.c.operands[0].as_slab().load.input].dtype, self.inputs[self.c.operands[1].as_slab().load.input].dtype)
+
+    def slab_pads(self) -> tuple[int, int]:
+        from emmy.compiler.ir.schedule.staging import scalar_slab_pads  # noqa: PLC0415
+
+        a, b = self.slab_elems()
+        return scalar_slab_pads(self.stage.bk_elems, a.nbytes, b.nbytes, self.c.as_contraction().b_trans, self.stage.transport)
 
     def carried_drain(self, operands, mn):  # noqa: ARG002 — the scalar drain carries no fragments
         """``None``: a scalar drain has no fragments to carry across chunks."""

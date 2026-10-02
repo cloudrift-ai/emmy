@@ -562,6 +562,18 @@ def resolve_warp_stage(
     return ResolvedStage(choice, bk_elems=bk_elems)
 
 
+def scalar_slab_pads(bk: int, a_bytes: int, b_bytes: int, b_trans: bool, transport: str) -> tuple[int, int]:
+    """Keep vector copies aligned while spreading scalar row reads across shared-memory banks.
+
+    A dense 128-byte row pitch aliases every row at one bank. A 16-byte pad spreads the
+    row owners across eight bank quartets. TMA deposits dense boxes and keeps no padding.
+    """
+    return tuple(
+        16 // width if rows and transport != "smem-tma" and bk * width % 128 == 0 else 0
+        for rows, width in ((True, a_bytes), (b_trans, b_bytes))
+    )
+
+
 def resolve_scalar_stage(c: Fold, tile: Tile, stage: Stage, inputs, budget: int, k_axis: Axis) -> ResolvedStage | None:
     """Resolve an operand ``Stage`` against the scalar register-tile contraction ``c``, or ``None``
     (gmem-direct). The slab K-chunk ``bk_elems`` is DERIVED to fit ``depth`` operand slots in the
@@ -615,8 +627,13 @@ def resolve_scalar_stage(c: Fold, tile: Tile, stage: Stage, inputs, budget: int,
     requested = min(stage.depth, SPLIT_COPY_DEPTH) if stage.transport == "smem" else stage.depth
     depth, bk_elems = max(1, requested), 0
     while depth >= 1:
-        cap = budget // (depth * max(1, tile.m.tile * elem_bytes + tile.n.tile * b_bytes))
-        bk_elems = next((v for v in (128, 64, 32, 16, 8, 4) if v <= cap and k % v == 0), 0)
+
+        def fits(bk):
+            pa, pb = scalar_slab_pads(bk, elem_bytes, b_bytes, b_trans, stage.transport)
+            size = tile.m.tile * (bk + pa) * elem_bytes + (tile.n.tile * (bk + pb) if b_trans else bk * tile.n.tile) * b_bytes
+            return depth * size <= budget
+
+        bk_elems = next((v for v in (128, 64, 32, 16, 8, 4) if k % v == 0 and fits(v)), 0)
         if bk_elems >= 4:
             break
         depth -= 1

@@ -279,6 +279,20 @@ def test_scalar_matmul_stages_through_pipeline(monkeypatch) -> None:
     assert "__shared__" in src and "cp.async" not in src
 
 
+def test_scalar_stage_budget_includes_the_bank_padding() -> None:
+    from emmy.commands.trace import graph_from_code  # noqa: PLC0415
+    from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
+
+    from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
+
+    graph = graph_from_code("import torch\na=torch.randn(64,128)\nb=torch.randn(64,128)\na @ b.transpose(-2,-1)")[0]
+    with pinned_knobs({"WORK": "t16x8", "TILE": "f2x8", "REDUCE": "", "STAGE": "d2/smem", "RASTER": ""}):
+        out = Pipeline.build(TILE_PASSES).run(graph, ctx=Context.from_target((7, 0)))
+    op = next(n.op for n in out.nodes.values() if isinstance(n.op, TileOp))
+    stage = _node_stage(op)
+    assert stage.depth == 2 and stage.bk_elems == 64, "128-wide chunks fit only if both operands' row pads are omitted"
+
+
 def test_scalar_masked_n_stage_pin_refuses(monkeypatch) -> None:
     """A masked-N (overhanging inner dim) SCALAR-tier contraction must DECLINE cp.async / TMA
     staging: the B-slab fill would clamp a chunk-start column into a row-crossing gmem address and
