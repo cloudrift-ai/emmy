@@ -60,8 +60,13 @@ def register_eval_command(subparsers) -> None:
         "Default: EMMY_OFFLINE_FILE or the repo-checked prior/weights/schedule.json.",
     )
     add_dataset_args(pp)
-    pp.add_argument("--json", dest="json_out", metavar="PATH", help="Also write the report as JSON, for diffing two runs.")
+    pp.add_argument("--json", dest="json_out", metavar="PATH", help="Also write the report as JSON.")
     pp.add_argument("--rank-only", action="store_true", help="Skip the greedy golden reproduction check after the rank report.")
+    pp.add_argument("--compare-to", metavar="PATH", help="Compare golden ranks with another weights artifact on this dataset.")
+    pp.add_argument(
+        "--min-rank-improvement", type=float, default=0.05,
+        help="Minimum median rank reduction for --compare-to (default: 0.05).",
+    )
     pp.set_defaults(func=handle_eval_prior)
 
     pg = sub.add_parser(
@@ -78,23 +83,23 @@ def register_eval_command(subparsers) -> None:
     pg.set_defaults(func=handle_eval_golden)
 
 
-def _prior_halves(space: str):
-    """The priors the report labels — one today, the offline model of the dataset's ``space``: the
-    ``--offline-file`` override, else the shipped weights of that space. Fails the command up front on an
-    unloadable artifact or one fit for the other space — the per-shape eval harness catches exceptions into
-    ERR rows, which would let a broken A/B exit 0."""
+def _load_prior(space: str, path: str | None = None):
+    """Load weights for the dataset's space, failing before evaluation on an invalid artifact.
+
+    An explicit path selects the comparison candidate. Otherwise ``--offline-file`` or the shipped weights
+    selects the current prior. A wrong-space artifact cannot turn into an ERR row in an otherwise green report."""
     from emmy.compiler.pipeline.search.prior import OfflinePrior  # noqa: PLC0415
     from emmy.compiler.pipeline.search.prior.offline import default_file  # noqa: PLC0415
 
     try:
-        prior = OfflinePrior(path=None if config.offline_path() else str(default_file(space)))
+        prior = OfflinePrior(path=path or (None if config.offline_path() else str(default_file(space))))
     except RuntimeError as exc:
         logger.error("%s", exc)
         sys.exit(2)
     if prior.space != space:
         logger.error("the weights rank the %s space; the dataset is the %s space", prior.space, space)
         sys.exit(2)
-    return [("offline", prior)]
+    return prior
 
 
 def _measured_report(args, halves, dataset, source: str):
@@ -153,6 +158,55 @@ def _golden_report(args, halves, dataset, source: str):
     return EvalReport(header, [c for half, prior in halves for c in golden_summaries(half, groups, prior.score_rows)])
 
 
+def _compare_golden_ranks(report, minimum: float) -> dict:
+    """Compare both weights over the same golden pools, without losing any scored pools."""
+    cells = {}
+    for summary in report.summaries:
+        half = summary.axes["half"]
+        key = tuple(sorted((name, value) for name, value in summary.axes.items() if name != "half"))
+        cells.setdefault(half, {})[key] = summary
+    current, candidate = cells.get("current", {}), cells.get("candidate", {})
+    if not current or current.keys() != candidate.keys():
+        raise ValueError("prior evaluations have different or empty GPU, tier, or pool-size cells")
+
+    improved = []
+    regressed = []
+    compared = 0
+    for key in sorted(current):
+        before, after = current[key], candidate[key]
+        if (before.groups, before.unscored) != (after.groups, after.unscored):
+            raise ValueError(f"prior evaluation coverage changed for {key}")
+        baseline = before.metrics["rank"]["median"]
+        fitted = after.metrics["rank"]["median"]
+        if baseline is None or fitted is None:
+            if baseline != fitted:
+                raise ValueError(f"prior evaluation rank coverage changed for {key}")
+            continue
+        compared += 1
+        if fitted > baseline:
+            regressed.append(key)
+        elif baseline > 0 and fitted <= baseline * (1 - minimum):
+            improved.append((key, baseline, fitted))
+
+    if not compared:
+        raise ValueError("prior evaluation has no scored golden pools")
+    qualified = bool(improved) and not regressed
+    cells_word = "cell" if compared == 1 else "cells"
+    percent = f"{minimum:.0%}"
+    if regressed:
+        message = f"candidate rejected: median rank rose in {len(regressed)} of {compared} {cells_word}"
+    elif not improved:
+        message = f"candidate rejected: no median rank fell by at least {percent} across {compared} {cells_word}"
+    else:
+        key, baseline, fitted = max(improved, key=lambda row: (row[1] - row[2]) / row[1])
+        axes = dict(key)
+        message = (
+            f"candidate qualifies: {len(improved)} of {compared} {cells_word} improved by at least {percent}, none regressed; "
+            f"largest change {baseline:g} to {fitted:g} on {axes['gpu']}, {axes['tier']}, {axes['pool']}"
+        )
+    return {"qualified": qualified, "message": message, "compared": compared, "improved": len(improved), "regressed": len(regressed)}
+
+
 def handle_eval_prior(args) -> None:
     """``eval prior`` — how well the prior ranks a candidate pool, over a dataset ``emmy db export`` wrote.
 
@@ -169,14 +223,28 @@ def handle_eval_prior(args) -> None:
         logger.error("%s", exc)
         sys.exit(2)
     space = dataset.provenance.get("space", "schedule")
-    halves = _prior_halves(space)
+    current = _load_prior(space)
+    halves = [("offline", current)]
     golden = args.pools == "golden"
+    if args.compare_to:
+        if not golden or not 0 < args.min_rank_improvement <= 1:
+            logger.error("--compare-to requires golden pools and a rank improvement between 0 and 1")
+            sys.exit(2)
+        halves = [("current", current), ("candidate", _load_prior(space, args.compare_to))]
     report = (_golden_report if golden else _measured_report)(args, halves, dataset, str(args.dataset))
     _emit_report(report)
+    result = report.to_json()
+    if args.compare_to:
+        try:
+            result["comparison"] = _compare_golden_ranks(report, args.min_rank_improvement)
+        except ValueError as exc:
+            logger.error("%s", exc)
+            sys.exit(2)
+        logger.info("%s", result["comparison"]["message"])
     if args.json_out:
-        storage.write_json(Path(args.json_out), report.to_json(), indent=2)
+        storage.write_json(Path(args.json_out), result, indent=2)
         logger.info("wrote %s", args.json_out)
-    if not golden or args.rank_only:
+    if not golden or args.rank_only or args.compare_to:
         return
     if space == "placement":
         _emit_placement_deploy_check(args, dataset, halves[0][1])

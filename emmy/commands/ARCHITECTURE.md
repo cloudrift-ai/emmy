@@ -884,8 +884,11 @@ emmy fit _data/schedule _tune/fits/ab/offline.json --folds 0 --out _tune/fits/ab
 ```
 
 `emmy eval prior --rank-only --json PATH` writes the same golden rank report while skipping the separate greedy
-reproduction walk. The nightly CI optimization workflow uses it to compare shipped and candidate weights on one
-exported dataset before running the reproduction gate for a candidate it would commit.
+reproduction walk. `emmy eval prior DATASET --offline-file CURRENT --compare-to CANDIDATE --json PATH` scores both
+weights over the same golden pools and writes their summaries and a comparison decision to one report. It requires a
+5% lower median golden rank in at least one GPU/tier/pool-size group, no higher median in any group, and unchanged
+coverage. `--min-rank-improvement` changes the threshold. The nightly CI optimization workflow uses this mode before
+running the reproduction gate for a candidate it would commit.
 
 ## Experiments
 

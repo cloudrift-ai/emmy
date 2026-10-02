@@ -9,6 +9,8 @@ import logging
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from emmy.compiler.pipeline.search.golden import GoldenFile, Measurements, write_trace_inventories
 
 
@@ -255,3 +257,49 @@ def test_eval_prior_golden_ranks_an_exported_datasets_golden_pools(tmp_path, cap
     rank_only = parser.parse_args(["eval", "prior", dataset, "--json", out, "--rank-only"])
     rank_only.func(rank_only)
     assert json.loads((tmp_path / "r.json").read_text())["summaries"]
+
+    from emmy.compiler.pipeline.search.prior.offline import default_file
+
+    weights = str(default_file("schedule"))
+    comparison = parser.parse_args(
+        ["eval", "prior", dataset, "--offline-file", weights, "--compare-to", weights, "--json", out]
+    )
+    comparison.func(comparison)
+    result = json.loads((tmp_path / "r.json").read_text())
+    assert not result["comparison"]["qualified"]
+    assert {row["axes"]["half"] for row in result["summaries"]} == {"current", "candidate"}
+
+
+def _rank_comparison_report(current: list[float], candidate: list[float], *, candidate_unscored: int = 0):
+    from emmy.compiler.pipeline.search.prior.report import EvalReport, Summary
+
+    summaries = [
+        Summary(
+            axes={"half": half, "gpu": f"gpu{i}", "tier": "warp", "pool": "<1k"},
+            groups=10,
+            unscored=candidate_unscored if half == "candidate" else 0,
+            metrics={"rank": {"median": median}},
+        )
+        for half, medians in (("current", current), ("candidate", candidate))
+        for i, median in enumerate(medians)
+    ]
+    return EvalReport({"dataset": "golden"}, summaries)
+
+
+def test_eval_prior_comparison_requires_five_percent_gain_without_regression():
+    from emmy.commands.eval import _compare_golden_ranks
+
+    result = _compare_golden_ranks(_rank_comparison_report([20, 4], [19, 4]), 0.05)
+    assert result["qualified"]
+    assert (result["compared"], result["improved"], result["regressed"]) == (2, 1, 0)
+    assert not _compare_golden_ranks(_rank_comparison_report([20], [19.1]), 0.05)["qualified"]
+    assert not _compare_golden_ranks(_rank_comparison_report([20, 4], [18, 4.1]), 0.05)["qualified"]
+
+
+def test_eval_prior_comparison_refuses_coverage_changes():
+    from emmy.commands.eval import _compare_golden_ranks
+
+    with pytest.raises(ValueError, match="coverage changed"):
+        _compare_golden_ranks(_rank_comparison_report([20], [18], candidate_unscored=1), 0.05)
+    with pytest.raises(ValueError, match="different or empty"):
+        _compare_golden_ranks(_rank_comparison_report([20], [18, 4]), 0.05)

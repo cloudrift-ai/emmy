@@ -125,20 +125,15 @@ jobs:
           ./venv/bin/emmy db import --db _data/ci-prior.db --fresh --repository
           ./venv/bin/emmy db export --db _data/ci-prior.db _data/ci-prior --space "$SPACE"
 
-      - name: Evaluate current prior
-        run: ./venv/bin/emmy eval prior _data/ci-prior --offline-file "$WEIGHTS" --rank-only --json _data/current.json
-
       - name: Fit candidate prior
         run: ./venv/bin/emmy fit _data/ci-prior _data/candidate.json --trainer linear --folds 0 --out _data/fit
-
-      - name: Evaluate candidate prior
-        run: ./venv/bin/emmy eval prior _data/ci-prior --offline-file _data/candidate.json --rank-only --json _data/candidate-eval.json
 
       - name: Compare prior ranks
         id: compare
         run: |
-          ./venv/bin/python .github/scripts/compare_prior_eval.py _data/current.json _data/candidate-eval.json --out _data/decision.json
-          echo "updated=$(jq -r .updated _data/decision.json)" >> "$GITHUB_OUTPUT"
+          ./venv/bin/emmy eval prior _data/ci-prior --offline-file "$WEIGHTS" \
+            --compare-to _data/candidate.json --min-rank-improvement 0.05 --json _data/decision.json
+          echo "updated=$(jq -r .comparison.qualified _data/decision.json)" >> "$GITHUB_OUTPUT"
 
       - name: Verify improved prior
         if: steps.compare.outputs.updated == 'true'
@@ -180,7 +175,10 @@ jobs:
           JOB_STATUS: ${{ job.status }}
         run: |
           if [ "$JOB_STATUS" = success ]; then
-            result=$(jq -r .message _data/decision.json)
+            result=$(jq -r .comparison.message _data/decision.json)
+            if [ "$(jq -r .comparison.qualified _data/decision.json)" = true ]; then
+              result="updated weights on main; $result"
+            fi
           else
             result="failed before updating weights; see run"
           fi

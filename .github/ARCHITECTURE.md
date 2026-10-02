@@ -56,9 +56,9 @@ GitHub App token, then posts the run link to #emmy-robots. An unchanged run post
 The repository's pull-request ruleset grants that App a bypass; the separate rule still rejects force pushes.
 
 The prior job follows durations and runs schedule and placement independently, one at a time, so their direct pushes
-cannot race. Each run imports the repository goldens into its own DB, exports that space's dataset, evaluates the
-shipped prior, fits a linear candidate without cross-validation, and evaluates it on the same dataset. The rank-only
-evaluation skips the CLI's separate greedy reproduction walk. A candidate needs at least one GPU/tier/pool-size cell
+cannot race. Each run imports the repository goldens into its own DB, exports that space's dataset, and fits a linear
+candidate without cross-validation. The comparison mode of `eval prior` scores both weights on the same dataset and
+skips the CLI's separate greedy reproduction walk. A candidate needs at least one GPU/tier/pool-size cell
 with 5% lower median golden rank, no cell with higher median rank, and unchanged scored-pool coverage. The matching
 space's reproduction tests run before a qualified candidate is committed. A move of `main` during evaluation stops
 the push, so a fit from stale goldens cannot overwrite newer weights. Every prior result, including no change or
