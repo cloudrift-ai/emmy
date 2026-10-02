@@ -111,7 +111,6 @@
   "space": "placement",
   "features": "P_*,H_cc,H_total_mem",
   "sources": {
-   "golden:1294412ab72c": 13,
    "golden:1fb6f2036136": 3,
    "golden:481b53dd670f": 42,
    "golden:50a8f9ad0047": 9,
@@ -120,12 +119,13 @@
    "golden:b88ca5b2d350": 5,
    "golden:bdc481e4e611": 50,
    "golden:c3dace1ff6d9": 164,
+   "golden:cec676ba4579": 15,
    "golden:d01809a88152": 56,
    "golden:db16c955eeb5": 10,
    "golden:e30032327e64": 4,
+   "golden:e5b90939e24d": 16,
    "golden:e6d243eede8b": 108,
-   "golden:f01426af79f5": 327,
-   "golden:f4e5cb486b44": 16
+   "golden:f01426af79f5": 327
   },
   "pool_sample": 2000,
   "groups": {
