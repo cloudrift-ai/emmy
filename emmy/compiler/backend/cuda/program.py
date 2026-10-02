@@ -340,6 +340,11 @@ class GraphCaptureError(RuntimeError):
     this can't be misclassified as a ``bench_fail`` there."""
 
 
+# Environments a program keeps the layout of. A symbolic serving program meets one per step width, so
+# a long-lived server would otherwise hold one entry per prompt length it ever served (kilobytes each,
+# per program, per worker). Measured on DeepSeek V4's shared expert program, which met 1,248 widths
+# over 22 prompts: at 256, one launch in eight rebuilds its layout once instead of five times.
+_LAYOUT_MEMO = 256
 _AUTO_BUDGET_MS = 100.0
 # Iter-count cap on ``num_iters="auto"``. Combined with the GPU-time
 # target above: whichever fires first wins. The cap is the binding
@@ -418,10 +423,15 @@ class CompiledProgram:
     def _layout(self, sym_values: dict[str, int]) -> dict:
         """The runtime's layout at ``sym_values``, memoized: the runtime plans every scratch offset
         and builds the dict anew on each call, and a routed MoE layer asks once per weight swap
-        and output view of each expert launch — over half of a prefill's host time when it did."""
+        and output view of each expert launch — over half of a prefill's host time when it did.
+        The ``_LAYOUT_MEMO`` most recently used environments are kept, the dict's order being
+        their age."""
         key = tuple(sorted(sym_values.items()))
-        if (layout := self._layouts.get(key)) is None:
-            layout = self._layouts[key] = self.program.layout(sym_values)
+        if (layout := self._layouts.pop(key, None)) is None:
+            if len(self._layouts) >= _LAYOUT_MEMO:
+                del self._layouts[next(iter(self._layouts))]
+            layout = self.program.layout(sym_values)
+        self._layouts[key] = layout
         return layout
 
     def _buffer(self, name: str) -> _Buffer:
