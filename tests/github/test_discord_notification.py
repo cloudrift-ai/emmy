@@ -99,13 +99,13 @@ def test_nightly_success_payload_reports_every_job_and_groups_modified_models():
     ]
 
 
-def test_nightly_payload_reports_no_recipe_changes_and_unchanged_durations():
-    environment = {**NIGHTLY_ENVIRONMENT, "DURATIONS_UPDATED": "false", "MODIFIED_MODELS": "[]"}
+def test_nightly_payload_reports_no_recipe_changes_and_no_duration_push():
+    environment = {**NIGHTLY_ENVIRONMENT, "DURATIONS_UPDATED": "", "MODIFIED_MODELS": "[]"}
 
     payload = discord_notification.build_payload(environment)
     fields = payload["embeds"][0]["fields"]
 
-    assert fields[0] == {"name": "CPU test durations", "value": "Unchanged.", "inline": False}
+    assert fields[0] == {"name": "CPU test durations", "value": "No change on main.", "inline": False}
     assert {"name": "Modified models", "value": "None; the lifecycle review produced no recipe changes.", "inline": False} in fields
 
 

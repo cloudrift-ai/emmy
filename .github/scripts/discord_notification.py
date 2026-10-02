@@ -164,7 +164,7 @@ def _nightly_summary(environment: Mapping[str, str]) -> tuple[str, str, int, lis
         description = "A nightly refresh job failed. Open the run for the failing step and logs."
         color = FAILURE_COLOR
 
-    durations = "Updated on main." if environment.get("DURATIONS_UPDATED") == "true" else "Unchanged."
+    durations = "Updated on main." if environment.get("DURATIONS_UPDATED") == "true" else "No change on main."
     fields = [{"name": "CPU test durations", "value": _job_status(results[0], durations), "inline": False}]
     for space in ("schedule", "placement"):
         # A leg reports its own comparison; a leg that never got there is described by the job result.

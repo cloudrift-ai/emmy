@@ -17,7 +17,7 @@ jobs:
     permissions:
       contents: read
     outputs:
-      updated: ${{ steps.changes.outputs.updated }}
+      updated: ${{ steps.commit.outputs.updated }}
     env:
       # The prior job may land its weights on main while this job measures; any other move stops the push.
       TOLERATED_PATHS: >-
@@ -26,7 +26,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: main
           fetch-depth: 0
           persist-credentials: false
 
@@ -61,8 +60,9 @@ jobs:
             echo "updated=true" >> "$GITHUB_OUTPUT"
           fi
 
+      # A dispatch from a branch measures that branch to test the workflow; only a run on main commits.
       - name: Generate GitHub App token
-        if: steps.changes.outputs.updated == 'true'
+        if: steps.changes.outputs.updated == 'true' && github.ref == 'refs/heads/main'
         id: app-token
         uses: actions/create-github-app-token@v1
         with:
@@ -71,12 +71,14 @@ jobs:
           repositories: ${{ github.event.repository.name }}
 
       - name: Commit updated durations to main
-        if: steps.changes.outputs.updated == 'true'
+        if: steps.changes.outputs.updated == 'true' && github.ref == 'refs/heads/main'
+        id: commit
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           source .github/workflows/scripts/bot_git.sh
           push_to_main "tests: refresh CPU durations" tests/durations_cpu.json
+          echo "updated=true" >> "$GITHUB_OUTPUT"
 
   prior:
     strategy:
@@ -101,7 +103,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: main
           fetch-depth: 0
           persist-credentials: false
 
@@ -137,7 +138,7 @@ jobs:
             -k "$SPACE" -q -p no:randomly -n auto --dist=loadgroup
 
       - name: Generate GitHub App token
-        if: steps.compare.outputs.updated == 'true'
+        if: steps.compare.outputs.updated == 'true' && github.ref == 'refs/heads/main'
         id: app-token
         uses: actions/create-github-app-token@v1
         with:
@@ -146,7 +147,8 @@ jobs:
           repositories: ${{ github.event.repository.name }}
 
       - name: Commit improved prior to main
-        if: steps.compare.outputs.updated == 'true'
+        if: steps.compare.outputs.updated == 'true' && github.ref == 'refs/heads/main'
+        id: commit
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
@@ -155,9 +157,11 @@ jobs:
 
       - name: Summarize the comparison
         id: summary
+        env:
+          COMMITTED: ${{ steps.commit.outcome }}
         run: |
           summary=$(jq -r .comparison.message _data/decision.json)
-          if [ "$(jq -r .comparison.qualified _data/decision.json)" = true ]; then
+          if [ "$COMMITTED" = success ]; then
             summary="Updated the weights on main; $summary"
           fi
           echo "$SPACE=$summary" >> "$GITHUB_OUTPUT"
