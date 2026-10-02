@@ -950,7 +950,10 @@ def _wrong_answer_flag(outputs: dict, ref_outputs: dict) -> str | None:
     graph, so they agree to reduction-reorder noise — a large deviation means the pinned
     config computed the wrong answer (the ``g2a`` atomic-split re-bench class: a skipped
     zero-init / finalize benches fast and silently wrong). Returns a flag string or
-    ``None``; loose 5% relative tolerance so split-K / atomic reorders never trip it."""
+    ``None``; loose 5% relative tolerance so split-K / atomic reorders never trip it. An output
+    whose worst element misses it still passes when its mean error stays under 0.5% of its peak:
+    a quantized output (4-bit codes) flips a code wherever a value sits on a rounding boundary,
+    and a kernel that computes the wrong answer is wrong on far more than a few elements."""
     import numpy as np  # noqa: PLC0415
 
     worst = 0.0
@@ -967,7 +970,9 @@ def _wrong_answer_flag(outputs: dict, ref_outputs: dict) -> str | None:
         finite = np.isfinite(b)
         if finite.any():
             denom = float(np.abs(b[finite]).max()) or 1.0
-            worst = max(worst, float(np.abs(a[finite] - b[finite]).max()) / denom)
+            diff = np.abs(a[finite] - b[finite]) / denom
+            if float(diff.mean()) > 0.005:
+                worst = max(worst, float(diff.max()))
     if worst > 0.05:
         return f"wrong-answer: rel err {worst:.3f} vs greedy output"
     return None

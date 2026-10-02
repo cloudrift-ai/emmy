@@ -551,6 +551,13 @@ def test_wrong_answer_flag_catches_bad_pinned_output():
     assert "wrong-answer" in _wrong_answer_flag({"o": ref["o"] * 0.5}, ref)
     assert "missing" in _wrong_answer_flag({}, ref)
     assert "shape" in _wrong_answer_flag({"o": np.zeros((2, 2))}, ref)
+    flipped = ref["o"].copy()
+    flipped[0, 0] = 50.0  # one quantization code flip among sixteen values: mean error 3% of peak
+    assert "wrong-answer" in _wrong_answer_flag({"o": flipped}, ref)
+    many = np.full((64, 64), 100.0)
+    one_flip = many.copy()
+    one_flip[0, 0] = 50.0  # the same flip among 4096 values stays under the 0.5% mean
+    assert _wrong_answer_flag({"o": one_flip}, {"o": many}) is None
 
 
 @pytest.mark.parametrize(
