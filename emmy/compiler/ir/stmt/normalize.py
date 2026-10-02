@@ -13,6 +13,14 @@ from ``Fold.lower``. So a body these passes could improve reaches the emitter
 unchanged whenever it comes down the term path — the sibling-loop merge below
 is reachable from Loop IR and from the digest, not from a materialized
 ``KernelOp``.
+
+Normalization is a canonical form, not a pipeline pass. It runs the same on every
+body and answers to no knob, pin or evidence; every function in this module runs
+inside ``normalize_body``. A body → body transform that something decides — a
+knob the search sets, a pin, a pass stage — belongs to the pipeline pass that
+owns the decision, even when another pass could reuse it from here. A pass may
+call a normalization step; normalization never calls a pass.
+``tests/architecture/test_layering.py`` guards the single entry point.
 """
 
 from __future__ import annotations

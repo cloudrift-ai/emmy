@@ -79,6 +79,9 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   backend turns a lower-level representation into executable code for a target such as CUDA.
 - **Pass** — One ordered compiler phase. A pass searches for known patterns and rewrites them into a form suitable
   for the next phase.
+- **Body normalization** — The canonical form every Loop IR body takes at construction and inside every identity
+  digest, so two spellings of one program key the same. It answers to no knob, pin or evidence; a transform that
+  something decides is a pass, not a normalization step.
 - **Rewrite rule** — A small compiler transformation. It recognizes a pattern, such as RMSNorm, and replaces it with
   equivalent lower-level operations.
 - **Pipeline** — An ordered sequence of compiler passes. The output of one stage becomes the input to the next.

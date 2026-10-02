@@ -58,6 +58,16 @@ This boundary is a review judgment, not a scripted check: when a change wants to
 for speed, move the decision to a fork plus evidence instead. The same rule governs the PROSE — a rationale for a
 deleted gate is a template for its return, so it is deleted with the code rather than left behind as history.
 
+## A knob lives in its pass
+
+The transform a knob, a pin or an evidence row decides lives in the pass that reads that decision, and nowhere else.
+Body normalization (`ir/stmt/normalize.py`) is the opposite kind of code: the canonical form every Loop IR body
+takes at construction and every identity digest takes, which can answer to nothing the pipeline chooses, and `ir/`
+imports no pipeline module. A pass may call a normalization step as a mechanical helper (`040_split_invariant_divides`
+calls `hoist_loop_invariants`); moving a pass's transform into the normalization module so another pass can reuse it
+inverts that direction and leaves a transform no normalization step runs. The IR `ARCHITECTURE.md` owns the
+normalization contract; `tests/architecture/test_layering.py` guards both sides.
+
 ## Quantization is not a concept past the decomposition band
 
 A quantized checkpoint is spelled as generic in-graph algebra at BIRTH (`loader.quant`, immediately post-trace).

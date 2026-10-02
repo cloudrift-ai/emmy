@@ -570,6 +570,15 @@ cell coordinates through.
 
 ### `ir/stmt/normalize.py` — executable body normalization
 
+Normalization is a canonical form, not a pipeline pass. It runs the same on every body, at construction and inside
+every identity digest, and answers to no knob, pin or evidence; nothing under `ir/` imports the pipeline that holds
+them. Every function in the module runs inside `normalize_body`. A body → body transform that something decides — a
+knob the search sets, a pin, a pass stage — is a pipeline pass and lives in the pass file owning that decision, even
+when another pass could reuse it from here. A pass may call a normalization step (kernel lowering's
+`040_split_invariant_divides` calls `hoist_loop_invariants`); normalization never calls a pass.
+`tests/architecture/test_layering.py` holds the module to one exported entry point, to no transform that no
+normalization step calls, and `ir/` to no pipeline import.
+
 Pure `body → body` passes run from `LoopOp.__post_init__` so every
 constructed `LoopOp` (including intermediate fusion results) is
 canonicalized before validation:
