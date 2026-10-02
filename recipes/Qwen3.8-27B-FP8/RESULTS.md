@@ -325,7 +325,7 @@ the exposed carry output remain stored; these timings include both outputs.
 
 | Internal target | Previous golden | New isolated row | Improvement |
 | --- | ---: | ---: | ---: |
-| Triangular update, 64 tokens | 1.51 ms | 0.226 ms | 6.7x |
+| Triangular update, 64 tokens | 1.307 ms | 0.226 ms | 5.8x |
 | Triangular update, 512 tokens | 12.93 ms | 1.094 ms | 11.8x |
 
 Each new layout passed strict same-input A/B against global storage on seeds 0, 1, 2 and 3, one seed per card, at
