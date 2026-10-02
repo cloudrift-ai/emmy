@@ -136,3 +136,15 @@ def test_two_product_channels_reuse_a_rows_and_b_columns() -> None:
     assert len(_loads_of(tile, "B")) == len(_loads_of(tile, "B2")) == mn[1].reg
     products = [stmt for stmt in tile.body.iter() if isinstance(stmt, Assign) and stmt.name.startswith("acc2__v")]
     assert {frozenset(stmt.args) for stmt in products} == {frozenset((f"a__ar{i}", f"b2__bc{j}")) for i, j in _cells(mn)}
+
+
+def test_a_cell_varying_operand_cannot_share_a_staged_slab() -> None:
+    from emmy.compiler.dtype import F32  # noqa: PLC0415
+    from emmy.compiler.ir.schedule import Stage  # noqa: PLC0415
+    from emmy.compiler.ir.schedule.staging import resolve_scalar_stage  # noqa: PLC0415
+    from emmy.compiler.tensor import Tensor  # noqa: PLC0415
+
+    a = _cone("a", "A", (Var("m"), Var("k"), Var("n")))
+    c = contraction(_K, a, (_b_load(), "acc"))
+    inputs = {"A": Tensor("A", (8, 4, 8), dtype=F32), "B": Tensor("B", (4, 8), dtype=F32)}
+    assert resolve_scalar_stage(c, _PLAN.at(_M, _N), Stage(depth=1, transport="smem"), inputs, 48 * 1024, _K) is None

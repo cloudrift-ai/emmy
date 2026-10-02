@@ -1096,6 +1096,7 @@ def _sync_operands(
     axes: tuple = (),
     b_atoms: int = 1,
     pads: tuple[int, int] = (0, 0),
+    elems: tuple = (),
 ) -> tuple[tuple, tuple[SyncOperand, ...], tuple[Operand, ...], list[Stmt]]:
     """The ``smem`` compute fill's drain-ordered, computed, copied, and prologue operands.
 
@@ -1151,6 +1152,8 @@ def _sync_operands(
     )
     if pads[0]:
         a_op = replace(a_op, pad_cols=pads[0])
+    if elems:
+        a_op = replace(a_op, dtype=cuda_name(elems[0]), elem_bytes=elems[0].nbytes)
     # One B slab per fold channel (the multi-B node fills each projection's weights alongside the
     # one compute-filled A slab); drain order is (A, B0, B1, …) regardless of which fill each rides.
     # ``swizzles`` are the per-operand slab modes (the mma tier's ``slab_swizzles``; NONE elsewhere):
@@ -1189,6 +1192,8 @@ def _sync_operands(
                 return _k_masked([s.substitute(sigma) for s in body], exposed, k, k_ext)
 
             op = SyncOperand(tag=tag, shape=(bk_elems * b_atoms, mn[1].tile // b_atoms), value=b_value, swizzle=swizzles[1])
+            if elems:
+                op = replace(op, dtype=cuda_name(elems[1]), elem_bytes=elems[1].nbytes)
             sync_ops.append(op)
             drain.append(op)
             continue
@@ -1208,7 +1213,7 @@ def _sync_operands(
             pads=pads,
             roles=(1,),
         )
-        op = replace(op, tag=tag)
+        op = replace(op, tag=tag, dtype=cuda_name(elems[1]) if elems else op.dtype, elem_bytes=elems[1].nbytes if elems else op.elem_bytes)
         async_ops.append(op)
         drain.append(op)
     return tuple(drain), tuple(sync_ops), tuple(async_ops), prologue
@@ -1682,6 +1687,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
                 axes=ops.axes,
                 b_atoms=ops.b_atoms(mn),
                 pads=ops.slab_pads(),
+                elems=ops.slab_elems(),
             )
         common = dict(slab_dtype=cuda_name(elem), elem_bytes=elem.nbytes, cta=cta)
         if stage.transport == "smem-tma":
@@ -1913,9 +1919,7 @@ def _scalar_protected(c: Fold, tile: Tile, lead: tuple = (), *, body: Body | tup
     return frozenset(prot)
 
 
-def _scalar_drain(
-    c: Fold, cells, offset, slabs: tuple[str, str], ki: str, bk_elems: int, base: tuple[Expr, Expr], offs=(None, None), *, b_trans=False
-) -> Loop:
+def _scalar_drain(c: Fold, cells, offset, operands, ki: str, bk_elems: int, base: tuple[Expr, Expr], slot) -> Loop:
     """The inner slab-drain reduce loop ``for ki: b = b_slab[ki, n_local]; a = a_slab[m_local, ki];
     v = a·b; acc += v`` — the scalar counterpart of the mma ``ldmatrix`` drain. Built per-cell directly
     (NOT via the masked gmem-direct σ, whose ``% extent`` wrap would corrupt the slab index for an
@@ -1924,26 +1928,30 @@ def _scalar_drain(
     clamped / zero-filled slab row and its store is discarded by the guard. ``_dedup_loads`` still
     shares A across the n-cells and B across the m-cells exactly as gmem-direct does. **Seed-less**
     (the accumulators are pre-seeded once by :meth:`_ScalarOps.state` outside the
-    outer slab loop, so the drain folds into them without re-seeding. ``offs`` (the gmem→smem ring,
-    depth > 1) is the ``(a, b)`` read SLOT row offset pair, added to each slab's ROW — the same slot
-    seam the mma drain rides."""
-    (a_slab, b_slab), (row_base, col_base) = slabs, base
-    off_a, off_b = offs
-    b_name, a_name = c.operands[1].exposes[-1], c.operands[0].exposes[-1]
+    outer slab loop, so the drain folds into them without re-seeding. Each operand adds its
+    ring-slot row offset to its slab read — the same slot seam the mma drain rides."""
+    a_op, *bs = operands
+    row_base, col_base = base
+    off_a = a_op.slot_row(slot)
+    a_name = c.operands[0].exposes[-1]
     body: list[Stmt] = []
     for i, j in cells:
         sfx = f"__c{i}_{j}"
-        bn, an, vn, cn = f"{b_name}{sfx}", f"{a_name}{sfx}", f"{c.exposes[0]}__v{sfx}", f"{c.exposes[0]}{sfx}"
+        an = f"{a_name}{sfx}"
         m_local = BinaryExpr("-", offset[0].base(i), row_base)
         n_local = BinaryExpr("-", offset[1].base(j), col_base)
-        b_row = n_local if b_trans else Var(ki)
-        b_row = b_row if off_b is None else BinaryExpr("+", off_b, b_row)
-        b_col = Var(ki) if b_trans else n_local
         m_row = m_local if off_a is None else BinaryExpr("+", off_a, m_local)
-        body.append(Load(names=(bn,), input=b_slab, index=(b_row, b_col)))
-        body.append(Load(names=(an,), input=a_slab, index=(m_row, Var(ki))))
-        body.append(Assign(name=vn, op=_MUL, args=(bn, an)))
-        body.append(Accum(name=cn, value=vn, op=_ADD, axes=(ki,)))
+        body.append(Load(names=(an,), input=a_op.slab, index=(m_row, Var(ki))))
+        for op, (index, _, b_name) in zip(bs, c.channel_operands(), strict=True):
+            trans = getattr(op, "trans", False)
+            off_b = op.slot_row(slot)
+            b_row = n_local if trans else Var(ki)
+            b_row = b_row if off_b is None else BinaryExpr("+", off_b, b_row)
+            b_col = Var(ki) if trans else n_local
+            bn, vn, cn = f"{b_name}{sfx}", f"{c.exposes[index]}__v{sfx}", f"{c.exposes[index]}{sfx}"
+            body.append(Load(names=(bn,), input=op.slab, index=(b_row, b_col)))
+            body.append(Assign(name=vn, op=_MUL, args=(bn, an)))
+            body.append(Accum(name=cn, value=vn, op=_ADD, axes=(ki,)))
     body = _dedup_loads(body)
     # seed=False: the accumulators are pre-seeded once by _ScalarOps.state outside the outer slab loop, so
     # this inner drain must NOT re-declare (re-zero) them each slab iteration.
@@ -2508,12 +2516,13 @@ class _ScalarOps(_AtomOps):
 
     def slab_elem(self):
         """The slab element dtype — the gmem operand's own dtype (fp32 SGEMM stages fp32)."""
-        return self.inputs[self.c.operands[0].as_slab().load.input].dtype
+        return self.slab_elems()[0]
 
     def slab_elems(self) -> tuple:
-        """Each gmem operand's OWN dtype — A and B may differ on the scalar tier (fp32 split
-        partials × fp16 weights); the drain's fma converts like the gmem-direct path does."""
-        return (self.inputs[self.c.operands[0].as_slab().load.input].dtype, self.inputs[self.c.operands[1].as_slab().load.input].dtype)
+        """Each operand's own dtype, including a computed cone's result type."""
+        from emmy.compiler.ir.schedule.staging import scalar_slab_elems  # noqa: PLC0415
+
+        return scalar_slab_elems(self.c, self.inputs)
 
     def slab_pads(self) -> tuple[int, int]:
         from emmy.compiler.ir.schedule.staging import scalar_slab_pads  # noqa: PLC0415
@@ -2533,13 +2542,7 @@ class _ScalarOps(_AtomOps):
         """The scalar slab drain — the plain-``Load`` fma leaf (:func:`_scalar_drain`), reading by
         LOCAL tile coords over ring ``slot`` (the ``depth >= 2`` gmem→smem ring offsets each slab's
         row by the slot, exactly as the mma drain does)."""
-        a_op, b_op = operands
-        offs = tuple(op.slot_row(slot) for op in operands)
-        return [
-            _scalar_drain(
-                self.c, cells, offset, (a_op.slab, b_op.slab), "_ki", self.stage.bk_elems, _tile_base(mn), offs, b_trans=b_op.trans
-            )
-        ]
+        return [_scalar_drain(self.c, cells, offset, operands, "_ki", self.stage.bk_elems, _tile_base(mn), slot)]
 
     def state(self, cells):
         """The scalar accumulator seeds. Gmem-direct (unstaged): none — the accumulators are seeded
@@ -2551,7 +2554,7 @@ class _ScalarOps(_AtomOps):
         c = self.c
         if self.stage is None:
             return []
-        return [Init(name=f"{c.exposes[0]}__c{i}_{j}", identity=_ADD.identity, dtype=F32) for i, j in cells]
+        return [Init(name=f"{name}__c{i}_{j}", identity=_ADD.identity, dtype=F32) for name in c.exposes for i, j in cells]
 
     def gmem_leaves(self, offset, mn):
         """The gmem-direct scalar leaf constructors: each register ROW reads its A operand once (a

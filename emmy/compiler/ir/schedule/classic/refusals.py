@@ -498,8 +498,8 @@ def _stage_candidates(tile: TileOp, target, node, choice: NodeSchedule) -> tuple
         candidates = (*fill_stage_moves(), *stage_moves(warp=True, ctx=target))
     else:
         candidates = (direct, *stage_moves(warp=choice.tile.is_warp, ctx=target))
-    # The per-cell tier has neither a multi-slab drain nor a fill to fall back to, so a prefetching
-    # transport there would name a deposit its materializer cannot emit.
+    # Scalar multi-channel staging uses the blocking fill; the byte-copy catalogs below
+    # keep their single-channel scalar geometry.
     if len(node.bilinear_channels()) > 1 and not choice.tile.is_warp:
         candidates = tuple(stage for stage in candidates if stage.transport not in ("smem-async", "smem-tma"))
     if not (choice.tile.is_warp and choice.tile.atom.is_wgmma):
@@ -691,7 +691,7 @@ def _resolve_stage(
             producer=facts.producer,
             producer_k=tile_op.axis_of(facts.producer.axis) if facts.producer is not None else None,
         )
-    return staging.resolve_scalar_stage(node, placed, choice, tile_op.inputs, target.max_dynamic_smem, facts.k_axis)
+    return staging.resolve_scalar_stage(node, placed, choice, tile_op.inputs, target.max_dynamic_smem, facts.k_axis, tile_op.axes)
 
 
 @dataclass(frozen=True)
