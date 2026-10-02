@@ -511,7 +511,10 @@ def _rows(node, inputs, axes, ka, pins=None):
         nodes={s.id: (tuple(c for c in s.nodes if c.tile == tile.choice) if s.id == site else s.nodes) for s in offers.node_sites},
         edges={edge: offers.node_site(edge[0]).edges for edge in op.edge_sites},
     )
-    rows = [next(iter(support.edges.values())).stage.spell() for support in context._local_frontier(context.problem.node_site(site))]
+    rows = [
+        next(iter(support.edges.values())).stage.spell()
+        for support in [support for choice in context.problem.node_site(site).choices for support in choice.supports]
+    ]
     pin = (pins or {}).get("STAGE")
     return [row for row in rows if pin is None or row == pin]
 
@@ -1261,5 +1264,5 @@ def test_a_packed_byte_slab_refuses_a_producer_band_under_tma():
             for edge in op.edge_sites
         },
     )
-    supports = context._local_frontier(context.problem.node_site(site))
+    supports = [support for choice in context.problem.node_site(site).choices for support in choice.supports]
     assert supports and all(not support.producer_eligible for support in supports)

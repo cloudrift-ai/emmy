@@ -83,7 +83,7 @@ def _spell(cap: tuple[int, int]) -> str:
 # Detection is a test, not a command: the check is GPU-free and roughly 0.1 s per case, so codec
 # and kernel-identity drift is caught on the pull request that causes it rather than weeks later
 # on a GPU box. ``make test-corpus-regen`` only APPLIES the fix — the same split as
-# ``ruff format --check`` / ``make format`` and the session-end durations gate.
+# ``ruff format --check`` / ``make format``.
 
 
 @pytest.mark.parametrize("path", helpers.case_files(), ids=lambda path: path.relative_to(helpers.CASES_DIR).as_posix())

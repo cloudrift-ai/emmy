@@ -160,7 +160,11 @@ lower to Loop IR, use the ordinary fusion splicer, and lift back to unscheduled 
 that region, preserving the selected workspace edge. The fused producer re-enters the cut pass; an output-owning
 cut can separate it again without creating workspace producers to re-fuse. Input argument order and prior
 cross-CTA split receipts survive the round trip. Packed storage retains its required boundary. A bare pinned cut
-consumes its one root-most cut the same way and may join scoped cuts in that single decision. A scoped pin whose site
+consumes its one root-most cut the same way and may join scoped cuts in that single decision. A further cut can be
+pinned on a named child with `PLACE@place_<token>/<site>=cut`, where the site is relative to that child. For example,
+`PLACE@place_abc123/map.1/inner=cut` addresses only that piece; the other children settle to fuse. The
+`place_<token>` name comes from the preceding cut's emitted kernel identity. Parent-only placement pins remain
+terminal, and a child pin that no piece resolves is rejected. A scoped pin whose site
 path does not exist on a kernel addresses another kernel of the graph; a kernel none of the pins address fuses, deterministic,
 so the unpinned placement fork never returns under a pin-driven compile. A pin that resolves to an edge no cut
 realizes is an addressing error. Newly fused producers and pieces of unpinned cuts can expose smaller seams before

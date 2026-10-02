@@ -20,7 +20,12 @@ from pathlib import Path
 
 from emmy import config
 from emmy.commands.compile import add_golden_arg
-from emmy.compiler.pipeline.search.pins import PLACEMENT_DECISIONS_HINT, pinned_knobs, unreproducible_pin_flag
+from emmy.compiler.pipeline.search.pins import (
+    PLACEMENT_APPLIED_PINS_HINT,
+    PLACEMENT_DECISIONS_HINT,
+    pinned_knobs,
+    unreproducible_pin_flag,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -965,7 +970,10 @@ def _wrong_answer_flag(outputs: dict, ref_outputs: dict) -> str | None:
 
 
 def env_pin_refusal(
-    kernel_knobs: list[dict], placement_knobs: list[dict] | None = None, kernel_names: list[tuple[str, ...]] | None = None
+    kernel_knobs: list[dict],
+    placement_knobs: list[dict] | None = None,
+    kernel_names: list[tuple[str, ...]] | None = None,
+    applied_place_pins: dict[str, str] | None = None,
 ) -> str | None:
     """The live ``EMMY_<KNOB>`` pins a compiled graph did not realize, or ``None``.
 
@@ -985,7 +993,17 @@ def env_pin_refusal(
     from emmy.compiler.pipeline.knob import KERNEL_DECISION_FAMILIES, family_pins  # noqa: PLC0415
 
     pins = {name: value for family in KERNEL_DECISION_FAMILIES for name, value in family_pins(family, kernels=True)}
-    return unreproducible_pin_flag(pins, kernel_knobs, placement_knobs=placement_knobs, kernel_names=kernel_names) if pins else None
+    return (
+        unreproducible_pin_flag(
+            pins,
+            kernel_knobs,
+            placement_knobs=placement_knobs,
+            kernel_names=kernel_names,
+            applied_place_pins=applied_place_pins,
+        )
+        if pins
+        else None
+    )
 
 
 def greedy_record_refusal(
@@ -1038,7 +1056,7 @@ def _comparison_outputs(outputs: dict, graph) -> dict:
     """Decode physical carriers before command-layer correctness checks."""
     import numpy as np  # noqa: PLC0415
 
-    from emmy.compiler.dtype import decode_bf16  # noqa: PLC0415
+    from emmy.compiler.dtype import decode_bf16, decode_f4x2  # noqa: PLC0415
 
     if not hasattr(graph, "buffer"):
         return outputs
@@ -1050,6 +1068,10 @@ def _comparison_outputs(outputs: dict, graph) -> dict:
             if decoded is outputs:
                 decoded = dict(outputs)
             decoded[name] = decode_bf16(arr)
+        elif dtype.name == "f4e2m1x2" and arr.dtype == np.uint8:
+            if decoded is outputs:
+                decoded = dict(outputs)
+            decoded[name] = decode_f4x2(arr)
     return decoded
 
 
@@ -1144,12 +1166,25 @@ def _strict_correctness_proof(outputs: dict, reference_out, *, reference="eager"
     return proof
 
 
-def _eager_outputs_by_name(outputs: dict, eager_out) -> dict:
-    """Map positional eager outputs to the lowered graph's stable output names."""
+def _eager_outputs_by_name(outputs: dict, eager_out, graph=None) -> dict:
+    """Map eager outputs to lowered names, preserving packed carriers for decoding."""
     refs = list(eager_out) if isinstance(eager_out, (tuple, list)) else [eager_out]
     if len(refs) != len(outputs):
         return {}
-    return {name: ref.detach().float().cpu().numpy() if hasattr(ref, "detach") else ref for name, ref in zip(outputs, refs, strict=True)}
+    mapped = {}
+    for name, ref in zip(outputs, refs, strict=True):
+        if hasattr(ref, "detach"):
+            tensor = ref.detach()
+            if graph is not None and graph.buffer(name).dtype.name == "f4e2m1x2":
+                import torch  # noqa: PLC0415
+
+                tensor = tensor.contiguous().view(torch.uint8)
+            try:
+                ref = tensor.cpu().numpy()
+            except TypeError:
+                ref = tensor.float().cpu().numpy()
+        mapped[name] = ref
+    return _comparison_outputs(mapped, graph) if graph is not None else mapped
 
 
 def _cuda_knob_dicts(graph) -> list[dict]:
@@ -1166,6 +1201,11 @@ def _cuda_kernel_names(graph) -> list[tuple[str, str]]:
 def _placement_knob_dicts(graph) -> list[dict]:
     """Placement receipts from the final greedy resolution of ``graph``."""
     return list(graph.hints.get(PLACEMENT_DECISIONS_HINT, []))
+
+
+def _applied_place_pins(graph) -> dict[str, str]:
+    """Piece-qualified PLACE source receipts from the final cut resolution."""
+    return dict(graph.hints.get(PLACEMENT_APPLIED_PINS_HINT, {}))
 
 
 def _ab_samples(specs, dynamic=None, route=None):
@@ -1316,7 +1356,8 @@ async def _bench_golden_variants(
                 _cuda_knob_dicts(g_compiled),
                 placement_knobs=_placement_knob_dicts(g_compiled),
                 kernel_names=names,
-            ) or env_pin_refusal(_cuda_knob_dicts(g_compiled), _placement_knob_dicts(g_compiled), names)
+                applied_place_pins=_applied_place_pins(g_compiled),
+            ) or env_pin_refusal(_cuda_knob_dicts(g_compiled), _placement_knob_dicts(g_compiled), names, _applied_place_pins(g_compiled))
         if flag:
             flags.append(f"{flag} — row NOT benched")
             logger.error(
@@ -1746,7 +1787,7 @@ def _write_ab_json(
         "kernels": _kernel_rows(graph, bench),
     }
     # An env pin gates THIS graph, so an unrealized one misrepresents the greedy row itself.
-    env_miss = env_pin_refusal(_cuda_knob_dicts(graph), _placement_knob_dicts(graph), _cuda_kernel_names(graph))
+    env_miss = env_pin_refusal(_cuda_knob_dicts(graph), _placement_knob_dicts(graph), _cuda_kernel_names(graph), _applied_place_pins(graph))
     if env_miss:
         greedy["flags"] = [f"{env_miss} — the env pin did not realize, so this row is the planner's own pick"]
         logger.error(
@@ -2363,13 +2404,14 @@ async def bench_lowered_vs_torch(
             torch_fn, torch_inputs = torch_ref.build_callable(frontend, input_tensors)
             with torch.no_grad(), correctness_oracle():
                 eager_out = torch_fn(*torch_inputs)
+            eager_values = _eager_outputs_by_name(result_outputs, eager_out, lowered)
             if strict_accuracy:
-                correctness = _strict_correctness_proof(result_outputs, eager_out)
+                correctness = _strict_correctness_proof(result_outputs, eager_values)
                 if correctness["status"] != "pass":
                     accuracy_error = f"strict eager correctness failed: {correctness.get('error', 'tolerance exceeded')}"
             else:
-                accuracy_error = _check_accuracy(result_outputs, eager_out)
-            reference = (input_data, _eager_outputs_by_name(result_outputs, eager_out))
+                accuracy_error = _check_accuracy(result_outputs, eager_values)
+            reference = (input_data, eager_values)
             if ref_out is not None:
                 ref_out.append(reference)
             if accuracy_error is not None:
@@ -2931,7 +2973,13 @@ async def _bench_ab_variants_ir(backend, ir_path, tail, specs, *, warmup, iters,
             logger.warning("[ab] %s: compile of the pinned config failed (%s) — row kept as bench_fail", sample.name, exc)
             out.append(_GoldenBench(sample, None, None, [f"compile failed: {exc}"], "bench_fail"))
             continue
-        flag = unreproducible_pin_flag(replay_knobs, _cuda_knob_dicts(g), placement_knobs=_placement_knob_dicts(g))
+        flag = unreproducible_pin_flag(
+            replay_knobs,
+            _cuda_knob_dicts(g),
+            placement_knobs=_placement_knob_dicts(g),
+            kernel_names=_cuda_kernel_names(g),
+            applied_place_pins=_applied_place_pins(g),
+        )
         if flag:
             logger.error("[ab] %s: %s — the pinned config did not realize; fix the pin spelling (row kept unbenched)", sample.name, flag)
             out.append(_GoldenBench(sample, g, None, [f"{flag} — row NOT benched"], "pin_unmatched"))
@@ -3226,7 +3274,9 @@ def _check_accuracy(outputs, eager_out) -> str | None:
         eager_refs = list(eager_out) if isinstance(eager_out, (tuple, list)) else [eager_out]
     # Arrays, never Python lists: a list holds one float object per element. Measured at 2M cells the lists
     # peaked at 13.3 f64 copies of the output against 4.3 here, which at an LM-head output (134M cells) is 14 GB.
-    eager_flats = [t.detach().cpu().double().flatten().numpy() for t in eager_refs]
+    eager_flats = [
+        t.detach().cpu().double().flatten().numpy() if hasattr(t, "detach") else np.asarray(t, dtype=np.float64).ravel() for t in eager_refs
+    ]
     if any(np.isnan(flat).any() for flat in eager_flats):
         return "eager reference contains NaN (reproducer inputs out of domain)"
     failures: list[str] = []

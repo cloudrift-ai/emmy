@@ -5,10 +5,12 @@ here too, so the context composes without owning legality."""
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from dataclasses import dataclass
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass, field
 from functools import cache
 from typing import TYPE_CHECKING
+
+from frozendict import frozendict
 
 from emmy.compiler.ir.address import gmem_axis_step, split_addressable
 from emmy.compiler.ir.atom import ATOM_REGISTRY, AtomKind, atoms_for, wide_accumulate
@@ -21,13 +23,13 @@ from emmy.compiler.ir.schedule.catalog import (
     warp_tile_in_catalog,
     warp_tile_moves,
 )
-from emmy.compiler.ir.schedule.choices import PlacedTile, Reduce, ResolvedStage, Stage, Tile
+from emmy.compiler.ir.schedule.choices import PlacedTile, Reduce, ResolvedStage, Stage, Tile, Work
 from emmy.compiler.ir.schedule.packing import block_scaled_atom
 from emmy.compiler.ir.schedule.views import ContractionFacts, NodeId
 from emmy.compiler.ir.stmt import Assign, Body, Load, Loop, Select, Write, mask_select_predicate
 from emmy.compiler.ir.stmt.passes import has_contraction_tail
 
-from .schedule import NodeSchedule, node_id_spelling
+from .schedule import NodeSchedule, binds_root, node_id_spelling, packed_works
 
 if TYPE_CHECKING:
     from emmy.compiler.ir.tile import TileOp
@@ -705,6 +707,105 @@ class _FragmentAgreement:
     def __post_init__(self) -> None:
         if self.role not in ("need", "offer"):
             raise ValueError(f"fragment agreement role must be need or offer, got {self.role!r}")
+
+
+@dataclass(frozen=True)
+class _Relation:
+    """What a prefix has decided that the compatibility of a later pick reads — the worker inventory it
+    claimed, its physical-axis and fragment-seam agreements, and the decided nodes where a rule reads them:
+    every one while no inventory is claimed (the canonical-form check runs over them), and all of them at a
+    site that is a shared root or a chain member. Two prefixes equal here admit the same picks at a site,
+    whatever else they decided, which is what lets a site keep one filtered answer per relation."""
+
+    work: Work | None = None
+    axes: Mapping[str, tuple[int, int]] = field(default_factory=frozendict)
+    fragments: Mapping[tuple[str, str], tuple] = field(default_factory=frozendict)
+    nodes: Mapping[NodeId, NodeSchedule] = field(default_factory=frozendict)
+
+    def __post_init__(self) -> None:
+        for name in ("axes", "fragments", "nodes"):
+            object.__setattr__(self, name, frozendict(getattr(self, name)))
+
+
+def _relation_refusal(site: NodeId, pick, relation: _Relation, *, roots, pairs, allowed_works) -> str | None:
+    """Why ``pick`` cannot extend a prefix whose compatibility facts are ``relation``, or ``None``.
+
+    ``pick`` is a site's tile choice or one of its supports; both carry ``node``, ``work``, ``axes`` and
+    ``fragments``, and the rules read nothing else. The shared-root and chain rules (``roots``, ``pairs``: the
+    kernel's) are the binder's dispatch applied at the offer; the inventory, canonical-form and physical-axis
+    rules read the tile; the seam rule reads the claims, which only a support completes with its transport's K
+    slab — so a choice passing here may still have no support that does."""
+    node = pick.node
+    if site in roots and binds_root(node) and any(binds_root(relation.nodes[other]) for other in roots if other in relation.nodes):
+        return "a second scheduled root on a projection its outputs do not partition by root"
+    for root, member in pairs:
+        if site not in (root, member):
+            continue
+        picks = {**relation.nodes, site: node}
+        if root not in picks or member not in picks or picks[member].reduce == Reduce():
+            continue
+        if picks[root].tile.is_tiled:
+            return "a partitioned chain member under an output-tiled root, whose fill owns its cone"
+        if picks[root].reduce.coop_transposed:
+            return "a partitioned chain member under a transposed band, which binds its fold alone"
+    work = relation.work
+    if work is not None and pick.work is not None and pick.work != work:
+        return "pick requires a different worker inventory"
+    resolved = pick.work or work
+    if (
+        allowed_works is not None
+        and resolved is not None
+        and (resolved.kind, resolved.units) not in allowed_works
+        and not any((packed.kind, packed.units) in allowed_works for packed in packed_works(resolved))
+    ):
+        return "pick cannot reach a kernel allowed by the schedule restriction"
+    if work is None and resolved is not None:
+        if not all(choice.tile.is_canonical_for(resolved) for choice in (*relation.nodes.values(), node)):
+            return "pick is not canonical for the worker inventory"
+    elif not node.tile.is_canonical_for(resolved):
+        return "pick is not canonical for the worker inventory"
+    axis_values = dict(relation.axes)
+    for claim in pick.axes:
+        value = (claim.tile, claim.units)
+        if axis_values.get(claim.name, value) != value:
+            return "pick disagrees on physical-axis geometry"
+    fragment_values = dict(relation.fragments)
+    for claim in pick.fragments:
+        key = (claim.role, claim.edge)
+        if fragment_values.setdefault(key, claim.value) != claim.value:
+            return "pick repeats a fragment endpoint inconsistently"
+        other_role = "need" if claim.role == "offer" else "offer"
+        other = fragment_values.get((other_role, claim.edge))
+        if other is None:
+            continue
+        need, offer = (claim.value, other) if claim.role == "need" else (other, claim.value)
+        if need[0] == "chunk":
+            rows, keys = offer[5] if offer[0] == "warp" else ((), ())
+            if offer[0] != "warp":
+                return "the chunk tier's score must be warp-tiled"
+            if need[1:3] != offer[1:3]:
+                return f"the score's cell {offer[1]} {offer[2]} is not the carrier's {need[1]} {need[2]}"
+            if keys[0] != need[5]:  # the producer's N is the carrier's key: a (row, chunk) tile
+                return "the score's N tile is not the carrier's key axis"
+            if keys[1:3] != (1, need[3]):  # one warp column, and that column IS the chunk
+                return f"the score's N tile ({keys[1]} warp columns, {keys[2]} wide) is not the carrier's chunk ({need[3]} wide)"
+            if rows[3] != need[4]:  # the same register rows the carrier holds
+                return f"the score holds {rows[3]} register rows where the carrier holds {need[4]}"
+            compatible = True
+        elif offer[0] == "free":
+            compatible = need[0] != "step"
+        else:
+            compatible = (
+                need[0] in ("warp", "step")
+                and offer[0] == "warp"
+                and need[1] == offer[1]
+                and need[2] == offer[2]
+                and offer[3] == 1
+                and offer[4] == need[3]
+            )
+        if not compatible:
+            return "pick is incompatible at a fragment seam"
+    return None
 
 
 def _fragment_agreements(

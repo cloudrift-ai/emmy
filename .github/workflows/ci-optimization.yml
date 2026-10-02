@@ -1,0 +1,90 @@
+name: CI optimization
+
+on:
+  schedule:
+    - cron: "13 8 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ci-optimization
+  cancel-in-progress: false
+
+jobs:
+  durations:
+    runs-on:
+      group: ubuntu-runners
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch the measurement freeze from LFS
+        run: git lfs pull --include="emmy/compiler/pipeline/search/freezes/*"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install dependencies
+        run: make setup-ci
+
+      - name: Cache HuggingFace models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-models-v1
+
+      - name: Measure CPU test durations
+        timeout-minutes: 110
+        run: make test-durations
+
+      - name: Check for updated durations
+        id: changes
+        run: |
+          if git diff --quiet -- tests/durations_cpu.json; then
+            echo "updated=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "updated=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Generate GitHub App token
+        if: steps.changes.outputs.updated == 'true'
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.EXPERIMENT_APP_ID }}
+          private-key: ${{ secrets.EXPERIMENT_APP_PRIVATE_KEY }}
+          repositories: ${{ github.event.repository.name }}
+
+      - name: Commit updated durations to main
+        if: steps.changes.outputs.updated == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          git config user.name "emmy-onboarding-bot"
+          git config user.email "emmy-onboarding-bot[bot]@users.noreply.github.com"
+          gh auth setup-git
+          git add -- tests/durations_cpu.json
+          git diff --cached --check
+          git commit -m "tests: refresh CPU durations"
+          git fetch origin main
+          git rebase origin/main
+          git push origin HEAD:main
+
+      - name: "Notify #emmy-robots"
+        if: steps.changes.outputs.updated == 'true'
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_EMMY_ROBOTS_WEBHOOK_URL }}
+        run: |
+          jq -n --arg url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            '{content: "CI optimization updated CPU test durations on main. " + $url, allowed_mentions: {parse: []}}' \
+            | curl --fail-with-body --silent --show-error \
+                --header 'Content-Type: application/json' \
+                --data-binary @- "$DISCORD_WEBHOOK_URL"

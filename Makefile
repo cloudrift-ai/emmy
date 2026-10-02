@@ -21,7 +21,7 @@ help:
 	@echo "                  - Check goldens, warm (on the target GPU), bake, verify, and publish a"
 	@echo "                    prebuilt per-model serving image (docker/vllm-emmy-serve)"
 	@echo "  serve-models    - List the models with a pinned release config"
-	@echo "  test-durations - Re-measure tests/durations.json (the CI test-balancing baseline)"
+	@echo "  test-durations - Re-measure tests/durations_cpu.json (the CI test-balancing baseline)"
 	@echo "  test-corpus-regen - Restamp the realization corpus after an identity / codec change (COMPLETE=1 adds entries)"
 	@echo "  clean          - Remove virtual environment and generated files"
 	@echo "  test-compose   - Test docker-compose generation with sample config"
@@ -62,7 +62,7 @@ setup-ci:
 lint: setup
 	./venv/bin/ruff check
 	./venv/bin/ruff format --check
-	./venv/bin/python -m json.tool --sort-keys --indent 1 tests/durations.json | diff -u tests/durations.json -
+	@for file in tests/durations_*.json; do ./venv/bin/python -m json.tool --sort-keys --indent 1 "$$file" | diff -u "$$file" - || exit 1; done
 
 .PHONY: test-native lint-native
 test-native:
@@ -77,7 +77,7 @@ lint-native:
 format: setup
 	./venv/bin/ruff format
 	./venv/bin/ruff check --fix
-	./venv/bin/python -m json.tool --sort-keys --indent 1 tests/durations.json tests/durations.json
+	@for file in tests/durations_*.json; do ./venv/bin/python -m json.tool --sort-keys --indent 1 "$$file" "$$file"; done
 
 # Compile CUDA kernels at -Xcicc -O1: the CORRECTNESS lane — -O1 changes runtime perf,
 # not numerics, and the deployable perf tests (tests/perf, -m perf) run at -O3 via
@@ -86,7 +86,7 @@ format: setup
 # to claim — that predated the WMMA->mma.sync migration which removed the cicc unroll
 # blowup it rested on. See AGENTS.md for the measurement.
 # --durations=0 plus --durations-min=1 prints every test taking at least 1s on each
-# run (CI included); the session gate still rejects unbaselined tests at 5s.
+# run (CI included).
 # `EMMY_GOLDEN_FILE=` (set, empty) deploys no repository golden in this lane: the correctness lane never asks how
 # fast a pick is, and importing a card's goldens is work every worker process would repeat. Tests that need golden
 # evidence scope it themselves (`--golden PATH`, `records_override`), which takes precedence.
@@ -97,17 +97,12 @@ test: setup
 # after a kernel-identity or schedule-codec change. `make test` DETECTS staleness on any machine,
 # GPU or not; this applies the fix. It refuses to write a case whose verdict also changed — that
 # is a realization regression to review, not a mechanical restamp.
-test-priors: setup
-	EMMY_GOLDEN_FILE= ./venv/bin/pytest tests/compiler/pipeline/search/prior/test_reproduction.py -m priors -n auto --dist=loadgroup -v
-
 test-corpus-regen: setup
 	./venv/bin/python -m tests.compiler.realization.regen $(if $(COMPLETE),--complete,)
 
-# Regenerate tests/durations.json — the checked-in per-test timings the conftest
-# LPT-buckets on, so CI's first (cache-less) run is balanced. Runs through one xdist
-# worker: loadgroup stamps the canonical @cuda group suffixes the parallel suite
-# looks up, without concurrent workers inflating the measurements. Commit the result
-# when the balance has drifted (a newly reported slow test, a big pass-cost change).
+# Regenerate CPU test timings for CI's first (cache-less) run. A nightly workflow
+# commits the result to main. One xdist worker avoids concurrent inflation; GPU
+# timings remain in their separate checked-in file.
 test-durations: setup
 	EMMY_NVCC_FLAGS="-Xcicc -O1" EMMY_GOLDEN_FILE= ./venv/bin/pytest tests/ -q -p no:randomly -n 1 --dist=loadgroup --write-durations
 

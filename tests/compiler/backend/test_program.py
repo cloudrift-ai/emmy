@@ -44,6 +44,27 @@ def test_layout_is_kept_per_environment_up_to_a_bound():
     assert len(asked) == _LAYOUT_MEMO + 2 and len(program._layouts) == _LAYOUT_MEMO
 
 
+def test_bf16_buffer_view_has_logical_dtype_and_shares_storage():
+    from types import SimpleNamespace
+
+    import torch
+
+    from emmy.compiler.backend.cuda.program import CompiledProgram
+
+    bits = torch.tensor([0x3F80, 0xC000, 0x4049], dtype=torch.uint16)
+    backing = torch.cat((torch.zeros(2, dtype=torch.uint8), bits.view(torch.uint8)))
+    buffer = SimpleNamespace(name="x", dtype=BF16, resolve_shape=lambda _sym: (3,))
+    runtime = SimpleNamespace(layout=lambda _sym: {"buffers": {"x": {"region": "r", "offset": 2, "bytes": 6}}})
+    program = CompiledProgram(SimpleNamespace(buffers=[buffer]), runtime, None, _tensors={"r": backing})
+
+    view = program.buffer_view("x")
+    assert view.dtype == torch.bfloat16
+    assert view.data_ptr() == backing.data_ptr() + 2
+    torch.testing.assert_close(view.float(), torch.tensor([1.0, -2.0, 3.140625]))
+    view[0] = 2.0
+    assert backing[2:4].view(torch.uint16).item() == 0x4000
+
+
 EW_ADD_SOURCE = """
 extern "C" __global__ void ew_add(const float* A, const float* B, float* C) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;

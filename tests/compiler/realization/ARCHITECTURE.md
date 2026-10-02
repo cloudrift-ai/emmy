@@ -201,8 +201,7 @@ GPU-free at a fraction of a second per case, so codec and kernel-identity drift 
 causes it, by the commit that causes it.
 
 `make test-corpus-regen` only *applies* the fix. That split is the shape the repository already uses twice:
-`ruff format --check` detects while `make format` fixes, and the session-end durations gate names its offenders and
-asks for `make test-durations`.
+`ruff format --check` detects while `make format` fixes.
 
 Four rules make it load-bearing:
 

@@ -1563,13 +1563,13 @@ def _w4a4_graph(modules, *, k=32, dtype="f32"):
 
 
 def _static_quantize_ref(x, s2):
-    """The spelled quantize's numpy twin: :func:`quantize_nvfp4` with the static ``s2``, the
-    divisor floored the way the graph floors it (a zero fused scale divides by the floor; the
-    decode multiplies those blocks back to zero either way)."""
+    """The spelled quantize's f32 activation algebra, with exact division in NumPy."""
     blocks = x.astype(np.float32).reshape(*x.shape[:-1], -1, 16)
-    scale_bits = encode_f8(np.abs(blocks).max(axis=-1) / 6.0 / s2, "f8e4m3")
-    fused = fuse_nvfp4_scales(scale_bits, np.float32(s2).reshape(1)).astype(np.float32)
-    quot = blocks / np.maximum(fused[..., None], 1e-12)
+    ratio = (np.abs(blocks).max(axis=-1) * (np.float32(1) / np.float32(6))) * (np.float32(1) / np.float32(s2))
+    scale_bits = encode_f8(ratio, "f8e4m3")
+    decoded = decode_f8(scale_bits, "f8e4m3")
+    fused = decoded * np.float32(s2)
+    quot = blocks / np.maximum(fused[..., None], np.float32(1e-12))
     return dequantize_nvfp4(encode_f4x2(quot.reshape(x.shape)), scale_bits, np.float32(s2).reshape(1))
 
 
@@ -1599,6 +1599,30 @@ def test_spell_static_fp4_matches_the_quantize_oracle(tmp_path):
     ref = _static_quantize_ref(x, s2) @ dequantize_nvfp4(packed, scale_bits, np.array(0.25, dtype=np.float32)).T
     assert not np.any(np.isnan(got))
     np.testing.assert_allclose(got, ref, rtol=1e-6, atol=1e-6)
+
+
+def test_spell_static_fp4_encodes_before_f16_fused_scale_rounding(tmp_path):
+    """A value at the 2/3 FP4 midpoint catches an f16 cast before code selection.
+
+    This pins the graph's f32 algebra, not exact CUDA ``rcp.approx`` byte parity.
+    Zero E4M3 scales retain the graph's finite divisor floor, which differs from
+    stock's explicit zero output scale for tiny nonzero blocks.
+    """
+    from emmy.compiler.backend.numpy import NumpyBackend
+
+    _w4a4_checkpoint(tmp_path, {"layer": (8, 0.1)})
+    g = _w4a4_graph({"layer": 8})
+    assert spell_quantized_constants(g, str(tmp_path)) == 1
+    assert spell_static_fp4_activations(g, str(tmp_path)) == 1
+    assert g.buffer("x_static_fp4_fused32").dtype.name == "f32"
+    g.outputs.extend(["x_static_fp4_scale_bits", "x_static_fp4_bits"])
+
+    x = np.zeros((4, 32), dtype=np.float32)
+    x[0, :2] = (0.625, 0.25)
+    data = load_constants_from_safetensors(g, str(tmp_path))
+    result, _ = NumpyBackend().run(g, input_data={**data, "x": x})
+    assert int(result.outputs["x_static_fp4_scale_bits"][0, 0, 0]) == 0x38  # E4M3 1.0
+    assert int(result.outputs["x_static_fp4_bits"][0, 0]) == 0x47  # FP4 [6, 2]
 
 
 def test_spell_static_fp4_shares_equal_scales_and_splits_unequal(tmp_path):
@@ -1978,6 +2002,7 @@ _FRONTEND_BAND_ALLOWLIST = {
     "emmy/compiler/loader/safetensors.py",  # checkpoint reads (fp8 bits, scale tensors)
     "emmy/compiler/loader/synthesize.py",  # writes the checkpoint ``--quantize`` then reads back through the speller
     "emmy/compiler/trace/huggingface.py",  # quantized-twin construction + detection
+    "emmy/serving/mlp.py",  # checkpoint leaf/profile reader and post-trace spelling for the mixed MLP lane
     "emmy/serving/native/prepare.py",  # checkpoint preparation: rejects quantized models before tracing
     "emmy/serving/vllm_model_gen.py",  # loader-role: routes checkpoint keys (scale siblings included) into the fork's attention
 }

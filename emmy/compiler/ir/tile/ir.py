@@ -689,6 +689,40 @@ class TileOp(Op):
         """The per-contraction structure every schedule choice over this kernel shares."""
         return contraction_facts(self) if isinstance(self.op, Fold) else frozendict()
 
+    @cached_property
+    def shared_roots(self) -> frozenset[NodeId]:
+        """The contraction roots a schedule may not bind together, as sites
+        (:func:`~emmy.compiler.ir.tile.ops.refused_roots`): where the projection does not partition its
+        outputs by root, one root is the kernel's and every other reduce lowers serially inside it, so a
+        schedule selecting a second — an output tile, a cooperative or ILP reduce — spells a kernel the
+        binder never builds. The binder's rule, read at the offer by the classic compatibility."""
+        from emmy.compiler.ir.tile.ops import refused_roots  # noqa: PLC0415 — tile.ops reads this module
+
+        if not isinstance(self.op, Fold):
+            return frozenset()
+        return frozenset(self.node_id(root) for root in refused_roots(self.op, tuple(self.output_specs)))
+
+    @cached_property
+    def chain_pairs(self) -> tuple[tuple[NodeId, NodeId], ...]:
+        """The ``(root, member)`` site pairs whose two partitions the binder cannot both realize: a chain
+        binds in ONE of the binder's arms, and a root that leaves it — output-tiled, or a transposed band —
+        cannot carry a partitioned member, whose partition nothing would then read. A member that is itself
+        a kernel root is no pair: it binds through its own arm whatever its neighbour took. Identity is the
+        site table's, never ``node_id``: the peel and the cone walk reach Folds the site walk does not carry."""
+        from emmy.compiler.ir.tile.ops import chain_members, kernel_roots  # noqa: PLC0415 — tile.ops reads this module
+
+        if not isinstance(self.op, Fold):
+            return ()
+        sites = {id(self.sites[site].node): site for site in self.node_sites}
+        roots = {sites[id(root)] for root in kernel_roots(self.op) if id(root) in sites}
+        return tuple(
+            (sites[id(root)], sites[id(member)])
+            for root in kernel_roots(self.op)
+            if id(root) in sites
+            for member in chain_members(root)
+            if id(member) in sites and sites[id(member)] not in roots
+        )
+
     def __getstate__(self):
         """Pickle stored fields only; derived schedule inventories recompute after transport."""
         return {name: self.__dict__[name] for name in self.__dataclass_fields__ if name in self.__dict__}

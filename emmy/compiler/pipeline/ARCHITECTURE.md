@@ -322,12 +322,17 @@ gets chosen.
 ### Lazy hierarchical forks
 
 A fork with many options would be expensive to build eagerly, and most options are never visited. So forks are lazy
-trees. `Fork` (`fork.py`) is an interface with three members:
+trees. `Fork` (`fork.py`) is an interface with four members:
 
 - `knobs` — the knob values this fork level fixes. Those values are the variant's identity: both the perf DB and the
   prior are keyed on them, and they can be read **without expanding** the fork.
 - `is_leaf` — whether this is a concrete option or an inner branch.
 - `expand()` — builds the next level of options.
+- `sample_child(rng)` — one option of the next level, drawn uniformly, or `None` where the branch has none. The
+  default expands and draws; the schedule fork answers without expanding, by asking its context for one extension
+  (`ScheduleContext.random_extension`). This is the step of a random descent (`fork.descent_sample`): the cold-pool
+  draw of a greedy compile and the pool draw of a dataset export (`PoolSample.draw`) both walk it, so a draw costs
+  the extensions it tries, never the frontiers it passes.
 
 A pick calls `expand()` only on the branches it descends into, so only the subtrees a resolve actually walks ever get
 built. `DeferredFork` is a leaf whose selected rewrite is materialized only when expanded — what the cut and split
@@ -1095,7 +1100,7 @@ over a dataset `emmy db export` wrote — its golden pools or its measured pools
 prior of the dataset's space, or with the artifact `--offline-file` names. Beside the ranks it re-decides every pool
 with no measurement in scope (`prior/reproduce.py`: the greedy tile lowering against the closest golden row; the cut
 pass with the placement prior deciding against the golden's arm) — the deploy-faithful check the reproduction gate in
-`make test` asserts a rate on, per repository golden (README, "Fit the priors").
+`make test` asserts a rate on, per slice of a repository golden's pools (README, "Fit the priors").
 
 **Two datasets, two questions, one report.** `search/prior/report.py` assembles both into one serialisable schema
 (`--json`), so comparing two models is a `diff`. `emmy fit` writes the same summaries into its `metrics.json`, through

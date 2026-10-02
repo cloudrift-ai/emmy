@@ -219,12 +219,10 @@ Quick test models / scripts (for local iteration):
 - `make test` — run `pytest` using the venv (skips the off-lane `perf` / `goldens` tests). Compiles
   kernels at `-Xcicc -O1` (correctness lane, ~12% faster than `-O3` on a cold cache; perf tests use `-O3` via
   `make bench-kernels`)
-- `make test-priors` — the schedule half of the prior reproduction gate (`tests/compiler/pipeline/search/prior/`),
-  a greedy walk per golden pool, off the default lane like `perf`
 - `make test-corpus-regen` — restamp the realization corpus's derived half after a kernel-identity or schedule-codec
   change (`make test` detects the staleness on any machine; this applies the fix)
-- `make test-durations` — re-measure `tests/durations.json`, the checked-in per-test timings the suite balances its
-  xdist workers on; commit the result when the balance has drifted
+- `make test-durations` — re-measure `tests/durations_cpu.json`, the checked-in CPU test timings the suite balances its
+  xdist workers on; the nightly CI optimization workflow commits updates directly to `main`
 - `make lint` — run `ruff check`, `ruff format --check`, and check test-duration formatting
 - `make format` — auto-format code, fix lint violations, and sort test durations without re-measuring
 - `make bench` — run benchmarks (`emmy bench recipes/*`)
@@ -342,25 +340,16 @@ Then run the gates, in this order, after every edit above is in:
 
 22. **Refit the priors if a repository golden changed**: a row added, re-recorded, restamped or dropped in a
     hardware golden or a recipe's means both priors are refit on the repository goldens (README, "Fit the priors")
-    and the weights committed with it — the reproduction gate holds the shipped priors to those goldens at one
-    tolerance. A change to a prior or a golden also runs `make test-priors`, the gate's off-lane half, and a node it
-    leaves red is named in the PR body.
+    and the weights committed with it — the reproduction gate in `make test` holds the shipped priors to those
+    goldens at one tolerance, one node per slice of a golden's pools and space, and a node it leaves red is named
+    in the PR body.
 23. **Run the full suite**: `make test` — fix any failures. If a realization case comes back stale, `make
     test-corpus-regen` applies the fix; if a repository golden stops being the fresh lowering, `emmy golden restamp`
     applies that one (the `refresh-golden` skill). If golden rows go red, name the change that did it in the PR body —
     do **not** re-record them to make it green, which enshrines the regression as the new reference.
-24. **Record the durations of every test this change ADDS that takes over half a second.** `make test` fails at
-    session end when a test at or over 5 s is missing from `tests/durations.json`, because CI buckets its xdist
-    workers on that file and plans around a hole. Record well BELOW that bar: the gate reads the runner's clock,
-    and a CI runner is several times slower than a dev box — the three nodes that failed this way measured 3-4 s
-    here and 24-38 s there. Half a second is that 5 s bar divided by the spread, with margin; it is not the file's
-    own floor, which is lower still (`_MIN_RECORDED`), because a regeneration can afford to list everything and a
-    hand-written addition cannot. Measure with the flags `make test` uses — `-n 2 --dist=loadgroup
-    --durations=0 --durations-min=0.5` — because under `loadgroup` a nodeid carries its group suffix (`@cuda`), and
-    a key written without one is never found. Add every node at the number you measured, keyed exactly as reported.
-    `make test-durations` re-measures the WHOLE suite serially and REPLACES the file; reach for it when the balance
-    has drifted, not to land a handful of new tests. If one still slips through, the gate names it and prints the
-    id in the form to paste — that is the backstop, not the plan.
+24. **Let the nightly CI optimization run refresh CPU test durations.** Missing duration rows do not fail `make test`.
+    The nightly run re-measures the whole CPU suite and commits `tests/durations_cpu.json` directly to `main` when it
+    changes. GPU timings stay in `tests/durations_gpu.json` and are not rewritten on the CPU runner.
 25. **Run the linter**: `make lint` — if it fails, run `make format` and re-check
 26. **Write the PR body** in an untracked temporary file outside the repository, using
     `.github/PULL_REQUEST_TEMPLATE.md` as a guide. Never replace the tracked template with a PR's content. The title

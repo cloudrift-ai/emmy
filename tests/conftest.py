@@ -153,16 +153,17 @@ RECIPES_DIR = os.path.join(PROJECT_ROOT, "recipes")
 #
 # The pytest cache only helps a box that has already run the suite once —
 # CI starts every job with an empty one, so the balancing never fired there
-# and the long poles landed wherever chance put them. ``durations.json`` is
-# the checked-in baseline that makes the FIRST run balanced: a nodeid → seconds
-# map, regenerated with ``make test-durations`` (``pytest --write-durations``).
+# and the long poles landed wherever chance put them. The checked-in CPU and GPU
+# duration files make the FIRST run balanced: nodeid → seconds maps. The nightly
+# ``make test-durations`` run refreshes the CPU file without touching GPU rows.
 # It holds only the entries worth scheduling around (see ``_MIN_RECORDED``);
 # anything absent is assumed cheap (``_UNKNOWN_COST``). A stale or partial
 # baseline costs balance, never correctness — the cache overlays it, so a local
 # run's own measurements always win over the committed numbers.
 
 _DURATIONS_KEY = "test_durations/call"
-_DURATIONS_FILE = os.path.join(os.path.dirname(__file__), "durations.json")
+_DURATIONS_CPU_FILE = os.path.join(os.path.dirname(__file__), "durations_cpu.json")
+_DURATIONS_GPU_FILE = os.path.join(os.path.dirname(__file__), "durations_gpu.json")
 _CALL_DURATIONS: dict[str, float] = {}
 
 #: Below this the entry is not worth a line in the baseline — a test this cheap
@@ -171,17 +172,9 @@ _CALL_DURATIONS: dict[str, float] = {}
 _MIN_RECORDED = 0.05
 #: What an unlisted test is assumed to cost when bucketing (see ``_MIN_RECORDED``).
 _UNKNOWN_COST = 0.05
-#: A test this slow MUST be in the baseline or the bucketing plans around a hole — the
-#: staleness gate below fails the run until it is recorded. Deliberately far above
-#: ``_MIN_RECORDED``: the bar has to survive the machine-speed spread (a CI runner is
-#: several times slower than a dev box), and only a pole-sized test can actually distort
-#: the plan. Nothing near the recording threshold can drift into this range.
-_GATE_SECONDS = 5.0
 #: Markers whose tests are deselected from the default suite. They cannot distort ITS bucketing,
-#: so they are exempt from the staleness gate and from the written baseline — otherwise every
-#: `make bench-kernels` would fail demanding entries that `make test`, which skips it,
-#: can never record.
-_OFF_LANE_MARKERS = ("perf", "priors")
+#: so they are excluded from the written baseline.
+_OFF_LANE_MARKERS = ("perf",)
 #: Node ids seen carrying an off-lane marker this session (filled during collection).
 _OFF_LANE_ITEMS: set[str] = set()
 
@@ -190,7 +183,7 @@ def pytest_addoption(parser):
     parser.addoption(
         "--write-durations",
         action="store_true",
-        help="Rewrite tests/durations.json (the checked-in LPT bucketing baseline) from this run's timings.",
+        help="Rewrite tests/durations_cpu.json from this run's CPU timings.",
     )
 
 
@@ -200,11 +193,14 @@ def pytest_runtest_logreport(report):
 
 
 def _load_baseline() -> dict[str, float]:
-    try:
-        with open(_DURATIONS_FILE) as fh:
-            return json.load(fh)
-    except (OSError, ValueError):
-        return {}
+    durations = {}
+    for path in (_DURATIONS_CPU_FILE, _DURATIONS_GPU_FILE):
+        try:
+            with open(path) as fh:
+                durations.update(json.load(fh))
+        except (OSError, ValueError):
+            pass
+    return durations
 
 
 def pytest_sessionfinish(session):
@@ -212,41 +208,17 @@ def pytest_sessionfinish(session):
     # test's report, and letting each worker write would race on the file.
     is_controller = not hasattr(session.config, "workerinput")
     if session.config.getoption("--write-durations") and _CALL_DURATIONS and is_controller:
-        # This run's measurements REPLACE the file rather than merging into it, so a
-        # renamed or deleted test drops out on its own. Merging kept ghosts alive, and a
-        # ghost is worse than a missing entry: the bucketer plans a slot for a test that
-        # will never run (the two whole-card gate entries, 340 s and 150 s, outlived the
-        # split into shards). Regenerate with `make test-durations`, which runs the WHOLE
-        # suite — pointing this at a subset writes a baseline covering only that subset.
-        fresh = {k: round(v, 2) for k, v in _CALL_DURATIONS.items() if v >= _MIN_RECORDED and k not in _OFF_LANE_ITEMS}
-        with open(_DURATIONS_FILE, "w") as fh:
+        # Replace CPU rows so renamed tests drop out. The nightly runner has no GPU,
+        # so its skipped CUDA tests must not remove the separate GPU baseline.
+        # Point --write-durations at the whole suite, never a subset.
+        fresh = {
+            k: round(v, 2)
+            for k, v in _CALL_DURATIONS.items()
+            if v >= _MIN_RECORDED and k not in _OFF_LANE_ITEMS and not k.endswith(("@cuda", "@cuda-cli"))
+        }
+        with open(_DURATIONS_CPU_FILE, "w") as fh:
             json.dump(dict(sorted(fresh.items())), fh, indent=1)
             fh.write("\n")
-
-    # Staleness gate: a test heavy enough to shape the schedule must be IN the baseline,
-    # or CI plans its buckets around a hole and the new long pole lands wherever chance
-    # puts it — the exact failure this whole mechanism exists to prevent. Checked here
-    # rather than as a test case: only the controller, and only after the last report,
-    # holds every test's duration (an xdist worker sees just its own slice).
-    if is_controller and _CALL_DURATIONS:
-        baseline = _load_baseline()
-        missing = sorted(
-            ((d, n) for n, d in _CALL_DURATIONS.items() if d >= _GATE_SECONDS and n not in baseline and n not in _OFF_LANE_ITEMS),
-            reverse=True,
-        )
-        if missing:
-            session.exitstatus = 1
-            print(f"\nERROR: {len(missing)} test(s) at or over {_GATE_SECONDS:g}s are missing from {_DURATIONS_FILE}:")
-            for d, n in missing:
-                print(f"  {d:7.1f}s  {n}")
-            print(
-                f"Add each to {_DURATIONS_FILE} at the seconds shown, keyed by the id EXACTLY as printed\n"
-                "above — under --dist=loadgroup a nodeid carries its group suffix (`@cuda`), and a key without\n"
-                "one is never found. This bar reads the RUNNER's clock, so when adding tests by hand record\n"
-                f"everything over ~{_GATE_SECONDS / 10:g}s on a dev box, not just what crosses {_GATE_SECONDS:g}s here.\n"
-                "`make test-durations` re-measures the whole suite serially and REPLACES the file — that is for\n"
-                "drift, not for landing a handful of new tests."
-            )
 
     cache = getattr(session.config, "cache", None)
     if cache is None or not _CALL_DURATIONS:

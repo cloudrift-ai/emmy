@@ -17,7 +17,7 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import MatmulOp
 from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.ir.schedule.classic import ClassicProblem, ClassicScheduleCodec, ClassicScheduleContext
+from emmy.compiler.ir.schedule.classic import ClassicNodeSite, ClassicProblem, ClassicScheduleCodec, ClassicScheduleContext
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import iter_leaves
 from emmy.compiler.pipeline.search.pins import pinned_knobs
@@ -55,7 +55,7 @@ def test_complete_pin_decodes_without_walking_the_compatibility_frontier(monkeyp
     def unexpected_frontier(*_args):
         raise AssertionError("a complete pin must use the exact classic decoder")
 
-    monkeypatch.setattr(ClassicScheduleContext, "_compatible_frontier", unexpected_frontier)
+    monkeypatch.setattr(ClassicNodeSite, "compatible", unexpected_frontier)
     with pinned_knobs(row):
         leaves = list(iter_leaves(classic_forks(tile, tile.name, tile.knobs, ctx)))
     assert len(leaves) == 1
@@ -70,7 +70,7 @@ def test_complete_pin_ignores_a_peer_kernel_site(monkeypatch) -> None:
     def unexpected_frontier(*_args):
         raise AssertionError("a peer site must not force frontier traversal")
 
-    monkeypatch.setattr(ClassicScheduleContext, "_compatible_frontier", unexpected_frontier)
+    monkeypatch.setattr(ClassicNodeSite, "compatible", unexpected_frontier)
     with pinned_knobs({**row, "REDUCE@peer": "coop"}):
         leaves = list(iter_leaves(classic_forks(tile, tile.name, tile.knobs, ctx)))
     assert len(leaves) == 1

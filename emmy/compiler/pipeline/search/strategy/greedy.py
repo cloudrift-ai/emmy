@@ -16,11 +16,12 @@ from emmy.compiler.context import Context
 from emmy.compiler.ir.loop.ir import LoopOp
 from emmy.compiler.ir.tile.ir import TileOp
 from emmy.compiler.pipeline.fork import stamp_signature
-from emmy.compiler.pipeline.knob import KERNEL_IDENTITY, family_of
+from emmy.compiler.pipeline.knob import KERNEL_IDENTITY, axis_of, family_of, family_pins
 from emmy.compiler.pipeline.pipeline import Decision, LoweringError, Run
 from emmy.compiler.pipeline.search.db import SearchDB
 from emmy.compiler.pipeline.search.golden.evidence import evidence_db
 from emmy.compiler.pipeline.search.pins import (
+    PLACEMENT_APPLIED_PINS_HINT,
     PLACEMENT_DECISIONS_HINT,
     composed_routes,
     place_keys_tracked,
@@ -105,6 +106,7 @@ class GreedyStrategy(SearchStrategy):
         report_pins = reaches_placement and not place_keys_tracked()
         with composed_routes(_measured_composed_routes(db) if reaches_placement else []), tracking_place_keys() as resolved:
             for _attempt in range(_MAX_GREEDY_RETRIES):
+                resolved.clear()
                 rejections: list[tuple[str, str, str]] = []
                 run = Run(pipeline=pipeline, ctx=ctx, db=db, backend=backend, dump=dump, rejections=rejections)
                 terminal, trace = run.resolve(graph.copy(), greedy_decide(blocked=blocked, db=db, price_structural=prices))
@@ -119,6 +121,7 @@ class GreedyStrategy(SearchStrategy):
             # re-resolve stays un-lowered and ``_raise_on_unlowered`` fires below, exactly as
             # before.
             if _stuck(terminal, rejections, lowers_to_cuda=complete):
+                resolved.clear()
                 rejections = []
                 run = Run(pipeline=pipeline, ctx=ctx, db=db, backend=backend, dump=dump, rejections=rejections)
                 terminal, trace = run.resolve(graph.copy(), greedy_decide(blocked=blocked, prior=None, db=db, price_structural=prices))
@@ -133,6 +136,10 @@ class GreedyStrategy(SearchStrategy):
                 for decision in trace
                 if any(family_of(str(key)) == "PLACE" for key in decision.knob_delta)
             ],
+        )
+        terminal.hints.set(
+            PLACEMENT_APPLIED_PINS_HINT,
+            {key: value for key, value in family_pins("PLACE", kernels=True) if key in resolved and "/" in (axis_of(key) or "")},
         )
         logger.info("compile: total %.2fs (deterministic resolve)", time.monotonic() - t_start)
         return terminal

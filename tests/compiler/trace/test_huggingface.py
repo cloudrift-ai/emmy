@@ -25,10 +25,9 @@ def _warm_transformers():
 
     Resolving a lazy ``transformers`` model module and constructing a torch module for the first
     time in a process costs ~1.3 s here and several seconds on a CI runner; every later build is
-    free. Whichever test got there first paid it and read as a 5 s test, which trips the durations
-    gate in ``tests/conftest.py`` — and because that gate's own baseline decides the bucketing,
-    recording the test that paid moves the cost to a different one, so the gate names a new test
-    every run. Fixture setup is not the call phase, so paying it here charges nobody.
+    free. Whichever test got there first paid it and read as a 5 s test, which skewed the duration
+    baseline in ``tests/conftest.py``. Recording that test moved the cost to a different one on
+    the next run. Fixture setup is not the call phase, so paying it here charges nobody.
     """
     import torch
     import transformers
