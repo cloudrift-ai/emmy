@@ -851,7 +851,7 @@ pools it is given and therefore selects nothing.
 Shared: `--seed`, `--folds N` (default 5; `0` skips cross-validation), `--out DIR`, and `--features SPEC` — the
 feature view, comma-separated names with a trailing `*` for a prefix glob and a leading `-` to exclude, recorded in
 the metrics header and artifact provenance so two fits are only compared under matching views. The default view is
-`search/dataset/group.DEFAULT_FEATURES` for the schedule space and `P_*` for the placement space. `--out DIR` defaults
+`search/dataset/group.DEFAULT_FEATURES` for the schedule space and `PLACEMENT_FEATURES` for placement. `--out DIR` defaults
 to `_tune/fits/<timestamp>/`. A run writes `metrics.json` — the per-run record two fits are diffed by:
 `full_train` (per-golden dual ranks plus per-card **summaries**) and the `cv` block (holdout and train summaries,
 per-card gap, per-fold detail); folds group by shape, so goldens sharing a candidate pool are held out together rather
@@ -875,7 +875,7 @@ The command layer builds one `CatBoostTrainer` from these flags; it serves the f
 tree ensemble has no warm start through which a held-out golden could leak. The metrics header records its
 hyperparameters; two fits are only comparable when those match, the same way they must match on `--features`.
 
-The dataset's space selects the rest: a placement dataset fits the `P_*` view and writes `space` into the artifact,
+The dataset's space selects the rest: a placement dataset fits the placement view and writes `space` into the artifact,
 which the loader checks against the fork it is asked at.
 
 ```bash
