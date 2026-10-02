@@ -848,7 +848,7 @@ class EmmyGenModel(nn.Module, SupportsPP):
         bounds = metadata.query_start_loc.tolist()
         out = torch.empty_like(hidden)
         for block, seq_len, start, end in zip(
-            metadata.state_indices_tensor.tolist(), metadata.seq_lens.tolist(), bounds, bounds[1:], strict=True
+            metadata.state_indices_tensor.tolist(), metadata.seq_lens.tolist(), bounds[:-1], bounds[1:], strict=True
         ):
             if end == start:
                 continue

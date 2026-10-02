@@ -44,6 +44,17 @@ pinned:
 raises `ValueError: Assign 'v2': arg 'in6' not defined`. The second cut alone does not fail. A greedy search over
 cuts found the pair; the recorded rows avoid it. Nobody re-ran this pair in isolation after the search.
 
+### One cut of the float16 width-1 GDN kernel yields a piece that nvcc rejects
+
+In float16 the whole width-1 GDN program fuses into one kernel, `k_conv1d_linear_mean_reduce_79c704`. In float32 the
+same program has three kernels, so the float32 cuts do not apply to it. Cutting that kernel at this seam:
+
+    PLACE@map.3/map.1/inner.1/map.1/inner.1/map.1/inner.1/map.2/reduce.1/inner.1/map.10/map.1/inner.1/map=cut
+
+mints a piece whose CUDA source does not compile: nvcc reports `identifier "in0__s0" is undefined` on the line
+`v1 = in0__s0 * in2;`. The lowering passes accept the piece; the error appears only when the program builds its
+kernels. The recorded rows cut the kernel at 44 other seams and leave this one fused.
+
 ### GDN programs and packs
 
 A pack is the on-disk store of compiled plans that a serving image boots from.

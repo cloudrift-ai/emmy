@@ -1,8 +1,9 @@
 # Serving the GDN layers of Qwen3.5 / Qwen3.8 through emmy
 
-Status: open, written 2026-10-02, last updated the same day on main `76c02562`. Branch `feat/serve-gdn-layers`.
-We finished stages 1 to 4 for a model with GDN layers only. Stage 5 comes next. Follow-ups that this goal does not need
-are in [`gdn-serving-followups.md`](gdn-serving-followups.md).
+Status: open, written 2026-10-02, last updated the same day on main `272b1094`. Branch `feat/serve-gdn-layers`.
+We finished stages 1 to 5 and the refusals of stage 6 on tiny models: a tiny hybrid Qwen3.5 generates through vLLM
+what Hugging Face generates. The architecture doc and stage 7, the real checkpoint, remain. Follow-ups that this
+goal does not need are in [`gdn-serving-followups.md`](gdn-serving-followups.md).
 
 ## Goal
 
@@ -50,19 +51,28 @@ which KV cache block and which token range belong to which request. This matches
 owns all per-request state. The closest existing case is DeepSeek V4: `EmmyGenModel` hosts an attention sublayer taken
 from a patched vLLM, and that sublayer registers its own KV cache layers with vLLM.
 
-emmy has never used this mechanism for state of its own, so stage 5 starts with an experiment: does `EmmyGenModel`
-receive KV cache blocks for the GDN state shapes? If not, the fallback is a single state inside the model class. With
-the fallback the model class serves one request at a time, refuses `--max-num-seqs` above 1, and resets the state when
-a step starts at position 0.
+How the model class uses the mechanism:
+
+- A checkpoint with GDN layers boots `EmmyGenHybridModel`, a subclass of `EmmyGenModel` with an architecture name of
+  its own. vLLM's hybrid flag belongs to the class; on `EmmyGenModel` it would change the KV cache sizing of every
+  model emmy serves. The serve command picks the class from the checkpoint's `layer_types`.
+- One small module per GDN layer declares the state layout to vLLM: the convolution history in the trunk dtype, then
+  the recurrent matrix in float32. It uses vLLM's plain linear-attention state backend, whose metadata carries each
+  request's token range, sequence length and KV cache block. vLLM's own GDN backend would pull in vLLM's GDN kernels.
+- vLLM never zeroes a KV cache block. The model class zeroes a request's state when the request's scheduled tokens
+  are its whole sequence, which means it has no computed token yet.
 
 A step can hold tokens of several requests. The model class separates the requests at their boundaries and runs the
 GDN programs for one request after another, each with its own state. This is slower than one call for all requests,
-and correct for any number of them. A test submits two requests together.
+and correct for any number of them. A test submits three requests together, then again in reverse order so that
+they reuse KV cache blocks that earlier requests freed.
 
 ### Refusals in the first version
 
 The model class refuses prefix caching and speculative decoding on a model with GDN layers. Both replay or skip
-tokens, and the first version keeps one state per request with no snapshots.
+tokens, and the first version keeps one state per request with no snapshots. It also refuses CUDA graph capture: a
+GDN layer reads each request's token range on the host, which a capture cannot record. The serve command passes
+`--enforce-eager` for such a checkpoint.
 
 ## Stages
 
