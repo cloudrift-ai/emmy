@@ -31,6 +31,7 @@ fills it.
 from __future__ import annotations
 
 import logging
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -71,6 +72,13 @@ def register_db_command(subparsers) -> None:
         "Recorded in the dataset's provenance — two datasets are comparable only when it matches.",
     )
     pe.add_argument("--seed", type=int, default=0, help="Seed of the per-pool draw (default: 0).")
+    pe.add_argument(
+        "--jobs",
+        type=int,
+        default=os.cpu_count(),
+        help="Worker processes enumerating golden pools side by side (default: one per core). The pools are independent "
+        "and the draw is seeded, so the dataset is the same at any count.",
+    )
     pe.add_argument(
         "--space",
         choices=("schedule", "placement"),
@@ -147,7 +155,7 @@ def handle_db_export(args) -> None:
     path = db_path(args.db)
     db = SearchDB.open_readonly(path)
     try:
-        dataset = export_dataset(db, source=str(path), pool_sample=args.pool_sample, seed=args.seed, space=args.space)
+        dataset = export_dataset(db, source=str(path), pool_sample=args.pool_sample, seed=args.seed, space=args.space, jobs=args.jobs)
     finally:
         db.close()
     try:

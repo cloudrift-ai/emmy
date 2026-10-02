@@ -77,7 +77,7 @@ def test_export_writes_a_dataset_the_readers_load(tmp_path):
     from emmy.compiler.pipeline.search.dataset import Dataset
 
     tuned_db(tmp_path / "dataset.db", (_CASE,), us=500.0).close()
-    args = Namespace(out=str(tmp_path / "dataset"), db=str(tmp_path / "dataset.db"), pool_sample=0, seed=0, space="schedule")
+    args = Namespace(out=str(tmp_path / "dataset"), db=str(tmp_path / "dataset.db"), pool_sample=0, seed=0, space="schedule", jobs=1)
     handle_db_export(args)
     dataset = Dataset.load(tmp_path / "dataset")
     assert (len(dataset.golden), len(dataset.measured)) == (0, 1) and dataset.provenance["source"] == str(tmp_path / "dataset.db")

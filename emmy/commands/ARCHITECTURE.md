@@ -791,23 +791,25 @@ default, so nothing here can touch the tune DB (`_data/dataset.db` in the exampl
 `import [SOURCES…] --db PATH [--fresh] [--repository]` fills it, and nothing else does: a source is a measurement
 freeze directory, a golden file, or a tune DB file, which is frozen first; `--repository` adds every repository golden
 — the hardware goldens and each maintained recipe's, the set the priors are fit on under `--fresh` (README, "Fit the
-priors"); a tune DB is the source to add when the fit needs more. A golden file is the DB's shape, so the import is
-a copy (`golden.evidence.import_file`), each row under the context of its own regime, and its rows are sourced by the
-file's kind and digest — `freeze:` for a freeze directory's files,
-`golden:` for a golden file; a source the instance already holds is skipped, and `--fresh` rebuilds from nothing. A
-held file is recorded in the `source` table whatever became of its rows, so naming a file again is a no-op and a
-report can list its sources. `export --db PATH OUT [--space {schedule,placement}] [--pool-sample N] [--seed N]` writes
-the instance's rows as the dataset of one space at `OUT` (`search/dataset/document.py` owns the format): the schedule
-space is every golden pool enumerated from its kernel's definition and packed (`db/export.py` over
-`ranking.build_golden_groups`; the pipeline ARCHITECTURE's Part 8 owns the pool) and every measured pool labelled with
-its microseconds; the placement space is every golden kernel's placement forks, each the arms the cut pass offers with
-the golden's arm marked (`ranking.build_placement_groups`); both carry the provenance — the DB, its sources by digest,
-the space, the sample and seed, the featurizer version and the compiler commit. `emmy fit` and `eval prior` read that
-directory and never the DB; exporting the same instance twice writes the same bytes. `freeze --db PATH --out DIR`
-writes an instance's admitted rows (`db/freeze.freeze_reason`) as a golden file per card — the artifact that gets
-checked in. `check [--db PATH]` counts the rows of an instance whose tables disagree with themselves
-(`SearchDB.drift`) and exits non-zero when any do. Every subcommand resolves its instance through
-`commands/db.db_path`, which refuses a missing one with the command that fills it.
+priors"); a tune DB is the source to add when the fit needs more. A golden file is the DB's shape, so the import is a
+copy (`golden.evidence.import_file`), each row under the context of its own regime, and its rows are sourced by the
+file's kind and digest — `freeze:` for a freeze directory's files, `golden:` for a golden file; a source the instance
+already holds is skipped, and `--fresh` rebuilds from nothing. A held file is recorded in the `source` table whatever
+became of its rows, so naming a file again is a no-op and a report can list its sources. `export --db PATH OUT
+[--space {schedule,placement}] [--pool-sample N] [--seed N] [--jobs N]` writes the instance's rows as the dataset of
+one space at `OUT` (`search/dataset/document.py` owns the format): the schedule space is every golden pool enumerated
+from its kernel's definition and packed (`db/export.py` over `ranking.build_golden_groups`; the pipeline
+ARCHITECTURE's Part 8 owns the pool) and every measured pool labelled with its microseconds; the placement space is
+every golden kernel's placement forks, each the arms the cut pass offers with the golden's arm marked
+(`ranking.build_placement_groups`); both carry the provenance — the DB, its sources by digest, the space, the sample
+and seed, the featurizer version and the compiler commit. `emmy fit` and `eval prior` read that directory and never
+the DB; exporting the same instance twice writes the same bytes. The schedule space's pools are enumerated `--jobs` at
+a time, one pool per worker process (default: one per core) — the export's whole cost; the pools are independent and
+the draw is seeded, so the dataset is the same at any count. `freeze --db PATH --out DIR` writes an instance's
+admitted rows (`db/freeze.freeze_reason`) as a golden file per card — the artifact that gets checked in. `check [--db
+PATH]` counts the rows of an instance whose tables disagree with themselves (`SearchDB.drift`) and exits non-zero when
+any do. Every subcommand resolves its instance through `commands/db.db_path`, which refuses a missing one with the
+command that fills it.
 
 ### `emmy fit`
 Fit an offline-prior weights artifact and cross-validate it, GPU-free, over the golden groups of a dataset `emmy db
