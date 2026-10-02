@@ -17,6 +17,7 @@ What differs is `compile()` — how far the backend lowers the graph:
 |----------------|----------------------------------------------------|----------------------|
 | `NumpyBackend` | returns the graph as-is (no-op)                    | default `Backend.run`|
 | `LoopBackend`  | runs decomposition → optimization → fusion         | default `Backend.run`|
+| `CpuBackend`   | fusion + `tile/cut` + LLVM codegen per cut piece   | its own topo walk    |
 | `CudaBackend`  | fusion + `lowering/kernel` + `lowering/cuda`       | the Rust runtime     |
 
 `numpy` and `loop` backends share the same runtime path — the only
@@ -110,6 +111,12 @@ this is the numpy backend with fusion in front.
 
 Used as the second axis of triangulation: **loop vs numpy disagreement
 implicates fusion; loop vs CUDA disagreement implicates codegen.**
+
+## CPU backend (`cpu/`)
+
+See `cpu/ARCHITECTURE.md`. Cuts the fused graph at every seam, compiles each piece's Loop IR to native code
+through LLVM (llvmlite, in process), and runs the pieces on a thread pool. A third triangulation axis that runs
+without a GPU: **cpu vs loop disagreement implicates the CPU code generator, not fusion or the cut.**
 
 ## CUDA backend (`cuda/`)
 

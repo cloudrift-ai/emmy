@@ -1,7 +1,7 @@
 """Conftest for ``tests/compiler/``.
 
 Defines the ``run_graph`` parametrized fixture that runs an accuracy test
-through each backend (numpy / loop / cuda). A test that takes ``run_graph``
+through each backend (numpy / loop / cpu / cuda). A test that takes ``run_graph``
 automatically executes three times under different param IDs — any
 disagreement between backends makes bug attribution mechanical.
 
@@ -31,7 +31,7 @@ def dtype(request):
     return _dt.get(request.param)
 
 
-@pytest.fixture(params=["numpy", "loop", "cuda"])
+@pytest.fixture(params=["numpy", "loop", "cpu", "cuda"])
 def run_graph(request) -> Callable:
     """Return a callable ``run(graph, input_data) -> dict[name, ndarray]``.
 
@@ -70,6 +70,13 @@ def run_graph(request) -> Callable:
             be = LoopBackend()
             compiled = be.compile(graph)
             augmented = inject_constants(dict(input_data), compiled)
+            return be.run(compiled, input_data=augmented)[0].outputs
+        if kind == "cpu":
+            from emmy.compiler.backend.cpu import CpuBackend
+
+            be = CpuBackend()
+            compiled = be.compile(graph)
+            augmented = inject_constants(dict(input_data), compiled.graph)
             return be.run(compiled, input_data=augmented)[0].outputs
         # cuda
         from emmy.compiler.backend.cuda.backend import CudaBackend
