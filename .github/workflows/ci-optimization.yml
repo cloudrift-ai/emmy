@@ -136,7 +136,7 @@ jobs:
           ./venv/bin/emmy db export --db _data/ci-prior.db _data/ci-prior --space "$SPACE"
 
       - name: Fit candidate prior
-        run: ./venv/bin/emmy fit _data/ci-prior _data/candidate.json --trainer linear --folds 0 --out _data/fit
+        run: ./venv/bin/emmy fit _data/ci-prior _data/candidate.json --folds 0 --out _data/fit
 
       - name: Compare prior ranks
         id: compare

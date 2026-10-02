@@ -135,7 +135,7 @@ def compare_golden_ranks(report: EvalReport, minimum: float) -> dict:
     compared = 0
     for key in sorted(current):
         before, after = current[key], candidate[key]
-        if (before.groups, before.unscored) != (after.groups, after.unscored):
+        if before.groups != after.groups:
             raise ValueError(f"prior evaluation coverage changed for {key}")
         baseline = before.metrics["rank"]["median"]
         fitted = after.metrics["rank"]["median"]

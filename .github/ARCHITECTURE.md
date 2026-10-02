@@ -56,7 +56,7 @@ GitHub App token, then posts the run link to #emmy-robots. An unchanged run post
 The repository's pull-request ruleset grants that App a bypass; the separate rule still rejects force pushes.
 
 The prior job runs beside durations, with schedule and placement one at a time. Each run imports the repository
-goldens into its own DB, exports that space's dataset, and fits a linear candidate without cross-validation. The
+goldens into its own DB, exports that space's dataset, and fits a CatBoost candidate without cross-validation. The
 comparison mode of `eval prior` scores both weights on the same dataset and
 skips the CLI's separate greedy reproduction walk. A candidate needs at least one GPU/tier/pool-size cell
 with 5% lower median golden rank, no cell with higher median rank, and unchanged scored-pool coverage. The matching

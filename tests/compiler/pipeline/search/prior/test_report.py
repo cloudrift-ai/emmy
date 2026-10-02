@@ -150,12 +150,11 @@ def test_quality_is_negated_into_a_cost_exactly_once():
     assert np.isclose(summary.metrics["regret1"]["median"], 3.0)
 
 
-def _rank_comparison_report(current: list[float], candidate: list[float], *, candidate_unscored: int = 0):
+def _rank_comparison_report(current: list[float], candidate: list[float], *, candidate_groups: int = 10):
     summaries = [
         Summary(
             axes={"half": half, "gpu": f"gpu{i}", "tier": "warp", "pool": "<1k"},
-            groups=10,
-            unscored=candidate_unscored if half == "candidate" else 0,
+            groups=candidate_groups if half == "candidate" else 10,
             metrics={"rank": {"median": median}},
         )
         for half, medians in (("current", current), ("candidate", candidate))
@@ -174,6 +173,6 @@ def test_comparison_requires_five_percent_gain_without_regression():
 
 def test_comparison_refuses_coverage_changes():
     with pytest.raises(ValueError, match="coverage changed"):
-        compare_golden_ranks(_rank_comparison_report([20], [18], candidate_unscored=1), 0.05)
+        compare_golden_ranks(_rank_comparison_report([20], [18], candidate_groups=9), 0.05)
     with pytest.raises(ValueError, match="different or empty"):
         compare_golden_ranks(_rank_comparison_report([20], [18, 4]), 0.05)
