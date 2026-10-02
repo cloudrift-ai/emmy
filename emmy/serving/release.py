@@ -50,15 +50,22 @@ class ServingConfig:
     def static_widths(self) -> tuple[int, ...]:
         return tuple(sorted({dict(row.bindings)["num_tokens"] for row in self.realizations if row.bindings}))
 
-    def realizations_for(self, width: int | None, *, expert: bool = False) -> tuple[ServingRealization, ...]:
+    def realizations_for(self, width: int | None, *, expert: bool = False, gdn: bool = False) -> tuple[ServingRealization, ...]:
         """The rows a twin at ``width`` reaches: a static twin is compiled at its own width only,
         so its target carries that width's rows; a symbolic twin (``None``) carries the dynamic
         rows, the any-width compile. An ``expert`` twin at width 1 carries the standard M=1 row even
         when the config serves no M=1 trunk: every MoE boot compiles that expert program for the
-        fixed-slot tier."""
+        fixed-slot tier. A ``gdn`` twin at width 1 carries an M=1 row in every lane: a gated DeltaNet
+        layer has no any-width program, so every lane builds its width-1 program."""
         rows = tuple(row for row in self.realizations if (dict(row.bindings).get("num_tokens") if row.bindings else None) == width)
         if expert and width == 1 and not rows:
             return (ServingRealization(name="m1", bindings=(("num_tokens", 1),), pins=(("FAST_MATH", False),)),)
+        if gdn and width == 1:
+            lanes = {row.pins for row in self.realizations} - {row.pins for row in rows}
+            return rows + tuple(
+                ServingRealization(name="m1.fm" if dict(pins).get("FAST_MATH") else "m1", bindings=(("num_tokens", 1),), pins=pins)
+                for pins in sorted(lanes)
+            )
         return rows
 
 

@@ -357,7 +357,7 @@ def handle_eval_golden(args) -> None:
     from emmy.compiler.pipeline.search.golden import GoldenFile, sole_evidence  # noqa: PLC0415
     from emmy.compiler.pipeline.search.pins import pinned_knobs  # noqa: PLC0415
     from emmy.serving.release import load_serving_config, model_matches  # noqa: PLC0415
-    from emmy.serving.twins import capture_serving_twins, twin_width  # noqa: PLC0415
+    from emmy.serving.twins import capture_serving_twins, twin_realizations  # noqa: PLC0415
 
     try:
         serving = load_serving_config(args.serving_config)
@@ -398,7 +398,7 @@ def handle_eval_golden(args) -> None:
                 by_twin.setdefault(twin, set()).add((tuple(sorted(kernel.bindings.items())), tuple(sorted(row.pins.items()))))
     missing = []
     for twin, actual in sorted(by_twin.items()):
-        expected = {(row.bindings, row.pins) for row in serving.realizations_for(twin_width(twin), expert=twin.startswith("expert"))}
+        expected = {(row.bindings, row.pins) for row in twin_realizations(serving, twin)}
         for bindings, pins in sorted(expected - actual, key=lambda item: (item[1], item[0])):
             missing.append((twin, dict(bindings), pins))
     if missing:
@@ -419,26 +419,22 @@ def handle_eval_golden(args) -> None:
 
     # The serving-matrix half of the gate: each lane's twins compiled with that lane's rows as the only evidence,
     # strictly, on the live card the golden names — a fork no golden row decides is an EvidenceError naming the
-    # kernel, never a prediction the prior makes. A lane reaches the widths the config warms in it (a shape's
-    # ``:fm`` suffix names its lane), so a static twin is compiled in the lanes that list its width; a symbolic twin
-    # in every lane.
+    # kernel, never a prediction the prior makes. A twin is compiled in each lane one of its rows names (a shape's
+    # ``:fm`` suffix names its lane).
     failed = False
     for pins in sorted({row.pins for row in serving.realizations}, key=repr):
         lane = _format_pins(pins)
-        reached = {dict(row.bindings).get("num_tokens") if row.bindings else None for row in serving.realizations if row.pins == pins}
+        reached = [name for name in graphs if any(row.pins == pins for row in twin_realizations(serving, name))]
         broken = 0
         in_lane = replace(document, rows=[row for row in document.rows if tuple(sorted(row.pins.items())) == tuple(sorted(pins))])
         with pinned_knobs(dict(pins)), sole_evidence([in_lane]):
-            for name, graph in graphs.items():
-                if twin_width(name) not in reached:
-                    continue
+            for name in reached:
                 try:
-                    Pipeline.build(CUDA_PASSES).run(graph, ctx=ctx)
+                    Pipeline.build(CUDA_PASSES).run(graphs[name], ctx=ctx)
                 except Exception as exc:  # noqa: BLE001 — one twin's failure is that twin's verdict
                     broken += 1
                     logger.error("%s: %s: %s", lane, name, " ".join(f"{type(exc).__name__}: {exc}".split()))
-        compiled = sum(1 for name in graphs if twin_width(name) in reached)
-        logger.info("%s: %d twin(s) deploy from the golden rows alone, %d do not", lane, compiled - broken, broken)
+        logger.info("%s: %d twin(s) deploy from the golden rows alone, %d do not", lane, len(reached) - broken, broken)
         failed |= bool(broken)
     if failed:
         logger.error("serving audit failed: every fork of every reachable kernel must be decided by a golden row")

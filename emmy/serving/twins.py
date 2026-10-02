@@ -62,6 +62,11 @@ def twin_width(name: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def twin_realizations(serving: ServingConfig, name: str) -> tuple:
+    """The serving config's rows the twin ``name`` reaches (:meth:`ServingConfig.realizations_for`)."""
+    return serving.realizations_for(twin_width(name), expert=name.startswith("expert"), gdn=name.startswith("gdn"))
+
+
 def _serving_twin_buckets(
     decode_bucket: int,
     prefill_bucket: int,
@@ -111,8 +116,8 @@ def capture_twin_graphs(
     the rungs differ in exactly the bit allocation the keys carry). Returns
     ``{"pre32": Graph, "post32": …, "pre256": …, "pre-sym": …}`` plus ``-global``
     variants of each when the model has ``full_attention`` layers — the names the serving-twin
-    trace writes. A gated DeltaNet layer traces one whole-layer program per static width (``gdn32``) and
-    has no any-width form. ``extra_widths`` adds release-specific decode or
+    trace writes. A gated DeltaNet layer traces one whole-layer program per static width plus width 1
+    (``gdn1``, ``gdn32``) and has no any-width form. ``extra_widths`` adds release-specific decode or
     prefill buckets. On an EXL3 checkpoint each twin holding coded weights is replaced by its
     spelled forms, one per rate profile (``…@b4``). An FP8 expert twin is replaced by the
     config-declared storage form (``…@f8e4m3``), retaining a plain form only when its layer
@@ -202,12 +207,13 @@ def capture_twin_graphs(
         members = {i for i, signature in enumerate(signatures) if signature == signatures[layer_idx]}
         mixer = getattr(block, "linear_attn", None)
         if mixer is not None:
-            # A GDN state program has static sequence widths only, so this layer has no any-width twin.
-            static = [(name, rows) for name, rows in buckets if rows is not None]
-            if not static:
-                raise NotImplementedError("GDN state programs require static sequence widths; capture at least one static width")
+            # A GDN state program exists at static widths only, and a padded token would corrupt the state, so the
+            # runner serves any token count as a sum of static widths. Width 1 makes every count reachable, so a GDN
+            # layer always has a width-1 twin and never an any-width one.
+            static = sorted({rows for _name, rows in buckets if rows is not None} | {1})
             wrapper = build_gdn_state_wrapper(block).to_empty(device="cpu").to(td)
-            for name, rows in static:
+            for rows in static:
+                name = str(rows)
                 args = [
                     torch.zeros(1, rows, hidden, dtype=td),
                     torch.zeros(1, mixer.num_v_heads, mixer.head_k_dim, mixer.head_v_dim, dtype=torch.float32),
