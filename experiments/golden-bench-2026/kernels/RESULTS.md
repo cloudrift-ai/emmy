@@ -1,5 +1,98 @@
 # Golden-bench kernel corpus
 
+## Shared K/V prefill and input-variance decode cuts (2026-10-02)
+
+Sharing K/V production improves prefill on H100, A100, RTX 4090 and RTX 5090. Cutting the input variance separately
+improves V100 decode. H100 has the clearest reduction; the RTX improvements are small. H100 prefill and V100 decode
+still do not establish a reliable advantage over `torch.compile`.
+
+Each comparison uses six baseline/candidate pairs with alternating execution order. Both arms use the pinned
+Qwen3-0.6B layer and measurement settings described in the baseline below. Every process starts with a fresh tune
+database and uses strict evidence without recording new timings. The model comparisons use scaled correctness;
+all twelve processes per card pass. Each accepted golden also passes five fresh-process strict replays. The selected
+routes need no manual pins. No completed pair is dropped, and every rejected or incomplete probe remains archived.
+
+Whole-layer times are microseconds. The reduction is the difference between the two arm medians divided by the
+baseline median. It is not the median of paired differences or a comparison with the historical baseline table.
+
+| Card and shape | Baseline median | Candidate median | Lower latency | Winning pairs | Launches before / after |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| H100, s512 | 86.765 | 82.518 | 4.90% | 6 / 6 | 12 / 11 |
+| A100, s512 | 179.456 | 175.957 | 1.95% | 6 / 6 | 12 / 11 |
+| RTX 4090, s512 | 156.501 | 155.904 | 0.38% | 5 / 6 | 12 / 11 |
+| RTX 5090, s512 | 129.950 | 129.353 | 0.46% | 6 / 6 | 12 / 11 |
+| V100, s1 | 68.288 | 67.396 | 1.31% | 5 / 6 | 14 / 14 |
+
+The losing RTX 4090 pair costs 0.171 µs; the losing V100 pair costs 0.192 µs. V100's arm means are 68.139 and
+67.432 µs, a 1.04% reduction. These are modest changes, and another GPU, shape or load can give a different result.
+The first RTX 4090 protocol hit its 115-second setup limit before producing a baseline JSON record. Its complete
+six-pair protocol restarted with a fixed 300-second process limit; the initial attempt remains in the archive.
+
+### Compiler and evidence changes
+
+Independent output sweeps can now align through coordinates established by shared input loads. This extends the
+previous flat-domain reform to the differently ordered row and channel coordinates in prefill K/V. Equal shared
+coordinates remain fixed; only the remaining equal-volume domain is flattened and expanded. The mapping must be
+injective and preserve output index order. Numerical tests cover one and two shared axes, distinct row/channel
+values, incompatible mappings and the existing symbolic and windowed single-axis cases. Fusion remains maximal,
+and ordinary cuts still offer separate producers.
+
+Each accepted prefill golden adds one shared K/V kernel, one producer route and one measured schedule row. All
+previous programs, kernel definitions, routes and rows remain unchanged. Nine unrelated emitted kernels are
+byte-identical between the two arms; Q's complete CUDA body is identical after its generated function and workspace
+names are aligned. The measured shared K/V rows cost 7.350 µs on H100, approximately 20.1 µs on A100, 17.821 µs on
+RTX 4090 and 13.9 µs on RTX 5090. These costs select the new route through normal evidence.
+
+V100 instead cuts the raw input variance and applies normalization while reading the Q and shared K/V projections.
+This removes the separate normalized input vector without changing the layer's 14 launches. Seven kernel
+definitions, four routes and four measured rows are added; all 28 original definitions, 11 routes and 18 rows remain
+unchanged. The measured new rows cost 1.933, 4.623, 2.510 and 4.637 µs. Source changes are confined to the variance,
+Q/K/V normalization and consistent K/V channel order, plus generated names and an unused down-projection argument.
+
+The nested cut used to construct this candidate exposed a pin-consumption bug: a parent placement pin could apply
+again to the parent's remaining work when another pin targeted a newly created child. The parent remainder now
+consumes its decision while explicitly named children retain theirs. A regression test checks the resulting three
+pieces instead of four. This affects explicit placement pins; accepted qualification uses unpinned evidence.
+
+All six maintained hardware goldens and nine maintained model goldens remain current without restamping. No
+maintained golden or prior weight changes in this round. The five edited goldens belong to this experiment. Existing
+measurements are never overwritten to make a slower or changed kernel look unchanged.
+
+### Rejected probes and remaining costs
+
+H100's first, wider shared K/V tile wins six pairs but costs 11.519 µs in isolation, above the old separate K/V sum
+of 11.357 µs. It therefore does not win normal evidence selection. The accepted narrower tile costs 7.350 µs and
+improves the complete layer more. A100's earlier larger reduction tiles and eight-warp candidate lose; its selected
+smaller reduction tile wins all six pairs. RTX 4090's smaller row tile loses, and its eight-warp shared tile reduces
+register use from 150 to 104. RTX 5090's eight-warp shared tile ties and its shallower pipeline loses.
+
+V100 profiling shows gate/up near 86% of measured cold DRAM throughput, while Q, K/V and O reach roughly 56–58%
+and spend 59–65% of sampled warp time stalled on long scoreboards. Its wider Q split wins only three of six pairs
+and is tied on average, so the original split stays. Cutting an input normalization factor instead of the variance
+also ties. Moving the post-attention variance separately preserves O but makes gate/up repeat more normalization
+work; the new gate/up and scalar costs outweigh the saving. Existing evidence continues to select the accepted
+input-only change. No mathematical precision or correctness tolerance is changed.
+
+The exact-source H100 attention profile has 128 CTAs on 132 SMs, 168 registers per thread and 80 KiB shared memory.
+It exposes about one active warp per scheduler and 0.36 eligible warps, with no eligible warp in 63.79% of sampled
+cycles. Compute utilization is 27.95%, L2 20.43% and DRAM 6.60%. Fixed-latency waits and barriers outweigh GMMA waits.
+Smaller row-tile probes are refused by existing schedule legality before CUDA emission; they provide no timing.
+An A100 attention schedule with more, smaller CTAs times out in two 115-second attempts and one fixed 300-second
+attempt without producing a timing. These attempts establish no performance result, and the old schedule remains.
+The remaining question is whether a supported smaller attention tile can improve latency hiding without adding
+more synchronization or changing rounding. Another broad schedule sweep is not supported by this evidence.
+
+RTX 5090 gate/up reaches 45.68% tensor throughput, 33.81% SM utilization and 51.47% L2 throughput, with 384 CTAs,
+256 threads, 104 registers and 50,176 total shared-memory bytes. A larger row tile was attempted to reuse each
+weight tile across more rows, but its bounded attempt returned no measurement. RTX 4090 profiling is blocked by
+`ERR_NVGPUCTRPERM`; no counters were obtained and host permissions were left unchanged. Profiled durations are
+diagnostics only, never the unprofiled latency claim.
+
+The qualification archives retain all paired records, strict repeats, commands, source comparisons and rejected
+trials: `tuning_h100x1_round2_2026-10-02.tar.gz`, `tuning_a100x1_round2_2026-10-02.tar.gz`,
+`tuning_rtx5090x1_round2_2026-10-02.tar.gz` and `results_v100x1_round2_diagnostics_2026-10-02.tar.gz`.
+RTX 4090's qualification archive and the remaining final recipe snapshots are pending.
+
 ## Five-card baseline for the second optimization round (2026-10-02)
 
 All ten model comparisons and all fifty strict golden replays pass on the merge of PR #1011,
