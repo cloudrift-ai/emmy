@@ -364,11 +364,11 @@ def test_serve_sh_renders_the_quantized_moe_invocation(tmp_path):
 
 def test_serve_sh_renders_the_deepseek_v4_parallel_invocation(tmp_path):
     """DeepSeek V4 on 16 V100s: the vLLM arguments every strict boot of its golden ran, rendered from the
-    pinned config, with decode captured at size 1 only — single-token decode rides the fixed-slot expert
-    tier, and every wider step runs eager."""
+    pinned config, with decode captured up to the decode bucket — each rank holds a slice of every
+    expert, so those steps ride the fixed-slot expert tier, and every wider step runs eager."""
     config = {key: value.strip('"') for key, value in config_values(SERVE_DIR / "models" / "deepseek-v4-flash-0731.env").items()}
     argv = render_serve_sh(tmp_path, config)
-    capture = '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1], "custom_ops": ["+rotary_embedding"]}'
+    capture = '{"cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1, 2, 4, 8, 16], "custom_ops": ["+rotary_embedding"]}'
     assert argv == [
         "-m",
         "vllm.entrypoints.openai.api_server",
@@ -506,6 +506,22 @@ def test_server_env_is_warm_bake_verify_parity():
     assert "ARG RUNTIME_ENV=" in dockerfile and 'SERVE_ENV="${RUNTIME_ENV}"' in dockerfile
     assert "--build-arg 'RUNTIME_ENV=$(SERVE_ENV_VALUE)'" in make
     assert 'check_baked SERVE_ENV "${SERVE_ENV:-}"' in verify
+
+
+@pytest.mark.parametrize(("key", "build_arg"), [("SERVE_CAPTURE_SIZES", "CAPTURE_SIZES"), ("SERVE_EXTRA_ARGS", "EXTRA_ARGS")])
+def test_capture_ladder_and_pinned_flags_are_warm_bake_verify_parity(key, build_arg):
+    """The capture ladder decides which decode steps replay a graph and the pinned flags are the rest of the
+    server's command line, and nothing else in verify would notice an image baked from other values (its
+    packs can still hit, its one request completes): the warm passes each, the bake bakes it and verify
+    refuses an image baked from another value."""
+    make = (PROJECT_ROOT / "Makefile").read_text()
+    warm = (SERVE_DIR / "warm.sh").read_text()
+    dockerfile = (SERVE_DIR / "Dockerfile").read_text()
+    verify = (SERVE_DIR / "verify.sh").read_text()
+    assert warm.count(f"-e {key}") == 2, "the initial boot and every fixpoint pass"
+    assert f'{key}="${{{build_arg}}}"' in dockerfile
+    assert f"--build-arg '{build_arg}=$({key}_VALUE)'" in make
+    assert f'check_baked {key} "${{{key}:-}}"' in verify
 
 
 def test_release_bakes_and_verifies_the_request_time_triton_cache():

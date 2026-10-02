@@ -260,7 +260,8 @@ def _gen_graph_args(vllm_args: list[str], *, model: str | None = None) -> list[s
         # MoE decode capture is FIXED-SLOT: single-token steps ride the runner's k-slot expert
         # dispatch (fixed launch set, no host sync — capture-legal), while wider decode steps
         # keep the routed dispatch, which host-syncs and stays eager. The ladder is therefore
-        # capped at capture size 1. Whether the fixed-slot tier actually built is unknowable
+        # capped at capture size 1 (a caller's config may reach the decode bucket on a
+        # tensor-parallel boot, where the slots serve batches). Whether the tier built is unknowable
         # pre-boot — the AUTHORITATIVE guard is in ``EmmyGenModel.__init__``, which inspects
         # the runner and rejects an MoE capture boot loudly when the tier is missing (serve
         # with --enforce-eager then). A caller-supplied config forwards untouched and faces

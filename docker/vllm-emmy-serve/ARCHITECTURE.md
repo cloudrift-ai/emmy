@@ -163,7 +163,8 @@ the same cubins and the standard-lane pack never exists.
   seals: `SERVE_QUANT=exl3` adds `"quantization_config": null` beside the architectures override (vLLM has no EXL3
   quantization method and refuses the boot at config parsing, though nothing in the engine needs one — emmy owns
   every coded weight), and `SERVE_CAPTURE_SIZES` replaces the power-of-two capture ladder, which an **MoE model must
-  cap at `[1]`**: single-token steps ride the runner's fixed-slot expert dispatch (fixed launch set, capture-legal)
+  cap**: at `[1]` on a rank holding whole experts, at the decode bucket where tensor parallelism gives each rank a
+  slice of every expert. Those steps ride the runner's fixed-slot expert dispatch (fixed launch set, capture-legal)
   while wider decode steps keep the routed dispatch, which host-syncs and stays eager. `SERVE_V2_MODEL_RUNNER=1`
   opts a qualified dense model into vLLM's V2 runner; it executes real prefill/decode warmups before enabling vLLM's
   request-time JIT monitor. An `--enforce-eager` in `SERVE_EXTRA_ARGS` drops the capture config, as a caller's does in
@@ -188,9 +189,11 @@ the same cubins and the standard-lane pack never exists.
   prebuilt image was possible. `emmy bench` runs its client in the same image and, for a recipe that pins a revision,
   names that snapshot as the client's tokenizer: the baked cache holds no branch ref, so a lookup by repo id finds
   nothing offline.
-- `verify.sh` — compares the image's baked `SERVE_REVISION` against the config's (a tag built from an older config
-  serves different weights and still passes every check below), then cold-starts the **baked** image with no token,
-  issues one completion, and diffs the cubin file set before/after: an empty diff proves 100% Emmy cache hit. It
+- `verify.sh` — compares the image's baked `SERVE_REVISION`, serving environment, capture ladder and pinned flags
+  against the config's (a tag built from an older config serves different weights, replays graphs for other decode
+  widths, or runs another command line, and can still pass every check below), then cold-starts the **baked** image
+  with no token, issues one completion, and diffs the cubin file set before/after: an empty diff proves 100% Emmy
+  cache hit. It
   also fails when the boot or the request writes a new entry into the baked Triton cache, which every Triton compile
   does. It does not read vLLM's JIT-monitor warning: that one also fires on a kernel's first launch in a process when
   the binary loads straight from the cache, which the 1Cat fork's first request does for its attention kernels with
