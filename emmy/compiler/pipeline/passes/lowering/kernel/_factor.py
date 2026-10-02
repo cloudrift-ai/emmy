@@ -50,7 +50,7 @@ from emmy.compiler.backend.cuda.dtype import cuda_name
 from emmy.compiler.dtype import F32
 from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expr import BinaryExpr, Literal, TernaryExpr, Var
 from emmy.compiler.ir.kernel import Tile
 from emmy.compiler.ir.kernel.ir import Smem, Sync, TreeHalve, WarpBroadcast, WarpShuffle
 from emmy.compiler.ir.pure.fold import Fold
@@ -60,6 +60,7 @@ from emmy.compiler.ir.schedule.views import cone_seam
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
 from emmy.compiler.ir.stmt.body import _exposed_defines
+from emmy.compiler.ir.stmt.normalize import guard_reductions
 from emmy.compiler.ir.tile import FoldMove, Level, Reduce, ReduceStage
 from emmy.compiler.ir.tile.ir import apply_output_specs, observed_result_names
 from emmy.compiler.ir.tile.ops import UnbindableProjection, chain_members, projection_regions, sched_of, tiled_edges
@@ -72,6 +73,7 @@ from emmy.compiler.pipeline.passes.lowering.kernel._atom import (
 )
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import sync_row_fill
 from emmy.compiler.pipeline.passes.lowering.kernel._tiling import atomize, grid_tile, register_tile, unit_tile
+from emmy.compiler.pipeline.search.space import GUARD_REDUCTIONS
 
 # ---- the ambient cell environment and the wire a node produces ---------------------------------- #
 
@@ -900,6 +902,18 @@ def _tile_reduce_axis_transposed(
     assert not (stage is not None and stage.smem), "transposed coop cannot ride shared-row staging"
     *hoisted, rloop = op.lower(axes=ctx.sched.tile.axes)
     out_ax = _coalescing_axis(rloop, grid, ctx.inputs)
+    candidate = rloop
+    if GUARD_REDUCTIONS.narrow((True,))[0]:
+        guarded = guard_reductions(Body((*hoisted, rloop, *tail)), frozenset(ax.name for ax in (*grid, *ctx.serial)))
+        candidate = guarded[len(hoisted)]
+    predicate = candidate.end.cond if isinstance(candidate, StridedLoop) and isinstance(candidate.end, TernaryExpr) else None
+
+    def uniform_parts(expr):
+        if isinstance(expr, BinaryExpr) and expr.op == "&&":
+            return (*uniform_parts(expr.left), *uniform_parts(expr.right))
+        return (expr,) if out_ax.name not in expr.free_vars() else ()
+
+    uniform = uniform_parts(predicate) if predicate is not None else ()
     view = op.as_reduction()
     axis = rloop.axis
     stride = k_ways * reg
@@ -966,6 +980,17 @@ def _tile_reduce_axis_transposed(
         stores = [Cond(cond=BinaryExpr("==", Var(k_co.name), Literal(0, "int")), body=tuple(stores))]
 
     lanes_axes = ((k_co,) if k_co is not None else ()) + (n_lane,)
+    if uniform:
+        condition = uniform[0]
+        for part in uniform[1:]:
+            condition = BinaryExpr("&&", condition, part)
+        # Output-axis predicates can differ between lanes. Only their independent conjuncts
+        # guard the collective; every thread reaches its barriers together. Seeds stay visible
+        # to the projection even when the whole block skips the reduction.
+        accums = {stmt.name: stmt for stmt in strided.body if isinstance(stmt, Accum)}
+        seeds = [Init(name=stmt.name, identity=stmt.op.identity, dtype=stmt.dtype or F32) for stmt in accums.values()]
+        strided = replace(strided, seed=False)
+        return seeds, [*sweep, Cond(cond=condition, body=(strided, *merge))], stores, lanes_axes, out_ax
     return [], [*sweep, strided, *merge], stores, lanes_axes, out_ax
 
 
