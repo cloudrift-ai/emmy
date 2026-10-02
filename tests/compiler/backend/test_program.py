@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from emmy.compiler.backend.cuda.program import _numpy_storage, benchmark_program, run_program
+from emmy.compiler.backend.cuda.program import _LAYOUT_MEMO, CompiledProgram, _numpy_storage, benchmark_program, run_program
 from emmy.compiler.dtype import BF16, decode_bf16
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
@@ -22,6 +22,26 @@ def test_bf16_host_values_materialize_as_bits():
     assert storage.dtype == np.uint16
     np.testing.assert_array_equal(decode_bf16(storage), np.array([1.0, -2.0, 3.140625], dtype=np.float32))
     np.testing.assert_array_equal(_numpy_storage(storage, BF16), storage)
+
+
+def test_layout_is_kept_per_environment_up_to_a_bound():
+    """A program asks the runtime for the layout once per environment and keeps the most recently used
+    ones: a routed MoE prefill asks five times per expert launch, and a long-lived server sees every
+    prompt length, so the memo must neither rebuild a hot entry nor grow with the lengths served."""
+    asked = []
+    runtime = SimpleNamespace(layout=lambda env: asked.append(dict(env)) or {"at": dict(env)})
+    program = CompiledProgram(plan=None, program=runtime, executor=None)
+
+    first = program._layout({"num_tokens": 0})
+    assert program._layout({"num_tokens": 0}) is first and asked == [{"num_tokens": 0}]
+    for width in range(1, _LAYOUT_MEMO):
+        program._layout({"num_tokens": width})
+        program._layout({"num_tokens": 0})  # stays the most recently used
+    program._layout({"num_tokens": _LAYOUT_MEMO})  # one past the bound: the least recently used (width 1) goes
+    assert len(program._layouts) == _LAYOUT_MEMO and len(asked) == _LAYOUT_MEMO + 1
+    assert program._layout({"num_tokens": 0}) is first
+    program._layout({"num_tokens": 1})
+    assert len(asked) == _LAYOUT_MEMO + 2 and len(program._layouts) == _LAYOUT_MEMO
 
 
 def test_bf16_buffer_view_has_logical_dtype_and_shares_storage():

@@ -340,6 +340,11 @@ class GraphCaptureError(RuntimeError):
     this can't be misclassified as a ``bench_fail`` there."""
 
 
+# Environments a program keeps the layout of. A symbolic serving program meets one per step width, so
+# a long-lived server would otherwise hold one entry per prompt length it ever served (kilobytes each,
+# per program, per worker). Measured on DeepSeek V4's shared expert program, which met 1,248 widths
+# over 22 prompts: at 256, one launch in eight rebuilds its layout once instead of five times.
+_LAYOUT_MEMO = 256
 _AUTO_BUDGET_MS = 100.0
 # Iter-count cap on ``num_iters="auto"``. Combined with the GPU-time
 # target above: whichever fires first wins. The cap is the binding
@@ -408,10 +413,26 @@ class CompiledProgram:
     # Number of completed ``iter_once`` calls — iter 0 runs under the first-iteration watchdog
     # deadline (first-launch lazy-load / carveout stalls are not hangs; see ``_launch_deadline_ms``).
     _iters_done: int = field(default=0, repr=False)
+    # Symbolic environment → the runtime's layout there (see :meth:`_layout`).
+    _layouts: dict[tuple, dict] = field(default_factory=dict, repr=False)
 
     @property
     def launches(self) -> list[_Launch]:
         return self.plan.launches
+
+    def _layout(self, sym_values: dict[str, int]) -> dict:
+        """The runtime's layout at ``sym_values``, memoized: the runtime plans every scratch offset
+        and builds the dict anew on each call, and a routed MoE layer asks once per weight swap
+        and output view of each expert launch — over half of a prefill's host time when it did.
+        The ``_LAYOUT_MEMO`` most recently used environments are kept, the dict's order being
+        their age."""
+        key = tuple(sorted(sym_values.items()))
+        if (layout := self._layouts.pop(key, None)) is None:
+            if len(self._layouts) >= _LAYOUT_MEMO:
+                del self._layouts[next(iter(self._layouts))]
+            layout = self.program.layout(sym_values)
+        self._layouts[key] = layout
+        return layout
 
     def _buffer(self, name: str) -> _Buffer:
         return next(b for b in self.plan.buffers if b.name == name)
@@ -486,7 +507,7 @@ class CompiledProgram:
         is that tensor."""
         if torch_module() is None:
             return None
-        layout = self.program.layout(sym_values)
+        layout = self._layout(sym_values)
         regions: dict[str, tuple[int, int]] = {}
         fresh = False
         for name, nbytes in layout["regions"].items():
@@ -700,7 +721,7 @@ class CompiledProgram:
         result clones it. Requires the program's memory to be torch's (it is whenever torch sees
         the device)."""
         buf = self._buffer(name)
-        placement = self.program.layout(self.sym_values)["buffers"][name]
+        placement = self._layout(self.sym_values)["buffers"][name]
         backing = self._tensors.get(placement["region"])
         if backing is None:
             raise RuntimeError(f"buffer {name!r} lives in runtime-owned memory; device views need torch")
@@ -736,7 +757,7 @@ class CompiledProgram:
         if not _is_device_tensor(tensor) or not tensor.is_contiguous():
             raise TypeError(f"operand {name!r}: expected a contiguous CUDA tensor")
         flat = _flat_bytes(tensor)
-        placement = self.program.layout(self.sym_values)["buffers"].get(name)
+        placement = self._layout(self.sym_values)["buffers"].get(name)
         if placement is None:
             self.executor.set_external(name, flat.data_ptr(), flat.numel())
             self._tensors[f"external:{name}"] = flat
@@ -747,7 +768,7 @@ class CompiledProgram:
     def release_buffer(self, name: str) -> None:
         """Give a buffer's memory back: an operand the kernels resolve through an indirect table
         and never read directly. The buffer keeps a valid one-byte address."""
-        region = self.program.layout(self.sym_values)["buffers"][name]["region"]
+        region = self._layout(self.sym_values)["buffers"][name]["region"]
         self.executor.release_region(region)
         self._tensors.pop(region, None)
 

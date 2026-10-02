@@ -131,7 +131,10 @@ are never read. This is what keeps all 28 layers' `[heads, S, S]` attention scra
 the card's memory. `build_from_plan` allocates one torch tensor per region — so vLLM's memory profiler counts every
 byte a program holds — and records each on the runtime's stream, so torch's caching allocator never recycles a block a
 launch still reads. A constant supplied as a CUDA tensor is lent as it is: the serving path uploads each weight once
-and shares it across twins. Without torch the runtime allocates for itself (the worker binary always does).
+and shares it across twins. Without torch the runtime allocates for itself (the worker binary always does). The
+layout depends on nothing but the environment, so a `CompiledProgram` keeps the ones it got for its most recently
+used environments: a routed MoE prefill asks for it on every weight swap and output view, and rebuilding it was over
+half that host time, while a server meets one environment per prompt length and must not keep them all.
 
 **Cross-program pooling (`BufferArena`).** The slab kills scratch duplication *within* a program; `BufferArena` kills
 it *across* programs that run sequentially (the serving runner builds 2–4 programs × `num_layers`, and without pooling
