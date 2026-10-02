@@ -147,27 +147,17 @@ def _align_owned_sweeps(piece: TileOp) -> TileOp:
     if len(regions) < 2 or any(tail or len(stores) != 1 or not stores[0].sweep for _, tail, stores in regions):
         return piece
     sweeps = tuple(stores[0].sweep for _, _, stores in regions)
-    anchor = next((sweep[0] for sweep in sweeps if len(sweep) == 1), None)
-    if anchor is None:
-        return piece
+    anchor = next((sweep for sweep in sweeps if len(sweep) == 1), sweeps[0])
     axes = tuple(axis for sweep in sweeps for axis in sweep)
     names = {axis.name for axis in axes}
     outputs = tuple(stores[0].write.output for _, _, stores in regions)
-    if (
-        len(names) != len(axes)
-        or len(set(outputs)) != len(outputs)
-        or any(
-            (sweep[0].extent != anchor.extent or form(sweep[0].window) != form(anchor.window))
-            if len(sweep) == 1
-            else (
-                anchor.window is not None
-                or any(axis.window is not None or not axis.extent.is_static for axis in sweep)
-                or not anchor.extent.is_static
-                or prod(axis.extent.as_static() for axis in sweep) != anchor.extent.as_static()
-            )
-            for sweep in sweeps
-        )
-        or names & {axis.name for axis in piece.place.free}
+    if len(names) != len(axes) or len(set(outputs)) != len(outputs) or names & {axis.name for axis in piece.place.free}:
+        return piece
+    if len(anchor) == 1 and all(len(sweep) == 1 for sweep in sweeps):
+        if any(sweep[0].extent != anchor[0].extent or form(sweep[0].window) != form(anchor[0].window) for sweep in sweeps):
+            return piece
+    elif any(axis.window is not None or not axis.extent.is_static for axis in axes) or any(
+        prod(axis.extent.as_static() for axis in sweep) != prod(axis.extent.as_static() for axis in anchor) for sweep in sweeps
     ):
         return piece
     for (region, _, stores), sweep in zip(regions, sweeps, strict=True):
@@ -196,11 +186,17 @@ def _align_owned_sweeps(piece: TileOp) -> TileOp:
         ):
             return piece
 
-    def sigma(sweep: tuple[Axis, ...]) -> Sigma:
-        mapping = {}
-        for i, axis in enumerate(sweep):
-            stride = prod(follower.extent.as_static() for follower in sweep[i + 1 :])
-            expr = Var(anchor.name)
+    def sigma(sweep: tuple[Axis, ...], mapping: dict) -> Sigma | None:
+        remaining = tuple(axis for axis in sweep if axis.name not in mapping)
+        available = tuple(axis for axis in anchor if axis.name not in {expr.name for expr in mapping.values()})
+        if prod(axis.extent.as_static() for axis in remaining) != prod(axis.extent.as_static() for axis in available):
+            return None
+        flat = Var(available[0].name) if available else Literal(0, "int")
+        for axis in available[1:]:
+            flat = flat * Literal(axis.extent.as_static(), "int") + Var(axis.name)
+        for i, axis in enumerate(remaining):
+            stride = prod(follower.extent.as_static() for follower in remaining[i + 1 :])
+            expr = flat
             if stride > 1:
                 expr = BinaryExpr("/", expr, Literal(stride, "int"))
             if i:
@@ -208,11 +204,49 @@ def _align_owned_sweeps(piece: TileOp) -> TileOp:
             mapping[axis.name] = expr
         return Sigma(mapping)
 
+    substitutions = {}
+    anchor_region = next(region for (region, _, _), sweep in zip(regions, sweeps, strict=True) if sweep == anchor)
+    def loads(region):
+        return tuple(stmt for site in sites(region) for node in (site.node, *site.node.operands)
+                     for stmt in node.lift.body.iter() if isinstance(stmt, Load))
+
+    anchor_loads = loads(anchor_region)
+    for (region, _, _), sweep in zip(regions, sweeps, strict=True):
+        if sweep == anchor or len(sweep) == len(anchor) == 1:
+            substitutions[sweep] = Sigma({sweep[0].name: Var(anchor[0].name)}) if sweep != anchor else Sigma.IDENTITY
+            continue
+        mapping = {}
+        if len(anchor) > 1:
+            owned = {axis.name: axis for axis in sweep}
+            reference = {axis.name: axis for axis in anchor}
+            for load in loads(region):
+                for other in anchor_loads:
+                    if load.input != other.input or len(load.index) != len(other.index):
+                        continue
+                    paired = {
+                        left.name: right
+                        for left, right in zip(load.index, other.index, strict=True)
+                        if isinstance(left, Var) and isinstance(right, Var) and left.name in owned and right.name in reference
+                        and owned[left.name].extent == reference[right.name].extent
+                    }
+                    if paired and len({expr.name for expr in paired.values()}) == len(paired) and tuple(
+                        expr.substitute(paired) for expr in load.index
+                    ) == other.index:
+                        mapping = paired
+                        break
+                if mapping:
+                    break
+            if not mapping:
+                return piece
+        substitution = sigma(sweep, mapping)
+        if substitution is None:
+            return piece
+        substitutions[sweep] = substitution
     operands = tuple(
-        rewrite(region, lambda name: name, sigma(sweep)) if sweep != (anchor,) else region
+        rewrite(region, lambda name: name, substitutions[sweep])
         for (region, _, _), sweep in zip(regions, sweeps, strict=True)
     )
-    specs = tuple(replace(spec, write=spec.write.substitute(sigma(spec.sweep)), sweep=(anchor,)) for spec in piece.output_specs)
+    specs = tuple(replace(spec, write=spec.write.substitute(substitutions[spec.sweep]), sweep=anchor) for spec in piece.output_specs)
     aligned = replace(piece, op=replace(op, operands=operands), output_specs=specs)
     return aligned if all(not spec.sweep for spec in aligned.output_specs) else piece
 

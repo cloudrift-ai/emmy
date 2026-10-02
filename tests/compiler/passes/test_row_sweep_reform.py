@@ -129,3 +129,39 @@ def test_repeated_output_buffer_keeps_separate_sweeps() -> None:
     first, second = tile.output_specs
     duplicate = replace(tile, output_specs=(first, replace(second, write=replace(second.write, output="out0"))))
     assert reformed(duplicate) is duplicate
+
+
+def _transposed_siblings(*, incompatible=False) -> TileOp:
+    n, m, h, row, d, k = Axis("n", 8), Axis("m", 3), Axis("h", 2), Axis("row", 3), Axis("d", 4), Axis("k", 5)
+    first = contraction(k, slab("x0", "x", "m", "k"), (slab("w0v", "w0", "k", "n"), "acc0"))
+    second = contraction(k, slab("x1", "x", "k", "row") if incompatible else slab("x1", "x", "row", "k"),
+                         (slab("w1v", "w1", "k", "h", "d"), "acc1"))
+    return TileOp(
+        op=projection((first, second), results=("acc0", "acc1")), place=Placement(free=()), axes=(n, m, h, row, d, k),
+        inputs={"x": Tensor("x", (3, 5), "f32"), "w0": Tensor("w0", (5, 8), "f32"), "w1": Tensor("w1", (5, 2, 4), "f32")},
+        outputs={"out0": Tensor("out0", (8, 3), "f32"), "out1": Tensor("out1", (2, 3, 4), "f32")},
+        output_specs=(OutputSpec(write=Write(output="out0", index=(Var("n"), Var("m")), value="acc0"), sweep=(n, m)),
+                      OutputSpec(write=Write(output="out1", index=(Var("h"), Var("row"), Var("d")), value="acc1"), sweep=(h, row, d))),
+    )
+
+
+def test_transposed_sweeps_preserve_shared_rows_and_output_order() -> None:
+    tile = _transposed_siblings()
+    formed = reformed(tile)
+    contractions = [site.node for site in formed.sites if site.node.as_contraction() is not None]
+    assert len(contractions) == 1 and len(contractions[0].bilinear_channels()) == 2
+    inputs = {name: np.arange(np.prod([dim.as_static() for dim in tensor.shape]), dtype=np.float32).reshape(
+        tuple(dim.as_static() for dim in tensor.shape)) / 10 for name, tensor in tile.inputs.items()}
+    expected = {"out0": (inputs["x"] @ inputs["w0"]).T,
+                "out1": np.tensordot(inputs["x"], inputs["w1"], axes=([1], [0])).transpose(1, 0, 2)}
+    for piece in (tile, formed):
+        loop = LoopOp(body=piece.loop_body, inputs=piece.inputs, outputs=piece.outputs)
+        actual = loop.forward(*(inputs[name] for name in piece.inputs))
+        for name, value in zip(piece.outputs, actual, strict=True):
+            np.testing.assert_allclose(value, expected[name], rtol=1e-6, atol=1e-6)
+    assert {spec.write.output: len(spec.write.index) for spec in formed.output_specs} == {"out0": 2, "out1": 3}
+
+
+def test_incompatible_row_mapping_keeps_separate_sweeps() -> None:
+    tile = _transposed_siblings(incompatible=True)
+    assert reformed(tile) is tile
