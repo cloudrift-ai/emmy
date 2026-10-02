@@ -1,5 +1,6 @@
 """The cross-thread smem combine's rendered forms and its rewrite."""
 
+from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.kernel.ir import TreeHalve
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, RenderCtx
@@ -30,3 +31,13 @@ def test_a_rewrite_keeps_the_segment_layout() -> None:
     """The transposed combine halves segment by segment; losing ``inner`` in a rewrite folds across outputs."""
     halve = TreeHalve(bufs=("b",), state=("acc0",), state_b=("acc0__o",), combine_states=_SUM, length=4, tid_var="k_co", inner=("n_ln", 32))
     assert _rewrite_kind(halve, lambda name: name, Sigma({}), lambda axis: axis).inner == ("n_ln", 32)
+
+
+def test_a_rewrite_keeps_and_substitutes_the_packed_cell_offset() -> None:
+    offset = BinaryExpr("*", Var("cell"), Literal(4, "int"))
+    halve = TreeHalve(bufs=("b",), state=("acc0",), state_b=("acc0__o",), combine_states=_SUM, length=4, tid_var="warp", offset=offset)
+    rewritten = _rewrite_kind(halve, lambda name: name, Sigma({"cell": Var("group")}), lambda axis: axis)
+    assert rewritten.offset == BinaryExpr("*", Var("group"), Literal(4, "int"))
+    source = _render(rewritten)
+    assert "if (warp == group * 4)" in source
+    assert source.rstrip().endswith("acc0 = b[group * 4];")

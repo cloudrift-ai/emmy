@@ -3144,6 +3144,7 @@ def _(s: TreeHalve, rename, sigma, axis_fn):
         barrier_id=s.barrier_id,
         barrier_count=s.barrier_count,
         inner=s.inner,
+        offset=sigma.apply(s.offset) if s.offset is not None else None,
     )
 
 
