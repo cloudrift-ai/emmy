@@ -353,6 +353,107 @@ def test_compile_split_spells_static_fp4_activations_on_a_symbolic_width_split(t
     )
 
 
+def _qwen3_5_full_attention_config():
+    """The tiny Qwen3.5 text config with every layer full attention: the runner has no path for a
+    linear-attention layer, and the full-attention layer is the one whose query projection also
+    carries the attention output gate."""
+    pytest.importorskip("transformers.models.qwen3_5")
+    from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5TextConfig
+
+    from tests.compiler.trace.test_huggingface import _QWEN3_5_TINY
+
+    return Qwen3_5TextConfig(**(_QWEN3_5_TINY | {"layer_types": ["full_attention", "full_attention"]}))
+
+
+def _traced_runner(monkeypatch, model, **kwargs):
+    """``EmmyGenRunner.from_model`` with every program traced but none compiled, so it runs on a CPU.
+
+    Returns the runner and its traced graphs as ``[(wrapper class name, token width or None for the
+    symbolic program, graph)]`` in build order."""
+    import types
+
+    import torch
+
+    from emmy.serving import gen_runner, roofline
+
+    traced = []
+
+    def trace_only(wrapper, example_args, argnames, *_args, **_kwargs):
+        graph = gen_runner.trace_split(wrapper, example_args, argnames)
+        traced.append((type(wrapper).__name__, None if argnames else example_args[0].shape[0], graph))
+        program = types.SimpleNamespace(buffer_view=lambda _name: torch.empty(0), alias_buffer=lambda *_a: None)
+        return gen_runner._Program(program, list(graph.inputs), list(graph.outputs)), None
+
+    monkeypatch.setenv("EMMY_GEN_M1_TIER", "1")  # every tier, the single-token twin included
+    monkeypatch.setattr(gen_runner, "_compile_split", trace_only)
+    monkeypatch.setattr(gen_runner.EmmyGenRunner, "_ensure_device", lambda self: None)
+    monkeypatch.setattr(roofline, "audit_boot_programs", lambda *_a, **_k: {})
+    return gen_runner.EmmyGenRunner.from_model(model, **kwargs), traced
+
+
+def _input_shapes(graph, rows):
+    return [tuple(rows if not d.is_static else d.value for d in graph.buffer(name).shape) for name in graph.inputs]
+
+
+@pytest.mark.parametrize("gated", [True, False])
+def test_runner_reads_true_head_count_and_feeds_post_the_output_gate(monkeypatch, gated):
+    """Qwen3.5's full-attention ``q_proj`` is twice its query width: the second half is a gate that
+    multiplies the attention output before ``o_proj``. The runner must count heads from the query
+    half (4, not 8) and give every ``post`` program the gate as a third input; with the width alone
+    corrected, ``post`` would trace and run without the gate, a wrong answer and no error. An
+    ungated model (tiny Qwen3, same head geometry) keeps its two ``post`` inputs."""
+    torch = pytest.importorskip("torch")
+    import transformers
+
+    from tests.serving.helpers import qwen3_model
+
+    if gated:
+        torch.manual_seed(0)
+        model = transformers.Qwen3_5ForCausalLM(_qwen3_5_full_attention_config()).eval()
+    else:
+        model = qwen3_model(2)
+    runner, traced = _traced_runner(monkeypatch, model, dtype_str="float32", decode_bucket=4, prefill_bucket=16)
+
+    assert [runner.layer_meta(i)[:3] for i in range(runner.num_layers)] == [(16, 4, 2)] * 2
+    assert runner._output_gates == (gated, gated)
+    posts = [(rows, graph) for kind, rows, graph in traced if kind == "Post"]
+    # Every tier: symbolic, the single-token twin, the decode bucket, the prefill bucket.
+    assert sorted({rows or 0 for rows, _graph in posts}) == [0, 1, 4, 16]
+    for rows, graph in posts:
+        expected = [(rows or "T", 64)] * (3 if gated else 2)
+        assert _input_shapes(graph, rows or "T") == expected
+
+
+def test_gated_runner_post_is_the_serving_twin(tmp_path, monkeypatch):
+    """Measured schedules reach serving only when its kernels are the ones the twin capture
+    recorded. For a gated layer the runner's ``post`` must therefore be the twin's graph at every
+    width, and lower to the same kernels."""
+    torch = pytest.importorskip("torch")
+    import transformers
+
+    from emmy.compiler.context import Context
+    from emmy.compiler.pipeline.search.bench_record import kernel_row
+    from emmy.compiler.pipeline.search.golden.restamp import lift_targets
+    from emmy.serving.twins import capture_twin_graphs
+
+    config = _qwen3_5_full_attention_config()
+    config.save_pretrained(tmp_path)
+    torch.manual_seed(0)
+    model = transformers.Qwen3_5ForCausalLM(config).eval()
+    _runner, traced = _traced_runner(monkeypatch, model, dtype_str="float32", decode_bucket=4, prefill_bucket=16)
+    twins = capture_twin_graphs(str(tmp_path), decode_bucket=4, prefill_bucket=16, extra_widths=(1,), dtype="float32")
+
+    ctx = Context.from_target((12, 0), gpu_name="NVIDIA GeForce RTX 5090")
+    posts = {rows: graph for kind, rows, graph in traced if kind == "Post"}  # layer 1 repeats layer 0
+    assert sorted(posts, key=lambda rows: rows or 0) == [None, 1, 4, 16]
+    for rows, graph in posts.items():
+        twin = twins["post-sym" if rows is None else f"post{rows}"]
+        assert graph.structural_key() == twin.structural_key()
+        if rows is not None:  # the symbolic program lowers per bound width; the static ones stand for it
+            identities = [{kernel_row(t, "k").exact_identity for t in lift_targets(g, ctx).values()} for g in (graph, twin)]
+            assert identities[0] and identities[0] == identities[1]
+
+
 def test_create_passes_the_expert_slice_through_to_the_loader(tmp_path, monkeypatch):
     """A tensor-parallel rank's expert slice must reach the checkpoint read, not just the programs:
     holding every whole expert is what does not fit the card in the first place."""
