@@ -1,8 +1,8 @@
 # Golden-bench kernel corpus
 
-## Shared K/V prefill and input-variance decode cuts (2026-10-02)
+## Shared K/V prefill and V100 input normalization (2026-10-02)
 
-Sharing K/V production improves prefill on H100, A100, RTX 4090 and RTX 5090. Cutting the input variance separately
+Sharing K/V production improves prefill on H100, A100, RTX 4090 and RTX 5090. Separating the input RMSNorm statistic
 improves V100 decode. H100 has the clearest reduction; the RTX improvements are small. H100 prefill and V100 decode
 still do not establish a reliable advantage over `torch.compile`.
 
@@ -40,13 +40,13 @@ and ordinary cuts still offer separate producers.
 Each accepted prefill golden adds one shared K/V kernel, one producer route and one measured schedule row. All
 previous programs, kernel definitions, routes and rows remain unchanged. Nine unrelated emitted kernels are
 byte-identical between the two arms; Q's complete CUDA body is identical after its generated function and workspace
-names are aligned. The measured shared K/V rows cost 7.350 µs on H100, approximately 20.1 µs on A100, 17.821 µs on
-RTX 4090 and 13.9 µs on RTX 5090. These costs select the new route through normal evidence.
+names are aligned. The recorded shared K/V rows cost 7.350 µs on H100, 19.850 µs on A100, 17.821 µs on RTX 4090
+and 13.938 µs on RTX 5090. These costs select the new route through normal evidence.
 
-V100 instead cuts the raw input variance and applies normalization while reading the Q and shared K/V projections.
+V100 instead cuts the raw input mean square and applies normalization while reading the Q and shared K/V projections.
 This removes the separate normalized input vector without changing the layer's 14 launches. Seven kernel
 definitions, four routes and four measured rows are added; all 28 original definitions, 11 routes and 18 rows remain
-unchanged. The measured new rows cost 1.933, 4.623, 2.510 and 4.637 µs. Source changes are confined to the variance,
+unchanged. The measured new rows cost 1.933, 4.623, 2.510 and 4.637 µs. Source changes are confined to that statistic,
 Q/K/V normalization and consistent K/V channel order, plus generated names and an unused down-projection argument.
 
 The nested cut used to construct this candidate exposed a pin-consumption bug: a parent placement pin could apply
@@ -68,10 +68,15 @@ register use from 150 to 104. RTX 5090's eight-warp shared tile ties and its sha
 
 V100 profiling shows gate/up near 86% of measured cold DRAM throughput, while Q, K/V and O reach roughly 56–58%
 and spend 59–65% of sampled warp time stalled on long scoreboards. Its wider Q split wins only three of six pairs
-and is tied on average, so the original split stays. Cutting an input normalization factor instead of the variance
-also ties. Moving the post-attention variance separately preserves O but makes gate/up repeat more normalization
+and is tied on average, so the original split stays. Cutting an input normalization factor instead of the mean square
+also ties. Moving the post-attention RMSNorm statistic separately preserves O but makes gate/up repeat more normalization
 work; the new gate/up and scalar costs outweigh the saving. Existing evidence continues to select the accepted
 input-only change. No mathematical precision or correctness tolerance is changed.
+
+The V100 trace has 14 Emmy launches versus nine for `torch.compile`, including five projection partial/final pairs.
+The reference uses a different weight orientation, so its unsplit geometry cannot simply replace those schedules.
+A useful next investigation is a legal unsplit projection with coalesced weight access, measured in the whole layer;
+the current split-factor trials do not establish that it will win.
 
 The exact-source H100 attention profile has 128 CTAs on 132 SMs, 168 registers per thread and 80 KiB shared memory.
 It exposes about one active warp per scheduler and 0.36 eligible warps, with no eligible warp in 63.79% of sampled
@@ -90,8 +95,71 @@ diagnostics only, never the unprofiled latency claim.
 
 The qualification archives retain all paired records, strict repeats, commands, source comparisons and rejected
 trials: `tuning_h100x1_round2_2026-10-02.tar.gz`, `tuning_a100x1_round2_2026-10-02.tar.gz`,
-`tuning_rtx5090x1_round2_2026-10-02.tar.gz` and `results_v100x1_round2_diagnostics_2026-10-02.tar.gz`.
-RTX 4090's qualification archive and the remaining final recipe snapshots are pending.
+`tuning_rtx4090x1_round2_2026-10-02.tar.gz`, `tuning_rtx5090x1_round2_2026-10-02.tar.gz` and
+`results_v100x1_round2_diagnostics_2026-10-02.tar.gz`.
+
+## Final five-card recipe after the second round (2026-10-02)
+
+All ten model comparisons and all fifty strict golden replays pass. These are the unchanged two-shape recipe on
+each exact card, with the accepted evidence and the same protocol as the baseline. Captured whole-forward model
+latencies are microseconds. The balanced pairs above establish the improvements; this table validates the final
+selections and retains the contemporaneous reference timings.
+
+| Card | s1 Emmy | s1 `torch.compile` | s512 Emmy | s512 `torch.compile` | Launches s1 / s512 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| A100 40GB | 49.688 | 55.896 | 176.333 | 180.120 | 14 / 11 |
+| H100 80GB | 29.200 | 31.729 | 82.942 | 82.037 | 14 / 11 |
+| V100 SXM2 16GB | 67.648 | 60.849 | 496.640 | 637.012 | 14 / 21 |
+| RTX 4090 | 24.545 | 29.163 | 155.502 | 162.778 | 14 / 11 |
+| RTX 5090 | 20.473 | 24.591 | 129.344 | 135.717 | 16 / 11 |
+
+The strict golden replays use different inputs and a different reference path. Their medians and full ranges are
+validation results, not the values to compare against the model's `torch.compile` column.
+
+| Card | s1 median [range], µs | s512 median [range], µs |
+| --- | ---: | ---: |
+| A100 40GB | 50.712 [50.404–51.054] | 175.787 [174.763–176.299] |
+| H100 80GB | 24.506 [23.907–25.088] | 83.877 [83.508–84.241] |
+| V100 SXM2 16GB | 67.968 [67.464–68.367] | 496.640 [491.520–499.200] |
+| RTX 4090 | 24.625 [24.576–24.726] | 155.467 [154.770–156.160] |
+| RTX 5090 | 20.472 [20.471–20.473] | 129.783 [129.308–130.139] |
+
+Within each shape, the model run and all five strict repeats have identical ordered CUDA source hashes, schedules
+and shared-memory sizes. Changed shapes match the accepted candidates; unchanged shapes match the baseline.
+H100's final recipe precedes the parent placement-pin fix. Fresh strict compiles of both H100 shapes reproduce
+byte-identical complete CUDA under the integrated parent in the same compilation context, confirming the fix leaves
+these unpinned selections unchanged. Later formatting changes preserve the Python ASTs.
+
+Every canonical archive contains two succeeded system-only experiment records, raw command artifacts, source
+provenance and logs. Earlier canonical snapshots remain in Git at the round's base; the newly measured baselines
+remain in the separate archives below. All GPU VMs are retained. Only the single V100 machine was used.
+
+| Card | Canonical archive | Root member | Executed source |
+| --- | --- | --- | --- |
+| A100 | `results_a100x1.tar.gz` | `2026-10-02_09-21-02/` | `9c81582c4` |
+| H100 | `results_h100x1.tar.gz` | `2026-10-02_08-35-50/` | `8872d9346` |
+| V100 | `results_v100x1.tar.gz` | `2026-10-02_09-09-03/` | `9c81582c4` |
+| RTX 4090 | `results_rtx4090x1.tar.gz` | `2026-10-02_09-13-19/` | `eb33f345c` |
+| RTX 5090 | `results_rtx5090x1.tar.gz` | `2026-10-02_09-17-30/` | `9c81582c4` |
+
+All five use Transformers 5.14.1. The recorded Torch versions and CUDA compilers differ between hosts, so comparisons
+between cards include those software differences. Exact GPU UUIDs, clocks, operating systems and package freezes
+are preserved in the matching records and artifacts.
+
+| Card | Host | Torch | nvcc | Driver |
+| --- | --- | --- | --- | --- |
+| A100 | `bench-keep-a100-0921-1621-6784` | 2.14.0 | 12.9.41 | 580.173.02 |
+| H100 | `bench-gb-h100-0924-1252-99aa` | 2.14.0 | 12.9.41 | 580.178.04 |
+| V100 | `riftvm`, single SXM2 card | 2.13.0+cu126 | 12.9.86 | 580.178.04 |
+| RTX 4090 | `riftvm`, single RTX 4090 | 2.14.0 | 13.3.73 | 580.159.03 |
+| RTX 5090 | `kenshin` | 2.13.0 | 13.0.88 | 580.173.02 |
+
+Final validation passes the full CPU suite with 5,716 passed and 1,250 skipped in 367.03 seconds, including
+maintained-golden freshness and prior reproduction. The full RTX 5090 suite passes with eight workers: 6,583 passed
+and 398 skipped in 1,117.76 seconds. Its initial missing test-entrypoint setup failure is retained separately.
+All ten experiment goldens pass a final freshness check without rewriting anything. Lint passes after formatting
+the new code and tests. The RTX 4090 tuning archive retains the CPU, lint and freshness logs; the RTX 5090 tuning
+archive retains the complete GPU suite and its setup provenance.
 
 ## Five-card baseline for the second optimization round (2026-10-02)
 
