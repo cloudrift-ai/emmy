@@ -1089,15 +1089,10 @@ def _gated_stitch(runner, model, t, *, gate_fn=lambda gate: gate):
     return out
 
 
-#: The single-token twin and the symbolic program lower Qwen3.5's input norm with its ``1 + weight``
-#: scale folded into a constant that the plan carries no source for, so the runner never binds it and
-#: ``pre`` reads zeros. Gemma-3's norm has the same form and the same fault; it is not the gate.
-_UNBOUND_NORM_CONSTANT = pytest.mark.xfail(strict=True, reason="folded (1 + norm weight) constant left unbound by the runner")
-
-
 # 1: the single-token twin; 3: the decode bucket; 9: the symbolic program; 16: the prefill bucket;
-# 18: the rider split (16 rows on the prefill twin, 2 on the decode twin).
-@pytest.mark.parametrize("t", [pytest.param(1, marks=_UNBOUND_NORM_CONSTANT), 3, pytest.param(9, marks=_UNBOUND_NORM_CONSTANT), 16, 18])
+# 18: the rider split (16 rows on the prefill twin, 2 on the decode twin). The single-token twin and
+# the symbolic program fold each norm's ``1 + weight`` into one constant computed from the weight.
+@pytest.mark.parametrize("t", [1, 3, 9, 16, 18])
 def test_gated_attention_layer_matches_hugging_face(gated_runner, t):
     """The attention output gate travels from ``pre`` to ``post`` on every device tier, and each
     layer matches the Hugging Face layer on the same input. Replacing the gate with zeros must break
@@ -1158,3 +1153,24 @@ def test_gated_attention_layer_host_path_matches_device(gated_runner):
     out_host = runner.forward_layer_post(0, attn, hidden, host[3])
     out_device = runner.forward_layer_post_device(0, torch.from_numpy(attn).cuda(), torch.from_numpy(hidden).cuda(), device[3])
     np.testing.assert_array_equal(out_host, out_device.cpu().numpy())
+
+
+def test_gemma3_single_token_pre_matches_torch():
+    """Gemma-3's norms also scale by ``1 + weight``, and at one row the compiler folds that into a
+    constant computed from the weight. The compiled single-token ``pre`` must match the wrapper's
+    own torch forward — the folded constant reached the device with its values, not zeros."""
+    import torch
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+    from emmy.serving.gen_runner import _compile_split
+    from tests.serving.generation.test_gen_runner import _offset_norm_pre
+
+    pre = _offset_norm_pre("gemma3")
+    program, plan = _compile_split(pre, [torch.zeros(1, 64)], None, np.dtype("float32"))
+    assert any(w.load_ops and w.load_ops[0][0] == "record" for w in plan.weights.values()), "the fold did not happen"
+    hidden = torch.randn(1, 64, generator=torch.Generator().manual_seed(1))
+    with torch.no_grad():
+        expected = pre(hidden)
+    for got, want in zip(program.run([hidden.numpy()]), expected, strict=True):
+        np.testing.assert_allclose(got, want.numpy(), rtol=1e-5, atol=1e-5)
