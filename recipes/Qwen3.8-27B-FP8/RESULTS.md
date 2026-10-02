@@ -255,18 +255,19 @@ This is partial model coverage; the pass did not retrace or qualify the full dec
 
 The following targets have an exact stored Torch twin. Emmy and `torch.compile` were checked against eager on the
 same inputs. Timings are captured whole-program latencies, including every kernel selected by a cut. Runs used five
-warm-ups and 100 iterations, except the output head, which used 50 iterations.
+warm-ups and 100 iterations, except the output head, which used 50 iterations. The table uses the final paired run
+on seed 3.
 
 | Target | Emmy | `torch.compile` | Speedup |
 | --- | ---: | ---: | ---: |
-| 64-step scan, 384 rows | 1.4 us | 4.0 us | 2.9x |
-| 64-step scan, 48 rows | 1.4 us | 5.0 us | 3.6x |
+| 64-step scan, 384 rows | 1.64 us | 5.68 us | 3.47x |
+| 64-step scan, 48 rows | 1.49 us | 3.25 us | 2.17x |
 | QK and triangular mask, 64 tokens | 20.5 us | 29.7 us | 1.45x |
-| QK and triangular mask, 512 tokens | 115.8 us | 128.2 us | 1.11x |
-| Recurrent update | 13.8–14.5 us | 20.3–20.4 us | 1.40–1.48x |
-| Output head | 3,299 us | 6,322 us | 1.92x |
+| QK and triangular mask, 512 tokens | 114.8 us | 127.3 us | 1.11x |
+| Recurrent update | 14.0 us | 20.3 us | 1.45x |
+| Output head | 3,378 us | 6,234 us | 1.85x |
 
-The recurrent update passed on seeds 0, 1 and 2. Its three kernels compute the key norm, the normalized state-vector
+The recurrent update passed on seeds 0, 1, 2 and 3. Its three kernels compute the key norm, the normalized state-vector
 product, and the residual update. Kernel-scoped pins let the producer use transposed cooperative reduction while the
 consumer uses eight lanes and four register partials. The golden stores those schedules on their actual derived
 kernel identities; it does not copy measurements from independently re-lifted pieces.
