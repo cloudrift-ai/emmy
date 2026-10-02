@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from emmy.compiler.context import Context
+from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Tensor
 from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.elementwise import ElementwiseImpl
@@ -241,6 +242,15 @@ def test_reduction_enumeration_filters_the_independent_product_by_compatibility(
     packed = sum(len(packed_works(Work(kind="thread", units=(plan.coop, 1)))) for plan in coop_reduce_moves() if not plan.coop_transposed)
     assert len(reference) == len(expected_reductions) + packed
     assert offers.bound > len(reference)
+
+
+def test_cross_warp_packing_requires_complete_blocks() -> None:
+    work = Work.parse("t128")
+    assert {w.spell() for w in packed_works(work, axes=(Axis("rows", 16),))} == {"t128x2", "t128x4", "t128x8"}
+    assert not packed_works(work, axes=(Axis("rows", 17),))
+    assert not packed_works(work, axes=(Axis("rows", Dim("rows")),))
+    # Warp-local groups never synchronize across cells and can mask a partial block.
+    assert packed_works(Work.parse("t32"), axes=(Axis("rows", 17),))
 
 
 def test_scalar_contraction_enumeration_is_the_compatible_independent_product(monkeypatch) -> None:

@@ -614,7 +614,7 @@ class ClassicKernelSite(Site[ClassicSchedule]):
             for site in self.problem.node_sites
             for choice in site.nodes
             if isinstance(choice, ReductionSchedule) and choice.reduce.coop > 1 and not choice.reduce.coop_transposed
-            for packed in packed_works(Work(kind="thread", units=(choice.reduce.coop, 1)))
+            for packed in packed_works(Work(kind="thread", units=(choice.reduce.coop, 1)), axes=self.problem.tile.place.free)
         }
 
     def _sweep_widths(self) -> set[Work]:

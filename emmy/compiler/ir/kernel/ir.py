@@ -785,6 +785,11 @@ class TreeHalve(Stmt):
     # slot — ``buf[t·scale + inner_var]`` vs ``buf[(t+s)·scale + inner_var]``, broadcast from
     # ``buf[inner_var]``. ``None`` keeps the flat ``buf[t]`` layout.
     inner: tuple[str, int] | None = None
+    # A separate contiguous tree per packed cell, addressed by its first slot.
+    offset: Expr | None = None
+
+    def exprs(self) -> tuple[Expr, ...]:
+        return (self.offset,) if self.offset is not None else ()
 
     def deps(self) -> tuple[str, ...]:
         return tuple(self.state)
@@ -811,27 +816,32 @@ class TreeHalve(Stmt):
             slot, slot_s, root = f"{t} * {scale} + {iv}", f"({t} + s) * {scale} + {iv}", str(iv)
         else:
             slot, slot_s, root = t, f"{t} + s", "0"
+        if self.offset is not None:
+            root = self.offset.render(ctx)
+            t = f"({t} - ({root}))"
+            slot, slot_s = f"{root} + {t}", f"{root} + {t} + s"
         # The carried names' dtypes as declared by the enclosing seed — a selecting fp16 carrier
         # (``__half`` max) keeps its declaration while the tree folds float shadows of the same
         # names. Captured before those shadows overwrite the flat ssa map, restored after the
         # broadcast so the epilogue's conversions read the live declaration, not the dead shadow.
         outer_dtypes = {st: ctx.ssa_dtypes.get(st) for st in self.state}
-        if t == "warp" and self.inner is None and self.barrier_id == 0 and self.length <= 32:
+        if self.tid_var == "warp" and self.inner is None and self.barrier_id == 0 and self.length <= 32:
             # The hierarchical cross-warp slab holds one partial per warp, so warp 0 alone folds it with a
             # register butterfly: one barrier before the broadcast instead of one per halving step.
-            out = [f"{pad}if (warp == 0) {{"]
+            out = [f"{pad}if (warp == {root}) {{"]
             for buf, st in zip(self.bufs, self.state, strict=True):
-                out.append(f"{in1}{ty} {st} = {buf}[lane & {self.length - 1}];")
+                index = f"lane & {self.length - 1}" if self.offset is None else f"{root} + (lane & {self.length - 1})"
+                out.append(f"{in1}{ty} {st} = {buf}[{index}];")
                 ctx.ssa_dtypes[st] = self.dtype.name
             butterfly = WarpShuffle(
                 state=self.state, state_b=self.state_b, combine_states=self.combine_states, length=self.length, dtype=self.dtype
             )
             out.extend(butterfly.render(ctx.child()))
             out.append(f"{in1}if (lane == 0) {{")
-            out.extend(f"{in2}{buf}[0] = {st};" for buf, st in zip(self.bufs, self.state, strict=True))
+            out.extend(f"{in2}{buf}[{root}] = {st};" for buf, st in zip(self.bufs, self.state, strict=True))
             out += [f"{in1}}}", f"{pad}}}", f"{pad}__syncthreads();"]
             for buf, st in zip(self.bufs, self.state, strict=True):
-                out.append(f"{pad}{st} = {buf}[0];")
+                out.append(f"{pad}{st} = {buf}[{root}];")
                 ctx.ssa_dtypes[st] = outer_dtypes[st] or self.dtype.name
             return out
         out: list[str] = [f"{pad}for (int s = {half}; s > 0; s >>= 1) {{", f"{in1}if ({t} < s) {{"]
