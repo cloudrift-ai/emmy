@@ -57,9 +57,9 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   each is captured at its EXACT S so every kernel runs at its exact grid — no oversized-grid masking (a single
   capacity-baked graph for all S is **not** viable: several symbolic-M kernels do illegal reads at an oversized grid,
   the swizzle decode + staged loads among them). See `compiler/backend/cuda/ARCHITECTURE.md`
-  → repeated execution + captured replay. Trunk compute dtype follows vLLM's `--dtype` (`mc.dtype`, mapped in
-  `vllm_model._trunk_dtype_str`): `float32`→fp32, `float16`→fp16, anything else (e.g. `bfloat16`/`auto`) downcasts to
-  fp16 with a warn — the runner's numpy weight carrier can't represent bf16, and only fp16/fp32 trunks are supported.
+  → repeated execution + captured replay. The pooling trunk supports fp16 and fp32. It still maps a BF16 vLLM dtype
+  to fp16 with a warning. The generative trunk accepts explicit BF16: its host arrays carry encoded `uint16` bits,
+  its device buffers expose `torch.bfloat16`, and its default remains fp16.
   With `EMMY_SERVING_BATCHED=1` (`config.serving_batched`) the symbolic-seq trace bakes the batch extent at
   `max_num_seqs` and `forward_hidden_states_batched` runs each step as one batched forward padded to the step's
   longest sequence; `EMMY_SERVING_STATIC=1` (`config.serving_static`) instead traces a **fully-static**
@@ -523,9 +523,10 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   verifies the runner adopted that same tensor (not in the gather itself — vLLM compiles the drafter's forward, and
   dynamo can't trace `data_ptr()`). `forward` branches on `num_tokens`: the decode hot
   path (`≤ bucket`) runs `_forward_device` (q/k/v + attn_out stay CUDA tensors through RoPE + attention, no host
-  hop); prefill keeps the numpy path. Select via `--runner generate` +
-  `--hf-overrides '{"architectures":["EmmyGenModel"]}'` + `--dtype float16` (the `serve --runner generate` branch forces
-  this for seam coherence). Registered in `__init__.py`. **Whole-step CUDA graphs are the `emmy serve
+  hop); prefill runs the symbolic device programs. Select via `--runner generate` +
+  `--hf-overrides '{"architectures":["EmmyGenModel"]}'` + `--dtype float16` (the `serve --runner generate` branch defaults
+  this for seam coherence; explicit `--dtype bfloat16` runs a BF16 residual stream). Registered in `__init__.py`.
+  **Whole-step CUDA graphs are the `emmy serve
   --runner generate` DEFAULT — decode AND chunk/mixed steps**: no `--enforce-eager`; instead a `--compilation-config`
   with `cudagraph_mode: FULL` (full cudagraphs need no torch.compile — vLLM wraps the model in its
   `CUDAGraphWrapper`) and

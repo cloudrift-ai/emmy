@@ -4,6 +4,7 @@ correctness are covered on GPU by ``test_gen_runner_gpu.py`` / ``test_vllm_plugi
 import numpy as np
 import pytest
 
+from emmy.compiler.dtype import F32
 from emmy.serving.gen_runner import EmmyGenRunner, _pad_rows, _program_config_sha, _static_decode_covers_capacity
 
 
@@ -284,7 +285,7 @@ def test_compile_split_spells_static_fp4_activations_for_a_marked_nvfp4_checkpoi
 
     monkeypatch.setattr("emmy.compiler.backend.cuda.backend.CudaBackend", _CaptureBackend)
     with pytest.raises(_StampedGraph) as caught:
-        _compile_split(wrapper, list(example), None, np.dtype("float32"), ckpt=(str(ckpt), id_to_key))
+        _compile_split(wrapper, list(example), None, F32, ckpt=(str(ckpt), id_to_key))
     graph = caught.value.graph
 
     packed_weights = [n for n in graph.nodes.values() if n.output.dtype.name == "f4e2m1x2" and type(n.op).__name__ == "ConstantOp"]
@@ -335,7 +336,7 @@ def test_compile_split_spells_static_fp4_activations_on_a_symbolic_width_split(t
     with pytest.raises(_StampedGraph) as caught:
         # ``["x"]`` ties the forward arg's axis 0 to the shared symbolic ``num_tokens`` Dim, and
         # ``capacity`` sizes the build feed — exactly how the runner builds its ``*.sym`` tier.
-        _compile_split(wrapper, list(example), ["x"], np.dtype("float32"), capacity=64, ckpt=(str(ckpt), id_to_key))
+        _compile_split(wrapper, list(example), ["x"], F32, capacity=64, ckpt=(str(ckpt), id_to_key))
     graph = caught.value.graph
 
     assert not graph.buffer(graph.inputs[0]).shape[0].is_static, "the fixture traced static — not the symbolic tier"
