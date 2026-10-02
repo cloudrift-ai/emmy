@@ -1,4 +1,4 @@
-"""Post a compact, non-pinging model lifecycle summary to Discord."""
+"""Post a compact, non-pinging nightly refresh or model onboarding summary to Discord."""
 
 from __future__ import annotations
 
@@ -139,28 +139,43 @@ def _onboard_summary(environment: Mapping[str, str]) -> tuple[str, str, int, lis
     return title, description, color, fields
 
 
-def _discover_summary(environment: Mapping[str, str]) -> tuple[str, str, int, list[dict[str, Any]]]:
-    result = environment.get("WORKFLOW_RESULT", "failure")
+def _job_status(result: str, success: str) -> str:
     if result == "success":
-        return (
-            "Model discovery completed",
-            "The maintained recipe set was reviewed and the rolling model lifecycle pull request was refreshed.",
-            SUCCESS_COLOR,
-            _modified_model_fields(environment.get("MODIFIED_MODELS", "")),
-        )
+        return success
     if result == "cancelled":
-        return (
-            "Model discovery workflow cancelled",
-            "The model discovery workflow was cancelled before it completed.",
-            CANCELLED_COLOR,
-            [],
-        )
-    return (
-        "Model discovery failed",
-        "The model discovery workflow failed. Open the run for the failing step and logs.",
-        FAILURE_COLOR,
-        [],
-    )
+        return "Cancelled."
+    if result == "skipped":
+        return "Skipped."
+    return "Failed; open the run for the failing step and logs."
+
+
+def _nightly_summary(environment: Mapping[str, str]) -> tuple[str, str, int, list[dict[str, Any]]]:
+    results = [environment.get(f"{job}_RESULT", "") for job in ("DURATIONS", "PRIOR", "DISCOVER")]
+    if "cancelled" in results:
+        title = "Nightly refresh cancelled"
+        description = "The nightly refresh was cancelled before every job completed."
+        color = CANCELLED_COLOR
+    elif all(result == "success" for result in results):
+        title = "Nightly refresh completed"
+        description = "CPU test durations and the priors were refreshed on main, and the maintained recipe set was reviewed."
+        color = SUCCESS_COLOR
+    else:
+        title = "Nightly refresh failed"
+        description = "A nightly refresh job failed. Open the run for the failing step and logs."
+        color = FAILURE_COLOR
+
+    durations = "Updated on main." if environment.get("DURATIONS_UPDATED") == "true" else "Unchanged."
+    fields = [{"name": "CPU test durations", "value": _job_status(results[0], durations), "inline": False}]
+    for space in ("schedule", "placement"):
+        # A leg reports its own comparison; a leg that never got there is described by the job result.
+        summary = environment.get(f"{space.upper()}_PRIOR", "").strip()
+        value = summary or _job_status(results[1], "No comparison reported; open the run.")
+        fields.append({"name": f"{space.capitalize()} prior", "value": value[:FIELD_VALUE_LIMIT], "inline": False})
+    if results[2] == "success":
+        fields.extend(_modified_model_fields(environment.get("MODIFIED_MODELS", "")))
+    else:
+        fields.append({"name": "Modified models", "value": _job_status(results[2], ""), "inline": False})
+    return title, description, color, fields
 
 
 def build_payload(environment: Mapping[str, str], *, now: datetime | None = None) -> dict[str, Any]:
@@ -168,8 +183,8 @@ def build_payload(environment: Mapping[str, str], *, now: datetime | None = None
     workflow_kind = environment.get("WORKFLOW_KIND", "")
     if workflow_kind == "onboard":
         title, description, color, fields = _onboard_summary(environment)
-    elif workflow_kind == "discover":
-        title, description, color, fields = _discover_summary(environment)
+    elif workflow_kind == "nightly":
+        title, description, color, fields = _nightly_summary(environment)
     else:
         raise ValueError(f"Unsupported WORKFLOW_KIND: {workflow_kind!r}")
 

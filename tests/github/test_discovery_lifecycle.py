@@ -25,7 +25,7 @@ GPU = "NVIDIA H200 141GB"
 @pytest.mark.parametrize(
     ("workflow", "message"),
     [
-        ("discover-model.yml", '"Complete the attached lifecycle task exactly. Its file is $AGENT_TASK."'),
+        ("nightly-refresh.yml", '"Complete the attached lifecycle task exactly. Its file is $AGENT_TASK."'),
         ("onboard-model.yml", '"Complete the attached onboarding task exactly."'),
     ],
 )
@@ -58,12 +58,13 @@ def test_onboarding_loads_control_code_from_exact_workflow_commit():
 
 
 def test_discovery_loads_control_code_and_agents_from_exact_workflow_commit():
-    document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "discover-model.yml").read_text())
+    document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "nightly-refresh.yml").read_text())
     job = document["jobs"]["discover"]
     steps = job["steps"]
     checkout = next(step for step in steps if step.get("name") == "Checkout discovery branch")
     install_index = next(index for index, step in enumerate(steps) if step.get("name") == "Install Emmy")
     load_index = next(index for index, step in enumerate(steps) if step.get("name") == "Load exact workflow source")
+    rebase_index = next(index for index, step in enumerate(steps) if step.get("name") == "Rebase existing discovery branch on latest main")
     agent_index = next(index for index, step in enumerate(steps) if step.get("name") == "Run discover-models agent")
     validation_index = next(index for index, step in enumerate(steps) if step.get("name") == "Validate and apply model lifecycle")
     load_script = steps[load_index]["run"]
@@ -71,7 +72,10 @@ def test_discovery_loads_control_code_and_agents_from_exact_workflow_commit():
     validation_script = steps[validation_index]["run"]
     cleanup_script = next(step["run"] for step in steps if step.get("name") == "Cleanup discovery credentials and output")
 
-    assert load_index < install_index < agent_index < validation_index
+    assert load_index < rebase_index < install_index < agent_index < validation_index
+    # The rolling checkout replaced the workspace by then: the helpers come from the exact workflow commit.
+    assert 'source "$WORKFLOW_SOURCE/.github/workflows/scripts/bot_git.sh"' in steps[rebase_index]["run"]
+    assert job["concurrency"] == {"group": "model-discovery", "cancel-in-progress": False}
     assert steps[install_index]["run"] == 'make setup-agent AGENT_SOURCE="$WORKFLOW_SOURCE"'
     assert checkout["with"]["ref"] == "${{ steps.rolling.outputs.branch || github.event.repository.default_branch }}"
     assert 'git archive "$WORKFLOW_SHA"' in load_script
@@ -94,26 +98,25 @@ def test_discovery_loads_control_code_and_agents_from_exact_workflow_commit():
 
 
 @pytest.mark.parametrize(
-    ("workflow", "primary_job", "workflow_kind", "notification_name"),
+    ("workflow", "primary_job", "needs", "workflow_kind", "notification_name"),
     [
-        ("discover-model.yml", "discover", "discover", "Send discovery summary"),
-        ("onboard-model.yml", "onboard", "onboard", "Send onboarding summary"),
+        ("nightly-refresh.yml", "discover", ["durations", "prior", "discover"], "nightly", "Send nightly summary"),
+        ("onboard-model.yml", "onboard", "onboard", "onboard", "Send onboarding summary"),
     ],
 )
-def test_model_lifecycle_workflow_posts_discord_summary_from_separate_job(workflow, primary_job, workflow_kind, notification_name):
+def test_model_lifecycle_workflow_posts_discord_summary_from_separate_job(workflow, primary_job, needs, workflow_kind, notification_name):
     document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / workflow).read_text())
     lifecycle = document["jobs"][primary_job]
     notify = document["jobs"]["notify"]
     lifecycle_pr = next(step for step in lifecycle["steps"] if step.get("id") == "lifecycle-pr")
     checkout, notification = notify["steps"]
 
-    assert notify["needs"] == primary_job
+    assert notify["needs"] == needs
     assert notify["if"] == "${{ always() }}"
     assert notify["runs-on"] == "ubuntu-latest"
     assert notify["permissions"] == {"contents": "read"}
     assert notify["env"]["DISCORD_WEBHOOK_URL"] == "${{ secrets.DISCORD_EMMY_ROBOTS_WEBHOOK_URL }}"
     assert notify["env"]["WORKFLOW_KIND"] == workflow_kind
-    assert notify["env"]["WORKFLOW_RESULT"] == f"${{{{ needs.{primary_job}.result }}}}"
     assert checkout["uses"] == "actions/checkout@v4"
     assert checkout["with"]["ref"] == "${{ github.sha }}"
     assert checkout["with"]["persist-credentials"] is False
@@ -122,10 +125,21 @@ def test_model_lifecycle_workflow_posts_discord_summary_from_separate_job(workfl
     assert notification["run"] == "python3 .github/scripts/discord_notification.py"
     assert 'echo "number=$PR_NUMBER" >> "$GITHUB_OUTPUT"' in lifecycle_pr["run"]
     assert lifecycle["outputs"]["pr_number"] == "${{ steps.lifecycle-pr.outputs.number || steps.rolling.outputs.number }}"
-    if workflow_kind == "discover":
+    if workflow_kind == "nightly":
         assert lifecycle["outputs"]["modified_models"] == "${{ steps.lifecycle.outputs.modified_models }}"
         assert notify["env"]["MODIFIED_MODELS"] == "${{ needs.discover.outputs.modified_models }}"
+        # One summary for the run: every job's result, each prior leg's own comparison line.
+        for job in ("durations", "prior", "discover"):
+            assert notify["env"][f"{job.upper()}_RESULT"] == f"${{{{ needs.{job}.result }}}}"
+        assert notify["env"]["DURATIONS_UPDATED"] == "${{ needs.durations.outputs.updated }}"
+        prior = document["jobs"]["prior"]
+        assert prior["strategy"]["matrix"]["space"] == ["schedule", "placement"]
+        for space in ("schedule", "placement"):
+            assert prior["outputs"][space] == f"${{{{ steps.summary.outputs.{space} }}}}"
+            assert notify["env"][f"{space.upper()}_PRIOR"] == f"${{{{ needs.prior.outputs.{space} }}}}"
+        assert 'echo "$SPACE=$summary" >> "$GITHUB_OUTPUT"' in next(step["run"] for step in prior["steps"] if step.get("id") == "summary")
     else:
+        assert notify["env"]["WORKFLOW_RESULT"] == f"${{{{ needs.{primary_job}.result }}}}"
         artifacts = next(step for step in lifecycle["steps"] if step.get("id") == "artifacts")
         assert lifecycle["outputs"]["deployment_summary"] == "${{ steps.artifacts.outputs.deployment_summary }}"
         assert lifecycle["outputs"]["performance_summary"] == "${{ steps.artifacts.outputs.performance_summary }}"
@@ -499,7 +513,7 @@ def test_onboarding_selects_with_generic_recipe_query():
 
 
 def test_discovery_counts_lifecycle_with_recipe_query():
-    document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "discover-model.yml").read_text())
+    document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "nightly-refresh.yml").read_text())
     script = next(step["run"] for step in document["jobs"]["discover"]["steps"] if step.get("name") == "Validate and apply model lifecycle")
 
     assert "recipe query" in script
@@ -524,7 +538,7 @@ def test_discovery_prompt_keeps_obsolete_classification_conservative():
 
 
 def test_discovery_inventory_uses_recipe_query_against_rolling_recipes():
-    document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "discover-model.yml").read_text())
+    document = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "nightly-refresh.yml").read_text())
     script = next(step["run"] for step in document["jobs"]["discover"]["steps"] if step.get("name") == "Run discover-models agent")
 
     assert "emmy recipe query" in script
@@ -539,7 +553,7 @@ def test_discovery_inventory_uses_recipe_query_against_rolling_recipes():
 
 def test_discovery_uses_source_subagents_and_scores_every_model():
     workspace = Path(__file__).parents[2]
-    document = yaml.safe_load((workspace / ".github" / "workflows" / "discover-model.yml").read_text())
+    document = yaml.safe_load((workspace / ".github" / "workflows" / "nightly-refresh.yml").read_text())
     script = next(step["run"] for step in document["jobs"]["discover"]["steps"] if step.get("name") == "Run discover-models agent")
     agent = (workspace / ".opencode" / "agents" / "discover-models.md").read_text()
     skill = (workspace / ".agents" / "skills" / "discover-models" / "SKILL.md").read_text()
@@ -586,7 +600,7 @@ def test_shared_model_fit_prompt_reaches_both_lifecycle_skills():
     assert "emmy/gpu.py" in fit_prompt
     for skill_name in ("discover-models", "onboard-model"):
         assert "prompts/model-fit.md" in (workspace / ".agents" / "skills" / skill_name / "SKILL.md").read_text()
-    for workflow_name in ("discover-model.yml", "onboard-model.yml"):
+    for workflow_name in ("nightly-refresh.yml", "onboard-model.yml"):
         document = yaml.safe_load((workspace / ".github" / "workflows" / workflow_name).read_text())
         scripts = [step.get("run", "") for job in document["jobs"].values() for step in job["steps"]]
         assert any('--file "$WORKFLOW_SOURCE/prompts/model-fit.md"' in script for script in scripts)
@@ -658,7 +672,7 @@ def test_fit_subagent_sizes_each_onboarding_model_alone():
     config = yaml.safe_load(agent.split("---", 2)[1])
     parent = (workspace / ".opencode" / "agents" / "discover-models.md").read_text()
     prompt = " ".join((workspace / "prompts" / "discover-models" / "size-deployments.md").read_text().split())
-    document = yaml.safe_load((workspace / ".github" / "workflows" / "discover-model.yml").read_text())
+    document = yaml.safe_load((workspace / ".github" / "workflows" / "nightly-refresh.yml").read_text())
     script = next(step["run"] for step in document["jobs"]["discover"]["steps"] if step.get("name") == "Run discover-models agent")
 
     assert config["mode"] == "subagent"
@@ -780,7 +794,7 @@ def test_discovery_workflow_summarizes_tracked_and_new_recipe_changes(tmp_path):
     existing.write_text(existing.read_text().replace("best-effort", "maintained"))
     _recipe(tmp_path, "new", "org/new", tags=["onboarding", "untested"])
 
-    workflow = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "discover-model.yml").read_text())
+    workflow = yaml.safe_load((Path(__file__).parents[2] / ".github" / "workflows" / "nightly-refresh.yml").read_text())
     script = next(step["run"] for step in workflow["jobs"]["discover"]["steps"] if step.get("name") == "Validate and apply model lifecycle")
     source = script.split("./venv/bin/python - <<'PY'\n", 1)[1].split("\nPY", 1)[0]
     output_path = tmp_path / "github-output"
