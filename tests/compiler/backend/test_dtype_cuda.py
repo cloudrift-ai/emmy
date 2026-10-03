@@ -378,3 +378,22 @@ def test_fp16_max_reduction_stays_in_fp16():
     assert "__half acc" in sources, f"expected fp16 accumulator for max, got:\n{sources}"
     # The combine uses __hmax (native fp16 max), not fmaxf.
     assert "__hmax" in sources, f"expected __hmax intrinsic for fp16 max, got:\n{sources}"
+
+
+@requires_cuda
+def test_f32_floor_renders_and_rounds_down():
+    """``floor`` (Ministral 3's position-dependent query scale) renders as ``floorf``."""
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.ir.cuda import CudaOp
+
+    g = Graph()
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (1024,), dt.F32), node_id="x")
+    g.add_node(op=ElementwiseOp("floor"), inputs=["x"], output=Tensor("y", (1024,), dt.F32), node_id="y")
+    g.inputs, g.outputs = ["x"], ["y"]
+    compiled = CudaBackend().compile(Pipeline.build(LOOP_PASSES).run(g))
+    sources = "\n".join(n.op.kernel_source for n in compiled.nodes.values() if isinstance(n.op, CudaOp))
+    assert "floorf" in sources, sources
+
+    x_data = (np.random.default_rng(2).standard_normal(1024) * 8).astype(np.float32)
+    result, _ = CudaBackend().run(compiled, input_data={"x": x_data})
+    np.testing.assert_array_equal(next(iter(result.outputs.values())).reshape(-1), np.floor(x_data))

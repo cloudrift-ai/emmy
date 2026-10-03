@@ -1385,6 +1385,7 @@ _INTRINSIC_TO_CUDA: dict[str, str] = {
     "pow": "powf",
     "sqrt": "sqrtf",
     "erf": "erff",
+    "floor": "floorf",
 }
 
 _BUILTIN_TO_CUDA: dict[str, str] = {
