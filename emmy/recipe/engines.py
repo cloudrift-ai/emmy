@@ -41,7 +41,7 @@ def banned_extra_arg_flags(engine: str = "vllm") -> set[str]:
     return set(flag_map.values()) | _HARDCODED_FLAGS
 
 
-def build_engine_args(llm: LLMConfig, model_name: str, model_revision: str | None = None) -> list[str]:
+def build_engine_args(llm: LLMConfig, model_name: str, model_revision: str | None = None, *, model_dir: str | None = None) -> list[str]:
     """Build the full CLI argument list for the active engine.
 
     Each element in the returned list is a complete flag-value pair (e.g.
@@ -71,6 +71,13 @@ def build_engine_args(llm: LLMConfig, model_name: str, model_revision: str | Non
 
     if model_revision is not None:
         args.append(f"--revision {model_revision}")
+
+    adapter = llm.vllm.lora_adapter if llm.vllm else None
+    if adapter is not None:
+        if model_dir is None:
+            raise ValueError("a LoRA adapter needs the model cache directory")
+        snapshot = f"{model_dir}/hub/models--{adapter.huggingface.replace('/', '--')}/snapshots/{adapter.revision}"
+        args.extend(("--enable-lora", f"--max-lora-rank {adapter.rank}", f"--lora-modules {adapter.name}={snapshot}"))
 
     if llm.extra_args.strip():
         args.append(llm.extra_args)

@@ -113,6 +113,12 @@ def _validate_and_build(config: dict) -> Recipe:
         engine = "vllm"
         extra_args = llm_dict.get("vllm", {}).get("extra_args", "")
     validate_extra_args(extra_args, engine=engine)
+    if engine == "vllm" and llm_dict.get("vllm", {}).get("lora_adapter"):
+        conflicts = {token.split("=")[0] for token in extra_args.split()} & {
+            "--enable-lora", "--max-lora-rank", "--lora-modules"
+        }
+        if conflicts:
+            raise ValueError(f"extra_args conflicts with vllm.lora_adapter: {', '.join(sorted(conflicts))}")
     validate_docker_options(llm_dict.get("docker_options", {}))
 
     return Recipe.from_dict(config)
