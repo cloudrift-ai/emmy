@@ -601,8 +601,10 @@ class CompiledProgram:
         inputs into their prefixes, launches every kernel and copies its outputs' prefixes out. One
         runtime call for the whole batch: a routed MoE layer runs every hit expert this way instead
         of a dozen Python calls per expert. Caller holds the GPU lock."""
-        self.executor.run_each(runs)
-        self.sym_values = self.executor.env()
+        try:
+            self.executor.run_each(runs)
+        finally:  # a refused entry leaves the runtime at the last width it bound
+            self.sym_values = self.executor.env()
 
     def capture_launch_graphs(self, batch_sizes: list[int]) -> None:
         """Capture each launch position's batch into one CUDA graph, so :meth:`iter_once` replays

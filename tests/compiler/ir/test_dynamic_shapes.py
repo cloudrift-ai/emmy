@@ -825,6 +825,47 @@ def test_run_each_binds_width_weight_and_rows_per_run():
 
 
 @requires_cuda
+def test_run_each_lets_a_queued_run_read_its_own_runtime_constant():
+    """A mean over the symbolic width divides by a runtime constant, which the runtime rewrites in
+    place when the width changes. ``run_each`` queues its runs with no wait between them, so before
+    it binds the next width it must let the queued run read its own value: wide runs followed at
+    once by narrow ones still match eager at every width."""
+    import torch
+
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.backend.cuda.program import CompiledProgram
+    from emmy.compiler.backend.gpu_lock import gpu_lock
+    from emmy.compiler.trace.torch import trace_module
+
+    class MeanOverWidth(torch.nn.Module):
+        def forward(self, x):
+            return x.mean(dim=1)
+
+    cap, h, widths = 4096, 512, (4096, 5, 4096, 12)
+    compiled = CudaBackend().compile(trace_module(MeanOverWidth(), (torch.randn(1, 32, h),), dynamic_shapes={"x": {1: _seq_len_dim()}}))
+    x = torch.randn(sum(widths), h, device="cuda")
+    out = torch.empty(len(widths), h, device="cuda")
+    row = h * x.element_size()
+    runs, start = [], 0
+    for i, s in enumerate(widths):
+        runs.append(
+            ({"seq_len": s}, [], [("x", x.data_ptr() + start * row, s * row)], [(compiled.outputs[0], out.data_ptr() + i * row, row)])
+        )
+        start += s
+
+    with gpu_lock():
+        prog = CompiledProgram.build(compiled, {"x": np.zeros((1, cap, h), np.float32)})
+        assert prog.plan.runtime_constants, "the mean must divide by a width-dependent runtime constant"
+        with prog.on_stream(torch.cuda.current_stream()):
+            prog.run_each(runs)
+        torch.cuda.synchronize()
+    start = 0
+    for i, s in enumerate(widths):
+        torch.testing.assert_close(out[i], x[start : start + s].mean(dim=0), rtol=1e-4, atol=1e-5)
+        start += s
+
+
+@requires_cuda
 @pytest.mark.skip(reason="Qwen dynamic accuracy is blocked by eager interface-group products in Tile scheduling")
 def test_qwen_whole_model_capture_replay_cache_matches_eager():
     """1-layer random-weight Qwen3 trunk through the captured-graph serving path:

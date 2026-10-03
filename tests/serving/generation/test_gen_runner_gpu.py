@@ -460,19 +460,24 @@ def test_moe_expert_shape_groups_compile_and_dispatch_per_layer(built):
         torch.testing.assert_close(runner._moe_combine_slots(moe, xn), runner._moe_combine(moe, xn), rtol=2e-3, atol=2e-3)
 
 
-def test_routed_experts_run_every_tier_in_one_call(built):
+@pytest.mark.parametrize("swap,m256", [(True, True), (True, False), (False, True)], ids=["swap", "swap-symbolic", "copy"])
+def test_routed_experts_run_every_tier_in_one_call(build_runner, swap, m256):
     """One ``_launch_experts`` call runs each hit expert on the tier its row count fits — the M=1
-    twin, the decode-bucket twin and the static M=256 prefill twin here — and returns every
-    expert's output in its own rows, matching the eager expert. The batch swaps each expert's
-    weight slices in before its run, so a stale swap would give a later expert an earlier one's
-    weights."""
+    twin, the decode-bucket twin and the static M=256 prefill twin, or the symbolic program where
+    that twin is missing — and returns every expert's output in its own rows, matching the eager
+    expert. Each run takes its expert's weight slices by pointer swap, or by copy as a tier with
+    TMA descriptors does, so a stale swap or copy would give an expert another one's weights."""
     import torch
 
     from emmy.compiler.backend.gpu_lock import gpu_lock
 
-    pair = built("olmoe.l1.b4")
+    pair = build_runner("olmoe.l1.b4")
     runner, config = pair.runner, pair.config
     assert runner._expert_m256 is not None, "the M=256 prefill twin must build for the plain OLMoE expert shape"
+    if not m256:
+        runner._expert_tiers[0]["m256"] = None
+    if not swap:
+        runner._expert_swap_safe = dict.fromkeys(runner._expert_swap_safe, False)
     runner._ensure_device()
 
     moe = runner._moe[0]

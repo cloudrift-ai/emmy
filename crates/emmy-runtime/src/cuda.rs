@@ -968,7 +968,8 @@ impl Executor {
             "region {name} needs {size} bytes, host lent {len}"
         );
         let owned = self.regions.get(name).is_some_and(|region| region.owned);
-        if wait || owned || !self.descriptors.is_empty() {
+        let baked = self.descriptors.values().any(|encoded| !encoded.is_empty());
+        if wait || owned || baked {
             self.synchronize()?;
         }
         self.graphs.clear();
@@ -1179,11 +1180,17 @@ impl Executor {
     /// lend its buffers without draining (the host keeps that memory alive until the runs finish),
     /// copy its inputs into their prefixes, launch every kernel and copy its outputs' prefixes out.
     /// One call for what a host would otherwise issue as a dozen per run: a routed MoE layer runs
-    /// every hit expert this way.
+    /// every hit expert this way. The runs queue back to back; the stream is drained between two
+    /// only where the next would change what the queued one reads, a runtime constant or a
+    /// descriptor.
     pub fn run_each(&mut self, runs: &[Run]) -> Result<()> {
         self.context.bind_to_thread()?;
         for run in runs {
             if !run.env.is_empty() {
+                // A runtime constant is rewritten in place: the runs already queued read it first.
+                if !self.program.runtime_constants.is_empty() {
+                    self.synchronize()?;
+                }
                 self.set_env(run.env.clone())?;
             }
             for (name, ptr, len) in &run.lent {
