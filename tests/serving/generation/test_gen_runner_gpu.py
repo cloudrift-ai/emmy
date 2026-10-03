@@ -1022,7 +1022,7 @@ def gated_runner():
     """A tiny Qwen3.5 whose layers are all full attention — the layer whose query projection also
     carries an attention output gate — built with every tier: the single-token twin, decode bucket
     4, prefill bucket 16 (so 17..20 is the rider split) and the symbolic program up to 32 tokens.
-    Not in the lane's golden: it compiles cold, so its schedules are this card's picks."""
+    Not in the lane's golden: it compiles cold, with serial reductions for exact host/device parity."""
     return _build_gated_runner("float32")
 
 
@@ -1033,6 +1033,7 @@ def _build_gated_runner(dtype_str):
 
     if not torch.cuda.is_available():
         pytest.skip("CUDA not available")
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
     from emmy.serving.gen_runner import EmmyGenRunner
     from tests.serving.generation.test_gen_runner import _qwen3_5_full_attention_config
 
@@ -1045,7 +1046,9 @@ def _build_gated_runner(dtype_str):
             # scaling the whole projection only moves the gate.
             block.self_attn.q_proj.weight.mul_(10)
     model = model.to(getattr(torch, dtype_str))
-    runner = EmmyGenRunner.from_model(model, dtype_str=dtype_str, decode_bucket=4, prefill_bucket=16, max_tokens=32)
+    # Atomic accumulation can vary its addition order; these fixtures also assert bitwise host/device parity.
+    with pinned_knobs({"REDUCE": ""}):
+        runner = EmmyGenRunner.from_model(model, dtype_str=dtype_str, decode_bucket=4, prefill_bucket=16, max_tokens=32)
     return runner, model
 
 

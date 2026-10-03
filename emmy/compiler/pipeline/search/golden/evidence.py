@@ -1,7 +1,8 @@
 """Golden rows as tune DB rows — what a compile imports before it picks.
 
 A golden file is the DB's shape, so the import is a copy: every kernel a ``kernel`` row, every decision a
-``routing`` row, every measured row a ``perf`` row under the card and regime it was measured in. The greedy then
+``routing`` row — and a ``taken`` row under the card, regime and sizes of each row of the file below it — every
+measured row a ``perf`` row under the card and regime it was measured in. The greedy then
 has one read (``policy.greedy``): a kernel's measured schedule rows, and the kernel-set decisions stored on it
 priced from the pieces' own rows.
 
@@ -26,6 +27,7 @@ from emmy.compiler.pipeline.knob import KnobType, family_of, registry
 from emmy.compiler.pipeline.search.bench_record import point_stats
 from emmy.compiler.pipeline.search.db import SearchDB
 from emmy.compiler.pipeline.search.db.freeze import is_lfs_pointer
+from emmy.compiler.wire import symbolic_vars
 
 from .format import GoldenFile, Row
 from .repository import documents_for_card, scope_digest, scope_explicit
@@ -71,13 +73,19 @@ def regime_context(document: GoldenFile, pins: dict) -> Context:
 
 def import_rows(db: SearchDB, ctx: Context, document: GoldenFile, rows: Iterable[Row], *, source: str) -> int:
     """File ``document``'s kernels and decisions, and ``rows`` of it as ``perf`` rows under ``ctx``, ``source`` on
-    every row. Returns the perf rows written: an unmeasured row is a proposal, not evidence."""
+    every row. Returns the perf rows written: an unmeasured row is a proposal, not evidence. Measured or not, a
+    row says its kernel is in the file under ``ctx`` at its sizes, so every decision on the way down to it
+    (:meth:`GoldenFile.path_to`) is one the file took there."""
     for kernel in document.kernels:
         db.record_kernel(kernel)
     for route in document.routing:
         db.record_routing(route)
     written = 0
     for row in rows:
+        for route in document.path_to(row.kernel):
+            sizes = symbolic_vars(document.kernel(route.parent).loop_ir)
+            if sizes <= row.bindings.keys():
+                db.record_taken(ctx, route.parent, bindings={var: row.bindings[var] for var in sizes}, arm=route.arm, source=source)
         if row.measurements is None or row.knobs is None:
             continue
         db.record_perf(

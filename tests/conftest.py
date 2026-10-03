@@ -6,6 +6,7 @@ import os
 import random
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -35,6 +36,14 @@ os.environ.setdefault("EMMY_GPU_LOCK", f"/tmp/emmy-gpu-{os.getuid()}.lock")
 # whichever card the runner happened to hold. Hidden, every CPU lane features the default card.
 if not torch.cuda.is_available():
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
+
+# The session's own tune DB, fresh and removed at exit, unless the caller points ``EMMY_TUNE_DB`` at
+# one. The default ``~/.cache/emmy/autotune.db`` is machine-local, mutable evidence: a CLI compile
+# picks from its rows, so the same test would decide differently on a box that once measured.
+# Set on import, like the lock above, so the xdist workers and every subprocess share the one file.
+if "EMMY_TUNE_DB" not in os.environ:
+    _TUNE_DB_DIR = tempfile.TemporaryDirectory(prefix="emmy_test_tune_db_")
+    os.environ["EMMY_TUNE_DB"] = os.path.join(_TUNE_DB_DIR.name, "autotune.db")
 
 
 # ── CUDA context poisoning containment ──────────────────────────────

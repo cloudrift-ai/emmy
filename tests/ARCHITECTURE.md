@@ -68,8 +68,8 @@ The standalone Rust runtime keeps unit tests beside its modules. `make test-nati
 Python parity and process-recovery tests against it; GPU cases skip when CUDA or the worker binary is unavailable.
 Native HTTP tests also verify checkpoint text parity, seeded streaming, stops, overload, cancellation recovery,
 and shutdown against a prepared artifact. Cargo tests cover transport semantics without GPU dependencies.
-The native generation tests pin serial reductions for bit-identical artifact replay, excluding atomic accumulation
-whose addition order can vary. They exercise cached tiny-Qwen3 logits, full and partial prefill chunks, EOS,
+Native generation and exact host/device parity fixtures pin serial reductions, excluding atomic accumulation whose
+addition order can vary. Native tests exercise cached tiny-Qwen3 logits, full and partial prefill chunks, EOS,
 seeded request reset, and exact-once
 graph replay, independent rotary rounding, and attention/cache boundaries, including near-tied scores checked against
 float64 attention. Local checkpoint qualification compares FP16
@@ -249,6 +249,11 @@ A lane whose torch has no CUDA hides the device from the compiler as well (`test
 `CUDA_VISIBLE_DEVICES`). The CI runners carry a GTX 1080 Ti that CPU-only torch cannot use, yet the runtime reached
 it through the driver and the prior featured its SM count, so an unpinned pick there diverged from every other host.
 Hidden, the lane features the default card everywhere.
+
+For the same reason every session runs on its own tune DB: on import the root `conftest.py` points `EMMY_TUNE_DB` at
+a fresh file, removed at exit, unless the caller already names one. The default `~/.cache/emmy/autotune.db` is
+machine-local evidence a CLI compile picks from, and the CI runners keep their home directory between jobs. Set on
+import, the one file reaches every xdist worker and subprocess; a test that needs a DB of its own still sets one.
 
 `tests/compiler/pipeline/search/test_golden.py` holds every repository golden — the hardware goldens and each
 recipe's model golden — to the fresh lowering of its own traced programs on the DEFAULT lane: a restamp

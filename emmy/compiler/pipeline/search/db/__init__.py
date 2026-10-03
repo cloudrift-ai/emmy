@@ -31,6 +31,9 @@ Tables (the DDL is the reference):
 - ``routing`` — one row per PIECE of one decision on one parent, in the fragment's order. A decision has
   no measurement of its own: its price on a context is the sum of its children's best rows there,
   all-or-nothing (:meth:`SearchDB.best_per_op_time`).
+- ``taken`` — one row per kernel-set decision a golden file took: the context and the sizes it took it under, the
+  parent, the ``placement`` and the ``source`` that holds it. A ``routing`` row says what a decision mints on any
+  card; this says where a golden chose it, measured or not — the label the placement dataset reads.
 - ``perf`` — one measurement per COMPILABLE kernel variant per context: the kernel, the sizes its symbolic
   dims were benched at (``bindings``, ``{}`` static), its schedule row, the statistics, ``captured``, a
   ``bench_fail`` row's ``error`` and ``source`` (``measured``, or the golden file or freeze it was imported from,
@@ -211,6 +214,15 @@ _DDL = {
             child      TEXT NOT NULL REFERENCES kernel (exact_identity),
             PRIMARY KEY (parent, placement, position)
         )""",
+    "taken": """
+        CREATE TABLE taken (
+            context    INTEGER NOT NULL REFERENCES context (id),
+            kernel     TEXT NOT NULL REFERENCES kernel (exact_identity),
+            bindings   TEXT NOT NULL,
+            placement  INTEGER NOT NULL REFERENCES placement (id),
+            source     TEXT NOT NULL,
+            PRIMARY KEY (context, kernel, bindings, placement)
+        )""",
     "perf": """
         CREATE TABLE perf (
             context    INTEGER NOT NULL REFERENCES context (id),
@@ -245,6 +257,7 @@ _COLS = {
     "placement": ("id", "digest"),
     "placement_knob": ("placement", "name", "value"),
     "routing": ("parent", "placement", "position", "child"),
+    "taken": ("context", "kernel", "bindings", "placement", "source"),
     "perf": (
         "context",
         "kernel",
@@ -270,6 +283,7 @@ _WIRE_VERSION = 1
 # Drop order respects the foreign keys; create order is the reverse.
 _DROP_ORDER = (
     "perf",
+    "taken",
     "routing",
     "placement_knob",
     "placement",
@@ -529,6 +543,24 @@ class SearchDB:
             grouped.setdefault((parent, pid), []).append(child)
         for (parent, pid), children in grouped.items():
             yield RoutingRow(parent=parent, arm=self._knobs_of("placement", pid), children=tuple(children))
+
+    def record_taken(self, ctx: Context, kernel: str, *, bindings: dict, arm: dict, source: str, backend: str = "cuda") -> None:
+        """Mark ``arm`` as a kernel-set decision ``source`` took on ``kernel`` under ``ctx`` at ``bindings``."""
+        context = self._context_id(backend, *self._regime(ctx), create=True)
+        self._conn.execute(
+            "INSERT OR REPLACE INTO taken (context, kernel, bindings, placement, source) VALUES (?, ?, ?, ?, ?)",
+            (context, kernel, knobs_json(bindings), self._row_id("placement", arm, create=True), source),
+        )
+
+    def iter_taken(self) -> Iterator[tuple[str, int, str, str, dict, dict, str]]:
+        """Every decision a source took (:meth:`record_taken`), as ``(gpu, cc, flags, kernel, bindings, arm,
+        source)`` in content order."""
+        rows = self._conn.execute(
+            "SELECT c.gpu_name, c.arch, c.flags, t.kernel, t.bindings, t.placement, t.source FROM taken t "
+            "JOIN context c ON c.id = t.context JOIN placement p ON p.id = t.placement ORDER BY 1, 2, 3, 4, 5, p.digest"
+        ).fetchall()
+        for gpu, arch, flags, kernel, bindings, pid, source in rows:
+            yield gpu, _cc(arch), flags, kernel, json.loads(bindings), self._knobs_of("placement", pid), source
 
     # ------------------------------------------------------------------
     # Perf — write

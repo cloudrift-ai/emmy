@@ -13,6 +13,10 @@ value and that unary op of it. The inner clamps fold against the condition, so R
 becomes ``(i < 64) ? i + 64 : i - 64``: one load of the row and one of the weight per cell instead
 of two each.
 
+The merged loads stay where branch A's were, so the rewrite is refused when an effect sits between the
+two chains, when the predicate or a merged index names something defined after the chain starts, or
+when a chain reads carried state.
+
 Structural and idempotent: once merged, the select's branches share their chain and no longer match.
 """
 
@@ -24,7 +28,7 @@ from dataclasses import replace
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.expr import Expr, Literal, TernaryExpr
 from emmy.compiler.ir.kernel import KernelOp
-from emmy.compiler.ir.stmt import Assign, Body, Stmt
+from emmy.compiler.ir.stmt import Assign, Body, Let, Stmt
 from emmy.compiler.ir.stmt.leaves import Load, Select, SelectBranch
 from emmy.compiler.pipeline import Pattern, RuleSkipped
 
@@ -69,7 +73,7 @@ def _cone(defs: dict[str, int], stmts: list, name: str, uses: Counter, cone: set
     if position is None:
         return True  # defined outside this body: a shared input of the chain, not part of it
     stmt = stmts[position]
-    if not isinstance(stmt, (Assign, Load)) or (isinstance(stmt, Load) and not stmt.is_scalar):
+    if not isinstance(stmt, (Assign, Load)) or (isinstance(stmt, Load) and (not stmt.is_scalar or stmt.carried)):
         return False
     if uses[name] != 1:
         return False
@@ -94,6 +98,8 @@ def _merge(stmts: list, position: int, uses: Counter) -> list | None:
         return None
     if not cone_a or cone_a & cone_b:
         return None
+    if not _safe(stmts, defs, cone_a | cone_b, cond):
+        return None
     pairs: dict[str, str] = {}
     if not _match(stmts, defs, a_name, b_name, cone_a, cone_b, pairs):
         return None
@@ -104,6 +110,8 @@ def _merge(stmts: list, position: int, uses: Counter) -> list | None:
         if isinstance(stmt, Load):
             twin = stmts[defs[pairs[stmt.name]]]
             index = tuple(_select_index(cond, a, b) for a, b in zip(stmt.index, twin.index, strict=True))
+            if any(defs.get(name, -1) >= i for e in index for name in e.free_vars()):
+                return None
             merged[i] = replace(stmt, index=index)
         else:
             merged[i] = stmt
@@ -129,6 +137,13 @@ def _merge(stmts: list, position: int, uses: Counter) -> list | None:
             continue
         out.append(merged.get(i, stmt))
     return out
+
+
+def _safe(stmts: list, defs: dict, cone: set[int], cond: Expr) -> bool:
+    """No effect between the two chains, and the predicate defined before them."""
+    first = min(cone)
+    pure = all(isinstance(s, (Assign, Let, Load, Select)) for s in stmts[first : max(cone) + 1])
+    return pure and all(defs.get(name, -1) < first for name in cond.free_vars())
 
 
 def _peel(stmts: list, defs: dict, a: str, b: str) -> tuple[str | None, tuple[str, str] | None]:

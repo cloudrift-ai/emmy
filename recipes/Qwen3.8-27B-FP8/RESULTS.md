@@ -242,14 +242,15 @@ the slowest of the three measured setups (table above), and it cannot hold a 250
 
 ## Emmy
 
-The V100 golden was optimized on 2026-10-02 on four Tesla V100-SXM2-16GB cards with CUDA 12.9 and torch 2.14.0+cu126.
-The final branch was rebased onto main `be7023c94`. Each card ran an independent kernel benchmark. These are single-GPU
+The first V100 golden optimization pass ran on 2026-10-02 on four Tesla V100-SXM2-16GB cards with CUDA 12.9 and
+torch 2.14.0+cu126.
+That branch was rebased onto main `be7023c94`. Each card ran an independent kernel benchmark. These are single-GPU
 kernel results, not a tensor-parallel model benchmark. Every schedule and cut was selected manually; `emmy tune` was not used.
 
-This pass covers the ten targets already stored in the golden's four programs. All ten now pass strict replay using
+That pass covered the ten targets already stored in the golden's four programs. All ten passed strict replay using
 only the golden's evidence and a fresh tune DB, at nvcc's deployable `-O3`. Every target passed on seeds 0, 1, 2 and 3,
-with one seed on each card. The file contains 28 kernels, nine routing rows and 26 measured schedule rows, including
-the older fused alternatives. It contains no unmeasured proposals.
+with one seed on each card. At the end of that pass, the file contained 28 kernels, nine routing rows and 26 measured
+schedule rows, including the older fused alternatives. It contained no unmeasured proposals.
 This is partial model coverage; the pass did not retrace or qualify the full decoder inventory.
 
 ### Exact frontend comparisons
@@ -314,6 +315,23 @@ EMMY_NVCC_FLAGS= emmy run --golden /tmp/qwen38-v100.json --bench --strict --stri
 
 The serving figures above remain measurements of stock 1Cat-vLLM. This compiler pass does not establish an Emmy
 serving result.
+
+### Shared triangular update — second pass, 2026-10-02
+
+The second pass used the same four cards and software. Each independent matrix now stays in two shared buffers while
+one CTA executes all 61 ordered steps. Padding shared rows by one column reduces
+bank conflicts. The original 512-thread cooperative reduction tree is preserved. Both the requested snapshots and
+the exposed carry output remain stored; these timings include both outputs.
+
+| Internal target | Previous golden | New isolated row | Improvement |
+| --- | ---: | ---: | ---: |
+| Triangular update, 64 tokens | 1.307 ms | 0.226 ms | 5.8x |
+| Triangular update, 512 tokens | 12.93 ms | 1.094 ms | 11.8x |
+
+The shared layout passed strict same-input A/B against global storage on seeds 0, 1, 2 and 3, one seed per card, at
+deployable `-O3`. Fresh-DB strict-evidence replay selects it without pins. The golden now contains
+28 kernels, nine routing rows and 28 measured rows, with no proposals. Existing rows and kernel identities are
+unchanged. Internal targets still have no exact standalone Torch twin, so the table makes no `torch.compile` claim.
 
 ## Reproduce
 

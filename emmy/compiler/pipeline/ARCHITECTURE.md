@@ -77,7 +77,7 @@ lifetimes, and telling them apart is the single most useful thing to learn early
 
 | Store | Where it lives | Written by | Consulted by |
 |-------|----------------|------------|--------------|
-| **Golden files** | model goldens under `recipes/<model>/golden/`; model-agnostic ones under `search/golden/records/` — the tune DB's tables for one card, beside the traced programs (Part 7) | `run --bench --record-greedy` / `--record` into a working golden, reviewed and promoted (Part 7) | greedy compile — measured rows in the one evidence index (the per-card files, or `--golden PATH`); `run --golden PATH --bench` measures them; `emmy db import` loads them into the dataset DB, whose export (`emmy db export`) is the dataset `emmy fit` and `emmy eval prior` read |
+| **Golden files** | model goldens under `recipes/<model>/golden/`; hardware goldens under `search/golden/records/` — the tune DB's tables for one card, beside the traced programs (Part 7) | `run --bench --record-greedy` / `--record` into a working golden, reviewed and promoted (Part 7) | greedy compile — measured rows in the one evidence index (the per-card files, or `--golden PATH`); `run --golden PATH --bench` measures them; `emmy db import` loads them into the dataset DB, whose export (`emmy db export`) is the dataset `emmy fit` and `emmy eval prior` read |
 | **`perf` table** | the tune DB (`~/.cache/emmy/autotune.db`), beside the `kernel` and `routing` rows its rows are of | `run --bench` — every clean pinned row (golden / `--ab`) and the greedy re-bench, per kernel (`search/bench_record.py`, Part 5); the golden import — the golden rows in scope, once per golden digest | greedy compile (measured evidence); the per-variant replay cache |
 | **Dataset DB** | the file `emmy db … --db PATH` names (`_data/dataset.db` in the examples, under the ignored `_data/`; never the tune DB) — the same tables in a file of their own | `emmy db import`, from the freeze directories, golden files and tune DB files named on its command line (the hardware goldens `search/golden/records/*.json` for the offline prior; nothing by default) — a copy of each file's tables | `emmy db export` and nothing else — **never** a deploy |
 | **Dataset** | the directory `emmy db export` is given (`_data/dataset` in the examples) — a `manifest.json` beside one matrix file per pool (`search/dataset/document.py`) | `emmy db export`: every golden pool enumerated from its kernel's definition and featurized, every measured pool, the provenance | `emmy eval prior` (both kinds of pool) and `emmy fit` — **never** a deploy |
@@ -420,16 +420,18 @@ kernels the arm leaves (`ranking.arm_features`: the piece count, each stamp summ
 the number of kernel roots that fold a whole contraction. That fact separates cuts with equal Loop histograms but
 different projection placement. Its dataset is `emmy db export --space placement`: one pool per placement fork of
 every golden kernel, walked through
-the lift and the cut pass only (`ranking.walk_placement`), the arm the routing row recorded marked — keep fused where
-none was. The greedy asks it at a placement fork no routing row decides (`policy/greedy._placement_pick`), with the
+the lift and the cut pass only (`ranking.walk_placement`), the cut the golden took marked — keep fused where it took
+none. The greedy asks it at a placement fork no routing row decides (`policy/greedy._placement_pick`), with the
 same featurizer, so the dataset's rank and the deploy's pick are one computation. Both artifacts name their `space`,
 and a reader refuses the other's.
 
 The placement view also retains `H_cc` and `H_total_mem`. They are constant inside a fork, but a tree can combine
 them with arm features to learn a different ranking per card, including same-die SKUs with different VRAM.
-The export prices each arm on its pool's card, precision regime and sizes using the same measured-evidence prices
-as a compile. A structural routing row on one card cannot mark a cut on another card that has no measurements for
-its pieces. Shared cut parents receive one pool per recorded context, and the walk keeps decisions within it.
+The export prices nothing: the label is what the golden did. The import marks every decision on the way down to a
+golden row as taken under that row's card, precision regime and sizes (the `taken` table), whether or not the row
+holds a time, so a golden that cut a kernel marks the cut and one that kept it whole marks keep-fused. A routing row
+names no card, so it cannot mark a cut on a card whose golden did not take it. Shared cut parents receive one pool
+per context a golden cut them under, and the walk keeps decisions within it.
 
 The proxy stays uncalibrated, and nothing in the deploy path corrects it by hand: the kernel-set Σ
 (`policy/greedy._resolved_price`) sums each row's own price as stamped or estimated. Where the prior ends up deciding
@@ -532,8 +534,9 @@ At a **schedule fork** (one kernel's row):
    golden digest into the tune DB — created on first use, and imported under the lock beside the file so the workers
    of a parallel boot sharing one DB import it once — or into an in-memory instance when the compile has none; a
    re-recorded file changes the digest, and its earlier rows on this card and regime are let go first. A golden file is
-   the DB's shape, so the import is a copy: every kernel a `kernel` row, every decision a `routing` row, every
-   measured row in the live input regime (`evidence.regime_live`) a `perf` row of its kernel. An unmeasured row (a
+   the DB's shape, so the import is a copy: every kernel a `kernel` row, every decision a `routing` row (and a `taken`
+   row where a row of the file sits below it), every measured row in the live input regime (`evidence.regime_live`) a
+   `perf` row of its kernel. An unmeasured row (a
    proposal) is not evidence: `run --golden PATH --bench` measures it under a hand pin and writes the measurement as
    `perf` rows, after which it deploys like any other;
 2. the prior's `mean_scores` argmin — only when no candidate has any evidence at all. Score ties break by
@@ -914,6 +917,11 @@ nothing else.
 
 ## Part 7: Golden files and the A/B integrity gates
 
+Hardware goldens under `search/golden/records/` hold standalone operations and programs derived from models, one
+file per exact GPU. Extend that file with missing cases, storing each kernel identity once and preserving existing
+measurements. Retain the selected routing graph and measured descendants, with parent decisions before children.
+Experiment records stay in place; only accepted routes join the hardware corpus.
+
 A golden file is a card's measurements in the tune DB's shape. It serves four purposes: measured evidence for the
 greedy compile (Part 3), pinned measurement (`run --golden PATH --realization NAME --bench`, `--ab`), training data for
 the offline prior, and a regression reference. This Part covers the file, what a record run writes into it, the
@@ -945,11 +953,11 @@ program first, since a kernel at a size is a kernel of its own.
 **A record run writes what the DB holds.** `run --golden PATH --realization NAME --bench --record-greedy`
 (`golden.record_greedy_pick`) writes the kernel set the greedy compile picked: the kernels it minted, one routing row
 per kernel-set decision the splice watcher reported (`search/inventory.py`), and one measured row per CUDA kernel —
-the tile kernel it lowered from, its realized schedule row, its own isolated launch timing — under the seed row's
-input regime with the compile's own precision gates laid over it (`pins.measured_precision_pins`) and the greedy
-comparison row as `same-input-greedy` reference. A row of the same kernel, sizes, regime and schedule takes the new
-timings. Recorded this way, a strict-evidence compile of the file picks the same kernel set again from the file's rows
-alone (no tune DB, no prior). `--record` writes a row's per-card latencies (`golden.record_latency`), the corpus's
+the tile kernel it lowered from, its realized schedule and later storage choices, its own isolated launch timing —
+under the seed row's input regime with the compile's own precision gates laid over it (`pins.measured_precision_pins`)
+and the greedy comparison row as `same-input-greedy` reference. A row of the same kernel, sizes, regime and schedule
+takes the new timings. Recorded this way, a strict-evidence compile picks the same kernel set again from the file's
+rows alone (no tune DB, no prior). `--record` writes a row's per-card latencies (`golden.record_latency`), the corpus's
 ratchet. Both refuse a canonical path: a re-record works on a copy.
 
 **A kernel entry's stamps are the identity strategy's, less the ones a schedule fork mints.** `golden.definition`
@@ -1338,6 +1346,13 @@ no per-CTA work, layout, or schedule — only the block-id decode (`ir/kernel` `
 `grid_tile` eligibility). The fixed 2-D contraction domain is `('', 'gm8', 'gn4', 'gn8')`; the schedule restriction
 keeps `gn4` and `gn8` out unless an exact `RASTER` parameter selects one. Wall-time effect is small and shape-dependent
 (±2–4% measured), so golden evidence arbitrates per shape.
+
+**`SHARED_CARRY`** (INT, `lowering/kernel/035_shared_carry`) — late carried-state storage: `0` keeps global storage
+and one launch per ordered step, `1` keeps the state in two shared buffers, each row padded by one column. The pass
+offers the shared layout only when state reads prove CTA ownership and both buffers plus existing scratch fit. The
+choice is part of the measured kernel row, so a recorded row replays its storage without a manual pin. Shared
+storage is not a rule: with few independent batches and a large per-step grid it serializes the card (2 CTAs doing
+every row: 163 ms against 2.8 ms for ordered launches on a V100), so evidence decides.
 
 **`S_*`** (FLOAT, the `IdentityStrategy` — `passes/identity.py`) — a kernel's structural features (statement/op
 histogram + loop extents + operand dtypes). A fresh Tile fragment is temporarily lowered only for this feature read.
