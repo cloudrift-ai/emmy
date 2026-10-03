@@ -27,6 +27,7 @@ from dataclasses import dataclass
 
 from emmy.hardware import (
     DEFAULT_GCP_ZONE,
+    G2_STANDARD_VCPUS,
     GPU_GCP_ZONES,
     GPU_INSTANCE_TYPES,
     resolve_instance_type,
@@ -61,6 +62,9 @@ def instance_gpu_count(provider: str, instance_type: str) -> int:
         return int(instance_type.rsplit(".", 1)[1])
     if instance_type.startswith("g4-standard-"):
         return int(instance_type.rsplit("-", 1)[1]) // 48
+    if instance_type.startswith("g2-standard-"):
+        vcpus = int(instance_type.rsplit("-", 1)[1])
+        return next(n for n, v in G2_STANDARD_VCPUS.items() if v == vcpus)
     match = re.search(r"-(\d+)g$", instance_type)
     if match is None:
         raise ValueError(f"Cannot determine GPU count for {provider} instance type {instance_type}")
