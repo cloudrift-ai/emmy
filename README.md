@@ -414,6 +414,13 @@ matrices:
       benchmark.max_concurrency: [128, 512]
 ```
 
+For one pinned LoRA adapter on vLLM, set `engine.llm.vllm.lora_adapter` with its `name`, Hugging Face repository,
+40-character revision, and rank. Emmy downloads it beside the base checkpoint and enables it in vLLM. Set
+`model.request_name` to the base model or adapter name when a smoke test or benchmark should target a particular one;
+with an adapter and no override, the request targets the adapter. The benchmark still uses the base tokenizer. This
+requires a regular vLLM image with a writable model cache. The
+[V100 LoRA experiment](experiments/Meta-Llama-3.1-8B-Instruct/lora_v100_sxm3_32gb/recipe.yaml) is a tested example.
+
 Discovery keeps ten tested recipes tagged `maintained` and records a current 0-100 heat score and rationale under
 every recipe's `model` block. Useful lower-priority recipes stay runnable as `best-effort`; technically superseded or
 unusable models become `obsolete`. Every promising new model becomes an `onboarding` plus `untested` shell with up to

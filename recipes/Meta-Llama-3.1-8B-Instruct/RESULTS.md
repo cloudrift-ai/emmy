@@ -48,12 +48,24 @@ remains unverified.
 
 ## Emmy compiler qualification
 
-The current compiler traced six distinct serving-twin targets on the exact V100. The `post1` target passed direct
-comparison with eager PyTorch at `rtol=atol=1e-3` (maximum absolute error 0.000488). Its greedy path took
-1,184,860 µs versus 673 µs eager and 436 µs `torch.compile`. The isolated re-benchmark hit the ten-second GPU-time
-limit and recorded `bench_fail`; a three-cut candidate did not complete within a three-minute diagnostic limit.
-The trace does not cover embeddings, final normalization, and the output head, so it is a partial compiler inventory.
-No complete, measured model golden was committed, and no Emmy kernel was used for serving.
+The current compiler traced six distinct serving-twin targets on the exact V100. All six pass the fresh-lowering check.
+A short diagnostic with one warmup and one timed iteration produced these results; it does not meet the recording bar:
+
+| Target | Emmy | Eager | Result |
+| --- | ---: | ---: | --- |
+| Post-attention, symbolic | — | — | Kernel exceeded 60 s |
+| Post-attention, M1 | 1,193,433 µs | 757 µs | Correct |
+| Post-attention, M8 | — | — | Kernel exceeded 2 s |
+| Pre-attention, symbolic | 579,149 µs | 678 µs | Correct |
+| Pre-attention, M1 | 390 µs | 138 µs | Correct |
+| Pre-attention, M8 | 418 µs | 163 µs | Correct |
+
+The `post1` target also passed a direct comparison with eager PyTorch at `rtol=atol=1e-3` (maximum absolute error
+0.000488) in a longer run. Its greedy path took 1,184,860 µs versus 673 µs eager and 436 µs `torch.compile`. The
+isolated re-benchmark exceeded the ten-second GPU-time limit and recorded `bench_fail`; a three-cut candidate did not
+complete within a three-minute diagnostic limit. The trace does not cover embeddings, final normalization, and the
+output head, so it is a partial compiler inventory. No complete, measured model golden was committed, and no Emmy
+kernel was used for serving.
 
 The earlier compiler run on 2026-08-13 measured 223,882 µs for a sequence-length-1 layer versus 773 µs eager, and
 its 512-token prefill CUDA did not compile. The current compiler path is different, so those timings are historical.

@@ -26,8 +26,8 @@ distribution.
 
 The 2026-08-13 run reported 280.80 ± 9.64 output tokens/s on a locally resolved image digest that cannot be pulled
 from the registry. The present number is 15.6% lower, but the image, driver, and attention path changed together;
-this is a historical comparison, not a measured effect of the new setting. An adapter-enabled server using the same
-current image and a similar 512/256 concurrency-8 workload delivered 236.38 base tokens/s in the companion LoRA
+this is a historical comparison, not a measured effect of the new setting. A server with the adapter loaded used the
+same current image and a similar 512/256 concurrency-8 workload, delivering 236.38 base tokens/s in the companion LoRA
 experiment. That suggests enabling one adapter had little base-request throughput cost here, although the protocols
 used 32 versus 40 requests and were run separately.
 

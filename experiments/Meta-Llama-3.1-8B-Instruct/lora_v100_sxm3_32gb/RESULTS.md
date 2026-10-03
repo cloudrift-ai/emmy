@@ -31,7 +31,12 @@ then selected either the base model or `limo` by request name. The same image an
 The adapter delivered 47% of base output throughput at concurrency 1 and 53% at concurrency 8. Its mean TPOT was
 2.16× and 1.95× the base value, respectively. The three concurrency-1 repeats varied by at most 0.04 output tok/s
 for base and 0.01 for the adapter. The concurrency-8 rows have one repeat each, so they do not establish run-to-run
-variance. These figures compare request names on an adapter-enabled server, not a separate base-only deployment.
+variance. These figures compare request names on a server with the adapter loaded.
+
+A separate run without an adapter used the same pinned image and V100 attention setting. It averaged 237.01 base
+output tokens/s at concurrency 8, close to 236.38 on the server with the adapter loaded. It used 32 rather than 40
+requests per repeat, so the comparison is directional. Load and warmup took about 137 seconds with the adapter loaded
+versus 88 seconds without it; most of that difference was CUDA graph capture (40 versus 2 seconds in the raw timings).
 
 ## V100 attention failure and correction
 
