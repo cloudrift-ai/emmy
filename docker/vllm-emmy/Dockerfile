@@ -21,6 +21,15 @@ RUN pip wheel --no-cache-dir --no-deps -w /wheels /src/emmy_ml-*.tar.gz
 
 FROM ${BASE_IMAGE}
 
+# The SM70 1Cat base has CUDA runtime libraries but no nvcc. Pass
+# CUDA_COMPILER_VERSION=12-8 when building it for Emmy tuning.
+ARG CUDA_COMPILER_VERSION=
+RUN if [ -n "$CUDA_COMPILER_VERSION" ]; then \
+      apt-get update && apt-get install -y --no-install-recommends \
+        cuda-nvcc-${CUDA_COMPILER_VERSION} cuda-cudart-dev-${CUDA_COMPILER_VERSION} \
+      && rm -rf /var/lib/apt/lists/*; \
+    fi
+
 # The emmy wheel installs --no-deps so the image's pinned torch /
 # transformers / numpy (vLLM's own dependency set) are never touched; the
 # runtime deps the serving path actually uses are added explicitly. cppyy is
