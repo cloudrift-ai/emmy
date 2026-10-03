@@ -35,17 +35,13 @@ mutation of a possibly-shared knob dict.
 
 from __future__ import annotations
 
-from collections import Counter
 from dataclasses import replace
-from sys import float_info
 from typing import TYPE_CHECKING
 
 from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.ir.stmt import Body
-from emmy.compiler.ir.stmt.blocks import Cond, Loop
-from emmy.compiler.ir.stmt.leaves import Assign
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.pipeline.knob import KERNEL_IDENTITY, STRUCT_PREFIX
+from emmy.compiler.pipeline.search.features import stamps, structure_features
 from emmy.compiler.pipeline.strategy import PassEndEvent, PipelineStrategy, RebindEvent, RunStartEvent, SpliceEvent
 from emmy.compiler.structural import digest
 
@@ -121,10 +117,8 @@ class IdentityStrategy(PipelineStrategy):
         op = node.op
         if not isinstance(op, (LoopOp, TileOp)):
             return
-        op = op.with_io(graph, node)
+        op = with_stamps(op.with_io(graph, node), graph)
         knobs = dict(op.knobs)
-        if not any(k.startswith(STRUCT_PREFIX) for k in knobs):
-            knobs.update(op_stamps(op, graph) or {})
         if exact or KERNEL_IDENTITY not in knobs:
             knobs[KERNEL_IDENTITY] = op.identity_key(structural=False, with_io=True)
         node.op = replace(op, knobs=knobs)
@@ -135,13 +129,9 @@ class IdentityStrategy(PipelineStrategy):
         """The sorted ``S_*`` row — golden-record identity. Knobs-first (the stamped row IS the
         identity every key already embeds); computed from the body only for an op nothing
         stamped yet (pass ``graph`` for the dtype features then)."""
-        stamped = tuple(sorted((k, float(v)) for k, v in (getattr(op, "knobs", None) or {}).items() if k.startswith(STRUCT_PREFIX)))
-        if stamped:
-            return stamped
-        body = _identity_body(op)
-        if body is None:
-            return ()
-        return tuple(sorted(structure_features(body, graph).items()))
+        if isinstance(op, (LoopOp, TileOp)):
+            op = with_stamps(op, graph)
+        return tuple(sorted(stamps(op).items()))
 
     def op_sig(self, op, graph: Graph | None = None) -> str:
         """Digest of :meth:`signature` — the tune DB node-table key and the kernel-inventory
@@ -149,155 +139,20 @@ class IdentityStrategy(PipelineStrategy):
         return digest(*self.signature(op, graph))
 
 
-# ---------------------------------------------------------------------------
-# The feature function — the identity's content
-# ---------------------------------------------------------------------------
+def with_stamps(op: LoopOp | TileOp, graph: Graph | None = None) -> LoopOp | TileOp:
+    """``op`` carrying its ``S_*`` row: as it is when stamped (the stamp stays the body's it was formed from,
+    whatever a later rewrite does to the body), else stamped with :func:`structure_features` of its ``stamp_body``,
+    ``graph`` supplying the operand dtypes. An op with no such body (a test's bare tile) stays unstamped."""
+    body = op.stamp_body
+    if body is None or any(k.startswith(STRUCT_PREFIX) for k in op.knobs):
+        return op
+    return replace(op, knobs={**op.knobs, **structure_features(body, graph)})
 
 
-def op_stamps(op, graph: Graph | None = None) -> dict[str, float] | None:
-    """The ``S_*`` stamps of one loop or tile op — :func:`structure_features` of the body its kernel row stores
-    (:func:`_identity_body`), ``graph`` supplying the operand dtypes — or ``None`` for an op with no such body (a
-    test's bare tile). What the strategy writes onto a kernel at a stamp boundary, and what a reader that has no
-    boundary (a placement arm's fresh pieces) computes itself."""
-    body = _identity_body(op)
-    return None if body is None else structure_features(body, graph)
-
-
-def _identity_body(op) -> Body | None:
-    """Return the loop-shaped body used only to compute a kernel's structural features."""
-    if isinstance(op, LoopOp):
-        return op.body
-    if not isinstance(op, TileOp):
-        return getattr(op, "body", None)
-    # A tile formed from a loop op (a piece a cut re-formed) is featured from that body — the definition its
-    # kernel row stores — not from the derived body a later lowering rewrite may still change.
-    return op.source.body if isinstance(op.source, LoopOp) else op.loop_body
-
-
-def kernel_stamps(wire: dict) -> dict[str, float]:
-    """The ``S_*`` features of the kernel a ``wire.kernel_wire`` wire defines: :func:`structure_features`
-    of its body, the dtype half read off the wire's own buffers. What a ``kernel`` row stores for a tile
-    nothing stamped; a stamped tile's row carries the strategy's own stamps, which are the same features:
-    the wire holds the body the kernel was formed from, the body the strategy stamps."""
-    from emmy.compiler.graph import Graph  # noqa: PLC0415
-
-    graph = Graph.from_wire(wire)
-    [node] = [node for node in graph.nodes.values() if isinstance(node.op, LoopOp)]
-    return structure_features(node.op.body, graph)
-
-
-def structure_features(body: Body, graph: Graph | None = None) -> dict[str, float]:
-    """Flat ``S_``-prefixed structural feature dict for a LoopOp ``body``:
-    the extent-free skeleton merged with the ``S_ext_*`` loop extents.
-
-    ``graph`` supplies operand dtypes for the ``S_dtype_*`` multiset; omit it
-    (e.g. ad-hoc callers without a surrounding graph) to skip dtype features.
-    Values are floats so the dict drops straight into the numeric knob row."""
-    return {**_skeleton(body, graph), **_extents(body)}
-
-
-def _skeleton(body: Body, graph: Graph | None) -> dict[str, float]:
-    """Extent-free histogram: stmt-type counts + pointwise/reduce op multisets
-    + loop-nest roles/depth + operand dtype multiset."""
-    feats: Counter[str] = Counter()
-    loads = body.loads
-    feats["S_n_load"] = len(loads)
-    feats["S_n_distinct_input"] = len({ld.input for ld in loads})
-    feats["S_n_write"] = len(body.writes)
-    feats["S_n_accum"] = len(body.accums)
-    feats["S_n_cond"] = len(body.iter_of_type(Cond))
-    assigns = body.iter_of_type(Assign)
-    feats["S_n_assign"] = len(assigns)
-    for s in assigns:
-        feats[f"S_pw_{s.op.name}"] += 1
-    for s in body.accums:
-        feats[f"S_reduce_{s.op.name}"] += 1
-    loops = body.loops
-    feats["S_n_loop"] = len(loops)
-    feats["S_n_reduce_loop"] = sum(1 for loop in loops if loop.is_reduce)
-    feats["S_n_free_loop"] = sum(1 for loop in loops if not loop.is_reduce)
-    feats["S_loop_depth"] = _loop_depth(body)
-    if graph is not None:
-        for ld in loads:
-            t = graph.buffer(ld.input)
-            dt = str(t.dtype) if t is not None else "?"
-            feats[f"S_dtype_{dt}"] += 1
-    return {k: float(v) for k, v in feats.items()}
-
-
-def _loop_depth(body: Body) -> int:
-    """Max ``Loop`` nesting depth along any path (non-Loop wrappers like
-    ``Cond`` recurse without incrementing)."""
-    best = 0
-    for s in body:
-        if isinstance(s, Loop):
-            best = max(best, 1 + _loop_depth(s.body))
-        else:
-            for nested in s.nested():
-                best = max(best, _loop_depth(nested))
-    return best
-
-
-def _bounded_mul(value: float, extent: float) -> float:
-    """One saturating multiply step of an extent product — never an unbounded Python integer."""
-    if extent and value > float_info.max / extent:
-        return float_info.max
-    return value * extent
-
-
-def _serial_cell_work(body: Body) -> float:
-    """Worst per-cell serial trip count: the max over loop-nest paths of the product of the
-    static reduce-loop extents along the path. Nest-aware where ``S_ext_reduce_prod`` is flat —
-    sibling reduces take the max, nested reduces multiply — so a subtree re-evaluated under an
-    enclosing reduce is priced by the trips a thread actually serializes (DeepSeek-V4
-    ``post4096``'s elected consumer piece recomputed a 16384-step statistics contraction inside a
-    4096-step reduce: flat product 2^36-blind, nest product the honest 2^30). Free and sweep
-    loops are excluded (grid-distributed / conservative), a symbolic extent contributes no
-    factor, and so does a ``StridedLoop`` (like everywhere else in this feature block — a
-    strided respelling can therefore evade the count, in the conservative direction), so the
-    value is a lower bound; saturates at the largest finite float."""
-    best = 1.0
-    for s in body:
-        if isinstance(s, Loop):
-            inner = _serial_cell_work(s.body)
-            ext = s.axis.extent
-            if s.is_reduce and ext.is_static:
-                inner = _bounded_mul(inner, float(ext.as_static()))
-            best = max(best, inner)
-        else:
-            for nested in s.nested():
-                best = max(best, _serial_cell_work(nested))
-    return best
-
-
-def _extents(body: Body) -> dict[str, float]:
-    """Continuous ``S_ext_*`` loop extents, split by free vs reduce axis
-    (``Loop.is_reduce``). Symbolic axes (non-static extent) are excluded from
-    the products and counted in ``S_ext_n_symbolic_axis``."""
-    free: list[int] = []
-    reduce_: list[int] = []
-    n_symbolic = 0
-    for loop in body.loops:
-        ext = loop.axis.extent
-        if not ext.is_static:
-            n_symbolic += 1
-            continue
-        (reduce_ if loop.is_reduce else free).append(ext.as_static())
-
-    def bounded_product(values: list[int]) -> float:
-        """Multiply extent features without constructing an unbounded Python integer."""
-        value = 1.0
-        for extent in values:
-            value = _bounded_mul(value, extent)
-        return value
-
-    return {
-        "S_ext_n_free_axis": float(len(free)),
-        "S_ext_free_prod": bounded_product(free),
-        "S_ext_free_max": float(max(free)) if free else 0.0,
-        "S_ext_n_reduce_axis": float(len(reduce_)),
-        "S_ext_reduce_prod": bounded_product(reduce_),
-        "S_ext_reduce_max": float(max(reduce_)) if reduce_ else 0.0,
-        "S_ext_n_symbolic_axis": float(n_symbolic),
-        "S_ext_serial_cell_work": _serial_cell_work(body),
-    }
+def stamp_pieces(fragment: Graph) -> Graph:
+    """Stamp every kernel of a rewrite's ``fragment`` — the pieces a cut builds, whose rows the cut cleared — so a
+    placement arm's kernels carry their ``S_*`` rows before any splice, as the spliced kernels will."""
+    for node in fragment.nodes.values():
+        if isinstance(node.op, (LoopOp, TileOp)):
+            node.op = replace(node.op, knobs=with_stamps(node.op.with_io(fragment, node), fragment).knobs)
+    return fragment

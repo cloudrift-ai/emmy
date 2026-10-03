@@ -50,12 +50,16 @@ def _small_smem_ctx() -> Context:
     return Context(compute_capability=(9, 0), max_dynamic_smem=2048)
 
 
+_STAMP = {"S_test": 1.0}
+
+
 def _graph_with_tile() -> Graph:
     """``x -> y`` where ``y`` holds a (placeholder) ``TileOp``. The rule's
-    rewrite ignores the body, so an empty one is fine."""
+    rewrite ignores the body, so an empty one is fine; the stamp stands in
+    for the body the featurizer would read."""
     g = Graph()
     g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (4,), "f32"), node_id="x")
-    g.add_node(op=TileOp(name="k_test"), inputs=["x"], output=Tensor("y", (4,), "f32"), node_id="y")
+    g.add_node(op=TileOp(name="k_test", knobs=_STAMP), inputs=["x"], output=Tensor("y", (4,), "f32"), node_id="y")
     g.inputs = ["x"]
     g.outputs = ["y"]
     return g
@@ -460,8 +464,8 @@ def _composed_fragment(input_id: str, suffix: str) -> Graph:
     g = Graph()
     g.add_node(op=InputOp(), inputs=[], output=Tensor(input_id, (4,), "f32"), node_id=input_id)
     ws, cut = f"y_ws{suffix}", f"y__cut{suffix}"
-    g.add_node(op=TileOp(name=f"k_ws{suffix}"), inputs=[input_id], output=Tensor(ws, (4,), "f32"), node_id=ws)
-    g.add_node(op=TileOp(name=f"k_residual{suffix}"), inputs=[ws], output=Tensor(cut, (4,), "f32"), node_id=cut)
+    g.add_node(op=TileOp(name=f"k_ws{suffix}", knobs=_STAMP), inputs=[input_id], output=Tensor(ws, (4,), "f32"), node_id=ws)
+    g.add_node(op=TileOp(name=f"k_residual{suffix}", knobs=_STAMP), inputs=[ws], output=Tensor(cut, (4,), "f32"), node_id=cut)
     g.outputs = [cut]
     return g
 
@@ -520,6 +524,8 @@ def _elect_composed_route(monkeypatch) -> None:
     import emmy.compiler.pipeline.search.policy.greedy as greedy_mod
 
     monkeypatch.setattr(greedy_mod, "_load_prior_safe", lambda: _BiggestBNFirstPrior())
+    # The routes are elected by pricing, so no placement prior ranks the arms.
+    monkeypatch.setattr(greedy_mod, "_load_placement_prior", lambda: None)
     monkeypatch.setattr(greedy_mod, "_price_graph", lambda *_: 1.0)
     monkeypatch.setattr(greedy_mod, "_price_op_leaf", lambda fp, *_: float("inf") if fp.root_op.name == "k_test" else 10.0)
 

@@ -151,7 +151,7 @@ def test_schedule_pick_descends_directly_to_complete_measured_row() -> None:
     tree = _tree(rows, lambda row: materialized.append(row))
 
     point = ForkPoint(
-        match=SimpleNamespace(root_node_id="node"),
+        match=SimpleNamespace(root_node_id="node", graph=None),
         options=[tree],
         root_op=SimpleNamespace(knobs={"S_shape": 128}),
         ctx=SimpleNamespace(features=lambda: {"H_opt": 3.0}),
@@ -233,7 +233,7 @@ class _BarePrior:
 def _point(rows):
     tree = _tree(rows, lambda row: (_ for _ in ()).throw(AssertionError("no leaf may materialize during ranking")))
     return ForkPoint(
-        match=SimpleNamespace(root_node_id="node"),
+        match=SimpleNamespace(root_node_id="node", graph=None),
         options=[tree],
         root_op=SimpleNamespace(knobs={"S_shape": 128}),
         ctx=SimpleNamespace(features=lambda: {"H_opt": 3.0}),
@@ -254,7 +254,7 @@ def test_streamed_model_pick_equals_flattened_argmin(monkeypatch) -> None:
     base = {"H_opt": 3.0, "S_shape": 128}
     flat = [(o, leaf_knobs(o)) for o in list(iter_leaves(point.options))]
     rows = [{**base, **k} for _, k in flat]
-    scores = _BarePrior().mean_scores_features([Featurizer({"H_opt": 3.0}).features({"S_shape": 128}, k) for _, k in flat])
+    scores = _BarePrior().mean_scores_features([Featurizer({"H_opt": 3.0}).features(point.root_op, k) for _, k in flat])
     best_i = min(range(len(rows)), key=lambda i: (scores[i], canonical_row_key(rows[i])))
     assert knobs == flat[best_i][1]
     # The lazy walk mints fresh (content-equal) leaf objects per expansion, so identity is by row.

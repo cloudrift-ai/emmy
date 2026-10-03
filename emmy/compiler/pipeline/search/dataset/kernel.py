@@ -4,7 +4,7 @@ golden pool, so a pool can be enumerated from it on any machine."""
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from emmy.compiler.wire import Wire
 
@@ -31,3 +31,11 @@ class KernelDef(Wire):
         from emmy.compiler.specialize import rehint_program  # noqa: PLC0415
 
         return rehint_program(Graph.from_wire(self.loop_ir), bindings)
+
+    def op(self, bindings: Mapping[str, int]):
+        """The kernel's Loop op at ``bindings``, carrying its stored stamps — the stamps a kernel formed from no loop
+        op keeps are its tile's, which its derived wire body does not reproduce."""
+        from emmy.compiler.ir.loop.ir import LoopOp  # noqa: PLC0415
+
+        [op] = [node.op for node in self.program(bindings).nodes.values() if isinstance(node.op, LoopOp)]
+        return replace(op, knobs={**op.knobs, **self.stamps})

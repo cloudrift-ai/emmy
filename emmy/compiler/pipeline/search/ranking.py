@@ -207,7 +207,8 @@ def _enumerate_packed(task: tuple) -> tuple[_Packed | None, list[tuple[str, str,
     # The feature view (default every feature) filters here, before the pool is packed, so the view is
     # exactly what the Group stores. ``feature_view`` keeps the routing features
     # whatever the spec says, so a narrower ``--features`` cannot silently misroute a symbolic-axis pool.
-    feats = [{k: v for k, v in featurizer.features(pool.kernel.stamps, r).items() if keep(k)} for r in rows]
+    kernel = pool.kernel.op(pool.bindings)
+    feats = [{k: v for k, v in featurizer.features(kernel, r).items() if keep(k)} for r in rows]
     return _Packed(pool, tier, _shape_group(shape), pack_features(feats), candidates.total, goldens, [pool]), skipped, None
 
 
@@ -385,7 +386,7 @@ def walk_placement(
             else:
                 unmatched.append(identity[:12])
         arms = [i for i in place if i != steer]
-        feats = [featurizer.features(root, rows[i], pieces=leaves[i].expand()[0], graph=fp.match.graph) or featurizer.base for i in arms]
+        feats = [featurizer.features(root, rows[i], pieces=leaves[i].expand()[0]) for i in arms]
         if prior is not None:
             scores = prior.mean_scores_features(feats)
             chosen = arms[min(range(len(arms)), key=scores.__getitem__)]

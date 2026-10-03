@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import math
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import replace
 
 from emmy.compiler.pipeline.search.dataset import Dataset, GoldenPool, GoldenRow, MeasuredGroup, measured_features, regime_of, repo_commit
@@ -80,10 +81,10 @@ def kernel_sig(feats: dict) -> str:
     return digest(*sorted((k, float(v)) for k, v in feats.items() if k.startswith("S_")))
 
 
-def measured_groups(rows) -> tuple[list[MeasuredGroup], dict[str, int]]:
+def measured_groups(rows, kernel_op: Callable) -> tuple[list[MeasuredGroup], dict[str, int]]:
     """Measured ``perf`` rows (:class:`~..db.PerfRow`) as groups labelled with measured µs, keyed
     ``(gpu, kernel_sig, opt, flags)`` — one group per set of configs that genuinely competed, plus a count
-    of what was dropped and why.
+    of what was dropped and why. ``kernel_op`` gives a row its kernel's op, which the featurizer reads.
 
     Each part of the key is load-bearing, and each has a plausible wrong answer:
 
@@ -119,7 +120,7 @@ def measured_groups(rows) -> tuple[list[MeasuredGroup], dict[str, int]]:
     groups = []
     for (gpu, sig, h_opt, regime), grp in sorted(buckets.items()):
         grp.sort(key=lambda r: (r.kernel, knobs_json(r.knobs)))  # a pool's row order is its own, not the DB's
-        feats = [measured_features(r) for r in grp]
+        feats = [measured_features(r, kernel_op(r)) for r in grp]
         key = f"{gpu}/{sig}@O{h_opt:g}" + (f" {regime}" if regime else "")
         groups.append(MeasuredGroup.from_measured(key, gpu, sig, h_opt, [r.stats.median for r in grp], feats))
     return groups, dict(dropped)
@@ -141,7 +142,8 @@ def export_dataset(db: SearchDB, *, source: str, pool_sample: int, seed: int, sp
     else:
         logger.info("Building %d golden pools (each under its own card's context, %d at a time) ...", len(pools), jobs)
         golden, skipped = build_golden_groups(pools, "*", sample=pool_sample, seed=seed, jobs=jobs)
-        measured, dropped_measured = measured_groups(db.iter_perf_rows(backend="cuda"))
+        kernels = {kernel.exact_identity: kernel for kernel in db.iter_kernels()}
+        measured, dropped_measured = measured_groups(db.iter_perf_rows(backend="cuda"), lambda r: kernels[r.kernel].op(r.bindings))
         dropped = {"golden": dropped_golden, "measured": dropped_measured}
     provenance = {
         "source": source,

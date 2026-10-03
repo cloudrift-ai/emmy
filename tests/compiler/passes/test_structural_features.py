@@ -1,5 +1,5 @@
 """Unit tests for structural feature extraction
-(``passes/identity.structure_features``).
+(``search/features.structure_features``).
 
 Hand-built ``Body`` fixtures (same style as ``tests/compiler/ir/stmt/
 test_structural_key.py``) exercise the skeleton histogram, the extent-free
@@ -23,7 +23,7 @@ from emmy.compiler.ir.stmt.blocks import Loop
 from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.leaves import Accum, Assign, Load, Write
 from emmy.compiler.pipeline.knob import STRUCT_PREFIX
-from emmy.compiler.pipeline.passes.identity import structure_features
+from emmy.compiler.pipeline.search.features import structure_features
 from emmy.compiler.tensor import Tensor
 
 

@@ -59,6 +59,7 @@ from emmy.compiler.ir.tile.ops import (
 from emmy.compiler.ir.tile.path import family_sites, sites, spell
 from emmy.compiler.pipeline import Match
 from emmy.compiler.pipeline.knob import consume_kernel_row
+from emmy.compiler.pipeline.passes.identity import stamp_pieces
 from emmy.compiler.pipeline.passes.loop.fusion._region import build_merged_region, live_outputs_of, wrap_multi_output_fragment
 from emmy.compiler.pipeline.passes.tile._row import lift_kernel, reformed
 from emmy.compiler.pipeline.passes.tile._split import add_output_piece, output_root
@@ -1430,7 +1431,7 @@ def realize(
         # A composed decision may hand every output away; then there is no sibling piece to emit.
         if not consumer_stores:
             _fuse_sibling_producers(fragment, tuple(all_buffers), tile)
-            return fragment
+            return stamp_pieces(fragment)
         consumer_outputs = {store.write.output for store in consumer_stores}
         consumer_fold = _region_term(
             tuple(region for region, _, _ in kept),
@@ -1459,7 +1460,7 @@ def realize(
         suffix=_PLACED,
     )
     _fuse_sibling_producers(fragment, tuple(all_buffers), tile)
-    return fragment
+    return stamp_pieces(fragment)
 
 
 __all__ = ["CutSite", "Frontier", "cuttable_seams", "full_projection_seams", "output_map", "realize", "storage_frontier"]

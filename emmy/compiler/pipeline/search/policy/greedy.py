@@ -157,22 +157,16 @@ def _load_placement_prior():
     return prior if prior.space == "placement" else None
 
 
-def _placement_pick(fp: ForkPoint, prior) -> object | None:
+def _placement_pick(fp: ForkPoint, prior) -> object:
     """The placement prior's argmin over a placement fork's arms — keep fused and every cut the pass
     offers — each featurized from the kernels it leaves (``Featurizer.features``), exactly as the
-    arms of the placement dataset the prior was fit on. The first of equally scored arms wins. ``None``
-    when some arm cannot be featurized (a kernel with no body to stamp), and the fork is priced as before."""
+    arms of the placement dataset the prior was fit on. The first of equally scored arms wins."""
     from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
 
     leaves = fp.flat()
     root = fp.root_op.with_io(fp.match.graph, fp.match.root)
     featurizer = Featurizer.of(fp.ctx)
-    rows = [
-        featurizer.features(root, leaf_knobs(o), pieces=_leaf_graph(o) if _is_structural_option(o) else root, graph=fp.match.graph)
-        for o in leaves
-    ]
-    if any(row is None for row in rows):
-        return None
+    rows = [featurizer.features(root, leaf_knobs(o), pieces=_leaf_graph(o) if _is_structural_option(o) else root) for o in leaves]
     scores = prior.mean_scores_features(rows)
     return leaves[min(range(len(leaves)), key=scores.__getitem__)]
 
@@ -280,7 +274,7 @@ def _resolved_price(terminal: Graph, trace: list, ctx: Context, prior, failed: d
     for nid, node in terminal.nodes.items():
         if node.op.identity_key(with_io=True, with_knobs=True) is None:
             continue
-        knobs = getattr(node.op, "knobs", None) or {}
+        knobs = node.op.knobs
         if failed:
             sig = frozenset((k, str(v)) for k, v in knobs.items() if k.startswith(EVIDENCE_PREFIXES))
             # The ONE signature rule (:func:`_sig_groups`): a stored signature describes this
@@ -295,7 +289,7 @@ def _resolved_price(terminal: Graph, trace: list, ctx: Context, prior, failed: d
                 return math.inf
         us = scored.get(nid)
         if us is None:
-            us = prior.mean_scores_features([Featurizer.of(ctx).features(knobs)])[0] if prior is not None else None
+            us = prior.mean_scores_features([Featurizer.of(ctx).features(node.op, knobs)])[0] if prior is not None else None
         if us is None:
             return None
         total += us
@@ -882,7 +876,7 @@ def _stream_tiers(
         rows = [row for _, _, row in chunk]
         if use_db:
             best_db = fold(best_db, chunk, _db_measured_pick(db_idx, rows))
-        scores = the_prior.mean_scores_features([featurizer.features(fp.root_op.knobs, knobs) for _, knobs, _ in chunk])
+        scores = the_prior.mean_scores_features([featurizer.features(fp.root_op, knobs) for _, knobs, _ in chunk])
         best_model = fold(best_model, chunk, _argmin(scores, rows))
 
     opts = fp.options if options is None else options
@@ -1052,8 +1046,7 @@ def greedy_decide(
             # No measured row spelled an arm here (those return above): the placement prior ranks the
             # arms, which strict evidence refuses the same way it refuses a priced comparison.
             _require_evidence(fp, "no measured row spells a kernel-set arm")
-            if (picked := _placement_pick(fp, placement)) is not None:
-                return picked
+            return _placement_pick(fp, placement)
         if dkey is not None and _schedule_fork(fp):
             picked = _direct_measured_pick(fp, blocked, db_index())
             if picked is not None:
@@ -1178,7 +1171,7 @@ def greedy_decide(
         if got is None:
             _require_evidence(fp, "no measured row vouches for any offered candidate")
             featurizer = Featurizer.of(fp.ctx)
-            got = _argmin(the_prior.mean_scores_features([featurizer.features(fp.root_op.knobs, k) for _, k in live]), rows)
+            got = _argmin(the_prior.mean_scores_features([featurizer.features(fp.root_op, k) for _, k in live]), rows)
         best_i, price = got
         fp.score = price  # measured µs when evidence decided, predicted µs otherwise
         if dkey is not None:

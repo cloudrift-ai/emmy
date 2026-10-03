@@ -5,8 +5,7 @@ A golden config and a tune-DB ``perf`` row are the same thing once normalized: a
 structural identity, and (for golden) a reference latency. ``Sample`` is that
 normal form. The split into ``knobs`` (tunable) / ``context`` (``H_*``) /
 ``s_features`` (``S_*``) is by key prefix and therefore lossless — :meth:`all_knobs`
-re-merges them to the exact original dict, and :meth:`features` runs the single
-featurizer (:class:`features.Featurizer`) on it.
+re-merges them to the exact original dict.
 
 Featurization fidelity (the load-bearing invariant): the prior scores the full ``S_*``
 histogram stamped by the ``IdentityStrategy``, which every row carries inline.
@@ -31,12 +30,12 @@ def _card_features(gpu_name: str, cc: int) -> dict[str, float]:
     return Context.from_target(divmod(cc, 10), gpu_name=gpu_name).features()
 
 
-def measured_features(row) -> dict[str, float]:
-    """The feature row of a measured ``perf`` row: its stored ``S_*`` stamps + tunables, under its card's ``H_*``
-    and the opt level it was measured under. A row stores no ``H_*`` of its own — they are a function of the
+def measured_features(row, kernel) -> dict[str, float]:
+    """The feature row of a measured ``perf`` row of ``kernel`` (its op): its stored tunables, under its card's
+    ``H_*`` and the opt level it was measured under. A row stores no ``H_*`` of its own — they are a function of the
     card, derived here by live code so a stored row outlives a change to the device features. Only for rows
     :func:`~.freeze.freeze_reason` admits (a registry card)."""
-    return Featurizer({**_card_features(row.gpu, row.cc), "H_opt": float(row.opt)}).features(row.knobs)
+    return Featurizer({**_card_features(row.gpu, row.cc), "H_opt": float(row.opt)}).features(kernel, row.knobs)
 
 
 def _split_by_prefix(knobs: dict) -> tuple[dict, dict, dict]:
@@ -88,10 +87,3 @@ class Sample:
         row this re-merges to exactly the recorded ``perf.knobs``; the per-knob
         regret analysis iterates this so its output is unchanged."""
         return {**self.context, **self.s_features(), **self.knobs}
-
-    def features(self) -> dict[str, float]:
-        """The flat numeric feature vector the priors regress on — the single
-        featurizer over the merged dict. Merge order ``context, s_*, knobs`` matches
-        the inline construction the eval / prior code used (knobs win on collision,
-        though the prefixes are disjoint)."""
-        return Featurizer(self.context).features({**self.s_features(), **self.knobs})

@@ -50,7 +50,7 @@ def test_placement_separates_contraction_roots_from_equal_loop_histograms() -> N
     )
     roots = (product, projection((product,), (selected,), results=("masked", "acc1")))
     tiles = [TileOp(op=root, place=Placement(free=(m, n)), axes=(m, n, k)) for root in roots]
-    rows = [Featurizer({}).features(tile, pieces=tile, graph=Graph()) for tile in tiles]
+    rows = [Featurizer({}).features(tile, pieces=tile) for tile in tiles]
 
     assert [row["P_n_whole_contraction_roots"] for row in rows] == [1.0, 0.0]
     assert {key: value for key, value in rows[0].items() if key != "P_n_whole_contraction_roots"} == {

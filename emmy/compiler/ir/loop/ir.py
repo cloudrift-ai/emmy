@@ -127,6 +127,11 @@ class LoopOp(BodyOp):
         return clone
 
     @property
+    def stamp_body(self) -> Body:
+        """The body this kernel's ``S_*`` stamps describe: its own."""
+        return self.body
+
+    @property
     def axes(self) -> tuple[Axis, ...]:
         """Iteration axes collected from the body's ``Loop`` tree.
 
