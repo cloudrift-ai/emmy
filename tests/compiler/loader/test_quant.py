@@ -522,6 +522,7 @@ def test_spell_static_activations_share_one_round_trip_per_scale(tmp_path):
     assert g.nodes["y_q"].inputs[0] == g.nodes["y_k"].inputs[0] != g.nodes["y_o"].inputs[0]
     assert len([n for n in _ops_by_type(g, ElementwiseOp) if n.op.op.name == "to_f8e4m3"]) == 2
     assert not [n for n in _ops_by_type(g, ReduceOp) if n.op.op.name == "maximum"]
+    assert not any(node.hints.get("trace.materialize") for node in g.nodes.values())
     scale_paths = {op.source_path for op in _constants(g).values() if op.source_path and op.source_path.endswith("activation_scale")}
     assert scale_paths == {"layer.q.activation_scale", "layer.o.activation_scale"}
     assert spell_static_fp8_activations(g, str(tmp_path)) == 0

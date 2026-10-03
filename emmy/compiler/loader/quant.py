@@ -550,15 +550,21 @@ def is_nvfp4_checkpoint(model_dir) -> bool:
     return _fp4_quant_config(Path(model_dir)) is not None
 
 
-def nvfp4_checkpoint_dir(model_id_or_path: str, hf_config=None, *, revision: str | None = None) -> Path | None:
-    """The local directory of a checkpoint declaring NVFP4 weights, or ``None`` for any other
-    scheme — :func:`is_nvfp4_checkpoint`'s answer plus the directory the answer is about.
+def _declares_static_fp8(qc: dict) -> bool:
+    """Whether a ``quantization_config`` MAPPING is the official FP8 declaration with STATIC
+    activations: one calibrated scale per linear input, stored in the shards."""
+    return qc.get("quant_method") == "fp8" and qc.get("activation_scheme") == "static"
 
-    The NVFP4 counterpart of :func:`~emmy.compiler.loader.exl3.coded_tensor_storage`, and it hands
-    back a directory rather than a weight-free allocation listing because this format has no such
-    description: the packed shapes live in the safetensors headers, and the activation half's
-    calibrated ``input_scale`` values live in the shards. A twin that wants the deployed program
-    therefore reads the same checkpoint the deployed program reads.
+
+def checkpoint_spelled_trunk_dir(model_id_or_path: str, hf_config=None, *, revision: str | None = None) -> Path | None:
+    """The local directory of a checkpoint whose trunk program only the checkpoint itself can
+    spell — NVFP4 weights, or FP8 with static activations — or ``None`` for any other scheme.
+
+    The counterpart of :func:`~emmy.compiler.loader.exl3.coded_tensor_storage`, and it hands
+    back a directory rather than a weight-free allocation listing because these formats have no
+    such description: NVFP4's packed shapes live in the safetensors headers, and either format's
+    calibrated activation scales (``input_scale``, ``activation_scale``) live in the shards. A
+    twin that wants the checkpoint's program therefore reads the checkpoint.
 
     ``hf_config`` is an already-loaded transformers config, consulted to confirm the scheme before
     any fetch, so a caller holding a config never touches the hub for an ordinary model. Omit it
@@ -567,13 +573,14 @@ def nvfp4_checkpoint_dir(model_id_or_path: str, hf_config=None, *, revision: str
     from emmy.compiler.loader.safetensors import _resolve_model_dir  # noqa: PLC0415
 
     if hf_config is None:
-        return Path(model_id_or_path) if is_nvfp4_checkpoint(model_id_or_path) else None
+        static_fp8 = _declares_static_fp8(_fp8_quant_config(Path(model_id_or_path)) or {})
+        return Path(model_id_or_path) if static_fp8 or is_nvfp4_checkpoint(model_id_or_path) else None
     qc = getattr(hf_config, "quantization_config", None)
     if qc is None:
         return None
     if not isinstance(qc, dict):
-        qc = {key: getattr(qc, key, None) for key in ("quant_method", "quant_algo", "config_groups")}
-    return _resolve_model_dir(model_id_or_path, revision) if _declares_nvfp4_weights(qc) else None
+        qc = {key: getattr(qc, key, None) for key in ("quant_method", "quant_algo", "config_groups", "activation_scheme")}
+    return _resolve_model_dir(model_id_or_path, revision) if _declares_nvfp4_weights(qc) or _declares_static_fp8(qc) else None
 
 
 def is_exl3_checkpoint(model_dir) -> bool:
@@ -1650,17 +1657,20 @@ def _spell_dynamic_activation(graph: Graph, activation: str, fmt: str, group: in
             inputs=[scale],
             output=Tensor(f"{stem}_scale_bc", shape, "f32"),
         )
-    # Trace inventories promote the scale to an auxiliary output before fusion. That preserves
-    # the genuine encode/scale boundary needed by a native W8A8 contraction without changing
-    # ordinary model-call outputs.
+    restored, bits = _spell_fp8_round_trip(graph, activation, scale_bc, fmt, stem, shape)
+    # Trace inventories promote these intermediates to auxiliary outputs before
+    # fusion. That preserves the genuine encode/scale boundary needed by a native
+    # W8A8 contraction without changing ordinary model-call outputs.
+    graph.nodes[bits].hints.set("trace.materialize", True)
     graph.nodes[scale].hints.set("trace.materialize", True)
-    return _spell_fp8_round_trip(graph, activation, scale_bc, fmt, stem, shape)
+    return restored
 
 
-def _spell_fp8_round_trip(graph: Graph, activation: str, scale_bc: str, fmt: str, stem: str, shape) -> str:
-    """Encode ``activation / scale_bc`` to ``fmt`` and return the decoded value times the scale —
-    the half the dynamic and the static FP8 activation share. The encode saturates to the
-    format's finite range, which is the clamp a static scale needs."""
+def _spell_fp8_round_trip(graph: Graph, activation: str, scale_bc: str, fmt: str, stem: str, shape) -> tuple[str, str]:
+    """Encode ``activation / scale_bc`` to ``fmt`` and return ``(value, codes)``: the decoded value
+    times the scale, and the encoded codes it came from — the half the dynamic and the static FP8
+    activation share. The encode saturates to the format's finite range, which is the clamp a
+    static scale needs."""
     from emmy.compiler.ir.tensor.ir import ElementwiseOp  # noqa: PLC0415
     from emmy.compiler.tensor import Tensor  # noqa: PLC0415
 
@@ -1686,8 +1696,7 @@ def _spell_fp8_round_trip(graph: Graph, activation: str, scale_bc: str, fmt: str
         output=Tensor(f"{stem}_value", shape, source.dtype),
     )
 
-    graph.nodes[bits].hints.set("trace.materialize", True)
-    return restored
+    return restored, bits
 
 
 def spell_dynamic_fp8_activations(graph: Graph, model_id_or_path: str) -> int:
@@ -1745,8 +1754,10 @@ def spell_static_fp8_activations(graph: Graph, model_id_or_path: str) -> int:
     ``input_scale`` (vLLM's). The activation is encoded as ``x / scale`` to the weight's own FP8
     format and decoded times the same scale, what Transformers and vLLM compute for these
     checkpoints. Consumers reading one activation through equal-valued scales share one round
-    trip (a fused projection group is calibrated to one scale, stored once per member). Returns
-    the number of rewired linears; any other declaration is a no-op. Runs after
+    trip (a fused projection group is calibrated to one scale, stored once per member). Nothing
+    is marked to stay materialized: the scale is a checkpoint constant, and the codes are an
+    ordinary cut seam of the kernel that reads them. Returns the number of rewired linears; any
+    other declaration is a no-op. Runs after
     :func:`spell_quantized_constants`, whose spelled weight cones are the marker it reads."""
     from safetensors import safe_open  # noqa: PLC0415
 
@@ -1757,7 +1768,7 @@ def spell_static_fp8_activations(graph: Graph, model_id_or_path: str) -> int:
 
     model_dir = _resolve_model_dir(model_id_or_path)
     qc = _fp8_quant_config(model_dir)
-    if not qc or qc.get("quant_method") != "fp8" or qc.get("activation_scheme") != "static":
+    if not qc or not _declares_static_fp8(qc):
         return 0
     index = _build_index(model_dir)
 
@@ -1810,7 +1821,7 @@ def spell_static_fp8_activations(graph: Graph, model_id_or_path: str) -> int:
                     output=Tensor(f"{stem}_scale", ones, "f32"),
                 )
                 scale_bc = broadcast_to(graph, scale, shape)
-                rewritten[(activation, fmt, value)] = _spell_fp8_round_trip(graph, activation, scale_bc, fmt, stem, shape)
+                rewritten[(activation, fmt, value)], _codes = _spell_fp8_round_trip(graph, activation, scale_bc, fmt, stem, shape)
             graph.replace_input(linear_id, activation, rewritten[(activation, fmt, value)])
             spelled += 1
     if spelled:
