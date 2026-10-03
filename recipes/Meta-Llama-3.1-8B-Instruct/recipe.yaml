@@ -20,10 +20,9 @@ engine:
     context_length: 65536
     max_concurrent_requests: 8
     vllm:
-      # RESULTS.md qualified digest sha256:8405bb60…, which only ever existed on the qualifying
-      # host: a registry pull by that digest fails, so a fresh VM could never deploy this recipe.
-      # The public tag is what the other SM70 recipes run; re-qualify on it.
-      image: "cloudriftai/1cat-vllm-sm70:1.0.0"
+      image: "cloudriftai/1cat-vllm-sm70@sha256:6f34e0b247a78ca65f88f305b1f1cc52c9020ecb83a5ca21df0599676dc443d3"
+      extra_env:
+        VLLM_FLASH_V100_DISABLE_PAGED_PREFILL: "1"
       extra_args: >-
         --dtype half
         --attention-backend FLASH_ATTN_V100
@@ -32,6 +31,7 @@ engine:
         --tokenizer-revision db1f81ad4b8c7e39777509fac66c652eb0a52f91
         --enable-auto-tool-choice
         --tool-call-parser llama3_json
+        --no-enable-prefix-caching
 
 matrices:
   - deploy.gpu: "NVIDIA Tesla V100 SXM3 32GB"
