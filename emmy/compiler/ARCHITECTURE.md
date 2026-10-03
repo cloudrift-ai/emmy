@@ -167,6 +167,13 @@ working-golden inventory generation alone promotes the marked bits and scale val
 preserves the materialized W8A8 boundary. Native FP8 tensor-core enumeration remains explicitly gated by `FP8_MMA`,
 and a conservative compile can still execute the same graph algebra without selecting that hardware path.
 
+When the declaration specifies static activations instead, `loader.quant.spell_static_fp8_activations` spells the same
+encode, decode and scale round trip at the calibrated per-tensor scale each linear stores beside its weight
+(`activation_scale`, or `input_scale`). There is no amax: the encode saturates to the format's finite range, which is
+the clamp the calibrated scale relies on. Linears reading one activation through equal scales share one round trip,
+as a projection group calibrated together does. Nothing is marked to stay materialized: the codes are an interior
+value of the kernel, and a contraction that wants both multiplicands as FP8 bytes takes a cut at that seam.
+
 **Input-sourced fp8.** When the weights are forward-argument `InputOp`s instead of constants (the MoE serving seam's
 expert programs — one program per layer kind, per-expert 2-D slices fed per launch), the constant speller can never
 fire; `loader.quant.spell_quantized_inputs(graph, specs)` is the post-trace twin. Each named input keeps its node id
