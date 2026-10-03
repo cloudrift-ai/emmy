@@ -131,9 +131,9 @@ def capture_twin_graphs(
     from transformers import AutoConfig, AutoModel  # noqa: PLC0415
 
     from emmy.compiler.loader.quant import (  # noqa: PLC0415
+        checkpoint_spelled_trunk_dir,
         fp8_weight_profile,
         mxfp4_weight_profile,
-        checkpoint_spelled_trunk_dir,
         strip_engine_quant_config,
     )
     from emmy.compiler.loader.safetensors import split_revision  # noqa: PLC0415
