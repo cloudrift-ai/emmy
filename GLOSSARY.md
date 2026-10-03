@@ -318,9 +318,9 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   knob rows, and to hold what `run --bench --record` / `--record-greedy` measured. Its measured rows are evidence
   when a command names the file with `--golden PATH`.
 - **Canonical golden file** — A reviewed per-GPU golden file. Model goldens live at
-  `recipes/<model>/golden/<gpu-slug>_<compute-cap>.json`; hardware goldens, including programs derived from models, live under
-  `emmy/compiler/pipeline/search/golden/records/`. Measured rows supply deploy evidence; a restamp can leave
-  unmeasured proposals awaiting a record run. The record writers refuse a canonical path, so a re-record works on
+  `recipes/<model>/golden/<gpu-slug>_<compute-cap>.json`; hardware goldens, including programs derived from models,
+  live under `emmy/compiler/pipeline/search/golden/records/`. Measured rows supply deploy evidence; a restamp can
+  leave unmeasured proposals awaiting a record run. The record writers refuse a canonical path, so a re-record works on
   a copy. An ordinary compile reads the files for its live card.
 - **Restamp** — The rewrite of a golden onto the fresh lowering of its own programs (`emmy golden restamp`): every
   kernel takes the identity, stamps and body a fresh lowering gives it, every decision is taken again on the fresh

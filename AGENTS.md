@@ -210,7 +210,7 @@ at the moment, or a tune DB joins the goldens the same way), and the dataset `em
 the DB) — and nothing has a default, so a refit never touches the tune DB. The examples keep both under `_data/`,
 which git ignores. `emmy fit DATASET WEIGHTS` rewrites the checked-in weights of the dataset's space. Nightly refresh
 owns routine prior refits, including after repository goldens change. Unless explicitly requested, do not refit or
-commit weights as part of PR finalization. A stale dataset or artifact is refused at load after a featurizer version bump.
+commit weights as part of PR finalization. A stale dataset or artifact is refused after a featurizer version bump.
 
 Quick test models / scripts (for local iteration):
 
