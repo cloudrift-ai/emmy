@@ -12,6 +12,7 @@ unchanged path (no ``ple`` buffer, no extra kwarg). The attention-split carve
 import pytest
 
 from emmy.compiler.trace.torch import has_torch
+from tests.serving.helpers import QWEN3_5_TINY
 
 pytestmark = pytest.mark.skipif(not has_torch(), reason="PyTorch not available")
 
@@ -943,23 +944,6 @@ def test_expert_slot_reads_per_expert_fp8_modules_and_stacks_them():
 # that both halves of the carve survive ``torch.export`` and reach Loop IR, since that is the whole
 # point of carving them out of a recurrence torch keeps.
 
-_QWEN3_5_TINY = dict(
-    vocab_size=64,
-    hidden_size=64,
-    intermediate_size=128,
-    num_hidden_layers=2,
-    num_attention_heads=4,
-    num_key_value_heads=2,
-    head_dim=16,
-    linear_key_head_dim=16,
-    linear_value_head_dim=16,
-    linear_num_key_heads=2,
-    linear_num_value_heads=4,
-    linear_conv_kernel_dim=4,
-    max_position_embeddings=64,
-    layer_types=["linear_attention", "full_attention"],
-)
-
 
 def _qwen3_5_linear_block():
     import pytest
@@ -970,7 +954,7 @@ def _qwen3_5_linear_block():
     from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5TextModel
 
     torch.manual_seed(0)
-    model = Qwen3_5TextModel(Qwen3_5TextConfig(**_QWEN3_5_TINY)).eval()
+    model = Qwen3_5TextModel(Qwen3_5TextConfig(**QWEN3_5_TINY)).eval()
     return model.layers[0]
 
 
@@ -1007,7 +991,7 @@ def test_gdn_state_wrapper_continues_resets_and_isolates_requests(length):
     wrapper = build_gdn_state_wrapper(block)
     state = torch.zeros(2, mixer.num_v_heads, mixer.head_k_dim, mixer.head_v_dim)
     history = torch.zeros(2, mixer.conv_dim, mixer.conv_kernel_size)
-    cache = DynamicCache(config=Qwen3_5TextConfig(**_QWEN3_5_TINY))
+    cache = DynamicCache(config=Qwen3_5TextConfig(**QWEN3_5_TINY))
     chunks = [torch.randn(2, rows, mixer.hidden_size) * 0.1 for rows in (length, 1, 3)]
     first = None
     with torch.no_grad():
@@ -1077,7 +1061,7 @@ def _tiny_gdn_cuda_programs(prefill, paged):
 
     config = Qwen3_5TextConfig(
         **(
-            _QWEN3_5_TINY
+            QWEN3_5_TINY
             | dict(
                 hidden_size=8,
                 intermediate_size=16,
@@ -1251,7 +1235,7 @@ def _qwen3_5_multimodal_config():
     pytest.importorskip("transformers.models.qwen3_5")
     from transformers.models.qwen3_5.configuration_qwen3_5 import Qwen3_5Config
 
-    return Qwen3_5Config(text_config=_QWEN3_5_TINY)
+    return Qwen3_5Config(text_config=QWEN3_5_TINY)
 
 
 def _graph_with_input(name: str, *, consumed: bool):

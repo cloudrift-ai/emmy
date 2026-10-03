@@ -1,6 +1,9 @@
 # Gated DeltaNet in the native Rust runtime
 
-Status: open, written 2026-10-03 against main `3a2510857`. Nothing here is implemented or measured yet.
+Status: milestones 0, 1 and 2 landed on `feature/gdn-native-runtime` (2026-10-03, on an L4). Milestones 3 and 4 are
+open. Finding from milestone 2: without measured evidence the chunk rule's fused kernel takes no cut and recomputes a
+64-wide reduction per state cell — 14 s per two-row chunk on the smallest geometry, hours at sixteen rows — so the
+tiny gate covers sequential prefill only and the 16-row chunk schedule is milestone 3's recorded schedule, as planned.
 
 Goal: native generation serves one active request of a dense, unquantized Qwen3.5-family text model — Gated DeltaNet
 layers beside full-attention layers — on one GPU, with no Python after preparation, under the accuracy contract native
