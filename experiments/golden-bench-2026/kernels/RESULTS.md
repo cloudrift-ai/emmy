@@ -1,5 +1,10 @@
 # Golden-bench kernel corpus
 
+H100 evidence is consolidated in `results_h100x1.tar.gz`, rooted at `2026-10-02_23-00-41/`. Within that root, each
+original bundle has a directory named after its former archive without `.tar.gz`. `ARCHIVE_INDEX.json` records
+those directories and the original archive hashes. H100 member paths below are relative to each bundle directory.
+Previously replaced recipe snapshots remain in Git history.
+
 ## H100 scheduling experiments: target gain, broader regression (2026-10-03)
 
 No compiler optimization from this four-hour continuation is retained. Moving independent row reductions after
@@ -215,13 +220,14 @@ All GPU experiments in this continuation use the existing H100 80 GB HBM3 card w
 Python 3.12.3, Torch 2.14.0+cu130, Transformers 5.14.1, Triton 3.8.0, NVCC 12.9.41 and driver 580.178.04. Matched
 NVIDIA captures use Nsight Compute 2025.2. No new VM is created. A100 stays stopped, and the 4×V100 VM remains unused.
 
-The wider-K evidence is in `tuning_h100x1_round4_wider_k_2026-10-03.tar.gz`; its 6,664 manifest entries verify.
-Register-query evidence is in `tuning_h100x1_round4_register_query_2026-10-03.tar.gz`; its 1,873 entries verify.
-The main attention evidence is in `tuning_h100x1_round4_attention_overlap_2026-10-03.tar.gz`; its 15,067 entries
-verify. Balanced-tree evidence is in `tuning_h100x1_round4_balanced_fragment_2026-10-03.tar.gz`; its 1,947 entries
-verify. All four archives are independently checked against their manifests, with safe relative paths, no
-symlinks and no AppleDouble files. They preserve source audits, experimental patches, numerical checks, commands,
-software versions, timeouts and failed attempts. Prepared controls that were not run are explicitly marked as such.
+This round's evidence is in four directories inside the single H100 results archive:
+`tuning_h100x1_round4_wider_k_2026-10-03`, `tuning_h100x1_round4_register_query_2026-10-03`,
+`tuning_h100x1_round4_attention_overlap_2026-10-03` and `tuning_h100x1_round4_balanced_fragment_2026-10-03`.
+Their original manifests verify 6,664, 1,873, 15,067 and 1,947 payloads respectively. The consolidated archive
+preserves all 34,234 original files from thirteen H100 bundles, including the current recipe records and earlier
+diagnostics. Its manifest verifies those files plus the archive index. Every file is byte-identical to its source;
+paths are safe and relative, with no symlinks or AppleDouble files. Sources, experimental patches, numerical checks,
+commands, software versions, timeouts and failed attempts remain intact. Unrun controls are explicitly marked.
 
 The final local suite passes: 5,788 tests passed and 1,307 skipped in 397.39 seconds. Lint and Git LFS object checks
 pass. Both Make targets use the existing environment, with setup skipped and a Transformers 5.14.1 overlay; the
@@ -333,9 +339,8 @@ setup timeouts, refused pins, unsupported intermediate-IR attempts and malformed
 with their terminal statuses. A100 is stopped with its persistent disk retained. The 4×V100 VM is unused.
 
 V100 qualification and rejected probes are retained in `tuning_v100x1_round3_2026-10-02.tar.gz`. H100 evidence is in
-`tuning_h100x1_round3_diagnostics_2026-10-02.tar.gz`,
-`tuning_h100x1_round3_m32_priceprobe_2026-10-02.tar.gz` and
-`tuning_h100x1_round3_pvn64_priceprobe_2026-10-02.tar.gz`. The corrected source audit is in
+the `tuning_h100x1_round3_diagnostics_2026-10-02`, `tuning_h100x1_round3_m32_priceprobe_2026-10-02` and
+`tuning_h100x1_round3_pvn64_priceprobe_2026-10-02` directories of the consolidated H100 archive. The source audit is in
 `tuning_round3_source_audit_2026-10-02.tar.gz`. Each archive includes a verified checksum manifest. The edited
 experiment golden passes fresh lowering. Final local CPU validation passes: 5,776 tests passed and 1,305 skipped
 in 412.19 seconds. Lint passes. GPU correctness is established by the separate V100 and H100 checks above.
@@ -406,7 +411,8 @@ The next work is bulk TMA staging and producer/consumer warp specialization thro
 mechanisms, followed by a measured causal-work alternative. Each needs balanced unprofiled whole-layer pairs and
 unchanged numerical checks. A blanket increase in CTA count or removal of barriers is not supported by these data.
 Raw reports, disassembly, generated sources, commands, software versions, both failed traces and a checksum manifest
-are retained in `tuning_h100x1_round2_matched_profiles_2026-10-02.tar.gz`, rooted at `matched-profile/`.
+are retained under `matched-profile/` in the H100 archive's `tuning_h100x1_round2_matched_profiles_2026-10-02`
+directory.
 
 ### V100: split projection finalizers
 
@@ -571,10 +577,10 @@ weight tile across more rows, but its bounded attempt returned no measurement. R
 `ERR_NVGPUCTRPERM`; no counters were obtained and host permissions were left unchanged. Profiled durations are
 diagnostics only, never the unprofiled latency claim.
 
-The qualification archives retain all paired records, strict repeats, commands, source comparisons and rejected
-trials: `tuning_h100x1_round2_2026-10-02.tar.gz`, `tuning_a100x1_round2_2026-10-02.tar.gz`,
-`tuning_rtx4090x1_round2_2026-10-02.tar.gz`, `tuning_rtx5090x1_round2_2026-10-02.tar.gz` and
-`results_v100x1_round2_diagnostics_2026-10-02.tar.gz`.
+The qualification evidence retains all paired records, strict repeats, commands, source comparisons and rejected
+trials. H100 uses the `tuning_h100x1_round2_2026-10-02` directory in its consolidated archive. The other archives are
+`tuning_a100x1_round2_2026-10-02.tar.gz`, `tuning_rtx4090x1_round2_2026-10-02.tar.gz`,
+`tuning_rtx5090x1_round2_2026-10-02.tar.gz` and `results_v100x1_round2_diagnostics_2026-10-02.tar.gz`.
 
 ## Final five-card recipe after the second round (2026-10-02)
 
@@ -615,7 +621,7 @@ remain in the separate archives below. All GPU VMs are retained. Only the single
 | Card | Canonical archive | Root member | Executed source |
 | --- | --- | --- | --- |
 | A100 | `results_a100x1.tar.gz` | `2026-10-02_09-21-02/` | `9c81582c4` |
-| H100 | `results_h100x1.tar.gz` | `2026-10-02_08-35-50/` | `8872d9346` |
+| H100 | `results_h100x1.tar.gz`, bundle `results_h100x1` | `2026-10-02_08-35-50/` | `8872d9346` |
 | V100 | `results_v100x1.tar.gz` | `2026-10-02_09-09-03/` | `9c81582c4` |
 | RTX 4090 | `results_rtx4090x1.tar.gz` | `2026-10-02_09-13-19/` | `eb33f345c` |
 | RTX 5090 | `results_rtx5090x1.tar.gz` | `2026-10-02_09-17-30/` | `9c81582c4` |
@@ -693,7 +699,7 @@ Only the single V100 SXM2 machine was used.
 | Card | Archive | Successful recipe root |
 | --- | --- | --- |
 | A100 | `tuning_a100x1_round2_baseline_2026-10-02.tar.gz` | `2026-10-02_06-51-38/` |
-| H100 | `tuning_h100x1_round2_baseline_2026-10-02.tar.gz` | `2026-10-02_06-30-53/` |
+| H100 | `results_h100x1.tar.gz`, bundle `tuning_h100x1_round2_baseline_2026-10-02` | `2026-10-02_06-30-53/` |
 | V100 | `results_v100x1_round2_baseline_2026-10-02.tar.gz` | `2026-10-02_06-31-09/` |
 | RTX 4090 | `tuning_rtx4090x1_round2_baseline_2026-10-02.tar.gz` | `2026-10-02_06-47-49/` |
 | RTX 5090 | `tuning_rtx5090x1_round2_baseline_2026-10-02.tar.gz` | `2026-10-02_06-39-47/` |
@@ -764,8 +770,8 @@ full-layer parent. Global pins that changed unrelated decisions were likewise re
 `tuning_rtx5090x1_2026-10-01.tar.gz` retain the paired JSON, logs, task databases, working goldens, source audits,
 failed probes and exact command protocols under `2026-10-01-a100/`, `2026-10-01-v100/`, `2026-10-01-rtx4090/` and
 `2026-10-01-rtx5090/`, respectively. The V100 work used the single SXM2 card throughout.
-H100's corresponding evidence is under `2026-10-01-h100/shared-kv/` in
-`tuning_h100x1_2026-10-01.tar.gz`, alongside the prefill profiling and rejected trials described below.
+H100's corresponding evidence is under `2026-10-01-h100/shared-kv/` in the consolidated archive's
+`tuning_h100x1_2026-10-01` directory, alongside the prefill profiling and rejected trials described below.
 
 ## Final five-card recipe after route selection (2026-10-01)
 
@@ -1006,8 +1012,8 @@ and 124–127 W. Both experiment goldens remained fresh. This small, order-sensi
 the code change was reverted.
 
 The K trial used source `5694af721`; later trials used `2daed32f`, the H100 cherry-pick of the partial-pin repair.
-Every control reproduced the validated baseline kernels. `tuning_h100x1_2026-10-01.tar.gz`, rooted at
-`2026-10-01-h100/`, preserves the profiles, exact commands, source proofs, trial JSON/log/database files, failed
+Every control reproduced the validated baseline kernels. The H100 archive's `tuning_h100x1_2026-10-01` directory,
+under `2026-10-01-h100/`, preserves the profiles, exact commands, source proofs, trial JSON/log/database files, failed
 probes, copy-removal patch and system snapshots. A tile-only pin initially hit the partial-pin bug, another probe
 lacked nvcc on its SSH path, and a separate work/staging probe failed strict accuracy before timing. Those failed
 probes supply no performance result and do not change the headline tolerance.
@@ -1132,8 +1138,8 @@ configurations; its best isolated result was 12.8 µs, close to the recorded row
 candidate is the TMA trial above and lost in the layer. The temporary `+p4` compiler offer was reverted after its
 loss. No compiler, route, or canonical golden change survived the pass.
 
-The raw JSON, logs, working golden, search DB snapshot, and fuller findings are in
-`tuning_h100x1_2026-09-30.tar.gz`. The #967 pass identified the projections and attention as contributors to its
+The raw JSON, logs, working golden, search DB snapshot, and fuller findings are in the H100 archive's
+`tuning_h100x1_2026-09-30` directory. The #967 pass identified the projections and attention as contributors to its
 larger gap. This pass did not localize the current 1.78 µs gap further. Hardware-counter profiling did not finish
 within the development time limit, so this pass makes no new counter claim.
 
