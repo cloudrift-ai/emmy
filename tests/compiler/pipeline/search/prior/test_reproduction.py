@@ -45,7 +45,7 @@ def _pools(path: Path):
     db = SearchDB()
     import_file(db, path, file_source("golden", path))
     pools, _dropped = golden_pools(db)
-    return {"schedule": pools, "placement": placement_pools(db, pools)[0]}
+    return {"schedule": pools, "placement": placement_pools(db, pools)}
 
 
 def _parameters():

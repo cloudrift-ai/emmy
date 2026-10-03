@@ -420,16 +420,18 @@ kernels the arm leaves (`ranking.arm_features`: the piece count, each stamp summ
 the number of kernel roots that fold a whole contraction. That fact separates cuts with equal Loop histograms but
 different projection placement. Its dataset is `emmy db export --space placement`: one pool per placement fork of
 every golden kernel, walked through
-the lift and the cut pass only (`ranking.walk_placement`), the arm the routing row recorded marked — keep fused where
-none was. The greedy asks it at a placement fork no routing row decides (`policy/greedy._placement_pick`), with the
+the lift and the cut pass only (`ranking.walk_placement`), the cut the golden took marked — keep fused where it took
+none. The greedy asks it at a placement fork no routing row decides (`policy/greedy._placement_pick`), with the
 same featurizer, so the dataset's rank and the deploy's pick are one computation. Both artifacts name their `space`,
 and a reader refuses the other's.
 
 The placement view also retains `H_cc` and `H_total_mem`. They are constant inside a fork, but a tree can combine
 them with arm features to learn a different ranking per card, including same-die SKUs with different VRAM.
-The export prices each arm on its pool's card, precision regime and sizes using the same measured-evidence prices
-as a compile. A structural routing row on one card cannot mark a cut on another card that has no measurements for
-its pieces. Shared cut parents receive one pool per recorded context, and the walk keeps decisions within it.
+The export prices nothing: the label is what the golden did. The import marks every decision on the way down to a
+golden row as taken under that row's card, precision regime and sizes (the `taken` table), whether or not the row
+holds a time, so a golden that cut a kernel marks the cut and one that kept it whole marks keep-fused. A routing row
+names no card, so it cannot mark a cut on a card whose golden did not take it. Shared cut parents receive one pool
+per context a golden cut them under, and the walk keeps decisions within it.
 
 The proxy stays uncalibrated, and nothing in the deploy path corrects it by hand: the kernel-set Σ
 (`policy/greedy._resolved_price`) sums each row's own price as stamped or estimated. Where the prior ends up deciding
@@ -532,8 +534,9 @@ At a **schedule fork** (one kernel's row):
    golden digest into the tune DB — created on first use, and imported under the lock beside the file so the workers
    of a parallel boot sharing one DB import it once — or into an in-memory instance when the compile has none; a
    re-recorded file changes the digest, and its earlier rows on this card and regime are let go first. A golden file is
-   the DB's shape, so the import is a copy: every kernel a `kernel` row, every decision a `routing` row, every
-   measured row in the live input regime (`evidence.regime_live`) a `perf` row of its kernel. An unmeasured row (a
+   the DB's shape, so the import is a copy: every kernel a `kernel` row, every decision a `routing` row (and a `taken`
+   row where a row of the file sits below it), every measured row in the live input regime (`evidence.regime_live`) a
+   `perf` row of its kernel. An unmeasured row (a
    proposal) is not evidence: `run --golden PATH --bench` measures it under a hand pin and writes the measurement as
    `perf` rows, after which it deploys like any other;
 2. the prior's `mean_scores` argmin — only when no candidate has any evidence at all. Score ties break by
