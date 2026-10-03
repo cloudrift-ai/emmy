@@ -197,13 +197,11 @@ def _statistic_refusal(node: Fold) -> str | None:
     under a normed row's dot product — and the pieces' axis table holds one axis per name, so the slice
     narrows that axis for every fold that names it and each partition would take the statistic over
     one slice. A contraction head is not refused: its slicer keeps the statistic full-row."""
-    if node.as_contraction() is not None:
-        return None
 
     def reduces_axis(edge) -> bool:
-        return getattr(edge, "axis", None) == node.axis or any(reduces_axis(e) for e in getattr(edge, "operands", ()))
+        return getattr(edge, "axis", None) == node.axis or any(map(reduces_axis, getattr(edge, "operands", ())))
 
-    if any(reduces_axis(edge) for edge in node.operands):
+    if node.as_contraction() is None and any(map(reduces_axis, node.operands)):
         return "an operand reduces the split axis itself; each partition would take that statistic over one slice"
     return None
 
