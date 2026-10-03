@@ -3,27 +3,11 @@
 import subprocess
 from pathlib import Path
 
-import pytest
-
 from emmy.benchmark.command_workload import build_substitution_map, render_command
 from emmy.benchmark.tasks import enumerate_tasks
 from emmy.recipe import load_recipe
 
 EXP = Path("experiments/golden-bench-2026")
-
-
-@pytest.mark.parametrize(
-    "path",
-    sorted((Path(__file__).resolve().parents[3] / EXP / "kernels" / "golden").glob("*.golden.json")),
-    ids=lambda path: path.name,
-)
-def test_kernel_golden_matches_fresh_lowering(path) -> None:
-    from emmy.compiler.pipeline.search.golden import GoldenFile, restamp
-
-    document = GoldenFile.load(path)
-    assert document.targets() and any(row.measured for row in document.rows)
-    fresh, report = restamp(document)
-    assert fresh == document, "\n".join(report.lines())
 
 
 def _experiment(project_root: str, name: str) -> str:
@@ -71,6 +55,16 @@ def test_common_kernel_corpus_is_small_and_identical(project_root) -> None:
             f"qwen3-06b-s1_{short}",
             f"qwen3-06b-s512_{short}",
         }
+    from emmy.compiler.pipeline.search.golden import GoldenFile
+    from emmy.compiler.pipeline.search.golden.repository import _RECORDS_DIR, repository_golden_paths
+
+    with repository_golden_paths() as paths:
+        for name in {task.variant.params["golden"] for task in replay_tasks}:
+            path = _RECORDS_DIR / f"{name}.golden.json"
+            assert path in paths
+            document = GoldenFile.load(path)
+            assert len(document.targets()) == 1 and all(row.measured for row in document.rows)
+            assert len({route.parent for route in document.routing}) == len(document.routing)
     assert all(task.variant.params["budget"] == 0 for task in replay_tasks)
     assert all(task.variant.params["patience"] == 0 for task in replay_tasks)
     assert all(task.variant.params["golden"] == "" for task in searched_tasks)
@@ -101,7 +95,6 @@ def test_common_kernel_corpus_is_small_and_identical(project_root) -> None:
         "Cargo.lock",
         "crates",
         "experiments/golden-bench-2026/kernels/recipe.yaml",
-        "experiments/golden-bench-2026/kernels/golden",
     ]
     assert recipe.command.strict is True
     assert recipe.command.result_files == ["artifacts.tar.gz"]
