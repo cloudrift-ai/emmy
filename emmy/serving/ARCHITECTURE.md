@@ -131,14 +131,18 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   Fused query/output-gate full-attention profiles retain the gate as the fourth pre output and third post input.
   A CODED TRUNK is spelled by the checkpoint's own spellers, in the order `gen_runner._compile_split`'s stamp runs them:
   the twin's wrapper-relative constant paths (`q_proj.weight`) are re-addressed to the representative layer's
-  checkpoint keys by dotted suffix, then `spell_quantized_constants` and — for a checkpoint declaring static 4-bit
-  input activations — `spell_static_fp4_activations` run over the checkpoint directory itself, yielding `…@nvfp4`.
+  checkpoint keys by dotted suffix (in a vision-language checkpoint, the layer group that names the most of the twin's
+  weights, since the vision tower numbers its layers too), then `spell_quantized_constants` and the static input
+  encode the checkpoint declares — `spell_static_fp4_activations` for NVFP4, `spell_static_fp8_activations` for FP8
+  with static activations — run over the checkpoint directory itself, yielding `…@nvfp4` or `…@fp8`.
   Tuning evidence transfers to serving only while the twin's kernels have serving's identities, and one trace path
-  plus one spell sequence is what makes them equal. NVFP4 is the one format with no weight-free description: its
-  packed shapes live in the safetensors headers and its calibrated `input_scale` values in the shards, so
-  `loader.quant.nvfp4_checkpoint_dir` resolves the directory (consulting the loaded config first, so no other model
-  touches the hub for it). No rate multiplies these twins — one rate, one block size, and the representative layer is
-  the profile's lowest member.
+  plus one spell sequence is what makes them equal. These two formats have no weight-free description: NVFP4's
+  packed shapes live in the safetensors headers and either format's calibrated activation scales in the shards, so
+  `loader.quant.checkpoint_spelled_trunk_dir` resolves the directory (consulting the loaded config first, so no
+  other model touches the hub for it). No rate multiplies these twins — one rate, one block size, and the
+  representative layer is the profile's lowest member. The runner itself still serves an FP8 trunk from decoded
+  values: the `…@fp8` twins record the program the coded lane will compile once serving parity opens it for that
+  format, as it did for NVFP4.
   Coded routed experts are spelled weight-free so the golden records the program serving deploys, not the f16 GEMM
   the trace promised: EXL3 from the allocation sidecar (`…@b4`, one twin per rate profile), fp8 from the config's
   `quantization_config` alone (`loader.quant.fp8_weight_profile` — format token, `weight_block_size`, skip patterns;
