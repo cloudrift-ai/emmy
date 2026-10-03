@@ -152,7 +152,10 @@ buffers re-upload, un-supplied buffers whose shape carries a symbolic dim (seq_l
 re-materialize under the same fill policy as `build`, static-shaped un-supplied buffers — the weights — keep their
 memory untouched, regions grow when the new layout needs more bytes, and the runtime drops captured graphs and
 re-encodes TMA descriptors, since both bake addresses. `run_once()` launches every kernel in program order with none
-of `iter_once`'s per-launch event record/sync/deadline; the caller's `outputs()` synchronizes. Both expect the caller to
+of `iter_once`'s per-launch event record/sync/deadline; the caller's `outputs()` synchronizes. `run_each(runs)` is the
+batched form for a program run many times back to back with different operands (the serving MoE expert loop): per
+entry the runtime binds the symbolic values, lends the listed buffers without draining the stream, copies the inputs
+into their prefixes, launches and copies the outputs' prefixes out, all in one host call. Each expects the caller to
 hold `gpu_lock()`. See `tests/compiler/e2e/test_program_rebind.py`.
 
 **Captured-graph replay over a capacity buffer set (`set_sym_values` / `upload_prefix` / `upload_prefix_device` /
