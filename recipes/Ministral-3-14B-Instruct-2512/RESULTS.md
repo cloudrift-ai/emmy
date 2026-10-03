@@ -34,32 +34,37 @@ were measured as separate programs: the embedding at 2.7 us against 4.1 us for `
 
 ### Results
 
-Whole-program latency of every kernel the route selects, 5 warm-ups and 100 iterations, Emmy and both references
-timed on the same random inputs in one run. Eager and `torch.compile` replay the same traced program, including its
-FP8 encode and decode steps; they are not the Transformers FP8 kernel. The any-width programs ran at 512 tokens.
+Whole-program latency of every kernel the route selects, Emmy and both references timed on the same random inputs in
+one run: 5 warm-ups and 100 iterations, or 20 iterations for the six standard-lane rows at widths 32 and up. Eager and
+`torch.compile` replay the same traced program, including its FP8 encode and decode steps; they are not the
+Transformers FP8 kernel. The any-width programs ran at 512 tokens.
 
 | Target | Lane | Emmy | `torch.compile` | Eager | Emmy vs `torch.compile` |
 | --- | --- | ---: | ---: | ---: | ---: |
 | pre, any-width | fast math | 172.3 us | 213.2 us | 576.9 us | 1.24x |
-| pre, any-width | standard | 174.7 us | 214.1 us | 581.9 us | 1.23x |
+| pre, any-width | standard | 7237.1 us | 222.5 us | 587.4 us | 0.03x |
 | pre, 1 | fast math | 18.4 us | 20.5 us | 368.7 us | 1.11x |
 | pre, 1 | standard | 19.9 us | 20.5 us | 364.8 us | 1.03x |
 | pre, 32 | fast math | 47.1 us | 57.4 us | 378.2 us | 1.22x |
-| pre, 32 | standard | 47.1 us | 57.3 us | 378.2 us | 1.22x |
+| pre, 32 | standard | 460.0 us | 68.1 us | 423.7 us | 0.15x |
 | pre, 4096 | fast math | 819.4 us | 1308.3 us | 2680.0 us | 1.60x |
-| pre, 4096 | standard | 829.8 us | 1313.9 us | 2681.2 us | 1.58x |
+| pre, 4096 | standard | 64.22 ms | 1.45 ms | 3.05 ms | 0.02x |
 | post, any-width | fast math | 1061.7 us | 1832.0 us | 5728.3 us | 1.73x |
-| post, any-width | standard | 1078.9 us | 1872.3 us | 5736.0 us | 1.74x |
+| post, any-width | standard | 63.86 ms | 2.01 ms | 6.37 ms | 0.03x |
 | post, 1 | fast math | 176.7 us | 171.0 us | 4508.0 us | 0.97x |
 | post, 1 | standard | 180.3 us | 170.5 us | 4512.1 us | 0.95x |
 | post, 32 | fast math | 355.8 us | 759.0 us | 4535.7 us | 2.13x |
-| post, 32 | standard | 359.6 us | 759.4 us | 4536.3 us | 2.11x |
+| post, 32 | standard | 3896.7 us | 858.4 us | 5143.2 us | 0.22x |
 | post, 4096 | fast math | 8151.8 us | 11116.1 us | 17711.7 us | 1.36x |
-| post, 4096 | standard | 8171.5 us | 11079.5 us | 17787.9 us | 1.36x |
+| post, 4096 | standard | 443.06 ms | 11.68 ms | 18.91 ms | 0.03x |
 
-The width-1 post half is the one target not ahead. Its five kernels sum to 148 us and the captured program takes
-177 us; `torch.compile` moved between 170 and 183 us across runs. Its largest kernel, the gate and up projections,
-reads 168 MB of FP8 weights in 104 us whatever the schedule, so it is bound by memory traffic.
+In the fast-math lane seven of the eight targets are ahead of `torch.compile`, by 1.1x to 2.1x. The width-1 post half
+is on par: its five kernels sum to 148 us and the captured program takes 177 us, while `torch.compile` moved between
+170 and 183 us across runs. Its largest kernel, the gate and up projections, reads 168 MB of FP8 weights in 104 us
+whatever the schedule, so it is bound by memory traffic.
+
+The standard lane is ahead or on par only at width 1. At widths 32 and up it is 4.5x to 44x slower than
+`torch.compile`, for the reason in the next section.
 
 ### How the kernel sets are built
 
@@ -72,11 +77,11 @@ runs the projections as scalar loops; on the post half that exceeded the bench's
   projection three times; then the activation codes in front of the output projection, of the gate and up pair, and
   of the down projection.
 
-With those cuts the projections run on the native FP8 tensor-core instruction (`mma_m16n8k32_e4m3_f32`) at widths 32
-and up, and on cooperative scalar reductions at width 1. That instruction is offered to an unpinned compile only in
-the fast-math lane. The standard-lane rows name the same tiles explicitly: on this card they match the exact scalar
-path almost element for element (below), and without them the standard lane runs the same route ten to forty times
-slower (3.8 ms against 0.36 ms on the 32-wide post half, 7.2 ms against 0.17 ms on the any-width pre half).
+With those cuts the fast-math projections run on the native FP8 tensor-core instruction (`mma_m16n8k32_e4m3_f32`) at
+widths 32 and up, and on cooperative scalar reductions at width 1. The compiler counts that instruction as precision
+trading and offers it only in the fast-math lane, so the standard lane runs the same cuts with scalar reductions at
+every width. Standard-lane rows naming the tensor-core tile were recorded first and removed: a hand pin can name the
+tile, but a compile that picks from evidence is never offered it, and those rows failed to replay.
 
 ### Accuracy
 
@@ -126,6 +131,10 @@ checkpoint's own.
   carry that pin.
 - **The whole-layer form is not tractable on this host.** One fused layer with attention has 86 cut seams; its
   unpinned pick hangs and a pinned compile grew past 40 GB of host memory twice.
+- **The standard lane has no tensor-core tier for these programs.** Six standard-lane targets lose to
+  `torch.compile`: pre at 32 (0.15x), 4096 (0.02x) and any-width (0.03x), post at 32 (0.22x), 4096 (0.03x) and
+  any-width (0.03x). No exact tensor-core tier takes an FP8-stored activation, and the FP8 one is fast-math only,
+  although on this card it matches the scalar path to within three elements in two million.
 - **Serving compiles these programs, but is not qualified.** The serving runner now keeps a static-FP8 trunk coded
   instead of decoding it to about 27 GiB of FP16 values, and a one-layer boot under strict evidence compiled exactly
   this golden's 48 kernels. Nothing beyond that layer was run.
