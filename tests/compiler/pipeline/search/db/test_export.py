@@ -5,13 +5,16 @@ that writes them as a dataset the readers load back unchanged."""
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 
 from emmy.compiler.context import Context
 from emmy.compiler.pipeline.search.dataset import Dataset
-from emmy.compiler.pipeline.search.db import RoutingRow, SearchDB
+from emmy.compiler.pipeline.search.db import SearchDB
 from emmy.compiler.pipeline.search.db.export import export_dataset, golden_pools, placement_pools
 from emmy.compiler.pipeline.search.features import tile_signature
+from emmy.compiler.pipeline.search.golden import import_rows
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from emmy.compiler.pipeline.search.ranking import build_golden_groups, enumerate_graph, enumerate_pool, pool_context
 from tests.compiler.pipeline.search.helpers import CARDS, GPU_5090, kernel_row, perf_row, tuned_db
@@ -63,9 +66,9 @@ def test_the_placement_space_is_one_pool_per_fork_with_the_golden_arm_marked(tmp
     cut arm marked and the fused one not. The parent's pool holds the routing decision as its one row; the pieces,
     pools of their own, offer no fork and are skipped by name. The dataset round-trips with its space."""
     db = tuned_db(None, (_CUT,), source="golden:case")
-    pools, dropped = placement_pools(db, golden_pools(db)[0])
+    pools = placement_pools(db, golden_pools(db)[0])
     [parent] = [pool for pool in pools if pool.rows]
-    assert dropped == {} and len(pools) == 3 and [row.knobs for row in parent.rows] == [{"PLACE": "cut"}]
+    assert len(pools) == 3 and [row.knobs for row in parent.rows] == [{"PLACE": "cut"}]
 
     dataset = export_dataset(db, source="test", pool_sample=0, seed=0, space="placement")
     [group] = dataset.golden
@@ -89,43 +92,30 @@ def test_a_golden_over_a_kernel_set_is_one_pool_per_piece():
     assert all(row.source == "golden:case" for pool in pools for row in pool.rows)
 
 
-def test_placement_labels_use_only_measurements_from_the_pool_card():
-    """One card measured a cut; another measured only the same kernel fused. Both labels survive export."""
+def test_a_placement_label_is_what_the_golden_of_that_card_did():
+    """One card's golden cut the kernel; another's only measured it whole. Each card keeps its own label, and no
+    price decides it: the cut stays the first card's label though the kernel is measured faster whole there too."""
     db = tuned_db(None, (_CUT,), source="golden:case")
-    [parent] = [pool for pool in placement_pools(db, golden_pools(db)[0])[0] if pool.rows]
+    [parent] = [pool for pool in placement_pools(db, golden_pools(db)[0]) if pool.rows]
     other = "NVIDIA Tesla V100 SXM3 32GB"
-    db.record_perf_row(
-        perf_row(
-            parent.kernel.exact_identity,
-            us=500.0,
-            gpu=other,
-            cc=70,
-            flags=parent.regime,
-            bindings=parent.bindings,
-            knobs={"WORK": "t1"},
-            source="golden:other",
-        )
-    )
+    whole = dict(us=1.0, flags=parent.regime, bindings=parent.bindings, knobs={"WORK": "t1"})
+    db.record_perf_row(perf_row(parent.kernel.exact_identity, gpu=parent.gpu, cc=70, source="golden:case", **whole))
+    db.record_perf_row(perf_row(parent.kernel.exact_identity, gpu=other, cc=70, source="golden:other", **whole))
+    assert {pool.gpu for pool in golden_pools(db)[0] if pool.kernel == parent.kernel} == {parent.gpu, other}
     dataset = export_dataset(db, source="test", pool_sample=0, seed=0, space="placement")
     assert {group.gpu: group.golden_ids for group in dataset.golden} == {parent.gpu: (1,), other: (0,)}
 
 
-def test_a_cut_whose_pieces_were_split_is_found_below_the_split():
-    """A piece split across thread blocks is measured as its partial and its finalize, never itself, so a cut
-    whose every piece was split has its rows two decisions down. The parent's pool is found there, its cut marked."""
+def test_a_cut_a_golden_took_is_the_label_with_no_piece_measured():
+    """What a golden did is the label, not what it measured: a file whose rows lost their times still says where
+    it cut the kernel, and the placement space marks that cut though the DB holds no measurement of any piece."""
+    case = corpus.load_case(corpus.CASES_DIR / _CUT)
+    ctx = Context.from_target(case.compute_cap, gpu_name=CARDS[case.compute_cap], compile_flags="")
     db = SearchDB()
-    db.record_kernel(kernel_row("parent"))
-    for piece in ("left", "right"):
-        halves = (f"{piece}_partial", f"{piece}_finalize")
-        for identity in (piece, *halves):
-            db.record_kernel(kernel_row(identity))
-        db.record_routing(RoutingRow(piece, {"REDUCE": "g2k"}, halves))
-        for identity in halves:
-            db.record_perf_row(perf_row(identity, us=500.0, source="golden:case"))
-    db.record_routing(RoutingRow("parent", {"PLACE": "cut"}, ("left", "right")))
-    pools, dropped = placement_pools(db, golden_pools(db)[0])
-    [parent] = [pool for pool in pools if pool.rows]
-    assert dropped == {} and parent.kernel.exact_identity == "parent" and [row.knobs for row in parent.rows] == [{"PLACE": "cut"}]
+    assert import_rows(db, ctx, case.document, [replace(row, measurements=None) for row in case.rows], source="golden:case") == 0
+    pools, _dropped = golden_pools(db)
+    [parent] = placement_pools(db, pools)
+    assert pools == [] and (parent.gpu, [row.knobs for row in parent.rows]) == (CARDS[case.compute_cap], [{"PLACE": "cut"}])
 
 
 def test_a_pool_of_a_kernel_formed_from_no_loop_op_is_skipped_by_name():

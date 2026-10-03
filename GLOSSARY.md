@@ -338,7 +338,9 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   their own (see *Routing table*).
 - **Routing table** — The tune database table that links a parent kernel and one decision taken on it to the kernels
   the decision minted, one row per piece. It says which pieces a route leads to, and the decision's price on a card
-  is the sum of the pieces' fastest measurements there — every piece measured, or the decision is unpriced.
+  is the sum of the pieces' fastest measurements there — every piece measured, or the decision is unpriced. Where a
+  golden took a decision — the card, the regime and the sizes — is the `taken` table beside it, written on import and
+  read by the placement dataset.
 - **Strict evidence** — A compile mode (`--strict-evidence`, `EMMY_STRICT_EVIDENCE`) in which a fork no measured row
   decides is an error naming the kernel, instead of a prediction the prior makes.
 - **Dataset DB** — A database with the tuning database's tables in a file of its own — the file

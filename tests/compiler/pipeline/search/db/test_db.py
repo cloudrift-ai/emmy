@@ -247,6 +247,7 @@ def test_a_file_another_emmy_wrote_is_re_created_whole_by_a_writer_and_refused_b
         "placement",
         "placement_knob",
         "routing",
+        "taken",
         "perf",
     }
     with pytest.raises(sqlite3.IntegrityError):
