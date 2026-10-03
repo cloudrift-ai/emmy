@@ -79,3 +79,10 @@ def test_every_declared_recipe_deployment_names_a_known_gpu():
             gpu_name = setup["deploy.gpu"]
             spec = gpu_registry.by_name(gpu_name)
             assert spec is not None and spec.name == gpu_name, f"{recipe_path} declares unknown GPU '{gpu_name}'"
+
+
+def test_gcp_g2_standard_l4():
+    assert resolve_instance_type("gcp", "g2-standard", 1) == "g2-standard-8"
+    assert resolve_instance_type("gcp", "g2-standard", 2) == "g2-standard-24"
+    assert resolve_instance_type("gcp", "g2-standard", 3) == "g2-standard-48"
+    assert resolve_instance_type("gcp", "g2-standard", 8) == "g2-standard-96"
