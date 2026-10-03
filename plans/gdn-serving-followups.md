@@ -1,8 +1,8 @@
 # GDN serving: follow-ups that Qwen3.8 NVFP4 serving does not need
 
 Status: open, written 2026-10-02 during the work on PR #1023 (GDN serving). This file collects what the GDN serving
-work found on the way and did not fix, because serving Qwen3.8 NVFP4 does not depend on it. The main plan is
-[`qwen38-gdn-serving.md`](qwen38-gdn-serving.md). This file outlives it.
+work found on the way and did not fix, because serving Qwen3.8 NVFP4 does not depend on it. The serving design itself
+is in `emmy/serving/ARCHITECTURE.md`.
 
 GDN is the gated DeltaNet layer of Qwen3.5 / Qwen3.8 (`layer_types` value `linear_attention`). A GDN layer carries
 per-request recurrent state: a matrix state `S` and a convolution history `H`. A GDN program is the `gdn<W>` program
