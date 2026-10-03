@@ -803,6 +803,9 @@ def test_matmul_mma_f16acc_coverage(stage, monkeypatch):
     monkeypatch.setenv("EMMY_F16_MMA_F32_ACC", "1")
     M = N = K = 128
     monkeypatch.setenv("EMMY_STAGE", _F16ACC_STAGES[stage])
+    # No cross-CTA split: the transport is what this test asserts, and a split the prior may pick offers no
+    # staged transport on its pieces.
+    monkeypatch.setenv("EMMY_REDUCE", "")
     run_m = M + 2
     rng = np.random.default_rng(0)
     a = (rng.standard_normal((run_m, K)) * 0.1).astype(np.float16)
@@ -1775,6 +1778,10 @@ def test_reshaped_a_fragment_takes_the_derived_row_stride(monkeypatch):
     """The gmem-direct mma fragment loader steps the reshaped A's rows at the DERIVED 128, not the
     buffer's declared trailing extent 256 — the ``ldm`` argument IS the bug, visible in the source."""
     monkeypatch.setenv("EMMY_STAGE", "")
+    # The mma tile and no cross-CTA split, pinned: the loader is what this test asserts, and the prior may
+    # otherwise pick a schedule with no mma fragment loader at all.
+    _pin_tile(monkeypatch, _WARP_PIN)
+    monkeypatch.setenv("EMMY_REDUCE", "")
     _, src, _ = _imap_run(_imap_graph("reshape_a")[0])
     calls = [ln.strip() for ln in src.splitlines() if "emmy_mma_load_a_gmem" in ln and "(_a" in ln]
     assert calls, "the gmem-direct pin must reach the mma fragment loader"
