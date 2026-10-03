@@ -4,7 +4,16 @@ import os
 
 import yaml
 
+from emmy.deploy.orchestrate import _request
+from emmy.recipe.types import Recipe
+
 # ── SSH deploy ──────────────────────────────────────────────────────
+
+
+def test_smoke_request_targets_named_adapter():
+    recipe = Recipe.from_dict({"model": {"huggingface": "org/base", "request_name": "limo"}})
+    assert recipe.model_name == "org/base"
+    assert _request(recipe)[1]["model"] == "limo"
 
 
 def test_ssh_deploy(run_cli, recipes_dir):

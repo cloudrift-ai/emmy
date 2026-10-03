@@ -82,9 +82,9 @@ async def _wait_healthy(run_cmd, name: str, port: int, dry_run: bool) -> bool:
 
 
 def _request(recipe: Recipe, *, example: bool = False) -> tuple[str, dict]:
-    """The endpoint path and JSON body a recipe answers: embeddings, a base-model completion, or
+    """The endpoint path and JSON body a recipe answers: embeddings, completion, or
     chat. The smoke test asks for 2+2; the printed curl example says hello."""
-    model = recipe.model_name
+    model = recipe.request_model_name
     if recipe.is_embedding:
         return "/v1/embeddings", {"model": model, "input": "Hello" if example else "What is 2+2?"}
     if recipe.model.smoke_test == "completion":
