@@ -68,8 +68,8 @@ The standalone Rust runtime keeps unit tests beside its modules. `make test-nati
 Python parity and process-recovery tests against it; GPU cases skip when CUDA or the worker binary is unavailable.
 Native HTTP tests also verify checkpoint text parity, seeded streaming, stops, overload, cancellation recovery,
 and shutdown against a prepared artifact. Cargo tests cover transport semantics without GPU dependencies.
-The native generation tests pin serial reductions for bit-identical artifact replay, excluding atomic accumulation
-whose addition order can vary. They exercise cached tiny-Qwen3 logits, full and partial prefill chunks, EOS,
+Native generation and exact host/device parity fixtures pin serial reductions, excluding atomic accumulation whose
+addition order can vary. Native tests exercise cached tiny-Qwen3 logits, full and partial prefill chunks, EOS,
 seeded request reset, and exact-once
 graph replay, independent rotary rounding, and attention/cache boundaries, including near-tied scores checked against
 float64 attention. Local checkpoint qualification compares FP16
