@@ -109,7 +109,9 @@ numerics, and the deployable perf tests (`tests/perf`, `-m perf`) are skipped he
 `make bench-kernels`. It also sets `EMMY_GOLDEN_FILE=` (set, empty): no repository golden is evidence in this lane,
 because the lane never asks how fast a pick is and importing a card's goldens is work every worker process would
 repeat; a test that needs golden evidence scopes it itself (`--golden PATH`, `golden.records_override`). To re-run the suite at deployable `-O3`, prefix `EMMY_NVCC_FLAGS=` (empty) or run `pytest`
-directly.
+directly. Every pytest session, `make test` or direct, also runs on a fresh tune DB (the root `tests/conftest.py`
+points `EMMY_TUNE_DB` at one unless the caller names one), so no test picks from a machine's stored measurements; a
+test that needs a DB sets its own.
 
 The lane saves far less than this file used to claim. Measured on an RTX 5090 (CUDA 13.0, 16 cores, one repo, only the
 opt level varying): cold cubin cache **923 s at `-O1` vs 1031 s at `-O3`** (1.12×); warm **718 s vs 760 s** (1.06×);

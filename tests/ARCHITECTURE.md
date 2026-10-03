@@ -250,6 +250,11 @@ A lane whose torch has no CUDA hides the device from the compiler as well (`test
 it through the driver and the prior featured its SM count, so an unpinned pick there diverged from every other host.
 Hidden, the lane features the default card everywhere.
 
+For the same reason every session runs on its own tune DB: on import the root `conftest.py` points `EMMY_TUNE_DB` at
+a fresh file, removed at exit, unless the caller already names one. The default `~/.cache/emmy/autotune.db` is
+machine-local evidence a CLI compile picks from, and the CI runners keep their home directory between jobs. Set on
+import, the one file reaches every xdist worker and subprocess; a test that needs a DB of its own still sets one.
+
 `tests/compiler/pipeline/search/test_golden.py` holds every repository golden — the hardware goldens and each
 recipe's model golden — to the fresh lowering of its own traced programs on the DEFAULT lane: a restamp
 (`golden.restamp`, the rewrite `emmy golden restamp` writes) must leave the file unchanged, one node per traced
