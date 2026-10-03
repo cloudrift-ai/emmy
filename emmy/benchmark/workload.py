@@ -20,9 +20,11 @@ def _bench_args(recipe: Recipe, repeat: int = 0, tokenizer: str | None = None) -
     _, load_balancer = replica_services(recipe)
     port = 8080 if load_balancer else 8000
     args = [
-        f"--model {recipe.model_name}",
+        f"--model {recipe.request_model_name}",
         "--trust-remote-code",
     ]
+    if tokenizer is None and recipe.request_model_name != recipe.model_name:
+        tokenizer = recipe.model_name
     if tokenizer:
         args.append(f"--tokenizer {tokenizer}")
     if recipe.is_embedding:

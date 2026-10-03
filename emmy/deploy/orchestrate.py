@@ -82,9 +82,9 @@ async def _wait_healthy(run_cmd, name: str, port: int, dry_run: bool) -> bool:
 
 
 def _request(recipe: Recipe, *, example: bool = False) -> tuple[str, dict]:
-    """The endpoint path and JSON body a recipe answers: embeddings, a base-model completion, or
+    """The endpoint path and JSON body a recipe answers: embeddings, completion, or
     chat. The smoke test asks for 2+2; the printed curl example says hello."""
-    model = recipe.model_name
+    model = recipe.request_model_name
     if recipe.is_embedding:
         return "/v1/embeddings", {"model": model, "input": "Hello" if example else "What is 2+2?"}
     if recipe.model.smoke_test == "completion":
@@ -209,17 +209,29 @@ async def run_deploy(
     for image in dict.fromkeys(service.recipe.engine.llm.image for service in services):
         baked_hf_home = await baked_hf_cache(run_cmd, image)
         if baked_hf_home:
+            if any(
+                service.recipe.engine.llm.vllm and service.recipe.engine.llm.vllm.lora_adapter
+                for service in services
+                if service.recipe.engine.llm.image == image
+            ):
+                logger.error("A pinned LoRA adapter needs a regular vLLM image with a writable model cache, not %s", image)
+                return False
             logger.info(f"Image {image} ships its model cache at {baked_hf_home} (offline) — skipping download")
             baked.add(image)
     if baked:
         await write_file(
             "docker-compose.yaml", generate_compose(services, model_dir, hf_token, load_balancer, baked_images=baked, proxy=proxy)
         )
-    downloads = dict.fromkeys(
-        (service.recipe.engine.llm.image, service.recipe.model_name, service.recipe.model.revision)
-        for service in services
-        if service.recipe.engine.llm.image not in baked
-    )
+    download_items = []
+    for service in services:
+        image = service.recipe.engine.llm.image
+        if image in baked:
+            continue
+        download_items.append((image, service.recipe.model_name, service.recipe.model.revision))
+        adapter = service.recipe.engine.llm.vllm.lora_adapter if service.recipe.engine.llm.vllm else None
+        if adapter:
+            download_items.append((image, adapter.huggingface, adapter.revision))
+    downloads = dict.fromkeys(download_items)
     proxy_args = "".join(f" -e {name}={value}" for name, value in proxy_env(proxy).items()) if proxy else ""
     async with timer.ameasure(PHASE_MODEL_DOWNLOAD):
         for image, model_name, revision in downloads:

@@ -50,6 +50,19 @@ def test_compose_uses_named_model_revision(sample_config):
     assert "--revision 0123456789abcdef" in result
 
 
+def test_compose_uses_pinned_adapter_snapshot(sample_config):
+    revision = "a" * 40
+    sample_config["engine"]["llm"]["vllm"]["lora_adapter"] = {
+        "name": "limo", "huggingface": "org/adapter", "revision": revision, "rank": 8,
+    }
+    recipe = Recipe.from_dict(sample_config)
+    result = generate_compose([Service(recipe)], "/mnt/models", "token")
+
+    assert "--enable-lora" in result
+    assert "--max-lora-rank 8" in result
+    assert f"--lora-modules limo=/mnt/models/hub/models--org--adapter/snapshots/{revision}" in result
+
+
 def test_compose_omits_unset_named_fields():
     config = {
         "model": {"huggingface": "test-org/test-model"},
