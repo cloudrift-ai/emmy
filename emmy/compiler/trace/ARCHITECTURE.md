@@ -110,6 +110,8 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   concrete `(cos, sin)` kwargs — those specialise rotary to the trace seq_len, which is exactly what dynamic mode must
   avoid. Forward arg is named `x`, so the CLI spec is `--dynamic seq_len@x:1`
   (`tests/compiler/ir/test_dynamic_shapes.py::test_qwen_layer_dynamic_compiles_and_matches_eager`).
+  An attention whose `forward` takes `position_ids` (Ministral 3 scales its queries by position) gets them the same
+  way: a position buffer sliced by `x.shape[1]`, as the static trace passes them as a concrete kwarg.
   Gemma-nano PLE blocks (those exposing `hidden_size_per_layer_input`) additionally get a seeded synthetic
   `per_layer_input` (`build_synthetic_ple`) — the dynamic wrapper registers it as a buffer sliced in-graph like
   cos/sin, and the static single-layer trace (`commands/compile.py`) passes the same buffer as a concrete kwarg
@@ -235,6 +237,12 @@ an `AutoModel` trunk yields hidden states instead of logits (the serving plugin'
   upstream's own `rename_source_key`, rather than hand-writing one family's rule. Pre-existing loads are unchanged not
   because unmapped families exist but because the mappings they do carry — four legacy `LayerNorm.gamma`/`weight_g`
   renames attach to every model — match no modern checkpoint key.
+  The reverse direction, which re-addresses a traced constant to its checkpoint key, runs the inverse renamings in
+  reverse order. Upstream applies every matching renaming in turn, so a key can pass through a chain (Mistral 3:
+  `language_model.model.` → `language_model.` → `model.language_model.`), and inverses applied in forward order stop
+  halfway: every weight then misses its checkpoint key and silently stays unquantized. A family Transformers
+  registers only as image-text-to-text (Mistral 3) is built as that whole model; its decoder is found as in a causal
+  LM.
 
   The NATIVE translation runs first, since the family one matches on module-namespace names. A checkpoint published in
   its own namespace is translated by `_native_checkpoint_renamer`, which reuses the renaming Transformers itself
