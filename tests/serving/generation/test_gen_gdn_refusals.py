@@ -60,3 +60,19 @@ def test_gdn_state_layout_matches_the_layer_programs():
     shapes, dtypes = _gdn_state_layout(config, torch.float16)
     assert shapes == ((mixer.conv_dim, mixer.conv_kernel_size), (mixer.num_v_heads, mixer.head_k_dim, mixer.head_v_dim))
     assert dtypes == (torch.float16, torch.float32)
+
+
+def test_mrope_positions_for_text_are_the_token_positions_on_every_axis():
+    """vLLM asks a model for M-RoPE positions whenever the config carries ``mrope_section``, as Qwen3.5 / Qwen3.8
+    do, and would otherwise refuse the first request. For text every axis carries the token position; vision
+    inputs are refused."""
+    import torch
+
+    from emmy.serving.vllm_model_gen import EmmyGenHybridModel, EmmyGenModel
+
+    model = EmmyGenHybridModel.__new__(EmmyGenHybridModel)  # the method reads no state
+    positions, delta = EmmyGenModel.get_mrope_input_positions(model, [5, 7, 11], [])
+    assert positions.shape == (3, 3) and delta == 0
+    assert torch.equal(positions, torch.arange(3).expand(3, -1))
+    with pytest.raises(NotImplementedError, match="text only"):
+        EmmyGenModel.get_mrope_input_positions(model, [5], [object()])

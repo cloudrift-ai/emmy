@@ -53,7 +53,7 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.rotary_embedding.yarn_scaling_rope import YaRNScalingRotaryEmbedding
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.interfaces import IsHybrid, SupportsPP
+from vllm.model_executor.models.interfaces import IsHybrid, SupportsMRoPE, SupportsPP
 from vllm.model_executor.models.utils import PPMissingLayer, make_empty_intermediate_tensors_factory
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
@@ -418,7 +418,7 @@ class _GdnStateLayer(nn.Module, MambaBase):
         return MambaAttentionBackendEnum.LINEAR
 
 
-class EmmyGenModel(nn.Module, SupportsPP):
+class EmmyGenModel(nn.Module, SupportsPP, SupportsMRoPE):
     def __init__(self, *, vllm_config, prefix: str = ""):
         super().__init__()
         mc = vllm_config.model_config
@@ -702,7 +702,9 @@ class EmmyGenModel(nn.Module, SupportsPP):
         # scatter itself lives inside the graph; only this host read is capture-excluded.
         self.runner.maybe_log_routing_histogram()
         device = positions.device
-        t = int(positions.shape[0])
+        # Under M-RoPE (Qwen3.5 / Qwen3.8: ``mrope_section`` in the rope parameters) vLLM hands positions
+        # as ``[3, T]``, one row per rotary axis; the per-layer rotary modules take either form.
+        t = int(positions.shape[-1])
         # Every rank clamps the step's ids (vLLM hands them to all pipeline stages): the first rank
         # embeds them, and any rank's hash-routed MoE layers select experts by them. The clamp
         # guards vLLM's _dummy_run garbage-id profiling batches (out-of-vocab → IndexError).
@@ -802,6 +804,15 @@ class EmmyGenModel(nn.Module, SupportsPP):
         if self._is_last_rank:
             return self.runner.final_norm_device(hidden)
         return IntermediateTensors({"hidden_states": hidden})
+
+    def get_mrope_input_positions(self, input_tokens, mm_features):
+        """M-RoPE positions for a text prompt: vLLM asks for them whenever the config carries ``mrope_section``
+        (Qwen3.5 / Qwen3.8), and for text every rotary axis carries the plain token position. The checkpoints'
+        vision inputs are not served, so a prompt with multimodal features is refused."""
+        if mm_features:
+            raise NotImplementedError("EmmyGenModel serves text only: multimodal inputs are not supported")
+        positions = torch.arange(len(input_tokens), dtype=torch.int64).unsqueeze(0).expand(3, -1)
+        return positions, 0
 
     @classmethod
     def _check_gdn_serving(cls, vllm_config):
