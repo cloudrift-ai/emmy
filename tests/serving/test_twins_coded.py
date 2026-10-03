@@ -819,7 +819,26 @@ def test_nvfp4_serving_twins_carry_the_declared_w4a4_program(tmp_path):
         assert _structure(Graph.from_dict(json.loads(json.dumps(graph.to_dict())))) == _structure(graph)
 
 
-def test_nvfp4_twin_is_the_graph_serving_stamps(tmp_path):
+def test_static_fp8_trunk_stays_coded_on_the_serving_lane(tmp_path):
+    """The serving loader leaves a static-FP8 trunk linear undecoded — a placeholder at the declared
+    shape — and says so in the store, which is what sends the runner to the checkpoint for the
+    bits. The default lane still decodes the same checkpoint to values."""
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("transformers")
+
+    from emmy.compiler.trace.huggingface import load_quantized_split
+
+    _static_fp8_checkpoint(tmp_path)
+    model, store = load_quantized_split(tmp_path, torch.float16, compress_trunk=True)
+    assert store["trunk"] == "codes" and store["dir"] == str(tmp_path)
+    weight = model.state_dict()["model.layers.0.self_attn.q_proj.weight"]
+    assert not weight.is_meta and weight.dtype == torch.float16 and tuple(weight.shape) == (64, 64)
+    _model, decoded = load_quantized_split(tmp_path, torch.float16)
+    assert decoded["trunk"] == "values"
+
+
+@pytest.mark.parametrize("scheme", ["nvfp4", "fp8"])
+def test_checkpoint_spelled_twin_is_the_graph_serving_stamps(tmp_path, scheme):
     """The transfer property, asserted directly: the captured twin and the graph
     ``gen_runner._compile_split`` stamps on the same wrapper at the same width are the same graph.
 
@@ -837,7 +856,7 @@ def test_nvfp4_twin_is_the_graph_serving_stamps(tmp_path):
     from emmy.serving.gen_runner import _compile_split
     from emmy.serving.twins import capture_twin_graphs
 
-    _nvfp4_checkpoint(tmp_path)
+    {"nvfp4": _nvfp4_checkpoint, "fp8": _static_fp8_checkpoint}[scheme](tmp_path)
     twins = capture_twin_graphs(str(tmp_path), decode_bucket=4, prefill_bucket=0, symbolic=False)
 
     config = transformers.AutoConfig.from_pretrained(tmp_path)
@@ -871,7 +890,7 @@ def test_nvfp4_twin_is_the_graph_serving_stamps(tmp_path):
         for half, wrapper in (("pre", pre_w), ("post", post_w)):
             with pytest.raises(_Stamped) as caught:
                 _compile_split(wrapper, examples[half], None, F16, ckpt=(str(tmp_path), id_to_key))
-            assert _structure(caught.value.graph) == _structure(twins[f"{half}4@nvfp4"])
+            assert _structure(caught.value.graph) == _structure(twins[f"{half}4@{scheme}"])
 
 
 def _structure(graph: Graph):

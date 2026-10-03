@@ -2164,6 +2164,11 @@ def load_quantized_split(
                 if t.dtype in torch_f8:
                     scale_key = next((c for c in (mk + "_scale", mk + "_scale_inv") if c in renamed), None)
                     if scale_key is not None and not _is_skipped(k, patterns):
+                        if compress_trunk:
+                            # The serving lane, as for the packed formats above: the bits stay
+                            # coded and the caller re-sources them from the checkpoint.
+                            coded_trunk.add(_checkpoint_to_model_key(rename(k)))
+                            continue
                         scale_key = renamed[scale_key]
                         s = _open(str(index[scale_key])).get_tensor(scale_key)
                         vals = dequantize(t.float().numpy(), s.float().numpy(), inverse=scale_is_reciprocal(scale_key))

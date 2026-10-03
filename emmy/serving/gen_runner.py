@@ -938,21 +938,24 @@ class EmmyGenRunner:
         qdir = quantized_checkpoint_dir(model_id)
         if qdir is not None:
             # EXL3 and AWQ keep the TRUNK coded too: expanding either checkpoint before compile
-            # gives back most of its memory savings. fp8 trunks stay on the decoded lane, where
-            # the values are what the fp8 expert path expects.
+            # gives back most of its memory savings. An fp8 trunk with dynamic activations stays
+            # on the decoded lane, where the values are what the fp8 expert path expects.
             from emmy.compiler.loader.quant import (
                 checkpoint_quant_digest,
                 checkpoint_quant_summary,
                 is_awq_checkpoint,
                 is_exl3_checkpoint,
                 is_nvfp4_checkpoint,
+                is_static_fp8_checkpoint,
             )
             from emmy.compiler.trace.huggingface import load_quantized_split
 
             # Generic EXL3/AWQ/NVFP4 reconstruction algebra is dissolved before lowering, so its
-            # checkpoint sources can stay coded on the card. FP8 keeps the existing value-trunk
+            # checkpoint sources can stay coded on the card. So can a static-FP8 trunk: its program
+            # quantizes each linear input at a stored scale, which decoded weights cannot express,
+            # and decoding doubles its size. FP8 with dynamic activations keeps the value-trunk
             # lane; only its routed experts are input-spelled today.
-            coded_trunk = is_exl3_checkpoint(qdir) or is_awq_checkpoint(qdir) or is_nvfp4_checkpoint(qdir)
+            coded_trunk = is_exl3_checkpoint(qdir) or is_awq_checkpoint(qdir) or is_nvfp4_checkpoint(qdir) or is_static_fp8_checkpoint(qdir)
             # The RESOLVED directory and the scheme summary are logged, not just the requested id:
             # a repo that publishes one rung per branch resolves to a per-commit snapshot, and this
             # line is how a boot proves which rung it actually opened.

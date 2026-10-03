@@ -550,6 +550,17 @@ def is_nvfp4_checkpoint(model_dir) -> bool:
     return _fp4_quant_config(Path(model_dir)) is not None
 
 
+def is_static_fp8_checkpoint(model_dir) -> bool:
+    """Whether the checkpoint is the official FP8 declaration with static activations.
+
+    Same narrow purpose as :func:`is_nvfp4_checkpoint`: serving asks only whether the dense trunk
+    may stay coded. A static-FP8 trunk does — its program quantizes each linear input at a stored
+    scale, which decoded weights cannot express — while an FP8 trunk with dynamic activations
+    keeps the decoded lane."""
+    qc = _fp8_quant_config(Path(model_dir))
+    return qc is not None and _declares_static_fp8(qc)
+
+
 def _declares_static_fp8(qc: dict) -> bool:
     """Whether a ``quantization_config`` MAPPING is the official FP8 declaration with STATIC
     activations: one calibrated scale per linear input, stored in the shards."""
@@ -573,8 +584,8 @@ def checkpoint_spelled_trunk_dir(model_id_or_path: str, hf_config=None, *, revis
     from emmy.compiler.loader.safetensors import _resolve_model_dir  # noqa: PLC0415
 
     if hf_config is None:
-        static_fp8 = _declares_static_fp8(_fp8_quant_config(Path(model_id_or_path)) or {})
-        return Path(model_id_or_path) if static_fp8 or is_nvfp4_checkpoint(model_id_or_path) else None
+        coded = is_nvfp4_checkpoint(model_id_or_path) or is_static_fp8_checkpoint(model_id_or_path)
+        return Path(model_id_or_path) if coded else None
     qc = getattr(hf_config, "quantization_config", None)
     if qc is None:
         return None

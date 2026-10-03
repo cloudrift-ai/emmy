@@ -103,8 +103,19 @@ random FP8 weight bits and random scales, so that small difference changes codes
 The control for this reading is the exact scalar route in the standard lane, which uses no tensor-core tile. It fails
 the strict check the same way: 264 of 2,097,152 elements on the any-width pre half, with the same worst element and
 the same two values as the tensor-core row, and 148,027 of 163,840 on the 32-wide post half (mean abs 0.56). So the
-difference is between Emmy's lowering of this algebra and the eager replay, not between tiers. What it means against
-the checkpoint's own reference has to be settled with real weights, in the serving parity check.
+difference is between Emmy's lowering of this algebra and the eager replay, not between tiers.
+
+With the real checkpoint the question goes away. The serving runner was booted for layer 0 with this golden as its
+only evidence, fed real embedding rows, and compared with the declared W8A8 math computed in float64 from the shard
+tensors. At widths 1, 32 and 40 every element of q, k, v and of the post half's output is inside `rtol = atol = 1e-3`:
+
+| Output | Relative L2 error | Max abs | Elements outside 1e-3 |
+| --- | ---: | ---: | ---: |
+| q, k, v (pre half) | 2e-5 to 4e-5 | 0.0039 | 0 |
+| layer output (post half) | 2.4e-4 to 5.9e-4 | 0.0010 | 0 |
+
+The post half's attention input in that check was synthetic (normal, standard deviation 0.1); everything else was the
+checkpoint's own.
 
 ### Gaps and findings
 
@@ -115,9 +126,9 @@ the checkpoint's own reference has to be settled with real weights, in the servi
   carry that pin.
 - **The whole-layer form is not tractable on this host.** One fused layer with attention has 86 cut seams; its
   unpinned pick hangs and a pinned compile grew past 40 GB of host memory twice.
-- **Serving does not compile these programs yet.** The serving runner still decodes an FP8 trunk to FP16 values at
-  load, about 27 GiB of weights for this model on a 32 GB card. The twins record the program its coded-trunk lane
-  will compile once serving parity opens that lane for FP8, as it did for NVFP4.
+- **Serving compiles these programs, but is not qualified.** The serving runner now keeps a static-FP8 trunk coded
+  instead of decoding it to about 27 GiB of FP16 values, and a one-layer boot under strict evidence compiled exactly
+  this golden's 48 kernels. Nothing beyond that layer was run.
 
 ### Not done
 
