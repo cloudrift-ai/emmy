@@ -1,8 +1,8 @@
 # One bounded model-derived corpus and its diagnostics. Every row is an ordinary matrix task on a shared per-GPU VM;
 # the study field keeps the headline common corpus, large-shape supplement, convergence check, and ablation separate.
 #
-# A row that names a `golden` replays the hardware golden `<golden>.golden.json` instead of tracing and searching:
-# those schedules were promoted from this experiment into the repository corpus, and the row only re-measures them
+# A row that names a `golden` replays `golden/<golden>.golden.json` instead of tracing and searching: those
+# schedules were tuned by the tune-kernels skill and committed beside this recipe, and the row only re-measures them
 # at deployable -O3. Rows with `golden: ""` keep the original trace + in-recipe search. Both paths end in the same
 # fresh-process `emmy run --golden ... --bench --strict` repeats against eager and Emmy, so the two lanes produce
 # the same terminal correctness evidence. Committed goldens also require measured evidence for every compiler
@@ -20,6 +20,7 @@ command:
     - Cargo.lock
     - crates
     - experiments/golden-bench-2026/kernels/recipe.yaml
+    - experiments/golden-bench-2026/kernels/golden
   strict: true
   run: |
     set -euo pipefail
@@ -63,7 +64,7 @@ command:
     evidence_args=()
     if [ -n "$golden" ]; then
       evidence_args=(--strict-evidence --no-record-evidence)
-      cp $repo_dir/emmy/compiler/pipeline/search/golden/records/$golden.golden.json $task_dir/working.json
+      cp $repo_dir/experiments/golden-bench-2026/kernels/golden/$golden.golden.json $task_dir/working.json
       echo "replaying committed golden $golden" | tee $task_dir/trace.log
       echo "search owned by the tune-kernels skill; this row only re-measures" | tee $task_dir/tune.log
     else

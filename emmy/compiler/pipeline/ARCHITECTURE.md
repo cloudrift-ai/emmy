@@ -917,11 +917,10 @@ nothing else.
 
 ## Part 7: Golden files and the A/B integrity gates
 
-Hardware goldens under `search/golden/records/` can hold standalone operations or complete programs derived from
-models. A card can have several workload files; each retains its exact GPU, precision regime and traced programs.
-An experiment that promotes its accepted routes into this set replays the canonical files instead of keeping a
-second copy. Retain the full selected routing graph and measured descendants, with parent decisions before children.
-Rejected alternatives remain in the experiment's archived evidence rather than becoming competing training labels.
+Hardware goldens under `search/golden/records/` hold standalone operations and programs derived from models, one
+file per exact GPU. Extend that file with missing cases, storing each kernel identity once and preserving existing
+measurements. Retain the selected routing graph and measured descendants, with parent decisions before children.
+Experiment records stay in place; only accepted routes join the hardware corpus.
 
 A golden file is a card's measurements in the tune DB's shape. It serves four purposes: measured evidence for the
 greedy compile (Part 3), pinned measurement (`run --golden PATH --realization NAME --bench`, `--ab`), training data for

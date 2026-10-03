@@ -25,8 +25,7 @@ An experiment that measures tuned Emmy does not tune: searching a schedule is ju
 `tune-kernels` skill, and a recipe that scripted it would encode that judgment in the harness. Instead the skill
 produces the golden files, they are committed under `golden/`, and the recipe replays them. The recipe still owns the
 program definition — a checked-in snippet or trace input the skill reads — so the tuned program and the benched
-program cannot drift apart. When accepted cases are promoted into the hardware golden corpus, the recipe replays
-those canonical files directly; staging `emmy` already includes them. Archived results retain the earlier evidence.
+program cannot drift apart.
 
 The committed files remain search state, so the measuring lane re-measures their selected kernels and its own
 records stay the experiment's evidence. They are per-card and are retuned when the platform changes, which is why a

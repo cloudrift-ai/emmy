@@ -18,7 +18,7 @@ from .format import GoldenFile
 
 logger = logging.getLogger("emmy.compiler.pipeline")
 
-#: The maintained hardware goldens, each naming its card: rows the offline prior trains on, the tests
+#: The maintained hardware goldens, one file per exact card: rows the offline prior trains on, the tests
 #: check, and a compile on that card picks from. They ship inside this package.
 _RECORDS_DIR = Path(__file__).parent / "records"
 _RECIPE_GOLDEN_DIR = "golden"
