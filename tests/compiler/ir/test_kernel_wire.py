@@ -102,3 +102,30 @@ def test_bindings_are_the_hints_a_bench_sizes_a_symbolic_kernel_by():
     static = corpus.load_case(corpus.CASES_DIR / "fused/norm-linear-f16-scalar-reduce.json")
     static_graph, _taken = corpus.lowered(static, static.context())
     assert all(kernel_bindings(kernel_tile(node.op)) == {} for node in static_graph.nodes.values() if isinstance(node.op, CudaOp))
+
+
+@pytest.mark.parametrize("program", ["root", "under-an-outer-loop"])
+def test_a_kernel_that_carries_a_state_re_lowers_from_its_wire_to_itself(program):
+    """A carried state reaches the lifted kernel as an extra port, the buffer its classic (serial) realization owns,
+    which the lift adds on its own. The wire spells only what the body writes, so lowering the wire alone adds that
+    port once, as the kernel's own program did, and comes back as the same kernel."""
+    from emmy.compiler.context import Context
+    from emmy.compiler.ir.loop import LoopOp
+    from emmy.compiler.ir.stmt import Body, Write
+    from tests.compiler.ir.test_carried_state import _batched_graph, _graph
+
+    ctx = Context.from_target((12, 0))
+    [tile] = _relowered((_graph() if program == "root" else _batched_graph()).to_wire(), ctx)
+    assert tile.carries
+    wire = kernel_wire(tile)
+    [node] = (node for node in Graph.from_wire(wire).nodes.values() if isinstance(node.op, LoopOp))
+    assert [tensor.name for tensor in node.outputs] == [write.output for write in Body(node.op.body).iter_of_type(Write)]
+    [again] = _relowered(wire, ctx)
+    assert _identities(again) == _identities(tile)
+    assert _stamps(again) == _stamps(tile)
+    # A restamp finds the stored kernel again by the same buffers: the ones its body writes.
+    from emmy.compiler.pipeline.search.golden.restamp import lift_targets
+    from emmy.compiler.wire import wire_writes
+
+    program = _graph() if program == "root" else _batched_graph()
+    assert wire_writes(wire) in lift_targets(program, ctx)

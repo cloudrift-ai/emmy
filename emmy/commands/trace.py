@@ -97,33 +97,16 @@ def handle_trace(args):
             logger.error("--serving-twins is incompatible with %s", ", ".join(conflicts))
             sys.exit(2)
         from emmy.serving.release import load_serving_config  # noqa: PLC0415
-        from emmy.serving.twins import capture_twin_graphs  # noqa: PLC0415
+        from emmy.serving.twins import capture_serving_twins  # noqa: PLC0415
 
         try:
             serving = load_serving_config(args.serving_config)
         except (OSError, ValueError) as exc:
             logger.error("invalid serving config: %s", exc)
             sys.exit(2)
-        # The release audit's graph set (``emmy eval golden``): the symbolic programs plus the
-        # config's static widths — a golden traced from fewer graphs leaves the audit with gaps.
-        if serving.static_only:
-            graphs = capture_twin_graphs(
-                args.input,
-                decode_bucket=1,
-                prefill_bucket=0,
-                symbolic=False,
-                static_only=True,
-                expert_slices=serving.tensor_parallel_size,
-            )
-        else:
-            graphs = capture_twin_graphs(
-                args.input,
-                decode_bucket=0,
-                prefill_bucket=0,
-                extra_widths=serving.static_widths,
-                symbolic=True,
-                expert_slices=serving.tensor_parallel_size,
-            )
+        # The release audit's graph set (``emmy eval golden``) — a golden traced from fewer graphs leaves the
+        # audit with gaps.
+        graphs = capture_serving_twins(args.input, serving)
         source_name = args.input.rstrip("/").rsplit("/", 1)[-1].partition("@")[0]
         destination = args.output or f"{source_name}.serving-twins.golden.json"
         try:
@@ -134,16 +117,13 @@ def handle_trace(args):
         if args.model_provenance and args.model_provenance != serving.model_provenance:
             logger.error("--model-provenance must match the serving config (%s)", serving.model_provenance)
             sys.exit(2)
-        from emmy.serving.twins import twin_width  # noqa: PLC0415
+        from emmy.serving.twins import twin_realizations  # noqa: PLC0415
 
         result = write_trace_inventories(
             graphs,
             destination,
             model=serving.model_provenance,
-            realizations={
-                name: [row.to_golden() for row in serving.realizations_for(twin_width(name), expert=name.startswith("expert"))]
-                for name in graphs
-            },
+            realizations={name: [row.to_golden() for row in twin_realizations(serving, name)] for name in graphs},
         )
         logger.info(
             "Saved serving-twin golden file: %s (%d graph(s), %d distinct kernel(s))",
