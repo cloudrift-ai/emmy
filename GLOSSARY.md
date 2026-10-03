@@ -318,9 +318,9 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   knob rows, and to hold what `run --bench --record` / `--record-greedy` measured. Its measured rows are evidence
   when a command names the file with `--golden PATH`.
 - **Canonical golden file** — A reviewed per-GPU golden file. Model goldens live at
-  `recipes/<model>/golden/<gpu-slug>_<compute-cap>.json`; the maintained model-agnostic golden records live under
-  `emmy/compiler/pipeline/search/golden/records/`. Measured rows supply deploy evidence; a restamp can leave
-  unmeasured proposals awaiting a record run. The record writers refuse a canonical path, so a re-record works on
+  `recipes/<model>/golden/<gpu-slug>_<compute-cap>.json`; hardware goldens, including programs derived from models,
+  live under `emmy/compiler/pipeline/search/golden/records/`. Measured rows supply deploy evidence; a restamp can
+  leave unmeasured proposals awaiting a record run. The record writers refuse a canonical path, so a re-record works on
   a copy. An ordinary compile reads the files for its live card.
 - **Restamp** — The rewrite of a golden onto the fresh lowering of its own programs (`emmy golden restamp`): every
   kernel takes the identity, stamps and body a fresh lowering gives it, every decision is taken again on the fresh
@@ -338,7 +338,9 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
   their own (see *Routing table*).
 - **Routing table** — The tune database table that links a parent kernel and one decision taken on it to the kernels
   the decision minted, one row per piece. It says which pieces a route leads to, and the decision's price on a card
-  is the sum of the pieces' fastest measurements there — every piece measured, or the decision is unpriced.
+  is the sum of the pieces' fastest measurements there — every piece measured, or the decision is unpriced. Where a
+  golden took a decision — the card, the regime and the sizes — is the `taken` table beside it, written on import and
+  read by the placement dataset.
 - **Strict evidence** — A compile mode (`--strict-evidence`, `EMMY_STRICT_EVIDENCE`) in which a fork no measured row
   decides is an error naming the kernel, instead of a prediction the prior makes.
 - **Dataset DB** — A database with the tuning database's tables in a file of its own — the file

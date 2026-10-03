@@ -18,7 +18,7 @@ from .format import GoldenFile
 
 logger = logging.getLogger("emmy.compiler.pipeline")
 
-#: The maintained golden records, one file per card: model-agnostic rows the offline prior trains on, the tests
+#: The maintained hardware goldens, one file per exact card: rows the offline prior trains on, the tests
 #: check, and a compile on that card picks from. They ship inside this package.
 _RECORDS_DIR = Path(__file__).parent / "records"
 _RECIPE_GOLDEN_DIR = "golden"
@@ -41,7 +41,7 @@ def is_repository_golden_path(path: str | Path) -> bool:
 
 @contextmanager
 def repository_golden_paths():
-    """Yield model-agnostic hardware goldens plus recipe-local model goldens."""
+    """Yield hardware goldens plus recipe-local model goldens."""
     with default_recipe_root() as recipe_root:
         paths = list(_RECORDS_DIR.glob("*.json"))
         if recipe_root is not None:
