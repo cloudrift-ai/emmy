@@ -120,7 +120,7 @@ removed the cicc unroll blowup it rested on. The cold/warm gap also puts kernel 
 suite's wall time, so it is not the dominant cost either. Keeping `-O1` here buys ~12% cold; dropping it would leave
 one compile regime everywhere in the repo.
 
-The default suite holds every repository golden — the model-agnostic hardware goldens and each recipe's model golden —
+The default suite holds every repository golden — the hardware goldens and each recipe's model golden —
 to the fresh lowering of its own traced programs: a restamp (`emmy golden restamp`) must change nothing, one test node
 per traced program so the work scatters over the xdist workers and a failure names the kernels, decisions and rows the
 compiler now disagrees with. Lowering is GPU-free, so a stale golden is detectable on any machine. There is no list of
@@ -210,10 +210,9 @@ measurement freeze directory under `emmy/compiler/pipeline/search/freezes/`, tra
 at the moment, or a tune DB joins the goldens the same way), and the dataset `emmy db export` writes from it (a
 `manifest.json` beside one matrix file per pool, which `emmy fit` and `emmy eval prior` read; the readers never open
 the DB) — and nothing has a default, so a refit never touches the tune DB. The examples keep both under `_data/`,
-which git ignores. `emmy fit DATASET WEIGHTS` rewrites the checked-in weights of the dataset's space. Re-export and
-refit after a featurizer version bump (a stale dataset or artifact is refused at load) and whenever a repository
-golden changes: the reproduction gate (README, "Fit the priors") holds the shipped priors to every repository golden,
-the set `emmy db import --repository` collects.
+which git ignores. `emmy fit DATASET WEIGHTS` rewrites the checked-in weights of the dataset's space. Nightly refresh
+owns routine prior refits, including after repository goldens change. Unless explicitly requested, do not refit or
+commit weights as part of PR finalization. A stale dataset or artifact is refused after a featurizer version bump.
 
 Quick test models / scripts (for local iteration):
 
@@ -357,11 +356,8 @@ Then update the documentation:
 
 Then run the gates, in this order, after every edit above is in:
 
-22. **Refit the priors if a repository golden changed**: a row added, re-recorded, restamped or dropped in a
-    hardware golden or a recipe's means both priors are refit on the repository goldens (README, "Fit the priors")
-    and the weights committed with it — the reproduction gate in `make test` holds the shipped priors to those
-    goldens at one tolerance, one node per slice of a golden's pools and space, and a node it leaves red is named
-    in the PR body.
+22. **Leave prior refits to nightly refresh.** Golden changes do not require a refit or a weights commit in the PR.
+    If the reproduction gate fails, name the failing nodes in the PR body; do not refit just to make them pass.
 23. **Run the full suite**: `make test` — fix any failures. If a realization case comes back stale, `make
     test-corpus-regen` applies the fix; if a repository golden stops being the fresh lowering, `emmy golden restamp`
     applies that one (the `refresh-golden` skill). If golden rows go red, name the change that did it in the PR body —

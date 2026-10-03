@@ -93,6 +93,9 @@ kernel stays ONE kernel — `030_cut` offers it no cut and no split — because 
 to completion before the next kernel's first, so pieces could not interleave step by step. The register schedule
 can realize that same ordered axis inside a CTA when every state read stays within its warp's rows. Its schedule
 choice goes through the same lazy fork adapter; the ordinary Fold tree and precision gates remain shared.
+Kernel lowering also offers shared storage when the complete state belongs to one CTA per independent batch and
+fits the card's shared-memory limit. It keeps the scheduled reduction order and requested snapshots while moving the
+ordered axis into the CTA. Global storage remains an offered sibling.
 
 `020_twisted` first applies the general exp-family Fold rewrite described at the boundary below. The single `030_cut`
 pass runs to a fixpoint over two ordered domains. It first offers the maximal fused tree beside every semantically

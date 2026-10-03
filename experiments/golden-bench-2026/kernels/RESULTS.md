@@ -1,5 +1,239 @@
 # Golden-bench kernel corpus
 
+H100 evidence is consolidated in `results_h100x1.tar.gz`, rooted at `2026-10-02_23-00-41/`. Within that root, each
+original bundle has a directory named after its former archive without `.tar.gz`. `ARCHIVE_INDEX.json` records
+those directories and the original archive hashes. H100 member paths below are relative to each bundle directory.
+Previously replaced recipe snapshots remain in Git history.
+
+## H100 scheduling experiments: target gain, broader regression (2026-10-03)
+
+No compiler optimization from this four-hour continuation is retained. Moving independent row reductions after
+the value product is issued improves the target H100 layer by 0.33%, but an existing smaller attention case loses
+in all six balanced pairs, with a median slowdown of 1.84%. That repeatable cost outweighs the modest target gain.
+Larger chunks, cross-chunk pipelines, register-held queries and balanced reduction trees also fail to justify a
+change. The report and compressed evidence are the complete change: compiler, identities, schedules, goldens,
+priors, FP16 boundaries, disabled fast math and numerical tolerances remain unchanged.
+
+### Reordering independent row reductions
+
+The smallest candidate moves independent row reductions and the pivot update after the asynchronous value product
+is issued. The full wait remains before shared-slot release, the next accumulator rescale and final stores.
+It uses the existing WGMMA primitives and keeps the non-WGMMA order unchanged. The selected kernel retains 168
+registers, 80 KiB shared memory and 128 CTAs of 128 threads, with no spills or local memory.
+
+Six fixed balanced pairs use Qwen3-0.6B revision `c1899de289a04d12100db370d81485cdf75e47ca`, layer zero, sequence
+length 512, FP16, O3 and fast math disabled. Every process gets a fresh tune database and dump, ten warmups and
+100 iterations. All twelve processes finish successfully and pass the unchanged scaled comparison against eager.
+Each also measures `torch.compile`.
+
+| Pair | Order | Baseline, µs | Candidate, µs | Reduction |
+| --- | --- | ---: | ---: | ---: |
+| 1 | Baseline then candidate | 82.45415 | 81.88307 | 0.6926% |
+| 2 | Candidate then baseline | 82.57477 | 82.62154 | −0.0566% |
+| 3 | Baseline then candidate | 82.18585 | 82.15384 | 0.0389% |
+| 4 | Candidate then baseline | 82.77170 | 82.27939 | 0.5948% |
+| 5 | Baseline then candidate | 82.90708 | 82.62892 | 0.3355% |
+| 6 | Candidate then baseline | 82.81354 | 82.54277 | 0.3270% |
+
+Five pairs win. The median paired reduction is 0.3312%; the geometric mean reduction is 0.3224%. Attention's
+arithmetic mean falls from 12.57127 to 12.12623 µs, or 3.54%. This is a small whole-layer effect on one shape and
+card. The source and all launch metadata are identical within each arm; across arms, only attention's CUDA body
+changes. The ten unrelated complete CUDA objects stay identical.
+
+SASS inspection shows that ptxas already overlaps some independent reductions in the baseline. Both versions put
+their final matrix instruction adjacent to the wait, so this result does not establish newly enabled overlap or
+identify one instruction as its cause. The measured benefit is from the complete instruction-order change.
+Eight CPU ordering and causal-bound checks pass. Four GPU cases pass three seeds each at 0.001 absolute and
+relative tolerances, covering one- and two-stage asynchronous copies, TMA and an active causal bound. Five fresh
+database replays of the stored complete program pass against eager at those same tolerances. Every replay reports
+maximum absolute error 0.001953125, mean absolute error 8.138e-08 and the same eleven selected sources. Absolute and
+relative tolerances apply together; this is not a zero-error result.
+
+The final separate actual-model comparison passes the scaled check and reproduces all eleven complete CUDA objects
+from the paired candidate. It measures 81.964 µs for Emmy, 79.738 µs for `torch.compile` and 198.792 µs for eager.
+Those single-process values are not the paired speedup claim, and Emmy still trails the compiled reference here.
+These target-shape results warranted checking another existing attention shape before retaining the change.
+
+The noncausal head-width-64 corpus case, shape `(1, 4, 256, 64)`, regresses in an initial screen and in every
+subsequent pair. The six-pair campaign fixes its existing pinned schedule and alternates execution order. All
+twelve processes finish successfully and pass eager comparison at 0.001 absolute and relative tolerances, with
+maximum absolute error 0.000244140625. Each arm reproduces its complete CUDA object in every process.
+
+| Pair | Order | Baseline, µs | Candidate, µs | Slowdown |
+| --- | --- | ---: | ---: | ---: |
+| 1 | Baseline then candidate | 6.00939 | 6.10436 | 1.5804% |
+| 2 | Candidate then baseline | 6.01351 | 6.14434 | 2.1757% |
+| 3 | Baseline then candidate | 6.01384 | 6.03956 | 0.4276% |
+| 4 | Candidate then baseline | 5.93217 | 6.10945 | 2.9885% |
+| 5 | Baseline then candidate | 6.04015 | 6.08316 | 0.7121% |
+| 6 | Candidate then baseline | 5.97935 | 6.10545 | 2.1089% |
+
+The median paired slowdown is 1.8447%; the geometric mean slowdown is 1.6617%. Both versions use sixteen CTAs of
+128 threads, 128 registers, 32 KiB dynamic plus 1 KiB static shared memory, and no local memory or stack. Their
+1,416 SASS instructions have identical opcode counts. Those controls rule out a resource-count explanation but
+do not identify the cause. An unmeasured greedy selection has a different schedule and is excluded from this
+comparison. A separate noncausal head-width-128 case, shape `(1, 8, 512, 128)`, improves from 11.040 to 10.662 µs;
+that is one screen, not a paired result.
+
+The global reorder and its tests are therefore removed. No existing schedule decision expresses this scalar
+ordering independently. A shape heuristic or a new scheduling knob is not justified by the small target benefit.
+
+Matched Nsight Compute captures select the first exact attention launch in each immutable compiler arm. Both
+finish successfully with kernel replay, cache flushing, no profiler clock adjustment and four metric passes.
+They use the same 128-CTA grid, 128 threads per CTA and 168 registers. These cold selected-launch diagnostics do
+not measure warm whole-layer latency.
+
+| NVIDIA metric | Baseline | Row reorder |
+| --- | ---: | ---: |
+| Tensor warp instructions | 49,152 | 49,152 |
+| Load/store warp instructions | 149,504 | 149,504 |
+| Total warp instructions | 3,870,720 | 3,871,232 |
+| Active warps / scheduler active cycle | 1.000 | 1.000 |
+| Eligible warps / scheduler active cycle | 0.3294 | 0.3405 |
+| Wait stalls | 22.228% | 21.560% |
+| Barrier stalls | 11.735% | 12.008% |
+| Long-scoreboard stalls | 14.502% | 15.580% |
+| Cold diagnostic duration, µs | 15.104 | 14.720 |
+
+The instruction mix and slightly higher issue eligibility are consistent with a modest scheduling change. Stalls
+do not improve uniformly: both barrier and long-scoreboard shares rise. The capture does not isolate a single
+cause for the unprofiled gain. Counter access requires the existing passwordless profiler privilege; no driver
+permission or clock configuration changes are made.
+
+### Larger reduction chunks
+
+A prototype extends the existing atom-major shared layout to two complete K atoms. It reuses the same fill and
+descriptor maps for raw projections, computed inputs, transposed weights and transposed attention values.
+Twelve H100 numerical controls pass. All eleven accepted k4 CUDA objects remain unchanged, and the maintained
+H100 golden remains current. The added capability does not produce a qualifying schedule and is excluded.
+
+| Candidate | Baseline, µs | Candidate, µs | Comparison |
+| --- | ---: | ---: | --- |
+| Q projection, k8 | 82.420 | 84.042 | Separate actual-model screens |
+| Gate/up, k8 | 20.815 | 23.961 | Exact-production closed kernel |
+| Attention, k8 / output N128 | 12.280 | 12.516 | Exact-production closed kernel |
+| Attention, k8 / output N64 | 12.335 | 14.386 | Exact-production closed kernel |
+
+Q's own model child increases from 6.537 to 6.739 µs. Its closed reproduction differs from production, so those
+closed timings are excluded. Gate/up and the first attention model attempts time out without JSON results;
+their supported closed comparisons supply the isolated findings instead. Every closed candidate passes strict
+same-input comparison against the exact accepted Emmy source. This supplements the independent numerical controls;
+it does not create a whole-layer result for those candidates.
+
+Gate/up increases from 168 to 196 registers without local memory. Attention N128 reaches 255 registers and eight
+local bytes, versus the baseline's 168 registers and no local memory. Reducing its output width to N64 removes
+the local bytes but still uses 255 registers and loses substantially. The N64 grid also doubles to 256 CTAs and
+activates the existing causal bound. Compared with accepted attention, duplicated score work rises 25%, value
+product work falls 37.5%, and total tensor arithmetic falls 6.25%. It is not an equal-work comparison.
+
+The weighted row-statistic controls pass. The first weightless controls expose an independent tracing bug: a
+dropped None weight leaves epsilon in the weight position. The same approximately 1e-6 scaling reproduces under
+the old k4 lowering against both original eager Torch and the unchanged NumPy oracle. No tracer change or
+tolerance relaxation is included in this optimization work.
+
+### Overlapping attention work
+
+The first cross-chunk prototype passes numerical checks only after ptxas serializes its asynchronous matrix
+products. Both accumulator-read and injected-wait warnings are retained. Moving the partial wait to the loop
+bottom removes one warning but still inserts a full wait before the back edge. Explicit operand fences do not
+remove that drain. These builds do not demonstrate overlap.
+
+A rotated loop follows the ordering used by
+[FlashAttention-3](https://github.com/Dao-AILab/flash-attention/blob/main/hopper/mainloop_fwd_sm90_tma_gmma_ws.hpp): prepare the first probability fragment in a
+prologue; issue the next score and previous value product; wait for the score; perform independent scalar work;
+then finish the value product before reusing its operands and shared slot. All asynchronous products finish
+inside their iteration. This extends the existing shared loop scheduler rather than adding an attention emitter.
+
+Seven numerical cases pass three seeds each at unchanged 0.001 absolute and relative tolerances. They cover one,
+two and three chunks, two- and three-stage asynchronous copies, TMA and active causal bounds. A small control's
+SASS contains 98 scalar instructions between the partial and full waits, with no writes to pending operands and
+no injected-wait warnings. Exponentials remain after the full wait. An additional completed-value fence does not
+move them. The production kernel keeps 168 registers and no local memory, matching baseline.
+
+| Rotated schedule | Baseline isolated, µs | Candidate, µs | Shared memory |
+| --- | ---: | ---: | ---: |
+| Two-stage asynchronous copy | 12.309 | 13.699 | 80 KiB |
+| Three-stage asynchronous copy | 12.171 | 12.469 | 112 KiB |
+
+Neither setting qualifies. Three stages recover much of the loss, consistent with more time to prefetch the next
+tile, but the timings do not prove that cause. The attempted three-stage TMA spelling is refused before candidate
+execution and supplies no timing. A later tail-fill control guards only unused transactions, retaining every
+asynchronous-copy commit and every needed TMA phase. Its assembly bypasses sixteen payload-copy instructions
+while retaining the commit. Seven GPU cases pass three seeds each at the same tolerances. The exact-production
+closed kernel costs 12.571 µs versus a 12.176 µs baseline isolated measurement. It is also rejected. A final
+four-stage TMA attempt emits the unchanged baseline in both actual-root and closed compilations. The matching
+three-stage asynchronous-copy control does change the selected source. Cut pieces may drop an unsupported
+published schedule restriction and retain their accepted selection; successful compilation alone does not prove
+that the requested stage was realized. The exact TMA refusal on this root remains unresolved. The synthetic
+four-stage TMA case is legal, but that does not establish production reachability. No GPU candidate timing is
+assigned to this unselected attempt.
+
+### Other instruction and data movement changes
+
+Hoisting invariant query descriptors produces byte-identical addressed SASS across all 2,264 instructions, so
+that change is rejected. A separate prototype keeps invariant query fragments in registers through the existing
+register-A WGMMA path. Nine GPU cases pass three seeds each at unchanged 0.001 tolerances. These cover both ordinary
+and production head layouts, including eight warps. All ten unrelated complete CUDA objects remain unchanged.
+
+The production four-warp variant uses 225 registers instead of 168 and 64 instead of 80 KiB shared memory, without
+spills. Its strict closed timing is essentially tied: 12.421 versus 12.440 µs. The eight-warp variant costs
+21.219 µs and uses 179 registers. The query loads overlap the initial key/value copies in assembly, but that
+does not establish a useful latency gain. Both variants and their added tests are excluded. A BF16 source control
+checks packed operand mapping only; it is not a BF16 GPU correctness result.
+
+A balanced local reduction tree shortens the actual addition and maximum dependency chains from fifteen to four
+before the first shuffle, with the same 168 registers and no spills. Nine independent GPU cases pass three seeds
+each at 0.001 tolerances. Its standalone strict screen improves from 12.307 to 12.160 µs, a modest signal.
+Combining it with the row reorder loses: 12.132 versus 11.863 µs in the contemporaneous pinned comparison,
+or 2.26% slower. The isolated comparison also loses, 12.017 versus 11.863 µs. Neither the tree nor the combination
+is retained, and neither receives additional whole-layer pairs.
+
+This reassociation preserves leaves and FP32 arithmetic but does not promise bitwise rounding. A prepared renderer
+test for ordinary and Volta fragment layouts was not run on a GPU after the combination lost. The old single-V100
+connection timed out, CloudRift listed no rentals, and the existing Google Cloud inventory had no running non-Hopper
+GPU. These are availability findings, not numerical or performance results on another card.
+
+### Remaining work
+
+Projection normalization and RoPE fusion reaches a broader lowering gap. The projection and head statistic own
+different output sweeps, and the statistic recomputes the projection instead of reading its rounded fragment.
+The focused reproducer emits two scalar contraction nests. Generic fragment reuse, producer grid ownership and
+statistic stores must be addressed before this becomes a useful schedule experiment. No fusion restriction is
+introduced.
+
+Production TMA coverage is still worth resolving before a larger producer/consumer warp-specialized schedule is
+implemented. Its synthetic numerical coverage does not answer the actual-root refusal. A later candidate needs
+exact production source verification, balanced whole-layer measurements and the same precision controls. The
+failed pipeline and register-query probes here do not establish that warp specialization is the only useful path.
+
+### Controls and retained evidence
+
+The accepted V100 result below landed in #1031 while these experiments were running. This continuation stays on
+the same branch in #1034 and does not change that claim. The immutable baseline compiler is
+`dcb0807e0c2ab6850a5793d3a28593dc5028b403`, with the same compiler as main after #1019. Rebased main at
+`0ab9c3e13296d8bb45d5036ee080c32c2057ed43` emits the same eleven complete baseline CUDA objects. Temporary
+integration of the row reorder reproduces the measured attention source, changes no field of the ten unrelated
+H100 CUDA objects and leaves all fourteen V100 decode CUDA objects unchanged. That integration is subsequently
+reverted because of the smaller H100 regression. The maintained H100 golden remains current; no golden is recorded.
+
+All GPU experiments in this continuation use the existing H100 80 GB HBM3 card with 132 SMs. The environment is
+Python 3.12.3, Torch 2.14.0+cu130, Transformers 5.14.1, Triton 3.8.0, NVCC 12.9.41 and driver 580.178.04. Matched
+NVIDIA captures use Nsight Compute 2025.2. No new VM is created. A100 stays stopped, and the 4×V100 VM remains unused.
+
+This round's evidence is in four directories inside the single H100 results archive:
+`tuning_h100x1_round4_wider_k_2026-10-03`, `tuning_h100x1_round4_register_query_2026-10-03`,
+`tuning_h100x1_round4_attention_overlap_2026-10-03` and `tuning_h100x1_round4_balanced_fragment_2026-10-03`.
+Their original manifests verify 6,664, 1,873, 15,067 and 1,947 payloads respectively. The consolidated archive
+preserves all 34,234 original files from thirteen H100 bundles, including the current recipe records and earlier
+diagnostics. Its manifest verifies those files plus the archive index. Every file is byte-identical to its source;
+paths are safe and relative, with no symlinks or AppleDouble files. Sources, experimental patches, numerical checks,
+commands, software versions, timeouts and failed attempts remain intact. Unrun controls are explicitly marked.
+
+The final local suite passes: 5,788 tests passed and 1,307 skipped in 397.39 seconds. Lint and Git LFS object checks
+pass. Both Make targets use the existing environment, with setup skipped and a Transformers 5.14.1 overlay; the
+local suite does not rerun the GPU experiments above. The complete diff changes no compiler or test code, so no
+corpus regeneration, golden recording, prior refit or new duration entries are required.
+
 ## One-warp V100 decode and rejected H100 alternatives (2026-10-02)
 
 An existing one-warp schedule reduces V100 decode latency by 0.62% across six balanced whole-layer pairs. It changes
@@ -105,9 +339,8 @@ setup timeouts, refused pins, unsupported intermediate-IR attempts and malformed
 with their terminal statuses. A100 is stopped with its persistent disk retained. The 4×V100 VM is unused.
 
 V100 qualification and rejected probes are retained in `tuning_v100x1_round3_2026-10-02.tar.gz`. H100 evidence is in
-`tuning_h100x1_round3_diagnostics_2026-10-02.tar.gz`,
-`tuning_h100x1_round3_m32_priceprobe_2026-10-02.tar.gz` and
-`tuning_h100x1_round3_pvn64_priceprobe_2026-10-02.tar.gz`. The corrected source audit is in
+the `tuning_h100x1_round3_diagnostics_2026-10-02`, `tuning_h100x1_round3_m32_priceprobe_2026-10-02` and
+`tuning_h100x1_round3_pvn64_priceprobe_2026-10-02` directories of the consolidated H100 archive. The source audit is in
 `tuning_round3_source_audit_2026-10-02.tar.gz`. Each archive includes a verified checksum manifest. The edited
 experiment golden passes fresh lowering. Final local CPU validation passes: 5,776 tests passed and 1,305 skipped
 in 412.19 seconds. Lint passes. GPU correctness is established by the separate V100 and H100 checks above.
@@ -178,7 +411,8 @@ The next work is bulk TMA staging and producer/consumer warp specialization thro
 mechanisms, followed by a measured causal-work alternative. Each needs balanced unprofiled whole-layer pairs and
 unchanged numerical checks. A blanket increase in CTA count or removal of barriers is not supported by these data.
 Raw reports, disassembly, generated sources, commands, software versions, both failed traces and a checksum manifest
-are retained in `tuning_h100x1_round2_matched_profiles_2026-10-02.tar.gz`, rooted at `matched-profile/`.
+are retained under `matched-profile/` in the H100 archive's `tuning_h100x1_round2_matched_profiles_2026-10-02`
+directory.
 
 ### V100: split projection finalizers
 
@@ -343,10 +577,10 @@ weight tile across more rows, but its bounded attempt returned no measurement. R
 `ERR_NVGPUCTRPERM`; no counters were obtained and host permissions were left unchanged. Profiled durations are
 diagnostics only, never the unprofiled latency claim.
 
-The qualification archives retain all paired records, strict repeats, commands, source comparisons and rejected
-trials: `tuning_h100x1_round2_2026-10-02.tar.gz`, `tuning_a100x1_round2_2026-10-02.tar.gz`,
-`tuning_rtx4090x1_round2_2026-10-02.tar.gz`, `tuning_rtx5090x1_round2_2026-10-02.tar.gz` and
-`results_v100x1_round2_diagnostics_2026-10-02.tar.gz`.
+The qualification evidence retains all paired records, strict repeats, commands, source comparisons and rejected
+trials. H100 uses the `tuning_h100x1_round2_2026-10-02` directory in its consolidated archive. The other archives are
+`tuning_a100x1_round2_2026-10-02.tar.gz`, `tuning_rtx4090x1_round2_2026-10-02.tar.gz`,
+`tuning_rtx5090x1_round2_2026-10-02.tar.gz` and `results_v100x1_round2_diagnostics_2026-10-02.tar.gz`.
 
 ## Final five-card recipe after the second round (2026-10-02)
 
@@ -387,7 +621,7 @@ remain in the separate archives below. All GPU VMs are retained. Only the single
 | Card | Canonical archive | Root member | Executed source |
 | --- | --- | --- | --- |
 | A100 | `results_a100x1.tar.gz` | `2026-10-02_09-21-02/` | `9c81582c4` |
-| H100 | `results_h100x1.tar.gz` | `2026-10-02_08-35-50/` | `8872d9346` |
+| H100 | `results_h100x1.tar.gz`, bundle `results_h100x1` | `2026-10-02_08-35-50/` | `8872d9346` |
 | V100 | `results_v100x1.tar.gz` | `2026-10-02_09-09-03/` | `9c81582c4` |
 | RTX 4090 | `results_rtx4090x1.tar.gz` | `2026-10-02_09-13-19/` | `eb33f345c` |
 | RTX 5090 | `results_rtx5090x1.tar.gz` | `2026-10-02_09-17-30/` | `9c81582c4` |
@@ -465,7 +699,7 @@ Only the single V100 SXM2 machine was used.
 | Card | Archive | Successful recipe root |
 | --- | --- | --- |
 | A100 | `tuning_a100x1_round2_baseline_2026-10-02.tar.gz` | `2026-10-02_06-51-38/` |
-| H100 | `tuning_h100x1_round2_baseline_2026-10-02.tar.gz` | `2026-10-02_06-30-53/` |
+| H100 | `results_h100x1.tar.gz`, bundle `tuning_h100x1_round2_baseline_2026-10-02` | `2026-10-02_06-30-53/` |
 | V100 | `results_v100x1_round2_baseline_2026-10-02.tar.gz` | `2026-10-02_06-31-09/` |
 | RTX 4090 | `tuning_rtx4090x1_round2_baseline_2026-10-02.tar.gz` | `2026-10-02_06-47-49/` |
 | RTX 5090 | `tuning_rtx5090x1_round2_baseline_2026-10-02.tar.gz` | `2026-10-02_06-39-47/` |
@@ -536,8 +770,8 @@ full-layer parent. Global pins that changed unrelated decisions were likewise re
 `tuning_rtx5090x1_2026-10-01.tar.gz` retain the paired JSON, logs, task databases, working goldens, source audits,
 failed probes and exact command protocols under `2026-10-01-a100/`, `2026-10-01-v100/`, `2026-10-01-rtx4090/` and
 `2026-10-01-rtx5090/`, respectively. The V100 work used the single SXM2 card throughout.
-H100's corresponding evidence is under `2026-10-01-h100/shared-kv/` in
-`tuning_h100x1_2026-10-01.tar.gz`, alongside the prefill profiling and rejected trials described below.
+H100's corresponding evidence is under `2026-10-01-h100/shared-kv/` in the consolidated archive's
+`tuning_h100x1_2026-10-01` directory, alongside the prefill profiling and rejected trials described below.
 
 ## Final five-card recipe after route selection (2026-10-01)
 
@@ -778,8 +1012,8 @@ and 124–127 W. Both experiment goldens remained fresh. This small, order-sensi
 the code change was reverted.
 
 The K trial used source `5694af721`; later trials used `2daed32f`, the H100 cherry-pick of the partial-pin repair.
-Every control reproduced the validated baseline kernels. `tuning_h100x1_2026-10-01.tar.gz`, rooted at
-`2026-10-01-h100/`, preserves the profiles, exact commands, source proofs, trial JSON/log/database files, failed
+Every control reproduced the validated baseline kernels. The H100 archive's `tuning_h100x1_2026-10-01` directory,
+under `2026-10-01-h100/`, preserves the profiles, exact commands, source proofs, trial JSON/log/database files, failed
 probes, copy-removal patch and system snapshots. A tile-only pin initially hit the partial-pin bug, another probe
 lacked nvcc on its SSH path, and a separate work/staging probe failed strict accuracy before timing. Those failed
 probes supply no performance result and do not change the headline tolerance.
@@ -904,8 +1138,8 @@ configurations; its best isolated result was 12.8 µs, close to the recorded row
 candidate is the TMA trial above and lost in the layer. The temporary `+p4` compiler offer was reverted after its
 loss. No compiler, route, or canonical golden change survived the pass.
 
-The raw JSON, logs, working golden, search DB snapshot, and fuller findings are in
-`tuning_h100x1_2026-09-30.tar.gz`. The #967 pass identified the projections and attention as contributors to its
+The raw JSON, logs, working golden, search DB snapshot, and fuller findings are in the H100 archive's
+`tuning_h100x1_2026-09-30` directory. The #967 pass identified the projections and attention as contributors to its
 larger gap. This pass did not localize the current 1.78 µs gap further. Hardware-counter profiling did not finish
 within the development time limit, so this pass makes no new counter claim.
 
