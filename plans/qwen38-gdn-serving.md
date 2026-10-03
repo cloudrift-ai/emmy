@@ -1,9 +1,10 @@
 # Serving the GDN layers of Qwen3.5 / Qwen3.8 through emmy
 
-Status: open, written 2026-10-02, last updated the same day on main `272b1094`. Branch `feat/serve-gdn-layers`.
-We finished stages 1 to 6 on tiny models: a tiny hybrid Qwen3.5 generates through vLLM what Hugging Face generates,
-and the GDN programs match the eager model in BF16. Stage 7, the real checkpoint, remains. Follow-ups that this goal
-does not need are in [`gdn-serving-followups.md`](gdn-serving-followups.md).
+Status: open, written 2026-10-02, last updated 2026-10-04 on main `abca1022`. Branch `feat/serve-gdn-layers`, PR #1023.
+All seven stages ran. On 2026-10-04 `Inferact/Qwen3.8-27B-NVFP4` booted on an RTX 5090 under `--strict-evidence` with
+the golden of #1027, in 9.5 minutes, and answered the fixed prompts of PR #993 coherently: about 0.13 s per decoded
+token and 4 to 6 s per 64-token prompt chunk. What remains is finalization of the PR. Follow-ups that this goal does
+not need are in [`gdn-serving-followups.md`](gdn-serving-followups.md).
 
 ## Goal
 
