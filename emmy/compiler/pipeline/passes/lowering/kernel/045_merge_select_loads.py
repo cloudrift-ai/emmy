@@ -1,4 +1,4 @@
-"""Compute matching coordinate-select branches once, at selected load indices.
+"""Compute a coordinate select's two branches once, at a selected load index.
 
 A concatenation along an axis lowers to a :class:`Select` whose branches read the same buffers at
 different offsets: RoPE's rotate-half is ``cat(-x[..., 64:], x[..., :64])``, so each cell computes
@@ -13,8 +13,9 @@ value and that unary op of it. The inner clamps fold against the condition, so R
 becomes ``(i < 64) ? i + 64 : i - 64``: one load of the row and one of the weight per cell instead
 of two each.
 
-For more than two branches, every private chain must match exactly. Nested index selects retain
-the branches' priority and use the last branch as the fallback, regardless of its predicate.
+The merged loads stay where branch A's were, so the rewrite is refused when an effect sits between the
+two chains, when the predicate or a merged index names something defined after the chain starts, or
+when a chain reads carried state.
 
 Structural and idempotent: once merged, the select's branches share their chain and no longer match.
 """
@@ -83,7 +84,7 @@ def _cone(defs: dict[str, int], stmts: list, name: str, uses: Counter, cone: set
 def _merge(stmts: list, position: int, uses: Counter) -> list | None:
     select: Select = stmts[position]
     if len(select.branches) != 2:
-        return _merge_many(stmts, position, uses)
+        return None
     first, other = select.branches
     cond = first.select
     defs = {name: i for i, stmt in enumerate(stmts[:position]) for name in stmt.defines()}
@@ -97,7 +98,7 @@ def _merge(stmts: list, position: int, uses: Counter) -> list | None:
         return None
     if not cone_a or cone_a & cone_b:
         return None
-    if not _safe(stmts, defs, cone_a | cone_b, (cond,)):
+    if not _safe(stmts, defs, cone_a | cone_b, cond):
         return None
     pairs: dict[str, str] = {}
     if not _match(stmts, defs, a_name, b_name, cone_a, cone_b, pairs):
@@ -138,53 +139,11 @@ def _merge(stmts: list, position: int, uses: Counter) -> list | None:
     return out
 
 
-def _safe(stmts, defs, cone, predicates):
-    first, last = min(cone), max(cone)
-    return not any(not isinstance(s, (Assign, Let, Load, Select)) for s in stmts[first : last + 1]) and not any(
-        defs.get(name, -1) >= first for predicate in predicates for name in predicate.free_vars()
-    )
-
-
-def _merge_many(stmts, position, uses):
-    """Merge any number of private, isomorphic branches with the select's original priority."""
-    select = stmts[position]
-    if len(select.branches) < 3:
-        return None
-    defs = {name: i for i, stmt in enumerate(stmts[:position]) for name in stmt.defines()}
-    cones = []
-    pairs = []
-    first = select.branches[0].value
-    for branch in select.branches:
-        cone = set()
-        if not _cone(defs, stmts, branch.value, uses, cone) or not cone or any(cone & old for old in cones):
-            return None
-        mapping = {}
-        if cones and not _match(stmts, defs, first, branch.value, cones[0], cone, mapping):
-            return None
-        cones.append(cone)
-        pairs.append(mapping)
-    combined = set.union(*cones)
-    if not _safe(stmts, defs, combined, tuple(b.select for b in select.branches[:-1])):
-        return None
-    merged = {}
-    for i in sorted(cones[0]):
-        stmt = stmts[i]
-        if not isinstance(stmt, Load):
-            continue
-        twins = [stmt, *(stmts[defs[mapping[stmt.name]]] for mapping in pairs[1:])]
-        index = []
-        for coordinates in zip(*(s.index for s in twins), strict=True):
-            chosen = coordinates[-1]
-            for branch, coordinate in reversed(tuple(zip(select.branches[:-1], coordinates[:-1], strict=True))):
-                chosen = _select_index(branch.select, coordinate, chosen)
-            if any(defs.get(name, -1) >= i for name in chosen.free_vars()):
-                return None
-            index.append(chosen)
-        merged[i] = replace(stmt, index=tuple(index))
-    dropped = combined - cones[0]
-    return [
-        Assign(select.name, "copy", (first,)) if i == position else merged.get(i, stmt) for i, stmt in enumerate(stmts) if i not in dropped
-    ]
+def _safe(stmts: list, defs: dict, cone: set[int], cond: Expr) -> bool:
+    """No effect between the two chains, and the predicate defined before them."""
+    first = min(cone)
+    pure = all(isinstance(s, (Assign, Let, Load, Select)) for s in stmts[first : max(cone) + 1])
+    return pure and all(defs.get(name, -1) < first for name in cond.free_vars())
 
 
 def _peel(stmts: list, defs: dict, a: str, b: str) -> tuple[str | None, tuple[str, str] | None]:

@@ -14,8 +14,10 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.cuda import CudaOp
 from emmy.compiler.ir.expr import BinaryExpr, Literal, TernaryExpr, Var
+from emmy.compiler.ir.kernel import KernelOp, Sync
 from emmy.compiler.ir.loop import LoopOp
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Loop, Pre, Select, SelectBranch, Write
+from emmy.compiler.ir.loop.runner import execute_loop_op_cpp
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Cond, Load, Loop, Pre, Select, SelectBranch, Write
 from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
 from emmy.compiler.pipeline.search.pins import pinned_knobs
 from tests.compiler.helpers import requires_cuda
@@ -115,6 +117,51 @@ def test_recorded_shared_storage_is_picked_again_without_a_pin(tmp_path):
         replay = Pipeline.build(CUDA_PASSES).run(target.program({}), ctx=Context.from_target((7, 0), gpu_name=card), db=None)
     [op] = [n.op for n in replay.nodes.values() if isinstance(n.op, CudaOp)]
     assert op.knobs["SHARED_CARRY"] == 2 and not op.serial
+
+
+def _selected_stores() -> Body:
+    return Body(
+        (
+            Load(name="a", input="x", index=(Var("i"),), dtype=F32),
+            Assign(name="neg", op="negative", args=("a",), dtype=F32),
+            Load(name="b", input="fallback", index=(Var("i"),), dtype=F32),
+            Select("chosen", (SelectBranch("neg", Var("i").lt(3)), SelectBranch("b", Literal(True, "bool")))),
+            Write(output="out", index=(Var("i"),), value="chosen", value_dtype=F32),
+            Write(output="other", index=(Var("i"),), value="chosen", value_dtype=F32),
+        )
+    )
+
+
+def test_selected_stores_evaluate_only_the_chosen_private_cone():
+    body = _selected_stores()
+    changed = shared._guard_stores(body)
+    (branch,) = changed
+    assert isinstance(branch, Cond)
+    assert [s.input for s in branch.body if isinstance(s, Load)] == ["x"]
+    assert [s.input for s in branch.else_body if isinstance(s, Load)] == ["fallback"]
+    inputs = {"x": np.arange(6, dtype=np.float32), "fallback": np.arange(10, 16, dtype=np.float32)}
+    outputs = {"out": (6,), "other": (6,)}
+    for candidate in (body, changed):
+        op = KernelOp(body=Body((Loop(Axis("i", 6), candidate),)))
+        for result in execute_loop_op_cpp(op, inputs, outputs):
+            np.testing.assert_array_equal(result, np.array([0, -1, -2, 13, 14, 15], dtype=np.float32))
+
+
+@pytest.mark.parametrize("unsafe", ["reload", "sync", "atomic", "extra_reader", "index_reader"])
+def test_selected_stores_keep_memory_effects_and_other_readers(unsafe):
+    stmts = list(_selected_stores())
+    if unsafe == "reload":
+        stmts.insert(2, Write(output="x", index=(Var("i"),), value="replacement"))
+    elif unsafe == "sync":
+        stmts.insert(2, Sync())
+    elif unsafe == "atomic":
+        stmts[-1] = replace(stmts[-1], atomic=True)
+    elif unsafe == "extra_reader":
+        stmts.append(Assign("used", "abs", ("chosen",), dtype=F32))
+    else:
+        stmts[-1] = replace(stmts[-1], index=(Var("chosen"),))
+    body = Body(stmts)
+    assert shared._guard_stores(body) == body
 
 
 @requires_cuda

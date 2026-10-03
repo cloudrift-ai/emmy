@@ -8,20 +8,23 @@ from importlib import import_module
 from math import prod
 
 from emmy.compiler.backend.cuda.dtype import cuda_name
+from emmy.compiler.dtype import F32
 from emmy.compiler.dtype import get as dtype_get
 from emmy.compiler.graph import Node
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import BinaryExpr, Builtin, Literal, TernaryExpr, Var
+from emmy.compiler.ir.expr import BinaryExpr, Builtin, Literal, SimplifyCtx, TernaryExpr, Var
 from emmy.compiler.ir.kernel import KernelOp, Smem, Sync, Tile
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Carry, Cond, Let, Load, Loop, Pre, Select, StridedLoop, Write
 from emmy.compiler.ir.stmt.base import dtype_promote
+from emmy.compiler.ir.stmt.body import free_names
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.fork import DeferredFork
 from emmy.compiler.pipeline.passes.tile._fromloop import seed_index
 from emmy.compiler.pipeline.search.space import SHARED_CARRY
 
 PATTERN = [Pattern("root", KernelOp)]
-_guards = import_module("emmy.compiler.pipeline.passes.lowering.kernel.090_guard_reductions")
+_resolve = import_module("emmy.compiler.pipeline.passes.lowering.kernel.045_merge_select_loads")._resolve
+_stamp = import_module("emmy.compiler.pipeline.passes.lowering.kernel.030_stamp_types")
 _materialize = import_module("emmy.compiler.pipeline.passes.lowering.kernel.010_materialize")
 
 
@@ -210,6 +213,94 @@ def _resident(op, program, retained=frozenset(), padding=0):
     return replace(op, serial=(), body=Body((replace(tile, axes=(*tile.axes[: len(batch)], *tile.axes[split:]), body=Body(body)),)))
 
 
+def _guard_stores(body: Body, types=None) -> Body:
+    """Sink each coordinate select's private scalar cones and their stores into the branch that
+    consumes them, so a branch that only copies the cell can be dropped once the whole CTA copies it.
+
+    A select's dependent assignments and scalar stores must form one contiguous continuation.
+    Other readers, nested effects and intervening writes to a cone's input keep the stream unchanged.
+    """
+    if types is None:
+        ctx = _stamp._StampCtx({})
+        _stamp._seed_explicit_dtypes(body, ctx)
+        _stamp._stamp_body(body, ctx)
+        types = ctx.ssa_dtypes
+    stmts = [stmt.with_bodies(tuple(_guard_stores(b, types) for b in stmt.nested())) if stmt.nested() else stmt for stmt in body]
+    uses = Counter(name for stmt in Body(stmts).iter() for name in free_names(stmt))
+    position = 0
+    while position < len(stmts):
+        select = stmts[position]
+        if not isinstance(select, Select) or len(select.branches) != 2:
+            position += 1
+            continue
+        end = position + 1
+        names = {select.name}
+        continuation = []
+        while end < len(stmts) and isinstance(stmts[end], Assign) and names & set(stmts[end].deps()):
+            continuation.append(stmts[end])
+            names.add(stmts[end].name)
+            end += 1
+        start = end
+        while end < len(stmts) and isinstance(stmts[end], Write) and stmts[end].is_scalar and stmts[end].value in names:
+            end += 1
+        stores = stmts[start:end]
+        readers = Counter(name for stmt in (*continuation, *stores) for name in free_names(stmt))
+        if (
+            not stores
+            or any(uses[name] != readers[name] for name in names)
+            or any(s.atomic or any(names & e.free_vars() for e in s.index) for s in stores)
+        ):
+            position += 1
+            continue
+        defs = {name: i for i, stmt in enumerate(stmts[:position]) for name in stmt.defines()}
+
+        def cone(name, found, defs=defs, stmts=stmts):
+            i = defs.get(name)
+            if i is None or uses[name] != 1 or not isinstance(stmts[i], (Assign, Let, Load, Select)):
+                return
+            if isinstance(stmts[i], Load) and (not stmts[i].is_scalar or stmts[i].carried):
+                return
+            found.add(i)
+            for arg in free_names(stmts[i]):
+                cone(arg, found)
+
+        branches = []
+        for branch in select.branches:
+            found = set()
+            cone(branch.value, found)
+            branches.append(found)
+        moved = branches[0] | branches[1]
+        reads = {stmts[i].input for i in moved if isinstance(stmts[i], Load)}
+        if (
+            not moved
+            or branches[0] & branches[1]
+            or any(
+                not isinstance(stmt, (Assign, Let, Load, Select, Write)) or getattr(stmt, "output", None) in reads
+                for i, stmt in enumerate(stmts[:position])
+                if min(moved) <= i and i not in moved
+            )
+        ):
+            position += 1
+            continue
+        cond = select.branches[0].select.simplify(SimplifyCtx.empty())
+        guarded = []
+        for truth, (branch, found) in zip((True, False), zip(select.branches, branches, strict=True), strict=True):
+            chain = []
+            for i in sorted(found):
+                stmt = stmts[i]
+                if isinstance(stmt, Load):
+                    stmt = replace(stmt, index=tuple(_resolve(e.simplify(SimplifyCtx.empty()), cond, truth) for e in stmt.index))
+                chain.append(stmt)
+            chain.append(Assign(select.name, "copy", (branch.value,), dtype=types.get(select.name, F32)))
+            guarded.append(_guard_stores(Body((*chain, *continuation, *stores)), types))
+        replacement = Cond(cond, guarded[0], guarded[1])
+        stmts = [stmt for i, stmt in enumerate(stmts) if i not in moved and not position <= i < end]
+        position -= len(moved)
+        stmts.insert(position, replacement)
+        position += 1
+    return Body(stmts)
+
+
 def _parallel_copy(op, program, step, shared, parity, shape, batch, threads, dtype, outputs):
     """Copy unchanged cells with the whole CTA, then overwrite only the selected updates."""
     loop, carry, _ = program
@@ -272,7 +363,7 @@ def _parallel_copy(op, program, step, shared, parity, shape, batch, threads, dty
             out.append(stmt)
         return Body(out)
 
-    changed = omit(_guards._guard_stores(step))
+    changed = omit(_guard_stores(step))
     if not removed:
         return None
     cell = Var("_carry_copy")

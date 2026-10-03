@@ -17,9 +17,8 @@ scale constant, incorrect coordinate mapping, etc.
 
 Kernel storage tests compare dense and padded shared state against ordered global launches on identical inputs.
 They cover selected and full updates, low-precision snapshots, a wider seed, externally visible carry ports and
-shared-memory limits. A recorded storage choice must also replay through strict evidence without a pin. Projection
-and selected-load tests preserve branch priority, casts and memory effects; vectorization tests prove alignment and
-per-buffer store order across multiple outputs.
+shared-memory limits. A recorded storage choice must also replay through strict evidence without a pin. The
+selected-load merge is held to memory order, carried loads and late coordinates.
 
 ## File Layout
 

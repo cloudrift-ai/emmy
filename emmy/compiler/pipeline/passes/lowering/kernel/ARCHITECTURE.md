@@ -724,7 +724,8 @@ instead of rounding through shared storage early. Requested snapshots and extern
 outputs; only an unused private carry port is removed through the materializer's existing graph splice.
 
 When the next state selects between an update and the unchanged cell, the whole CTA copies the previous state and its
-snapshots before overwriting selected cells. Intermediate casts or different output dtypes retain the ordinary
+snapshots before overwriting selected cells: the pass sinks each cell's private cone and stores under the predicate
+that selects its update and drops the branch that would only copy the cell. Intermediate casts or different output dtypes retain the ordinary
 per-cell path. Both dense shared storage and a layout padded by one column per row are offered beside global storage.
 The resource check includes both state buffers and the reduction's existing shared scratch. Evidence picks the
 storage choice; ownership, supported geometry and the card's shared-memory limit decide only legality.
@@ -735,9 +736,6 @@ Vector loads and stores share one alignment proof over the complete flattened ad
 and the constant base must be divisible by the vector width, and subsequent elements must be consecutive. An aligned
 last coordinate alone is insufficient when an outer row has an odd stride. Unknown multidimensional layouts retain
 scalar operations; split coordinates may still vectorize when simplification reconstructs an aligned flat address.
-A common row coordinate need not be affine when its known stride is a multiple of the vector width; the remaining
-address must still prove alignment and consecutive cells. Store vectorization groups adjacent write-only sequences
-by output buffer, retaining each buffer's store order and never crossing a read, computation, barrier or atomic store.
 
 `030_stamp_types` resolves element dtypes, including the common branch type of a `Select` used by later statements.
 Integer algebra is always restamped from its typed operands, repairing a
@@ -763,9 +761,8 @@ prologue `Sync` is correctly retained; `with_bodies` preserves the cooperative t
 lowers to a coordinate `Select` whose branches read the same buffers at different offsets, each clamped in range; when
 the two branches' private chains are one computation up to their load indices (and at most one unary op on top of one
 branch — RoPE's rotate-half negation), `045` emits the chain once with each load at `cond ? index_a : index_b`, the
-branches' own clamps folded against `cond`. Selects with more branches require exactly matching private chains and
-retain branch priority plus the final fallback. Effects, carried loads and coordinates defined after the original
-loads prevent the rewrite. `047` then unrolls every lane-strided loop of at most eight trips (a
+branches' own clamps folded against `cond`. An effect between the two chains, a carried load, or a predicate or
+index defined after the chains start refuses the merge. `047` then unrolls every lane-strided loop of at most eight trips (a
 cooperative reduce's fold and its full-row projection: a 128-wide row at 32 lanes is four) and drops each load of a
 read-only buffer at an index an earlier load of the same body already read, compared after folding against the lane
 ranges. The projection reads the values the fold loaded, and a partner read resolves to another trip of the same lane.
@@ -777,10 +774,6 @@ read-only operands in registers across the kernel's stores and read them through
 reduction whose result is read only under an enclosing-coordinate predicate becomes a zero-trip loop elsewhere.
 Its identity seed stays outside the loop. Stores, synchronization, warp operations and predicates depending on values
 computed later cannot be guarded this way.
-
-A coordinate select's private scalar loads and assignments may also move into its branches together with a contiguous
-dependent assignment and store sequence. The branches retain the select's common dtype and every intermediate cast.
-Additional readers, atomics, barriers or an intervening write to an input keep the original stream unchanged.
 
 This pass also supplies the coordinate-demand transform for transposed cooperative reductions. They guard their
 collectives only with predicates independent of the swept output coordinate. Seeds, prologues and stores remain

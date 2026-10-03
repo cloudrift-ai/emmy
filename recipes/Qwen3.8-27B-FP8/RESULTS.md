@@ -333,34 +333,6 @@ deployable `-O3`. Fresh-DB strict-evidence replay selects the new layouts withou
 28 kernels, nine routing rows and 28 measured rows, with no proposals. Existing rows and kernel identities are
 unchanged. Internal targets still have no exact standalone Torch twin, so the table makes no `torch.compile` claim.
 
-A separate frontend triangular recurrence, using inputs scaled by 0.01 and returning both the stacked snapshots and
-their first-batch view, passed strict comparison against eager on all four seeds. Captured whole-program latency was
-2.096–2.102 ms for Emmy, 1.680–1.688 ms for `torch.compile`, and 3.324–3.357 ms for eager, with five warm-ups and
-30 iterations. Emmy's update takes 0.640–0.646 ms once its private carry output is removed. Its remaining copy takes
-1.457–1.464 ms: Emmy allocates both outputs, whereas Torch can return the second as a view. The frontend remains
-about 25% behind `torch.compile`. Unscaled random inputs are numerically unstable under differing reduction orders;
-this comparison does not qualify them.
-
-Reproduce the frontend comparison with the recipe golden in scope:
-
-```bash
-EMMY_GOLDEN_FILE=recipes/Qwen3.8-27B-FP8/golden/v100_sm70.json \
-EMMY_NVCC_FLAGS= EMMY_FAST_MATH=1 EMMY_KNOBS='SHARED_CARRY=2,TILE@node_stack=f4' \
-emmy run --bench --strict --warmup 5 --iters 30 --bench-backends eager,emmy,tcompile --code '
-class TriangularUpdate(torch.nn.Module):
-    def forward(self, state):
-        snapshots = []
-        for i in range(2, 63):
-            row = state[..., i, :i]
-            update = row + (row.unsqueeze(-1) * state[..., :i, :i]).sum(-2)
-            state = state.clone()
-            state[..., i, :i] = update
-            snapshots.append(state)
-        snapshots = torch.stack(snapshots)
-        return snapshots, snapshots[:, 0]
-TriangularUpdate()(torch.randn(1, 48, 8, 64, 64) * 0.01)'
-```
-
 ## Reproduce
 
 ```bash

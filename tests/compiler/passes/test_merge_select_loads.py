@@ -1,4 +1,4 @@
-"""Coordinate selects issue one private branch's loads without changing memory order."""
+"""A coordinate select's two private load chains merge into one without changing memory order."""
 
 from collections import Counter
 from dataclasses import replace
@@ -17,10 +17,10 @@ from emmy.compiler.ir.stmt import Body, Let, Load, Loop, Select, SelectBranch, W
 merge = import_module("emmy.compiler.pipeline.passes.lowering.kernel.045_merge_select_loads")
 
 
-def _body(branches=3):
+def _body():
     i = Var("i")
-    loads = tuple(Load(f"v{j}", "x", (Literal(j, "int"), i % Literal(4, "int")), dtype=F32) for j in range(branches))
-    select = Select("selected", tuple(SelectBranch(load.name, i.lt(4 * (j + 1))) for j, load in enumerate(loads)))
+    loads = tuple(Load(f"v{j}", "x", (Literal(j, "int"), i % Literal(4, "int")), dtype=F32) for j in range(2))
+    select = Select("selected", (SelectBranch("v0", i.lt(4)), SelectBranch("v1", Literal(True, "bool"))))
     return Body((*loads, select, Write("out", (i,), "selected", value_dtype=F32)))
 
 
@@ -28,23 +28,20 @@ def _rewrite(body):
     return merge._walk(body, Counter(name for s in body.iter() for name in merge._reads(s)))
 
 
-@pytest.mark.parametrize("branches", [2, 3, 5])
-def test_selected_loads_keep_branch_priority_and_the_final_fallback(branches):
-    original = _body(branches)
+def test_two_selected_loads_merge_into_one():
+    original = _body()
     changed = _rewrite(original)
     assert len([s for s in changed if isinstance(s, Load)]) == 1
-    # The final branch is the fallback even when its predicate is false.
-    x = np.arange(branches * 4, dtype=np.float32).reshape(branches, 4)
+    x = np.arange(8, dtype=np.float32).reshape(2, 4)
     for body in (original, changed):
-        op = KernelOp(body=Body((Loop(Axis("i", branches * 4 + 4), body),)))
-        actual = execute_loop_op_cpp(op, {"x": x}, {"out": (branches * 4 + 4,)})
+        op = KernelOp(body=Body((Loop(Axis("i", 12), body),)))
+        actual = execute_loop_op_cpp(op, {"x": x}, {"out": (12,)})
         np.testing.assert_array_equal(actual, np.concatenate((x.flatten(), x[-1])))
 
 
-@pytest.mark.parametrize("branches", [2, 3])
 @pytest.mark.parametrize("unsafe", ["write", "sync", "late_predicate", "late_index", "carried"])
-def test_selected_loads_keep_memory_effects_and_late_coordinates(branches, unsafe):
-    stmts = list(_body(branches))
+def test_selected_loads_keep_memory_effects_and_late_coordinates(unsafe):
+    stmts = list(_body())
     if unsafe == "write":
         stmts.insert(1, Write("x", (Literal(1, "int"), Literal(0, "int")), "v0"))
     elif unsafe == "sync":

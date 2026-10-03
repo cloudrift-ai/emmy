@@ -190,7 +190,7 @@ GUARD_REDUCTIONS = Knob(
     "GUARD_REDUCTIONS",
     KnobType.BOOL,
     hints=(True,),
-    help="Guard private scalar reductions, projection loads and stores by their consuming coordinate selects.",
+    help="Skip scalar reductions whose results are discarded by coordinate selects.",
     off=False,
 )
 

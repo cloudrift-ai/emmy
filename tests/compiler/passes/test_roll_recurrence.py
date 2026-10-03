@@ -238,8 +238,7 @@ def test_the_rolled_kernel_lowers_to_one_launch_per_step() -> None:
     ((axis, launches),) = step.serial
     assert launches == 3 and axis in step.runtime_args
     assert f"int {axis}" in step.kernel_source and f"for (int {axis}" not in step.kernel_source
-    previous = step.kernel_source.split(f"if ({axis} > 0) {{", 1)[1].split("} else {", 1)[0]
-    assert f"({axis} - 1)" in previous
+    assert f"({axis} > 0) ? ({axis} - 1) : (0)" in step.kernel_source
 
 
 @requires_cuda
