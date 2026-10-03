@@ -592,6 +592,20 @@ class CompiledProgram:
         caller's subsequent ``outputs()`` synchronizes."""
         self.executor.run_once()
 
+    def run_each(self, runs) -> None:
+        """Run the program once per ``(sym_values, lent, inputs, outputs)`` entry of ``runs``, in
+        order, on the current stream; the last three list ``(buffer, device address, bytes)``. A run
+        binds its symbolic values, points each lent buffer at that memory without waiting (the
+        caller keeps it alive and unwritten until the runs finish, as with ``alias_buffer(...,
+        wait=False)``; :meth:`buffer_view` keeps showing the buffer's earlier memory), copies its
+        inputs into their prefixes, launches every kernel and copies its outputs' prefixes out. One
+        runtime call for the whole batch: a routed MoE layer runs every hit expert this way instead
+        of a dozen Python calls per expert. Caller holds the GPU lock."""
+        try:
+            self.executor.run_each(runs)
+        finally:  # a refused entry leaves the runtime at the last width it bound
+            self.sym_values = self.executor.env()
+
     def capture_launch_graphs(self, batch_sizes: list[int]) -> None:
         """Capture each launch position's batch into one CUDA graph, so :meth:`iter_once` replays
         it with one call and the event window measures dense GPU work. Unchanged batch sizes are

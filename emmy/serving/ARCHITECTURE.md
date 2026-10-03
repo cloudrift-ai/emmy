@@ -297,16 +297,15 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   static M=1 (`moe.expert.one`), static M=decode-bucket (`moe.expert.bucket`, pad → run → slice), static M=256
   (`moe.expert.m256` — the prefill twin at the mean per-expert chunk width T·k/E, serving routed row sets in
   (bucket, 256]), and the symbolic fallback for anything wider — routed per HIT expert by its routed row count.
-  Per-launch framing, not weight bytes, was the measured decode wall (~0.23 ms/launch through the per-call symbolic
-  path), so `_moe_combine` hoists the GPU lock around the whole per-expert loop and
-  `_launch_expert` issues bare `upload_prefix_device` + `run_once` calls on torch's stream; the per-expert weight
-  views are minted once at `_ensure_device`. A tier whose schedule stages no operand through a TMA descriptor
-  (descriptors bake pointers at build) takes the weight slices by POINTER SWAP (`alias_buffer(..., wait=False)`) — no
+  Host framing, not weight bytes, paces this path: issued from Python, a dozen calls per expert (width, weight swaps,
+  input copy, launch, output view and copy) cost about three times an expert's GPU time on V100, so a routed prefill
+  layer left the GPU idle most of the time. `combine_routed_experts` therefore hands every hit expert to ONE
+  `run_experts(rows, counts)` call, and `_launch_experts` issues each tier's experts as one `run_each` — a runtime
+  call that, per expert, binds the width, lends the weight slices, copies the rows in, launches and copies the output
+  rows out. The per-expert weight addresses are read once per layer and program. A tier whose schedule stages no
+  operand through a TMA descriptor (descriptors bake pointers at build) takes the weight slices by POINTER SWAP — no
   D2D weight copy, and no stream drain per swap: the slices are resident, so launches already queued may keep reading
-  the previous expert's; descriptor-bearing tiers upload the slices normally. The M=256 twin instead replays its
-  captured whole-program graph per expert (`capture_program_graph` — one host call instead of per-kernel Python
-  framing; prefill FFN was launch-bound at ~3×), which bakes the twin's own buffer pointers — so its weights always
-  arrive by UPLOAD, never by pointer swap (a swap would freeze the first expert's slices into every later replay).
+  the previous expert's; descriptor-bearing tiers copy the slices in instead.
   **Fixed-slot decode tier (T=1, capture-legal):** k slot INSTANCES of the INDIRECT M=1 expert twin
   (`moe.expert.one.ind`) are built at boot — the same expert graph compiled with `w_gate_up`/`w_down` marked as
   **indirect operands** (`_compile_split(indirect_inputs=...)` → the `cuda.indirect_inputs` graph hint; the ABI
@@ -408,7 +407,7 @@ contract lives in [native/ARCHITECTURE.md](native/ARCHITECTURE.md); vLLM remains
   **Expert shape groups.** One expert program set per DISTINCT per-expert weight shape, not one per model.
   `shape_key` covers every per-expert tensor's shape, the codebook ids, the activation and the layout flags;
   `from_model` interns it into a group index, compiles that group's whole tier set on first sight
-  (`_build_expert_group`), and stamps the index on the layer's `moe` entry, which is what `_launch_expert` and
+  (`_build_expert_group`), and stamps the index on the layer's `moe` entry, which is what `_launch_experts` and
   `_moe_combine_slots` route through. Homogeneous MoEs (gpt-oss, OLMoE) have exactly one group and group 0 keeps
   the original pack names (`moe.expert.sym` …), so their packs and plans are unchanged; later groups take a `g<N>`
   infix. The live driver is EXL3's MIXED bit allocation: bits are spent by Hessian sensitivity, so K varies per

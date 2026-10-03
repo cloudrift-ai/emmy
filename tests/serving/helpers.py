@@ -27,6 +27,22 @@ from pathlib import Path
 GOLDEN = Path(__file__).parent / "goldens" / "serving.golden.json"
 
 
+def per_expert(run_expert):
+    """``combine_routed_experts``'s batch callback from a per-expert ``run_expert(e, rows)``: each hit
+    expert runs on its own block of rows, and the outputs come back concatenated in the same order."""
+    import torch
+
+    def run(rows, counts):
+        outputs, start = [], 0
+        for e, count in enumerate(counts):
+            if count:
+                outputs.append(run_expert(e, rows[start : start + count]))
+            start += count
+        return torch.cat(outputs)
+
+    return run
+
+
 def qwen3_config(layers: int):
     """The lane's dense model: a 1-head-group Qwen3 small enough to compile in seconds."""
     import transformers

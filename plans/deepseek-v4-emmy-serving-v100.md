@@ -169,6 +169,17 @@ checkpoint stays impractical here.
    - Prefill: 5.7 s per stage against 1.9. The symbolic expert program takes 2.7 s against the fork's 1.0 (its main
      kernel reaches ~0.1 TFLOP/s on large experts, not on tensor cores), and ranks holding whole experts finish
      unevenly, so the others wait ~1.3 s per stage in all-reduces the fork does not wait in.
+   - Prefill again, 2026-10-03, the release image at `3eb58b19f` on the 8-concurrent point (steps of 1,024, 3,056 and
+     4,112 tokens): GPU work per stage equals the fork's (5.55 s busy against 5.81; at 4,112 tokens the experts take
+     0.45 s against the fork's 1.15, the pre and post programs 0.52 s against 0.07 for the fork's stream mixing), but
+     the GPU idled about 1 s per step behind the Python loop over the hit experts: a dozen calls per expert, ~250 us
+     of host time against ~80 us of GPU work, ~215 experts a layer. One runtime call per tier (`run_each`) removes it.
+     On the second stage the three steps take 6.01 s against 8.58 (the fork 6.28), 0.52 s of it idle against 2.92
+     (0.53). Same commit, image and flags, with and without the change: one 2,048-token request reaches its first
+     token in 3.13 s against 4.18 (the fork 3.77) at 119 ms per token either way; 8 concurrent deliver 20.4 to 20.8
+     tokens/s against 17.8 to 18.9 (21.2) and wait 8.7 s for the first token against 11.1 (9.1); probes agree to the
+     last bit. Left at 8 concurrent: the decode step (191 ms between tokens against 175) and, on the GPU side of
+     prefill, the pre and post programs.
 
    #981 (fusion CSE) left every DeepSeek program refusing strict evidence at its cut fork, which neither the row
    decode nor the fresh-lowering check caught; #988 restored the pre and post routes and #995 re-measures the expert

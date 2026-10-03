@@ -11,6 +11,8 @@ Pure eager, CPU, fp32 — no compile.
 
 import pytest
 
+from tests.serving.helpers import per_expert
+
 
 def _tiny_config(transformers):
     return transformers.DeepseekV4Config(
@@ -97,7 +99,7 @@ def test_hyper_connection_split_matches_eager_layer(layer_idx):
         routed = combine_routed_experts(
             xn,
             gated,
-            lambda e, rows: expert(rows, experts.gate_up_proj[e], experts.down_proj[e]),
+            per_expert(lambda e, rows: expert(rows, experts.gate_up_proj[e], experts.down_proj[e])),
             num_experts=experts.gate_up_proj.shape[0],
         )
         got = place_routed_streams(mixed, routed, mix)
