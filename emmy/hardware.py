@@ -13,6 +13,7 @@ from emmy import gpu
 #   CloudRift: "{base}.{gpu_count}"       e.g. rtx49-10c-kn.4
 #   GCP:       "{base}-{gpu_count}g"      e.g. a3-highgpu-8g
 #   GCP g4:    "g4-standard-{gpu_count * 48}"  e.g. g4-standard-192
+#   GCP g2:    "g2-standard-{vcpus}" from G2_STANDARD_VCPUS  e.g. g2-standard-24 (2 x L4)
 GPU_INSTANCE_TYPES = {
     "NVIDIA GeForce RTX 4090": [
         ("cloudrift", "rtx49-10c-kn"),
@@ -40,6 +41,9 @@ GPU_INSTANCE_TYPES = {
     ],
     "NVIDIA L40S": [
         ("cloudrift", "l40s-24c-kn"),
+    ],
+    "NVIDIA L4": [
+        ("gcp", "g2-standard"),
     ],
     "NVIDIA H100 80GB": [
         ("gcp", "a3-highgpu"),
@@ -83,6 +87,22 @@ GPU_SHORT_NAMES = gpu.short_names()
 DEFAULT_GCP_ZONE = "us-central1-b"
 GPU_GCP_ZONES = {
     "NVIDIA RTX PRO 6000 Blackwell Server Edition": ["us-central1-b"],
+    # Every US zone that lists g2-standard-8 (gcloud compute machine-types list, 2026-10-03).
+    "NVIDIA L4": [
+        "us-west1-a",
+        "us-west1-b",
+        "us-west1-c",
+        "us-central1-a",
+        "us-central1-b",
+        "us-central1-c",
+        "us-east1-b",
+        "us-east1-c",
+        "us-east1-d",
+        "us-east4-a",
+        "us-east4-c",
+        "us-west4-a",
+        "us-west4-c",
+    ],
     # Every zone that lists a3-highgpu-1g (gcloud compute machine-types list, 2026-09-10), US first.
     "NVIDIA H100 80GB": [
         "us-central1-a",
@@ -146,6 +166,7 @@ GPU_GCP_ZONES = {
 DEFAULT_GCP_PROVISIONING_MODEL = "FLEX_START"
 GPU_GCP_PROVISIONING_MODEL = {
     "NVIDIA RTX PRO 6000 Blackwell Server Edition": "SPOT",
+    "NVIDIA L4": "SPOT",
 }
 
 
@@ -167,6 +188,9 @@ GCP_AVAILABLE_GPU_COUNTS = {
     "a4-highgpu": [8],
 }
 
+# g2-standard GPU count -> vCPUs of the smallest shape with at least 32 GB RAM per GPU.
+G2_STANDARD_VCPUS = {1: 8, 2: 24, 4: 48, 8: 96}
+
 
 def resolve_instance_type(provider, base, gpu_count):
     """Derive full instance type name from base name and GPU count.
@@ -178,6 +202,9 @@ def resolve_instance_type(provider, base, gpu_count):
         return f"{base}.{gpu_count}"
     if base == "g4-standard":
         return f"g4-standard-{gpu_count * 48}"
+    if base == "g2-standard":
+        actual = next((c for c in sorted(G2_STANDARD_VCPUS) if c >= gpu_count), 8)
+        return f"g2-standard-{G2_STANDARD_VCPUS[actual]}"
     available = GCP_AVAILABLE_GPU_COUNTS.get(base)
     if available:
         actual = next((c for c in available if c >= gpu_count), available[-1])
