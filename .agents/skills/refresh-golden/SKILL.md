@@ -141,8 +141,8 @@ When the restamp leaves nothing, or drops the kernels a deploy needs (a serving 
 
 The file is refreshed when `emmy golden check PATH` passes and every proposal the restamp left was measured again or
 dropped on purpose. For a serving golden the release gate is the strict audit on the card,
-`emmy eval golden --golden PATH --serving-config <models/slug.env>`; run it before calling the file refreshed. A
-repository golden that changed also refits the priors (README, "Fit the priors").
+`emmy eval golden --golden PATH --serving-config <models/slug.env>`; run it before calling the file refreshed.
+Nightly refresh owns prior refits after repository goldens change; leave the weights out of the golden-refresh PR.
 
 ## Report
 
