@@ -106,10 +106,11 @@ released one drops every graph and descriptor. Lending a region drains the strea
 is free once the call returns; a host that keeps that memory alive itself can skip the drain (`set_region` with `wait`
 off), because each launch reads its addresses when it is queued. The runtime drains anyway when the old memory is its
 own, which it frees, or a descriptor baked the address. `run_each` relies on that: it runs the program once per entry
-in one call, each entry binding its symbols, lending its buffers undrained, copying its inputs in and its outputs out. A host may adopt its own stream for a call (`set_stream`):
-launches, device copies and memsets then go there, so a stream that is recording a graph records them, while host
-uploads and descriptor encodes always use the device's stream and complete before returning. Graph capture always
-happens on the device's stream. A load replaces the previous program; release drops it.
+in one call, each entry binding its symbols, lending its buffers undrained, copying its inputs in and its outputs out.
+A host may adopt its own stream for a call (`set_stream`): launches, device copies and memsets then go there, so a
+stream that is recording a graph records them, while host uploads and descriptor encodes always use the device's
+stream and complete before returning. Graph capture always happens on the device's stream. A load replaces the
+previous program; release drops it.
 
 All unsafe CUDA submission stays in `cuda`. Buffer pointers and the context are private. Executors have disjoint
 storage and synchronize before releasing it, so cudarc's cross-stream event tracking is disabled. Copies and launches
