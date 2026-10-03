@@ -129,13 +129,6 @@ def bench_pair(request):
     return _run
 
 
-# The lane's own tune DB, fresh per session, unless the caller points ``EMMY_TUNE_DB`` at one
-# (``make bench-kernels-tuned``). The box's ``~/.cache/emmy/autotune.db`` is machine-local, mutable
-# evidence, and a grown one also makes every compile in the lane slower. The case's own rows stay
-# the compile's evidence, which is what makes a stored latency comparable across machines.
-_LANE_TUNE_DB = os.environ.get("EMMY_TUNE_DB") or str(Path(tempfile.mkdtemp(prefix="emmy_perf_tune_db_")) / "autotune.db")
-
-
 def _bench_corpus_case(case: Case, *, profile: bool) -> PerfRow:
     """Measure one case and build its row, including the regression verdict.
 
@@ -158,7 +151,7 @@ def _bench_corpus_case(case: Case, *, profile: bool) -> PerfRow:
                 command,
                 capture_output=True,
                 text=True,
-                env={**os.environ, "EMMY_NVCC_FLAGS": "", "EMMY_DUMP_DIR": tmp, "EMMY_TUNE_DB": _LANE_TUNE_DB},
+                env={**os.environ, "EMMY_NVCC_FLAGS": "", "EMMY_DUMP_DIR": tmp},
                 timeout=1800,
             )
             if result.returncode != 0 or not output.exists():
