@@ -710,6 +710,26 @@ the slab (`_restage_loads`). So every staging decision rides a `Stage` on the sc
 row · cp.async / TMA 2-D slab) lowers through one module. A contraction operand `Stage` never sets `smem`, which is how
 the two apply paths stay distinct on a coop-K contraction.
 
+## Shared carried state
+
+`035_shared_carry` offers a late storage choice for an ordered kernel whose state reads stay within independent
+leading batch coordinates. It proves ownership from each read's consuming predicates, including discarded clamped
+branches. One CTA owns each batch's complete state; the ordered axis and remaining grid axes become device loops.
+The scheduled reduction and its combine order remain unchanged. This changes kernel lowering, not Loop or Tile
+canonicalization, so the kernel keeps its identity.
+
+Two shared buffers separate the previous and next state. The seed initializes the first buffer, and barriers keep
+initialization, copies and updates uniform across the CTA. A wider seed retains its original first-iteration reads
+instead of rounding through shared storage early. Requested snapshots and externally read carry ports remain global
+outputs; only an unused private carry port is removed through the materializer's existing graph splice.
+
+When the next state selects between an update and the unchanged cell, the whole CTA copies the previous state and its
+snapshots before overwriting selected cells: the pass sinks each cell's private cone and stores under the predicate
+that selects its update and drops the branch that would only copy the cell. Intermediate casts or different output dtypes retain the ordinary
+per-cell path. Each shared row is padded by one column, so column-strided reads of the state do not share a bank.
+The resource check includes both state buffers and the reduction's existing shared scratch. Evidence picks between
+shared and global storage; ownership, supported geometry and the card's shared-memory limit decide only legality.
+
 ## Kernel-IR peepholes
 
 Vector loads and stores share one alignment proof over the complete flattened address. Every variable coefficient
@@ -741,7 +761,8 @@ prologue `Sync` is correctly retained; `with_bodies` preserves the cooperative t
 lowers to a coordinate `Select` whose branches read the same buffers at different offsets, each clamped in range; when
 the two branches' private chains are one computation up to their load indices (and at most one unary op on top of one
 branch — RoPE's rotate-half negation), `045` emits the chain once with each load at `cond ? index_a : index_b`, the
-branches' own clamps folded against `cond`. `047` then unrolls every lane-strided loop of at most eight trips (a
+branches' own clamps folded against `cond`. An effect between the two chains, a carried load, or a predicate or
+index defined after the chains start refuses the merge. `047` then unrolls every lane-strided loop of at most eight trips (a
 cooperative reduce's fold and its full-row projection: a 128-wide row at 32 lanes is four) and drops each load of a
 read-only buffer at an index an earlier load of the same body already read, compared after folding against the lane
 ranges. The projection reads the values the fold loaded, and a partner read resolves to another trip of the same lane.
