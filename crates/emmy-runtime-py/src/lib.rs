@@ -31,6 +31,15 @@ fn env(values: Option<HashMap<String, i64>>) -> Env {
     values.unwrap_or_default().into_iter().collect()
 }
 
+/// One `run_each` entry as Python passes it: its symbols, then the operands it lends, copies in and
+/// copies out.
+type Run = (
+    HashMap<String, i64>,
+    Vec<cuda::Operand>,
+    Vec<cuda::Operand>,
+    Vec<cuda::Operand>,
+);
+
 fn regions(
     values: Option<HashMap<String, (u64, usize)>>,
 ) -> Option<BTreeMap<String, (u64, usize)>> {
@@ -279,6 +288,20 @@ impl Executor {
 
     fn run_once(&mut self, py: Python<'_>) -> PyResult<()> {
         py.detach(|| self.0.run_once()).map_err(translate)
+    }
+
+    /// Run the program once per entry of `runs`; see `cuda::Executor::run_each`.
+    fn run_each(&mut self, py: Python<'_>, runs: Vec<Run>) -> PyResult<()> {
+        let runs: Vec<cuda::Run> = runs
+            .into_iter()
+            .map(|(env, lent, inputs, outputs)| cuda::Run {
+                env: self::env(Some(env)),
+                lent,
+                inputs,
+                outputs,
+            })
+            .collect();
+        py.detach(|| self.0.run_each(&runs)).map_err(translate)
     }
 
     /// Per-call milliseconds of launch `index` repeated `batch` times in one event window.

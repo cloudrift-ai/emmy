@@ -10,6 +10,7 @@ from dataclasses import replace
 
 import pytest
 
+from tests.serving.helpers import per_expert
 from tests.support.checkpoints import exl3_linear_tensors
 
 
@@ -71,7 +72,10 @@ def _combine(gate, experts, expert, xn):
     from emmy.serving.gen_runner import combine_routed_experts
 
     return combine_routed_experts(
-        xn, gate(xn), lambda e, rows: expert(rows, experts.gate_up_proj[e], experts.down_proj[e]), num_experts=experts.gate_up_proj.shape[0]
+        xn,
+        gate(xn),
+        per_expert(lambda e, rows: expert(rows, experts.gate_up_proj[e], experts.down_proj[e])),
+        num_experts=experts.gate_up_proj.shape[0],
     )
 
 
@@ -283,7 +287,7 @@ def test_exl3_laguna_routed_scale_matches_reference_architecture():
     reference = combine_routed_experts(
         hidden,
         routed,
-        lambda e, rows: original_expert(rows, *experts.gate_up_proj[e].chunk(2, dim=0), experts.down_proj[e]),
+        per_expert(lambda e, rows: original_expert(rows, *experts.gate_up_proj[e].chunk(2, dim=0), experts.down_proj[e])),
         num_experts=experts.gate_up_proj.shape[0],
     )
     assert moe_block_parts(dense) is None
@@ -309,7 +313,7 @@ def test_exl3_laguna_routed_scale_matches_reference_architecture():
     combined = combine_routed_experts(
         hidden,
         scaled_gate(hidden),
-        lambda e, rows: expert(rows, *experts.gate_up_proj[e].chunk(2, dim=0), experts.down_proj[e]),
+        per_expert(lambda e, rows: expert(rows, *experts.gate_up_proj[e].chunk(2, dim=0), experts.down_proj[e])),
         num_experts=experts.gate_up_proj.shape[0],
     )
     assert torch.isfinite(combined).all()
@@ -630,7 +634,7 @@ def test_combine_casts_fp32_router_scores():
     xn = torch.randn(5, 8, dtype=torch.float16)
     scores = torch.rand(5, 2, dtype=torch.float32)
     indices = torch.randint(0, 4, (5, 2))
-    out = combine_routed_experts(xn, (None, scores, indices), lambda e, rows: rows * (e + 1), num_experts=4)
+    out = combine_routed_experts(xn, (None, scores, indices), per_expert(lambda e, rows: rows * (e + 1)), num_experts=4)
     assert out.dtype == torch.float16
     ref = torch.zeros_like(xn)
     for t in range(5):
@@ -654,8 +658,8 @@ def test_marked_moe_contributions_preserve_the_float32_residual():
     def run_expert(expert, rows):
         return partials[expert].expand_as(rows)
 
-    assert not torch.isfinite(combine_routed_experts(xn, gated, run_expert, num_experts=2)).all()
-    routed = combine_routed_experts(xn, gated, run_expert, num_experts=2, accumulate_float32=True)
+    assert not torch.isfinite(combine_routed_experts(xn, gated, per_expert(run_expert), num_experts=2)).all()
+    routed = combine_routed_experts(xn, gated, per_expert(run_expert), num_experts=2, accumulate_float32=True)
     slots = _combine_slot_partials(scores, partials, xn.dtype, accumulate_float32=True)
 
     torch.testing.assert_close(routed, torch.zeros_like(xn, dtype=torch.float32), rtol=0, atol=0)

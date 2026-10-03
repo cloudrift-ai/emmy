@@ -779,6 +779,52 @@ def test_capture_replay_device_io_matches_eager():
 
 
 @requires_cuda
+def test_run_each_binds_width_weight_and_rows_per_run():
+    """``run_each`` runs a symbolic program once per entry in ONE runtime call — the routed MoE
+    expert loop's shape: each run binds its width, lends its own weight, copies its rows in and its
+    output rows out into one shared tensor, all queued with no host wait between runs. Every run
+    must match torch eager with its own weight."""
+    import torch
+
+    from emmy.compiler.backend.cuda.backend import CudaBackend
+    from emmy.compiler.backend.cuda.program import CompiledProgram
+    from emmy.compiler.backend.gpu_lock import gpu_lock
+    from emmy.compiler.trace.torch import trace_module
+
+    cap, h, widths = 48, 1024, (5, 33, 12)
+    m = torch.nn.RMSNorm(h)
+    compiled = CudaBackend().compile(trace_module(m, (torch.randn(1, 32, h),), dynamic_shapes={"x": {1: _seq_len_dim()}}))
+    x = torch.randn(sum(widths), h, device="cuda")
+    weights = [torch.randn(h, device="cuda") for _ in widths]
+    out = torch.empty_like(x)
+    row = h * x.element_size()
+    runs, start = [], 0
+    for s, w in zip(widths, weights, strict=True):
+        lent = [("p_weight", w.data_ptr(), w.numel() * w.element_size())]
+        runs.append(
+            (
+                {"seq_len": s},
+                lent,
+                [("x", x.data_ptr() + start * row, s * row)],
+                [(compiled.outputs[0], out.data_ptr() + start * row, s * row)],
+            )
+        )
+        start += s
+
+    with gpu_lock():
+        prog = CompiledProgram.build(compiled, {"x": np.zeros((1, cap, h), np.float32), "p_weight": np.ones(h, np.float32)})
+        with prog.on_stream(torch.cuda.current_stream()):
+            prog.run_each(runs)
+        torch.cuda.synchronize()
+    start = 0
+    for s, w in zip(widths, weights, strict=True):
+        ref = torch.nn.functional.rms_norm(x[start : start + s], (h,), w, eps=m.eps)
+        torch.testing.assert_close(out[start : start + s], ref, rtol=1e-4, atol=1e-4)
+        start += s
+    assert prog.sym_values["seq_len"] == widths[-1]
+
+
+@requires_cuda
 @pytest.mark.skip(reason="Qwen dynamic accuracy is blocked by eager interface-group products in Tile scheduling")
 def test_qwen_whole_model_capture_replay_cache_matches_eager():
     """1-layer random-weight Qwen3 trunk through the captured-graph serving path:

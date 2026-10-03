@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import pytest
 
+from tests.serving.helpers import per_expert
+
 
 def _router_return(torch, tokens: int, experts: int, top_k: int, seed: int = 0):
     """One HF-router-shaped ``(scores, indices)`` pair over the GLOBAL expert space."""
@@ -113,7 +115,7 @@ def test_a_single_row_routes_without_waiting_on_the_device(monkeypatch):
     def run_expert(e, rows):
         return (rows.unsqueeze(-1) * weights[e]).sum(dim=1)
 
-    batch = combine_routed_experts(xn, gated, run_expert, num_experts=experts)
+    batch = combine_routed_experts(xn, gated, per_expert(run_expert), num_experts=experts)
     launched: list[int] = []
 
     def run_recorded(e, rows):
@@ -125,7 +127,7 @@ def test_a_single_row_routes_without_waiting_on_the_device(monkeypatch):
 
     monkeypatch.setattr(torch.Tensor, "unique", refuse)
     monkeypatch.setattr(torch, "where", refuse)
-    row = combine_routed_experts(xn[:1], tuple(g[:1] for g in gated), run_recorded, num_experts=experts)
+    row = combine_routed_experts(xn[:1], tuple(g[:1] for g in gated), per_expert(run_recorded), num_experts=experts)
 
     assert torch.equal(row, batch[:1])
     assert launched == sorted(gated[1][0].tolist())
@@ -157,7 +159,7 @@ def test_a_batch_reads_its_routing_once(monkeypatch):
     monkeypatch.setattr(torch, "where", lambda *a, **k: pytest.fail("a batch asked the device for one expert's rows"))
     # CUDA bincount reads its input's min and max to the host before counting.
     monkeypatch.setattr(torch, "bincount", lambda *a, **k: pytest.fail("a batch counted its rows with bincount"))
-    got = combine_routed_experts(xn, (scores, indices), lambda e, rows: rows @ weights[e], num_experts=experts)
+    got = combine_routed_experts(xn, (scores, indices), per_expert(lambda e, rows: rows @ weights[e]), num_experts=experts)
 
     assert torch.equal(got, reference)
     assert len(reads) == 1
