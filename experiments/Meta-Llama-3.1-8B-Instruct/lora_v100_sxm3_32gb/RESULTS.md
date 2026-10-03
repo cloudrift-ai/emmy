@@ -62,3 +62,27 @@ The Git LFS archive `results_v100x1.tar.gz` contains the dated raw run, includin
 The rows were run sequentially on fresh servers, so this is a comparison of selectable request names rather than a
 mixed base-and-adapter traffic test. The smoke test checks a simple answer; it does not establish adapter task quality,
 tool-call behavior, or 65,536-token request success. Emmy compiler kernels were not used by this serving image.
+
+## Follow-up: active LoRA specialization does not preserve adapter behavior
+
+On 2026-10-03, one freshly rented Tesla V100-SXM3-32GB repeated the concurrency-eight LoRA row three times with
+seeds 0–2. Each repeat sent 40 requests with 512 random input tokens and 256 forced output tokens. The published
+vLLM 1.0.0 image, checkpoint, adapter, FP16 precision, 65,536-token context, and eight-sequence limit were identical;
+only `--specialize-active-lora` changed. All 240 requests completed.
+
+| LoRA setting | Output tok/s, seeds 0–2 | Mean TPOT, seeds 0–2 | Adapter effect observed? |
+| --- | --- | --- | --- |
+| Default | 118.58, 128.04, 129.60 | 57.09, 55.57, 55.31 ms | Yes |
+| `--specialize-active-lora` | 187.52, 217.28, 212.97 | 33.91, 32.10, 32.22 ms | No |
+
+The apparent 1.64× average throughput gain is invalid. On five fixed prompts, the default adapter changed four
+answers relative to the base model. With the specialization flag, all five adapter answers matched the base answers.
+For the one answer that matched even without the flag, the sum of absolute generated-token log-probability differences
+was 1.70 normally and 0.009 with specialization. A 16-iteration PyTorch GPU trace recorded 2,064 LoRA shrink
+and 2,080 expand kernel launches without the flag, versus 16 of each with the flag. The trace uses a shorter four-
+request probe and is diagnostic, not a throughput measurement. These observations indicate that the published image
+skips most adapter updates when this flag is set. The serving recipe therefore leaves it disabled.
+
+The archive keeps the two three-repeat client logs and system records, the profiler traces, the five prompts, and
+both sets of API responses under `diagnostics/optimization_20261003/`. The printed vLLM row status and smoke answer
+did not detect this failure; comparison of base and adapter responses did.
