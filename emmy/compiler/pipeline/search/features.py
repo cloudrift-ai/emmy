@@ -16,6 +16,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import lru_cache
 from types import MappingProxyType
+from typing import TYPE_CHECKING
 
 from emmy.compiler.pipeline.knob import (
     _SITE_FAMILIES,
@@ -28,6 +29,10 @@ from emmy.compiler.pipeline.knob import (
     family_value,
     get,
 )
+
+if TYPE_CHECKING:
+    from emmy.compiler.graph import Graph
+    from emmy.compiler.ir.base import Op
 
 # Version of the knob vocabulary + feature encoding this module reads. Rows recorded under a
 # different version featurize to garbage (the 2026-07 tile-IR rebuild replaced ``BM/BN/FM/FN/…``
@@ -402,6 +407,77 @@ def knob_features(knobs: dict) -> dict[str, float]:
     if work:
         # The one feature monotone in per-thread serial work — a fit signal for the priors.
         feats["D_serial_cell_work"] = math.log2(1.0 + work)
+    return feats
+
+
+class Featurizer:
+    """The one featurizer every prior reads: a candidate's row is the card's ``H_*`` features, the decided kernel's
+    stamps and the candidate's knobs (:func:`knob_features`), joined with the kernels the candidate leaves summed
+    and maxed (:func:`piece_features`). A schedule row leaves its kernel whole; a placement arm leaves the cut's
+    pieces. Training and deploy featurize through :meth:`features`, so both priors read one feature set."""
+
+    def __init__(self, base: Mapping[str, float]) -> None:
+        self.base = dict(base)
+
+    @classmethod
+    def of(cls, ctx) -> Featurizer:
+        """The featurizer of the card and regime ``ctx`` compiles for."""
+        return cls(ctx.features())
+
+    def features(
+        self,
+        kernel: Op | Mapping[str, float],
+        knobs: Mapping = MappingProxyType({}),
+        *,
+        pieces: Graph | Op | None = None,
+        graph: Graph | None = None,
+    ) -> dict[str, float] | None:
+        """One candidate's feature row. ``kernel`` is the kernel the fork decides: its op, or — where only a stored
+        row survives (a golden pool, a measured DB row, a fork's offer op whose knobs carry its stamps) — that knob
+        row, ``S_*`` stamps included; ``knobs`` the candidate's own row; ``pieces`` the kernels it leaves (a cut's fragment
+        ``Graph`` or the fused op; ``None``: the kernel itself); ``graph`` supplies an op's operand dtypes.
+        ``None`` when a kernel has no body to stamp."""
+        own = stamps_of(kernel, graph)
+        left = [(own, None)] if pieces is None else kernel_pieces(pieces, kernel, graph)
+        if own is None or left is None:
+            return None
+        return {**knob_features({**self.base, **own, **knobs}), **piece_features(left)}
+
+
+def stamps_of(kernel: Op | Mapping[str, float], graph: Graph | None = None) -> dict[str, float] | None:
+    """A kernel's row: a stored row as it is, an op's ``S_*`` stamps (``op_stamps``); ``None`` for an op with no
+    body to stamp."""
+    from emmy.compiler.pipeline.passes.identity import op_stamps  # noqa: PLC0415
+
+    return dict(kernel) if isinstance(kernel, Mapping) else op_stamps(kernel, graph)
+
+
+def kernel_pieces(option: Graph | Op, kernel: Op, graph: Graph | None) -> list[tuple[dict[str, float], bool]] | None:
+    """Each kernel ``option`` leaves — a cut's pieces, or ``kernel`` itself where the option keeps it fused — with
+    its stamps and whether it folds a whole contraction; ``None`` when a piece has no body to stamp."""
+    from emmy.compiler.graph import Graph  # noqa: PLC0415
+    from emmy.compiler.ir.tile.ir import TileOp  # noqa: PLC0415
+
+    if isinstance(option, Graph):
+        ops, graph = [node.op.with_io(option, node) for node in option.nodes.values() if isinstance(node.op, TileOp)], option
+    else:
+        ops = [kernel]
+    left = [(stamps_of(op, graph), op.op is not None and op.op.tiles_whole()) for op in ops]
+    return None if any(stamps is None for stamps, _ in left) else left
+
+
+def piece_features(left: list[tuple[dict[str, float], bool | None]]) -> dict[str, float]:
+    """The ``P_*`` block: how many kernels a candidate leaves, each ``S_*`` stamp summed and maxed over them, and —
+    where known — how many fold a whole contraction, which tells apart cuts whose Loop histograms agree but whose
+    contraction has a surrounding projection."""
+    stamps = [{k: v for k, v in row.items() if k.startswith(STRUCT_PREFIX)} for row, _ in left]
+    feats = {"P_n_pieces": float(len(left))}
+    for key in sorted({k for row in stamps for k in row}):
+        values = [float(row.get(key, 0.0)) for row in stamps]
+        feats[f"P_sum_{key[2:]}"] = sum(values)
+        feats[f"P_max_{key[2:]}"] = max(values)
+    if all(whole is not None for _, whole in left):
+        feats["P_n_whole_contraction_roots"] = float(sum(whole for _, whole in left))
     return feats
 
 

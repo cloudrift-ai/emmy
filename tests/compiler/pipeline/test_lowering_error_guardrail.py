@@ -184,15 +184,14 @@ def test_truncated_kernel_pipeline_registers_measured_composed_routes(monkeypatc
 class _BiggestBNFirstPrior:
     """Stub global prior that ranks leaves by ``BN`` descending — i.e. always
     prefers the largest (over-budget) tile, the way a prior trained on big
-    square matmuls extrapolates onto a tiny shape. ``pick`` returns the
-    argmax-BN row, so greedy keeps choosing over-budget tiles until the
-    blocklist retry budget is exhausted."""
+    square matmuls extrapolates onto a tiny shape. The argmax-BN row scores
+    lowest, so greedy keeps choosing over-budget tiles until the blocklist
+    retry budget is exhausted."""
 
     fitted = True
 
-    def pick(self, rows: list[dict]) -> tuple[int, float]:
-        best_i = max(range(len(rows)), key=lambda i: rows[i].get("BN", 0))
-        return best_i, 0.0
+    def mean_scores_features(self, rows: list[dict]) -> list[float]:
+        return [-float(row.get("BN", 0)) for row in rows]
 
 
 def _two_pass_tile_pipeline(n_over_budget: int, *, decline: bool = False) -> Pipeline:

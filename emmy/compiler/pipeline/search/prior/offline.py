@@ -1,13 +1,13 @@
-"""Offline prior — a stateless, fit-offline :class:`Prior` over ``features.knob_features``.
+"""Offline prior — a stateless, fit-offline :class:`Prior` over ``features.Featurizer`` rows.
 
 The ONE ranking model a compile consults where nothing measured decides a fork, fit by ``emmy fit`` from the
 dataset's golden groups and shipped with the repo.
 
-``mean_score`` returns a positive latency *proxy* (``exp(-scale · quality)``), **lower is better**. The proxy is
+``mean_scores_features`` returns a positive latency *proxy* (``exp(-scale · quality)``), **lower is better**. The proxy is
 not calibrated µs; only its ordering matters (the greedy argmin).
 
-The scoring itself lives in :class:`~.catboost_model.CatBoostModel`; this class is the adapter that turns a knob
-dict into features and satisfies the ``Prior`` contract around it.
+The scoring itself lives in :class:`~.catboost_model.CatBoostModel`; this class is the adapter that loads it and
+satisfies the ``Prior`` contract around it.
 
 The model lives in the repo-checked artifact ``weights/schedule.json`` beside this module (override with
 ``EMMY_OFFLINE_FILE`` / ``emmy eval … --offline-file`` to A/B a candidate fit), written by ``emmy fit DATASET
@@ -22,7 +22,7 @@ import functools
 from pathlib import Path
 
 from emmy import config, storage
-from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION, knob_features
+from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
 from emmy.compiler.pipeline.search.prior.base import Prior
 from emmy.compiler.pipeline.search.prior.catboost_model import CatBoostModel
 
@@ -66,10 +66,10 @@ def _load_artifact(path_str: str) -> dict:
 
 
 class OfflinePrior(Prior):
-    """Fixed ranker over ``knob_features`` — the cold-start prior.
+    """Fixed ranker over ``Featurizer`` rows — the cold-start prior.
 
     An adapter, not a model: the scoring is a :class:`CatBoostModel`, and this class adds what ``Prior`` needs
-    around it: knob-dict featurization. Pass a ready ``model``, or let it resolve from the weights artifact
+    around it: the artifact load and its space. Pass a ready ``model``, or let it resolve from the weights artifact
     (``path`` → ``config.offline_path()`` override → the repo-checked default)."""
 
     def __init__(self, *, model: CatBoostModel | None = None, path: str | None = None) -> None:
@@ -91,19 +91,9 @@ class OfflinePrior(Prior):
     def fitted(self) -> bool:
         return True
 
-    def mean_score(self, knobs: dict) -> float:
-        """Latency proxy (``exp(-scale · quality)``), lower is better."""
-        return self.mean_score_features(knob_features(knobs))
-
-    def mean_scores(self, knobs_list: list[dict]) -> list[float]:
-        """Batched :meth:`mean_score` — featurize the whole candidate set, then ONE scoring pass. The model has a
-        vectorized predict whose per-call overhead would otherwise be paid once per candidate."""
-        return self.mean_scores_features([knob_features(k) for k in knobs_list])
-
     def mean_score_features(self, feats: dict) -> float:
-        """:meth:`mean_score` from an already-featurized row — the entry point for a caller that featurized
-        once and wants to score without a knob dict to hand. An absent key lands in the tree's ``NaN`` missing
-        bucket."""
+        """Latency proxy (``exp(-scale · quality)``) of one feature row, lower is better. An absent key lands in
+        the tree's ``NaN`` missing bucket."""
         return self._model.mean_score_features(feats)
 
     def mean_scores_features(self, feats_list: list[dict]) -> list[float]:

@@ -6,8 +6,7 @@ structural identity, and (for golden) a reference latency. ``Sample`` is that
 normal form. The split into ``knobs`` (tunable) / ``context`` (``H_*``) /
 ``s_features`` (``S_*``) is by key prefix and therefore lossless — :meth:`all_knobs`
 re-merges them to the exact original dict, and :meth:`features` runs the single
-featurizer (:func:`features.knob_features`) on that merge, so a ``Sample`` reproduces
-the feature vector each source built inline today.
+featurizer (:class:`features.Featurizer`) on it.
 
 Featurization fidelity (the load-bearing invariant): the prior scores the full ``S_*``
 histogram stamped by the ``IdentityStrategy``, which every row carries inline.
@@ -20,7 +19,7 @@ from dataclasses import dataclass, field
 
 from emmy.compiler.pipeline.knob import CTX_PREFIX, IDENTITY_PREFIX, METADATA_PREFIXES, STRUCT_PREFIX
 from emmy.compiler.pipeline.search.dataset.shape import ShapeKey
-from emmy.compiler.pipeline.search.features import knob_features
+from emmy.compiler.pipeline.search.features import Featurizer
 
 
 @functools.cache
@@ -32,12 +31,12 @@ def _card_features(gpu_name: str, cc: int) -> dict[str, float]:
     return Context.from_target(divmod(cc, 10), gpu_name=gpu_name).features()
 
 
-def measured_features(row) -> dict:
-    """The full feature dict a measured ``perf`` row featurizes as: its card's ``H_*``, the opt level it
-    was measured under, and its stored ``S_*`` stamps + tunables. A row stores no ``H_*`` of its own —
-    they are a function of the card, derived here by live code so a stored row outlives a change to
-    the device features. Only for rows :func:`~.freeze.freeze_reason` admits (a registry card)."""
-    return {**_card_features(row.gpu, row.cc), "H_opt": float(row.opt), **row.knobs}
+def measured_features(row) -> dict[str, float]:
+    """The feature row of a measured ``perf`` row: its stored ``S_*`` stamps + tunables, under its card's ``H_*``
+    and the opt level it was measured under. A row stores no ``H_*`` of its own — they are a function of the
+    card, derived here by live code so a stored row outlives a change to the device features. Only for rows
+    :func:`~.freeze.freeze_reason` admits (a registry card)."""
+    return Featurizer({**_card_features(row.gpu, row.cc), "H_opt": float(row.opt)}).features(row.knobs)
 
 
 def _split_by_prefix(knobs: dict) -> tuple[dict, dict, dict]:
@@ -95,4 +94,4 @@ class Sample:
         featurizer over the merged dict. Merge order ``context, s_*, knobs`` matches
         the inline construction the eval / prior code used (knobs win on collision,
         though the prefixes are disjoint)."""
-        return knob_features(self.all_knobs())
+        return Featurizer(self.context).features({**self.s_features(), **self.knobs})

@@ -69,6 +69,7 @@ from typing import TYPE_CHECKING, NamedTuple
 from emmy.compiler.graph import Graph
 from emmy.compiler.pipeline.fork import Fork, descent_sample, fork_signature, iter_leaves, leaf_knobs, stamp_signature
 from emmy.compiler.pipeline.knob import EVIDENCE_PREFIXES, METADATA_PREFIXES, schedule_pin_fingerprint
+from emmy.compiler.pipeline.search.features import Featurizer
 
 logger = logging.getLogger(__name__)
 
@@ -122,7 +123,7 @@ _LOAD_PRIOR = object()
 def _load_prior_cached(path_str: str):  # noqa: ARG001 — the arg is the cache key
     """The prior for one weights artifact path — the process-wide memo behind
     :func:`_load_prior_safe`. ``maxsize=1`` evicts on any key change. The deploy path only
-    *reads* this prior (``mean_scores`` / ``pick``), so one shared instance is safe across the
+    *reads* this prior (``mean_scores_features``), so one shared instance is safe across the
     ~96 program compiles of a serve boot."""
     from emmy.compiler.pipeline.search.prior import load_prior  # noqa: PLC0415
 
@@ -158,19 +159,21 @@ def _load_placement_prior():
 
 def _placement_pick(fp: ForkPoint, prior) -> object | None:
     """The placement prior's argmin over a placement fork's arms — keep fused and every cut the pass
-    offers — each featurized from the kernels it leaves (``ranking.arm_features``), exactly as the
+    offers — each featurized from the kernels it leaves (``Featurizer.features``), exactly as the
     arms of the placement dataset the prior was fit on. The first of equally scored arms wins. ``None``
     when some arm cannot be featurized (a kernel with no body to stamp), and the fork is priced as before."""
     from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
-    from emmy.compiler.pipeline.search.ranking import arm_features  # noqa: PLC0415
 
     leaves = fp.flat()
     root = fp.root_op.with_io(fp.match.graph, fp.match.root)
-    rows = [arm_features(_leaf_graph(o) if _is_structural_option(o) else _leaf_op(o), root, fp.match.graph) for o in leaves]
+    featurizer = Featurizer.of(fp.ctx)
+    rows = [
+        featurizer.features(root, leaf_knobs(o), pieces=_leaf_graph(o) if _is_structural_option(o) else root, graph=fp.match.graph)
+        for o in leaves
+    ]
     if any(row is None for row in rows):
         return None
-    base = fp.ctx.features()
-    scores = prior.mean_scores_features([{**base, **row} for row in rows])
+    scores = prior.mean_scores_features(rows)
     return leaves[min(range(len(leaves)), key=scores.__getitem__)]
 
 
@@ -292,8 +295,7 @@ def _resolved_price(terminal: Graph, trace: list, ctx: Context, prior, failed: d
                 return math.inf
         us = scored.get(nid)
         if us is None:
-            rows = [{**ctx.features(), **knobs}]
-            us = prior.mean_scores(rows)[0] if prior is not None else None
+            us = prior.mean_scores_features([Featurizer.of(ctx).features(knobs)])[0] if prior is not None else None
         if us is None:
             return None
         total += us
@@ -817,6 +819,17 @@ def _descent_sample(options, pool_id: str, node_blocked) -> list:
     return descent_sample(options, draw=_POOL_DRAW, seed=pool_id, skip=skip)
 
 
+def _argmin(scores: list[float], rows: list[dict]) -> tuple[int, float]:
+    """The lowest score's index and score, ties broken by :func:`~emmy.compiler.pipeline.knob.canonical_row_key`
+    (candidate content, never enumeration order — an order-broken tie flips the deployed kernel per boot). Two
+    stages: the key is a canonicalizing sort over the whole row, so it is spelled only for the tied rows."""
+    from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
+
+    lo = min(scores)
+    ties = [j for j, score in enumerate(scores) if score == lo]
+    return (ties[0] if len(ties) == 1 else min(ties, key=lambda j: canonical_row_key(rows[j]))), lo
+
+
 def _stream_tiers(
     fp: ForkPoint, the_prior, node_blocked, db_idx: dict, options: list | None = None
 ) -> tuple[object, dict | None, float | None, str | None] | None:
@@ -827,7 +840,7 @@ def _stream_tiers(
     so this scan walks exactly once, like the flatten it replaces, and evaluates every source
     chunk-wise as the leaves go by: the evidence index's measured best (tune DB rows and golden
     rows) and the model score, each folded into its own running best. The PRIORITY is applied
-    after the stream ends (index > model); the one behavioral trade is that the model's ``mean_scores`` runs even
+    after the stream ends (index > model); the one behavioral trade is that the model's scoring runs even
     when a later chunk turns up evidence — acceptable because measured forks are normally decided
     upstream by the direct measured descent, never here. The pick is EXACTLY the flattened argmin: every source
     breaks ties by candidate content (``canonical_row_key``), never enumeration order, so
@@ -849,7 +862,7 @@ def _stream_tiers(
     from emmy.compiler.pipeline.pipeline import NO_OPTION, _is_structural_option  # noqa: PLC0415
 
     base = {**fp.ctx.features(), **dict(fp.root_op.knobs)}
-    picker = getattr(the_prior, "pick", None)
+    featurizer = Featurizer.of(fp.ctx)
     use_db = bool(db_idx)
     # Per-source running bests: (price, canonical_row_key, leaf, knobs).
     best_db: tuple | None = None
@@ -869,22 +882,8 @@ def _stream_tiers(
         rows = [row for _, _, row in chunk]
         if use_db:
             best_db = fold(best_db, chunk, _db_measured_pick(db_idx, rows))
-        scorer = getattr(the_prior, "mean_scores", None)
-        if scorer is not None:
-            scores = scorer(rows)
-            # Two-stage argmin: find the min score first, spell ``canonical_row_key`` only for
-            # the tied rows — the key is a canonicalizing sort over the whole row, and computing
-            # it for every candidate (as the flattened ``min`` key did) dominated large-pool
-            # scans.
-            lo = min(scores)
-            ties = [j for j, score in enumerate(scores) if score == lo]
-            i = ties[0] if len(ties) == 1 else min(ties, key=lambda j: canonical_row_key(rows[j]))
-            best_model = fold(best_model, chunk, (i, lo))
-        else:
-            # A ``pick``-only prior (no per-row scoring surface): ask it per chunk and fold on the
-            # ``(index, score)`` it returns — exact for any single-chunk pool, and for the real
-            # ``Prior`` classes generally (their pick IS the mean_scores argmin).
-            best_model = fold(best_model, chunk, picker(rows))
+        scores = the_prior.mean_scores_features([featurizer.features(fp.root_op.knobs, knobs) for _, knobs, _ in chunk])
+        best_model = fold(best_model, chunk, _argmin(scores, rows))
 
     opts = fp.options if options is None else options
     # The cold-pool budget: a pool whose minted bound exceeds _POOL_BUDGET is sampled by seeded
@@ -1171,23 +1170,16 @@ def greedy_decide(
         # 2); (2) the model argmin only when no candidate has evidence at all.
         # An env pin overrides everything upstream of the fork (a pinned family
         # never reaches a decide).
-        picker = getattr(the_prior, "pick", None)
-        if picker is not None:
-            got = None
-            if db_index():
-                got = _db_measured_pick(db_index(), rows)
-                if got is None:
-                    _warn_disjoint_evidence(db_index(), rows, fp.node_id)
+        got = None
+        if db_index():
+            got = _db_measured_pick(db_index(), rows)
             if got is None:
-                _require_evidence(fp, "no measured row vouches for any offered candidate")
-            best_i, price = got if got is not None else picker(rows)
-        else:  # bare-mean_scores prior
-            from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
-
-            _require_evidence(fp, "a bare scoring prior decides")
-            s = the_prior.mean_scores(rows)
-            best_i = min(range(len(rows)), key=lambda i: (s[i], canonical_row_key(rows[i])))
-            price = s[best_i]
+                _warn_disjoint_evidence(db_index(), rows, fp.node_id)
+        if got is None:
+            _require_evidence(fp, "no measured row vouches for any offered candidate")
+            featurizer = Featurizer.of(fp.ctx)
+            got = _argmin(the_prior.mean_scores_features([featurizer.features(fp.root_op.knobs, k) for _, k in live]), rows)
+        best_i, price = got
         fp.score = price  # measured µs when evidence decided, predicted µs otherwise
         if dkey is not None:
             decisions[dkey] = (dict(live[best_i][1]), price)

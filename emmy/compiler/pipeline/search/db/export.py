@@ -16,7 +16,7 @@ from dataclasses import replace
 from emmy.compiler.pipeline.search.dataset import Dataset, GoldenPool, GoldenRow, MeasuredGroup, measured_features, regime_of, repo_commit
 from emmy.compiler.pipeline.search.db import PerfRow, SearchDB, knobs_json
 from emmy.compiler.pipeline.search.db.freeze import freeze_reason, schedule_row
-from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION, knob_features
+from emmy.compiler.pipeline.search.features import FEATURIZER_VERSION
 from emmy.compiler.pipeline.search.ranking import build_golden_groups, build_placement_groups
 from emmy.compiler.structural import digest
 
@@ -119,7 +119,7 @@ def measured_groups(rows) -> tuple[list[MeasuredGroup], dict[str, int]]:
     groups = []
     for (gpu, sig, h_opt, regime), grp in sorted(buckets.items()):
         grp.sort(key=lambda r: (r.kernel, knobs_json(r.knobs)))  # a pool's row order is its own, not the DB's
-        feats = [knob_features(measured_features(r)) for r in grp]
+        feats = [measured_features(r) for r in grp]
         key = f"{gpu}/{sig}@O{h_opt:g}" + (f" {regime}" if regime else "")
         groups.append(MeasuredGroup.from_measured(key, gpu, sig, h_opt, [r.stats.median for r in grp], feats))
     return groups, dict(dropped)

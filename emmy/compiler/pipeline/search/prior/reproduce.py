@@ -22,7 +22,7 @@ belong to nightly refresh (README, "Fit the priors").
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from emmy.compiler.pipeline.search.dataset import GoldenPool
@@ -108,9 +108,9 @@ def reproduce_schedule(pools: Sequence[GoldenPool], *, kernel: str | None = None
     return out
 
 
-def reproduce_placement(pools: Sequence[GoldenPool], scorer: Callable, *, kernel: str | None = None) -> list[Verdict]:
+def reproduce_placement(pools: Sequence[GoldenPool], prior, *, kernel: str | None = None) -> list[Verdict]:
     """The placement verdicts of every pool with a placement fork, one per pool: its kernel's own fork under
-    ``scorer`` (the placement prior's ``mean_scores_features``)."""
+    the placement ``prior``."""
     from emmy.compiler.pipeline.search.ranking import placement_decisions, pool_context, walk_placement  # noqa: PLC0415
 
     out: list[Verdict] = []
@@ -118,7 +118,7 @@ def reproduce_placement(pools: Sequence[GoldenPool], scorer: Callable, *, kernel
         if not pool.kernel.formed or (kernel and kernel not in pool.kernel.name):
             continue
         try:
-            forks, _unmatched = walk_placement(pool, pool_context(pool), placement_decisions(pools, pool), scorer=scorer, first=True)
+            forks, _unmatched = walk_placement(pool, pool_context(pool), placement_decisions(pools, pool), prior, first=True)
         except Exception as exc:  # noqa: BLE001
             out.append(Verdict(pool, error=" ".join(f"{type(exc).__name__}: {exc}".split())[:100]))
             continue
