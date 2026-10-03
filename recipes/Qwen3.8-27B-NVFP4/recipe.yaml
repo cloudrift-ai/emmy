@@ -1,0 +1,21 @@
+# Qwen3.8-27B at NVFP4 (W4A4) on one RTX 5090 (sm_120).
+#
+# Compiler-qualified on one RTX 5090; NOT deployable yet: the generation runner cannot build the
+# gated DeltaNet layers, which are 48 of the 64. The golden under golden/ holds measured rows for
+# every serving twin of serving-rtx5090.env (full attention at widths 16, 64 and any width; gated
+# DeltaNet at widths 1, 16 and 64), and `emmy eval golden` deploys all nine twins from it alone.
+tags:
+  - best-effort
+  - compiler-qualified
+  - serving-blocked
+
+model:
+  huggingface: Inferact/Qwen3.8-27B-NVFP4
+  revision: 6128240ebaf4eaa7bad2b3d1c72c37d677c5f462
+  rationale: "Qwen3.8 27B at 4-bit weights and activations fits one 32 GB card; serving waits on the gated DeltaNet runner."
+  heat: 90
+  task: generate
+
+matrices:
+  deploy.gpu: NVIDIA GeForce RTX 5090
+  deploy.gpu_count: 1
